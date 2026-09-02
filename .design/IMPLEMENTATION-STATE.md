@@ -33413,3 +33413,66 @@ instance-investigator pushed back on my write-failure hypothesis and was right. 
 **Rule 1008** — a dropped field that breaks an arithmetic identity is worse than one that merely omits a classification, because the summary stays readable and is quietly false. Prefer log lines a reader can reconcile without the database.
 
 **Rule 1009** — when production data is clean on some path, that is absence of coverage, not evidence of correctness. Name those paths and raise the bar on their seeded tests instead of lowering it.
+
+## §5mx — the 4-row inconsistency was both candidates at once, cancelling
+
+instance-investigator resolved it. Per-project `row_errors` summed to 11,597 = `total_residuals`, eliminating the accumulator carry-forward as *the* cause — but the per-project identity test found **four** projects failing, in two populations of equal and opposite size:
+
+```
+bb420115  +4  Inferred stamps (hazard-a thread)
+84e32420  -1  | a3083e98  -1  | fa7b87b9  -2   non-derive errors
+                                              net 0
+```
+
+35 projects balance exactly. `row_errors (11,597) = derive_failures (11,593) + non-derive (4)`. The non-derive errors add to `row_errors` without consuming a `processed` slot, because their messages were **stamped successfully** and only the participant add was refused.
+
+So write/resolution failures are **4**, not 0. My original hypothesis had the right count and the wrong quartet.
+
+**The investigator's framing is the root cause and is now in the design:**
+
+```
+processed  = attributed + inferred + skipped + derive_failures
+row_errors = derive_failures + write_failures + resolution_failures
+```
+
+Different equations; the boot hook logs the second in the field where a reader expects the first. The wrong number in the right-looking place is why a +4 and a −4 in one summary line were invisible.
+
+**`WriteFailures` is not a transient bucket.** The refusal is `adding participant user:... to ...: not named in direct conversation key` — deterministic, refuses identically forever. I classified the whole bucket as retryable from its doc comment, *which names participant validation as its example*. The comment told me it was deterministic and I read the bucket as transient anyway.
+
+`actionable` stayed 0 exact through this, the third correction absorbed without moving the design.
+
+## §5my — M9 first submission: REQUIRED rework, eight items
+
+`ca-mig-9` delivered `edad66d6b` before corrections 3 and 4 landed. Core is right: measured accumulator, no tally subtraction, gate 3's mutation well-targeted with real red output. Sent back on eight items (A–H).
+
+**Verified by reading and mutating the branch, not the report.**
+
+**G — DEF-111 reintroduced, confirmed in code at `boot_data_migrations.go:606`:** `"remedy", "scion server backfill --execute"` plus `"these may resolve on retry"`. **M6's explicit task was deleting that exact string; M9 re-added it on a new line.** A completed phase regressed, and design prose did not prevent it — hence the required gate asserting its absence.
+
+**H — the headline number is never asserted, and the original bug survives all nine gates.** I mutated the report to fire on the right condition and print the wrong variable:
+
+```go
+if actionable > 0 {
+    slog.Warn("Messages remain unattributed in listed projects", "count", reachable)  // was: actionable
+}
+```
+
+**Entire M9 suite passes.** On gteam that prints **12,583** — precisely the number M9 exists to eliminate, reproduced inside its own fix with every gate green.
+
+Structural, not an oversight: the gates check the WARN's *presence*, never its *value*, and gate 1 says "Reproduce the exact arithmetic the report uses" and recomputes the formula in the test. A test holding its own copy of the formula cannot see production's copy drift.
+
+Required fix — factor the arithmetic into a pure function that production and gate 1 both call, assert logged **values** not substrings, and put the pure-function tests in an **untagged** file so the blocking `no_sqlite` gate finally sees M9 coverage (all 823 lines were compiled out; DEF-94's per-change form).
+
+Other items: A remove the false remedy; B reconciliation is `transient` 4 not 0; C per-project identity gates with **no aggregation** (a global-sum gate passes against this data — +4/−4 cancel); E eight of nine gates never mutated, including gate 1 and the M-2 gate; F blocking-gate visibility.
+
+Mutations I ran so ca-mig-9 need not repeat them: widening the clamp to swallow `actionable <= 8` → **caught** by gate 2. Swapping the logged variable → **caught by nothing.**
+
+**Rule 1010** — a global reconciliation that balances is not evidence; equal and opposite defects produce exactly the same zero as correctness. Reconcile per partition and assert per partition. Any gate that aggregates before comparing would have passed this data.
+
+**Rule 1011** — assert the value a human will read, not the presence of the line containing it. Presence checks certify that a report fires, never that it is true, and the number is the entire product.
+
+**Rule 1012** — a test that recomputes production's formula tests its own copy. Extract the formula into one function both call; duplicated arithmetic is duplicated, not verified.
+
+**Rule 1013** — deleting a string is not a durable fix; it is a one-time edit that the next phase re-adds. When a phase's job is removing something, the same phase must add the gate forbidding its return. DEF-111's remedy string has now been introduced twice.
+
+**Rule 1014** — when a doc comment names an example, read the example, not the category. `WriteFailures` was documented as "errors after key derivation, e.g. participant validation" and I took the bucket as transient while the example given was deterministic.
