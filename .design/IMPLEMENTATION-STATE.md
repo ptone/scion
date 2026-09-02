@@ -34302,3 +34302,80 @@ not just the original claim.
   google.com. The split holds either way; which conversation his browser rendered is
   indicative pending his confirmation. Third recurrence of the Rule 1033/1034
   identity-assumption trap.
+
+---
+
+## §5no — Two rulings from ptone; fix2 rework reviewed by mutation
+
+**Date:** 2026-09-02.
+
+### Ruling 1 — DEF-134 retracted
+
+> *"i don't expect scion to support two email based logins as a single 'user'. i can have two independent user accounts on the system."*
+
+Two independent accounts is the model. A conversation per account is correct, and
+the UI showing only the authenticated principal's conversation is correct.
+Retracted at [^56]. The measurement survives as a debugging note; the inference
+that the system *ought* to relate the two accounts does not.
+
+Note what this does **not** touch: DEF-126 (one address matching two rows — a real
+resolution ambiguity) and DEF-32 (federated identity must not be resolved by
+email). Both concern the system *guessing* sameness, which is still prohibited.
+
+**Rule 1052.** I filed "X and Y should be related" without stating the product
+assumption that made the relation desirable. A defect report that silently encodes
+a design opinion gets read as a measurement.
+
+### Ruling 2 — the actual Discord complaint, three rounds late
+
+> *"on the discord envelope. i was expecting a conversation id."*
+
+He was never talking about field names. He was pointing at a field that is absent.
+Filed **DEF-135** [^57], marked **blocking for gteam acceptance**.
+
+Both halves measured: envelope = `timestamp, from, to, kind, intent, msg`, no
+`conversation`; the same messages sit in conversation `b2fd01b6`. The id exists and
+the envelope does not carry it.
+
+Cause is ordering. `handlers_broker_inbound.go:243` populates `preDispatchConvResult`
+only when the caller supplies **both** `Surface` and `ExternalRef`. Discord supplies
+neither, so it is nil when `RenderDeliveryText` runs at `:305`; the DM conversation
+resolves downstream, after the envelope is built.
+
+I had recorded this in [^51] as correct behaviour — "omitting beats fabricating".
+That reasoning is still sound and the conclusion was still wrong: it answers
+*should the renderer invent a value?* when the live question was *why does the
+renderer not have one?* **Rule 1053.**
+
+Two candidate fixes, not equivalent — (a) render after resolution (ordering only);
+(b) Discord declares Surface/ExternalRef, which resolves a **group** conversation
+pre-dispatch and changes which conversation the message lands in (semantic change
+to persisted data). Design owed by me.
+
+### fix2 rework round 1 reviewed — correct code, half-covered
+
+`bda4cbf10` → `037268be8`. Agent pushed, then stalled without reporting again;
+reviewed the branch rather than assume incomplete. Suite green (pkg/hub +
+pkg/messaging, exit 0, 5 packages). All three code fixes accepted as written.
+Verified `LogQueryOptions.ParticipantID` has exactly one setter
+(`handlers_logs.go:355`), so making the filter unconditional is safe.
+
+Mutation results — each fix reverted to its broken form, confirmed to **compile**,
+then the suite run:
+
+| Mutation | Reverted fix | Result |
+|---|---|---|
+| MUT-A | fail-closed guard → fail-open `if user != nil` | compiles, suite **PASSES** — **NOT CAUGHT** |
+| MUT-B | delete `logAuthzDenial` at `:320` | compiles, suite **PASSES** — **NOT CAUGHT** |
+| MUT-C | re-add `&& opts.LogID == logging.MessageLogID` | **FAILS 5 subtests** — CAUGHT |
+
+MUT-A is the security-critical one and is undefended. Round-2 rework dispatched
+requiring both tests, with the explicit warning that a status-code-only assertion
+would have passed against the fail-open bug — the distinguishing assertion is that
+no unscoped filter is ever built. For MUT-B, `authorize_test.go` already carries
+`authzHelperCaptureLogs` (:44) and `authzHelperDenialRecord` (:55); there is
+currently **no test anywhere in pkg/hub asserting `logAuthzDenial` fires**, which
+is exactly why it was silently droppable.
+
+Mutation testing earned its keep here: three correct fixes, green suite, clean
+diff, and two of the three would have regressed on the next edit with no signal.
