@@ -33185,3 +33185,25 @@ The Rule 976 failure this repeats is not "I misread an error" but its inverse: *
 **Rule 984** — a verifier derived from one case must be checked against every case it will be applied to. Success strings vary by recipient, subcommand, and transport; a grep tuned on one of them silently reports failure on the others. Prefer matching the *error* condition and treating its absence as success, or enumerate every success string, but never let a narrow positive pattern stand in for "it worked".
 
 **Rule 985** — when a verification is ambiguous, learn the output format with a probe that costs nothing, not by repeating the action whose effect you are unsure of. Repeating is the intuitive move and it is the one that double-sends.
+
+### §5mm — M6 reviewed: right fix, missing gate; and I broke my own mutation first (2026-09-02)
+
+M6 at `1bbb0bea8`. The agent confirmed the LEAD CONSTRAINT from the M5 source rather than taking my word, and took the anti-join, stating M7's promotion explicitly. Numstat reproduces; clean fast-forward.
+
+**The correctness question their report did not raise, and the one I most wanted answered:** the anti-join tests membership in the `projects` table, but the backfill iterates `ListProjects()`. Those are only complements if `ListProjects` applies no unconditional predicate. It doesn't — with an empty `ProjectFilter{}` every clause is conditional, no soft-delete or archived exclusion — so the split is sound. Had it filtered anything, the fix would have *relocated* the alarm-fatigue bug into a permanently-firing WARN instead of fixing it, and every test would still have passed. I asked for the dependency to be recorded in the comment, because a filter added to `ListProjects` later breaks this silently from a different file.
+
+Both counters share `ConversationIDIsNil()`, so the subtraction nests and cannot go negative.
+
+**REQUIRED: the defect that caused this phase to be re-specified is fixed but ungated.** Their four mutations all land, but all four perturb `unreachable`. The bug is `reachable` reading 0 on a *steady-state* boot. AC-9's steady-state half cannot catch it — there, reachable is *legitimately* 0, because the seeded message was attributed on boot one — and `ReachableWarnFires` boots only once, so it never reaches steady state. I reintroduced the exact defect and the whole `./cmd/` suite stayed green.
+
+This is the fourth instance of one shape in three days: the right property identified, the test written on a path incapable of exhibiting it. It is now frequent enough that I should stop treating each as a surprise. The generator is always the same — the cheapest way to trigger a condition is usually a path that resembles it rather than one that is it.
+
+**And I produced the fifth instance myself, in the act of catching the fourth.** My first mutation used a package-level "work performed" flag that I never reset per boot. It stayed true from boot one, the steady-state branch never executed, and my probe passed. For a few minutes I had evidence that the gate I was about to demand was worthless — and the evidence was an artefact of my own inducement. I only caught it because the result was *too* convenient: a gate I had just reasoned my way to should not have failed to catch the thing I designed it for. Both the earlier "suite stays green" run and the probe run were invalid and had to be redone.
+
+Before demanding the test I verified it both ways myself: it passes against their current code and fails against a corrected mutation. Asking for a gate I have not confirmed is achievable is how a reviewer sends an agent chasing something impossible.
+
+**Rule 986** — a mutation carrying state across the iterations it perturbs is not a mutation of those iterations. Per-run flags must be reset per run, or the second run silently observes the first run's world.
+
+**Rule 987** — when a mutation produces the convenient answer, distrust it exactly as hard as when it produces the inconvenient one. I check surprising results by habit; the failure mode here is that a result confirming my own prediction gets waved through, and this one would have.
+
+**Rule 988** — verify a demanded gate both ways before demanding it: green on correct code, red on the defect. A reviewer who specifies an unachievable test burns an agent's cycle and their trust in the review.
