@@ -33286,3 +33286,34 @@ The reasoning is sound and worth stating so I do not drift from it: a fresh cuto
 **Action for me:** the gteam AC list needs assembling into an explicit, orderable checklist before step 2 — the design's numbered acceptance criteria plus the tranche-wide items that accumulated across M0–M8. That is my next deliverable after M7 merges, and it gates the fresh cutover, so it should be exhaustive rather than convenient. Note the standing constraint that AC-8 (Postgres concurrency) is untestable on SQLite by construction and must be carried as a declared gap rather than quietly marked done.
 
 **Rule 997** — sequence irreversible tests last, not by importance. A test that consumes its own preconditions is a one-shot instrument; every defect reachable by a repeatable test must be cleared before it is spent, or you burn the instrument discovering something you could have found for free.
+
+### §5mr — M7 merged. TRANCHE CODE-COMPLETE: `tranche-g` = `cbd4f8b6a` (2026-09-02)
+
+The source-scan guard landed as `TestListProjects_NoUnconditionalFilter_DEF112`, following the `TestAdvisoryLockKeys_AllUnique` template.
+
+**The check that mattered most for a source-scan guard is that it cannot pass vacuously**, and it can't: it fatals on an unreadable file (line 76) and on a missing function (line 123). I exercised both paths rather than reading them — pointing it at a nonexistent filename and at a renamed signature, both of which compile, and both fatal with a clear message. A source-scan that silently passes when it cannot find its target is worse than no guard, because it reports success forever after the code moves out from under it. My first attempt to test this renamed the function in the *source* and produced a build failure, which is not a caught violation by my own rule; the mutation has to compile.
+
+Evasion results:
+- `query.Where(...)` at one tab — CAUGHT (this is the case the consistency test misses)
+- `query = query.Where(...)` at one tab — CAUGHT
+- filter hidden in a helper called from `ListProjects` — **NOT caught**
+
+**Accepting the third as a documented residual rather than spending another round.** Extracting a helper to hold an unconditional filter is a deliberate, conspicuous act, unlike adding one inline; the two natural forms are covered; and the consistency test still backstops any filter that touches seeded data. The two gates are complementary — one catches filters by their effect, the other by their shape — and neither alone was sufficient, which is why I asked for the second rather than a replacement.
+
+Baselines in both configurations on the *merged* tree are exactly the known-environmental set. Merged as `cbd4f8b6a`; `ca-mig-7` retired. **M0–M8 are all in. The tranche is code-complete.**
+
+### §5ms — the DEF-118 gate got its first real catch, cross-project
+
+`ca-d-test` reported `scion/aux-authz-backend` review-clean, so it is heading for main. It declares `LockRecoveryAuthz = 0x5C100020` in `concurrency.go` and never adds it to the test's `all` slice.
+
+**I simulated the merge instead of predicting it, and my first simulation was wrong in a way worth recording.** I overwrote our `concurrency.go` with theirs, which deleted our own `LockDataMigrations` and produced a build failure — a clobber, not a merge. Redone as git would actually resolve it (two additive hunks, union both), it fails with exactly the intended message. No value collision; purely a stale test list.
+
+Relayed to `ca-d-test`, who *is* reachable, unlike `aa-aux-backend-rev-3` which 404s across the project boundary. I told them the fix is one line and explicitly that they must not resolve it by deleting the assertion, with the reason — the compiler permits two const names sharing a value, so a duplicate compiles cleanly and silently makes two unrelated operations mutually exclusive. I also offered to add their entry myself if we merge second, because I would rather it land than be correct about ownership.
+
+This is the gate catching drift from a team that had no reason to know it existed. That is the whole point of a source-derived gate over a hardcoded count: the previous version used a count literal and never caught anything, because anyone adding a key updated both numbers together.
+
+**Rule 998** — a source-scanning gate must fail loudly when it cannot find what it scans for. Test that path explicitly, with a mutation that compiles; "target not found" defaulting to pass is a gate that silently retires itself the day the code is refactored.
+
+**Rule 999** — simulating a merge means reproducing what the merge tool would produce. Substituting one side's file for the other's is a clobber, and the build failure it produces is an artefact of the simulation, not a finding.
+
+**NEXT DELIVERABLE:** the exhaustive gteam acceptance checklist. Per ptone's ruling (§5mq) it gates the fresh cutover, so it must be complete rather than convenient — the design's numbered criteria plus everything that accumulated across M0–M8, with AC-8 (Postgres concurrency) carried as a declared gap since it is untestable on SQLite by construction.
