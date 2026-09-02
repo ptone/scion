@@ -30910,3 +30910,53 @@ ptone clears it rather than dispatch it.
 
 Also noted for the record: `cla/google` reports fail. Believed pre-existing and
 identity-related. Flagged, not chased.
+
+---
+
+## §5kt — Discord sends have TWO failure modes, not one. 1995 chars delivered truncated.
+
+ptone reported my inventory summary arrived cut off after *"I'll raise them one at a time "*.
+The send was **1995 characters** — under the 2000 cap I had been budgeting against — and
+the CLI reported success.
+
+**This is a second, distinct failure mode and it is the worse of the two.**
+
+| Length | CLI behaviour | Delivery |
+|---|---|---|
+| well over 2000 | prints CLI help instead of sending | nothing arrives — **loud** |
+| just under 2000 | reports "Message sent" | arrives **truncated** — silent |
+
+I had internalised only the first, because it bit me three times visibly. A loud failure
+teaches you the threshold; a silent one lets you believe you are inside it. I have been
+tuning messages *up* toward 1990-1995 on the belief that anything the CLI accepted arrived
+whole. Some earlier message may have lost its tail without either of us noticing.
+
+Lost content this time was three words, so no damage. The dangerous case is a message whose
+final paragraph is the escalation or the question — which is exactly how I structure them.
+
+**New budget: 1800 characters.** Not 1990. The gap between "accepted" and "delivered
+intact" is not something I can measure from this side, so the margin has to absorb it.
+
+**Rule 880: a transport that reports success is claiming it accepted the message, not that
+the recipient received all of it. When a cap exists, the only proof of full delivery is the
+recipient quoting the end.** The corollary is structural: **never put the ask in the last
+paragraph of a message that is near the cap.**
+
+Told ptone the lost tail was immaterial and that I am dropping to 1800.
+
+### Q1 of 3 raised
+
+Took his earlier "say when" as satisfied and opened the Phase 9 question series with the
+cutover-granularity decision: hub-wide switch, per-agent opt-in, or harness-config driven.
+
+Carried a recommendation rather than a bare menu — **hub-wide switch** — on two grounds:
+it matches his stated preference for simulating the atomic all-switches-flipped upgrade
+path, and it is the only option under which Phase 13 can actually delete the legacy
+formatter instead of leaving it permanently reachable. Named the cost honestly: flipping it
+on gteam changes inbound format for all 27 agents at once.
+
+This is the correction for his earlier complaint that *"the two items are lacking a
+recommended course of action."* Every question in this series ships with one.
+
+Q2 (agents whose prompts parse `thread_id`) and Q3 (whether participant lists go on the
+wire) held until he answers. Status set to `ask_user`.
