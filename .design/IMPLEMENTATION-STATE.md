@@ -33916,3 +33916,37 @@ Worth noting what did *not* catch it. Decomposing the match counts by rule (Rule
 **Rule 1034** — when a human confirms an outcome, confirm *which* outcome. "I received it" answers a different question from "the right principal received it", and the gap between them is invisible if you have already decided which principal is theirs.
 
 **Rule 1035** — when correcting a premise you gave an agent, do not also hand them the conclusion you now expect. State that the premise changed, restate the measurement, and let them report. An agent told what the tidy answer would be is a poor instrument for deciding whether it is true.
+
+### DEF-126: mechanism fully established
+
+Both sides now agree, and they agree because they were finally asked the same question.
+
+**Source (ca-msg-addr).** The `ILIKE` was a Postgres branch. The SQLite branch is `escapedLikeFold`, ent `builder.go:1217-1222`, emitting `LOWER(col) LIKE <lowered pattern>`. The ordering has **no dialect switch** — ent `sql.go:414-417` writes `ORDER BY <col> DESC` identically for both backends. Literal SQLite query:
+
+```sql
+SELECT id, created FROM users
+WHERE (LOWER(email) LIKE '%preston%' OR LOWER(display_name) LIKE '%preston%')
+ORDER BY created DESC LIMIT 2 OFFSET 0;
+```
+
+**Measurement (instance-investigator).** Run verbatim: 2 rows, `7581ea89` (May 2) first, `b53249ea` (Mar 19) second. Domains: `b53249ea` = google.com, `7581ea89` = gmail.com.
+
+**Hub logs, 19:07:26.** `recipient_id: 7581ea89` on every line of the dispatch chain. `b53249ea` appears **zero times** in the window. At 19:07:26.724 — 240ms later — ptone authenticated as `ptone@google.com`, i.e. as `b53249ea`, confirming which principal he was operating as. Hub binary confirmed `98543da9`.
+
+So: he acted as google.com, the resolver selected gmail, and `ORDER BY created DESC` accounts for it exactly. **ca-msg-addr's first report was correct on every point.** The two contradictions I chased were both mine: an unchecked id-to-identity mapping, and a hand-written query that was not the one the code emits.
+
+### What the defect actually is — and what it is not
+
+My earlier framing was **non-determinism**, on instance-investigator's finding that a no-`ORDER BY` query returns rows in insertion order. That framing is wrong and is superseded. There *is* an `ORDER BY`; selection is perfectly deterministic and perfectly reproducible.
+
+**The defect is ambiguity silently resolved, not instability.** The resolver finds two candidates and returns the newer one with no signal that a choice was made. Determinism makes this *worse*, not better: a non-deterministic bug announces itself by producing inconsistent results, whereas this one will misdeliver to the same wrong principal every single time, reproducibly, which reads as intended behaviour to anyone who tests it twice.
+
+It is also worth stating plainly that the selection rule is arbitrary with respect to intent. "Most recently created" bears no relationship to which principal the sender meant. It systematically favours the newest account, so a long-standing user is the one who *loses* their own name to a newcomer — the opposite of what anyone would guess.
+
+**Rule 1036** — determinism is not correctness, and for an ambiguous resolver it is an aggravating factor. A reproducible wrong answer survives testing; an unstable one does not.
+
+### Two open threads out of this
+
+**1. Where does resolution happen?** instance-investigator observed no hub-side resolution logging and inferred the CLI resolved locally and POSTed a populated `recipient_id`. That is an inference from a missing log line — the traced handler may simply not log — and I have sent it back rather than accepting it. It is now the highest-priority question in DEF-126, because **a client-side resolver defeats the single atomic cut-over requirement**: updating the hub would leave every deployed CLI still misdelivering, while the fix appeared complete. It also raises the possibility that the `len(Items) == 1` defect exists in two implementations needing two fixes.
+
+**2. Conversation MISMATCH in the same window.** Two WARN `conversation consistency check: MISMATCH`, `resolved_conv_id` f92dc5cf vs `prior_conv_id` 6ef436bd. Working hypothesis: a **consequence** of the wrong-principal selection — addressing gmail rather than google.com derives a different DM key and therefore a different conversation. Testable from the two `external_ref`s, which are keys and in bounds. Not filed as independent until that comes back; not dropped either.
