@@ -31811,3 +31811,85 @@ closed.**
 
 Not writing the tranche design yet — Phase 9a is mid-flight and ptone has not asked for it.
 The above is the load-bearing measurement it will rest on, taken while it was cheap.
+
+---
+
+## §5lh — Phase 9a verification: the predicted hole was absent, an unpredicted one was not
+
+`ca-msg-9a` reported Phase 9a complete and pushed. Two things were wrong with the report and
+one thing was wrong with the code, and none of the three was the thing I had queued as the
+likely failure.
+
+**The push had not landed where I could see it.** `git ls-remote ptone/scion scion/ca-msg-9a`
+returned nothing; the branch was on `scion-frontiers/scion-repo-contrib`, the agent's own
+`origin`. The agent had verified its push against the remote it pushed to, which is not the
+same as verifying it against the remote that matters. It re-pushed to ptone/scion at
+`9e67fbd2` on request.
+
+**Rule 921: "I pushed" is a claim about a destination, not an action. An agent's `origin` is
+not necessarily the remote the coordinator reads. Completion criteria must name the remote,
+and the confirming `ls-remote` must name it too.**
+
+This is the failure mode my own standing rule was written against — a completion signal is read
+as permission to delete the container — and it very nearly consumed three commits. The rule was
+right; what was missing was that the agent's confirmation step was self-referential.
+
+**The hole I predicted was not there.** From the report text alone I had inferred that commit 2
+set `Malformed` via `json.Valid`, a purely syntactic check, and that a document like
+`{"conversation_envelope_switch":"yes"}` — valid JSON, wrong type — would fail `json.Unmarshal`
+and fall through to the compiled default, now ON. A typo would have *enabled* the switch,
+defeating exactly what §4.6.2 exists to prevent. The code keeps the `json.Unmarshal` error
+branch and returns `false` from it. The prediction was sound and the implementation had already
+handled it.
+
+**Rule 922: predicting a defect from a report is cheap and worth doing, but the prediction is
+about the report, not the code. Read the code before acting on it — the gap between "the report
+does not mention X" and "the code does not do X" is where most false reds live.**
+
+**The hole that was there, I found by reading the guard expression rather than the getter.** All
+seven enforcement sites read `ops != nil && ops.ConversationEnvelopeSwitch()`, so a nil
+`OperationalSettings` yields OFF. But `handleGetMessaging` returns ON when `ops == nil`. The
+admin endpoint therefore reports a switch that is not in effect. Only `entadapter` implements
+`HubSettingStore` and `initOperationalSettings` returns early with a warning otherwise, so this
+is not a production path — but it is a lying endpoint, and the fix direction matters: make the
+GET honest, never make enforcement treat nil as ON, which would activate the envelope path with
+no settings service present.
+
+**Rule 923: when a default is inverted, audit the guard expressions and not only the function
+whose default changed. `x != nil && x.F()` pins its own default for the nil case, and that
+default does not move when `F`'s does. Every short-circuit guard is a second, silent default.**
+
+**DEF-92 is narrowed, not closed.** Syntactic malformation now logs at ERROR once per ingest.
+The type-mismatch case returns OFF completely silently — the operator-typo path, which silently
+defeats the cutover on that hub with nothing in the log. Sent back as a fix with two
+constraints: not once per getter call (the thing `sectionState.Malformed` exists to avoid), and
+no change to the OFF behaviour. Running the registry schema over existing rows is not available
+as a fix: `additionalProperties:false` would reject legitimate stale-key documents.
+
+**Verified sound, by measurement rather than by report:** AC-9-7a (stale-keys-only document
+unmarshals clean, leaves the new pointer nil, returns ON — the auto-cutover requirement works);
+the PUT path writes only the new key so documents self-clean via `omitempty`; no functional
+caller of the removed getters survives; the three deleted admin tests were all "one switch
+preserves the other" cases and meaningless under one switch; `handlers_agent_messaging.go`
+(B5 forcing) is untouched, being absent from the changed-file set. Build clean, `pkg/hub`,
+`pkg/hub/auth`, `pkg/messages`, `pkg/config/opsettings` all green under `-tags no_sqlite`.
+
+**The byte-identity guard is not self-fulfilling.** Twelve golden cases; the `system_message`
+case recomputes its expected value at runtime, which is the shape a vacuous assertion takes, but
+it recomputes from a literal template rather than from `FormatForDelivery`. Checking that
+distinction cost one `sed` and is the difference between a safety net and a decoration.
+
+**Reported counts drifted again**: "12 files, +336 -248" against an actual 13 files, +688 -248
+(the 329-line new test file omitted), and "all 6 callers" followed by an enumeration of seven.
+The enumeration was correct; only the label was wrong. Re-running the numstat myself is what
+caught it, which is why that is a standing rule and not a spot check.
+
+**Not yet accepted.** Dispatched `ca-msg-9a-rev` for the one risk diff-reading does not cover:
+the default flipped OFF→ON, so every test that got OFF for free by not seeding the section now
+gets ON, and may be passing while exercising the opposite path. `TestG2_AC6_WriteDenySwitch_
+IntegrationChatV2` still carries an "OFF (default)" comment and asserts a write succeeds —
+first thing to check. Holding the tranche-g merge until that returns and the three fixes land.
+
+**Rule 924: flipping a default silently re-points every test that relied on the old default by
+omission. Those tests do not fail — they pass while testing the other branch. Inverting a
+default requires an audit of tests that never mention it.**
