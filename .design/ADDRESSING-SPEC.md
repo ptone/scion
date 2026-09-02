@@ -89,7 +89,34 @@ Nine forms. Uniqueness column states the **storage layer**, not what Go enforces
 |---|------|-----------|--------------------|-------|
 | 1 | `conv:<uuid>` | conversation id | Yes, by construction | resolves + authorizes; **no recipient derivation** |
 | 2 | `#<thread>` | (project_id, kind=group, display_name) | **No index at all** | resolves first match; no delivery |
-| 3 | `@<agent>` | (project_id, slug) | **Yes** — `UNIQUE(slug, project_id)` | working, exact |
+| 3 | `@<agent>` | (project_id, slug) | **Yes** — `UNIQUE(slug, project_id)` | **path-dependent** — see note [3] |
+
+> **Note [3] — corrected 2026-09-02, measured at `97c3462ab`.** This row
+> originally read "working, exact" with no path qualifier, and that was
+> wrong by omission. `@<agent>` behaves differently depending on how it
+> enters the system:
+>
+> - **Via the CLI it works.** `cmd/message.go:150` calls
+>   `messaging.ParseReference` before any legacy handling;
+>   `resolve.go:76-85` returns `Kind: RefAgent`, and the guard at `:154`
+>   rejects only `RefConversation` and `RefThread`. `@<agent>` is the one
+>   conversation reference the CLI fully supports today. It never reaches
+>   the legacy resolver.
+> - **Via the legacy envelope path it has never worked.** A
+>   `StructuredMessage` carrying `recipient: "@name"` reaches
+>   `buildPrincipalRef` (`envelope_compat.go:224-226`), which cannot derive
+>   a kind from a colonless string and returns `system:@name`. Addressee
+>   validation (`envelope.go:363`) then rejects it: *principal_kind must be
+>   user or agent, got "system"*. Filed as **DEF-132**.
+>
+> **The table's real defect was structural, not factual: it had no path
+> column.** Every row in it describes resolution behaviour as though a form
+> has one behaviour, when a form has one behaviour *per entry point*. Rows
+> 1-9 were all written from the hub-side resolver and silently assume the
+> CLI is a transparent pass-through. That assumption is false for at least
+> this row and has not been checked for the others. Treat any unqualified
+> entry here as measured at the hub boundary only, until re-measured.
+
 | 4 | `@<email>` | users.email | **Yes** — column-level UNIQUE | working, exact |
 | 5 | `group[]` / `set[]` | mixed | inherits members' | working; user members use form 6 |
 | 6 | `user:<name>` | users.email + users.display_name, **substring** | display_name has no index | **DEF-126** |
