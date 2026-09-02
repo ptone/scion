@@ -454,3 +454,81 @@ inventory of which prompts do this. Options: (a) ship both keys during a window
 membership list. For a `direct` conversation it is trivially the two parties, but for a
 `group` it is a disclosure to every recipient. Under "under-granting is recoverable,
 over-granting is not" the default should be to omit it unless there is a named consumer.
+
+---
+
+## Resolutions — 2026-09-02
+
+All three questions above are answered. Recorded here so the Phase 9 design starts from
+settled ground.
+
+**Q1 — cutover granularity → HUB-WIDE, and the question was too small.**
+
+ptone: *"Hub wide switch - an reminder we want to deliver this a SINGLE cut-over upgrade,
+I've already requested we consolidate existing read / write switches - this seems to be
+proliferating another one. The goal is that when a hub is updated to a version that includes
+this completed refactor - migrations are auto-run, and all switches cut-over by default"*
+
+Binding consequences:
+
+- **No third switch.** `conversation_read_switch` and `conversation_write_deny_switch`
+  consolidate into **one** messaging switch, and the delivery envelope rides that one switch
+  rather than getting its own.
+- **Defaults ON** in the version that ships the completed refactor. A switch shipped OFF is a
+  permanent fork in behaviour and is how the legacy formatter would survive Phase 13.
+- **Migrations auto-run on upgrade.** No operator step.
+- The switch is transitional scaffolding; **Phase 13 deletes it.**
+- Sub-behaviours may remain separable **in test code only**, never in opsettings, so QA can
+  bisect a failure (as DEF-100 required) without operators seeing multiple knobs.
+
+**Q2 — legacy field names in prompts → HARD CUTOVER** (confirmed by ptone 2026-09-02).
+
+The original framing named the wrong field: `thread_id` appears in no skill or prompt
+template in the repo. The real scope is that `FormatNewDelivery` renames or drops **every
+field except `timestamp` and `msg`**. In-repo exposure is three documentation items —
+`scion-messaging/SKILL.md:128` (`metadata.system_category`, whose datum survives as
+`event.type` via `envelope_compat.go:411`), `SKILL.md:130` (`type` → `kind`), and
+`docs-site/src/content/docs/hosted/user/messaging.md`. The agent prompt template
+`.scion/templates/instance-manager/agents-hub.md` names only the delimiters, and those are
+byte-identical between the two formatters (`format.go:22-24` = `delivery.go:22-24`), so the
+framing every agent is taught to recognise does not change. Fix the three in the cutover
+commit; fix user-written prompts reactively. **Deliverable: a gate that fails the build when
+`SKILL.md` names a field absent from `DeliveryEnvelope`.**
+
+Not in scope for Q2: `extras/scion-slack/.../blocks.go:186` and
+`extras/scion-telegram/.../format.go:287` parse `system_category` in real code, but they
+consume the broker-side `StructuredMessage`, not the agent envelope. Phase 11b.
+
+**Q3 — `conversation.participants` on the wire → RECOMMENDED DELETE** (awaiting confirmation).
+
+No producer and no consumer: `synthesizeConversationInfo` never sets it and the only
+reference is one test assertion. Migration cost is zero either way. `to` already covers the
+recipient's real need. For a `group` the field is a membership roster disclosed to every
+recipient on every message. Recommendation is to **delete the field**, not leave it declared
+and empty, so that re-adding it is a reviewed decision rather than a three-line completion.
+
+---
+
+## New scope discovered by Q1: "migrations auto-run" is not true today
+
+Measured against `scion/tranche-g` @ `85f25c1a1`.
+
+| Migration | Auto-runs on upgrade? | Evidence |
+|---|---|---|
+| `backfillTopicConversations` | **YES** | `webchannel_store.go:1425` via `runMigrations()`; Postgres mirrors at `webchannel_store_postgres.go:1029` |
+| `BackfillService` (message → conversation) | **NO** — manual CLI | sole non-test caller `cmd/server_backfill.go:153`; `scion server backfill`, `--execute` defaults to dry-run |
+| `DMMigrationService` | **NO — zero callers anywhere** | every reference is inside `pkg/messaging/dm_migration.go`; no command, no startup hook |
+
+`DMMigrationService` being unreachable is the likely reason **DEF-29 persists on gteam**: the
+migration meant to repair keyless `direct` rows has never been runnable. Stated as likely,
+not established — confirming it requires tracing the keyless row's provenance.
+
+This is the **fourth** built-but-dark component in the refactor, after the Phase 9 delivery
+formatter (DEF-101), `messaging.Resolve`, and the Phase 6 envelope types. Satisfying ptone's
+auto-run requirement is therefore unbuilt work on two paths, one of which needs a caller
+invented from nothing — not a Phase 13 footnote.
+
+**New defect: DEF-102** — `synthesizeConversationInfo` fabricates a `conversation.id` from
+`channel + "/" + thread_id` and infers `kind` from a recipient count. Dark today (the adapter
+has no non-test callers), which makes now the cheap moment to fix it. Resolution belongs in
+the Phase 9 design.

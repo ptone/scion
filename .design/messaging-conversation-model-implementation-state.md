@@ -30960,3 +30960,235 @@ recommended course of action."* Every question in this series ships with one.
 
 Q2 (agents whose prompts parse `thread_id`) and Q3 (whether participant lists go on the
 wire) held until he answers. Status set to `ask_user`.
+
+### 5ku — Q1 answered: hub-wide, and a directive against switch proliferation
+
+ptone: *"Hub wide switch - an reminder we want to deliver this a SINGLE cut-over upgrade,
+I've already requested we consolidate existing read / write switches - this seems to be
+proliferating another one. The goal is that when a hub is updated to a version that
+includes this completed refactor - migrations are auto-run, and all switches cut-over by
+default"*
+
+The answer to Q1 is the smaller half. The directive is the load-bearing part, and it
+reframes the endgame:
+
+- **No third switch.** My Q1 framing assumed a new `delivery_envelope_switch` alongside
+  the two that exist. That assumption was wrong and he caught it. The two existing
+  switches consolidate into **one**, and the envelope rides that one.
+- **Defaults ON at the shipping version.** A switch that ships OFF and waits for an
+  operator is a permanent fork in behaviour, which is how the legacy formatter would
+  survive Phase 13.
+- **Migrations auto-run on upgrade.** No operator step.
+- **Switches are transitional scaffolding**, deleted by Phase 13.
+
+This is a coherent position and I should have derived it from his earlier *"I want to get
+the entire refactor done and tested - not just to some hybrid state."* A switch defaulting
+OFF **is** the hybrid state, made permanent and shipped. I had been treating the switches
+as the deliverable's safety feature rather than as debt the deliverable must retire.
+
+**Rule 881: a feature switch that ships defaulted-off is not a rollout mechanism, it is a
+fork in the product. The rollout question is not "can operators turn it on" but "what
+deletes it."**
+
+#### The one tension I named rather than swallowed
+
+Consolidating to one switch removes granular rollback during QA. DEF-100 was exactly that
+shape: the read path was broken while dual-write was fine, and being able to flip only the
+read switch is what made the diagnosis cheap. Recommended one operator-facing switch with
+the sub-behaviours separable **only in test code, never in opsettings** — QA keeps the
+bisect, operators never see three knobs, and nothing extra ships. Offered to drop even the
+test seam if he wants literally one boolean end to end.
+
+#### Measured "migrations are auto-run" before agreeing to it
+
+He stated it as a property of the target. I checked whether it is a property of anything
+we have. It is not, for two of three paths:
+
+| Migration | Auto-runs? | Evidence |
+|---|---|---|
+| `backfillTopicConversations` | **YES** | `webchannel_store.go:528` → `runMigrations()` → `:1425`. Postgres mirrors it at `webchannel_store_postgres.go:179` / `:1029`. |
+| `BackfillService` (message → conversation) | **NO** — manual CLI | Sole non-test caller `cmd/server_backfill.go:153`; subcommand `scion server backfill`, `--execute` defaults to dry-run. |
+| `DMMigrationService` | **NO — zero callers anywhere** | Every reference is inside `pkg/messaging/dm_migration.go`. Not wired to a command, not wired to startup. Unreachable. |
+
+`DMMigrationService` is the **fourth** built-but-dark component in this refactor, after the
+Phase 9 delivery formatter (DEF-101), `messaging.Resolve`, and the Phase 6 envelope types.
+Four is no longer a series of coincidences; it is the signature of a plan whose phases were
+marked done at "the code exists" rather than at "the code runs."
+
+**Rule 882: for any component a plan calls done, the completion test is a production
+caller, not a passing test. A tested unreachable function is indistinguishable from a
+deleted one at runtime, and strictly worse than one that was never written, because it
+reads as coverage.**
+
+The likely consequence: **DEF-29 persists on gteam because the migration meant to repair
+keyless `direct` rows has never been runnable.** Stated to ptone as "likely," not
+established — I have not traced the keyless row's provenance to confirm the migration
+would have caught it. Do not promote this to a finding without that trace.
+
+Scope consequence: "migrations auto-run" is not a Phase 13 footnote. It is unbuilt work on
+two paths, one of which needs a caller invented from nothing.
+
+Q2 and Q3 still held. Reply sent at 1717 chars, ask not in the final paragraph.
+
+### 5kv — I have been grepping a tree that is 189 commits behind the work
+
+While measuring Q2 I grepped for `DeliveryEnvelope` in `/workspace` and got **zero hits**. The
+Phase 9 formatter is the thing I have been writing inventory entries about for days. Zero
+hits was not possible.
+
+`/workspace` is checked out on `scion/ca-msg-arch` — my own docs branch. Against
+`scion/tranche-g` it is **189 commits behind** and 535 ahead. Every code grep I have run in
+this workspace answered a question about a tree that does not contain the work.
+
+I did assert `pwd` before that grep, because Rule 872 told me to assert the search root. I
+asserted the wrong coordinate. In a repository the search root is `(ref, path)`, and I had
+been treating it as path alone.
+
+**Rule 883: in a git repository the search root is a ref and a path, not a path. `pwd` proves
+where you are standing, not which version of the tree you are standing on. A negative result
+from a working tree you did not verify is on the branch under discussion is inadmissible —
+grep the ref explicitly (`git grep <pattern> <ref> -- <path>`).**
+
+This upgrades Rule 872 rather than replacing it: 872 said assert the root, 883 says the root
+has two coordinates.
+
+#### Re-verified everything I told ptone in §5ku
+
+The migration-reachability claims went out **before** I discovered this, so they were made
+against an unverified tree. Re-ran all three against `refs/ca-msg-arch/tranche-g` (85f25c1a1):
+
+- `backfillTopicConversations` auto-runs — **holds** (`webchannel_store.go:1425`,
+  `webchannel_store_postgres.go:1029`).
+- `BackfillService` CLI-only — **holds** (sole non-test caller `cmd/server_backfill.go:153`).
+- `DMMigrationService` zero callers — **holds** (no hits outside `dm_migration.go`).
+
+All three survived. That is luck, not method. The report was correct by accident and I have
+no way to know how many earlier "not found" results in this workspace were the same artefact
+without the ref pinned.
+
+Created a private ref `refs/ca-msg-arch/tranche-g` so the correct tree is one token away.
+Deliberately did **not** rebase or switch the checkout: `SCION_WORKSPACE_MODE=shared-plain`,
+so the working tree belongs to every agent in the project, not to me. A namespaced ref is
+private; a branch switch is not.
+
+### 5kw — Q2 measured, and my own framing was the thing that was wrong
+
+I had been carrying Q2 as "agents whose prompts parse `thread_id`." Measured against the
+pinned ref: **`thread_id` appears in no skill and no prompt template in the repo.** The
+question named a field that nothing depends on.
+
+The actual scope is larger. `FormatNewDelivery` renames or drops **every field except
+`timestamp` and `msg`**: `sender`→`from`, `type`→`kind`, `recipients`→`to`,
+`thread_id`/`channel`→`conversation.{id,surface}`, `urgent`/`broadcasted`→`visibility`, and
+`metadata` is gone entirely.
+
+**Rule 884: a question carried across phases decays. Before asking it, re-derive the premise
+— a question whose subject has moved will get a confident answer to the wrong thing, and the
+answer will be treated as settled.**
+
+In-repo exposure is three items, all documentation:
+
+| Item | Breaks how |
+|---|---|
+| `scion-messaging/SKILL.md:128` | instructs agents to read `metadata.system_category`; the map is deleted. `envelope_compat.go:411` already maps the category to `event.type`, so the datum survives and the path does not. |
+| `scion-messaging/SKILL.md:130` | instructs agents to discriminate on `type`; becomes `kind`. |
+| `docs-site/src/content/docs/hosted/user/messaging.md` | user-facing description of the old shape. |
+
+The load-bearing negative: `.scion/templates/instance-manager/agents-hub.md` — the template
+that lands in agent prompts — names **only** the `---BEGIN SCION MESSAGE---` delimiters and
+no field at all. Both formatters emit byte-identical `deliveryIntro`, `beginDelimiter`,
+`endDelimiter` (verified: `format.go:22-24` vs `delivery.go:22-24`). So the framing every
+agent is taught to recognise does not change.
+
+Recommended **hard cutover**: a dual-key window is precisely the hybrid state ptone ruled out
+in §5ku, and it doubles the token cost of every delivered message forever until someone
+removes it. The consumers are LLMs reading self-describing JSON, so a rename degrades to "the
+prompt mentions a field that isn't there" — per-agent recoverable, corrupts nothing. Proposed
+one gate: fail the build when `SKILL.md` names a field absent from `DeliveryEnvelope`.
+
+Kept separate rather than conflated: `extras/scion-slack/.../blocks.go:186` and
+`extras/scion-telegram/.../format.go:287` **do** parse `system_category` in real code, but
+they consume the broker-side `StructuredMessage`, not the agent envelope. Phase 11b.
+
+### 5kx — sent 1947 chars against my own 1800 budget
+
+I put the length check and the `scion message` call in the same shell invocation, so the
+measurement could not gate the send. It printed 1947 after the message was already gone.
+
+The budget existed because §5kt established that Discord truncates silently below the hard
+cap; 1947 is inside the band where that was observed. Setting a limit and then building a
+pipeline that cannot enforce it is worse than having no limit, because it produces the
+feeling of having checked.
+
+**Rule 885: a check that runs in the same breath as the action it guards is not a check. Any
+budget worth having must be evaluated in a prior step that can refuse.**
+
+Recovered by sending a 410-char follow-up carrying the two items that were at risk — the ask
+and the Phase 11b aside — and saying plainly that the tail may have been cut. Cost: one extra
+message. Had the ask been the only thing at the end, the cost would have been a stall while I
+waited for a reply to something he never received.
+
+### 5ky — Q3 measured and answered; the three questions are closed
+
+ptone: *"confirm hard cutover"* — Q2 settled. Went straight to Q3 having measured it first,
+per Rule 884.
+
+**Q3 was: does `ConversationInfo.Participants` go on the wire?** Measurement against the
+pinned ref:
+
+- The only production constructor of `ConversationInfo` is `synthesizeConversationInfo`
+  (`delivery_compat.go:67`), which sets `ID`, `Kind`, `Surface` and **never touches
+  `Participants`**.
+- The only reference to the field anywhere is one assertion at `delivery_test.go:377`.
+- So: **no producer, no consumer.** The decision has zero migration cost in either
+  direction, which is worth saying out loud because it converts a scary-sounding disclosure
+  question into a cheap one.
+
+**Recommended deleting the field outright, not keeping it and leaving it empty.** Three
+grounds, in order of weight:
+
+1. `to` already carries who else was addressed *on this message*, which is the actual need a
+   recipient has (don't double-reply). Conversation **membership** is a strictly larger fact
+   and nobody has asked for it.
+2. For a `group` it is a membership roster delivered to every recipient on every message.
+   Under "under-granting is recoverable, over-granting is not," a disclosure with no named
+   consumer should not exist. It also costs tokens proportional to group size, and gteam
+   groups reach 27 agents.
+3. Declared-but-empty is the same pattern I spent today cataloguing. **A declared field is an
+   invitation to populate it**, and the person who eventually does will be adding three lines
+   to an existing struct rather than proposing a new disclosure, so it will not get an ACL
+   review. Deleting it makes the re-addition a visible act.
+
+**Rule 886: an unpopulated field with a security meaning is not neutral. Its cost is not the
+bytes on the wire, it is that filling it in later looks like completing something rather than
+deciding something.**
+
+#### DEF-102 filed — the envelope fabricates a conversation id
+
+Found while reading `synthesizeConversationInfo` for Q3, and deliberately kept out of the Q3
+message beyond one line, because merging it into the participants question would have made
+both harder to decide.
+
+When no real conversation is available the adapter sets
+`conv.ID = msg.Channel + "/" + msg.ThreadID` and picks `conv.Kind` by heuristic — `"group"`
+if `Broadcasted || Recipients != ""`, else `"direct"`. The agent then receives a value under
+the key `conversation.id` that matches no row in `conversations`, and a `kind` — a field with
+ACL meaning elsewhere in this design — asserted from a recipient count.
+
+Live severity is nil: the adapter has zero non-test callers (DEF-101). That is precisely why
+it is worth fixing now. **Rule 887: dark code is the cheapest place to correct a wrong
+default, and the last place anyone will think to look for one. "It has no callers" is an
+argument for fixing it now, not for leaving it.**
+
+Recommended resolution deferred into the Phase 9 design rather than patched: **omit
+`conversation` entirely when there is no real conversation.** A missing field is honest; a
+fabricated identifier is not. The standing rule that a wrong key is worse than no key applies
+with more force here than in the DM case — a DM key is consumed by a comparison, this one is
+consumed by a model that will treat it as fact.
+
+#### State
+
+All three Phase 9 questions are now answered: **hub-wide, single consolidated switch
+defaulting ON; hard cutover on field names; participants deleted** (pending his yes on the
+last). Next artifact is the Phase 9 design doc, which must also absorb the §5ku scope finding
+that two of three migration paths do not auto-run and one has no caller at all.
