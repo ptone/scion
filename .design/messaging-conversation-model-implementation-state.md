@@ -32077,3 +32077,69 @@ work, and they are near-invisible because review reads the conclusion. The concl
 the reporter checked; the support is what they reconstructed. Audit the support.**
 
 Phase 9a is complete: designed, implemented, reviewed, corrected, merged, deployed, verified.
+
+---
+
+## §5ll — the 9b(ii) checkpoint earned its keep
+
+The mandatory checkpoint in the 9b brief existed to make the Alt E decision cheap. It did
+better than that: it produced a finding neither the design nor I had, and it did so before any
+code was written.
+
+**Option C chosen over Alt E and Option A.** `ca-msg-9b` traced five send paths, all holding
+`storeMsg` in local scope at dispatch, none passing it down an 8-deep chain across 2 interfaces
+and 5 `MessageAgent` implementations. Option A (thread a new parameter) is ~11 signatures and
+200+ lines. Option C stamps a rendered `DeliveryText` onto `StructuredMessage`, which already
+flows the whole chain: ~80-120 lines, zero interface changes.
+
+The objection that could have sunk Option C is payload duplication into storage. It does not
+apply: `StructuredMessage` appears nowhere in `pkg/store` or `pkg/ent`. Transport-only, so the
+body is duplicated in the dispatch payload and never in the database. Phase 13 deletes the type
+regardless. Alt E stays unused — it is for when correct rendering is unaffordable, and at
+~100 lines it plainly is not.
+
+**Enrich `ConversationResult`; do not add a `GetConversation` lookup.** The agent framed this as
+one extra query per message versus a struct change. It is not a trade at all — enrichment costs
+**zero** queries. `conversation.go:111` (`UpsertConversationByExternalRef`) and `:194`/`:369`
+(`GetConversationByExternalRef`) all return `*store.Conversation`. Every resolution path already
+holds the full row with Kind, Surface and Name, and `ConversationResult` keeps two fields and
+discards the rest. A lookup would re-fetch, on the hot send path, what the resolver had in hand
+microseconds earlier.
+
+**Rule 937: before accepting "we need an extra query for field X," check whether the function
+that just ran already returned X and dropped it. Narrow result types hide data that was already
+paid for.**
+
+Told it to carry only the fields `ConversationInfo` needs rather than embedding the whole row —
+widening a narrow result type into a row carrier invites callers to depend on fields we have not
+decided to expose.
+
+**The B11/B13 claim was a real observation with the wrong name on it.** `handleBrokerInbound`
+does dispatch at ~:293 and persist at :418; the error branch says so outright ("the dispatch
+already succeeded, so the agent got the message"). But B11/B13 governs **publishing to the event
+bus**, and `PublishUserMessage` is at :424, inside the branch that runs only after
+`CreateMessage` succeeds. The invariant holds. Dispatch-to-agent and event-bus publish are
+different mechanisms, and the agent collapsed them.
+
+**Rule 938: an invariant is defined over a specific operation. "X happens before persist" is
+only a violation if X is the operation the invariant names. Check the verb, not the vicinity.**
+
+**What the observation actually implies — and it is load-bearing for 9b.** Today the ordering is
+harmless because the delivery text carries no identifiers. The moment 9b stamps a real message
+ID and conversation ID into that text, a `CreateMessage` failure hands an agent identifiers for
+a row that never existed. Not fabricated — **dangling** — and by §4.5's own standard the effect
+is identical: a reference that dereferences to nothing. Filed as **DEF-105**.
+
+Ruled: do NOT reorder persist before dispatch to fix it. That inverts failure semantics on a hot
+path (today a persist failure still delivers; after reordering it would not), which is a real
+behaviour change and not part of 9b. Instead, log at ERROR with message ID, conversation ID and
+agent ID, with a test, and carry it as a declared gap — it does not dead-end the end state,
+because the eventual fix is exactly that reordering, made deliberately.
+
+**Rule 939: a latent ordering bug becomes live when you add data that depends on the ordering.
+Before plumbing an identifier through a path, ask what that path does when the identifier's
+referent fails to exist.**
+
+Also required one shared rendering helper for all five sites. Five sites each constructing
+`ConversationInfo` and calling `FormatNewDelivery` is five things that drift; sites supply
+inputs and receive text, and none knows the envelope's shape.
