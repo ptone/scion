@@ -156,8 +156,25 @@ the ordering checks in §3 are vacuous.
 
   This matters more than it sounds. A stale client does not produce clean errors; it
   produces plausible-looking wrong behaviour, which makes every observation in the pass
-  unattributable between "stale client" and "real defect". Rebuild authorized on gteam
-  2026-09-02 with a rollback copy preserved; restart timing left to ptone.
+  unattributable between "stale client" and "real defect". Rebuilt on gteam 2026-09-02 with
+  a rollback copy preserved at `.build/container.known-good-45c440bd/`.
+
+- **P-2a. Freeze the binaries for the duration of an acceptance pass.** Measured 2026-09-02:
+  `SCION_DEV_BINARIES` is a **read-only bind mount resolved per access**, not cached at hub
+  startup or at container creation. Verified by exec'ing into a container that had been
+  running for two days — it immediately saw the newly built `sciontool` (`98543da`), and its
+  in-container sha256 matched the host's byte for byte. `PATH` places `/opt/scion/bin` ahead
+  of the image-baked `/usr/local/bin`, so the sideload always wins.
+
+  Convenient — no restart needed to deploy a client fix. **And a trap.** The same property
+  means overwriting those binaries *during* a pass silently changes what already-running
+  agents execute, mid-flight, with nothing in any log marking the boundary. Observations
+  either side of that swap are not comparable, and the discontinuity is invisible after the
+  fact.
+
+  So: no binary rebuild while an acceptance pass is in flight. The control point is whoever
+  authorizes the rebuild, not whoever runs the pass — the person running it has no way to
+  detect that it happened.
 - **P-3.** Second instance provisioned, isolated from gteam. Its own project, or at minimum
   its own zone and firewall posture. It must not be able to reach gteam's hub.
 - **P-4.** `hub.db.pre-e132380f` **copied** to the new instance. The retention snapshot

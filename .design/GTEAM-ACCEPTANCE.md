@@ -309,13 +309,31 @@ after. gteam's only old-format row is `f003ad87`, and it names `da7cf1ab`, which
 nowhere on the instance. It can never be repaired, so it can never demonstrate repair.
 
 **Covered by:** unit tests asserting against `isDMParticipant` rather than the stored
-string. **Also note:** the DM key migration already ran on gteam at `e132380f`/`e8e4cc3bf`
-— the repair-eligible population there was consumed before this tranche. gteam has no
-remaining repairable rows by construction.
+string.
 
-**Consequence:** the fresh-cutover instance is where the repair path gets its live
-exercise. This is a substantive reason for the fresh-cutover test beyond cutover mechanics
-— worth stating when that instance is provisioned.
+**CORRECTED 2026-09-02.** This section previously read: *"the DM key migration already ran
+on gteam at `e132380f`/`e8e4cc3bf` — the repair-eligible population there was consumed
+before this tranche."* **That was wrong, and I was the source of it.**
+
+Measurement of the pre-migration retention snapshot `hub.db.pre-e132380f` (sha256
+`58b6b240…`) shows its entire `direct` population is seven rows: 5 already new-format, 1
+empty-ref, and 1 old-format — the same `da7cf1ab` orphan. **The repairable population was
+never non-zero.** Nothing was consumed; there was nothing to consume.
+
+The conclusion (gteam cannot demonstrate AC-4) survives unchanged. The mechanism does not,
+and the difference matters: "consumed" implies the repair path ran and we merely missed
+watching it. In fact **step 3b, the old-format rekey, has never executed against real data
+on any instance we hold** — before the migration, after it, or anywhere else.
+
+**Consequence — revised.** The fresh-cutover instance cannot supply a live exercise either,
+because it would be seeded from this same snapshot. No live exercise of the repair path is
+available to us at all. Gap A is therefore closeable only *by construction*, via an
+enumerated adversarial fixture set — see `FRESH-CUTOVER-PLAN.md` §1.2–§1.3 and the F-1 … F-7
+classes. Do not let the acceptance record be read as stronger than that.
+
+This does not lower the stakes. The rekey path exists for hubs whose data we cannot sample,
+upgrading unattended in a single boot under the no-switch cutover design, rewriting ACLs
+with no operator watching.
 
 ### Gap B — AC-8, Postgres concurrency
 
@@ -393,5 +411,15 @@ Fresh cutover on a second instance is unblocked when G-1 through G-7 are signed 
 the M9 question (§ G-4 known deviation) has a ruling — fix-first or annotate-and-defer.
 Gaps A–E do not block; they are recorded, not outstanding.
 
-The fresh-cutover instance carries one item this checklist cannot: **Gap A**, the live
-exercise of the repair path, which gteam consumed before this tranche began.
+~~The fresh-cutover instance carries one item this checklist cannot: **Gap A**, the live
+exercise of the repair path, which gteam consumed before this tranche began.~~
+
+**Superseded 2026-09-02.** Gap A has no live exercise available anywhere — see the
+correction in § Gap A. The fresh-cutover instance still carries something this checklist
+cannot, but it is **the single-boot migration ordering**, not the repair path: gteam reached
+its current state through six sequential deploys with operator attention between each, so
+the DM-key-then-backfill sequence has never run as a sequence. See
+`FRESH-CUTOVER-PLAN.md` §0.1.
+
+The M9 question referenced above was resolved by fixing (M9 + M9a, `98543da92`), so G-7 is
+the only remaining precondition.
