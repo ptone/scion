@@ -31893,3 +31893,68 @@ first thing to check. Holding the tranche-g merge until that returns and the thr
 **Rule 924: flipping a default silently re-points every test that relied on the old default by
 omission. Those tests do not fail — they pass while testing the other branch. Inverting a
 default requires an audit of tests that never mention it.**
+
+---
+
+## §5li — the reviewer's reassurance was the thing to check
+
+`ca-msg-9a` pushed the three fixes as `41f84ece` (4 files, +67 -13 — the counts matched the
+report this time). All verified green: build clean, `pkg/hub`, `pkg/hub/auth`, `pkg/messages`,
+`pkg/config/opsettings` under `-tags no_sqlite`.
+
+**Fix (1) is broader than what I asked for, and I checked the widening before the fix.** I asked
+for observability on the messaging type-mismatch; the agent made it generic across all sections
+via `opsettings.SectionByName(name).New()`. The failure mode that would matter is `New()`
+returning a value rather than a pointer: `json.Unmarshal` into a non-pointer errors
+unconditionally, so *every* section would be marked `Malformed`, and since `Malformed` forces
+the envelope switch OFF, the entire cutover would silently revert — while the agent's own
+`{"...":"yes"} → Malformed=true` test passed, for the wrong reason. All fifteen `New` funcs
+return pointers, and `New` predates this change, so the mechanism was already exercised. The
+guard is also nil-safe on both `sec` and `sec.New`. Sound.
+
+**Rule 925: when an agent generalises a fix beyond the defect, audit the generalisation's worst
+case, not the defect's. The blast radius moved; the test did not.**
+
+Only `ConversationEnvelopeSwitch` reads `Malformed`, so other sections gain ERROR logs and no
+behaviour change. Residual risk is boot-log noise if any legitimate document type-mismatches its
+struct — bounded, and worth checking as "no new ERROR lines at boot" when tranche-g deploys.
+
+**The review came back clean, and its central conclusion was wrong.** `ca-msg-9a-rev` produced a
+genuinely good seven-site table and a sharp finding on `TestG2_AC6`: its first half passes
+because `testServer()` leaves `ops` nil and the gate short-circuits at `ops != nil`, not because
+the switch reads OFF. Correct, and the kind of distinction most reviews miss.
+
+Then it concluded: *"the ops-nil guard prevents it from affecting file/SQLite mode... the only
+real-world impact is on postgres-mode hubs."* That conflates **file mode** — a store not
+implementing `HubSettingStore` — with the **SQLite driver**. `server_foreground.go:1172`
+switches on the driver; `sqlite` and `postgres` both converge on
+`entadapter.NewCompositeStore(entClient)` at :1209, `default:` hard-errors, and entadapter is
+the only implementer of `HubSettingStore`. Nil ops is unreachable in any shipped configuration.
+The empirical check settles it independently: gteam runs SQLite with both switches ON and
+effective, which is impossible if ops were nil there.
+
+So the risk is inverted from what the review said. The flip affects **every** shipped hub,
+gteam included — which is the requirement, but I was told the one machine slated to exercise the
+cutover would not be affected by it. Had I taken it, I would have planned QA around a fixture I
+believed inert.
+
+**Rule 926: when a review concludes "safe because X is unreachable," reachability is the
+load-bearing claim and needs more evidence than everything else in the review combined. Trace it
+to the construction site, not to the guard that reads it.**
+
+**Rule 927: a clean review is not a cheap one to accept. The reassuring conclusion is the one
+with no adversary — the reviewer stops looking once it holds, and so does the reader. I spent
+more effort on the two words "SQLite mode" than on the entire seven-site table, and that was the
+correct allocation.**
+
+**A real gap the review surfaced without naming it as one.** Because `testServer()` yields nil
+ops, no *enforcement-level* test ever runs with OperationalSettings present and the messaging
+row absent. Absent-row→ON is covered at the getter, but the actual cutover — a hub upgrades and
+finds the write-deny gate live with no setting touched — is untested where it takes effect.
+That is the phase's core requirement. Requested a spec for it before merging to tranche-g.
+
+**Rule 928: coverage of a getter is not coverage of the behaviour the getter gates. The default
+that matters is the one observed at the enforcement site.**
+
+Holding the merge for that test plus the `TestG2_AC6` comment fix. Everything else in 9a is
+accepted.
