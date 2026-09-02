@@ -2434,6 +2434,12 @@ type RoleDefinition struct {
 	System      bool      `json:"system"`      // true = seeded, not user-modifiable
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
+
+	// ApplicableTo lists the principal types this role can be assigned to.
+	// Valid values: "user", "agent", "group". Empty means all types (legacy
+	// compat). The server validates this on role binding creation and the
+	// frontend uses it to filter inapplicable roles from the UI.
+	ApplicableTo []string `json:"applicableTo,omitempty"`
 }
 
 // RoleBinding connects a principal to a role definition, optionally scoped.

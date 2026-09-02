@@ -46,11 +46,12 @@ import (
 
 // BuiltInRole declares the code-authoritative definition of a system role.
 type BuiltInRole struct {
-	Name        string
-	Description string
-	ScopeType   string
-	Revision    int
-	Permissions []string
+	Name         string
+	Description  string
+	ScopeType    string
+	Revision     int
+	Permissions  []string
+	ApplicableTo []string // principal types this role can be assigned to; nil = all
 }
 
 // builtInRoleRevisionKey returns the hub-setting key used to track the last
@@ -89,18 +90,20 @@ func BuiltInRoles() []BuiltInRole {
 		// ── System-scoped roles ──────────────────────────────────────────
 
 		{
-			Name:        store.SystemRoleSuperAdmin,
-			Description: "Full platform administrator with all permissions",
-			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
-			Permissions: allPermissionIDs(),
+			Name:         store.SystemRoleSuperAdmin,
+			Description:  "Full platform administrator with all permissions",
+			ScopeType:    store.RoleScopeSystem,
+			Revision:     1,
+			Permissions:  allPermissionIDs(),
+			ApplicableTo: []string{store.RoleBindingPrincipalUser},
 		},
 		{
-			Name:        store.SystemRoleHubAdmin,
-			Description: "Hub administrator with scopeable admin permissions",
-			ScopeType:   store.RoleScopeSystem,
-			Revision:    2,
-			Permissions: hubAdminPermissionIDs(),
+			Name:         store.SystemRoleHubAdmin,
+			Description:  "Hub administrator with scopeable admin permissions",
+			ScopeType:    store.RoleScopeSystem,
+			Revision:     2,
+			Permissions:  hubAdminPermissionIDs(),
+			ApplicableTo: []string{store.RoleBindingPrincipalUser},
 		},
 		{
 			// hub-member: curated read permissions for directory/catalog resources.
@@ -108,75 +111,84 @@ func BuiltInRoles() []BuiltInRole {
 			// agent.read at system scope. Those are handled by project-scoped
 			// role bindings to prevent cross-project visibility.
 			// See: TestGolden_CrossProjectVisibilityRegression
-			Name:        store.SystemRoleHubMember,
-			Description: "Hub member with read access to directory resources and project creation",
-			ScopeType:   store.RoleScopeSystem,
-			Revision:    2,
-			Permissions: hubMemberPermissionIDs(),
+			Name:         store.SystemRoleHubMember,
+			Description:  "Hub member with read access to directory resources and project creation",
+			ScopeType:    store.RoleScopeSystem,
+			Revision:     2,
+			Permissions:  hubMemberPermissionIDs(),
+			ApplicableTo: []string{store.RoleBindingPrincipalUser, store.RoleBindingPrincipalGroup},
 		},
 		{
 			// hub-viewer: read-only permissions at system scope, carefully curated.
 			// Same exclusions as hub-member (no cross-project visibility).
-			Name:        store.SystemRoleHubViewer,
-			Description: "Hub viewer with read-only access to directory resources",
-			ScopeType:   store.RoleScopeSystem,
-			Revision:    2,
-			Permissions: hubViewerPermissionIDs(),
+			Name:         store.SystemRoleHubViewer,
+			Description:  "Hub viewer with read-only access to directory resources",
+			ScopeType:    store.RoleScopeSystem,
+			Revision:     2,
+			Permissions:  hubViewerPermissionIDs(),
+			ApplicableTo: []string{store.RoleBindingPrincipalUser, store.RoleBindingPrincipalGroup},
 		},
 
 		// ── Project-scoped roles ─────────────────────────────────────────
 
 		{
-			Name:        store.ProjectRoleOwner,
-			Description: "Project owner with full project permissions",
-			ScopeType:   store.RoleScopeProject,
-			Revision:    1,
-			Permissions: projectOwnerPermissionIDs(),
+			Name:         store.ProjectRoleOwner,
+			Description:  "Project owner with full project permissions",
+			ScopeType:    store.RoleScopeProject,
+			Revision:     1,
+			Permissions:  projectOwnerPermissionIDs(),
+			ApplicableTo: []string{store.RoleBindingPrincipalUser},
 		},
 		{
-			Name:        store.ProjectRoleAdmin,
-			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
-			ScopeType:   store.RoleScopeProject,
-			Revision:    1,
-			Permissions: projectAdminPermissionIDs(),
+			Name:         store.ProjectRoleAdmin,
+			Description:  "Project admin with most project permissions (no delete, no set_message_mode)",
+			ScopeType:    store.RoleScopeProject,
+			Revision:     1,
+			Permissions:  projectAdminPermissionIDs(),
+			ApplicableTo: []string{store.RoleBindingPrincipalUser, store.RoleBindingPrincipalGroup},
 		},
 		{
-			Name:        store.ProjectRoleMember,
-			Description: "Project member with basic project permissions",
-			ScopeType:   store.RoleScopeProject,
-			Revision:    1,
-			Permissions: projectMemberCuratedPermissionIDs(),
+			Name:         store.ProjectRoleMember,
+			Description:  "Project member with basic project permissions",
+			ScopeType:    store.RoleScopeProject,
+			Revision:     1,
+			Permissions:  projectMemberCuratedPermissionIDs(),
+			ApplicableTo: []string{store.RoleBindingPrincipalUser, store.RoleBindingPrincipalAgent, store.RoleBindingPrincipalGroup},
 		},
 
 		// ── Agent roles (system-scoped, used for agent JWT scope mapping) ─
 
 		{
-			Name:        store.AgentRoleDefNone,
-			Description: "No agent permissions",
-			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
-			Permissions: nil,
+			Name:         store.AgentRoleDefNone,
+			Description:  "No agent permissions",
+			ScopeType:    store.RoleScopeSystem,
+			Revision:     1,
+			Permissions:  nil,
+			ApplicableTo: []string{store.RoleBindingPrincipalAgent},
 		},
 		{
-			Name:        store.AgentRoleDefReadonly,
-			Description: "Read-only agent permissions",
-			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
-			Permissions: agentRolePermissionIDs(AgentRoleReadOnly),
+			Name:         store.AgentRoleDefReadonly,
+			Description:  "Read-only agent permissions",
+			ScopeType:    store.RoleScopeSystem,
+			Revision:     1,
+			Permissions:  agentRolePermissionIDs(AgentRoleReadOnly),
+			ApplicableTo: []string{store.RoleBindingPrincipalAgent},
 		},
 		{
-			Name:        store.AgentRoleDefBaseline,
-			Description: "Baseline agent permissions",
-			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
-			Permissions: agentRolePermissionIDs(AgentRoleBaseline),
+			Name:         store.AgentRoleDefBaseline,
+			Description:  "Baseline agent permissions",
+			ScopeType:    store.RoleScopeSystem,
+			Revision:     1,
+			Permissions:  agentRolePermissionIDs(AgentRoleBaseline),
+			ApplicableTo: []string{store.RoleBindingPrincipalAgent},
 		},
 		{
-			Name:        store.AgentRoleDefFull,
-			Description: "Full agent permissions",
-			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
-			Permissions: agentRolePermissionIDs(AgentRoleFull),
+			Name:         store.AgentRoleDefFull,
+			Description:  "Full agent permissions",
+			ScopeType:    store.RoleScopeSystem,
+			Revision:     1,
+			Permissions:  agentRolePermissionIDs(AgentRoleFull),
+			ApplicableTo: []string{store.RoleBindingPrincipalAgent},
 		},
 	}
 }

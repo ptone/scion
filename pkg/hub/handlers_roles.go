@@ -16,6 +16,7 @@ package hub
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -223,10 +224,35 @@ func (s *Server) listRoleDefinitions(w http.ResponseWriter, r *http.Request) {
 	if defs == nil {
 		defs = []*store.RoleDefinition{}
 	}
+	// Enrich role definitions with applicability metadata from seed data.
+	enrichRoleDefinitionsApplicability(defs)
 	writeJSON(w, http.StatusOK, listRoleDefinitionsResponse{
 		Items:      defs,
 		TotalCount: len(defs),
 	})
+}
+
+// builtInApplicabilityMap builds a lookup from role name to applicable principal
+// types from the authoritative seed data.
+var builtInApplicabilityMap = func() map[string][]string {
+	m := make(map[string][]string)
+	for _, role := range BuiltInRoles() {
+		if len(role.ApplicableTo) > 0 {
+			m[role.Name] = role.ApplicableTo
+		}
+	}
+	return m
+}()
+
+// enrichRoleDefinitionsApplicability sets the ApplicableTo field on role
+// definitions from the authoritative seed data. Custom roles get all
+// principal types by default (fail-open for custom roles).
+func enrichRoleDefinitionsApplicability(defs []*store.RoleDefinition) {
+	for _, def := range defs {
+		if applicableTo, ok := builtInApplicabilityMap[def.Name]; ok {
+			def.ApplicableTo = applicableTo
+		}
+	}
 }
 
 func (s *Server) getRoleDefinition(w http.ResponseWriter, r *http.Request, id string) {
@@ -238,6 +264,10 @@ func (s *Server) getRoleDefinition(w http.ResponseWriter, r *http.Request, id st
 		}
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	// D6: Enrich single role definition with applicability metadata.
+	if applicableTo, ok := builtInApplicabilityMap[def.Name]; ok {
+		def.ApplicableTo = applicableTo
 	}
 	writeJSON(w, http.StatusOK, def)
 }
@@ -553,6 +583,32 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 	if req.NotBefore != nil && req.ExpiresAt != nil && !req.ExpiresAt.After(*req.NotBefore) {
 		BadRequest(w, "expiresAt must be after notBefore")
 		return
+	}
+
+	// D6: Validate role applicability — reject if the role is not applicable
+	// to the requested principal type. This enforces the seed-declared
+	// applicability rules server-side, even if the client bypasses filtering.
+	roleDef, err := s.store.GetRoleDefinition(r.Context(), req.RoleDefinitionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			BadRequest(w, "role definition not found")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if applicableTo, ok := builtInApplicabilityMap[roleDef.Name]; ok && len(applicableTo) > 0 {
+		applicable := false
+		for _, pt := range applicableTo {
+			if pt == req.PrincipalType {
+				applicable = true
+				break
+			}
+		}
+		if !applicable {
+			BadRequest(w, fmt.Sprintf("role %q is not applicable to %s principals", roleDef.Name, req.PrincipalType))
+			return
+		}
 	}
 
 	// R4 brief item 2: project-scoped role-binding create MUST route through

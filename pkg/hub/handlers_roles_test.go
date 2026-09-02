@@ -1186,3 +1186,157 @@ func TestRolesAPI_CreateRoleBinding_WithOnlyExpiresAt(t *testing.T) {
 	assert.Nil(t, binding.NotBefore, "notBefore should be nil when not set")
 	require.NotNil(t, binding.ExpiresAt, "expiresAt should be persisted")
 }
+
+// ---------------------------------------------------------------------------
+// D6: Role applicability validation
+// ---------------------------------------------------------------------------
+
+func TestRolesAPI_CreateRoleBinding_AgentRoleRejectsUser(t *testing.T) {
+	srv, st := testServer(t)
+
+	userID := tid("d6-user-agent-reject")
+	seedRolesTestUser(t, st, userID, "d6-user-agent-reject@test.local")
+
+	// Look up the agent-role-baseline built-in role.
+	rd, err := st.GetRoleDefinitionByName(t.Context(), store.AgentRoleDefBaseline, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Attempt to bind an agent-only role to a user — must be rejected.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        "system",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not applicable")
+}
+
+func TestRolesAPI_CreateRoleBinding_UserRoleRejectsAgent(t *testing.T) {
+	srv, st := testServer(t)
+
+	agentID := tid("d6-agent-user-reject")
+	projectID := tid("d6-agent-user-project")
+	seedRolesTestAgent(t, st, agentID, projectID)
+
+	// Look up hub-admin — a user-only role.
+	rd, err := st.GetRoleDefinitionByName(t.Context(), store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Attempt to bind a user-only role to an agent — must be rejected.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    "agent",
+		PrincipalID:      agentID,
+		ScopeType:        "system",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not applicable")
+}
+
+func TestRolesAPI_CreateRoleBinding_AgentRoleAcceptsAgent(t *testing.T) {
+	srv, st := testServer(t)
+
+	agentID := tid("d6-agent-ok")
+	projectID := tid("d6-agent-ok-project")
+	seedRolesTestAgent(t, st, agentID, projectID)
+
+	// Look up agent-role-baseline.
+	rd, err := st.GetRoleDefinitionByName(t.Context(), store.AgentRoleDefBaseline, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Agent binding with an agent role — should succeed.
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    "agent",
+		PrincipalID:      agentID,
+		ScopeType:        "system",
+	})
+	assert.Equal(t, "agent", binding.PrincipalType)
+	assert.Equal(t, agentID, binding.PrincipalID)
+}
+
+func TestRolesAPI_CreateRoleBinding_UserGroupRoleAcceptsGroup(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := t.Context()
+
+	// Create a group so the existence check passes.
+	require.NoError(t, st.CreateGroup(ctx, &store.Group{
+		ID: tid("d6-group-ok"), Slug: "d6-group-ok", Name: "D6 Group OK",
+	}))
+
+	// hub-member allows user and group.
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleHubMember, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    "group",
+		PrincipalID:      tid("d6-group-ok"),
+		ScopeType:        "system",
+	})
+	assert.Equal(t, "group", binding.PrincipalType)
+	assert.Equal(t, tid("d6-group-ok"), binding.PrincipalID)
+}
+
+func TestRolesAPI_CreateRoleBinding_CustomRoleNoApplicabilityCheck(t *testing.T) {
+	srv, s := testServer(t)
+
+	agentID := tid("d6-custom-agent")
+	projectID := tid("d6-custom-project")
+	seedRolesTestAgent(t, s, agentID, projectID)
+
+	// Custom roles have no applicability entry — should be unrestricted.
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "d6-custom-role",
+		Description: "Custom role for D6 test",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	// Binding a custom role to an agent should succeed (no restriction).
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "agent",
+		PrincipalID:      agentID,
+		ScopeType:        "system",
+	})
+	assert.Equal(t, "agent", binding.PrincipalType)
+}
+
+func TestRolesAPI_ListRoleDefinitions_IncludesApplicableTo(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles", nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleDefinitionsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	// Find the agent-role-baseline definition and verify applicableTo.
+	var found bool
+	for _, def := range resp.Items {
+		if def.Name == store.AgentRoleDefBaseline {
+			found = true
+			assert.Equal(t, []string{"agent"}, def.ApplicableTo,
+				"agent-role-baseline should only be applicable to agents")
+			break
+		}
+	}
+	assert.True(t, found, "agent-role-baseline should be in the list")
+}
+
+func TestRolesAPI_GetRoleDefinition_IncludesApplicableTo(t *testing.T) {
+	srv, st := testServer(t)
+
+	rd, err := st.GetRoleDefinitionByName(t.Context(), store.AgentRoleDefBaseline, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/"+rd.ID, nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var def store.RoleDefinition
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &def))
+	assert.Equal(t, []string{"agent"}, def.ApplicableTo,
+		"single role definition response should include applicableTo")
+}
