@@ -34120,3 +34120,40 @@ Under (a) every project is one message away from the same exposure. Under (b) so
 Requested the discriminator: agent↔user DM counts by project across 2026-09-01 → now, and how many carry a `kind=direct` conversation id. The contrast that matters is whether **any** other project sent a DM in the window and filed it right. Flagged the alarming case explicitly so it cannot hide behind the clean sweep — *"there were only 8 agent↔user DMs on the whole instance and all 8 misfiled"* is consistent with everything measured so far and would mean the failure rate is **100%**, not 2-in-40.
 
 **Rule 1042** — a count of unaffected containers is not a measure of scope. Ask how many were *exposed to the condition*; a clean sweep across containers that never saw traffic measures nothing but traffic distribution.
+
+### DEF-129 RETRACTED — there was no misfiling and no disclosure
+
+**Everything above from "reachability confirmed" onward is superseded. It is retained deliberately, because the reasoning error is more instructive than the finding would have been.**
+
+`ca-msg-misfile` was dispatched to falsify the fallback hypothesis and did. The answer is the boring one I never tested:
+
+**All 8 messages carry a `thread_id` equal to their conversation's topic key** — `f1b450c9` for `general`, `815deddb` for `new-thread`. They are channel messages. A user typed in a webchat topic; an agent replied in the same topic. Correctly filed, by design, through the intended path.
+
+The discriminator is decisive in both directions. None of the 13 correctly-filed DMs in the same project carries a topic key as `thread_id`; all 8 "misfiled" ones do. Confirmed independently by measurement (instance-investigator, from the DB) and by source (`ca-msg-misfile`, from the write path). Two methods, same answer.
+
+`CheckConversationConsistency` flagged them because it pairs messages by sender/recipient and compares stored `conversation_id`, **without regard to the surface the message was sent on**. Two people who both DM each other *and* talk in a shared channel will trip it on every channel message, forever. 16 WARNs a day on gteam, all false positives. Filed as its own defect: the check is over-broad, not the data.
+
+#### What I actually got wrong
+
+I escalated a live disclosure to ptone without testing the innocent explanation. The specific failure is narrow and worth naming precisely: I had a set of messages in a group conversation between two principals who also DM each other, and I concluded they were **misplaced DMs** when they were equally consistent with **channel messages**. Those two are indistinguishable in the fields I was looking at. The field that separates them — `thread_id` — I did not ask for until later, and only because I was chasing the write path rather than the classification.
+
+The escalation was live for roughly an hour. I told ptone mid-flight, while it was still provisional, and it dissolved shortly after.
+
+**Rule 1043** — before escalating that data is in the wrong place, state what it would look like if it were in the *right* place, and confirm the observation distinguishes them. "This looks misfiled" is a hypothesis about intent, and intent is not in the row.
+
+**Rule 1044** — an alarm that cannot distinguish two legitimate surfaces is not evidence about either. Establish what the check *ignores* before treating what it reports as a finding.
+
+#### What survives
+
+Two things from the above are unaffected by the retraction, because they were established from source rather than from these 8 rows:
+
+- **Rule 1040 stands.** The read filter really is `Channel:"web"` + `ConversationID` and nothing else, and nothing re-derives a message's sender/recipient against the conversation it claims. `conversation_id` is authoritative and unverified. No bug writes a wrong one today — but the read path would not catch one if it did. This is a real gap, now correctly sized as *latent* rather than *realised*.
+- **The 40 shells are live and reachable**, 39 of them `is_general=1`. That is just what a general channel is. It stops being an alarming fact once the misfiling premise is removed, but it remains the accurate description of the container class.
+
+**Rules 1039, 1041 and 1042 also stand** — each caught a real error on the way here, and they did their job even though the finding they were guarding evaporated. Rule 1042 in particular is what stopped "38 clean shells" from being read as reassurance; it was right to demand the denominator, and the denominator is what eventually produced the correct answer.
+
+#### Cost accounting, honestly
+
+Three agents and roughly a day, ending in a negative result and one genuine defect (the over-broad check). Against that: the falsification protocol worked exactly as designed. I handed `ca-msg-misfile` the hypothesis explicitly labelled *to be falsified*, withheld the shadow-check evidence that pointed against it (Rule 1035), and they falsified it. The process caught my error before it reached remediation — no rows were moved, no topics hidden, no "one clean before-state" spent. Instructing instance-investigator not to remediate is what made the retraction cheap.
+
+**Rule 1045** — the value of a falsification dispatch is not that it finds bugs. It is that it makes being wrong recoverable. A confirmation dispatch would have found supporting detail for a story that was not true.
