@@ -32551,3 +32551,71 @@ delivered JSON and reaches only `Addressee.MessageID`, which is not serialised.
 Deploy is held for DEF-109 rather than taken now and repeated. A single cutover is closer to the
 upgrade path ptone actually wants exercised, and it avoids QA against a format that would change
 underneath it minutes later. ptone informed with the scope stated plainly.
+
+---
+
+## §5ls — DEF-109 merged; Phase 9 runtime cutover complete; gteam deploy dispatched (2026-09-02)
+
+`scion/tranche-g` = **`e132380fe`**, linear (0 merge commits over `45c440bd..HEAD`).
+
+### 9f verified
+
+Numstat re-measured: `16/0` `server.go`, `16/0` `notifications.go`, `222/0` new test file. Zero
+deletions. Build clean; **4 RUN / 4 PASS untagged**, exit 0 from the binary.
+
+Both stamps are additive, switch-gated, and correctly placed. The notification path reuses
+`nd.writeDenyEnabled`, a `func() bool` field that **already existed** at `notifications.go:45` and was
+already wired at `server.go:2497` — confirmed against the base, so no new plumbing and no exposure to
+the standing `StartNotificationDispatcher` lock hazard.
+
+**One ordering detail worth naming as a pass rather than a finding.** `structuredMsg.Plain` is set
+*before* the stamp in both paths. `RenderDeliveryText` short-circuits to the raw body when `Plain` is
+set, so a stamp placed earlier would have wrapped plain scheduler messages in an envelope the payload
+explicitly asked them not to have. Silent, and it would have looked like an envelope-rendering bug
+rather than an ordering one.
+
+### Cleanup recorded, not fixed (`DEFECTS.md` [^27])
+
+Both 9f stamps parse `structuredMsg.Timestamp` to fill `CreatedAt`. `MapLegacyEnvelope` already parses
+that same field from that same struct at `envelope_compat.go:158`. Equivalent output; harmless.
+
+**Rule 957.** `CreatedAt` exists for callers holding a persisted row, where the DB timestamp beats
+anything derivable from a formatted string. A parameter meaning "I have better data than you" must not
+be passed by a caller who does not — the next reader infers an authoritative source that is not there.
+
+### Post-9f sweep — DEF-110, and the classification that matters
+
+Swept again rather than assuming DEF-109 was the last. Remaining unstamped agent-delivery sites:
+
+- **DELIVERY_FAILED notifications** (`messagebroker.go:892`, `handlers_agent_messaging.go:1901`) —
+  same wiring gap as DEF-109 (`mapSystemCategory` already has a `SystemCategoryDeliveryFailed` case),
+  differing only in frequency: they fire only after a dispatch has already failed.
+- **`reconcile.go:328`** — passes a **nil** `StructuredMessage`, so the transport takes its
+  pre-rendered-text fallback and the agent gets bare text. Verified nil at the `45c440bd` base too:
+  this path never had an envelope of either kind and is **unchanged by the cutover**.
+
+Filed as DEF-110 and explicitly **not** allowed to hold the deploy. The high-frequency paths are all
+converted; a rare error-path split is precisely the tracked drift the standing directive permits.
+
+**Rule 958.** When a sweep turns up leftovers, separate *this tranche's omissions* from *pre-existing
+gaps the tranche made visible*. Merging them either inflates the tranche's scope or lets a real
+omission hide behind a "pre-existing" label. Here (a) is ours and will be finished; (b) is older than
+Phase 9 and is a genuine inconsistency on its own merits.
+
+### State of the cutover
+
+Twelve stamp sites. `messages.FormatForDelivery` survives at exactly two production call sites, both
+switch-OFF fallbacks (`cmd/server_dispatcher.go:289`, `pkg/runtimebroker/handlers.go:1723`) — which is
+G3's precondition for Phase 13 deleting it. Delivery delimiters untouched, so the frame every agent
+recognises survives the cutover.
+
+### Deploy dispatched
+
+`instance-investigator` tasked with deploying `e132380fe` to gteam. Requirements set: fresh WAL-correct
+DB snapshot with path/size/sha256 reported and the existing `hub.db.pre-45c440bd` preserved; running
+sha and PID recorded before restart so rollback is a known target; post-restart verification of
+healthz **and the reported build sha**, the switch reading ON, row-count reconciliation, confirmation
+that no migration ran and no settings row was minted or modified (the `messaging` section row in
+particular), and the first minute of ERROR lines. Read-only DB access throughout, never dumping the
+`hub_settings` value column. Standing instruction repeated that any deviation from the approved
+procedure is flagged, not merely reflected in a quoted command line.
