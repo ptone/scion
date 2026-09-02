@@ -31288,3 +31288,70 @@ covers DEF-102, DEF-103 and the synthesised message ID in a single check.
 §7 carries the migration auto-run gap forward as a separate tranche needing its own design,
 since an idempotent startup migration that touches DM ACLs is a higher-risk object than
 anything in Phase 9.
+
+### 5la — ptone: "Are you sure you aren't confusing runtime broker and message broker again?"
+
+The word that mattered was **again**. A challenge to a premise I had just built a design's
+central decision on, from someone who has seen me get this wrong before. Traced it end to end
+rather than defending it.
+
+**The distinction is correct.**
+
+| | runtime broker (`pkg/runtimebroker`) | message broker proxy (`pkg/hub/messagebroker.go`) |
+|---|---|---|
+| Where | separate process, reached over HTTP at `brokerEndpoint` | in the hub |
+| Does | owns tmux, injects text into agents | bridges Discord/Slack/Telegram topics to agents |
+| Store | **none** (`Server` @ `server.go:191`: manager, runtime, hub connections, 3 caches) | **yes** — `MessageBrokerProxy.store store.Store` |
+| Formats agent delivery | **yes**, `handlers.go:1711` | no — dispatches via `DispatchAgentMessage` |
+
+§4.1 was about the runtime broker and stands.
+
+**But the challenge found a real error, one layer down.** §3.2 cited
+`pkg/hubclient/agents.go:527` and `:579` as the hub→broker wire. Those are
+`agentService.SendStructuredMessage` posting to the hub's **own**
+`/api/v1/agents/<id>/message` — **CLI→hub**, a different hop entirely. The actual
+hub→runtime-broker transports are `broker_http_transport.go:326`
+(`brokerHTTPTransport.MessageAgent`) and `controlchannel_client.go:258`
+(`ControlChannelBrokerClient.MessageAgent`).
+
+I found those two by grepping `structured_message` across non-test Go, which I should have
+done when writing §3.2 instead of matching on the shape of a struct literal that happened to
+have a `StructuredMessage:` field. Two hops in this system post the same JSON key to the same
+URL path; the field name does not disambiguate them and the package name does.
+
+**Rule 890: when two hops in a system carry the same payload to the same path, a grep for the
+payload identifies neither. Cite the hop by the function that owns the destination, not by
+the struct literal that fills the body.**
+
+**Rule 891: a challenge to a conclusion should be answered by re-tracing the evidence, not by
+re-checking the conclusion. Mine was right and the evidence under it was wrong — had I only
+re-read my own reasoning I would have replied "yes, I'm sure" and left the bad citation in a
+document someone is about to implement from.**
+
+#### Correcting it made the design smaller
+
+Both hub→runtime-broker transports already carry a pre-rendered-text fallback —
+`reqBody["message"] = message` when `structuredMsg == nil` — and `sendMessage` already
+delivers `req.Message` verbatim. **Shipping rendered text to the runtime broker is not a new
+capability.** I had written §4.1 as though it were, which overstated both the size and the
+irreversibility of the decision.
+
+The one real obstacle survives and is smaller than the original framing:
+`sendMessage` computes `isRaw := req.StructuredMessage != nil && req.StructuredMessage.Raw`,
+so sending only `message` silently drops the raw send-keys path. That is why `DeliveryText`
+is a new field rather than a reuse of `message` — content and transport flags must travel
+together.
+
+**Rule 892: "the wire cannot carry X" deserves the same scepticism as "the code does not do
+X." Check the fallback branch of the transport before designing a new field; wire formats
+accumulate escape hatches, and one of them is usually already the thing you were about to
+add.**
+
+#### Handling
+
+Added a two-broker table to §3.2 so the next reader does not re-derive it, and **recorded the
+bad citation in the document rather than silently swapping it** — a design doc that quietly
+corrects itself teaches nobody which distinctions are slippery. Pushed as `8a575cfa1`.
+
+Asked ptone where he remembers the earlier confusion, since "again" implies an instance I
+have not found and would rather fix than leave.
