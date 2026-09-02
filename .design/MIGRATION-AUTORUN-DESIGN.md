@@ -565,9 +565,26 @@ WARN  Messages remain unattributed in listed projects
 This requires a reachable-only count, which `CountUnbackfilledMessages` cannot express
 today — it takes a single project ID or nothing. Two options: sum the per-project counts
 the backfill already computes (no new store surface, and it is the number the migration
-actually acted on), or add an anti-join count. **Prefer the former** — it derives the
-number from the work performed rather than from a second query that could drift from it,
-which is the same reasoning that produced DEF-112.
+actually acted on), or add an anti-join count.
+
+> **CORRECTION (post-M5, 2026-09-02).** This section originally read *"prefer the
+> former"*, on the DEF-112 reasoning that deriving the number from work performed beats a
+> second query that can drift from it. **M5 invalidated that preference.** M5 added
+> per-project resumption: `runMessageBackfill` skips any project already listed in
+> `projects_done`. On a steady-state boot — every project done, zero work performed —
+> there are no per-project counts to sum, so the sum yields zero, the WARN never fires,
+> and the report is silently wrong in the state the hub occupies almost all of its life.
+> Note that a first-boot test cannot see this: the first boot is the one run where the
+> sums do exist.
+>
+> **Binding requirement:** on a steady-state boot with zero backfill work performed, both
+> the reachable and the unreachable counts must still be correct, and this case must be
+> tested explicitly. The sum approach cannot satisfy it alone.
+>
+> If an anti-join count is added to satisfy this, **the DEF-112 drift concern becomes
+> live and M7 is promoted from optional to required**: the counter and the backfill's
+> skip predicate must then share one predicate rather than being two expressions of the
+> same intent that are free to diverge.
 
 Deleting the warning would hide a real anomaly; leaving it unchanged would advertise a
 remedy that cannot work and bury a genuine signal under a permanent one. Splitting the
@@ -750,9 +767,12 @@ Commit-sized, in order. Each is independently reviewable.
   unreachable (INFO, stable), and delete the stale remediation string. Grep for prose
   describing the old behaviour — docs-site and SKILL.md — per the standing rule that
   removing a gate requires removing the text that describes it.
-- **M7 — DEF-112 hardening** (optional). Make the counter and the skip guard share one
-  predicate. OQ-4 resolved this as latent, so M7 is droppable if the tranche runs long;
-  it is listed last for that reason.
+- **M7 — DEF-112 hardening** (*conditionally* optional). Make the counter and the skip
+  guard share one predicate. OQ-4 resolved this as latent, so M7 was droppable if the
+  tranche ran long, and it is listed last for that reason. **But if M6 satisfies the
+  steady-state requirement with an anti-join count (see the correction in §4.6), the
+  drift it guards against stops being latent and M7 becomes required.** M6 must report
+  which approach it took.
 - **M8 — DEF-113 rename** (§3 F10). Rename `stepMergeOrRekeyEmptyRef` to
   `stepSkipEmptyRef`, delete the unreachable `EmptyRefMerged` and `EmptyRefRekeyed`
   counters, and keep the B14 comment. Pure rename plus dead-field deletion, no behaviour
@@ -813,6 +833,12 @@ A reviewer or QA agent should verify:
    `scion server backfill --execute`. The specific failure to test for is the orphan
    being counted in the actionable bucket — that is the bug that makes the warning
    permanent.
+
+   **And the steady-state case** (added post-M5, see the correction in §4.6): run the
+   boot hook a second time, so every project is already in `projects_done` and no
+   backfill work is performed. Both counts must still be correct and the WARN must still
+   not fire. The first boot is the only run on which per-project sums exist, so a
+   single-boot test passes over the defect entirely.
 10. **B14 still holds after auto-run.** Seed a keyless `direct` row. After the boot hook
     runs, the row is unchanged — still keyless, no participants invented from the listing
     index — and is reported as skipped. This is the assertion that would catch someone
