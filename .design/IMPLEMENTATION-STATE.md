@@ -33950,3 +33950,49 @@ It is also worth stating plainly that the selection rule is arbitrary with respe
 **1. Where does resolution happen?** instance-investigator observed no hub-side resolution logging and inferred the CLI resolved locally and POSTed a populated `recipient_id`. That is an inference from a missing log line — the traced handler may simply not log — and I have sent it back rather than accepting it. It is now the highest-priority question in DEF-126, because **a client-side resolver defeats the single atomic cut-over requirement**: updating the hub would leave every deployed CLI still misdelivering, while the fix appeared complete. It also raises the possibility that the `len(Items) == 1` defect exists in two implementations needing two fixes.
 
 **2. Conversation MISMATCH in the same window.** Two WARN `conversation consistency check: MISMATCH`, `resolved_conv_id` f92dc5cf vs `prior_conv_id` 6ef436bd. Working hypothesis: a **consequence** of the wrong-principal selection — addressing gmail rather than google.com derives a different DM key and therefore a different conversation. Testable from the two `external_ref`s, which are keys and in bounds. Not filed as independent until that comes back; not dropped either.
+
+### DEF-127: investigation results
+
+ca-msg-blank, no corrections to my premises, worktree removed, nothing pushed.
+
+**Mechanism confirmed.** `ResolveDMConversationForRead` → `GetConversationByExternalRef` → `store.ErrNotFound` → nil → the G3 branch at `handlers_chat_v2.go:1913`. The conversation row is created only by `UpsertConversationByExternalRef` on the write path.
+
+**Q2 came back "no", which is the answer that mattered.** There is no cheap discriminator. The message schema (`pkg/ent/schema/message.go:106-113`) indexes `project_id`, `(recipient, recipient_id)`, `created`, and `conversation_id` — **nothing covers `(channel, thread_id)`**, so the "are there legacy messages under this key" probe I had penciled into the design is a full table scan. Conversation participants offer nothing either: without a conversation id there is nothing to look up. Absence is genuinely indistinguishable from never-used short of a scan or a schema change.
+
+**So the design I was leaning toward is dead**, and it died before I wrote it down rather than after. This is the value of asking the discriminator question first: the whole "empty 200 when never-existed, 409 when drifted" shape depended on a probe that does not exist. Recording the negative result explicitly, because the next person to design this will reach for the same idea.
+
+Where that leaves the fix: the 409 cannot be made precise, so the choice is between showing a user-facing error on a normal state, or accepting that DM drift stops being visible *at this endpoint*. I lean strongly to the latter — **a user-facing error is the wrong instrument for a drift alarm in the first place.** The reader can neither interpret nor act on it, and G3's actual requirement was that failures be *observable*, which a counter and a WARN satisfy without conflation. That is a design decision I will write up properly rather than settle in a note.
+
+**Q5: cosmetic-on-read.** The write path (`sendHumanToHuman:1476`, `sendAgentRouted:1178`) routes through `ResolveOrCreateThreadConversation` → `DeriveConversationKey` case 1 (`derive_key.go:69`) → `UpsertConversationByExternalRef`, which creates the row. After the first send, reads return 200. The DM is fully functional; only the empty first view is broken.
+
+**Q3: three sites.** S2 (`handlers_messages.go:85-89`) and S3b (`:331-335`) share the hole. S3a (`:316-319`, thread path) does **not** — threads are created by the topic system, so a missing row there is genuine drift and the 409 is correct. That distinction is load-bearing and must survive into the fix: the same-looking branch is right in one place and wrong in two.
+
+### DEF-127a: a database failure is dressed as data drift
+
+Separate defect, from the same trace. `ResolveDMConversationForRead` collapses `store.ErrNotFound` and every other error into nil at `conversation.go:206-209`, and the real error is logged at **Debug** only (`:207`). So a connection failure or timeout renders to the user as "no matching conversation record exists".
+
+That is not a cosmetic mislabel. It points the reader at the wrong system: someone will go hunting for data drift and migration bugs during what is actually an outage, with the true cause sitting below the log level they are reading. The two-way split (absent vs broken) already exists in the store and is discarded one layer up.
+
+**Rule 1037** — an error path that collapses "not found" into "failed" is not a simplification, it is a misdiagnosis generator. Absence and failure have different remedies and must not share a message.
+
+---
+
+## §5nh — DEF-128: the Cloud Logging fallback bypasses the participant filter
+
+Found by ca-msg-blank while answering a question I asked for a different reason.
+
+**The mechanism.** `agent-message-viewer.ts` `fetchMessages` (:418) checks `hubRes.ok` and, on non-OK, **silently** falls through to a Cloud Logging fallback. The fallback endpoint is properly and independently authorized — `checkAgentReadScope`, agent existence, project isolation, and RBAC `ActionRead` (`handlers_logs.go:287-307`) — and its query is scoped to `logName=scion-messages`, `recipient_id OR sender_id = agentID`, and `project_id`. So there is **no cross-agent or cross-project hole**, and I want that stated plainly rather than lost in the alarm.
+
+**The hole is one level in.** The hub-store path applies `filter.ParticipantID = user.ID()` for non-manage users (`handlers_messages.go:258-260`). The Cloud Logging path is **agent-scoped, not user-scoped**, and applies no participant filter. Same viewer, same page: own messages when the call succeeds, **every user's messages with that agent** when it fails. No error is rendered.
+
+**Why "pre-existing" is not much of a defence.** The widening lives in `handleAgentMessageLogs` and predates this refactor. But it is reached through an **error path**, which is the least-exercised branch in any system and the one least likely to appear in a test or a review. Over-granting that requires a failure to occur is not rarer in practice — it is merely rarer in testing. Standing rule unchanged: under-granting is recoverable, over-granting is not.
+
+**The G3 assessment, stated fairly.** ca-msg-blank's read is that this is not the same class of fallback G3 removed — different data source, narrow trigger (agent detail page, `cloudLogging=true`). I accept that. It nonetheless **silences the 409 that G3 exists to make visible**, at the layer where a human would notice. The property "there is no fallback" is false at the client, and a server-side guarantee that a client quietly undoes is not a guarantee.
+
+### The composite is the real question
+
+Two of the three DEF-127 sites are agent-message endpoints. If the one `agent-message-viewer` calls is among them, then a **never-used agent conversation** — benign, common, first-touch — produces a 409 that silently promotes a viewer from own-messages to all-users' messages. DEF-127 would stop being cosmetic and become the thing that *drives traffic into* DEF-128.
+
+I have asked for that as a yes/no with the endpoint named, explicitly instructing against stretching to connect them, because I have already made two unchecked inferences today and this one would sit under an escalation. Escalated to ptone as established-plus-pending rather than waiting for the linkage, since the fail-open half is confirmed and the instance carries production data.
+
+**Rule 1038** — when a fallback exists, the security question is never "is the fallback authorized" but "is it authorized *identically*". A fallback with its own correct-looking authorization that is merely narrower in a different dimension is the most dangerous shape, because every individual check passes review.
