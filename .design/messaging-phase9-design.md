@@ -839,3 +839,114 @@ deletion is Phase 13, and by then it should have no callers.
   every `reply_to` selects a row. This is the single acceptance criterion that covers
   DEF-102, DEF-103 and the synthesised message ID together, and it is the one to run against
   gteam rather than against fixtures.
+
+---
+
+## 11. Amendments, 2026-09-02
+
+Made during implementation of 9b/9c. Each supersedes the text in §9.
+
+### 11.1 Step 6 — the hubclient is not a rendering site
+
+§9 step 6 read "Both hub sites and the hubclient path." That was imprecise and `ca-msg-9b`
+challenged it with a call path rather than accepting it. The challenge is upheld.
+
+`hubclient/agents.go:520` `SendStructuredMessage` POSTs a `StructuredMessage` as JSON to
+`/api/v1/agents/{id}/message`. That is CLI→hub. The hub receives it at `handleAgentMessage`, which
+resolves the conversation, persists, and dispatches. No formatting happens client-side.
+
+Stamping delivery text at the hubclient would be wrong on principle, not merely redundant: it would
+happen **before the hub has authorized or persisted**. The rendering must sit downstream of both.
+
+**Step 6 now reads:** the two hub rendering sites at `cmd/server_dispatcher.go:261` and `:271`. The
+hubclient is an input path that feeds `handleAgentMessage` — itself a rendering site — and is not
+modified.
+
+### 11.2 Step 10 — `urgent` is not independent
+
+§9 step 10 called `urgent bool` "small and independent of OQ-1; do not let it wait on OQ-1." The
+independence claim was right; the "small" claim was wrong.
+
+`messaging.Message` (`envelope.go:273-288`) has **no `Urgent` field**, so there is no source for the
+value. The step requires adding `Urgent` to `Message`, mapping `old.Urgent` in
+`envelope_compat.go:178-188`, and only then populating the envelope. It spans two files it was not
+scoped for.
+
+Confirmed and not to be re-derived: `broadcasted` is deliberately absent from `DeliveryEnvelope`,
+and `delivery_test.go:216` (`TestFormatNewDelivery_NoBroadcasted`) asserts the absence.
+
+**New hazard, recorded because it produces no git conflict.** `pkg/messages/format.go:50-51, 72-73`
+is the legacy renderer and it *does* serialize both `urgent` and `broadcasted`. Phase 9b is editing
+that file. The two renderers can drift apart silently — textually independent, semantically
+coupled. A test pinning `urgent` semantics on the new envelope is required as drift insurance.
+
+### 11.3 Step 11 / OQ-1 — `AddressedVia` stays off the wire. CLOSED.
+
+`AddressedVia` is carried only on `Addressee.Via` (`envelope.go:339`, `json:"via"`), a
+persistence/resolution type. `FormatNewDelivery` already discards it deliberately, collapsing each
+addressee to a bare principal ref (`delivery.go:86`), and `delivery_test.go:382-405` asserts exactly
+that by building addressees with differing `Via` values and checking only `env.To`.
+
+**Decision: do not add it.** It is provenance the hub uses to decide routing, not information a
+receiving agent acts on. The reversibility argument settles it — adding a field to the envelope
+later is backward compatible; removing one is not. Recorded as a deliberate omission. No code
+change; step 11 becomes documentation only.
+
+### 11.4 The 9b/9c API contract
+
+9b creates the first external callers of an API 9c re-signs. At `45c440bd` these functions have
+**zero callers outside `pkg/messaging`**, so the seam is created and closed within this tranche.
+Fixing the target shape up front stops both agents building toward a moving target:
+
+```go
+type PersistedIdentity struct {
+    MessageID string // persisted store row ID; "" => OMIT
+    ReplyToID string // real reply target;      "" => OMIT
+}
+
+func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity) (*Message, []Addressee, error)
+func FormatLegacyAsNewDelivery(msg *messages.StructuredMessage, ident PersistedIdentity, convInfo *ConversationInfo) string
+func FormatNewDelivery(msg *Message, addrs []Addressee, convInfo *ConversationInfo, opts DeliveryOptions) string
+// DeliveryEnvelope.Conversation *ConversationInfo `json:"conversation,omitempty"`
+```
+
+The empty-string-means-omit convention enforces the design's "omitted, never fabricated" rule at the
+type level rather than by reviewer vigilance.
+
+**Seam ownership: 9c updates 9b's call sites.** 9b writes against the current signature and does not
+anticipate the change. Whichever lands second absorbs a compile error at one or two call sites —
+loud, local, and cheap, which is the acceptable kind of coupling.
+
+Note `FormatLegacyAsNewDelivery` already takes `convInfo *ConversationInfo`; it is the inner
+`FormatNewDelivery` call that flattens it and `synthesizeConversationInfo` that fills the nil. So
+§11.4's conversation change propagates a pointer inward and deletes the synthesizer — the outer
+signature does not change for that parameter, which keeps 9b's blast radius to one added argument.
+
+### 11.5 Mentions do not inherit the parent conversation — an access decision, not an absence
+
+Phase 9b initially reported that `processMentions` has no conversation available. That is false:
+it is called at `handlers_agent_messaging.go:1148` and `:1237`, both inside `handleAgentMessage`,
+where `convResult` is live from `:926` and populated at `:1014`/`:1052`. The conversation is
+resolved and **dropped at the call boundary** because the signature at `:1858` does not accept it.
+
+The conclusion (omit the conversation) is nonetheless correct, and the reason matters more than the
+conclusion because it governs the group case:
+
+A mention fans out to an agent that is not necessarily in the parent conversation. Where the parent
+is `direct`, the mention target is by definition **not** a participant — invariant D-1 fixes a
+direct conversation's participant set at two parties for its lifetime. Stamping that conversation's
+ID onto a delivery to a non-participant discloses the identity of a conversation the recipient has
+no access to. Under-granting is recoverable; over-granting is not.
+
+So the conversation is omitted **as an access decision**. The code comment must say so. A comment
+claiming no conversation is available would be false and would invite a later agent to "fix" it by
+threading `convResult` through — which is precisely the disclosure.
+
+`broadcastDirect` is the genuine-absence case: its caller resolves no conversation anywhere in
+scope, and broadcasts skip conversation resolution by design. Omission there needs no justification
+beyond absence.
+
+**OPEN QUESTION (new).** Where the parent conversation is a **group** and the mention target IS a
+participant, omitting is over-conservative and loses context the recipient is entitled to. Stamping
+it requires a participant check at fan-out time. Out of scope for 9b; needs a design before any
+agent touches it.
