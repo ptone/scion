@@ -33044,3 +33044,26 @@ The fix commit also added nine lines of production code — a nil guard on `resu
 Dispatched in parallel: the live boot test on gteam, and M5 to a fresh `ca-mig-5`. The boot test is the first run-level **write** to gteam this tranche — the DM migration re-keys real rows. I did not escalate it, and the reason is specific rather than a judgement call: I required a fresh `hub.db.pre-e8e4cc3b` snapshot as step 1, gated on its sha256 before anything else runs. **A snapshot makes the write reversible, and reversibility is exactly what my escalation threshold turns on.** Aggressive testing on a dedicated instance is the standing instruction; irreversibility is the line, not risk.
 
 **Correction to my own operating notes.** I recorded yesterday that the ~2000-character cap applies to agent-to-agent messages. It does not. The 2068-character heads-up failed with `agent_not_found` — a 404 across a project boundary — and I trimmed it to 1725 and re-sent it into the same 404. I then trimmed a review from 1997 to 1845 for the same imagined reason. Today's M5 brief went through at 4459 characters. The cap is Discord-only; agent messages are uncapped. Two wasted trims and a false note in my own reference, all downstream of one unread error line. Rule 976 was the right lesson and I wrote it down while still carrying the belief it should have dislodged — **writing the rule is not the same as re-examining what the rule invalidates.**
+
+---
+
+### §5mf — The boot hook runs on production, and the thing it refuses to do is the thing worth reading (2026-09-02)
+
+First live boot of M4 on gteam at `e8e4cc3bf`. Snapshot `hub.db.pre-e8e4cc3b` taken first (sha256 `2e6d3542…`), both older snapshots verified untouched. Four acceptance criteria confirmed against production data rather than fixtures:
+
+- **AC-1 idempotence.** Second boot logged `already complete, skipping` and did no work. 7,604ms → 5,104ms.
+- **AC-6 boot never blocked.** Healthy, 27 agents, 39 projects, no ERROR lines.
+- **AC-10 / B14.** `adf13f87` still `external_ref = ''`. The row the design forbids touching was not touched.
+- **M-1′, the one I most wanted to see.** The pass produced one row-level refusal and **the marker was written anyway**, with `residuals: 1`. That is the invariant working on real data. Under superseded M-1 this hub would now re-run the migration on every boot forever. The livelock was not hypothetical and it is now demonstrably avoided.
+
+The migration itself took **9ms** against 8 conversations.
+
+**AC-4 — "the repair works" — did not get tested, and that is a fact about gteam rather than a failure.** `rekeyed=0`, because the only old-format row was refused. The unit test seeds a resolvable old-format row and re-keys it correctly, so the code path is covered; live data simply contains no case it can act on. Worth stating plainly rather than letting a green board imply otherwise: **the repair has never run against production data.** A fresh-cutover test on another instance is where that gets exercised.
+
+**What the refusal actually says is the finding.** `f003ad87` was refused with *"ambiguous kind resolution … found in neither or both tables"*. The refusal is very likely correct. But "neither" and "both" are opposite conditions — deleted principals, which is permanent and uninteresting, versus a UUID that is simultaneously an agent and a user, which is an integrity fault. One string covers both. The counter is named `Ambiguous`, which describes the code's state of mind rather than the data's condition. Both IDs are reported jointly, so "one resolved, one didn't" is invisible. And `unparseable=1` names no row at all, on a corpus of **eight**, where naming it would have cost nothing. Filed as **DEF-124**.
+
+**The part I should not let slide is that this is my own rule, unenforced.** The Tranche G evidence constraints I wrote require `unresolvable` to be a separate bucket from `disagree` and from non-UUID principals. I applied that to the evidence report and left the migration's own refusal path bucketed in exactly the way I had prohibited — because I was reviewing the *report* as the diagnostic surface and did not think of the migration's log as one. It is the DEF-119 scoping error again: I check the artefact I named and not the other place the same information escapes.
+
+One thread worth pulling: `b53249ea-b8ce-4e75-99f1-883ec0f5e967`, one of the two unresolvable principals, is the same UUID that appears in DEF-121 in corrupted form with an embedded newline. If a single deleted principal accounts for both our only old-format row and our only key corruption, that is one narrow problem rather than two independent faults. Investigator is checking, read-only.
+
+**Rule 978** — a constraint written for one output surface applies to every surface carrying the same information. Naming the artefact in the rule is what makes the rule easy to satisfy and easy to evade at once.
