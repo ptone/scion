@@ -6,7 +6,7 @@ measurement (§2.1) and the approach changed as a result — see §1. Still gate
 off (ptone's ruling: *"fresh cutover only happens after all other acceptance testing on
 gteam is done"*).
 
-**Recommended next action:** staff the F-1 … F-7 fixture classes (§1.3, §4.1) as permanent
+**Recommended next action:** staff the F-1 … F-9 fixture classes (§1.3, §4.1) as permanent
 test coverage. That work is unblocked now, does not need an instance, and is the durable
 half of this plan.
 
@@ -115,14 +115,36 @@ from **real** principals drawn from the snapshot itself:
 | F-5 | old-format, both resolve to the *same* principal | **no rekey** — degenerate, must not produce a self-DM ACL |
 | F-6 | empty `external_ref` | skip, stay keyless (B14) |
 | F-7 | already new-format | participant rebuild only, key byte-identical after |
+| F-8 | old-format, both resolve, **both users** | **no rekey** — unrepresentable, never a fabricated kind |
+| F-9 | old-format, both resolve, **both agents** | **no rekey** — unrepresentable, never a fabricated kind |
 
-This is stronger than the live-population test it replaces, not weaker. A live instance would
-have handed us whichever classes it happened to contain — here that was one class, the
-unrepairable one. The constructed set covers the discriminations exhaustively, and the ones
-that must **not** repair (F-3, F-4, F-5) are the security-relevant half.
+**F-8 and F-9 were missed in the first enumeration.** ca-mig-10's inventory surfaced an
+existing test for a principal resolving to *both* the users and agents tables, which showed
+the classification space is per-principal {user only, agent only, both, neither} — a 4×4
+grid, of which the original seven classes sampled only a corner.
 
-Each row needs at least one message so the backfill has something to attribute; without that
-the ordering checks in §3 are vacuous.
+The two added rows are the dangerous corner. If the target format requires exactly one agent
+and one user, a same-kind pair resolves *successfully* on both principals yet cannot be
+expressed. The failure mode is not a crash: it is assigning kinds positionally or by
+fallback and emitting a syntactically valid key that names the wrong kind for one principal.
+That is a fabricated ACL, and it passes any check that only asks "did it rekey". Verify the
+parser's actual constraint before assuming this shape.
+
+This is stronger than the live-population test it replaces. A live instance would have handed
+us whichever classes it happened to contain — here that was exactly one, the unrepairable
+one. The classes that must **not** repair (F-3, F-4, F-5, F-8, F-9) are the security-relevant
+half.
+
+**But do not read the set as exhaustive.** The first draft of this section claimed it "covers
+the discriminations exhaustively", and F-8 and F-9 were found within a day of writing that.
+The real space is 4×4 over per-principal resolution outcomes, before considering ordering and
+representability, and this table samples it rather than enumerating it. Treat the set as a
+floor that grows whenever someone finds a corner it misses — and expect that to keep
+happening, because the last person to call it complete was wrong.
+
+Rows for the VM run (§3) need at least one message each so the backfill has something to
+attribute; without that the ordering checks are vacuous. The unit-level classes generally do
+not — seed a message only where the test asserts something about that message.
 
 ### 1.4 Constraints on building the fixture
 
@@ -137,6 +159,15 @@ the ordering checks in §3 are vacuous.
 - **Never point a write at the retention snapshot.** Copy first; the snapshot is read-only
   forever.
 - Real principal UUIDs, synthetic message content. Report keys and IDs, never bodies.
+- **Authorization assertions must run against a real store, not a mock.** The counter,
+  format and key-identity checks are fine against a mock. But every class that must *not*
+  repair — F-3, F-4, F-5, F-8, F-9 — additionally needs a sqlite-backed assertion that real
+  `isDMParticipant` denies both named principals afterwards, as must F-1's third-principal
+  denial. An authorization assertion against a mock proves the mock behaves as written.
+  This pattern already exists: the strong half of F-4's coverage is the integration test
+  `TestBootDMKeyMigration_FailClosed`, while the weak half is the mock unit test.
+- Seed a message only where a test asserts something about that message. The VM run needs
+  messages so the backfill has something to attribute; the unit classes mostly do not.
 
 ---
 
@@ -268,7 +299,7 @@ Boot 2 must skip both migrations and report identical counts. Boot 3 likewise.
 
 The item gteam could not carry.
 
-**Before the boot**, record for every constructed row F-1 … F-7: the conversation ID, the
+**Before the boot**, record for every constructed row F-1 … F-9: the conversation ID, the
 `external_ref`, and both principal IDs. Keys and IDs only — **never message content**.
 
 **Assert before:** `isDMParticipant` denies for both named principals on every old-format
@@ -305,7 +336,7 @@ the derivation path.
 The obvious challenge to §1.3 is: if the population is constructed anyway, why does this need
 a VM at all? Why is it not a Go integration test?
 
-Largely, it is — and it should be. **F-1 … F-7 should land as permanent test coverage
+Largely, it is — and it should be. **F-1 … F-9 should land as permanent test coverage
 regardless of whether the VM run ever happens.** They are cheap, they are deterministic, they
 encode the discriminations the repair path must make, and unlike a VM exercise they keep
 protecting the path after this tranche closes. If only one of the two ever gets built, build
