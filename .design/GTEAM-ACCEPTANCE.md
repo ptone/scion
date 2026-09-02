@@ -1,6 +1,6 @@
 # gteam Acceptance Checklist — Messaging Migration Tranche
 
-**Target:** `scion/tranche-g` @ `cbd4f8b6ab3e2b54781476a6c0a660fb9c36d1c3`
+**Target:** `scion/tranche-g` @ `5ca3e4026b73324d3ec3585ba7d21cf8683a311b` (was `cbd4f8b6a`; M9 landed 2026-09-02 — see §1.6)
 **Instance:** `scion-gteam` (`deploy-demo-test` / `us-central1-a` / 10.128.0.56)
 **Status:** ptone's ruling — this checklist gates the fresh-cutover test on a second
 instance. Fresh cutover happens only after everything here is done.
@@ -114,6 +114,35 @@ gap 24 = 20 (skipped, already had a conversation_id) + 4 (Inferred stamps)
 | post-derivation failures | WARN | fires only if > 0, and carries **no remedy string** |
 
 Per-project lines now carry `inferred` and the per-cause `derive_*` breakdown.
+
+### 1.6.1 Result — deploy of `5ca3e4026`, 2026-09-02
+
+Snapshot `hub.db.pre-5ca3e4026`, sha256 `1f9b0f84b06ca4f95c41dcf4900e62da1d6b346bc1afb5149eeb68fd0522179b`.
+
+**G-4 re-run: PASS on every check that decides it.**
+
+| Check | Result |
+|---|---|
+| WARN `Messages remain unattributed` absent | PASS — 0 occurrences |
+| `backfill --execute` absent from boot log | PASS — 0 occurrences |
+| `unreachable` stable | PASS — 5,637 on both boots |
+| `permanent` INFO present | PASS — 12,583, re-summed by me from the per-project column |
+| Boot 2 idempotent | PASS — M9 marker recognised, backfill skipped |
+| Protected fixtures intact | PASS — all three |
+
+`actionable` reaches zero **by arithmetic, not by clamping** — the condition this whole
+milestone turned on. Per-project lines now carry `inferred`, `write_failures`,
+`resolution_failures`, `permanent_residual` and the per-cause `derive_*` breakdown. All
+derive failures are `derive_principal_pair` except one `derive_dm_key_parse` (`84e32420`,
+the newline-in-UUID row).
+
+**One defect found, in a field the checklist did not cover.** `total_residuals` reported
+23,190, which is this pass's 11,593 plus the *previous* pass's 11,597 — the accumulator
+carries forward across a completed pass. Log-and-marker only; it never feeds the bucket
+arithmetic, so nothing above is affected. **M9a dispatched.** G-4 does not need a third
+re-run for it; the re-verification is the M9a gate suite plus one confirming boot.
+
+---
 
 **The check that matters:** `actionable` must reach zero by arithmetic, not by clamping.
 If the WARN still prints 12,583, M9 has not taken effect. If it prints a small non-zero

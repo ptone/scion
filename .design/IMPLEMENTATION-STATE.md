@@ -33545,3 +33545,57 @@ Rule 1010 still stands: it was derived from *production data*, where the +4/−4
 **Rule 1018** — before requiring an agent to demonstrate a property by construction, check the construction exists. I specified a cancelling fixture for a mutation whose error term is provably non-negative. A monotone defect cannot be hidden by summation, and one line of algebra over the invariant I had already written down would have shown it before the requirement went out.
 
 **Rule 1019** — "the weaker gate would also have caught this" is evidence about the *mutation*, not about the gate. Establish whether a mutation can discriminate between two gate designs before using it to judge one.
+
+## §5nb — M9 on gteam (`5ca3e4026`): buckets correct, `total_residuals` double-counted (M9a dispatched)
+
+Snapshot `hub.db.pre-5ca3e4026`, sha256 `1f9b0f84b06ca4f95c41dcf4900e62da1d6b346bc1afb5149eeb68fd0522179b`, 141,082,624 bytes.
+
+**The headline works.** WARN `Messages remain unattributed` is **absent**. `backfill --execute` appears **zero** times in the boot log. `unreachable` 5,637 unchanged across both boots; boot 2 recognises the M9 marker and skips. All three protected fixtures intact. I re-summed the per-project `permanent_residual` column myself: **12,583 exactly** — the population that used to be the WARN is now an INFO, reached by arithmetic and not by the clamp.
+
+The pre-M9 marker upgrade path worked as designed: detected the missing `permanent_residual`, cleared `CompletedAt`, re-ran all 39 projects, wrote the M9-format marker.
+
+**But `total_residuals` is wrong, and I found it by re-adding the columns rather than reading the conclusion.**
+
+```
+reported total_residuals        = 23,190
+Σ per-project row_errors        = 11,593   (write_failures = resolution_failures = 0 everywhere)
+prior pass total_residuals      = 11,597
+11,593 + 11,597                 = 23,190   exact
+```
+
+Root cause at `boot_data_migrations.go:243`:
+
+```go
+totalResiduals := marker.Residuals // carry forward from prior boots
+```
+
+Unconditional. Eleven lines below, M9's own accumulator is guarded:
+
+```go
+if len(marker.ProjectsDone) > 0 && marker.PermanentResidual != nil {
+    permanentResidual = *marker.PermanentResidual
+    ...
+}
+```
+
+**Two accumulators side by side; M9 guarded the one it added and left the neighbour alone.** Latent before M9, because a completed marker meant skip and the pass never re-ran. M9 introduced the upgrade path that re-runs a full pass over a marker whose `Residuals` is already populated — so M9 created the conditions that make the pre-existing bug observable. **Rule 1004 in living form:** the fix was written next to an identical unfixed instance and the diagnosis was not re-run over the neighbourhood.
+
+**Confirmed in-suite, not just inferred from production.** `TestM9_Gate5_PreM9MarkerRerun` seeds `Residuals: 5` and its pass yields exactly one derive-refused message. Probe:
+
+```
+PROBE: seeded Residuals=5, this pass has 1 derive-refused message;
+       marker.Residuals=6 (expect 1 if reset, 6 if carried forward)
+--- PASS: TestM9_Gate5_PreM9MarkerRerun
+```
+
+Six, and the gate passes. The gate walking precisely this path is blind to it, because **every** assertion on `Residuals` in the tree is an inequality (`Greater`/`GreaterOrEqual` at `boot_data_migrations_test.go:175`, `boot_backfill_test.go:294,458,882`). A double-counted 23,190 satisfies all four.
+
+**Severity: not escalated.** `total_residuals` is log-and-marker only; it never feeds the bucket arithmetic, so no decision is wrong and nothing is irreversible. Also effectively dead in the shipped upgrade path — a hub coming from a released version has no marker at all, so only interim test instances take it. Fixed anyway, because a summary line a reader cannot trust is the exact defect class this milestone exists to remove.
+
+**M9a dispatched** (`ca-mig-9a`, branch `scion/ca-mig-9a` off `5ca3e4026`): give `totalResiduals` the same reset semantics, factor the shared resume-or-reset decision into one place, and add the two gates below. Genuine resumption carry-forward (`boot_backfill_test.go:445/457`, `850/881`) must stay green.
+
+**Rule 1020** — gate C asserts each partition internally; nothing asserted that the **aggregate equals the sum of the partitions**. Per-partition assertions and a global total are two different identities, and this defect lived exactly in the gap between them. Reconciling within partitions does not reconcile the roll-up.
+
+**Rule 1021** — when adding an accumulator beside an existing one, apply the new guard to the neighbour or state why it does not need it. Adjacency is where this class of defect survives: the reviewer's eye reads the new lines and treats the old ones as background.
+
+**Reporting nit, no code impact:** instance-investigator's table is headed "20 of 39" but lists 22 rows. The 22 rows are right — they sum to 12,583 exactly. The prose count is wrong.
