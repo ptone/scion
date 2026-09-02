@@ -318,6 +318,18 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// Step 3b: Legacy trusted proxy headers (backward compat when no ProxyAuthenticator)
 				if cfg.ProxyAuthenticator == nil && len(trustedNets) > 0 && isTrustedProxy(r, trustedNets) {
 					if user := extractProxyUser(r); user != nil {
+						// D4 circuit-breaker: check user status from store
+						// before admitting legacy proxy identities.
+						if cfg.UserStore != nil {
+							u, uErr := cfg.UserStore.GetUser(ctx, user.ID())
+							if uErr == nil && u.Status == store.UserStatusSuspended {
+								log.Warn("Legacy proxy auth rejected: user is suspended",
+									"user_id", user.ID(), "email", user.Email())
+								writeError(w, http.StatusForbidden, "user_suspended",
+									"access denied: user account is suspended", nil)
+								return
+							}
+						}
 						ctx = context.WithValue(ctx, userContextKey{}, user)
 						ctx = contextWithIdentity(ctx, user)
 						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(user))

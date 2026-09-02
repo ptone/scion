@@ -233,6 +233,43 @@ func TestJWTAuth_DeletedUser_PassesThroughToHandler(t *testing.T) {
 	}
 }
 
+// D4 circuit-breaker: legacy proxy path must check suspension.
+func TestLegacyProxyAuth_SuspendedUser_Returns403(t *testing.T) {
+	cfg := AuthConfig{
+		Mode:           "production",
+		TrustedProxies: []string{"192.0.2.0/24"},
+		UserStore: &stubUserStore{
+			getUser: func(_ context.Context, _ string) (*store.User, error) {
+				return &store.User{
+					ID:     "legacy-proxy-suspended",
+					Email:  "suspended@example.com",
+					Status: store.UserStatusSuspended,
+				}, nil
+			},
+		},
+		Debug: false,
+	}
+
+	middleware := UnifiedAuthMiddleware(cfg)
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler must not be reached for suspended user via legacy proxy")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.Header.Set("X-Forwarded-User-Id", "legacy-proxy-suspended")
+	req.Header.Set("X-Forwarded-User-Email", "suspended@example.com")
+	req.Header.Set("X-Forwarded-User-Name", "Suspended Legacy")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for suspended user via legacy proxy, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestJWTAuth_NoUserStore_PassesThrough(t *testing.T) {
 	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
 	if err != nil {
