@@ -32869,3 +32869,39 @@ error count on production-shaped data; "should be zero" is a prediction.
 **Rule 964** — when a measurement you requested comes back acceptable but the same run
 undercuts the premise of the measurement, the premise is the finding. Ask what else the
 run observed, not just whether the number was good.
+
+### §5lx — Both migration agents reported success without pushing; M0 clears review, M1–M3 does not (2026-09-02)
+
+**Neither agent's work existed anywhere but its own container.** `ca-mig-1` reported "Pushed to `scion/ca-mig-1` (3 commits)". `ca-mig-0` reported "Pushed to `scion/ca-mig-0` at `003fbc7b0`". Both were false. `git ls-remote` against the fork returned nothing for either name, across 769 branches, and nothing on the GoogleCloudPlatform remote either.
+
+Two agents failing identically within the same minute is not two mistakes, so I looked for a shared cause before writing to either of them. The obvious hypothesis was a dead credential, and I tested it rather than reasoned about it: pushed a throwaway ref to the fork with the shared token and deleted it again. It worked. So the credential was fine and the fault was on the agents' side — which is what let me tell both of them, truthfully and immediately, not to go hunting for a token problem.
+
+`ca-mig-1` found the real cause: **`origin` in the agent containers points at `scion-frontiers/scion-repo-contrib.git`, not at the fork.** A bare `git push` succeeds, prints every reassuring thing a successful push prints, and puts the branch somewhere nobody will look. This is the same repository whose remote URL carries an embedded `github_pat_` (DEF-87), so it is a place work can land quietly and be forgotten. Both agents recovered once given the explicit token-bearing push command.
+
+The procedural fix is mine, not theirs. My briefs said to push and verify; they did not say *verify against what*. Adding the exact `ls-remote` command and requiring its raw output in the report costs one line and converts an unfalsifiable claim into a checkable one. **A push is done when `ls-remote` returns the expected sha, not when the push command prints something.** Both agents now report it that way.
+
+**M0 / DEF-114 (`ca-mig-0`) — verified, clears with one addition.**
+
+I went looking for a specific failure and did not find it. The agent wrote that `DeriveConversationKey` "now returns `*DeriveError` (implements `error`)", which is exactly how the typed-nil trap is usually described a moment before it bites: a concrete pointer type in the return signature makes every successful call produce a non-nil `error` interface holding a nil pointer. On this function that would turn every successful derivation into a refusal. The declared type is `err error`, all three success paths `return ..., nil`, and there is an explicit test pinning it. Clean.
+
+I also went looking for a units mismatch in the hazard-A fix, because the new increment is `result.HazardAEmailCount++` on a single refused message while the pre-existing one is `+= len(g.messageIDs)`. If the old increment had been per-*group*, the fix would have been summing groups and messages into one integer. It is per-message on both sides. Also clean. Both of these were worth the minutes: the first would have been catastrophic and invisible, the second would have quietly corrupted the number I am about to make a scope decision on.
+
+What I did insist on: the agent verified "attributed counts are unchanged" **by argument** — `persistGroup` untouched, success path byte-for-byte identical. The argument is sound and is almost certainly true. It is still not a measurement, and this is the one property that must not regress. It now has `TestBackfill_DEF114_AttributedMessageIDs_Pinned`, which asserts the exact *set* of attributed message IDs rather than the count — a count alone can survive one message moving out of attribution and another moving in.
+
+One addition requested before merge: the `errors.As` block has no `else`, so a future failure branch returning a plain error would appear in `result.Errors` and in no bucket of `DeriveFailures`, with nothing flagging the discrepancy. That matters because reconciling exactly these numbers against a 24,700-message run is the next thing I do, and last time the arithmetic failing to add up is how the hard-deleted-project population (DEF-111, 22.7%) surfaced at all. Requested an `unclassified` bucket plus an assertion that the buckets sum to `len(Errors)` — the sum assertion being the durable one, since it keeps checking after today's five causes stop being the whole list.
+
+**M1–M3 (`ca-mig-1`) — three defects, all the same shape.**
+
+Verified first: numstat reconciles exactly (1080/0, 7 files), `e132380fe` is an ancestor, `pkg/messaging` untouched as instructed, `--execute` defaults false with `DryRun: !execute`, and all 22 advisory lock values are unique — which I established by extracting them from `concurrency.go` in the shell rather than by running the test that claims to check it, a distinction that turned out to matter. Gate visibility I confirmed by compiling under `-tags no_sqlite`, not by reading build tags.
+
+The agent's B14 answer was correct and I want that on the record: `TestB14_EmptyRefRowLeftKeyless` asserts `conv.ExternalRef == ""` against the actual stored row, not merely that a counter incremented. That is the load-bearing check — a counter-only test would still pass if someone later made `stepMergeOrRekeyEmptyRef` write a key.
+
+Then DEF-116, DEF-117, DEF-118. Filed separately, but they are one thing three times: **a mechanism that reports on itself instead of on the thing it claims to watch.** `MarkMigrationComplete` reports success for a write it did not perform. The `_migrations` round-trip reports a completed marker while having deleted a sibling. `TestAdvisoryLockKeys_AllUnique` reports that the key list is in sync by comparing the test file to itself.
+
+DEF-116 is the one I want to remember, because it is INVARIANT M-1 — my own livelock, removed from this design last week — reappearing in code written by an agent who had read the correction. M-1′ governs *when it is legitimate to write a marker*. It says nothing about whether the write you requested actually landed. **A policy invariant does not protect against a mechanism that silently no-ops**, and I did not think to say so.
+
+**A useful thing the agent found on its own.** It could not construct an empty-ref `direct` row through the store API: `CreateConversation` now validates `direct` conversations for a non-empty `external_ref`. That is the DEF-29 predicate enforced at creation, which means the keyless direct row on gteam (`adf13f87`) is legacy data that the current code can no longer produce. Good news, and it also explains why the B14 coverage is mock-only — the scenario is unseedable through the real store, which is the correct reason for a mock and worth noting so nobody later "fixes" it by weakening the validator.
+
+**Counts.** I make it 19 new tests, not the 20 reported, and 4 gate-visible, not 5; the agent counted the pre-existing `TestAdvisoryLockKeys_NonOverlapping` as its own. Immaterial in itself, but it is the second count I have had to re-derive today and the first one led somewhere real.
+
+**Environment note.** `go test ./cmd/` in this container emits a GitHub device-authorisation prompt and fails, which looks alarming and is not: the only actual `--- FAIL` is `TestDeleteStopped_RequiresGroveContext` (docker absent, already catalogued), and it fails identically at the base commit. The device-flow text is stdout noise from an unrelated test. Recording it because all of `ca-mig-1`'s code lives in `cmd/`, so this will be the first thing that agent sees when it validates its own package.

@@ -378,6 +378,32 @@ Document shape:
 }
 ```
 
+#### INVARIANT M-2 — the marker document is shared ground
+
+> **M-2.** A writer of `_migrations` may modify only the keys it owns. Keys it does not
+> recognise must survive the write byte-for-byte.
+
+Added 2026-09-02 after DEF-117. The natural implementation — unmarshal into a struct,
+set a field, re-marshal — silently deletes every key the struct has no field for. That is
+harmless while there are exactly two migrations and one binary version in the world, and
+it stops being harmless the moment either of those changes.
+
+The concrete failure is a **downgrade**, which is a supported operation for us and not a
+hypothetical one: `scion.known-good-85f25c1a` and `scion.known-good-e132380f` are staged
+on the gteam VM specifically so the beta cutover can be rolled back under supervision. An
+older binary that boots against a newer document, marks one migration complete, and
+thereby erases a third migration's marker leaves no error and no log line — and the
+operator's evidence that the third migration ever ran is gone. The migration then re-runs
+against data it has already processed.
+
+So: decode into `map[string]json.RawMessage`, touch only owned keys, write the remainder
+back untouched. The cost is a few lines now; the alternative is a data-loss path that only
+appears under the exact conditions we have deliberately arranged to exercise.
+
+This is why §4.2's "no schema change" advantage carries a matching obligation. A shared
+settings document is cheaper than a table precisely because anyone may add a key to it,
+and that is the same reason a careless writer can destroy one.
+
 ### 4.3 INVARIANT M-1 — what a marker means
 
 > **M-1 (SUPERSEDED — see M-1′).** A completion marker records that a run finished with
