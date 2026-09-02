@@ -32213,3 +32213,54 @@ gathered are preserved in `MIGRATION-SURVEY.md` §Addendum rather than held in c
 advisory lock key is `0x5C100014`, `runWithAdvisoryLock` no-ops on SQLite, the `webchat_migrations`
 marker is check-then-act and hand-written per dialect (DEF-104), and
 `maybeWarnUnbackfilledMessages` is both the model for the hook and the prose the hook obsoletes.
+
+### §5ln — Fresh-cutover upgrade path proven on a real snapshot, 2026-09-02
+
+Executed by `instance-investigator` as Option 3: a second hub process on gteam against a copy of
+`hub.db.pre-45c440bd`, isolated by DB file, port (8081), storage dir and session secret. Zero data
+movement — the snapshot's 12 real user identities and 24,717 messages never left the machine.
+
+**Result — the single-cutover promise holds in both initial conditions.**
+
+| Initial condition | Pre-9a binary (`85f25c1a`) | Post-9a binary (`45c440bd`) | Row after |
+|---|---|---|---|
+| `messaging` row present, both old keys FALSE | `{"conversation_read_switch":false,"conversation_write_deny_switch":false}` | `{"conversation_envelope_switch":true}` | unchanged, old keys still FALSE |
+| `messaging` row absent entirely (21 rows) | same two-key response | `{"conversation_envelope_switch":true}` | still absent — no row minted |
+
+No migration, no settings write, no operator action. The stale keys are ignored rather than read,
+and the absent-row case defaults ON exactly as §4.6.2 specifies. This is the upgrade path a
+customer hub will take, reproduced against real production-shaped data rather than a fixture.
+
+**Isolation held.** The socket measurement I required in place of trusting the analysis:
+
+```
+LISTEN  127.0.0.1:8081                       (the only listener)
+ESTAB   10.128.0.46:36834 → 172.217.114.4:443  (iam.googleapis.com)
+```
+
+No connection to Discord, Telegram, Teams or Google Chat. Both mitigations were applied and both
+proved necessary to trust: `HOME=/tmp/test-hub-home` blocked the settings file, launching from
+`/tmp` blocked the CWD-relative `.scion/` fallback the investigator found on its own, and the
+targeted `DELETE FROM secrets WHERE name LIKE 'DISCORD%' OR ...` removed the credentials while
+preserving the signing keys the hub needs to boot. It also confirmed there is no `SCION_CONFIG`
+/`SCION_SETTINGS`/`SCION_HOME` env override and no `/etc/scion/` system path — which was the open
+hole in the original single-lever argument.
+
+**WHAT THIS DOES NOT PROVE, recorded so the claim is not over-read.** Both runs assert on
+`GET /api/v1/admin/messaging`. That endpoint reads `ConversationEnvelopeSwitch()`, and per Rule 928
+coverage of a getter is not coverage of the behaviour it gates. Strictly, this proves the *reported
+setting* transitions OFF→ON on upgrade, not that enforcement engages.
+
+The gap closes by composition rather than by a further run: gteam itself is live on `45c440bd` with
+the switch ON and real traffic, and the seven enforcement sites read the *same* getter
+(`ops != nil && ops.ConversationEnvelopeSwitch()`). gteam proves enforcement given the getter is
+true; this fixture proves the getter becomes true on upgrade. Together they cover the path. Stated
+explicitly because the composition is the argument — neither run establishes it alone.
+
+**Deviation from the approved plan, minor and accepted.** The runs used `--hosted --host 127.0.0.1`
+rather than workstation mode. Hosted mode is what gteam actually runs, so this is closer to the
+real upgrade, but it did cause the test process to authenticate to `iam.googleapis.com`. Read-only
+token generation, no mutation, acceptable — but it was a change to an approved procedure made
+without flagging it, and the investigator should have said so.
+
+Cleanup confirmed: test processes stopped, temp DB removed, live hub healthy on `45c440bd`.
