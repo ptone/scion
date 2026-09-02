@@ -31192,3 +31192,99 @@ All three Phase 9 questions are now answered: **hub-wide, single consolidated sw
 defaulting ON; hard cutover on field names; participants deleted** (pending his yes on the
 last). Next artifact is the Phase 9 design doc, which must also absorb the §5ku scope finding
 that two of three migration paths do not auto-run and one has no caller at all.
+
+### 5kz — Phase 9 design written; reading the adapter changed the design twice
+
+ptone confirmed Q3 with *"yes - clean out participants"* and then, unprompted, clarified
+*"as in I mean delete it from the structured data"* — the same reading I had recommended. All
+three questions closed. Wrote `PHASE9-DESIGN.md`.
+
+The doc changed shape twice while I was writing it, both times because I read the code the
+design depended on instead of reasoning from type names.
+
+#### First change: the runtime broker cannot look up a conversation
+
+`FormatForDelivery` has three production call sites. Two are hub-side
+(`cmd/server_dispatcher.go:261` and `:271`, on `agentDispatcherAdapter`, which holds
+`d.store`). The third is `pkg/runtimebroker/handlers.go:1711`, in a **separate process**.
+`runtimebroker.Server` (`server.go:191`) holds `manager`, `runtime`, hub connections and
+three caches — **no database**.
+
+So "put a real conversation object in the envelope" is not a formatter change. It forces a
+decision about which process renders. Chose **render at the hub, broker delivers bytes**,
+with a new `DeliveryText` field on `MessageRequest`. It is the only option under which
+Phase 13 can delete `pkg/messages/format.go` rather than inherit it.
+
+The enabler I nearly missed: `StructuredMessage` **already carries `ConversationID`** from
+Phase 5's dual-write, and the hub→broker request embeds the whole struct as JSON. So the ID
+already crosses; it is `kind`/`surface`/`name` that need the row. Also confirmed there is no
+`conversation_id` anywhere in `proto/` — the gRPC surface is the external channel broker, not
+this path — so no proto change is implied. Both of those are facts that would have changed
+the design if I had guessed them wrong in either direction.
+
+#### Second change: the adapter fabricates three identifiers, not one
+
+I had DEF-102 (`conversation.id` synthesised from `channel + "/" + thread_id`) and assumed it
+was isolated. Reading `MapLegacyEnvelope` end to end found two more:
+
+- **`reply_to` is set to `old.ThreadID`** (`envelope_compat.go:171-175`). The field is
+  declared `// msg ID`. A thread ID is not a message ID. **DEF-103**, and worse in kind than
+  DEF-102 — a fabricated value in a descriptive field is misleading, a fabricated value in a
+  *pointer* field is a dangling reference that reads as valid.
+- **The message ID is `"legacy-" + timestamp`** — not the persisted row's ID, and it collides
+  for two messages in the same second.
+
+**Rule 888: when you find one fabricated identifier in a conversion, read the whole
+conversion. Lossy-input adapters do not fabricate once; they fabricate wherever the output
+type demands a field the input does not carry, and the count of such fields is a property of
+the type pair, not of the bug.**
+
+The reframe that came out of it: **none of the three are bugs in the adapter's logic.** They
+are the adapter accurately reporting that a `StructuredMessage` contains no message ID, no
+conversation ID and no reply target. Improving the derivations is therefore the wrong repair.
+The design now says: **render from the persisted message row**, which by B11/B13 must exist
+before publication and carries all three for real. That retires `envelope_compat.go` and
+`synthesizeConversationInfo` rather than deprecating them.
+
+Kept the cheap path as **Alt E** and named its condition explicitly rather than just
+rejecting it: acceptable as a fallback **only** with `reply_to` and the message ID omitted
+rather than fabricated. This is the one place in the tranche where the cheap option is also
+the dishonest one, and a fallback recorded without that condition is an invitation to take it
+without it.
+
+#### Third finding: `urgent` and `broadcasted` are silently dropped
+
+While building the field-disposition table I checked each mapping rather than trusting the
+name. `MapLegacyEnvelope` **never reads `old.Urgent`**, and `old.Broadcasted` is used only to
+compute `hasAddressee` — `Visibility` comes from `old.Visibility`. `TextIntent` is a closed
+three-value enum (`inform`/`request`/`question`) with no urgency slot, so there is nowhere
+for `urgent` to go.
+
+My earlier note had both of these as "mapped." They are not.
+
+**Rule 889: a field-mapping table is only evidence if every row was read out of the
+conversion function. A row written from the plausibility of the two field names is a guess
+wearing the formatting of a measurement.**
+
+`urgent` is tracked as **OQ-1b** and flagged in the doc as the item most likely to be found
+late by a user rather than by a test — nothing fails when urgency disappears; messages simply
+stop being urgent.
+
+Also corrected: `mention_source` **does** have a home — `AddressedVia` on `Addressee` — but
+`FormatNewDelivery` flattens `To` to bare principal-ref strings and discards it. The
+information survives in the model and dies at the wire. That is OQ-1, a one-field decision
+rather than the redesign I had it down as.
+
+#### Shape of the doc
+
+Ten sections. Two load-bearing decisions (§4.1 render location, §4.5 render source), five
+alternatives each with the reason it lost, an eleven-step commit breakdown, and fourteen
+acceptance criteria. AC-9-1 is the cheapest real safety property in the tranche and is
+scheduled first: **switch-off output must be byte-identical to `85f25c1a1`, asserted by
+test.** AC-9-14 is the one to run against gteam rather than fixtures — every
+`conversation.id` and every `reply_to` in a sample of live envelopes must select a row. It
+covers DEF-102, DEF-103 and the synthesised message ID in a single check.
+
+§7 carries the migration auto-run gap forward as a separate tranche needing its own design,
+since an idempotent startup migration that touches DM ACLs is a higher-risk object than
+anything in Phase 9.
