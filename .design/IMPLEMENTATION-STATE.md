@@ -33317,3 +33317,43 @@ This is the gate catching drift from a team that had no reason to know it existe
 **Rule 999** — simulating a merge means reproducing what the merge tool would produce. Substituting one side's file for the other's is a clobber, and the build failure it produces is an artefact of the simulation, not a finding.
 
 **NEXT DELIVERABLE:** the exhaustive gteam acceptance checklist. Per ptone's ruling (§5mq) it gates the fresh cutover, so it must be complete rather than convenient — the design's numbered criteria plus everything that accumulated across M0–M8, with AC-8 (Postgres concurrency) carried as a declared gap since it is untestable on SQLite by construction.
+
+---
+
+## §5mt — gteam deployed to `cbd4f8b6a`; six of seven live checks pass
+
+Snapshot `/home/scion/hub.db.pre-cbd4f8b6`, sha256 `a61754a44dc97bc3d12e13a7633cab95635c018e59ae3ca13722da3db433dca2`, 141,082,624 bytes, taken before the deploy.
+
+Boot 1: 39 projects, 19,083 processed, 6,476 attributed, 1,010 skipped, 11,597 row errors, ~37s against a 10-minute budget. `unreachable` 5,637 INFO / `reachable` 12,583 WARN. Boot 2: both migrations skipped, both counts identical, healthy. 27 agents, 39 projects.
+
+**G-1 through G-6 pass.** Checklist and the gap analysis are in `GTEAM-ACCEPTANCE.md`. Six of the design's eleven ACs are exercisable here; five are structurally not, and of those only AC-8 (Postgres concurrency) is uncovered anywhere. G-7, the post-cutover UX pass, is the one remaining gteam item — ptone has been running that interactively himself.
+
+Boot 2 is the substantive result: M6's anti-join and M7's consistency property both compute the reachable count with no per-project sums in existence, and that path had only ever run against fixtures. Reproduced to the row.
+
+**AC-4 is consumed on gteam and moves to the fresh-cutover instance.** Its only old-format row `f003ad87` names `da7cf1ab`, which exists nowhere, and the DM key migration already ran at `e132380f`/`e8e4cc3bf`, so there are no repairable rows left. This is a substantive reason for the fresh-cutover test beyond cutover mechanics — state it when that instance is provisioned.
+
+## §5mu — M9 approved and dispatched; the production numbers falsified my first design for it
+
+ptone: *"sure. add the M9 fix. proceed"*. Fresh agent `ca-mig-9`, no repurposing.
+
+M9 separates *permanently underivable in a listed project* from *actionable*, so the boot WARN counts only what re-running the backfill can fix. M6 removed 5,637 rows of alarm noise and left ~12,583 — about twice as much. Design §4.8.
+
+I rejected a third live SQL counter despite its symmetry with M6's anti-join: two of the four derive causes need `ParseDMKey` and are not SQL-expressible, and the rest would mean a second implementation of principal-shape checking. The key IS the ACL; two derivations that can disagree is the hazard the standing rules exist for. Same impedance mismatch M7 cited.
+
+**Then the boot-1 numbers falsified the version I had just written.** I defined `permanent` as `DeriveRefusals + Skipped` tallied from `BackfillResult`:
+
+```
+11,597 + 1,010 = 12,607     reachable = 12,583     ->  -24, clamped to 0
+```
+
+It reaches zero *through the clamp* — the exact outcome §4.8's own text calls unacceptable. Two causes: `len(result.Errors)` is derive plus write plus resolution (the over-subtraction I had explicitly forbidden, re-entering through the accumulator), and `Skipped` is not a subset of the unbackfilled population.
+
+Corrected to **measure** the residual per project (`CountUnbackfilledMessages(pid)` minus the transient buckets) rather than tally it. Same population as the live counter, so steady state reaches zero exactly and the clamp goes back to being a drift guard. Sent to ca-mig-9 before they built anything.
+
+**Rule 1000** — when a fix subtracts a persisted number from a live one, name the population each side counts and prove one nests inside the other. If it does not nest, a clamp converts the error into a plausible zero and every unit test agrees with it.
+
+**Rule 1001** — a gate that asserts on the *reported* outcome cannot distinguish a correct value from a clamped wrong one. Assert on the pre-clamp intermediate.
+
+**Rule 1002** — I wrote the acceptance bar ("the clamp must not be what reaches zero") into §4.8 and then, in the same section, specified a formula that violated it. Stating a bar does not check the work against it; run your own criterion over your own design before dispatching.
+
+**NEXT:** awaiting ca-mig-9 (M9) and instance-investigator (per-cause `DeriveFailures` split plus the composition of the 1,010 `Skipped`, to close the 24 exactly). Then G-7, then fresh cutover on a second instance.
