@@ -34453,3 +34453,96 @@ No overlap in non-test files (`handlers_broker_inbound.go` vs `handlers_logs.go`
 → instance-investigator rebuilds and deploys gteam → ptone re-tests. **AC-9 is the
 criterion he is actually waiting on:** a Discord message produces an envelope carrying
 a conversation id that matches the persisted row.
+
+---
+
+## §5nq — DEF-135 review: the hoist worked, and moved a stamp out of its guard
+
+**Date:** 2026-09-02. Reviewed `scion/ca-msg-fix3` = `15498d71c` against base `43be4baad`.
+
+### Verified independently
+
+Numstat matches the agent's report exactly (44/0, 118/72, 641/0) — first time this
+project a developer's numstat has agreed with mine on the first attempt. AC-6 is
+satisfied **structurally**: none of the four protected files appear in the diff at
+all, which is stronger than the grep the AC asked for. P1 is genuinely
+behaviour-neutral, including the one place it could have drifted (the metric key
+moved from branch-position to a `ThreadID` test — equivalent). Full
+`./pkg/hub/... ./pkg/messaging/...` green, exit 0, 5 packages.
+
+All three claimed mutations reproduce. **One method note worth keeping:** their
+MUT-2 did not test what it claimed. Flipping the initialiser makes Phase 11 win
+*even when nil*, so AC-1 fails for the wrong reason and AC-4 never fires. The clean
+inversion — keep the structure, add `&& convFromPhase5 == nil` — does fail AC-4, so
+the test is sound. But the mutation as run would have passed a build in which AC-4
+was vacuous. **A mutation that fails the wrong test is not evidence about the right
+one**, and it looks like success in a report.
+
+### F3 — confirmed regression, by measurement
+
+The stamp moved outside the broadcast guard:
+
+```go
+if effectiveConv != nil { storeMsg.ConversationID = effectiveConv.ConversationID }
+if !storeMsg.Broadcasted { ...divergence... }
+```
+
+For a broadcast, `convFromPhase5` is correctly nil but `effectiveConv` still picks up
+`preDispatchConvResult`. Probed: broadcast with `surface` set persists
+`conversation_id=79f06537-…`. Base stamped none.
+
+The isolation is what makes this evidence rather than a hypothesis: I restored
+**only** the base handler with the new tests held constant, and the same probe
+passes. The change is in the production file, not the test.
+
+AC-3 misses it because it sends `surface=""` — the test is right about the envelope
+and blind to the row.
+
+**The fix is not simply moving the stamp back, because base was already incoherent
+here.** With `surface` set, base put a conversation in the broadcast *envelope* while
+persisting none — exactly the envelope/row disagreement DEF-135 exists to remove.
+Ruling: **unify on no conversation for broadcasts, in both places**, matching the
+invariant at `handlers_agent_messaging.go:1898` and the tranche accounting where
+broadcasts are the bucket expected to carry none. This changes the broadcast envelope
+relative to base; accepted deliberately.
+
+### F2 — gate coverage gap, from source reading (labelled as such)
+
+`ValidateAttributed` is applied to `convFromPhase5`; `effectiveConv` is what gets
+persisted. When Phase 11 wins they differ, so the persisted value is never validated.
+Base always validated the persisted value. Live impact is currently nil —
+`ValidateAttributed` only rejects the empty string and Phase 11 has no live caller —
+but a fail-closed gate that silently stops covering the value it was written to
+protect is the DEF-131/DEF-132 family again, and this time we would be *adding* one.
+
+### My error, recorded
+
+Unifying on Phase 11 changes which conversation a message is **persisted** into,
+contradicting **G3** in my own design. G3 was written too strongly. Unifying is
+correct: an envelope naming a different conversation than the row means an agent
+replying by id writes somewhere else, which is the entire bug class. G3 should have
+read "no change for any path carrying traffic today". No caller sets `surface`, so
+nothing live changes. The developer's reading was right and my goal statement was
+sloppy — recorded because a design goal that contradicts another goal in the same
+document will be resolved by whoever implements it, silently, and I only caught this
+one because I was reviewing for something else.
+
+**The tripwire this creates must not be discovered by accident:** the day anyone sets
+`surface` + `external_ref` on this endpoint, Discord messages move from DM into
+**group** conversations. That is Alternative B, rejected in the design because it
+splits every user's history at the deploy boundary. Required in the changelog note.
+
+### Also returned
+
+`TestDEF135_AC5` carries ~25 lines of stream-of-consciousness comments ("But wait",
+"Actually even simpler", "Let me reconsider"). The reasoning was good; the trail does
+not belong in the file.
+
+### Status
+
+Both `ca-msg-fix2` and `ca-msg-fix3` stalled immediately after pushing without
+reporting — the same pattern twice, now three times counting fix2's first push. In
+each case the work was complete and the branch was fine. **Treating "stalled" as
+"incomplete" would have cost a re-dispatch every time**; the correct response is to
+review the branch. Both have been sent rework and told to say so if they are short on
+context rather than let the work sit.
