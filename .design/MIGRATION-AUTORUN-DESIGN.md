@@ -714,8 +714,8 @@ formula tallied events observed during the pass and subtracted them from a live 
 rows.** Those are different populations, and nothing forces one to nest inside the other.
 Non-nesting is what admits a negative, and the clamp is what hides it.
 
-**Corrected definition.** At the end of each project's pass, *measure* the residual rather
-than deriving it from error tallies:
+**First corrected definition — also wrong, see below.** At the end of each project's pass,
+*measure* the residual rather than deriving it from error tallies:
 
 ```
 PermanentResidual += CountUnbackfilledMessages(pid)   // measured, after the project completes
@@ -723,23 +723,90 @@ PermanentResidual += CountUnbackfilledMessages(pid)   // measured, after the pro
                    - resolutionFailures(pid)          // transient — must stay actionable
 ```
 
-The measured term is drawn from the same population the live counter measures, at a known
-moment, so at steady state the two agree by construction and `actionable` reaches zero
-*exactly*. The clamp returns to being a drift guard rather than the mechanism producing the
-answer. Cost is one `COUNT` per project.
+The measured term is drawn from the same population the live counter measures, so at steady
+state the two agree by construction and `actionable` reaches zero *exactly*. Cost is one
+`COUNT` per project.
 
-This also sharpens the gate: a steady-state test must assert `actionable == 0` **before**
-the clamp is applied. A test that only checks whether the WARN fired cannot distinguish a
-correct zero from a clamped negative — which is exactly how the tally version would have
-shipped green.
+#### CORRECTION 2 — the fix contained a smaller copy of the bug it fixed
+
+*Written after the per-cause follow-up. The `- writeFailures - resolutionFailures` terms
+above are wrong for the same reason the tally was.*
+
+The 24 decomposes exactly. Non-broadcast messages in active projects = 19,083 − 990
+broadcast = 18,093:
+
+```
+ 6,476  attributed this run
+    20  skipped — already had a conversation_id
+11,597  row errors
+------
+18,093  ✓
+
+Post-backfill 6,500 non-broadcast rows carry a conversation_id, but 6,476 + 20 = 6,496
+   => 4 rows were counted as row errors AND carry a conversation_id
+Cross-check: 11,597 − 4 = 11,593 NULL;  990 + 11,593 = 12,583 = reachable  ✓
+
+gap 24 = 20 (skipped, has conv_id) + 4 (errored, has conv_id)
+```
+
+The 4 are almost certainly `WriteFailures`: the dry run refused 11,593 and execute refused
+11,597, so four errors arise only when writing — the signature of a group that stamps some
+messages and then fails validation, leaving a row both stamped and counted as an error.
+
+**Those 4 rows have a `conversation_id`, so they are not in `CountUnbackfilledMessages`.**
+Subtracting them removes something the measurement never counted, leaving
+`PermanentResidual` short by 4 and a permanent WARN of exactly 4. Same fault as the tally,
+one order of magnitude smaller, sitting inside the correction for it.
+
+#### Final definition — measurements and tallies are never mixed
+
+```
+permanent  = Σ CountUnbackfilledMessages(pid)                   // measured, per project
+actionable = max(0, reachable - permanent)                      // measurement − measurement
+transient  = Σ (writeFailures + resolutionFailures)             // tally, persisted, never subtracted
+```
+
+Four reported lines: INFO `unreachable`; INFO `permanent`; WARN `actionable` only when
+`> 0`; WARN `transient` only when `> 0`, advertised as retryable via `scion server
+backfill`.
+
+A transiently-failed row that stays unstamped falls inside `permanent` and is therefore
+silent in `actionable` — correct, because `transient` already reports it, in its own units,
+with the right remedy. No double count, no gap.
+
+**This version does not depend on classifying the population correctly.** `permanent` is
+measured, so whatever the 4 turn out to be, `actionable` is 0; they move only the
+`transient` line. Both earlier versions required my classification to be exactly right, and
+twice it was not. Reconciliation on gteam: `reachable` 12,583, `permanent` 990 + 11,593 =
+12,583, `actionable` **0 exact, not clamped**, `transient` 4.
+
+A steady-state test must assert `actionable == 0` **before** the clamp. A test that only
+checks whether the WARN fired cannot distinguish a correct zero from a clamped negative —
+exactly how the tally version would have shipped green.
 
 *Known residual:* messages written concurrently during a pass are counted as permanent and
 thereafter suppressed. Post-cutover writes carry a `conversation_id`, so the window is
 narrow. Recorded, not engineered around.
 
-**Rule.** When a fix subtracts a persisted number from a live one, name the population each
-side counts and show that one nests inside the other. If it does not nest, a clamp will
-convert the error into a plausible-looking zero, and every unit test will agree with it.
+**Rule.** Never subtract a tally of events observed during a pass from a measurement of
+rows. Name the population each side counts and prove one nests inside the other; if it does
+not, a clamp converts the error into a plausible zero and every unit test agrees with it.
+Where both kinds of number are needed, report them as separate lines in their own units
+rather than combining them.
+
+#### Diagnosability regression, folded into M9
+
+The boot hook does not log the classification. `DeriveFailures`, `WriteFailures` and
+`ResolutionFailures` exist on `BackfillResult`, but only the CLI print path consumes them;
+the boot hook emits `processed / attributed / skipped / row_errors / elapsed` and drops the
+map. DEF-114 created that breakdown precisely to make the dominant failure mode
+identifiable, and the boot hook is now its primary caller — so in practice the undiagnosable
+state DEF-114 closed has been reintroduced at the only call site that matters. It cost a
+round trip to the instance to answer "what were the 11,597?", which no log could answer.
+
+M9 logs the per-cause map and both non-derive counts on the per-project line and as totals
+on the completion line. The counts must be persisted for `transient` regardless, so the
+marginal cost is a few log fields.
 
 #### Why the phase must reconcile against real numbers
 

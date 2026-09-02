@@ -33357,3 +33357,41 @@ Corrected to **measure** the residual per project (`CountUnbackfilledMessages(pi
 **Rule 1002** — I wrote the acceptance bar ("the clamp must not be what reaches zero") into §4.8 and then, in the same section, specified a formula that violated it. Stating a bar does not check the work against it; run your own criterion over your own design before dispatching.
 
 **NEXT:** awaiting ca-mig-9 (M9) and instance-investigator (per-cause `DeriveFailures` split plus the composition of the 1,010 `Skipped`, to close the 24 exactly). Then G-7, then fresh cutover on a second instance.
+
+## §5mv — the 24 decomposed; my correction contained a smaller copy of the bug it corrected
+
+instance-investigator's follow-up measured the skipped composition: **990 broadcast (conv_id stays NULL) + 20 already-attributed**. That plus the error total closes the gap exactly, and the decomposition is 20 + 4, not 24 of one kind:
+
+```
+Non-broadcast in active projects = 19,083 − 990 = 18,093
+   6,476 attributed | 20 skipped w/ conv_id | 11,597 row errors  = 18,093 ✓
+Post-backfill conv_id set = 6,500, but 6,476 + 20 = 6,496
+   => 4 rows counted as row errors AND carrying a conversation_id
+11,597 − 4 = 11,593 NULL;  990 + 11,593 = 12,583 = reachable ✓
+```
+
+The 4 are almost certainly `WriteFailures` — dry run refused 11,593, execute refused 11,597, so four errors arise only when writing, the signature of a group that stamps some messages then fails validation.
+
+**Which falsified correction 1.** I had `PermanentResidual += CountUnbackfilledMessages(pid) − writeFailures − resolutionFailures`. Those 4 rows carry a conv_id and are therefore *not in the measurement*, so subtracting them leaves `permanent` short by 4 and a permanent WARN of exactly 4. Same fault as the original tally, one order of magnitude smaller, sitting inside the fix for it.
+
+**Final design (§4.8):** measurements and tallies are never mixed.
+
+```
+permanent  = Σ CountUnbackfilledMessages(pid)               // measured
+actionable = max(0, reachable − permanent)                  // measurement − measurement
+transient  = Σ (writeFailures + resolutionFailures)         // tally, reported, never subtracted
+```
+
+Four lines: INFO unreachable, INFO permanent, WARN actionable (>0), WARN transient (>0, retryable). gteam reconciles to `actionable` **0 exact**, `transient` 4.
+
+The property that matters: **this version does not depend on classifying the population correctly.** `permanent` is measured, so whatever the 4 are, `actionable` is 0 — they move only the `transient` line. Both prior versions required my classification to be exactly right and twice it was not.
+
+**Also folded into M9: the boot hook drops the per-cause classification.** `DeriveFailures`/`WriteFailures`/`ResolutionFailures` are consumed only by the CLI print path; the boot hook logs `processed/attributed/skipped/row_errors/elapsed`. DEF-114 built that breakdown to make the dominant failure mode identifiable and the boot hook is now its primary caller, so the undiagnosable state DEF-114 closed is back at the only call site that matters. It cost a round trip to the VM to answer "what were the 11,597?".
+
+**Rule 1003** — never subtract a tally of events observed during a pass from a measurement of rows. Prove one population nests inside the other, or report them as separate lines in their own units. A clamp over a non-nesting subtraction produces a plausible zero that every unit test will ratify.
+
+**Rule 1004** — after fixing a class of defect, re-run the diagnosis over the fix. I identified "tally minus measurement" as the fault and then shipped a correction containing it. The second instance was smaller and in a subordinate clause, which is exactly where it survives review.
+
+**Rule 1005** — prefer a design that does not depend on your classification being exhaustive. Two versions here needed the population split to be right; the third only needs a count to be measured. When a fix keeps failing at the same joint, move the joint rather than re-deriving the split.
+
+**Rule 1006** — a total that reconciles is not a decomposition that reconciles. The investigator's 24 was arithmetically correct and hid the informative half; splitting it into 20 + 4 is what surfaced the write-failure rows.
