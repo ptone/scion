@@ -39,7 +39,11 @@ time, an empty settings doc yields ON, and a malformed doc fails closed to OFF
   operator command run.
 - Boot time on an already-migrated hub is O(1) with respect to message and conversation
   count.
-- No code path writes a completion marker for a run that logged per-row errors.
+- No code path writes a completion marker for a pass that did not finish (M-1′, §4.3).
+- The hub can state, per message, **why** a message was not attributed. Measured reality
+  (F11) is that a fully successful backfill attributes 26% of history; the goal is
+  therefore accurate accounting of the remainder, **not** 100% attribution. Attributing a
+  message whose key cannot be derived would mean inventing an ACL.
 
 ## 2. Non-Goals
 
@@ -207,6 +211,102 @@ names do.
 Not a blocker for auto-run. It becomes more urgent *because* of auto-run: the counters
 move from a CLI report a human reads once to a boot-log line emitted forever.
 
+
+### F11 — Measured: a fully successful backfill attributes 26% of history
+
+Timed on a throwaway copy of the gteam pre-deploy snapshot, dry-run and execute, all 39
+projects. **Both runs exited non-zero.**
+
+| Run | Wall clock | Processed | Attributed | Refused |
+|---|---|---|---|---|
+| dry-run | ~20s | 19,082 | 6,476 | 11,593 |
+| execute | ~37s | 19,082 | 6,476 | 11,597 |
+
+Reconciled against the 24,700 unattributed messages:
+
+| Outcome | Count | Share |
+|---|---|---|
+| attributed (incl. 4 inferred) | 6,480 | **26.2%** |
+| refused — key derivation failed | 11,593 | 46.9% |
+| unreachable — project hard-deleted (DEF-111) | 5,618 | 22.7% |
+| skipped — broadcast or already attributed | 1,009 | 4.1% |
+
+**Timing is a non-issue and was the least important thing the run discovered.** 37
+seconds is comfortably inside any boot budget, which largely settles OQ-1. The finding
+that matters is that a migration which completes successfully still leaves **18,220
+messages unattributed**.
+
+Refusal is the *correct* behaviour — `DeriveConversationKey` documents that a guess on
+any input to key derivation is a guess on the ACL, and refusing beats inventing one. But
+it means "run the migrations and history is attributed" is not a true statement about
+this system, and the design must not imply otherwise.
+
+Two further observations from the same runs:
+
+- **Dry-run over-reports.** 733 conversations projected vs 728 actually created. Dry-run
+  does not evaluate write-time constraints, so its projection cannot be used as an
+  expected value for verifying an execute run.
+- **Four execute-only errors are the D-1 guard firing** — see F13.
+
+### F12 — The dominant failure mode is undiagnosable by construction (DEF-114)
+
+`DeriveConversationKey` distinguishes four causes: a `dm:` ThreadID that fails
+`ParseDMKey`; a `dm:` ThreadID that parses but is non-canonical; a thread key with no
+project; and failure to derive from the principal pair. Each returns a distinct wrapped
+error.
+
+All four are then thrown away, twice:
+
+```go
+// groupForMessage (pkg/messaging/backfill.go)
+if deriveErr != nil {
+    return nil          // deriveErr discarded
+}
+
+// Run (pkg/messaging/backfill.go:140)
+if g == nil {
+    result.Errors = append(result.Errors,
+        fmt.Sprintf("message %s: key derivation failed", msg.ID))   // cause gone
+}
+```
+
+The result is 11,593 identical strings that say nothing. The single largest population in
+the migration cannot be classified, so it cannot be decided about.
+
+A related casualty: `hazardA` is set **after** a successful derive, but non-UUID
+principals are precisely what makes case 3 fail. The hazard-A counter therefore
+structurally cannot count the population it was written to measure — it reported 4
+against a suspected legacy-principal population three orders of magnitude larger.
+
+Filed as **DEF-114**. Fixing it is small and it gates every other decision here.
+
+### F13 — Key comes from ThreadID, participants come from the message (DEF-115)
+
+`groupForMessage` derives the conversation key from `ThreadID` when one is present
+(cases 1 and 2), but always collects participants from the message's own sender and
+recipient. **Nothing checks that those principals are named in that key.**
+
+The execute run surfaced this as four rejections of the form:
+
+```
+adding participant user:7581ea89-… to 93ef83f1-…:
+  invalid input: participant (user, 7581ea89-…) not named in direct conversation key
+```
+
+That is `CheckDMParticipantKey` — the B1/D-1 guard — refusing to write a participant into
+a DM whose key does not name them. **The guard worked**, and the outcome is an
+under-grant, which is the recoverable direction. But the backfill *attempted* an
+ACL-widening write, and it did so on real data.
+
+The asymmetry that makes this worth filing: the guard is scoped to `direct` conversations.
+A `thread:`-keyed **group** conversation takes the same code path with no equivalent
+check, so a mismatched participant is written without objection. For group conversations
+the participant table is a listing index rather than the ACL, which is why this is a
+defect rather than a breach — but it is the same unchecked inference, and it is only the
+conversation kind that decides whether anything catches it.
+
+Filed as **DEF-115**.
+
 ---
 
 ## 4. Proposed Design
@@ -280,27 +380,51 @@ Document shape:
 
 ### 4.3 INVARIANT M-1 — what a marker means
 
-> **M-1.** A completion marker records that a run finished **with zero per-row errors**,
-> not that a run returned.
+> **M-1 (SUPERSEDED — see M-1′).** A completion marker records that a run finished with
+> zero per-row errors, not that a run returned.
 
-Concretely, given F4:
+**M-1 as first written is wrong, and the measurement in F11 disproves it.** On real data
+the backfill produces 11,593 per-row refusals. Under M-1 the marker would never be
+written, so the migration would re-run on every boot forever — a permanent 37-second boot
+penalty that makes no progress, because the refusals are deterministic and retrying
+cannot change them. An invariant that can never be satisfied is not a safety property; it
+is a livelock.
+
+The error it makes is conflating two different things:
+
+- **Run-level failure** — could not list projects, could not write, context cancelled.
+  The pass did not happen. Retrying may well succeed.
+- **Row-level refusal** — this message's key cannot be derived from its own contents.
+  The pass *did* happen and reached a terminal answer for that row. Retrying is futile.
+
+A row-level refusal is not incomplete work. It is the same category as DEF-111's
+unreachable messages: a permanent, correct, reportable outcome.
+
+> **M-1′.** A completion marker records that a **full pass completed without a run-level
+> failure**. Row-level refusals do not block the marker; they are counted, persisted
+> alongside it, and reported. A marker must never be written for a pass that did not
+> finish.
 
 ```go
 res, err := svc.Run(ctx, cfg)
-if err != nil || len(res.Errors) > 0 {
-    slog.Error("...migration incomplete; will retry next boot",
-        "error", err, "row_errors", len(res.Errors), /* bounded sample */)
-    return  // marker NOT written
+if err != nil {                       // run-level: pass did not complete
+    slog.Error("...migration did not complete; will retry next boot", "error", err)
+    return                            // marker NOT written
 }
-markComplete(ctx, s, "...")
+// Pass completed. Row refusals are an outcome, not an interruption.
+markComplete(ctx, s, key, refusals(res))
 ```
 
-This is the §5lg failure posture, unchanged: log at ERROR, leave the marker unwritten so
-the next boot retries, do **not** refuse to boot.
-
 The error sample logged must be bounded (first N, with the total count). `res.Errors` is
-unbounded and can contain one entry per row; logging it whole turns a bad migration into
-a disk-space incident.
+unbounded and holds one entry per refused row — 11,593 of them on gteam today. Logging it
+whole turns a bad migration into a disk-space incident.
+
+**This is blocked on DEF-114 and must not be implemented before it.** Distinguishing
+run-level from row-level requires knowing *why* a row was refused, and the code currently
+discards that (F12). Until the refusal reasons are visible, "these refusals are
+deterministic" is an assumption, and building the marker policy on an assumption is how a
+migration silently marks itself complete over data it should have retried. Sequencing is
+in §8: M0 before M5.
 
 ### 4.4 DM key migration — synchronous, unbudgeted
 
@@ -485,11 +609,13 @@ migrations themselves do on first boot.
 
 ## 7. Open Questions
 
-**OQ-1 (blocking the implementer, resolvable without ptone).** What should the backfill
-time budget default be? Must come from the §6.1 measurement, not from a guess. If a full
-gteam backfill takes single-digit seconds, the budget is close to irrelevant and could
-arguably be dropped; if it takes minutes, the budget and its convergence caveat (§4.5)
-become load-bearing.
+**OQ-1 — RESOLVED by measurement.** Full execute run on a copy of the gteam snapshot:
+**37 seconds**, all 39 projects, 19,082 messages, 6,476 writes (F11). Dry-run was 20s, so
+write overhead is ~17s. Timing is a non-issue at this scale and the budget is not
+load-bearing — set a generous default (10 minutes) purely as a runaway guard rather than
+as a tuning parameter, and do not let it become one. The convergence caveat in §4.5 stays
+in the design because it protects against a hub far larger than gteam, but it is no longer
+an expected operating mode.
 
 **OQ-2 (needs ptone).** Re-pointing `maybeWarnUnbackfilledMessages` (§4.6). My standing
 threshold says I block on removing or re-pointing an existing gate. This is a warning
@@ -537,6 +663,12 @@ it rather than acting silently, because it is a row under an explicit preservati
 
 Commit-sized, in order. Each is independently reviewable.
 
+- **M0 — Surface the derivation reason** (DEF-114, §3 F12). Propagate `deriveErr` out of
+  `groupForMessage` and record it in `result.Errors` instead of the fixed string. Also fix
+  the `hazardA` classification so it can see rows that failed to derive. **This is now the
+  first commit in the tranche and blocks M5**, because the marker policy in M-1′ depends
+  on distinguishing run-level from row-level failure, and no one can currently tell the
+  difference. Small change; re-measure immediately after it lands.
 - **M1 — Lock key + uniqueness test.** Add `LockDataMigrations = 0x5C100014` and a test
   asserting the key set is unique. No behaviour change. Smallest possible first commit
   and it de-risks the constant choice.
@@ -563,8 +695,10 @@ Commit-sized, in order. Each is independently reviewable.
   change. **Not droppable** — unlike M7 this guards a security invariant against a
   plausible future edit, and it gets cheaper the sooner it lands.
 
-M1–M2 can proceed immediately. M5 is blocked on OQ-1's measurement. M6 depends on M5 for
-the reachable count it reports.
+M0 first, then re-measure. M1–M3 are independent of it and already dispatched. **M5 is
+blocked on M0**, not on OQ-1 — that one is now resolved. M6 depends on M5 for the
+reachable count it reports. DEF-115 (§3 F13) is not yet scheduled: it needs the M0
+classification to size, since it may be a large population or exactly the four rows seen.
 
 ---
 

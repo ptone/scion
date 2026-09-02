@@ -32799,3 +32799,73 @@ the code's misleading names. → Rule 962.
 **Rule 962** — a correct summary is not a substitute for the source when the source's
 names are wrong; summaries preserve behaviour but inherit vocabulary, and a misleading
 name is a defect that propagates through every document that trusts it.
+
+### §5lw — The backfill attributes 26% of history; M-1 was wrong; DEF-114 and DEF-115
+
+I asked `instance-investigator` for a timing measurement to settle OQ-1. Timing came back
+fine — 37s execute, 20s dry-run, all 39 projects, against a throwaway copy of the
+pre-deploy snapshot. That was the least important thing the run produced.
+
+**Both runs exited non-zero, with 11,593 errors against 19,082 messages processed.**
+Reconciled against the 24,700-message backlog:
+
+| Outcome | Count | Share |
+|---|---|---|
+| attributed | 6,480 | **26.2%** |
+| refused, key derivation failed | 11,593 | 46.9% |
+| unreachable, project hard-deleted (DEF-111) | 5,618 | 22.7% |
+| skipped, broadcast or already attributed | 1,009 | 4.1% |
+
+A backfill that runs to completion successfully leaves **18,220 messages unattributed**.
+Refusal is the correct behaviour — `DeriveConversationKey` documents that a guess on any
+input to key derivation is a guess on the ACL — but "run the migrations and history is
+attributed" is not a true statement about this system, and the design said it was.
+
+**My INVARIANT M-1 was wrong and the measurement disproved it.** M-1 said: write the
+marker only when the run returns cleanly *and* `len(result.Errors) == 0`. With 11,593
+deterministic refusals the marker would never be written, so the migration would re-run
+every boot forever — a permanent 37-second boot penalty making zero progress. An
+invariant that can never be satisfied is not a safety property, it is a livelock, and I
+had written it into a design I was about to have implemented.
+
+The error was conflating **run-level failure** (the pass did not happen; retry may help)
+with **row-level refusal** (the pass reached a terminal answer for that row; retry is
+futile). A refusal is not incomplete work — it is the same category as DEF-111's
+unreachable messages. Replaced with **M-1′**: the marker records that a full pass
+completed without a run-level failure; refusals are counted, persisted alongside it, and
+reported. → Rule 963.
+
+**DEF-114 blocks that fix, and everything else.** The four distinct causes
+`DeriveConversationKey` distinguishes are discarded twice — `groupForMessage` returns
+bare `nil`, and the caller appends a constant string. 11,593 identical lines with no
+reason. So "these refusals are deterministic" is currently an *assumption*, and M-1′
+cannot be implemented on an assumption: that is exactly how a migration marks itself
+complete over data it should have retried. Promoted to phase **M0**, ahead of the whole
+tranche. Same shape claimed a second victim: `hazardA` is set only after a *successful*
+derive, while non-UUID principals are what makes derivation fail — so the hazard counter
+structurally cannot see its own population, and reported 4.
+
+**DEF-115** came out of the four execute-only errors. The key comes from `ThreadID`; the
+participants come from the message's sender and recipient; nothing checks they agree.
+`CheckDMParticipantKey` refused the write, which is the guard working and an under-grant.
+Filed anyway because the backfill attempted an ACL-widening write on real data, and
+because the guard is scoped to `direct` — the identical unchecked inference on a `group`
+conversation is written silently. The conversation kind, not any deliberate check,
+decides whether the mistake is caught.
+
+**Two process notes.** The investigator's coverage was good — the 733-vs-728 dry-run
+divergence and the participant-rejection example are both mine only because it included
+them — but it led with the metric I asked for and buried the finding that undercut it,
+describing exit-1 runs as having "completed all 39 projects." Relayed. And I escalated to
+ptone rather than absorbing it: he has said he wants the whole refactor rather than a
+hybrid state, and a 26% ceiling is the first thing found that might genuinely cap that.
+Recommendation given rather than a bare question, per his standing complaint about items
+lacking a recommended course.
+
+**Rule 963** — an invariant that real data can never satisfy is a livelock, not a safety
+property. Before writing a completion rule that keys on an error count, get the observed
+error count on production-shaped data; "should be zero" is a prediction.
+
+**Rule 964** — when a measurement you requested comes back acceptable but the same run
+undercuts the premise of the measurement, the premise is the finding. Ask what else the
+run observed, not just whether the number was good.
