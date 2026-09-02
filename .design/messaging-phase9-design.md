@@ -315,10 +315,127 @@ switch-consolidation work (§6, Phase 9a). During QA the sub-behaviours remain s
 test code only** — never in `opsettings` — so a failure can be bisected the way DEF-100
 required, without operators ever seeing more than one knob.
 
-Fail-closed semantics are unchanged and non-negotiable: absent row, empty `{}`, malformed
-JSON and nil pointer all yield OFF. An unreadable setting must never enable a behaviour. The
-switch defaults ON by **shipping a default in the settings registry**, not by inverting the
-parse failure path.
+The two questions this raised (OQ-2a, OQ-2b) are now closed by measurement. Both answers are
+forced by code, not preference.
+
+#### 4.6.1 The consolidated switch takes a NEW key (closes OQ-2a)
+
+`conversation_envelope_switch`, replacing `conversation_read_switch` and
+`conversation_write_deny_switch`. **No data migration.**
+
+The reason is not naming hygiene. It is that reuse cannot deliver the auto-cutover ptone
+required, on any hub that has ever touched the endpoint:
+
+`pkg/hub/admin_messaging.go:85-90` builds the section document by seeding **both** pointers
+from the current getters before applying the caller's partial update:
+
+```go
+currentRead := ops.ConversationReadSwitch()
+currentWriteDeny := ops.ConversationWriteDenySwitch()
+ms := opsettings.MessagingSettings{
+    ConversationReadSwitch:      &currentRead,      // ALWAYS non-nil
+    ConversationWriteDenySwitch: &currentWriteDeny, // ALWAYS non-nil
+}
+```
+
+Both fields are always non-nil at `json.Marshal`, so the persisted document **always carries
+both keys explicitly**. An operator who enabled only the read switch also persisted
+`"conversation_write_deny_switch": false`. That explicit `false` beats any compiled default —
+`if ms.X != nil { return *ms.X }` runs before the default branch. Reusing either key therefore
+leaves such a hub OFF after upgrade, which is precisely the outcome the single-cutover
+directive forbids.
+
+A new key is absent on every existing hub, so it takes the compiled default, so it is ON. The
+stale keys become inert, and they self-clean: `handlePutMessaging` reconstructs the document
+from the Go struct rather than patching the stored JSON, so the first write after upgrade
+drops them. Nothing needs to run at startup.
+
+Two edits this requires, both small and both easy to miss:
+
+- `pkg/config/opsettings/registry.go:317-327` — the `messaging` schema is hand-written and
+  carries `"additionalProperties": false`. The new key must be added there or writes fail.
+- The stale keys may be removed from the schema in the same commit. Confirmed safe:
+  `opsettings.Validate` is called only on write paths (`operational_settings.go:461`,
+  `admin_messaging.go:125`, `admin_settings_db.go:574`) and **never against a stored
+  document** — `Refresh` (`:204-243`) copies `row.Value` into the cache without parsing it.
+  Go's `json.Unmarshal` ignores unknown fields, so a stored document carrying dropped keys
+  still loads. `additionalProperties: false` bites only on the way in.
+
+#### 4.6.2 Default-ON and fail-closed require splitting one branch three ways (closes OQ-2b)
+
+Default-ON has an in-tree precedent — `ProjectDefaultScratchpad`
+(`operational_settings.go:1149`), documented as *"When nil (section absent from DB), the
+compiled default is true (ON)"*. But it cannot simply be copied, and this is the load-bearing
+finding of OQ-2:
+
+**All three getters share one identical shape, in which three distinct states collapse to a
+single return.** `ConversationReadSwitch` (`:1172`), `ConversationWriteDenySwitch` (`:1195`)
+and `ProjectDefaultScratchpad` (`:1149`) differ only in the constant returned:
+
+```go
+state, ok := o.cache["messaging"]
+if !ok            { return DEFAULT }   // section absent
+if unmarshal fails { return DEFAULT }  // malformed JSON  <-- silently (DEF-92)
+if ms.Field != nil { return *ms.Field }
+return DEFAULT                          // field omitted
+```
+
+Flipping `DEFAULT` to `true` flips the malformed-JSON branch too. That would make an
+unreadable settings document **enable** the new behaviour, violating the standing rule. So
+default-ON and fail-closed are not simultaneously expressible in the current shape. One of
+them has to give, or the shape changes.
+
+**Recommendation: change the shape.** Parse once at `Refresh`, record the outcome, and let the
+getter distinguish "validated document" from "unreadable document":
+
+```go
+type sectionState struct {
+    Value    json.RawMessage
+    Revision int64
+    // ... existing fields ...
+    Malformed bool   // NEW: set at Refresh/Update, not at read time
+}
+
+// getter:
+state, ok := o.cache["messaging"]
+if !ok             { return true }   // absent   → compiled default → ON
+if state.Malformed { return false }  // unreadable → pre-refactor behaviour → OFF
+if ms.Field != nil { return *ms.Field }
+return true                           // omitted  → compiled default → ON
+```
+
+This is the DEF-92 fix, which I had already scoped as *"belongs at parse-time in `Refresh`,
+not at read-time in the getter"* — OQ-2b converges on it rather than adding work. Doing it in
+`Refresh` also means the parse-failure `slog.Error` fires once per refresh instead of once per
+request, which is why the current code can afford to be silent and the fixed code can afford
+not to be. The change is generic to `sectionState`, so it repairs every section, not just
+`messaging`.
+
+**A framing correction that matters here.** For the write-deny half, "fail closed" reads
+ambiguously: OFF *permits* legacy writes. The rule is not "deny everything on an unreadable
+setting" — it is **fall back to the behaviour of the version before this feature existed**.
+OFF is that behaviour. So malformed → OFF is correct for both halves, and the apparent tension
+is only in the word.
+
+Residual risk, tracked not blocking: on a hub already running the new envelope, a malformed
+`messaging` document would silently revert agents to the legacy format mid-conversation. The
+validated write path cannot produce one; only direct DB tampering can. The `slog.Error` at
+`Refresh` is the detection.
+
+#### 4.6.3 Two consequences to carry into implementation
+
+- `handlePutMessaging` hardcodes `f := false` twice as "the compiled default" for the
+  explicit-null reset (`admin_messaging.go:100`, `:108`). Under default-ON those become lies.
+  The reset must **delete the key** so the absent→default path runs, rather than write a
+  literal. `OperationalSettings.DeleteSection` (`:507`) already exists for this.
+- Consolidation removes the ability to bisect read vs write-deny **on a live hub** — QA can no
+  longer set one ON and the other OFF on gteam. That is deliberate and matches ptone's
+  *"simulate the more atomic (all switches flipped) upgrade path"*, but it is a real loss of a
+  debug affordance, and it is why test-level separability (above) is not optional.
+
+All of §4.6 is temporary: Phase 13 deletes the switch. The `sectionState` change is the only
+part that outlives it, which is the argument for making that part generic rather than
+messaging-specific.
 
 ### 4.7 Documentation, cut in the same commit as the behaviour
 
@@ -398,9 +515,16 @@ Phase 9 lands behind the consolidated switch and changes nothing until it is on.
 
 **Phase 9a — switch consolidation (prerequisite, not part of 9 proper).**
 `ConversationReadSwitch` and `ConversationWriteDenySwitch` collapse into one
-`MessagingSettings` field. This is a settings-schema change and needs its own migration for
-the 22 `hub_settings` rows on gteam. It must land *before* 9b so the envelope has one switch
-to ride.
+`conversation_envelope_switch`, defaulting ON when absent. Per §4.6 this needs **no data
+migration** — the new key is absent everywhere, so every hub takes the default. It does need
+the `registry.go` schema edit, the three-way `sectionState` split (DEF-92), and the
+`DeleteSection`-based reset in `handlePutMessaging`. It must land *before* 9b so the envelope
+has one switch to ride.
+
+Note for gteam specifically: both old switches are currently explicitly `true` there, so under
+key reuse gteam would have cut over correctly and hidden the bug. **gteam is not a valid test
+of the cutover-by-default property** — that property must be tested against a hub whose
+`messaging` row records an explicit `false`, or against no row at all.
 
 **Phase 9b — render at the hub.** `DeliveryText` on `MessageRequest`; hub-side rendering;
 broker prefers it. Legacy path still present and still reachable when the switch is off.
@@ -461,10 +585,18 @@ merely a schema one. Needs a home in the envelope or an explicit ruling that age
 see urgency. **This is the item in the design most likely to be discovered late by a user
 rather than by a test**, because nothing fails — messages simply stop being urgent.
 
-**OQ-2 (blocks 9a).** Does the consolidated switch keep one of the two existing setting keys
-or introduce a third name? Keeping `conversation_read_switch` and repurposing it means the
-22 existing gteam rows need no migration but the name lies. A new key is honest and needs a
-migration. Leaning: new key, migration, since 9a is already a schema change.
+**OQ-2 — CLOSED by measurement, see §4.6.** New key `conversation_envelope_switch`, and **no
+migration**. The getter shape changes to distinguish absent / malformed / omitted, converging
+with DEF-92.
+
+*Correction on the record.* My stated lean was "new key, **migration**, since 9a is already a
+schema change." The conclusion was right and the reasoning was wrong. Reading the write path
+inverted the migration half: because `handlePutMessaging` rebuilds the document from the Go
+struct, stale keys self-clean on first write, and because `Validate` never runs against a
+stored document, they are harmless until then. The real argument for a new key was one I had
+not found — that the endpoint persists **both** switches explicitly on every write, so any
+hub that ever used it carries an explicit `false` that would defeat reuse. I had reasoned from
+"a new key is honest"; honesty was not what decided it.
 
 **OQ-3 (tracking).** `visibility` now appears in the agent-facing envelope. It is an existing
 `StructuredMessage` field, so this is not new information reaching agents, but it is newly
@@ -478,24 +610,30 @@ Commit-sized, in order. Each is independently reviewable.
 
 1. **Byte-identity test for the off state.** Assert `FormatForDelivery` output is unchanged
    with the switch off. Written first, before any behaviour changes. Pure addition.
-2. **9a — switch consolidation** + settings migration. Fail-closed tests for absent row,
-   empty `{}`, malformed JSON, nil pointer. Resolve OQ-2 first.
-3. **9b(i) — `DeliveryText` on `MessageRequest`** and broker preference logic. No hub-side
+2. **9a(i) — three-way `sectionState` split (DEF-92).** Parse at `Refresh`/`Update`, record
+   `Malformed`, log once. Generic to all sections; no default changes yet, so no behaviour
+   change. Pure addition plus one struct field — the safe half of 9a, and it can be reviewed
+   on its own merits as a DEF-92 fix.
+3. **9a(ii) — switch consolidation.** New `conversation_envelope_switch` defaulting ON;
+   `registry.go` schema edit; stale keys dropped from the schema; `admin_messaging.go`
+   collapses to one field with a `DeleteSection`-based reset. No data migration. Tests per
+   AC-9-7, AC-9-7a–d.
+4. **9b(i) — `DeliveryText` on `MessageRequest`** and broker preference logic. No hub-side
    producer yet, so no behaviour change. Tests: broker prefers `DeliveryText`; falls back
    correctly when empty; `Raw`/`Plain` still honoured.
-4. **9b(ii) — carry the persisted message to dispatch** (§4.5). The largest step and the one
+5. **9b(ii) — carry the persisted message to dispatch** (§4.5). The largest step and the one
    to schedule first if effort is uncertain, because Alt E is the fallback and choosing it
    late is expensive.
-5. **9b(iii) — hub-side rendering** behind the switch. Both hub sites and the hubclient path.
-6. **9c(i) — delete `Participants`** from `ConversationInfo` and its test assertion.
-7. **9c(ii) — `Conversation` becomes a pointer; delete `synthesizeConversationInfo`.**
+6. **9b(iii) — hub-side rendering** behind the switch. Both hub sites and the hubclient path.
+7. **9c(i) — delete `Participants`** from `ConversationInfo` and its test assertion.
+8. **9c(ii) — `Conversation` becomes a pointer; delete `synthesizeConversationInfo`.**
    Test: no conversation ⇒ no `conversation` key ⇒ body still delivered (DEF-102).
-8. **9c(iii) — `reply_to` sourced from a real reply target or omitted** (DEF-103); message ID
+9. **9c(iii) — `reply_to` sourced from a real reply target or omitted** (DEF-103); message ID
    is the persisted row's ID. Test: a threaded message does **not** put a thread ID in
    `reply_to`.
-9. **9c(iv) — resolve OQ-1 and OQ-1b.**
-10. **9d — SKILL.md, docs-site, and the field-name gate.**
-11. **Endpoint deletion count** per file, re-run independently before push, per standing rule.
+10. **9c(iv) — resolve OQ-1 and OQ-1b.**
+11. **9d — SKILL.md, docs-site, and the field-name gate.**
+12. **Endpoint deletion count** per file, re-run independently before push, per standing rule.
 
 `FormatForDelivery` is **not** deleted in Phase 9 — it remains the switch-off path. Its
 deletion is Phase 13, and by then it should have no callers.
@@ -516,8 +654,29 @@ deletion is Phase 13, and by then it should have no callers.
 - **AC-9-5.** `messages.FormatForDelivery` has zero production callers on the switch-on path.
   `runtimebroker` performs no formatting when `DeliveryText` is set.
 - **AC-9-6.** `Raw` and `Plain` deliver body text only, exactly as today, on both paths.
-- **AC-9-7.** The consolidated switch is OFF for: absent row, empty `{}`, malformed JSON, nil
-  pointer. Four separate tests.
+- **AC-9-7 (revised by OQ-2b — the old wording is now wrong).** The consolidated switch
+  resolves as follows, one test each:
+  | Stored state | Result |
+  |---|---|
+  | no `messaging` row at all | **ON** (compiled default) |
+  | row present, key omitted (e.g. `{}`, or only stale keys) | **ON** (compiled default) |
+  | row present, key explicitly `false` | **OFF** (explicit wins) |
+  | row present, key explicitly `true` | **ON** |
+  | **malformed JSON** | **OFF**, and an error is logged at `Refresh` |
+  The previous version of this criterion said the switch is OFF for an absent row. That was
+  correct for a default-off switch and is the exact behaviour the single-cutover directive
+  forbids. A test asserting the old table would pass while the feature failed to ship.
+- **AC-9-7a.** A hub whose `messaging` row contains **only** the two stale keys
+  (`conversation_read_switch`, `conversation_write_deny_switch`), both `false`, cuts over to
+  **ON** after upgrade with no migration run. This is the single most important test in
+  Phase 9a: it is the one that would have caught key reuse.
+- **AC-9-7b.** The malformed-JSON error is logged **once per refresh**, not once per read.
+  Asserted by counting log records across N getter calls.
+- **AC-9-7c.** After one `PUT /api/v1/admin/messaging` on an upgraded hub, the stored document
+  contains the new key and **no** stale keys — self-cleaning, per §4.6.1.
+- **AC-9-7d.** An explicit-null reset via the admin endpoint returns the switch to the
+  compiled default (**ON**), not to `false`. This is the `f := false` trap in
+  `admin_messaging.go:100,:108`.
 - **AC-9-8.** The SKILL gate fails the build when `SKILL.md` names a field absent from
   `DeliveryEnvelope`. Demonstrated by a deliberate red.
 - **AC-9-9.** `system_category` survives as `event.type` for every category in
