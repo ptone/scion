@@ -248,6 +248,42 @@ Two further observations from the same runs:
   expected value for verifying an execute run.
 - **Four execute-only errors are the D-1 guard firing** — see F13.
 
+#### F11a — Re-measured after DEF-114 landed: the ceiling is legacy data, not a bug
+
+Second run, `36b5eda51`, `--execute` against a throwaway copy. The classification the
+first run could not produce:
+
+| Cause | Count | Share of refusals |
+|---|---|---|
+| `principal_pair` | **11,592** | 99.96% |
+| `dm_key_parse` | 1 | 0.01% |
+| `dm_key_not_canonical` | 0 | — |
+| `thread_no_project` | 0 | — |
+| `unclassified` | 0 | — |
+| *(write-time, outside the breakdown)* | 4 | 0.03% |
+
+`principal_pair` is not a derivation defect. The principals are slugs, display names and
+email addresses — `agent:poet-red`, `user:ptone@google.com`,
+`users/102876876769796327221` — against a length histogram with 31 distinct values, **none
+of which is 36**. There is no slug-to-UUID resolution on the derivation path, and adding
+one would be an inference about principal identity, which is an inference about the ACL.
+
+**This closes the scope question.** The 26% ceiling in F11 is real and permanent under the
+current model. It does not dead-end the end state: new messages attribute correctly, and
+the ceiling applies only to historical backfill.
+
+Two things the re-measurement also established, both recorded as defects rather than
+findings because they are faults in the tool and not in the data:
+
+- The arithmetic does **not** balance — `sum(DeriveFailures)` is 11,593 against 11,597
+  errors. The four extra are post-derivation *write* failures and belong to no derivation
+  bucket. The invariant I asked for (`sum == len(Errors)`) was wrong when I specified it;
+  the honest relation is `sum(DeriveFailures) + writeFailures == len(Errors)`.
+- The breakdown above had to be reconstructed by string-parsing the error list, because
+  `DeriveFailures` is merged and printed nowhere (DEF-119), and the hazard-A figure of 4
+  quoted in F11 is `r.Inferred` under a mislabelled heading, not `HazardAEmailCount`,
+  which has never been displayed at all (DEF-120).
+
 ### F12 — The dominant failure mode is undiagnosable by construction (DEF-114)
 
 `DeriveConversationKey` distinguishes four causes: a `dm:` ThreadID that fails

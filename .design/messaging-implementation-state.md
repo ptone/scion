@@ -32905,3 +32905,33 @@ DEF-116 is the one I want to remember, because it is INVARIANT M-1 — my own li
 **Counts.** I make it 19 new tests, not the 20 reported, and 4 gate-visible, not 5; the agent counted the pre-existing `TestAdvisoryLockKeys_NonOverlapping` as its own. Immaterial in itself, but it is the second count I have had to re-derive today and the first one led somewhere real.
 
 **Environment note.** `go test ./cmd/` in this container emits a GitHub device-authorisation prompt and fails, which looks alarming and is not: the only actual `--- FAIL` is `TestDeleteStopped_RequiresGroveContext` (docker absent, already catalogued), and it fails identically at the base commit. The device-flow text is stdout noise from an unrelated test. Recording it because all of `ca-mig-1`'s code lives in `cmd/`, so this will be the first thing that agent sees when it validates its own package.
+
+### §5ly — The 26% ceiling is real; the diagnostics that proved it were never printed (2026-09-02)
+
+**tranche-g is at 23a2a1160.** M0 (DEF-114) merged at `36b5eda51`, then M1–M3 rebased onto it and merged. The two branches touched disjoint files — `pkg/messaging` versus `cmd/` plus `pkg/store` — so the rebase replayed cleanly and I re-ran build, the blocking gate, and the full-tag tests on the rebased tree before pushing rather than trusting that disjoint files implies a working tree.
+
+**The ceiling question is closed, and the answer is that there is no bug to fix.**
+
+Of 11,593 refusals, **11,592 are `principal_pair`** — 99.96%. The failing principals are `agent:poet-red`, `agent:orchestrator`, `user:ptone@google.com`, `user:Preston Holmes`, `users/102876876769796327221`. The investigator supplied a length histogram of them: 31 distinct lengths spanning 2 to 39, and **not one is 36**. That histogram is what turns a plausible story into a settled one. There is no slug-to-UUID resolution on the derivation path and there should not be one bolted on, because inferring which principal a slug denotes is an inference about identity, and identity is the ACL.
+
+So a fully successful backfill attributes 6,476 of 24,700 messages and 18,220 stay unattributed forever. Reported to ptone as a scope decision with a recommended course rather than a bare question.
+
+**One refusal is a different animal.** `dm_key_parse` = 1: message `eac1dd71` has a literal newline inside a UUID in an otherwise well-formed key. Filed as DEF-121, but for the investigator's extension rather than the row itself — a *length-preserving* corruption would pass `isValidUUID`, derive without complaint, and name the wrong principal. Refusals are safe. That class is not, because it does not fail.
+
+**I specified an invariant that real data violates. Again.**
+
+I asked for `sum(DeriveFailures) == len(Errors)`, and argued for it on the grounds that I would be reconciling those numbers personally. It is false: 11,593 versus 11,597. `Errors` carries post-derivation *write* failures — three `participant not named in direct conversation key`, one `invalid enum value for principal_kind: "thread"` — which belong to no derivation bucket. The unit test passes because its fixture contains no write failures.
+
+This is the third time in two days: M-1's zero-errors marker rule, DEF-116's typo livelock, and now this. The recurring shape is that **I write invariants against the data I expect rather than the data we have**, and each time the check passes in CI and fails on contact. Rule 963 exists because of the first one, and I violated it in the very next instruction I issued. Writing the rule down is evidently not the same as applying it. The concrete discipline: before requiring an assertion about a production quantity, get the production number first — and if I cannot, say in the brief that the invariant is provisional.
+
+**Two defects found because the arithmetic was off by exactly 4.**
+
+Chasing that 4 is what exposed DEF-119 and DEF-120, and both are worse than the discrepancy that led to them.
+
+`DeriveFailures` is merged nowhere and printed nowhere. The investigator's classification table — the evidence the scope decision rests on — was reconstructed by **string-parsing the cause back out of the error list**. It only worked because DEF-114 had put the cause in the string. The structured field built for exactly that purpose was disconnected at the operator end. I briefed DEF-114 against `pkg/messaging`, reviewed `pkg/messaging` closely, and never asked whether the new field reached a human.
+
+`HazardAEmailCount` is summed and never printed, while `r.Inferred` is printed under the label `"Inferred (hazard-a)"`. So the "hazard-a = 4" figure from both production runs was always `Inferred`. The real counter has never been observed. The investigator wrote a careful structural argument for why 4 might be correct — about the wrong variable. And I had already written "duly reported 4" into DEF-114's own footnote, in a defect whose subject is a counter that cannot see its own population. Three readers, one label, none of us checked the format string. Footnote corrected.
+
+**A mislabelled number is worse than a missing one.** A missing number sends someone looking. A wrong number under a plausible name gets analysed, written down, and cited — which is exactly what all three of us did with it.
+
+**Agents.** ca-mig-0 and ca-mig-1 retired with their work merged; ca-mig-2 dispatched fresh for DEF-119/120 and the invariant repair, rather than reusing a spent context. Its brief leads with the push procedure, since both predecessors reported successful pushes that had gone to the contrib repo.
