@@ -6,9 +6,14 @@ measurement (§2.1) and the approach changed as a result — see §1. Still gate
 off (ptone's ruling: *"fresh cutover only happens after all other acceptance testing on
 gteam is done"*).
 
-**Recommended next action:** staff the F-1 … F-9 fixture classes (§1.3, §4.1) as permanent
-test coverage. That work is unblocked now, does not need an instance, and is the durable
-half of this plan.
+**F-1 … F-9 are DONE and merged** — `scion/tranche-g` is now `97c3462ab`. The durable half of
+this plan has landed as permanent test coverage. What remains here is the VM run, which adds
+scale and the real boot path (§0.1, §3) and is still gated on G-7.
+
+**Delivered:** `cmd/dm_migration_adversarial_test.go` (+358, `!no_sqlite`),
+`pkg/messaging/dm_migration_test.go` (+436), `pkg/messages/dm_key_test.go` (+14),
+`pkg/messaging/dm_migration.go` (+12, additive only — the `DegeneratePairs` counter and its
+log line). No deletions in any file.
 
 ---
 
@@ -199,6 +204,32 @@ not gate. Cheap now, impossible to reconstruct later.
 
 Whether such rows should instead be refused is a behaviour change on the derivation path and
 therefore ptone's call, not mine. Recorded as OQ-E, not implemented.
+
+### 1.5.1 Verification of the delivered coverage, and one residual
+
+Merged 2026-09-02 at `97c3462ab`. I verified against the branch rather than accepting the
+report: build tag present at line 15, authorization assertions genuinely sqlite-backed for
+F-1/F-3/F-5/F-8/F-9, F-2 asserting the exact canonical key rather than a prefix, F-5
+asserting `OldFormatRekeyed` *and* `DegeneratePairs`, F-7 byte-identical, production diff
+additive and non-gating. Both configurations reproduce green apart from the known
+docker-absent `TestDeleteStopped_RequiresGroveContext`.
+
+**One mutation in the delivery was too coarse.** The report gave F-4 "the same mutation as
+F-3", which cannot show the two classes are independently gated — it is equally consistent
+with F-3 having no discriminating power. I built the separating mutation instead: accept
+partial resolution (`!ok1 && !ok2` for the ambiguous branch, then borrow the resolved kind
+for the unresolved side), which is also the more plausible real bug. **F-3 went red in both
+its unit and sqlite variants while `TestStep3b_AmbiguousIDInNeither` stayed green.**
+Independently gated, confirmed. The tests were stronger than the evidence offered for them —
+which is the usual direction, but only checkable by building the mutation that separates.
+
+**Residual — replica drift.** `isDMParticipantCheck` is a copy of the production
+`isDMParticipant`, because `pkg/hub` cannot be imported from `cmd` tests without a cycle. The
+F-series therefore rests partly on a predicate that can silently diverge from the one the
+HTTP path enforces. The `CheckDMParticipantKey` assertions are against production code and do
+not have this problem. Pre-existing, not introduced here, and worth closing by extracting the
+predicate to a package both can import — or, failing that, a source-scan guard that fails
+when the two bodies diverge.
 
 ### 1.6 Constraints on building the fixture
 
