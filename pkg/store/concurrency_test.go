@@ -65,6 +65,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockBrokerMessageSweep,
 		LockSchemaMigration,
 		LockExposedPortsSweep,
+		LockRecoveryAuthz,
 	}
 
 	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+1)
