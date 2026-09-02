@@ -749,14 +749,18 @@ Cross-check: 11,597 − 4 = 11,593 NULL;  990 + 11,593 = 12,583 = reachable  ✓
 gap 24 = 20 (skipped, has conv_id) + 4 (errored, has conv_id)
 ```
 
-The 4 are almost certainly `WriteFailures`: the dry run refused 11,593 and execute refused
-11,597, so four errors arise only when writing — the signature of a group that stamps some
-messages and then fails validation, leaving a row both stamped and counted as an error.
+The 4 are **`Inferred`** stamps. *(A first reading called them `WriteFailures`, on the
+strength of the dry-run/execute delta. That was wrong — see the note below, which is worth
+more than the correct answer.)* They are hazard-a thread-keyed messages: the key derives
+from `ThreadID`, the sender is an email address rather than a UUID so the group is flagged
+`hazardA`, and `persistGroup` stamps them while incrementing `result.Inferred++` rather
+than `result.Attributed++`. `WriteFailures` and `ResolutionFailures` are **0** across the
+instance.
 
 **Those 4 rows have a `conversation_id`, so they are not in `CountUnbackfilledMessages`.**
-Subtracting them removes something the measurement never counted, leaving
-`PermanentResidual` short by 4 and a permanent WARN of exactly 4. Same fault as the tally,
-one order of magnitude smaller, sitting inside the correction for it.
+Subtracting write/resolution failures from that measurement removes something the
+measurement never counted, leaving `PermanentResidual` short and a permanent WARN. Same
+fault as the tally, one order of magnitude smaller, sitting inside the correction for it.
 
 #### Final definition — measurements and tallies are never mixed
 

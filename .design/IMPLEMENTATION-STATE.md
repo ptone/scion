@@ -33395,3 +33395,21 @@ The property that matters: **this version does not depend on classifying the pop
 **Rule 1005** — prefer a design that does not depend on your classification being exhaustive. Two versions here needed the population split to be right; the third only needs a count to be measured. When a fix keeps failing at the same joint, move the joint rather than re-deriving the split.
 
 **Rule 1006** — a total that reconciles is not a decomposition that reconciles. The investigator's 24 was arithmetically correct and hid the informative half; splitting it into 20 + 4 is what surfaced the write-failure rows.
+
+## §5mw — the 4 are `Inferred`, not write failures; the design absorbed the correction without moving
+
+instance-investigator pushed back on my write-failure hypothesis and was right. The 4 rows are **`Inferred`** stamps: hazard-a thread-keyed messages in a single conversation, sender `ptone@google.com` (email, not a UUID → `hazardA`), stamped by `persistGroup` while incrementing `result.Inferred++` rather than `result.Attributed++`. `WriteFailures` and `ResolutionFailures` are **0** across the instance. The gap is `20 pre-attributed + 4 Inferred`, both stamped, neither in `reachable`.
+
+**The design did not move.** `permanent` is measured, so `actionable` stayed 0 exact; only `transient` changed, 4 → 0. I had asserted that robustness one message before the correction arrived, so it was tested immediately and adversarially rather than by my own say-so. Reconciliation target is now `actionable` 0, `transient` 0 — no WARN of either kind on gteam.
+
+**`Inferred` is a third field the boot hook drops**, and the worst of them: it makes the summary *visibly wrong* rather than merely incomplete. The log says `attributed=6,476` when 6,480 rows were stamped, so anyone reconciling from the log lands 4 short with no way to see why — which is exactly what happened to both of us. Added to M9's logging scope; the completion line must let a reader verify `processed = attributed + inferred + skipped + errors` without touching the DB.
+
+**Consequence for M9's gates:** `transient` is 0 on gteam, so the write/resolution WARN path gets **no** production exercise and must be fully covered by seeded tests. Told ca-mig-9 I will check that gate harder than the others precisely because production cannot back it up.
+
+**OPEN — 4-row inconsistency, awaiting instance-investigator.** Logged `row_errors`/`total_residuals` = 11,597; non-broadcast rows still NULL = 11,593; the identity `processed = attributed + inferred + skipped + errors` gives 11,593. Two candidates: (1) rows counted both as `Inferred` and as an error — a stamped row in the error tally, a real double count; (2) `totalResiduals` carried a non-zero value into this pass from `marker.Residuals`, which is the accumulator double-count I flagged as latent when briefing M9 — if live, not latent. Asked for the per-project `row_errors` sum vs the completion line, and a per-project test of the identity. Instructed ca-mig-9 to write the reconciliation gate to **assert** the identity and fail, never to accommodate a 4-row tolerance.
+
+**Rule 1007** — a robustness claim is only worth something once something it was supposed to absorb actually hits it. I claimed the third design would survive my classification of the 4 being wrong, and it was wrong within the hour. Make such claims explicitly and in advance, so the test is honest when it comes.
+
+**Rule 1008** — a dropped field that breaks an arithmetic identity is worse than one that merely omits a classification, because the summary stays readable and is quietly false. Prefer log lines a reader can reconcile without the database.
+
+**Rule 1009** — when production data is clean on some path, that is absence of coverage, not evidence of correctness. Name those paths and raise the bar on their seeded tests instead of lowering it.
