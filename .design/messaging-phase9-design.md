@@ -249,8 +249,8 @@ dual-key window.
 | `type` | `kind` + `intent`/`event` | `envelope_compat.MapLegacyType` |
 | `channel` | `conversation.surface` | |
 | `thread_id` | `conversation.id` | **not** `reply_to` — see §4.5 |
-| `urgent` | **DROPPED** | `MapLegacyEnvelope` never reads `old.Urgent`; `TextIntent` is a closed 3-value enum (`inform`/`request`/`question`) with no urgency slot |
-| `broadcasted` | **DROPPED** | only used to compute `hasAddressee`; `Visibility` comes from `old.Visibility`, not from `Broadcasted` |
+| `urgent` | **RESTORED as `urgent bool`** — see §4.4.1 | the interrupt it drives is carried out-of-band and is unaffected; what is lost is the agent's in-band marker |
+| `broadcasted` | **DROPPED, superseded by `conversation.kind`** — see §4.4.1 | a hub-side routing/authorization input, fully consumed before rendering |
 | `attachments` | `attachments` | paths, unchanged |
 | `metadata.system_category` | `event.type` | `envelope_compat.go:88`, reverse map at `:411` |
 | `metadata.mention_source` | `Addressee.AddressedVia = "body-mention"` — **in the model, not on the wire** | see OQ-1 |
@@ -259,9 +259,54 @@ dual-key window.
 
 Three of these were listed as "mapped" in earlier notes and are not. **`urgent` and
 `broadcasted` are silently discarded** by the conversion, and I only found that by reading
-`MapLegacyEnvelope` rather than trusting the type names. Whether that loss is acceptable is a
-product question, not an implementation detail: `urgent` in particular changes how a harness
-interrupts an agent.
+`MapLegacyEnvelope` rather than trusting the type names.
+
+#### 4.4.1 `urgent` and `broadcasted` (closes OQ-1b)
+
+**Correction first.** An earlier version of this section said of `urgent`: *"it changes how a
+harness interrupts an agent,"* and OQ-1b called dropping it *"a behaviour change and not merely
+a schema one."* **That is wrong.** The interrupt is carried out-of-band, as a sibling of the
+payload, and the envelope cannot affect it. The full chain, every hop cited by the function
+that owns its destination:
+
+```
+cmd/message.go:519        msg.Urgent = msgInterrupt          // Urgent IS the --interrupt flag
+hub/server.go:2960        structuredMsg.Urgent = payload.Interrupt
+broker_routing.go:148     dispatchWithBrokerRetry(..., urgent bool, ...)
+hub/server.go:380         DispatchAgentMessage(..., interrupt bool, ...)   // same value, renamed
+broker_http_transport.go  MessageAgent(..., interrupt bool, ...) → reqBody["interrupt"]
+runtimebroker/handlers.go mgr.Message(ctx, id, projectID, deliveryText, req.Interrupt)
+```
+
+The last line is the proof: `deliveryText` and `req.Interrupt` are **separate arguments**. The
+interrupt is never read out of the rendered text, so no envelope change can reach it. The
+comment at `handlers.go:1745` confirms the behaviour is real and unaffected — *"Interrupt
+messages bypass the buffer."*
+
+**`urgent` — restore it, as one boolean.** What is actually lost by dropping it is narrow but
+real: today `FormatForDelivery` emits `"urgent": true`, so an interrupted agent can see *why*
+it was interrupted. Under the new envelope that marker disappears and the agent is interrupted
+with no in-band explanation. Urgency is orthogonal to `intent` (`inform`/`request`/`question`),
+so it does not belong in that enum; a sibling `urgent bool` with `omitempty` is the honest
+encoding. Cost is one field. Note the `!`-prefix promotion at `handlers_broker_inbound.go:215`
+and `messagebroker.go:611` also sets it, so the marker covers inline interrupts too.
+
+**`broadcasted` — drop it, and this is an improvement rather than a loss.** Every read is a
+hub-side routing or authorization decision taken *before* the envelope is rendered:
+`messagebroker.go:464,:664` and `handlers_broker_inbound.go:354` gate DM-vs-broadcast routing;
+`backfill.go:127` skips broadcasts during migration; `handlers_agent_messaging.go:1648` is the
+B5 fix. Nothing consumes it as delivery content. `conversation.kind` (`direct`/`group`) already
+expresses the distinction in the new model's vocabulary, and expresses it **better**:
+`Broadcasted` is client-settable — which is precisely why B5 had to force it `true`
+server-side — whereas `kind` is derived from a persisted `conversations` row. Removing a
+client-influenced field from what agents see is a small strengthening.
+
+*One caveat, tracked not blocking.* Under DEF-102's omit-never-synthesise rule, a message with
+no resolvable conversation carries no `conversation` key and therefore no `kind`. For those
+messages the group/direct distinction is genuinely absent rather than relocated. Those are
+exactly the unmigrated legacy rows, so the migration tranche (§7) closes the gap; until it
+does, the gap is real. This is the second place DEF-102's correctness depends on the migration
+tranche actually shipping.
 
 `mention_source` **does** have a home — `AddressedVia` on `Addressee`, values
 `explicit`/`body-mention`/`default-agent`/`direct` — but `FormatNewDelivery` flattens
@@ -578,12 +623,18 @@ recorded as a deliberate removal? Cost of the object form is a schema change to 
 Phase 13 cannot easily undo. I will identify the consumer of `mention_source` before asking
 anyone to decide. `mention_position` has no home either way.
 
-**OQ-1b (blocks 9c).** `urgent` and `broadcasted` are **silently dropped** by
-`MapLegacyEnvelope` (§4.4) — neither field is read. `urgent` is the one that matters: it
-influences how a harness interrupts an agent, so losing it is a behaviour change and not
-merely a schema one. Needs a home in the envelope or an explicit ruling that agents no longer
-see urgency. **This is the item in the design most likely to be discovered late by a user
-rather than by a test**, because nothing fails — messages simply stop being urgent.
+**OQ-1b — CLOSED by measurement, see §4.4.1.** Restore `urgent` as one boolean; drop
+`broadcasted`, superseded by `conversation.kind`. **Neither is a behaviour change** — the
+premise of the question was wrong. The interrupt `urgent` drives reaches the harness as its own
+wire field alongside the rendered text (`mgr.Message(ctx, id, projectID, deliveryText,
+req.Interrupt)`), so no envelope change can touch it; `broadcasted` is consumed by hub-side
+routing and authorization before rendering ever happens.
+
+*Correction on the record.* I wrote that losing `urgent` was *"a behaviour change and not
+merely a schema one"* and called this **"the item in the design most likely to be discovered
+late by a user rather than by a test."** Both claims were wrong, and wrong in the direction
+that inflates. The residual loss is that an interrupted agent sees no in-band reason for the
+interruption — worth one field to fix, not worth the alarm I attached to it.
 
 **OQ-2 — CLOSED by measurement, see §4.6.** New key `conversation_envelope_switch`, and **no
 migration**. The getter shape changes to distinguish absent / malformed / omitted, converging
@@ -631,9 +682,11 @@ Commit-sized, in order. Each is independently reviewable.
 9. **9c(iii) — `reply_to` sourced from a real reply target or omitted** (DEF-103); message ID
    is the persisted row's ID. Test: a threaded message does **not** put a thread ID in
    `reply_to`.
-10. **9c(iv) — resolve OQ-1 and OQ-1b.**
-11. **9d — SKILL.md, docs-site, and the field-name gate.**
-12. **Endpoint deletion count** per file, re-run independently before push, per standing rule.
+10. **9c(iv) — `urgent bool` added to `DeliveryEnvelope`; `broadcasted` confirmed absent**
+    (OQ-1b, §4.4.1). Small and independent of OQ-1; do not let it wait on OQ-1.
+11. **9c(v) — resolve OQ-1** (`AddressedVia` on the wire, or a recorded removal).
+12. **9d — SKILL.md, docs-site, and the field-name gate.**
+13. **Endpoint deletion count** per file, re-run independently before push, per standing rule.
 
 `FormatForDelivery` is **not** deleted in Phase 9 — it remains the switch-off path. Its
 deletion is Phase 13, and by then it should have no callers.
@@ -683,6 +736,19 @@ deletion is Phase 13, and by then it should have no callers.
   `eventTypeToSystemCategory`, round-tripped.
 - **AC-9-10.** No change to `authorizeAgentMessage` reachability, to DM key derivation, or to
   any item on the prohibition list. Reviewer confirms by reading the diff, not by counting.
+- **AC-9-10a (OQ-1b, `urgent`).** A message sent with `--interrupt` yields an envelope
+  containing `"urgent": true`, **and** the harness is interrupted. Asserted as two independent
+  facts: the interrupt must be observed at `mgr.Message`'s `interrupt` argument, not inferred
+  from the envelope. A test that only checks the envelope would pass if the interrupt were
+  silently lost.
+- **AC-9-10b (OQ-1b, `urgent` negative).** With the envelope's `urgent` field forced absent,
+  the interrupt still fires. This pins the independence claim in §4.4.1 rather than trusting
+  it, and is the test that would catch a future refactor routing interrupt through the body.
+- **AC-9-10c (OQ-1b, `broadcasted`).** `broadcasted` appears nowhere in the rendered envelope,
+  and a project broadcast yields `conversation.kind == "group"` while a DM yields `"direct"`.
+  Separately: B5's server-side `Broadcasted = true` forcing at
+  `handlers_agent_messaging.go:1648` is **unchanged** — dropping the field from the *envelope*
+  must not touch the field on `StructuredMessage`. Reviewer confirms by reading the diff.
 - **AC-9-11.** Slack and Telegram outbound formatting is unchanged — they consume
   `StructuredMessage`, which Phase 9 does not alter.
 - **AC-9-12 (DEF-103).** `reply_to` is either absent or the ID of a message that exists. A
