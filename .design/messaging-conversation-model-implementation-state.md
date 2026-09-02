@@ -31355,3 +31355,61 @@ corrects itself teaches nobody which distinctions are slippery. Pushed as `8a575
 
 Asked ptone where he remembers the earlier confusion, since "again" implies an instance I
 have not found and would rather fix than leave.
+
+### 5lb — hunted the earlier broker confusion; found a better problem instead
+
+ptone: *"It must have been lost in a compaction - but happened earlier in this refactor arc."*
+
+Compaction is not the end of the record — the journal is 31k lines and survives it. So I
+searched rather than accepting the loss. **Rule 876 in its other direction: when a memory is
+gone, search the durable document before treating the fact as unrecoverable.**
+
+**Did not find it.** Every `runtimebroker` mention is correct usage. Phase 11's "broker edge"
+consistently means the external channel inbound path. F-D's "the brokers filter unregistered
+senders client-side" correctly cites `discord/broker.go:1312` and `telegram/broker_v2.go:1963`.
+The gteam "5 brokers" counts are runtime brokers and are used as such. Most likely it was said
+to ptone in Discord and never journaled — which is itself the finding that my notes capture
+what I concluded, not everything I asserted.
+
+#### What the search found instead
+
+**"Broker" has five distinct referents in my own durable notes:**
+
+| Referent | Where | Distinguishing fact |
+|---|---|---|
+| runtime broker | `pkg/runtimebroker` | separate process, owns tmux, **no store** |
+| message broker proxy | `pkg/hub/messagebroker.go` | in the hub, **has a store**, dispatches not formats |
+| channel brokers | `extras/scion-discord`, `-slack`, `-telegram` | the bots themselves |
+| broker inbound edge | `handlers_broker_inbound.go` | HMAC-gated; Phase 11's "broker edge" |
+| "5 brokers" | every gteam deploy report | runtime brokers — **never once qualified** |
+
+Occurrence counts across the journal: `broker inbound` 14, `broker edge` 6, `runtime broker`
+5, `broker HMAC` 4, `message broker` 3, `external broker` 1, `channel broker` 1. Against 26
+bare uses of "the broker."
+
+**Rule 893: when a term has more than two referents in a system, the bare noun is not
+shorthand, it is an unresolved reference. Counting the qualified uses against the bare ones
+measures how much of your own writing is relying on the reader to guess — and here the ratio
+was 34 qualified to 26 bare, which is not a margin any reader should have to work with.**
+
+This explains a confusion without needing to locate one. In "the broker has no store," context
+is being asked to do work it cannot reliably do, and the sentence is *true of one referent and
+false of another*. That is the worst possible shape for an ambiguous term: both readings are
+grammatical and one is a design error.
+
+**Rule 894: an ambiguous term is dangerous in proportion to whether the competing readings
+disagree about a fact. "Broker" is not risky because it is vague; it is risky because the
+runtime broker has no store and the message broker proxy does.**
+
+#### Guards
+
+1. §3.2 of the Phase 9 design now opens with a table separating the two that mattered there,
+   and states explicitly which one the rest of the document means.
+2. **Added `Broker` to the Phase 12 glossary list**, which had Conversation, `external_ref`,
+   Addressee, Participant and Surface — and not the term that has actually caused a problem.
+   The glossary was assembled from the new model's vocabulary; the word that hurts is an old
+   one that acquired new meanings without anyone renaming it.
+
+**Rule 895: a glossary built from the vocabulary a refactor introduces will miss the terms the
+refactor overloaded. The dangerous words are the ones that were already there and quietly
+gained a second referent.**

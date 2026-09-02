@@ -367,6 +367,20 @@ delivered today.
   filter labelled "Conversation", and "harness conversation" under Suspend/Resume. Given
   that `external_ref` **is** the ACL for a direct conversation, its absence from the
   glossary is a real gap.
+- **`Broker` must be added to that list, and it is the highest-value entry of the six.**
+  Added 2026-09-02 after ptone challenged a Phase 9 premise. The term has **five** distinct
+  referents in this project: the **runtime broker** (`pkg/runtimebroker`, separate process,
+  owns tmux, **no store**); the **message broker proxy** (`pkg/hub/messagebroker.go`, in the
+  hub, **has a store**, dispatches rather than formats); the **channel brokers** (the
+  Discord/Slack/Telegram bots); the **broker inbound edge** (`handlers_broker_inbound.go`,
+  HMAC-gated — what Phase 11 calls "broker edge"); and **"N brokers"** in deploy reports,
+  which always means runtime brokers and is never qualified.
+
+  The sentence *"the broker has no store"* is **true of the first and false of the second**.
+  That is what makes this entry urgent rather than tidy: the competing readings disagree
+  about a fact that a design decision rests on. Note also that the other five glossary terms
+  were drawn from the vocabulary the refactor *introduced*, whereas this one was already
+  present and silently acquired a second referent — which is why it was missing.
 - **No user-facing docs-site page for the conversation model.** The only messaging doc
   outside `.design/` is `docs/messaging-authorization.md`, which is internal.
 
