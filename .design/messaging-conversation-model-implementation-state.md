@@ -31958,3 +31958,72 @@ that matters is the one observed at the enforcement site.**
 
 Holding the merge for that test plus the `TestG2_AC6` comment fix. Everything else in 9a is
 accepted.
+
+---
+
+## §5lj — Phase 9a merged to tranche-g; two findings from the last mile
+
+`45c440bd` (5 commits) fast-forwarded `scion/tranche-g` from `85f25c1a1`. tranche-g is linear,
+so ff matches its shape.
+
+The two upgrade-cutover tests are sound: canary in each helper, and a three-way assertion (409,
+`ErrCodeConversationNotResolved`, `WriteDenialMetrics` increment) that pins the denial to the
+write-deny gate rather than to any incidental conflict. `TestG2_AC6`'s first half is a natural
+negative control — identical topic setup, ops nil, 201. Causation established. Assertions in
+`handlers_chat_v2_test.go` went 413→427, purely additive.
+
+**I nearly accepted the phase on test runs that never executed its central tests.** Every
+verification I had run used `-tags no_sqlite`. I checked for build tags with `head -5` and
+concluded there were none. The directive sits at **line 15**, below a 14-line Apache header:
+`handlers_chat_v2_test.go` and `handlers_read_switch_test.go` are both `//go:build !no_sqlite`.
+`go test -run 'TestPhase9a_UpgradeCutover|TestG2_AC6' -tags no_sqlite` returns **"no tests to
+run"** — and it returns it as a *success*. Only running the tag-free suite (345s for `pkg/hub`,
+all green) actually exercised them.
+
+**Rule 929: `head -n` is not a search. A `//go:build` line is positionally constrained relative
+to the package clause, not to the top of the file, and a license header pushes it out of any
+short window. Grep the whole file.**
+
+**Rule 930: "no tests to run" is a passing exit status. A `-run` filter that matches nothing
+looks exactly like a filter that matches everything and passes. Any targeted test invocation
+must be read for the count of tests that ran, not for `ok`.**
+
+The consequence is a declared gap, not a defect: the phase's enforcement-level cutover proof
+lives in files excluded from `make test-fast`, the blocking CI job, and runs only in
+`test-full-suite`, which is `continue-on-error: true` (DEF-94). A regression there will not fail
+CI. This is acceptable because absent-row→ON, stale-keys→ON, omitted→ON and malformed→OFF are
+*all* covered at the getter in `operational_settings_test.go` and `admin_messaging_test.go`,
+neither of which is tagged — so the cutover decision itself is blocking-tested, and only its
+observation at the enforcement site is not. Not stripping the tag: that prohibition stands.
+
+**Rule 931: when the decisive test is behind a non-blocking job, the question is not whether to
+move it but whether the decision it proves is also tested somewhere blocking. Coverage of the
+predicate can substitute for coverage of the consequence; nothing substitutes for neither.**
+
+**Where the reviewer's error came from, and why it was reasonable.** `6ac1a50e8` (cr-dev-a, Aug
+31) removed a `strings.EqualFold(cfg.Database.Driver, "postgres")` gate around
+`initOperationalSettings`. Its own message: *"The gate made GetOperationalSettings() nil on
+SQLite, so the messaging admin API returned 501 and both switches were unreachable."* So
+"SQLite → nil ops" was **true until two days ago**. The commit updated the code but left sibling
+comments reading "In file/SQLite mode (no OperationalSettings)" scattered nearby, and those are
+what the reviewer read. The claim was not invented; it was correctly recalled from stale prose.
+
+**Rule 932: a behaviour change that leaves its old description in adjacent comments creates a
+false claim that survives review, because the next reader finds corroboration for the wrong
+answer. When you delete a gate, grep for prose describing it in the same breath.**
+
+**Fix (2) was worth more than I graded it.** I called the nil-ops GET divergence low severity on
+the grounds that nil ops was unreachable in a shipped configuration. `6ac1a50e8` also made init
+**fail-soft**: a boot-time settings error is logged at ERROR and the hub continues with
+`ops == nil` for the whole process lifetime. So nil ops is genuinely reachable in production via
+a transient DB fault at boot — and in that state the hub silently does not cut over and runs
+pre-refactor behaviour. That is the correct posture (fail to the previous version, Rule 900) and
+it is logged, but it means the admin endpoint reporting ON while enforcement was OFF would have
+been a live, misleading signal during exactly the incident where an operator is looking at it.
+
+**Rule 933: "unreachable in a shipped configuration" has a shelf life. Reachability is a
+property of the current boot path, and a fail-soft branch converts an impossible state into a
+degraded one. Re-derive reachability at the commit you are reviewing, not from memory.**
+
+DEF-92 closed: syntactic malformation and type-incompatible documents are both now detected at
+ingest and logged once per refresh with the section, revision and error.

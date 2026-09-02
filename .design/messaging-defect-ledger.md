@@ -110,7 +110,7 @@ rather than re-deriving it.
 
 | DEF-91 | Agent SSH keys accumulate unboundedly in GCE **project** metadata — availability, not security [^7] | FILED-NOT-STAFFED | 29020 | 28960 |
 | DEF-104 | Web-chat migration marker insert is not conflict-safe; a concurrent multi-replica cold start silently disables web chat on the losing replica [^20] | FILED-NOT-STAFFED | §5lf | §5lf |
-| DEF-92 | Messaging switch getters swallow a malformed `messaging` doc silently — fail-closed but undiagnosable [^8] | **PROMOTED — now blocks Phase 9a** | §5kc, §5lc | §5kc, §5lc |
+| DEF-92 | Messaging switch getters swallow a malformed `messaging` doc silently — fail-closed but undiagnosable [^8] | **RESOLVED** in `683ba145`+`41f84ece` (tranche-g `45c440bd`) — `sectionState.Malformed` set at ingest; both syntactic malformation and type-incompatible documents logged once per refresh with section, revision and error | §5kc, §5lc, §5lh, §5lj | §5kc, §5lc |
 | DEF-93 | Full `pkg/hub` suite takes ~346s with SQLite — exceeds common default tool timeouts, agents keep misreading the kill as a test failure [^9] | OPEN | §5ke | §5kc |
 | DEF-94 | `test-full-suite` is `continue-on-error: true` — 3074/4187 `pkg/hub` tests, incl. the whole authz suite, sit behind a job that cannot fail the build [^10] | OPEN | §5ke | §5ke |
 | DEF-95 | `internal/fixturegen.TestFixtureCoverage` red on `main` for ≥3 consecutive runs, invisible because of DEF-94 — `access_constraints` has no fixture row [^11] | OPEN | §5ke | §5ke |
