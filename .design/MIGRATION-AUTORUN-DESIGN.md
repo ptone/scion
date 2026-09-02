@@ -612,6 +612,172 @@ run" and would be extremely hard to diagnose.
 
 ---
 
+### 4.8 A third bucket: permanently underivable in a listed project (M9)
+
+**Added post-M7, after computing what the residual report will actually print on gteam.
+Approved by ptone.**
+
+M6 split the residual report in two: *unreachable* (the message's `project_id` names no
+row — INFO, permanent) and everything else (WARN, actionable). Applying that to gteam's
+measured numbers gives a WARN of roughly **12,606**, against the 5,637 orphans M6 was
+built to suppress. We removed one body of alarm noise and left one about twice its size.
+
+The cause is that "everything else" is not one population. A message can sit unattributed
+in a listed project for reasons no operator action will ever change:
+
+| Population | Attributable by re-running the backfill? |
+|---|---|
+| Project row deleted (orphan) | No — M6 already splits this out |
+| Key derivation refused | **No — deterministic property of the row** |
+| Broadcast / intentionally skipped | **No — has no conversation by design** |
+| Project never processed | Yes |
+| Write or resolution failure | Yes — transient, retryable |
+
+Only the last two are actionable. The WARN must count only those.
+
+**The classification already exists in the code.** `BackfillResult` records errors
+exclusively through `addDeriveFailure`, `addWriteFailure` and `addResolutionFailure`, so
+`sum(DeriveFailures) + WriteFailures + ResolutionFailures == len(Errors)` holds by
+construction rather than by discipline. Derive refusals are permanent — all four causes
+(`dm_key_parse`, `dm_key_not_canonical`, `thread_no_project`, `principal_pair`) are
+deterministic properties of the row. Write and resolution failures are store errors and
+are transient. M9 does not need a new classification; it needs to *carry the existing one
+into the report*.
+
+#### Why the count must be persisted rather than recomputed
+
+The obvious alternative is a third live SQL counter, matching the shape of M6's anti-join
+so it nests. **Reject it.** Two of the four causes require running `ParseDMKey` and
+re-deriving, which is not expressible in SQL at all, and the other two would mean
+re-implementing principal-shape checking in a second language. The key IS the ACL; a
+second derivation implementation that can disagree with the first is precisely the hazard
+the standing rules exist to prevent. This is the same impedance mismatch that led M7 to
+reject a shared predicate.
+
+So the count is persisted at the moment the classification is known — during the pass —
+and read back on later boots. `markBackfillComplete` already preserves a global residual
+count across completion (it clears `projects_done` for bounded growth but keeps
+`Residuals`), so the storage pattern exists and stays bounded.
+
+**Do not reuse `Residuals`.** It is `len(result.Errors)` — derive *plus* write *plus*
+resolution. Subtracting it would suppress transient failures, which are exactly the thing
+the WARN should still fire on. M9 adds a separate accumulator covering derive refusals and
+intentional skips only.
+
+#### The arithmetic
+
+```
+total       = CountUnbackfilledMessages("")             // live
+unreachable = CountUnreachableUnbackfilledMessages()    // live, nests under total
+reachable   = total - unreachable                       // nests, cannot go negative
+permanent   = marker.PermanentResidual                  // persisted, survives completion
+actionable  = max(0, reachable - permanent)
+```
+
+Report: INFO for `unreachable`, INFO for `permanent`, and WARN **only when
+`actionable > 0`**.
+
+`reachable` still nests and cannot go negative. `actionable` does not nest — it subtracts a
+persisted number from a live one — hence the clamp.
+
+**The clamp is a drift guard, not a way to reach zero.** If gteam needs the clamp to print
+zero, the classification is incomplete and the missing population must be named, not
+absorbed. This is the acceptance bar for M9 and the reason the phase is not done when the
+number merely gets smaller.
+
+#### CORRECTION — `permanent` must be measured, not tallied
+
+*Written after gteam's first production backfill. The first draft of this section defined
+`permanent` as `marker.DeriveRefusals + marker.Skipped`, accumulated from `BackfillResult`
+during the pass. **That version is wrong and the real numbers prove it.***
+
+Boot 1 produced: 19,083 processed, 6,476 attributed, **1,010 skipped**, **11,597 row
+errors**, `unreachable` 5,637, `reachable` **12,583**. The tally version gives
+
+```
+permanent  = 11,597 + 1,010 = 12,607
+actionable = 12,583 - 12,607 = -24    ->  clamped to 0
+```
+
+It reaches zero **only through the clamp** — the precise outcome the paragraph above
+declares unacceptable. Two independent causes:
+
+1. `len(result.Errors)` is derive *plus* write *plus* resolution failures. The tally
+   reintroduces through the accumulator exactly the over-subtraction that the "do not
+   reuse `Residuals`" rule forbids.
+2. `Skipped` is not a subset of the unbackfilled population. A skipped message that
+   already carried a `conversation_id` was never unbackfilled, so subtracting it removes
+   something the live counter never counted.
+
+The general fault is worth stating plainly, because it is the reusable lesson: **the
+formula tallied events observed during the pass and subtracted them from a live count of
+rows.** Those are different populations, and nothing forces one to nest inside the other.
+Non-nesting is what admits a negative, and the clamp is what hides it.
+
+**Corrected definition.** At the end of each project's pass, *measure* the residual rather
+than deriving it from error tallies:
+
+```
+PermanentResidual += CountUnbackfilledMessages(pid)   // measured, after the project completes
+                   - writeFailures(pid)               // transient — must stay actionable
+                   - resolutionFailures(pid)          // transient — must stay actionable
+```
+
+The measured term is drawn from the same population the live counter measures, at a known
+moment, so at steady state the two agree by construction and `actionable` reaches zero
+*exactly*. The clamp returns to being a drift guard rather than the mechanism producing the
+answer. Cost is one `COUNT` per project.
+
+This also sharpens the gate: a steady-state test must assert `actionable == 0` **before**
+the clamp is applied. A test that only checks whether the WARN fired cannot distinguish a
+correct zero from a clamped negative — which is exactly how the tally version would have
+shipped green.
+
+*Known residual:* messages written concurrently during a pass are counted as permanent and
+thereafter suppressed. Post-cutover writes carry a `conversation_id`, so the window is
+narrow. Recorded, not engineered around.
+
+**Rule.** When a fix subtracts a persisted number from a live one, name the population each
+side counts and show that one nests inside the other. If it does not nest, a clamp will
+convert the error into a plausible-looking zero, and every unit test will agree with it.
+
+#### Why the phase must reconcile against real numbers
+
+Two of the four populations in the table above (`Skipped`, and the write/resolution split
+inside row errors) were invisible in unit fixtures and only appeared against production
+data. Had M9 shipped on the tally definition it would have looked correct in every test
+and left a clamped negative on gteam. The phase therefore carries an explicit
+reconciliation requirement against boot-1's actual numbers, not just green tests.
+
+#### Accumulator reset
+
+`totalResiduals` carries forward from prior boots to survive resumption. That is correct
+across a *resumed* pass and wrong across a *repeated* one: a project that runs again adds
+its errors a second time. Today `completed_at` makes a full repeat unreachable, so the
+double-count is latent. M9 makes it reachable, because a marker written in the pre-M9
+format has no `DeriveRefusals` key and the safe response is to re-run (see below). The
+accumulators must therefore reset to zero at the start of a pass that begins with an empty
+`projects_done`, and carry forward only within a pass.
+
+#### Pre-M9 markers
+
+gteam will have run the backfill under `cbd4f8b6a` before M9 lands, leaving a completed
+marker with no `DeriveRefusals` key. Reading absent-as-zero would make the entire reachable
+population look actionable — the bug M9 exists to fix.
+
+Treat a completed marker lacking the new key as **not complete** and re-run the backfill
+once, writing the new format. The backfill is idempotent and takes ~37s on gteam, so the
+upgrade is self-healing and cheap. Per **INVARIANT M-2**, the rewrite must preserve every
+`_migrations` key it does not own, byte for byte.
+
+#### Not in scope
+
+M9 splits permanent from actionable. It does **not** split per-cause reporting
+(DEF-124/125), which is a different axis and carries its own constraint that
+`unresolvable` stay a separate bucket from `disagree`/non-UUID principal. Keep them apart.
+
+---
+
 ## 5. Alternatives Considered
 
 ### A1 — Run the migrations asynchronously after the listener opens
@@ -778,6 +944,15 @@ Commit-sized, in order. Each is independently reviewable.
   counters, and keep the B14 comment. Pure rename plus dead-field deletion, no behaviour
   change. **Not droppable** — unlike M7 this guards a security invariant against a
   plausible future edit, and it gets cheaper the sooner it lands.
+
+- **M9 — Third residual bucket** (§4.8). Separate *permanently underivable in a listed
+  project* from *actionable*, so the boot WARN counts only what re-running the backfill
+  can fix. Added after the tranche was code-complete, once the arithmetic against gteam's
+  measured numbers showed M6's WARN landing at ~12,606 — larger than the 5,637 it was
+  built to suppress. Persist derive refusals and intentional skips as accumulators that
+  survive completion; report three buckets; WARN only on the actionable remainder.
+  **Acceptance is reconciliation against gteam boot-1's real numbers reaching ~0, not
+  merely a smaller number**, and not a number the clamp produced.
 
 M0 first, then re-measure. M1–M3 are independent of it and already dispatched. **M5 is
 blocked on M0**, not on OQ-1 — that one is now resolved. M6 depends on M5 for the
