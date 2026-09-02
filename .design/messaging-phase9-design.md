@@ -905,7 +905,7 @@ type PersistedIdentity struct {
 }
 
 func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity) (*Message, []Addressee, error)
-func FormatLegacyAsNewDelivery(msg *messages.StructuredMessage, ident PersistedIdentity, convInfo *ConversationInfo) string
+func FormatLegacyAsNewDelivery(msg *messages.StructuredMessage, convInfo *ConversationInfo) string // AMENDED — see §11.6
 func FormatNewDelivery(msg *Message, addrs []Addressee, convInfo *ConversationInfo, opts DeliveryOptions) string
 // DeliveryEnvelope.Conversation *ConversationInfo `json:"conversation,omitempty"`
 ```
@@ -950,3 +950,27 @@ beyond absence.
 participant, omitting is over-conservative and loses context the recipient is entitled to. Stamping
 it requires a participant check at fan-out time. Out of scope for 9b; needs a design before any
 agent touches it.
+
+### 11.6 Amendment — `FormatLegacyAsNewDelivery` does **not** take a `PersistedIdentity`
+
+§11.4 above specified `ident PersistedIdentity` as the second parameter. The implementation omitted
+it and always passes `PersistedIdentity{}` internally. Raised by `cr-msg-9c` as a deviation from the
+stated contract; **the implementation is right and the contract was wrong.** Corrected above.
+
+The reason is not convenience. `FormatLegacyAsNewDelivery` is the *compat* path — the one whose
+entire premise is that a `StructuredMessage` arrived carrying no persisted identity. Threading a
+`PersistedIdentity` through it would offer callers a parameter that, on that path, there is nothing
+truthful to fill. Under the empty-means-omit convention a caller with nothing to say passes
+`PersistedIdentity{}`, which is precisely what the function now does unconditionally and
+unavoidably. The narrower signature makes the absence structural instead of conventional.
+
+Generalising, because §11.4 got this wrong by symmetry: a parameter that a call site can only ever
+satisfy with a zero value is not a contract, it is an invitation to fabricate. The design reached
+for a uniform signature across both mappers when the two paths differ in exactly the respect the
+parameter encodes. `MapLegacyEnvelope` keeps `ident` because `RenderDeliveryText` genuinely has a
+persisted row to pass; `FormatLegacyAsNewDelivery` has no such caller and, if one ever appears, the
+signature change will be a compile error at the moment a real identity exists to supply — loud and
+correctly timed.
+
+Live scope is nil either way: `FormatLegacyAsNewDelivery` still has zero non-test callers (DEF-101).
+Recorded so the deviation is not "corrected" back later by someone reading §11.4 alone.

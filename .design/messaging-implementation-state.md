@@ -32405,3 +32405,63 @@ the file, never the notification's summary.
 deploying with `group[]` on the legacy renderer would put a known split-brain format in front of the
 very end-state testing ptone asked for. Deploy trigger is now: 9c reviewed and merged, **and** 9e
 merged.
+
+---
+
+## §5lq — 9c reviewed and merged; `tranche-g` at `7f12309a` (2026-09-02)
+
+`cr-msg-9c` returned **approve, no blockers**, with a check-by-check account rather than a bare
+verdict — including what it checked and how, which is the form I asked for. Notable: it verified the
+omit contract by unmarshalling raw JSON in the tests rather than by reading struct tags, confirmed
+`validateStructural` is composition and not the rejected duplication, and accounted for every deleted
+line in the four test files (each one either had its subject removed, was replaced by a strictly
+stronger assertion, or was a mechanical signature change — none deleted because it went red).
+
+It also volunteered a non-finding with its reasoning (`Message.ID` lacks `omitempty`, judged correct
+because `FormatNewDelivery`'s output only becomes a delivered envelope via `RenderDeliveryText`, which
+always supplies an ID). That is the behaviour I asked for after §5lp, and it arrived one review later.
+
+`scion/tranche-g` fast-forwarded `ebdc069d → 7f12309a`. **DEF-102, DEF-103, DEF-106 closed.**
+
+### Finding 1 — fixed, not filed
+
+`NewEnvelopeToLegacy` (`envelope_compat.go:310`) maps new→old and never sets `old.Urgent`, while the
+forward direction maps it at `:189`. Verified: the asymmetry is real and the function has zero callers
+of any kind outside tests. Live severity nil.
+
+Directed to `ca-msg-9c` as a fix rather than a ledger entry, because it is two lines — but with the
+second half made explicit, since the one-line fix is not the interesting part:
+
+**`TestRoundTrip_NewToOldToNew` leaves `Urgent` at its zero value on the input side.** A round-trip
+test whose input does not populate a field cannot detect that the round trip loses it: it asserts that
+*zero survives the journey*, which is exactly what a dropped field also does. So the test was
+structurally incapable of catching this, and would be equally incapable for the next field added.
+
+**Rule 952.** A round-trip test is only as strong as the non-zero coverage of its input. Any field left
+at its zero value is untested by construction, and the test's green is evidence about the fields it
+populated and nothing else.
+
+Instruction therefore includes walking the `Message` struct field-by-field against what the reverse
+mapper sets, and reporting whether `Urgent` was the only gap or merely the one that happened to be
+read. A mapper that silently dropped one field has no particular reason to have dropped only one, and
+this was found by reading rather than by a test failing.
+
+### Finding 2 — the design doc was wrong, not the code (§11.6)
+
+`FormatLegacyAsNewDelivery`'s implemented signature omits the `ident PersistedIdentity` that §11.4
+specified. The implementation is right. That function *is* the compat path — its premise is that no
+persisted identity exists — so the parameter could only ever be satisfied with `PersistedIdentity{}`.
+
+**Rule 953.** A parameter that every call site can only satisfy with a zero value is not a contract,
+it is an invitation to fabricate. §11.4 reached for a uniform signature across both mappers when the
+two paths differ in precisely the respect the parameter encodes. Corrected in the doc with the
+rationale attached, so it is not "restored" later by someone reading §11.4 alone.
+
+### Scheduling
+
+Two branches now sit on the same base (`7f12309a` = `tranche-g`): `ca-msg-9e` (DEF-107/108, `pkg/hub`)
+and `ca-msg-9c-urgent` (`pkg/messaging`). Disjoint files, so whichever lands second takes a trivial
+rebase and history stays linear.
+
+**Deploy trigger unchanged from §5lp: DEF-108 gates it.** DEF-107 and the `Urgent` asymmetry do not,
+but both will be in by then anyway.
