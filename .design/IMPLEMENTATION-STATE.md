@@ -33067,3 +33067,28 @@ The migration itself took **9ms** against 8 conversations.
 One thread worth pulling: `b53249ea-b8ce-4e75-99f1-883ec0f5e967`, one of the two unresolvable principals, is the same UUID that appears in DEF-121 in corrupted form with an embedded newline. If a single deleted principal accounts for both our only old-format row and our only key corruption, that is one narrow problem rather than two independent faults. Investigator is checking, read-only.
 
 **Rule 978** — a constraint written for one output surface applies to every surface carrying the same information. Naming the artefact in the rule is what makes the rule easy to satisfy and easy to evade at once.
+
+---
+
+### §5mg — A counter that made its own row unfindable, and one principal behind two defects (2026-09-02)
+
+The investigator could not identify which of 8 conversations produced `unparseable=1`. It reported the ambiguity and two candidate hypotheses rather than choosing one — which is the right call, and worth marking as such given that an agent on this same tranche fabricated a plausible answer eight hours ago. Both hypotheses happened to be wrong, and picking either would have buried the finding under a confident explanation.
+
+I resolved it from source. Dispatch is a `switch`, one branch per row, so `f003ad87` reached `Ambiguous` only and is not double-counted; and all six new-format keys are structurally sound. The real site is `stepRebuildParticipants:193`:
+
+```go
+if !s.verifyPrincipal(ctx, kindA, idA) || !s.verifyPrincipal(ctx, kindB, idB) {
+    result.Unparseable++
+    return
+}
+```
+
+The key parsed perfectly. What failed is that a principal *named by a well-formed key* no longer exists — a referential-integrity condition, filed under a counter whose name asserts a syntactic one. And unlike the genuine parse-failure branch seven lines above, this one appends **no error**, so the row is counted and simultaneously made unnameable. There is nothing to grep. `Unparseable` now spans at least three unrelated conditions across five sites. Filed as **DEF-125**.
+
+The behaviour is correct and fail-closed — participants are not rebuilt for a conversation naming a principal that is gone. Only the accounting is wrong. But this is Rule 971 with the volume up: mislabelled *and* silent, costing a full investigative pass to fail to locate one row among eight.
+
+**DEF-124 is also worse than I filed it.** Per-UUID resolution shows `b53249ea` is found, in exactly one table, as ptone's user record; `da7cf1ab` exists nowhere at all, with no soft-delete tombstone and zero messages — a phantom appearing only in that one `external_ref`. So *"found in neither or both tables"* is not merely ambiguous, it is **false** for one of the two principals it describes. The refusal remains correct: a wrong kind is worse than an old-format key. The diagnostic is simply wrong about the data.
+
+**And the two open data defects collapse into one principal.** `b53249ea` — ptone's own user ID — accounts for both our only old-format conversation and DEF-121's newline corruption. 1,359 messages reference it; 6 distinct thread_ids, 5 clean and 1 corrupted. The detail that settles DEF-121 is one the investigator volunteered unprompted: **the corrupted thread_id has 5 messages, and 4 of them carry the clean form.** Same thread, same principal, same ingestion path, one bad write. A systematic corruption would have mangled all five. So DEF-121 is a single event, not a class — which is the opposite of the conclusion its worst case implied, and it materially de-risks the length-preserving-corruption worry. It does not eliminate it, and the read-only scan is still worth doing, but it is no longer the shape of thing that would block a cutover.
+
+**Rule 979** — when a search fails to find something the counters insist exists, suspect the instrument before widening the search. An unattributable count in a corpus of eight is not a hard search problem; it is evidence that the thing doing the counting is not the thing doing the reporting.
