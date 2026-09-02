@@ -32465,3 +32465,89 @@ rebase and history stays linear.
 
 **Deploy trigger unchanged from §5lp: DEF-108 gates it.** DEF-107 and the `Urgent` asymmetry do not,
 but both will be in by then anyway.
+
+---
+
+## §5lr — DEF-107/108 and the `Urgent` fix merged; full rendering-site sweep finds two more (2026-09-02)
+
+`scion/tranche-g` = **`c98a2b521`**, linear (0 merge commits over `45c440bd..HEAD`).
+Sequence: `07bad456d` (9e, three commits + comment correction) fast-forwarded, then 9c's
+`554c3dae2` cherry-picked onto it as `c98a2b521` — disjoint files, no conflict, as predicted.
+
+### Verification actually performed
+
+- **9e numstat** re-measured: `22/0` and `225/0`. Zero deletions in the authorization file.
+- **9e's tests genuinely run**: 3 RUN / 3 PASS untagged.
+- **9c-urgent mutation-tested**, not taken on trust: deleting the `Urgent` mapping fails
+  `TestRoundTrip_NewToOldToNew`; restoring it and deleting `ConversationID` fails again. Both
+  mappings are covered. Its three "deletions" are gofmt realignment.
+- Combined head builds clean; `pkg/messaging` + `pkg/hub` targeted suites pass, exit 0 from the
+  binary.
+
+### 9e's gate could not see 9e's tests
+
+`handlers_agent_messaging_test.go` carries `//go:build !no_sqlite` at line 15, so `make test-fast`
+compiles it out — confirmed with `go test -tags no_sqlite -list TestPhase9e ./pkg/hub/`, which lists
+nothing. 9e reported the tagged run's exit 0 as its gate. Tagging was correct and required; treating
+the tagged run as evidence was not.
+
+**Rule 954.** DEF-94 has a per-change form: when new tests land behind a build tag the blocking gate
+excludes, the gate's green is evidence about the rest of the repo and says nothing about the change.
+A tagged test requires an untagged run to be evidence of anything.
+
+### 9e's observer-copy reasoning was wrong; the conclusion was right
+
+9e justified stamping before `observerMsg := agentMsg` partly on the grounds that `DeliveryText`
+"adds no new information" because the observer already carries those fields structurally. **False.**
+Every assignment to `agentMsg` between `:1292` and `:1470` was checked: `agentMsg.ConversationID` is
+never set — only `storeMsg.ConversationID` is, at `:1385`. So the observer copy did not previously
+carry conversation identity, and `DeliveryText` is the first vector putting conversation id, kind,
+surface and display name onto a project-scoped plugin publish.
+
+The behaviour is still correct, on different grounds: `bp.PublishMessage` already hands the observer
+the full message body, so conversation metadata discloses strictly less than what it holds. **The
+safety is a property of the observer surface, not of the envelope** — and only one of those survives
+the envelope growing. Comment rewritten to say so, including that an N-recipient fan-out yields N
+envelopes each naming a different DM conversation.
+
+**Rule 955.** "Adds no new information" is a licence, not a justification. Where a disclosure is safe
+because the recipient is already inside the trust boundary, the comment must say *that*, because the
+next field added to the envelope will be read against whichever reason is written down.
+
+Third instance this tranche of a correct conclusion reached by a reason that would not survive the
+next change (9b/`processMentions`, 9c/`Validate()`, now 9e/observer).
+
+### The sweep — DEF-109
+
+Rather than trust the phase brief's enumeration, every `FormatForDelivery` / `DeliveryText` site was
+listed at `c98a2b521`. Ten stamp sites exist; `FormatForDelivery` survives only as the switch-OFF
+fallback at `server_dispatcher.go:289` and `runtimebroker/handlers.go:1723`, which is correct.
+
+**Two paths construct a `StructuredMessage` and dispatch without stamping**: the scheduler's delivery
+(`server.go:~2965`) and notification dispatch (`notifications.go:~391`). Both therefore deliver the
+legacy envelope with the switch ON. `cr-msg-9b` saw both and classified them "system/operational
+paths, not user messaging paths."
+
+**That framing is rejected.** From the receiving agent there is one inbox. Agent state-change
+notifications are high-frequency on gteam, so the mixed stream would have been among the first things
+QA saw — and would have been filed as a defect, correctly.
+
+**Rule 956.** "Operational, not user-facing" is a statement about a code path's origin, not about what
+the recipient experiences. Where two paths terminate in the same inbox, a format split between them is
+user-facing whatever the sending path is called.
+
+Confirmed to be **wiring, not design**: `envelope_compat.go` already maps `messages.TypeSystem →
+KindEvent` via `mapSystemCategory`, which has an explicit `SystemCategoryScheduler` case, and
+`TypeAgentStateChanged → EventBody{Type: EventAgentStateChanged}`. The machinery was built for these
+messages and never connected.
+
+Neither path has a persisted row or a conversation, so both pass `MessageID: ""` and `ConvResult: nil`
+— omit, never substitute. Checked the wire consequence so the implementer need not guess:
+**`DeliveryEnvelope` has no message-id field at all**, so an empty `MessageID` is invisible in the
+delivered JSON and reaches only `Addressee.MessageID`, which is not serialised.
+
+### Deploy held
+
+Deploy is held for DEF-109 rather than taken now and repeated. A single cutover is closer to the
+upgrade path ptone actually wants exercised, and it avoids QA against a format that would change
+underneath it minutes later. ptone informed with the scope stated plainly.
