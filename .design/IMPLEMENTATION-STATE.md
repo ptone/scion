@@ -33267,3 +33267,22 @@ Required a source-scan guard instead, following the `TestAdvisoryLockKeys_AllUni
 **Rule 995** — "one assertion, one hazard, one mutation, caught" is a closed loop that never tests its own premise. The mutation is chosen by the same understanding that wrote the assertion, so it inherits every blind spot. An independent reviewer's job is to supply the mutation the author's model does not generate.
 
 **Rule 996** — run `scion` from `/workspace`. Twice now I have removed a `/tmp` worktree while standing in it and had the next `scion` call fail with "not in a scion project". Harmless, but the shell's cwd drift makes it recurrent.
+
+### §5mq — RULING: fresh cutover is sequenced last (2026-09-02)
+
+ptone, verbatim: **"fresh cutover only happens after all other acceptance testing on gteam is done"**.
+
+This settles the ordering I left open. I had reported the fresh-cutover test on a second instance as *necessary rather than optional* (AC-4 has never executed against production data), and it reads naturally as the next thing to schedule once the tranche is code-complete. It is not. It is last.
+
+The sequence is now fixed:
+
+1. M7 merges — tranche is code-complete.
+2. Deploy `tranche-g` to gteam and work the **entire** acceptance-criteria list there.
+3. Only when gteam AC is exhausted, run the fresh cutover on a second instance.
+4. ptone merges `tranche-g` → `main` (his gate, and not until testing completes).
+
+The reasoning is sound and worth stating so I do not drift from it: a fresh cutover is the one test that consumes its own fixture. An instance can only be cut over for the first time once, so every defect it could have surfaced must already have been hunted somewhere cheaper. Spending it while gteam still has untested acceptance criteria would mean discovering a gteam-findable bug on the one instance whose value was that it had never been migrated — and there is no second first cutover to retry with. gteam, having already cut over, is now unlimited-use for end-state QA precisely because it cannot regress to being fresh.
+
+**Action for me:** the gteam AC list needs assembling into an explicit, orderable checklist before step 2 — the design's numbered acceptance criteria plus the tranche-wide items that accumulated across M0–M8. That is my next deliverable after M7 merges, and it gates the fresh cutover, so it should be exhaustive rather than convenient. Note the standing constraint that AC-8 (Postgres concurrency) is untestable on SQLite by construction and must be carried as a declared gap rather than quietly marked done.
+
+**Rule 997** — sequence irreversible tests last, not by importance. A test that consumes its own preconditions is a one-shot instrument; every defect reachable by a repeatable test must be cleared before it is spent, or you burn the instrument discovering something you could have found for free.
