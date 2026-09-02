@@ -479,6 +479,121 @@ func TestRolesAPI_DeleteRoleBinding_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestRolesAPI_DeleteRoleBinding_ProjectScoped verifies that the admin API can
+// delete a project-scoped binding (system-authorized bypass of project governance).
+func TestRolesAPI_DeleteRoleBinding_ProjectScoped(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	ownerID := tid("ps-del-owner")
+	memberID := tid("ps-del-member")
+	projectID := tid("ps-del-project")
+
+	seedRolesTestUser(t, s, ownerID, "ps-del-owner@test.local")
+	seedRolesTestUser(t, s, memberID, "ps-del-member@test.local")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "ps-del-project", Slug: "ps-del-project",
+		OwnerID: ownerID, CreatedBy: ownerID, Created: time.Now(), Updated: time.Now(),
+	}))
+
+	// Seed owner binding so the project has an owner.
+	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      ownerID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+	})
+	require.NoError(t, err)
+
+	// Create a member binding to delete.
+	memberRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	memberBinding, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      memberID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+	})
+	require.NoError(t, err)
+
+	// Admin API: DELETE project-scoped binding — should succeed (system-authorized).
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+memberBinding.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, "admin should be able to delete project-scoped binding: %s", rec.Body.String())
+
+	// Verify binding is actually removed.
+	_, err = s.GetRoleBinding(ctx, memberBinding.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "binding should be deleted from store")
+}
+
+// TestRolesAPI_DeleteRoleBinding_LastOwnerProtected verifies the last-owner
+// invariant is preserved even through the admin endpoint.
+func TestRolesAPI_DeleteRoleBinding_LastOwnerProtected(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	ownerID := tid("lo-del-owner")
+	projectID := tid("lo-del-project")
+
+	seedRolesTestUser(t, s, ownerID, "lo-del-owner@test.local")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "lo-del-project", Slug: "lo-del-project",
+		OwnerID: ownerID, CreatedBy: ownerID, Created: time.Now(), Updated: time.Now(),
+	}))
+
+	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	ownerBinding, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRoleDef.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      ownerID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+	})
+	require.NoError(t, err)
+
+	// Try to delete the last owner — should return 409 (last_owner).
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+ownerBinding.ID, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, "should not delete last owner")
+
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	errObj, _ := resp["error"].(map[string]interface{})
+	assert.Equal(t, "last_owner", errObj["code"], "denial code should be last_owner")
+}
+
+// TestRolesAPI_DeleteRoleBinding_Idempotent verifies that deleting an already-
+// deleted binding returns 404 (not 409 or 500).
+func TestRolesAPI_DeleteRoleBinding_Idempotent(t *testing.T) {
+	srv, s := testServer(t)
+
+	delUserID := tid("idem-del-user")
+	seedRolesTestUser(t, s, delUserID, "idem-del-user@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "idem-del-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+	binding := createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "user",
+		PrincipalID:      delUserID,
+		ScopeType:        "system",
+	})
+
+	// First delete — success.
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+binding.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	// Second delete — should return 404, not 409.
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+binding.ID, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "repeated deletion should return 404")
+}
+
 func TestRolesAPI_ListBindingsForUser(t *testing.T) {
 	srv, s := testServer(t)
 

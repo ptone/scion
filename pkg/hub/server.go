@@ -4078,9 +4078,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/webhooks/github", s.guarded("/api/v1/webhooks/github", s.handleGitHubWebhook))
 	s.mux.HandleFunc("/github-app/setup", s.guarded("/github-app/setup", s.handleGitHubAppSetup))
 
+	// System status: available in all modes (handler returns minimal status in
+	// non-workstation mode). Authenticated via route guard.
+	s.mux.HandleFunc("/api/v1/system/status", s.guarded("/api/v1/system/status", s.handleSystemStatus))
+
 	// Workstation-only system endpoints: declarative guard enforces workstation token.
 	s.mux.HandleFunc("/api/v1/system/identity", s.guarded("/api/v1/system/identity", s.handleSystemIdentity))
-	s.mux.HandleFunc("/api/v1/system/status", s.guarded("/api/v1/system/status", s.handleSystemStatus))
 	s.mux.HandleFunc("/api/v1/system/check", s.guarded("/api/v1/system/check", s.handleSystemCheck))
 	s.mux.HandleFunc("/api/v1/system/runtime", s.guarded("/api/v1/system/runtime", s.handleSystemRuntime))
 	s.mux.HandleFunc("/api/v1/system/init", s.guarded("/api/v1/system/init", s.handleSystemInit))

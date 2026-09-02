@@ -167,7 +167,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/webhooks/github":                   "webhook-signature:github",
 	"/github-app/setup":                         "public:github-app",
 	"/api/v1/system/identity":                   "workstation:system",
-	"/api/v1/system/status":                     "workstation:system",
+	"/api/v1/system/status":                     "authenticated:system",
 	"/api/v1/system/check":                      "workstation:system",
 	"/api/v1/system/runtime":                    "workstation:system",
 	"/api/v1/system/init":                       "workstation:system",

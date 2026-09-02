@@ -900,7 +900,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/system/status": {
 		Pattern: "/api/v1/system/status", RouteID: "system.status",
-		Classification: RouteWorkstation,
+		Classification: RouteAuthenticated,
 	},
 	"/api/v1/system/check": {
 		Pattern: "/api/v1/system/check", RouteID: "system.check",

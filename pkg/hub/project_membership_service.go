@@ -126,6 +126,12 @@ type MembershipRequest struct {
 
 	// Transfer fields — the target user who will become the new owner.
 	NewOwnerID string
+
+	// SystemAuthorized indicates that the caller has already been authorized
+	// at the system level (e.g., via role_binding.delete permission on the
+	// admin API). When true, project-level governance checks are skipped,
+	// but structural invariants (last-owner guard) are still enforced.
+	SystemAuthorized bool
 }
 
 // MembershipDecision captures the governance outcome.
@@ -869,10 +875,14 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "cannot resolve role", HTTPStatus: 500}
 	}
 
-	// Governance check.
-	decision := svc.checkGovernance(ctx, req, roleDef.Name)
-	if !decision.Allowed {
-		return nil, &decision
+	// Governance check — skipped when the caller has already been authorized
+	// at the system level (e.g., admin API with role_binding.delete permission).
+	// Structural invariants (last-owner guard) are always enforced.
+	if !req.SystemAuthorized {
+		decision := svc.checkGovernance(ctx, req, roleDef.Name)
+		if !decision.Allowed {
+			return nil, &decision
+		}
 	}
 
 	// Delete the binding, enforce last-owner guard, and write audit inside a
@@ -885,14 +895,30 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 			return fmt.Errorf("lock project: %w", err)
 		}
 
-		// R4 O-1: re-evaluate actor authority under lock.
-		// R5 O-1: propagate store errors as 500 instead of masking as 403.
-		actorRole, roleErr := svc.projectEffectiveRoleFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
-		if roleErr != nil {
-			return fmt.Errorf("authority lookup failed under lock: %w", roleErr)
-		}
-		if actorRole == "" {
-			return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+		// R4 O-1: re-evaluate actor authority under lock — skipped when
+		// system-authorized (caller already holds system-level permission).
+		if !req.SystemAuthorized {
+			actorRole, roleErr := svc.projectEffectiveRoleFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+			if roleErr != nil {
+				return fmt.Errorf("authority lookup failed under lock: %w", roleErr)
+			}
+			if actorRole == "" {
+				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+			}
+
+			// Re-validate governance under lock.
+			if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
+				return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
+			}
+			if requiresDirectOwner(roleDef.Name) {
+				actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
+				if ownerErr != nil {
+					return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
+				}
+				if !actorIsDirectOwner {
+					return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
+				}
+			}
 		}
 
 		// Re-fetch the target binding under lock.
@@ -907,20 +933,6 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		roleDef, err = tx.GetRoleDefinition(ctx, binding.RoleDefinitionID)
 		if err != nil {
 			return fmt.Errorf("resolve role under lock: %w", err)
-		}
-
-		// Re-validate governance under lock.
-		if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
-			return fmt.Errorf("governance:%d:%s", 403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
-		}
-		if requiresDirectOwner(roleDef.Name) {
-			actorIsDirectOwner, ownerErr := svc.isActorDirectOwnerFromStore(ctx, tx, req.Actor.ID(), req.ProjectID)
-			if ownerErr != nil {
-				return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
-			}
-			if !actorIsDirectOwner {
-				return fmt.Errorf("governance:%d:%s", 403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
-			}
 		}
 
 		// Last-owner guard (inside tx for serialization).

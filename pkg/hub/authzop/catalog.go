@@ -2382,7 +2382,7 @@ var EntryPointExemptions = []EntryPointExemption{
 
 	// Workstation endpoints — workstation token authentication
 	{Pattern: "/api/v1/system/identity", Kind: ExemptionInternalOnly, Reason: "Workstation system endpoint, workstation-token auth", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/system/status", Kind: ExemptionInternalOnly, Reason: "Workstation system endpoint, workstation-token auth", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/system/status", Kind: ExemptionAuthenticationOnly, Reason: "System status: authenticated in all modes, minimal response in non-workstation mode", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/system/check", Kind: ExemptionInternalOnly, Reason: "Workstation system endpoint, workstation-token auth", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/system/runtime", Kind: ExemptionInternalOnly, Reason: "Workstation system endpoint, workstation-token auth", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/system/init", Kind: ExemptionInternalOnly, Reason: "Workstation system endpoint, workstation-token auth", Owner: "route_metadata.go"},

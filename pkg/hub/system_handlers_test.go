@@ -80,11 +80,29 @@ func doWorkstationRequest(t *testing.T, srv *Server, method, path string, body i
 // requireWorkstation middleware
 // ============================================================================
 
-func TestRequireWorkstation_Disabled(t *testing.T) {
+func TestSystemStatus_NonWorkstation(t *testing.T) {
 	srv, _ := testServer(t)
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/system/status", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404 when workstation disabled, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for non-workstation system status, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var status OnboardingStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if !status.Complete {
+		t.Errorf("expected Complete=true in non-workstation mode")
+	}
+	if status.Workstation {
+		t.Errorf("expected Workstation=false in non-workstation mode")
+	}
+}
+
+func TestSystemStatus_NonWorkstation_Unauthenticated(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/system/status", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 when unauthenticated, got %d", rec.Code)
 	}
 }
 

@@ -663,11 +663,18 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 				"membership service unavailable — project-scope mutations require governance", nil)
 			return
 		}
+		// When called from the admin API (/api/v1/admin/role-bindings/:id),
+		// the caller has already been authorized with role_binding.delete at
+		// the system level. Set SystemAuthorized so the membership service
+		// skips project-level governance but still enforces structural
+		// invariants (last-owner guard).
+		systemAuth := r.URL.Path != "" && strings.HasPrefix(r.URL.Path, "/api/v1/admin/")
 		mReq := MembershipRequest{
-			Op:        MembershipOpRemove,
-			ProjectID: binding.ScopeID,
-			Actor:     user,
-			BindingID: id,
+			Op:               MembershipOpRemove,
+			ProjectID:        binding.ScopeID,
+			Actor:            user,
+			BindingID:        id,
+			SystemAuthorized: systemAuth,
 		}
 		_, denial := s.membershipService.RemoveMember(ctx, mReq)
 		if denial != nil && !denial.Allowed {

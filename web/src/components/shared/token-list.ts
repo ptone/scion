@@ -305,7 +305,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
   {
     value: 'project:manage',
     label: 'project:manage',
-    description: 'Manage project administration (RS1 membership operations)',
+    description: 'Manage project administration, membership, and security settings',
     resource: 'project',
     isAlias: false,
   },

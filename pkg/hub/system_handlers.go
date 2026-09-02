@@ -423,6 +423,17 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Non-workstation (hosted) mode: return a minimal status indicating the
+	// system is ready and onboarding is not applicable. No loopback check is
+	// required — the route guard already enforces authentication.
+	if !s.workstation {
+		writeJSON(w, http.StatusOK, OnboardingStatus{
+			Complete:    true,
+			Workstation: false,
+		})
+		return
+	}
+
 	if err := assertLoopback(r); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
 		return
