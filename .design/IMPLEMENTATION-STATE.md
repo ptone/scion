@@ -32988,3 +32988,23 @@ The investigator explained 11,596 as "three more than the 11,593 errors — thre
 There is a pleasing symmetry in how this arrived. DEF-114, DEF-119 and DEF-120 were three separate faults in a single counter — it could not observe its population, its map never reached the operator, and the line printed under its name held a different variable. The first number it ever emitted, once all three were repaired, reconciled to the unit against an independently-derived population. That is the payoff for fixing the instrument before trusting the reading, and it is the argument for having refused to reason about the 4 back when the 4 was all we had.
 
 **Rule 975** — a counter that does not reconcile is explained by reading its increment sites, not by subtracting it from the nearest similar number. The subtraction always yields a difference, and a difference always suggests a population; both can be entirely fictional while looking like analysis.
+
+---
+
+### §5mc — The DEF-118 gate catches its first real drift, from another project (2026-09-02)
+
+A broadcast from a reviewer on `policy-refactor` (branch `scion/aux-authz-backend`) is not my work and I did not comment on its findings. But it touches `pkg/store/concurrency.go`, which is mine and in flight, so I checked the overlap — conflict risk on `tranche-g` is something I own even when the change isn't.
+
+No advisory-lock collision: they took `LockRecoveryAuthz = 0x5C100020`, I took `LockDataMigrations = 0x5C100014`. Worth checking rather than assuming, because a colliding lock value is legal Go and presents as *"the background job sometimes doesn't run"*.
+
+**The interesting part is the second-order effect.** Their branch adds a key to `concurrency.go` and never mentions it in `concurrency_test.go`. Under the old test that is invisible — `expectedTotal = 22` compared against a list in the same file, both operands literals, which is precisely why DEF-118 called it theatre. Under the post-DEF-118 test, which reads the source from its own package directory, it fails. I applied their constant to my merged tip and got it:
+
+```
+concurrency_test.go:180: concurrency.go declares LockRecoveryAuthz but this test does not include it — add it to the 'all' slice
+```
+
+So the gate's first catch is a real one, from a team that has never heard of it, on a drift the previous version could not have detected. That is the whole argument for DEF-118 arriving unprompted, and I would not have believed it as cheaply from a synthetic mutation.
+
+I could not deliver the heads-up: `agent_not_found`, 404 — the reviewer is in another project and the broadcast crossed a boundary replies do not. Recorded here instead. Whoever hits it at merge should add the key, not delete the assertion. The mitigating factor is that the failure text names the fix in the failure itself, which lowers the odds of someone resolving it by weakening the gate. That was deliberate when it was written and it is now load-bearing.
+
+**Rule 976** — read the error before explaining the failure. `scion message` printed usage text and I diagnosed the length cap from the shape of the output, trimmed a message from 2068 to 1725 characters, and re-sent it into the same 404. The cap was real, the trim was wasted, and the actual cause was in a line I had filtered out of my own tool call. Same fault as Rule 975 one day earlier: a plausible explanation, arrived at by pattern-matching, that survives because it is never checked against the source. Grep for `Error:`, not for the symptom.
