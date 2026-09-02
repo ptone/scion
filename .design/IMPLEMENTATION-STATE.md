@@ -33207,3 +33207,21 @@ Before demanding the test I verified it both ways myself: it passes against thei
 **Rule 987** — when a mutation produces the convenient answer, distrust it exactly as hard as when it produces the inconvenient one. I check surprising results by habit; the failure mode here is that a result confirming my own prediction gets waved through, and this one would have.
 
 **Rule 988** — verify a demanded gate both ways before demanding it: green on correct code, red on the defect. A reviewer who specifies an unachievable test burns an agent's cycle and their trust in the review.
+
+### §5mn — M6 merged; `tranche-g` = `d10ba2ace`; M7 required and dispatched with M8 (2026-09-02)
+
+The rework added `TestResidualReport_SteadyStateReachableWarn` — seed an unattributable message in a listed project, boot twice, assert the WARN still fires on the second boot.
+
+**Their mutation was weaker than the defect.** They zeroed `reachable` on *every* boot, which `ReachableWarnFires` also catches, so it did not establish that the new test is load-bearing. I re-ran my surgical version — reachable zeroed only when no project was processed on that boot — and the new test was the **only** thing that went red. That is the result worth having: not "a mutation was caught" but "this specific test, and nothing else, catches this specific defect." A mutation coarse enough to be caught by three tests tells you nothing about any of them.
+
+The `DEPENDENCY:` note landed on the interface in `store.go`, where an implementer will meet it, rather than only on the implementation. Baselines in both tag configurations are exactly the known-environmental set. No switch, no build-tag changes. Merged; `ca-mig-6` retired.
+
+**M7 is promoted to required**, as the §4.6 correction anticipated. Dispatched alongside M8 — disjoint files, so they run in parallel with an explicit stay-out-of instruction each way.
+
+**M7's real deliverable is not a refactor, it is converting a comment into a gate.** The reachable/unreachable split is correct *only* because `ListProjects` with an empty filter applies no unconditional predicate. That invariant is currently held by prose. An unconditional filter added to `ListProjects` later — excluding archived projects from listings is an entirely reasonable thing for someone to want — would make messages in those projects unreachable in fact while still counted as reachable, firing the WARN forever with a number no action can reduce. That is the exact bug M6 existed to remove, reintroduced from a different file, with every test green.
+
+So the acceptance criterion I gave M7 is behavioural rather than structural: **adding an unconditional filter to `ListProjects` must turn something red**, demonstrated as a mutation. I suggested a consistency test — reachable-by-subtraction equals the sum over the projects `ListProjects` actually returns — over extracting a shared predicate, because the counter is one SQL anti-join and the backfill is a paginated Go loop, and forcing them to share a literal expression would likely make one of them worse. Constraining the observable relationship survives either side being rewritten; constraining the implementation does not.
+
+**Rule 989** — a load-bearing invariant that spans two files is protected by whichever of them is edited *second*, and prose in the first file does not travel to that edit. If breaking it requires touching only the file without the comment, the comment is decorative.
+
+**Rule 990** — when reviewing a mutation someone else ran, check its blast radius, not just that it was caught. If several tests catch it, it is too coarse to certify any one of them; demand the narrowest mutation that isolates the defect to a single gate.
