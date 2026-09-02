@@ -33168,3 +33168,20 @@ I sent this as the lead constraint but told the agent to confirm or refute it fr
 **Rule 982** — a design's stated preferences have dependencies on the state of the system when they were written, and a later phase can invalidate one without touching a word of it. Superseding an *invariant* announces itself (Rule 974); superseding a *preference* does not, because the prose still reads as sound. Re-derive the recommendation against current code before briefing the phase that implements it, not just the invariant it rests on.
 
 **Rule 983** — when resumption is added to a pass, every number derived from the work that pass performs becomes unavailable on the runs that skip it. Ask what each such number reads on a no-op boot.
+
+### §5ml — the send-verification grep had a false-negative arm (2026-09-02)
+
+`scion message` uses **different success strings depending on recipient type**:
+
+- to an agent: `Message delivered to agent 'X'.`
+- to a user:   `Message sent to user:X via Hub.`
+
+My standing verification was `grep -iE "Error:|delivered"`, which was derived from agent sends and does not match user sends. A successful boundary report to ptone therefore produced empty output and read as a failure. I resolved it by sending a throwaway probe to learn the real format — which put a junk line in ptone's thread. Cheap, but avoidable, and the wrong instinct if the ambiguous message had been one I could not safely duplicate.
+
+**Corrected pattern: `grep -iE "Error:|delivered|sent"`.**
+
+The Rule 976 failure this repeats is not "I misread an error" but its inverse: **the filter I built to make errors visible was itself capable of hiding a success.** I hardened the send path against one failure mode (silent truncation, inferred wrongly from help text) and in doing so introduced a second one pointing the other way. A verification step that can produce a false negative will eventually be acted on as though it were true, and the action it invites — resend — is exactly the action that is unsafe when the first send actually worked.
+
+**Rule 984** — a verifier derived from one case must be checked against every case it will be applied to. Success strings vary by recipient, subcommand, and transport; a grep tuned on one of them silently reports failure on the others. Prefer matching the *error* condition and treating its absence as success, or enumerate every success string, but never let a narrow positive pattern stand in for "it worked".
+
+**Rule 985** — when a verification is ambiguous, learn the output format with a probe that costs nothing, not by repeating the action whose effect you are unsure of. Repeating is the intuitive move and it is the one that double-sends.
