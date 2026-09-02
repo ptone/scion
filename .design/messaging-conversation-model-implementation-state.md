@@ -32027,3 +32027,53 @@ degraded one. Re-derive reachability at the commit you are reviewing, not from m
 
 DEF-92 closed: syntactic malformation and type-incompatible documents are both now detected at
 ingest and logged once per refresh with the section, revision and error.
+
+---
+
+## §5lk — Phase 9a verified live on gteam
+
+`45c440bd` deployed to scion-gteam. Healthy at 6m27s, 5 brokers / 27 agents / 39 projects, zero
+ERROR lines. Chat delivery confirmed end-to-end (two messages, 201 + read-back, dispatched).
+DB snapshot retained at `/home/scion/hub.db.pre-45c440bd`, previous binary at
+`scion.known-good-85f25c1a`.
+
+**The residual risk from the generalised ingest type-check did not materialise.** Zero
+occurrences of `type-incompatible fields` or `malformed JSON in section document` across all 22
+settings sections. Every existing document round-trips against its Go struct.
+
+**The cutover is confirmed on the path that matters.** `GET /api/v1/admin/messaging` returns
+`{"conversation_envelope_switch":true}` while the stored messaging row still carries only
+`conversation_read_switch` and `conversation_write_deny_switch`, and the row count is unchanged
+at 22. So the switch is ON because the new key is absent from a row that **exists** — the
+stale-keys-present shape, which per the OQ-2a finding is what every hub that ever called the
+admin endpoint will have. No migration ran, no row was written, no third switch exists. That is
+the single-cutover requirement satisfied end-to-end on a real hub.
+
+**The first report of this had check 2 citing the wrong endpoint** —
+`/api/v1/admin/messaging/divergence`, which is `handleAdminMessagingDivergence` and returns
+`divergenceBoardResponse` (hub_id, uptime, matches, mismatches, comparisons, fallbacks,
+caveats). It has no `conversation_envelope_switch` field and could not have produced the quoted
+body. The path had been retyped from memory. The same report annotated check 2 as "absent from
+DB", contradicting its own check 4 showing the row present — the outcome was right, the
+mechanism described was not. Re-run with raw `curl -i` output confirmed the result; the
+`Content-Length: 38` is consistent with the 37-byte body plus the encoder's newline.
+
+**Rule 934: a retyped command is the one line in a report that nothing else cross-checks. Every
+other claim can be tested against the system; the command is the only assertion about what was
+asked. Require the literal invocation, not a reconstruction.**
+
+**Rule 935: when a report's annotation contradicts another check inside the same report, treat
+the whole report as reasoned rather than read. Internal inconsistency is cheaper to spot than
+external falsity and predicts it well.**
+
+**The pattern across the whole of Phase 9a is worth naming.** The branch was not where it was
+reported; the counts were wrong twice; the reviewer's clean verdict rested on a premise that had
+been true until two days earlier; a green test run was not running the tests; a passing deploy
+check cited an endpoint that cannot produce it. In every case the *conclusion* was right or
+nearly right and the *supporting claim* was wrong.
+
+**Rule 936: correct conclusions with false support are the dominant failure mode of delegated
+work, and they are near-invisible because review reads the conclusion. The conclusion is what
+the reporter checked; the support is what they reconstructed. Audit the support.**
+
+Phase 9a is complete: designed, implemented, reviewed, corrected, merged, deployed, verified.
