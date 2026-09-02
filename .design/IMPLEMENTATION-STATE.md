@@ -33008,3 +33008,25 @@ So the gate's first catch is a real one, from a team that has never heard of it,
 I could not deliver the heads-up: `agent_not_found`, 404 — the reviewer is in another project and the broadcast crossed a boundary replies do not. Recorded here instead. Whoever hits it at merge should add the key, not delete the assertion. The mitigating factor is that the failure text names the fix in the failure itself, which lowers the odds of someone resolving it by weakening the gate. That was deliberate when it was written and it is now load-bearing.
 
 **Rule 976** — read the error before explaining the failure. `scion message` printed usage text and I diagnosed the length cap from the shape of the output, trimmed a message from 2068 to 1725 characters, and re-sent it into the same 404. The cap was real, the trim was wasted, and the actual cause was in a line I had filtered out of my own tool call. Same fault as Rule 975 one day earlier: a plausible explanation, arrived at by pattern-matching, that survives because it is never checked against the source. Grep for `Error:`, not for the symptom.
+
+---
+
+### §5md — The most important test in the set was the one that could not fail (2026-09-02)
+
+M4 arrived at `8f3836a22`: `runBootDataMigrations` under the advisory lock, the `:1218` call site replaced, twelve tests. Provenance clean, numstat matches my own, no operator switch added, and the only build-tag line is a required `!no_sqlite` on a new sqlite-dependent test file. The M-1′ implementation itself is correct — the decision point is exactly right, and the agent reported no ambiguity in the corrected design doc, which is the payoff for §5ma.
+
+I mutation-tested the gates instead of reading them. Three held:
+
+- Reintroduce superseded M-1 — make row refusals block the marker — and `RowRefusal_MarkerWritten` fails. The livelock guard is real.
+- Delete the warning call and `WarningStillFires` fails.
+- Make kind resolution best-effort, defaulting unresolvable principals to `user` instead of refusing, and `FailClosed` fails. That is the security-critical one and it works.
+
+**The fourth did not hold, and it is the one AC-2 calls the most important in the set.** `TestBootDMKeyMigration_RunLevelFailure_NoMarker` induces the run-level failure by cancelling a context — and then passes that same cancelled context through the entire function, so it reaches `MarkMigrationComplete` as well. I deleted the `return` that implements the guard, so a marker is written for a pass that did not finish, and **the test still passed**. The marker was absent because the write was impossible, not because the code declined to make it. I then re-ran the identical mutation with `context.Background()` on the marker write alone and it failed immediately. The cancelled context was the only thing keeping it green.
+
+So the test asserts the correct property and cannot observe it. It passes whether or not the guard exists, which makes it worth exactly nothing as a gate — and worse than nothing as documentation, because it tells the next reader this case is covered.
+
+What makes this the sharpest instance yet of the tranche's recurring pattern is *where* it landed. I wrote the acceptance criterion. I flagged M-1′ as the crux in the brief, in bold, with the livelock explained. The agent implemented M-1′ correctly and wrote a test for each half. Every step was done attentively, and the negative half still came out hollow — because the cheapest way to make a pass fail was a cancelled context, and a cancelled context also disables the observation. **The fault is not inattention; it is that the mechanism used to induce the failure was the same mechanism needed to detect it.**
+
+Positive halves are easy to test and negative halves are not, because asserting an absence requires proving the absence has a cause. Absence is the default state of most things.
+
+**Rule 977** — when a test asserts that something did *not* happen, the induced failure must not be capable of preventing it independently. Verify by removing the guard: if the test still passes, it is measuring the inducement, not the code. Every "assert X was not written" test needs this check, and I now owe it to AC-2-style criteria generally rather than case by case.
