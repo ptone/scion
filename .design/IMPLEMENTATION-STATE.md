@@ -33996,3 +33996,77 @@ Two of the three DEF-127 sites are agent-message endpoints. If the one `agent-me
 I have asked for that as a yes/no with the endpoint named, explicitly instructing against stretching to connect them, because I have already made two unchecked inferences today and this one would sit under an escalation. Escalated to ptone as established-plus-pending rather than waiting for the linkage, since the fail-open half is confirmed and the instance carries production data.
 
 **Rule 1038** — when a fallback exists, the security question is never "is the fallback authorized" but "is it authorized *identically*". A fallback with its own correct-looking authorization that is merely narrower in a different dimension is the most dangerous shape, because every individual check passes review.
+
+### DEF-128: the composite confirmed
+
+ca-msg-blank returned a twelve-step chain, every link named. Condensed:
+
+Agent detail page → `GET /api/v1/agents/{id}/messages?limit=200` with **no `channel` and no `thread_id`** → `handleAgentMessages` (`handlers_messages.go:200`) → `channel == ""` takes the branch at `:321`, which is **S3b** → `ResolveDMConversationForRead` returns nil for a never-used DM → **409** at `:331-334` → `fetchMessages` sees `!hubRes.ok`, skips the block, falls through at `:428` to the Cloud Logging fallback → `handleAgentMessageLogs`, agent-scoped, **no participant filter** → the viewer sees every user's messages with that agent, no error rendered.
+
+The participant filter at `handlers_messages.go:258-260` is never reached: the 409 short-circuits before `ListMessages`.
+
+**The trigger is opening an agent page for the first time.** Not an exotic failure — the most ordinary interaction there is.
+
+Recommended order, escalated to ptone:
+
+1. **Stop the fallback firing on 4xx.** A 409 or 403 is the hub *answering*, not failing. Reserve fallback for network errors and 5xx.
+2. **Scope the Cloud Logging query by participant** for non-manage users, matching the hub-store path. Closes DEF-128 on its own merits; it predates the refactor and is reachable by other means.
+3. **Then DEF-127**, which removes the trigger.
+
+The ordering is the point. 1 and 2 are each individually sufficient; doing 3 first would remove the *symptom* and leave a fail-open privacy filter in place, un-triggered and unfixed. **Fixing the trigger before the hole is how a finding gets closed without being resolved.**
+
+---
+
+## §5ni — DEF-129: direct messages filed under group conversations
+
+The most serious thing found today, and it was found by pulling on the MISMATCH warning that I had wrongly dismissed as expected shadow-mode noise.
+
+### How it was nearly missed
+
+I hypothesised the `conversation consistency check: MISMATCH` warnings were the pre/post-refactor shadow comparison announcing an intended improvement. instance-investigator checked the source and found **two independent checks** in `pkg/messaging/divergence.go`:
+
+- **(A) `LogDivergence`** (`:199-222`), "conversation routing check" — this *is* the shadow comparison. At 19:07:26 it logged **match**, reason `dm-routing-agreement`. 24-hour totals: 17 match, **0 divergence, 0 fallback**.
+- **(B) `CheckConversationConsistency`** (`:336-437`), "conversation consistency check" — **not** a shadow comparison. It queries *actual stored prior messages* for the same sender/recipient pair and compares their stored `conversation_id` against the freshly resolved one.
+
+So `prior_conv_id` is not "where the old logic would have put it". It is **where a stored message actually lives**. My hypothesis was wrong, and it was wrong in the direction that would have closed the investigation. Had the two checks not been separated, 16 warnings a day would have been filed as expected transition noise.
+
+**Rule 1039** — before dismissing a warning as expected noise, confirm which check emits it. Two checks with similar names and similar fields can mean opposite things, and the "expected noise" reading is the one that ends investigations.
+
+### Scope, from ids and counts only
+
+| Conversation | Shape | Messages | All DM pairs? |
+|---|---|---|---|
+| `6ef436bd` "general" | `kind=group`, empty `external_ref`, 0 participants | 3 | yes |
+| `dbd35ed2` "new-thread" | same shape | 5 | yes |
+
+**8 misfiled messages, zero genuine group traffic in either row.** One project (`a3083e98`), two agents (`c9c1123b`, `7ad8aadc`), both `preston` accounts. Range 2026-09-01 13:44 → 2026-09-02 18:59 — the last one **eight minutes before** ptone's `user:preston` test. **Live, not historical.**
+
+**40 conversations share the shape.** 38 are empty `general` shells, one per project, batch-created 2026-08-31 09:05:42 — a seed operation. They hold no messages today. They are precisely the containers a misfiled DM would land in, one per project.
+
+DEF-126 also recurs in this data: the second agent likewise sends to the gmail account while ptone operates as google.com. **Not a one-off.**
+
+### Why it is a design problem, not a data-repair problem
+
+ca-msg-blank, from source:
+
+- The read filter is `Channel:"web"` + `ConversationID` and **nothing else** (`handlers_chat_v2.go:1900-1908` → `message_store.go:339-344`). No participant, sender or recipient constraint, on either side of the read switch.
+- A group conversation authorizes by **project membership** — `GetTopic` → `GetProject` → `authorize(projectResource, ActionRead)` (`:1833-1856`).
+- **Nothing re-derives or cross-checks a message's own sender/recipient against the conversation it claims to belong to.** `ValidateAttributed` (`validate.go:84`) is a non-empty check, not a cross-check, and runs only on the **write** path (`:1203`).
+
+So `conversation_id` is **authoritative and unverified**. The consequence generalises well beyond these 8 rows:
+
+> Any bug that writes a wrong `conversation_id` — past, present or future — is a disclosure.
+
+This is the same principle the DM key work established, arriving from the other direction. There, the key *is* the ACL, so a wrong key is worse than no key. Here, `conversation_id` is the ACL for group reads, and nothing validates that a message belongs to the conversation it names. We hardened derivation on the DM path and left the attribution path trusting whatever was written.
+
+**Rule 1040** — if a field determines who may read a row, then writing that field is an authorization decision, and reading it back without verification is trusting the writer. Either the reader re-checks, or every writer is part of the security boundary.
+
+### The gate I have not yet cleared
+
+Before reporting this as *presently readable* rather than *would be readable*: the read path reaches a conversation through `wcs.GetTopic(ctx, key)`. Both rows have an **empty `external_ref`**. If no webchat topic maps to those conversation ids, they may be unreachable through the UI and the 8 messages misfiled but not exposed. Asked of instance-investigator as topic-key metadata; explicitly **not** by opening the UI to see what renders.
+
+All 8 messages are ptone's own traffic between his own two accounts, so the realised exposure on gteam is bounded regardless. **The mechanism is not bounded** — 38 seeded shells, one per project.
+
+### Dispatched
+
+`ca-msg-misfile`, single question: **what write path attributes a direct message to a group conversation?** Hypothesis offered explicitly to be falsified — a resolution failure falling back to a project-default conversation, which would be a fallback of exactly the kind G3 was meant to have removed. Note that shadow-check (A) reports **0 fallbacks** in 24h, which is evidence against that hypothesis and which I have deliberately not shown them, to avoid steering the answer (Rule 1035).
