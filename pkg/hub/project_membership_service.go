@@ -438,6 +438,11 @@ func isProtectedRole(role string) bool {
 //   - project-owner: direct user only (permanent invariant)
 //   - project-admin: direct user or group (D3 approved)
 //   - project-member: user, agent, or group
+//
+// R-7: Custom (non-built-in) project-scoped roles are checked against
+// the D6 builtInApplicabilityMap. If the role is not in the map, all
+// principal types are allowed (fail-open for extensibility, consistent
+// with the D6 applicability approach for custom roles).
 func principalEligibleForRole(principalType, roleName string) bool {
 	switch roleName {
 	case store.ProjectRoleOwner:
@@ -451,7 +456,18 @@ func principalEligibleForRole(principalType, roleName string) bool {
 			principalType == store.RoleBindingPrincipalAgent ||
 			principalType == store.RoleBindingPrincipalGroup
 	default:
-		return false
+		// Custom roles: check D6 applicability map. If the role has an
+		// explicit applicability list, enforce it. Otherwise allow all
+		// principal types (fail-open for custom extensibility).
+		if applicableTo, ok := builtInApplicabilityMap[roleName]; ok {
+			for _, pt := range applicableTo {
+				if pt == principalType {
+					return true
+				}
+			}
+			return false
+		}
+		return true
 	}
 }
 

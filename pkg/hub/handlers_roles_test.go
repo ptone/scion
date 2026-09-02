@@ -1426,12 +1426,115 @@ func TestRolesAPI_ListRoleBindings_FilterByScopeType(t *testing.T) {
 	}
 }
 
+func TestRolesAPI_ListRoleBindings_InvalidUUID_Returns400(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?roleDefinitionId=not-a-uuid", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "invalid roleDefinitionId")
+}
+
 func TestRolesAPI_ListRoleBindings_UnknownFilterParam_Returns400(t *testing.T) {
 	srv, _ := testServer(t)
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?bogusParam=foo", nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "unknown query parameter")
+}
+
+func TestRolesAPI_ListRoleBindings_IncludeGroupDerived_Accepted(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// R-3: includeGroupDerived is a known param — must not return 400.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?includeGroupDerived=true", nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "includeGroupDerived should be accepted")
+}
+
+// TestRolesAPI_ListRoleBindings_IncludeGroupDerived_ExpandsGroups verifies
+// that includeGroupDerived=true truthfully expands group-derived bindings
+// when filtering for a specific user principal. The response should include
+// the group's direct bindings with source = group slug.
+func TestRolesAPI_ListRoleBindings_IncludeGroupDerived_ExpandsGroups(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := t.Context()
+
+	// Create a user and a group, then add the user as a group member.
+	userID := tid("igd-user")
+	groupID := tid("igd-group")
+	seedRolesTestUser(t, s, userID, "igd-user@test.local")
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "igd-test-group", Name: "IGD Test Group",
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    groupID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   userID,
+		Role:       "member",
+	}))
+
+	// Create a role and assign it directly to the group.
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "igd-group-role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    "group",
+		PrincipalID:      groupID,
+		ScopeType:        "system",
+	})
+
+	// Also create a direct binding for the user.
+	directRole := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "igd-direct-role",
+		ScopeType:   "system",
+		Permissions: []string{"project.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: directRole.ID,
+		PrincipalType:    "user",
+		PrincipalID:      userID,
+		ScopeType:        "system",
+	})
+
+	// Query with includeGroupDerived=true for the specific user.
+	rec := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?principalType=user&principalId="+userID+"&includeGroupDerived=true", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// Should include the direct user binding + the group-derived binding.
+	var foundDirect, foundGroupDerived bool
+	for _, item := range resp.Items {
+		if item.RoleDefinitionID == directRole.ID && item.PrincipalType == "user" {
+			foundDirect = true
+			assert.Empty(t, item.Source, "direct bindings should have empty source")
+		}
+		if item.RoleDefinitionID == role.ID && item.PrincipalType == "group" {
+			foundGroupDerived = true
+			assert.Equal(t, "igd-test-group", item.Source,
+				"group-derived binding should have source = group slug")
+		}
+	}
+	assert.True(t, foundDirect, "direct user binding should be in response")
+	assert.True(t, foundGroupDerived, "group-derived binding should be included when includeGroupDerived=true")
+
+	// Without includeGroupDerived, the group binding should NOT appear.
+	rec2 := doRequest(t, srv, http.MethodGet,
+		"/api/v1/admin/role-bindings?principalType=user&principalId="+userID, nil)
+	require.Equal(t, http.StatusOK, rec2.Code)
+
+	var resp2 listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&resp2))
+
+	for _, item := range resp2.Items {
+		if item.RoleDefinitionID == role.ID && item.PrincipalType == "group" {
+			t.Fatal("group-derived binding should NOT appear without includeGroupDerived=true")
+		}
+	}
 }
 
 func TestRolesAPI_ListRoleBindings_PrincipalIdWithoutType_Returns400(t *testing.T) {
@@ -1482,7 +1585,7 @@ func TestRolesAPI_ListRoleBindings_RoleNameEnrichment(t *testing.T) {
 		"response should include human-readable roleName")
 }
 
-func TestRolesAPI_ListRoleBindings_SourceFieldDirect(t *testing.T) {
+func TestRolesAPI_ListRoleBindings_SourceFieldOmitted(t *testing.T) {
 	srv, s := testServer(t)
 
 	userID := tid("source-direct-user")
@@ -1501,8 +1604,10 @@ func TestRolesAPI_ListRoleBindings_SourceFieldDirect(t *testing.T) {
 	var resp listRoleBindingsResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.Len(t, resp.Items, 1)
-	assert.Equal(t, "direct", resp.Items[0].Source,
-		"directly created bindings should have source='direct'")
+	// R-4: source is omitted until group-derived provenance is implemented.
+	// The frontend defaults to "unknown" for empty values.
+	assert.Empty(t, resp.Items[0].Source,
+		"source should be empty until provenance is implemented")
 }
 
 func TestRolesAPI_ListRoleBindings_TotalCountReflectsFilter(t *testing.T) {
@@ -1564,8 +1669,47 @@ func TestRolesAPI_ListBindingsForUser_IncludesRoleName(t *testing.T) {
 		if item.RoleDefinitionID == role.ID {
 			found = true
 			assert.Equal(t, "user-bindings-rn-role", item.RoleName)
-			assert.Equal(t, "direct", item.Source)
+			assert.Empty(t, item.Source, "source should be empty until provenance is implemented")
 		}
 	}
 	assert.True(t, found, "binding with our role should be in user bindings")
+}
+
+// TestEnrichRoleDefinitionsApplicability_NeverNil verifies invariant O-2:
+// enrichRoleDefinitionsApplicability always sets ApplicableTo to a non-nil,
+// non-empty slice — preventing nil ambiguity that would cause frontends to
+// fail-closed on missing values.
+func TestEnrichRoleDefinitionsApplicability_NeverNil(t *testing.T) {
+	// All built-in roles must have explicit ApplicableTo after enrichment.
+	builtInRoles := BuiltInRoles()
+	defs := make([]*store.RoleDefinition, len(builtInRoles))
+	for i, br := range builtInRoles {
+		defs[i] = &store.RoleDefinition{
+			Name:      br.Name,
+			ScopeType: br.ScopeType,
+			// ApplicableTo is nil (as read from DB — not persisted in Ent schema).
+		}
+	}
+	enrichRoleDefinitionsApplicability(defs)
+	for _, def := range defs {
+		assert.NotNil(t, def.ApplicableTo,
+			"built-in role %q must have non-nil ApplicableTo after enrichment", def.Name)
+		assert.NotEmpty(t, def.ApplicableTo,
+			"built-in role %q must have non-empty ApplicableTo after enrichment", def.Name)
+	}
+
+	// Custom roles (unknown names) must also get non-nil ApplicableTo.
+	customDefs := []*store.RoleDefinition{
+		{Name: "custom-role-1", ScopeType: "project"},
+		{Name: "custom-role-2", ScopeType: "system"},
+	}
+	enrichRoleDefinitionsApplicability(customDefs)
+	for _, def := range customDefs {
+		assert.NotNil(t, def.ApplicableTo,
+			"custom role %q must have non-nil ApplicableTo after enrichment", def.Name)
+		assert.NotEmpty(t, def.ApplicableTo,
+			"custom role %q must have non-empty ApplicableTo after enrichment", def.Name)
+		assert.Equal(t, allPrincipalTypes, def.ApplicableTo,
+			"custom role %q should get allPrincipalTypes", def.Name)
+	}
 }

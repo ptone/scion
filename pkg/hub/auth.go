@@ -322,7 +322,16 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						// before admitting legacy proxy identities.
 						if cfg.UserStore != nil {
 							u, uErr := cfg.UserStore.GetUser(ctx, user.ID())
-							if uErr == nil && u.Status == store.UserStatusSuspended {
+							if uErr != nil {
+								if !errors.Is(uErr, store.ErrNotFound) {
+									log.Error("Legacy proxy auth: store error during suspension check",
+										"user_id", user.ID(), "error", uErr)
+									writeError(w, http.StatusServiceUnavailable, "store_error",
+										"unable to verify user status", nil)
+									return
+								}
+								// ErrNotFound: user doesn't exist in store — fall through
+							} else if u.Status == store.UserStatusSuspended {
 								log.Warn("Legacy proxy auth rejected: user is suspended",
 									"user_id", user.ID(), "email", user.Email())
 								writeError(w, http.StatusForbidden, "user_suspended",

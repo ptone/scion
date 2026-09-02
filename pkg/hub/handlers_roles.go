@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -70,7 +73,7 @@ type RoleBindingInfo struct {
 	PrincipalDisplayName string `json:"principalDisplayName,omitempty"`
 	ScopeDisplayName     string `json:"scopeDisplayName,omitempty"`
 	CreatedByDisplayName string `json:"createdByDisplayName,omitempty"`
-	Source               string `json:"source"` // "direct" or group slug for group-derived bindings
+	Source               string `json:"source,omitempty"` // "direct" or group slug for group-derived bindings; empty until provenance is implemented
 }
 
 // listRoleBindingsResponse wraps the list result for the API.
@@ -461,13 +464,14 @@ func (s *Server) deleteRoleDefinition(w http.ResponseWriter, r *http.Request, id
 // role-binding filtering. Any query parameter not in this set and not a
 // pagination param triggers a fail-closed 400 response.
 var knownBindingFilterParams = map[string]bool{
-	"roleDefinitionId": true,
-	"principalType":    true,
-	"principalId":      true,
-	"scopeType":        true,
-	"scopeId":          true,
-	"limit":            true,
-	"offset":           true,
+	"roleDefinitionId":    true,
+	"principalType":       true,
+	"principalId":         true,
+	"scopeType":           true,
+	"scopeId":             true,
+	"includeGroupDerived": true, // R-3: accepted for frontend contract; expansion below
+	"limit":               true,
+	"offset":              true,
 }
 
 func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
@@ -493,6 +497,14 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 		ScopeID:          r.URL.Query().Get("scopeId"),
 	}
 
+	// R-2: Validate roleDefinitionId as a valid UUID — never silently drop predicate.
+	if filter.RoleDefinitionID != "" {
+		if _, err := uuid.Parse(filter.RoleDefinitionID); err != nil {
+			BadRequest(w, fmt.Sprintf("invalid roleDefinitionId: not a valid UUID"))
+			return
+		}
+	}
+
 	// Validate filter combinations.
 	if filter.PrincipalID != "" && filter.PrincipalType == "" {
 		BadRequest(w, "principalType is required when principalId is specified")
@@ -502,6 +514,9 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "scopeType is required when scopeId is specified")
 		return
 	}
+	// Note: scopeType without scopeId is intentionally permitted. For example,
+	// scopeType=project without scopeId returns all project-scoped bindings
+	// hub-wide — valid for admin audit/overview purposes.
 	if filter.PrincipalType != "" {
 		if filter.PrincipalType != store.RoleBindingPrincipalUser &&
 			filter.PrincipalType != store.RoleBindingPrincipalAgent &&
@@ -532,30 +547,34 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build a role-name cache to avoid N+1 lookups.
-	roleNameCache := make(map[string]string)
-	for _, b := range bindings {
-		if b != nil && b.RoleDefinitionID != "" {
-			roleNameCache[b.RoleDefinitionID] = "" // placeholder
-		}
-	}
-	for rdID := range roleNameCache {
-		rd, err := s.store.GetRoleDefinition(ctx, rdID)
-		if err == nil && rd != nil {
-			roleNameCache[rdID] = rd.Name
-		}
+	// includeGroupDerived: when filtering for a specific user principal and
+	// the flag is truthy, expand group-derived bindings — i.e., bindings
+	// assigned to groups the user belongs to. These synthetic entries carry
+	// source = group slug/name so the frontend can display provenance.
+	includeGroupDerived := r.URL.Query().Get("includeGroupDerived") == "true"
+	var groupDerivedBindings []*store.RoleBinding
+	groupSourceMap := map[string]string{} // binding ID → group slug/name
+	if includeGroupDerived && filter.PrincipalType == store.RoleBindingPrincipalUser && filter.PrincipalID != "" {
+		groupDerivedBindings, groupSourceMap = s.expandGroupDerivedBindings(ctx, filter)
 	}
 
+	// O-3: Build role-name cache using batch lookup to avoid N+1 queries.
+	allBindings := append(bindings, groupDerivedBindings...)
+	roleNameCache := s.buildRoleNameCache(ctx, allBindings)
+
 	// Enrich bindings with human-friendly display names, role name, and source.
-	enriched := make([]RoleBindingInfo, 0, len(bindings))
-	for i, b := range bindings {
+	enriched := make([]RoleBindingInfo, 0, len(allBindings))
+	for i, b := range allBindings {
 		if b == nil {
 			slog.Warn("nil role binding in list result, skipping", "index", i)
 			continue
 		}
 		info := RoleBindingInfo{RoleBinding: *b}
 		info.RoleName = roleNameCache[b.RoleDefinitionID]
-		info.Source = "direct" // Default; group-derived expansion is future work
+		if source, ok := groupSourceMap[b.ID]; ok {
+			info.Source = source
+		}
+		// Direct bindings: source left empty (R-4 fix — frontend defaults to "unknown").
 		info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
 		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
 		if b.ScopeType == store.RoleScopeProject && b.ScopeID != "" {
@@ -569,8 +588,72 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, listRoleBindingsResponse{
 		Items:      enriched,
-		TotalCount: total,
+		TotalCount: total + len(groupDerivedBindings),
 	})
+}
+
+// expandGroupDerivedBindings looks up the groups a user belongs to and
+// returns bindings assigned to those groups, along with a map from binding
+// ID to the source group's display name (slug or name). The returned bindings
+// are NOT included in the primary query's total count — they are additive.
+//
+// The filter's remaining predicates (roleDefinitionId, scopeType, scopeId) are
+// preserved so group-derived bindings are filtered consistently with direct
+// bindings. Only the principalType/principalId are swapped to target groups.
+func (s *Server) expandGroupDerivedBindings(ctx context.Context, filter store.RoleBindingFilter) ([]*store.RoleBinding, map[string]string) {
+	userID := filter.PrincipalID
+	groups, err := s.store.GetUserGroups(ctx, userID)
+	if err != nil {
+		slog.Warn("includeGroupDerived: failed to look up user groups",
+			"user_id", userID, "error", err)
+		return nil, nil
+	}
+	if len(groups) == 0 {
+		return nil, nil
+	}
+
+	// Build a lookup from group ID to display name.
+	groupNames := make(map[string]string, len(groups))
+	for _, gm := range groups {
+		group, gErr := s.store.GetGroup(ctx, gm.GroupID)
+		if gErr != nil {
+			slog.Warn("includeGroupDerived: failed to look up group",
+				"group_id", gm.GroupID, "error", gErr)
+			groupNames[gm.GroupID] = gm.GroupID // fallback to ID
+			continue
+		}
+		if group.Slug != "" {
+			groupNames[gm.GroupID] = group.Slug
+		} else {
+			groupNames[gm.GroupID] = group.Name
+		}
+	}
+
+	// For each group, query bindings with the same filter constraints but
+	// targeting the group as principal.
+	var result []*store.RoleBinding
+	sourceMap := make(map[string]string)
+	for _, gm := range groups {
+		gFilter := store.RoleBindingFilter{
+			RoleDefinitionID: filter.RoleDefinitionID,
+			PrincipalType:    store.RoleBindingPrincipalGroup,
+			PrincipalID:      gm.GroupID,
+			ScopeType:        filter.ScopeType,
+			ScopeID:          filter.ScopeID,
+		}
+		gBindings, gErr := s.store.ListRoleBindingsFiltered(ctx, gFilter, 1000, 0)
+		if gErr != nil {
+			slog.Warn("includeGroupDerived: failed to list group bindings",
+				"group_id", gm.GroupID, "error", gErr)
+			continue
+		}
+		for _, b := range gBindings {
+			sourceMap[b.ID] = groupNames[gm.GroupID]
+			result = append(result, b)
+		}
+	}
+
+	return result, sourceMap
 }
 
 // parsePaginationParams extracts limit and offset from query parameters.
@@ -587,6 +670,42 @@ func parsePaginationParams(r *http.Request) (limit, offset int) {
 		}
 	}
 	return limit, offset
+}
+
+// buildRoleNameCache resolves role definition names for a set of bindings
+// using a single batch query (O-3). Returns a map from roleDefinitionID to name.
+// Logs warnings for orphaned bindings or store failures (O-4).
+func (s *Server) buildRoleNameCache(ctx context.Context, bindings []*store.RoleBinding) map[string]string {
+	ids := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, b := range bindings {
+		if b != nil && b.RoleDefinitionID != "" && !seen[b.RoleDefinitionID] {
+			ids = append(ids, b.RoleDefinitionID)
+			seen[b.RoleDefinitionID] = true
+		}
+	}
+	if len(ids) == 0 {
+		return map[string]string{}
+	}
+
+	rdMap, err := s.store.GetRoleDefinitionsByIDs(ctx, ids)
+	if err != nil {
+		slog.Warn("failed to batch-load role definitions for enrichment", "error", err)
+		return map[string]string{}
+	}
+
+	cache := make(map[string]string, len(rdMap))
+	for id, rd := range rdMap {
+		cache[id] = rd.Name
+	}
+	// O-4: Log warning for orphaned bindings (roleDefinitionID not found).
+	for _, id := range ids {
+		if _, ok := cache[id]; !ok {
+			slog.Warn("orphaned role binding: role definition not found",
+				"role_definition_id", id)
+		}
+	}
+	return cache
 }
 
 func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user UserIdentity) {
@@ -699,13 +818,13 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		}
 	}
 
-	// R4 brief item 2: project-scoped role-binding create MUST route through
-	// ProjectMembershipService for typed governance, delegation, lock,
-	// last-owner protection, transactional audit, and D4 enforcement.
-	// System-scoped operations remain generic.
-	// R5-1: fail-closed — if membershipService is nil, return 500. Never fall
-	// through to direct store mutation for project scope.
-	if req.ScopeType == store.RoleScopeProject {
+	// R4 brief item 2: project-scoped role-binding create routes through
+	// ProjectMembershipService for built-in project roles (typed governance,
+	// delegation, lock, last-owner protection, transactional audit, D4).
+	// Custom project-scoped roles use the direct store path (R-7 fix).
+	// System-scoped operations remain generic (direct store path below).
+	isBuiltInProjectRole := validProjectRoles[roleDef.Name]
+	if req.ScopeType == store.RoleScopeProject && isBuiltInProjectRole {
 		if s.membershipService == nil {
 			writeError(w, http.StatusInternalServerError, "internal_error",
 				"membership service unavailable — project-scope mutations require governance", nil)
@@ -857,19 +976,8 @@ func (s *Server) listBindingsForUser(w http.ResponseWriter, r *http.Request, use
 		bindings = []*store.RoleBinding{}
 	}
 
-	// Build role-name cache.
-	roleNameCache := make(map[string]string)
-	for _, b := range bindings {
-		if b != nil && b.RoleDefinitionID != "" {
-			roleNameCache[b.RoleDefinitionID] = ""
-		}
-	}
-	for rdID := range roleNameCache {
-		rd, err := s.store.GetRoleDefinition(ctx, rdID)
-		if err == nil && rd != nil {
-			roleNameCache[rdID] = rd.Name
-		}
-	}
+	// O-3: Build role-name cache using batch lookup.
+	roleNameCache := s.buildRoleNameCache(ctx, bindings)
 
 	// Enrich bindings with human-friendly display names.
 	enriched := make([]RoleBindingInfo, 0, len(bindings))
@@ -880,7 +988,7 @@ func (s *Server) listBindingsForUser(w http.ResponseWriter, r *http.Request, use
 		}
 		info := RoleBindingInfo{RoleBinding: *b}
 		info.RoleName = roleNameCache[b.RoleDefinitionID]
-		info.Source = "direct"
+		// Source left empty — see R-4 comment in listRoleBindings.
 		info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
 		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
 		if b.ScopeType == store.RoleScopeProject && b.ScopeID != "" {

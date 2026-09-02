@@ -270,6 +270,74 @@ func TestLegacyProxyAuth_SuspendedUser_Returns403(t *testing.T) {
 	}
 }
 
+// C-2: Legacy proxy path must fail closed on store errors.
+func TestLegacyProxyAuth_StoreError_Returns503(t *testing.T) {
+	storeErr := errors.New("database connection lost")
+
+	cfg := AuthConfig{
+		Mode:           "production",
+		TrustedProxies: []string{"192.0.2.0/24"},
+		UserStore: &stubUserStore{
+			getUser: func(_ context.Context, _ string) (*store.User, error) {
+				return nil, storeErr
+			},
+		},
+		Debug: false,
+	}
+
+	middleware := UnifiedAuthMiddleware(cfg)
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler must not be reached on store error via legacy proxy")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.Header.Set("X-Forwarded-User-Id", "legacy-proxy-store-err")
+	req.Header.Set("X-Forwarded-User-Email", "store-err@example.com")
+	req.Header.Set("X-Forwarded-User-Name", "Store Err User")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 on store error via legacy proxy, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// C-2: Legacy proxy with no UserStore should still pass through (startup scenario).
+func TestLegacyProxyAuth_NoUserStore_PassesThrough(t *testing.T) {
+	cfg := AuthConfig{
+		Mode:           "production",
+		TrustedProxies: []string{"192.0.2.0/24"},
+		UserStore:      nil,
+		Debug:          false,
+	}
+
+	middleware := UnifiedAuthMiddleware(cfg)
+	var handlerReached bool
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerReached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.Header.Set("X-Forwarded-User-Id", "legacy-proxy-nostore")
+	req.Header.Set("X-Forwarded-User-Email", "nostore@example.com")
+	req.Header.Set("X-Forwarded-User-Name", "No Store User")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !handlerReached {
+		t.Error("expected handler to be reached when no UserStore configured")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for legacy proxy with no UserStore, got %d", rec.Code)
+	}
+}
+
 func TestJWTAuth_NoUserStore_PassesThrough(t *testing.T) {
 	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
 	if err != nil {

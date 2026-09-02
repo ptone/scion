@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -181,17 +182,25 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		user.Preferences = updates.Preferences
 	}
 
-	if err := s.store.UpdateUser(ctx, user); err != nil {
+	// Wrap User.Role update + binding sync in a single transaction so
+	// a partial failure (e.g., binding sync fails after User.Role is
+	// written) never leaves inconsistent authority state. C-1 fix.
+	roleChanged := updates.Role != "" && updates.Role != previousRole
+	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		if txErr := tx.UpdateUser(ctx, user); txErr != nil {
+			return txErr
+		}
+		if roleChanged {
+			return s.syncUserRoleBindings(ctx, tx, user.ID, previousRole, updates.Role)
+		}
+		return nil
+	})
+	if err != nil {
+		if writeErrorFromLastAdmin(w, err) {
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
-	}
-
-	// Synchronize role bindings when the user's role changes to ensure
-	// the binding set stays consistent with the User.Role field.
-	// D5-fix: prevents a viewer-role user from retaining a super-admin
-	// binding (and thus all permissions) after a role demotion.
-	if updates.Role != "" && updates.Role != previousRole {
-		s.syncUserRoleBindings(ctx, user.ID, previousRole, updates.Role)
 	}
 
 	writeJSON(w, http.StatusOK, user)
@@ -217,13 +226,15 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 // syncUserRoleBindings reconciles system-scoped role bindings when a user's
-// role changes. When demoting from "admin", the super-admin binding is deleted.
-// When promoting to "admin", a super-admin binding is created. For non-admin
-// roles, the appropriate hub-member or hub-viewer binding is ensured.
+// syncUserRoleBindings synchronizes system-scope role bindings when a user's
+// role changes. It operates within the caller's transaction (tx) so that the
+// User.Role update and binding mutations are atomic — a partial failure rolls
+// back the entire operation (C-1 fix).
 //
-// This mirrors the startup reconciliation (ReconcileSuperAdminBindings) but
-// runs in real-time as part of the role update handler.
-func (s *Server) syncUserRoleBindings(ctx context.Context, userID, oldRole, newRole string) {
+// R-1: Before deleting a super-admin binding, it counts remaining super-admin
+// bindings inside the transaction. If this is the last one, the operation is
+// refused with a "last_admin" error to prevent lockout.
+func (s *Server) syncUserRoleBindings(ctx context.Context, tx store.Store, userID, oldRole, newRole string) error {
 	roleMap := map[string]string{
 		"admin":  store.SystemRoleSuperAdmin,
 		"member": store.SystemRoleHubMember,
@@ -232,35 +243,50 @@ func (s *Server) syncUserRoleBindings(ctx context.Context, userID, oldRole, newR
 
 	// Delete the old role binding if it maps to a known system role.
 	if oldRoleName, ok := roleMap[oldRole]; ok {
-		oldRD, err := s.store.GetRoleDefinitionByName(ctx, oldRoleName, store.RoleScopeSystem)
-		if err == nil {
-			bindings, listErr := s.store.ListRoleBindingsForPrincipal(
-				ctx, store.RoleBindingPrincipalUser, userID)
-			if listErr == nil {
-				for _, b := range bindings {
-					if b.RoleDefinitionID == oldRD.ID && b.ScopeType == store.RoleScopeSystem {
-						if delErr := s.store.DeleteRoleBinding(ctx, b.ID); delErr != nil {
-							slog.Warn("failed to delete old role binding during role sync",
-								"user_id", userID, "role", oldRoleName, "binding_id", b.ID, "error", delErr)
-						} else {
-							slog.Info("deleted role binding during role sync",
-								"user_id", userID, "old_role", oldRole, "binding_id", b.ID)
-						}
-					}
+		oldRD, err := tx.GetRoleDefinitionByName(ctx, oldRoleName, store.RoleScopeSystem)
+		if err != nil {
+			return fmt.Errorf("lookup old role definition %q: %w", oldRoleName, err)
+		}
+
+		// R-1: Last-super-admin guard — refuse demotion if this is the last
+		// super-admin binding. Count is evaluated within the transaction to
+		// prevent concurrent demotions from both succeeding.
+		if oldRoleName == store.SystemRoleSuperAdmin {
+			count, countErr := tx.CountRoleBindingsFiltered(ctx, store.RoleBindingFilter{
+				RoleDefinitionID: oldRD.ID,
+				ScopeType:        store.RoleScopeSystem,
+			})
+			if countErr != nil {
+				return fmt.Errorf("count super-admin bindings: %w", countErr)
+			}
+			if count <= 1 {
+				return &LastAdminError{}
+			}
+		}
+
+		bindings, err := tx.ListRoleBindingsForPrincipal(
+			ctx, store.RoleBindingPrincipalUser, userID)
+		if err != nil {
+			return fmt.Errorf("list bindings for user %s: %w", userID, err)
+		}
+		for _, b := range bindings {
+			if b.RoleDefinitionID == oldRD.ID && b.ScopeType == store.RoleScopeSystem {
+				if err := tx.DeleteRoleBinding(ctx, b.ID); err != nil {
+					return fmt.Errorf("delete old role binding %s: %w", b.ID, err)
 				}
+				slog.Info("deleted role binding during role sync",
+					"user_id", userID, "old_role", oldRole, "binding_id", b.ID)
 			}
 		}
 	}
 
 	// Create the new role binding.
 	if newRoleName, ok := roleMap[newRole]; ok {
-		newRD, err := s.store.GetRoleDefinitionByName(ctx, newRoleName, store.RoleScopeSystem)
+		newRD, err := tx.GetRoleDefinitionByName(ctx, newRoleName, store.RoleScopeSystem)
 		if err != nil {
-			slog.Warn("role definition not found during role sync",
-				"user_id", userID, "role", newRoleName, "error", err)
-			return
+			return fmt.Errorf("lookup new role definition %q: %w", newRoleName, err)
 		}
-		_, err = s.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		_, err = tx.CreateRoleBinding(ctx, &store.RoleBinding{
 			RoleDefinitionID: newRD.ID,
 			PrincipalType:    store.RoleBindingPrincipalUser,
 			PrincipalID:      userID,
@@ -270,13 +296,31 @@ func (s *Server) syncUserRoleBindings(ctx context.Context, userID, oldRole, newR
 		})
 		if err != nil {
 			if errors.Is(err, store.ErrAlreadyExists) {
-				return // binding already exists — idempotent
+				return nil // binding already exists — idempotent
 			}
-			slog.Warn("failed to create new role binding during role sync",
-				"user_id", userID, "role", newRoleName, "error", err)
-		} else {
-			slog.Info("created role binding during role sync",
-				"user_id", userID, "new_role", newRole)
+			return fmt.Errorf("create new role binding %q: %w", newRoleName, err)
 		}
+		slog.Info("created role binding during role sync",
+			"user_id", userID, "new_role", newRole)
 	}
+
+	return nil
+}
+
+// LastAdminError is returned when a role demotion would remove the last
+// super-admin binding, risking system lockout.
+type LastAdminError struct{}
+
+func (e *LastAdminError) Error() string {
+	return "cannot demote: this is the last super-admin user"
+}
+
+// writeErrorFromLastAdmin handles LastAdminError with the stable "last_admin" code.
+func writeErrorFromLastAdmin(w http.ResponseWriter, err error) bool {
+	var lae *LastAdminError
+	if errors.As(err, &lae) {
+		writeError(w, http.StatusConflict, "last_admin", lae.Error(), nil)
+		return true
+	}
+	return false
 }

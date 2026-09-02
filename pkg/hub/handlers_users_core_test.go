@@ -18,7 +18,9 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -164,6 +166,54 @@ func TestUpdateUser_RoleDemotion_RemovesSuperAdminBinding(t *testing.T) {
 	assert.True(t, hasViewer, "viewer binding should be created after demotion")
 }
 
+// TestUpdateUser_LastAdmin_DemotionRefused verifies that demoting the last
+// super-admin user is refused with a 409 "last_admin" error (R-1).
+func TestUpdateUser_LastAdmin_DemotionRefused(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// First, delete ALL existing super-admin bindings (including the dev user's).
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	filter := store.RoleBindingFilter{
+		RoleDefinitionID: superAdminRD.ID,
+		ScopeType:        store.RoleScopeSystem,
+	}
+	existingBindings, err := s.ListRoleBindingsFiltered(ctx, filter, 1000, 0)
+	require.NoError(t, err)
+	for _, b := range existingBindings {
+		require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+	}
+
+	// Create the sole admin user with a single super-admin binding.
+	userID := tid("last-admin")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "last-admin@example.com", DisplayName: "Last Admin",
+		Role: "admin", Status: "active",
+	}))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemBackfillCreatedBy,
+	})
+	require.NoError(t, err)
+
+	// Attempt demotion — should be refused.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+userID, map[string]string{
+		"role": "viewer",
+	})
+	assert.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "last_admin")
+
+	// Verify user role was NOT changed (transaction rollback).
+	user, err := s.GetUser(ctx, userID)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", user.Role, "user role should not change on refused demotion")
+}
+
 // TestUpdateUser_ViewerCannotCreateProject verifies that after demotion from
 // admin to viewer, the user can no longer create projects.
 func TestUpdateUser_ViewerCannotCreateProject(t *testing.T) {
@@ -206,4 +256,346 @@ func TestUpdateUser_ViewerCannotCreateProject(t *testing.T) {
 		})
 		assert.False(t, decision.Allowed, "viewer should not have project.create permission")
 	}
+}
+
+// TestUpdateUser_TransactionRollback_OnSyncFailure verifies the C-1 atomicity
+// fix: when syncUserRoleBindings fails (e.g., last-admin guard), the User.Role
+// update is rolled back — the database remains consistent.
+func TestUpdateUser_TransactionRollback_OnSyncFailure(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Set up a sole super-admin (triggers last-admin guard on demotion).
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Clear all existing super-admin bindings.
+	filter := store.RoleBindingFilter{
+		RoleDefinitionID: superAdminRD.ID,
+		ScopeType:        store.RoleScopeSystem,
+	}
+	existingBindings, err := s.ListRoleBindingsFiltered(ctx, filter, 1000, 0)
+	require.NoError(t, err)
+	for _, b := range existingBindings {
+		require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+	}
+
+	userID := tid("txn-rollback")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "txn-rollback@example.com", DisplayName: "TXN Test",
+		Role: "admin", Status: "active",
+	}))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemBackfillCreatedBy,
+	})
+	require.NoError(t, err)
+
+	// Attempt demotion — should fail with 409 (last admin).
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+userID, map[string]string{
+		"role": "viewer",
+	})
+	require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+
+	// Verify User.Role is still "admin" (transaction rolled back).
+	user, err := s.GetUser(ctx, userID)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", user.Role, "User.Role must be rolled back on sync failure")
+
+	// Verify the super-admin binding still exists.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	hasSuperAdmin := false
+	for _, b := range bindings {
+		if b.RoleDefinitionID == superAdminRD.ID {
+			hasSuperAdmin = true
+			break
+		}
+	}
+	assert.True(t, hasSuperAdmin, "super-admin binding must survive after rollback")
+}
+
+// TestUpdateUser_ConcurrentRoleUpdates verifies R-5: concurrent PATCH requests
+// changing the same user's role do not produce duplicate bindings. The WithTx
+// wrapper (C-1 fix) serializes the operations at the database level.
+func TestUpdateUser_ConcurrentRoleUpdates(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a second admin so the last-admin guard doesn't block.
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	guardUserID := tid("guard-admin")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: guardUserID, Email: "guard@example.com", DisplayName: "Guard Admin",
+		Role: "admin", Status: "active",
+	}))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      guardUserID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemBackfillCreatedBy,
+	})
+	require.NoError(t, err)
+
+	// Create the target user as admin with super-admin binding.
+	userID := tid("concurrent-user")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "concurrent@example.com", DisplayName: "Concurrent Test",
+		Role: "admin", Status: "active",
+	}))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemBackfillCreatedBy,
+	})
+	require.NoError(t, err)
+
+	// Fire concurrent PATCH requests to change the user's role.
+	const concurrency = 5
+	var wg sync.WaitGroup
+	roles := []string{"viewer", "member", "viewer", "member", "viewer"}
+	results := make([]*struct {
+		code int
+		body string
+	}, concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		i := i
+		go func() {
+			defer wg.Done()
+			rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+userID, map[string]string{
+				"role": roles[i],
+			})
+			results[i] = &struct {
+				code int
+				body string
+			}{code: rec.Code, body: rec.Body.String()}
+		}()
+	}
+	wg.Wait()
+
+	// All requests should succeed (200 OK) — the transaction serializes them.
+	for i, r := range results {
+		assert.Equal(t, http.StatusOK, r.code, "request %d failed: %s", i, r.body)
+	}
+
+	// Verify the user has exactly ONE system-scope role binding.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+
+	systemBindings := 0
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem {
+			systemBindings++
+		}
+	}
+	assert.Equal(t, 1, systemBindings,
+		"user should have exactly 1 system-scope binding after concurrent updates, got %d", systemBindings)
+
+	// Verify the final User.Role matches the final binding.
+	user, err := s.GetUser(ctx, userID)
+	require.NoError(t, err)
+
+	// Determine which role definition matches the surviving binding.
+	roleBindingRDMap := map[string]string{}
+	roleDefs := []struct {
+		name string
+		role string
+	}{
+		{store.SystemRoleSuperAdmin, "admin"},
+		{store.SystemRoleHubMember, "member"},
+		{store.SystemRoleHubViewer, "viewer"},
+	}
+	for _, rd := range roleDefs {
+		rdObj, err := s.GetRoleDefinitionByName(ctx, rd.name, store.RoleScopeSystem)
+		if err == nil {
+			roleBindingRDMap[rdObj.ID] = rd.role
+		}
+	}
+
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeSystem {
+			expectedRole := roleBindingRDMap[b.RoleDefinitionID]
+			assert.Equal(t, expectedRole, user.Role,
+				"User.Role (%s) must match the surviving binding role (%s)", user.Role, expectedRole)
+		}
+	}
+}
+
+// TestUpdateUser_DuplicateBindingIdempotent verifies that re-assigning the same
+// role (e.g., "viewer" → "viewer") is handled gracefully — no error, no
+// duplicate bindings.
+func TestUpdateUser_DuplicateBindingIdempotent(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	userID := tid("idempotent-user")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "idempotent@example.com", DisplayName: "Idempotent Test",
+		Role: "viewer", Status: "active",
+	}))
+
+	// Create the viewer binding manually.
+	viewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: viewerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+
+	// PATCH with the same role — should be a no-op.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+userID, map[string]string{
+		"role": "viewer",
+	})
+	assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// Verify still exactly one viewer binding.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	viewerCount := 0
+	for _, b := range bindings {
+		if b.RoleDefinitionID == viewerRD.ID && b.ScopeType == store.RoleScopeSystem {
+			viewerCount++
+		}
+	}
+	assert.Equal(t, 1, viewerCount, "should have exactly one viewer binding")
+}
+
+// TestUpdateUser_RoleSync_Returns500_OnError verifies C-1a: when the binding
+// sync encounters an error (after the C-1 transactional fix), the handler
+// returns an error response — not 200 OK.
+func TestUpdateUser_RoleSync_Returns500_OnError(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Verify that the handler structure returns non-200 on sync errors by
+	// reading the response body. We test this via the last-admin path (R-1)
+	// which is a controlled failure in sync — the handler must NOT return 200.
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Clear existing super-admin bindings.
+	filter := store.RoleBindingFilter{
+		RoleDefinitionID: superAdminRD.ID,
+		ScopeType:        store.RoleScopeSystem,
+	}
+	existing, err := s.ListRoleBindingsFiltered(ctx, filter, 1000, 0)
+	require.NoError(t, err)
+	for _, b := range existing {
+		require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+	}
+
+	userID := tid("sync-error")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "sync-error@example.com", DisplayName: "Sync Error Test",
+		Role: "admin", Status: "active",
+	}))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemBackfillCreatedBy,
+	})
+	require.NoError(t, err)
+
+	// Attempt demotion of last admin — sync MUST fail and handler MUST NOT
+	// return 200 OK (this was the original C-1a bug: swallowed errors → 200).
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+userID, map[string]string{
+		"role": "viewer",
+	})
+
+	assert.NotEqual(t, http.StatusOK, rec.Code,
+		"handler must NOT return 200 when sync fails (C-1a fix); got body: %s", rec.Body.String())
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"expected 409 for last-admin guard; got %d: %s", rec.Code, rec.Body.String())
+
+	// Parse the error response to verify structured error.
+	var errResp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	err = json.Unmarshal(rec.Body.Bytes(), &errResp)
+	require.NoError(t, err, "response should be valid JSON error")
+	assert.Equal(t, "last_admin", errResp.Error.Code, "error code should be 'last_admin'")
+}
+
+// TestUpdateUser_MultipleAdmins_DemotionAllowed verifies that demotion is
+// permitted when multiple super-admin bindings exist (not the last admin).
+func TestUpdateUser_MultipleAdmins_DemotionAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Create two admin users with super-admin bindings.
+	user1ID := tid("multi-admin-1")
+	user2ID := tid("multi-admin-2")
+
+	for _, u := range []struct {
+		id    string
+		email string
+	}{
+		{user1ID, "admin1@example.com"},
+		{user2ID, "admin2@example.com"},
+	} {
+		require.NoError(t, s.CreateUser(ctx, &store.User{
+			ID: u.id, Email: u.email, DisplayName: "Admin",
+			Role: "admin", Status: "active",
+		}))
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: superAdminRD.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      u.id,
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        store.SystemBackfillCreatedBy,
+		})
+		require.NoError(t, err)
+	}
+
+	// Demote user1 — should succeed because user2 (and dev user) are still admins.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user1ID, map[string]string{
+		"role": "viewer",
+	})
+	assert.Equal(t, http.StatusOK, rec.Code, "demotion should succeed with multiple admins: %s", rec.Body.String())
+
+	// Verify user1 is now a viewer.
+	user1, err := s.GetUser(ctx, user1ID)
+	require.NoError(t, err)
+	assert.Equal(t, "viewer", user1.Role)
+
+	// Verify user1's super-admin binding was deleted.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user1ID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		assert.NotEqual(t, superAdminRD.ID, b.RoleDefinitionID,
+			"super-admin binding should be deleted after demotion")
+	}
+
+	// Verify user1 has a viewer binding.
+	viewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	hasViewer := false
+	for _, b := range bindings {
+		if b.RoleDefinitionID == viewerRD.ID {
+			hasViewer = true
+			break
+		}
+	}
+	assert.True(t, hasViewer, "viewer binding should exist after demotion")
 }

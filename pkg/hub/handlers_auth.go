@@ -480,7 +480,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	if user != nil && user.Status == store.UserStatusSuspended {
 		slog.Warn("Refresh rejected: user is suspended", "email", claims.Email, "user_id", user.ID)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+		writeError(w, http.StatusForbidden, "user_suspended",
 			"user account is suspended", nil)
 		return
 	}
