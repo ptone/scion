@@ -112,7 +112,7 @@ from **real** principals drawn from the snapshot itself:
 | F-2 | old-format, both resolve, reversed lexical order | rekey to identical canonical key as F-1's ordering rule dictates |
 | F-3 | old-format, one resolves, one orphan | **no rekey** — the real `da7cf1ab` class |
 | F-4 | old-format, neither resolves | **no rekey** |
-| F-5 | old-format, both resolve to the *same* principal | **unverified — see OQ-E.** Assumed no rekey; behaviour to be read out of the code, not asserted from this table |
+| F-5 | old-format, both resolve to the *same* principal | **rekeyed** — self-DM key produced; named principal granted, stranger denied. See §1.5 |
 | F-6 | empty `external_ref` | skip, stay keyless (B14) |
 | F-7 | already new-format | participant rebuild only, key byte-identical after |
 | F-8 | old-format, both resolve, **both users** | rekey with true kinds; grant both; deny third party |
@@ -132,20 +132,19 @@ kind-distinctness, and `resolveKind` assigns *true* kinds. `dm:user:<min>:user:<
 valid and grants both principals. No fabrication hazard.
 
 **The classes stay anyway, because the finding relocated the risk rather than removing it.**
-A same-kind pair is ordered `dm:user:<min>:user:<max>` — by UUID. A mixed pair must be
-ordered by something else, presumably kind. So the canonical-ordering comparator has at
-least two branches, and **same-kind rows are the only inputs that reach the UUID-tiebreak
-branch**. No test reaches it today, and it decides the exact bytes of an ACL key. Two callers
-disagreeing about canonical order yield two different keys for one pair of principals, and a
-conversation one of them cannot open.
+Same-kind pairs are the only inputs whose canonical order is decided by the UUID rather than
+by the kind prefix — see §1.4 for the comparator's actual mechanism, which turned out not to
+have branches at all. No test reaches that case today, and it decides the exact bytes of an
+ACL key. Two callers disagreeing about canonical order yield two different keys for one pair
+of principals, and a conversation one of them cannot open.
 
 Each therefore needs a reversed-input variant asserting a byte-identical key — F-2's property
-applied to the same-kind branch, which is the direct test of the comparator.
+applied to same-kind inputs, which is the direct test of the comparator.
 
 This is stronger than the live-population test it replaces. A live instance would have handed
 us whichever classes it happened to contain — here that was exactly one, the unrepairable
-one. The classes that must **not** repair (F-3, F-4, F-5) are the security-relevant
-half.
+one. The classes that must **not** repair (F-3, F-4) are the security-relevant half; F-5
+turned out to repair (§1.5).
 
 **But do not read the set as exhaustive.** The first draft of this section claimed it "covers
 the discriminations exhaustively", and F-8 and F-9 were found within a day of writing that.
@@ -158,7 +157,50 @@ Rows for the VM run (§3) need at least one message each so the backfill has som
 attribute; without that the ordering checks are vacuous. The unit-level classes generally do
 not — seed a message only where the test asserts something about that message.
 
-### 1.4 Constraints on building the fixture
+### 1.4 The canonical comparator, and why renaming a kind token is a key-format break
+
+Established 2026-09-02. `DMConversationKey` does **not** sort by kind-then-UUID. It renders
+each principal to a single `kind + ":" + uuid` token and compares the two tokens as strings.
+Mixed pairs come out agent-first only because `'a' < 'u'`; same-kind pairs fall through to
+the UUID because the prefixes are equal. There is no kind-first branch. This confirms F-2's
+expected key.
+
+**The ordering is emergent, not designed, and that is a latent hazard.** Nothing states
+"agent precedes user" as an invariant — it is a property of how two string literals happen to
+be spelled. Rename either token (`user` → `human`, `agent` → `bot`, any cosmetic tidy-up) and
+canonical order silently flips for every mixed-kind pair. Every existing DM key in every
+deployment becomes underivable from its principals: the keys still parse, they simply no
+longer match what derivation now produces. **A mass ACL break, with no error at the point of
+change, presenting in review as a harmless rename.**
+
+Mitigation: a test pinning the literal tokens `"agent"` and `"user"` and asserting mixed-kind
+pairs render agent-first, commented with *why* — so a rename fails loudly instead of
+silently. Check the existing golden vectors first; if they already pin it, do not duplicate.
+
+### 1.5 Degenerate pairs — the cost is diagnosability, not authorization
+
+Established 2026-09-02. Nothing rejects `dm:<X>:<X>`. `resolveKind` returns the same result
+for both slots, `DMConversationKey` accepts them, and the migration mints
+`dm:user:<X>:user:<X>`. `CheckDMParticipantKey` then grants X through both slots. There is no
+distinctness check anywhere in the chain.
+
+**This is not over-granting.** The key names exactly the one principal the source named
+twice, so the failure direction is under-granting — a lost counterparty, recoverable.
+
+The actual cost is evidential. A `dm:<X>:<X>` row is self-evidently broken and invites
+investigation; a `dm:user:<X>:user:<X>` row is indistinguishable from a legitimate same-kind
+DM, and nothing afterwards records that it was ever degenerate. **The migration converts a
+visibly-broken row into a plausible-looking one and destroys the evidence.**
+
+Ruling: keep the behaviour, preserve the evidence. A `DegeneratePairs` counter and a log line
+naming the conversation ID, incremented *in addition to* `OldFormatRekeyed` so no existing
+total shifts under an assertion that already watches it. Observation only — the counter must
+not gate. Cheap now, impossible to reconstruct later.
+
+Whether such rows should instead be refused is a behaviour change on the derivation path and
+therefore ptone's call, not mine. Recorded as OQ-E, not implemented.
+
+### 1.6 Constraints on building the fixture
 
 - **No production code may gain the ability to emit an old-format key.** The fixture is built
   by direct SQL against a throwaway copy. Adding a helper that writes the legacy format —
@@ -178,7 +220,7 @@ not — seed a message only where the test asserts something about that message.
   the same treatment.
 - **Authorization assertions must run against a real store, not a mock.** The counter,
   format and key-identity checks are fine against a mock. But every class that must *not*
-  repair — F-3, F-4, F-5 — additionally needs a sqlite-backed assertion that real
+  repair — F-3, F-4 — additionally needs a sqlite-backed assertion that real
   `isDMParticipant` denies both named principals afterwards, as must F-1's third-principal
   denial. An authorization assertion against a mock proves the mock behaves as written.
   This pattern already exists: the strong half of F-4's coverage is the integration test
@@ -332,11 +374,16 @@ broadly passes that test.
 > **Under-granting is recoverable; over-granting is not.** A wrong key is worse than no key,
 > since the key IS the ACL.
 
-**Unrepairable rows must remain unrepaired — F-3, F-4, F-5.** Each must come out of the
+**Unrepairable rows must remain unrepaired — F-3, F-4.** Each must come out of the
 migration byte-identical and still denied, and must be counted as `Ambiguous` rather than
 `OldFormatRekeyed`. Fail-closed is the correct outcome here, not a defect to be fixed on the
-spot. F-5 (both principals identical) deserves particular attention: it is the one class
-where a naive "both sides resolved, proceed" check would succeed and produce a self-DM ACL.
+spot.
+
+**F-5 does not belong in that list.** It was written there on the assumption that a
+degenerate pair would be refused. It is not — the migration mints a self-DM key (§1.5). The
+assertion is therefore that it rekeys, grants the named principal, denies a stranger, and
+increments the `DegeneratePairs` counter. Do not "fix" this back into a refusal to make the
+grouping tidier; that is a behaviour change on the derivation path and it is ptone's call.
 
 **F-7 must come out byte-identical too.** A new-format key that the migration rewrites — even
 to an equivalent value — means the rekey path is reachable from rows that do not need it,
@@ -411,11 +458,18 @@ depth of live exercise.
   blocking:** the key is only an ACL for a conversation that already exists, so accepting the
   shape grants nothing on its own. Tests must encode today's behaviour; if this changes, it
   changes as a decision, not as a test assertion.
-- **OQ-E. Is a degenerate pair (both principals the same UUID) refused anywhere?** F-5
-  assumes it is. That assumption has not been checked against the code, and it is the same
-  species of assumption that F-8/F-9 just falsified. Ruling deferred to ca-mig-10's finding:
-  if the code rekeys it, that is the behaviour the test encodes and a finding to report — not
-  a refusal to be added so the table stays tidy.
+- **OQ-E. ANSWERED — a degenerate pair is refused nowhere; should it be?** Measured
+  2026-09-02: no distinctness check exists in `resolveKind`, `DMConversationKey`,
+  `ParseDMKey`, or step 3b. `dm:<X>:<X>` becomes `dm:user:<X>:user:<X>` and grants X through
+  both slots (§1.5).
+
+  **For ptone.** The authorization direction is safe — it grants only the principal already
+  named twice, so the failure is under-granting and recoverable. The cost is evidential: a
+  visibly-broken row becomes a plausible-looking one. My ruling was to keep the behaviour and
+  add a `DegeneratePairs` counter plus a log line, which preserves the evidence without
+  changing an outcome on the derivation path. **Refusing such rows outright would be a
+  behaviour change on that path and is yours to decide, not mine.** Not blocking; the counter
+  buys the time to decide later on real data rather than now on none.
 - **OQ-C.** OQ-6 (purging gteam's 5,637 orphans) is irreversible and ptone's. It is
   unaffected by this plan and should not be bundled into it.
 
