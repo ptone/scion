@@ -32969,3 +32969,22 @@ The result is narrower than what was reported, and the difference is worth namin
 Had I dispatched that brief, a competent agent following the acceptance criteria would have implemented the precise bug the design exists to prevent — and it would have looked like compliance. Superseding an invariant in prose does not supersede it in the places that operationalise it: the acceptance criteria, the phase list, the sections that cite it in passing. I fixed all three, and rewrote AC-2 as an explicit *pair* of tests, because the invariant is a distinction between run-level and row-level failure rather than a threshold, and a single test cannot express a distinction.
 
 **Rule 974** — when you supersede an invariant, grep for every citation of it. The prose that argues the correction is not the prose that gets implemented; the acceptance criteria are. A design doc that contradicts itself will be resolved by the implementer, silently, in favour of whichever half is more actionable.
+
+---
+
+### §5mb — The counter that had never been seen reconciles exactly, and closes OQ-1 (2026-09-02)
+
+First observation of `HazardAEmailCount` in the project's history: **11,596**. Re-measured at `2912048b8` against a throwaway copy of the live gteam DB. Invariant now exact — `sum(DeriveFailures) 11,593 + WriteFailures 0 + ResolutionFailures 0 == Errors 11,593`. Attributed unchanged at 6,476 of 24,700, so nothing in three defect fixes moved attribution. The old 4-message gap is explained: those were write-time failures, and a dry-run attempts no writes, so the gap is structurally absent here and will reappear in the `WriteFailures` bucket under `--execute`. That is the bucket working as designed.
+
+The investigator explained 11,596 as "three more than the 11,593 errors — three messages with a non-UUID principal that derived anyway." Plausible sentence; the population does not exist. There are two increment sites, and reading them gives an exact decomposition instead of a remainder:
+
+- `:195` fires only for `DeriveErrPrincipalPair` **and** a sender or recipient failing `isValidUUID` — **11,592**.
+- `:309` fires per message in a `hazardA` group, and those groups are exactly what `:223` counts as `Inferred` — **4**.
+
+11,592 + 4 = 11,596. The `dm_key_parse` refusal never touches hazard-a, because it fails at parse before principals are examined, which is why the base is 11,592 rather than 11,593. The subtraction had used two numbers that do not share a denominator.
+
+**The corrected version is the stronger result, and it closes OQ-1 by construction rather than by inference.** `:195`'s count equals the `principal_pair` count exactly, with zero remainder. Every one of the 11,592 refusals carries a non-UUID principal — not the bulk of them, all of them. A single refusal with two well-formed UUIDs would have been a real derivation bug hiding inside the legacy population, and it was the last thing that could still have moved the 26% ceiling. There is not one. The ceiling is legacy data, definitively, and the question can stop being asked.
+
+There is a pleasing symmetry in how this arrived. DEF-114, DEF-119 and DEF-120 were three separate faults in a single counter — it could not observe its population, its map never reached the operator, and the line printed under its name held a different variable. The first number it ever emitted, once all three were repaired, reconciled to the unit against an independently-derived population. That is the payoff for fixing the instrument before trusting the reading, and it is the argument for having refused to reason about the 4 back when the 4 was all we had.
+
+**Rule 975** — a counter that does not reconcile is explained by reading its increment sites, not by subtracting it from the nearest similar number. The subtraction always yields a difference, and a difference always suggests a population; both can be entirely fictional while looking like analysis.
