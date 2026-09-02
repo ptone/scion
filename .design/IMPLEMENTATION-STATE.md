@@ -34379,3 +34379,77 @@ is exactly why it was silently droppable.
 
 Mutation testing earned its keep here: three correct fixes, green suite, clean
 diff, and two of the three would have regressed on the next edit with no signal.
+
+---
+
+## §5np — DEF-135 designed and staffed; scope narrowed from systemic to one site
+
+**Date:** 2026-09-02. Design: `DEF-135-DESIGN.md`, pushed at `6f454c454`.
+
+### The scope check that mattered
+
+Before designing, I checked all ten `RenderDeliveryText` call sites for what they pass
+as `ConvResult`. **Five can be nil. Four of those five are deliberate and correct:**
+
+| site | why nil is right |
+|---|---|
+| `notifications.go:398` | agent-to-agent state-change notifications — no row, no conversation |
+| `server.go:2973` | scheduler deliveries — no row, no conversation |
+| `handlers_agent_messaging.go:1898` | broadcasts skip conversation resolution (the 990-broadcast bucket) |
+| `handlers_agent_messaging.go:2067` | mention fan-out — conversation **is** resolved and deliberately withheld: the target may not be a participant, and stamping it would disclose a conversation they cannot access |
+
+So DEF-135 is **one site**, `handlers_broker_inbound.go:307`, not a systemic hole.
+Worth the twenty minutes: had I designed from the assumption it was systemic, the
+obvious "fix" would have been to thread a conversation into every render site, which
+at `:2067` is **a disclosure bug**. The site most in need of leaving alone is the one
+that looks most like the others from a grep.
+
+`:2067` also supplies the rule the fix must respect: **stamp a conversation id only
+when the recipient is a participant.** Broker inbound satisfies it — the recipient is
+the agent and the agent is a participant in the DM being resolved.
+
+### The design
+
+Hoist sender resolution and the Phase 5 resolution block above the render. Verified
+nothing in either depends on dispatch. Compute one `effectiveConv`, used by both the
+envelope and `storeMsg.ConversationID`.
+
+Precedence rule made explicit because the hoist puts both resolutions in scope at one
+point: **Phase 11 (explicit `surface`+`external_ref`) beats Phase 5 (derived DM key)**
+— a caller assertion outranks an inference. Latent today; no live caller sets both.
+
+Two consequences named as decisions rather than left to be discovered:
+
+1. **Write-deny 409s now fire before dispatch.** Today the 409 returns *after* the
+   agent already received the message, so a client retry double-delivers. The hoist
+   fixes that. It is still drift and goes in the tranche notes.
+2. **A dispatch failure can leave an empty conversation row.** Acceptable: DM and
+   thread conversations resolve by deterministic key, so the row is reused by the
+   next message. Inert and self-healing, not an orphan.
+
+Alternative B — have Discord declare `surface`/`external_ref` — rejected, and this is
+the one worth remembering: it would make Phase 11 run with kind `"group"`, so Discord
+messages would start landing in **group** conversations instead of the DMs they land
+in today, splitting every user's history at the deploy boundary on an instance holding
+production data. There is a real product question under it (*should a Discord channel
+be a group conversation?*) and it may well be yes — but deciding it as a side effect
+of fixing an envelope field is the wrong way to decide it.
+
+### Dispatched
+
+- **`ca-msg-fix3`** (fresh agent, per the no-repurposing directive) — DEF-135, four
+  phases, briefed with the four "do not touch" items including the `:2067` disclosure
+  trap, and with AC-5's requirement to assert the dispatcher was never called.
+- **`ca-msg-fix2`** — round-2 rework, tests for MUT-A and MUT-B only; its three code
+  fixes are accepted as written.
+
+No overlap in non-test files (`handlers_broker_inbound.go` vs `handlers_logs.go` /
+`logquery.go` / `handlers_messages.go` / `conversation.go`), both branched from
+`43be4baad`, so they merge independently.
+
+### Critical path to ptone re-testing
+
+`fix2` tests + `fix3` implementation → review both by mutation → merge to `tranche-g`
+→ instance-investigator rebuilds and deploys gteam → ptone re-tests. **AC-9 is the
+criterion he is actually waiting on:** a Discord message produces an envelope carrying
+a conversation id that matches the persisted row.
