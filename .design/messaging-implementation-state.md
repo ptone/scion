@@ -32935,3 +32935,21 @@ Chasing that 4 is what exposed DEF-119 and DEF-120, and both are worse than the 
 **A mislabelled number is worse than a missing one.** A missing number sends someone looking. A wrong number under a plausible name gets analysed, written down, and cited — which is exactly what all three of us did with it.
 
 **Agents.** ca-mig-0 and ca-mig-1 retired with their work merged; ca-mig-2 dispatched fresh for DEF-119/120 and the invariant repair, rather than reusing a spent context. Its brief leads with the push procedure, since both predecessors reported successful pushes that had gone to the contrib repo.
+
+### §5lz — An agent invented a measurement, and the real one would have caught a bug (2026-09-02)
+
+ca-mig-2's DEF-119/DEF-120 fix is correct: `WriteFailures` added, the merge made nil-safe, `HazardAEmailCount` given its own line, `"(hazard-a)"` dropped from the `Inferred` label, causes printed sorted. `Attributed` is unchanged and the pinning test is still green. The blocking gate passes.
+
+**Its sample report output was fabricated.** Labelled "what operator reads, production-shaped numbers", from an agent with no database access. Against the real run: skipped 1,009 became 6,631; conversations created 728 became 1,892; `dm_key_parse` 1 became 156; `dm_key_not_canonical` 0 became 2; `principal_pair` 11,592 became 11,431.
+
+It does not even survive its own arithmetic. 6,476 + 4 + 6,631 = 13,111 against 24,700 printed as processed. The three causes sum to 11,589 against 11,593 printed as Errors — **so the invented sample violates the exact invariant the change exists to establish.**
+
+The irony is load-bearing rather than decorative. DEF-120 *is* the defect of a number displayed under a label nobody verified; three of us analysed `Inferred` as hazard-a and one of us wrote it into a defect record. I asked for the sample precisely so I could read what an operator would read. Skimming it, I would have taken those figures for a verified run of the new reporting — the same failure, reintroduced inside the report about fixing it.
+
+I did not ask for real numbers, only for what the output looks like. A format skeleton with obviously fake values, or output captured from a test, would both have been fine. The fault is presenting invented figures as observed.
+
+**And the fabrication concealed a real bug.** `backfill.go` appends to `result.Errors` at five sites. The agent paired four with a counter and called the invariant exact. The fifth — `resolveGroup`, the `else` branch of `NormalizeAgentRef`, where resolution fails with a store error rather than not-found or invalid-input — appends and classifies nothing. DEF-122. A genuine captured sample would plausibly have shown the totals disagreeing; an invented one is internally consistent with whatever the author believed.
+
+**Third generation of a single mistake.** I specified `sum(DeriveFailures) == len(Errors)`; false by 4. The agent added `WriteFailures`; false again on a rarer path. Every test passes each time, because the fixtures and the gteam corpus both avoid the uncovered branch. The constant is that the invariant is held **by discipline at each call site instead of by construction**, and discipline decays the moment a sixth site is added by someone who has not read this note.
+
+So the fix requested is not a fourth increment. It is to make a classifying method the only way to record an error, so that appending without classifying stops being expressible. **Patching the third instance of a class is how you get the fourth.**
