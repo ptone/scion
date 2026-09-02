@@ -112,27 +112,39 @@ from **real** principals drawn from the snapshot itself:
 | F-2 | old-format, both resolve, reversed lexical order | rekey to identical canonical key as F-1's ordering rule dictates |
 | F-3 | old-format, one resolves, one orphan | **no rekey** — the real `da7cf1ab` class |
 | F-4 | old-format, neither resolves | **no rekey** |
-| F-5 | old-format, both resolve to the *same* principal | **no rekey** — degenerate, must not produce a self-DM ACL |
+| F-5 | old-format, both resolve to the *same* principal | **unverified — see OQ-E.** Assumed no rekey; behaviour to be read out of the code, not asserted from this table |
 | F-6 | empty `external_ref` | skip, stay keyless (B14) |
 | F-7 | already new-format | participant rebuild only, key byte-identical after |
-| F-8 | old-format, both resolve, **both users** | **no rekey** — unrepresentable, never a fabricated kind |
-| F-9 | old-format, both resolve, **both agents** | **no rekey** — unrepresentable, never a fabricated kind |
+| F-8 | old-format, both resolve, **both users** | rekey with true kinds; grant both; deny third party |
+| F-9 | old-format, both resolve, **both agents** | rekey with true kinds; grant both; deny third party |
 
 **F-8 and F-9 were missed in the first enumeration.** ca-mig-10's inventory surfaced an
 existing test for a principal resolving to *both* the users and agents tables, which showed
 the classification space is per-principal {user only, agent only, both, neither} — a 4×4
 grid, of which the original seven classes sampled only a corner.
 
-The two added rows are the dangerous corner. If the target format requires exactly one agent
-and one user, a same-kind pair resolves *successfully* on both principals yet cannot be
-expressed. The failure mode is not a crash: it is assigning kinds positionally or by
-fallback and emitting a syntactically valid key that names the wrong kind for one principal.
-That is a fabricated ACL, and it passes any check that only asks "did it rekey". Verify the
-parser's actual constraint before assuming this shape.
+I first classified these as must-NOT-repair, on the hypothesis that the target format
+requires exactly one agent and one user, so a same-kind pair would resolve successfully yet
+be unrepresentable — and the migration would fabricate a kind. **That hypothesis was wrong.**
+`DMConversationKey` and `ParseDMKey` validate each kind independently against `validDMKinds`
+(`dm_key.go:46-51`, `:159-164`) with no cross-check, `CheckDMParticipantKey` asserts no
+kind-distinctness, and `resolveKind` assigns *true* kinds. `dm:user:<min>:user:<max>` is
+valid and grants both principals. No fabrication hazard.
+
+**The classes stay anyway, because the finding relocated the risk rather than removing it.**
+A same-kind pair is ordered `dm:user:<min>:user:<max>` — by UUID. A mixed pair must be
+ordered by something else, presumably kind. So the canonical-ordering comparator has at
+least two branches, and **same-kind rows are the only inputs that reach the UUID-tiebreak
+branch**. No test reaches it today, and it decides the exact bytes of an ACL key. Two callers
+disagreeing about canonical order yield two different keys for one pair of principals, and a
+conversation one of them cannot open.
+
+Each therefore needs a reversed-input variant asserting a byte-identical key — F-2's property
+applied to the same-kind branch, which is the direct test of the comparator.
 
 This is stronger than the live-population test it replaces. A live instance would have handed
 us whichever classes it happened to contain — here that was exactly one, the unrepairable
-one. The classes that must **not** repair (F-3, F-4, F-5, F-8, F-9) are the security-relevant
+one. The classes that must **not** repair (F-3, F-4, F-5) are the security-relevant
 half.
 
 **But do not read the set as exhaustive.** The first draft of this section claimed it "covers
@@ -159,9 +171,14 @@ not — seed a message only where the test asserts something about that message.
 - **Never point a write at the retention snapshot.** Copy first; the snapshot is read-only
   forever.
 - Real principal UUIDs, synthetic message content. Report keys and IDs, never bodies.
+- **Where this table disagrees with the code, the code wins the test and the disagreement
+  gets reported.** These classes encode today's behaviour. Changing behaviour is a separate,
+  deliberate decision — never something introduced through a test assertion written to make
+  an expectation come true. F-8/F-9 were re-ruled on exactly this basis, and F-5 is pending
+  the same treatment.
 - **Authorization assertions must run against a real store, not a mock.** The counter,
   format and key-identity checks are fine against a mock. But every class that must *not*
-  repair — F-3, F-4, F-5, F-8, F-9 — additionally needs a sqlite-backed assertion that real
+  repair — F-3, F-4, F-5 — additionally needs a sqlite-backed assertion that real
   `isDMParticipant` denies both named principals afterwards, as must F-1's third-principal
   denial. An authorization assertion against a mock proves the mock behaves as written.
   This pattern already exists: the strong half of F-4's coverage is the integration test
@@ -386,6 +403,19 @@ depth of live exercise.
   run is attributable to the messaging migrations rather than to incidental schema drift.
 - **OQ-B.** Should the second instance keep its data after the test, as a standing
   pre-migration fixture for future tranches? Cheap to keep, expensive to reconstruct.
+- **OQ-D. Should same-kind DM keys be permitted at all?** Established 2026-09-02:
+  `DMConversationKey` and `ParseDMKey` validate each kind independently with no cross-check,
+  so `dm:user:<a>:user:<b>` and `dm:agent:<a>:agent:<b>` are legal, parse, and grant. This is
+  a product question, not a test question — if user↔user DMs are not a feature, the format
+  accepting them is latent permissiveness worth closing deliberately. **Not urgent and not
+  blocking:** the key is only an ACL for a conversation that already exists, so accepting the
+  shape grants nothing on its own. Tests must encode today's behaviour; if this changes, it
+  changes as a decision, not as a test assertion.
+- **OQ-E. Is a degenerate pair (both principals the same UUID) refused anywhere?** F-5
+  assumes it is. That assumption has not been checked against the code, and it is the same
+  species of assumption that F-8/F-9 just falsified. Ruling deferred to ca-mig-10's finding:
+  if the code rekeys it, that is the behaviour the test encodes and a finding to report — not
+  a refusal to be added so the table stays tidy.
 - **OQ-C.** OQ-6 (purging gteam's 5,637 orphans) is irreversible and ptone's. It is
   unaffected by this plan and should not be bundled into it.
 
