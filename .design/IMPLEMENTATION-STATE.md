@@ -33888,3 +33888,31 @@ Consider a `user:<token>` that resolves uniquely and works. A new, unrelated use
 This points the fix past the cardinality check toward the grammar itself: resolution should be by **identity** — exact id, exact email, exact handle — and any convenience matching should be a distinct, clearly-marked interactive affordance that never sits on a programmatic send path. That belongs in the addressing specification rather than in a patch, which is why I am holding the fix until ca-msg-addr's Q3 inventory lands rather than shipping the two-line `TotalCount` change on its own.
 
 **Rule 1032** — an identifier that resolves by fuzzy or partial match is not stable, because its meaning can be changed by the creation of an unrelated record. Fail-closed is the floor, not the fix; the fix is exact resolution.
+
+### CORRECTION: the incident was a misdelivery, not a coin flip
+
+**Superseded, retained because it was load-bearing:** above I wrote *"ptone: I did get the test3 on the gmail user account. So the resolver picked `b53249ea` and the intended recipient received it. The coin came up heads."* Also superseded: instance-investigator's and my description of `7581ea89` as *"a different user"*.
+
+ptone: *"On the two preston's I was actually logged in as the google.com one, not the gmail one — you've assumed which one I was logged in as."*
+
+**Both accounts are his.** He was acting as the google.com principal; the message arrived at the gmail one. I had labelled `b53249ea` "ptone's own account" — an inference, never checked — and then read his confirmation of receipt through that label. The confirmation was true and my reading of it was wrong.
+
+### What the correction changes
+
+**The severity goes up.** The resolver selected a principal *other than* the one the sender was acting as. It did not pick correctly and get lucky; it picked wrongly, and the destination happened to belong to the same human. Replace the newer row with any unrelated account and that send reaches a stranger. The `len(Items) == 1` defect now has an **observed instance** behind it rather than a hypothetical one.
+
+**And the contradiction probably never existed.** If the gmail account is the more recently created row, `ORDER BY created DESC` accounts for the outcome exactly and ca-msg-addr's first report was correct throughout. I sent two agents hunting an inconsistency that my own unchecked mapping manufactured. That is the real cost of the error — not the wrong conclusion, which was corrected in twenty minutes, but the agent-hours spent reconciling evidence that never disagreed.
+
+I have redirected both to **confirm by measurement rather than explain**, and deliberately withheld which id I now expect, so that neither is anchored to my conclusion the way I was anchored to my label.
+
+### Why this failed twice in one investigation
+
+This is the second inference-treated-as-fact in DEF-126 alone. The first was the claim that gteam's repairable population "was consumed at `e132380f`". Both share a shape: a plausible mapping was formed early, used as a premise, and never revisited when new evidence arrived that depended on it.
+
+Worth noting what did *not* catch it. Decomposing the match counts by rule (Rule 1026) was good practice and found the real matching behaviour — but it reported ids, and I attached identities to those ids from memory. The decomposition was rigorous downstream of an assumption that was never in the query.
+
+**Rule 1033** — an identifier is not an identity. When a finding is reported as an id, do not silently substitute who you believe that id belongs to; the mapping is itself a claim and needs its own evidence. If the mapping matters to the conclusion, ask for it explicitly and in the narrowest form that settles it.
+
+**Rule 1034** — when a human confirms an outcome, confirm *which* outcome. "I received it" answers a different question from "the right principal received it", and the gap between them is invisible if you have already decided which principal is theirs.
+
+**Rule 1035** — when correcting a premise you gave an agent, do not also hand them the conclusion you now expect. State that the premise changed, restate the measurement, and let them report. An agent told what the tidy answer would be is a poor instrument for deciding whether it is true.
