@@ -2521,6 +2521,8 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUser", Symbol: "DeleteUser", OperationID: "user.admin.suspend"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
+	{File: "pkg/hub/handlers_users_core.go", Function: "syncUserRoleBindings", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "D5 role-binding sync: creates the new role binding when User.Role changes; called only from updateUser which is route-guarded by user.update; uses SystemReconcileCreatedBy", Scope: "pkg/hub/handlers_users_core.go"}},
+	{File: "pkg/hub/handlers_users_core.go", Function: "syncUserRoleBindings", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "D5 role-binding sync: removes the stale role binding when User.Role changes; called only from updateUser which is route-guarded by user.update; uses SystemReconcileCreatedBy", Scope: "pkg/hub/handlers_users_core.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_agents_core.go — agent lifecycle
