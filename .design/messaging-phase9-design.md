@@ -71,20 +71,57 @@ Named explicitly because each has been mistaken for part of this work at least o
 connections and three content-addressed caches. **It has no database and no hub store.** It
 cannot resolve a conversation.
 
-### 3.2 What already crosses the wire
+### 3.2 Which broker this is
+
+Two different things in this codebase are called a broker, and the design depends on not
+confusing them.
+
+| | **runtime broker** (`pkg/runtimebroker`) | **message broker proxy** (`pkg/hub/messagebroker.go`) |
+|---|---|---|
+| What | the process on the agent host that owns tmux sessions and injects text into agents | hub-side bridge that subscribes to external channel topics (Discord/Slack/Telegram) on behalf of agents |
+| Where | separate process, reached over HTTP at `brokerEndpoint` | in the hub |
+| Store | **none** — `runtimebroker.Server` holds `manager`, `runtime`, hub connections, three caches | **yes** — `MessageBrokerProxy.store store.Store` |
+| Formats agent delivery? | **yes**, `handlers.go:1711` | no — it dispatches via `DispatchAgentMessage` |
+
+Everything below about "the broker cannot resolve a conversation" is about the **runtime
+broker**. `MessageBrokerProxy` has a store and is not affected by Phase 9.
+
+### 3.3 What already crosses the hub→runtime-broker wire
 
 `messages.StructuredMessage` (`pkg/messages/types.go:141`) **already carries
 `ConversationID string \`json:"conversation_id,omitempty"\``** — added by Phase 5's
-dual-write. The hub→broker request (`pkg/runtimebroker/types.go:484`) embeds the whole
-`StructuredMessage` as JSON, set at `pkg/hubclient/agents.go:527` and `:579`.
+dual-write.
 
-So the conversation **ID** reaches the broker today. `ConversationInfo` needs `kind`,
-`surface` and `name` as well, and those require a row lookup the broker cannot perform.
+There are **two** hub→runtime-broker transports, and both send the whole `StructuredMessage`
+as JSON:
+
+- `pkg/hub/broker_http_transport.go:326` — `brokerHTTPTransport.MessageAgent`, `POST
+  <brokerEndpoint>/api/v1/agents/<id>/message`
+- `pkg/hub/controlchannel_client.go:258` — `ControlChannelBrokerClient.MessageAgent`, same
+  path over the control channel
+
+Received at `pkg/runtimebroker/types.go:484` (`MessageRequest`), dispatched at
+`handlers.go:1279` → `sendMessage` → `FormatForDelivery` at `:1711`.
+
+**Both transports already have a pre-rendered-text fallback**: `reqBody["message"] = message`
+when `structuredMsg == nil`. So shipping rendered text to the runtime broker is not a new
+capability — the wire supports it today, and `sendMessage` already delivers `req.Message`
+verbatim when no structured message is present.
+
+So the conversation **ID** reaches the runtime broker today. `ConversationInfo` needs `kind`,
+`surface` and `name` as well, and those require a row lookup it cannot perform.
 
 There is **no `conversation_id` anywhere in `proto/`** — the gRPC surface is the external
 channel broker, not this path, so no proto change is implied.
 
-### 3.3 The delimiters do not change
+**Correction, recorded rather than silently fixed.** An earlier draft of this section cited
+`pkg/hubclient/agents.go:527` and `:579` as the hub→broker wire. Those are **CLI→hub**
+(`agentService.SendStructuredMessage`, posting to the hub's own
+`/api/v1/agents/<id>/message`), a different hop entirely. The conclusion was unaffected, but
+the citation was wrong and the wrong citation would have sent an implementer to the wrong
+file.
+
+### 3.4 The delimiters do not change
 
 `FormatNewDelivery` reuses byte-identical framing: `deliveryIntro`, `beginDelimiter`,
 `endDelimiter` are the same strings in `pkg/messages/format.go:22-24` and
@@ -120,7 +157,15 @@ The hub renders the envelope text and ships it; the broker delivers bytes.
                                       └─ delivery_text ──────► manager.Message ──► tmux
 ```
 
-`MessageRequest` gains one field:
+**This is a smaller change than it first appears**, because §3.3 established that both
+hub→runtime-broker transports already carry a pre-rendered-text field and `sendMessage`
+already delivers it verbatim. The obvious move — send `reqBody["message"]` instead of
+`reqBody["structured_message"]` — is *nearly* right and fails on one detail:
+`sendMessage` computes `isRaw := req.StructuredMessage != nil && req.StructuredMessage.Raw`,
+so dropping the structured message silently loses `Raw` and with it the send-keys path.
+
+Hence one new field rather than reuse of `message`, so that content and transport flags can
+travel together:
 
 ```go
 // DeliveryText is the fully rendered agent-facing envelope, produced by the
