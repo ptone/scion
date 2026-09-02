@@ -33247,3 +33247,23 @@ The subtler damage is to evidence rather than code. **A baseline run in a shared
 **Rule 993** — "stage only named files" is not hygiene, it is the containment boundary for concurrent agents. It is the cheapest instruction in a brief and the one whose absence is discovered last, because a contaminated commit looks exactly like a correct one until someone diffs it against what the agent said it changed.
 
 `ca-mig-8` retired. `ca-mig-7` (M7) still in flight; its branch is based on `d10ba2ace`, so it now needs a merge rather than a fast-forward — trivial, since M8 touched only `pkg/messaging/dm_migration*.go` and M7 touches `cmd/boot_data_migrations*.go` and `pkg/store/*`.
+
+### §5mp — M7 reviewed: the gate has a ceiling below the requirement (2026-09-02)
+
+M7 at `b0990a359`. Chose the consistency test over the shared predicate, and the argument is right: making the counter call `ListProjects` to build a SQL `IN (...)` clause would turn an O(1) anti-join into an O(N) query to buy a property a test asserts for free. Numstat reproduces, no contamination in either direction, and the merge onto post-M8 `tranche-g` is clean with M8's rename surviving. Their `ListProjects` mutation reproduces exactly as reported.
+
+**REQUIRED: the test detects an unconditional filter only if that filter excludes one of its own three seeded projects.** Their mutation excludes `def112-project-0` by name, so it lands. I added `query.Where(project.Not(project.NameHasPrefix("archived-")))` — unconditional, top of `ListProjects`, the precise "exclude archived projects from listings" shape we are actually guarding against — and the entire suite passed. The seeds are named `def112-project-N`, nothing trips the predicate, the sum is unchanged, the drift ships.
+
+The class of filters this gate catches is the class that happens to collide with the test's own naming scheme. Every realistic future filter keys on `archived`, `deleted_at`, visibility, or template status — attributes the seeds leave at defaults.
+
+**And it is not fixable by seeding more projects.** No data-driven test can detect a predicate that no row in the database violates, and you cannot anticipate which attribute a future filter will key on, so you cannot guarantee a seed that trips it. The approach has a hard ceiling and the requirement sits above it. Recognising that a technique *cannot* reach the goal matters more than the specific miss, because otherwise the fix is "seed more projects", which buys a little coverage and leaves the ceiling exactly where it was.
+
+Required a source-scan guard instead, following the `TestAdvisoryLockKeys_AllUnique` template at `pkg/store/concurrency_test.go:159`, which already reads its source file from disk. Per Rule 988 I verified a discriminator before demanding it: inside the `ListProjects` body, a `query.Where(` at one tab is unconditional while every legitimate one today sits at two or more inside an `if`/`switch`; current code yields zero matches, the `archived-` mutation yields one. gofmt guarantees the indentation. Told them to beat my heuristic if they can, and to keep the consistency test — it guards the broader property that the two notions of reachable agree *for any reason*, so the two together are stronger than either.
+
+**Their stated reason for running no further mutations is the root cause and I said so:** "the test has exactly one gate assertion and one hazard it guards." That reasoning verifies the gate catches *their mutation*; it never asks whether their mutation represents the hazard. When a phase exists to prevent a class of future edits, the mutation that matters is the edit you did not think of.
+
+**Rule 994** — a data-driven gate can only catch a violation that its fixture data provokes. Before accepting one, ask what a violation would look like if it keyed on an attribute the fixtures do not set — and if the answer is "invisible", the gate needs a structural companion, not a bigger fixture.
+
+**Rule 995** — "one assertion, one hazard, one mutation, caught" is a closed loop that never tests its own premise. The mutation is chosen by the same understanding that wrote the assertion, so it inherits every blind spot. An independent reviewer's job is to supply the mutation the author's model does not generate.
+
+**Rule 996** — run `scion` from `/workspace`. Twice now I have removed a `/tmp` worktree while standing in it and had the next `scion` call fail with "not in a scion project". Harmless, but the shell's cwd drift makes it recurrent.
