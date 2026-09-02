@@ -32264,3 +32264,63 @@ token generation, no mutation, acceptable — but it was a change to an approved
 without flagging it, and the investigator should have said so.
 
 Cleanup confirmed: test processes stopped, temp DB removed, live hub healthy on `45c440bd`.
+
+### §5lo — 9b and 9c must land as a pair; 9b alone regresses delivery. 2026-09-02
+
+Found by reading `pkg/messaging/render_delivery.go` at `ebdc069d` after `ca-msg-9c` reported that
+9b's actual shape differs from the brief I wrote. My brief predicted 9b would call
+`FormatLegacyAsNewDelivery`; it introduced a new `RenderDeliveryText` helper instead. 9c reported
+the discrepancy rather than bending its work to fit the brief, which is what surfaced this.
+
+**The good news first: 9b anticipated the fabrication problem.** `RenderDeliveryText` calls
+`MapLegacyEnvelope` (still the 1-arg fabricating form at its base) and then overrides
+`msg.ID = in.MessageID` and `msg.ReplyToID = nil`. So the phase does not push `legacy-<ts>` or a
+thread-ID-as-reply-target onto the wire. My initial concern that 9b activated a new path still
+carrying DEF-103 was wrong.
+
+**FINDING 1 — a live behavioural gap. This is the load-bearing one.**
+
+`render_delivery.go`'s doc comment states: *"When nil, the envelope omits the conversation key
+entirely (§4.3)."* **False at 9b's HEAD.** 9b never touches `delivery.go`, where the field remains
+
+```go
+Conversation ConversationInfo `json:"conversation"`
+```
+
+— a value type with no `omitempty`. With `ConvResult == nil`, `convInfo` is the zero struct, so the
+envelope emits `"conversation":{"id":"","kind":"","surface":""}`. Both nil-`ConvResult` callers are
+live paths: `broadcastDirect` and `processMentions`.
+
+An empty-string conversation ID is exactly the identifier-that-dereferences-to-nothing the design
+forbids, and it is worse than absence because it reads as present. The comment describes 9c's
+commit 2 behaviour, written while implementing 9b — a promise made against a change that had not
+landed.
+
+**Consequence, and the reason this is recorded here rather than as a code note: 9b MUST NOT be
+deployed to gteam alone.** Merging 9b to `tranche-g` is fine. A *deploy* taken between 9b and 9c
+would emit empty conversation objects on every broadcast and mention delivery. The two land as a
+pair before any gteam deploy. This is the first cross-tranche sequencing constraint in Phase 9
+where the intermediate state is worse than either endpoint.
+
+**FINDING 2 — internal inconsistency masked by the override pattern.**
+
+Inside `MapLegacyEnvelope`, `addrs := buildAddressees(old, msgID)` consumes the fabricated ID
+*before* 9b's post-hoc override of `msg.ID` runs. So the helper returns a `msg` carrying the real
+persisted ID alongside `addrs` carrying `legacy-<ts>`. No wire impact today, because
+`FormatNewDelivery` collapses addressees to bare principal refs and discards their `MessageID`.
+But the returned pair disagrees about message identity, and it becomes a defect the moment anything
+persists those addressees.
+
+Structural, not cosmetic: passing `PersistedIdentity` **into** `MapLegacyEnvelope` fixes it because
+the real ID reaches `buildAddressees` before it runs. Overriding after the fact cannot, and the
+override also masks any future regression in the mapper. 9c's commit 4 deletes both override lines
+rather than leaving them redundant.
+
+**Process note.** Neither agent flagged either finding, and both are downstream of a correct local
+decision — 9b's override was a sensible way to avoid depending on an unlanded signature change. The
+gap appeared only when the two branches were read against each other. Where two agents work a seam
+in parallel, the intermediate state is nobody's assigned scope and has to be read deliberately.
+
+**Also unblocked 9c:** it is rebasing onto the 9b *branch* (`ebdc069d`) rather than waiting for 9b
+to reach `tranche-g`, since 9b is still in review. If review forces changes to 9b, 9c re-rebases —
+cheap, and much cheaper than serialising the two.
