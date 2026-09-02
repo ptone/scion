@@ -66,9 +66,11 @@ type listRoleDefinitionsResponse struct {
 // RoleBindingInfo is a role binding enriched with human-friendly display info.
 type RoleBindingInfo struct {
 	store.RoleBinding
+	RoleName             string `json:"roleName,omitempty"`
 	PrincipalDisplayName string `json:"principalDisplayName,omitempty"`
 	ScopeDisplayName     string `json:"scopeDisplayName,omitempty"`
 	CreatedByDisplayName string `json:"createdByDisplayName,omitempty"`
+	Source               string `json:"source"` // "direct" or group slug for group-derived bindings
 }
 
 // listRoleBindingsResponse wraps the list result for the API.
@@ -244,13 +246,24 @@ var builtInApplicabilityMap = func() map[string][]string {
 	return m
 }()
 
+// allPrincipalTypes is the exhaustive set of principal types for custom roles
+// that have no explicit applicability restriction. Using an explicit list
+// avoids nil/empty ambiguity for frontends that fail-closed on missing values.
+var allPrincipalTypes = []string{
+	store.RoleBindingPrincipalUser,
+	store.RoleBindingPrincipalAgent,
+	store.RoleBindingPrincipalGroup,
+}
+
 // enrichRoleDefinitionsApplicability sets the ApplicableTo field on role
-// definitions from the authoritative seed data. Custom roles get all
-// principal types by default (fail-open for custom roles).
+// definitions from the authoritative seed data. Custom roles get the full
+// principal type set (no nil ambiguity).
 func enrichRoleDefinitionsApplicability(defs []*store.RoleDefinition) {
 	for _, def := range defs {
 		if applicableTo, ok := builtInApplicabilityMap[def.Name]; ok {
 			def.ApplicableTo = applicableTo
+		} else if len(def.ApplicableTo) == 0 {
+			def.ApplicableTo = allPrincipalTypes
 		}
 	}
 }
@@ -266,8 +279,11 @@ func (s *Server) getRoleDefinition(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 	// D6: Enrich single role definition with applicability metadata.
+	// Custom roles get all principal types to avoid nil ambiguity.
 	if applicableTo, ok := builtInApplicabilityMap[def.Name]; ok {
 		def.ApplicableTo = applicableTo
+	} else if len(def.ApplicableTo) == 0 {
+		def.ApplicableTo = allPrincipalTypes
 	}
 	writeJSON(w, http.StatusOK, def)
 }
@@ -441,11 +457,67 @@ func (s *Server) deleteRoleDefinition(w http.ResponseWriter, r *http.Request, id
 // CRUD: Role Bindings
 // ---------------------------------------------------------------------------
 
+// knownBindingFilterParams is the set of recognised query parameter names for
+// role-binding filtering. Any query parameter not in this set and not a
+// pagination param triggers a fail-closed 400 response.
+var knownBindingFilterParams = map[string]bool{
+	"roleDefinitionId": true,
+	"principalType":    true,
+	"principalId":      true,
+	"scopeType":        true,
+	"scopeId":          true,
+	"limit":            true,
+	"offset":           true,
+}
+
 func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// Fail-closed: reject any unknown query parameter so clients cannot
+	// silently ignore a typo and receive unfiltered global data.
+	for param := range r.URL.Query() {
+		if !knownBindingFilterParams[param] {
+			BadRequest(w, fmt.Sprintf("unknown query parameter: %s", param))
+			return
+		}
+	}
+
 	limit, offset := parsePaginationParams(r)
 
-	bindings, err := s.store.ListAllRoleBindings(ctx, limit, offset)
+	// Parse filter parameters.
+	filter := store.RoleBindingFilter{
+		RoleDefinitionID: r.URL.Query().Get("roleDefinitionId"),
+		PrincipalType:    r.URL.Query().Get("principalType"),
+		PrincipalID:      r.URL.Query().Get("principalId"),
+		ScopeType:        r.URL.Query().Get("scopeType"),
+		ScopeID:          r.URL.Query().Get("scopeId"),
+	}
+
+	// Validate filter combinations.
+	if filter.PrincipalID != "" && filter.PrincipalType == "" {
+		BadRequest(w, "principalType is required when principalId is specified")
+		return
+	}
+	if filter.ScopeID != "" && filter.ScopeType == "" {
+		BadRequest(w, "scopeType is required when scopeId is specified")
+		return
+	}
+	if filter.PrincipalType != "" {
+		if filter.PrincipalType != store.RoleBindingPrincipalUser &&
+			filter.PrincipalType != store.RoleBindingPrincipalAgent &&
+			filter.PrincipalType != store.RoleBindingPrincipalGroup {
+			BadRequest(w, fmt.Sprintf("invalid principalType: %s", filter.PrincipalType))
+			return
+		}
+	}
+	if filter.ScopeType != "" {
+		if filter.ScopeType != store.RoleScopeSystem && filter.ScopeType != store.RoleScopeProject {
+			BadRequest(w, fmt.Sprintf("invalid scopeType: %s", filter.ScopeType))
+			return
+		}
+	}
+
+	bindings, err := s.store.ListRoleBindingsFiltered(ctx, filter, limit, offset)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -454,13 +526,27 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 		bindings = []*store.RoleBinding{}
 	}
 
-	total, err := s.store.CountAllRoleBindings(ctx)
+	total, err := s.store.CountRoleBindingsFiltered(ctx, filter)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	// Enrich bindings with human-friendly display names.
+	// Build a role-name cache to avoid N+1 lookups.
+	roleNameCache := make(map[string]string)
+	for _, b := range bindings {
+		if b != nil && b.RoleDefinitionID != "" {
+			roleNameCache[b.RoleDefinitionID] = "" // placeholder
+		}
+	}
+	for rdID := range roleNameCache {
+		rd, err := s.store.GetRoleDefinition(ctx, rdID)
+		if err == nil && rd != nil {
+			roleNameCache[rdID] = rd.Name
+		}
+	}
+
+	// Enrich bindings with human-friendly display names, role name, and source.
 	enriched := make([]RoleBindingInfo, 0, len(bindings))
 	for i, b := range bindings {
 		if b == nil {
@@ -468,6 +554,8 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		info := RoleBindingInfo{RoleBinding: *b}
+		info.RoleName = roleNameCache[b.RoleDefinitionID]
+		info.Source = "direct" // Default; group-derived expansion is future work
 		info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
 		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
 		if b.ScopeType == store.RoleScopeProject && b.ScopeID != "" {
@@ -769,6 +857,20 @@ func (s *Server) listBindingsForUser(w http.ResponseWriter, r *http.Request, use
 		bindings = []*store.RoleBinding{}
 	}
 
+	// Build role-name cache.
+	roleNameCache := make(map[string]string)
+	for _, b := range bindings {
+		if b != nil && b.RoleDefinitionID != "" {
+			roleNameCache[b.RoleDefinitionID] = ""
+		}
+	}
+	for rdID := range roleNameCache {
+		rd, err := s.store.GetRoleDefinition(ctx, rdID)
+		if err == nil && rd != nil {
+			roleNameCache[rdID] = rd.Name
+		}
+	}
+
 	// Enrich bindings with human-friendly display names.
 	enriched := make([]RoleBindingInfo, 0, len(bindings))
 	for i, b := range bindings {
@@ -777,6 +879,8 @@ func (s *Server) listBindingsForUser(w http.ResponseWriter, r *http.Request, use
 			continue
 		}
 		info := RoleBindingInfo{RoleBinding: *b}
+		info.RoleName = roleNameCache[b.RoleDefinitionID]
+		info.Source = "direct"
 		info.PrincipalDisplayName = s.resolveGroupMemberDisplayName(ctx, b.PrincipalType, b.PrincipalID)
 		info.CreatedByDisplayName = s.resolveGroupMemberDisplayName(ctx, store.GroupMemberTypeUser, b.CreatedBy)
 		if b.ScopeType == store.RoleScopeProject && b.ScopeID != "" {

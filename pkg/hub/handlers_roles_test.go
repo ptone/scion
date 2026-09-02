@@ -1302,6 +1302,14 @@ func TestRolesAPI_CreateRoleBinding_CustomRoleNoApplicabilityCheck(t *testing.T)
 		ScopeType:        "system",
 	})
 	assert.Equal(t, "agent", binding.PrincipalType)
+
+	// Verify custom role returns full applicableTo set (R2 contract: no nil ambiguity).
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/"+role.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var def store.RoleDefinition
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &def))
+	assert.Equal(t, []string{"user", "agent", "group"}, def.ApplicableTo,
+		"custom roles should return all principal types (no nil ambiguity)")
 }
 
 func TestRolesAPI_ListRoleDefinitions_IncludesApplicableTo(t *testing.T) {
@@ -1339,4 +1347,225 @@ func TestRolesAPI_GetRoleDefinition_IncludesApplicableTo(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &def))
 	assert.Equal(t, []string{"agent"}, def.ApplicableTo,
 		"single role definition response should include applicableTo")
+}
+
+// ---------------------------------------------------------------------------
+// Server-side binding filters, roleName enrichment, source/provenance
+// ---------------------------------------------------------------------------
+
+func TestRolesAPI_ListRoleBindings_FilterByRoleDefinitionId(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("filter-rd-user")
+	seedRolesTestUser(t, s, userID, "filter-rd@test.local")
+
+	roleA := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "filter-role-a", ScopeType: "system", Permissions: []string{"agent.read"},
+	})
+	roleB := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "filter-role-b", ScopeType: "system", Permissions: []string{"agent.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleA.ID, PrincipalType: "user", PrincipalID: userID, ScopeType: "system",
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleB.ID, PrincipalType: "user", PrincipalID: userID, ScopeType: "system",
+	})
+
+	// Filter by roleA — should include only roleA bindings.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?roleDefinitionId="+roleA.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, 1, resp.TotalCount)
+	require.Len(t, resp.Items, 1)
+	assert.Equal(t, roleA.ID, resp.Items[0].RoleDefinitionID)
+}
+
+func TestRolesAPI_ListRoleBindings_FilterByPrincipal(t *testing.T) {
+	srv, s := testServer(t)
+
+	userA := tid("filter-pa-user-a")
+	userB := tid("filter-pa-user-b")
+	seedRolesTestUser(t, s, userA, "filter-pa-a@test.local")
+	seedRolesTestUser(t, s, userB, "filter-pa-b@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "filter-principal-role", ScopeType: "system", Permissions: []string{"agent.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID, PrincipalType: "user", PrincipalID: userA, ScopeType: "system",
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID, PrincipalType: "user", PrincipalID: userB, ScopeType: "system",
+	})
+
+	// Filter by userA
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?principalType=user&principalId="+userA, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	for _, item := range resp.Items {
+		assert.Equal(t, userA, item.PrincipalID, "filtered result should only contain userA bindings")
+	}
+}
+
+func TestRolesAPI_ListRoleBindings_FilterByScopeType(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Seeded roles create system-scoped bindings. Filter to system only.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?scopeType=system", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	for _, item := range resp.Items {
+		assert.Equal(t, "system", item.ScopeType)
+	}
+}
+
+func TestRolesAPI_ListRoleBindings_UnknownFilterParam_Returns400(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?bogusParam=foo", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "unknown query parameter")
+}
+
+func TestRolesAPI_ListRoleBindings_PrincipalIdWithoutType_Returns400(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?principalId=some-id", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "principalType is required")
+}
+
+func TestRolesAPI_ListRoleBindings_InvalidPrincipalType_Returns400(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?principalType=robot", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid principalType")
+}
+
+func TestRolesAPI_ListRoleBindings_InvalidScopeType_Returns400(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?scopeType=universe", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid scopeType")
+}
+
+func TestRolesAPI_ListRoleBindings_RoleNameEnrichment(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("enrich-rn-user")
+	seedRolesTestUser(t, s, userID, "enrich-rn@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "enrichment-test-role", ScopeType: "system", Permissions: []string{"agent.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID, PrincipalType: "user", PrincipalID: userID, ScopeType: "system",
+	})
+
+	// List with filter to isolate our binding.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?roleDefinitionId="+role.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Items, 1)
+	assert.Equal(t, "enrichment-test-role", resp.Items[0].RoleName,
+		"response should include human-readable roleName")
+}
+
+func TestRolesAPI_ListRoleBindings_SourceFieldDirect(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("source-direct-user")
+	seedRolesTestUser(t, s, userID, "source-direct@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "source-test-role", ScopeType: "system", Permissions: []string{"agent.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID, PrincipalType: "user", PrincipalID: userID, ScopeType: "system",
+	})
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?roleDefinitionId="+role.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Items, 1)
+	assert.Equal(t, "direct", resp.Items[0].Source,
+		"directly created bindings should have source='direct'")
+}
+
+func TestRolesAPI_ListRoleBindings_TotalCountReflectsFilter(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("filter-count-user")
+	seedRolesTestUser(t, s, userID, "filter-count@test.local")
+
+	roleA := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "count-role-a", ScopeType: "system", Permissions: []string{"agent.read"},
+	})
+	roleB := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "count-role-b", ScopeType: "system", Permissions: []string{"agent.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleA.ID, PrincipalType: "user", PrincipalID: userID, ScopeType: "system",
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: roleB.ID, PrincipalType: "user", PrincipalID: userID, ScopeType: "system",
+	})
+
+	// Unfiltered count should be >= 2
+	recAll := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings", nil)
+	require.Equal(t, http.StatusOK, recAll.Code)
+	var respAll listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(recAll.Body).Decode(&respAll))
+
+	// Filtered count for roleA should be exactly 1
+	recA := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings?roleDefinitionId="+roleA.ID, nil)
+	require.Equal(t, http.StatusOK, recA.Code)
+	var respA listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(recA.Body).Decode(&respA))
+
+	assert.Equal(t, 1, respA.TotalCount, "filtered totalCount should reflect only matched bindings")
+	assert.Greater(t, respAll.TotalCount, respA.TotalCount, "unfiltered count should be higher than filtered")
+}
+
+func TestRolesAPI_ListBindingsForUser_IncludesRoleName(t *testing.T) {
+	srv, s := testServer(t)
+
+	userID := tid("user-bind-rn")
+	seedRolesTestUser(t, s, userID, "user-bind-rn@test.local")
+
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name: "user-bindings-rn-role", ScopeType: "system", Permissions: []string{"agent.read"},
+	})
+	createBindingViaAPI(t, srv, createRoleBindingRequest{
+		RoleDefinitionID: role.ID, PrincipalType: "user", PrincipalID: userID, ScopeType: "system",
+	})
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/role-bindings/user/"+userID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp listRoleBindingsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	var found bool
+	for _, item := range resp.Items {
+		if item.RoleDefinitionID == role.ID {
+			found = true
+			assert.Equal(t, "user-bindings-rn-role", item.RoleName)
+			assert.Equal(t, "direct", item.Source)
+		}
+	}
+	assert.True(t, found, "binding with our role should be in user bindings")
 }

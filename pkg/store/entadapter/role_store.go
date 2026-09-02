@@ -287,6 +287,68 @@ func (r *RoleStore) CountAllRoleBindings(ctx context.Context) (int, error) {
 	return r.client.RoleBinding.Query().Count(ctx)
 }
 
+// roleBindingFilterPredicates builds Ent predicates from a RoleBindingFilter.
+func roleBindingFilterPredicates(f store.RoleBindingFilter) []predicate.RoleBinding {
+	var preds []predicate.RoleBinding
+	if f.RoleDefinitionID != "" {
+		uid, err := uuid.Parse(f.RoleDefinitionID)
+		if err == nil {
+			preds = append(preds, rolebinding.RoleDefinitionIDEQ(uid))
+		}
+	}
+	if f.PrincipalType != "" {
+		preds = append(preds, rolebinding.PrincipalTypeEQ(rolebinding.PrincipalType(f.PrincipalType)))
+	}
+	if f.PrincipalID != "" {
+		preds = append(preds, rolebinding.PrincipalIDEQ(f.PrincipalID))
+	}
+	if f.ScopeType != "" {
+		preds = append(preds, rolebinding.ScopeTypeEQ(rolebinding.ScopeType(f.ScopeType)))
+	}
+	if f.ScopeID != "" {
+		preds = append(preds, rolebinding.ScopeIDEQ(f.ScopeID))
+	}
+	return preds
+}
+
+// ListRoleBindingsFiltered returns role bindings matching the given filter,
+// with pagination. When filter.IsEmpty(), behaves like ListAllRoleBindings.
+func (r *RoleStore) ListRoleBindingsFiltered(ctx context.Context, filter store.RoleBindingFilter, limit, offset int) ([]*store.RoleBinding, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	q := r.client.RoleBinding.Query().
+		Where(roleBindingFilterPredicates(filter)...).
+		Order(ent.Desc(rolebinding.FieldCreated)).
+		Limit(limit).
+		Offset(offset)
+
+	rbs, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	result := make([]*store.RoleBinding, len(rbs))
+	for i, rb := range rbs {
+		result[i] = entRoleBindingToStore(rb)
+	}
+	return result, nil
+}
+
+// CountRoleBindingsFiltered returns the count of role bindings matching
+// the given filter.
+func (r *RoleStore) CountRoleBindingsFiltered(ctx context.Context, filter store.RoleBindingFilter) (int, error) {
+	return r.client.RoleBinding.Query().
+		Where(roleBindingFilterPredicates(filter)...).
+		Count(ctx)
+}
+
 // GetRoleBinding retrieves a role binding by ID.
 func (r *RoleStore) GetRoleBinding(ctx context.Context, id string) (*store.RoleBinding, error) {
 	uid, err := parseGetID(id)

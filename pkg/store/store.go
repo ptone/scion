@@ -1795,6 +1795,15 @@ type RoleStore interface {
 	// CountAllRoleBindings returns the total number of role bindings.
 	CountAllRoleBindings(ctx context.Context) (int, error)
 
+	// ListRoleBindingsFiltered returns role bindings matching the given
+	// filter, with pagination. When filter.IsEmpty(), behaves like
+	// ListAllRoleBindings.
+	ListRoleBindingsFiltered(ctx context.Context, filter RoleBindingFilter, limit, offset int) ([]*RoleBinding, error)
+
+	// CountRoleBindingsFiltered returns the count of role bindings matching
+	// the given filter.
+	CountRoleBindingsFiltered(ctx context.Context, filter RoleBindingFilter) (int, error)
+
 	// GetProjectMembership returns the project membership for a user in a project.
 	// Returns ErrNotFound if the user is not a member of the project.
 	GetProjectMembership(ctx context.Context, projectID, userID string) (*ProjectMembership, error)

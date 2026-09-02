@@ -2456,6 +2456,23 @@ type RoleBinding struct {
 	CreatedAt        time.Time  `json:"createdAt"`
 }
 
+// RoleBindingFilter specifies optional server-side filters for listing
+// role bindings. All fields are optional; when set, only bindings matching
+// ALL specified filters are returned (AND semantics). Unrecognized filter
+// names must be rejected at the handler layer (fail-closed).
+type RoleBindingFilter struct {
+	RoleDefinitionID string // exact match on role_definition_id
+	PrincipalType    string // exact match on principal_type (user, agent, group)
+	PrincipalID      string // exact match on principal_id (requires PrincipalType)
+	ScopeType        string // exact match on scope_type (system, project)
+	ScopeID          string // exact match on scope_id (requires ScopeType=project)
+}
+
+// IsEmpty returns true when no filter fields are set.
+func (f RoleBindingFilter) IsEmpty() bool {
+	return f.RoleDefinitionID == "" && f.PrincipalType == "" && f.PrincipalID == "" && f.ScopeType == "" && f.ScopeID == ""
+}
+
 // ProjectMembership is a convenience view of role bindings scoped to a project.
 // It is NOT a separate table -- project membership IS role bindings with scope_type="project".
 // This type is used only for query results and API compatibility.
