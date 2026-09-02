@@ -32619,3 +32619,71 @@ that no migration ran and no settings row was minted or modified (the `messaging
 particular), and the first minute of ERROR lines. Read-only DB access throughout, never dumping the
 `hub_settings` value column. Standing instruction repeated that any deviation from the approved
 procedure is flagged, not merely reflected in a quoted command line.
+
+### §5lt — Phase 9 closing evidence: end-to-end envelope observation on gteam
+
+Phase 9 runtime cutover is complete, deployed to gteam at `e132380f`, and handed
+to ptone for concurrence testing on 2026-09-02.
+
+The handoff was held for one end-to-end observation. The deploy report's check 2
+(`{"conversation_envelope_switch":true}`) proves only that the getter returns
+true; it does not prove any delivery path acts on it. Per Rule 928, a green gate
+which cannot see the behaviour is not evidence.
+
+**Observed envelope**, read out of the receiving agent's own session JSONL — the
+agent's actual view, not a hub-side reconstruction:
+
+```
+---BEGIN SCION MESSAGE---
+{
+  "timestamp": "2026-09-02T05:02:59Z",
+  "conversation": {
+    "id": "764af9a2-589f-4760-bc26-8c4dcbadbbd7",
+    "kind": "direct",
+    "surface": "native"
+  },
+  "from": "user:a0000000-0000-0000-0000-000000000001",
+  "to": ["agent:991ad46e-7e5f-4eba-bc25-be27ab7ca63e"],
+  "kind": "text",
+  "intent": "request",
+  "msg": "<redacted>",
+  "visibility": "normal"
+}
+---END SCION MESSAGE---
+```
+
+No `sender`, `recipients`, `channel` or `thread_id`. Hard cutover on field names
+(Q2) confirmed in production shape. `participants` absent (Q3).
+
+**Dereference check.** The design's success criterion is not that the envelope
+carries a conversation id, but that the id resolves. Read-only query against the
+live DB returned:
+
+```
+id            764af9a2-589f-4760-bc26-8c4dcbadbbd7
+kind          direct
+surface       native
+external_ref  dm:agent:991ad46e-...:user:a0000000-...
+```
+
+Three findings:
+
+1. The row exists — the identifier dereferences.
+2. `kind` and `surface` **match** the envelope rather than merely being
+   non-empty. This is the sharper half of the DEF-107 check and was under-stated
+   in the first verification request. DEF-107 was fields present-but-empty; the
+   fix populates them from the conversation row. Present-and-wrong would have
+   looked identical to correct from the envelope alone, while meaning the values
+   were sourced from somewhere other than the row. → Rule 959.
+3. `external_ref` is a well-formed DM key, so the chat endpoint is not minting
+   keyless `direct` rows. gteam's DEF-29 count is unchanged at 1.
+
+The scratch conversation and its message row were deliberately **not** cleaned
+up: a DM row with known provenance is worth more than a tidy table, and deleting
+rows to tidy up is how reproductions get lost. The scratch *agent*
+(`envelope-test-scratch`, `991ad46e`) was deleted; agent count back to 27.
+
+**Rule 959** — a field that is populated is not thereby correct. Where a fix
+replaces empty values with sourced ones, the test must compare against the
+source, not against emptiness; present-and-wrong is worse than present-and-empty
+because nothing looks broken.
