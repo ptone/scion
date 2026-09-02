@@ -34070,3 +34070,34 @@ All 8 messages are ptone's own traffic between his own two accounts, so the real
 ### Dispatched
 
 `ca-msg-misfile`, single question: **what write path attributes a direct message to a group conversation?** Hypothesis offered explicitly to be falsified — a resolution failure falling back to a project-default conversation, which would be a fallback of exactly the kind G3 was meant to have removed. Note that shadow-check (A) reports **0 fallbacks** in 24h, which is evidence against that hypothesis and which I have deliberately not shown them, to avoid steering the answer (Rule 1035).
+
+### DEF-129: reachability confirmed — this is a live disclosure
+
+The gate is cleared, and it cleared the wrong way.
+
+| Conversation | Topic | Name | `is_general` |
+|---|---|---|---|
+| `6ef436bd` | `f1b450c9` | `general` | **1** |
+| `dbd35ed2` | `815deddb` | `new-thread` | 0 |
+
+`is_general=1` is the project's default channel — shown to every member, and per instance-investigator it **cannot be hidden or unsubscribed**. So the 3 misfiled DMs sit in the first thing anyone opens. The other 5 are in a named sidebar channel. **All 8 are presently readable by any member of project `a3083e98` through the standard UI.** No unusual path, no crafted request.
+
+**And the container class is universal: 40 of 40 empty shells have an active topic** (`deleted_at IS NULL`), 39 of them `is_general=1`. Zero are inert. Every project on the hub has a participant-less, empty-`external_ref` group conversation serving as its live general channel.
+
+That is the finding that outlives this incident. The seeded rows are not dormant artefacts to be cleaned up at leisure — they are **live, reachable containers, one per project**, and the misfiling condition is not project-specific. Only `a3083e98` has misfiled content today because that is where the traffic was.
+
+### How I am handling it
+
+Escalated to ptone as a live disclosure with a recommendation, and I recommended **against** emergency containment. The reasoning, recorded so it can be judged rather than assumed:
+
+- Every one of the 8 messages is ptone's own traffic between his own two accounts. The realised exposure is bounded to his content.
+- **Repair before the write-path fix is worse than no repair.** The last misfiling was 18:59 today; corrected rows would simply be refilled, and we would have spent our one clean before-state.
+- The data as it stands is evidence. instance-investigator is instructed not to remediate — no updates, no moving rows, no hiding topics.
+
+I said explicitly that had the exposed content belonged to another user I would be asking him to take the channel down now, and invited him to overrule me. **The recommendation depends on a fact I do not yet have** — the human member count of `a3083e98`, requested as counts and ids only. If there are third parties in that project, other people can presently read his DMs, and the recommendation changes.
+
+**Rule 1041** — when recommending against containment, state the fact the recommendation depends on and what would reverse it. A recommendation whose premise is unstated cannot be overruled by someone who knows better.
+
+### The ordering principle, restated because it will be under pressure
+
+Fix order is: write path → then data repair → then the read-path verification gap. Repairing visible bad rows first is the tempting move because it makes the symptom disappear from the UI, and it is the wrong one. **The exposure is not the 8 rows; it is the mechanism that produced them and the read path that trusts them.**
