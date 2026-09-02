@@ -33856,3 +33856,35 @@ Intended shape, subject to the investigation:
 The discriminator is the load-bearing unknown: whether "are there any messages under `Channel:"web"`, `ThreadID:key`" can be asked cheaply, and whether an index covers it. If it cannot, the design changes, and I would rather learn that before writing it than after. Dispatched to `ca-msg-blank` as an investigation, explicitly forbidden from applying a fix.
 
 **Rule 1030** — a control that fires on the common benign case has already been removed; it is just still in the source. Conflating an expected state with the anomaly an alarm was built for is a way of deleting the alarm without editing it.
+
+### DEF-126: the structural defect, confirmed by quoted path
+
+ca-msg-addr traced the truncation and the reading holds. Seven steps, each with a line:
+
+1. caller passes `Limit: 1` — `handlers_agent_messaging.go:155`
+2. store sets `limit = 1` — `user_store.go:290`
+3. SQL issues `Limit(limit+1)` = `LIMIT 2` — `user_store.go:323`; the `+1` is `hasMore` detection
+4. up to 2 rows are fetched into `items` — `user_store.go:321-328`
+5. `result.Items = items` — `user_store.go:336`, still up to 2
+6. **truncation**: `if len(items) > limit { result.Items = items[:1] }` — `user_store.go:339-340`
+7. caller checks `len(result.Items) == 1` — `handler:156`, which is **always true whenever there is at least one match**
+
+So the guard is confirmed structurally incapable of observing a collision. My earlier doubt — that the `LIMIT 2` might leave both rows visible to the caller and rescue the check — is answered: the store trims before returning.
+
+**The sharpest detail is step 6 against `TotalCount`.** `TotalCount` is set at `user_store.go:337` from the pre-`LIMIT` count computed at `:285`. The correct answer is therefore already computed, already returned, and sitting in the same struct the caller is holding — and the caller inspects the one field that has been deliberately truncated instead of the one field that was deliberately not. Nothing needs to be measured to fix this; something needs to be *read*.
+
+This is worth naming because of how it will look in review. A `+1`-and-trim pagination helper is a good pattern, and `len(Items) == 1` reads like a uniqueness check to anyone skimming. The defect is invisible at the call site and only appears when the store's trimming contract is held in mind at the same time. It is not a careless line.
+
+**Rule 1031** — a limit and a cardinality check must never be written by two different authors at two different layers. If a caller needs to know "how many matched", the store must answer that question in a field the limit cannot touch, and the caller must be made to ask for it by name.
+
+### The deeper problem: substring matching makes an address unstable
+
+Confirmed mechanism: the resolver does a **case-insensitive substring match over email and display name**. Fixing the cardinality check alone would make `user:preston` fail closed today, which is necessary but is not the whole defect.
+
+Consider a `user:<token>` that resolves uniquely and works. A new, unrelated user joins the hub whose display name or email happens to contain that substring. The token now matches two rows. Under the fixed behaviour the previously working command starts erroring; under the current behaviour it may silently start delivering somewhere else.
+
+**An address whose meaning depends on the rest of the population is not an address.** Nobody edited the sender, the recipient, or the command; a third party's account creation changed what it means. That is not a property any addressing scheme should have, and it is not repaired by failing closed — failing closed only converts silent misdelivery into an outage that arrives with no proximate cause and no obvious owner.
+
+This points the fix past the cardinality check toward the grammar itself: resolution should be by **identity** — exact id, exact email, exact handle — and any convenience matching should be a distinct, clearly-marked interactive affordance that never sits on a programmatic send path. That belongs in the addressing specification rather than in a patch, which is why I am holding the fix until ca-msg-addr's Q3 inventory lands rather than shipping the two-line `TotalCount` change on its own.
+
+**Rule 1032** — an identifier that resolves by fuzzy or partial match is not stable, because its meaning can be changed by the creation of an unrelated record. Fail-closed is the floor, not the fix; the fix is exact resolution.
