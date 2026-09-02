@@ -98,3 +98,112 @@ func TestDeleteUser_CascadesSkillInjections(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, otherList, 1, "other user's skill injections should be unaffected")
 }
+
+// TestUpdateUser_RoleDemotion_RemovesSuperAdminBinding verifies that changing
+// a user's role from "admin" to "viewer" deletes the super-admin role binding,
+// preventing the user from retaining all permissions (D5 fix).
+func TestUpdateUser_RoleDemotion_RemovesSuperAdminBinding(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	userID := tid("demote-user")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "demote@example.com", DisplayName: "Demote User",
+		Role: "admin", Status: "active",
+	}))
+
+	// Seed a super-admin binding (like startup backfill would create).
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemBackfillCreatedBy,
+	})
+	require.NoError(t, err)
+
+	// Verify the super-admin binding exists.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	hasSuperAdmin := false
+	for _, b := range bindings {
+		if b.RoleDefinitionID == superAdminRD.ID {
+			hasSuperAdmin = true
+			break
+		}
+	}
+	require.True(t, hasSuperAdmin, "super-admin binding should exist before demotion")
+
+	// Demote user to viewer.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+userID, map[string]string{
+		"role": "viewer",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "update should succeed: %s", rec.Body.String())
+
+	// Verify the super-admin binding is gone.
+	bindings, err = s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.RoleDefinitionID == superAdminRD.ID {
+			t.Fatal("super-admin binding should be deleted after demotion to viewer")
+		}
+	}
+
+	// Verify a viewer binding was created.
+	viewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	hasViewer := false
+	for _, b := range bindings {
+		if b.RoleDefinitionID == viewerRD.ID {
+			hasViewer = true
+			break
+		}
+	}
+	assert.True(t, hasViewer, "viewer binding should be created after demotion")
+}
+
+// TestUpdateUser_ViewerCannotCreateProject verifies that after demotion from
+// admin to viewer, the user can no longer create projects.
+func TestUpdateUser_ViewerCannotCreateProject(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	userID := tid("viewer-no-proj")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: "viewer-noproj@example.com", DisplayName: "Viewer User",
+		Role: "admin", Status: "active",
+	}))
+
+	// Seed super-admin binding (like startup backfill would create).
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: superAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemBackfillCreatedBy,
+	})
+	require.NoError(t, err)
+
+	// Demote to viewer.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+userID, map[string]string{
+		"role": "viewer",
+	})
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Now verify authorization: viewer should NOT have project.create.
+	if srv.authzService != nil {
+		user := NewAuthenticatedUser(userID, "viewer-noproj@example.com", "Viewer User", "viewer", "api")
+		decision := srv.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(user),
+			Credential: credentialContextForIdentity(user),
+			Resource:   Resource{Type: "project"},
+			Action:     ActionCreate,
+			Permission: "project.create",
+		})
+		assert.False(t, decision.Allowed, "viewer should not have project.create permission")
+	}
+}

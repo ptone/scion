@@ -15,6 +15,8 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -168,6 +170,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	if updates.DisplayName != "" {
 		user.DisplayName = updates.DisplayName
 	}
+	previousRole := user.Role
 	if updates.Role != "" {
 		user.Role = updates.Role
 	}
@@ -181,6 +184,14 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	if err := s.store.UpdateUser(ctx, user); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Synchronize role bindings when the user's role changes to ensure
+	// the binding set stays consistent with the User.Role field.
+	// D5-fix: prevents a viewer-role user from retaining a super-admin
+	// binding (and thus all permissions) after a role demotion.
+	if updates.Role != "" && updates.Role != previousRole {
+		s.syncUserRoleBindings(ctx, user.ID, previousRole, updates.Role)
 	}
 
 	writeJSON(w, http.StatusOK, user)
@@ -203,4 +214,69 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// syncUserRoleBindings reconciles system-scoped role bindings when a user's
+// role changes. When demoting from "admin", the super-admin binding is deleted.
+// When promoting to "admin", a super-admin binding is created. For non-admin
+// roles, the appropriate hub-member or hub-viewer binding is ensured.
+//
+// This mirrors the startup reconciliation (ReconcileSuperAdminBindings) but
+// runs in real-time as part of the role update handler.
+func (s *Server) syncUserRoleBindings(ctx context.Context, userID, oldRole, newRole string) {
+	roleMap := map[string]string{
+		"admin":  store.SystemRoleSuperAdmin,
+		"member": store.SystemRoleHubMember,
+		"viewer": store.SystemRoleHubViewer,
+	}
+
+	// Delete the old role binding if it maps to a known system role.
+	if oldRoleName, ok := roleMap[oldRole]; ok {
+		oldRD, err := s.store.GetRoleDefinitionByName(ctx, oldRoleName, store.RoleScopeSystem)
+		if err == nil {
+			bindings, listErr := s.store.ListRoleBindingsForPrincipal(
+				ctx, store.RoleBindingPrincipalUser, userID)
+			if listErr == nil {
+				for _, b := range bindings {
+					if b.RoleDefinitionID == oldRD.ID && b.ScopeType == store.RoleScopeSystem {
+						if delErr := s.store.DeleteRoleBinding(ctx, b.ID); delErr != nil {
+							slog.Warn("failed to delete old role binding during role sync",
+								"user_id", userID, "role", oldRoleName, "binding_id", b.ID, "error", delErr)
+						} else {
+							slog.Info("deleted role binding during role sync",
+								"user_id", userID, "old_role", oldRole, "binding_id", b.ID)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Create the new role binding.
+	if newRoleName, ok := roleMap[newRole]; ok {
+		newRD, err := s.store.GetRoleDefinitionByName(ctx, newRoleName, store.RoleScopeSystem)
+		if err != nil {
+			slog.Warn("role definition not found during role sync",
+				"user_id", userID, "role", newRoleName, "error", err)
+			return
+		}
+		_, err = s.store.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: newRD.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      userID,
+			ScopeType:        store.RoleScopeSystem,
+			ScopeID:          "",
+			CreatedBy:        store.SystemReconcileCreatedBy,
+		})
+		if err != nil {
+			if errors.Is(err, store.ErrAlreadyExists) {
+				return // binding already exists — idempotent
+			}
+			slog.Warn("failed to create new role binding during role sync",
+				"user_id", userID, "role", newRoleName, "error", err)
+		} else {
+			slog.Info("created role binding during role sync",
+				"user_id", userID, "new_role", newRole)
+		}
+	}
 }
