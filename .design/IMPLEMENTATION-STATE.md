@@ -33705,3 +33705,154 @@ The isolation is nonetheless proven, and by better evidence than my check would 
 **Limit on what this run proves.** Every message in the snapshot was already stamped by the cbd4f8b6a pass, so `attributed = 0` and `inferred = 0` everywhere and `persistGroup` was never reached. Identity 1 balancing across all 22 projects is therefore weaker than it looks: the +4/−4 cancellation that made the original defect invisible **cannot occur when `inferred` is zero everywhere**. That path is covered synthetically by gate C's fixture and by G-2's earlier at-scale run, not here. Not a gap to chase — a limit to state (Rule 1009).
 
 **M9 is complete and verified.** gteam acceptance now reduces to G-7, the post-cutover UX pass, which is ptone's and interactive. After that, the fresh-cutover test on a second instance carrying Gap A.
+
+---
+
+## §5nf — DEF-126: unqualified addressee resolution silently picks a winner
+
+**Found by ptone during G-7**, which is exactly what G-7 was for. Reported cleanly, with the full command and output:
+
+```
+scion message user:preston "Received test3"
+...
+Message sent to user:preston via Hub.
+```
+
+`preston` is a bare first name. It should have errored. It did not.
+
+### The measurement
+
+instance-investigator, read-only on live gteam, broken down by candidate field:
+
+| Rule | Matches |
+|---|---|
+| exact `id` | 0 |
+| exact email | 0 |
+| email local-part | 0 |
+| display name exactly `preston` | 0 |
+| **display name first token** | **2** |
+| substring anywhere | 2 (same rows) |
+
+Out of 12 users. The two are ptone's own account `b53249ea` and a different user `7581ea89`.
+
+**The field-by-field split is what makes this diagnostic, and it is why I asked for it that way rather than as a total.** Because 1a–1d are all zero, first-token matching is not a last-resort fallback the resolver reached after stricter rules failed — it is a rule the resolver applies directly. A single count of "2 matches" would have left both readings open.
+
+### Why this is not a UX wart
+
+Addressee resolution sits on the send path, so it is authorization-adjacent. A resolver that finds several candidates and chooses one is a misdelivery path, and **misdelivery is disclosure — the direction that does not undo.** The standing rule applies unchanged: under-granting is recoverable, over-granting is not.
+
+The required behaviour is the same fail-closed shape used everywhere else in this refactor:
+
+- zero matches → error
+- two or more matches → error, **naming the collision** so the sender can disambiguate
+- never a silent winner
+
+Note the enriched-refusal precedent from AC-33: naming what was rejected is permitted, but a refusal must not leak information the sender was not already entitled to. Listing colliding *display names* to a sender who supplied one of them is likely fine; that boundary needs stating explicitly when the fix is designed.
+
+### The open incident question
+
+Whether ptone received the message decides whether this is a bug or an event. If he did, he won the coin flip. If he did not, `7581ea89` received it, and that is a real misdelivery on an instance carrying production data. Asked directly; **not** to be answered by inspecting the other user's conversations — investigating a disclosure by reading the recipient's content is its own problem, and I told instance-investigator so explicitly.
+
+### The hypothesis linking both of ptone's G-7 findings
+
+He also asked why the help text advertises two address forms that error:
+
+```
+conv:<uuid>   Send to a conversation by ID (not yet supported — errors)
+#<thread>     Send to a named thread (not yet supported — errors)
+```
+
+**I suspect one defect underlies both.** The addressing grammar has no stated uniqueness rule. `user:preston` resolves an unqualified name against a namespace that does not guarantee uniqueness and picks a winner. `#<thread>` may be unimplemented precisely because nobody could say what namespace a thread name resolves in — hub-wide, per surface, or per conversation.
+
+If that holds, the deliverable is not a patch to one resolver but **an addressing specification**: for every prefix, the namespace it resolves in, whether that namespace guarantees uniqueness, and the required behaviour at 0, 1 and N matches. That is squarely the original brief — "a clear, crisp, coherent semantic contract" — and its absence is why an unqualified name could reach a send.
+
+I gave ca-msg-addr the hypothesis as something to **falsify**, not confirm. If there is a documented uniqueness rule and this is a narrow bug, that is a better answer and I want it.
+
+### Rules
+
+- **1025** — a resolver that accepts an unqualified name is an authorization surface, not a convenience. Any namespace that does not guarantee uniqueness must fail closed on collision.
+- **1026** — when asking for a count that will be used diagnostically, ask for it decomposed by the rule that could have produced it. "How many matched" answers less than "which rule matched, and how many under each", and costs the same query.
+- **1027** — do not investigate a suspected disclosure by reading the suspected recipient's content. Establish it from the sender's side or from metadata.
+
+### Incident question: closed. No misdelivery.
+
+ptone: *"I did get the test3 on the gmail user account"*. So the resolver picked `b53249ea` and the intended recipient received it. The coin came up heads.
+
+**The defect is unchanged by that.** Nothing in the code made the right choice; the right choice happened. Recording the outcome as reassurance would be the error here — a resolver that picks correctly by accident is exactly as broken as one that picks wrongly, and only the second kind gets fixed promptly. The value of the outcome is narrow and specific: it means there is no disclosure to remediate, so the fix can be scheduled rather than rushed, and no other user's data has to be examined.
+
+### Determinism: there is none to rely on
+
+instance-investigator measured the selection directly against the two rows:
+
+| Query | First row |
+|---|---|
+| plain `SELECT`, no `ORDER BY` | `b53249ea` |
+| `ORDER BY created` ASC | `b53249ea` (Mar 19) |
+| `ORDER BY created` DESC | `7581ea89` (May 2) |
+| `ORDER BY id` | `7581ea89` (`7` < `b`) |
+
+The resolver uses `QueryRow` — an implicit `LIMIT 1` with no `ORDER BY`. SQLite therefore returns rows in rowid order, and `b53249ea` happens to have been inserted first. **That is not a contract.** A `VACUUM`, a page split, or a dump-and-restore can reorder physical rows, and the winner flips with no code change, no migration, and no log line. The instance would begin misdelivering after a maintenance operation that nobody would think to connect to messaging.
+
+The second account is not a stale record: `7581ea89` is **active, role `admin`, last login Aug 5**. Both endpoints of the coin flip are live humans, so the path is real and bi-directional.
+
+### An unresolved contradiction between two sources
+
+ca-msg-addr, reading the Go rather than the data, reports that the resolver uses a **case-insensitive substring match** over email and display name via `ListUsers(Search, Limit: 1)`, and that multi-match "silently picks the most-recently-created user".
+
+Most-recently-created is `7581ea89`. ptone received the message. **The two accounts cannot both be right.**
+
+I have not reconciled this by preferring the source I like better. ca-msg-addr is resolving it against the literal SQL of `ListUsers`: whether an `ORDER BY` exists at all, and whether "most-recently-created" was stated by the code or inferred by the reader. The third possibility is that `scion message` from an agent container does not reach the call site being read — there are two (`handleAgentOutboundMessage:155`, `handleGroupMessage:1495`) and they may not share a resolver.
+
+**Rule 1028** — when a code reading and a measured outcome disagree, one of them is wrong; do not synthesise a story in which both are partly right. Name the disagreement, and resolve it by going back to the primary source.
+
+### The more serious half, and it is not the ordering
+
+ca-msg-addr's other finding outranks everything above: the uniqueness check is `len(Items) == 1` against a result set already capped at `Limit: 1`.
+
+If that reading survives verification, the check is **structurally incapable of observing a collision**. It is not a guard that fails open under some inputs — it is a guard that cannot fail under any input, because the only value it can ever see is the value it accepts. The ordering question then becomes a detail of *which* wrong user gets the message, not of whether the collision is caught.
+
+This is the shape to specify against, and it generalises: a uniqueness check applied downstream of the limit that would make it non-unique is not a uniqueness check. `TotalCount` — or fetching `Limit: 2` and refusing on the second row — is the fix.
+
+**Rule 1029** — never test cardinality against a result set that has already been truncated. Ask the query for one more row than you will accept, or ask for the count.
+
+Also established, and it removes one line of inquiry: this is **pre-existing**, introduced in `180342991` (Apr 7), well before tranche-g. Not a regression from this refactor. The `@<email>` convref path is unaffected — it uses exact `GetUserByEmail`.
+
+---
+
+## §5ng — DEF-127: a never-used DM renders as an error, not as an empty conversation
+
+Found by ptone during G-7:
+
+> initially loading a DM conversation with another user that is blank results in an error with "Conversation could not be resolved for this key; the read-switch is ON but no matching conversation record exists"
+
+### Mechanism
+
+`handleConversationHistory` (`pkg/hub/handlers_chat_v2.go`, ~1809-1918 at `97c3462ab`). With the switch ON, the handler resolves the DM key to a conversation and filters by `ConversationID`. A DM that has never carried a message has no conversation row, `ResolveDMConversationForRead` returns nil, and control reaches the G3 branch at ~1914: `409 ErrCodeConversationNotResolved`.
+
+### Why the 409 is right and still wrong
+
+G3 removed the channel+thread fallback deliberately, so that an unresolvable conversation is **observable** instead of silently empty. That control is correct and is not up for removal.
+
+The defect is that it **conflates two states with opposite meanings**:
+
+- *no conversation row because nothing was ever sent* — normal, expected, and by volume the common case
+- *no conversation row although messages exist* — genuine drift, the thing G3 was built to surface
+
+Emitting the same 409 for both does not merely produce a bad first-touch experience. It **destroys the signal**: once every unopened DM raises the alarm, the alarm carries no information, and the drift case it was built to catch becomes unfindable in the noise. This is the failure mode where a control is technically still present and practically already gone.
+
+### What the fix may and may not do
+
+Authorization on this path is **key-based and runs before resolution** — `validDMKey(key)` then `isDMParticipant(key, user.ID())` at ~1823-1833. The caller is proven to be one of the two principals named in the key without any conversation row being consulted. Returning an empty history therefore involves **no authorization change and no ACL inference**; this stays clear of the standing prohibition, and of B14's ruling that a listing index must never become the source of an ACL.
+
+Intended shape, subject to the investigation:
+
+- well-formed key, caller named in it, no conversation row, **and no messages under the pre-switch filter** → empty `200`
+- no conversation row but messages **do** exist → keep the 409; that is the drift case
+
+**Rejected: lazily creating the conversation row on read.** A `GET` must not mint a record whose `external_ref` is an access-control basis. Creation belongs on the first write.
+
+**Rejected: teaching the client to treat 409 as empty.** That is the make-the-gate-tolerant antipattern in its purest form — it would suppress the drift case too, at the one layer where nobody would ever look for the suppression.
+
+The discriminator is the load-bearing unknown: whether "are there any messages under `Channel:"web"`, `ThreadID:key`" can be asked cheaply, and whether an index covers it. If it cannot, the design changes, and I would rather learn that before writing it than after. Dispatched to `ca-msg-blank` as an investigation, explicitly forbidden from applying a fix.
+
+**Rule 1030** — a control that fires on the common benign case has already been removed; it is just still in the source. Conflating an expected state with the anomaly an alarm was built for is a way of deleting the alarm without editing it.
