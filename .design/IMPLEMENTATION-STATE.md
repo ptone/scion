@@ -33638,3 +33638,30 @@ Not escalated: over-warning rather than under-warning, nothing irreversible, and
 **Rule 1022** — when a fix adds a "resume or reset" predicate, enumerate the *marker shapes* that can reach it, not just the code paths. Here two shapes share one predicate — completed-pre-M9 and mid-pass-pre-M9 — and only the first was considered. The second is rarer, which is exactly why it survived review.
 
 **Rule 1023** — mutate a fix in the direction of its own over-application. A reset fix fails characteristically by resetting too much, and the author's mutation list will naturally only contain the under-application they were asked to fix.
+
+## §5nd — M9a follow-up `98543da92`: accepted, merged to `scion/tranche-g`
+
+`scion/tranche-g` fast-forwarded `5ca3e4026..98543da92` (2 commits). `ca-mig-9a` retired.
+
+**The promotion is correctly placed.** It sits *above* `doneSet` construction, clears both `ProjectsDone` and `Residuals`, and as a result the `resuming` predicate downstream is now provably safe — only M9-format markers can reach the carry-forward branch, so the `PermanentResidual != nil` sub-guard is documentation rather than load-bearing.
+
+Both directions gated, one test each:
+
+| Mutation | Result |
+|---|---|
+| **N1** — `if false && …`, revert the promotion | red on `TestM9a_GateG4_PreM9MidPassPromotion` only |
+| **N3** — `if len(ProjectsDone) > 0`, over-promote every mid-pass marker | red on `TestBootBackfill_Resumption_MonotonicProgress` only |
+
+**G4 is built the way I asked.** It cross-checks `permanent` against `CountUnbackfilledMessages(ctx, "")` rather than a literal, so the gate cannot drift from reality; asserts the actionable WARN is absent; asserts a per-project line for *both* projects, which is what proves the previously-done project was actually re-run; and closes with the identity plus an absolute value.
+
+**The fixture edits to two existing tests were the thing to check hardest, and they are honest.** `TestBootBackfill_Resumption_MonotonicProgress` and `TestBootBackfill_PanicPreservesProgress` had markers with `ProjectsDone` non-empty and no `PermanentResidual` — which is now *by definition* the pre-M9 mid-pass shape and must restart. Only `PermanentResidual: &priorPermanent` (0) was added. `Equal(5)` and `Equal(3)` are untouched, no assertion weakened, and net against the pre-M9a baseline both are still stronger (they were `GreaterOrEqual` before M9a). Coverage of the old shape is not lost — it moved to G4, where the expectation is inverted on purpose.
+
+Numstat matches their report exactly; both tag configs show only the docker-absent `TestDeleteStopped`.
+
+### Documented residual, not worth a round
+
+`TestBootBackfill_PanicPreservesProgress` survives N3, and I chased down why rather than accepting the green. `ListProjects` returns pid3 first, so it panics before any project is banked and the on-disk marker is never rewritten — the test reads back its own fixture. It does genuinely test its stated purpose (a panic must not corrupt or reset the persisted marker), but its `Equal(3)` comment claiming "the carried-forward 3 survives unchanged" overstates it: nothing was carried, because nothing was written. The test is also order-dependent — had pid3 sorted last, N3 would have reddened it. Pre-existing in shape, not introduced here.
+
+**Rule 1024** — when a test passes under a mutation you expected it to catch, find out why before moving on. The answer is either that the mutation is weaker than you thought or that the test is weaker than you thought, and both are worth knowing. Here it was the second, and it surfaced an order-dependence no one had noticed.
+
+**M9 is now complete.** Remaining before gteam acceptance closes: one confirming boot on the redeploy, then G-7 (post-cutover UX, ptone's, interactive), then the fresh-cutover test on a second instance carrying Gap A.
