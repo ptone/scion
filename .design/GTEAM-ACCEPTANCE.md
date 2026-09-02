@@ -1,6 +1,6 @@
 # gteam Acceptance Checklist — Messaging Migration Tranche
 
-**Target:** `scion/tranche-g` @ `5ca3e4026b73324d3ec3585ba7d21cf8683a311b` (was `cbd4f8b6a`; M9 landed 2026-09-02 — see §1.6)
+**Target:** `scion/tranche-g` @ `98543da921ebd1ee6bae6b1abc4ca00a9d35b327` (2026-09-02: `cbd4f8b6a` → `5ca3e4026` M9 → `98543da92` M9a — see §1.6)
 **Instance:** `scion-gteam` (`deploy-demo-test` / `us-central1-a` / 10.128.0.56)
 **Status:** ptone's ruling — this checklist gates the fresh-cutover test on a second
 instance. Fresh cutover happens only after everything here is done.
@@ -75,7 +75,7 @@ skipped, **both counts identical**. Healthy after both; 27 agents, 39 projects.
 | G-4 Residual report | **PASS on both halves.** Boot 2's steady-state path had never run on real data; counts held exactly |
 | G-5 Fail-closed | **PASS** — `f003ad87` and `764af9a2` unchanged, neither repaired |
 | G-6 B14 | **PASS** — `adf13f87` still keyless |
-| G-7 Post-cutover UX | not started |
+| G-7 Post-cutover UX | not started — ptone's, interactive; the last open gteam item |
 
 **The most valuable result is boot 2.** M6's anti-join and M7's consistency property both
 compute the reachable count with no per-project sums in existence, and that path had only
@@ -135,6 +135,18 @@ milestone turned on. Per-project lines now carry `inferred`, `write_failures`,
 `resolution_failures`, `permanent_residual` and the per-cause `derive_*` breakdown. All
 derive failures are `derive_principal_pair` except one `derive_dm_key_parse` (`84e32420`,
 the newline-in-UUID row).
+
+**M9a verified at scale, 98543da92.** Run against a throwaway copy of the pre-M9
+snapshot (no writes to the live DB): `total_residuals` = **11,593**, the correct
+this-pass-only value, where the defect produced 23,190. I re-derived every column: all 22
+per-project identities balance, `sum(row_errors)` == `total_residuals`, and
+`permanent - derive` = **990**, exactly the broadcast population derived independently
+months earlier. The decomposition closes end to end. **G-4 is CLOSED.**
+
+Limit worth stating: every message in that snapshot was already stamped, so
+`attributed = inferred = 0` and `persistGroup` was never reached. The +4/-4 cancellation
+cannot arise when `inferred` is zero, so this run does not re-prove that path; gate C's
+fixture and the earlier G-2 run cover it.
 
 **One defect found, in a field the checklist did not cover.** `total_residuals` reported
 23,190, which is this pass's 11,593 plus the *previous* pass's 11,597 — the accumulator

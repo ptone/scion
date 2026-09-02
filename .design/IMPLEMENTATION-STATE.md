@@ -33665,3 +33665,43 @@ Numstat matches their report exactly; both tag configs show only the docker-abse
 **Rule 1024** — when a test passes under a mutation you expected it to catch, find out why before moving on. The answer is either that the mutation is weaker than you thought or that the test is weaker than you thought, and both are worth knowing. Here it was the second, and it surfaced an order-dependence no one had noticed.
 
 **M9 is now complete.** Remaining before gteam acceptance closes: one confirming boot on the redeploy, then G-7 (post-cutover UX, ptone's, interactive), then the fresh-cutover test on a second instance carrying Gap A.
+
+## §5ne — M9a verified on production-scale data; the decomposition closes completely
+
+`98543da92` deployed to gteam (live boot correctly logs "already complete, skipping"), and the real test run against a throwaway copy of `hub.db.pre-5ca3e4026` — the pre-M9 marker shape that produced the 23,190 — with no writes to the live database.
+
+**The deciding number is right.**
+
+```
+total_residuals   11,593   correct (this pass only)
+                  23,190   the defect (11,593 + carried 11,597)
+                  34,783   worse (carrying the already-doubled value)
+```
+
+Observed: **11,593.**
+
+**I re-derived every column rather than accepting the sums:**
+
+```
+identity 1, per project (processed == skipped + derive, attributed = inferred = 0)
+                                    ALL 22 BALANCE
+sum derive_failures                 11,593
+sum row_errors                      11,593  == total_residuals          ✓
+sum permanent_residual              12,583
+permanent - derive                     990  == the broadcast population ✓
+derive + broadcast                  12,583  == reachable                ✓
+```
+
+The 990 was derived months earlier from a completely different direction (the skipped-composition analysis). It falls out here as a residue of two independently measured columns. **The decomposition now closes end to end with nothing left over.**
+
+The aggregate-equals-sum-of-partitions identity — the one whose absence was this entire defect (Rule 1020) — holds across all 39 projects on real data. It had only ever run against 3-project fixtures.
+
+### Two things worth recording honestly
+
+**My live-DB integrity check was unsatisfiable, again.** I asked for the live `hub.db` sha256 before and after, and said "they must match." A WAL-mode SQLite under a running hub changes continuously from heartbeats alone; the hashes could never have matched. **Rule 1018 for the second time in one milestone** — I specified a check without asking whether the thing I was checking could hold still.
+
+The isolation is nonetheless proven, and by better evidence than my check would have given: the copy run logged `pre-M9 marker detected`. The live DB carries an M9-format marker and would have produced `already complete, skipping`. The run therefore provably read the copy. **The log line is the isolation proof.** When a check on state is unsatisfiable, look for a behavioural consequence that discriminates instead.
+
+**Limit on what this run proves.** Every message in the snapshot was already stamped by the cbd4f8b6a pass, so `attributed = 0` and `inferred = 0` everywhere and `persistGroup` was never reached. Identity 1 balancing across all 22 projects is therefore weaker than it looks: the +4/−4 cancellation that made the original defect invisible **cannot occur when `inferred` is zero everywhere**. That path is covered synthetically by gate C's fixture and by G-2's earlier at-scale run, not here. Not a gap to chase — a limit to state (Rule 1009).
+
+**M9 is complete and verified.** gteam acceptance now reduces to G-7, the post-cutover UX pass, which is ptone's and interactive. After that, the fresh-cutover test on a second instance carrying Gap A.
