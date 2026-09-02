@@ -34157,3 +34157,60 @@ Two things from the above are unaffected by the retraction, because they were es
 Three agents and roughly a day, ending in a negative result and one genuine defect (the over-broad check). Against that: the falsification protocol worked exactly as designed. I handed `ca-msg-misfile` the hypothesis explicitly labelled *to be falsified*, withheld the shadow-check evidence that pointed against it (Rule 1035), and they falsified it. The process caught my error before it reached remediation — no rows were moved, no topics hidden, no "one clean before-state" spent. Instructing instance-investigator not to remediate is what made the retraction cheap.
 
 **Rule 1045** — the value of a falsification dispatch is not that it finds bugs. It is that it makes being wrong recoverable. A confirmation dispatch would have found supporting detail for a story that was not true.
+
+## §5nm — DEF-126 merged; switch-collapse phase requested
+
+`scion/ca-msg-fix1` merged to `scion/tranche-g` at **`43be4baad`**. Full
+`./pkg/hub/... ./pkg/store/... ./pkg/messaging/...` suite green, exit 0.
+
+**Verified rather than accepted, and the difference mattered.** The agent
+reported `57 / 35` for `handlers_agent_messaging.go`; the merge measures
+`73 / 27`, and the test file is 675 lines, not 676. I confirmed the gap is
+not a merge artefact — `git diff --numstat base refs/rt/f1` returns the
+identical five lines, so the merge carries exactly the branch and nothing
+else. The likely cause is summing per-commit numstats across two commits,
+which double-counts lines touched twice. Content correct, count wrong.
+This is the whole justification for the standing re-measure rule: a wrong
+count is harmless until it is the number a reviewer uses to decide whether
+a diff is small enough to skim.
+
+All 24 deletions in the non-test file were read individually: the
+`ListUsers` substring lookup, both `len(result.Items) == 1` checks, the
+fallback scaffolding, and the old generic refusals. `ListUsers` now occurs
+zero times in that file. Nothing unrelated removed.
+
+### The switch position, corrected
+
+ptone reiterated the no-new-switches directive on the strength of my own
+wrong answer — I told him a switch was off, so he reasonably concluded
+Discord had acquired one. **It has not.** `conversation_envelope_switch`
+was already in the consolidated set and is not Discord-specific. Measured
+gteam state: envelope switch ON (key absent, compiled default ON),
+`conversation_read_switch` true, `conversation_write_deny_switch` true,
+the latter two described as stale. **gteam is already all-switches-on**;
+there is nothing to flip.
+
+**Rule 1051** — a wrong diagnosis does not stop at being wrong. It becomes
+a premise the principal reasons from, and the correction has to reach the
+decisions it has already influenced, not just the original claim.
+
+### Latent: default-on is not the same as set-on
+
+The envelope switch is ON because its key is *absent* and the compiled
+default is ON — not because anyone enabled it. Behaviourally correct,
+and a poor test condition: "on by default when unset" and "on because we
+set it" are externally indistinguishable, so a fresh instance that writes
+an explicit `false` diverges from gteam with no visible difference in the
+settings document. The collapse removes the branch and dissolves this;
+recording it because it is precisely the trap the fresh-cutover test
+would fall into. Ties directly to the FRESH-CUTOVER-PLAN.
+
+### Switch-collapse phase (requested, not yet designed)
+
+ptone: *"before final merge we want to collapse all switches."* Scope:
+three switch names, at least two stale, one read through `writeDenyEnabled`
+(DEF-131 — the name is unclaimed and attractive to whoever later implements
+real write-denial). End state is zero switches, behaviour unconditional,
+branches deleted. Sequenced **after** gteam acceptance and **before** the
+fresh-cutover test, since a fresh cutover should exercise the collapsed
+code rather than the gated code.
