@@ -33132,3 +33132,39 @@ The agent's own mutation 2 demonstrated it without either of us intending to: re
 **And `TestBootDataMigrations_NeverBlocksBoot` looks like it covers this.** Its comment reads *"A panic is the only failure mode"* — exactly right — and then it induces a cancelled context, which produces clean errors and cannot reach a panic. The test asserts the correct property on a path incapable of exhibiting it. **This is the third instance of one shape in two days**: AC-2b's cancelled context that also disabled the observation, DEF-125's counter that made its own row unfindable, and now an assertion whose inducement cannot produce the condition it guards. In all three the author identified the right property and reached for the cheapest way to trigger it, and the cheapest trigger was the one that could not exercise the path.
 
 **Rule 981** — a comment naming the failure mode a test guards is a claim to verify, not a reassurance to accept. `NotPanics` around code that cannot panic passes forever and reads, to every future maintainer, as coverage.
+
+---
+
+### §5mj — M5 rework accepted and merged; `tranche-g` = `f667e2e5e` (2026-09-02)
+
+The panic containment came back at `f667e2e5e`, and it is placed correctly: the `recover()` sits **inside** the advisory-lock closure, wrapping each migration individually, with a comment noting that `runWithAdvisoryLock`'s early `fn()` path returns before its deferred release and therefore cannot be relied on for containment. That was the specific trap and the agent named it.
+
+Three mutations, three distinct gates, no overlap:
+
+| Property | Mutation | Test that fired |
+|---|---|---|
+| The recover is load-bearing | delete `recover()` | all three panic tests |
+| Per-migration, not per-pair | one wrapper around both calls | `DMKeyPanic_BackfillStillRuns` **only** |
+| Scoped abort, not rollback | wipe `projects_done` on panic | `PanicPreservesProgress` **only** |
+
+The second and third rows are the ones worth keeping. Each mutation reddened exactly one test and left the others green, which means the three tests are testing three different things rather than three shadings of one thing. Coverage that collapses under a single mutation is one test wearing three names, and you only find out which you have by mutating each property separately.
+
+The third row is the property I explicitly warned about in review — that an over-broad recover would suppress already-persisted progress along with the work that failed, converting a scoped abort into a silent rollback and making every panic restart the backfill from zero. It is enforced.
+
+`//go:build !no_sqlite` appears once in the delta, on `cmd/boot_backfill_test.go`, which git reports as `A`. A new sqlite-dependent test file, which is permitted and required — not a tag added to an existing file to duck the CI gate. Worth confirming by status rather than by grep, since the two are indistinguishable in a diff.
+
+Baseline in both tag configurations is exactly the known-environmental set — `TestDeleteStopped_RequiresGroveContext` plus the six `pkg/config` tests — with no additions. Merged fast-forward; `scion/tranche-g` is now `f667e2e5e`. `ca-mig-5` retired.
+
+### §5mk — M6 dispatched, and M5 invalidated a preference in its spec
+
+Dispatched M6 (residual report split, §4.6) to a fresh `ca-mig-6`.
+
+**Re-reading §4.6 against what M5 actually built turned up a stale preference in my own design.** §4.6 says to derive the reachable count by summing the per-project counts the backfill already computes, rather than adding an anti-join query, on the DEF-112 reasoning that a second query can drift from the work actually performed. That was sound when written. M5 then added per-project resumption: `runMessageBackfill` skips any project already in `projects_done`. On a steady-state boot — every project done, zero work performed — there are no per-project counts to sum. The naive implementation of my stated preference yields zero, the WARN never fires, and the report is silently wrong in the state the hub occupies almost all of the time.
+
+The failure is invisible in the obvious test. A first-boot test, which is what AC-9 as written describes, exercises the one boot where the sums do exist. The bug lives entirely in the second boot onward.
+
+I sent this as the lead constraint but told the agent to confirm or refute it from the M5 source rather than take my word, and to report before committing to an approach. If it holds, an anti-join count is needed, which makes the DEF-112 drift concern live and promotes **M7 from optional to required** — the counter and the backfill's skip predicate would then have to share one predicate rather than being two expressions of the same intent free to diverge. I asked to be told explicitly if that is the outcome, since M7 was on the droppable list.
+
+**Rule 982** — a design's stated preferences have dependencies on the state of the system when they were written, and a later phase can invalidate one without touching a word of it. Superseding an *invariant* announces itself (Rule 974); superseding a *preference* does not, because the prose still reads as sound. Re-derive the recommendation against current code before briefing the phase that implements it, not just the invariant it rests on.
+
+**Rule 983** — when resumption is added to a pass, every number derived from the work that pass performs becomes unavailable on the runs that skip it. Ask what each such number reads on a no-op boot.
