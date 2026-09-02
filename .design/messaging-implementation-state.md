@@ -32687,3 +32687,75 @@ rows to tidy up is how reproductions get lost. The scratch *agent*
 replaces empty values with sourced ones, the test must compare against the
 source, not against emptiness; present-and-wrong is worse than present-and-empty
 because nothing looks broken.
+
+### §5lu — Migration auto-run design, and two defects found while writing it
+
+Design written to `MIGRATION-AUTORUN-DESIGN.md`. This is the second half of ptone's
+binding requirement: Phase 9a delivered switches-default-ON, this is "migrations are
+auto-run." The deferral recorded in `MIGRATION-SURVEY.md` §Scheduling was conditioned on
+Phases 9b and 9c, both of which have landed, so the condition has lapsed.
+
+**Stale-branch trap, caught before it reached the document.** `/workspace` sits on
+`scion/ca-msg-arch`, which is docs-only and **211 commits behind `scion/tranche-g`** on
+the code side. `maybeWarnUnbackfilledMessages` — the hook the whole design is built
+around — does not exist in the local checkout at all. Every line reference in the design
+is therefore taken against `e132380fe` via `git grep <pat> <sha> -- <path>`, and the doc
+says so in its header. Had I read the local tree, the design would have shipped with
+plausible-looking line numbers pointing at the wrong file contents, which is worse than
+no line numbers because a developer would trust them. → Rule 960.
+
+**The load-bearing finding is that no gate is needed.** `maybeWarnUnbackfilledMessages`
+is called at `cmd/server_foreground.go:1218`, inside store construction, after
+`migrateStore` and before the HTTP listener opens. A migration placed there completes
+before the first request is served, so "migrations done" and "switch on" are never
+independently observable. The interlock is *sequencing*, not state. This is what lets the
+design satisfy "no third switch" honestly rather than by renaming one — and it is also
+the reason the async alternative is rejected on correctness rather than on cost, since
+running after the listener opens reintroduces the window and would require a gate.
+
+**The two migrations turn out not to be the same kind of thing.** Verified rather than
+assumed: `isDMParticipant` (`handlers_chat_v2.go:3250`) requires ≥5 colon-separated
+segments and an old-format key `dm:<uuidA>:<uuidB>` yields 3, so an un-migrated
+old-format direct conversation **denies access to its own participants**. That denial
+exists today, on main, in any switch position. So `DMMigrationService` is a repair of a
+live access defect, not a cutover step, and coupling it to the envelope switch would be
+wrong. `BackfillService` by contrast supplies history attribution, where absence degrades
+rather than denies. They get different treatment: DM migration unbudgeted (it is tens of
+rows), backfill budgeted with per-project resumption (it is O(messages)).
+
+`DMMigrationService` has **zero production callers** — no boot path and, unlike the
+backfill, no CLI either. The repair is not merely un-automated, it is unavailable. The
+design adds the CLI alongside the boot hook, on the principle that a migration triggerable
+only by rebooting is not operable.
+
+**Live sizing (gteam, read-only census).** 6 new-format direct conversations, 1
+old-format (`f003ad87`, live, currently denying its participants), 1 keyless (`adf13f87`,
+DEF-29). Messages: **24,700 of 24,720 unattributed — 99.9%**. The backfill has effectively
+never run anywhere, which is the empirical case against the do-nothing alternative and is
+recorded in the design as such.
+
+**DEF-111 and DEF-112 filed.** Both came out of the sizing rather than out of reading
+code. DEF-111: the boot warning counts hub-wide, the remedy it advertises runs
+per-project, and 5,637 of the 24,700 point at hard-deleted projects (`projects` has no
+`deleted_at`; these are permanent orphans). After a *fully successful* backfill the
+warning will still read ≥5,637, forever. The design's answer is to split the report into
+a reachable bucket that can reach zero and an unreachable bucket that cannot, because
+reporting an unfixable condition at the same severity as a fixable one is what turns a
+warning into noise. DEF-112: the counter tests `IS NULL` while the backfill tests `!= ""`;
+measured 0 divergent rows, so latent. Kept on the books only because DEF-111 destroyed
+its detectability — the one symptom it would produce is a count that never reaches zero,
+which DEF-111 has just made the expected steady state. → Rule 961.
+
+**Held back from deciding**: whether to purge the 5,637 orphans (irreversible, OQ-6,
+ptone's), and re-keying `f003ad87` (OQ-5) — the repair is correct but it destroys the only
+live DEF-29 reproduction, which I am under standing orders to preserve. Capturing the
+row's current `external_ref` in the defect record before any migration runs is the cheap
+resolution, but it is not mine to assume.
+
+**Rule 960** — a docs branch's code tree is not the implementation branch's code tree.
+Before writing any line reference into a design, confirm the file being read is the file
+the developer will edit; `git merge-base --is-ancestor` answers it in one call.
+
+**Rule 961** — when filing a latent defect, check whether an unrelated live defect has
+removed the symptom that would reveal it. Two defects can be individually minor and
+jointly undetectable, and that combination is worth more than either entry alone.
