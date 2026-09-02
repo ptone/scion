@@ -34101,3 +34101,22 @@ I said explicitly that had the exposed content belonged to another user I would 
 ### The ordering principle, restated because it will be under pressure
 
 Fix order is: write path → then data repair → then the read-path verification gap. Repairing visible bad rows first is the tempting move because it makes the symptom disappear from the UI, and it is the wrong one. **The exposure is not the 8 rows; it is the mechanism that produced them and the read path that trusts them.**
+
+### DEF-129: incident confined to one project
+
+38-shell sweep complete. Only `6ef436bd` (3) and `dbd35ed2` (5) hold messages; the other 38 are empty. No other project has acquired misfiled traffic. All 40 retain active topics, 39 `is_general=1`.
+
+So: **mechanism hub-wide, data exposure confined to `a3083e98`.**
+
+### Why "38 clean shells" is not yet reassuring
+
+A count of empty containers conceals the denominator. Two readings fit the same observation and they imply different fixes:
+
+- **(a)** The misfiling condition is common, and the other 38 escaped only because no agent↔user DM traffic passed through them in the window.
+- **(b)** Other projects did send DMs and filed them correctly, in which case the trigger is specific to this project or these two agents, and `ca-msg-misfile` should be hunting a narrower condition than "DM send".
+
+Under (a) every project is one message away from the same exposure. Under (b) something particular happened here.
+
+Requested the discriminator: agent↔user DM counts by project across 2026-09-01 → now, and how many carry a `kind=direct` conversation id. The contrast that matters is whether **any** other project sent a DM in the window and filed it right. Flagged the alarming case explicitly so it cannot hide behind the clean sweep — *"there were only 8 agent↔user DMs on the whole instance and all 8 misfiled"* is consistent with everything measured so far and would mean the failure rate is **100%**, not 2-in-40.
+
+**Rule 1042** — a count of unaffected containers is not a measure of scope. Ask how many were *exposed to the condition*; a clean sweep across containers that never saw traffic measures nothing but traffic distribution.
