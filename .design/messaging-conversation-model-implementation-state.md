@@ -31754,3 +31754,60 @@ something is safe. "Safe" invites a verdict; "what happens" returns a trace, and
 mine to draw.**
 
 Retiring `ca-msg-mig`. The survey stands; DEF-104 is the amendment.
+
+---
+
+## §5lg — the failure posture I was about to design was backwards
+
+Coordinator sweep answered and closed; nothing needed from them. While reading the survey's
+blast-radius section I started forming a position on the auto-run tranche's failure posture,
+and it was wrong. Recording it because the reasoning error is more reusable than the answer.
+
+**What I was about to design.** DEF-104 showed the webchat migration swallows failure into a
+warning and continues. I generalised: an ACL migration must not do that, therefore a failed
+`DMMigrationService` must block startup or force the read switch OFF — and since Phase 9a's
+consolidated switch defaults ON, I had started drafting a coupling where the cutover default is
+conditional on migration completion. That is a real cross-tranche dependency and I was about to
+write it into two designs.
+
+**Then I checked what an unmigrated row actually does at the read gate**, instead of reasoning
+from "unrepaired ACLs are dangerous":
+
+- `CheckDMParticipantKey` (`pkg/messages/dm_key.go:120`) — `ParseDMKey` failure returns an
+  error. Denies.
+- `isDMParticipant` (`handlers_chat_v2.go:3223`) — `len(parts) < 5` returns `false`. An empty
+  `external_ref` splits to one part. Denies.
+
+A keyless `direct` row therefore denies **everyone**. Under-migration produces *inaccessible*
+DMs, not *exposed* ones. That is the recoverable direction, and it is what the standing rule —
+under-granting is recoverable, over-granting is not — was put in place to guarantee. The same
+holds for `BackfillService`: an unstamped message has no `conversation_id`, so with the switch
+ON it is invisible rather than misrouted.
+
+So the coupling is unnecessary. The switch can default ON regardless of migration state, and
+the tranches stay independent.
+
+**Rule 918: "this data is security-relevant" does not imply "failing to fix it is a security
+risk." Trace what the unfixed state does at the gate. Here every unmigrated row denies, so a
+failed migration degrades availability, not confidentiality — and I nearly coupled two
+tranches together to defend against a leak the code already prevents.**
+
+**Rule 919: a fail-closed invariant is an asset to spend, not just a property to protect. Once
+established that parse failure denies, the designs downstream get simpler — they may treat
+missing data as safe-but-broken instead of dangerous. I keep re-establishing the invariant and
+then failing to draw the inference it licenses.**
+
+What survives from the DEF-104 concern is narrower and still real: the posture difference is
+about **observability**, not about whether to block. webchat's `log.Printf` warning is
+undetectable; a DM-key migration that silently under-migrates looks identical to a hub with
+nothing to migrate, and users just see conversations missing. So the tranche needs structured
+error logging, a surfaced health signal, and the marker left unwritten so the next boot
+retries. It does not need to refuse to serve.
+
+**Rule 920: when the consequence of a silent failure is user-visible but attributable to the
+wrong cause, the fix is observability, not refusal. Refusing to start converts a recoverable
+degradation into an outage, and is the more expensive error when the data path already fails
+closed.**
+
+Not writing the tranche design yet — Phase 9a is mid-flight and ptone has not asked for it.
+The above is the load-bearing measurement it will rest on, taken while it was cheap.
