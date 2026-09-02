@@ -1017,6 +1017,28 @@ func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, bind
 // Helpers
 // ---------------------------------------------------------------------------
 
+// CheckRoleBindingRemovalTx is the tx-aware seam for enforcing the boundary
+// lockout invariant (access_constraint.admin) when deleting a role binding.
+// It is designed to run inside the caller's transaction so the evaluated
+// state and the deletion share the same commit boundary.
+//
+// TODO(RS5): Replace this stub with the full activation-aware, suspension-aware
+// evaluator built on assessLockout. The current CheckRoleBindingChange is an
+// advisory flag only — it does not count surviving admins, does not call
+// assessLockout or resolveAdminUsers, and ignores bindingID/isRemoval entirely.
+// The real evaluator (enforceLockout → assessLockout) takes a CommitRequest
+// shaped for constraint mutations, which a role-binding deletion cannot populate.
+// RS5 owns the evaluator semantics; this seam is the call-site contract (A-7).
+//
+// Until RS5 delivers the evaluator, this method returns nil (no-op). The
+// last-super-admin guard in the caller independently prevents the most
+// critical lockout scenario.
+func (gs *GovernanceService) CheckRoleBindingRemovalTx(ctx context.Context, tx store.Store, binding *store.RoleBinding) error {
+	// RS5 will implement: load role, check access_constraint.admin,
+	// count surviving lifecycle-valid admin bindings at scope, refuse if zero.
+	return nil
+}
+
 // roleHasConstraintAdmin checks whether a role definition includes the
 // access_constraint.admin permission.
 func roleHasConstraintAdmin(rd *store.RoleDefinition) bool {

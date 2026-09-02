@@ -507,7 +507,7 @@ func (s *Server) listRoleBindings(w http.ResponseWriter, r *http.Request) {
 	// R-2: Validate roleDefinitionId as a valid UUID — never silently drop predicate.
 	if filter.RoleDefinitionID != "" {
 		if _, err := uuid.Parse(filter.RoleDefinitionID); err != nil {
-			BadRequest(w, fmt.Sprintf("invalid roleDefinitionId: not a valid UUID"))
+			BadRequest(w, "invalid roleDefinitionId: not a valid UUID")
 			return
 		}
 	}
@@ -677,7 +677,7 @@ func (s *Server) expandGroupDerivedBindings(ctx context.Context, filter store.Ro
 			ScopeType:        filter.ScopeType,
 			ScopeID:          filter.ScopeID,
 		}
-		gBindings, gErr := s.store.ListRoleBindingsFiltered(ctx, gFilter, 0, 0)
+		gBindings, gErr := s.store.ListRoleBindingsFiltered(ctx, gFilter, 1000, 0)
 		if gErr != nil {
 			slog.Warn("includeGroupDerived: failed to list group bindings",
 				"group_id", gm.GroupID, "error", gErr)
@@ -710,7 +710,7 @@ func (s *Server) expandScopeGroupDerivedBindings(ctx context.Context, filter sto
 		ScopeType:        filter.ScopeType,
 		ScopeID:          filter.ScopeID,
 	}
-	groupBindings, err := s.store.ListRoleBindingsFiltered(ctx, groupFilter, 0, 0)
+	groupBindings, err := s.store.ListRoleBindingsFiltered(ctx, groupFilter, 1000, 0)
 	if err != nil {
 		slog.Warn("includeGroupDerived: failed to list group bindings for scope",
 			"scope_type", filter.ScopeType, "scope_id", filter.ScopeID, "error", err)
@@ -731,7 +731,11 @@ func (s *Server) expandScopeGroupDerivedBindings(ctx context.Context, filter sto
 	// For each group binding, expand group members into effective user rows.
 	var result []*store.RoleBinding
 	sourceMap := make(map[string]groupSourceInfo)
-	seen := make(map[string]bool) // dedup key: roleDefinitionID + userID + scopeID
+	// Dedup key includes the source group binding ID so that each distinct
+	// group path emits its own row. When a user belongs to two groups that
+	// each grant the same role, both rows appear with their respective
+	// group provenance — preventing silent first-group-wins.
+	seen := make(map[string]bool) // dedup key: bindingID + userID
 
 	for _, gb := range groupBindings {
 		// Lifecycle check: skip expired or not-yet-valid bindings.
@@ -748,7 +752,7 @@ func (s *Server) expandScopeGroupDerivedBindings(ctx context.Context, filter sto
 		// Expand group members (including transitive groups, up to depth 5).
 		userIDs := s.expandGroupMembers(ctx, gb.PrincipalID, 5)
 		for _, userID := range userIDs {
-			dedupKey := gb.RoleDefinitionID + ":" + userID + ":" + gb.ScopeID
+			dedupKey := gb.ID + ":" + userID
 			if seen[dedupKey] {
 				continue
 			}
@@ -786,17 +790,21 @@ func (s *Server) expandGroupMembers(ctx context.Context, groupID string, maxDept
 	if maxDepth <= 0 {
 		return nil
 	}
-	visited := make(map[string]bool)
+	visitedGroups := make(map[string]bool)
+	// userStatusCache prevents N+1 GetUser calls when the same user appears
+	// in multiple groups during transitive expansion. Cache values:
+	// true = active (include), false = suspended/deleted/error (exclude).
+	userStatusCache := make(map[string]bool)
 	var userIDs []string
-	s.expandGroupMembersRecursive(ctx, groupID, maxDepth, visited, &userIDs)
+	s.expandGroupMembersRecursive(ctx, groupID, maxDepth, visitedGroups, userStatusCache, &userIDs)
 	return userIDs
 }
 
-func (s *Server) expandGroupMembersRecursive(ctx context.Context, groupID string, depth int, visited map[string]bool, userIDs *[]string) {
-	if depth <= 0 || visited[groupID] {
+func (s *Server) expandGroupMembersRecursive(ctx context.Context, groupID string, depth int, visitedGroups map[string]bool, userStatusCache map[string]bool, userIDs *[]string) {
+	if depth <= 0 || visitedGroups[groupID] {
 		return
 	}
-	visited[groupID] = true
+	visitedGroups[groupID] = true
 
 	members, err := s.store.GetGroupMembers(ctx, groupID)
 	if err != nil {
@@ -809,18 +817,25 @@ func (s *Server) expandGroupMembersRecursive(ctx context.Context, groupID string
 		switch m.MemberType {
 		case store.GroupMemberTypeUser:
 			// Check user lifecycle — exclude suspended/deleted users.
-			user, uErr := s.store.GetUser(ctx, m.MemberID)
-			if uErr != nil {
-				// User not found or store error — skip safely.
-				continue
+			// Use cache to avoid repeated GetUser calls for the same user.
+			active, cached := userStatusCache[m.MemberID]
+			if !cached {
+				user, uErr := s.store.GetUser(ctx, m.MemberID)
+				if uErr != nil {
+					// User not found or store error — skip safely.
+					userStatusCache[m.MemberID] = false
+					continue
+				}
+				active = user.Status != store.UserStatusSuspended
+				userStatusCache[m.MemberID] = active
 			}
-			if user.Status == store.UserStatusSuspended {
+			if !active {
 				continue
 			}
 			*userIDs = append(*userIDs, m.MemberID)
 		case store.GroupMemberTypeGroup:
 			// Transitive expansion.
-			s.expandGroupMembersRecursive(ctx, m.MemberID, depth-1, visited, userIDs)
+			s.expandGroupMembersRecursive(ctx, m.MemberID, depth-1, visitedGroups, userStatusCache, userIDs)
 		}
 	}
 }
@@ -1127,12 +1142,69 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	if err := s.store.DeleteRoleBinding(ctx, id); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
+	// R3-REQ-1 + A-7: All non-project role-binding deletions run inside a
+	// transaction that enforces two invariants:
+	//   1. Last super-admin guard (system-scope only): LockSystemRoleSync +
+	//      count prevents deleting the last super-admin binding.
+	//   2. Boundary lockout guard: GovernanceService.GuardRoleBindingDeletion
+	//      prevents deleting the last binding carrying access_constraint.admin.
+	// Both checks run inside the same transaction so the evaluated state and
+	// the deletion share a single commit boundary.
+	var lastAdminErr *LastAdminError
+	var govErr *GovernanceError
+	txErr := s.store.WithTx(ctx, func(tx store.Store) error {
+		// Guard 1: last super-admin (system-scope super-admin bindings only).
+		// R3: Only count lifecycle-valid bindings (not expired, not future).
+		if binding.ScopeType == store.RoleScopeSystem {
+			rd, rdErr := tx.GetRoleDefinition(ctx, binding.RoleDefinitionID)
+			if rdErr != nil {
+				return rdErr
+			}
+			if rd.Name == store.SystemRoleSuperAdmin {
+				if lockErr := tx.LockSystemRoleSync(ctx, rd.ID); lockErr != nil {
+					return fmt.Errorf("lock system role sync: %w", lockErr)
+				}
+				activeCount := countActiveBindings(ctx, tx, rd.ID, store.RoleScopeSystem)
+				if activeCount <= 1 {
+					lastAdminErr = &LastAdminError{}
+					return nil // no-op commit — guard tripped
+				}
+			}
+		}
+
+		// Guard 2: boundary lockout (access_constraint.admin) — A-7.
+		// TODO(RS5): CheckRoleBindingRemovalTx is currently a no-op stub.
+		// RS5 will deliver the full activation-aware evaluator.
+		if s.governanceService != nil {
+			if gErr := s.governanceService.CheckRoleBindingRemovalTx(ctx, tx, binding); gErr != nil {
+				var ge *GovernanceError
+				if errors.As(gErr, &ge) {
+					govErr = ge
+					return nil // no-op commit — guard tripped
+				}
+				return gErr // unexpected error — roll back
+			}
+		}
+
+		return tx.DeleteRoleBinding(ctx, id)
+	})
+
+	if lastAdminErr != nil {
+		writeError(w, http.StatusConflict, "last_admin",
+			"cannot delete last super-admin binding", nil)
+		return
+	}
+	if govErr != nil {
+		writeError(w, http.StatusConflict, govErr.Code,
+			govErr.Message, nil)
+		return
+	}
+	if txErr != nil {
+		if errors.Is(txErr, store.ErrNotFound) {
 			NotFound(w, "Role Binding")
 			return
 		}
-		writeErrorFromErr(w, err, "")
+		writeErrorFromErr(w, txErr, "")
 		return
 	}
 

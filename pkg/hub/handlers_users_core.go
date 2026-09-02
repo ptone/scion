@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -200,12 +201,16 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		if txErr := tx.UpdateUser(ctx, txUser); txErr != nil {
 			return txErr
 		}
+		// R3-REQ-2: Always copy the updated user for the response body
+		// BEFORE branching into syncUserRoleBindings. Previously, the
+		// copy was on the non-roleChanged path and was unreachable when
+		// a role change occurred, causing the response to return the
+		// stale pre-transaction user.
+		*user = *txUser
 		roleChanged := updates.Role != "" && updates.Role != previousRole
 		if roleChanged {
 			return s.syncUserRoleBindings(ctx, tx, txUser.ID, previousRole, updates.Role)
 		}
-		// Update the outer user pointer for the response.
-		*user = *txUser
 		return nil
 	})
 	if err != nil {
@@ -270,17 +275,13 @@ func (s *Server) syncUserRoleBindings(ctx context.Context, tx store.Store, userI
 		}
 
 		// R-1: Last-super-admin guard — refuse demotion if this is the last
-		// super-admin binding. The lock above serializes concurrent callers
-		// so the count is stable within this transaction.
+		// lifecycle-valid super-admin binding. The lock above serializes
+		// concurrent callers so the count is stable within this transaction.
+		// R3: Only count bindings that are currently active (not expired,
+		// not future-dated). An expired binding cannot satisfy last_admin.
 		if oldRoleName == store.SystemRoleSuperAdmin {
-			count, countErr := tx.CountRoleBindingsFiltered(ctx, store.RoleBindingFilter{
-				RoleDefinitionID: oldRD.ID,
-				ScopeType:        store.RoleScopeSystem,
-			})
-			if countErr != nil {
-				return fmt.Errorf("count super-admin bindings: %w", countErr)
-			}
-			if count <= 1 {
+			activeCount := countActiveBindings(ctx, tx, oldRD.ID, store.RoleScopeSystem)
+			if activeCount <= 1 {
 				return &LastAdminError{}
 			}
 		}
@@ -326,6 +327,32 @@ func (s *Server) syncUserRoleBindings(ctx context.Context, tx store.Store, userI
 	}
 
 	return nil
+}
+
+// countActiveBindings counts lifecycle-valid role bindings for the given
+// role definition and scope. Only bindings that are currently active
+// (NotBefore <= now, ExpiresAt > now or nil) are counted. This prevents
+// expired or future-dated bindings from satisfying the last-admin guard.
+func countActiveBindings(ctx context.Context, tx store.Store, roleDefinitionID, scopeType string) int {
+	bindings, err := tx.ListRoleBindingsFiltered(ctx, store.RoleBindingFilter{
+		RoleDefinitionID: roleDefinitionID,
+		ScopeType:        scopeType,
+	}, 1000, 0)
+	if err != nil {
+		return 0 // fail closed — 0 means guard will refuse
+	}
+	now := time.Now()
+	active := 0
+	for _, b := range bindings {
+		if b.ExpiresAt != nil && !b.ExpiresAt.After(now) {
+			continue // expired
+		}
+		if b.NotBefore != nil && b.NotBefore.After(now) {
+			continue // not yet valid
+		}
+		active++
+	}
+	return active
 }
 
 // LastAdminError is returned when a role demotion would remove the last

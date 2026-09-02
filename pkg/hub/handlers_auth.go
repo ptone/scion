@@ -1713,6 +1713,11 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 // (D11-fix2, Finding 3) so that IsSystemAdmin immediately agrees with
 // IsUnscopedLocalPlatformAdmin. Best-effort: errors are logged but do not fail
 // the login — the next startup reconciliation will clean up.
+//
+// R3-FYI-1/R3-REQ-1: The last-admin invariant is enforced here too —
+// if this is the last super-admin binding, the deletion is refused and
+// logged. The login proceeds with the user's old binding intact; the
+// next admin config change or reconciliation will resolve the conflict.
 func (s *Server) deleteSuperAdminBinding(ctx context.Context, userID string) {
 	rd, err := s.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	if err != nil {
@@ -1728,9 +1733,31 @@ func (s *Server) deleteSuperAdminBinding(ctx context.Context, userID string) {
 
 	for _, b := range bindings {
 		if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
-			if err := s.store.DeleteRoleBinding(ctx, b.ID); err != nil {
+			// Use a transaction with LockSystemRoleSync and the boundary
+			// lockout guard (A-7) to prevent concurrent last-admin deletion.
+			txErr := s.store.WithTx(ctx, func(tx store.Store) error {
+				if lockErr := tx.LockSystemRoleSync(ctx, rd.ID); lockErr != nil {
+					return fmt.Errorf("lock: %w", lockErr)
+				}
+				activeCount := countActiveBindings(ctx, tx, rd.ID, store.RoleScopeSystem)
+				if activeCount <= 1 {
+					slog.Warn("deleteSuperAdminBinding: refusing to delete last super-admin binding",
+						"user_id", userID, "binding_id", b.ID)
+					return nil // no-op — last admin guard
+				}
+				// A-7: boundary lockout guard (stub — RS5 will deliver evaluator).
+				if s.governanceService != nil {
+					if gErr := s.governanceService.CheckRoleBindingRemovalTx(ctx, tx, b); gErr != nil {
+						slog.Warn("deleteSuperAdminBinding: boundary lockout guard refused deletion",
+							"user_id", userID, "binding_id", b.ID, "error", gErr)
+						return nil // no-op — boundary guard tripped
+					}
+				}
+				return tx.DeleteRoleBinding(ctx, b.ID)
+			})
+			if txErr != nil {
 				slog.Warn("deleteSuperAdminBinding: failed to delete binding",
-					"user_id", userID, "binding_id", b.ID, "error", err)
+					"user_id", userID, "binding_id", b.ID, "error", txErr)
 			} else {
 				slog.Info("deleted super-admin binding at login-time demotion",
 					"user_id", userID, "binding_id", b.ID)

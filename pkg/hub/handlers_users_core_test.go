@@ -599,3 +599,145 @@ func TestUpdateUser_MultipleAdmins_DemotionAllowed(t *testing.T) {
 	}
 	assert.True(t, hasViewer, "viewer binding should exist after demotion")
 }
+
+// R3-REQ-2: Verify that the PATCH response body contains the updated role
+// (not the stale pre-transaction value).
+func TestUpdateUser_ResponseBodyContainsNewRole(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Create two admin users so the last-admin guard doesn't block.
+	user1ID := tid("resp-body-1")
+	user2ID := tid("resp-body-2")
+	for _, u := range []struct {
+		id    string
+		email string
+	}{
+		{user1ID, "resp1@example.com"},
+		{user2ID, "resp2@example.com"},
+	} {
+		require.NoError(t, s.CreateUser(ctx, &store.User{
+			ID: u.id, Email: u.email, DisplayName: "Admin",
+			Role: "admin", Status: "active",
+		}))
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: superAdminRD.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      u.id,
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        store.SystemBackfillCreatedBy,
+		})
+		require.NoError(t, err)
+	}
+
+	// Demote user1 from admin to viewer.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user1ID, map[string]string{
+		"role": "viewer",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// The response body must contain the NEW role, not the old one.
+	var respUser store.User
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&respUser))
+	assert.Equal(t, "viewer", respUser.Role,
+		"response body should contain the updated role, not the stale pre-transaction value")
+
+	// Verify persistence matches the response.
+	persisted, err := s.GetUser(ctx, user1ID)
+	require.NoError(t, err)
+	assert.Equal(t, respUser.Role, persisted.Role,
+		"response role should match persisted role")
+}
+
+// R3-REQ-1: Verify that DELETE /api/v1/admin/role-bindings/:id refuses to
+// delete the last super-admin binding.
+func TestDeleteRoleBinding_LastSuperAdmin_Returns409(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// The dev user (seeded by testServer) is the only super-admin.
+	// Find their super-admin binding.
+	devBindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, DevUserID)
+	require.NoError(t, err)
+	var devSuperAdminBindingID string
+	for _, b := range devBindings {
+		if b.RoleDefinitionID == superAdminRD.ID && b.ScopeType == store.RoleScopeSystem {
+			devSuperAdminBindingID = b.ID
+			break
+		}
+	}
+	require.NotEmpty(t, devSuperAdminBindingID, "dev user should have a super-admin binding")
+
+	// Try to delete the dev user's own super-admin binding — this is the
+	// last one, so the guard should refuse with 409.
+	rec := doRequest(t, srv, http.MethodDelete,
+		"/api/v1/admin/role-bindings/"+devSuperAdminBindingID, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code,
+		"should refuse to delete last super-admin binding: %s", rec.Body.String())
+
+	// Verify the binding still exists.
+	_, err = s.GetRoleBinding(ctx, devSuperAdminBindingID)
+	assert.NoError(t, err, "last super-admin binding should not have been deleted")
+}
+
+// R3-REQ-1: Verify that DELETE succeeds when multiple super-admin bindings exist.
+func TestDeleteRoleBinding_MultipleSuperAdmins_Succeeds(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+
+	// Create two admin users with super-admin bindings.
+	user1ID := tid("del-multi-1")
+	user2ID := tid("del-multi-2")
+	for _, u := range []struct {
+		id    string
+		email string
+	}{
+		{user1ID, "del1@example.com"},
+		{user2ID, "del2@example.com"},
+	} {
+		require.NoError(t, s.CreateUser(ctx, &store.User{
+			ID: u.id, Email: u.email, DisplayName: "Admin",
+			Role: "admin", Status: "active",
+		}))
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: superAdminRD.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      u.id,
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        store.SystemBackfillCreatedBy,
+		})
+		require.NoError(t, err)
+	}
+
+	// Get user1's super-admin binding.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user1ID)
+	require.NoError(t, err)
+	var targetBindingID string
+	for _, b := range bindings {
+		if b.RoleDefinitionID == superAdminRD.ID && b.ScopeType == store.RoleScopeSystem {
+			targetBindingID = b.ID
+			break
+		}
+	}
+	require.NotEmpty(t, targetBindingID, "should find super-admin binding for user1")
+
+	// Delete user1's super-admin binding — should succeed because user2 and
+	// dev user still have super-admin bindings.
+	rec := doRequest(t, srv, http.MethodDelete,
+		"/api/v1/admin/role-bindings/"+targetBindingID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code,
+		"should succeed with multiple super-admins: %s", rec.Body.String())
+
+	// Verify the binding is gone.
+	_, err = s.GetRoleBinding(ctx, targetBindingID)
+	assert.Error(t, err, "deleted binding should not exist")
+}
