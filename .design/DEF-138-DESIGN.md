@@ -1,14 +1,27 @@
 # DEF-138 — Inbound/outbound conversation split
 
 **Project:** ca-msg-arch
-**Status:** DRAFT — ready for dispatch
+**Status:** DRAFT v2 — **redesigned on explicit routing** after ptone's objection to affinity
 **Measured at:** `scion/tranche-g` = `0cff20a2b1ad5e46d4ce3e1a4cc1b7140221e651`
 **Author:** ca-msg-arch (architect)
-**Reproduction:** live on gteam, preserved — conversations `0c57b491` / `b2fd01b6`, messages `3e718a5a` (in) / `1f3f0e39` (reply)
+**Reproduction:** live on gteam — conversations `0c57b491` / `b2fd01b6`, messages `3e718a5a` (in) / `1f3f0e39` (reply) / `54b029ac` (probe)
+
+> **v1 → v2.** v1 proposed remembering the inbound `thread_id` in the existing
+> affinity record. ptone objected, verbatim: *"it's somewhat seems to train
+> agents into a lazy approach of not actually referencing explicitly where they
+> are sending messages and relying on an external affinity memory system…
+> I'd broadly prefer consistent, explicit routing of messages and an error."*
+>
+> **He is right and v1 was chosen for the wrong reason.** Affinity won on
+> migration cost — no agent change, small blast radius. Those are transition
+> virtues, and I let them select the target architecture. That is the precise
+> mechanism by which a refactor lands in the "hybrid state" ptone has twice
+> said he does not want. Recorded as a design error of mine, not a change of
+> requirements.
 
 ---
 
-## 1. Problem & Goals
+## 1. Problem & root cause
 
 ### The observation
 
@@ -16,315 +29,325 @@
 |---|---|---|---|
 | inbound `3e718a5a` | `0c57b491` | group | `thread:a3083e98:1532505776013312133` |
 | reply `1f3f0e39` | `b2fd01b6` | direct | `dm:agent:c9c1123b:user:b53249ea` |
+| probe `54b029ac` (thread_id forced) | `0c57b491` | group | same as inbound |
 
 The reply was **delivered to the Discord channel** but **persisted as a DM**.
+The probe confirms the mechanism: forcing `thread_id` moves persistence back
+onto the inbound conversation.
 
-### Root cause
+### Root cause — the address is under-specified
 
-Two independent resolution strategies, selected on one field.
-
-**Inbound** (`handlers_broker_inbound.go:556-564`): every channel plugin sets
-`ThreadID` — Discord `broker.go:1471-1489`, Slack `events.go:403`, Teams
-`activities.go:85`, web chat `handlers_chat_v2.go:1159`. None sets
-`Surface`/`ExternalRef`, so all four take the **Phase 5 thread branch** →
+**Inbound** (`handlers_broker_inbound.go:556-564`): every plugin sets
+`ThreadID` and none sets `Surface`/`ExternalRef` — Discord
+`broker.go:1471-1489`, Slack `events.go:403`, Teams `activities.go:85`, web chat
+`handlers_chat_v2.go:1159`. All four take the Phase 5 thread branch →
 `thread:{projectID}:{threadID}`, kind `group`.
 
-**Outbound** (`messagebroker.go:466`) branches on exactly one thing:
+**Outbound** (`messagebroker.go:466`) branches on one field:
 
 ```go
-if msg.ThreadID != "" {          // → ResolveOrCreateThreadConversation (group)
+if msg.ThreadID != "" {          // → thread conversation (group)
 } else if msg.SenderID != "" && msg.RecipientID != "" {
-                                 // → ResolveOrCreateDMConversation (direct)
+                                 // → DM conversation (direct)
 ```
 
-An agent's reply carries **empty `ThreadID`**. No surface, channel or plugin is
-consulted. Empty ⇒ DM, always.
+An agent's reply carries empty `ThreadID`. Empty ⇒ DM, always.
 
-### The asymmetry that makes it confusing
+**The deeper problem is not the branch.** It is that an agent's reply is
+addressed to a **principal** (`user:X`), and a principal does not identify a
+conversation. The system is being asked a question the caller never answered,
+and it answers by derivation. Improving the derivation — v1 — leaves the
+address under-specified. **The fix is to complete the address.**
 
-There **is** an affinity mechanism, and it works — it just carries the wrong
-field. `webchat_conversation_context`
-(`webchannel_store_postgres.go:51-58`) stores
-`user_id, project_id, agent_id, last_channel, last_message_at`. Written inbound
-(`handlers_broker_inbound.go:476-481` `RecordChannel`), read outbound
-(`handlers_agent_messaging.go:221-229`):
+### Scope
 
-```go
-if lastCh, err := wcsAffinity.GetLastChannel(ctx, recipientID, agent.ProjectID, agent.ID); ...
-} else if lastCh != "" {
-    req.Channel = lastCh
-}
-```
+Not Discord-specific. All four surfaces split their round trip identically.
 
-**No thread id and no conversation id in that table.** Delivery has affinity;
-persistence does not. That single omission is the whole defect.
+---
 
-### Goals
+## 2. Goals
 
-- **G1** — For every surface, an agent's reply persists into the **same
-  conversation** as the message it is replying to.
-- **G2** — No agent-side behaviour change. Existing agents are fixed as-is.
-- **G3** — No new way for a client to assert a conversation it is not
-  authorised for. The fix must not open an injection surface.
-- **G4** — Reduce, not increase, the number of places that resolve a
-  conversation.
+- **G1** — An agent's reply persists into the conversation it is replying to,
+  on every surface.
+- **G2** — **Routing is explicit.** Where a message belongs is stated by the
+  caller or derived deterministically from the caller's own address. **No
+  component consults a side-table memory of "where this agent was last active."**
+- **G3** — No unauthorised conversation assertion. An agent naming a
+  conversation must be authorised for it.
+- **G4** — Reduce the number of places that resolve a conversation.
+- **G5** — A proactive send with no prior context still works without ceremony.
 
 ### Non-goals
 
-- Multi-conversation precision. An agent addressed in two conversations that
-  replies without saying which gets the most recent. §7 / OQ-138-2.
-- `conv:<id>` CLI addressing (`cmd/message.go:150-161` gates it off). Separate
-  work, and the escape hatch `--channel X --thread-id Y` already exists.
-- Fixing the false-warning volume in `CheckConversationConsistency` — DEF-130.
-- `reply_to_id` plumbing (`render_delivery.go:76-80` leaves it deliberately
-  empty). See Alternative D.
+- Removing the *existing* channel affinity (`GetLastChannel`,
+  `handlers_agent_messaging.go:221-229`). It governs **delivery**, not
+  identity, and ripping it out is a separate decision. **But see OQ-138-5** —
+  G2's logic applies to it too, and leaving it is a deliberate deferral rather
+  than an endorsement.
+- Backfilling existing split history. §6.
+- DEF-130's false-warning volume.
 
 ---
 
-## 2. Proposed design — carry the thread id in the affinity record
+## 3. Proposed design — explicit conversation routing
 
-**Mirror the mechanism that already works.** Channel affinity sets
-`req.Channel` when the caller omits it; thread affinity sets `req.ThreadID` the
-same way.
+### 3.1 The resolution rule
 
-1. Add `last_thread_id` to `webchat_conversation_context`.
-2. Record it inbound, at the existing `RecordChannel` site.
-3. Read it outbound, immediately beside the existing `GetLastChannel` block:
+One rule, applied everywhere a message is persisted:
 
-```go
-// pseudocode, handlers_agent_messaging.go ~:229
-if req.ThreadID == "" {
-    if lastThread, err := wcsAffinity.GetLastThreadID(ctx, recipientID, agent.ProjectID, agent.ID); err == nil && lastThread != "" {
-        req.ThreadID = lastThread
-    }
-}
+```
+1. Caller named a conversation   → authorize it, then use it.        (explicit)
+2. Caller named a thread         → derive thread:{project}:{thread}.  (derivation)
+3. Caller named only principals  → derive dm:{kind}:{id}:{kind}:{id}. (derivation)
+4. Otherwise                     → error. Do not guess.
 ```
 
-**An explicit `req.ThreadID` always wins.** Affinity only fills a blank —
-identical precedence to the channel rule, and to DEF-135's "Phase 11 explicit
-beats Phase 5 inferred."
+Steps 2 and 3 are **derivations, not guesses**: they are pure functions of the
+address the caller supplied, deterministic, and already implemented
+(`derive_key.go:67-108`). Step 3 is what keeps `scion message user:X "heads up"`
+working for a genuine proactive send — G5.
 
-### Why this is the right shape
+**What is removed is step 0, which v1 would have added:** *consult a memory of
+where this agent was last seen.* No such lookup exists in this design.
 
-Both resolution sites already handle a non-empty `ThreadID` **correctly and
-identically**: the handler's `DeriveConversationKey` (`derive_key.go:94-100`)
-and the broker's `ResolveOrCreateThreadConversation`
-(`messagebroker.go:466-472`) both produce `thread:{projectID}:{threadID}`, kind
-`group`. So populating the field makes the two existing paths **agree**, rather
-than adding a third path that has to be kept in sync with them.
+### 3.2 How a reply becomes explicit without the agent remembering anything
 
-Consequences worth stating plainly:
+The envelope already carries the conversation — DEF-135 put it there
+(`render_delivery.go:93-101`, emitted as the `conversation` key by
+`delivery.go:74-76`). The reply carries it **back**, in-band, on the request.
 
-- **No wire change.** `OutboundMessageRequest` (`handlers_agent_messaging.go:37-50`)
-  is untouched. Verified: it has 10 fields and none is a conversation.
-- **No authorization surface.** The value is server-recorded from an inbound
-  message the agent demonstrably received. The client never asserts it, so G3
-  holds by construction of the data flow — not by a check that could be removed.
-- **No migration.** A nullable column; absent ⇒ empty ⇒ today's behaviour.
-- **Derivation stays single-source.** We supply an input to the existing key
-  derivation rather than storing a resolved conversation id and bypassing it.
-  This respects the standing rule that the derivation path is authoritative.
+That is the whole difference from affinity: the conversation id travels **with
+the message**, sourced from the message being replied to. There is no server
+memory keyed on `(user, project, agent)` that a later message silently inherits.
 
-### ⚠️ The risk that must be measured before this ships
+Absence of the field then means something precise and useful: **"this is not a
+reply."** Under rule 3 that is a proactive send and a derived DM is correct.
 
-`req.ThreadID` may not be inert on the **delivery** side. If a plugin routes on
-`thread_id`, populating it changes where replies appear, not merely where they
-are stored — turning a persistence fix into a delivery change.
+### 3.3 Wire change
 
-Three outcomes, and they are not equally acceptable:
+`OutboundMessageRequest` (`handlers_agent_messaging.go:37-50`) gains one field —
+verified today it has ten and none is a conversation:
 
-| Outcome | Verdict |
-|---|---|
-| Delivery ignores `thread_id`; only persistence changes | Ship it |
-| Delivery becomes *more* precise (reply lands in the originating thread) | Ship it — but it is a **behaviour change**, must be in the changelog, and ptone must be told rather than discovering it |
-| Delivery breaks or is misrouted | **Blocks this design**; fall back to Alternative B |
+```go
+ConversationID string `json:"conversation_id,omitempty"`
+```
 
-**This is the single load-bearing unknown.** It is AC-4, and it must be
-answered by measurement on gteam, not by reading plugin code alone —
-`--channel`/`--thread-id` interact (`cmd/message.go:192-194`) and the plugins
-each interpret the pair differently.
+The CLI `conv:<uuid>` gate (`cmd/message.go:150-161`) is opened. Its comment is
+explicit that the grammar already works and only routing was missing:
 
-### Second change: collapse the double resolution (G4)
+> *"conv:&lt;id&gt; and #&lt;thread&gt; resolve correctly but delivery routing is not yet
+> implemented — accepting them would silently drop the message."*
 
-`handleAgentOutboundMessage` resolves a conversation at `:307-314` and assigns
-it at `:343` — **then discards the whole `storeMsg` when a broker is present**
-(`:398-407`), because `structuredMsg` carries no `ConversationID` and
-`store.CreateMessage` only runs on the non-broker branch at `:409`. The row that
-survives is written by `deliverToUser` (`messagebroker.go:501,522`), which
-resolves again from scratch.
+This design implements that routing, so the gate's stated reason expires. Help
+text (`cmd/message.go:103-104`) and `SKILL.md:32,130` change with it.
 
-Two resolutions, two divergence log lines for one reply (`:355-369` and
-`messagebroker.go:504-518`) with different message ids, and one result silently
-thrown away. They agree today only because they consume the same inputs.
+### 3.4 Authorization — the gate already exists, and must not be copy-pasted
 
-**This is not cosmetic.** The dead resolution is exactly the kind of code a
-future change "fixes" without effect, and the duplicate log lines make the
-instrumentation ambiguous. Delete the dead path, or make the handler's result
-authoritative — SC-2 below picks the former as lower-risk.
+An agent asserting a conversation id is a **client assertion** and must be
+authorised. This is the security-critical part of the design, and it is already
+written: the sibling agent→agent handler implements the full DEF-49 block at
+`handlers_agent_messaging.go:951-1044`, honouring the assertion only at `:1037`.
+It requires an authenticated identity, 400s an unknown conversation, fails
+closed on `(nil, nil)`, and then splits by kind — `direct` via
+`CheckDMParticipantKey` (the DM key *is* the ACL), `group` via project
+containment with an explicit guard against two unset project IDs comparing
+equal, and unknown kinds denied.
 
----
+**⚠️ It cannot be copied verbatim, and this is the most likely way to get this
+wrong.** In the sibling, `agent` is the **recipient** (resolved from the URL
+path at `:668`), so the group case asserts *"the conversation belongs to the
+addressed agent's project."* On the outbound path, `agent` is the **sender**.
+The same code would then assert something different — *"the conversation
+belongs to the sending agent's project"* — which is the right check for this
+direction, but it is a different claim reached by identical-looking code. The
+docstring must be rewritten to say which claim is being made. A silent
+copy-paste leaves a comment that describes the other direction.
 
-## 3. DEF-139 — the divergence detector cannot fail
+`authenticatedSender` is on the prohibition list and this design **uses** it;
+nothing here removes it.
 
-Filed separately because it is a **defect in the evidence**, not in the
-messaging path, and it is why DEF-138 ran undetected.
+### 3.5 Collapse the double resolution (G4)
 
-`ComputeDivergenceMatch` (`divergence.go:286-323`) opens with:
+`handleAgentOutboundMessage` resolves at `:307-314`, assigns at `:343`, logs
+divergence at `:355-369` — then **discards the whole `storeMsg`** when a broker
+is present (`:398-407`), because `structuredMsg` carries no `ConversationID`
+and `store.CreateMessage` runs only on the non-broker branch at `:409`. The
+surviving row is written by `deliverToUser` (`messagebroker.go:501,522`), which
+resolves again.
 
-> *"The comparison is non-tautological: actualExternalRef comes from the
-> database, not from reconstructing inputs."*
+**Confirmed empirically, not just by reading:** the probe produced *two* routing
+log lines with different message ids — `4bb4d3e2` (pre-broker, absent from the
+messages table) and `54b029ac` (persisted).
 
-In the DM branch this is **false**. `oldPair` = sorted{`senderID`,
-`recipientID`}. `newPair` = the ids at `parts[2]`/`parts[4]` of
-`actualExternalRef` — a key that `ResolveOrCreate**DM**Conversation`
-(`conversation.go:92-116`) built from those same two ids and upserted moments
-earlier. The two sides are the same derivation. It **cannot** return anything
-but `dm-routing-agreement`.
-
-The docstring's defence — "comes from the database" — is true and irrelevant:
-the row was written from those inputs on this request. The claim holds only for
-rows created under a *different* rule, which is the case the resolve-or-**create**
-path guarantees against.
-
-The check that could have caught the split, `CheckConversationConsistency`
-(`divergence.go:381-460`), runs immediately after (`messagebroker.go:520`) and
-**its return value is discarded at both call sites**. DEF-130 already records it
-emitting ~16 false warnings a day, so even the log line it does emit is buried.
-
-**A detector that cannot fail is worse than no detector**, because it is read as
-evidence. This is the mechanism by which a green signal accompanied a broken
-round trip for the entire life of the switch.
-
-Fix: make the DM branch compare against a conversation the request did not just
-create (or drop the branch and report `dm-routing-unverifiable`), correct the
-docstring, and consume the `CheckConversationConsistency` return value.
+This defect becomes load-bearing under the new design: the explicit
+`ConversationID` must reach the writer, and today the handler's result does not
+survive. **The fix is the same edit as the feature** — propagate
+`ConversationID` onto `structuredMsg` and have `deliverToUser` honour a
+pre-resolved conversation instead of re-deriving. That collapses two
+resolutions into one and is what makes explicit routing actually take effect.
 
 ---
 
 ## 4. Alternatives considered
 
-**A — Store `last_conversation_id` instead of `last_thread_id`, and propagate a
-resolved conversation through `structuredMsg` into `deliverToUser`.**
-Rejected as the primary, though it is the closest runner-up. It bypasses key
-derivation and makes a stored id authoritative, which conflicts with the
-standing rule that derivation is the single source of truth for conversation
-identity. It also requires a new field on the internal message struct and a
-behaviour change in `deliverToUser` (honour-if-set), i.e. more moving parts for
-the same outcome. **Promote this to primary if AC-4 shows `ThreadID` is not
-inert on delivery** — it changes persistence without touching routing, which is
-precisely the property we would then need.
+**A — Thread/conversation affinity (design v1).** Store the inbound thread in
+`webchat_conversation_context` beside `last_channel` and use it to fill an empty
+`ThreadID`. **Rejected on ptone's objection, which I endorse.** It makes
+`scion message user:X "hi"` mean different things at different times depending
+on invisible server state; it trains agents not to state their destination; it
+is a guess that is silently wrong rather than loudly absent; and it inherits the
+multi-conversation ambiguity noted as OQ-138-2. Its one real merit — cheap, no
+agent change — is a migration property, and migration properties should not pick
+architectures. *Cost of rejecting it: 2–3× the work, and existing agents are not
+fixed until they send the field.* That cost is real and is the honest price of
+G2.
 
-**B — Add `ConversationID` to `OutboundMessageRequest` and have agents echo it
-back.** Rejected as the *first* move; correct as a later enhancement. It is the
-most precise answer and it is the only one that solves multi-conversation
-addressing (§7). But: it fixes no existing agent, since none sends the field;
-`SKILL.md:130` currently tells agents the field is "not yet required"; and it
-introduces a client-asserted conversation, which **requires an authorization
-gate**. That gate is not hypothetical work — the sibling handler
-`handleAgentMessage` already implements exactly this pattern at `:951-1044`
-before honouring the assertion at `:1037`, and any implementation here must
-match it. Doing B first means shipping the authorization surface to fix nobody.
+**B — Populate `reply_to_id` and derive the conversation from the replied-to
+message.** Rejected as the mechanism, though it is the most semantically precise
+— it answers "which conversation" by pointing at a concrete message rather than
+an id the agent must carry. `render_delivery.go:76-80` deliberately leaves
+`ReplyToID` empty and `reply_to_id` exists only on the web-chat human→agent path
+(`handlers_chat_v2.go:839`). It needs the same echo plumbing as the chosen
+design plus a message lookup, and it degrades badly when the replied-to message
+is unavailable. **Worth revisiting** once explicit routing exists, as a
+convenience layer over it rather than an alternative to it.
 
-**C — Have plugins set `Surface`/`ExternalRef` so Phase 11 runs.** Rejected,
-and this is the same trap recorded in DEF-135 Alternative B: Phase 11 keys
-`discord:chan:X` while the current path keys `thread:{projectID}:X`, so it
-splits history at the deploy boundary. Worse here, because it would do so on
-**four** surfaces at once.
+**C — Plugins set `Surface`/`ExternalRef` so Phase 11 runs.** Rejected — same
+trap as DEF-135 Alternative B. Phase 11 keys `discord:chan:X` while the current
+path keys `thread:{projectID}:X`, splitting history at the deploy boundary, here
+on four surfaces at once.
 
-**D — Populate `reply_to_id` and derive the conversation from the replied-to
-message.** Rejected for now. Semantically the most precise — it answers "which
-conversation" by pointing at an actual message rather than guessing. But
-`render_delivery.go:76-80` leaves `ReplyToID` deliberately empty, `reply_to_id`
-exists only on the web-chat human→agent path
-(`handlers_chat_v2.go:839`), and it needs the same agent-echo plumbing as B. It
-is the right long-term shape and the wrong next commit.
+**D — Error on any message without an explicit conversation.** This is ptone's
+stated position taken literally, and it is **rejected only in degree**. It would
+break every proactive send, including `scion message user:X "heads up"` where no
+conversation exists yet and no reasonable caller could name one. The design
+keeps his principle — never consult a memory — while allowing *derivation from
+the caller's own address*, which is not a guess. If he wants the strict form,
+rule 3 becomes an error and G5 is dropped; that is a one-line change to this
+design and I would want it stated explicitly rather than assumed.
 
-**E — Do nothing; document the split.** Rejected. Under the standing tolerance
-for "tracked buggy behaviour that does not dead-end us," this superficially
-qualifies. It does not, because the conversation id in the envelope is
-*actively misleading*: it names a conversation the agent cannot reply into.
-Shipping an identifier that does not round-trip trains every future consumer to
-distrust it, which forecloses the end state rather than deferring it.
+**E — Do nothing.** Rejected. The envelope names a conversation the agent cannot
+reply into, which is worse than naming none: it trains every future consumer to
+distrust the field.
 
 ---
 
-## 5. Migration / rollout
+## 5. DEF-139 — the detector cannot report this class of failure
 
-Additive nullable column; absent ⇒ empty ⇒ current behaviour. No backfill —
-affinity is populated by the next inbound message per (user, project, agent)
-tuple, so the fix takes effect on the second message of each conversation and
-is self-healing.
+Filed separately; **its priority rises under this design**, because the new
+failure mode is "agent omitted the conversation" and we need something that can
+see it.
 
-**Explicitly not backfilled:** existing split history stays split. Retro-editing
-`conversation_id` on historical rows is an irreversible rewrite of the record
-for a cosmetic gain, and is not proposed. OQ-138-3.
+`ComputeDivergenceMatch` (`divergence.go:286-340`) is tautological in **both**
+branches. DM: `oldPair` = sorted{senderID, recipientID} vs ids extracted from a
+ref `ResolveOrCreateDMConversation` built from those same ids. Thread:
+`oldThreadID` = `msg.ThreadID` vs the threadID portion of a ref built from
+`msg.ThreadID`. Both sides, both branches, same inputs. Its mismatch branches
+are effectively unreachable because `OldRoutingFromMessage` and the resolver
+both branch on the identical `threadID != ""` test.
 
-Rollback is a revert; the column can be left in place, unread.
+**Precision:** it *can* return `no-new-routing` when resolution fails, which is
+a real signal. The exact claim is that its **agreement verdicts carry no
+information**.
+
+**The codebase already contains the correct diagnosis.**
+`CheckConversationConsistency`'s docstring (`divergence.go:368-372`) says:
+*"Unlike ComputeDivergenceMatch (which compares routing keys derived from the
+same input fields), this function queries actual persisted messages… providing a
+truly independent source of truth."* That is exactly right — and it sits above
+the function whose **return value is discarded at seven call sites**:
+`messagebroker.go:520,720`, `handlers_broker_inbound.go:452`,
+`handlers_agent_messaging.go:371,1127,1433,1615`. Meanwhile
+`ComputeDivergenceMatch`'s own docstring asserts *"The comparison is
+non-tautological."* **Two docstrings in one file contradict each other and the
+correct one belongs to the ignored function.**
+
+Consequence recorded as [^74]: the divergence board's `matches` count is not
+evidence, and cannot serve as acceptance evidence for gteam or the fresh cutover.
 
 ---
 
-## 6. Implementation phases
+## 6. Migration / rollout
+
+The new field is optional; absent ⇒ rules 2/3 ⇒ today's behaviour. No schema
+change, no backfill.
+
+**Agents are not fixed until they send the field.** This is the honest cost of
+G2 and it must not be papered over: between this landing and agent guidance
+propagating, replies still persist as DMs. That is a *known, tracked* drift of
+the kind ptone has accepted, and it is bounded — the round trip is not made
+worse than today, merely not yet fixed.
+
+Existing split history stays split (OQ-138-3). Rollback is a revert.
+
+---
+
+## 7. Implementation phases
 
 | Phase | Content |
 |---|---|
-| **SC-1** | Schema: add nullable `last_thread_id` to `webchat_conversation_context`, both sqlite and postgres. Store method + read method. No call sites yet. |
-| **SC-2** | Delete the dead resolution in `handleAgentOutboundMessage` (`:307-314`, `:343`) and its divergence log (`:355-369`). Pure deletion — behaviour must not change, since the result is already discarded when a broker is present. **Verify the non-broker branch at `:409` still resolves correctly before deleting anything it depends on.** |
-| **SC-3** | Record `last_thread_id` inbound at the `RecordChannel` site. |
-| **SC-4** | Consume it outbound beside `GetLastChannel`. Explicit `req.ThreadID` wins. This is the commit that changes behaviour. |
-| **SC-5** | DEF-139: fix the DM branch of `ComputeDivergenceMatch`, correct the false docstring, consume the `CheckConversationConsistency` return. |
-| **SC-6** | Tests, per §7. |
+| **P-1** | Add `ConversationID` to `OutboundMessageRequest`; propagate onto `structuredMsg`. No behaviour change yet — nothing sets it. |
+| **P-2** | Port the DEF-49 authorization block to the outbound handler. **Rewrite the group-case docstring for the sender direction** (§3.4). Deny on unauthorised assertion. |
+| **P-3** | `deliverToUser` honours a pre-resolved `ConversationID` instead of re-deriving; delete the dead resolution at `:307-314`/`:343` and its duplicate divergence log. One resolution, one log line. |
+| **P-4** | Open the CLI `conv:<uuid>` gate; update help text and `SKILL.md:32,130`. |
+| **P-5** | DEF-139: fix both branches, correct the false docstring, consume the `CheckConversationConsistency` return at all seven sites. |
+| **P-6** | Tests per §8. |
 
 Standing constraints: never make a gate pass by weakening it; report red to me
 rather than tuning it away; stage only named files, never `git add -A`; per-file
-numstat before push; push to the explicit token-bearing ptone/scion URL and
-include raw `ls-remote` output.
+numstat before push; push to the explicit token-bearing ptone/scion URL with raw
+`ls-remote` output in the report.
 
 ---
 
-## 7. Acceptance criteria
+## 8. Acceptance criteria
 
-- **AC-1 — the round trip, per surface.** For Discord, Slack, Teams and web
-  chat: inbound to an agent, agent replies, **the reply's `conversation_id`
-  equals the inbound's**. This is the criterion DEF-135's AC-9 should have been.
-- **AC-2 — explicit beats affinity.** A reply with an explicit `thread_id`
-  resolves to that thread, not the remembered one.
-- **AC-3 — no affinity, no change.** With an empty `last_thread_id`, behaviour
-  is byte-identical to today (DM branch). Guards the upgrade path.
-- **AC-4 — ⚠️ delivery is unchanged.** Measured on gteam, not reasoned from
-  code: populating `req.ThreadID` must not alter **where the reply appears** on
-  any surface. If it does, report before proceeding — per §2 this either forces
-  a changelog entry or blocks the design in favour of Alternative A.
-- **AC-5 — no client assertion.** Assert that a `conversation_id` supplied in
-  request `Metadata` is still ignored. Today it is written by
-  `cmd/message.go:784` and read by nobody; this fix must not accidentally make
-  it live, because that would be an unauthorised assertion path.
-- **AC-6 — one resolution, one log line.** After SC-2, a single agent reply
-  produces exactly **one** divergence log line, not two with differing message
-  ids.
-- **AC-7 — DEF-139 mutation test.** Force the outbound path to resolve a
-  conversation inconsistent with the inbound and assert the divergence check
-  **reports a mismatch**. This must be a genuine mutation that compiles and
-  runs — the current check passes this scenario, so a test that does not fail
-  against unfixed code proves nothing.
-- **AC-8 — consistency return consumed.** `CheckConversationConsistency`'s
-  result is acted on, not discarded, at both call sites.
-- **AC-9** — `make test-fast` green; `pkg/hub` + `pkg/messaging` + `pkg/store`
+- **AC-1 — round trip, per surface.** Discord, Slack, Teams, web chat: agent
+  replies **with** the conversation from the envelope; reply's
+  `conversation_id` equals the inbound's. This is what DEF-135's AC-9 should
+  have been.
+- **AC-2 — unauthorised assertion is denied.** An agent naming a conversation
+  in another project's group, or a direct conversation it is not a principal
+  of, gets 403 and **no message is persisted**. Assert the absence of the row,
+  not just the status code.
+- **AC-3 — no memory.** Assert that no code path consults `GetLastChannel`-style
+  state to determine a **conversation**. A grep-based test is acceptable here;
+  the property is structural.
+- **AC-4 — proactive send still works.** `scion message user:X "hi"` with no
+  prior conversation resolves a DM by derivation (rule 3), unchanged.
+- **AC-5 — absent field is unchanged behaviour.** Byte-identical to today.
+  Guards the upgrade path and the interim in which agents have not adopted.
+- **AC-6 — one resolution, one log line.** A single reply produces exactly one
+  divergence line. Today it produces two with different message ids
+  (`4bb4d3e2` / `54b029ac`) — this is a measured regression target, not a
+  hypothetical.
+- **AC-7 — DEF-139 mutation test.** Force outbound to resolve a conversation
+  inconsistent with the inbound; assert a **mismatch is reported**. Must
+  compile and must fail against unfixed code — the current check passes this
+  scenario, so a test that goes green on both is worthless.
+- **AC-8 — consistency return consumed** at all seven call sites.
+- **AC-9 — metadata assertion still ignored.** `Metadata["conversation_id"]`
+  (written by `cmd/message.go:784`, read by nobody) must **not** become live as
+  a side effect. That would be an unauthorised assertion path bypassing P-2.
+- **AC-10** — `make test-fast` green; `pkg/hub` + `pkg/messaging` + `pkg/store`
   green excluding the two known-environmental failures.
 
 ---
 
-## 8. Open questions
+## 9. Open questions
 
-- **OQ-138-1 (blocking SC-4)** — AC-4's answer. Is `req.ThreadID` inert on
-  delivery? Must be measured on gteam per surface. **This is the one that
-  decides between the primary design and Alternative A.**
-- **OQ-138-2 (not blocking)** — multi-conversation agents. Affinity gives the
-  most recent conversation; an agent active in two gets the wrong one for the
-  older. Note this is **already true of channel affinity** and has been
-  tolerated, so the fix does not introduce the class of error, it inherits it.
-  Alternative B is the real answer, later.
-- **OQ-138-3 (ptone's, irreversible, not urgent)** — leave existing split
-  history split? My read: yes. Rewriting historical `conversation_id` values is
-  irreversible and buys tidiness only.
-- **OQ-138-4** — should `SKILL.md:130` ("`conversation_id` … not yet required")
-  change? Not until Alternative B lands. Recorded so the two do not drift.
+- **OQ-138-1 — CLOSED by the probe.** Setting `thread_id` moves persistence to
+  the thread conversation (`54b029ac` → `0c57b491`). Delivery-side effect was
+  never confirmed and is now **moot**: this design does not set `ThreadID`
+  behind the caller's back.
+- **OQ-138-5 (new, for ptone)** — G2's argument applies equally to the existing
+  **channel** affinity (`GetLastChannel`). It is why the probe reply reached the
+  right Discord channel. Should it also become explicit? My read: **not now** —
+  it governs delivery, not identity, and removing it would break replies
+  outright. But leaving it is a deferral, not an endorsement, and the
+  inconsistency should be recorded rather than discovered later.
+- **OQ-138-2** — multi-conversation agents. Under explicit routing this
+  **dissolves**: the agent names the conversation. It only existed as a defect
+  of the affinity design.
+- **OQ-138-3 (ptone's, irreversible)** — leave split history split? My read: yes.
+- **OQ-138-4 — resolved into P-4.** `SKILL.md` changes with the gate.
