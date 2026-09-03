@@ -35020,3 +35020,56 @@ I corrected the record to them immediately and in full, leading with my error
 rather than burying it under the review. A reviewer who only ever revises other
 people's numbers downward is not calibrating, and will eventually be humoured
 rather than believed.
+
+## §5ny — Rule 1062: a guard built from a copy of the thing it guards cannot fail
+
+DEF-140 produced the same defect shape four times in one file, each time inside
+the fix for the previous instance:
+
+1. `WithThreadSurface`'s docstring required callers to pass validated channels.
+   No caller validated. (BLOCKER 1)
+2. The test double accepted any surface string, so nothing could detect (1).
+   (BLOCKER 2)
+3. The fix introduced `validSurfaces` and a test-side `validSurfaceEnum`, two
+   hand-maintained copies of the ent enum linked only by the comment *"This
+   must match the SurfaceValidator enum"*.
+4. The cross-check test written to close (3) enumerated the ent enum **by
+   hand** into `entSurfaces`. Adding a value to the real schema leaves all
+   three assertions passing — including the cardinality check, which compares
+   the hand list against itself. The doc comment claims it "will fail in BOTH
+   directions"; only one direction can fail.
+
+**Rule 1062 — a consistency guard must read the source of truth, not a
+transcription of it. A guard whose expected value is a copy of the thing it
+guards is decorative: it can only detect edits to the copy.**
+
+The tell is mechanical and worth reusing: **ask which single edit the guard
+exists to catch, then check whether that edit changes any input the guard
+actually reads.** Here the edit is "add a value to the schema enum", and no
+assertion read the schema. Everything read one of the copies.
+
+### My share
+
+I asked for a test that "asserts `validSurfaces` equals the enum's permitted
+set exactly, both directions". I never checked that the set is programmatically
+reachable — ent generates `SurfaceValidator` as a switch plus individual
+constants and no `Values()`. My instruction was satisfiable only by hand-
+listing. The developer did the reachable thing; the request was the defective
+part, and I said so to them plainly.
+
+**This is the second time in two rounds that an under-specified instruction of
+mine produced the work I then criticised** (the first being the DEF-138 "propose
+the shape to me" stall). The pattern: I state the desired property without
+checking that a mechanism exists to achieve it, and the developer supplies the
+nearest reachable thing. Before requiring a property, confirm the mechanism.
+
+### Layering decision recorded
+
+Rejected importing `pkg/ent` into production `pkg/messaging` to obtain the enum
+programmatically. `pkg/messaging` has no production ent dependency today, and
+`pkg/store` defines no surface constants; pulling the generated ORM into the
+domain layer to solve a list-sync problem is the wrong trade. Drift detection
+belongs in a test that scans `pkg/ent/schema/conversation.go:52-53`, with a
+**fail-closed** requirement: a scan that cannot find the declaration or
+extracts zero values must fail, never pass vacuously. Precedent for
+source-scanning structural tests: `pkg/hub/consistency_check_guard_test.go`.
