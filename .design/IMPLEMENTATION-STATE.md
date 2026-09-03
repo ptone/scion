@@ -34708,3 +34708,79 @@ envelope is what made the incoherence observable within one test message.
 disagreeing with something.** That argument belongs in the record because the
 naive reading of this sequence — "the fix landed and immediately a defect
 appeared" — inverts the causation.
+
+---
+
+## §5nt — DEF-138 redesigned on explicit routing; DEF-139 dispatched first
+
+**2026-09-03.** ptone rejected the affinity design in v1, verbatim: *"it's
+somewhat seems to train agents into a lazy approach of not actually
+referencing explicitly where they are sending messages and relying on an
+external affinity memory system… I'd broadly prefer consistent, explicit
+routing of messages and an error."*
+
+**He was right, and the interesting part is why I got it wrong.** I chose
+affinity on migration cost — no agent change, small blast radius, works for
+existing agents on day one. Every one of those is a *transition* property. I
+let transition properties select the target architecture. That is not a
+one-off slip; it is the exact generator of the "hybrid state" ptone has now
+twice said he does not want, and it will recur unless it is named.
+
+**Rule 1056** — migration cost may choose the *path* to an architecture. It
+may not choose the architecture. When an option wins primarily on "cheaper to
+adopt", check explicitly whether it would still win if adoption were free. If
+it would not, it is a transition plan being mistaken for a design.
+
+The reframe that made the redesign tractable: the defect is not that the
+outbound branch picks wrongly, it is that **the address is under-specified**.
+An agent replies to a *principal*, and a principal does not identify a
+conversation. Affinity improves the guess. Explicit routing removes the need
+to guess. Once stated that way the affinity option is visibly answering the
+wrong question.
+
+**One argument I had counted for affinity actually cuts against it.** Channel
+affinity already exists (`GetLastChannel`) and works — that is why the probe
+reply reached the correct Discord channel while being stored as a DM. I read
+that as precedent. It is better read as the mechanism by which the split
+stayed invisible: delivery had affinity, persistence did not, so the symptom
+was silent everywhere a human could see it. Filed as OQ-138-5 rather than
+fixed, because it governs delivery rather than identity and removing it would
+break replies outright — but recorded as a deferral, not an endorsement.
+
+**Where I did not follow ptone literally, and told him so.** His "and an
+error" taken strictly would error on any send without an explicit
+conversation, which breaks every proactive send including an agent reporting
+to him unprompted. The design keeps his actual principle — *never consult a
+memory* — while permitting derivation *from the caller's own supplied
+address*, which is deterministic rather than a guess. Recorded as rejected
+Alternative D with the one-line change noted if he wants the strict form. The
+distinction that carries the argument: **a derivation from the caller's own
+input is not hidden state; a side-table lookup is.**
+
+### Dispatch sequencing
+
+DEF-139 (`ca-msg-d139`, branch `scion/def-139-detector`) dispatched **first**,
+ahead of the DEF-138 implementation it was originally scoped behind. Two
+reasons:
+
+1. **[^74] makes it a prerequisite, not a follow-up.** The divergence board
+   cannot serve as acceptance evidence, so any DEF-138 acceptance run measured
+   against it would be measuring nothing. Fixing the detector first means the
+   DEF-138 work lands against instrumentation that can actually fail.
+2. **The new failure mode needs it.** Under explicit routing the way this
+   breaks is "the agent omitted the conversation" — and today's detector is
+   structurally incapable of seeing that.
+
+They cannot run in parallel: both edit `handlers_agent_messaging.go:307-371`
+and `messagebroker.go:520`, and dispatched agents share a working tree.
+
+The brief carries the [^73] precision correction explicitly, instructing the
+developer not to overstate the finding in the commit message — `no-new-routing`
+is a real signal, and the `WithTopicLookup` remap is a genuine residual
+mismatch path that must survive the cleanup. A developer handed only the vivid
+form of the finding would likely delete it.
+
+AC-7 is written as a hard gate with an unusual requirement: **run the new test
+against the unmodified base commit and paste the failure output**. A mutation
+test that is green before and after proves nothing, and this is the single
+most likely way for this task to be completed and still be worthless.
