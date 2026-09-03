@@ -34642,3 +34642,69 @@ AC-9. Both `ca-msg-fix2` and `ca-msg-fix3` retired.
 Not reporting to ptone until the deploy verification returns; his standing
 instruction is section boundaries and escalations only, and "merged" is not the
 boundary he is waiting on — "you can re-test" is.
+
+---
+
+## §5ns — DEF-135 round-trip verification: AC-9 passes inbound, DEF-138 fails outbound
+
+**Rule 1054** — a statement about what a user interface *offers* is not a
+statement about what the database *contains*. ptone said "there is no DM option
+via the discord integration"; I recorded that Discord messages "have never
+landed in a direct conversation." The first is true and is about an inbound
+affordance. The second is false — gteam holds 32 Discord messages in direct
+conversations, reached on the **outbound** leg. Converting an affordance claim
+into a storage claim requires a query, not an inference, because the two are
+connected only by code that may well be the thing under investigation. Here it
+*was* the thing under investigation: the very mechanism I failed to consider —
+outbound taking a different resolution path — is DEF-138 itself.
+
+**Rule 1055** — a correction is written at the speed of the insight and is
+therefore more error-prone than the claim it replaces, not less. [^67] was
+wrong, was produced while correcting [^64], and shipped inside thirty minutes
+of it. The relief of having spotted an error suppresses the instinct to measure
+the replacement. Corrections get the same evidentiary bar as findings: state
+the measurement, or mark the claim as an inference.
+
+### What the round trip actually showed
+
+| Fact | Value | Verdict |
+|---|---|---|
+| (a) envelope key names | `timestamp, conversation, from, to, kind, intent, msg, visibility` | new format ✅ |
+| (b) envelope `conversation.id` | `0c57b491` (group, `thread:a3083e98:…312133`) | — |
+| (c) persisted inbound `conversation_id` | `0c57b491` | **(b)==(c) PASS** |
+| (d) persisted reply `conversation_id` | `b2fd01b6` (direct, `dm:agent:c9c1123b:user:b53249ea`) | **FAIL** |
+
+(b) and (c) were both anchored to message id `3e718a5a` — envelope from the
+agent's container log at 00:06:43, row from `SELECT … WHERE id = '3e718a5a'`.
+A matched pair, not two lookups that happened to agree. That anchoring was
+worth insisting on and cost one extra sentence in the brief.
+
+### The methodological point worth keeping
+
+**AC-9 as I originally wrote it would have passed this defect through.** It
+asked only whether the envelope's id matched the stored row — a question about
+the inbound leg. The *purpose* of the id is that the agent can reply against it,
+which is a question about the round trip. The acceptance criterion tested the
+mechanism I had just fixed rather than the property the fix was for.
+
+The only reason DEF-138 surfaced is that ptone volunteered "got the reply from
+agent" — an unsolicited observation about a leg nobody was measuring. Had he
+said nothing, I would have recorded AC-9 as passed, closed DEF-135, and shipped
+an envelope carrying an id that leads nowhere.
+
+**Generalisation:** when a fix exists so that some *downstream actor* can do
+something with its output, the acceptance criterion must exercise the downstream
+actor. Verifying the output's shape is necessary and is not sufficient. Restated
+as a check on my own criteria: *for each AC, name who consumes the thing being
+asserted, and confirm the AC exercises that consumer.*
+
+### DEF-138 is evidence FOR the DEF-135 design, not against it
+
+The split predates the fix; the outbound path was never touched. Before the fix
+the envelope carried no conversation id, so nothing in the system could
+contradict the outbound path's independent choice. Putting a correct id in the
+envelope is what made the incoherence observable within one test message.
+**The value of stamping an identifier is partly that it can be caught
+disagreeing with something.** That argument belongs in the record because the
+naive reading of this sequence — "the fix landed and immediately a defect
+appeared" — inverts the causation.
