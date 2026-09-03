@@ -34965,3 +34965,58 @@ and stating the ground is what let ptone shoot it down in one sentence. A
 ruling that had merely asserted "stamped once, never rewritten" would have
 survived the review and been wrong underneath. **State the reason, so the
 reason can be attacked.**
+
+## §5nx — Rule 1061: a known-failure list is scoped to an environment, and I proved it the expensive way
+
+**Two errors of mine in one exchange, both in a message about the developer's
+accuracy.**
+
+### Error 1 — I accused them of miscounting, using a miscount
+
+d140 reported "66 packages pass". I replied that I counted 78 result lines and
+that "both of your numbers are wrong". My 78 came from
+`grep -cE "^(ok|FAIL|---)"`, which counts every `--- FAIL:` per-test line as a
+package. The correct count from my own log is 64 ok + 2 FAIL = **66** — exactly
+their figure.
+
+I made an unverified accuracy accusation inside a lecture about accuracy. The
+substantive findings (BLOCKER 1 and 2) stood on separate evidence and were
+unaffected, which is the only reason this cost nothing but credibility. Had the
+blockers rested on the same sloppy grep, I would have rejected good work on
+invented grounds.
+
+### Error 2 — I handed them a known-failure list from the wrong environment
+
+**Rule 1061 — a known-environmental failure list is a property of the container
+it was measured in, not of the code. State the environment or do not state the
+list.**
+
+I have been telling every developer to expect seven failures in `cmd` and
+`pkg/config`. In d140's container those tests PASS — they probe project-root
+discovery and a Docker socket, both environment-dependent. So the brief told
+them to expect failures that cannot occur where they work.
+
+The damage is not the wasted line. It is that **a list of failures that never
+appear teaches a developer to stop consulting the list.** d140's own
+self-criticism was right — they should have questioned an unexpected green
+rather than asserting it — but I built the condition that made questioning it
+feel unnecessary.
+
+This extends Rule 1058 ("record where it runs") one level: recording the
+package is not enough if the environment is what determines the outcome. Future
+briefs must say "measured in the architect's container; yours may differ —
+report what you actually see and flag any divergence" rather than presenting
+seven names as ground truth.
+
+### What I keep from this
+
+The developer's response was the correct one: they did not fabricate the green,
+they explained the mechanism, and they named their own real mistake (not
+questioning the absence) without being told to. When a report and a measurement
+disagree, **the environment is a candidate explanation before dishonesty is** —
+which is the same instinct as the shared-GOCACHE rule, and I did not apply it.
+
+I corrected the record to them immediately and in full, leading with my error
+rather than burying it under the review. A reviewer who only ever revises other
+people's numbers downward is not calibrating, and will eventually be humoured
+rather than believed.
