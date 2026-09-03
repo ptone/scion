@@ -67,6 +67,9 @@ export class ScionPageAdminRoles extends LitElement {
   @state() private deletingRole: RoleDefinition | null = null;
   @state() private showViewDialog = false;
   @state() private viewingRole: RoleDefinition | null = null;
+  @state() private showDuplicateDialog = false;
+  @state() private duplicatingRole: RoleDefinition | null = null;
+  @state() private duplicateName = '';
 
   // Form fields
   @state() private formName = '';
@@ -470,6 +473,12 @@ export class ScionPageAdminRoles extends LitElement {
     this.showViewDialog = true;
   }
 
+  private openDuplicateDialog(role: RoleDefinition): void {
+    this.duplicatingRole = role;
+    this.duplicateName = '';
+    this.showDuplicateDialog = true;
+  }
+
   private togglePermission(permId: string): void {
     const next = new Set(this.formPermissions);
     if (next.has(permId)) {
@@ -583,6 +592,43 @@ export class ScionPageAdminRoles extends LitElement {
     }
   }
 
+  private async duplicateRole(): Promise<void> {
+    if (!this.duplicatingRole) return;
+    this.actionInProgress = true;
+    this.actionFeedback = null;
+    try {
+      const res = await apiFetch(`/api/v1/admin/roles/${this.duplicatingRole.id}/duplicate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: this.duplicateName.trim(),
+        }),
+      });
+
+      if (!res.ok) {
+        const msg = await extractApiError(res, `HTTP ${res.status}`);
+        this.actionFeedback = { message: msg, variant: 'danger' };
+        return;
+      }
+
+      const newRole = (await res.json()) as RoleDefinition;
+      this.showDuplicateDialog = false;
+      this.duplicatingRole = null;
+      this.actionFeedback = {
+        message: `Role duplicated as "${newRole.name}"`,
+        variant: 'success',
+      };
+      void this.loadData();
+    } catch (err) {
+      this.actionFeedback = {
+        message: err instanceof Error ? err.message : 'Failed to duplicate role',
+        variant: 'danger',
+      };
+    } finally {
+      this.actionInProgress = false;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
@@ -629,7 +675,7 @@ export class ScionPageAdminRoles extends LitElement {
 
       ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderRoles()}
       ${this.renderCreateDialog()} ${this.renderEditDialog()} ${this.renderDeleteDialog()}
-      ${this.renderViewPermissionsDialog()}
+      ${this.renderDuplicateDialog()} ${this.renderViewPermissionsDialog()}
     `;
   }
 
@@ -714,6 +760,11 @@ export class ScionPageAdminRoles extends LitElement {
               name="eye"
               label="View permissions"
               @click=${() => this.openViewDialog(role)}
+            ></sl-icon-button>
+            <sl-icon-button
+              name="copy"
+              label="Duplicate role"
+              @click=${() => this.openDuplicateDialog(role)}
             ></sl-icon-button>
             ${role.system
               ? nothing
@@ -942,6 +993,57 @@ export class ScionPageAdminRoles extends LitElement {
           ?loading=${this.actionInProgress}
           @click=${() => this.deleteRole()}
           >Delete Role</sl-button
+        >
+      </sl-dialog>
+    `;
+  }
+
+  private renderDuplicateDialog() {
+    if (!this.showDuplicateDialog || !this.duplicatingRole) return nothing;
+
+    return html`
+      <sl-dialog
+        label="Duplicate Role"
+        open
+        @sl-request-close=${() => {
+          if (!this.actionInProgress) {
+            this.showDuplicateDialog = false;
+            this.duplicatingRole = null;
+          }
+        }}
+      >
+        <p>
+          Create a new custom role based on
+          <strong>${this.duplicatingRole.name}</strong> with the same permissions and scope.
+        </p>
+        <div class="form-group">
+          <sl-input
+            label="New Role Name"
+            placeholder="e.g., ${this.duplicatingRole.name}-copy"
+            .value=${this.duplicateName}
+            @sl-input=${(e: Event) => {
+              this.duplicateName = (e.target as HTMLInputElement).value;
+            }}
+            required
+          ></sl-input>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.actionInProgress}
+          @click=${() => {
+            this.showDuplicateDialog = false;
+            this.duplicatingRole = null;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="primary"
+          ?loading=${this.actionInProgress}
+          ?disabled=${!this.duplicateName.trim()}
+          @click=${() => this.duplicateRole()}
+          >Duplicate Role</sl-button
         >
       </sl-dialog>
     `;
