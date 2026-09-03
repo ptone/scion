@@ -202,15 +202,45 @@ rather than a surprise.
 ### Alternative B — have the Discord plugin declare `surface` + `external_ref`
 
 Phase 11 would then run and the envelope would carry a conversation with no
-reordering at all. **Rejected as the fix**, and the reason matters: Phase 11 calls
-`ResolveOrCreateConversationByKey(..., "group", ...)`. Discord messages would begin
-landing in **group** conversations keyed on the Discord ref, instead of the DM
-conversations they land in today.
+reordering at all. **Rejected as the fix** — but see the correction below, because
+the reason I originally gave was wrong.
+
+> ### ⚠️ CORRECTION (2026-09-03) — the original rejection reasoning was false
+>
+> This section originally read: *"Discord messages would begin landing in **group**
+> conversations keyed on the Discord ref, instead of the DM conversations they land
+> in today… It splits each user's history at the deploy boundary — prior messages in
+> a DM, subsequent ones in a group."*
+>
+> **The DM half of that is false.** ptone, 2026-09-03, verbatim: *"messaged via
+> channel. there is no DM option via the discord integration."* The Discord
+> integration has **no DM surface at all**. Discord messages therefore always carry
+> a channel id as `thread_id`, always take the Phase 5 *thread* branch, and have
+> never landed in a direct conversation. There was no DM history to split.
+>
+> This was confirmed empirically the same day: the gteam AC-9 capture (message
+> `3e718a5a`) resolved to group thread conversation `0c57b491`,
+> `external_ref: thread:a3083e98:1532505776013312133` — **not** to the direct
+> conversation `b2fd01b6`.
+>
+> **The rejection still stands, for a different and narrower reason.** Phase 11 keys
+> group conversations as `discord:chan:<X>`; the Phase 5 thread branch keys them as
+> `thread:<projectID>:<X>`. Alternative B would therefore still have split history
+> at the deploy boundary — but **group-to-group**, not DM-to-group. Same conclusion,
+> different mechanism, and G3 is still violated.
+>
+> **Why this is recorded rather than quietly edited:** the false premise came from my
+> own topology note describing `b2fd01b6` as "holds the Discord traffic." That label
+> is almost certainly wrong (it is likely web-chat traffic; provenance confirmation
+> pending from instance-investigator). A rejected alternative is read by future
+> implementers as settled ground, so a rejection resting on a bad premise is worse
+> than no rejection at all — it forecloses an option for a reason that would not
+> survive contact. Rules 1046 and 1051.
 
 That is a change to persisted data semantics, not a rendering fix. It splits each
-user's history at the deploy boundary — prior messages in a DM, subsequent ones in a
-group — and it would do so on a live instance holding production data. It also
-violates G3.
+user's history at the deploy boundary — prior messages under one conversation key,
+subsequent ones under another — and it would do so on a live instance holding
+production data. It also violates G3.
 
 There is a genuine product question underneath it (*should a Discord channel be a
 group conversation?*), and it may well be yes. It is not this defect, and answering
