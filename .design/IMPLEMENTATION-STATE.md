@@ -34921,3 +34921,47 @@ diffed line-by-line, because my per-revision reviews had covered only the
 inter-revision deltas. Reviewed at merge time — pure gofmt realignment plus the
 `ConversationID` field. **Reviewing each revision's delta is not the same as
 reviewing the branch.** Diff against the merge base before merging, always.
+
+## §5nw — Rule 1060, and why this one is different from Rules 1054 and 1056
+
+**Rule 1060 — a row that violates your model is a question, not a
+counterexample.** Before widening a model to admit an anomalous row, establish
+what produced the row. Data drawn from a system with a known open defect is not
+neutral evidence about how that system should behave; it may be the defect.
+
+This is the third instance of the same family in this project:
+
+- **Rule 1054** ([^67]) — converted a UI-affordance claim into a storage claim.
+- **Rule 1056** ([^70]) — let migration cost select the target architecture.
+- **Rule 1060** (this one) — took the output of an open defect as evidence for
+  a design principle.
+
+What separates 1060 from the other two is **blast radius and timing**. The
+first two were caught inside my own notes before anything was built on them.
+1060 had already been transmitted to a developer as a binding ruling ("these
+are decided, do not reopen"), against which they were actively writing code.
+Had ptone not corrected the premise, the codebase would have acquired
+accommodation logic for a condition that the schema forbids — and the schema
+would have kept forbidding it, so the accommodation would have been
+untestable-correct and permanently confusing.
+
+**The specific failure was cheap to avoid.** I ruled on the meaning of
+`surface` without reading the uniqueness index over `surface`. It sits in
+`pkg/ent/schema/conversation.go`, the schema file for the field I was ruling
+about, twenty lines from the field declaration. I had a worktree open at the
+time and had already grepped that package twice for other purposes.
+
+**The generalisable form:** before ruling on what a field MEANS, read what the
+storage layer ENFORCES about it. Constraints are the system's own answer to the
+semantic question, they predate the ruling, and where they disagree with me
+they are the incumbent and I am the proposal. This is the same instinct as the
+standing rule that where a design table disagrees with the code, the code wins
+the test — extended from tests to design authority.
+
+**Process change adopted immediately:** rulings issued to developers now carry
+the evidence they rest on, in the ruling itself. I wrote "because a conversation
+legitimately receives traffic from several channels" into the DEF-140 brief,
+and stating the ground is what let ptone shoot it down in one sentence. A
+ruling that had merely asserted "stamped once, never rewritten" would have
+survived the review and been wrong underneath. **State the reason, so the
+reason can be attacked.**
