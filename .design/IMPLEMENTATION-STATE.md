@@ -34784,3 +34784,85 @@ AC-7 is written as a hard gate with an unusual requirement: **run the new test
 against the unmodified base commit and paste the failure output**. A mutation
 test that is green before and after proves nothing, and this is the single
 most likely way for this task to be completed and still be worthless.
+
+---
+
+## §5nu — DEF-139 accepted; two evidence failures, one of them mine
+
+**2026-09-03.** `scion/def-139-detector` @ `222775ee` accepted after independent
+verification. Numstat reproduced, all seven call sites confirmed consuming
+(grepped for bare calls and `_ =`, zero found), docstring accurate, board
+caveat correct.
+
+**CORRECTION TO A STANDING NOTE — the known-environmental exception is in
+`cmd`, not `pkg/hub`.** `TestDeleteStopped_RequiresGroveContext` lives at
+`cmd/delete_test.go:395`. I have been carrying it in briefs as a known
+`pkg/hub` failure alongside the six `pkg/config` tests, without ever recording
+its package. It is therefore **not in the test scope I hand developers**
+(`pkg/hub`, `pkg/messaging`, `pkg/store`) and will never appear in their
+results. Every brief that listed it as an expected failure in those packages
+was wrong.
+
+The developer ran `go test -run TestDeleteStopped_RequiresGroveContext
+./pkg/hub/`, got `[no tests to run]`, and reported *"the test does not exist at
+commit 0cff20a2b."* The run was correct; the conclusion was not.
+
+**Rule 1057** — a negative result from a scoped search bounds only that scope.
+"Absent from package X" and "does not exist" are different claims. Before
+reporting non-existence, widen the search to the repository. This is Rule 1054
+in a new costume: a scoped measurement converted into a global claim.
+
+**Rule 1058** — a known-failure exception must record *where it runs*, not just
+its name. An exception naming only a symbol invites the reader to look for it
+in whatever scope is at hand and draw conclusions from its absence. My note
+caused the developer's error as much as their reasoning did; a brief that lists
+an expected failure outside the scope it asks for is setting a trap.
+
+### Evidence failure #1 (developer): a build failure offered as a caught violation
+
+AC-7's evidence was `ConsistencyMismatches undefined … [build failed]`. That
+demonstrates the test references a not-yet-existing API, not that it can detect
+the defect. It matters specifically here because
+**`CheckConversationConsistency` already returned false on mismatch before the
+change** — the defect was that the return was *discarded*, not that detection
+was broken. So the test's substantive assertion would have passed against
+unfixed code, and the red came entirely from a missing method.
+
+I ran the real mutation: `IncConsistency(false); return false` →
+`IncConsistency(true); return true`, build green. Result:
+`divergence_test.go:409: expected consistency check to detect the mismatch, but
+it reported consistent`. Semantic failure. **The test is sound; the evidence
+offered for it was not.** Those are separable, and conflating them is how a
+worthless test gets accepted — the criterion was nearly satisfied by an API
+addition alone.
+
+### Evidence failure #2 (mine): I left a mutated file behind
+
+I chained mutate → test → restore in one command. The `go test` recompiled
+`pkg/hub` (~350s), the call timed out at 120s, and **the restore never ran** —
+leaving `messagebroker.go` mutated in a worktree. I caught it on the next
+`git status`, but only because I thought to look.
+
+**Rule 1059** — never chain a restore behind a long-running command in the same
+invocation. A timeout kills the cleanup, not just the work, and leaves mutated
+production source on disk. Either restore in a separate invocation, or run the
+whole sequence in the background where the timeout does not apply. Mutation
+testing is the technique I rely on most and it is the one that writes to
+production files, so this is the failure mode most likely to recur.
+
+### Accepted with two bounded gaps (recorded, not fixed)
+
+- The guard scans `pkg/hub` only (`hubDir := "."`). Complete today; a call site
+  added elsewhere escapes it.
+- Line-oriented regex misses a gofmt-split call. The call-count assertion
+  partly covers it.
+
+Recorded so that if the guard is ever green while the defect returns, these are
+the first two places to look.
+
+### Side benefit worth keeping visible
+
+`Inc()` is now reached only from `LogDivergence`. The consistency signal no
+longer inflates `mismatches`, which is DEF-124/125's de-conflation arriving as
+a by-product. Not a goal of the change; a consequence of routing the consistency
+path to its own counter.
