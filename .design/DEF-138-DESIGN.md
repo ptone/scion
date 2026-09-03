@@ -123,6 +123,25 @@ memory keyed on `(user, project, agent)` that a later message silently inherits.
 Absence of the field then means something precise and useful: **"this is not a
 reply."** Under rule 3 that is a proactive send and a derived DM is correct.
 
+**Where the affinity lives instead — ptone, 2026-09-03:** *"the affinity will
+have to come from agent context to make sure they do not reply to a
+conversation with a DM. this can be covered in a well developed skill."*
+
+This is the load-bearing half of the design and it is worth stating sharply:
+**the affinity does not disappear, it relocates.** Something must still connect
+"the message I received" to "where my reply belongs." v1 put that connection in
+a server side-table. This design puts it in the agent's own context, where the
+inbound message is already sitting. The agent is not being asked to *remember*
+anything — it is being asked to *read the message it is replying to*, which it
+must do anyway.
+
+That relocation is what makes the routing honest. Server-side affinity is state
+the caller cannot see, cannot audit, and does not know is being applied.
+Agent-side context is the message in front of it. Same information, but the
+party that acts on it is the party that can see it.
+
+**Consequence: the skill becomes a correctness-critical artifact.** See §3.5.
+
 ### 3.3 Wire change
 
 `OutboundMessageRequest` (`handlers_agent_messaging.go:37-50`) gains one field —
@@ -166,7 +185,44 @@ copy-paste leaves a comment that describes the other direction.
 `authenticatedSender` is on the prohibition list and this design **uses** it;
 nothing here removes it.
 
-### 3.5 Collapse the double resolution (G4)
+### 3.5 The skill is a correctness-critical artifact
+
+ptone: *"this can be covered in a well developed skill."* Agreed — and the
+consequence must be stated plainly rather than left as a docs task.
+
+`resources/platform_skills/scion-messaging/SKILL.md` currently tells agents the
+**opposite** of what this design needs. Line ~131:
+
+> *"New fields such as `conversation_id` may appear in message metadata but are
+> not yet required for correct agent behavior."*
+
+That sentence is wrong in three ways after this change: the field **is**
+required for a correct reply; it is not in `metadata` but a top-level envelope
+key (`conversation`, per DEF-135 `render_delivery.go:93-101`); and "not yet"
+implies an agent can safely defer. Lines 32-33 also advertise `conv:<uuid>` and
+`#<thread>` as *"Not yet supported — currently errors"*, which P-4 falsifies.
+
+**The uncomfortable property this creates.** Routing correctness now depends
+partly on a markdown file that **no test executes**. Server-side affinity, for
+all its faults, could not be forgotten by a caller. Agent-side context can be.
+The failure is silent and it degrades in a specific direction: an agent that
+ignores the guidance sends no conversation, rule 3 fires, and the reply lands in
+a DM — **exactly today's DEF-138 symptom**. So the defect we are fixing is also
+the failure mode of not adopting the fix.
+
+This is not an argument against the approach — ptone's point stands, and the
+agent is the only party that can see the message it is replying to. It is an
+argument that the skill text and the detector are **load-bearing parts of the
+design, not documentation and telemetry**. Specifically:
+
+- The skill wording must make "reply into the conversation you were addressed
+  in" the default described behaviour, not an optional new capability.
+- **DEF-139 is what makes the silent failure visible.** Under this design the
+  detector's job changes from "did the two models agree" to "did an agent reply
+  outside the conversation it was addressed in." That is a real question with a
+  real answer, and it is now the primary signal that adoption is working.
+
+### 3.6 Collapse the double resolution (G4)
 
 `handleAgentOutboundMessage` resolves at `:307-314`, assigns at `:343`, logs
 divergence at `:355-369` — then **discards the whole `storeMsg`** when a broker
@@ -217,7 +273,7 @@ trap as DEF-135 Alternative B. Phase 11 keys `discord:chan:X` while the current
 path keys `thread:{projectID}:X`, splitting history at the deploy boundary, here
 on four surfaces at once.
 
-**D — Error on any message without an explicit conversation.** This is ptone's
+**D — Error on any message without an explicit conversation. RESOLVED 2026-09-03: rejected, confirmed by ptone** (*"i agree that simple DM form is not an error"*). This was ptone's
 stated position taken literally, and it is **rejected only in degree**. It would
 break every proactive send, including `scion message user:X "heads up"` where no
 conversation exists yet and no reasonable caller could name one. The design
@@ -289,7 +345,7 @@ Existing split history stays split (OQ-138-3). Rollback is a revert.
 | **P-1** | Add `ConversationID` to `OutboundMessageRequest`; propagate onto `structuredMsg`. No behaviour change yet — nothing sets it. |
 | **P-2** | Port the DEF-49 authorization block to the outbound handler. **Rewrite the group-case docstring for the sender direction** (§3.4). Deny on unauthorised assertion. |
 | **P-3** | `deliverToUser` honours a pre-resolved `ConversationID` instead of re-deriving; delete the dead resolution at `:307-314`/`:343` and its duplicate divergence log. One resolution, one log line. |
-| **P-4** | Open the CLI `conv:<uuid>` gate; update help text and `SKILL.md:32,130`. |
+| **P-4** | Open the CLI `conv:<uuid>` gate; update help text. **Rewrite `scion-messaging/SKILL.md` (lines ~32-33 and ~131) so replying into the addressed conversation is the described default.** Per §3.5 this is a correctness deliverable, not a docs chore — do not schedule it last. |
 | **P-5** | DEF-139: fix both branches, correct the false docstring, consume the `CheckConversationConsistency` return at all seven sites. |
 | **P-6** | Tests per §8. |
 
@@ -329,6 +385,13 @@ numstat before push; push to the explicit token-bearing ptone/scion URL with raw
 - **AC-9 — metadata assertion still ignored.** `Metadata["conversation_id"]`
   (written by `cmd/message.go:784`, read by nobody) must **not** become live as
   a side effect. That would be an unauthorised assertion path bypassing P-2.
+- **AC-11 — the skill no longer contradicts the design.** Assert that
+  `SKILL.md` does not describe `conversation_id` as optional or `conv:<uuid>`
+  as unsupported. A grep-based test is adequate and is worth having precisely
+  because nothing else executes this file.
+- **AC-12 — the omission is detectable.** With DEF-139 fixed, an agent replying
+  *without* the conversation field must produce a consistency mismatch in the
+  counters. This is the adoption signal; without it, non-adoption is silent.
 - **AC-10** — `make test-fast` green; `pkg/hub` + `pkg/messaging` + `pkg/store`
   green excluding the two known-environmental failures.
 
