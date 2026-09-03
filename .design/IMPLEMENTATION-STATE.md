@@ -34866,3 +34866,58 @@ the first two places to look.
 longer inflates `mismatches`, which is DEF-124/125's de-conflation arriving as
 a by-product. Not a goal of the change; a consequence of routing the consistency
 path to its own counter.
+
+## §5nv — DEF-138 explicit routing: three review rounds (merged `c316b08de`)
+
+`scion/tranche-g` = `c316b08de8f865ad9763916d996d910dab33a3fc`, parents
+`f7687e2dc` (DEF-139) + `a026a3b7a` (DEF-138). Gate on the merged head shows
+exactly the seven known-environmental failures in `cmd` and `pkg/config`;
+`pkg/hub`, `pkg/messaging`, `pkg/store` green.
+
+### The two blockers, and why only mutation found them
+
+**BLOCKER 1 — the fix would have made the board scream while working.** The
+first revision passed a minimal `ConversationResult{ConversationID: x}` — empty
+`ExternalRef` — into `ComputeDivergenceMatch`, which then fell through to
+`return false, "routing-type-mismatch"` for every explicitly routed message.
+Nothing in the developer's report suggested it; the tests passed because none
+of them asserted on the divergence outcome of the explicit path. I found it by
+writing a throwaway probe test and running it, then removed the probe and
+confirmed `0 files dirty` before saying anything.
+
+The repair is worth stating as a principle, not a patch: **a comparison is
+meaningless when the caller stated the answer.** The old routing key exists to
+be compared against a derivation. When there is no derivation there is nothing
+to compare, and forcing a comparison manufactures a verdict. So the explicit
+path leaves the matcher entirely rather than being taught to tolerate it.
+
+**BLOCKER 2 — scope declared away.** AC-6 (collapse the double divergence log)
+was in the brief and was reported "out of scope." The tell was structural and
+cheap: the AC-8 guard still asserted 7 call sites, and the collapse necessarily
+makes it 6. **A constant that should have moved and did not is a scope claim
+you can check without reading the diff.**
+
+### A stall I caused
+
+d138 went quiet for nine minutes after my review. My review had said *"Propose
+the shape to me before you build it if it is not obvious"* — which invited a
+wait on a decision I was always going to make myself. Fixed with a forced-choice
+nudge carrying the pre-made decision. **An invitation to check in is a blocking
+instruction unless it names the condition under which you should not.**
+
+### Reporting accuracy
+
+The developer reported the new test file as 458 lines when it was 640, and
+later 795. Flagged to them as a credibility issue specifically because it is a
+number I would not normally re-derive. I now re-run numstat on every phase, and
+this round that habit caught something else: **a stale local `refs/rt/tg`
+showed 13 changed files instead of 6.** Re-fetch before diffing; a ref name is
+not a promise of currency.
+
+### Carried forward
+
+`pkg/hubclient/agents.go` (10/9) was in the delta but not in any revision I had
+diffed line-by-line, because my per-revision reviews had covered only the
+inter-revision deltas. Reviewed at merge time — pure gofmt realignment plus the
+`ConversationID` field. **Reviewing each revision's delta is not the same as
+reviewing the branch.** Diff against the merge base before merging, always.
