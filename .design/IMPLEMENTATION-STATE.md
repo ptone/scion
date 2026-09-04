@@ -35150,3 +35150,26 @@ Required fix is cheap: sortable fixture IDs so insertion order equals sort order
 **A new constraint P1 created, which I have escalated into the P3 brief.** `Resolve` returns resolver errors *before* `checkPostResolutionAuth`. P1's ambiguity error carries conversation UUIDs and surfaces, so it now escapes pre-authorization, and the only thing scoping it is `rctx.ProjectID`. That is safe exactly while `ProjectID` is the authenticated caller's own — if it were ever sourced from request JSON, the error would become an enumeration oracle for conversation IDs and thread names in any project the caller cares to name.
 
 So G-1 on `ResolveContext` has changed character. It was a rule about sender identity being honest; it is now the containment boundary for a disclosure that P1 deliberately introduced. **A fail-closed refusal that explains itself is a disclosure surface, and the explanation inherits the scoping of whatever the refusal was computed over.** We chose to name candidates rather than silently pick one, which remains right — but naming them means the scope of the listing is now security-critical, and that obligation lands on a step (P3) that has not been written yet.
+
+---
+
+## §5oe — DEF-142 P3: wiring up dead code publishes its error paths
+
+`ca-msg-d141` delivered the P1 fixture fix and P2/P3 at `64938d7d0`. The fixture fix is verified: my pagination mutation is now caught **20/20**, up from 3/20. P3's wiring is right — mutual exclusion before resolution, validation still before `Resolve`, `ResolveContext` built entirely from the authenticated caller with the reasoning recorded in a comment, and the resolved id promoted into `req.ConversationID` so it passes through the *existing* DEF-138 authorization block rather than a second implementation.
+
+**AC-3 is not implemented, and P3 is what makes it matter.** The handler concatenates `resErr.Error()` into the response body. Read from the code:
+
+- a `conv:<uuid>` that does not exist → `Reason: "not-found"` → *"… : not found"*
+- a `conv:<uuid>` naming a **direct** conversation the sender is not party to → `checkPostResolutionAuth` returns `Reason: "not-a-participant"` → *"… : sender is not a participant"*
+
+Two distinguishable bodies, so the response tells any caller whether a given conversation UUID exists. AC-3 requires them to be byte-identical and says explicitly that asserting "both fail" does not test the property.
+
+**The resolver's own defence is partial in a way that is easy to mistake for complete.** `resolveConvByID` goes to deliberate lengths here: when the sender does not belong to the owning project it returns `not-found` rather than `boundary-violation`, with a comment saying the response must be "identical to a genuine not-found". Seeing that care, it is natural to assume the leakage question was settled. It was settled *for the project-boundary case only*; the direct-participant case returns a distinct reason, and the handler renders whatever it is handed. **Evidence of care on one branch of a problem is not evidence of coverage over the problem** — and a partial defence is more dangerous than none, because it reads as a completed argument.
+
+**The pattern, now three for three in this tranche.** DEF-142 wires up `messaging.Resolve`, which had zero callers. Doing so made `resolveThread`'s first-match ambiguity live (P1), and now makes its error vocabulary an API surface. The generalisable rule: **when you make dead code reachable, its error paths become public interface, and error paths are the least-reviewed part of any code that has never run.** Success paths get read because that is what the author was building; refusals get written once and never exercised. The audit obligation on a wiring change is therefore inverted from the usual — enumerate every way the newly-live code can *refuse*, and ask what each refusal discloses, before exposing any of them.
+
+Required: collapse `not-found`, `not-a-participant` and `boundary-violation` into one identical response, keeping the true reason in the server log. Deliberately **not** collapsed: `ambiguous` and `no-shared-project`. Ambiguity candidates are group conversations in the caller's own project, which the caller is already authorized for, and the candidate list is the entire value of failing closed usefully. **Distinguish only what the caller is already entitled to know** — that is the line, not "minimise all detail".
+
+Also missing: AC-6, covering a reference that resolves to a *newly created* conversation. `Resolve` exempts `Created == true` from its own post-resolution check, so on that path the DEF-138 block is the only gate, and nothing currently tests it.
+
+Outstanding process point, now asked three times without an answer: the developer has reported gate *duration* rather than gate *scope*. A duration cannot distinguish a full-tree run from five packages. I will not accept the tranche on a green whose extent is unstated.
