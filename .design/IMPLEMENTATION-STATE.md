@@ -35073,3 +35073,22 @@ belongs in a test that scans `pkg/ent/schema/conversation.go:52-53`, with a
 **fail-closed** requirement: a scan that cannot find the declaration or
 extracts zero values must fail, never pass vacuously. Precedent for
 source-scanning structural tests: `pkg/hub/consistency_check_guard_test.go`.
+
+### §5nz — AC-12 root cause: the log label lied, and smith is exonerated (2026-09-04)
+
+I told the investigator the two live explanations were **(A)** smith never sent a conversation id, so this is non-adoption, or **(B)** smith sent one and the hub dropped it, which is a defect in the fix I merged. I then read the hub log line `conversation routing check: explicit-routing` with `conversation_id: b2fd01b6`, `explicit_route_count: 1`, and concluded smith was shown `0c57b491` in its envelope and **explicitly asserted** `b2fd01b6`. That conclusion is wrong. The answer is (A), and the reason I read it as neither is that the instrumentation misreported it.
+
+**The chain, established by reading code rather than logs:**
+
+1. Smith replied with a plain principal recipient. `ParseReference` (`pkg/messaging/resolve.go:64-101`) accepts exactly `conv:`, `@`, `#` and returns an error on anything else, and `cmd/message.go:150-176` sends a `user:`-prefixed recipient down the legacy `userRecipient` path. **The CLI cannot stamp a conversation id for that form** — so the "CLI launders a derivation as an assertion" hypothesis I was chasing is falsified for the `user:` form.
+2. `handleAgentOutboundMessage` took the `else` branch and **derived** `dm:agent:c9c1123b…:user:b53249ea…` → `b2fd01b6`, because the reply carries no `ThreadID`. This is [^69]'s original mechanism, untouched by DEF-138.
+3. DEF-138 P-3 propagated that derived id onto `structuredMsg` (`handlers_agent_messaging.go:485-487`) — correctly; that is what closed [^71].
+4. The broker branched on `msg.ConversationID != ""` alone and called `LogExplicitRouting` → **DEF-141** ([^81]).
+
+**The independent argument that settles it without any log:** smith's envelope contained `0c57b491`. `b2fd01b6` was never shown to smith and smith had no means to name it. Had smith asserted anything, it could only have been `0c57b491`. Therefore `req.ConversationID` was empty and the DM was derived hub-side. Smith did nothing wrong.
+
+**What DEF-138 actually fixed, stated honestly:** the *split* between the handler's resolution and the broker's re-derivation. It did **not** change what a reply with no thread context derives, which is still a DM. AC-12 as written — "an agent reply carrying `conv:<uuid>` lands in the inbound conversation" — was never exercised, because nothing made smith carry one. And per [^82] it may not have been exercisable at all.
+
+**Rule 1063 — an instrumentation label is a claim made by the code, not an observation of the code.** `explicit-routing` is a string the broker prints when a condition holds; it is evidence about that condition, never about the world the condition is meant to stand for. I treated the label as a witness to smith's behaviour when it was only a witness to `msg.ConversationID != ""`. **The tell, and it is cheap:** before believing a log line, find the `if` that emits it and ask what else could satisfy that predicate. Here the answer was one branch away in the same function. This is Rule 1060's shape displaced one layer — there I generalised from data produced by a known defect; here I generalised from a *label* produced by an undiscovered one — and it cost the investigator a wasted measurement plus a diagnosis I stated to them with more confidence than any of it earned.
+
+**Also recorded:** I twice framed a conclusion for the investigator before the evidence closed ("smith was shown the correct conversation and explicitly asserted the wrong one"). The framing was not idle — an investigator given a conclusion measures to confirm it. Both the (A)/(B) framing and this one should have been questions.
