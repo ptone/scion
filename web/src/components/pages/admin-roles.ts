@@ -620,6 +620,23 @@ export class ScionPageAdminRoles extends LitElement {
                 >${this.roles.length} role${this.roles.length !== 1 ? 's' : ''}</span
               >`
             : ''}
+          <sl-button
+            variant="default"
+            size="small"
+            href="/api/v1/admin/roles/export"
+            target="_self"
+            download="scion-custom-roles.json"
+            @click=${(e: Event) => {
+              // Use direct navigation so the browser's native download
+              // handling (Content-Disposition: attachment) works reliably
+              // across all browsers including Safari.
+              e.preventDefault();
+              window.location.href = '/api/v1/admin/roles/export';
+            }}
+          >
+            <sl-icon slot="prefix" name="download"></sl-icon>
+            Export Custom Roles
+          </sl-button>
           <sl-button variant="primary" size="small" @click=${() => this.openCreateDialog()}>
             <sl-icon slot="prefix" name="plus-lg"></sl-icon>
             Create Role
@@ -718,6 +735,13 @@ export class ScionPageAdminRoles extends LitElement {
             ${role.system
               ? nothing
               : html`
+                  <sl-icon-button
+                    name="download"
+                    label="Export role"
+                    @click=${() => {
+                      window.location.href = `/api/v1/admin/roles/${role.id}/export`;
+                    }}
+                  ></sl-icon-button>
                   <sl-icon-button
                     name="pencil"
                     label="Edit role"

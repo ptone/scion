@@ -1071,3 +1071,237 @@ func TestRolesAPI_CreateRoleBinding_WithOnlyExpiresAt(t *testing.T) {
 	assert.Nil(t, binding.NotBefore, "notBefore should be nil when not set")
 	require.NotNil(t, binding.ExpiresAt, "expiresAt should be persisted")
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Role Export
+// ---------------------------------------------------------------------------
+
+func TestRolesAPI_ExportAllCustomRoles(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create two custom roles.
+	createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "export-role-a",
+		Description: "First export role",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+	createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "export-role-b",
+		Description: "Second export role",
+		ScopeType:   "project",
+		Permissions: []string{"project.read"},
+	})
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/export", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Verify Content-Disposition header.
+	cd := rec.Header().Get("Content-Disposition")
+	assert.Contains(t, cd, "attachment")
+	assert.Contains(t, cd, "scion-custom-roles.json")
+
+	// Verify Content-Type.
+	ct := rec.Header().Get("Content-Type")
+	assert.Equal(t, "application/json", ct)
+
+	// Verify Content-Length is set.
+	cl := rec.Header().Get("Content-Length")
+	assert.NotEmpty(t, cl)
+
+	// Parse the export envelope.
+	var envelope roleExportEnvelope
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&envelope))
+
+	assert.Equal(t, "1", envelope.Version)
+
+	// Only custom roles should be included (no system roles).
+	for _, role := range envelope.Roles {
+		assert.False(t, role.System, "system role %q should not be in export", role.Name)
+	}
+
+	// Our two custom roles must be present.
+	names := make(map[string]bool)
+	for _, role := range envelope.Roles {
+		names[role.Name] = true
+	}
+	assert.True(t, names["export-role-a"], "export-role-a missing")
+	assert.True(t, names["export-role-b"], "export-role-b missing")
+}
+
+func TestRolesAPI_ExportAllCustomRoles_Empty(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// No custom roles created — export should return empty array.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/export", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var envelope roleExportEnvelope
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&envelope))
+
+	assert.Equal(t, "1", envelope.Version)
+	assert.Empty(t, envelope.Roles)
+}
+
+func TestRolesAPI_ExportAllCustomRoles_WrongMethod(t *testing.T) {
+	srv, _ := testServer(t)
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		rec := doRequest(t, srv, method, "/api/v1/admin/roles/export", nil)
+		assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "method %s should not be allowed", method)
+	}
+}
+
+func TestRolesAPI_ExportAllCustomRoles_Unauthenticated(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/admin/roles/export", nil)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestRolesAPI_ExportSingleRole(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "single-export-role",
+		Description: "A role to export individually",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read", "project.read"},
+	})
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/"+created.ID+"/export", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Verify Content-Disposition header with safe filename.
+	cd := rec.Header().Get("Content-Disposition")
+	assert.Contains(t, cd, "attachment")
+	assert.Contains(t, cd, "scion-role-single-export-role.json")
+
+	// Verify Content-Type.
+	ct := rec.Header().Get("Content-Type")
+	assert.Equal(t, "application/json", ct)
+
+	// Parse the export envelope.
+	var envelope roleExportEnvelope
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&envelope))
+
+	assert.Equal(t, "1", envelope.Version)
+	require.Len(t, envelope.Roles, 1)
+	assert.Equal(t, created.ID, envelope.Roles[0].ID)
+	assert.Equal(t, "single-export-role", envelope.Roles[0].Name)
+	assert.Equal(t, []string{"agent.read", "project.read"}, envelope.Roles[0].Permissions)
+}
+
+func TestRolesAPI_ExportSingleRole_SafeFilename(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "my role/with <special> chars!",
+		Description: "Tests filename sanitization",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/"+created.ID+"/export", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	cd := rec.Header().Get("Content-Disposition")
+	// Unsafe chars should be replaced with underscores.
+	assert.Contains(t, cd, "scion-role-my_role_with__special__chars_")
+	assert.NotContains(t, cd, "/")
+	assert.NotContains(t, cd, "<")
+	assert.NotContains(t, cd, ">")
+	assert.NotContains(t, cd, "!")
+}
+
+func TestRolesAPI_ExportSingleRole_SystemRoleRejected(t *testing.T) {
+	srv, st := testServer(t)
+
+	// Find a system role.
+	defs, err := st.ListRoleDefinitions(t.Context())
+	require.NoError(t, err)
+
+	var systemRole *store.RoleDefinition
+	for _, d := range defs {
+		if d.System {
+			systemRole = d
+			break
+		}
+	}
+	require.NotNil(t, systemRole, "expected at least one system role")
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/"+systemRole.ID+"/export", nil)
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "system_role")
+	assert.Contains(t, body, "System roles cannot be exported")
+}
+
+func TestRolesAPI_ExportSingleRole_NotFound(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/nonexistent-id/export", nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestRolesAPI_ExportSingleRole_WrongMethod(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "method-test-role",
+		Description: "Testing wrong methods",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		rec := doRequest(t, srv, method, "/api/v1/admin/roles/"+created.ID+"/export", nil)
+		assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "method %s should not be allowed", method)
+	}
+}
+
+func TestRolesAPI_ExportSingleRole_Unauthenticated(t *testing.T) {
+	srv, _ := testServer(t)
+
+	created := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "unauth-export-role",
+		Description: "Test unauthenticated",
+		ScopeType:   "system",
+		Permissions: []string{"agent.read"},
+	})
+
+	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/admin/roles/"+created.ID+"/export", nil)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestRolesAPI_ExportEnvelopeRoundTrip(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// Create a custom role.
+	createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "roundtrip-role",
+		Description: "Test round-trip importability",
+		ScopeType:   "project",
+		Permissions: []string{"agent.read", "project.read"},
+	})
+
+	// Export all custom roles.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/roles/export", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Parse the exported JSON.
+	var envelope roleExportEnvelope
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&envelope))
+
+	// Re-marshal the envelope and verify it's valid JSON.
+	data, err := json.MarshalIndent(envelope, "", "  ")
+	require.NoError(t, err)
+	assert.True(t, json.Valid(data), "exported JSON should be valid")
+
+	// Parse it back again to verify round-trip.
+	var envelope2 roleExportEnvelope
+	require.NoError(t, json.Unmarshal(data, &envelope2))
+	assert.Equal(t, envelope.Version, envelope2.Version)
+	assert.Equal(t, len(envelope.Roles), len(envelope2.Roles))
+}
