@@ -41,6 +41,10 @@ Both environment variables and secrets support **Injection Modes**, which contro
 - **As Needed (Default)**: The variable or secret is only injected if it is explicitly requested in the agent's template (`scion-agent.yaml`) or harness configuration. This is the recommended mode for most credentials to minimize the attack surface.
 - **Always**: The variable or secret is injected into *every* agent started within that scope, regardless of whether it is explicitly requested.
 
+:::note[GITHUB_TOKEN defaults to always]
+The `GITHUB_TOKEN` secret uses `always` injection mode by default. This ensures the token is available during the initial workspace clone in **Clone-per-agent** and **Worktree-per-agent** sharing modes, which happens before the agent process starts and before `as_needed` secrets are resolved. Existing projects with `GITHUB_TOKEN` set to `as_needed` are automatically migrated to `always`.
+:::
+
 You can set the injection mode via the CLI using the `--always` flag:
 
 ```bash
@@ -221,6 +225,7 @@ Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
 *   **`GET /api/v1/agents/{agentID}/secrets`**: Lists available secret metadata in the agent's project.
 *   **`GET /api/v1/agents/{agentID}/secrets/{key}`**: Retrieves a single secret's metadata and its base64-encoded value.
 *   **`PUT /api/v1/agents/{agentID}/secrets/{key}`**: Stores or updates a secret.
+*   **`POST /api/v1/agent/secrets`**: Batch-fetches multiple secret values in a single call. The agent is identified from its token (no agent ID in the URL). Request body: `{ "keys": ["KEY_A", "KEY_B"] }` (max 100 keys). Each key in the response carries a per-key `status` (`ok`, `not_found`, or `entitled_but_unavailable`). Used internally by `sciontool init` to pull secrets at startup rather than receiving them via command-line arguments.
 
 #### Security & Audit Logging
 *   **Authentication**: API access is restricted to the running agent container. The agent must include its unique Hub-issued JWT (loaded from `SCION_HUB_TOKEN`) in the `Authorization: Bearer <token>` header of every request.
