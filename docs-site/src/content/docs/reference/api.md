@@ -33,6 +33,11 @@ Agent state uses a layered model:
 - **Activity**: Runtime activity within the `running` phase (`working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`). Note: `offline` occurs when an agent heartbeat has not been heard for some time, often due to an expired auth token that the agent failed to refresh; `stalled` flags a live-but-hung agent and can trigger auto-suspend. (A crash surfaces as the `error` phase, not as an activity.)
 - **Detail**: Freeform context (tool name, message, task summary).
 
+#### Agent-Internal (`/api/v1/agent`)
+Endpoints called by the agent itself (authenticated via `X-Scion-Agent-Token`; no agent ID in the URL — identity is derived from the token).
+
+- `POST /secrets`: Batch-fetch multiple secret values in a single call. Request body: `{ "keys": ["KEY_A", "KEY_B"] }` (max 100 keys, 64 KB body limit). Each key in the response carries a per-key `status` of `ok`, `not_found`, or `entitled_but_unavailable`. Used by `sciontool init` to retrieve secrets at startup.
+
 #### Projects (`/api/v1/projects`)
 - `GET /`: List projects you have access to.
 - `POST /register`: Register or link a project repository.
