@@ -38,6 +38,7 @@ import type { PrincipalChangeDetail } from './principal-picker.js';
 import { showConfirm } from './confirm-dialog.js';
 import './principal-picker.js';
 import {
+  BUILT_IN_PROJECT_MEMBERSHIP_ROLES,
   PROJECT_DIRECT_USER_ONLY_ROLES,
   PROJECT_OWNER_ROLE_NAMES,
   getPrincipalIcon,
@@ -487,11 +488,14 @@ export class ScionProjectMembersEditor extends LitElement {
         }));
       }
 
-      // Load project roles
+      // Load project roles — show only built-in membership roles.
+      // Custom project-scoped roles are managed via the admin role-bindings page.
       if (rolesRes.ok) {
         const rolesData = (await rolesRes.json()) as { items?: ProjectRole[] };
         this.projectRoles = (rolesData.items || []).filter(
-          (r) => r.scopeType === 'project'
+          (r) =>
+            r.scopeType === 'project' &&
+            BUILT_IN_PROJECT_MEMBERSHIP_ROLES.includes(r.name)
         );
       }
 

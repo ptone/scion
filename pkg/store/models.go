@@ -2481,6 +2481,22 @@ const (
 	ProjectRoleMember = "project-member"
 )
 
+// BuiltInProjectMembershipRoles is the set of built-in project membership role
+// names. Exactly one of these is permitted per (principal, project) pair.
+// Custom project-scoped roles are additive and not subject to this constraint.
+var BuiltInProjectMembershipRoles = map[string]struct{}{
+	ProjectRoleOwner:  {},
+	ProjectRoleAdmin:  {},
+	ProjectRoleMember: {},
+}
+
+// IsBuiltInProjectMembershipRole reports whether the given role name is one
+// of the three built-in project membership roles.
+func IsBuiltInProjectMembershipRole(name string) bool {
+	_, ok := BuiltInProjectMembershipRoles[name]
+	return ok
+}
+
 // Agent role definition names (matching existing AgentRole constants)
 const (
 	AgentRoleDefNone     = "agent-role-none"

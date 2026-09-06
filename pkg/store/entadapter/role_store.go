@@ -418,7 +418,49 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 		}
 	}
 
-	builder := r.client.RoleBinding.Create().
+	// Use a transaction to make the built-in membership check + insert atomic.
+	// Without this, two concurrent built-in membership creates could both pass
+	// the check and both insert, leaving two built-in roles per principal/project.
+	isBuiltIn := store.IsBuiltInProjectMembershipRole(rd.Name)
+
+	tx, err := r.client.Tx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Built-in membership uniqueness: exactly one built-in project membership
+	// role (project-owner/-admin/-member) per (principal, project) pair.
+	// Custom project-scoped roles are additive and bypass this check.
+	if isBuiltIn {
+		existingBindings, txErr := tx.RoleBinding.Query().
+			Where(
+				rolebinding.PrincipalTypeEQ(rolebinding.PrincipalType(rb.PrincipalType)),
+				rolebinding.PrincipalIDEQ(rb.PrincipalID),
+				rolebinding.ScopeTypeEQ(rolebinding.ScopeTypeProject),
+				rolebinding.ScopeIDEQ(rb.ScopeID),
+			).
+			WithRoleDefinition().
+			All(ctx)
+		if txErr != nil {
+			err = fmt.Errorf("checking existing project memberships: %w", mapError(txErr))
+			return nil, err
+		}
+		for _, existing := range existingBindings {
+			if existing.Edges.RoleDefinition != nil &&
+				store.IsBuiltInProjectMembershipRole(existing.Edges.RoleDefinition.Name) {
+				err = fmt.Errorf("%w: already has role %q",
+					store.ErrBuiltInMembershipConflict, existing.Edges.RoleDefinition.Name)
+				return nil, err
+			}
+		}
+	}
+
+	builder := tx.RoleBinding.Create().
 		SetNillableRoleDefinitionID(&rdUID).
 		SetPrincipalType(rolebinding.PrincipalType(rb.PrincipalType)).
 		SetPrincipalID(rb.PrincipalID).
@@ -426,8 +468,9 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 		SetScopeID(rb.ScopeID)
 
 	if rb.ID != "" {
-		uid, err := parseUUID(rb.ID)
-		if err != nil {
+		uid, pErr := parseUUID(rb.ID)
+		if pErr != nil {
+			err = pErr
 			return nil, err
 		}
 		builder.SetID(uid)
@@ -446,8 +489,15 @@ func (r *RoleStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding
 
 	created, err := builder.Save(ctx)
 	if err != nil {
-		return nil, mapError(err)
+		err = mapError(err)
+		return nil, err
 	}
+
+	if txErr := tx.Commit(); txErr != nil {
+		return nil, fmt.Errorf("committing transaction: %w", txErr)
+	}
+	// Clear err so the deferred rollback is a no-op.
+	err = nil
 	return entRoleBindingToStore(created), nil
 }
 

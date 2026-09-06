@@ -179,6 +179,10 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusNotFound
 		code = ErrCodeNotFound
 		message = "Resource not found"
+	case errors.Is(err, store.ErrBuiltInMembershipConflict):
+		statusCode = http.StatusConflict
+		code = ErrCodeConflict
+		message = err.Error()
 	case errors.Is(err, store.ErrAlreadyExists):
 		statusCode = http.StatusConflict
 		code = ErrCodeConflict
@@ -191,6 +195,14 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusBadRequest
 		code = ErrCodeValidationError
 		message = "Invalid input"
+	case errors.Is(err, store.ErrScopeMismatch):
+		statusCode = http.StatusBadRequest
+		code = ErrCodeScopeMismatch
+		message = err.Error()
+	case errors.Is(err, store.ErrDirectUserOnly):
+		statusCode = http.StatusBadRequest
+		code = ErrCodeValidationError
+		message = err.Error()
 	case errors.Is(err, secret.ErrNoSecretBackend):
 		statusCode = http.StatusNotImplemented
 		code = ErrCodeUnavailable

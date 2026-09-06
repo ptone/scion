@@ -44,6 +44,13 @@ var (
 	// ErrScopeMismatch is returned when a role binding's scope type does not
 	// match the role definition's scope type.
 	ErrScopeMismatch = errors.New("binding scope type does not match role definition scope type")
+
+	// ErrBuiltInMembershipConflict is returned when attempting to create a
+	// built-in project membership role binding and the principal already has
+	// a different built-in membership role on that project. Exactly one
+	// built-in membership role (project-owner/-admin/-member) is permitted
+	// per (principal, project) pair.
+	ErrBuiltInMembershipConflict = errors.New("principal already has a built-in membership role on this project")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the

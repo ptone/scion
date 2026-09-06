@@ -583,8 +583,12 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 
 	created, err := s.store.CreateRoleBinding(r.Context(), rb)
 	if err != nil {
+		if errors.Is(err, store.ErrBuiltInMembershipConflict) {
+			Conflict(w, err.Error())
+			return
+		}
 		if errors.Is(err, store.ErrAlreadyExists) {
-			Conflict(w, "this role binding already exists")
+			Conflict(w, "an identical role binding already exists for this principal and scope")
 			return
 		}
 		if errors.Is(err, store.ErrSuperAdminBindingRestricted) {
@@ -593,6 +597,16 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		}
 		if errors.Is(err, store.ErrNotFound) {
 			BadRequest(w, "role definition not found")
+			return
+		}
+		if errors.Is(err, store.ErrScopeMismatch) {
+			writeError(w, http.StatusBadRequest, ErrCodeScopeMismatch,
+				err.Error(), nil)
+			return
+		}
+		if errors.Is(err, store.ErrDirectUserOnly) {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				err.Error(), nil)
 			return
 		}
 		writeErrorFromErr(w, err, "")

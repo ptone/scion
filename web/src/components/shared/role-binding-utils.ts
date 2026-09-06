@@ -44,6 +44,17 @@ export const PROJECT_DIRECT_USER_ONLY_ROLES = ['project-owner'];
  */
 export const PROJECT_OWNER_ROLE_NAMES = ['project-owner', 'owner'];
 
+/**
+ * Built-in project membership role names. Exactly one of these is permitted per
+ * (principal, project) pair. The project-members-editor shows only these roles;
+ * custom project-scoped roles are managed via the admin role-bindings page.
+ */
+export const BUILT_IN_PROJECT_MEMBERSHIP_ROLES = [
+  'project-owner',
+  'project-admin',
+  'project-member',
+];
+
 // ---------------------------------------------------------------------------
 // Lifecycle helpers
 // ---------------------------------------------------------------------------
