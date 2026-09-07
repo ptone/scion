@@ -3,6 +3,39 @@
 Measured facts about this tree. These are not suggestions; each one has already
 cost someone a wrong conclusion.
 
+## Base verification — do this before you edit a single file
+
+`scion start` clones the repository at its **default branch, `main`**. Our work
+does not live on `main`. If you begin editing without an explicit checkout you
+will silently do correct-looking work on the wrong tree, and your own numstat
+will look clean because it is computed against the base you actually have.
+
+This has already happened once and was caught only in review.
+
+```sh
+export GITHUB_TOKEN=$(cat /scion-volumes/scratchpad/transition-github-token.txt)
+git fetch "https://x-access-token:${GITHUB_TOKEN}@github.com/ptone/scion.git" <base-branch>
+git checkout -B work FETCH_HEAD
+git rev-parse HEAD    # MUST equal the base hash in your brief, exactly
+```
+
+**Do not proceed unless that hash matches.** If it does not, stop and report.
+
+Then **lead your final report** with:
+
+```sh
+git merge-base --is-ancestor <base-hash> HEAD && echo BASE-OK || echo BASE-WRONG
+git diff --numstat <base-hash> HEAD
+```
+
+The numstat must be computed against the brief's base hash, not against
+whatever your local branch happens to sit on.
+
+**If you discover mid-task that your base was wrong: do not rebase or
+cherry-pick your work across.** Files diverge between branches, and resolving
+those conflicts by taking your own side is how a refactor gets silently
+reverted. Start again on the correct base and re-apply the intent by hand.
+
 ## Timeouts
 
 `pkg/hub` takes **~395 seconds** to compile and test. Use `-timeout 900s`.
