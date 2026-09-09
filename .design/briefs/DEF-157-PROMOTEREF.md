@@ -185,10 +185,21 @@ Inherited red, **not yours, do not fix**: `gofmt` on
 `pkg/hub/handlers_agents_core.go` and `pkg/hub/web_test.go`;
 `TestMutationClassificationBidirectional`. Any *other* red comes to me.
 
-If you add a new test file that opens sqlite, it **must** carry
-`//go:build !no_sqlite` below the 14-line Apache header, with a blank line before
-`package hub`. Check with `grep`, never `head -n`. Do **not** strip that tag from
-anywhere to make something run.
+**CORRECTED 2026-09-09 21:30 — the paragraph this replaces was already wrong when
+this brief was dispatched, and it was followed.** It said a new test file that
+opens sqlite must carry `//go:build !no_sqlite`. That is false and it cost three
+tests their place in the blocking gate before I caught it.
+
+See `_GATE-APPARATUS.md` § `//go:build !no_sqlite`, which is now the authority.
+Short form: `no_sqlite` gates only `pkg/store/sqlite` and the `pkg/ent/entc`
+driver; `mattn/go-sqlite3` is ungated. **The tag is required iff the file reaches
+a `!no_sqlite`-only package** — opening sqlite through the raw driver does not
+qualify. Adding it where it is not needed silently removes your tests from
+`make test-fast`, the only gate in ci.yml that can fail a build, and everything
+stays green.
+
+Probe both directions and compare `--- PASS:` counts before you decide. Do **not**
+strip the tag from an existing file to make something run.
 
 ## Branch and push
 

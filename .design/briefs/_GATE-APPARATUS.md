@@ -72,6 +72,51 @@ combination shipped a broken merge here recently.
 `go vet ./...` typechecks test files in every package regardless of build tags
 and costs about a minute.
 
+## `//go:build !no_sqlite` — when it is required, and it is narrower than you think
+
+**This section is the authority. If a brief tells you something different about
+this tag, the brief is stale and this wins — tell me so I can fix it.**
+
+The rule everyone assumes is *"my test uses sqlite, therefore it needs the tag."*
+That is wrong, and following it costs coverage. Measured 2026-09-09:
+
+- `no_sqlite` gates exactly two things repo-wide: `pkg/store/sqlite/driver.go`
+  and the `pkg/ent/entc` sqlite driver (plus its `migrate_*` pairs).
+  **`github.com/mattn/go-sqlite3` is an ordinary, ungated dependency** and
+  compiles and runs fine under `-tags no_sqlite`.
+- `CGO_ENABLED=0` appears only at Makefile:126 and :135, both container-binary
+  targets. `test-fast` and ci.yml run with cgo on, so cgo is not a hidden term.
+- In `pkg/hub`, 13 test files import the raw driver: **5 tagged, 8 untagged.**
+  The tag is not even the majority in the package people generalise from.
+- Probed directly: 11 DEF-156 tests and 7 `TestPromoteDM*` tests, all in untagged
+  files that open sqlite, run and pass under `-tags no_sqlite` with identical
+  PASS counts and zero silent skips.
+
+**The rule: the tag is required iff the file reaches a `!no_sqlite`-only package.
+Calling `sql.Open("sqlite3", ...)` through the raw driver does not qualify.**
+
+In `pkg/hub`, exactly one file imports the `!no_sqlite`-only `pkg/store/sqlite`:
+`system_handlers_test.go`. It is tagged. It is the only one that has to be.
+
+Why this matters enough to have its own section: `make test-fast` is the **only**
+gate in ci.yml that can fail a build. Adding the tag to a file that does not need
+it silently deletes those tests from that gate, and **everything stays green** —
+success and failure look identical, which is why you must probe both directions:
+
+```sh
+go test -tags no_sqlite -run '<Your>' -v -count=1 ./pkg/<pkg>/
+go test                 -run '<Your>' -v -count=1 ./pkg/<pkg>/
+```
+
+Compare the `--- PASS:` counts. If they match, no tag. If the tagged run fails,
+you need the tag — and the failure output is more interesting than the tag, so
+send it to me.
+
+**Never strip the tag from an existing file to make something run.** Removing a
+tag adds tests to the blocking gate and is a deliberate act with its own review;
+`TestRS1_StaleAuthorityForcedOverlap` is 23m37s and is tagged for exactly that
+reason.
+
 ## `-run` patterns
 
 `-run <pattern>` matching *something* and matching *what you meant* are

@@ -230,7 +230,17 @@ zsh where `${PIPESTATUS[0]}` is empty.
 `check-conversation-upsert-guard` watches this exact surface. **If it fires, that
 is a finding you report — not an obstacle to route around.**
 
-If a test file needs sqlite it must carry `//go:build !no_sqlite`. Adding that
+**SUPERSEDED 2026-09-09 — this paragraph is wrong. See `_GATE-APPARATUS.md`
+§ `//go:build !no_sqlite`, which is the authority.** "A test file needs sqlite,
+therefore it needs the tag" is false: `no_sqlite` gates only `pkg/store/sqlite`
+and the `pkg/ent/entc` driver, and `mattn/go-sqlite3` is ungated. **The tag is
+required iff the file reaches a `!no_sqlite`-only package.** Adding it otherwise
+silently removes the tests from `make test-fast`, the only gate in ci.yml that
+can fail a build. Probe both directions and compare `--- PASS:` counts before
+deciding. **Never strip the tag from an existing file to make something run** —
+that part was always right.
+
+~~If a test file needs sqlite it must carry `//go:build !no_sqlite`. Adding that
 tag to a new sqlite-dependent test file is correct. **Never strip it from an
 existing file to make something run.** The directive sits below a 14-line Apache
 header — find it with grep, not `head -n`.

@@ -58,7 +58,17 @@ pinning that `message_authorized` is recorded on this path is sufficient and is
 the whole point. If a fuller sequence falls out naturally, fine, but do not
 invent ordering guarantees that the code does not actually make.
 
-If the test needs sqlite, the file **must** carry the `//go:build !no_sqlite`
+**SUPERSEDED 2026-09-09 — this paragraph is wrong. See `_GATE-APPARATUS.md`
+§ `//go:build !no_sqlite`, which is the authority.** "A test file needs sqlite,
+therefore it needs the tag" is false: `no_sqlite` gates only `pkg/store/sqlite`
+and the `pkg/ent/entc` driver, and `mattn/go-sqlite3` is ungated. **The tag is
+required iff the file reaches a `!no_sqlite`-only package.** Adding it otherwise
+silently removes the tests from `make test-fast`, the only gate in ci.yml that
+can fail a build. Probe both directions and compare `--- PASS:` counts before
+deciding. **Never strip the tag from an existing file to make something run** —
+that part was always right.
+
+~~If the test needs sqlite, the file **must** carry the `//go:build !no_sqlite`
 tag. Adding that tag to a new sqlite-dependent test file is correct and
 expected. **Never strip the tag from an existing file to make something run.**
 Note the build directive sits below a 14-line Apache header — locate it with
