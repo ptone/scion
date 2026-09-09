@@ -84,6 +84,28 @@ Any message written while the conversation **write** switch was on carries
 `handlers_chat_v2.go:1202`). After promotion those rows sit under the new
 topic's `thread_id` while still naming the old direct conversation.
 
+**F2′ — and the predicate itself barely matches. Found 2026-09-09, after this
+design was written and dispatched.** The `WHERE thread_id = dmKey` clause above
+is not merely incomplete in what it *sets*; it is nearly inert in what it
+*selects*. Measured on gteam, read-only, over messages in `kind='direct'`
+conversations: **22 carry a `thread_id`, 6,454 do not** — and of those 6,454,
+**6,403 are agent messages**.
+
+The cause is a split between two write paths. Web chat sets `ThreadID: key`
+explicitly (`handlers_chat_v2.go:1060, 1159, 1319, 1460`). The agent messaging
+path propagates whatever the caller supplied (`handlers_agent_messaging.go:292,
+308, 1232, 1343` — all `req.ThreadID` / `structuredMsg.ThreadID`), and an agent
+replying into a DM supplies nothing. Since agent replies are the majority of
+every real DM, the column promotion keys on is empty for almost every row it
+needs to move.
+
+**So promotion today does not "move the messages but leave them mis-attributed."
+It leaves the conversation behind almost in its entirety** — a handful of
+user-authored rows follow the topic and everything else stays put. F2 is
+therefore worse than filed, and the fix originally designed here inherited the
+same predicate and would have shipped a half-move that looked like a fix. C2 is
+corrected accordingly.
+
 **F3 — the consequence, with the read switch on.** Chat history for a thread is
 fetched by conversation, not by thread id:
 
@@ -198,19 +220,67 @@ This activates the store branch that already exists and is already tested
 `webchannel_store_dualwrite_test.go:334`). The unique index
 `idx_webchat_topic_conversation` is satisfied by a fresh UUID.
 
-**C2 — step 2 re-points both columns, in both stores.**
+**C2 — step 2 re-points both columns, and is keyed on the conversation, not the
+thread id.**
+
+> **CORRECTED 2026-09-09, after measurement, mid-implementation.** The first
+> version of this section kept the existing `WHERE thread_id = dmKey` predicate
+> and merely added `conversation_id` to the SET clause. **That was wrong, and it
+> would have shipped a fix that moved almost nothing.** See §1.2 F2′ and §5.4b.
+
+The measurement that forced this, taken on gteam read-only:
+
+```
+DM messages (conversation.kind = 'direct')
+  with thread_id:      22
+  without thread_id: 6,454      (agent 6,403 / user 48 / other 3)
+```
+
+**99.7% of DM messages carry no `thread_id` at all.** The web chat write path
+sets it (`handlers_chat_v2.go:1060, 1159, 1319, 1460`); the agent messaging path
+takes it from the caller (`handlers_agent_messaging.go:292, 308, 1232, 1343`,
+all `req.ThreadID` / `structuredMsg.ThreadID`), and agents replying into a DM do
+not supply one. Agent replies are the bulk of every real DM.
+
+So the predicate must key on the thing DM messages actually carry:
 
 ```sql
 -- sqlite, replacing webchannel_store.go:2148-2154
-UPDATE messages SET thread_id = ?, conversation_id = ? WHERE thread_id = ?
---                  topic.ID     topic.ConversationID       dmKey
+UPDATE messages
+   SET thread_id = ?, conversation_id = ?
+ WHERE (? <> '' AND conversation_id = ?)      -- directConvID, when resolved
+    OR thread_id = ?                          -- dmKey, legacy arm
 
--- postgres, replacing webchannel_store_postgres.go:1657-1663
-UPDATE messages SET thread_id = $1, conversation_id = $2 WHERE thread_id = $3
+-- postgres, replacing webchannel_store_postgres.go:1657-1663 — same shape
 ```
 
+**Both arms, not either.** The `conversation_id` arm carries the modern
+population; the `thread_id` arm carries messages written before conversation
+stamping, which have an empty `conversation_id` and are invisible to the first
+arm. Dropping either one silently strands a population, which is the defect we
+are fixing.
+
+The `? <> ''` guard on the first arm is load-bearing: if `directConvID` were
+empty and the guard absent, `conversation_id = ''` would match **every
+unstamped message on the hub**. That is not a hypothetical — 
+`CountUnbackfilledMessages` exists precisely because that population is large.
+An empty needle must never become a wildcard.
+
+**Where `directConvID` comes from.** The handler already holds the authorized
+DM key; the direct conversation is a lookup on it —
+`GetConversationByExternalRef(ctx, "native", dmKey)`, since
+`ResolveOrCreateDMConversation` writes `Kind: "direct", Surface: "native",
+ExternalRef: <DM key>` (`conversation.go:107-113`). **Lookup only — promotion
+must never *create* a direct conversation.** If the lookup returns
+`store.ErrNotFound`, pass `""` and let the legacy arm do the work; that is a
+pre-conversation-model hub, not an error.
+
+No new authorization surface: the key was already validated as a DM key and the
+caller already proven a participant (`handlers_chat_v2.go:2474-2508`), so the
+conversation id is derived from an authorized key rather than supplied.
+
 One statement, not two, so there is no window in which `thread_id` has moved and
-`conversation_id` has not. Both are inside the existing transaction, so G3 holds.
+`conversation_id` has not. Inside the existing transaction, so G3 holds.
 
 Note this also *populates* `conversation_id` on pre-write-switch rows that had it
 empty. That is the same act `backfillTopicConversations` performs, applied to
@@ -495,6 +565,42 @@ against correct behaviour.**
 
 ---
 
+### 5.4b MEASURED — 2026-09-09, gteam, read-only — the DM `thread_id` split
+
+Taken after §5.4, in response to a `thread_id` anomaly noticed while
+reconciling DEF-156 counts. It invalidated C2's original predicate.
+
+Messages whose `conversation_id` names a `kind='direct'` conversation:
+
+| | count |
+|---|---|
+| with `thread_id` | 22 |
+| without `thread_id` | 6,454 |
+| — of those, sender is an agent | 6,403 |
+| — sender is a user | 48 |
+| — other | 3 |
+
+**99.7% have no `thread_id`.** The 3 "other" are an unprefixed display name
+rather than a `user:`-prefixed principal — the known old-format population, not
+a new finding.
+
+**What this measurement is and is not.** It is a strong statement about the
+*current* population on one hub. It is **not** a statement that the ratio holds
+everywhere: it reflects how much of this hub's DM traffic is agent-authored,
+which varies. The design does not depend on the ratio — a single stranded agent
+reply is enough to require the fix — so the number is motivation, not a
+parameter. Recording the distinction because a percentage in a design document
+invites being treated as a constant.
+
+**Why it was not found earlier.** §5.4 measured the *orphan* populations the
+repair migration would have targeted, and correctly returned zero. It never
+asked what fraction of DM messages the re-key predicate would actually match,
+because the predicate was inherited from working code and was not on the list
+of things under suspicion. → **a measurement plan derived from the fix you
+intend to make cannot test the assumption the fix rests on.**
+
+---
+
 ## 6. Open Questions
 
 **~~OQ-96-1 (ptone)~~ — WITHDRAWN 2026-09-09.** Was: authorize the repair
@@ -523,6 +629,15 @@ traced every consumer.
 Commit-sized, in dependency order. **Each phase reports a per-file numstat
 against the briefed base commit, with `merge-base --is-ancestor` confirmed
 before any edit.**
+
+**P0 — resolve the direct conversation id and widen the predicate.** *(Added
+2026-09-09 with the C2 correction; this is now the first commit.)* Look the
+direct conversation up by `external_ref` from the already-authorized DM key,
+thread it into `PromoteDM`, and key the re-key on both arms per C2. Assert the
+empty-needle guard explicitly: with `directConvID = ""`, the statement must
+match **nothing** via the first arm. **Test that by planting an unstamped
+message belonging to a different conversation and asserting it does not move** —
+a test that only checks the DM's own rows cannot detect a wildcard.
 
 **P1 — store: re-point `conversation_id` on re-key.** C2 + C2a in both
 `webchannel_store.go` and `webchannel_store_postgres.go`. **No minting yet**, so
@@ -569,6 +684,21 @@ reader does not infer that production takes it.
 returns exactly those N messages, **on the first read, with no hub restart**.
 The restart caveat is the point — a test that passes only after a restart is
 testing the backfill, not the fix.
+
+**AC-96-1a — the fixture must look like a real DM.** *(Added with the C2
+correction.)* The majority of messages in the fixture must be **agent replies
+written through the agent messaging path**, not hand-constructed rows with
+`thread_id` pre-populated. On the live instance 99.7% of DM messages have no
+`thread_id`; a fixture that sets it on every row would have passed against the
+old, nearly-inert predicate and proved nothing. Assert every message moves **by
+count and by id**, not that "messages appear."
+
+**AC-96-1b — the empty needle is not a wildcard.** With no direct conversation
+resolvable (`directConvID = ""`), promotion must move only rows matched by the
+legacy `thread_id` arm. Plant an unstamped message belonging to an unrelated
+conversation and assert it is untouched. This is the one failure mode of C2
+that damages data outside the DM being promoted, so it gets its own criterion
+rather than riding along in AC-96-1.
 
 **AC-96-2.** After promotion, `webchat_topic.conversation_id` is non-empty, a
 `conversations` row exists with that id and `kind='group'`, and every re-keyed
