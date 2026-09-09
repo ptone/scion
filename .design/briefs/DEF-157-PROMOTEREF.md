@@ -192,9 +192,29 @@ anywhere to make something run.
 
 ## Branch and push
 
-Base is `scion/tranche-g` — I will send you the exact SHA when I dispatch, and it
-will already contain both DEF-96 and DEF-156. **Confirm it with
-`git merge-base --is-ancestor` before reading anything.**
+Your base is **`scion/ca-msg-stage157` @ `6c32ff491`**, not `tranche-g`.
+
+That branch is the merge commit itself: `tranche-g` (`f4326b727`, carrying DEF-96)
+with `scion/ca-msg-unify` (`2fb44cf75`, DEF-156) merged in. It exists precisely
+because I would not put this defect on `tranche-g`, which is what gteam tests
+from — and the very next thing we are asking for on gteam is a **promotion**
+re-test, which is the one action that triggers DEF-157. `tranche-g` advances only
+once your fix is reviewed and in.
+
+Fetch and confirm before reading anything:
+
+```sh
+export GITHUB_TOKEN=$(cat /scion-volumes/scratchpad/transition-github-token.txt)
+git -C /workspace fetch -q "https://x-access-token:${GITHUB_TOKEN}@github.com/ptone/scion.git" \
+    scion/ca-msg-stage157:refs/rt/st157 --force
+git -C /workspace worktree add --detach /tmp/wt-157 refs/rt/st157 -q
+git -C /workspace rev-parse --short refs/rt/st157        # expect 6c32ff491
+git -C /workspace merge-base --is-ancestor f4326b727 refs/rt/st157 && echo "tranche-g: ancestor OK"
+git -C /workspace merge-base --is-ancestor 2fb44cf75 refs/rt/st157 && echo "unify:     ancestor OK"
+```
+
+Both ancestor checks must print. If either does not, stop and tell me — you are
+not on the tree this brief describes and nothing below applies.
 
 `origin` in your container does **not** point at ptone/scion. Push with:
 
