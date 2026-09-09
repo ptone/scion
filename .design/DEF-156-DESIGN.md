@@ -166,6 +166,50 @@ Note the same lookup must run inside Route 1's per-topic transaction, and
 INVARIANT U-TX-1 applies: anything touching the ambient pool must happen
 **before** `BeginTx`. At `MaxOpenConns=1` a violation hangs rather than fails.
 
+#### 3.2a The collision surface C1 creates — check-then-insert
+
+The lookup sits before `BeginTx` and the insert sits inside it, so the two are
+not atomic. A writer arriving between them loses the race and hits the partial
+unique index.
+
+**The index prevents a duplicate; it does not produce convergence.** It makes
+the loser *fail*. On Postgres the error poisons the transaction. That is worth
+stating plainly because convergence is the entire purpose of C2 — "works
+unless the two writers overlap" is order-dependence with a smaller window, and
+G2 asks for order-independence.
+
+This must be assessed per call site, and the two answers differ:
+
+- **`backfillTopicConversations` — no change needed.** Boot is single-threaded,
+  and the migration marker is written only on a completed pass (INVARIANT
+  M-1′), so a partial failure re-runs on the next boot and the lookup then
+  finds whatever the first pass wrote. Self-healing.
+
+- **`CreateTopic` — a live request path, and the boot argument does not
+  transfer.** Note what C1 does to it: *before* this change `CreateTopic` wrote
+  `external_ref = ''`, structurally incapable of colliding with Route 2's
+  `thread:<project>:<id>` key, because the two occupied disjoint namespaces.
+  C1 puts them in one namespace. **This design creates the collision surface it
+  now has to handle**, and that is a consequence of the change rather than a
+  pre-existing hazard it inherits.
+
+Whether the window is *reachable* on `CreateTopic` turns on where `topic.ID`
+comes from. The store takes it from the caller
+(`webchannel_store.go:680`, `CreateTopic(ctx, topic WebChatTopic)`). If every
+call site mints a fresh UUID immediately before calling, no other writer can
+name that key yet and the window is closed by construction — acceptable, but it
+must be established **from the call sites**, not asserted from the store.
+`EnsureGeneralTopic` is the first to check, since "the general topic for this
+project" is a name two concurrent requests can both resolve to.
+
+If the window is reachable, the fix is to preserve convergence at the point
+where it has to hold: **on a unique-constraint error from the conversations
+INSERT, re-read the row inside the transaction and link the topic to it**
+rather than returning the error. A bare `ON CONFLICT DO NOTHING` is not
+sufficient — it returns no rows, and the winner's id is exactly what is needed.
+Any `ON CONFLICT` clause used here must match the partial index's conflict
+target *including its predicate*, or it will not fire at all.
+
 ### 3.3 C3 — derive `surface` from the channel
 
 `persistGroup` must set `Surface` from the message's channel rather than the
@@ -403,6 +447,14 @@ creates unique-index collisions on upgrade.
 - **AC-156-8 — nothing on the live write path changed.** Route 2's behaviour
   is identical; its existing tests pass unmodified. If a Route 2 test needed
   editing, that is a finding to report, not an edit to make.
+- **AC-156-9 — the collision surface C1 creates is accounted for (§3.2a).**
+  Every `CreateTopic` call site is enumerated in the report with where its
+  `topic.ID` comes from. Either the report establishes that each mints a fresh
+  UUID immediately before the call — closing the window by construction — or
+  the unique-violation path re-reads and links rather than returning an error,
+  with a test that drives it. **"The index catches it" is not an answer:** the
+  index prevents the duplicate and fails the loser, which is the opposite of
+  the convergence C2 exists to provide.
 
 ---
 
