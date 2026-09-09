@@ -62,6 +62,14 @@ ExternalRef: <DM key>` (`pkg/messaging/conversation.go:107-113`).
 `store.ErrNotFound`, pass `""` and let the legacy arm do the work — that is a
 pre-conversation-model hub, not an error.
 
+**Do the lookup BEFORE `BeginTx`.** `GetConversationByExternalRef` touches the
+ambient pool. At `MaxOpenConns=1` the transaction holds the only connection, so
+an ambient call inside it **deadlocks rather than fails** — INVARIANT U-TX-1.
+`hasConversationsTable()` already obeys this at `webchannel_store.go:2106`; the
+new lookup must too. **This hazard is created by today's correction**, since the
+original predicate needed no lookup. Every test on this path needs an explicit
+timeout: a hang costs you the evidence as well as the time.
+
 Thread the id into `PromoteDM` and key the re-key on both arms:
 
 ```sql

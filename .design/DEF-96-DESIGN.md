@@ -279,6 +279,22 @@ No new authorization surface: the key was already validated as a DM key and the
 caller already proven a participant (`handlers_chat_v2.go:2474-2508`), so the
 conversation id is derived from an authorized key rather than supplied.
 
+**U-TX-1 HAZARD, introduced by this correction — resolve before `BeginTx`.**
+`GetConversationByExternalRef` is an ambient-pool call. `PromoteDM` runs its
+work inside a transaction, and at `MaxOpenConns=1` the transaction holds the
+only connection, so an ambient call made inside it waits forever for a second
+one. **It deadlocks; it does not fail.** The lookup must happen **before**
+`BeginTx` and the id passed in, exactly as `hasConversationsTable()` already
+does at `webchannel_store.go:2106`.
+
+This hazard did not exist in the original C2 — that version needed no lookup,
+because `dmKey` was already in hand. **The correction created it**, which is
+worth stating plainly: widening a predicate from a value the caller holds to a
+value the caller must fetch converts a pure statement into one with an ordering
+constraint against the transaction boundary. Any test touching this path needs
+an explicit timeout, because the failure mode consumes the evidence as well as
+the time.
+
 One statement, not two, so there is no window in which `thread_id` has moved and
 `conversation_id` has not. Inside the existing transaction, so G3 holds.
 
