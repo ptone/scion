@@ -770,6 +770,27 @@ conversation, and no re-keyed message survives. The existing
 Two directions because C1 and C2 are jointly necessary and a single test could
 otherwise pass while only one of them is present.
 
+**AC-96-6a — revert the predicate, not just the columns.** *(Added 2026-09-09,
+after a four-direction run came back clean on a fix that would have been nearly
+inert.)* A third direction, and the one that tests the C2 correction itself:
+restore everything, then change **only** the `WHERE` clause back to the
+inherited form, keeping both SET columns:
+
+```sql
+UPDATE messages SET thread_id = ?, conversation_id = ? WHERE thread_id = ?
+```
+
+The AC-96-1 test must go **red**, reporting missing messages.
+
+Reverting the minting (C1) and reverting the `conversation_id` column (C2's SET
+clause) both leave the predicate untouched, so neither can observe the defect
+that the predicate matches 22 of 6,476 real DM rows. **This mutation is the only
+one whose outcome depends on what the fixture rows look like**, which makes it
+simultaneously a test of the fix and a test of AC-96-1a: if the fixture's
+messages carry `thread_id` the way production does not, the old predicate still
+selects them and this run comes back green. A green here is not a pass — it is
+a report that the fixture is unrealistic.
+
 **AC-96-7.** No new authorization path reads `parent_ref`, and `parent_ref`
 remains `''` on the promoted conversation. G5.
 
