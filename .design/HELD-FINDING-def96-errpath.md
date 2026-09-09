@@ -95,3 +95,31 @@ retained only for shape-parity with sqlite — or deleting it.
 - `PromoteKeys` is used at the one call site; the two fields are named, not
   positional.
 - The lookup is `GetConversationByExternalRef` only — no create-on-miss.
+
+---
+
+## OUTCOME 2026-09-09 20:21 — released
+
+`cr-msg-def96` **found it independently**, at the exact lines, with the mechanism
+described accurately including the ~0.3% figure. They also independently found
+the postgres dead `else` branch, which I had likewise not mentioned.
+
+**But they graded it *Nit / Optional*, remedy "log a warning".** Their stated
+reasoning: *"The messageCount in the response would surface this"* and *"the
+alternative (failing the entire promotion) has its own costs."*
+
+Both are wrong, and the corrections are recorded as DEFECTS `[^166]`:
+
+- `messageCount` is delivered **after** the destructive commit, to a consumer
+  under no obligation to read it. A value in a success response is not a safety
+  control.
+- The costs were weighed without weighing **reversibility** — the only axis on
+  which they differ in kind. Retry is the whole cost of refusing.
+
+Released to `ca-msg-promote` as a required change, not optional, together with
+the step-numbering nit and a re-run of the full-repo build (the reviewer's hit
+disk space at link stage; host was at 99%, now 71% after I cleared caches).
+
+**The experiment was worth running.** It converts the seven `CONFIRMED` verdicts
+into evidence rather than assertion, and it identified the failure mode as soft
+grading rather than missed detection — which has a different fix.
