@@ -163,6 +163,22 @@ No data is destroyed. The rows are intact and unreachable from both sides.
   All on the prohibition list.
 - **Repairing already-promoted topics.** Designed in §5, but gated on ptone
   (§6, OQ-96-1) because it is an irreversible write to production data.
+- **Moving DM messages that are reachable by neither arm.** *(Added
+  2026-09-09.)* C2's predicate moves rows matched by
+  `conversation_id = directConvID` **or** `thread_id = dmKey`. A message with
+  neither is moved by neither. Note that the gteam measurement behind F2′
+  cannot speak to that population — it selected messages *whose
+  `conversation_id` names a direct conversation*, so every row in it carries a
+  `conversation_id` by construction; it measured the `thread_id` split **within
+  stamped messages** and is silent on unstamped ones. Same tautological shape
+  as [^149] and [^153]: the predicate contains the thing under investigation.
+  A known orphan population exists on that hub (OQ-6) and whether any of it is
+  DM traffic is unmeasured. Routed to the investigator. **This is a limit on
+  the fix's reach, not a defect in it** — promotion moves what is reachable by
+  conversation or by thread, and genuinely orphaned messages are already
+  ptone's open decision under OQ-6. Widening the predicate to catch them would
+  mean guessing at DM membership from sender/recipient pairs, which is exactly
+  the inference the key exists to make unnecessary.
 
 ---
 
@@ -730,12 +746,50 @@ written through the agent messaging path**, not hand-constructed rows with
 old, nearly-inert predicate and proved nothing. Assert every message moves **by
 count and by id**, not that "messages appear."
 
+**Amended 2026-09-09 — hand-constructed rows satisfy this, for a specific
+reason.** The implementation built all five fixture messages directly through
+`CreateMessage` rather than through the agent messaging handler, with two
+carrying `thread_id` and three not. That is accepted. The point of demanding the
+production path was that a fixture encoding my *account* of why the column is
+empty fails silently if my account of `handlers_agent_messaging.go` is wrong.
+That risk is discharged by a different route here: the shape is established by
+**direct measurement on live data** (6,403 of 6,454 agent DM messages carry no
+`thread_id`), which is stronger evidence than a code-path fixture would have
+produced. A fixture matching a measured distribution does not encode an
+assumption; it encodes an observation. **What remains non-negotiable is
+AC-96-6a** — the fixture must be shown to discriminate, and reverting the
+predicate is what shows it.
+
 **AC-96-1b — the empty needle is not a wildcard.** With no direct conversation
 resolvable (`directConvID = ""`), promotion must move only rows matched by the
 legacy `thread_id` arm. Plant an unstamped message belonging to an unrelated
 conversation and assert it is untouched. This is the one failure mode of C2
 that damages data outside the DM being promoted, so it gets its own criterion
 rather than riding along in AC-96-1.
+
+**AC-96-1b is a separate test, and this is not a stylistic preference.**
+*(Clarified 2026-09-09, after a first attempt satisfied the letter of it inside
+the AC-96-1 test.)* The failure fires **only when `directConvID` is empty** —
+that is the sole condition under which `conversation_id = ''` degenerates into
+matching every unstamped message on the hub. AC-96-1's fixture resolves the
+direct conversation, so `directConvID` is a real UUID throughout and the
+unrelated message survives for reasons unrelated to the guard: arm 1 misses
+because `'' ≠ <uuid>`, arm 2 misses because its `thread_id` is not `dmKey`. It
+would survive identically with the `? <> ''` clause deleted. **The main test's
+preconditions are the negation of the ones this failure needs**, so it cannot
+host the scenario however carefully the assertion is written.
+
+The separate test must therefore:
+
+- drive a DM whose direct conversation does **not** resolve
+  (`GetConversationByExternalRef` → `ErrNotFound`, P0 passes `""`) — the legacy
+  pre-stamping path the code explicitly supports;
+- plant a message elsewhere with `conversation_id = ''` — genuinely empty, not
+  merely different, since empty is the condition the wildcard matches;
+- assert it does not move;
+- **and go red when the `? <> ''` clause is deleted.** Without that mutation the
+  test's coverage of the guard is unestablished, which is the same gap AC-96-6a
+  closes for the predicate.
 
 **AC-96-2.** After promotion, `webchat_topic.conversation_id` is non-empty, a
 `conversations` row exists with that id and `kind='group'`, and every re-keyed
