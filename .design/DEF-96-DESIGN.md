@@ -172,8 +172,13 @@ No data is destroyed. The rows are intact and unreachable from both sides.
   `conversation_id` by construction; it measured the `thread_id` split **within
   stamped messages** and is silent on unstamped ones. Same tautological shape
   as [^149] and [^153]: the predicate contains the thing under investigation.
-  A known orphan population exists on that hub (OQ-6) and whether any of it is
-  DM traffic is unmeasured. Routed to the investigator. **This is a limit on
+  **Measured 2026-09-09 and the answer is one message.** Of 18,220 orphans on
+  gteam, exactly **1** carries a `thread_id`, and it is a DM key
+  (`dm:agent:553a59e9…:user:b53249ea…`, both principals resolving). The other
+  18,219 have no `thread_id` at all, so promotion of any DM strands at most one
+  known row. The non-goal stands, but it is now bounded by a measurement rather
+  than resting on an assumption — which is the only reason it is safe to leave
+  as a non-goal. **This is a limit on
   the fix's reach, not a defect in it** — promotion moves what is reachable by
   conversation or by thread, and genuinely orphaned messages are already
   ptone's open decision under OQ-6. Widening the predicate to catch them would
