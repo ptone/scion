@@ -390,6 +390,16 @@ WHERE thread_id = :T
         SELECT id FROM conversations WHERE kind = 'direct'))
 ```
 
+**The `conversation_id = ''` arm is not DEF-96-specific and must be decided
+separately.** Messages written before the conversation *write* switch was turned
+on carry an empty `conversation_id` regardless of how their thread came to
+exist. That predicate therefore also sweeps ordinary, natively created threads.
+Re-pointing those may well be desirable — it is what a full backfill would do —
+but it is a different change with a different blast radius, and folding it in
+here would let a DEF-96 repair quietly become a general message backfill.
+**Measure the two populations separately (§5.3 Q2 vs Q4) and decide the arm on
+the numbers, not on the convenience of one `WHERE` clause.**
+
 Constraints on the repair, all load-bearing:
 
 - **It must not touch rows already naming a `group` conversation.** Those are
@@ -406,18 +416,24 @@ Constraints on the repair, all load-bearing:
 
 Before any repair is authorized, a **read-only** count from gteam:
 
-1. topics with NULL `conversation_id` (P1 size);
-2. message rows whose `thread_id` is a topic id and whose `conversation_id`
-   names a `direct` conversation (P2 size, and the exact repair scope);
-3. how many distinct users those touch.
+- **Q1** — topics with NULL `conversation_id` and `deleted_at IS NULL` (the
+  pre-restart population).
+- **Q2** — message rows whose `thread_id` is a topic id and whose
+  `conversation_id` names a `direct` conversation. **This is the exact DEF-96
+  repair scope.**
+- **Q3** — how many distinct threads Q2 spans.
+- **Q4** — message rows under a topic with an empty or NULL `conversation_id`,
+  counted **separately** from Q2 for the reason given above.
 
 Read-only connection (`file:...?mode=ro`). IDs and keys only — **no message
 bodies, no bulk email addresses, and never the `value` column of
 `hub_settings`.** This is instance-investigator's work, not a developer's.
 
-The count may well be zero or near-zero: promotion is a niche feature and gteam
-is one instance. **If it is zero, the repair migration should not be written.**
-An unnecessary irreversible migration is a liability, not diligence.
+Q2 may well be zero: promotion is a niche feature and gteam is one instance.
+**If Q2 is zero, the repair migration should not be written.** An unnecessary
+irreversible migration is a liability, not diligence.
+
+*Dispatched to instance-investigator 2026-09-09.*
 
 ---
 
