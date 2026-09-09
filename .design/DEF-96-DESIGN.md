@@ -433,16 +433,63 @@ Q2 may well be zero: promotion is a niche feature and gteam is one instance.
 **If Q2 is zero, the repair migration should not be written.** An unnecessary
 irreversible migration is a liability, not diligence.
 
-*Dispatched to instance-investigator 2026-09-09.*
+### 5.4 MEASURED — 2026-09-09, gteam, read-only
+
+| | Result |
+|---|---|
+| Q1 — topics with no conversation | **0** |
+| Q2 — messages under a topic attributed to a `direct` conversation | **0** |
+| Q3 — distinct threads Q2 spans | **0** |
+| Q4 — messages under a topic with empty/NULL `conversation_id` | **0** |
+
+**Positive controls, requested before believing the zeros**, because a JOIN that
+returns 0 because its `ON` clause never matches is indistinguishable from one
+whose predicate found nothing:
+
+| | Result |
+|---|---|
+| C1 — `messages JOIN webchat_topic ON thread_id = id` | **61** |
+| C2 — topics | **41** |
+| C3 — conversation kinds | direct **737**, group **46** |
+
+C1 is non-zero, so the join is matching real rows and the zeros are facts about
+the data.
+
+**The zeros are time-unbounded, which matters more than the log evidence.** A
+promotion strands messages in exactly one of two states: after the write switch,
+carrying the *direct* conversation's id (Q2); before it, carrying an empty
+`conversation_id`, which promotion never fills (Q4). Both are zero over all
+rows with no date predicate, so between them they cover both eras. The correct
+claim is **"no promotion has ever stranded a message on this hub"** — not the
+weaker "no promotion since Sep 6" that the journal window supports. The only
+case invisible to the queries is promotion of a DM with no messages, which
+strands nothing.
+
+**Decisions taken on this measurement:**
+
+- **P5 (repair migration) is cancelled.** Not deferred — cancelled. There is
+  nothing to repair, and writing an irreversible migration for an empty
+  population is a liability.
+- **OQ-96-1 is withdrawn.** ptone has no decision to make here.
+- **The `conversation_id = ''` arm question is moot** — Q4 is zero, so the two
+  populations the arm would have distinguished are both empty. Recorded rather
+  than deleted, because the reasoning applies to any future backfill.
+
+*Loose end, non-blocking:* C2 = 41 topics against C3 = 46 group conversations,
+so five group conversations have no topic. Expected explanation is soft-deleted
+topics, which would be correct — the conversation surviving a soft-deleted topic
+is right, since soft-deletion is not declassification. Query outstanding.
 
 ---
 
 ## 6. Open Questions
 
-**OQ-96-1 (ptone, blocking §5.2 only).** Authorize the repair migration for
-already-promoted topics? Irreversible read-widening on production rows.
-*Recommendation: decide after §5.3 returns a count.* If zero, skip it and ship
-§5.1 alone.
+**~~OQ-96-1 (ptone)~~ — WITHDRAWN 2026-09-09.** Was: authorize the repair
+migration for already-promoted topics? §5.4 measured the affected population at
+zero, with positive controls confirming the queries matched real rows. No
+irreversible write is needed, so there is nothing to authorize. Kept struck
+through rather than deleted so the sequence — *ask for the count before asking
+for the decision* — stays visible.
 
 **OQ-96-2 (mine, non-blocking).** Should promotion write a message into the new
 thread recording that it was promoted from a DM, so project members reading the
@@ -489,10 +536,12 @@ handler and prove nothing about the path the user takes. Also assert the
 
 **P3 — provenance log.** §3.3. Structured record, no schema change.
 
-**P4 — read-only measurement on gteam.** §5.3, instance-investigator.
+**P4 — read-only measurement on gteam. DONE 2026-09-09**, results in §5.4.
+Ran ahead of P1–P3 because it decides whether P5 exists at all.
 
-**P5 — repair migration.** Only if P4 returns a non-zero count *and* OQ-96-1 is
-answered yes. Separate commit, separate review, never bundled with P1–P2.
+**P5 — repair migration. CANCELLED 2026-09-09.** P4 returned zero on every
+population with sound positive controls (§5.4). No rows to repair. Do not write
+this.
 
 **P6 — close the pinned-skip test.** `TestPromoteDM_NoConversationID_SkipsDualWrite`
 stays (the store contract is unchanged) but gains a comment stating that the
