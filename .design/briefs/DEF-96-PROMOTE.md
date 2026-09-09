@@ -218,10 +218,30 @@ gofmt -l <your changed files>
 `check-conversation-upsert-guard` watches this exact surface. **If it fires,
 that is a finding and you report it — it is not an obstacle to route around.**
 
-`pkg/hub` takes ~7 minutes to compile and test. Run it in the **foreground** and
-pass an explicit timeout. A backgrounded job's exit code belongs to the
-launcher, not the job; if you background anything, confirm the log has bytes
-before believing a green.
+> **CORRECTION 2026-09-09 — the "~7 minutes" figure below was wrong and is
+> retracted.** It was mine, unsourced, and it is where the 900s timeout came
+> from. Measured on clean `77ebea1f6`, `go test -timeout 1800s ./pkg/hub/`:
+> **35:05.83 wall** — about 5m30s of compile plus a 30m test binary that ends in
+> `panic: test timed out`. **`TestRS1_StaleAuthorityForcedOverlap` alone accounts
+> for 23m37s** and is the only test still running at the panic. Everything else
+> finishes in roughly 6m23s.
+>
+> **Do not run the full `pkg/hub` package.** Run your tests by name. RS1 is
+> `ci-fix-lead`'s and carries `!no_sqlite`, so it never fires in blocking CI.
+>
+> Note also that `-timeout` covers the **test binary only, not compile**. Wall
+> clock is compile plus the timeout, so a timeout sized off a wall-clock
+> observation under-provisions by the compile time.
+
+Run tests in the **foreground** and pass an explicit timeout. A backgrounded
+job's exit code belongs to the launcher, not the job; if you background
+anything, confirm the log has bytes before believing a green.
+
+**A failure count from a run that panicked at its timeout is a floor, not a
+total** — it reports the tests that completed and is silent on the ones that
+never started. Without `-v` the log prints no PASS lines either, so such a run
+cannot even distinguish "passed" from "never ran". Label any count from a
+timed-out run as a floor.
 
 Expected red and **not yours**: `gofmt` on `pkg/hub/handlers_agents_core.go` and
 `pkg/hub/web_test.go`, and `TestMutationClassificationBidirectional` at 200

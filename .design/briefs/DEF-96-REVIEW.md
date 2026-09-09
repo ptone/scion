@@ -159,9 +159,18 @@ gofmt -l <changed files>
 No pipes — `$?` after a pipeline is the last command's status, and this shell is
 zsh where `${PIPESTATUS[0]}` is empty.
 
-**Do not run the full `pkg/hub` package.** `TestRS1_StaleAuthorityForcedOverlap`
-runs 8+ minutes and times the package out; it is upstream's and it is with
-`ci-fix-lead`. Run the promote-related tests by name.
+**Do not run the full `pkg/hub` package.** Measured on clean `77ebea1f6`:
+**35:05.83 wall**, being ~5m30s compile plus a 30m test binary that ends in
+`panic: test timed out`. **`TestRS1_StaleAuthorityForcedOverlap` alone is
+23m37s** — not the 8m16s previously circulated — and is the only test still
+running at the panic. Everything else finishes in about 6m23s. RS1 is
+upstream's, carries `!no_sqlite`, and is with `ci-fix-lead`. Run the
+promote-related tests by name.
+
+The clean-base run produced **43 `--- FAIL:` lines across 32 distinct top-level
+tests**, all sub-second. Those pre-exist this branch. **That count is a floor,
+not a total** — the binary panicked, so nothing scheduled after RS1 ran, and
+without `-v` the log cannot distinguish "passed" from "never ran".
 
 Expected red and **not yours**: `gofmt` on `pkg/hub/handlers_agents_core.go` and
 `pkg/hub/web_test.go`, and `TestMutationClassificationBidirectional` at 200

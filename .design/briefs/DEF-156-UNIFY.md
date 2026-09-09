@@ -234,10 +234,27 @@ that tag to a new sqlite-dependent test file is correct and expected. **Never
 strip the tag from an existing file to make something run.** The directive sits
 below a 14-line Apache header — locate it with grep, not `head -n`.
 
-`pkg/hub` takes ~7 minutes to compile and test. Run it in the **foreground**
-with an explicit timeout. A backgrounded job's exit code belongs to the
-launcher, not the job; if you background anything, confirm the log has bytes
-before believing a green.
+> **CORRECTION 2026-09-09 — the "~7 minutes" figure below was wrong and is
+> retracted.** It was mine and unsourced. Measured on clean `77ebea1f6`,
+> `go test -timeout 1800s ./pkg/hub/`: **35:05.83 wall** — about 5m30s of compile
+> plus a 30m test binary ending in `panic: test timed out`.
+> **`TestRS1_StaleAuthorityForcedOverlap` alone accounts for 23m37s** and is the
+> only test still running at the panic. Everything else finishes in roughly
+> 6m23s, which is probably where the old figure came from before RS1 grew.
+>
+> **Do not run the full `pkg/hub` package.** Run your tests by name. RS1 is
+> `ci-fix-lead`'s and carries `!no_sqlite`, so it never fires in blocking CI.
+>
+> `-timeout` covers the **test binary only, not compile**. Wall clock is compile
+> plus the timeout.
+
+Run tests in the **foreground** with an explicit timeout. A backgrounded job's
+exit code belongs to the launcher, not the job; if you background anything,
+confirm the log has bytes before believing a green.
+
+**A failure count from a run that panicked at its timeout is a floor, not a
+total.** Without `-v` the log prints no PASS lines, so it cannot distinguish
+"passed" from "never ran". Label any such count as a floor.
 
 Expected red and **not yours**: `gofmt` on `pkg/hub/handlers_agents_core.go`
 and `pkg/hub/web_test.go`, and `TestMutationClassificationBidirectional` at 200
