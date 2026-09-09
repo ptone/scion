@@ -295,6 +295,27 @@ constraint against the transaction boundary. Any test touching this path needs
 an explicit timeout, because the failure mode consumes the evidence as well as
 the time.
 
+**The signature must not grow a second bare string.** Adding `directConvID`
+alongside `dmKey` creates a run of two adjacent `string` parameters. Transposing
+them **compiles, runs, and silently matches nothing** — `conversation_id =
+dmKey` selects no rows and `thread_id = directConvID` selects no rows, so
+promotion moves zero messages and reports success. That is this very defect,
+reintroduced by argument order, undetectable by the type checker and invisible
+to any test whose fixture happens to be empty. Pass a named struct:
+
+```go
+type PromoteKeys struct {
+    DMKey                string
+    DirectConversationID string // "" when unresolved
+}
+```
+
+Named fields make a transposition a compile error and make the `""` case
+self-documenting. → **when a change adds to a run of same-typed arguments,
+type-checking stops being evidence and the mapping has to be read** — the same
+rule already recorded for *removing* from such a run, which is symmetric and
+was not written down that way.
+
 One statement, not two, so there is no window in which `thread_id` has moved and
 `conversation_id` has not. Inside the existing transaction, so G3 holds.
 
