@@ -172,18 +172,34 @@ No data is destroyed. The rows are intact and unreachable from both sides.
   `conversation_id` by construction; it measured the `thread_id` split **within
   stamped messages** and is silent on unstamped ones. Same tautological shape
   as [^149] and [^153]: the predicate contains the thing under investigation.
-  **Measured 2026-09-09 and the answer is one message.** Of 18,220 orphans on
-  gteam, exactly **1** carries a `thread_id`, and it is a DM key
-  (`dm:agent:553a59e9…:user:b53249ea…`, both principals resolving). The other
-  18,219 have no `thread_id` at all, so promotion of any DM strands at most one
-  known row. The non-goal stands, but it is now bounded by a measurement rather
-  than resting on an assumption — which is the only reason it is safe to leave
-  as a non-goal. **This is a limit on
-  the fix's reach, not a defect in it** — promotion moves what is reachable by
-  conversation or by thread, and genuinely orphaned messages are already
-  ptone's open decision under OQ-6. Widening the predicate to catch them would
-  mean guessing at DM membership from sender/recipient pairs, which is exactly
-  the inference the key exists to make unnecessary.
+  **Measured 2026-09-09. The bound is ~5,228, not 1 — an earlier revision of
+  this paragraph said "one message" and was wrong; the correction is recorded
+  here rather than silently replaced.** Of 18,220 orphans on gteam exactly
+  **1** carries a `thread_id` in DM-key format, and I read that as bounding the
+  stranded population at one row. **That reading reproduced the very error this
+  design exists to correct.** The discriminator I commissioned identified DM
+  traffic *by `thread_id` format* — in a defect whose entire substance is that
+  99.7% of DM messages have no `thread_id` at all. The query could not have
+  found them. A different question in the same batch answered it by accident:
+  broken down by principal type, the orphans are 12,989 agent→agent, **4,015
+  agent→user and 1,214 user→agent**. Those 5,229 agent↔user rows have no
+  `conversation_id` and (bar one) no `thread_id`, so **~5,228 are reachable by
+  neither arm.** Treat that as an upper bound rather than a count: an
+  agent↔user message *could* belong to a project thread rather than a DM, but
+  such a message would carry a `thread_id`, and these do not — so most of it is
+  DM traffic. A sharper discriminator would need the DM key derived from the
+  principal pair, which is available and has not been run.
+  **The non-goal is unchanged and the reasoning is unchanged; only the
+  magnitude moved, by three orders.** These messages were already unreachable
+  before this fix and remain so after it — promotion does not make them worse,
+  it declines to rescue them. It has no key by which to find them: with neither
+  a conversation nor a thread, the only route is inferring DM membership from
+  sender/recipient pairs, **which is exactly the inference the DM key exists to
+  make unnecessary, and performing it inside a data-moving `UPDATE` would be
+  worse than leaving the rows where they are.** Under-granting is recoverable;
+  a message swept into a project thread on a guess is not. What does change is
+  that this belongs in front of ptone alongside OQ-6, because ~5,228
+  unreachable agent↔user messages is a different decision from one.
 
 ---
 
