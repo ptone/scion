@@ -475,10 +475,23 @@ strands nothing.
   populations the arm would have distinguished are both empty. Recorded rather
   than deleted, because the reasoning applies to any future backfill.
 
-*Loose end, non-blocking:* C2 = 41 topics against C3 = 46 group conversations,
-so five group conversations have no topic. Expected explanation is soft-deleted
-topics, which would be correct — the conversation surviving a soft-deleted topic
-is right, since soft-deletion is not declassification. Query outstanding.
+*Loose end, non-blocking, and the query was mine to get wrong:* C2 = 41 topics
+against C3 = 46 group conversations, so five group conversations have no
+`webchat_topic` row. I guessed soft-deleted topics; the measurement says
+`deleted_at IS NOT NULL` count is zero, so that guess was wrong.
+
+**But the five are probably not orphans either, because my predicate was
+under-specified.** It read `kind = 'group' AND NOT EXISTS (topic)`, which
+assumes every group conversation is a native web thread. Group conversations
+also exist for Discord channels and threads and other non-native surfaces, and
+those correctly have no `webchat_topic`. The missing discriminator is `surface`.
+
+The tell was in the data: one of the five is `0c57b491`, ptone's preserved
+Discord reproduction conversation — a row for which "no topic" is right.
+Re-issued as a `GROUP BY surface`; only rows with `surface = 'native'` are
+genuine drift. → **and note this only surfaced because the report included the
+ids rather than just the count. A bare "5" would have become a defect filed
+against correct behaviour.**
 
 ---
 
