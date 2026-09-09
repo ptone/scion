@@ -34,6 +34,50 @@ This is live and a user can hit it.
 **The order is load-bearing. P2 before P1 makes the bug permanent instead of
 fixing it.** Read §7 of the design for why.
 
+> ## CORRECTION 2026-09-09 — read this before P1
+>
+> **The predicate was wrong and P1 has changed.** Measured on the live hub:
+> of the messages in `kind='direct'` conversations, **22 carry a `thread_id`
+> and 6,454 do not** — 6,403 of those are agent replies. The agent messaging
+> path takes `ThreadID` from the caller and agents supply none.
+>
+> So `WHERE thread_id = dmKey` does not just fail to set the right columns; it
+> **barely selects anything**. The original P1 kept that predicate and would
+> have shipped a fix that moved a handful of user messages and left the
+> conversation behind.
+>
+> **P1 now keys on the direct conversation, with the `thread_id` clause kept as
+> a second arm** for rows written before conversation stamping. See design
+> §1.2 F2′, §3.1 C2, §5.4b, and the new AC-96-1a / AC-96-1b. **A new P0
+> precedes P1.** This is my error, caught before it shipped.
+
+### P0 — resolve the direct conversation and widen the predicate
+
+The handler already holds the authorized DM key. The direct conversation is a
+**lookup** on it — `GetConversationByExternalRef(ctx, "native", dmKey)`, since
+`ResolveOrCreateDMConversation` writes `Kind: "direct", Surface: "native",
+ExternalRef: <DM key>` (`pkg/messaging/conversation.go:107-113`).
+
+**Lookup only. Promotion must never create a direct conversation.** On
+`store.ErrNotFound`, pass `""` and let the legacy arm do the work — that is a
+pre-conversation-model hub, not an error.
+
+Thread the id into `PromoteDM` and key the re-key on both arms:
+
+```sql
+UPDATE messages
+   SET thread_id = ?, conversation_id = ?
+ WHERE (? <> '' AND conversation_id = ?)      -- directConvID, when resolved
+    OR thread_id = ?                          -- dmKey, legacy arm
+```
+
+**The `? <> ''` guard is load-bearing and is the one thing here that can damage
+data outside the DM.** With an empty `directConvID` and no guard,
+`conversation_id = ''` matches **every unstamped message on the hub**. Test it
+by planting an unstamped message belonging to an unrelated conversation and
+asserting it does not move. A test that only inspects the DM's own rows cannot
+detect a wildcard.
+
 ### P1 — re-point `conversation_id` when re-keying
 
 In **both** stores, `PromoteDM`'s "Step 2: Re-key all messages":
@@ -41,7 +85,8 @@ In **both** stores, `PromoteDM`'s "Step 2: Re-key all messages":
 - `pkg/hub/webchannel_store.go:2148-2154` (sqlite)
 - `pkg/hub/webchannel_store_postgres.go:1657-1663` (postgres)
 
-Set `thread_id` **and** `conversation_id` in a **single** `UPDATE`, not two.
+Set `thread_id` **and** `conversation_id` in a **single** `UPDATE`, not two,
+using the P0 predicate.
 
 **Guard it.** If `topic.ConversationID` is empty, set only `thread_id`, exactly
 as today. Blanking `conversation_id` on every moved row would destroy
@@ -80,6 +125,13 @@ then read the thread's history through the same endpoint the UI calls, and
 assert the messages come back — **on the first read, with no restart**. A
 store-level test would have passed before this fix and proves nothing about the
 path a user takes.
+
+**The fixture must look like a real DM.** Most of its messages must be **agent
+replies written through the agent messaging path**, not hand-constructed rows
+with `thread_id` pre-populated. 99.7% of real DM messages have no `thread_id`;
+a fixture that sets it on every row would have passed against the old, nearly
+inert predicate and proved nothing. Assert every message moves **by count and
+by id** — not that "messages appear".
 
 ### P3 — provenance log
 
