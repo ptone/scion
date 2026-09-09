@@ -82,6 +82,42 @@ documents at `webchannel_store.go:693` and `webchannel_store_postgres.go:321`:
 sqlite gates on `hasConversationsTable()`, postgres does not. Do not
 "harmonise" it.
 
+> ## ADDENDUM 2026-09-09 — the collision surface P2 creates
+>
+> Lookup before `BeginTx`, insert inside it: check-then-insert is not atomic.
+> A writer arriving in between loses to the partial unique index.
+>
+> **The index prevents the duplicate by *failing* the loser — that is the
+> opposite of convergence, which is the whole reason P2's lookup exists.**
+> "The index catches it" is not an answer here. Assess per call site:
+>
+> - **`backfillTopicConversations` — no change needed.** Boot is
+>   single-threaded and the marker is written only on a completed pass, so a
+>   partial failure re-runs next boot and the lookup finds the first pass's
+>   rows. Self-healing.
+> - **`CreateTopic` — live request path, boot argument does not transfer.**
+>   And note: before P2 it wrote `''` and was structurally incapable of
+>   colliding with Route 2's `thread:` key — disjoint namespaces. **P2 merges
+>   them and creates this contention.** Say so in your report.
+>
+> **What I need (AC-156-9):** enumerate every `CreateTopic` call site and where
+> its `topic.ID` comes from. If each mints a fresh UUID immediately before
+> calling, the window is closed by construction and I accept that — but
+> establish it from the call sites, not from the store. Check
+> `EnsureGeneralTopic` first: "the general topic for this project" is a name
+> two concurrent requests can both resolve to.
+>
+> If the window is reachable: **on unique-constraint error from the
+> conversations INSERT, re-read inside the transaction and link the topic to
+> the winner** rather than returning the error. Not a bare `ON CONFLICT DO
+> NOTHING` — it returns no rows and the winner's id is what you need. Any
+> `ON CONFLICT` must match the partial index's conflict target **including its
+> predicate** or it will not fire at all.
+>
+> Also: `webchannel_store.go:690-693` says *"The external_ref derivation (empty
+> string) matches backfillTopicConversations."* P2 falsifies it. Fold it into
+> P4 with the other stale comments.
+
 ### P3 — derive `surface` from the channel
 
 `persistGroup` (`pkg/messaging/backfill.go:353`) hardcodes `Surface: "native"`
