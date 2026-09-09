@@ -72,6 +72,37 @@ both generalise:
 The same test applies to log lines, metrics, and response headers offered as
 mitigations. Name the reader and the refusal, or it is not a mitigation.
 
+## The table sets floors, not ceilings — and here is the escalator it omits
+
+**Who would notice, and how long would it take them?** A fault that refuses
+loudly on a path someone is watching is cheaper than a quieter fault on a
+population nobody can see.
+
+Escalate above the table when the affected population is **invisible**: old
+deployments, un-migrated data, users on a path the team does not exercise,
+anything whose operators would read the symptom as normal breakage rather than
+as a regression with a cause. Those are, by construction, the cases least likely
+to generate a report, so the defect's lifetime is bounded by nothing.
+
+This clause has already been used once, against this rubric's own table: a
+missing test on an error-classification branch is a coverage gap and the table
+floors it at *Nit*, but its failure mode was **total refusal for
+pre-conversation-model hubs** — the oldest deployments, least watched, whose
+operators would read the 503 as "this feature is broken" and never file
+anything. It was filed as *Required*.
+
+## Hardening a path creates coverage obligations on branches you did not edit
+
+When you change what an error **means** — narrowing a swallow-all into a
+classification, turning a warning into a refusal, making a default strict —
+check what was **harmless before and is not now**.
+
+A branch that never mattered can become load-bearing without its line changing,
+and the tests will not notice, because nothing about the diff points at it. Ask:
+which mistakes about this value were survivable an hour ago and are not
+survivable now? Those branches need coverage in **this** commit, not a follow-up.
+An inherited hazard can be deferred; a created one cannot.
+
 ## "Extremely narrow failure path" is not a severity argument on its own
 
 Rarity multiplies with consequence; it does not replace it. A rare path that
