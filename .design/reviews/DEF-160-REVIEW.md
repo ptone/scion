@@ -5,7 +5,9 @@ Branch under review: `scion/ca-msg-def160fix`. Base `2519aa8b3`.
 | Round | Commit | Findings raised | Outcome |
 |---|---|---|---|
 | 1 | `a7c8fb8a3` | H-1 P4 deferral inverted; H-2 narrowing rejected; H-3 coverage asymmetry; tag/CI note | rework |
-| 2 | pending | — | — |
+| 2 | `7dee386cf` | H-4 AC-6 fixture swapped syntax, hid DEF-164 | rework |
+| 3 | `c6aed1151` | R4-A refusal enumerates DM participants | rework |
+| 4 | pending | — | — |
 
 ## What the report got right, and why it is worth saying
 
@@ -142,3 +144,67 @@ address from a mention of an address.
 - Build tag placement: `!no_sqlite` at line 15, correct. **Consequence flagged
   to the developer and tracked separately: these 7 tests do not run in the only
   blocking CI gate.**
+
+
+## H-4 — a bad fixture was suppressing an unrelated guard
+
+Dropping AC-6's mismatched recipient (the H-1 remedy) made the request take the
+DEF-152 derivation path for the first time, which immediately hit a pre-existing
+guard at `:577` — `addrKind != "user"`, refusing agent↔agent DMs on an endpoint
+that delivers to human inboxes.
+
+**The bad fixture had been suppressing that guard.** Supplying a user recipient
+meant the whole DEF-152 block was skipped, so `addrKind != "user"` was
+unreachable from that test. One wrong fixture was concealing two separate
+things: the DEF-161 row-shape violation it created, and an unrelated refusal it
+routed around.
+
+That is a property of bad fixtures rather than a coincidence: **a request shape
+that is wrong in one dimension tends to take an atypical path, and atypical paths
+skip guards.** Generalised: *when a fix forces a fixture change, the newly-taken
+path is unexercised code by definition, and whatever it does next is a finding
+whether or not it looks like one.*
+
+The developer's response was to change the syntax (`@agent-slug` → `@email`) so
+the test passed — the H-3 reflex again, one round after it was raised. It deleted
+the only `@agent-slug` coverage in `pkg/hub` (grep: nothing else matches) and
+left the test's name and assertion text still saying "@agent". Filed as DEF-164
+[^184]; remedied by restoring the fixture as a **negative** test that pins the
+current refusal.
+
+## R4-A — a refusal that enumerates what a sibling control hides
+
+P4's mismatch error names both DM participants (`kindA:idA and kindB:idB`).
+DEF-142 AC-3 exists so that not-found and not-a-participant return *byte-identical*
+bodies, enforced through the `disclosableResolutionReason` allowlist. The new
+refusal bypasses that machinery on an adjacent path.
+
+It is not exploitable today: reaching `:715` requires the sender to already be a
+participant. But that guarantee is supplied by `checkPostResolutionAuth` and by
+resolve-or-create, neither of which knows it is providing it, and nothing at the
+error site states the dependency. **A control whose safety is inherited from
+upstream components, unstated locally and unguarded by a test, is one refactor
+away from becoming an oracle.**
+
+The disclosure also buys nothing: under the ruling the caller should supply no
+recipient at all, so naming the participants teaches them to construct a matching
+recipient — the behaviour being removed. Remedy: name the remediation, keep the
+detail in the non-caller-visible `log.Warn`, and add a **negative** assertion that
+the body contains neither ID. Negative assertions are what hold this, because the
+instinct when improving an error message is to add detail.
+
+## Verification ledger — round 3
+
+- Numstat re-run against `2519aa8b3`: matches.
+- Suite, stated with its instrument: untagged, `-v -count=1`,
+  `-run 'TestDEF138|…|TestDEF164'` → **72 top-level PASS, 0 FAIL**.
+- **81 vs 72 reconciled**: 81 counts subtests, 72 counts top-level functions
+  (DEF-142 = 13 + 7). Both correct. Cost a round-trip because neither of us
+  stated the counting rule — Lesson 3's instrument problem in a third guise
+  (after tag sets and grep filters).
+- **`TestDEF140` does not exist**: zero matching functions. It appeared in the
+  reported list of passing suites and contributed nothing — the "`-run` matching
+  nothing exits 0" trap, mild form.
+- **Mutation M5, run by me**: P4 predicate → `if false`, presence confirmed with
+  `grep -c`, rejection test RED, positive twin green, restored, re-confirmed
+  green, tree clean.
