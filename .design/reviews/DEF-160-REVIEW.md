@@ -4,7 +4,8 @@ Branch under review: `scion/ca-msg-def160fix`. Base `2519aa8b3`.
 
 | Round | Commit | Findings raised | Outcome |
 |---|---|---|---|
-| 1 | `a7c8fb8a3` | H-1 P4 deferral inverted; H-2 narrowing rejected; tag/CI note | rework |
+| 1 | `a7c8fb8a3` | H-1 P4 deferral inverted; H-2 narrowing rejected; H-3 coverage asymmetry; tag/CI note | rework |
+| 2 | pending | — | — |
 
 ## What the report got right, and why it is worth saying
 
@@ -80,6 +81,40 @@ correcting it, so the test exercises the contract being shipped
 (`conv-ref` alone) instead of the one being removed; enumerate every other
 DEF-142 case pairing a `direct` conv-ref with a non-participant recipient and
 report the list before editing.
+
+## H-3 — the enumeration explained why the bad shape survived
+
+I asked for the list of affected DEF-142 cases before any edit. It came back
+correct — ten `postOutboundWithRef` call sites, verified against the file, with
+AC-6 the only case reaching the new check. But the classification exposed
+something the report did not draw out.
+
+**L379 covers the sender side of the same invariant.** It sends a `direct`
+conv-ref naming a conversation the *sender* is not party to, and asserts 400 via
+`checkPostResolutionAuth` "not-a-participant". That is AC-INGRESS-1, tested
+deliberately.
+
+DEF-161 is the **recipient-side counterpart of that exact property**, and the
+enumeration shows the file contains no test for it. The only place the
+recipient-side shape appears is AC-6 — where it is asserted as a **success**.
+
+That is a better explanation of how the defect survived than "nobody thought
+about it." Somebody thought about it carefully enough to test one half. **A
+two-sided invariant with one side tested and the other side's violation blessed
+by a passing assertion is more durable than an untested invariant**, because the
+green test reads as coverage of the whole property. Anyone auditing "is
+participant-mismatch handled?" finds L379, sees a deliberate test with a precise
+name, and stops.
+
+Consequence for the fix: dropping AC-6's recipient closes the violation but
+leaves the asymmetry — one side tested, one side merely not-wrong. Round 2
+therefore adds the **twin**: a recipient-side test modelled on L379 and commented
+as its counterpart, so the pair is legible to whoever reads either one next.
+
+**Generalisable: when a fix removes a test's bad fixture, ask what the test was
+the only instance of.** A fixture that encodes a defect is usually sitting in a
+coverage hole, and deleting the encoding without filling the hole leaves the next
+author free to re-create it.
 
 ## Incidental — mention extraction fires on prose
 
