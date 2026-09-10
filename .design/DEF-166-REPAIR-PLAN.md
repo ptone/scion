@@ -2,8 +2,12 @@
 
 **Status:** DRAFT — repair feasibility fully verified 2026-09-10 (Q5–Q10 clean,
 38/41 rows repair without collision). Minting path independently confirmed
-closed as of `e5b651719` — no code fix outstanding. Ready pending only ptone's
-two rulings (§7).
+closed as of `e5b651719` — no code fix outstanding. **Reframed by ptone,
+2026-09-10: gteam's data is non-critical; the target is a real migration baked
+into the codebase, not a one-off hand-applied fix (§6).** Ready to design as a
+boot-time migration once ptone confirms the shadow-pair disposition (§6 step
+2) — no longer blocking on a row-by-row review, since the 3 colliding rows are
+now a skip-and-log case rather than a decision gate.
 **Decision owner:** ptone. Nothing in this document runs without his say-so.
 **Author:** `ca-msg-arch`, 2026-09-10.
 
@@ -240,7 +244,67 @@ See §6 for what this means for execution. **38 of the 41 are clean.**
 
 ## 6. Execution shape (for when it is authorised)
 
-Not authorised yet. Recorded so the decision is about a concrete thing.
+**REFRAMED by ptone, 2026-09-10, verbatim:** *"The data on gteam is not
+critical data - so our main interest is any repair work that would inform an
+improved migration to bake into the codebase for future upgrades."*
+
+This changes the shape of the work, not just its venue. The plan below §6.0 was
+written for a one-off, reviewed, hand-applied fix to gteam specifically —
+snapshot, read-only report, ptone reviews rows, apply by ID, never by
+predicate. That level of ceremony was justified when gteam's data was the
+thing being protected. **It no longer is.** What's worth protecting now is
+**every other hub that will eventually upgrade through this code path** —
+gteam is not the last instance with this defect, it is just the first one we
+happened to look at.
+
+**New target: a real migration, in the same family as the existing boot-time
+auto-run steps** (`backfillTopicConversations`, the DM key migration,
+`BackfillService`), not a script run once against one database. Concretely:
+
+1. A new step in the `runBootDataMigrations` family: find `kind='group'`
+   conversations with `external_ref=''`, resolve each to its linked
+   `webchat_topic`, compute the ref via the **production** function
+   (`ThreadConversationExternalRef` — not a reimplementation, per §5), and
+   `UPDATE`.
+2. **The 3 index-colliding rows become a skip-and-log case inside the
+   migration, not a blocking decision.** This is the same shape as every other
+   per-row anomaly this project's backfills already handle (empty-ref DM rows
+   in B14, derive-refusals in the message backfill): attempt the row, and on a
+   unique-constraint violation, log it by ID and move on rather than fail the
+   run. **This is a lower bar than my original §6.0 plan required** — I had
+   ptone reviewing the 3 by hand before deciding; a migration instead just
+   needs to not crash on them, and the shadow/topic-side duplication they
+   represent stays filed as its own defect, unblocking this migration entirely.
+3. Idempotent and marker-gated per M-1′: a completion marker records a full
+   pass with no run-level failure, so re-running on an already-migrated hub is
+   a no-op, and a hub that failed mid-pass retries next boot exactly like the
+   existing backfill does.
+4. **Because the data is not precious, testing shifts from "review then
+   apply" to "deploy and verify."** The migration can run on gteam as part of
+   an ordinary deploy, the same way DEF-156/157's fix did — `instance-investigator`
+   confirms the post-run state (the same Q1-style audit: how many `kind='group'`
+   rows now have empty refs, expect 3), rather than me producing a
+   row-by-row report for sign-off first. This is a real loosening from §6.0 and
+   it's ptone's call, not mine, that data being non-critical justifies it — it's
+   recorded here because it's exactly the kind of authorization that should be
+   traceable to the message that granted it, not inferred later.
+
+**Why this is a better outcome than §6.0, not just a faster one.** A one-off
+fix closes DEF-166 for gteam. A migration closes it for **every hub that ever
+ran the pre-DEF-156 `CreateTopic`** — which is the actual promise of this
+project's single-cutover, auto-run design: upgrade the binary, and the data
+comes with it. It also directly unblocks Decision 2 (§3): the CHECK
+constraint is only safe to add once a hub's existing rows can no longer
+violate it, and a migration that runs on every upgrade is what makes that
+true universally, not just on this one instance after a manual pass.
+
+**What §6.0 still contributes:** the batch split (38 clean / 3 colliding), the
+exact skip condition (unique violation on `(surface, external_ref)`), and the
+production-function requirement all carry over unchanged into the migration's
+implementation — the analysis was never gteam-specific, only the execution
+ceremony was.
+
+### 6.0 Superseded — the original hand-applied plan, kept for its analysis
 
 **The 41 are not one batch — they are two, with different outcomes, confirmed
 by Q10.**
@@ -250,36 +314,12 @@ by Q10.**
 | Clean | 38 | `UPDATE` succeeds; ref goes from `''` to the computed `thread:` value |
 | Index-colliding | 3 (`38f3e567`, `6ef436bd`, `d1431b04`) | `UPDATE` **fails** against `conversation_surface_external_ref` — each collides with its shadow twin (`53e35bb9`, `020ee410`, `6165c1d6` respectively), which already holds the identical ref, same surface, not deleted |
 
-1. Snapshot the database. Repair is a write to production data; there is no
-   reversal without one.
-2. Emit the full proposed change set as a **read-only report** first: conversation
-   id, current ref (`''`), computed ref, **and which batch it is in**. ptone
-   reviews the actual rows, not a predicate.
-3. **Apply only the 38-row clean batch**, by conversation id from that reviewed
-   list — never by predicate, and never as a single statement covering all 41.
-   If the 3 colliding rows are included in the same transaction as the 38, an
-   engine that aborts the whole transaction on one constraint violation turns a
-   3-row problem into a 41-row failure. Keep them separate for that reason
-   alone, independent of whatever gets decided about the 3.
-4. **The 3 colliding rows are a separate decision, not a repair-plan detail.**
-   They already have a live counterpart holding the correct data; giving the
-   topic-side row the same ref does not add information, it adds a second row
-   claiming the same identity. Options, unordered, none chosen here:
-   - Leave the 3 empty permanently, documented as structurally distinct from
-     the other 38 (they are the shadow/topic-side split itself, which is a
-     separate pre-existing anomaly, not a new one this repair should paper over).
-   - Merge or soft-delete one side of each pair — this is a data model decision
-     about what a "shadow pair" *should* be, not a mechanical repair, and is the
-     kind of change this plan's scope was written to exclude.
-   - Something else ptone specifies once he has seen the pairing.
-   **Recommendation: leave the 3 out of this repair entirely** and record them
-   in `DEFECTS.md` as a distinct, related defect (shadow/topic-side duplication)
-   rather than stretch DEF-166's repair to cover a different problem.
-5. Re-run the audit. Expect: 38 now parse; the 3 colliding rows and any genuine
-   remainder still `''`.
-6. Record the remainder — the 3, plus anything else left — in `DEFECTS.md` as
-   permanently unrepaired by this pass, with reasons. An undocumented remainder
-   becomes someone's future mystery.
+The original 6-step hand-applied procedure (snapshot, read-only report,
+apply-by-ID, re-audit) is superseded by the migration approach above. Kept
+below only for the batch table and the constraint that the 3 must never be
+included in the same transaction as the 38 — that constraint still applies
+inside the migration's implementation, just enforced by per-row error handling
+rather than by hand-picked IDs.
 
 Constraints carried from prior rounds: never point a write-capable migration
 command at the live DB; write-then-rename rather than overwrite in place; do not
