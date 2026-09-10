@@ -207,3 +207,31 @@ invisible to an exhaustive search of either one.
 report a search as exhaustive, name the directories it covered. If the feature
 has a CLI half and a server half, both must appear in that list or the claim
 means less than it looks like it means.
+
+## A named function must carry its file:line — in briefs and designs too
+
+DEF-160's design named `ThreadConversationExternalRef` "and its inverse" as the
+authority for parsing a thread ref. The forward helper exists
+(`pkg/messaging/derive_key.go:119`). **The inverse does not exist anywhere in the
+repo.** The only code that decomposes a `thread:` ref is an ad-hoc `TrimPrefix`
+in `divergence.go`.
+
+The sentence was plausible because the forward helper is real, the naming
+convention is regular, and a codebase that centralises construction *usually*
+centralises parsing. Plausibility is exactly the problem: nothing in the sentence
+invites checking.
+
+This is the same failure as the three invented mechanisms in the DEF-158 review,
+with the blast radius pointed the other way. **A wrong mechanism claim in a
+review wastes a round-trip. A wrong one in a design gets implemented** — the
+developer would have gone looking for the inverse, not found it, and then either
+hand-rolled a split (reintroducing precisely the DEF-156 defect the forward
+helper was written to fix) or stopped to ask, having already lost the time.
+
+**Rule, applying to me as much as to anyone I dispatch: every function named as
+existing carries `file:line`. A function that should exist but does not gets
+written as "add X" with its contract, never as a reference.** The two are one
+word apart in prose and a whole phase apart in the work.
+
+The tell to reach for: if you cannot produce the `file:line` without searching,
+you do not know the function exists — you know the naming convention.
