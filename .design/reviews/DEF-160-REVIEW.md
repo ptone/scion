@@ -208,3 +208,79 @@ instinct when improving an error message is to add detail.
 - **Mutation M5, run by me**: P4 predicate → `if false`, presence confirmed with
   `grep -c`, rejection test RED, positive twin green, restored, re-confirmed
   green, tree clean.
+
+---
+
+## Round 4 — `31dfbb414` — ACCEPTED, merged to `tranche-g`
+
+R4-A resolved. The caller-visible refusal now reads *"a recipient may not be
+supplied with a direct conversation reference — the conversation is the address;
+remove the recipient and retry"*; the participant detail stays in the
+non-caller-visible `log.Warn`; `ParseDMKey`'s kind returns became blank
+identifiers. Three `assert.NotContains` guards were added to
+`TestDEF161_AC6_DirectConvRef_RecipientNotInDMKey_Rejected` covering `agent.ID`,
+`otherUser.ID` and `user.ID`.
+
+### Verification ledger — round 4 (all re-run by me, none relayed)
+
+| Check | Method | Result |
+|---|---|---|
+| Numstat vs `2519aa8b3` | `git diff --numstat` | Reproduced the reported seven-file table exactly |
+| DEF suite | untagged, `-v -count=1`, `-run 'TestDEF138\|141\|142\|152\|156\|158\|160\|161\|164'` | **72 top-level PASS / 81 incl. subtests / 0 FAIL**, 6.781s |
+| `go vet` | `./pkg/hub/... ./pkg/messaging/...` | clean |
+| `gofmt -l` | seven changed files | clean |
+| Tree after mutations | `git status --porcelain` | empty |
+| **Mutation M5** | P4 predicate → `if false`; application confirmed `grep -c` = 1 | `..._RecipientNotInDMKey_Rejected` **RED**, positive twin green — P4 still fails closed |
+| **Mutation M6** (new) | re-added participant IDs to the caller-visible body via `fmt.Sprintf`; confirmed applied | **RED** on two of three `NotContains`, with the leaked UUIDs quoted in the failure output |
+
+M6 is the round's substantive check. An `assert.NotContains` written in a world
+where the string was never present passes for the wrong reason and is
+indistinguishable from a correct one. The only way to establish that a negative
+assertion is wired to anything is to **mutate in the direction that makes the
+absent thing present**. This is the inverse of the usual mutation direction and
+it is the one that applies to any test whose subject is a non-event — no-panic,
+no-write, no-notification, no-disclosure.
+
+**A negative assertion that has not been mutated is a comment.**
+
+### Why R4-A was worth a round when it was not exploitable
+
+Reaching the enumeration required the caller to be a participant already, so it
+disclosed nothing they did not have. The reword was still required, for reasons
+that are about durability rather than about today's blast radius:
+
+- The safety was **inherited and unstated**. It came from
+  `checkPostResolutionAuth` and from resolve-or-create semantics — neither of
+  which knows it is supplying it — and nothing at the error site recorded the
+  dependency. DEF-142 AC-3 exists so that not-found and not-a-participant return
+  byte-identical bodies through the `disclosableResolutionReason` allowlist;
+  this refusal bypassed that machinery on an adjacent path.
+- **A control whose safety is inherited from upstream components, unstated
+  locally and unguarded by a test, is one refactor away from becoming an
+  oracle.**
+- Disclosure is not recoverable. *Under-granting is recoverable, over-granting is
+  not* applies to information as much as to access.
+- There is a plain design argument that needs no security framing: under ptone's
+  ruling the caller should not be supplying a recipient at all, so naming the
+  participants teaches them to construct a matching one rather than to drop the
+  field. **An error message that enumerates the accepted values of a field you
+  want removed is arguing against itself.**
+
+### Instrument note
+
+The 81-vs-72 disagreement in round 3 resolved as a counting-rule difference
+(subtests vs top-level functions; DEF-142 = 13 + 7). Third occurrence of the same
+class on this project after build-tag sets and grep filters. Fix adopted: **state
+the counting rule with the number**, so disagreements resolve by comparison
+instead of by re-running. Round 4 complied unprompted and matched first time.
+
+Separately: `TestDEF140` was named among passing suites in round 3 and does not
+exist — the `-run`-matches-nothing trap in its mildest form.
+
+### Disposition
+
+Merged `scion/ca-msg-def160fix` → `scion/tranche-g` as a fast-forward,
+`2519aa8b3` → `31dfbb414`. `ca-msg-g160` retired. **DEF-160 P5 (routing
+error-text pass) is not part of this merge** and is staffed to a fresh agent
+`ca-msg-p5` on `scion/ca-msg-p5text`; DEF-160 is not closed until it lands or is
+explicitly deferred.

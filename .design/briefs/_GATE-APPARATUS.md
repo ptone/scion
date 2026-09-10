@@ -235,3 +235,49 @@ word apart in prose and a whole phase apart in the work.
 
 The tell to reach for: if you cannot produce the `file:line` without searching,
 you do not know the function exists — you know the naming convention.
+
+---
+
+## A negative assertion must be mutated in the direction that makes the absent thing present
+
+`assert.NotContains`, "does not panic", "no row was written", "no notification
+fired" — every assertion whose subject is a **non-event** passes trivially in the
+world it was written in, because in that world the event was already not
+happening. Passing tells you nothing about whether the assertion is connected to
+the code at all. A `NotContains` against a typo'd variable, against a body that
+is empty for an unrelated reason, or against a handler that never ran, is green.
+
+So the mutation direction is inverted from the usual one. For a positive
+assertion you break the behaviour and expect red. For a negative assertion you
+**cause the forbidden thing** and expect red.
+
+Worked example, DEF-160 R4-A: the fix removed two participant UUIDs from a
+caller-visible error body and added three `NotContains` guards. Verification was
+to put the enumeration back via `fmt.Sprintf`, confirm with `grep -c` that the
+mutation applied, and observe two of the three assertions fire with the leaked
+UUIDs quoted in the failure output. Only then was the guard evidence.
+
+**A negative assertion you have not mutated is a comment.**
+
+Corollary for briefs: when you ask a developer for a negative assertion, ask in
+the same breath for the mutation that proves it, or expect to run it yourself.
+
+## State the counting rule alongside any pass count
+
+`grep -cE '^--- PASS:'` counts top-level test functions. `grep -cE '^ *--- PASS:'`
+includes subtests. On the DEF suite these give 72 and 81 — both correct, and the
+gap is one package's table tests.
+
+This is the third form the same problem has taken here, after build-tag sets
+(which tests ran at all) and grep filters (`^\+\+\+` swallowing the file header).
+The common shape: **two people measure honestly with different instruments and
+read the disagreement as a disagreement about the code.** It costs a round-trip
+every time, and the round-trip is spent re-running rather than comparing.
+
+The durable fix is not a canonical command — people will still deviate — it is a
+**disclosure requirement**. Any reported count carries the rule that produced it.
+Then a mismatch is resolved by reading two sentences instead of by rebuilding.
+
+Related, same family: `go test -run 'Pattern'` with a pattern matching nothing
+prints `ok` and exits 0. A green from a `-run` nobody confirmed matches something
+is not evidence. Confirm the pattern hits before trusting its result.
