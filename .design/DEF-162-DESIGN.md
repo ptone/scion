@@ -120,6 +120,19 @@ does) after the `bp == nil` fork, and site the call there.
 If the two paths do not converge after the fork, the fallback is to fire on both
 and dedupe — but that must be justified in the report, not chosen silently.
 
+**P0 ANSWER, delivered by `ca-msg-162` and verified independently (2026-09-10):
+they do converge.** The fork is `if/else` at `:890`; both branches return on
+error (`:891-899` broker, `:900-918` direct); the only shared post-fork code is
+`s.logMessage` (`:938`) and `writeJSON` (`:946`). Siting the call between `:918`
+and `:920` — after the fork, before the `bp == nil` gate — covers both. See §6.3.
+
+**Corollary worth recording: the `bp == nil` DM block is dead in production.**
+`StartMessageBroker` (`server.go:2572`) is called unconditionally from
+`cmd/server_foreground.go:631`, so every real deployment including gteam runs
+*with* a proxy. The block at `:920-936` only executes in tests that omit one.
+That makes F2's warning sharper than when it was written: a fix placed inside
+that gate would be green in the test suite and dead everywhere else.
+
 ### F3 — the mention lookup silently collapses distinct users who share an email local-part
 
 `handlers_chat_v2.go:3519-3525` builds the lookup by display name, full email,
@@ -188,14 +201,56 @@ be re-read.
 
 ### 6.2 Call it from the agent outbound path
 
-Beside the existing DM block at `handlers_agent_messaging.go:920-936`, subject to
-F2's choke-point ruling. `req.ThreadID` holds `threadKey` for groups after
-DEF-160 (`:685`).
+**RESOLVED by P0 (2026-09-10) — one call site, not two.** See §6.3.
 
-### 6.3 Call it from the broker path
+The call goes in `handlers_agent_messaging.go` after the `bp == nil` fork closes
+(`:918`) and **outside** the `bp == nil` gate that wraps the DM block at
+`:920-936`. Both topologies traverse it. `req.ThreadID` holds `threadKey` for
+groups after DEF-160 (`:685`).
 
-Per F2. `deliverToUser` in `messagebroker.go` already has `msg.ThreadID` in scope
-(`+22`, `+50` from the function head).
+Guard: skip `""`, skip `dm:`-prefixed, **and skip `agent:`-prefixed** — the third
+exclusion mirrors `deliverToUser`'s own watermark switch at
+`messagebroker.go:591`, which treats `agent:` keys as neither DM nor topic. An
+`agent:` key reaching `fireHumanMentionNotifications` would miss in `GetTopic`
+(`handlers_chat_v2.go:3535`) and notify with a blank conversation name.
+
+No caller-side `getChatNotifier() != nil` guard is required:
+`fireHumanMentionNotifications` acquires and nil-checks the notifier itself
+(`handlers_chat_v2.go:3498-3501`). The guard at `:1393` is belt-and-braces.
+It also dedupes by member ID (`:3553-3556`), so a message mentioning the same
+person twice yields one notification — no caller-side dedupe either.
+
+Context: match the existing notification call sites, which use
+`go … context.Background()` (`handlers_agent_messaging.go:928`,
+`handlers_chat_v2.go:1395`, `:1561`) precisely so the notification outlives the
+request context. A synchronous call with the request `ctx` inherits its
+cancellation.
+
+### 6.3 Why one site and not two — and the ordering cost it carries
+
+`MessageBrokerProxy` (`messagebroker.go:47-72`) holds `store`, `events`,
+`chatNotifier` and `webChatStore`, but **no `*Server`** — so it cannot reach
+`fireHumanMentionNotifications`, which is a `*Server` method. Firing from inside
+`deliverToUser` would require a new injected field. There is precedent for that
+(`getDispatcher func() AgentDispatcher`, `:59`), so "no access" is really "no
+access without a new field" — but a single post-fork call site in the handler
+covers both topologies with no new wiring, so the field is not earned.
+
+**The cost, which must be stated in the comment at the call site.** A `nil`
+return from `bp.PublishUserMessage` means the message was *accepted onto the
+bus*, not persisted. `deliverToUser` then runs asynchronously and can fail at
+`p.store.CreateMessage` (`messagebroker.go:568`) and return. So on the broker
+path the mention notification can outlive a message that never persisted.
+
+This is **accepted**, not overlooked: the window only opens during an event that
+is already data loss and already logged, and relocating the call later is a local
+change. But the neighbouring DM notification on the same path fires *after* the
+persist (`:568` → `:606`). Two adjacent notification kinds with different
+ordering guarantees, one of them unexplained, is how the next reader ends up
+"fixing" the wrong one. The comment must name the asymmetry, not merely say the
+call fires on both paths — that part is evident from the code.
+
+Tracked as OQ-162-4.
 
 ### 6.4 Do not touch
 
@@ -268,8 +323,18 @@ revert, not a data migration.
   `agent.ID`.
 - **AC-7** A DM (`dm:`-prefixed key) containing a mention produces exactly one
   notification, not a DM notification *plus* a mention notification.
-- **AC-8** The mention fires on **both** the broker and non-broker paths, or on
-  the single choke point both traverse — with a test per path.
+- **AC-8** The mention fires on **both** the broker and non-broker paths — with a
+  test per path, and **the broker test must construct a real
+  `MessageBrokerProxy`**, not reason about one. Siting the call correctly does
+  not retire the risk P0 existed to find; only running the broker topology does.
+  Precedent in-package: proxy wiring at `handlers_agent_messaging_test.go:446-450`
+  and `dm_injection_security_test.go:136-140`; `handlers_outbound_def141_test.go`
+  drives `proxy.deliverToUser` directly (`:95`, `:167`, `:539`, `:551`) and
+  documents the chain at `:195` — *"The broker is wired so that handler →
+  PublishUserMessage → deliverToUser."*
+- **AC-9** An `agent:`-prefixed `ThreadID` produces no mention notification
+  (§6.2), or the implementer demonstrates the case is unreachable with evidence
+  rather than with an argument that it should not happen.
 
 ### Verification required of the implementer
 
@@ -289,6 +354,13 @@ State the counting rule with every pass count.
   sending agent? Today it is silently dropped, which is the affordance-looks-like-
   it-worked failure. Recommend: log at info with the unresolved token, no user-
   visible error, and revisit under DEF-165. **Not blocking.**
+- **OQ-162-4** The mention notification fires on bus *acceptance*, while the
+  DM notification on the same path fires post-persist. A broker-side
+  `CreateMessage` failure (`messagebroker.go:568`) therefore leaves a
+  notification row for a message that does not exist. Accepted for this tranche
+  under the standing directive on tracked interim divergence; the exit is
+  callback injection into `MessageBrokerProxy`, following the
+  `getDispatcher` precedent (`:59`). **Must be named in the call-site comment.**
 - **OQ-162-3 (ptone)** Should an agent mentioning a human in a *project* the
   human cannot read be refused, or silently dropped? Current
   `resolveProjectHumanMembers` scopes to project members, so the question is
