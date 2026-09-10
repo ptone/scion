@@ -151,3 +151,59 @@ and `go vet ./...`.
 with the full log attached. A real failure is far more welcome than a tuned-green
 one. Re-running a failing gate until it goes green, without capturing the
 failure, is the same offence.
+
+## Baseline — required on every defect, breakage or security finding
+
+**State the baseline commit before you write the finding, not after someone asks
+for it.** A finding is not complete until you have said whether the behaviour is
+present on `main`, and on the branch base.
+
+The check is one grep. It is required because **the same facts read as "a known
+issue we inherited" or "a regression we are about to ship" depending on it**, and
+those two dispositions have opposite consequences: one is filed and scheduled, the
+other blocks a merge. A finding that omits the baseline has not narrowed the
+decision at all — it has only moved the work to the reader.
+
+Two live examples from DEF-160, one investigation, both missing this:
+
+- **DEF-161** was reported at the branch head as a security hole. It is real —
+  but `main` has neither `ConversationID` nor `ConversationRef`, so the path is
+  **ours**, authored by this tranche, and becomes reachable on `main` at merge.
+  Worse than reported.
+- **DEF-163** was reported as a live breakage. `main` carries the identical call
+  site and an equivalent guard, and our edit only *relaxed* that guard. **Not
+  ours**, not merge-blocking. Better than reported.
+
+Report it in this form:
+
+```
+Baseline: present on main @ <sha> (<yes|no>); present on branch base @ <sha> (<yes|no>)
+Method:   <the command you ran>
+```
+
+If you cannot establish it, write "baseline not established" and say what you
+tried. That is a usable answer. Silence is not.
+
+## Severity — a property of the dependents, not of the break
+
+Tracing a break precisely and then assuming its blast radius yields a confident
+number unrelated to the truth. **Before assigning severity, establish what
+actually depends on the broken thing** — and say which parts of that you checked
+versus assumed.
+
+DEF-163 again: the mirror path is genuinely broken, but deliberate `scion
+message` sends traverse the same handler *with* a recipient and are unaffected,
+so the user-facing loss is far smaller than reported. The real cost was somewhere
+else entirely — a `log.Error` on every agent turn, fleet-wide — and that was not
+in the report at all.
+
+## Scope statements must name every package the feature spans
+
+"I searched `pkg/hub/` exhaustively" is an honest sentence that can still support
+a wrong conclusion, because a feature split across `cmd/` and `pkg/hub/` is
+invisible to an exhaustive search of either one.
+
+**An exhaustive search of one package is not an exhaustive search.** When you
+report a search as exhaustive, name the directories it covered. If the feature
+has a CLI half and a server half, both must appear in that list or the claim
+means less than it looks like it means.
