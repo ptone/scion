@@ -109,6 +109,57 @@ meant and what I had to ask for explicitly.
 Round 3's G-3a is the same failure one level down: a test that cannot fail
 because it does not call the code it names.
 
+## Lesson 6 — the instrument is part of the measurement (deploy postscript)
+
+Not a code finding. The `2519aa8b3` deploy report to gteam flagged a boot line
+(`Permanently unattributable messages in listed projects … permanent:12583`) as
+**new**, and explained it as "new logging for an existing condition."
+
+Both halves were false. `cmd/boot_data_migrations.go:620` emits it, and that file
+is **byte-identical** on `f38f3ba18` and `2519aa8b3` — the merge touched nothing
+in `cmd/`. The line was present in *both* boots.
+
+The actual cause: the two reports used **different grep filters**. The first
+filtered on `migration|backfill|boot|…`, the second added `INFO`. The first
+filter caught the neighbouring `Message attribution complete` line only by
+accident — the word "backfill" appears inside its detail string — and dropped the
+`permanent` line entirely. Two outputs, two instruments, one conclusion about the
+subject.
+
+**A difference between two observations is attributable to the subject only if
+the instrument was identical.** Once the filter moves, a diff of the outputs
+measures the filter.
+
+This is the same family as Lesson 3. There, the developer's "7 PASS" and my "no
+tests to run" were both accurate and mutually unintelligible because the **tag
+set** — the instrument — differed and neither of us stated it. Filter, tag set,
+`-run` pattern: all are part of the measurement, all invisible in the result, all
+capable of turning "no change" and "changed" into the same observation.
+
+Practice, applied to both: **state the invocation with the result, and when
+comparing two runs, make it the same invocation.** If it must change, re-run the
+baseline under the new one before concluding.
+
+### And: my withheld theory was wrong
+
+I had a hypothesis — a marker write-ordering effect across boots. I did not send
+it. I sent the hole (*"same code, same boot sequence, different output means an
+input moved — which input?"*) plus three discriminating questions.
+
+Had I sent the theory, I would have aimed the investigation at markers when the
+answer was in the grep invocation, and the investigator would have spent its time
+disproving my idea instead of examining its own method.
+
+**Arguing "your evidence does not reach your claim" outperformed proposing a
+rival conclusion** — second time on this project. The asymmetry is structural: a
+hole is correct whether or not my private theory is, and it returns the
+investigation to the person holding the evidence. A rival theory is only useful
+when it is right, and it relocates the work to me.
+
+The investigator's own summary, which is the right standard: *"I compared outputs
+from two different grep filters and concluded an input moved. Nothing moved. My
+comparison was unsound and my report was wrong."*
+
 ## Standing: what I verified myself rather than relaying
 
 - G-1: `git diff | grep -E '^-[^-]'` — confirmed the only deletions were the
