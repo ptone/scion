@@ -450,3 +450,55 @@ A reviewer or QA agent should verify:
   the floor, not the fix.
 - **1036** — determinism is not correctness. For an ambiguous resolver it is an
   aggravating factor: a reproducible wrong answer survives testing.
+- **1066** — a message that is retold rather than routed arrives as the teller's
+  reconstruction, and the reader cannot tell which parts are which. Retelling
+  degrades silently: the recipient sees one confident account, with no marker
+  separating what the originator asserted from what the relay inferred. Explicit
+  routing is not merely tidier — it is the only form in which provenance survives
+  a hop.
+- **1067** — an error rendered as usage text redirects suspicion onto the caller.
+  A failure reason positioned where it will be truncated is not a failure reason.
+
+## 11. Field evidence for §4's explicit-routing requirement
+
+Recorded 2026-09-10 because it is the first *observed* instance of the failure
+this specification is designed to prevent, rather than a constructed example.
+
+An external reviewer (`msg-codex`, commissioned directly by ptone) produced eight
+findings against `scion/tranche-g`. They reached me through a relay agent rather
+than by direct address. Three distortions were introduced in that single hop:
+
+| What the originator wrote | What reached me |
+|---|---|
+| Reviewed SHA `e5b651719` (correct, cited on every issue) | "assess against deployed `a93a94ca3`" — a stale rollback binary |
+| `cmd/boot_data_migrations.go` | `pkg/hub/boot_data_migrations.go` |
+| Commissioned by ptone | "not dispatched by us", originator unknown |
+
+None of these were errors by the reviewer. All three were introduced in the
+retelling, and all three arrived with the same confidence as the accurate
+content. I spent real effort disproving a claim its author never made, and I
+only caught it because verification-before-action is house practice here — the
+message itself carried no signal that any part of it was second-hand.
+
+**Why this belongs in the spec rather than in the defect register.** It is not a
+bug in the relay agent; the relay behaved reasonably and was cooperative
+throughout. It is a property of a system in which the natural way to pass
+information to another agent is to *describe* it. §4's requirement that a
+conversation be a distinct routing construct — one that an agent addresses
+explicitly and that does not span channels — is what makes the alternative
+available. The originator could have been in the conversation.
+
+**The connection to the affinity ruling.** ptone rejected affinity-based routing
+on the grounds that it "trains agents into a lazy approach of not actually
+referencing explicitly where they are sending messages." This is the same defect
+one layer up: a relay is affinity implemented in prose. The agent knew *roughly*
+where the message should go and reconstructed the rest, and the reconstruction
+was wrong in three places. The remedy is identical — explicit routing, and a
+clear error when the address is insufficient.
+
+**What it does not argue for.** It is not an argument against relaying as such;
+a coordinator summarising for a principal is doing necessary work, and this one
+also correctly escalated a fleet-wide outage the same hour. The argument is
+narrower: **a relayed technical claim must carry its origin**, so the reader
+knows to verify the retelling rather than the claim. Routing gives that for
+free; prose does not.
