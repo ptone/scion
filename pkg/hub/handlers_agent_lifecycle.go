@@ -228,6 +228,38 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// For start and restart, verify the assigned GCP service account is still
+	// verified. Create (handlers_agents_core.go:770) and PATCH (:2245) both
+	// check this; the lifecycle handler did not, so an SA that was marked
+	// unverified after the agent was created could still be started. Stop and
+	// suspend are exempt: you must always be able to shut down an agent
+	// regardless of its SA's verification state.
+	if action == api.AgentActionStart || action == api.AgentActionRestart {
+		if agent.AppliedConfig != nil &&
+			agent.AppliedConfig.GCPIdentity != nil &&
+			agent.AppliedConfig.GCPIdentity.MetadataMode == store.GCPMetadataModeAssign &&
+			agent.AppliedConfig.GCPIdentity.ServiceAccountID != "" {
+			gcpID := agent.AppliedConfig.GCPIdentity
+			sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
+			if err != nil {
+				slog.Warn("lifecycle: could not look up assigned GCP service account",
+					"agent_id", id, "sa_id", gcpID.ServiceAccountID, "error", err)
+				ValidationError(w, fmt.Sprintf(
+					"assigned GCP service account %s is not available; "+
+						"re-verify or re-assign it before starting",
+					gcpID.ServiceAccountID), nil)
+				return
+			}
+			if !sa.Verified {
+				ValidationError(w, fmt.Sprintf(
+					"GCP service account %s is not verified; "+
+						"verify it before starting the agent",
+					sa.Email), nil)
+				return
+			}
+		}
+	}
+
 	var newPhase string
 	var dispatchErr error
 
