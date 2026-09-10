@@ -50,7 +50,6 @@ var msgWake bool
 var msgChannel string
 var msgThreadID string
 var msgCC []string
-var msgVisibility string
 
 // emitDeprecationWarning prints a deprecation notice to stderr.
 func emitDeprecationWarning(flag, replacement string) {
@@ -113,16 +112,6 @@ Examples:
 	Args:              cobra.MinimumNArgs(1),
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Validate --visibility if provided.
-		if msgVisibility != "" {
-			switch msgVisibility {
-			case "normal", "verbose", "full":
-				// valid
-			default:
-				return fmt.Errorf("invalid --visibility value %q: must be one of: normal, verbose, full", msgVisibility)
-			}
-		}
-
 		// Emit deprecation warnings for any deprecated flags in use.
 		// Deprecated flags still work — they warn AND succeed.
 		emitDeprecationWarnings(cmd)
@@ -523,9 +512,6 @@ func buildStructuredMessage(sender, recipient, message string) *messages.Structu
 	}
 	msg.Channel = msgChannel
 	msg.ThreadID = msgThreadID
-	if msgVisibility != "" {
-		msg.Visibility = msgVisibility
-	}
 	return msg
 }
 
@@ -1246,7 +1232,6 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
-	messageCmd.Flags().StringVar(&msgVisibility, "visibility", "", "Message visibility: normal, verbose, or full")
 
 	// Deprecated flags — still functional, emit warnings when used.
 	// These flags are hidden from help output to guide users toward

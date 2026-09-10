@@ -73,10 +73,8 @@ const (
 	//       deliverToUser in messagebroker.go pass type through without switching
 	//       on it. Human-to-human messages use recipient prefix "thread:" or
 	//       "user:", never "agent:", so they never enter the agent dispatch path.
-	//   (b) Visibility backfill: the frontend shouldShowMessage (chat-thread.ts)
-	//       defaults empty visibility to "normal" (msg.visibility || 'normal').
-	//       type:chat messages have empty visibility, so they correctly display
-	//       as normal. No backend visibility filter switches on type.
+	//   (b) Visibility: the message-envelope visibility field has been removed
+	//       (all messages are now shown unconditionally).
 	//   (c) Plugin Publish/Validate: broker plugins (broker_plugin.go) relay
 	//       StructuredMessage via RPC without checking the Type field. The only
 	//       type validation is in StructuredMessage.Validate(), and chat is now
@@ -89,26 +87,6 @@ const (
 	SystemCategoryScheduler      = "scheduler"
 	SystemCategoryPortForward    = "port-forward"
 	SystemCategoryDeliveryFailed = "delivery-failed"
-)
-
-// Visibility constants control which consumers see a message.
-// Downstream consumers (chat apps, web UI, broker plugins) filter
-// messages by visibility level to avoid surfacing raw agent output
-// (e.g. thinking traces) in normal chat views.
-const (
-	// VisibilityNormal — always shown. Used for explicit agent→user
-	// messages (scion message, ask_user) and user→agent instructions.
-	VisibilityNormal = "normal"
-
-	// VisibilityVerbose — shown in verbose mode. Used for automatic
-	// assistant replies from hook events (agent turn output without
-	// thinking content).
-	VisibilityVerbose = "verbose"
-
-	// VisibilityFull — shown only in full-fidelity mode. Used for
-	// content that includes thinking/reasoning traces and raw tool
-	// output. Intended for ACP streams and debugging interfaces.
-	VisibilityFull = "full"
 )
 
 // validTypes is the set of valid message types.
@@ -145,11 +123,6 @@ type StructuredMessage struct {
 	Channel        string            `json:"channel,omitempty"`
 	ThreadID       string            `json:"thread_id,omitempty"`
 	ConversationID string            `json:"conversation_id,omitempty"`
-
-	// Visibility controls which consumers see this message.
-	// One of VisibilityNormal, VisibilityVerbose, or VisibilityFull.
-	// Empty defaults to VisibilityNormal for backward compatibility.
-	Visibility string `json:"visibility,omitempty"`
 }
 
 // ValidateType returns an error if the message type is not in the closed enum.

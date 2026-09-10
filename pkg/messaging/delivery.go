@@ -44,7 +44,6 @@ type DeliveryEnvelope struct {
 	Intent       *TextIntent      `json:"intent,omitempty"` // Kind == text
 	Event        *EventBody       `json:"event,omitempty"`  // Kind == event
 	Msg          string           `json:"msg"`
-	Visibility   Visibility       `json:"visibility,omitempty"`
 	Attachments  []string         `json:"attachments,omitempty"`
 	ReplyTo      *string          `json:"reply_to,omitempty"` // msg ID
 }
@@ -77,7 +76,6 @@ func FormatNewDelivery(
 		Intent:       msg.Intent,
 		Event:        msg.Event,
 		Msg:          msg.Body,
-		Visibility:   msg.Visibility,
 		ReplyTo:      msg.ReplyToID,
 	}
 

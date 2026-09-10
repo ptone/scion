@@ -33,24 +33,23 @@ import (
 // and returns a restore function.
 func resetMessageFlags() func() {
 	orig := struct {
-		interrupt  bool
-		broadcast  bool
-		all        bool
-		in         string
-		at         string
-		plain      bool
-		raw        bool
-		attach     []string
-		notify     bool
-		wake       bool
-		channel    string
-		threadID   string
-		cc         []string
-		visibility string
+		interrupt bool
+		broadcast bool
+		all       bool
+		in        string
+		at        string
+		plain     bool
+		raw       bool
+		attach    []string
+		notify    bool
+		wake      bool
+		channel   string
+		threadID  string
+		cc        []string
 	}{
 		msgInterrupt, msgBroadcast, msgAll, msgIn, msgAt, msgPlain,
 		msgRaw, msgAttach, msgNotify, msgWake, msgChannel, msgThreadID,
-		msgCC, msgVisibility,
+		msgCC,
 	}
 	// Reset all
 	msgInterrupt = false
@@ -66,7 +65,6 @@ func resetMessageFlags() func() {
 	msgChannel = ""
 	msgThreadID = ""
 	msgCC = nil
-	msgVisibility = ""
 
 	return func() {
 		msgInterrupt = orig.interrupt
@@ -82,7 +80,6 @@ func resetMessageFlags() func() {
 		msgChannel = orig.channel
 		msgThreadID = orig.threadID
 		msgCC = orig.cc
-		msgVisibility = orig.visibility
 	}
 }
 
@@ -638,7 +635,7 @@ func TestDeprecatedFlags_Hidden(t *testing.T) {
 // TestRetainedFlags_NotHidden verifies that retained flags are NOT hidden.
 func TestRetainedFlags_NotHidden(t *testing.T) {
 	retainedFlags := []string{
-		"interrupt", "wake", "attach", "visibility",
+		"interrupt", "wake", "attach",
 	}
 	for _, name := range retainedFlags {
 		f := messageCmd.Flags().Lookup(name)

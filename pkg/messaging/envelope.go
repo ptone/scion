@@ -212,35 +212,6 @@ func ValidateDeliveryState(s DeliveryState) error {
 	return nil
 }
 
-// ---------- Visibility ----------
-
-// Visibility controls which consumers see a message.
-type Visibility string
-
-const (
-	VisibilityNormal  Visibility = "normal"
-	VisibilityVerbose Visibility = "verbose"
-	VisibilityFull    Visibility = "full"
-)
-
-// validVisibilities enumerates all accepted Visibility values.
-var validVisibilities = map[Visibility]bool{
-	VisibilityNormal:  true,
-	VisibilityVerbose: true,
-	VisibilityFull:    true,
-}
-
-// ValidateVisibility returns an error if v is not a recognised visibility.
-func ValidateVisibility(v Visibility) error {
-	if v == "" {
-		return nil // empty defaults to normal
-	}
-	if !validVisibilities[v] {
-		return fmt.Errorf("invalid visibility %q: must be one of: normal, verbose, full", v)
-	}
-	return nil
-}
-
 // ---------- EventBody ----------
 
 // EventBody carries the payload for an event-kind message.
@@ -283,7 +254,6 @@ type Message struct {
 
 	Body        string          `json:"body"`
 	Attachments []AttachmentRef `json:"attachments,omitempty"`
-	Visibility  Visibility      `json:"visibility,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
 }
 
@@ -296,9 +266,6 @@ func (m *Message) Validate() error {
 		return fmt.Errorf("invalid from: %w", err)
 	}
 	if err := ValidateMessageKind(m.Kind); err != nil {
-		return err
-	}
-	if err := ValidateVisibility(m.Visibility); err != nil {
 		return err
 	}
 

@@ -43,9 +43,6 @@ type OutboundMessageRequest struct {
 	Channel     string            `json:"channel,omitempty"`
 	ThreadID    string            `json:"thread_id,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
-	// Visibility controls which consumers see this message.
-	// One of "normal", "verbose", "full". Empty defaults to "normal".
-	Visibility string `json:"visibility,omitempty"`
 }
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
@@ -102,17 +99,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 	if msgLen := utf8.RuneCountInString(req.Msg); msgLen > messages.MaxMessageLength {
 		ValidationError(w, fmt.Sprintf("message exceeds %d character limit (current: %d chars). Consider splitting into multiple messages using multiple scion message invocations", messages.MaxMessageLength, msgLen), nil)
-		return
-	}
-
-	// Validate and default visibility.
-	switch req.Visibility {
-	case "":
-		req.Visibility = messages.VisibilityNormal
-	case messages.VisibilityNormal, messages.VisibilityVerbose, messages.VisibilityFull:
-		// valid
-	default:
-		ValidationError(w, fmt.Sprintf("invalid visibility %q; must be one of: normal, verbose, full", req.Visibility), nil)
 		return
 	}
 
@@ -249,7 +235,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		AgentID:     agent.ID,
 		Channel:     req.Channel,
 		ThreadID:    req.ThreadID,
-		Visibility:  req.Visibility,
 		CreatedAt:   time.Now(),
 	}
 
@@ -265,7 +250,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Attachments: req.Attachments,
 		Channel:     req.Channel,
 		ThreadID:    req.ThreadID,
-		Visibility:  req.Visibility,
 		Metadata:    req.Metadata,
 	}
 	// Validate the assembled message through the legacy envelope choke point
