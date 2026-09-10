@@ -335,6 +335,29 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// DEF-3: Independent consistency check against prior messages.
 	messaging.CheckConversationConsistency(ctx, s.store, storeMsg.ID, convID, req.ThreadID, agent.ID, recipientID, s.messageLog)
 
+	// Backfill native-chat side-effects for agent→user DM messages.
+	// When DeriveConversationKey produced a dm: key from the principal pair
+	// (Case 3: caller supplied no ThreadID), stamp the fields and registry
+	// rows the native-chat subsystem needs to display the message in the
+	// DM channel. Without this, the message is persisted but invisible to
+	// native-chat (missing Channel/ThreadID, no webchat_dm rows, no SSE
+	// DM fan-out, no broker watermark update).
+	if deriveErr == nil && strings.HasPrefix(extRef, "dm:") && storeMsg.ThreadID == "" {
+		storeMsg.ThreadID = extRef
+		storeMsg.Channel = "web"
+		structuredMsg.ThreadID = extRef
+		structuredMsg.Channel = "web"
+
+		// Create webchat_dm registry rows so the DM appears in the
+		// native-chat rail listing (ListDMs query).
+		s.mu.RLock()
+		dmWcs := s.webChatStore
+		s.mu.RUnlock()
+		if dmWcs != nil {
+			registerDMParticipants(ctx, dmWcs, extRef)
+		}
+	}
+
 	// Propagate recipients and group_id from metadata for group-set messages.
 	if req.Metadata != nil {
 		if r, ok := req.Metadata["recipients"]; ok {
