@@ -1847,7 +1847,11 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	// Use t.Cleanup instead of defer so that db.Close runs after the W6
+	// notification goroutine (go cn.NotifyDMReceived) has finished — the
+	// backfill now populates req.ThreadID, which makes the non-broker
+	// notification path fire.
+	t.Cleanup(func() { _ = db.Close() })
 	wcs := NewWebChatStore(db, "sqlite3")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init WebChatStore: %v", err)
@@ -1948,6 +1952,11 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	require.Equal(t, "web", storedMsg.Channel)
 	require.True(t, strings.HasPrefix(storedMsg.ThreadID, "dm:"),
 		"ThreadID must start with 'dm:' for SSE DM fan-out")
+
+	// Allow the W6 notification goroutine (go cn.NotifyDMReceived) to
+	// complete before t.Cleanup closes the database. The goroutine checks
+	// IsConversationMuted which hits the WebChatStore's SQLite DB.
+	time.Sleep(100 * time.Millisecond)
 }
 
 // TestHandleAgentOutboundMessage_DMSyncBrokerPath verifies that when the broker
@@ -1963,7 +1972,11 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	// Register db.Close as a t.Cleanup BEFORE proxy.Stop so that LIFO
+	// ordering guarantees proxy.Stop runs first — draining in-flight
+	// deliverToUser callbacks (including TouchDMActivity) before the
+	// database handle is closed.
+	t.Cleanup(func() { _ = db.Close() })
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)

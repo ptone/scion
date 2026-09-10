@@ -347,6 +347,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		storeMsg.Channel = "web"
 		structuredMsg.ThreadID = extRef
 		structuredMsg.Channel = "web"
+		req.ThreadID = extRef
 
 		// Create webchat_dm registry rows so the DM appears in the
 		// native-chat rail listing (ListDMs query).
