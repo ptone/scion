@@ -2640,7 +2640,7 @@ export class ScionChatThread extends LitElement {
     }
     return html`
       <div class="thread-container">
-        ${this.renderStreamBar()} ${this.renderContent()}
+        ${this.renderContent()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
         ${this.canSend
           ? html`
@@ -2659,7 +2659,6 @@ export class ScionChatThread extends LitElement {
   private renderV2() {
     return html`
       <div class="thread-container">
-        ${this.renderStreamBar()}
         ${this.renderInteragentToggle()}
         ${this.renderContent()} ${this.renderTypingIndicator()}
         ${this.sendError ? html`<div class="send-error">${this.sendError}</div>` : nothing}
@@ -2750,10 +2749,6 @@ export class ScionChatThread extends LitElement {
         <span class="typing-text">${text}</span>
       </div>
     `;
-  }
-
-  private renderStreamBar() {
-    return nothing;
   }
 
   private renderContent() {

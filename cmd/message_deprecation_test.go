@@ -560,7 +560,7 @@ func TestDeprecatedFlag_ChannelStillSucceeds(t *testing.T) {
 }
 
 // TestDeprecatedFlags_NoWarningForRetainedFlags verifies that retained
-// flags (--interrupt, --wake, --attach, --visibility) do NOT emit
+// flags (--interrupt, --wake, --attach) do NOT emit
 // deprecation warnings.
 func TestDeprecatedFlags_NoWarningForRetainedFlags(t *testing.T) {
 	orig := saveMessageTestState()
