@@ -148,7 +148,7 @@ def _apply_native_system_prompt(ctx: scion_harness.ProvisionContext) -> None:
 # Vertex AI configuration
 # ---------------------------------------------------------------------------
 
-_VERTEX_MODEL_ID = "xai/grok-4.6"
+_VERTEX_MODEL_ID = "xai/grok-4"
 _VERTEX_AUTH_PROVIDER_NAME = "vertex-grok"
 _VERTEX_MODEL_CONFIG_NAME = "vertex-grok"
 

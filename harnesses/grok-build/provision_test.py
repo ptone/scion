@@ -1164,7 +1164,7 @@ class VertexAIAuthTest(unittest.TestCase):
             finally:
                 os.environ.pop("SCION_MODEL", None)
             # Alias "small" should resolve to default Vertex model, not "small".
-            self.assertIn("xai/grok-4.6", content)
+            self.assertIn("xai/grok-4", content)
             self.assertNotIn('"small"', content)
 
     def test_vertex_explicit_model_id_passes_through(self) -> None:
@@ -1197,7 +1197,7 @@ class VertexAIAuthTest(unittest.TestCase):
             finally:
                 os.environ.pop("SCION_MODEL", None)
             self.assertIn("xai/grok-4.2", content)
-            self.assertNotIn("xai/grok-4.6", content)
+            self.assertNotIn('"xai/grok-4"', content)
 
     def test_vertex_detected_from_metadata_project_id(self) -> None:
         """GCP identity's SCION_METADATA_PROJECT_ID triggers vertex-ai auth."""
