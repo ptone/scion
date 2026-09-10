@@ -284,3 +284,67 @@ Merged `scion/ca-msg-def160fix` → `scion/tranche-g` as a fast-forward,
 error-text pass) is not part of this merge** and is staffed to a fresh agent
 `ca-msg-p5` on `scion/ca-msg-p5text`; DEF-160 is not closed until it lands or is
 explicitly deferred.
+
+---
+
+## P5 — `e5b651719` — ACCEPTED first round, merged to `tranche-g`
+
+Four files, +27/−3. `handlers_agent_messaging.go:215` now names `user:<email>`,
+`user:<id>`, `@<agent>` and `conv:<id>`; `message_group.go:176-181` special-cases
+a `conv:` prefix inside `group[]` with remediation guidance, generic branch
+preserved. P5-3 (`types.go:197`) assessed and left alone.
+
+### Verification ledger — P5
+
+| Check | Method | Result |
+|---|---|---|
+| Numstat vs `31dfbb414` | `git diff --numstat` | Four-file table reproduced exactly |
+| `pkg/messages` | full package, `-count=1` | green; `TestParseGroupRecipient_Errors` 24 subtests PASS (`^ *--- PASS:`) |
+| DEF regression suite | `pkg/hub`, `-v -count=1`, nine-family `-run` | **72 top-level / 81 incl. subtests / 0 FAIL** — no collateral |
+| `go vet`, `gofmt -l` | changed files | clean |
+| **Mutation M7** | removed the `conv:` special-case, `grep -c` = 0 | `pkg/messages` **RED** |
+| **Mutation M8** | restored the pre-P5 error text | `TestDEF152_NoRecipient_NoConvRef_Still400` **RED** |
+| Generic branch not shadowed | existing `foo:bar` case | still PASS |
+| P5-3 claim | traced `ValidateLegacyMessage` (`pkg/messaging/validate_compat.go:29`) | confirmed: it does **not** call `StructuredMessage.Validate()`; `types.go:197` is unreachable from production |
+
+### The finding was worth more than the fix
+
+`assert.Contains(rr.Body.String(), …)` had been passing only because the old text
+had no angle brackets. `encoding/json` escapes `<`/`>`, so raw-body assertions
+match escaped text.
+
+**The dangerous direction is not the one that was hit.** `Contains` against
+escaped text fails loudly — that is how it surfaced. **`NotContains` against
+escaped text passes silently and is indistinguishable from a correct guard.**
+Directly relevant here: DEF-161's R4-A disclosure guard is exactly such an
+assertion. Swept the tree — eight `NotContains` with angle brackets, all against
+HTML or raw non-JSON bodies, none affected. Rule recorded in
+`_GATE-APPARATUS.md`.
+
+### Verifying the fix, not the test
+
+An error-message change is worthless if the reader never sees the message, so the
+escaping question had to be answered end-to-end rather than in the harness:
+`SendOutboundMessage` (`pkg/hubclient/agents.go:556`) → `CheckResponse`
+(`pkg/apiclient/transport.go:301`) → `ParseErrorResponse`, which unmarshals and
+returns the unescaped string. Agents receive the new address forms intact.
+
+### My own error, recorded
+
+Checking the P5-3 claim I piped a repo-wide grep through `head -20` and concluded
+`ValidateLegacyMessage` had no production callers. It has fourteen. Alphabetical
+ordering put one package first and `head` truncated the rest. **Truncation
+removes evidence of presence, so it biases toward concluding absence — the exact
+shape of the claim being tested.** One message away from a false finding against
+correct work. Rule recorded.
+
+The developer's conclusion was right; the supporting sentence overstated it
+(`ValidateLegacyMessage` checks *sender* at `:80-81`, not recipient). Accepted
+with the correction noted, since a correct conclusion resting on a wrong reason
+is the harder thing to catch later.
+
+### Disposition
+
+Merged as a fast-forward, `31dfbb414` → `e5b651719`. `ca-msg-p5` retired.
+**DEF-160 is now closed.** The ruling's *attention* clause remains unimplemented
+and is tracked as DEF-162.

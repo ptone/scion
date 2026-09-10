@@ -281,3 +281,56 @@ Then a mismatch is resolved by reading two sentences instead of by rebuilding.
 Related, same family: `go test -run 'Pattern'` with a pattern matching nothing
 prints `ok` and exits 0. A green from a `-run` nobody confirmed matches something
 is not evidence. Confirm the pattern hits before trusting its result.
+
+---
+
+## JSON-escaped angle brackets: `Contains` fails loudly, `NotContains` fails silently
+
+Go's `encoding/json` escapes `<`, `>` and `&` as `<`, `>`, `&`.
+Any assertion made against a **raw response body** — `rr.Body.String()` — is
+therefore matching the *escaped* text, not the text in the source.
+
+- `assert.Contains(rr.Body.String(), "user:<email>")` **fails loudly.** Annoying,
+  self-announcing, fixed in minutes.
+- `assert.NotContains(rr.Body.String(), "…<…>…")` **passes silently, forever**,
+  and is indistinguishable from a correct guard.
+
+The second is the one to design against, and it compounds with the
+negative-assertion rule above: a `NotContains` that was never going to match
+anything is the exact failure mode that mutation testing exists to catch, and
+angle brackets give it a second way to arise that mutation of the *production*
+string will not reveal.
+
+**Assert on the decoded field, not the raw body.** Unmarshal into a minimal
+struct and assert against `errResp.Error.Message`.
+
+Swept 2026-09-10: eight `NotContains` assertions in the tree carry angle
+brackets, all against HTML or raw non-JSON bodies. None affected. Re-sweep if
+JSON error bodies start carrying markup.
+
+Note also the distinction between verifying the *test* and verifying the *fix*.
+For a change whose entire product is a string that something else reads, trace it
+to its consumer. Here: `pkg/hubclient/agents.go:556` →
+`pkg/apiclient/transport.go:301` → `ParseErrorResponse`, which unmarshals, so the
+agent receives the unescaped text. The escaping was a harness artifact only —
+but that was a finding, not an assumption.
+
+## Never `head` a grep whose ordering you do not control when the claim is "there are none"
+
+Verifying a "zero production callers" claim, I ran a repo-wide grep piped through
+`head -20`, saw only test files, and nearly filed a false finding against correct
+work. The function had **fourteen** production callers; alphabetical ordering put
+one package and its tests first and `head` ate the rest.
+
+The failure is directional and that is what makes it dangerous: truncation
+removes evidence of **presence**, so it always biases toward concluding
+**absence** — which is precisely the shape of claim you reach for a grep to test.
+
+- Claim is "there are none" → `grep -c`, or read the full list. Never `head`.
+- Claim is "here is an example" → `head` is fine.
+- `head` is a readability convenience. It is not a summary, and it has no
+  semantics you can rely on unless you sorted the input yourself.
+
+Same family as the counting-rule and `-run`-matches-nothing traps: **an
+instrument that quietly returns less than the truth, in a context where less
+looks like an answer.**
