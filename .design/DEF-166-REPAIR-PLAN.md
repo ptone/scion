@@ -1,7 +1,9 @@
 # DEF-166 — repair plan for empty group `external_ref` on gteam
 
-**Status:** DRAFT — feasibility data received and verified 2026-09-10. Blocked on one
-remaining consistency check (Q9) and then on ptone's decision.
+**Status:** DRAFT — repair feasibility fully verified 2026-09-10 (Q5–Q10 clean,
+38/41 rows repair without collision). Minting path independently confirmed
+closed as of `e5b651719` — no code fix outstanding. Ready pending only ptone's
+two rulings (§7).
 **Decision owner:** ptone. Nothing in this document runs without his say-so.
 **Author:** `ca-msg-arch`, 2026-09-10.
 
@@ -30,31 +32,78 @@ Read-only audit of gteam, 2026-09-10:
 delivered nothing; DEF-160 made well-formed topics work and left malformed ones
 failing more legibly. Nobody should revert DEF-160 expecting relief.
 
-## 2. The two halves have different owners
+## 2. The two halves have different owners — and one has already closed
 
 | Half | What it is | Owner | Status |
 |---|---|---|---|
-| **Minting** | A live write path still producing empty refs — proven by the two post-backfill rows | `ca-msg-arch` to staff | Brief written (`briefs/DEF-166-EMPTY-REF-MINT.md`), undispatched pending the platform 403 |
+| **Minting** | A write path producing empty refs | `ca-msg-arch` to staff | **CLOSED, no code change needed — see 2a** |
 | **Repair** | 41 existing rows on a production-data instance | **ptone alone** | This document |
 
-Keeping these apart is the point. Escalating them as one item would have parked
-the code fix behind a data decision; fixing them as one item would have meant
-touching gteam without asking.
+Keeping these apart was the right call even though one half turned out not to
+need action: escalating them as one item would have parked the still-live
+repair question behind uncertainty about the code, and the two questions had
+genuinely different owners regardless of the code outcome.
+
+### 2a. The minting path is closed, not merely staffed — independently verified
+
+`ca-msg-166`'s investigation (`findings/DEF-166-finding.md`) found **12** total
+write paths (8 raw `INSERT INTO conversations`, 5 `UpsertConversationByExternalRef`
+call sites, 0 `CreateConversation` production callers) and concluded that **none
+of the 12 can produce an empty group `external_ref` at `e5b651719`** — the
+DEF-156/DEF-157 merge (`f38f3ba18`, 2026-09-09) closed every one of the 8 raw
+INSERT sites by routing `extRef` through `ThreadConversationExternalRef`, which
+refuses an empty `projectID` or `threadID` before the transaction opens.
+
+**I did not take this on the report's word.** Given it reverses the "open write
+path" framing I escalated to ptone, I re-derived the load-bearing claims myself:
+
+- `git merge-base --is-ancestor f38f3ba18 e5b651719` → **true**, and
+  `f38f3ba18` (2026-09-09 21:34) predates `e5b651719` (2026-09-10 05:22) — the
+  fix is in the SHA gteam is running now.
+- All 8 raw INSERT sites (`webchannel_store_postgres.go:394/628/1218/1738`,
+  `webchannel_store.go:786/1039/1610/2247`) traced individually: each derives
+  `extRef` via `ThreadConversationExternalRef` and returns on error before
+  `BeginTx`. Confirmed by reading, not by grep count alone.
+- `UpsertConversationByExternalRef` (`conversation_store.go:389-391`) rejects
+  `ExternalRef == ""` — confirmed.
+- `CreateConversation` production callers: **0** (interface definitions only)
+  — confirmed by unfiltered grep.
+
+**Revised timeline.** `dbd35ed2` (2026-09-01) and `fd9710a1` (2026-09-02) were
+minted a full week *before* the fix merged, by the pre-fix `CreateTopic`, which
+hardcoded `external_ref=''`. They are not evidence of an open path *today* —
+they are the last two casualties of a path that closed on 2026-09-09. My
+original escalation ("something is still minting them") was the correct read
+at the time the audit ran and is superseded now that the fix's ancestry is
+established. Recording the correction here rather than leaving the stronger
+claim standing uncorrected upstream.
+
+**What this changes.** DEF-166 is no longer two open problems; it is one
+(repair) plus a **deploy-gate** finding: gteam is safe from *new* empty-ref
+rows only because it already happens to be running past `f38f3ba18`, not
+because anyone verified that on purpose. The next question is whether that
+verification should be a standing gate rather than a coincidence — see §3.
 
 ## 3. The sequencing constraint — this is the part that changes the plan
 
-The obvious structural gate is a non-empty constraint on group `external_ref`,
-matching what DEF-29 already established for `kind='direct'` (where the ref is
-the ACL and `CreateConversation` rejects an empty value).
+The structural gate is a non-empty constraint on group `external_ref`, matching
+what DEF-29 already established for `kind='direct'` (where the ref is the ACL
+and `CreateConversation` rejects an empty value). `ca-msg-166` converged on the
+same recommendation independently, from the write-path side rather than the
+data side, and specified it precisely: a **kind-conditional CHECK constraint**,
+`CHECK (kind <> 'group' OR external_ref <> '')`, applying only to `kind='group'`
+so it does not collide with `direct`'s existing guard. Two independent routes
+to the same conclusion is a reason for more confidence in it, not less scrutiny
+— see §3a for why a CHECK specifically, not merely "add a constraint."
 
-**That gate cannot be added first.** 41 existing rows violate it. Adding the
-constraint before the repair either fails the migration or fails boot. So the
-three steps are strictly ordered:
+**Step 1 (stop the bleeding) is DONE, not merely staffed** — see §2a. Step 2
+(repair) still cannot happen before step 3, because 41 existing rows violate
+it:
 
 ```
-  1. STOP THE BLEEDING   fix the minting path            (code — no permission needed)
-  2. REPAIR THE DATA     41 rows, with a remainder       (ptone's decision — this doc)
-  3. CLOSE THE DOOR      non-empty constraint on group   (only possible after 2)
+  1. STOP THE BLEEDING   fix the minting path            DONE (already in e5b651719)
+  2. REPAIR THE DATA     41 rows, with a remainder       ptone's decision — this doc
+  3. CLOSE THE DOOR      CHECK (kind<>'group' OR ext<>'') only possible after 2
 ```
 
 **Step 3 is the one that will get dropped, and dropping it is how we end up here
@@ -63,6 +112,25 @@ a fifth time.** Empty-string-as-sentinel has now bitten this project four times
 and not the representability. If step 2 is declined, step 3 becomes impossible
 and step 1 is the whole fix — which is defensible, but it should be a decision
 rather than an omission.
+
+### 3a. Why a database CHECK and not another derivation-level guard
+
+`ca-msg-166` identified something the code-first framing of this defect had
+missed: **4 of the 8 raw INSERT sites bypass the Ent layer entirely**
+(`webchannel_store_postgres.go`'s direct SQL). Any future validation added to
+`UpsertConversationByExternalRef` or `CreateConversation` — both already guard
+correctly — would give those 4 sites zero benefit, because they never call
+either function. A derivation-level guard (`ThreadConversationExternalRef`
+refusing empty inputs) is what closed the path this time, but it is a
+*discipline*, not a *barrier*: it protects only the sites that call it, and
+relies on every future site continuing to. A CHECK constraint is enforced by
+the database itself regardless of which code path reaches the INSERT, which is
+the property every previous point-fix in this family lacked.
+
+Also flagged: `entadapter/conversation_store.go:121`'s comment — *"Group
+conversations may legitimately omit the external ref"* — is now stale
+post-DEF-156 and should be corrected or removed so the next reader does not
+inherit a false premise from a comment the code no longer matches.
 
 ## 4. The repair value, and why it may not exist for every row
 
