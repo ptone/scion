@@ -334,3 +334,25 @@ removes evidence of **presence**, so it always biases toward concluding
 Same family as the counting-rule and `-run`-matches-nothing traps: **an
 instrument that quietly returns less than the truth, in a context where less
 looks like an answer.**
+
+## gteam deploys are batched, not per-fix — standing as of 2026-09-11
+
+ptone changed the testing workflow (relayed via `chat-admin-lead`, 2026-09-11
+20:27): the next round of feedback arrives as a batch. **Merge accepted fixes
+to `tranche-g` as always — that part of the process is unchanged.** But do
+**not** request a gteam deploy from `instance-investigator` per fix, the way
+every fix landed tonight (DEF-168, DM-sync, visibility-removal, envelope
+collapse — each deployed individually, immediately after merge). Hold all
+deploy requests until ptone gives an explicit go-ahead for the accumulated
+batch.
+
+This reverses the pattern used all through the 2026-09-10/11 session, where
+"merge to tranche-g, then immediately request gteam deploy" was the default
+next action after every accepted fix. That pattern is now wrong until told
+otherwise. If a future instruction supersedes this, it will say so
+explicitly — do not infer a reversion from the absence of a reminder.
+
+**What does not change:** merging to `tranche-g` still happens as soon as a
+fix is verified. The gate that moved is `tranche-g → gteam`, not `branch →
+tranche-g`. Keep advancing `tranche-g`; just stop calling
+`instance-investigator` to deploy it.
