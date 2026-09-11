@@ -110,8 +110,11 @@ func msgAuthzAddProjectMember(t *testing.T, s store.Store, userID, projectID, pr
 
 	// Create role binding
 	roleName := store.ProjectRoleMember
-	if groupRole == store.GroupMemberRoleOwner {
+	switch groupRole {
+	case store.GroupMemberRoleOwner:
 		roleName = store.ProjectRoleOwner
+	case store.GroupMemberRoleAdmin:
+		roleName = store.ProjectRoleAdmin
 	}
 	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
 	if err != nil {
@@ -200,11 +203,12 @@ func TestAuthorizeAgentMessage_BaselineProjectMode_NoLifecycleScope(t *testing.T
 		t.Fatalf("baseline project-mode agent should be allowed to message: %s", reason)
 	}
 
-	// A project member (user) with agent.message but NOT agent.attach can message.
+	// After the attach-gate fix, a project member (user) WITHOUT agent.attach
+	// is denied messaging a project-mode agent they did not create.
 	memberIdent := msgAuthzUserIdentity(member.ID)
-	allowed, reason = srv.authorizeAgentMessage(ctx, memberIdent, target, false)
-	if !allowed {
-		t.Fatalf("project member should be allowed to message project-mode agent: %s", reason)
+	allowed, _ = srv.authorizeAgentMessage(ctx, memberIdent, target, false)
+	if allowed {
+		t.Fatal("project member without agent.attach should be denied messaging project-mode agent")
 	}
 }
 
@@ -263,14 +267,16 @@ func TestAuthorizeAgentMessage_MemberWithoutAttach(t *testing.T) {
 	target := msgAuthzAgent(t, s, "msg-only-target", projectID, store.MessageModeProject,
 		[]string{owner.ID})
 
-	// Member can message (has agent.message via project membership)
+	// After the attach-gate fix, messaging requires agent.attach — same as
+	// terminal attach.  A plain project member lacks agent.attach, so both
+	// message-send and terminal attach must be denied.
 	memberIdent := msgAuthzUserIdentity(member.ID)
-	allowed, reason := srv.authorizeAgentMessage(ctx, memberIdent, target, false)
-	if !allowed {
-		t.Fatalf("member should be allowed to message project-mode agent: %s", reason)
+	allowed, _ := srv.authorizeAgentMessage(ctx, memberIdent, target, false)
+	if allowed {
+		t.Fatal("member without agent.attach should be denied messaging project-mode agent")
 	}
 
-	// Verify the member cannot attach (separate permission axis)
+	// Verify the member also cannot attach (same permission axis now)
 	resource := agentResource(target)
 	decision := srv.authzService.CheckAccess(ctx, memberIdent, resource, ActionAttach)
 	if decision.Allowed {
@@ -791,8 +797,8 @@ func TestAuthorizeAgentMessage_IngressParity(t *testing.T) {
 		// Owner → none mode agent: denied (none sealed to non-super-admin)
 		{"owner→none", ownerIdent, noneAgent, false, false},
 
-		// Member → project mode agent: allowed (agent.message permission)
-		{"member→project", memberIdent, projectAgent, false, true},
+		// Member → project mode agent: denied (requires agent.attach, member lacks it)
+		{"member→project", memberIdent, projectAgent, false, false},
 		// Member → lineage mode agent: denied (not in ancestry, not project owner)
 		{"member→lineage", memberIdent, lineageAgent, false, false},
 		// Member → branch mode agent: denied (not in ancestry, not project owner)
@@ -821,4 +827,77 @@ func TestAuthorizeAgentMessage_IngressParity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Attach-gate enforcement for project-mode messaging
+// Validates that message-send now requires agent.attach (same permission as
+// terminal attach), while ancestry, owner-piercing, and agent-to-agent paths
+// are unaffected.
+// ---------------------------------------------------------------------------
+
+func TestAuthorizeAgentMessage_AttachGateForProjectMode(t *testing.T) {
+	srv, s, owner, member, projectID := msgAuthzSetup(t)
+	ctx := context.Background()
+
+	target := msgAuthzAgent(t, s, "attach-gate-target", projectID, store.MessageModeProject,
+		[]string{owner.ID})
+
+	t.Run("project member CANNOT message project-mode agent they did not create", func(t *testing.T) {
+		memberIdent := msgAuthzUserIdentity(member.ID)
+		allowed, _ := srv.authorizeAgentMessage(ctx, memberIdent, target, false)
+		if allowed {
+			t.Fatal("project member without agent.attach should be denied")
+		}
+	})
+
+	t.Run("project admin CAN message project-mode agent", func(t *testing.T) {
+		admin := &store.User{
+			ID:          tid("msg-admin-user"),
+			Email:       "admin-user@test.com",
+			DisplayName: "Project Admin",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require_NoError(t, s.CreateUser(ctx, admin))
+		ensureHubMembership(ctx, s, admin.ID)
+		msgAuthzAddProjectMember(t, s, admin.ID, projectID, "msg-authz-project", store.GroupMemberRoleAdmin)
+
+		adminIdent := msgAuthzUserIdentity(admin.ID)
+		allowed, reason := srv.authorizeAgentMessage(ctx, adminIdent, target, false)
+		if !allowed {
+			t.Fatalf("project admin (has agent.attach) should be allowed to message: %s", reason)
+		}
+	})
+
+	t.Run("project owner CAN message project-mode agent", func(t *testing.T) {
+		ownerIdent := msgAuthzUserIdentity(owner.ID)
+		allowed, reason := srv.authorizeAgentMessage(ctx, ownerIdent, target, false)
+		if !allowed {
+			t.Fatalf("project owner should be allowed to message: %s", reason)
+		}
+	})
+
+	t.Run("agent creator CAN message their own agent via ancestry", func(t *testing.T) {
+		creatorAgent := msgAuthzAgent(t, s, "attach-gate-creator-target", projectID, store.MessageModeProject,
+			[]string{member.ID})
+
+		memberIdent := msgAuthzUserIdentity(member.ID)
+		allowed, reason := srv.authorizeAgentMessage(ctx, memberIdent, creatorAgent, false)
+		if !allowed {
+			t.Fatalf("agent creator should be allowed via ancestry: %s", reason)
+		}
+	})
+
+	t.Run("agent-to-agent messaging unaffected by attach gate", func(t *testing.T) {
+		sender := msgAuthzAgent(t, s, "attach-gate-agent-sender", projectID, store.MessageModeProject,
+			[]string{owner.ID})
+		senderIdent := msgAuthzAgentIdentity(sender.ID, projectID, sender.Ancestry)
+
+		allowed, reason := srv.authorizeAgentMessage(ctx, senderIdent, target, false)
+		if !allowed {
+			t.Fatalf("agent-to-agent project-mode messaging should be unaffected: %s", reason)
+		}
+	})
 }

@@ -139,14 +139,15 @@ func (s *Server) authorizeUserToAgent(
 		return true, "project owner piercing"
 	}
 
-	// target.mode == project → require agent.message permission on the project
-	// (evaluated via AK1 kernel including UAT credential caveat intersection).
+	// target.mode == project → require agent.attach permission (same gate as
+	// terminal attach), evaluated via AK1 kernel including UAT credential
+	// caveat intersection.
 	if targetAgent.MessageMode == store.MessageModeProject {
-		decision := s.authzService.CheckAccess(ctx, userIdent, targetResource, ActionMessage)
+		decision := s.authzService.CheckAccess(ctx, userIdent, targetResource, ActionAttach)
 		if decision.Allowed {
-			return true, "agent.message permission granted"
+			return true, "agent.attach permission granted (message-send)"
 		}
-		return false, "agent.message permission denied: " + decision.Reason
+		return false, "agent.attach permission denied (message-send): " + decision.Reason
 	}
 
 	// target.mode is lineage or branch, and sender is not in ancestry and
