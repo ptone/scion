@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -500,6 +501,13 @@ func TestDeliverUserMessage_LegacyPath_HTTPPayloadShape(t *testing.T) {
 
 // TestDeliverUserMessage_SenderFallback verifies that when the user mapping has
 // no scion_email, the sender field falls back to "slack:<username>".
+//
+// NOTE: This sender format is NOT accepted by the hub's routed endpoint, which
+// requires "user:<email>" and rejects non-"user:" prefixed senders with 400.
+// The adapter sends it anyway and the hub returns an error (tested by
+// TestDeliverUserMessage_RoutedSenderRejected_NoLegacyFallback below). The
+// email-empty case is expected to be rare (registration normally provides an
+// email), but if it occurs the message is silently lost on the routed path.
 func TestDeliverUserMessage_SenderFallback(t *testing.T) {
 	f := newRoutedTestFixture(t)
 	f.enableRouted()
@@ -519,4 +527,171 @@ func TestDeliverUserMessage_SenderFallback(t *testing.T) {
 
 	require.Len(t, f.routedCalls, 1)
 	assert.Equal(t, "slack:slackonly", f.routedCalls[0].Message.Sender)
+}
+
+// TestDeliverUserMessage_RoutedSenderRejected_NoLegacyFallback proves that when
+// the hub rejects a "slack:<username>" sender (400 validation_error), the
+// adapter does NOT fall back to legacy delivery. The "slack:" prefix is a
+// legacy-era identity format; the routed endpoint requires "user:<email>".
+func TestDeliverUserMessage_RoutedSenderRejected_NoLegacyFallback(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Hub rejects "slack:" sender with 400.
+	f.mu.Lock()
+	f.routedStatus = http.StatusBadRequest
+	f.routedBody = `{"error":{"code":"validation_error","message":"sender must use user: prefix for mapped identity"}}`
+	f.mu.Unlock()
+
+	require.NoError(t, f.store.CreateUserMapping(context.Background(), &SlackUserMapping{
+		SlackUserID:   "U-NOEMAIL2",
+		SlackUsername: "slackonly2",
+		ScionEmail:    "",
+		LinkedAt:      time.Now(),
+	}))
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.001400", "U-NOEMAIL2", "rejected sender")
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	require.Len(t, f.routedCalls, 1, "routed endpoint must be called exactly once")
+	require.Len(t, f.legacyCalls, 0,
+		"must NOT fall back to legacy when hub rejects slack: sender on routed path")
+}
+
+// TestDeliverUserMessage_RoutedMixedResults_NoRetry verifies that when the hub
+// returns 200 with delivered=true and a response body containing a delivered
+// primary and an unauthorized secondary, the adapter treats it as success
+// (single request, no retry, no legacy fallback).
+func TestDeliverUserMessage_RoutedMixedResults_NoRetry(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Hub returns 200 with mixed results: primary delivered, secondary unauthorized.
+	f.mu.Lock()
+	f.routedStatus = http.StatusOK
+	f.routedBody = `{
+		"delivered": true,
+		"primary_agent": "alpha",
+		"results": [
+			{"agent_slug": "alpha", "type": "message", "status": "delivered", "message_id": "msg-001"},
+			{"agent_slug": "beta", "type": "mention", "status": "unauthorized", "error": "not a project member"}
+		],
+		"unresolved_mentions": []
+	}`
+	f.mu.Unlock()
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.001500", "U-SENDER", "hello @beta review this")
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	require.Len(t, f.routedCalls, 1, "exactly one routed request — no retry on mixed results")
+	require.Len(t, f.legacyCalls, 0, "no legacy fallback on mixed results")
+
+	// Verify the adapter sent the raw message including the mention.
+	assert.Equal(t, "hello @beta review this", f.routedCalls[0].Message.Msg)
+	assert.Equal(t, "alpha", f.routedCalls[0].DefaultAgent)
+}
+
+// TestDeliverUserMessage_RoutedTransportFailure_NoLegacyFallback proves that
+// when the routed hub endpoint is unreachable (transport error), the adapter
+// makes exactly one attempt and does NOT fall back to legacy delivery.
+// Uses a closed server for instant connection-refused — no 6-minute wait.
+func TestDeliverUserMessage_RoutedTransportFailure_NoLegacyFallback(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Close the hub server to force transport error (connection refused).
+	f.hubServer.Close()
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.001600", "U-SENDER", "transport fail")
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// The routed call never reaches the handler (server is closed), so no
+	// routedCalls are captured. The key assertion: no legacy fallback either.
+	assert.Len(t, f.routedCalls, 0, "routed handler never reached (server closed)")
+	assert.Len(t, f.legacyCalls, 0,
+		"must NOT fall back to legacy on transport failure")
+}
+
+// TestDeliverUserMessage_RoutedTimeout_NoLegacyFallback proves that when the
+// routed hub endpoint hangs and a bounded transport times out, the adapter makes
+// one attempt and does NOT fall back to legacy. Uses a custom deliverRoutedInbound
+// with a short-timeout transport to avoid the production 6-minute wait.
+func TestDeliverUserMessage_RoutedTimeout_NoLegacyFallback(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Track whether the custom delivery function was called.
+	var called int
+	var calledMu sync.Mutex
+
+	// Create a hub that hangs on routed requests. The handler blocks until the
+	// client gives up (200ms) or until cleanupDone fires during test cleanup.
+	cleanupDone := make(chan struct{})
+	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-cleanupDone:
+		}
+	}))
+	t.Cleanup(func() {
+		close(cleanupDone)
+		slowServer.Close()
+	})
+
+	// Override the eventServer's deliverRoutedInbound with a version that uses
+	// a short timeout — consistent with the production code path but bounded for
+	// testing.
+	es := f.events()
+	es.deliverRoutedInbound = func(projectID, defaultAgent string, msg *messages.StructuredMessage) *hubError {
+		calledMu.Lock()
+		called++
+		calledMu.Unlock()
+
+		payload := routedInboundPayload{
+			ProjectID:    projectID,
+			DefaultAgent: defaultAgent,
+			Message:      msg,
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return nil
+		}
+
+		// Short timeout: 200ms instead of 6 minutes.
+		client := &http.Client{Timeout: 200 * time.Millisecond}
+		req, _ := http.NewRequest("POST", slowServer.URL+"/api/v1/broker/inbound/routed",
+			bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			// Transport/timeout error — same handling as production code.
+			return nil
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode >= 400 {
+			return parseHubError(resp)
+		}
+		io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.001700", "U-SENDER", "timeout test")
+
+	calledMu.Lock()
+	defer calledMu.Unlock()
+
+	assert.Equal(t, 1, called, "routed delivery must be attempted exactly once")
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	assert.Len(t, f.legacyCalls, 0,
+		"must NOT fall back to legacy on timeout")
 }
