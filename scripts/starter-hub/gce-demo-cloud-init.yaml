@@ -59,15 +59,6 @@ runcmd:
   - systemctl enable docker
   - systemctl start docker
 
-  # Install NATS Server
-  - |
-    if ! command -v nats-server >/dev/null 2>&1; then
-      curl -L https://github.com/nats-io/nats-server/releases/download/v2.10.20/nats-server-v2.10.20-amd64.deb -o /tmp/nats.deb
-      dpkg -i /tmp/nats.deb
-    fi
-  - systemctl enable nats-server
-  - systemctl start nats-server
-
   # Install Go (latest stable)
   - |
     if [ ! -d /usr/local/go ]; then

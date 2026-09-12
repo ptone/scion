@@ -13,6 +13,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -245,6 +246,7 @@ func commandInSubtree(cmd *cobra.Command, name string) bool {
 }
 
 func init() {
+	rootCmd.Version = version.Short()
 	rootCmd.Long = util.GetBanner() + "\n" + rootCmd.Long
 	rootCmd.PersistentFlags().StringVarP(&projectPath, "project", "g", "", "Project identifier: path, slug (with Hub), or git URL (with Hub)")
 	rootCmd.PersistentFlags().StringVar(&projectPath, "grove", "", "Deprecated alias for --project")
