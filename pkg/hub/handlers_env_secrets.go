@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1036,7 +1037,10 @@ type AgentSetSecretRequest struct {
 	Target       string `json:"target,omitempty"`       // Injection target path
 	Force        bool   `json:"force,omitempty"`        // Overwrite existing secret
 	Scope        string `json:"scope,omitempty"`        // "project" (default) or "user"
-	AllowProgeny bool   `json:"allowProgeny,omitempty"` // Allow creator's progeny agents to access (user scope only)
+	// AllowProgeny opts the secret in to progeny inheritance (user scope only).
+	// A pointer so an unset field is distinguishable from an explicit false:
+	// unset falls back to the hub default, explicit false always wins.
+	AllowProgeny *bool `json:"allowProgeny,omitempty"`
 }
 
 // AgentSetSecretResponse is returned on successful agent secret creation.
@@ -1171,8 +1175,10 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 
-	// allowProgeny is only valid on user-scoped secrets
-	if req.AllowProgeny && scope != store.ScopeUser {
+	// allowProgeny is only valid on user-scoped secrets. Only an explicit
+	// true is rejected; unset on a project-scoped write is fine and simply
+	// resolves to false below.
+	if req.AllowProgeny != nil && *req.AllowProgeny && scope != store.ScopeUser {
 		ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
 			"field": "allowProgeny",
 			"scope": scope,
@@ -1250,6 +1256,30 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
+	// Progeny opt-in. Harness credential capture is the main writer here, and a
+	// captured credential that progeny cannot read makes progeny unusable for
+	// the harness it was captured for: a spawned child has no auth and cannot
+	// start. So an unset flag falls back to the hub default, which is on.
+	//
+	// The widening is narrower than it first looks. The value is already in the
+	// user's own scope and the writing agent already holds it, so inheritance
+	// propagates rather than grants; it reaches only the user's own descendants;
+	// and project:secret:read is an agent-role-full scope, so a readonly or
+	// baseline child inherits nothing regardless of this flag.
+	//
+	// An explicit false from the caller always wins, and operators who disagree
+	// with the default can flip it hub-wide.
+	allowProgeny := false
+	if scope == store.ScopeUser {
+		if req.AllowProgeny != nil {
+			allowProgeny = *req.AllowProgeny
+		} else {
+			allowProgeny = s.captureProgenyDefault(ctx)
+		}
+	} else if req.AllowProgeny != nil {
+		allowProgeny = *req.AllowProgeny
+	}
+
 	// Attribution. A user-scoped secret belongs to the user whose scope it
 	// lives in, even when an agent is what wrote it — which is the normal case
 	// for harness credential capture.
@@ -1274,7 +1304,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		Target:       target,
 		Scope:        scope,
 		ScopeID:      scopeID,
-		AllowProgeny: req.AllowProgeny,
+		AllowProgeny: allowProgeny,
 		CreatedBy:    createdBy,
 		UpdatedBy:    fmt.Sprintf("agent:%s", agentID),
 	}
@@ -2656,4 +2686,33 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 	default:
 		MethodNotAllowed(w)
 	}
+}
+
+// captureProgenyDefaultKey is the hub_settings key controlling whether a
+// user-scoped secret written by an agent is progeny-enabled when the caller
+// does not say. Absent means on.
+const captureProgenyDefaultKey = "capture_progeny_default"
+
+// captureProgenyDefault reports the hub-wide default for agent-written
+// user-scoped secrets.
+//
+// Defaults to true, including when the setting is missing or unreadable. That
+// is deliberate: the failure mode of defaulting off is silent and hard to
+// diagnose — capture succeeds, the child spawns, and it simply cannot
+// authenticate with nothing reporting why — whereas defaulting on is visible
+// on the secret and reversible per-secret or hub-wide.
+func (s *Server) captureProgenyDefault(ctx context.Context) bool {
+	hs, err := s.store.GetHubSetting(ctx, captureProgenyDefaultKey)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "captureProgenyDefault: setting unreadable, defaulting to enabled", "error", err)
+		}
+		return true
+	}
+	var enabled bool
+	if err := json.Unmarshal(hs.Value, &enabled); err != nil {
+		slog.WarnContext(ctx, "captureProgenyDefault: setting malformed, defaulting to enabled", "error", err)
+		return true
+	}
+	return enabled
 }
