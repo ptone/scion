@@ -145,6 +145,19 @@ func stripMentions(text string, botUserID string, agentSlugs []string) string {
 	return strings.Join(parts, " ")
 }
 
+// stripBotMention removes Discord-format bot mentions (<@BOT_ID> and
+// <@!BOT_ID>) from text, leaving text-format @agent mentions untouched.
+// Used by the routed inbound path where agent mention extraction is
+// delegated to the hub planner.
+func stripBotMention(text string, botUserID string) string {
+	if botUserID == "" {
+		return text
+	}
+	text = strings.ReplaceAll(text, "<@"+botUserID+">", "")
+	text = strings.ReplaceAll(text, "<@!"+botUserID+">", "")
+	return text
+}
+
 // extractUnresolvedMentions finds @tokens in text that don't match known agents,
 // the bot mention format (<@ID>), or @all. Used for error feedback when a user
 // misspells an agent name.

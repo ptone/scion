@@ -67,12 +67,33 @@ type Config struct {
 	GuildIDs       []string // parsed from comma-separated "guild_ids" config value; empty = global commands
 	DBPath         string
 	MentionRouting bool
+
+	// RoutedInboundEnabled controls whether ordinary user messages use the
+	// centralized /api/v1/broker/inbound/routed endpoint instead of legacy
+	// /api/v1/broker/inbound. Default false; enable only against an upgraded hub.
+	RoutedInboundEnabled bool
 }
 
 // inboundPayload is the JSON body sent to the hub API inbound endpoint.
 type inboundPayload struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+}
+
+// routedInboundPayload is the JSON body sent to the hub routed inbound endpoint.
+type routedInboundPayload struct {
+	ProjectID    string                      `json:"project_id"`
+	DefaultAgent string                      `json:"default_agent,omitempty"`
+	Surface      string                      `json:"surface,omitempty"`
+	ExternalRef  string                      `json:"external_ref,omitempty"`
+	ParentRef    string                      `json:"parent_ref,omitempty"`
+	Message      *messages.StructuredMessage `json:"message"`
+}
+
+// routedInboundResult is the success response from the hub routed endpoint.
+type routedInboundResult struct {
+	Delivered    bool   `json:"delivered"`
+	PrimaryAgent string `json:"primary_agent"`
 }
 
 // hubError represents a structured error returned by the hub API.
@@ -97,6 +118,10 @@ func (e *hubError) userFacingMessage() string {
 		return "Agent is not running. It may be stopped, suspended, or in error state."
 	case "broker_auth_failed", "unauthorized":
 		return "Authentication error — please contact an administrator."
+	case "transport_error":
+		return "Message delivery could not be confirmed — the service may be temporarily unavailable."
+	case "local_error":
+		return "Failed to prepare your message for delivery. Please try again or contact an administrator."
 	default:
 		return "Failed to deliver message. Please try again or contact an administrator."
 	}
@@ -295,6 +320,10 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 			cfg.MentionRouting = v != "false" && v != "0"
 		}
 
+		if v, ok := config["routed_inbound_enabled"]; ok {
+			cfg.RoutedInboundEnabled = v == "true" || v == "1"
+		}
+
 		cfg.DBPath = config["db_path"]
 		if cfg.DBPath == "" {
 			cfg.DBPath = defaultDBPath
@@ -357,6 +386,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 			"guild_ids", cfg.GuildIDs,
 			"db_path", cfg.DBPath,
 			"mention_routing", cfg.MentionRouting,
+			"routed_inbound_enabled", cfg.RoutedInboundEnabled,
 		)
 	}
 
@@ -1229,6 +1259,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	b.mu.RLock()
 	store := b.store
 	botUser := b.botUser
+	config := b.config
 	b.mu.RUnlock()
 
 	channelID := m.ChannelID
@@ -1254,9 +1285,6 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		botUserID = botUser.ID
 	}
 
-	// Get project agents (with cache refresh).
-	agents := b.getProjectAgents(ctx, link.ProjectID)
-
 	// Resolve effective default — thread override first, then channel fallback.
 	// Computed before resolveTargetAgents so the additive model uses the
 	// correct implicit primary (thread-level override when present).
@@ -1268,6 +1296,28 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 			effectiveDefault = threadDefault
 		}
 	}
+
+	// Determine if routed inbound is enabled.
+	routedEnabled := config != nil && config.RoutedInboundEnabled
+
+	// --- Routed inbound path ---
+	// When routed_inbound_enabled is true, use the centralized hub endpoint
+	// that handles mention extraction and multi-agent dispatch. The adapter
+	// supplies the project ID, effective default agent slug, and the message;
+	// the hub resolves routing. @all broadcasts stay legacy.
+	if routedEnabled {
+		// extractAgentMentions returns hasAll=true when it sees "@all"
+		// regardless of the agent list — pure text detection.
+		_, hasAll := extractAgentMentions(m.Content, nil)
+		if !hasAll {
+			b.handleRoutedInbound(ctx, s, m, store, link, channelID, botUserID, effectiveDefault)
+			return
+		}
+		// @all broadcast: fall through to legacy path below.
+	}
+
+	// Get project agents (with cache refresh) — only needed for legacy path.
+	agents := b.getProjectAgents(ctx, link.ProjectID)
 
 	// Three-tier @-mention routing (additive model: effectiveDefault is
 	// included as implicit primary when explicit agent mentions are present).
@@ -1617,6 +1667,150 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	}
 }
 
+// --- Routed inbound handler ---
+
+// handleRoutedInbound processes an incoming Discord message through the
+// centralized routed hub endpoint. The hub handles mention extraction and
+// multi-agent routing; the adapter supplies the project, effective default
+// agent, identity, attachments, and the raw message text.
+func (b *DiscordBroker) handleRoutedInbound(
+	ctx context.Context,
+	s *discordgo.Session,
+	m *discordgo.MessageCreate,
+	store Store,
+	link *ChannelLink,
+	channelID, botUserID, effectiveDefault string,
+) {
+	senderID := m.Author.ID
+
+	// Determine sender identity.
+	mapping, err := store.GetUserMapping(ctx, senderID)
+	if err != nil {
+		b.log.Error("Failed to get user mapping", "sender_id", senderID, "error", err)
+		return
+	}
+	if mapping == nil {
+		b.log.Debug("Unregistered user tried to send message (routed)", "sender_id", senderID)
+		s.ChannelMessageSend(channelID, "Please use `/scion register` first to interact with agents.")
+		return
+	}
+
+	// The routed endpoint requires "user:<email>" sender format. If the user
+	// mapping has no email, block early rather than sending to the hub which
+	// would reject with 400.
+	if mapping.ScionEmail == "" {
+		b.log.Warn("Routed inbound blocked: user has no email mapping",
+			"discord_user_id", senderID, "discord_username", mapping.DiscordUsername)
+		s.ChannelMessageSend(channelID,
+			"Your registration is incomplete — please use `/scion register` with your email to send messages.")
+		return
+	}
+	sender := "user:" + mapping.ScionEmail
+
+	// Skip messages directed only at non-bot humans — these should not be
+	// routed to the hub. If no default agent is configured and no bot mention
+	// is present and the only mentions are human users, drop silently.
+	if effectiveDefault == "" && !isBotMentioned(m, botUserID) {
+		if hasNonBotMentions(m.Message, botUserID) {
+			return
+		}
+		// Plain text with no default agent: nothing to route.
+		text := strings.TrimSpace(m.Content)
+		if text == "" || strings.HasPrefix(text, "/") {
+			return
+		}
+	}
+
+	// Strip Discord bot mentions (<@BOT_ID>) from text but leave text-format
+	// @agent mentions raw — the hub planner handles agent extraction.
+	cleanText := stripBotMention(m.Content, botUserID)
+	cleanText = strings.TrimSpace(cleanText)
+
+	// Download Discord attachments and build metadata.
+	var attachmentPaths []string
+	for _, att := range m.Attachments {
+		if att == nil || att.URL == "" {
+			continue
+		}
+		agentPath, placeholder, err := b.downloadDiscordAttachment(ctx, att, link.ProjectSlug, link.ProjectID)
+		if err != nil {
+			b.log.Error("Failed to download Discord attachment",
+				"filename", att.Filename, "error", err)
+			continue
+		}
+		attachmentPaths = append(attachmentPaths, agentPath)
+		if placeholder != "" {
+			if cleanText != "" {
+				cleanText = cleanText + "\n" + placeholder
+			} else {
+				cleanText = placeholder
+			}
+		}
+	}
+
+	if cleanText == "" {
+		return
+	}
+
+	// Build the routed message. The hub resolves routing from the text @mentions.
+	// Do NOT set Recipient — the hub determines that.
+	msg := &messages.StructuredMessage{
+		Version:     messages.Version,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Channel:     "discord",
+		ThreadID:    channelID,
+		Sender:      sender,
+		SenderID:    senderID,
+		Msg:         cleanText,
+		Type:        messages.TypeInstruction,
+		Attachments: attachmentPaths,
+		Metadata: map[string]string{
+			"discord_channel_id": channelID,
+			"discord_message_id": m.ID,
+			"discord_guild_id":   m.GuildID,
+		},
+	}
+
+	b.log.Debug("Delivering routed inbound message",
+		"project_id", link.ProjectID, "sender", sender,
+		"default_agent", effectiveDefault)
+
+	result, he := b.deliverRoutedInbound(link.ProjectID, effectiveDefault, msg)
+	if he != nil {
+		s.ChannelMessageSend(channelID, he.userFacingMessage())
+		return
+	}
+
+	// Save conversation context ONLY when the hub explicitly confirms
+	// delivered=true with a nonempty primary_agent. No fallback to the
+	// configured default — a nil result, delivered=false, empty primary,
+	// malformed/empty 200, or decode error means the routing outcome is
+	// uncertain and must not be persisted. The adapter does not retry
+	// and does not fall back to legacy.
+	if result != nil && result.Delivered && result.PrimaryAgent != "" {
+		cc := &ConversationContext{
+			DiscordUserID: senderID,
+			ProjectID:     link.ProjectID,
+			AgentSlug:     result.PrimaryAgent,
+			LastChannelID: channelID,
+			LastMessageAt: time.Now(),
+		}
+		if err := store.SetConversationContext(ctx, cc); err != nil {
+			b.log.Warn("Failed to save conversation context", "error", err)
+		}
+	} else if result == nil || !result.Delivered {
+		// Uncertain result: no error from transport, but the hub response
+		// was nil, malformed, or did not confirm delivery. Surface feedback
+		// so the user knows the outcome is uncertain.
+		b.log.Warn("Routed delivery returned uncertain result",
+			"result_nil", result == nil,
+			"project_id", link.ProjectID,
+			"default_agent", effectiveDefault)
+		s.ChannelMessageSend(channelID,
+			"Message delivery could not be confirmed — the service may be temporarily unavailable.")
+	}
+}
+
 // --- Hub delivery ---
 
 // deliverInbound sends a message to the hub API or InboundHandler.
@@ -1684,6 +1878,99 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 
 	io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+// deliverRoutedInbound sends a message to the hub's centralized routed inbound
+// endpoint. This endpoint handles mention extraction and multi-agent dispatch
+// on the hub side, replacing the legacy topic-based single-agent delivery.
+func (b *DiscordBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *messages.StructuredMessage) (*routedInboundResult, *hubError) {
+	b.mu.RLock()
+	hubURL := b.hubURL
+	hmacKey := b.hmacKey
+	brokerID := b.brokerID
+	pluginName := b.pluginName
+	b.mu.RUnlock()
+
+	if hubURL == "" {
+		b.log.Debug("No hub URL configured, dropping routed inbound message",
+			"project_id", projectID)
+		return nil, nil
+	}
+
+	payload := routedInboundPayload{
+		ProjectID:    projectID,
+		DefaultAgent: defaultAgent,
+		Message:      msg,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		b.log.Error("Failed to marshal routed inbound message", "error", err)
+		return nil, &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
+	}
+
+	routedURL := hubURL + "/api/v1/broker/inbound/routed"
+	req, err := http.NewRequest("POST", routedURL, bytes.NewReader(body))
+	if err != nil {
+		b.log.Error("Failed to create routed inbound request", "error", err)
+		return nil, &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
+	}
+	req.ContentLength = int64(len(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Plugin-Name", pluginName)
+
+	if brokerID != "" && hmacKey != "" {
+		if err := signInboundRequest(req, brokerID, hmacKey); err != nil {
+			b.log.Error("Failed to sign routed inbound request", "error", err)
+			return nil, &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
+		}
+	}
+
+	// Use a longer timeout for routed requests: the hub may fan out to up to
+	// 11 recipients sequentially (30s each), plus preparation overhead.
+	client := &http.Client{Timeout: 6 * time.Minute}
+	// Inherit transport from broker's httpClient so IAP auth is preserved.
+	b.mu.RLock()
+	if b.httpClient != nil {
+		client.Transport = b.httpClient.Transport
+	}
+	b.mu.RUnlock()
+
+	resp, err := client.Do(req)
+	if err != nil {
+		b.log.Error("Failed to deliver routed inbound message",
+			"error", err, "project_id", projectID)
+		// Surface transport failures to the user. Do NOT advise retry —
+		// a timeout has uncertain delivery (the hub may have received and
+		// processed the request before the client gave up).
+		return nil, &hubError{Code: "transport_error", Message: "Message delivery could not be confirmed — the service may be temporarily unavailable."}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		he := parseHubError(resp)
+		b.log.Error("Hub rejected routed inbound message",
+			"status", resp.StatusCode, "code", he.Code, "message", he.Message,
+			"project_id", projectID, "default_agent", defaultAgent)
+		return nil, he
+	}
+
+	// Parse success response to extract primary_agent for context tracking.
+	// Treat read or decode errors as uncertain delivery: return nil result
+	// with an uncertain-result hubError so the caller never saves context
+	// from a partially populated struct.
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if readErr != nil {
+		b.log.Error("Failed to read routed inbound response body",
+			"error", readErr, "project_id", projectID)
+		return nil, &hubError{Code: "transport_error", Message: "Message delivery could not be confirmed — the service may be temporarily unavailable."}
+	}
+	var result routedInboundResult
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		b.log.Error("Failed to decode routed inbound response",
+			"error", err, "project_id", projectID)
+		return nil, &hubError{Code: "transport_error", Message: "Message delivery could not be confirmed — the service may be temporarily unavailable."}
+	}
+	return &result, nil
 }
 
 // --- Agent cache ---
