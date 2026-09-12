@@ -1250,6 +1250,23 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
+	// Attribution. A user-scoped secret belongs to the user whose scope it
+	// lives in, even when an agent is what wrote it — which is the normal case
+	// for harness credential capture.
+	//
+	// Two things go wrong if the writing agent is recorded instead. Progeny
+	// lookup matches created_by against the agent's ancestry chain
+	// (ListProgenySecrets -> CreatedByIn), and ancestry entries are bare UUIDs,
+	// so an "agent:<uuid>" value can never match and a captured credential can
+	// never be inherited. Even unprefixed it would only reach descendants of
+	// the one agent that captured it, rather than the owning user's agents.
+	//
+	// The agent is still recorded as the updater, so provenance is not lost.
+	createdBy := fmt.Sprintf("agent:%s", agentID)
+	if scope == store.ScopeUser && scopeID != "" {
+		createdBy = scopeID
+	}
+
 	input := &secret.SetSecretInput{
 		Name:         key,
 		Value:        string(decoded),
@@ -1258,7 +1275,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		Scope:        scope,
 		ScopeID:      scopeID,
 		AllowProgeny: req.AllowProgeny,
-		CreatedBy:    fmt.Sprintf("agent:%s", agentID),
+		CreatedBy:    createdBy,
 		UpdatedBy:    fmt.Sprintf("agent:%s", agentID),
 	}
 
