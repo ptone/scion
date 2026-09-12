@@ -31,9 +31,9 @@ type routedTestFixture struct {
 	broker *SlackBroker
 
 	// Captured payloads from the two hub endpoints.
-	mu             sync.Mutex
-	legacyCalls    []inboundPayload
-	routedCalls    []routedInboundPayload
+	mu              sync.Mutex
+	legacyCalls     []inboundPayload
+	routedCalls     []routedInboundPayload
 	legacyRawBodies []json.RawMessage
 	routedRawBodies []json.RawMessage
 
@@ -595,7 +595,7 @@ func TestConfigureRoutedInboundEnabled(t *testing.T) {
 			cfg := map[string]string{
 				"bot_token":              "xoxb-test",
 				"signing_secret":         "secret",
-				"db_path":               t.TempDir() + "/test.db",
+				"db_path":                t.TempDir() + "/test.db",
 				"routed_inbound_enabled": tt.value,
 			}
 			require.NoError(t, b.Configure(cfg))

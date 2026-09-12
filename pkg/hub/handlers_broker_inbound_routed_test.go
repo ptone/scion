@@ -40,11 +40,11 @@ import (
 // routedEnvelope is the parsed DeliveryText envelope for assertion.
 // Reuses the existing extractEnvelopeJSON helper from def171.
 type routedEnvelope struct {
-	Type         string             `json:"type"`
-	To           []string           `json:"to,omitempty"`
-	From         string             `json:"from"`
-	Msg          string             `json:"msg"`
-	Conversation *routedConvInfo    `json:"conversation,omitempty"`
+	Type         string          `json:"type"`
+	To           []string        `json:"to,omitempty"`
+	From         string          `json:"from"`
+	Msg          string          `json:"msg"`
+	Conversation *routedConvInfo `json:"conversation,omitempty"`
 }
 
 type routedConvInfo struct {
@@ -617,10 +617,10 @@ func TestHandleBrokerInboundRouted_IncomingMentionMetadataStripped(t *testing.T)
 			Type:    messages.TypeInstruction,
 			Metadata: map[string]string{
 				"mention_co_addressees": `["evil"]`,
-				"group_id":             "injected",
-				"mention_source":       "injected:source",
-				"mention_position":     "injected:position",
-				"safe_key":             "preserved",
+				"group_id":              "injected",
+				"mention_source":        "injected:source",
+				"mention_position":      "injected:position",
+				"safe_key":              "preserved",
 			},
 		},
 	})

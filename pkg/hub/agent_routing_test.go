@@ -97,15 +97,15 @@ func TestResolveRoutingAgents(t *testing.T) {
 	allAgents := []store.Agent{alpha, foo, bar, baz}
 
 	tests := []struct {
-		name               string
-		content            string
-		defaultAgent       *store.Agent
-		agents             []store.Agent
-		wantSlugs          []string
-		wantUnresolved     []string
-		wantEmpty          bool
-		wantMentionNames   []string
-		pageSize           int
+		name             string
+		content          string
+		defaultAgent     *store.Agent
+		agents           []store.Agent
+		wantSlugs        []string
+		wantUnresolved   []string
+		wantEmpty        bool
+		wantMentionNames []string
+		pageSize         int
 	}{
 		{
 			name:         "no mentions, default present",

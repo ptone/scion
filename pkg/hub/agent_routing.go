@@ -27,8 +27,8 @@ import (
 // recipient; Agents[1:] are secondary mention recipients. MentionNames and
 // MentionResults correspond 1:1 with the extracted and resolved mentions.
 type RoutingPlan struct {
-	Agents         []*store.Agent          // ordered; first is primary
-	MentionNames   []string                // extracted @-mention tokens (original case)
+	Agents         []*store.Agent           // ordered; first is primary
+	MentionNames   []string                 // extracted @-mention tokens (original case)
 	MentionResults []messages.MentionResult // per-mention resolution outcome
 
 	// UnresolvedMentions collects mention slugs that did not resolve to any

@@ -31,27 +31,27 @@ import (
 
 // routedInboundRequest is the JSON body for POST /api/v1/broker/inbound/routed.
 type routedInboundRequest struct {
-	ProjectID    string                     `json:"project_id"`
-	DefaultAgent string                     `json:"default_agent,omitempty"` // slug, not UUID
-	Surface      string                     `json:"surface,omitempty"`
-	ExternalRef  string                     `json:"external_ref,omitempty"`
-	ParentRef    string                     `json:"parent_ref,omitempty"`
+	ProjectID    string                      `json:"project_id"`
+	DefaultAgent string                      `json:"default_agent,omitempty"` // slug, not UUID
+	Surface      string                      `json:"surface,omitempty"`
+	ExternalRef  string                      `json:"external_ref,omitempty"`
+	ParentRef    string                      `json:"parent_ref,omitempty"`
 	Message      *messages.StructuredMessage `json:"message"`
 }
 
 // routedInboundResponse is returned from POST /api/v1/broker/inbound/routed.
 type routedInboundResponse struct {
-	Delivered          bool                        `json:"delivered"`
-	PrimaryAgent       string                      `json:"primary_agent"`
-	Results            []routedDeliveryResult       `json:"results"`
-	UnresolvedMentions []string                     `json:"unresolved_mentions,omitempty"`
-	MentionErrors      []routedMentionError         `json:"mention_errors,omitempty"`
+	Delivered          bool                   `json:"delivered"`
+	PrimaryAgent       string                 `json:"primary_agent"`
+	Results            []routedDeliveryResult `json:"results"`
+	UnresolvedMentions []string               `json:"unresolved_mentions,omitempty"`
+	MentionErrors      []routedMentionError   `json:"mention_errors,omitempty"`
 }
 
 type routedDeliveryResult struct {
 	AgentSlug          string `json:"agent_slug"`
-	Type               string `json:"type"`                          // "message" or "mention"
-	Status             string `json:"status"`                        // delivered, unauthorized, not_running, conversation_not_resolved, error, not_attempted
+	Type               string `json:"type"`   // "message" or "mention"
+	Status             string `json:"status"` // delivered, unauthorized, not_running, conversation_not_resolved, error, not_attempted
 	MessageID          string `json:"message_id,omitempty"`
 	Error              string `json:"error,omitempty"`
 	PersistenceWarning string `json:"persistence_warning,omitempty"`
@@ -383,11 +383,11 @@ func (s *Server) dispatchRoutedRecipient(
 	var msg *messages.StructuredMessage
 	if params.isPrimary {
 		msg = &messages.StructuredMessage{
-			Version:   messages.Version,
-			Timestamp: params.now.Format(time.RFC3339),
-			Sender:    params.req.Message.Sender,
-			SenderID:  params.req.Message.SenderID,
-			Recipient: "agent:" + agent.Slug,
+			Version:     messages.Version,
+			Timestamp:   params.now.Format(time.RFC3339),
+			Sender:      params.req.Message.Sender,
+			SenderID:    params.req.Message.SenderID,
+			Recipient:   "agent:" + agent.Slug,
 			RecipientID: agent.ID,
 			Msg:         params.req.Message.Msg,
 			Type:        messages.TypeInstruction,
