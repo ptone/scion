@@ -527,6 +527,8 @@ type V1ServerHubConfig struct {
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles *bool `json:"soft_delete_retain_files,omitempty" yaml:"soft_delete_retain_files,omitempty" koanf:"soft_delete_retain_files"`
+	// GCPProjectID is the GCP project ID used for IAM, OTel, and other GCP integrations.
+	GCPProjectID string `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
 	// GCPIAMCheckMode controls whether IAM actAs permission is checked when
 	// binding a GCP service account to an agent.
 	// "off" (default) or "enforce".
@@ -1457,6 +1459,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.SoftDeleteRetainFiles != nil {
 			gc.Hub.SoftDeleteRetainFiles = *v1.Hub.SoftDeleteRetainFiles
 		}
+		if v1.Hub.GCPProjectID != "" {
+			gc.Hub.GCPProjectID = v1.Hub.GCPProjectID
+		}
 		if v1.Hub.GCPIAMCheckMode != "" {
 			gc.Hub.GCPIAMCheckMode = v1.Hub.GCPIAMCheckMode
 		}
@@ -1756,6 +1761,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		ReadTimeout:  gc.Hub.ReadTimeout.String(),
 		WriteTimeout: gc.Hub.WriteTimeout.String(),
 		AdminEmails:  gc.Hub.AdminEmails,
+		GCPProjectID: gc.Hub.GCPProjectID,
 		CORS: &V1CORSConfig{
 			Enabled:        gc.Hub.CORSEnabled,
 			AllowedOrigins: gc.Hub.CORSAllowedOrigins,

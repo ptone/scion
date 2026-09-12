@@ -4680,3 +4680,25 @@ func TestNativeChatConfig_ThreadedToGlobalConfig(t *testing.T) {
 	gcDefault := ConvertV1ServerToGlobalConfig(&V1ServerConfig{})
 	assert.Nil(t, gcDefault.NativeChat.EnabledSetting())
 }
+
+func TestConvertV1ServerToGlobalConfig_GCPProjectID(t *testing.T) {
+	v1 := &V1ServerConfig{
+		Hub: &V1ServerHubConfig{
+			GCPProjectID: "my-gcp-project",
+		},
+	}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.Equal(t, "my-gcp-project", gc.Hub.GCPProjectID)
+}
+
+func TestConvertGlobalToV1ServerConfig_GCPProjectID(t *testing.T) {
+	gc := DefaultGlobalConfig()
+	gc.Hub.GCPProjectID = "my-gcp-project"
+
+	v1 := ConvertGlobalToV1ServerConfig(&gc)
+	assert.Equal(t, "my-gcp-project", v1.Hub.GCPProjectID)
+
+	// Round-trip back
+	gc2 := ConvertV1ServerToGlobalConfig(v1)
+	assert.Equal(t, "my-gcp-project", gc2.Hub.GCPProjectID)
+}
