@@ -917,31 +917,48 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		projectID = resolveProjectFromDMKey(ctx, s, key)
 	}
 
-	// Step 1: Extract mentions.
-	mentionNames := messages.ExtractMentions(content)
-
-	// Step 2: Resolve agent mentions against project agents.
-	var mentionedAgents []*store.Agent
-	var mentionResults []messages.MentionResult
-	if len(mentionNames) > 0 && projectID != "" {
-		agentList, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{Limit: 200})
-		if err == nil {
-			agentInfos := make([]messages.AgentInfo, 0, len(agentList.Items))
-			agentBySlug := make(map[string]*store.Agent, len(agentList.Items))
-			for i := range agentList.Items {
-				a := &agentList.Items[i]
-				agentInfos = append(agentInfos, messages.AgentInfo{Slug: a.Slug, Name: a.Name})
-				agentBySlug[strings.ToLower(a.Slug)] = a
+	// --- Resolve default agent (DM key or topic default) ---
+	var defaultAgent *store.Agent
+	if isDM {
+		if agentID := parseAgentDMKey(key); agentID != "" {
+			if dmAgent, err := s.store.GetAgent(ctx, agentID); err == nil && dmAgent != nil {
+				defaultAgent = dmAgent
 			}
-			mentionResults = messages.ResolveMentions(mentionNames, agentInfos, "")
-			for _, mr := range mentionResults {
-				if mr.Status == "delivered" {
-					if a, ok := agentBySlug[strings.ToLower(mr.Slug)]; ok {
-						mentionedAgents = append(mentionedAgents, a)
+		}
+	} else if projectID != "" {
+		topic, err := wcs.GetTopic(ctx, key)
+		if err == nil && topic != nil && topic.DefaultAgent != "" {
+			da, daErr := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
+			if daErr != nil || da == nil {
+				// Fall back to lookup by ID in case the value is a UUID.
+				da, daErr = s.store.GetAgent(ctx, topic.DefaultAgent)
+				// Scope the fallback: reject agents from other projects or
+				// soft-deleted agents — DEF-31.
+				if daErr == nil && da != nil {
+					if da.ProjectID != projectID || !da.DeletedAt.IsZero() {
+						da = nil
 					}
 				}
 			}
+			if daErr == nil && da != nil {
+				defaultAgent = da
+			}
 		}
+	}
+
+	// --- Resolve routing via shared planner ---
+	var plan RoutingPlan
+	if projectID != "" {
+		var planErr error
+		plan, planErr = resolveRoutingAgents(ctx, s.store, projectID, content, defaultAgent)
+		if planErr != nil {
+			slog.Error("agent routing resolution failed", "error", planErr)
+			// Fall through: plan.Agents will be empty, triggering human-to-human.
+		}
+	} else if defaultAgent != nil {
+		// No project context but DM default resolved: single-recipient plan.
+		plan.Agents = []*store.Agent{defaultAgent}
+		plan.MentionNames = messages.ExtractMentions(content)
 	}
 
 	now := time.Now().UTC()
@@ -953,129 +970,21 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	// Step 3: Determine routing.
-	if len(mentionedAgents) > 0 {
-		// --- Agent-routed: explicit mentions ---
-		// Detect leading @-mention: if the message starts with @<first-resolved>,
-		// the leading mention overrides the thread's default agent (scenarios C/D).
-		// If not leading, mentions are additive (scenario B).
-		isLeading := len(mentionNames) > 0 &&
-			strings.EqualFold(mentionedAgents[0].Slug, mentionNames[0]) &&
-			messages.IsLeadingMention(content, mentionNames[0])
-
-		agents := mentionedAgents
-		if !isLeading {
-			// Non-leading mentions: additive model — resolve the thread's
-			// implicit primary agent and prepend it.
-			var implicitPrimary *store.Agent
-			if isDM {
-				if agentID := parseAgentDMKey(key); agentID != "" {
-					if dmAgent, err := s.store.GetAgent(ctx, agentID); err == nil && dmAgent != nil {
-						implicitPrimary = dmAgent
-					}
-				}
-			} else if projectID != "" {
-				topic, topicErr := wcs.GetTopic(ctx, key)
-				if topicErr == nil && topic != nil && topic.DefaultAgent != "" {
-					defaultAgent, daErr := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
-					if daErr != nil || defaultAgent == nil {
-						// Fall back to lookup by ID in case the value is a UUID.
-						defaultAgent, daErr = s.store.GetAgent(ctx, topic.DefaultAgent)
-						// Scope the fallback: reject agents from other projects or
-						// soft-deleted agents. GetAgent is a bare primary-key fetch
-						// with no project or deletion filter, so without this guard
-						// a UUID naming an agent in another project (or a deleted
-						// agent) would bind successfully — DEF-31.
-						if daErr == nil && defaultAgent != nil {
-							if defaultAgent.ProjectID != projectID || !defaultAgent.DeletedAt.IsZero() {
-								defaultAgent = nil
-							}
-						}
-					}
-					if daErr == nil && defaultAgent != nil {
-						implicitPrimary = defaultAgent
-					}
-				}
-			}
-
-			if implicitPrimary != nil {
-				// Dedup: remove implicit primary from mentions if also @-mentioned.
-				deduped := make([]*store.Agent, 0, len(mentionedAgents))
-				for _, a := range mentionedAgents {
-					if a.ID != implicitPrimary.ID {
-						deduped = append(deduped, a)
-					}
-				}
-				agents = append([]*store.Agent{implicitPrimary}, deduped...)
-			}
-		}
-		// When isLeading: agents = mentionedAgents as-is.
-		// mentionedAgents[0] is the leading-mentioned agent → primary by position.
-
-		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, agents, mentionNames, mentionResults, attachmentRefs, now, body.ReplyToID)
+	// --- Agent routing ---
+	if len(plan.Agents) > 0 {
+		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID)
 		if msgID == "" {
 			return // error response already written by sendAgentRouted
 		}
 		recordIdempotency(msgID)
-		// Ensure DM registry rows exist so the DM appears in the rail.
 		if isDM {
 			s.ensureDMRegistered(ctx, key, user.ID())
 		}
 		return
 	}
 
-	if isDM {
-		// Agent DM implicit routing: when the key is dm:agent:<uuid>:user:<uuid>,
-		// the agent is the implicit recipient (equivalent to default_agent for
-		// topics). An explicit @mention of a different agent takes precedence
-		// (handled above). Design §3, §4.3.
-		if agentID := parseAgentDMKey(key); agentID != "" {
-			dmAgent, err := s.store.GetAgent(ctx, agentID)
-			if err == nil && dmAgent != nil {
-				msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{dmAgent}, mentionNames, nil, attachmentRefs, now, body.ReplyToID)
-				if msgID == "" {
-					return // error response already written by sendAgentRouted
-				}
-				recordIdempotency(msgID)
-				// Ensure DM registry rows exist so the DM appears in the rail.
-				s.ensureDMRegistered(ctx, key, user.ID())
-				return
-			}
-		}
-	} else if projectID != "" {
-		// Check if topic has a default_agent.
-		topic, err := wcs.GetTopic(ctx, key)
-		if err == nil && topic != nil && topic.DefaultAgent != "" {
-			// Resolve the default agent. The default_agent field stores either
-			// a slug (from /default command) or a UUID, so try both lookups.
-			defaultAgent, err := s.store.GetAgentBySlug(ctx, projectID, topic.DefaultAgent)
-			if err != nil || defaultAgent == nil {
-				// Fall back to lookup by ID in case the value is a UUID.
-				defaultAgent, err = s.store.GetAgent(ctx, topic.DefaultAgent)
-				// Scope the fallback: reject agents from other projects or
-				// soft-deleted agents. GetAgent is a bare primary-key fetch
-				// with no project or deletion filter, so without this guard
-				// a UUID naming an agent in another project (or a deleted
-				// agent) would bind successfully — DEF-31.
-				if err == nil && defaultAgent != nil {
-					if defaultAgent.ProjectID != projectID || !defaultAgent.DeletedAt.IsZero() {
-						defaultAgent = nil
-					}
-				}
-			}
-			if err == nil && defaultAgent != nil {
-				msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, []*store.Agent{defaultAgent}, mentionNames, nil, attachmentRefs, now, body.ReplyToID)
-				if msgID == "" {
-					return // error response already written by sendAgentRouted
-				}
-				recordIdempotency(msgID)
-				return
-			}
-		}
-	}
-
 	// --- Human-to-human message ---
-	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, mentionNames, attachmentRefs, now, body.ReplyToID)
+	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, plan.MentionNames, attachmentRefs, now, body.ReplyToID)
 	if msgID == "" {
 		return // error response already written by sendHumanToHuman
 	}
