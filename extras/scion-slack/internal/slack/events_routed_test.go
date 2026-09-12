@@ -420,6 +420,78 @@ func TestDeliverUserMessage_RoutedEnabled_ContextNotSavedOnFailure(t *testing.T)
 	assert.Nil(t, cc, "context must NOT be saved when delivery fails")
 }
 
+func TestDeliverUserMessage_RoutedEnabled_ContextNotSavedOnEmptyPrimary(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Hub returns delivered=true but empty primary_agent.
+	f.mu.Lock()
+	f.routedBody = `{"delivered":true,"primary_agent":""}`
+	f.mu.Unlock()
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.002100", "U-SENDER", "empty primary")
+
+	ctx := context.Background()
+	// No context for configured default.
+	cc, err := f.store.GetConversationContext(ctx, "U-SENDER", "proj-001", "alpha")
+	require.NoError(t, err)
+	assert.Nil(t, cc, "context must NOT be saved when primary_agent is empty")
+}
+
+func TestDeliverUserMessage_RoutedEnabled_ContextNotSavedOnDeliveredFalse(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Hub returns 200 but delivered=false (e.g. primary failed, all secondaries skipped).
+	f.mu.Lock()
+	f.routedBody = `{"delivered":false,"primary_agent":"alpha"}`
+	f.mu.Unlock()
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.002200", "U-SENDER", "not delivered")
+
+	ctx := context.Background()
+	cc, err := f.store.GetConversationContext(ctx, "U-SENDER", "proj-001", "alpha")
+	require.NoError(t, err)
+	assert.Nil(t, cc, "context must NOT be saved when delivered=false")
+}
+
+func TestDeliverUserMessage_RoutedEnabled_ContextNotSavedOnMalformedResponse(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Hub returns 200 with malformed body.
+	f.mu.Lock()
+	f.routedBody = `not json at all`
+	f.mu.Unlock()
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.002300", "U-SENDER", "malformed response")
+
+	ctx := context.Background()
+	// Malformed response: json.Unmarshal fails, result has zero values.
+	// delivered defaults to false, primary_agent defaults to "".
+	cc, err := f.store.GetConversationContext(ctx, "U-SENDER", "proj-001", "alpha")
+	require.NoError(t, err)
+	assert.Nil(t, cc, "context must NOT be saved on malformed response")
+}
+
+func TestDeliverUserMessage_RoutedEnabled_ContextNotSavedOnEmptyObjectResponse(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Hub returns 200 with an empty JSON object — valid JSON but missing
+	// delivered and primary_agent (both default to zero values: false/"").
+	f.mu.Lock()
+	f.routedBody = `{}`
+	f.mu.Unlock()
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.002400", "U-SENDER", "empty object response")
+
+	ctx := context.Background()
+	cc, err := f.store.GetConversationContext(ctx, "U-SENDER", "proj-001", "alpha")
+	require.NoError(t, err)
+	assert.Nil(t, cc, "context must NOT be saved when hub returns empty JSON object")
+}
+
 func TestDeliverUserMessage_UnknownChannel_NoCalls(t *testing.T) {
 	f := newRoutedTestFixture(t)
 	f.enableRouted()

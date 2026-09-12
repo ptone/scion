@@ -425,29 +425,35 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 			return
 		}
 
-		// Save conversation context using the hub's confirmed primary_agent
-		// rather than the configured default. When a leading mention overrides
-		// the default (e.g. @beta overrides "alpha"), the hub's primary_agent
-		// reflects the actual routing outcome.
-		contextSlug := ""
+		// Save conversation context ONLY when the hub explicitly confirms
+		// delivered=true with a nonempty primary_agent. No fallback to the
+		// configured default — a nil result, delivered=false, empty primary,
+		// malformed/empty 200, or decode error means the routing outcome is
+		// uncertain and must not be persisted. The adapter does not retry
+		// and does not fall back to legacy.
 		if result != nil && result.Delivered && result.PrimaryAgent != "" {
-			contextSlug = result.PrimaryAgent
-		} else if agentSlug != "" {
-			// Fallback to configured default when the hub doesn't report a
-			// primary (e.g. nil result from no-hub-url path).
-			contextSlug = agentSlug
-		}
-		if contextSlug != "" {
 			cc := &ConversationContext{
 				SlackUserID:   userID,
 				ProjectID:     link.ProjectID,
-				AgentSlug:     contextSlug,
+				AgentSlug:     result.PrimaryAgent,
 				LastChannelID: channelID,
 				LastThreadTS:  threadID,
 				LastMessageAt: time.Now(),
 			}
 			if err := s.store.SetConversationContext(ctx, cc); err != nil {
 				s.log.Warn("Failed to save conversation context", "error", err)
+			}
+		} else if result == nil || !result.Delivered {
+			// Uncertain result: no error from transport, but the hub response
+			// was nil, malformed, or did not confirm delivery. Surface feedback
+			// so the user knows the outcome is uncertain.
+			s.log.Warn("Routed delivery returned uncertain result",
+				"result_nil", result == nil,
+				"project_id", link.ProjectID,
+				"default_agent", agentSlug)
+			if s.client != nil {
+				s.client.PostEphemeral(channelID, userID,
+					slackapi.MsgOptionText("Message delivery could not be confirmed — the service may be temporarily unavailable.", false))
 			}
 		}
 		return

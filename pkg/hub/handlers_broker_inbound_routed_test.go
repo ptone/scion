@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
@@ -35,6 +36,38 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// routedEnvelope is the parsed DeliveryText envelope for assertion.
+// Reuses the existing extractEnvelopeJSON helper from def171.
+type routedEnvelope struct {
+	Type         string             `json:"type"`
+	To           []string           `json:"to,omitempty"`
+	From         string             `json:"from"`
+	Msg          string             `json:"msg"`
+	Conversation *routedConvInfo    `json:"conversation,omitempty"`
+}
+
+type routedConvInfo struct {
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	Surface string `json:"surface"`
+}
+
+func parseRoutedEnvelope(t *testing.T, deliveryText string) routedEnvelope {
+	t.Helper()
+	jsonStr := extractEnvelopeJSON(t, deliveryText)
+	var env routedEnvelope
+	require.NoError(t, json.Unmarshal([]byte(jsonStr), &env),
+		"failed to unmarshal envelope JSON: %s", jsonStr)
+	return env
+}
+
+func sortedStrings(s []string) []string {
+	c := make([]string, len(s))
+	copy(c, s)
+	sort.Strings(c)
+	return c
+}
 
 // routedTestEnv holds the common test fixtures for routed inbound tests.
 type routedTestEnv struct {
@@ -283,7 +316,8 @@ func TestHandleBrokerInboundRouted_MentionRouting(t *testing.T) {
 	assert.Equal(t, "agent:alpha", calls[1].StructuredMessage.Metadata["mention_source"],
 		"secondary must have mention_source pointing to primary")
 
-	// Verify per-recipient message ID equality: response ID matches persisted row.
+	// Verify per-recipient: response ID == persisted ID, conversation ID, DeliveryText.
+	expectedTypes := []string{"message", "mention"}
 	for i, agentID := range []string{env.agent1.ID, env.agent2.ID} {
 		msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
 			AgentID: agentID,
@@ -292,20 +326,62 @@ func TestHandleBrokerInboundRouted_MentionRouting(t *testing.T) {
 		require.GreaterOrEqual(t, len(msgs.Items), 1,
 			"at least one message must be persisted for agent %s", agentID)
 		persisted := msgs.Items[0]
+
+		// Response message ID must match persisted row ID.
 		assert.Equal(t, resp.Results[i].MessageID, persisted.ID,
 			"response message ID must match persisted row for result %d", i)
 		assert.NotEmpty(t, persisted.ConversationID,
 			"persisted message must have conversation_id for agent %s", agentID)
+
+		// Parse rendered DeliveryText envelope.
+		require.NotEmpty(t, calls[i].StructuredMessage.DeliveryText,
+			"DeliveryText must be rendered for dispatch %d", i)
+		envelope := parseRoutedEnvelope(t, calls[i].StructuredMessage.DeliveryText)
+
+		// Rendered type must match message/mention.
+		assert.Equal(t, expectedTypes[i], envelope.Type,
+			"rendered envelope type must be %q for dispatch %d", expectedTypes[i], i)
+
+		// Rendered conversation.id must match persisted ConversationID.
+		require.NotNil(t, envelope.Conversation,
+			"rendered envelope must have conversation for dispatch %d", i)
+		assert.Equal(t, persisted.ConversationID, envelope.Conversation.ID,
+			"rendered conversation.id must match persisted ConversationID for dispatch %d", i)
+
+		// Rendered "to" must contain both alpha and beta.
+		assert.Equal(t,
+			sortedStrings([]string{"agent:alpha", "agent:beta"}),
+			sortedStrings(envelope.To),
+			"rendered to list must contain both agents for dispatch %d", i)
 	}
 
 	// Verify reply affinity recorded for both successful recipients.
+	ctx := context.Background()
 	for _, agentID := range []string{env.agent1.ID, env.agent2.ID} {
-		ch, err := env.webChatStore.GetLastChannel(context.Background(),
+		ch, err := env.webChatStore.GetLastChannel(ctx,
 			env.user.ID, env.project.ID, agentID)
 		require.NoError(t, err)
 		assert.Equal(t, "slack", ch,
 			"reply affinity channel must be recorded for agent %s", agentID)
 	}
+
+	// Verify TouchThread watermark via store read API.
+	threads, err := env.webChatStore.GetThreads(ctx,
+		env.user.ID, env.project.ID, 10)
+	require.NoError(t, err)
+	threadAgentIDs := make(map[string]string)
+	for _, th := range threads {
+		threadAgentIDs[th.AgentID] = th.LastMessageID
+	}
+	assert.Contains(t, threadAgentIDs, env.agent1.ID,
+		"alpha must have a thread watermark")
+	assert.Contains(t, threadAgentIDs, env.agent2.ID,
+		"beta must have a thread watermark")
+	// Watermark message IDs must match the persisted message IDs.
+	assert.Equal(t, resp.Results[0].MessageID, threadAgentIDs[env.agent1.ID],
+		"alpha thread watermark must reference alpha's message ID")
+	assert.Equal(t, resp.Results[1].MessageID, threadAgentIDs[env.agent2.ID],
+		"beta thread watermark must reference beta's message ID")
 }
 
 func TestHandleBrokerInboundRouted_LeadingMentionOverride(t *testing.T) {
