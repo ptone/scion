@@ -921,6 +921,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/broker/inbound", RouteID: "broker.inbound",
 		Classification: RouteBrokerHMAC,
 	},
+	"/api/v1/broker/inbound/routed": {
+		Pattern: "/api/v1/broker/inbound/routed", RouteID: "broker.inbound.routed",
+		Classification: RouteBrokerHMAC,
+	},
 	"/api/v1/broker/callback": {
 		Pattern: "/api/v1/broker/callback", RouteID: "broker.callback",
 		Classification: RouteBrokerHMAC,

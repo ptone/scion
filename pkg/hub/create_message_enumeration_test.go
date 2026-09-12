@@ -58,6 +58,9 @@ func TestCreateMessageEnumeration(t *testing.T) {
 		// handleBrokerInbound: external channel inbound (B15).
 		"handlers_broker_inbound.go:handleBrokerInbound": "B15 dual-write: broker inbound conversation stamping",
 
+		// dispatchRoutedRecipient: routed broker inbound (centralized routing).
+		"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "Routed inbound: conversation stamped via Phase 11 or Phase 5 before CreateMessage",
+
 		// sendAgentRouted primary: web chat user → agent.
 		"handlers_chat_v2.go:sendAgentRouted:primary": "B15 dual-write: web chat user→agent primary message",
 

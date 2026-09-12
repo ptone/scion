@@ -85,6 +85,10 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// error check.
 		"handlers_broker_inbound.go:handleBrokerInbound": "Publish in else branch of CreateMessage error check",
 
+		// dispatchRoutedRecipient: publish in else branch of CreateMessage
+		// error check.
+		"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "Publish in else branch of CreateMessage error check",
+
 		// handleAgentOutboundMessage: CreateMessage error triggers early
 		// return before publish.
 		"handlers_agent_messaging.go:handleAgentOutboundMessage:publish": "CreateMessage error triggers early return before publish",
