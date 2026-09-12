@@ -606,6 +606,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 		warnings = append(warnings, fmt.Sprintf("Auth: resolved as %s", authDetail))
 	}
+	if opts.NoAuth {
+		// Clean up stale auth-candidates from a prior run so the
+		// provisioner sees no candidates and runs in no-auth mode.
+		_ = os.Remove(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+	}
 authDone:
 
 	// Unconditionally clear corrupted opts.HarnessAuth. This runs even when
