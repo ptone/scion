@@ -877,7 +877,7 @@ func TestConfigureRoutedInboundEnabled_Discord(t *testing.T) {
 			b := NewBroker(discardLogger())
 			cfg := map[string]string{
 				"bot_token":              "Bot fake-token",
-				"db_path":               filepath.Join(t.TempDir(), "cfg_test.db"),
+				"db_path":                filepath.Join(t.TempDir(), "cfg_test.db"),
 				"routed_inbound_enabled": tt.value,
 			}
 			require.NoError(t, b.Configure(cfg))
