@@ -402,6 +402,20 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 	// supplies the project ID, default agent slug, and the message; the hub
 	// resolves routing. Slash-command paths remain legacy.
 	if s.routedInboundEnabled && s.deliverRoutedInbound != nil {
+		// The routed endpoint requires "user:<email>" sender format. If the
+		// user mapping has no email, the hub will reject the message with 400.
+		// Block early and tell the user to complete registration rather than
+		// silently losing the message.
+		if mapping.ScionEmail == "" {
+			s.log.Warn("Routed inbound blocked: user has no email mapping",
+				"slack_user_id", userID, "slack_username", mapping.SlackUsername)
+			if s.client != nil {
+				s.client.PostEphemeral(channelID, userID,
+					slackapi.MsgOptionText("Your registration is incomplete — please use `/scion register` with your email to send messages.", false))
+			}
+			return
+		}
+
 		msg := &messages.StructuredMessage{
 			Version:   messages.Version,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),

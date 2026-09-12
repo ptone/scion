@@ -499,20 +499,16 @@ func TestDeliverUserMessage_LegacyPath_HTTPPayloadShape(t *testing.T) {
 		"legacy payload must not contain 'default_agent' top-level field")
 }
 
-// TestDeliverUserMessage_SenderFallback verifies that when the user mapping has
-// no scion_email, the sender field falls back to "slack:<username>".
-//
-// NOTE: This sender format is NOT accepted by the hub's routed endpoint, which
-// requires "user:<email>" and rejects non-"user:" prefixed senders with 400.
-// The adapter sends it anyway and the hub returns an error (tested by
-// TestDeliverUserMessage_RoutedSenderRejected_NoLegacyFallback below). The
-// email-empty case is expected to be rare (registration normally provides an
-// email), but if it occurs the message is silently lost on the routed path.
-func TestDeliverUserMessage_SenderFallback(t *testing.T) {
+// TestDeliverUserMessage_SenderFallback_Legacy verifies that on the legacy path,
+// when the user mapping has no scion_email, the sender field falls back to
+// "slack:<username>". The legacy hub handleBrokerInbound uses the broker
+// identity for non-"user:" senders, and authorizeAgentMessage denies the
+// broker identity type — so this message is also denied on legacy, but it
+// reaches the hub (the adapter doesn't guard against it).
+func TestDeliverUserMessage_SenderFallback_Legacy(t *testing.T) {
 	f := newRoutedTestFixture(t)
-	f.enableRouted()
+	f.disableRouted()
 
-	// Create a user mapping without email.
 	require.NoError(t, f.store.CreateUserMapping(context.Background(), &SlackUserMapping{
 		SlackUserID:   "U-NOEMAIL",
 		SlackUsername: "slackonly",
@@ -525,23 +521,20 @@ func TestDeliverUserMessage_SenderFallback(t *testing.T) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	require.Len(t, f.routedCalls, 1)
-	assert.Equal(t, "slack:slackonly", f.routedCalls[0].Message.Sender)
+	// Legacy path sends the message — the hub will deny it via authorizeAgentMessage
+	// since "slack:" is not a "user:" sender.
+	require.Len(t, f.legacyCalls, 1)
+	assert.Equal(t, "slack:slackonly", f.legacyCalls[0].Message.Sender)
 }
 
-// TestDeliverUserMessage_RoutedSenderRejected_NoLegacyFallback proves that when
-// the hub rejects a "slack:<username>" sender (400 validation_error), the
-// adapter does NOT fall back to legacy delivery. The "slack:" prefix is a
-// legacy-era identity format; the routed endpoint requires "user:<email>".
-func TestDeliverUserMessage_RoutedSenderRejected_NoLegacyFallback(t *testing.T) {
+// TestDeliverUserMessage_RoutedNoEmail_BlockedBeforeHub verifies that on the
+// routed path, when the user mapping has no scion_email, the adapter blocks
+// the message before reaching the hub and shows an ephemeral registration
+// prompt. The hub requires "user:<email>" sender format and would reject
+// "slack:<username>" with 400.
+func TestDeliverUserMessage_RoutedNoEmail_BlockedBeforeHub(t *testing.T) {
 	f := newRoutedTestFixture(t)
 	f.enableRouted()
-
-	// Hub rejects "slack:" sender with 400.
-	f.mu.Lock()
-	f.routedStatus = http.StatusBadRequest
-	f.routedBody = `{"error":{"code":"validation_error","message":"sender must use user: prefix for mapped identity"}}`
-	f.mu.Unlock()
 
 	require.NoError(t, f.store.CreateUserMapping(context.Background(), &SlackUserMapping{
 		SlackUserID:   "U-NOEMAIL2",
@@ -550,14 +543,19 @@ func TestDeliverUserMessage_RoutedSenderRejected_NoLegacyFallback(t *testing.T) 
 		LinkedAt:      time.Now(),
 	}))
 
-	f.events().deliverUserMessage("C-TEST", "1726099200.001400", "U-NOEMAIL2", "rejected sender")
+	f.events().deliverUserMessage("C-TEST", "1726099200.001400", "U-NOEMAIL2", "blocked sender")
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	require.Len(t, f.routedCalls, 1, "routed endpoint must be called exactly once")
-	require.Len(t, f.legacyCalls, 0,
-		"must NOT fall back to legacy when hub rejects slack: sender on routed path")
+	// No hub call — the adapter blocks the message before delivery.
+	assert.Len(t, f.routedCalls, 0,
+		"routed endpoint must NOT be called for email-empty user")
+	assert.Len(t, f.legacyCalls, 0,
+		"legacy endpoint must NOT be called when routed is enabled")
+	// The adapter posts an ephemeral to the user via s.client.PostEphemeral.
+	// We can't easily assert the ephemeral content without a mock Slack client,
+	// but the absence of hub calls proves the guard fired.
 }
 
 // TestDeliverUserMessage_RoutedMixedResults_NoRetry verifies that when the hub
