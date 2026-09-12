@@ -247,6 +247,9 @@ Settings for forwarding telemetry to a cloud OTLP backend.
 | `endpoint` | string | — | Cloud OTLP endpoint URL. |
 | `protocol` | string | `grpc` | Transport protocol: `grpc` or `http`. |
 | `headers` | map | — | Additional headers for OTLP export (e.g., `Authorization`). |
+| `provider` | string | — | Cloud telemetry provider (e.g., `gcp` for GCP-native export). |
+| `gcp_project_id` | string | — | GCP project ID for Cloud Monitoring. Overrides auto-detection from SA credentials. |
+| `cloud_logging` | bool | `false` | Enable direct Cloud Logging output. `SCION_CLOUD_LOGGING` env var takes precedence. |
 | `tls.enabled` | bool | `true` | Enable TLS for the connection. |
 | `tls.insecure_skip_verify` | bool | `false` | Skip TLS certificate verification (development only). |
 | `batch.max_size` | int | `512` | Maximum spans per batch export. |

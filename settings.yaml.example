@@ -46,6 +46,8 @@ schema_version: "1"
 #     protocol: "grpc"                # "grpc" or "http"
 #     headers: {}
 #     provider: ""
+#     gcp_project_id: ""        # GCP project ID for Cloud Monitoring; overrides auto-detection
+#     cloud_logging: false       # Enable direct Cloud Logging output
 #     tls:
 #       enabled: false
 #       insecure_skip_verify: false

@@ -220,6 +220,7 @@ telemetry:
   cloud:
     enabled: true
     provider: "gcp"
+    gcp_project_id: ""        # Set to override auto-detection from SA credentials
     batch:
       max_size: 256
       timeout: "5s"

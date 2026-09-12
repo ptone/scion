@@ -69,6 +69,7 @@ func init() {
 				"telemetry.enabled",
 				"telemetry.cloud", "telemetry.cloud.enabled", "telemetry.cloud.endpoint",
 				"telemetry.cloud.protocol", "telemetry.cloud.headers", "telemetry.cloud.provider",
+				"telemetry.cloud.gcp_project_id", "telemetry.cloud.cloud_logging",
 				"telemetry.cloud.tls", "telemetry.cloud.tls.enabled", "telemetry.cloud.tls.insecure_skip_verify", "telemetry.cloud.tls.ca_file",
 				"telemetry.cloud.batch", "telemetry.cloud.batch.max_size", "telemetry.cloud.batch.timeout",
 				"telemetry.hub", "telemetry.hub.enabled", "telemetry.hub.report_interval",
