@@ -2737,11 +2737,8 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 			// route gates on authorizeAgentLifecycle, which decides
 			// ActionAttach for a user identity, so ask the same question here
 			// rather than offering a control the server will refuse.
-			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-				agentCopy := a
-				entry.CanAttach = s.authzService.CheckAccess(
-					ctx, userIdent, agentResource(&agentCopy), ActionAttach).Allowed
-			}
+			entry.CanAttach = s.authzService.CheckAccess(
+				ctx, user, agentResource(&a), ActionAttach).Allowed
 			if !a.LastSeen.IsZero() {
 				entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
 			}
