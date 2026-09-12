@@ -47,7 +47,12 @@ type agentLister interface {
 func listAllProjectAgents(ctx context.Context, lister agentLister, projectID string) ([]store.Agent, error) {
 	var all []store.Agent
 	cursor := ""
+	prevCursor := ""
 	for {
+		// Check context before each page fetch to avoid looping after cancellation.
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("listing agents for project %s: %w", projectID, err)
+		}
 		page, err := lister.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{
 			Limit:  200,
 			Cursor: cursor,
@@ -63,6 +68,11 @@ func listAllProjectAgents(ctx context.Context, lister agentLister, projectID str
 		if page.NextCursor == "" {
 			break
 		}
+		// Guard against a buggy store returning the same cursor indefinitely.
+		if page.NextCursor == prevCursor {
+			return nil, fmt.Errorf("listing agents for project %s: pagination returned repeated cursor %q", projectID, page.NextCursor)
+		}
+		prevCursor = cursor
 		cursor = page.NextCursor
 	}
 	return all, nil

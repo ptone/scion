@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -35,19 +36,27 @@ import (
 
 // routedTestEnv holds the common test fixtures for routed inbound tests.
 type routedTestEnv struct {
-	srv     *Server
-	store   store.Store
-	user    *store.User
-	project *store.Project
-	agent1  *store.Agent // "alpha" — running, project mode
-	agent2  *store.Agent // "beta" — running, project mode
-	agent3  *store.Agent // "gamma" — stopped
+	srv        *Server
+	store      store.Store
+	dispatcher *recordingDispatcher
+	user       *store.User
+	project    *store.Project
+	agent1     *store.Agent // "alpha" — running, project mode
+	agent2     *store.Agent // "beta" — running, project mode
+	agent3     *store.Agent // "gamma" — stopped
 }
 
 func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 	t.Helper()
 	srv, s := testServer(t)
 	ctx := context.Background()
+
+	// Wire a recording dispatcher so dispatch tests exercise the full path.
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	// Enable the envelope switch for DeliveryText assertions.
+	enableWriteDenySwitch(t, srv)
 
 	// Create a project owner (separate from the test sender).
 	owner := &store.User{
@@ -126,13 +135,14 @@ func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 	require.NoError(t, s.CreateAgent(ctx, agent3))
 
 	return routedTestEnv{
-		srv:     srv,
-		store:   s,
-		user:    user,
-		project: project,
-		agent1:  agent1,
-		agent2:  agent2,
-		agent3:  agent3,
+		srv:        srv,
+		store:      s,
+		dispatcher: dispatcher,
+		user:       user,
+		project:    project,
+		agent1:     agent1,
+		agent2:     agent2,
+		agent3:     agent3,
 	}
 }
 
@@ -150,6 +160,8 @@ func (e routedTestEnv) doRoutedRequest(t *testing.T, req routedInboundRequest) *
 	return rec
 }
 
+// --- Lifecycle tests (F-3): exercises dispatch → persist → SSE → affinity ---
+
 func TestHandleBrokerInboundRouted_BasicDelivery(t *testing.T) {
 	env := setupRoutedTestEnv(t)
 
@@ -166,21 +178,398 @@ func TestHandleBrokerInboundRouted_BasicDelivery(t *testing.T) {
 		},
 	})
 
-	// Dispatch will fail (no real dispatcher), but we should see 502 (runtime error)
-	// because the hub has no dispatcher wired in test mode.
-	// Let me check what status we get:
-	if rec.Code == http.StatusOK {
-		var resp routedInboundResponse
-		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		assert.True(t, resp.Delivered)
-		assert.Equal(t, "alpha", resp.PrimaryAgent)
-		assert.Len(t, resp.Results, 1)
-		assert.Equal(t, "delivered", resp.Results[0].Status)
-	} else {
-		// No dispatcher available → 503
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp routedInboundResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.True(t, resp.Delivered)
+	assert.Equal(t, "alpha", resp.PrimaryAgent)
+	require.Len(t, resp.Results, 1)
+	assert.Equal(t, "delivered", resp.Results[0].Status)
+	assert.Equal(t, "alpha", resp.Results[0].AgentSlug)
+	assert.Equal(t, "message", resp.Results[0].Type)
+	assert.NotEmpty(t, resp.Results[0].MessageID)
+
+	// Verify dispatch.
+	calls := env.dispatcher.getCalls()
+	require.Equal(t, 1, len(calls), "exactly one dispatch call expected")
+	assert.Equal(t, env.agent1.ID, calls[0].Agent.ID)
+	assert.Equal(t, "hello", calls[0].Message)
+	assert.False(t, calls[0].Interrupt)
+	require.NotNil(t, calls[0].StructuredMessage)
+	assert.Equal(t, messages.TypeInstruction, calls[0].StructuredMessage.Type)
+	assert.Equal(t, "agent:alpha", calls[0].StructuredMessage.Recipient)
+
+	// Verify persistence.
+	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
+		AgentID: env.agent1.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(msgs.Items), 1, "at least one message must be persisted")
+	persisted := msgs.Items[0]
+	assert.Equal(t, "hello", persisted.Msg)
+	assert.Equal(t, "user:"+env.user.Email, persisted.Sender)
+	assert.Equal(t, "agent:alpha", persisted.Recipient)
+	assert.Equal(t, env.agent1.ID, persisted.RecipientID)
+	assert.Equal(t, env.user.ID, persisted.SenderID)
+	assert.Equal(t, resp.Results[0].MessageID, persisted.ID)
+	assert.Equal(t, store.MessageDispatchDispatched, persisted.DispatchState)
+}
+
+func TestHandleBrokerInboundRouted_MentionRouting(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+
+	// Message with @beta mention → should route to alpha (default) + beta.
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "hello @beta",
+			Type:    messages.TypeInstruction,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp routedInboundResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.True(t, resp.Delivered)
+	assert.Equal(t, "alpha", resp.PrimaryAgent)
+	require.Len(t, resp.Results, 2)
+
+	// Primary: alpha (message type).
+	assert.Equal(t, "alpha", resp.Results[0].AgentSlug)
+	assert.Equal(t, "message", resp.Results[0].Type)
+	assert.Equal(t, "delivered", resp.Results[0].Status)
+
+	// Secondary: beta (mention type).
+	assert.Equal(t, "beta", resp.Results[1].AgentSlug)
+	assert.Equal(t, "mention", resp.Results[1].Type)
+	assert.Equal(t, "delivered", resp.Results[1].Status)
+
+	// Verify dispatch calls.
+	calls := env.dispatcher.getCalls()
+	require.Equal(t, 2, len(calls))
+	assert.Equal(t, env.agent1.ID, calls[0].Agent.ID, "first dispatch to alpha")
+	assert.Equal(t, env.agent2.ID, calls[1].Agent.ID, "second dispatch to beta")
+
+	// Primary is TypeInstruction, secondary is TypeMention.
+	assert.Equal(t, messages.TypeInstruction, calls[0].StructuredMessage.Type)
+	assert.Equal(t, messages.TypeMention, calls[1].StructuredMessage.Type)
+
+	// Verify both messages persisted.
+	for _, agentID := range []string{env.agent1.ID, env.agent2.ID} {
+		msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
+			AgentID: agentID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(msgs.Items), 1,
+			"at least one message must be persisted for agent %s", agentID)
 	}
 }
+
+func TestHandleBrokerInboundRouted_LeadingMentionOverride(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+
+	// Leading @beta overrides default alpha.
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "@beta hello",
+			Type:    messages.TypeInstruction,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp routedInboundResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "beta", resp.PrimaryAgent, "leading mention must override default")
+	require.Len(t, resp.Results, 1)
+	assert.Equal(t, "delivered", resp.Results[0].Status)
+
+	// Verify dispatch to beta, not alpha.
+	calls := env.dispatcher.getCalls()
+	require.Equal(t, 1, len(calls))
+	assert.Equal(t, env.agent2.ID, calls[0].Agent.ID)
+}
+
+func TestHandleBrokerInboundRouted_UnresolvedMentionDiagnostic(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "@unknown hello",
+			Type:    messages.TypeInstruction,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp routedInboundResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "alpha", resp.PrimaryAgent)
+	assert.Contains(t, resp.UnresolvedMentions, "unknown")
+
+	// Verify dispatch to alpha (default fallback).
+	calls := env.dispatcher.getCalls()
+	require.Equal(t, 1, len(calls))
+	assert.Equal(t, env.agent1.ID, calls[0].Agent.ID)
+}
+
+func TestHandleBrokerInboundRouted_MissingDefault_WithMention(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+
+	// No default, but @alpha is mentioned → alpha becomes primary.
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID: env.project.ID,
+		// No DefaultAgent
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "@alpha hello",
+			Type:    messages.TypeInstruction,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp routedInboundResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "alpha", resp.PrimaryAgent)
+
+	calls := env.dispatcher.getCalls()
+	require.Equal(t, 1, len(calls))
+	assert.Equal(t, env.agent1.ID, calls[0].Agent.ID)
+}
+
+func TestHandleBrokerInboundRouted_StoppedAgentPrimary(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+
+	// gamma is stopped → should fail with not_running.
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "gamma",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "hello",
+			Type:    messages.TypeInstruction,
+		},
+	})
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+
+	// No dispatch should have occurred.
+	calls := env.dispatcher.getCalls()
+	assert.Equal(t, 0, len(calls), "stopped agent must not be dispatched to")
+}
+
+func TestHandleBrokerInboundRouted_PrimaryFailureStopsFanOut(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+
+	// Make dispatcher fail for all calls.
+	env.dispatcher.returnErr = fmt.Errorf("simulated dispatch failure")
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "hello @beta",
+			Type:    messages.TypeInstruction,
+		},
+	})
+
+	// Primary dispatch failed → should return error, not 200.
+	assert.NotEqual(t, http.StatusOK, rec.Code)
+
+	// Only one dispatch attempt (the primary); secondary must be not_attempted.
+	calls := env.dispatcher.getCalls()
+	assert.Equal(t, 1, len(calls), "only primary dispatch should be attempted")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	// The response should contain results with not_attempted for secondary.
+	if errResp.Error.Details != nil {
+		if results, ok := errResp.Error.Details["results"]; ok {
+			resultsJSON, _ := json.Marshal(results)
+			assert.Contains(t, string(resultsJSON), "not_attempted",
+				"secondary agent must be not_attempted when primary fails")
+		}
+	}
+}
+
+func TestHandleBrokerInboundRouted_SecondaryFailureReported(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+
+	// Make the dispatcher succeed for alpha (first call) but fail for beta (second call).
+	callCount := 0
+	env.dispatcher.returnErr = nil // reset
+	// We need a more targeted approach. Since recordingDispatcher uses a fixed
+	// returnErr, let's stop beta so it fails at phase check instead.
+	ctx := context.Background()
+	env.agent2.Phase = string(state.PhaseStopped)
+	require.NoError(t, env.store.UpdateAgent(ctx, env.agent2))
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "hello @beta",
+			Type:    messages.TypeInstruction,
+		},
+	})
+	_ = callCount
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp routedInboundResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.True(t, resp.Delivered, "overall delivery succeeds when primary succeeds")
+	require.Len(t, resp.Results, 2)
+	assert.Equal(t, "delivered", resp.Results[0].Status, "primary must succeed")
+	assert.Equal(t, "not_running", resp.Results[1].Status, "stopped secondary reported")
+
+	// Only one dispatch call (alpha); beta never reaches dispatch.
+	calls := env.dispatcher.getCalls()
+	assert.Equal(t, 1, len(calls))
+}
+
+func TestHandleBrokerInboundRouted_InterruptStripping(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "! urgent message",
+			Type:    messages.TypeInstruction,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// Verify dispatch with stripped message and interrupt=true.
+	calls := env.dispatcher.getCalls()
+	require.Equal(t, 1, len(calls))
+	assert.Equal(t, "urgent message", calls[0].Message)
+	assert.True(t, calls[0].Interrupt, "interrupt must be set for ! prefix")
+}
+
+func TestHandleBrokerInboundRouted_IncomingMentionMetadataStripped(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "hello",
+			Type:    messages.TypeInstruction,
+			Metadata: map[string]string{
+				"mention_co_addressees": `["evil"]`,
+				"group_id":             "injected",
+				"safe_key":             "preserved",
+			},
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// Verify dispatched message has safe_key but not the stripped fields.
+	calls := env.dispatcher.getCalls()
+	require.Equal(t, 1, len(calls))
+	require.NotNil(t, calls[0].StructuredMessage)
+	meta := calls[0].StructuredMessage.Metadata
+	assert.Equal(t, "preserved", meta["safe_key"])
+	_, hasMentionCoAddr := meta["mention_co_addressees"]
+	_, hasGroupID := meta["group_id"]
+	assert.False(t, hasMentionCoAddr, "mention_co_addressees must be stripped")
+	assert.False(t, hasGroupID, "group_id must be stripped")
+}
+
+func TestHandleBrokerInboundRouted_AttachmentsDeepCopied(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version:     messages.Version,
+			Channel:     "slack",
+			Sender:      "user:" + env.user.Email,
+			Msg:         "hello @beta with attachments",
+			Type:        messages.TypeInstruction,
+			Attachments: []string{"file1.txt", "file2.txt"},
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	calls := env.dispatcher.getCalls()
+	require.Equal(t, 2, len(calls), "two dispatches: alpha + beta")
+
+	// Both recipients must have the attachments.
+	for i, call := range calls {
+		require.NotNil(t, call.StructuredMessage)
+		assert.Equal(t, []string{"file1.txt", "file2.txt"}, call.StructuredMessage.Attachments,
+			"call %d must have attachments", i)
+	}
+}
+
+func TestHandleBrokerInboundRouted_ConversationPersisted(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "conversation test",
+			Type:    messages.TypeInstruction,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// Verify persisted message has a conversation_id (Phase 5 DM resolution).
+	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
+		AgentID: env.agent1.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(msgs.Items), 1)
+	assert.NotEmpty(t, msgs.Items[0].ConversationID,
+		"persisted message must have a conversation_id from Phase 5 DM resolution")
+}
+
+// --- Validation tests (these don't need dispatcher) ---
 
 func TestHandleBrokerInboundRouted_MissingProjectID(t *testing.T) {
 	env := setupRoutedTestEnv(t)
@@ -370,26 +759,6 @@ func TestHandleBrokerInboundRouted_UnknownSender(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
-func TestHandleBrokerInboundRouted_InterruptStripping(t *testing.T) {
-	env := setupRoutedTestEnv(t)
-
-	rec := env.doRoutedRequest(t, routedInboundRequest{
-		ProjectID:    env.project.ID,
-		DefaultAgent: "alpha",
-		Message: &messages.StructuredMessage{
-			Version: messages.Version,
-			Channel: "slack",
-			Sender:  "user:" + env.user.Email,
-			Msg:     "! urgent message",
-			Type:    messages.TypeInstruction,
-		},
-	})
-
-	// Should process (503 for no dispatcher, or 200 if dispatcher present).
-	// The key thing is it doesn't reject — the "!" is stripped.
-	assert.NotEqual(t, http.StatusBadRequest, rec.Code)
-}
-
 func TestHandleBrokerInboundRouted_NoBrokerAuth(t *testing.T) {
 	env := setupRoutedTestEnv(t)
 
@@ -428,106 +797,6 @@ func TestHandleBrokerInboundRouted_MethodNotAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
 
-func TestHandleBrokerInboundRouted_MentionRouting(t *testing.T) {
-	env := setupRoutedTestEnv(t)
-
-	// Message with @beta mention → should route to alpha (default) + beta.
-	rec := env.doRoutedRequest(t, routedInboundRequest{
-		ProjectID:    env.project.ID,
-		DefaultAgent: "alpha",
-		Message: &messages.StructuredMessage{
-			Version: messages.Version,
-			Channel: "slack",
-			Sender:  "user:" + env.user.Email,
-			Msg:     "hello @beta",
-			Type:    messages.TypeInstruction,
-		},
-	})
-
-	// Without a dispatcher, expect 503.
-	if rec.Code == http.StatusServiceUnavailable {
-		return // expected: no dispatcher in test
-	}
-
-	// If a dispatcher was somehow available:
-	var resp routedInboundResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Equal(t, "alpha", resp.PrimaryAgent)
-	assert.GreaterOrEqual(t, len(resp.Results), 2)
-}
-
-func TestHandleBrokerInboundRouted_LeadingMentionOverride(t *testing.T) {
-	env := setupRoutedTestEnv(t)
-
-	// Leading @beta overrides default alpha.
-	rec := env.doRoutedRequest(t, routedInboundRequest{
-		ProjectID:    env.project.ID,
-		DefaultAgent: "alpha",
-		Message: &messages.StructuredMessage{
-			Version: messages.Version,
-			Channel: "slack",
-			Sender:  "user:" + env.user.Email,
-			Msg:     "@beta hello",
-			Type:    messages.TypeInstruction,
-		},
-	})
-
-	if rec.Code == http.StatusServiceUnavailable {
-		return
-	}
-
-	var resp routedInboundResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Equal(t, "beta", resp.PrimaryAgent)
-}
-
-func TestHandleBrokerInboundRouted_StoppedAgentPrimary(t *testing.T) {
-	env := setupRoutedTestEnv(t)
-
-	// gamma is stopped → should fail with not_running.
-	rec := env.doRoutedRequest(t, routedInboundRequest{
-		ProjectID:    env.project.ID,
-		DefaultAgent: "gamma",
-		Message: &messages.StructuredMessage{
-			Version: messages.Version,
-			Channel: "slack",
-			Sender:  "user:" + env.user.Email,
-			Msg:     "hello",
-			Type:    messages.TypeInstruction,
-		},
-	})
-
-	assert.Equal(t, http.StatusConflict, rec.Code)
-}
-
-func TestHandleBrokerInboundRouted_UnresolvedMentionDiagnostic(t *testing.T) {
-	env := setupRoutedTestEnv(t)
-
-	rec := env.doRoutedRequest(t, routedInboundRequest{
-		ProjectID:    env.project.ID,
-		DefaultAgent: "alpha",
-		Message: &messages.StructuredMessage{
-			Version: messages.Version,
-			Channel: "slack",
-			Sender:  "user:" + env.user.Email,
-			Msg:     "@unknown hello",
-			Type:    messages.TypeInstruction,
-		},
-	})
-
-	if rec.Code == http.StatusServiceUnavailable {
-		return
-	}
-
-	// Should still route to alpha (default), with "unknown" in unresolved.
-	if rec.Code == http.StatusOK {
-		var resp routedInboundResponse
-		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		assert.Equal(t, "alpha", resp.PrimaryAgent)
-		assert.Contains(t, resp.UnresolvedMentions, "unknown")
-	}
-}
-
 func TestHandleBrokerInboundRouted_EmptyBody(t *testing.T) {
 	env := setupRoutedTestEnv(t)
 
@@ -544,57 +813,4 @@ func TestHandleBrokerInboundRouted_EmptyBody(t *testing.T) {
 	})
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-}
-
-func TestHandleBrokerInboundRouted_MissingDefault_WithMention(t *testing.T) {
-	env := setupRoutedTestEnv(t)
-
-	// No default, but @alpha is mentioned → alpha becomes primary.
-	rec := env.doRoutedRequest(t, routedInboundRequest{
-		ProjectID: env.project.ID,
-		// No DefaultAgent
-		Message: &messages.StructuredMessage{
-			Version: messages.Version,
-			Channel: "slack",
-			Sender:  "user:" + env.user.Email,
-			Msg:     "@alpha hello",
-			Type:    messages.TypeInstruction,
-		},
-	})
-
-	if rec.Code == http.StatusServiceUnavailable {
-		return
-	}
-
-	if rec.Code == http.StatusOK {
-		var resp routedInboundResponse
-		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		assert.Equal(t, "alpha", resp.PrimaryAgent)
-	}
-}
-
-func TestHandleBrokerInboundRouted_IncomingMentionMetadataStripped(t *testing.T) {
-	env := setupRoutedTestEnv(t)
-
-	rec := env.doRoutedRequest(t, routedInboundRequest{
-		ProjectID:    env.project.ID,
-		DefaultAgent: "alpha",
-		Message: &messages.StructuredMessage{
-			Version: messages.Version,
-			Channel: "slack",
-			Sender:  "user:" + env.user.Email,
-			Msg:     "hello",
-			Type:    messages.TypeInstruction,
-			Metadata: map[string]string{
-				"mention_co_addressees": `["evil"]`,
-				"group_id":             "injected",
-				"safe_key":             "preserved",
-			},
-		},
-	})
-
-	// The endpoint should have stripped mention_co_addressees and group_id.
-	// We can't directly inspect the dispatched message from the test, but
-	// the endpoint should not error from the metadata.
-	assert.NotEqual(t, http.StatusBadRequest, rec.Code)
 }

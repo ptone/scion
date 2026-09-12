@@ -384,16 +384,23 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 		return
 	}
 
-	cc := &ConversationContext{
-		SlackUserID:   userID,
-		ProjectID:     link.ProjectID,
-		AgentSlug:     agentSlug,
-		LastChannelID: channelID,
-		LastThreadTS:  threadID,
-		LastMessageAt: time.Now(),
-	}
-	if err := s.store.SetConversationContext(ctx, cc); err != nil {
-		s.log.Warn("Failed to save conversation context", "error", err)
+	// Save conversation context only when we know the agent slug. When the
+	// routed path has no default agent, the hub resolves routing from mentions
+	// and the adapter does not know the primary agent until the hub responds.
+	// An empty-slug context row would be returned by GetLatestConversationContext
+	// and could misroute outbound replies.
+	if agentSlug != "" {
+		cc := &ConversationContext{
+			SlackUserID:   userID,
+			ProjectID:     link.ProjectID,
+			AgentSlug:     agentSlug,
+			LastChannelID: channelID,
+			LastThreadTS:  threadID,
+			LastMessageAt: time.Now(),
+		}
+		if err := s.store.SetConversationContext(ctx, cc); err != nil {
+			s.log.Warn("Failed to save conversation context", "error", err)
+		}
 	}
 
 	// --- Routed inbound path ---

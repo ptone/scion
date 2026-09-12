@@ -92,6 +92,10 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_broker_inbound.go", function: "handleBrokerInbound", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage at handlers_broker_inbound.go:164"},
 
+	// handlers_broker_inbound_routed.go: dispatchRoutedRecipient — guarded per-recipient.
+	{file: "handlers_broker_inbound_routed.go", function: "dispatchRoutedRecipient", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "authorizeAgentMessage called per-recipient before dispatch"},
+
 	// handlers_chat_v2.go: sendAgentRouted primary — guarded at :1125.
 	{file: "handlers_chat_v2.go", function: "sendAgentRouted", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage at handlers_chat_v2.go:1125"},

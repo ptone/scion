@@ -669,8 +669,9 @@ func TestDeliverUserMessage_RoutedTimeout_NoLegacyFallback(t *testing.T) {
 
 		resp, err := client.Do(req)
 		if err != nil {
-			// Transport/timeout error — same handling as production code.
-			return nil
+			// Transport/timeout error — matches O-5 production behavior:
+			// surface transport failures so the caller can show ephemeral feedback.
+			return &hubError{Code: "transport_error", Message: "Message delivery could not be confirmed — the service may be temporarily unavailable."}
 		}
 		defer resp.Body.Close()
 

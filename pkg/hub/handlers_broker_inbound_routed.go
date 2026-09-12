@@ -367,6 +367,16 @@ func (s *Server) dispatchRoutedRecipient(
 		return result
 	}
 
+	// --- Dispatcher availability ---
+	// Check before conversation resolution to avoid creating orphan
+	// conversation rows when no dispatcher is available.
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		result.Status = "error"
+		result.Error = "no dispatcher available"
+		return result
+	}
+
 	// --- Build structured message ---
 	var msg *messages.StructuredMessage
 	if params.isPrimary {
@@ -398,7 +408,11 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 
 	// Copy visibility, transport flags, and supported attachments.
-	msg.Attachments = params.req.Message.Attachments
+	// Deep-copy the slice so recipients don't share the underlying array.
+	if len(params.req.Message.Attachments) > 0 {
+		msg.Attachments = make([]string, len(params.req.Message.Attachments))
+		copy(msg.Attachments, params.req.Message.Attachments)
+	}
 	// Copy metadata but ensure hub-owned fields are excluded.
 	if params.req.Message.Metadata != nil {
 		if msg.Metadata == nil {
@@ -510,13 +524,6 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 
 	// --- Dispatch ---
-	dispatcher := s.GetDispatcher()
-	if dispatcher == nil {
-		result.Status = "error"
-		result.Error = "no dispatcher available"
-		return result
-	}
-
 	retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 

@@ -83,6 +83,10 @@ func (e *hubError) userFacingMessage() string {
 		return "You don't have permission to message this agent."
 	case "broker_auth_failed", "unauthorized":
 		return "Authentication error — please contact an administrator."
+	case "transport_error":
+		return "Message delivery could not be confirmed — the service may be temporarily unavailable."
+	case "local_error":
+		return "Failed to prepare your message for delivery. Please try again or contact an administrator."
 	default:
 		return "Failed to deliver message. Please try again or contact an administrator."
 	}
@@ -765,14 +769,14 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 	body, err := json.Marshal(payload)
 	if err != nil {
 		b.log.Error("Failed to marshal routed inbound message", "error", err)
-		return nil
+		return &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
 	}
 
 	routedURL := hubURL + "/api/v1/broker/inbound/routed"
 	req, err := http.NewRequest("POST", routedURL, bytes.NewReader(body))
 	if err != nil {
 		b.log.Error("Failed to create routed inbound request", "error", err)
-		return nil
+		return &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
 	}
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -781,7 +785,7 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 	if brokerID != "" && hmacKey != "" {
 		if err := signInboundRequest(req, brokerID, hmacKey); err != nil {
 			b.log.Error("Failed to sign routed inbound request", "error", err)
-			return nil
+			return &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
 		}
 	}
 
@@ -792,7 +796,10 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 	if err != nil {
 		b.log.Error("Failed to deliver routed inbound message",
 			"error", err, "project_id", projectID)
-		return nil
+		// Surface transport failures to the user. Do NOT advise retry —
+		// a timeout has uncertain delivery (the hub may have received and
+		// processed the request before the client gave up).
+		return &hubError{Code: "transport_error", Message: "Message delivery could not be confirmed — the service may be temporarily unavailable."}
 	}
 	defer resp.Body.Close()
 
