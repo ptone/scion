@@ -2,7 +2,7 @@
 
 **Author:** ca-msg-arch  
 **Date:** 2026-09-12  
-**Status:** PROPOSED  
+**Status:** IMPLEMENTED (638f8278) — REFINED by LEADING-MENTION-OVERRIDE-DESIGN.md  
 **Supersedes:** DEF-169's "mention overrides default" routing model  
 **Branch:** `scion/ca-msg-arch`
 
