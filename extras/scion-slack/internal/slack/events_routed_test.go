@@ -459,7 +459,9 @@ func TestDeliverUserMessage_RoutedEnabled_ContextNotSavedOnMalformedResponse(t *
 	f := newRoutedTestFixture(t)
 	f.enableRouted()
 
-	// Hub returns 200 with malformed body.
+	// Hub returns 200 with malformed body. deliverRoutedInbound returns
+	// nil + hubError (decode failure), so deliverUserMessage hits the
+	// he != nil path and shows ephemeral feedback. No context saved.
 	f.mu.Lock()
 	f.routedBody = `not json at all`
 	f.mu.Unlock()
@@ -467,11 +469,42 @@ func TestDeliverUserMessage_RoutedEnabled_ContextNotSavedOnMalformedResponse(t *
 	f.events().deliverUserMessage("C-TEST", "1726099200.002300", "U-SENDER", "malformed response")
 
 	ctx := context.Background()
-	// Malformed response: json.Unmarshal fails, result has zero values.
-	// delivered defaults to false, primary_agent defaults to "".
 	cc, err := f.store.GetConversationContext(ctx, "U-SENDER", "proj-001", "alpha")
 	require.NoError(t, err)
 	assert.Nil(t, cc, "context must NOT be saved on malformed response")
+
+	// No legacy fallback.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	assert.Len(t, f.legacyCalls, 0, "must NOT fall back to legacy on decode error")
+}
+
+func TestDeliverUserMessage_RoutedEnabled_ContextNotSavedOnUnmarshalTypeError(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Hub returns 200 with a duplicate key where the second value has a wrong
+	// type. json.Unmarshal may partially populate the struct (delivered=true,
+	// primary_agent="alpha") before hitting the type error on the second
+	// "delivered" key. deliverRoutedInbound must return nil + hubError rather
+	// than a partially populated result.
+	f.mu.Lock()
+	f.routedBody = `{"delivered":true,"primary_agent":"alpha","delivered":"bad"}`
+	f.mu.Unlock()
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.002500", "U-SENDER", "type error response")
+
+	ctx := context.Background()
+	// Despite partial decode having delivered=true and primary_agent="alpha",
+	// the decode error must prevent context save.
+	cc, err := f.store.GetConversationContext(ctx, "U-SENDER", "proj-001", "alpha")
+	require.NoError(t, err)
+	assert.Nil(t, cc, "context must NOT be saved when response has UnmarshalTypeError")
+
+	// No legacy fallback or retry.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	assert.Len(t, f.legacyCalls, 0, "must NOT fall back to legacy on type error")
 }
 
 func TestDeliverUserMessage_RoutedEnabled_ContextNotSavedOnEmptyObjectResponse(t *testing.T) {

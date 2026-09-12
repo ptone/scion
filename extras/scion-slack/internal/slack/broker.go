@@ -818,10 +818,20 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 	}
 
 	// Parse success response to extract primary_agent for context tracking.
+	// Treat read or decode errors as uncertain delivery: return nil result
+	// with an uncertain-result hubError so the caller never saves context
+	// from a partially populated struct.
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if readErr != nil {
+		b.log.Error("Failed to read routed inbound response body",
+			"error", readErr, "project_id", projectID)
+		return nil, &hubError{Code: "transport_error", Message: "Message delivery could not be confirmed — the service may be temporarily unavailable."}
+	}
 	var result routedInboundResult
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if len(respBody) > 0 {
-		json.Unmarshal(respBody, &result)
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		b.log.Error("Failed to decode routed inbound response",
+			"error", err, "project_id", projectID)
+		return nil, &hubError{Code: "transport_error", Message: "Message delivery could not be confirmed — the service may be temporarily unavailable."}
 	}
 	return &result, nil
 }
