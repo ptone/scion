@@ -41,12 +41,27 @@ type SlackConfig struct {
 	SocketMode    bool
 	ListenAddress string
 	DBPath        string
+
+	// RoutedInboundEnabled controls whether ordinary user messages use the
+	// centralized /api/v1/broker/inbound/routed endpoint instead of legacy
+	// /api/v1/broker/inbound. Default false; enable only against an upgraded hub.
+	RoutedInboundEnabled bool
 }
 
 // inboundPayload is the JSON body sent to the hub API inbound endpoint.
 type inboundPayload struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+}
+
+// routedInboundPayload is the JSON body sent to the hub routed inbound endpoint.
+type routedInboundPayload struct {
+	ProjectID    string                      `json:"project_id"`
+	DefaultAgent string                      `json:"default_agent,omitempty"`
+	Surface      string                      `json:"surface,omitempty"`
+	ExternalRef  string                      `json:"external_ref,omitempty"`
+	ParentRef    string                      `json:"parent_ref,omitempty"`
+	Message      *messages.StructuredMessage `json:"message"`
 }
 
 // hubError represents a structured error returned by the hub API.
@@ -232,9 +247,14 @@ func (b *SlackBroker) Configure(config map[string]string) error {
 			b.agentCacheTTL = d
 		}
 
+		if v, ok := config["routed_inbound_enabled"]; ok {
+			cfg.RoutedInboundEnabled = v == "true" || v == "1"
+		}
+
 		b.log.Info("Slack broker phase 1 configured",
 			"socket_mode", cfg.SocketMode,
 			"db_path", cfg.DBPath,
+			"routed_inbound_enabled", cfg.RoutedInboundEnabled,
 		)
 	}
 
@@ -250,14 +270,16 @@ func (b *SlackBroker) Configure(config map[string]string) error {
 		}
 
 		b.events = &eventServer{
-			client:         b.client,
-			socketClient:   b.socketClient,
-			signingSecret:  b.config.SigningSecret,
-			log:            b.log,
-			store:          b.store,
-			hubClient:      b.hubClient,
-			registration:   b.registration,
-			deliverInbound: b.deliverInbound,
+			client:               b.client,
+			socketClient:         b.socketClient,
+			signingSecret:        b.config.SigningSecret,
+			log:                  b.log,
+			store:                b.store,
+			hubClient:            b.hubClient,
+			registration:         b.registration,
+			deliverInbound:       b.deliverInbound,
+			deliverRoutedInbound: b.deliverRoutedInbound,
+			routedInboundEnabled: b.config.RoutedInboundEnabled,
 			onBotUserID: func(id string) {
 				b.mu.Lock()
 				b.botUserID = id
@@ -711,6 +733,74 @@ func (b *SlackBroker) deliverInbound(topic string, msg *messages.StructuredMessa
 		he := parseHubError(resp)
 		b.log.Error("Hub rejected inbound message",
 			"status", resp.StatusCode, "code", he.Code, "message", he.Message, "topic", topic)
+		return he
+	}
+
+	io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+// deliverRoutedInbound sends a message to the hub's centralized routed inbound
+// endpoint. This endpoint handles mention extraction and multi-agent dispatch
+// on the hub side, replacing the legacy topic-based single-agent delivery.
+func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *messages.StructuredMessage) *hubError {
+	b.mu.RLock()
+	hubURL := b.hubURL
+	hmacKey := b.hmacKey
+	brokerID := b.brokerID
+	pluginName := b.pluginName
+	b.mu.RUnlock()
+
+	if hubURL == "" {
+		b.log.Debug("No hub URL configured, dropping routed inbound message",
+			"project_id", projectID)
+		return nil
+	}
+
+	payload := routedInboundPayload{
+		ProjectID:    projectID,
+		DefaultAgent: defaultAgent,
+		Message:      msg,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		b.log.Error("Failed to marshal routed inbound message", "error", err)
+		return nil
+	}
+
+	routedURL := hubURL + "/api/v1/broker/inbound/routed"
+	req, err := http.NewRequest("POST", routedURL, bytes.NewReader(body))
+	if err != nil {
+		b.log.Error("Failed to create routed inbound request", "error", err)
+		return nil
+	}
+	req.ContentLength = int64(len(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Plugin-Name", pluginName)
+
+	if brokerID != "" && hmacKey != "" {
+		if err := signInboundRequest(req, brokerID, hmacKey); err != nil {
+			b.log.Error("Failed to sign routed inbound request", "error", err)
+			return nil
+		}
+	}
+
+	// Use a longer timeout for routed requests: the hub may fan out to up to
+	// 11 recipients sequentially (30s each), plus preparation overhead.
+	client := &http.Client{Timeout: 6 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		b.log.Error("Failed to deliver routed inbound message",
+			"error", err, "project_id", projectID)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		he := parseHubError(resp)
+		b.log.Error("Hub rejected routed inbound message",
+			"status", resp.StatusCode, "code", he.Code, "message", he.Message,
+			"project_id", projectID, "default_agent", defaultAgent)
 		return he
 	}
 

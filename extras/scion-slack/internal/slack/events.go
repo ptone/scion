@@ -35,10 +35,12 @@ type eventServer struct {
 	botUserID     string
 	onBotUserID   func(string)
 
-	store          Store
-	hubClient      HubClient
-	registration   *RegistrationHandler
-	deliverInbound func(topic string, msg *messages.StructuredMessage) *hubError
+	store                Store
+	hubClient            HubClient
+	registration         *RegistrationHandler
+	deliverInbound       func(topic string, msg *messages.StructuredMessage) *hubError
+	deliverRoutedInbound func(projectID, defaultAgent string, msg *messages.StructuredMessage) *hubError
+	routedInboundEnabled bool
 }
 
 // startHTTP begins listening for Slack events via HTTP webhooks.
@@ -377,7 +379,8 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 	}
 
 	agentSlug := link.DefaultAgent
-	if agentSlug == "" {
+	if agentSlug == "" && !s.routedInboundEnabled {
+		// Legacy path requires a default agent; routed path can derive from mentions.
 		return
 	}
 
@@ -391,6 +394,38 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 	}
 	if err := s.store.SetConversationContext(ctx, cc); err != nil {
 		s.log.Warn("Failed to save conversation context", "error", err)
+	}
+
+	// --- Routed inbound path ---
+	// When routed_inbound_enabled is true, use the centralized hub endpoint
+	// that handles mention extraction and multi-agent routing. The adapter
+	// supplies the project ID, default agent slug, and the message; the hub
+	// resolves routing. Slash-command paths remain legacy.
+	if s.routedInboundEnabled && s.deliverRoutedInbound != nil {
+		msg := &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			ThreadID:  threadID,
+			Sender:    sender,
+			SenderID:  userID,
+			Msg:       text,
+			Type:      messages.TypeInstruction,
+			Metadata: map[string]string{
+				"slack_channel_id": channelID,
+				"slack_thread_ts":  threadID,
+			},
+		}
+		if he := s.deliverRoutedInbound(link.ProjectID, agentSlug, msg); he != nil {
+			s.client.PostEphemeral(channelID, userID,
+				slackapi.MsgOptionText(he.userFacingMessage(), false))
+		}
+		return
+	}
+
+	// --- Legacy inbound path ---
+	if agentSlug == "" {
+		return
 	}
 
 	topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
