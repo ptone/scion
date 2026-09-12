@@ -550,6 +550,13 @@ export const listPageStyles = css`
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .resource-name a {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .resource-name sl-icon {

@@ -361,6 +361,7 @@ export class ScionPageProjectDetail extends LitElement {
       text-decoration: none;
       color: inherit;
       display: block;
+      overflow: hidden;
     }
 
     .agent-card:hover {
@@ -373,6 +374,15 @@ export class ScionPageProjectDetail extends LitElement {
       align-items: flex-start;
       justify-content: space-between;
       margin-bottom: 0.75rem;
+      gap: 0.5rem;
+    }
+
+    .agent-header > div:first-child {
+      min-width: 0;
+    }
+
+    .agent-header > scion-status-badge {
+      flex-shrink: 0;
     }
 
     .agent-name {
@@ -383,6 +393,13 @@ export class ScionPageProjectDetail extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.5rem;
+      min-width: 0;
+    }
+
+    .agent-name a {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .agent-name sl-icon {
@@ -2218,7 +2235,6 @@ export class ScionPageProjectDetail extends LitElement {
         <td>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
             size="small"
           ></scion-status-badge>
         </td>
@@ -2375,7 +2391,6 @@ export class ScionPageProjectDetail extends LitElement {
           </div>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
             size="small"
           ></scion-status-badge>
         </div>

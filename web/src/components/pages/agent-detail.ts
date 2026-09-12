@@ -1181,7 +1181,6 @@ export class ScionPageAgentDetail extends LitElement {
             <h1>${agent.name}</h1>
             <scion-status-badge
               status=${getAgentDisplayStatus(agent) as StatusType}
-              label=${getAgentDisplayStatus(agent)}
             ></scion-status-badge>
             <scion-message-mode-badge
               mode=${agent.messageMode || 'project'}

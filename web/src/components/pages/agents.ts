@@ -148,6 +148,17 @@ export class ScionPageAgents extends LitElement {
         align-items: flex-start;
         justify-content: space-between;
         margin-bottom: 0.75rem;
+        gap: 0.5rem;
+      }
+
+      .agent-header > div:first-child {
+        min-width: 0;
+      }
+
+      .agent-header > scion-status-badge,
+      .agent-header > scion-message-mode-badge,
+      .agent-header > scion-messageability-indicator {
+        flex-shrink: 0;
       }
 
       .agent-meta {
@@ -213,6 +224,7 @@ export class ScionPageAgents extends LitElement {
         border-radius: var(--scion-radius-lg, 0.75rem);
         padding: 1.5rem;
         transition: all var(--scion-transition-fast, 150ms ease);
+        overflow: hidden;
       }
 
       .agent-card:hover {
@@ -1312,7 +1324,6 @@ export class ScionPageAgents extends LitElement {
           </div>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
             size="small"
           >
           </scion-status-badge>
@@ -1427,7 +1438,6 @@ export class ScionPageAgents extends LitElement {
         <td>
           <scion-status-badge
             status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
             size="small"
           ></scion-status-badge>
         </td>
