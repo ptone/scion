@@ -207,14 +207,6 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// --- Prepare for dispatch ---
-	dispatcher := s.GetDispatcher()
-	if dispatcher == nil {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-			"no dispatcher available", nil)
-		return
-	}
-
 	now := time.Now().UTC()
 	primaryAgent := plan.Agents[0]
 
@@ -251,14 +243,13 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 
 	// --- Primary agent: authorize, resolve conversation, dispatch, persist ---
 	primaryResult := s.dispatchRoutedRecipient(r.Context(), dispatchRoutedParams{
-		agent:         primaryAgent,
-		isPrimary:     true,
-		sender:        senderIdentity,
-		req:           &req,
-		plan:          &plan,
-		coAddressees:  coAddressees,
-		dispatcher:    dispatcher,
-		now:           now,
+		agent:        primaryAgent,
+		isPrimary:    true,
+		sender:       senderIdentity,
+		req:          &req,
+		plan:         &plan,
+		coAddressees: coAddressees,
+		now:          now,
 	})
 	results = append(results, primaryResult)
 
@@ -295,7 +286,10 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 			// Dispatch error.
 			status := http.StatusBadGateway
 			code := ErrCodeRuntimeError
-			if primaryResult.Error != "" && strings.Contains(primaryResult.Error, "30s deadline") {
+			if primaryResult.Error == "no dispatcher available" {
+				status = http.StatusServiceUnavailable
+				code = ErrCodeUnavailable
+			} else if primaryResult.Error != "" && strings.Contains(primaryResult.Error, "30s deadline") {
 				status = http.StatusGatewayTimeout
 				code = ErrCodeBrokerTimeout
 			}
@@ -315,7 +309,6 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 			req:              &req,
 			plan:             &plan,
 			coAddressees:     coAddressees,
-			dispatcher:       dispatcher,
 			now:              now,
 			primaryRecipient: "agent:" + primaryAgent.Slug,
 		})
@@ -335,7 +328,6 @@ type dispatchRoutedParams struct {
 	req              *routedInboundRequest
 	plan             *RoutingPlan
 	coAddressees     []messaging.Addressee
-	dispatcher       AgentDispatcher
 	now              time.Time
 	primaryRecipient string // "agent:<slug>" of primary, for mention metadata
 }
@@ -518,10 +510,17 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 
 	// --- Dispatch ---
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		result.Status = "error"
+		result.Error = "no dispatcher available"
+		return result
+	}
+
 	retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	if err := dispatchWithBrokerRetry(retryCtx, params.dispatcher, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrBrokerTimeout) {
+	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrBrokerTimeout) {
 		result.Status = "error"
 		result.Error = "broker unreachable after 30s deadline"
 		return result
