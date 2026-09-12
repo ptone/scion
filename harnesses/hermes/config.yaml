@@ -45,8 +45,7 @@ model_aliases:
   extra-large: anthropic/claude-opus-4
 
 command:
-  base: ["hermes", "chat", "--yolo"]
-  resume_flag: "-c"
+  base: ["hermes", "chat", "--yolo", "-c", "scion-session", "--create-if-missing"]
   task_position: after_base_args
 
 capabilities:
