@@ -1788,6 +1788,12 @@ func (b *DiscordBroker) handleRoutedInbound(
 	// uncertain and must not be persisted. The adapter does not retry
 	// and does not fall back to legacy.
 	if result != nil && result.Delivered && result.PrimaryAgent != "" {
+		// Fresh context for the store call: the parent ctx (10s preflight)
+		// will have expired during the hub's 6-minute fan-out window.
+		// deliverRoutedInbound uses its own http.Client timeout and does
+		// not propagate ctx, so we must not reuse ctx for post-response work.
+		storeCtx, storeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer storeCancel()
 		cc := &ConversationContext{
 			DiscordUserID: senderID,
 			ProjectID:     link.ProjectID,
@@ -1795,7 +1801,7 @@ func (b *DiscordBroker) handleRoutedInbound(
 			LastChannelID: channelID,
 			LastMessageAt: time.Now(),
 		}
-		if err := store.SetConversationContext(ctx, cc); err != nil {
+		if err := store.SetConversationContext(storeCtx, cc); err != nil {
 			b.log.Warn("Failed to save conversation context", "error", err)
 		}
 	} else if result == nil || !result.Delivered {

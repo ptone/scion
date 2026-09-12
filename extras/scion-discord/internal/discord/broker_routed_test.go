@@ -44,8 +44,9 @@ type discordRoutedFixture struct {
 	hubServer *httptest.Server
 
 	// Response overrides (default: 200 OK with delivered+primary_agent).
-	routedStatus int
-	routedBody   string
+	routedStatus          int
+	routedBody            string
+	routedHandlerOverride http.HandlerFunc // if set, replaces default routed handler
 
 	// Discord session stub.
 	session *discordgo.Session
@@ -106,9 +107,17 @@ func newDiscordRoutedFixture(t *testing.T) *discordRoutedFixture {
 		f.mu.Lock()
 		f.routedCalls = append(f.routedCalls, p)
 		f.routedRawBodies = append(f.routedRawBodies, json.RawMessage(body))
+		override := f.routedHandlerOverride
 		status := f.routedStatus
 		respBody := f.routedBody
 		f.mu.Unlock()
+
+		// Allow per-test handler override (e.g. to inject delays).
+		if override != nil {
+			override(w, r)
+			return
+		}
+
 		w.WriteHeader(status)
 		if respBody != "" {
 			w.Write([]byte(respBody))
@@ -171,6 +180,14 @@ func (f *discordRoutedFixture) disableRouted() {
 	f.broker.mu.Lock()
 	f.broker.config.RoutedInboundEnabled = false
 	f.broker.mu.Unlock()
+}
+
+// setRoutedHandler replaces the default routed endpoint handler, allowing
+// per-test behavior (e.g. injecting delays to simulate slow hub responses).
+func (f *discordRoutedFixture) setRoutedHandler(fn http.HandlerFunc) {
+	f.mu.Lock()
+	f.routedHandlerOverride = fn
+	f.mu.Unlock()
 }
 
 // simulateMessage builds a discordgo.MessageCreate and passes it to the
@@ -588,6 +605,73 @@ func TestRoutedEnabled_ContextNotSavedOnEmptyObjectResponse(t *testing.T) {
 	cc, err := f.store.GetConversationContext(ctx, "U-SENDER", "proj-001", "alpha")
 	require.NoError(t, err)
 	assert.Nil(t, cc, "context must NOT be saved when hub returns empty JSON object")
+}
+
+// --- R-1 regression: context save after expired preflight context ---
+
+// TestRoutedEnabled_ContextSavedAfterPreflightExpiry is the regression test for
+// R-1: the 10-second preflight context created in handleIncomingMessage must NOT
+// be reused for the store.SetConversationContext call after deliverRoutedInbound
+// returns. deliverRoutedInbound uses its own 6-minute http.Client timeout, so
+// the original context will be expired on slow hub responses.
+//
+// This test calls handleRoutedInbound directly with an already-cancelled context,
+// simulating the worst case (preflight expired before the hub even responds).
+// The fix creates a fresh bounded context for the store call, so the save must
+// succeed despite the expired parent.
+func TestRoutedEnabled_ContextSavedAfterPreflightExpiry(t *testing.T) {
+	f := newDiscordRoutedFixture(t)
+	f.enableRouted()
+
+	// Replace the default hub handler with one that sleeps just long enough for
+	// the caller's 50ms context to expire, then responds with a successful
+	// delivery. deliverRoutedInbound creates its own http.Client (6-min timeout)
+	// and does NOT propagate the parent ctx to the HTTP call, so the request
+	// itself succeeds even though the parent ctx is long expired by return time.
+	f.setRoutedHandler(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond) // outlive the 50ms parent context
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"delivered":     true,
+			"primary_agent": "alpha",
+		})
+	})
+
+	// Use a very short-lived context: valid when handleRoutedInbound starts
+	// (so GetUserMapping succeeds), but guaranteed expired by the time
+	// deliverRoutedInbound returns after the 100ms hub delay.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	link := &ChannelLink{
+		ChannelID:    "C-TEST",
+		GuildID:      "G-TEST",
+		ProjectID:    "proj-001",
+		ProjectSlug:  "test-project",
+		DefaultAgent: "alpha",
+		Active:       true,
+	}
+	m := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg-r1-regression",
+			ChannelID: "C-TEST",
+			GuildID:   "G-TEST",
+			Content:   "preflight expiry regression",
+			Author:    &discordgo.User{ID: "U-SENDER", Username: "testuser"},
+			Timestamp: time.Now(),
+			Type:      discordgo.MessageTypeDefault,
+		},
+	}
+
+	f.broker.handleRoutedInbound(ctx, f.session, m, f.store, link, "C-TEST", "BOT123", "alpha")
+
+	// The context save must succeed despite the expired parent ctx, because
+	// handleRoutedInbound now creates a fresh bounded context for the store call.
+	checkCtx := context.Background()
+	cc, err := f.store.GetConversationContext(checkCtx, "U-SENDER", "proj-001", "alpha")
+	require.NoError(t, err)
+	require.NotNil(t, cc, "conversation context must be saved even when preflight context is expired (R-1 regression)")
+	assert.Equal(t, "C-TEST", cc.LastChannelID)
 }
 
 // --- Sender identity / unregistered / email-empty ---
