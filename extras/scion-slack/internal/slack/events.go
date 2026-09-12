@@ -39,7 +39,7 @@ type eventServer struct {
 	hubClient            HubClient
 	registration         *RegistrationHandler
 	deliverInbound       func(topic string, msg *messages.StructuredMessage) *hubError
-	deliverRoutedInbound func(projectID, defaultAgent string, msg *messages.StructuredMessage) *hubError
+	deliverRoutedInbound func(projectID, defaultAgent string, msg *messages.StructuredMessage) (*routedInboundResult, *hubError)
 	routedInboundEnabled bool
 }
 
@@ -384,25 +384,6 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 		return
 	}
 
-	// Save conversation context only when we know the agent slug. When the
-	// routed path has no default agent, the hub resolves routing from mentions
-	// and the adapter does not know the primary agent until the hub responds.
-	// An empty-slug context row would be returned by GetLatestConversationContext
-	// and could misroute outbound replies.
-	if agentSlug != "" {
-		cc := &ConversationContext{
-			SlackUserID:   userID,
-			ProjectID:     link.ProjectID,
-			AgentSlug:     agentSlug,
-			LastChannelID: channelID,
-			LastThreadTS:  threadID,
-			LastMessageAt: time.Now(),
-		}
-		if err := s.store.SetConversationContext(ctx, cc); err != nil {
-			s.log.Warn("Failed to save conversation context", "error", err)
-		}
-	}
-
 	// --- Routed inbound path ---
 	// When routed_inbound_enabled is true, use the centralized hub endpoint
 	// that handles mention extraction and multi-agent routing. The adapter
@@ -437,11 +418,56 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 				"slack_thread_ts":  threadID,
 			},
 		}
-		if he := s.deliverRoutedInbound(link.ProjectID, agentSlug, msg); he != nil {
+		result, he := s.deliverRoutedInbound(link.ProjectID, agentSlug, msg)
+		if he != nil {
 			s.client.PostEphemeral(channelID, userID,
 				slackapi.MsgOptionText(he.userFacingMessage(), false))
+			return
+		}
+
+		// Save conversation context using the hub's confirmed primary_agent
+		// rather than the configured default. When a leading mention overrides
+		// the default (e.g. @beta overrides "alpha"), the hub's primary_agent
+		// reflects the actual routing outcome.
+		contextSlug := ""
+		if result != nil && result.Delivered && result.PrimaryAgent != "" {
+			contextSlug = result.PrimaryAgent
+		} else if agentSlug != "" {
+			// Fallback to configured default when the hub doesn't report a
+			// primary (e.g. nil result from no-hub-url path).
+			contextSlug = agentSlug
+		}
+		if contextSlug != "" {
+			cc := &ConversationContext{
+				SlackUserID:   userID,
+				ProjectID:     link.ProjectID,
+				AgentSlug:     contextSlug,
+				LastChannelID: channelID,
+				LastThreadTS:  threadID,
+				LastMessageAt: time.Now(),
+			}
+			if err := s.store.SetConversationContext(ctx, cc); err != nil {
+				s.log.Warn("Failed to save conversation context", "error", err)
+			}
 		}
 		return
+	}
+
+	// --- Legacy inbound path ---
+	// Save conversation context with the configured default before delivery.
+	// Legacy behavior: always saves with the configured default slug.
+	if agentSlug != "" {
+		cc := &ConversationContext{
+			SlackUserID:   userID,
+			ProjectID:     link.ProjectID,
+			AgentSlug:     agentSlug,
+			LastChannelID: channelID,
+			LastThreadTS:  threadID,
+			LastMessageAt: time.Now(),
+		}
+		if err := s.store.SetConversationContext(ctx, cc); err != nil {
+			s.log.Warn("Failed to save conversation context", "error", err)
+		}
 	}
 
 	// --- Legacy inbound path ---

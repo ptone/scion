@@ -233,6 +233,8 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	if req.Message.Metadata != nil {
 		delete(req.Message.Metadata, "mention_co_addressees")
 		delete(req.Message.Metadata, "group_id")
+		delete(req.Message.Metadata, "mention_source")
+		delete(req.Message.Metadata, "mention_position")
 	}
 
 	// Build co-addressees for envelope rendering (when multiple recipients).
@@ -400,6 +402,9 @@ func (s *Server) dispatchRoutedRecipient(
 			params.req.Message.Msg,
 			params.primaryRecipient,
 		)
+		// Override NewMention's time.Now() with the shared arrival timestamp
+		// so all recipients see one consistent arrival time (design step 6).
+		msg.Timestamp = params.now.Format(time.RFC3339)
 		msg.SenderID = params.req.Message.SenderID
 		msg.RecipientID = agent.ID
 		msg.Urgent = params.req.Message.Urgent
@@ -419,7 +424,8 @@ func (s *Server) dispatchRoutedRecipient(
 			msg.Metadata = make(map[string]string)
 		}
 		for k, v := range params.req.Message.Metadata {
-			if k == "mention_co_addressees" || k == "group_id" {
+			switch k {
+			case "mention_co_addressees", "group_id", "mention_source", "mention_position":
 				continue
 			}
 			msg.Metadata[k] = v

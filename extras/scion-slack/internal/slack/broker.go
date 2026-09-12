@@ -64,6 +64,12 @@ type routedInboundPayload struct {
 	Message      *messages.StructuredMessage `json:"message"`
 }
 
+// routedInboundResult is the success response from the hub routed endpoint.
+type routedInboundResult struct {
+	Delivered    bool   `json:"delivered"`
+	PrimaryAgent string `json:"primary_agent"`
+}
+
 // hubError represents a structured error returned by the hub API.
 type hubError struct {
 	StatusCode int
@@ -747,7 +753,7 @@ func (b *SlackBroker) deliverInbound(topic string, msg *messages.StructuredMessa
 // deliverRoutedInbound sends a message to the hub's centralized routed inbound
 // endpoint. This endpoint handles mention extraction and multi-agent dispatch
 // on the hub side, replacing the legacy topic-based single-agent delivery.
-func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *messages.StructuredMessage) *hubError {
+func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *messages.StructuredMessage) (*routedInboundResult, *hubError) {
 	b.mu.RLock()
 	hubURL := b.hubURL
 	hmacKey := b.hmacKey
@@ -758,7 +764,7 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 	if hubURL == "" {
 		b.log.Debug("No hub URL configured, dropping routed inbound message",
 			"project_id", projectID)
-		return nil
+		return nil, nil
 	}
 
 	payload := routedInboundPayload{
@@ -769,14 +775,14 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 	body, err := json.Marshal(payload)
 	if err != nil {
 		b.log.Error("Failed to marshal routed inbound message", "error", err)
-		return &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
+		return nil, &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
 	}
 
 	routedURL := hubURL + "/api/v1/broker/inbound/routed"
 	req, err := http.NewRequest("POST", routedURL, bytes.NewReader(body))
 	if err != nil {
 		b.log.Error("Failed to create routed inbound request", "error", err)
-		return &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
+		return nil, &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
 	}
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -785,7 +791,7 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 	if brokerID != "" && hmacKey != "" {
 		if err := signInboundRequest(req, brokerID, hmacKey); err != nil {
 			b.log.Error("Failed to sign routed inbound request", "error", err)
-			return &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
+			return nil, &hubError{Code: "local_error", Message: "Failed to prepare message for delivery."}
 		}
 	}
 
@@ -799,7 +805,7 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 		// Surface transport failures to the user. Do NOT advise retry —
 		// a timeout has uncertain delivery (the hub may have received and
 		// processed the request before the client gave up).
-		return &hubError{Code: "transport_error", Message: "Message delivery could not be confirmed — the service may be temporarily unavailable."}
+		return nil, &hubError{Code: "transport_error", Message: "Message delivery could not be confirmed — the service may be temporarily unavailable."}
 	}
 	defer resp.Body.Close()
 
@@ -808,11 +814,16 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 		b.log.Error("Hub rejected routed inbound message",
 			"status", resp.StatusCode, "code", he.Code, "message", he.Message,
 			"project_id", projectID, "default_agent", defaultAgent)
-		return he
+		return nil, he
 	}
 
-	io.Copy(io.Discard, resp.Body)
-	return nil
+	// Parse success response to extract primary_agent for context tracking.
+	var result routedInboundResult
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if len(respBody) > 0 {
+		json.Unmarshal(respBody, &result)
+	}
+	return &result, nil
 }
 
 // --- Agent cache ---

@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -36,14 +38,15 @@ import (
 
 // routedTestEnv holds the common test fixtures for routed inbound tests.
 type routedTestEnv struct {
-	srv        *Server
-	store      store.Store
-	dispatcher *recordingDispatcher
-	user       *store.User
-	project    *store.Project
-	agent1     *store.Agent // "alpha" — running, project mode
-	agent2     *store.Agent // "beta" — running, project mode
-	agent3     *store.Agent // "gamma" — stopped
+	srv          *Server
+	store        store.Store
+	dispatcher   *recordingDispatcher
+	webChatStore WebChatStore
+	user         *store.User
+	project      *store.Project
+	agent1       *store.Agent // "alpha" — running, project mode
+	agent2       *store.Agent // "beta" — running, project mode
+	agent3       *store.Agent // "gamma" — stopped
 }
 
 func setupRoutedTestEnv(t *testing.T) routedTestEnv {
@@ -57,6 +60,14 @@ func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 
 	// Enable the envelope switch for DeliveryText assertions.
 	enableWriteDenySwitch(t, srv)
+
+	// Wire webChatStore for reply affinity assertions.
+	wcsDB, err := sql.Open("sqlite3", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = wcsDB.Close() })
+	wcs := NewWebChatStore(wcsDB, "sqlite3")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
 
 	// Create a project owner (separate from the test sender).
 	owner := &store.User{
@@ -135,14 +146,15 @@ func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 	require.NoError(t, s.CreateAgent(ctx, agent3))
 
 	return routedTestEnv{
-		srv:        srv,
-		store:      s,
-		dispatcher: dispatcher,
-		user:       user,
-		project:    project,
-		agent1:     agent1,
-		agent2:     agent2,
-		agent3:     agent3,
+		srv:          srv,
+		store:        s,
+		dispatcher:   dispatcher,
+		webChatStore: wcs,
+		user:         user,
+		project:      project,
+		agent1:       agent1,
+		agent2:       agent2,
+		agent3:       agent3,
 	}
 }
 
@@ -214,6 +226,12 @@ func TestHandleBrokerInboundRouted_BasicDelivery(t *testing.T) {
 	assert.Equal(t, env.user.ID, persisted.SenderID)
 	assert.Equal(t, resp.Results[0].MessageID, persisted.ID)
 	assert.Equal(t, store.MessageDispatchDispatched, persisted.DispatchState)
+
+	// Verify reply affinity recorded.
+	ch, err := env.webChatStore.GetLastChannel(context.Background(),
+		env.user.ID, env.project.ID, env.agent1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "slack", ch, "reply affinity channel must be recorded")
 }
 
 func TestHandleBrokerInboundRouted_MentionRouting(t *testing.T) {
@@ -260,14 +278,33 @@ func TestHandleBrokerInboundRouted_MentionRouting(t *testing.T) {
 	assert.Equal(t, messages.TypeInstruction, calls[0].StructuredMessage.Type)
 	assert.Equal(t, messages.TypeMention, calls[1].StructuredMessage.Type)
 
-	// Verify both messages persisted.
-	for _, agentID := range []string{env.agent1.ID, env.agent2.ID} {
+	// Secondary must have co-addressees metadata indicating the primary.
+	require.NotNil(t, calls[1].StructuredMessage.Metadata)
+	assert.Equal(t, "agent:alpha", calls[1].StructuredMessage.Metadata["mention_source"],
+		"secondary must have mention_source pointing to primary")
+
+	// Verify per-recipient message ID equality: response ID matches persisted row.
+	for i, agentID := range []string{env.agent1.ID, env.agent2.ID} {
 		msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
 			AgentID: agentID,
 		}, store.ListOptions{Limit: 10})
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, len(msgs.Items), 1,
 			"at least one message must be persisted for agent %s", agentID)
+		persisted := msgs.Items[0]
+		assert.Equal(t, resp.Results[i].MessageID, persisted.ID,
+			"response message ID must match persisted row for result %d", i)
+		assert.NotEmpty(t, persisted.ConversationID,
+			"persisted message must have conversation_id for agent %s", agentID)
+	}
+
+	// Verify reply affinity recorded for both successful recipients.
+	for _, agentID := range []string{env.agent1.ID, env.agent2.ID} {
+		ch, err := env.webChatStore.GetLastChannel(context.Background(),
+			env.user.ID, env.project.ID, agentID)
+		require.NoError(t, err)
+		assert.Equal(t, "slack", ch,
+			"reply affinity channel must be recorded for agent %s", agentID)
 	}
 }
 
@@ -453,6 +490,17 @@ func TestHandleBrokerInboundRouted_SecondaryFailureReported(t *testing.T) {
 	// Only one dispatch call (alpha); beta never reaches dispatch.
 	calls := env.dispatcher.getCalls()
 	assert.Equal(t, 1, len(calls))
+
+	// Verify reply affinity: alpha (success) has affinity, beta (failed) does not.
+	chAlpha, err := env.webChatStore.GetLastChannel(ctx,
+		env.user.ID, env.project.ID, env.agent1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "slack", chAlpha, "successful recipient must have affinity")
+
+	chBeta, err := env.webChatStore.GetLastChannel(ctx,
+		env.user.ID, env.project.ID, env.agent2.ID)
+	require.NoError(t, err)
+	assert.Empty(t, chBeta, "failed recipient must NOT have affinity")
 }
 
 func TestHandleBrokerInboundRouted_InterruptStripping(t *testing.T) {
@@ -494,6 +542,8 @@ func TestHandleBrokerInboundRouted_IncomingMentionMetadataStripped(t *testing.T)
 			Metadata: map[string]string{
 				"mention_co_addressees": `["evil"]`,
 				"group_id":             "injected",
+				"mention_source":       "injected:source",
+				"mention_position":     "injected:position",
 				"safe_key":             "preserved",
 			},
 		},
@@ -509,8 +559,12 @@ func TestHandleBrokerInboundRouted_IncomingMentionMetadataStripped(t *testing.T)
 	assert.Equal(t, "preserved", meta["safe_key"])
 	_, hasMentionCoAddr := meta["mention_co_addressees"]
 	_, hasGroupID := meta["group_id"]
+	_, hasMentionSource := meta["mention_source"]
+	_, hasMentionPosition := meta["mention_position"]
 	assert.False(t, hasMentionCoAddr, "mention_co_addressees must be stripped")
 	assert.False(t, hasGroupID, "group_id must be stripped")
+	assert.False(t, hasMentionSource, "mention_source must be stripped from primary")
+	assert.False(t, hasMentionPosition, "mention_position must be stripped from primary")
 }
 
 func TestHandleBrokerInboundRouted_AttachmentsDeepCopied(t *testing.T) {

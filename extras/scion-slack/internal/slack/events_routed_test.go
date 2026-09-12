@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -97,7 +98,9 @@ func newRoutedTestFixture(t *testing.T) *routedTestFixture {
 		if respBody != "" {
 			w.Write([]byte(respBody))
 		} else {
-			w.Write([]byte(`{"delivered":true}`))
+			// Default: successful delivery with primary_agent from the request.
+			defaultResp := fmt.Sprintf(`{"delivered":true,"primary_agent":%q}`, p.DefaultAgent)
+			w.Write([]byte(defaultResp))
 		}
 	})
 	f.hubServer = httptest.NewServer(mux)
@@ -341,6 +344,80 @@ func TestDeliverUserMessage_RoutedEnabled_ConversationContextSaved(t *testing.T)
 	require.NotNil(t, cc)
 	assert.Equal(t, "C-TEST", cc.LastChannelID)
 	assert.Equal(t, "1726099200.000700", cc.LastThreadTS)
+}
+
+func TestDeliverUserMessage_RoutedEnabled_ContextUsesRoutedPrimary(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Hub returns primary_agent="beta" (leading mention overrides default "alpha").
+	f.mu.Lock()
+	f.routedBody = `{"delivered":true,"primary_agent":"beta"}`
+	f.mu.Unlock()
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.001800", "U-SENDER", "@beta hello")
+
+	// Context must be saved with the routed primary "beta", not the configured default "alpha".
+	ctx := context.Background()
+	cc, err := f.store.GetConversationContext(ctx, "U-SENDER", "proj-001", "beta")
+	require.NoError(t, err)
+	require.NotNil(t, cc, "context must be saved with hub's primary_agent")
+	assert.Equal(t, "C-TEST", cc.LastChannelID)
+	assert.Equal(t, "1726099200.001800", cc.LastThreadTS)
+
+	// Verify no context was saved for the configured default "alpha".
+	ccAlpha, err := f.store.GetConversationContext(ctx, "U-SENDER", "proj-001", "alpha")
+	require.NoError(t, err)
+	assert.Nil(t, ccAlpha, "context must NOT be saved for the overridden default")
+}
+
+func TestDeliverUserMessage_RoutedEnabled_ContextNoDefault_UsesPrimary(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Create channel with no default agent.
+	require.NoError(t, f.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ChannelID:    "C-NODEFAULT3",
+		TeamID:       "T-TEAM",
+		ProjectID:    "proj-005",
+		DefaultAgent: "",
+		LinkedBy:     "test",
+		LinkedAt:     time.Now(),
+		Active:       true,
+	}))
+
+	// Hub returns primary_agent="gamma" (resolved from mention).
+	f.mu.Lock()
+	f.routedBody = `{"delivered":true,"primary_agent":"gamma"}`
+	f.mu.Unlock()
+
+	f.events().deliverUserMessage("C-NODEFAULT3", "1726099200.001900", "U-SENDER", "@gamma help me")
+
+	// Context saved with hub's primary_agent even though no default was configured.
+	ctx := context.Background()
+	cc, err := f.store.GetConversationContext(ctx, "U-SENDER", "proj-005", "gamma")
+	require.NoError(t, err)
+	require.NotNil(t, cc, "context must be saved with hub's primary_agent when no default")
+	assert.Equal(t, "C-NODEFAULT3", cc.LastChannelID)
+}
+
+func TestDeliverUserMessage_RoutedEnabled_ContextNotSavedOnFailure(t *testing.T) {
+	f := newRoutedTestFixture(t)
+	f.enableRouted()
+
+	// Hub returns error.
+	f.mu.Lock()
+	f.routedStatus = http.StatusConflict
+	f.routedBody = `{"error":{"code":"agent_not_running","message":"primary agent is stopped"}}`
+	f.mu.Unlock()
+
+	f.events().deliverUserMessage("C-TEST", "1726099200.002000", "U-SENDER", "should fail")
+
+	// No context should be saved on delivery failure.
+	ctx := context.Background()
+	cc, err := f.store.GetConversationContext(ctx, "U-SENDER", "proj-001", "alpha")
+	require.NoError(t, err)
+	assert.Nil(t, cc, "context must NOT be saved when delivery fails")
 }
 
 func TestDeliverUserMessage_UnknownChannel_NoCalls(t *testing.T) {
@@ -646,7 +723,7 @@ func TestDeliverUserMessage_RoutedTimeout_NoLegacyFallback(t *testing.T) {
 	// a short timeout — consistent with the production code path but bounded for
 	// testing.
 	es := f.events()
-	es.deliverRoutedInbound = func(projectID, defaultAgent string, msg *messages.StructuredMessage) *hubError {
+	es.deliverRoutedInbound = func(projectID, defaultAgent string, msg *messages.StructuredMessage) (*routedInboundResult, *hubError) {
 		calledMu.Lock()
 		called++
 		calledMu.Unlock()
@@ -658,7 +735,7 @@ func TestDeliverUserMessage_RoutedTimeout_NoLegacyFallback(t *testing.T) {
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
-			return nil
+			return nil, nil
 		}
 
 		// Short timeout: 200ms instead of 6 minutes.
@@ -671,15 +748,15 @@ func TestDeliverUserMessage_RoutedTimeout_NoLegacyFallback(t *testing.T) {
 		if err != nil {
 			// Transport/timeout error — matches O-5 production behavior:
 			// surface transport failures so the caller can show ephemeral feedback.
-			return &hubError{Code: "transport_error", Message: "Message delivery could not be confirmed — the service may be temporarily unavailable."}
+			return nil, &hubError{Code: "transport_error", Message: "Message delivery could not be confirmed — the service may be temporarily unavailable."}
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode >= 400 {
-			return parseHubError(resp)
+			return nil, parseHubError(resp)
 		}
 		io.Copy(io.Discard, resp.Body)
-		return nil
+		return &routedInboundResult{Delivered: true, PrimaryAgent: defaultAgent}, nil
 	}
 
 	f.events().deliverUserMessage("C-TEST", "1726099200.001700", "U-SENDER", "timeout test")
