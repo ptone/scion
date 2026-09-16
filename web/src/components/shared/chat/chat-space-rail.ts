@@ -2544,20 +2544,22 @@ export class ScionChatSpaceRail extends LitElement {
         ${
           !thread.isGeneral
             ? html`
-                ${this.getGroups(projectId).map(
-                  (group) => html`
-                    <div
-                      class="context-menu-item"
-                      @click=${() => {
-                        this.contextMenuTarget = null;
-                        void this.moveThreadToGroup(thread.id, group.id, projectId);
-                      }}
-                    >
-                      <sl-icon name="folder"></sl-icon>
-                      Move to ${group.name}
-                    </div>
-                  `
-                )}
+                ${this.getGroups(projectId)
+                  .filter((g) => !g.threadIds.includes(thread.id))
+                  .map(
+                    (group) => html`
+                      <div
+                        class="context-menu-item"
+                        @click=${() => {
+                          this.contextMenuTarget = null;
+                          void this.moveThreadToGroup(thread.id, group.id, projectId);
+                        }}
+                      >
+                        <sl-icon name="folder"></sl-icon>
+                        Move to ${group.name}
+                      </div>
+                    `
+                  )}
                 ${
                   this.getGroups(projectId).some((g) => g.threadIds.includes(thread.id))
                     ? html`
