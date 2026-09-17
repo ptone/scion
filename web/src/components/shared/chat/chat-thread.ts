@@ -1322,6 +1322,14 @@ export class ScionChatThread extends LitElement {
     // indicator now rather than waiting out TYPING_EXPIRY_MS.
     this.clearTypingForUser(eventData.senderId);
 
+    // Skip mention fan-out duplicates — these are dispatch-internal artifacts
+    // created for each @-mentioned agent. The primary "instruction" message
+    // already contains the full content. "mention-reply" and other types are
+    // intentionally kept.
+    if (eventData.type === 'mention') {
+      return;
+    }
+
     // If the event carries a full message payload, merge directly instead of
     // doing a round-trip backfill.
     // SSE events from PublishUserMessage carry the full message payload.

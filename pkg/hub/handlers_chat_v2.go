@@ -1965,6 +1965,21 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		result.Items = []store.Message{}
 	}
 
+	// Filter out mention fan-out duplicates — only the primary
+	// "instruction" message should appear in the user-facing history.
+	// The "mention" rows are dispatch-internal artifacts created by
+	// sendAgentRouted for each @-mentioned agent beyond the primary
+	// recipient. Agent replies to mentions come back as separate
+	// "mention-reply" messages which are intentionally kept.
+	filtered := make([]store.Message, 0, len(result.Items))
+	for _, msg := range result.Items {
+		if msg.Type == "mention" {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	result.Items = filtered
+
 	// W7: Enrich messages with attachment metadata using a single batch
 	// query (R3 — avoids N+1 per-message queries on history pages).
 	var messageAttachments map[string][]AttachmentRef
