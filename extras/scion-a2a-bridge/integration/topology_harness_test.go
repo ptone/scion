@@ -28,16 +28,16 @@ import (
 )
 
 const (
-	helperModeEnv      = "SCION_INTEGRATION_HELPER_MODE"
-	helperAddressEnv   = "SCION_INTEGRATION_HELPER_ADDRESS"
-	helperReplicaIDEnv = "SCION_INTEGRATION_HELPER_REPLICA_ID"
+	helperModeEnv       = "SCION_INTEGRATION_HELPER_MODE"
+	helperAddressEnv    = "SCION_INTEGRATION_HELPER_ADDRESS"
+	helperReplicaIDEnv  = "SCION_INTEGRATION_HELPER_REPLICA_ID"
+	helperListenerFDEnv = "SCION_INTEGRATION_HELPER_LISTENER_FD"
 )
 
 type processSpec struct {
 	Name      string
 	Mode      string
 	ReplicaID string
-	Port      int
 	Env       map[string]string
 }
 
@@ -63,7 +63,7 @@ type processTopology struct {
 	stopOnce     sync.Once
 }
 
-func newProcessTopology(t *testing.T, firstPort int, redactor *credentialRedactor) *processTopology {
+func newProcessTopology(t *testing.T, redactor *credentialRedactor) *processTopology {
 	t.Helper()
 	if redactor == nil {
 		redactor = newCredentialRedactor()
@@ -72,7 +72,7 @@ func newProcessTopology(t *testing.T, firstPort int, redactor *credentialRedacto
 	topology := &processTopology{
 		ctx:          ctx,
 		cancel:       cancel,
-		allocator:    newLoopbackPortAllocator(firstPort, firstPort+100),
+		allocator:    newLoopbackPortAllocator(),
 		logs:         newSanitizedWriter(redactor),
 		observations: newObservationRecorder(redactor),
 	}
@@ -82,25 +82,22 @@ func newProcessTopology(t *testing.T, firstPort int, redactor *credentialRedacto
 
 func (t *processTopology) start(tb testing.TB, spec processSpec) *testProcess {
 	tb.Helper()
-	port := spec.Port
-	if port == 0 {
-		var err error
-		port, err = t.allocator.reserve()
-		if err != nil {
-			tb.Fatalf("reserve port for %s: %v", spec.Name, err)
-		}
-		// The helper process cannot inherit arbitrary production listeners, so keep the
-		// deterministic reservation until immediately before starting the child.
-		if err := t.allocator.release(port); err != nil {
-			tb.Fatalf("release port for %s: %v", spec.Name, err)
-		}
+	port, err := t.allocator.reserve()
+	if err != nil {
+		tb.Fatalf("reserve port for %s: %v", spec.Name, err)
+	}
+	listenerFile, err := t.allocator.listenerFile(port)
+	if err != nil {
+		tb.Fatalf("inherit listener for %s: %v", spec.Name, err)
 	}
 
 	cmd := exec.CommandContext(t.ctx, os.Args[0], "-test.run=^TestHarnessHelperProcess$", "-test.v")
+	cmd.ExtraFiles = []*os.File{listenerFile}
 	cmd.Env = append(os.Environ(),
 		helperModeEnv+"="+spec.Mode,
 		helperAddressEnv+"=127.0.0.1:"+strconv.Itoa(port),
 		helperReplicaIDEnv+"="+spec.ReplicaID,
+		helperListenerFDEnv+"=3",
 	)
 	for key, value := range spec.Env {
 		cmd.Env = append(cmd.Env, key+"="+value)
@@ -108,7 +105,14 @@ func (t *processTopology) start(tb testing.TB, spec processSpec) *testProcess {
 	cmd.Stdout = t.logs
 	cmd.Stderr = t.logs
 	if err := cmd.Start(); err != nil {
+		_ = listenerFile.Close()
 		tb.Fatalf("start %s: %v", spec.Name, err)
+	}
+	if err := listenerFile.Close(); err != nil {
+		tb.Fatalf("close inherited-listener copy for %s: %v", spec.Name, err)
+	}
+	if err := t.allocator.release(port); err != nil {
+		tb.Fatalf("release parent listener for %s: %v", spec.Name, err)
 	}
 	process := &testProcess{Name: spec.Name, PID: cmd.Process.Pid, Port: port, cmd: cmd}
 	t.processes = append(t.processes, process)
@@ -116,6 +120,7 @@ func (t *processTopology) start(tb testing.TB, spec processSpec) *testProcess {
 		tb.Fatalf("wait for %s readiness (PID %d): %v\nlogs:\n%s", spec.Name, process.PID, err, t.logs.String())
 	}
 	process.Ready = true
+	tb.Logf("helper ready name=%s pid=%d port=%d", process.Name, process.PID, process.Port)
 	t.observations.record(observation{ReplicaID: spec.ReplicaID, Outcome: "ready"})
 	return process
 }
@@ -144,6 +149,7 @@ func (t *processTopology) stop(tb testing.TB) {
 			if err := process.cmd.Wait(); err != nil && process.cmd.ProcessState == nil {
 				tb.Errorf("wait for %s (PID %d): %v", process.Name, process.PID, err)
 			}
+			tb.Logf("helper stopped name=%s pid=%d port=%d reaped=%t", process.Name, process.PID, process.Port, process.cmd.ProcessState != nil)
 			t.observations.record(observation{ReplicaID: process.Name, Outcome: "stopped"})
 		}
 		if err := t.allocator.close(); err != nil {
@@ -171,27 +177,41 @@ func waitForTCP(ctx context.Context, address string, timeout time.Duration) erro
 
 type loopbackPortAllocator struct {
 	mu           sync.Mutex
-	next, last   int
 	reservations map[int]net.Listener
 }
 
-func newLoopbackPortAllocator(first, last int) *loopbackPortAllocator {
-	return &loopbackPortAllocator{next: first, last: last, reservations: make(map[int]net.Listener)}
+func newLoopbackPortAllocator() *loopbackPortAllocator {
+	return &loopbackPortAllocator{reservations: make(map[int]net.Listener)}
 }
 
 func (a *loopbackPortAllocator) reserve() (int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for port := a.next; port <= a.last; port++ {
-		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-		if err != nil {
-			continue
-		}
-		a.next = port + 1
-		a.reservations[port] = listener
-		return port, nil
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, fmt.Errorf("reserve ephemeral loopback port: %w", err)
 	}
-	return 0, fmt.Errorf("no loopback ports available in deterministic range")
+	port := listener.Addr().(*net.TCPAddr).Port
+	a.reservations[port] = listener
+	return port, nil
+}
+
+func (a *loopbackPortAllocator) listenerFile(port int) (*os.File, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	listener, ok := a.reservations[port]
+	if !ok {
+		return nil, fmt.Errorf("port %d is not reserved", port)
+	}
+	tcpListener, ok := listener.(*net.TCPListener)
+	if !ok {
+		return nil, fmt.Errorf("port %d listener has type %T, want TCP", port, listener)
+	}
+	file, err := tcpListener.File()
+	if err != nil {
+		return nil, fmt.Errorf("duplicate listener for port %d: %w", port, err)
+	}
+	return file, nil
 }
 
 func (a *loopbackPortAllocator) release(port int) error {

@@ -18,10 +18,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -114,7 +116,30 @@ func serveBackendProcess(t *testing.T, address, replicaID string) {
 func serveHTTPProcess(t *testing.T, address string, handler http.Handler) {
 	t.Helper()
 	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: time.Second}
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	listener := inheritedHelperListener(t, address)
+	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		t.Fatal(err)
 	}
+}
+
+func inheritedHelperListener(t *testing.T, address string) net.Listener {
+	t.Helper()
+	fd, err := strconv.Atoi(os.Getenv(helperListenerFDEnv))
+	if err != nil || fd < 3 {
+		t.Fatalf("invalid inherited listener fd %q", os.Getenv(helperListenerFDEnv))
+	}
+	file := os.NewFile(uintptr(fd), "integration-helper-listener")
+	if file == nil {
+		t.Fatalf("open inherited listener fd %d", fd)
+	}
+	listener, err := net.FileListener(file)
+	_ = file.Close()
+	if err != nil {
+		t.Fatalf("open inherited listener for %s: %v", address, err)
+	}
+	if listener.Addr().String() != address {
+		_ = listener.Close()
+		t.Fatalf("inherited listener address = %s, want %s", listener.Addr(), address)
+	}
+	return listener
 }

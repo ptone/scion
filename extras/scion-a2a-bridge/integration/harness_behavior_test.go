@@ -32,7 +32,7 @@ import (
 )
 
 func TestProcessTopologyStartsDistinctProcessesAndCancelsThem(t *testing.T) {
-	topology := newProcessTopology(t, 32100, nil)
+	topology := newProcessTopology(t, nil)
 	first := topology.start(t, processSpec{Name: "hub", Mode: "backend", ReplicaID: "hub"})
 	second := topology.start(t, processSpec{Name: "bridge-1", Mode: "backend", ReplicaID: "bridge-1"})
 
@@ -42,8 +42,8 @@ func TestProcessTopologyStartsDistinctProcessesAndCancelsThem(t *testing.T) {
 	if first.Port == second.Port {
 		t.Fatalf("processes share port %d", first.Port)
 	}
-	if first.Port != 32100 || second.Port != 32101 {
-		t.Fatalf("ports = %d, %d; want deterministic sequence 32100, 32101", first.Port, second.Port)
+	if first.Port == 0 || second.Port == 0 {
+		t.Fatalf("ports were not allocated: %d, %d", first.Port, second.Port)
 	}
 	if !first.Ready || !second.Ready {
 		t.Fatalf("readiness not captured: first=%t second=%t", first.Ready, second.Ready)
@@ -61,7 +61,7 @@ func TestProcessTopologyStartsDistinctProcessesAndCancelsThem(t *testing.T) {
 }
 
 func TestLoadAlternatorUsesRealProcessesAndPinsSSE(t *testing.T) {
-	topology := newProcessTopology(t, 32200, nil)
+	topology := newProcessTopology(t, nil)
 	backend1 := topology.start(t, processSpec{Name: "bridge-1", Mode: "backend", ReplicaID: "bridge-1"})
 	backend2 := topology.start(t, processSpec{Name: "bridge-2", Mode: "backend", ReplicaID: "bridge-2"})
 	alternator := topology.start(t, processSpec{
@@ -157,7 +157,7 @@ func TestCredentialRedactionFoundation(t *testing.T) {
 		}
 	}
 
-	topology := newProcessTopology(t, 32300, redactor)
+	topology := newProcessTopology(t, redactor)
 	topology.start(t, processSpec{
 		Name:      "credential-logging-fixture",
 		Mode:      "backend-log",

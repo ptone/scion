@@ -31,6 +31,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -67,6 +68,7 @@ import (
 const (
 	testGoogleClientID = "ge-integration-client.apps.googleusercontent.com"
 	testHubSigningKey  = "ge-integration-hub-signing-key-32-bytes-minimum"
+	testHubTokenTTL    = 3 * time.Second
 )
 
 type rewritePinnedGoogleTransport struct {
@@ -180,10 +182,11 @@ func (f *fakeGoogleProcess) mint(response http.ResponseWriter, request *http.Req
 }
 
 type hubProcessStats struct {
-	Exchanges       int    `json:"exchanges"`
-	Messages        int    `json:"messages"`
-	LastUserID      string `json:"last_user_id,omitempty"`
-	LastMessageAuth string `json:"-"`
+	Exchanges       int                   `json:"exchanges"`
+	Messages        int                   `json:"messages"`
+	LastUserID      string                `json:"last_user_id,omitempty"`
+	LastMessageAuth string                `json:"-"`
+	LastExchange    *hub.ExchangeResponse `json:"-"`
 }
 
 func serveHubProcess(t *testing.T, address string) {
@@ -211,7 +214,7 @@ func serveHubProcess(t *testing.T, address string) {
 	cfg.UserTokenConfig.SigningKey = []byte(testHubSigningKey)
 	cfg.AgentTokenConfig.SigningKey = []byte(testHubSigningKey + "-agent")
 	cfg.GEGoogleExchange = hub.GEGoogleExchangeConfig{
-		Enabled: true, AllowedClientIDs: []string{testGoogleClientID}, TokenTTL: time.Second,
+		Enabled: true, AllowedClientIDs: []string{testGoogleClientID}, TokenTTL: testHubTokenTTL,
 	}
 	hubServer, err := hub.New(cfg, store)
 	if err != nil {
@@ -228,10 +231,23 @@ func serveHubProcess(t *testing.T, address string) {
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch {
 		case request.URL.Path == "/api/v1/auth/integrations/google/exchange":
+			recorder := httptest.NewRecorder()
+			productionHandler.ServeHTTP(recorder, request)
+			var exchange hub.ExchangeResponse
+			if recorder.Code == http.StatusOK {
+				if err := json.Unmarshal(recorder.Body.Bytes(), &exchange); err != nil {
+					t.Errorf("decode captured exchange response: %v", err)
+				}
+			}
 			mu.Lock()
 			stats.Exchanges++
+			stats.LastExchange = &exchange
 			mu.Unlock()
-			productionHandler.ServeHTTP(response, request)
+			for key, values := range recorder.Header() {
+				response.Header()[key] = append([]string(nil), values...)
+			}
+			response.WriteHeader(recorder.Code)
+			_, _ = recorder.Body.WriteTo(response)
 		case request.Method == http.MethodGet && request.URL.Path == "/api/v1/agents":
 			if request.Header.Get("Authorization") != "Bearer unused-admin-token" && !validHubBearer(request, tokenService) {
 				http.Error(response, "unauthorized", http.StatusUnauthorized)
@@ -266,6 +282,15 @@ func serveHubProcess(t *testing.T, address string) {
 			bearer := stats.LastMessageAuth
 			mu.Unlock()
 			writeTestJSON(response, http.StatusOK, map[string]string{"bearer": strings.TrimPrefix(bearer, "Bearer ")})
+		case request.URL.Path == "/__test/last-exchange":
+			mu.Lock()
+			exchange := stats.LastExchange
+			mu.Unlock()
+			if exchange == nil {
+				http.Error(response, "no exchange captured", http.StatusNotFound)
+				return
+			}
+			writeTestJSON(response, http.StatusOK, exchange)
 		default:
 			http.NotFound(response, request)
 		}
@@ -365,10 +390,7 @@ func serveControlGRPCProcess(t *testing.T, address string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		t.Fatal(err)
-	}
+	listener := inheritedHelperListener(t, address)
 	broker := refbroker.New(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	defer broker.Close()
 	server := grpc.NewServer(
@@ -449,9 +471,9 @@ func postBearer(t *testing.T, endpoint, bearer, body string) (int, []byte) {
 	return response.StatusCode, data
 }
 
-func startAuthTopology(t *testing.T, firstPort int, redactor *credentialRedactor) (*processTopology, *testProcess, *testProcess, *testProcess, *testProcess) {
+func startAuthTopology(t *testing.T, redactor *credentialRedactor) (*processTopology, *testProcess, *testProcess, *testProcess, *testProcess) {
 	t.Helper()
-	topology := newProcessTopology(t, firstPort, redactor)
+	topology := newProcessTopology(t, redactor)
 	fakeGoogle := topology.start(t, processSpec{Name: "fake-google", Mode: "fake-google", ReplicaID: "fake-google"})
 	hubDatabase := filepath.Join(t.TempDir(), "hub.db")
 	hubProcess := topology.start(t, processSpec{Name: "hub", Mode: "hub", ReplicaID: "hub", Env: map[string]string{
@@ -463,7 +485,7 @@ func startAuthTopology(t *testing.T, firstPort int, redactor *credentialRedactor
 }
 
 func TestColdReplicaAndRotation(t *testing.T) {
-	topology, fakeGoogle, hubProcess, bridge1, bridge2 := startAuthTopology(t, 32400, nil)
+	topology, fakeGoogle, hubProcess, bridge1, bridge2 := startAuthTopology(t, nil)
 	alternator := topology.start(t, processSpec{Name: "alternator", Mode: "alternator", ReplicaID: "alternator", Env: map[string]string{
 		"SCION_TEST_BACKEND_1": bridge1.URL(), "SCION_TEST_BACKEND_2": bridge2.URL(),
 	}})
@@ -513,9 +535,40 @@ func TestColdReplicaAndRotation(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("cache re-prime status = %d: %s", status, body)
 	}
-	// The Hub's one-second JWT cap must also cap each bridge cache. A repeat
-	// after expiry re-exchanges instead of accepting the stale Hub bearer.
-	time.Sleep(1200 * time.Millisecond)
+	// Observe the exact response used to prime the bridge cache and wait from
+	// the minted JWT's integer-second exp boundary, not from arbitrary setup.
+	exchange := getJSON[hub.ExchangeResponse](t, hubProcess.URL()+"/__test/last-exchange")
+	parsedToken, err := jwt.ParseSigned(exchange.AccessToken, []jose.SignatureAlgorithm{jose.HS256})
+	if err != nil {
+		t.Fatalf("parse captured Hub JWT: %v", err)
+	}
+	var claims hub.UserTokenClaims
+	if err := parsedToken.Claims([]byte(testHubSigningKey), &claims); err != nil {
+		t.Fatalf("verify captured Hub JWT: %v", err)
+	}
+	if claims.Expiry == nil {
+		t.Fatal("captured Hub JWT has no exp claim")
+	}
+	jwtExpiry := claims.Expiry.Time()
+	responseExpiry, err := time.Parse(time.RFC3339, exchange.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse response expiresAt: %v", err)
+	}
+	upstreamExpiry, err := time.Parse(time.RFC3339, exchange.UpstreamExpiresAt)
+	if err != nil {
+		t.Fatalf("parse response upstreamExpiresAt: %v", err)
+	}
+	if !jwtExpiry.Equal(responseExpiry) {
+		t.Fatalf("JWT exp %s != response expiresAt %s", jwtExpiry, responseExpiry)
+	}
+	if responseExpiry.After(upstreamExpiry) {
+		t.Fatalf("Hub expiry %s exceeds upstream expiry %s", responseExpiry, upstreamExpiry)
+	}
+	remaining := time.Until(jwtExpiry)
+	if remaining <= 0 {
+		t.Fatalf("captured Hub JWT already expired at observation boundary: %s", jwtExpiry)
+	}
+	time.Sleep(remaining + 200*time.Millisecond)
 	status, body = postBearer(t, bridge1.URL()+"/request", rotated, "")
 	if status != http.StatusOK {
 		t.Fatalf("post-Hub-expiry re-exchange status = %d: %s", status, body)
@@ -563,7 +616,7 @@ func TestColdReplicaAndRotation(t *testing.T) {
 }
 
 func TestGEEnvelopeCompatibility(t *testing.T) {
-	topology := newProcessTopology(t, 32500, nil)
+	topology := newProcessTopology(t, nil)
 	fakeGoogle := topology.start(t, processSpec{Name: "fake-google", Mode: "fake-google", ReplicaID: "fake-google"})
 	hubProcess := topology.start(t, processSpec{Name: "hub", Mode: "hub", ReplicaID: "hub", Env: map[string]string{
 		"SCION_TEST_FAKE_GOOGLE_URL": fakeGoogle.URL(), "SCION_TEST_HUB_DATABASE": filepath.Join(t.TempDir(), "hub.db"),
@@ -641,7 +694,7 @@ func invokeEveryUnary(client brokerv1.BrokerServiceClient) []error {
 
 func TestControlPlanePrincipalIsolation(t *testing.T) {
 	const audience = "https://bridge-control.example.invalid"
-	topology := newProcessTopology(t, 32700, nil)
+	topology := newProcessTopology(t, nil)
 	fakeGoogle := topology.start(t, processSpec{Name: "fake-google", Mode: "fake-google", ReplicaID: "fake-google"})
 	control := topology.start(t, processSpec{Name: "bridge-control", Mode: "grpc-control", ReplicaID: "bridge-control", Env: map[string]string{
 		"SCION_TEST_FAKE_GOOGLE_URL": fakeGoogle.URL(), "SCION_TEST_CONTROL_AUDIENCE": audience,
@@ -800,7 +853,7 @@ func writeMTLSFixture(t *testing.T) (string, string, string) {
 func TestCredentialRedaction(t *testing.T) {
 	upstream := fetchSyntheticTokenSeed(t)
 	redactor := newCredentialRedactor(upstream)
-	topology := newProcessTopology(t, 32600, redactor)
+	topology := newProcessTopology(t, redactor)
 	fakeGoogle := topology.start(t, processSpec{Name: "fake-google", Mode: "fake-google", ReplicaID: "fake-google"})
 	hubProcess := topology.start(t, processSpec{Name: "hub", Mode: "hub", ReplicaID: "hub", Env: map[string]string{
 		"SCION_TEST_FAKE_GOOGLE_URL": fakeGoogle.URL(), "SCION_TEST_HUB_DATABASE": filepath.Join(t.TempDir(), "hub.db"),
