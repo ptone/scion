@@ -183,3 +183,80 @@ git diff --exit-code 346b1f74 HEAD -- <three paths>  rc=0
 
 The guard was neither changed nor skipped. This phase does not touch the unrelated
 conversation architecture.
+
+## Review 1 bounded startup follow-up and approved route correction
+
+The follow-up branch `scion/dev-integration-auth-transport-fix` started from the
+immutable combined tip `06f5116d40ba2b57628221c285beaa90eb5cd7e1`. Review finding
+2 is resolved with direct production-composition coverage rather than leaf-only
+validation:
+
+- `pkg/hub/ge_exchange_startup_test.go` calls actual `hub.New(cfg, store)`. It
+  rejects enabled configs with missing clients, blank clients, negative TTL, and
+  TTL above `MaxGETokenTTL`, asserting the exact wrapped startup errors. A migrated
+  real SQLite test store proves enabled/default-TTL startup initializes the exchange
+  service with `DefaultGETokenTTL`, while disabled exchange starts without it.
+- `extras/scion-a2a-bridge/cmd/scion-a2a-bridge/main_test.go` writes and loads real
+  YAML through production `loadConfig`, verifies its timeout defaults, and passes
+  the result through the exact `validateStartupConfig` gate used by both production
+  serving modes. Missing/invalid Hub URL, implicit/unknown credential type, and
+  negative/oversized cache TTL all fail closed with exact errors.
+- `resolveGRPCServerAuth` now returns its validation error to `serveStandalone`,
+  whose existing startup boundary still logs and exits. This smallest pure seam is
+  exercised for Cloud Run h2c (native TLS ignored) and Kubernetes dedicated-listener
+  mTLS using a real generated certificate/key/CA; both configurations also build
+  actual gRPC server options. No validation was bypassed or weakened.
+
+The auth correction was initially held and this follow-up was correspondingly
+incomplete. After its independent gates passed, exact approved tip
+`2f2e4fe212e8b4effb6af6d6541700c3478feb14` was fetched from
+`scion/dev-ge-auth` and merged as an ancestor at `1c76e047`. Git's textual merge
+retained both the combined branch's earlier exemption and the approved correction;
+`d7c8a3ae` resolved that semantic duplicate by deleting the earlier line and retaining
+the approved line/comment from `0dc81074`. The seven reviewed real-router tests from
+`bea2b4d9..2f2e4fe` are included unchanged. There is one route exemption, not a
+competing implementation.
+
+Post-incorporation evidence at code tip `d7c8a3aecedb77b905bcdabc459fc98ccc48e69d`:
+
+```text
+go test ./pkg/hub -run '^(TestGEExchange_Route_|TestGEGoogleExchangeHubNew)' -count=1
+  PASS  pkg/hub 0.796s
+go test -race ./pkg/hub -run '^(TestGEExchange_Route_|TestGEGoogleExchangeHubNew)' -count=1
+  PASS  pkg/hub 7.836s
+
+go test ./cmd/scion-a2a-bridge ./internal/bridge ./internal/state ./integration -count=1
+  PASS  command 0.424s; bridge 35.836s; state 0.191s; integration 10.469s
+go test -race ./cmd/scion-a2a-bridge ./internal/bridge ./internal/state ./integration -count=1
+  PASS  command 1.904s; bridge 37.589s; state 1.214s; integration 21.679s
+
+go vet ./pkg/hub
+go build -buildvcs=false ./...
+make compat-literals
+go vet ./cmd/scion-a2a-bridge ./internal/bridge ./internal/state ./integration
+go build -buildvcs=false ./...  (bridge module)
+  PASS  all
+```
+
+The pre-incorporation full Hub run finished after 479.634s and remained non-green.
+A clean targeted rerun reproduced the same four deterministic baseline failures;
+the previously classified intermittent DMSync test passed this time:
+
+```text
+TestGetEffectivePermissions_PrincipalConstraintTargetingGroup  FAIL (baseline)
+TestBypassCensus                                               FAIL (baseline)
+TestAgentMentions_DoNotCreateUserNotifications                 FAIL (baseline)
+TestCreateMessageEnumeration                                   FAIL (baseline)
+TestHandleAgentOutboundMessage_DMSyncBackfill                  PASS (intermittent baseline)
+```
+
+The eight implicated Hub files have an empty diff from exact base `346b1f74`.
+`make ci` remains blocked at the same four conversation-upsert guard findings; the
+guard and both reported source files also have an empty diff from `346b1f74`. The
+new authz guard reports no violations.
+
+The topology tests and acceptance JSON are byte-identical to `06f5116d`. Strict
+exchange/envelope counters, blocked taskstore and live rows, inherited-listener
+allocator behavior, and all baseline classifications are unchanged. With the exact
+approved auth correction now incorporated, the earlier incomplete/pending label is
+resolved; final delivery SHA and remote-ref proof are recorded in the durable report.
