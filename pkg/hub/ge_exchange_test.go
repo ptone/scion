@@ -1498,7 +1498,7 @@ func TestGEExchange_JWTExpCryptographicRegression(t *testing.T) {
 
 	// Step 7: When upstream < configured, the effective TTL must be capped by
 	// upstream remaining (~45s), not the configured TTL (60s).
-	jwtDuration := jwtExp.Sub(time.Now())
+	jwtDuration := time.Until(jwtExp)
 	if jwtDuration > 50*time.Second {
 		t.Errorf("JWT duration (%v) not capped by upstream remaining (~45s)", jwtDuration)
 	}
@@ -1554,7 +1554,7 @@ func TestGEExchange_JWTExpRegression_ConfiguredTTLWins(t *testing.T) {
 	}
 
 	// JWT duration should be ~60s (configured), not ~30min (upstream).
-	jwtDuration := claims.Expiry.Time().Sub(time.Now())
+	jwtDuration := time.Until(claims.Expiry.Time())
 	if jwtDuration > 65*time.Second {
 		t.Errorf("JWT duration (%v) exceeds configured TTL (60s) — not properly capped", jwtDuration)
 	}

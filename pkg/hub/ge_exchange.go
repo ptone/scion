@@ -327,7 +327,7 @@ func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *Vali
 				"sub", identity.Subject, "user_id", user.ID)
 			_ = s.extIDStore.UpdateExternalIdentityEmail(ctx, binding.ID, normalizedEmail)
 			// Also update the user's profile email if it matches the old binding email.
-			if strings.ToLower(user.Email) == strings.ToLower(binding.Email) {
+			if strings.EqualFold(user.Email, binding.Email) {
 				user.Email = normalizedEmail
 				_ = s.userStore.UpdateUser(ctx, user)
 			}
