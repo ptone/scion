@@ -111,19 +111,19 @@ type GoogleCredentialValidator interface {
 // ---------------------------------------------------------------------------
 
 var (
-	ErrGoogleInvalidCredential  = errors.New("invalid Google credential")
-	ErrGoogleExpiredCredential  = errors.New("expired Google credential")
-	ErrGoogleUntrustedAudience  = errors.New("untrusted Google client ID")
-	ErrGoogleUntrustedIssuer    = errors.New("untrusted Google issuer")
-	ErrGoogleUnverifiedEmail    = errors.New("Google email not verified")
-	ErrGoogleMissingSubject     = errors.New("missing Google subject")
-	ErrGoogleServiceAccount     = errors.New("service account credentials not accepted")
-	ErrGoogleFieldDisagreement  = errors.New("Google token metadata fields disagree")
-	ErrGoogleMissingField       = errors.New("required field missing from Google response")
-	ErrGoogleUpstreamError      = errors.New("Google upstream validation failed")
-	ErrGENotConfigured          = errors.New("GE Google exchange not configured")
-	ErrGEUnsupportedCredType    = errors.New("unsupported credential type")
-	ErrGENoRemainingLifetime    = errors.New("credential has no remaining usable lifetime")
+	ErrGoogleInvalidCredential = errors.New("invalid Google credential")
+	ErrGoogleExpiredCredential = errors.New("expired Google credential")
+	ErrGoogleUntrustedAudience = errors.New("untrusted Google client ID")
+	ErrGoogleUntrustedIssuer   = errors.New("untrusted Google issuer")
+	ErrGoogleUnverifiedEmail   = errors.New("Google email not verified")
+	ErrGoogleMissingSubject    = errors.New("missing Google subject")
+	ErrGoogleServiceAccount    = errors.New("service account credentials not accepted")
+	ErrGoogleFieldDisagreement = errors.New("Google token metadata fields disagree")
+	ErrGoogleMissingField      = errors.New("required field missing from Google response")
+	ErrGoogleUpstreamError     = errors.New("Google upstream validation failed")
+	ErrGENotConfigured         = errors.New("GE Google exchange not configured")
+	ErrGEUnsupportedCredType   = errors.New("unsupported credential type")
+	ErrGENoRemainingLifetime   = errors.New("credential has no remaining usable lifetime")
 )
 
 // ---------------------------------------------------------------------------
