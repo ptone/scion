@@ -330,7 +330,7 @@ func TestTwoReplicaUserLifecycle(t *testing.T) {
 		t.Fatalf("cancel result id=%q state=%q raw=%s", gotCancelID, canceledState, canceled.Result)
 	}
 
-	attacker := fetchMintedToken(t, h.fakeGoogle.URL(), url.Values{"sub": {"attacker-subject"}, "email": {"attacker@example.invalid"}})
+	attacker := fetchMintedToken(t, h.fakeGoogle.URL(), url.Values{"sub": {"attacker-subject"}, "email": {"attacker@gmail.com"}})
 	wrongCaller, _ := callRPC(t, h.bridgeB.URL(), attacker, "GetTask", map[string]any{"id": taskID})
 	if wrongCaller.Error == nil || strings.Contains(string(wrongCaller.Result), taskID) {
 		t.Fatalf("wrong caller received task metadata: result=%s error=%+v", wrongCaller.Result, wrongCaller.Error)
@@ -413,6 +413,11 @@ func assertNoSSE(t *testing.T, stream *sseStream, wait time.Duration) {
 
 func TestCrossReplicaStreamCursor(t *testing.T) {
 	h := startHAFinalTopology(t)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("Topology logs:\n%s", h.topology.logs.String())
+		}
+	})
 	send := callRPCAsync(h.bridgeA.URL(), h.userToken, "SendMessage", newMessageParams("cursor-1", "stream me", "", ""))
 	stats := waitHubMessages(t, h, 1)
 
@@ -477,6 +482,11 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 
 func TestCrashLeaseBoundary(t *testing.T) {
 	h := startHAFinalTopology(t)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("Topology logs:\n%s", h.topology.logs.String())
+		}
+	})
 	send := callRPCAsync(h.bridgeA.URL(), h.userToken, "SendMessage", newMessageParams("crash-1", "crash after send", "", ""))
 	_ = send
 	stats := waitHubMessages(t, h, 1)
@@ -498,6 +508,7 @@ func TestCrashLeaseBoundary(t *testing.T) {
 		"SCION_TEST_FAKE_GOOGLE_URL": h.fakeGoogle.URL(), "SCION_TEST_HUB_URL": h.hub.URL(),
 		"SCION_TEST_CONTROL_AUDIENCE": haControlAudience,
 	}})
+	time.Sleep(300 * time.Millisecond)
 
 	got, _ := callRPC(t, h.bridgeB.URL(), h.userToken, "GetTask", map[string]any{"id": taskID})
 	_, _, state := taskIdentity(t, got.Result)

@@ -812,7 +812,7 @@ func (s *PostgresTaskStore) ClaimExecution(ctx context.Context, taskID, ownerID 
 		 WHERE id = $2
 		   AND (exec_owner IS NULL OR exec_heartbeat < NOW() - $3::interval)
 		   AND payload->'status'->>'state' NOT IN (%s)`, terminalStatesSQL),
-		ownerID, taskID, fmt.Sprintf("%d seconds", int(leaseTimeout.Seconds())),
+		ownerID, taskID, fmt.Sprintf("%d milliseconds", leaseTimeout.Milliseconds()),
 	)
 	if err != nil {
 		return false, fmt.Errorf("claim execution: %w", err)
@@ -881,7 +881,7 @@ func (s *PostgresTaskStore) ReapStaleTasks(ctx context.Context, leaseTimeout tim
 		   AND exec_heartbeat < NOW() - $1::interval
 		   AND payload->'status'->>'state' NOT IN (%s)
 		 LIMIT 100`, terminalStatesSQL),
-		fmt.Sprintf("%d seconds", int(leaseTimeout.Seconds())),
+		fmt.Sprintf("%d milliseconds", leaseTimeout.Milliseconds()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list stale SDK tasks: %w", err)
