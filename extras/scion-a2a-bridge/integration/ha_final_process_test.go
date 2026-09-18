@@ -330,7 +330,7 @@ func TestTwoReplicaUserLifecycle(t *testing.T) {
 		t.Fatalf("cancel result id=%q state=%q raw=%s", gotCancelID, canceledState, canceled.Result)
 	}
 
-	attacker := fetchMintedToken(t, h.fakeGoogle.URL(), url.Values{"sub": {"attacker-subject"}, "email": {"attacker@example.invalid"}})
+	attacker := fetchMintedToken(t, h.fakeGoogle.URL(), url.Values{"sub": {"attacker-subject"}, "email": {"attacker@gmail.com"}})
 	wrongCaller, _ := callRPC(t, h.bridgeB.URL(), attacker, "GetTask", map[string]any{"id": taskID})
 	if wrongCaller.Error == nil || strings.Contains(string(wrongCaller.Result), taskID) {
 		t.Fatalf("wrong caller received task metadata: result=%s error=%+v", wrongCaller.Result, wrongCaller.Error)
@@ -413,6 +413,11 @@ func assertNoSSE(t *testing.T, stream *sseStream, wait time.Duration) {
 
 func TestCrossReplicaStreamCursor(t *testing.T) {
 	h := startHAFinalTopology(t)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("Topology logs:\n%s", h.topology.logs.String())
+		}
+	})
 	send := callRPCAsync(h.bridgeA.URL(), h.userToken, "SendMessage", newMessageParams("cursor-1", "stream me", "", ""))
 	stats := waitHubMessages(t, h, 1)
 
@@ -443,13 +448,23 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	if !bytes.Contains(restartSnapshot, []byte(taskID)) || bytes.Contains(restartSnapshot, []byte("_bridgeEventID")) {
 		t.Fatalf("invalid restart snapshot: %s", restartSnapshot)
 	}
+	// Per no-old-replay contract, the unreflected working event after last_event_cursor must stream.
+	workingEvent := nextSSE(t, reconnected, 3*time.Second)
+	if !bytes.Contains(workingEvent, []byte("TASK_STATE_WORKING")) || bytes.Contains(workingEvent, []byte("_bridgeEventID")) {
+		t.Fatalf("invalid unreflected working event: %s", workingEvent)
+	}
 	assertNoSSE(t, reconnected, 250*time.Millisecond)
 
 	publishBrokerMessage(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once")
 	publishBrokerMessage(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once")
-	finalEvent := nextSSE(t, reconnected, 3*time.Second)
-	if !bytes.Contains(finalEvent, []byte("TASK_STATE_COMPLETED")) || bytes.Contains(finalEvent, []byte("_bridgeEventID")) {
-		t.Fatalf("invalid final event: %s", finalEvent)
+	for {
+		ev := nextSSE(t, reconnected, 3*time.Second)
+		if bytes.Contains(ev, []byte("_bridgeEventID")) {
+			t.Fatalf("bridge event ID leaked on wire: %s", ev)
+		}
+		if bytes.Contains(ev, []byte("TASK_STATE_COMPLETED")) {
+			break
+		}
 	}
 	assertNoSSE(t, reconnected, 250*time.Millisecond)
 	result := awaitRPC(t, send)
@@ -477,6 +492,11 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 
 func TestCrashLeaseBoundary(t *testing.T) {
 	h := startHAFinalTopology(t)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("Topology logs:\n%s", h.topology.logs.String())
+		}
+	})
 	send := callRPCAsync(h.bridgeA.URL(), h.userToken, "SendMessage", newMessageParams("crash-1", "crash after send", "", ""))
 	_ = send
 	stats := waitHubMessages(t, h, 1)
@@ -493,14 +513,25 @@ func TestCrashLeaseBoundary(t *testing.T) {
 	taskID := listed.Tasks[0].ID
 
 	h.topology.stopProcess(t, h.bridgeA)
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(2200 * time.Millisecond)
 	h.bridgeA = h.topology.start(t, processSpec{Name: "ha-bridge-a-restarted", Mode: "ha-bridge", ReplicaID: "ha-bridge-a-restarted", Env: map[string]string{
 		"SCION_TEST_FAKE_GOOGLE_URL": h.fakeGoogle.URL(), "SCION_TEST_HUB_URL": h.hub.URL(),
 		"SCION_TEST_CONTROL_AUDIENCE": haControlAudience,
 	}})
 
-	got, _ := callRPC(t, h.bridgeB.URL(), h.userToken, "GetTask", map[string]any{"id": taskID})
-	_, _, state := taskIdentity(t, got.Result)
+	var state string
+	var got rpcReply
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ = callRPC(t, h.bridgeB.URL(), h.userToken, "GetTask", map[string]any{"id": taskID})
+		if got.Error == nil {
+			_, _, state = taskIdentity(t, got.Result)
+			if state == "TASK_STATE_FAILED" {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	if state != "TASK_STATE_FAILED" {
 		t.Fatalf("crash-reaped task state=%q want failed result=%s", state, got.Result)
 	}

@@ -457,7 +457,7 @@ func serveHABridgeProcess(t *testing.T, address, replica string) {
 
 	// A restarted replica reaps only expired leases. Tests set the timeout low
 	// enough to exercise the crash boundary without test-only database mutation.
-	if _, err := sdkStore.ReapStaleTasks(context.Background(), 500*time.Millisecond); err != nil {
+	if _, err := sdkStore.ReapStaleTasks(context.Background(), 2*time.Second); err != nil {
 		t.Fatalf("startup reap: %v", err)
 	}
 
