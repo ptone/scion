@@ -58,6 +58,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/refbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	brokerv1 "github.com/GoogleCloudPlatform/scion/proto/broker/v1"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -378,6 +380,96 @@ func serveFullBridgeProcess(t *testing.T, address, replica string) {
 	b.SetSDKRequestHandler(sdkHandler)
 	server := bridge.NewServer(b, cfg, nil, logger, a2asrv.NewJSONRPCHandler(sdkHandler))
 	serveHTTPProcess(t, address, server.Handler())
+}
+
+// serveHABridgeProcess composes the same production HTTP auth, SDK executor,
+// durable PostgreSQL stores, and BrokerService h2c routing used by standalone
+// bridge deployments. Only its Hub and Google identity providers are local
+// deterministic processes; no store helper is exposed to the test client.
+func serveHABridgeProcess(t *testing.T, address, replica string) {
+	t.Helper()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Fatal("TEST_DATABASE_URL is required for ha-bridge")
+	}
+	stateStore, err := bridgestate.NewPostgres(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stateStore.Close()
+	sdkStore, err := bridge.NewPostgresTaskStoreWithDB(stateStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sdkStore.Close()
+
+	hubURL := os.Getenv("SCION_TEST_HUB_URL")
+	adminClient, err := hubclient.New(hubURL, hubclient.WithBearerToken("unused-admin-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &bridge.Config{
+		Bridge: bridge.BridgeConfig{ExternalURL: "http://" + address, MaxSubscribers: 16},
+		Hub:    bridge.HubConfig{Endpoint: hubURL, User: "integration@example.invalid"},
+		Auth: bridge.AuthConfig{Scheme: "geGoogle", GEExchange: bridge.GEExchangeConfig{
+			CredentialType: "id_token", CacheTTL: 10 * time.Second,
+		}},
+		Projects: []bridge.ProjectConfig{{Slug: "proj1", ExposedAgents: []string{"agent1"}}},
+		Timeouts: bridge.TimeoutConfig{SendMessage: 2 * time.Second, SSEKeepalive: 50 * time.Millisecond},
+	}
+	b := bridge.New(stateStore, adminClient, nil, cfg, nil, logger.With("replica", replica))
+	defer b.Shutdown()
+	b.SetSDKTaskStore(sdkStore)
+	barrierStore := bridge.NewBarrierTaskStore(sdkStore)
+	b.SetBarrierStore(barrierStore)
+
+	brokerServer := bridge.NewBrokerServer(nil, logger.With("component", "broker"), context.Background())
+	brokerServer.SetHandler(b.HandleBrokerMessage)
+	b.SetBroker(brokerServer)
+
+	executor := bridge.NewScionExecutor(b, logger.With("component", "executor"))
+	sdkHandler := a2asrv.NewHandler(executor,
+		a2asrv.WithLogger(logger),
+		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{Streaming: true}),
+		a2asrv.WithAgentInactivityTimeout(2*time.Second),
+		a2asrv.WithTaskStore(barrierStore),
+	)
+	b.SetSDKRequestHandler(sdkHandler)
+	durableHandler := bridge.NewDurableRequestHandler(sdkHandler, sdkStore, stateStore, nil)
+	a2aServer := bridge.NewServer(b, cfg, nil, logger, a2asrv.NewJSONRPCHandler(
+		durableHandler, a2asrv.WithTransportKeepAlive(50*time.Millisecond)))
+
+	validator, err := grpcbroker.NewGoogleIDTokenValidator(grpcbroker.GoogleIDTokenValidatorConfig{
+		Audience:           os.Getenv("SCION_TEST_CONTROL_AUDIENCE"),
+		AuthorizedSubjects: []string{"hub-sa@hub-project.iam.gserviceaccount.com"},
+		JWKSURL:            os.Getenv("SCION_TEST_FAKE_GOOGLE_URL") + "/oauth2/v3/certs",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(grpcbroker.UnaryAuthInterceptor(validator)),
+		grpc.StreamInterceptor(grpcbroker.StreamAuthInterceptor(validator)),
+	)
+	brokerv1.RegisterBrokerServiceServer(grpcServer, grpcbroker.NewServer(brokerServer))
+	defer grpcServer.Stop()
+
+	// A restarted replica reaps only expired leases. Tests set the timeout low
+	// enough to exercise the crash boundary without test-only database mutation.
+	if _, err := sdkStore.ReapStaleTasks(context.Background(), 500*time.Millisecond); err != nil {
+		t.Fatalf("startup reap: %v", err)
+	}
+
+	httpHandler := a2aServer.Handler()
+	muxed := h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+			grpcServer.ServeHTTP(w, r)
+			return
+		}
+		httpHandler.ServeHTTP(w, r)
+	}), &http2.Server{})
+	serveHTTPProcess(t, address, muxed)
 }
 
 func serveControlGRPCProcess(t *testing.T, address string) {
