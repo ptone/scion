@@ -55,11 +55,15 @@ configuration was added.
 - `make ci` (root): did not reach tests because `fmt-check` reports six existing
   Hub/messaging files. `git diff` confirms all six are unchanged from the required
   transport base. They were not reformatted in this scoped branch.
-- `go test -count=1 ./...` (root module): completed with base-state failures in
-  unrelated command, config/project-discovery, Hub, runtime broker, and utility
-  tests. The harness is inside a nested module and adds no root package; the root
-  build and accepted transport package pass. See the external completion report
-  for the recorded failure groups.
+- `go test -count=1 ./...` (root module) with ambient orchestration variables:
+  failed broadly because those variables leaked into command/config tests.
+  Targeted clean-environment reruns of `./cmd` and `./pkg/config` pass.
+- `go test -count=1 ./...` (root module) with all ambient `SCION_*` variables
+  removed: most packages pass, including `cmd`, `pkg/config`, `pkg/runtimebroker`,
+  `pkg/util`, and `pkg/plugin/grpcbroker`. The base still fails in `pkg/hub` after
+  504 seconds and in `pkg/hub/authzop` because the permission catalog is missing
+  existing route/permission/mutation classifications. The harness is inside a
+  nested module and changes none of those root packages.
 
 ## Eight-layer acceptance status
 
