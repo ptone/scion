@@ -48,17 +48,17 @@ func BridgePathPatterns() []logging.PathPattern {
 
 // Server is the A2A HTTP server that routes requests to the SDK handler.
 type Server struct {
-	bridge     *Bridge
-	config     *Config         // base config (kept for backward compat in non-snapshot paths)
-	snapshot   *SnapshotHolder // atomic snapshot of effective config (hot-apply)
-	metrics    *Metrics
-	log        *slog.Logger
-	sdkHandler   http.Handler // SDK JSON-RPC handler
+	bridge        *Bridge
+	config        *Config         // base config (kept for backward compat in non-snapshot paths)
+	snapshot      *SnapshotHolder // atomic snapshot of effective config (hot-apply)
+	metrics       *Metrics
+	log           *slog.Logger
+	sdkHandler    http.Handler // SDK JSON-RPC handler
 	v0RESTHandler http.Handler // v0.3 REST compat handler (nil if not configured)
 	// Legacy validators — used only when snapshot is nil (tests, backward compat).
-	uatValidator         *UATValidator
-	jwtValidator         *JWTValidator
-	geExchangeValidator  *GEExchangeValidator
+	uatValidator        *UATValidator
+	jwtValidator        *JWTValidator
+	geExchangeValidator *GEExchangeValidator
 }
 
 // NewServer creates a new A2A protocol server backed by the SDK.
@@ -166,6 +166,21 @@ func ValidateConfig(cfg *Config) error {
 	}
 	if cfg.Auth.Scheme == "hubJWT" && cfg.Hub.SigningKey == "" && cfg.Hub.SigningKeySecret == "" {
 		return fmt.Errorf("hub.signing_key or hub.signing_key_secret is required when auth.scheme is hubJWT")
+	}
+	if cfg.Auth.Scheme == "geGoogle" {
+		hubEndpoint, err := url.Parse(cfg.Hub.Endpoint)
+		if err != nil || hubEndpoint.Host == "" || (hubEndpoint.Scheme != "http" && hubEndpoint.Scheme != "https") {
+			return fmt.Errorf("hub.endpoint must be an absolute HTTP(S) URL for geGoogle auth")
+		}
+		switch cfg.Auth.GEExchange.CredentialType {
+		case "id_token", "access_token":
+			// Valid and intentionally explicit; startup never guesses the credential type.
+		default:
+			return fmt.Errorf("auth.ge_exchange.credential_type must be id_token or access_token")
+		}
+		if cfg.Auth.GEExchange.CacheTTL < 0 || cfg.Auth.GEExchange.CacheTTL > maxGECacheTTL {
+			return fmt.Errorf("auth.ge_exchange.cache_ttl must be between 0 and %s", maxGECacheTTL)
+		}
 	}
 	if cfg.Auth.UATCacheTTL < 0 {
 		return fmt.Errorf("auth.uat_cache_ttl must not be negative")

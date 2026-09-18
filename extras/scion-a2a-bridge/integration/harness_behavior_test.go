@@ -122,7 +122,7 @@ func TestLoadAlternatorUsesRealProcessesAndPinsSSE(t *testing.T) {
 	}
 }
 
-func TestCredentialRedaction(t *testing.T) {
+func TestCredentialRedactionFoundation(t *testing.T) {
 	bearer := "SYNTHETIC_RUNTIME_BEARER_A_DO_NOT_USE"
 	digest := sha256.Sum256([]byte(bearer))
 	stableHash := hex.EncodeToString(digest[:])
@@ -260,7 +260,7 @@ func TestPostgreSQLSchemaAllocator(t *testing.T) {
 	}
 }
 
-func TestAcceptanceScaffoldListsEightUnpassedLayers(t *testing.T) {
+func TestAcceptanceLayersMatchProvenScope(t *testing.T) {
 	data, err := os.ReadFile("testdata/acceptance_layers.json")
 	if err != nil {
 		t.Fatal(err)
@@ -272,13 +272,26 @@ func TestAcceptanceScaffoldListsEightUnpassedLayers(t *testing.T) {
 	if len(scaffold.Layers) != 8 {
 		t.Fatalf("layers = %d; want 8", len(scaffold.Layers))
 	}
-	allowed := []string{"foundation-ready", "blocked-on-auth", "blocked-on-taskstore", "external-live-only"}
+	allowed := []string{"passing", "partial", "blocked-on-taskstore", "external-live-only"}
+	wantPassing := map[string]bool{
+		"TestGEEnvelopeCompatibility":        false,
+		"TestTwoReplicaUserLifecycle":        false,
+		"TestColdReplicaAndRotation":         true,
+		"TestCrossReplicaStreamCursor":       false,
+		"TestCrashLeaseBoundary":             false,
+		"TestControlPlanePrincipalIsolation": true,
+		"TestCombinedStartupMatrix":          false,
+		"TestCredentialRedaction":            true,
+	}
 	for _, layer := range scaffold.Layers {
-		if layer.Passing {
-			t.Errorf("layer %s prematurely marked passing", layer.Name)
+		if layer.Passing != wantPassing[layer.Name] {
+			t.Errorf("layer %s passing = %t, want %t", layer.Name, layer.Passing, wantPassing[layer.Name])
 		}
 		if !slices.Contains(allowed, layer.Status) {
 			t.Errorf("layer %s has unknown status %q", layer.Name, layer.Status)
+		}
+		if layer.Status == "blocked-on-taskstore" && layer.Passing {
+			t.Errorf("taskstore-blocked layer %s must remain false", layer.Name)
 		}
 	}
 }

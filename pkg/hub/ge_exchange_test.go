@@ -148,9 +148,9 @@ func (s *fakeUserStore) IsUserInvitedOrActive(_ context.Context, email string) (
 }
 
 // Stubs for Store interface methods we don't use.
-func (s *fakeUserStore) Close() error                                           { return nil }
-func (s *fakeUserStore) Ping(_ context.Context) error                           { return nil }
-func (s *fakeUserStore) Migrate(_ context.Context) error                        { return nil }
+func (s *fakeUserStore) Close() error                    { return nil }
+func (s *fakeUserStore) Ping(_ context.Context) error    { return nil }
+func (s *fakeUserStore) Migrate(_ context.Context) error { return nil }
 func (s *fakeUserStore) WithTx(_ context.Context, fn func(tx store.Store) error) error {
 	return fn(s)
 }
@@ -332,26 +332,49 @@ func newPersistentTestExchangeService(t *testing.T, dbPath string) (*GEExchangeS
 
 func validGmailIdentity() *ValidatedGoogleIdentity {
 	return &ValidatedGoogleIdentity{
-		Subject:       "google-sub-123",
-		Email:         "user@gmail.com",
-		EmailVerified: true,
-		DisplayName:   "Test User",
-		Issuer:        googleCanonicalIssuer,
-		Audience:      "test-client-id.apps.googleusercontent.com",
+		Subject:        "google-sub-123",
+		Email:          "user@gmail.com",
+		EmailVerified:  true,
+		DisplayName:    "Test User",
+		Issuer:         googleCanonicalIssuer,
+		Audience:       "test-client-id.apps.googleusercontent.com",
 		UpstreamExpiry: time.Now().Add(30 * time.Minute),
+	}
+}
+
+func TestGEGoogleExchangeConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  GEGoogleExchangeConfig
+		wantErr bool
+	}{
+		{name: "disabled", config: GEGoogleExchangeConfig{}},
+		{name: "valid", config: GEGoogleExchangeConfig{Enabled: true, AllowedClientIDs: []string{"client-id"}, TokenTTL: time.Minute}},
+		{name: "missing audience", config: GEGoogleExchangeConfig{Enabled: true}, wantErr: true},
+		{name: "blank audience", config: GEGoogleExchangeConfig{Enabled: true, AllowedClientIDs: []string{" "}}, wantErr: true},
+		{name: "negative ttl", config: GEGoogleExchangeConfig{Enabled: true, AllowedClientIDs: []string{"client-id"}, TokenTTL: -time.Second}, wantErr: true},
+		{name: "oversized ttl", config: GEGoogleExchangeConfig{Enabled: true, AllowedClientIDs: []string{"client-id"}, TokenTTL: MaxGETokenTTL + time.Second}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.config.Validate()
+			if (err != nil) != test.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
 	}
 }
 
 func validWorkspaceIdentity() *ValidatedGoogleIdentity {
 	return &ValidatedGoogleIdentity{
-		Subject:       "google-sub-456",
-		Email:         "user@company.com",
-		EmailVerified: true,
-		DisplayName:   "Workspace User",
-		Issuer:        googleCanonicalIssuer,
-		Audience:      "test-client-id.apps.googleusercontent.com",
+		Subject:        "google-sub-456",
+		Email:          "user@company.com",
+		EmailVerified:  true,
+		DisplayName:    "Workspace User",
+		Issuer:         googleCanonicalIssuer,
+		Audience:       "test-client-id.apps.googleusercontent.com",
 		UpstreamExpiry: time.Now().Add(30 * time.Minute),
-		HostedDomain:  "company.com",
+		HostedDomain:   "company.com",
 	}
 }
 
@@ -687,14 +710,14 @@ func TestGEExchange_SuspendedUser(t *testing.T) {
 func TestGEExchange_NonAuthoritativeEmail_NoAutoLink(t *testing.T) {
 	// Third-party email domain (not Gmail, not Workspace) — fails closed.
 	identity := &ValidatedGoogleIdentity{
-		Subject:       "google-sub-789",
-		Email:         "user@custom-domain.com",
-		EmailVerified: true,
-		DisplayName:   "Custom User",
-		Issuer:        googleCanonicalIssuer,
-		Audience:      "test-client-id.apps.googleusercontent.com",
+		Subject:        "google-sub-789",
+		Email:          "user@custom-domain.com",
+		EmailVerified:  true,
+		DisplayName:    "Custom User",
+		Issuer:         googleCanonicalIssuer,
+		Audience:       "test-client-id.apps.googleusercontent.com",
 		UpstreamExpiry: time.Now().Add(30 * time.Minute),
-		HostedDomain:  "", // No Workspace hd claim
+		HostedDomain:   "", // No Workspace hd claim
 	}
 	validator := &fakeGoogleValidator{idTokenResult: identity}
 	userStore := newFakeUserStore()
@@ -866,10 +889,10 @@ func TestIsAuthoritativeEmailDomain(t *testing.T) {
 	}{
 		{"user@gmail.com", "", true},
 		{"user@googlemail.com", "", true},
-		{"user@company.com", "company.com", true},  // Workspace
-		{"user@custom.com", "", false},              // No workspace, not Gmail
-		{"user@evil.com", "other.com", false},       // HD doesn't match email
-		{"sa@iam.gserviceaccount.com", "", false},   // Service account
+		{"user@company.com", "company.com", true}, // Workspace
+		{"user@custom.com", "", false},            // No workspace, not Gmail
+		{"user@evil.com", "other.com", false},     // HD doesn't match email
+		{"sa@iam.gserviceaccount.com", "", false}, // Service account
 	}
 	for _, tt := range tests {
 		got := isAuthoritativeEmailDomain(tt.email, tt.hd)
@@ -1561,9 +1584,9 @@ func TestGEExchange_ProvisioningAuth_DomainRestricted(t *testing.T) {
 	// Use real checkUserAuthorized with domain restriction.
 	authChecker := func(_ context.Context, email string) bool {
 		return checkUserAuthorized(context.Background(), email,
-			[]string{"allowed.com"},    // authorized domains
-			[]string{"admin@hub.com"},  // admin emails
-			"domain_restricted",        // access mode
+			[]string{"allowed.com"},   // authorized domains
+			[]string{"admin@hub.com"}, // admin emails
+			"domain_restricted",       // access mode
 			userStore,
 		)
 	}
@@ -1652,9 +1675,9 @@ func TestGEExchange_ProvisioningAuth_InviteOnly_Rejected(t *testing.T) {
 	// The fakeUserStore has no invited users, so IsUserInvitedOrActive will fail.
 	authChecker := func(_ context.Context, email string) bool {
 		return checkUserAuthorized(context.Background(), email,
-			nil,                        // no domain restriction
-			[]string{"admin@hub.com"},  // admin emails
-			"invite_only",              // access mode
+			nil,                       // no domain restriction
+			[]string{"admin@hub.com"}, // admin emails
+			"invite_only",             // access mode
 			userStore,
 		)
 	}
@@ -1780,7 +1803,7 @@ func TestGEExchange_ProvisioningAuth_NilAuthChecker_FailsClosed(t *testing.T) {
 type raceExtIDStore struct {
 	mu            sync.Mutex
 	inner         *memExtIDStore
-	createFails   bool           // when true, Create fails and injects winner
+	createFails   bool                           // when true, Create fails and injects winner
 	winnerBinding *store.ExternalIdentityBinding // injected on first Create failure
 }
 

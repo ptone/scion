@@ -55,6 +55,26 @@ func (c *GEGoogleExchangeConfig) IsValid() bool {
 	return c.Enabled && len(c.AllowedClientIDs) > 0
 }
 
+// Validate rejects enabled exchange configurations that would otherwise be
+// silently disabled or have their security lifetime rewritten at startup.
+func (c *GEGoogleExchangeConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if len(c.AllowedClientIDs) == 0 {
+		return fmt.Errorf("GE Google exchange requires at least one allowed client ID")
+	}
+	for _, clientID := range c.AllowedClientIDs {
+		if strings.TrimSpace(clientID) == "" {
+			return fmt.Errorf("GE Google exchange allowed client IDs must not be empty")
+		}
+	}
+	if c.TokenTTL < 0 || c.TokenTTL > MaxGETokenTTL {
+		return fmt.Errorf("GE Google exchange token TTL must be between 0 and %s", MaxGETokenTTL)
+	}
+	return nil
+}
+
 // DefaultGETokenTTL is the default Hub access token lifetime for GE exchange.
 // Aligned with the bridge cache default (~60s) per the auth-exchange contract:
 // a shorter token lifetime bounds the revocation window when a Google credential
@@ -273,12 +293,12 @@ var (
 // resolveLocalUser resolves a validated Google identity to a local Hub user
 // via the external identity binding system. The flow is:
 //
-// 1. Look up existing binding by (provider, canonical issuer, sub).
-// 2. If found: verify the bound user exists and is not suspended, update
-//    email if changed. Return the user.
-// 3. If not found: attempt first-time bootstrap via email, guarded by
-//    authoritative email domain requirement.
-// 4. Create atomic binding and return user.
+//  1. Look up existing binding by (provider, canonical issuer, sub).
+//  2. If found: verify the bound user exists and is not suspended, update
+//     email if changed. Return the user.
+//  3. If not found: attempt first-time bootstrap via email, guarded by
+//     authoritative email domain requirement.
+//  4. Create atomic binding and return user.
 func (s *GEExchangeService) resolveLocalUser(ctx context.Context, identity *ValidatedGoogleIdentity) (*store.User, error) {
 	canonicalIssuer := canonicalizeGoogleIssuer(identity.Issuer)
 

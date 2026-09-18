@@ -999,6 +999,9 @@ func (s *Server) InstanceID() string { return s.instanceID }
 
 // New creates a new Hub API server.
 func New(cfg ServerConfig, s store.Store) (*Server, error) {
+	if err := cfg.GEGoogleExchange.Validate(); err != nil {
+		return nil, fmt.Errorf("GE Google exchange config: %w", err)
+	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {

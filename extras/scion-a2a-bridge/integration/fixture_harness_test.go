@@ -146,9 +146,16 @@ type acceptanceScaffold struct {
 }
 
 type acceptanceLayer struct {
-	Name             string   `json:"name"`
-	Status           string   `json:"status"`
-	Passing          bool     `json:"passing"`
-	Dependencies     []string `json:"dependencies"`
-	ExternalLiveOnly []string `json:"external_live_only,omitempty"`
+	Name             string               `json:"name"`
+	Status           string               `json:"status"`
+	Passing          bool                 `json:"passing"`
+	Dependencies     []string             `json:"dependencies"`
+	ExternalLiveOnly []string             `json:"external_live_only,omitempty"`
+	Sublayers        []acceptanceSublayer `json:"sublayers,omitempty"`
+}
+
+type acceptanceSublayer struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Passing bool   `json:"passing"`
 }

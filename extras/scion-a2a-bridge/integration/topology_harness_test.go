@@ -16,6 +16,7 @@ package integration_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -36,6 +37,7 @@ type processSpec struct {
 	Name      string
 	Mode      string
 	ReplicaID string
+	Port      int
 	Env       map[string]string
 }
 
@@ -80,14 +82,18 @@ func newProcessTopology(t *testing.T, firstPort int, redactor *credentialRedacto
 
 func (t *processTopology) start(tb testing.TB, spec processSpec) *testProcess {
 	tb.Helper()
-	port, err := t.allocator.reserve()
-	if err != nil {
-		tb.Fatalf("reserve port for %s: %v", spec.Name, err)
-	}
-	// The helper process cannot inherit arbitrary production listeners, so keep the
-	// deterministic reservation until immediately before starting the child.
-	if err := t.allocator.release(port); err != nil {
-		tb.Fatalf("release port for %s: %v", spec.Name, err)
+	port := spec.Port
+	if port == 0 {
+		var err error
+		port, err = t.allocator.reserve()
+		if err != nil {
+			tb.Fatalf("reserve port for %s: %v", spec.Name, err)
+		}
+		// The helper process cannot inherit arbitrary production listeners, so keep the
+		// deterministic reservation until immediately before starting the child.
+		if err := t.allocator.release(port); err != nil {
+			tb.Fatalf("release port for %s: %v", spec.Name, err)
+		}
 	}
 
 	cmd := exec.CommandContext(t.ctx, os.Args[0], "-test.run=^TestHarnessHelperProcess$", "-test.v")
@@ -112,6 +118,22 @@ func (t *processTopology) start(tb testing.TB, spec processSpec) *testProcess {
 	process.Ready = true
 	t.observations.record(observation{ReplicaID: spec.ReplicaID, Outcome: "ready"})
 	return process
+}
+
+func (t *processTopology) stopProcess(tb testing.TB, process *testProcess) {
+	tb.Helper()
+	if process.cmd.ProcessState != nil {
+		return
+	}
+	if err := process.cmd.Process.Kill(); err != nil {
+		tb.Fatalf("kill %s (PID %d): %v", process.Name, process.PID, err)
+	}
+	if err := process.cmd.Wait(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			tb.Fatalf("wait for %s (PID %d): %v", process.Name, process.PID, err)
+		}
+	}
 }
 
 func (t *processTopology) stop(tb testing.TB) {

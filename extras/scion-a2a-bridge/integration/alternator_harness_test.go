@@ -74,6 +74,16 @@ func TestHarnessHelperProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 		serveHTTPProcess(t, address, alternator)
+	case "fake-google":
+		serveHTTPProcess(t, address, newFakeGoogleProcess(t))
+	case "hub":
+		serveHubProcess(t, address)
+	case "auth-bridge":
+		serveAuthBridgeProcess(t, address, os.Getenv(helperReplicaIDEnv))
+	case "full-bridge":
+		serveFullBridgeProcess(t, address, os.Getenv(helperReplicaIDEnv))
+	case "grpc-control":
+		serveControlGRPCProcess(t, address)
 	default:
 		t.Fatalf("unknown helper mode %q", mode)
 	}

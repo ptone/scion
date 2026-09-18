@@ -1,13 +1,17 @@
 {
   "schema": "scion.test.ge-a2a.acceptance-layers/v1",
-  "comment": "Foundation status only. passing remains false until reviewed auth/taskstore components are assembled and the named test runs at that combined immutable tip.",
+  "comment": "Auth+transport phase status at the combined immutable tip. Parent layers remain false whenever an external-live or taskstore sublayer is still pending.",
   "layers": [
     {
       "name": "TestGEEnvelopeCompatibility",
-      "status": "external-live-only",
+      "status": "partial",
       "passing": false,
       "dependencies": ["reviewed-auth", "production-mux"],
-      "external_live_only": ["actual Gemini Enterprise envelope capture"]
+      "external_live_only": ["actual Gemini Enterprise envelope capture"],
+      "sublayers": [
+        {"name": "local-deterministic", "status": "passing", "passing": true},
+        {"name": "actual-ge-capture", "status": "external-live-only", "passing": false}
+      ]
     },
     {
       "name": "TestTwoReplicaUserLifecycle",
@@ -17,8 +21,8 @@
     },
     {
       "name": "TestColdReplicaAndRotation",
-      "status": "blocked-on-auth",
-      "passing": false,
+      "status": "passing",
+      "passing": true,
       "dependencies": ["reviewed-auth", "two-bridge-processes"]
     },
     {
@@ -35,20 +39,24 @@
     },
     {
       "name": "TestControlPlanePrincipalIsolation",
-      "status": "foundation-ready",
-      "passing": false,
+      "status": "passing",
+      "passing": true,
       "dependencies": ["accepted-grpc-transport", "process-topology"]
     },
     {
       "name": "TestCombinedStartupMatrix",
-      "status": "blocked-on-auth",
+      "status": "partial",
       "passing": false,
-      "dependencies": ["reviewed-auth", "reviewed-taskstore", "accepted-grpc-transport"]
+      "dependencies": ["reviewed-auth", "reviewed-taskstore", "accepted-grpc-transport"],
+      "sublayers": [
+        {"name": "auth-transport-startup", "status": "passing", "passing": true},
+        {"name": "taskstore-ha-startup", "status": "blocked-on-taskstore", "passing": false}
+      ]
     },
     {
       "name": "TestCredentialRedaction",
-      "status": "foundation-ready",
-      "passing": false,
+      "status": "passing",
+      "passing": true,
       "dependencies": ["credential-redactor", "structured-observations"]
     }
   ]

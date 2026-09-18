@@ -28,27 +28,36 @@ import (
 var bearerPattern = regexp.MustCompile(`(?i)(authorization\s*[:=]\s*)?bearer\s+[^\s,;]+`)
 
 type credentialRedactor struct {
+	mu        sync.RWMutex
 	forbidden []string
 }
 
 func newCredentialRedactor(credentials ...string) *credentialRedactor {
 	redactor := &credentialRedactor{}
+	redactor.add(credentials...)
+	return redactor
+}
+
+func (r *credentialRedactor) add(credentials ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, credential := range credentials {
 		if credential == "" {
 			continue
 		}
 		digest := sha256.Sum256([]byte(credential))
-		redactor.forbidden = append(redactor.forbidden,
+		r.forbidden = append(r.forbidden,
 			credential,
 			hex.EncodeToString(digest[:]),
 			base64.StdEncoding.EncodeToString(digest[:]),
 			base64.RawURLEncoding.EncodeToString(digest[:]),
 		)
 	}
-	return redactor
 }
 
 func (r *credentialRedactor) redact(input string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	redacted := bearerPattern.ReplaceAllString(input, "Authorization: Bearer [REDACTED]")
 	for _, forbidden := range r.forbidden {
 		redacted = strings.ReplaceAll(redacted, forbidden, "[REDACTED]")
