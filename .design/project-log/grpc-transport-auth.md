@@ -247,3 +247,45 @@ config, Hub, authz, runtime, and runtime-broker packages. The transport package
 remained green. `make lint` and `make build` passed; the unrelated failures
 were documented in the durable report and intentionally left out of this
 bounded fix.
+
+## PR #1743 current-main CI composition fix (2026-09-18)
+
+- **Branch**: `scion/dev-transport-ci-composition-fix`
+- **Accepted Transport Base**: `c82fdab076e044b3038b7014320127c152b6c27b`
+- **Current Main Tip**: `b5b2590684d9a824e396632bad53d2d31201361d` (post PR #1744 `go mod tidy` for extras modules)
+- **Merge Commit**: `2e70fede350a0d5d6e16a9c51af6de79231b7ec8`
+
+### Proven Composition Defect & Fix
+
+When merging current `main` (`b5b2590684d9a824e396632bad53d2d31201361d`) into the accepted transport branch (`c82fdab076e044b3038b7014320127c152b6c27b`), git auto-merged `extras/scion-a2a-bridge/internal/bridge/followup_test.go`. Because both branches had added a stub for `mockHubClient.Messaging`, the resulting file contained a duplicate method declaration:
+1. `func (m *mockHubClient) Messaging() hubclient.MessagingService { return nil }` (line 163, after `Invites()`, matching current main)
+2. `func (m *mockHubClient) Messaging() hubclient.MessagingService { return nil }` (line 166, after `SkillRegistries()`, from accepted transport)
+
+The composition fix removed the redundant declaration at line 166, preserving the declaration at line 163 matching current-main mock behavior with zero semantic difference.
+
+No compat allowlist, guard, auth, module changes beyond accepted main, or broad refactors were made.
+
+### Verification Summary
+
+1. **extras/scion-a2a-bridge**:
+   - `go test -v ./...`: PASS (23.3s bridge + 0.25s state)
+   - `go test -race ./...`: PASS (24.5s bridge + 1.2s state)
+   - `go build -buildvcs=false ./...`: PASS
+   - `golangci-lint run --new-from-rev=main --concurrency=1 ./...`: 0 issues
+2. **pkg/plugin and pkg/plugin/grpcbroker**:
+   - `go test -v ./pkg/plugin/...`: PASS
+   - `go test -race ./pkg/plugin/...`: PASS
+   - `go test -count=10 ./pkg/plugin/grpcbroker`: PASS (14.9s, 10/10 repetitions)
+   - `go test -race -count=5 ./pkg/plugin/grpcbroker`: PASS (10.8s, 5/5 repetitions, zero data races)
+3. **Regressions**:
+   - Google ID Token JWKS Cancellation (`TestGoogleIDTokenValidator_FirstCallerCancellationDoesNotAbortSharedFetch`, `TestGoogleIDTokenValidator_AllCallersCanceledFetchStillStops`, `TestGoogleIDTokenValidator_JWKSFetchTimeoutBoundsWork`): PASS normal & race
+   - JWKS Cooldown & Coalescing (`TestGoogleIDTokenValidator_JWKSCooldown_PreventsStampede`, `TestGoogleIDTokenValidator_ConcurrentRefreshes_Coalesce`): PASS
+   - Cloud Run Dual-Header & Ingress Metadata (`TestCloudRunIngress_GEInvokerOnlyServerlessAuth`, `TestCloudRunDualHeaders_ClientSendsBothHeaders`, `TestCloudRunDualHeaders_WithoutOption`, `TestCloudRunIngressMetadataPassthrough`): PASS normal & race
+   - Principal Authorization & Control RPC Denials (`TestGoogleIDTokenValidator_GEInvoker_CannotCallControlRPCs`, `TestProductionFactoryToServer_EndToEnd`): PASS normal & race
+   - Dynamic Integration Auth Propagation (`TestActivateInstalledIntegration_AuthFieldsPropagatedToLoadOne`): PASS
+4. **Toolchain & Quality Gates**:
+   - `make fmt-check`: PASS
+   - `make compat-literals`: PASS
+   - `go vet ./...` (root + extras/scion-a2a-bridge): PASS
+   - Scoped `golangci-lint run --new-from-rev=main` on touched root packages: 0 issues
+   - Root build `go build -buildvcs=false ./...`: PASS
