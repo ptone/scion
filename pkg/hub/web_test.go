@@ -299,7 +299,7 @@ func TestSPACatchAll(t *testing.T) {
 		"/", "/projects", "/agents", "/projects/abc123", "/settings", "/not-a-real-page",
 		"/chat",
 		"/chat/my-project",
-		"/chat/chat-grove/649788a3-322a-45d5-9972-c7e66b2ada30",
+		"/chat/chat-project/649788a3-322a-45d5-9972-c7e66b2ada30",
 		"/chat/space/project-id",
 		"/chat/space/project-id/thread/topic-id",
 		"/chat/dm/dm-key",
