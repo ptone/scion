@@ -260,3 +260,45 @@ exchange/envelope counters, blocked taskstore and live rows, inherited-listener
 allocator behavior, and all baseline classifications are unchanged. With the exact
 approved auth correction now incorporated, the earlier incomplete/pending label is
 resolved; final delivery SHA and remote-ref proof are recorded in the durable report.
+
+## Dev integration classification and reconciliation
+
+Date: 2026-09-18. Branch: `scion/dev-integration-classification`.  
+Base commit: `547ee17b7e23ade47e0517f69fbf1c3210f02599` (`scion/dev-integration-final-resume`).  
+Classification commit: `6f5986191b92bf9b79424e0f317b620b7baee6df`.  
+Evaluated HOLD branch: `9e4f0085e75bb0dd0a87e1ee4e625545008d85d7`.
+
+### 1. Exact Delta Isolation & Classification
+The experimental HOLD branch `9e4f008` introduced exactly two production lines in `extras/scion-a2a-bridge/internal/bridge/pgstore.go` (changing `Seconds()` to `Milliseconds()` in PostgreSQL interval strings) and four test changes in `ha_final_process_test.go`.
+
+Analysis against real PostgreSQL 15.19 proved that no production defect exists on accepted HA (`ccee8c06`) or preserved base (`547ee17`). All production callers pass integer durations (30s, 60s, 120s, 4m); sub-second leases are neither specified nor used in production. The failure observed in test was caused exclusively by test helper `serveHABridgeProcess` passing `500 * time.Millisecond` into `ReapStaleTasks`, which truncated to `'0 seconds'::interval` in PostgreSQL and prematurely reaped active tasks upon replica restart. The production modification to `pgstore.go` was classified as **unsupported and discarded**. The test helper was corrected to `2 * time.Second` (matching `cfg.Timeouts.SendMessage`), fully resolving the boundary with zero production changes.
+
+### 2. Synchronization Boundary in Crash Lease Boundary
+The `time.Sleep(300 * time.Millisecond)` in `TestCrashLeaseBoundary` was removed. The underlying race was proven: `processTopology.start` duplicates a pre-bound file descriptor to the child process via `ExtraFiles`, allowing TCP connectivity before Go runtime initialization and startup task reaping finish. The test was updated to deterministically poll `callRPC("GetTask")` on Bridge B with a 5-second deadline until `TASK_STATE_FAILED` is observed, proving the synchronization boundary via explicit RPC assertions.
+
+### 3. Cursor and Replay Contract Resolution
+`TestCrossReplicaStreamCursor` was reconciled with the canonical no-old-replay contract:
+- The initial snapshot reflects `last_event_cursor = 0`.
+- The intermediate `cursor-working` event appended to `a2a_task_events` is not reflected in the snapshot; therefore, the no-old-replay contract requires that it stream to the reconnected subscriber.
+- The test now reads and asserts the unreflected `TASK_STATE_WORKING` event, verifies `assertNoSSE` for zero duplicate replays, consumes incoming SSE events from `cursor-final` until terminal `TASK_STATE_COMPLETED`, and verifies `_bridgeEventID` is never leaked on the wire.
+- In `TestTwoReplicaUserLifecycle`, the attacker subject domain was corrected from `attacker@example.invalid` to `attacker@gmail.com` so the minted token can be exchanged to test cross-caller isolation without triggering an early 401 token exchange failure.
+
+### 4. Verification Evidence
+All integration tests and package suites passed against real PostgreSQL:
+```text
+=== RUN   TestTwoReplicaUserLifecycle
+--- PASS: TestTwoReplicaUserLifecycle (0.90s)
+=== RUN   TestCrossReplicaStreamCursor
+--- PASS: TestCrossReplicaStreamCursor (1.47s)
+=== RUN   TestCrashLeaseBoundary
+--- PASS: TestCrashLeaseBoundary (3.38s)
+PASS
+ok  github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/integration 5.873s
+
+ok  github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/cmd/scion-a2a-bridge 0.270s
+ok  github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/integration 16.866s
+ok  github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge 106.310s
+ok  github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state 0.398s
+```
+Zero production code lines were altered. The classification commit was pushed to `origin/scion/dev-integration-classification`.
+
