@@ -429,15 +429,19 @@ else
   echo "  Created service account: ${SA_EMAIL}"
 fi
 
-# Bind minimal IAM roles (idempotent)
+# Bind IAM roles (idempotent)
+# - Observability: logging, monitoring, tracing
+# - Runtime broker: create/manage agent service accounts and mint tokens
 info "Binding IAM roles..."
-for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent; do
+for ROLE in roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent \
+            roles/iam.serviceAccountAdmin roles/iam.serviceAccountTokenCreator; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="${ROLE}" \
     --quiet &>/dev/null
 done
-echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent"
+echo "  Roles bound: logging.logWriter, monitoring.metricWriter, cloudtrace.agent,"
+echo "               iam.serviceAccountAdmin, iam.serviceAccountTokenCreator"
 
 # --- Grant deployer IAP tunnel access (required for SSH to --no-address VMs) ---
 info "Granting IAP tunnel access to deployer..."
