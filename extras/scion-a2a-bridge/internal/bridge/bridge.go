@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
@@ -404,17 +405,24 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 		heartbeatStore = sdkStore[0]
 	}
 	ownerID := OwnerID()
+	var ownerKey string
 	if heartbeatStore != nil {
-		ownerKey, ok, err := buildOwnerKey(ctx)
+		// Continuations must start strictly after the last event reflected in
+		// this task's durable snapshot. Derive the same owner key used by the
+		// task store from authenticated route/caller context; never authorize
+		// from a local cache or a process/global cursor.
+		var ok bool
+		var err error
+		ownerKey, ok, err = buildOwnerKey(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("deriving durable owner for task %s: %w", taskID, err)
+			return nil, fmt.Errorf("derive task owner: %w", err)
 		}
 		if !ok {
-			return nil, fmt.Errorf("deriving durable owner for task %s: owner unavailable", taskID)
+			return nil, fmt.Errorf("task owner unavailable")
 		}
 		_, durableCursor, err := heartbeatStore.GetOwnedTaskSnapshotAndCursor(ctx, taskID, ownerKey)
 		if err != nil {
-			return nil, fmt.Errorf("loading durable cursor for task %s: %w", taskID, err)
+			return nil, fmt.Errorf("load owned task cursor: %w", err)
 		}
 		cursor = durableCursor
 	}
@@ -428,12 +436,20 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 	}
 
 	for {
+		canceledLeaseRelease := false
 		// STEP 1: Verify ownership BEFORE reading (Constraint 5).
 		// CRIT-4: If heartbeat fails (lease lost, reaped, or stolen by
 		// another replica), abort immediately. No post-loss event may be yielded.
 		if heartbeatStore != nil {
 			if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
-				return nil, fmt.Errorf("lease lost before read for task %s: %w", taskID, hbErr)
+				// Cancellation atomically releases the lease and publishes a final
+				// event. The authenticated task owner may consume that one terminal
+				// boundary after lease release; every other lease loss still aborts.
+				stored, _, snapshotErr := heartbeatStore.GetOwnedTaskSnapshotAndCursor(ctx, taskID, ownerKey)
+				if snapshotErr != nil || stored == nil || stored.Task == nil || stored.Task.Status.State != a2a.TaskStateCanceled {
+					return nil, fmt.Errorf("lease lost before read for task %s: %w", taskID, hbErr)
+				}
+				canceledLeaseRelease = true
 			}
 		}
 
@@ -444,11 +460,17 @@ func (b *Bridge) waitForTaskEvent(ctx context.Context, taskID string, timeout ti
 		}
 		for _, ev := range events {
 			cursor = ev.ID
+			if canceledLeaseRelease && !isCanceledEvent(ev) {
+				continue
+			}
 			if isResponseEvent(ev) || ev.Final {
 				// STEP 3: Verify ownership IMMEDIATELY before returning.
 				if heartbeatStore != nil {
 					if hbErr := heartbeatStore.HeartbeatExecution(ctx, taskID, ownerID); hbErr != nil {
-						return nil, fmt.Errorf("lease lost before emit for task %s: %w", taskID, hbErr)
+						stored, _, snapshotErr := heartbeatStore.GetOwnedTaskSnapshotAndCursor(ctx, taskID, ownerKey)
+						if snapshotErr != nil || stored == nil || stored.Task == nil || stored.Task.Status.State != a2a.TaskStateCanceled || !isCanceledEvent(ev) {
+							return nil, fmt.Errorf("lease lost before emit for task %s: %w", taskID, hbErr)
+						}
 					}
 				}
 				return &ev, nil
@@ -503,6 +525,14 @@ func isResponseEvent(ev state.TaskEvent) bool {
 	}
 	var update TaskStatusUpdate
 	return json.Unmarshal(ev.Payload, &update) == nil && update.Status.State == TaskStateInputRequired
+}
+
+func isCanceledEvent(ev state.TaskEvent) bool {
+	if ev.Kind != "status" || !ev.Final {
+		return false
+	}
+	var update TaskStatusUpdate
+	return json.Unmarshal(ev.Payload, &update) == nil && update.Status.State == TaskStateCanceled
 }
 
 // taskEventToTaskResult converts a stored TaskEvent to a TaskResult for
@@ -1016,6 +1046,11 @@ func (b *Bridge) correlateWithMetadata(ctx context.Context, projectID, agentSlug
 		// Standalone mode: SDK store is authoritative.
 		sdkTask, callerUserID, sdkErr := b.sdkTaskStore.GetByIDAndAgent(ctx, taskID, projectID, agentSlug)
 		if sdkErr == nil && sdkTask != nil {
+			// A canceled SDK snapshot fences late broker delivery: no assistant
+			// reply may be appended after a cross-replica cancel.
+			if sdkTask.Task.Status.State == a2a.TaskStateCanceled {
+				return "", fmt.Errorf("task is terminal")
+			}
 			if err := b.validateTopicUser(topic, callerUserID, taskID); err != nil {
 				return "", err
 			}
