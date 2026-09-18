@@ -85,7 +85,7 @@ func main() {
 	}
 
 	// Validate auth configuration at startup (fail closed).
-	if err := bridge.ValidateConfig(cfg); err != nil {
+	if err := validateStartupConfig(cfg); err != nil {
 		log.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
@@ -353,7 +353,11 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	grpcBrokerServer := grpcbroker.NewServer(brokerServer)
 
 	// Resolve gRPC server auth configuration from environment.
-	grpcAuthCfg := resolveGRPCServerAuth(muxPorts, log)
+	grpcAuthCfg, err := resolveGRPCServerAuth(muxPorts, log)
+	if err != nil {
+		log.Error("gRPC server auth config validation failed", "error", err)
+		os.Exit(1)
+	}
 	grpcServerOpts, err := grpcbroker.BuildStandaloneServerOptions(grpcAuthCfg)
 	if err != nil {
 		log.Error("failed to build gRPC server options", "error", err)
@@ -427,7 +431,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	}
 
 	// Validate configuration after applying runtime overrides.
-	if err := bridge.ValidateConfig(cfg); err != nil {
+	if err := validateStartupConfig(cfg); err != nil {
 		log.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
@@ -665,7 +669,7 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 //	GRPC_TLS_CERT        - path to server TLS certificate (Kubernetes only)
 //	GRPC_TLS_KEY         - path to server TLS key (Kubernetes only)
 //	GRPC_TLS_CLIENT_CA   - path to client CA for mTLS (Kubernetes only)
-func resolveGRPCServerAuth(muxPorts bool, log *slog.Logger) grpcbroker.StandaloneServerConfig {
+func resolveGRPCServerAuth(muxPorts bool, log *slog.Logger) (grpcbroker.StandaloneServerConfig, error) {
 	cfg := grpcbroker.StandaloneServerConfig{
 		AuthMode: grpcbroker.StandaloneAuthMode(os.Getenv("GRPC_AUTH_MODE")),
 		Audience: os.Getenv("GRPC_AUTH_AUDIENCE"),
@@ -712,8 +716,7 @@ func resolveGRPCServerAuth(muxPorts bool, log *slog.Logger) grpcbroker.Standalon
 
 	// Validate config at startup — fail closed on invalid config.
 	if err := grpcbroker.ValidateStandaloneServerConfig(cfg); err != nil {
-		log.Error("gRPC server auth config validation failed", "error", err)
-		os.Exit(1)
+		return cfg, err
 	}
 
 	log.Info("gRPC server auth configured",
@@ -725,7 +728,13 @@ func resolveGRPCServerAuth(muxPorts bool, log *slog.Logger) grpcbroker.Standalon
 		"mux_ports", muxPorts,
 	)
 
-	return cfg
+	return cfg, nil
+}
+
+// validateStartupConfig is the common fail-closed bridge configuration gate
+// used after production config composition in both serving modes.
+func validateStartupConfig(cfg *bridge.Config) error {
+	return bridge.ValidateConfig(cfg)
 }
 
 // resolveTransportAuth resolves the transport-layer OIDC token source and
