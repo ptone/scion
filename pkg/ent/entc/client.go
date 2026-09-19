@@ -28,6 +28,7 @@ import (
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	entschema "entgo.io/ent/dialect/sql/schema"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -147,7 +148,20 @@ func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client,
 		connConfig.ConnectTimeout = connectTimeout
 	}
 
-	db := stdlib.OpenDB(*connConfig)
+	// Register google/uuid.UUID as the default Go type for the "uuid" PostgreSQL
+	// type. Without this, pgx's UUIDCodec.PlanEncode returns nil for uuid.UUID
+	// values (which implement driver.Valuer but not pgx's UUIDValuer) and the
+	// fallback encodePlanDriverValuer path can emit OID 25 (text) instead of OID
+	// 2950 (uuid) after statement-cache eviction, causing Postgres to reject with
+	// SQLSTATE 42883 ("operator does not exist: uuid = text"). Registering the
+	// type gives every connection a direct encode plan, eliminating the fallback.
+	// See #1634.
+	db := stdlib.OpenDB(*connConfig, stdlib.OptionAfterConnect(
+		func(ctx context.Context, conn *pgx.Conn) error {
+			conn.TypeMap().RegisterDefaultPgType(uuid.UUID{}, "uuid")
+			return nil
+		},
+	))
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.Postgres, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
