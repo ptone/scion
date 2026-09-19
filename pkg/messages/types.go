@@ -301,6 +301,9 @@ func (m *StructuredMessage) LogAttrs() []any {
 	if m.ThreadID != "" {
 		attrs = append(attrs, "thread_id", m.ThreadID)
 	}
+	if m.ConversationID != "" {
+		attrs = append(attrs, "conversation_id", m.ConversationID)
+	}
 	return attrs
 }
 

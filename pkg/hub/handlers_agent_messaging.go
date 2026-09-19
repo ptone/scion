@@ -1081,6 +1081,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		"project_id", agent.ProjectID,
 		"recipient_id", result.RecipientID,
 		"msg_type", req.Type,
+		"conversation_id", storeMsg.ConversationID,
 	)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

@@ -326,23 +326,24 @@ func TestNewNotification(t *testing.T) {
 
 func TestLogAttrs(t *testing.T) {
 	m := &StructuredMessage{
-		Version:     Version,
-		Sender:      "user:alice",
-		SenderID:    "user-uuid-123",
-		Recipient:   "agent:dev",
-		RecipientID: "agent-uuid-456",
-		Msg:         "hello",
-		Type:        TypeInstruction,
-		Urgent:      true,
-		Broadcasted: false,
-		Plain:       true,
+		Version:        Version,
+		Sender:         "user:alice",
+		SenderID:       "user-uuid-123",
+		Recipient:      "agent:dev",
+		RecipientID:    "agent-uuid-456",
+		Msg:            "hello",
+		Type:           TypeInstruction,
+		Urgent:         true,
+		Broadcasted:    false,
+		Plain:          true,
+		ConversationID: "conv-uuid-789",
 	}
 
 	attrs := m.LogAttrs()
 
-	// Should contain 10 key-value pairs (20 elements) when IDs are set
-	if len(attrs) != 20 {
-		t.Fatalf("LogAttrs() returned %d elements, want 20", len(attrs))
+	// Should contain 11 key-value pairs (22 elements) when IDs and conversation_id are set
+	if len(attrs) != 22 {
+		t.Fatalf("LogAttrs() returned %d elements, want 22", len(attrs))
 	}
 
 	// Verify key-value pairs
@@ -357,6 +358,7 @@ func TestLogAttrs(t *testing.T) {
 		"broadcasted":     false,
 		"plain":           true,
 		"raw":             false,
+		"conversation_id": "conv-uuid-789",
 	}
 	for i := 0; i < len(attrs); i += 2 {
 		key, ok := attrs[i].(string)
@@ -391,10 +393,10 @@ func TestLogAttrsWithoutIDs(t *testing.T) {
 		t.Fatalf("LogAttrs() returned %d elements, want 16", len(attrs))
 	}
 
-	// Verify sender_id and recipient_id are not present
+	// Verify sender_id, recipient_id, and conversation_id are not present
 	for i := 0; i < len(attrs); i += 2 {
 		key := attrs[i].(string)
-		if key == "sender_id" || key == "recipient_id" {
+		if key == "sender_id" || key == "recipient_id" || key == "conversation_id" {
 			t.Errorf("LogAttrs() should not include %q when empty", key)
 		}
 	}
