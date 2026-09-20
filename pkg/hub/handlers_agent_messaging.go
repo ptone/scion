@@ -854,15 +854,44 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// side effects (message persistence, dispatch, attachment ingest, SSE,
 	// observer publish). Re-read server-owned sender/target state;
 	// ignore client identity/provenance assertions.
+	//
+	// The gate fires in two cases:
+	//  (a) deliveryAgentDM with a resolved target (conversation_ref path).
+	//  (b) Any delivery path where the conversation is a direct agent-to-
+	//      agent DM (conversation_id + recipientID path). Without this,
+	//      conversation_id bypasses agent DM routing and falls through to
+	//      the user delivery path, persisting the message without mode or
+	//      cross-project checks.
+	var s7TargetAgentID string
 	if result.DeliveryPath == deliveryAgentDM && result.TargetAgent != nil {
+		// Case (a): conversation_ref path — target already resolved.
+		s7TargetAgentID = result.TargetAgent.ID
+	} else if result.ConvResult != nil && result.ConvResult.Kind == "direct" &&
+		strings.HasPrefix(result.ConvResult.ExternalRef, "dm:") {
+		// Case (b): check if the DM key names two agents and the
+		// recipientID matches the non-sender side.
+		kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(result.ConvResult.ExternalRef)
+		if parseErr == nil {
+			if kindA == "agent" && kindB == "agent" {
+				// Both sides are agents. Identify the target.
+				if idA == agent.ID && idB == result.RecipientID {
+					s7TargetAgentID = idB
+				} else if idB == agent.ID && idA == result.RecipientID {
+					s7TargetAgentID = idA
+				}
+			}
+		}
+	}
+
+	if s7TargetAgentID != "" {
 		// Re-read the target agent to get its current mode. The record
 		// from S5 may come from the same request, but calling
 		// authorizeAgentMessage with the fresh store record ensures the
 		// mode is current at decision time.
-		freshTarget, targetErr := s.store.GetAgent(ctx, result.TargetAgent.ID)
+		freshTarget, targetErr := s.store.GetAgent(ctx, s7TargetAgentID)
 		if targetErr != nil {
 			s.messageLog.Error("outbound DM authorization: target agent re-read failed",
-				"target_id", result.TargetAgent.ID, "error", targetErr)
+				"target_id", s7TargetAgentID, "error", targetErr)
 			writeErrorFromErr(w, targetErr, "")
 			return
 		}
@@ -889,7 +918,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 		// Update the target agent reference with the fresh record so
 		// downstream dispatch uses current state.
-		result.TargetAgent = freshTarget
+		if result.TargetAgent != nil {
+			result.TargetAgent = freshTarget
+		}
 	}
 
 	// Translate @email mentions to @firstname-lastname for user-facing messages.

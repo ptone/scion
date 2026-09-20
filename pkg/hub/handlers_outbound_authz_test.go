@@ -981,3 +981,95 @@ func TestOutboundDMAuthz_CrossProject_SenderModeNotHub_Denied(t *testing.T) {
 	assertZeroSideEffects(t, s, agentA.ID, dispatcher, rr)
 	assertDenialDetails(t, rr, string(MessageDenialCrossProjectSenderMode))
 }
+
+// ---------------------------------------------------------------------------
+// conversation_id tests
+//
+// The conversation_id input (without conversation_ref) requires a recipient
+// per the pre-S3 guard. With recipientID set, S5 derivation is skipped, so
+// targetAgent stays nil and the request routes to the user delivery path —
+// NOT deliveryAgentDM. The S7 gate fires only on deliveryAgentDM. These
+// tests verify that conversation_id cannot produce a silently unguarded
+// agent-to-agent message delivery.
+// ---------------------------------------------------------------------------
+
+// sendAuthzDMViaConversationID sends an agent-to-agent DM through the HTTP
+// handler using conversation_id (not conversation_ref) alongside a recipient.
+func sendAuthzDMViaConversationID(t *testing.T, srv *Server, sender, target *store.Agent, convID, projectID, msgText string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	reqBody, err := json.Marshal(OutboundMessageRequest{
+		ConversationID: convID,
+		RecipientID:    target.ID,
+		Recipient:      "agent:" + target.Slug,
+		Msg:            msgText,
+		Type:           "instruction",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+projectID+"/agents/"+sender.ID+"/outbound-message",
+		bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: sender.ID},
+		ProjectID: projectID,
+		Ancestry:  sender.Ancestry,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, sender.ID)
+	return rr
+}
+
+// ---------------------------------------------------------------------------
+// Test 14: conversation_id — target mode none → denied
+//
+// With conversation_id + recipientID, the request bypasses S5 derivation
+// (recipientID is already set), so targetAgent stays nil and the delivery
+// path is user-direct rather than deliveryAgentDM. S7 case (b) detects
+// that the DM conversation is between two agents and applies the
+// authorization gate, preventing the message from being persisted.
+// ---------------------------------------------------------------------------
+
+func TestOutboundDMAuthz_ConversationID_TargetModeNone_Denied(t *testing.T) {
+	srv, s, project, sender, target, convID, dispatcher := authzDMSetup(t,
+		store.MessageModeProject, store.MessageModeNone)
+
+	rr := sendAuthzDMViaConversationID(t, srv, sender, target, convID, project.ID, "conv_id mode none")
+	assertZeroSideEffects(t, s, sender.ID, dispatcher, rr)
+	assertDenialDetails(t, rr, "")
+}
+
+// ---------------------------------------------------------------------------
+// Test 15: conversation_id — same-project project mode allowed → DM delivered
+//
+// When both agents are in project mode and conversation_id is used with a
+// recipient, the request enters the user-direct delivery path (since
+// targetAgent is nil in S5 when recipientID is set). This test verifies
+// the conversation_id input reaches the handler and persists when authorized.
+// ---------------------------------------------------------------------------
+
+func TestOutboundDMAuthz_ConversationID_Allowed_Persisted(t *testing.T) {
+	srv, s, project, sender, target, convID, _ := authzDMSetup(t,
+		store.MessageModeProject, store.MessageModeProject)
+
+	rr := sendAuthzDMViaConversationID(t, srv, sender, target, convID, project.ID, "conv_id allowed")
+
+	// The request should succeed (user-direct path persists the message).
+	require.Equal(t, http.StatusOK, rr.Code,
+		"conversation_id with project-mode target must succeed; body: %s", rr.Body.String())
+
+	// Verify the message was persisted.
+	ctx := context.Background()
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{SenderID: sender.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	var found bool
+	for _, m := range msgs.Items {
+		if m.Msg == "conv_id allowed" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "conversation_id allowed DM must be persisted")
+}
