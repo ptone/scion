@@ -33,6 +33,24 @@ import (
 	"github.com/google/uuid"
 )
 
+// sanitizeCrossProjectObserver strips body and attachment content from an
+// observer StructuredMessage so that cross-project broker publications do not
+// leak payload to unrelated project members. Metadata keys unrelated to
+// attachments are preserved.
+func sanitizeCrossProjectObserver(msg *messages.StructuredMessage) {
+	msg.Msg = ""
+	msg.Attachments = nil
+	if msg.Metadata != nil {
+		sanitized := make(map[string]string, len(msg.Metadata))
+		for k, v := range msg.Metadata {
+			if k != attachmentsMetadataKey {
+				sanitized[k] = v
+			}
+		}
+		msg.Metadata = sanitized
+	}
+}
+
 // OutboundMessageRequest is the request body for POST /api/v1/agents/{id}/outbound-message.
 type OutboundMessageRequest struct {
 	Recipient   string            `json:"recipient,omitempty"`
@@ -1085,17 +1103,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			observerMsg.ObserverOnly = true
 			observerMsg.ConversationAsserted = false
 			if agent.ProjectID != result.TargetAgent.ProjectID {
-				observerMsg.Msg = ""
-				observerMsg.Attachments = nil
-				if observerMsg.Metadata != nil {
-					sanitized := make(map[string]string, len(observerMsg.Metadata))
-					for k, v := range observerMsg.Metadata {
-						if k != attachmentsMetadataKey {
-							sanitized[k] = v
-						}
-					}
-					observerMsg.Metadata = sanitized
-				}
+				sanitizeCrossProjectObserver(&observerMsg)
 			}
 			if err := bp.PublishMessage(ctx, result.TargetAgent.ProjectID, &observerMsg); err != nil {
 				s.messageLog.Error("DEF-164: observer publish failed",
@@ -2107,17 +2115,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				isCrossProjectObs = senderAgent.ProjectID() != "" && senderAgent.ProjectID() != agent.ProjectID
 			}
 			if isCrossProjectObs {
-				observerMsg.Msg = ""
-				observerMsg.Attachments = nil
-				if observerMsg.Metadata != nil {
-					sanitized := make(map[string]string, len(observerMsg.Metadata))
-					for k, v := range observerMsg.Metadata {
-						if k != attachmentsMetadataKey {
-							sanitized[k] = v
-						}
-					}
-					observerMsg.Metadata = sanitized
-				}
+				sanitizeCrossProjectObserver(&observerMsg)
 			}
 			if err := bp.PublishMessage(ctx, agent.ProjectID, &observerMsg); err != nil {
 				s.messageLog.Error("Failed to publish agent-to-agent observer message",

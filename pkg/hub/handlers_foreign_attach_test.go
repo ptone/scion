@@ -704,6 +704,18 @@ func TestInteragentView_CrossProject_BodyStripped(t *testing.T) {
 		Role:           "member",
 	}))
 
+	// Create a second agent in projectA for same-project messaging.
+	agentA2 := &store.Agent{
+		ID:          tid("ia-agent-a2"),
+		Name:        "ia-agent-a2",
+		Slug:        "ia-agent-a2",
+		ProjectID:   projectA.ID,
+		Phase:       "running",
+		Visibility:  store.VisibilityPrivate,
+		MessageMode: store.MessageModeHub,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agentA2))
+
 	// Persist a cross-project inter-agent message.
 	senderProjID := projectA.ID
 	recipientProjID := projectB.ID
@@ -724,6 +736,45 @@ func TestInteragentView_CrossProject_BodyStripped(t *testing.T) {
 	}
 	require.NoError(t, s.CreateMessage(ctx, crossProjMsg))
 
+	// Persist a same-project inter-agent message (agentA ↔ agentA2, both in
+	// projectA). The viewer owns projectA, so the body must be preserved.
+	sameProjConvKey, err := messages.DMConversationKey("agent", agentA.ID, "agent", agentA2.ID)
+	require.NoError(t, err)
+	sameProjConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: sameProjConvKey,
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+	require.NoError(t, s.EnsureParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: sameProjConv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    agentA.ID,
+		Role:           "member",
+	}))
+	require.NoError(t, s.EnsureParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: sameProjConv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    agentA2.ID,
+		Role:           "member",
+	}))
+	sameProjMsg := &store.Message{
+		ID:              tid("ia-msg-same"),
+		ProjectID:       projectA.ID,
+		Sender:          "agent:" + agentA.Slug,
+		SenderID:        agentA.ID,
+		Recipient:       "agent:" + agentA2.Slug,
+		RecipientID:     agentA2.ID,
+		Msg:             "same-project visible body",
+		Type:            "instruction",
+		AgentID:         agentA.ID,
+		ConversationID:  sameProjConv.ID,
+		SenderProjectID: &senderProjID,
+		CreatedAt:       time.Now(),
+	}
+	require.NoError(t, s.CreateMessage(ctx, sameProjMsg))
+
 	enableCPM(t, srv, s)
 
 	// The viewer (dev user) requests the interagent view via the full router.
@@ -742,6 +793,10 @@ func TestInteragentView_CrossProject_BodyStripped(t *testing.T) {
 		if m.ID == crossProjMsg.ID {
 			assert.Empty(t, m.Msg,
 				"cross-project message body must be stripped in interagent view for non-participant viewer")
+		}
+		if m.ID == sameProjMsg.ID {
+			assert.Equal(t, "same-project visible body", m.Msg,
+				"same-project message body must be preserved in interagent view")
 		}
 	}
 }

@@ -2300,7 +2300,7 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 		seen[m.ID] = true
 		if ClassifyLegacyViewQuery(&m) == LegacyViewCanonical && m.ConversationID != "" {
 			decision := s.AuthorizeCrossProjectContentAccess(
-				ctx, viewerID, m.ConversationID, ContentSurfaceStreamEvents,
+				ctx, viewerID, m.ConversationID, ContentSurfaceInteragentView,
 			)
 			if !decision.Allowed {
 				// Strip body — viewer is not a participant.
