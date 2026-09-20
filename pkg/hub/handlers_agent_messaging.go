@@ -1003,6 +1003,21 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// ── Foreign attachment rejection (#1687) ─────────────────────────────
+	// Cross-project DMs are text-only until managed transfer is implemented.
+	// Reject before attachment ingestion, message persistence, or any
+	// publication side effect.
+	if len(req.Attachments) > 0 && result.DeliveryPath == deliveryAgentDM && result.TargetAgent != nil {
+		if agent.ProjectID != result.TargetAgent.ProjectID {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability,
+				"cross-project attachment transfer is not supported; send text-only messages across projects",
+				map[string]interface{}{
+					"reason": string(MessageDenialCrossProjectAttachUnsupported),
+				})
+			return
+		}
+	}
+
 	// Process attachments.
 	attachmentRefs := s.ingestAgentAttachments(ctx, agent.ProjectID, agent.ID, req.Attachments)
 	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {
@@ -1061,10 +1076,27 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		// F6: The pre-refactor DEF-164 path exited before ConversationAsserted
 		// was set, so observer messages always had ConversationAsserted = false.
 		// Restore that behavior to avoid changing the observer envelope shape.
+		//
+		// #1687: For cross-project DMs, strip body and attachment metadata
+		// from the observer message so unrelated project members receive no
+		// content through the broker publication sink.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
 			observerMsg := *structuredMsg
 			observerMsg.ObserverOnly = true
 			observerMsg.ConversationAsserted = false
+			if agent.ProjectID != result.TargetAgent.ProjectID {
+				observerMsg.Msg = ""
+				observerMsg.Attachments = nil
+				if observerMsg.Metadata != nil {
+					sanitized := make(map[string]string, len(observerMsg.Metadata))
+					for k, v := range observerMsg.Metadata {
+						if k != attachmentsMetadataKey {
+							sanitized[k] = v
+						}
+					}
+					observerMsg.Metadata = sanitized
+				}
+			}
 			if err := bp.PublishMessage(ctx, result.TargetAgent.ProjectID, &observerMsg); err != nil {
 				s.messageLog.Error("DEF-164: observer publish failed",
 					"agent_id", result.TargetAgent.ID, "error", err)
@@ -1431,6 +1463,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	messaging.RecordStep(ctx, "agent_loaded")
+
+	// ── Foreign attachment rejection (#1687) — inbound path ──────────────
+	// When the authenticated sender is an agent in a different project,
+	// reject any attachments before persistence, dispatch, or publication.
+	if structuredMsg != nil && len(structuredMsg.Attachments) > 0 {
+		if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
+			if senderAgent.ProjectID() != "" && senderAgent.ProjectID() != agent.ProjectID {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability,
+					"cross-project attachment transfer is not supported; send text-only messages across projects",
+					map[string]interface{}{
+						"reason": string(MessageDenialCrossProjectAttachUnsupported),
+					})
+				return
+			}
+		}
+	}
 
 	// AC-33 + Phase 5 D1: Cross-project mention check with fan-out support.
 	// For same-project mentions, validate all agents belong to the same project.
@@ -2045,11 +2093,32 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Publish agent-to-agent messages through the broker so plugin observers
 	// (Telegram, broker-log) can see them. ObserverOnly prevents the hub's own
 	// subscription from re-dispatching.
+	//
+	// #1687: For cross-project DMs, strip body and attachment metadata from
+	// the observer message so unrelated project members receive no content
+	// through the broker publication sink.
 	if strings.HasPrefix(structuredMsg.Sender, "agent:") &&
 		strings.HasPrefix(structuredMsg.Recipient, "agent:") {
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
 			observerMsg := *structuredMsg
 			observerMsg.ObserverOnly = true
+			isCrossProjectObs := false
+			if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
+				isCrossProjectObs = senderAgent.ProjectID() != "" && senderAgent.ProjectID() != agent.ProjectID
+			}
+			if isCrossProjectObs {
+				observerMsg.Msg = ""
+				observerMsg.Attachments = nil
+				if observerMsg.Metadata != nil {
+					sanitized := make(map[string]string, len(observerMsg.Metadata))
+					for k, v := range observerMsg.Metadata {
+						if k != attachmentsMetadataKey {
+							sanitized[k] = v
+						}
+					}
+					observerMsg.Metadata = sanitized
+				}
+			}
 			if err := bp.PublishMessage(ctx, agent.ProjectID, &observerMsg); err != nil {
 				s.messageLog.Error("Failed to publish agent-to-agent observer message",
 					"agent_id", agent.ID, "error", err)
