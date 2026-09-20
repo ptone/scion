@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -665,18 +667,16 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// ref inline (P3) and routes through the existing DEF-138 auth block.
 	senderAgent := os.Getenv("SCION_AGENT_NAME")
 	if senderAgent != "" {
-		// Cross-project conv:<uuid> reply: use the Messaging().SendMessage API
-		// which hits POST /api/v1/conversations/{id}/messages. This bypasses
-		// the project-scoped agent lookup that rejects cross-project targets.
-		// The conversation send API does not support attachments or wake;
-		// reject explicitly rather than silently dropping them.
-		if ref.Kind == messaging.RefConversation {
-			if len(attachments) > 0 {
-				return fmt.Errorf("--attach is not supported with conv: references; the conversation send API does not support attachments")
-			}
-			if wake {
-				return fmt.Errorf("--wake is not supported with conv: references; the conversation send API does not support wake")
-			}
+		// Cross-project conv:<uuid> reply: try the Messaging().SendMessage API
+		// which hits POST /api/v1/conversations/{id}/messages. This enforces
+		// CPM authorization (Hub enable, agent mode, inbound policy) for
+		// cross-project DM replies. If the server returns 501 (group
+		// conversations not supported on this endpoint), fall through to the
+		// outbound endpoint below which handles all conversation kinds.
+		//
+		// The conversation send API does not support attachments or wake —
+		// when either is requested, skip directly to the outbound endpoint.
+		if ref.Kind == messaging.RefConversation && len(attachments) == 0 && !wake {
 			sendReq := &hubclient.ConversationSendRequest{
 				Msg:       message,
 				Type:      "instruction",
@@ -685,12 +685,21 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			}
 			result, sendErr := hubCtx.Client.Messaging().SendMessage(ctx, ref.Value, sendReq)
 			if sendErr != nil {
-				return wrapHubError(fmt.Errorf("failed to send message to conversation '%s': %w", ref.Value, sendErr))
+				// Group conversations return 501 from the conversation send
+				// API — fall through to the outbound endpoint which handles
+				// group routing, attachments, and wake.
+				var apiErr *apiclient.APIError
+				if errors.As(sendErr, &apiErr) && apiErr.StatusCode == 501 {
+					// Fall through to outbound path below.
+				} else {
+					return wrapHubError(fmt.Errorf("failed to send message to conversation '%s': %w", ref.Value, sendErr))
+				}
+			} else {
+				if !isJSONOutput() {
+					fmt.Printf("Message sent to conversation '%s' (message %s).\n", ref.Value, result.MessageID)
+				}
+				return nil
 			}
-			if !isJSONOutput() {
-				fmt.Printf("Message sent to conversation '%s' (message %s).\n", ref.Value, result.MessageID)
-			}
-			return nil
 		}
 
 		// DEF-164: agent-to-agent messages use the structured message

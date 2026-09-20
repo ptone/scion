@@ -2084,6 +2084,24 @@ func crossProjectMockServer(t *testing.T, targetAgentID, targetAgentSlug, target
 				"status":    "delivered",
 			})
 
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/outbound-message"):
+			var body struct {
+				Msg             string   `json:"msg"`
+				Type            string   `json:"type"`
+				ConversationRef string   `json:"conversation_ref"`
+				Attachments     []string `json:"attachments"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+
+			sm := sentMessage{
+				AgentName: body.ConversationRef,
+				Message:   body.Msg,
+			}
+			mu.Lock()
+			sent = append(sent, sm)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -2461,16 +2479,16 @@ func TestConvRefSameProjectAllowed(t *testing.T) {
 	assert.False(t, rejected, "same-project conv: should not be rejected")
 }
 
-// TestConvRefAttachWakeRejection verifies that --attach and --wake are
-// explicitly rejected for conv: references, since the conversation send
-// API (ConversationSendRequest) does not support them.
-func TestConvRefAttachWakeRejection(t *testing.T) {
+// TestConvRefAttachWakeOutboundFallback verifies that conv: sends with
+// --attach or --wake skip the conversation send API (which does not
+// support them) and route through the outbound endpoint instead.
+func TestConvRefAttachWakeOutboundFallback(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
 
 	t.Setenv("SCION_AGENT_NAME", "sender-agent")
 
-	server, _ := crossProjectMockServer(t, "", "", "", "")
+	server, sent := crossProjectMockServer(t, "", "", "", "")
 	defer server.Close()
 
 	client, err := hubclient.New(server.URL)
@@ -2482,24 +2500,33 @@ func TestConvRefAttachWakeRejection(t *testing.T) {
 		ProjectID: "proj-a-uuid",
 	}
 
-	convID := "conv-uuid-reject-test"
+	convID := "conv-uuid-attach-test"
 	ref := &messaging.Reference{
 		Kind:  messaging.RefConversation,
 		Value: convID,
 		Raw:   "conv:" + convID,
 	}
 
-	// Attachments should be rejected
+	// Attachments: should succeed via outbound endpoint (skips conversation send API)
 	err = sendMessageViaConversation(hubCtx, ref, "msg with attach", false, false, []string{"file.txt"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--attach is not supported with conv: references")
+	require.NoError(t, err)
+	require.Len(t, *sent, 1)
+	assert.Equal(t, "conv:"+convID, (*sent)[0].AgentName) // sent via outbound with conversation_ref
+	assert.Equal(t, "msg with attach", (*sent)[0].Message)
 
-	// Wake should be rejected
+	// Wake: should succeed via outbound endpoint (skips conversation send API)
+	*sent = (*sent)[:0] // reset
 	err = sendMessageViaConversation(hubCtx, ref, "msg with wake", false, true, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--wake is not supported with conv: references")
+	require.NoError(t, err)
+	require.Len(t, *sent, 1)
+	assert.Equal(t, "conv:"+convID, (*sent)[0].AgentName)
+	assert.Equal(t, "msg with wake", (*sent)[0].Message)
 
-	// Neither attachment nor wake: should succeed
+	// Neither attachment nor wake: should succeed via conversation send API
+	*sent = (*sent)[:0] // reset
 	err = sendMessageViaConversation(hubCtx, ref, "normal msg", false, false, nil)
 	require.NoError(t, err)
+	require.Len(t, *sent, 1)
+	assert.Equal(t, "conv:"+convID, (*sent)[0].AgentName) // sent via conversation send API
+	assert.Equal(t, "normal msg", (*sent)[0].Message)
 }
