@@ -1,0 +1,27 @@
+{
+  "base": "86cde0d4c5a9fcfb1a6f2ae60e7a965cc4f0f4c7",
+  "head": "10790ec174fec4775b8cfe5bc2d3723ba244ead6",
+  "sha256": "31984a0fe4c7c1467454b263cf5e5e6df217d8c0b650acfd16f32e7e3df44442",
+  "branch": "scion/tw-p2-1655-dev",
+  "issue": "#1655",
+  "phase": "P2.2",
+  "files": [
+    "web/src/client/terminal-workspace-root.ts",
+    "web/e2e/terminal-workspace/workspace.pw.ts"
+  ],
+  "tests": {
+    "browser": {
+      "workspace.pw.ts": "23 passed (15 existing + 8 new)",
+      "base.pw.ts": "1 passed"
+    },
+    "vitest": {
+      "terminal-layout.test.ts": "54 passed",
+      "terminal-sessions.test.ts": "passed",
+      "terminal-pane.test.ts": "10 passed",
+      "full-suite": "1264 passed (62 files)"
+    },
+    "types": "tsc --noEmit: clean",
+    "build": "npm run build: clean",
+    "lint": "eslint changed files: clean"
+  }
+}
