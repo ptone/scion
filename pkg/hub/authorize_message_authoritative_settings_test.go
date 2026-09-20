@@ -280,7 +280,7 @@ func TestAuthoritativeSettings_MalformedJSONFailsClosed(t *testing.T) {
 	settingStore.seed("messaging", json.RawMessage(`{invalid json`))
 	ops := NewOperationalSettings(settingStore, emptyKoanf(), emptyKoanf())
 	// Refresh will mark it as malformed in cache.
-	ops.Refresh(ctx)
+	_, _ = ops.Refresh(ctx)
 	f.srv.SetOperationalSettings(ops)
 
 	_, err := f.store.UpdateProjectMessagingPolicy(ctx, f.projectB, store.CrossProjectInboundAny, 1)
