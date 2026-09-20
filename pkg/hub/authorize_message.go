@@ -424,9 +424,23 @@ func (s *Server) evaluateCrossProject(
 	decision := MessageDecision{CrossProject: true}
 
 	// Gate (a): Hub cross_project_messaging_enabled must be true.
-	// Read from operational settings (DB-backed cache, periodically refreshed).
+	// Authoritative store read — bypasses the replica-local cache so that the
+	// very next send after a policy change enforces the current setting,
+	// regardless of notification/poll propagation state (#1686).
 	ops := s.GetOperationalSettings()
-	if ops == nil || !ops.CrossProjectMessagingEnabled() {
+	if ops == nil {
+		decision.Code = MessageDenialCrossProjectDisabled
+		decision.Reason = "cross-project messaging is not enabled on this Hub (no operational settings)"
+		return decision
+	}
+	cpmSetting := ops.ReadAuthoritativeCrossProjectEnabled(ctx)
+	if cpmSetting.Err != nil {
+		decision.Code = MessageDenialCrossProjectDisabled
+		decision.Reason = "cross-project messaging setting read failed (failing closed)"
+		return decision
+	}
+	decision.HubPolicyRevision = cpmSetting.Revision
+	if !cpmSetting.Enabled {
 		decision.Code = MessageDenialCrossProjectDisabled
 		decision.Reason = "cross-project messaging is not enabled on this Hub"
 		return decision
@@ -625,9 +639,13 @@ func (s *Server) authorizeCrossProjectAgentMessage(
 		return false, "cross_project_target_mode"
 	}
 
-	// 3. Hub-level kill switch.
+	// 3. Hub-level kill switch — authoritative store read (#1686).
 	ops := s.GetOperationalSettings()
-	if ops == nil || !ops.CrossProjectMessagingEnabled() {
+	if ops == nil {
+		return false, "cross_project_disabled"
+	}
+	cpmSetting := ops.ReadAuthoritativeCrossProjectEnabled(ctx)
+	if cpmSetting.Err != nil || !cpmSetting.Enabled {
 		return false, "cross_project_disabled"
 	}
 
@@ -729,9 +747,13 @@ func (s *Server) EvaluateCrossProjectReadAccess(
 		return false, "no_hub_mode_endpoint"
 	}
 
-	// Hub switch must be enabled.
+	// Hub switch must be enabled — authoritative store read (#1686).
 	ops := s.GetOperationalSettings()
-	if ops == nil || !ops.CrossProjectMessagingEnabled() {
+	if ops == nil {
+		return false, "cross_project_disabled"
+	}
+	cpmSetting := ops.ReadAuthoritativeCrossProjectEnabled(ctx)
+	if cpmSetting.Err != nil || !cpmSetting.Enabled {
 		return false, "cross_project_disabled"
 	}
 
