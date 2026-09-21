@@ -410,10 +410,10 @@ func WriteAgentDMError(w http.ResponseWriter, dmErr *AgentDMError) {
 // WriteAgentDMResult writes an AgentDMResult as an HTTP JSON response.
 // Adapters call this to translate operation results into wire format.
 func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult) {
+	// Always report "sent" — even for ambiguous outcomes (message persisted,
+	// dispatch uncertain) the wire contract is "sent" to match pre-refactor
+	// behavior. Callers must NOT assume delivery for ambiguous results (AC-5).
 	status := "sent"
-	if result.Outcome == AgentDMAmbiguous {
-		status = "sent" // persisted; dispatch uncertain — still report "sent" to match existing wire contract
-	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message_id":   result.MessageID,
 		"status":       status,
