@@ -79,6 +79,7 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 		}
 
 		var inproc, target *NamedEventBus
+		var observers []NamedEventBus
 		for i := range buses {
 			if buses[i].Name == InProcessBusName {
 				inproc = &buses[i]
@@ -90,6 +91,12 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 			}
 			if channelKey == msg.Channel {
 				target = &buses[i]
+			} else if buses[i].Observer {
+				// Observer spokes receive copies of ALL messages
+				// regardless of channel, enabling cross-channel
+				// integrations (e.g. the A2A bridge observing
+				// agent replies sent on the "web" channel).
+				observers = append(observers, buses[i])
 			}
 		}
 		// Always publish to inproc first for persistence/SSE, even if the
@@ -118,6 +125,17 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 					}
 				}
 			}()
+		}
+		// Deliver to observer spokes (fire-and-forget).
+		for _, obs := range observers {
+			wg.Add(1)
+			go func(b NamedEventBus) {
+				defer wg.Done()
+				if err := b.Bus.Publish(ctx, topic, msg); err != nil {
+					f.log.Error("observer publish failed",
+						"bus", b.Name, "channel", msg.Channel, "topic", topic, "error", err)
+				}
+			}(obs)
 		}
 		wg.Wait()
 		if target == nil {

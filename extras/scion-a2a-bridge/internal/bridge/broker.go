@@ -189,7 +189,7 @@ func (b *BrokerServer) GetInfo() (*plugin.PluginInfo, error) {
 	return &plugin.PluginInfo{
 		Name:         "scion-a2a-bridge",
 		Version:      "1.0.0",
-		Capabilities: []string{"a2a-bridge"},
+		Capabilities: []string{"a2a-bridge", "observer"},
 	}, nil
 }
 
