@@ -242,6 +242,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			"denial_code", denialCode,
 		)
 		// Audit: body-free denial record with policy revisions (#1690).
+		// CrossProject is derived from agent records by DMAuditEntryFromInput,
+		// not from the decision — avoids relying on the authorization path
+		// to set it.
 		auditDecision := &MessageDecision{
 			Allowed: false,
 			Code:    MessageDenialCode(denialCode),
@@ -250,7 +253,6 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		if authDecision != nil {
 			auditDecision.HubPolicyRevision = authDecision.HubPolicyRevision
 			auditDecision.ProjectPolicyRevision = authDecision.ProjectPolicyRevision
-			auditDecision.CrossProject = authDecision.CrossProject
 		}
 		LogDMAdmission(DMAuditEntryFromInput(input, auditDecision))
 		return nil, &AgentDMError{
@@ -350,11 +352,12 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 
 	// 7a. Audit: body-free admission allow record (#1690).
 	// Logged after persistence so the message ID is available as correlation.
+	// CrossProject is derived from agent records by DMAuditEntryFromInput,
+	// not from the decision.
 	allowDecision := &MessageDecision{Allowed: true}
 	if authDecision != nil {
 		allowDecision.HubPolicyRevision = authDecision.HubPolicyRevision
 		allowDecision.ProjectPolicyRevision = authDecision.ProjectPolicyRevision
-		allowDecision.CrossProject = authDecision.CrossProject
 	}
 	admissionEntry := DMAuditEntryFromInput(input, allowDecision)
 	admissionEntry.CorrelationID = msgID
@@ -386,9 +389,12 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// Dispatch failure after persistence yields an ambiguous outcome —
 	// the message is stored but delivery is uncertain.
 	var dispatchErr error
+	dispatchAttempted := false
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
+		dispatchAttempted = true
 		dispatchErr = s.managedAgentMessage(ctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
+		dispatchAttempted = true
 		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 		dispatchErr = dispatchWithBrokerRetry(retryCtx, dispatcher, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt, structuredMsg)
 		retryCancel()
@@ -405,12 +411,13 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 
 	// 10a. Audit: dispatch outcome (#1690).
 	// Recorded separately from admission so allow ≠ delivered (AC-3).
+	// Uses the dispatchAttempted flag captured at dispatch time to avoid
+	// TOCTOU with GetDispatcher().
 	{
 		var dOutcome DispatchOutcome
 		if dispatchErr != nil {
 			dOutcome = DispatchFailed
-		} else if isManagedAgentRuntime(input.TargetAgent.Runtime) ||
-			(s.GetDispatcher() != nil && input.TargetAgent.RuntimeBrokerID != "") {
+		} else if dispatchAttempted {
 			dOutcome = DispatchSucceeded
 		} else {
 			dOutcome = DispatchSkipped
