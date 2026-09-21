@@ -133,6 +133,11 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
 		scionMsg.Metadata = map[string]string{"a2aTaskId": string(taskID)}
 
+		// Tag the message with the bridge channel so the FanOutEventBus
+		// routes the agent's reply back to the bridge spoke instead of
+		// the default "web" channel.
+		scionMsg.Channel = "a2a-bridge"
+
 		// Request broker subscription for responses.
 		if e.bridge.broker != nil {
 			if caller != nil && !caller.IsAgent() {

@@ -1877,6 +1877,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			messaging.RecordStep(ctx, "sse_published")
 		}
 
+		// Record channel affinity for reply routing. When a message arrives
+		// with an explicit channel (e.g. "a2a-bridge"), persist it so the
+		// outbound handler's reply-affinity lookup (GetLastChannel) can route
+		// the agent's reply back through the same channel spoke. This mirrors
+		// the RecordChannel call in the broker inbound path.
+		if structuredMsg.Channel != "" && structuredMsg.SenderID != "" {
+			s.mu.RLock()
+			wcsAff := s.webChatStore
+			s.mu.RUnlock()
+			if wcsAff != nil {
+				if err := wcsAff.RecordChannel(ctx, structuredMsg.SenderID, agent.ProjectID, agent.ID, structuredMsg.Channel, time.Now().UTC()); err != nil {
+					s.messageLog.Error("Failed to record channel affinity", "error", err, "channel", structuredMsg.Channel)
+				}
+			}
+		}
+
 		// Phase 9b(ii): render the delivery envelope from the persisted row
 		// and conversation result when the envelope switch is ON.
 		if s.writeDenyEnabled() && persistedMsgID != "" {
