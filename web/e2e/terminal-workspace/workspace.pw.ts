@@ -3964,3 +3964,268 @@ test('deterministic ties: agents with same name sort consistently by session key
   expect(socket.attaches).toBe(3);
   expect(socket.closes).toBe(0);
 });
+
+// ────────────────────────────────────────────────────────────────────────────
+// Live SSE lastActivityEvent sort reorder (#1703 fix verification)
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Enhanced setup that captures EventSource instances for SSE event injection.
+ * The production SSEClient listens for 'update' MessageEvents on the native
+ * EventSource; this mock stores instances so tests can dispatch events.
+ */
+async function setupWithSSE(
+  page: Page,
+  agents: Record<string, AgentFixture>
+): Promise<{
+  readonly attaches: number;
+  readonly closes: number;
+  emitSSE(agentId: string, kind: string, data: unknown): Promise<void>;
+  sendToSocket(index: number, data: string): void;
+}> {
+  let attaches = 0;
+  let closes = 0;
+  const sockets: Array<{
+    close: (options?: { code?: number; reason?: string }) => void;
+    send: (data: string | Buffer) => void;
+  }> = [];
+  await page.addInitScript(
+    ({ agents: _agents }) => {
+      window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
+      void customElements.whenDefined('scion-terminal-pane').then(() => {
+        const instrumented = window as typeof window & { terminalInitializers?: number };
+        const prototype = customElements.get('scion-terminal-pane')!.prototype as {
+          initTerminal: (...args: unknown[]) => Promise<unknown>;
+        };
+        const initialize = prototype.initTerminal;
+        prototype.initTerminal = function (...args: unknown[]): Promise<unknown> {
+          instrumented.terminalInitializers = (instrumented.terminalInitializers ?? 0) + 1;
+          return initialize.apply(this, args);
+        };
+      });
+      // Store EventSource instances globally for SSE event injection.
+      const win = window as typeof window & { __sseInstances: EventTarget[] };
+      win.__sseInstances = [];
+      window.EventSource = class extends EventTarget {
+        onopen: (() => void) | null = null;
+        constructor() {
+          super();
+          win.__sseInstances.push(this);
+          queueMicrotask(() => this.onopen?.());
+        }
+        close(): void {}
+      } as unknown as typeof EventSource;
+    },
+    { agents }
+  );
+  await page.route('**/auth/me', (route) =>
+    route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
+  );
+  await page.route('**/api/v1/settings/public', (route) =>
+    route.fulfill({ json: { nativeChatEnabled: true } })
+  );
+  await page.route(/\/api\/v1\/agents(\?|$)/, (route) => {
+    void route.fulfill({
+      json: Object.values(agents).map((a) => ({
+        ...a,
+        _capabilities: { actions: ['attach'] },
+      })),
+    });
+  });
+  await page.route('**/api/v1/agents/**', (route) => {
+    if (route.request().url().endsWith('/pty')) {
+      void route.fulfill({ json: {} });
+      return;
+    }
+    const id =
+      route
+        .request()
+        .url()
+        .match(/\/api\/v1\/agents\/([^/?]+)/)?.[1] ?? '';
+    void route.fulfill({
+      status: agents[id] ? 200 : 404,
+      json: agents[id] ?? { error: 'not found' },
+    });
+  });
+  await page.route('**/api/v1/system/status', (route) =>
+    route.fulfill({ json: { complete: true } })
+  );
+  await page.routeWebSocket('**/pty?*', (socket) => {
+    attaches++;
+    sockets.push(socket);
+    socket.onClose(() => closes++);
+  });
+  return {
+    get attaches(): number {
+      return attaches;
+    },
+    get closes(): number {
+      return closes;
+    },
+    async emitSSE(agentId: string, kind: string, data: unknown): Promise<void> {
+      await page.evaluate(
+        ({ agentId: aid, kind: k, data: d }) => {
+          const win = window as typeof window & { __sseInstances: EventTarget[] };
+          const payload = JSON.stringify({ subject: `agent.${aid}.${k}`, data: d });
+          for (const es of win.__sseInstances) {
+            es.dispatchEvent(new MessageEvent('update', { data: payload }));
+          }
+        },
+        { agentId, kind, data }
+      );
+    },
+    sendToSocket(index: number, data: string): void {
+      if (sockets[index]) sockets[index].send(data);
+    },
+  };
+}
+
+test('Last Activity sort reorders rail on SSE status event with newer lastActivityEvent (#1703)', async ({
+  page,
+}) => {
+  const agents: Record<string, AgentFixture> = {
+    [agent]: {
+      id: agent,
+      name: 'OldAgent',
+      phase: 'running',
+      projectId: 'proj',
+      lastActivityEvent: '2026-09-21T10:00:00Z',
+    },
+    [agentB]: {
+      id: agentB,
+      name: 'NewAgent',
+      phase: 'running',
+      projectId: 'proj',
+      lastActivityEvent: '2026-09-21T12:00:00Z',
+    },
+  };
+  const socket = await setupWithSSE(page, agents);
+
+  // Open both agents
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  // Switch to activity sort — initial order: NewAgent (newer), OldAgent (older)
+  await selectRailSort(page, 'activity');
+  await expect.poll(() => getRailAgentNames(page)).toEqual(['NewAgent', 'OldAgent']);
+
+  // Record attach count before SSE event
+  const attachesBefore = socket.attaches;
+
+  // Emit SSE status event for OldAgent with a newer timestamp → should move to top
+  await socket.emitSSE(agent, 'status', {
+    activity: 'executing',
+    lastActivityEvent: '2026-09-21T14:00:00Z',
+  });
+
+  // Rail should reorder: OldAgent now has the newest timestamp
+  await expect.poll(() => getRailAgentNames(page)).toEqual(['OldAgent', 'NewAgent']);
+
+  // No pane/socket/session recreation — only metadata changed
+  expect(socket.attaches).toBe(attachesBefore);
+  expect(socket.closes).toBe(0);
+});
+
+test('quiet control — agent with no SSE event stays stable in rail (#1703)', async ({ page }) => {
+  const agents: Record<string, AgentFixture> = {
+    [agent]: {
+      id: agent,
+      name: 'Active',
+      phase: 'running',
+      projectId: 'proj',
+      lastActivityEvent: '2026-09-21T12:00:00Z',
+    },
+    [agentB]: {
+      id: agentB,
+      name: 'Quiet',
+      phase: 'running',
+      projectId: 'proj',
+      lastActivityEvent: '2026-09-21T10:00:00Z',
+    },
+  };
+  const socket = await setupWithSSE(page, agents);
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  // Switch to activity sort — Active first (newer), Quiet second
+  await selectRailSort(page, 'activity');
+  await expect.poll(() => getRailAgentNames(page)).toEqual(['Active', 'Quiet']);
+
+  // Emit SSE event only for Active — Quiet gets nothing
+  await socket.emitSSE(agent, 'status', {
+    activity: 'thinking',
+    lastActivityEvent: '2026-09-21T13:00:00Z',
+  });
+
+  // Active stays at top, Quiet stays at bottom — order unchanged
+  await expect.poll(() => getRailAgentNames(page)).toEqual(['Active', 'Quiet']);
+
+  // Verify Quiet's lastActivityEvent is still the original value
+  const quietTs = await page.evaluate((id) => {
+    const panes = document.querySelectorAll<
+      HTMLElement & {
+        registry: {
+          metadata: { get: (id: string) => { agent?: { lastActivityEvent?: string } } | undefined };
+        };
+      }
+    >('#terminal-workspace scion-terminal-pane');
+    for (const p of panes) {
+      if (p.registry) {
+        return p.registry.metadata.get(id)?.agent?.lastActivityEvent ?? null;
+      }
+    }
+    return null;
+  }, agentB);
+  expect(quietTs).toBe('2026-09-21T10:00:00Z');
+});
+
+test('PTY output alone does not reorder rail — only harness status events do (#1703)', async ({
+  page,
+}) => {
+  // PTY I/O does not advance LastActivityEvent by design — only
+  // harness status events (sciontool) do.
+  const agents: Record<string, AgentFixture> = {
+    [agent]: {
+      id: agent,
+      name: 'Bottom',
+      phase: 'running',
+      projectId: 'proj',
+      lastActivityEvent: '2026-09-21T08:00:00Z',
+    },
+    [agentB]: {
+      id: agentB,
+      name: 'Top',
+      phase: 'running',
+      projectId: 'proj',
+      lastActivityEvent: '2026-09-21T12:00:00Z',
+    },
+  };
+  const socket = await setupWithSSE(page, agents);
+
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  await navigateToTerminal(page, agentB);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  // Switch to activity sort — Top first, Bottom second
+  await selectRailSort(page, 'activity');
+  await expect.poll(() => getRailAgentNames(page)).toEqual(['Top', 'Bottom']);
+
+  // Send PTY data on Bottom's WebSocket (simulating terminal output)
+  socket.sendToSocket(0, 'Hello from PTY\r\n');
+
+  // Allow any microtasks to flush
+  await page.waitForTimeout(100);
+
+  // Sort order must NOT change — PTY I/O does not advance LastActivityEvent
+  expect(await getRailAgentNames(page)).toEqual(['Top', 'Bottom']);
+
+  // No new connections from PTY data
+  expect(socket.attaches).toBe(2);
+  expect(socket.closes).toBe(0);
+});

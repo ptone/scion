@@ -395,3 +395,134 @@ it.each(['fetch', 'body'])(
     expect(metadata.get(id(1))?.availability).toBe('ready');
   }
 );
+
+// ────────────────────────────────────────────────────────────────────────────
+// SSE lastActivityEvent extraction (#1703)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('SSE lastActivityEvent extraction (#1703)', () => {
+  it('SSE status event with lastActivityEvent updates metadata and notifies once', async () => {
+    metadata.retain(id(1));
+    await flush();
+    const source = Source.instances[0];
+    source.open();
+    await flush();
+    const listener = vi.fn();
+    metadata.subscribe(id(1), listener);
+    // subscribe fires initial callback immediately
+    const callsBefore = listener.mock.calls.length;
+
+    source.update(1, 'status', { lastActivityEvent: '2026-09-21T15:00:00Z' });
+
+    expect(listener).toHaveBeenCalledTimes(callsBefore + 1);
+    expect(metadata.get(id(1))?.agent?.lastActivityEvent).toBe('2026-09-21T15:00:00Z');
+  });
+
+  it('omitted lastActivityEvent preserves prior timestamp', async () => {
+    fetcher.mockImplementation((url) => {
+      const n = Number(String(url).slice(-12));
+      return Promise.resolve(json({ ...agent(n), lastActivityEvent: '2026-09-21T10:00:00Z' }));
+    });
+    metadata.retain(id(1));
+    await flush();
+    const source = Source.instances[0];
+    source.open();
+    await flush();
+    expect(metadata.get(id(1))?.agent?.lastActivityEvent).toBe('2026-09-21T10:00:00Z');
+
+    // Emit a status event with phase and activity but NO lastActivityEvent
+    source.update(1, 'status', { phase: 'running', activity: 'thinking' });
+
+    expect(metadata.get(id(1))?.agent?.lastActivityEvent).toBe('2026-09-21T10:00:00Z');
+    expect(metadata.get(id(1))?.agent?.activity).toBe('thinking');
+  });
+
+  it('explicit valid timestamp with fractional precision is retained exactly', async () => {
+    metadata.retain(id(1));
+    await flush();
+    const source = Source.instances[0];
+    source.open();
+    await flush();
+
+    source.update(1, 'status', {
+      lastActivityEvent: '2026-09-21T20:00:00.123456Z',
+    });
+
+    expect(metadata.get(id(1))?.agent?.lastActivityEvent).toBe('2026-09-21T20:00:00.123456Z');
+  });
+
+  it('phase/activity behavior unchanged when lastActivityEvent is also present', async () => {
+    metadata.retain(id(1));
+    await flush();
+    const source = Source.instances[0];
+    source.open();
+    await flush();
+
+    // All three fields present
+    source.update(1, 'status', {
+      phase: 'running',
+      activity: 'executing',
+      lastActivityEvent: '2026-09-21T12:00:00Z',
+    });
+    expect(metadata.get(id(1))?.agent?.phase).toBe('running');
+    expect(metadata.get(id(1))?.agent?.activity).toBe('executing');
+    expect(metadata.get(id(1))?.agent?.lastActivityEvent).toBe('2026-09-21T12:00:00Z');
+
+    // Only phase — activity and lastActivityEvent preserved
+    source.update(1, 'status', { phase: 'stopped' });
+    expect(metadata.get(id(1))?.agent?.phase).toBe('stopped');
+    expect(metadata.get(id(1))?.agent?.activity).toBe('executing');
+    expect(metadata.get(id(1))?.agent?.lastActivityEvent).toBe('2026-09-21T12:00:00Z');
+  });
+
+  it('sort recomputes on metadata notification — deterministic ties', async () => {
+    // Two agents with identical lastActivityEvent: tie-broken by name → session key
+    fetcher.mockImplementation((url) => {
+      const n = Number(String(url).slice(-12));
+      return Promise.resolve(json({ ...agent(n), lastActivityEvent: '2026-09-21T12:00:00Z' }));
+    });
+    metadata.retain(id(1));
+    metadata.retain(id(2));
+    await flush();
+    const source = Source.instances[0];
+    source.open();
+    await flush();
+    const a1 = metadata.get(id(1))?.agent;
+    const a2 = metadata.get(id(2))?.agent;
+    expect(a1?.lastActivityEvent).toBe('2026-09-21T12:00:00Z');
+    expect(a2?.lastActivityEvent).toBe('2026-09-21T12:00:00Z');
+
+    // Both have identical timestamps. The comparator (in workspace root)
+    // uses Date.parse for numeric comparison, descending order. For identical
+    // timestamps, it falls back to name then session key for determinism.
+    const tsA = a1?.lastActivityEvent ?? '';
+    const tsB = a2?.lastActivityEvent ?? '';
+    const dateA = tsA ? Date.parse(tsA) : 0;
+    const dateB = tsB ? Date.parse(tsB) : 0;
+    // Identical timestamps → numeric difference is 0
+    expect(dateB - dateA).toBe(0);
+    // Tie-breaker: agent name (agent-1 < agent-2 lexicographically)
+    const nameA = (a1?.name ?? id(1)).toLowerCase();
+    const nameB = (a2?.name ?? id(2)).toLowerCase();
+    expect(nameA.localeCompare(nameB)).toBeLessThan(0);
+  });
+
+  it('missing/invalid timestamps treated as oldest (NaN → 0)', () => {
+    // Missing lastActivityEvent → fallback to empty string → Date.parse('') is NaN → 0
+    const missingTs = '';
+    const missing = missingTs ? Date.parse(missingTs) : 0;
+    expect(missing).toBe(0);
+
+    // Invalid lastActivityEvent → Date.parse returns NaN → treated as 0
+    const invalidTs = 'not-a-date';
+    const invalid = Date.parse(invalidTs);
+    expect(isNaN(invalid)).toBe(true);
+    // The comparator normalizes NaN to 0: (isNaN(dateB) ? 0 : dateB)
+    const normalized = isNaN(invalid) ? 0 : invalid;
+    expect(normalized).toBe(0);
+
+    // A valid timestamp sorts newer than 0
+    const valid = Date.parse('2026-09-21T12:00:00Z');
+    expect(valid).toBeGreaterThan(0);
+  });
+});

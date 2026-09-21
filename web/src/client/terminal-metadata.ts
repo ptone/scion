@@ -256,6 +256,7 @@ export class TerminalMetadata {
     else if (kind === 'status') {
       if (data.phase !== undefined) patch.phase = data.phase;
       if (data.activity !== undefined) patch.activity = data.activity;
+      if (data.lastActivityEvent !== undefined) patch.lastActivityEvent = data.lastActivityEvent;
     } else return;
     entry.patch = { ...entry.patch, ...patch };
     if (entry.value.agent)
