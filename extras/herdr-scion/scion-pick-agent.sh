@@ -24,7 +24,7 @@ log() { echo "[scion-pick] $*" >&2; }
 # Build a display line for each agent: "identifier  template  activity"
 # Uses .slug // .name because slug is omitempty in local/podman mode.
 agent_display_lines() {
-  scion list -r --format json 2>/dev/null \
+  scion list -a -r --format json 2>/dev/null \
     | jq -r '.[] | select(.phase == "running")
               | "\(.slug // .name)\t\(.template // "-")\t\(.activity // "idle")"' 2>/dev/null
 }

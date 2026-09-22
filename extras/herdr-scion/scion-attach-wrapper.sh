@@ -55,14 +55,14 @@ check_deps() {
 # Check whether the agent is currently running.
 # Uses .slug // .name because slug is omitempty in local/podman mode.
 is_running() {
-  scion list -r --format json 2>/dev/null \
+  scion list -a -r --format json 2>/dev/null \
     | jq -e ".[] | select((.slug // .name) == \"$1\" and .phase == \"running\")" \
     >/dev/null 2>&1
 }
 
 # Get the agent's current lifecycle phase (or "unknown").
 agent_phase() {
-  scion list --format json 2>/dev/null \
+  scion list -a --format json 2>/dev/null \
     | jq -r ".[] | select((.slug // .name) == \"$1\") | .phase // \"unknown\"" 2>/dev/null \
     | head -1
 }

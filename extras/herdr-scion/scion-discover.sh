@@ -23,7 +23,7 @@ log() { echo "[scion-discover] $*" >&2; }
 # Collect identifiers of running scion agents (one per line).
 # Uses .slug // .name because slug is omitempty in local/podman mode.
 running_agents() {
-  scion list -r --format json 2>/dev/null \
+  scion list -a -r --format json 2>/dev/null \
     | jq -r '.[] | select(.phase == "running") | .slug // .name' 2>/dev/null
 }
 

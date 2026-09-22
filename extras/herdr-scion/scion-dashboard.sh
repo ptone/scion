@@ -101,7 +101,7 @@ main() {
   log "Building agent dashboard..."
 
   local agents
-  agents="$(scion list -r --format json 2>/dev/null \
+  agents="$(scion list -a -r --format json 2>/dev/null \
     | jq -r '.[] | select(.phase == "running") | .slug // .name' 2>/dev/null)"
 
   if [[ -z "$agents" ]]; then

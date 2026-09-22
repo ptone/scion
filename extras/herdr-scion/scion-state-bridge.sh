@@ -112,7 +112,7 @@ poll_once() {
 
   # Get current scion agent states in one call.
   local agents_json
-  agents_json="$(scion list --format json 2>/dev/null)" || return 1
+  agents_json="$(scion list -a --format json 2>/dev/null)" || return 1
 
   while IFS=$'\t' read -r pane_id identifier; do
     [[ -z "$pane_id" || -z "$identifier" ]] && continue
