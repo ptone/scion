@@ -71,6 +71,10 @@ main() {
   done <<< "$agents"
 
   log "Discovery complete. Created $created new pane(s)."
+
+  # Start the state bridge in the background if it's not already running.
+  bash "${SCRIPT_DIR}/scion-state-bridge.sh" &
+  disown
 }
 
 main "$@"
