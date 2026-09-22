@@ -11,6 +11,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# shellcheck source=scion-common.sh
+source "${SCRIPT_DIR}/scion-common.sh"
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -49,6 +52,7 @@ check_deps() {
 
 main() {
   check_deps
+  resolve_project_cwd
   log "Discovering running Scion agents..."
 
   local agents
