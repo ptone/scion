@@ -1,0 +1,37 @@
+id = "scion.herdr-integration"
+name = "Scion Agent Integration"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos"]
+
+# Auto-discover and attach to running scion agents on startup
+[[startup]]
+command = ["bash", "scion-discover.sh"]
+
+# Action: attach to an existing running scion agent
+[[actions]]
+id = "attach-agent"
+title = "Attach to Scion Agent"
+contexts = ["workspace"]
+command = ["bash", "scion-pick-agent.sh"]
+
+# Action: start a new scion agent from a template and attach
+[[actions]]
+id = "start-agent"
+title = "Start Scion Agent"
+contexts = ["workspace"]
+command = ["bash", "scion-start-agent.sh"]
+
+# Action: refresh the agent pane list (re-run discovery)
+[[actions]]
+id = "refresh-agents"
+title = "Refresh Scion Agents"
+contexts = ["workspace"]
+command = ["bash", "scion-discover.sh"]
+
+# Action: open a tiled dashboard of all agents
+[[actions]]
+id = "dashboard"
+title = "Scion Agent Dashboard"
+contexts = ["workspace"]
+command = ["bash", "scion-dashboard.sh"]
