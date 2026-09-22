@@ -20,19 +20,21 @@ source "${SCRIPT_DIR}/scion-common.sh"
 
 log() { echo "[scion-discover] $*" >&2; }
 
-# Collect slugs of running scion agents.
-# Returns one slug per line.
+# Collect identifiers of running scion agents (one per line).
+# Uses .slug // .name because slug is omitempty in local/podman mode.
 running_agents() {
   scion list -r --format json 2>/dev/null \
-    | jq -r '.[] | select(.phase == "running") | .slug' 2>/dev/null
+    | jq -r '.[] | select(.phase == "running") | .slug // .name' 2>/dev/null
 }
 
-# Collect labels of existing herdr panes that belong to this plugin.
-# We tag every pane we create with label "scion:<slug>".
-existing_pane_labels() {
+# Collect agent identifiers from existing herdr panes that belong to this plugin.
+# Panes are tracked by the .agent field set via herdr pane report-agent,
+# with the format "scion/<identifier>".
+existing_pane_agents() {
   herdr pane list --json 2>/dev/null \
-    | jq -r '.[].label // empty' 2>/dev/null \
-    | grep '^scion:' || true
+    | jq -r '.[] | select(.agent != null) | .agent' 2>/dev/null \
+    | grep '^scion/' \
+    | sed 's|^scion/||' || true
 }
 
 # ---------------------------------------------------------------------------
@@ -64,24 +66,23 @@ main() {
   fi
 
   local existing
-  existing="$(existing_pane_labels)"
+  existing="$(existing_pane_agents)"
 
   local created=0
 
-  while IFS= read -r slug; do
-    [[ -z "$slug" ]] && continue
+  while IFS= read -r identifier; do
+    [[ -z "$identifier" ]] && continue
 
     # Skip if a pane already exists for this agent.
-    if echo "$existing" | grep -qxF "scion:${slug}"; then
-      log "Pane already exists for $slug — skipping."
+    if echo "$existing" | grep -qxF "$identifier"; then
+      log "Pane already exists for $identifier — skipping."
       continue
     fi
 
-    log "Creating pane for agent: $slug"
+    log "Creating pane for agent: $identifier"
     herdr pane split --direction right \
-      --label "scion:${slug}" \
-      --env "SCION_AGENT=${slug}" \
-      -- bash "${SCRIPT_DIR}/scion-attach-wrapper.sh" "$slug"
+      --env "SCION_AGENT=${identifier}" \
+      -- bash "${SCRIPT_DIR}/scion-attach-wrapper.sh" "$identifier"
 
     created=$((created + 1))
   done <<< "$agents"

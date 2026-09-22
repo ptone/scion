@@ -98,14 +98,15 @@ cleanup() {
 
 poll_once() {
   # Get all herdr panes belonging to this plugin.
+  # Scion panes are identified by .agent field starting with "scion/".
   local panes_json
   panes_json="$(herdr pane list --json 2>/dev/null)" || return 1
 
-  # Filter to scion-labelled panes and extract pane_id + slug.
+  # Extract pane_id + agent identifier from scion-managed panes.
   local pane_entries
   pane_entries="$(echo "$panes_json" \
-    | jq -r '.[] | select(.label != null and (.label | startswith("scion:")))
-             | "\(.pane_id)\t\(.label | ltrimstr("scion:"))"' 2>/dev/null)"
+    | jq -r '.[] | select(.agent != null and (.agent | startswith("scion/")))
+             | "\(.pane_id)\t\(.agent | ltrimstr("scion/"))"' 2>/dev/null)"
 
   [[ -z "$pane_entries" ]] && return 0
 
@@ -113,13 +114,14 @@ poll_once() {
   local agents_json
   agents_json="$(scion list --format json 2>/dev/null)" || return 1
 
-  while IFS=$'\t' read -r pane_id slug; do
-    [[ -z "$pane_id" || -z "$slug" ]] && continue
+  while IFS=$'\t' read -r pane_id identifier; do
+    [[ -z "$pane_id" || -z "$identifier" ]] && continue
 
     # Look up this agent in the scion list output.
+    # Uses .slug // .name because slug is omitempty in local/podman mode.
     local agent_info
     agent_info="$(echo "$agents_json" \
-      | jq -r ".[] | select(.slug == \"$slug\")" 2>/dev/null)"
+      | jq -r ".[] | select((.slug // .name) == \"$identifier\")" 2>/dev/null)"
 
     local activity phase herdr_state
 
@@ -135,7 +137,7 @@ poll_once() {
     # Report to herdr.
     herdr pane report-agent "$pane_id" \
       --source "scion:integration" \
-      --agent "scion/${slug}" \
+      --agent "scion/${identifier}" \
       --state "$herdr_state" 2>/dev/null || true
 
   done <<< "$pane_entries"

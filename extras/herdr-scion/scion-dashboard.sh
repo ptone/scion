@@ -102,7 +102,7 @@ main() {
 
   local agents
   agents="$(scion list -r --format json 2>/dev/null \
-    | jq -r '.[] | select(.phase == "running") | .slug' 2>/dev/null)"
+    | jq -r '.[] | select(.phase == "running") | .slug // .name' 2>/dev/null)"
 
   if [[ -z "$agents" ]]; then
     echo "No running Scion agents found." >&2
