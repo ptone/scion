@@ -41,6 +41,17 @@ done
 
 log() { echo "[scion-attach] $*" >&2; }
 
+check_deps() {
+  local missing=()
+  for cmd in scion jq; do
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    log "Missing required commands: ${missing[*]}"
+    exit 1
+  fi
+}
+
 # Check whether the agent is currently running.
 is_running() {
   scion list -r --format json 2>/dev/null \
@@ -111,4 +122,5 @@ reconnect_loop() {
 # Entry point
 # ---------------------------------------------------------------------------
 
+check_deps
 reconnect_loop

@@ -29,10 +29,12 @@ pane_node() {
 }
 
 # Recursively build a balanced binary split tree from an array of pane nodes.
-# Input: JSON array of pane nodes on stdin.
-# Output: a single LayoutNode (pane or split).
+# Alternates split direction by depth (even=right, odd=down) for a grid layout.
+#   $1 — JSON array of pane nodes
+#   $2 — current depth (default 0)
 build_tree() {
   local nodes="$1"
+  local depth="${2:-0}"
   local count
   count="$(echo "$nodes" | jq 'length')"
 
@@ -46,24 +48,22 @@ build_tree() {
     return
   fi
 
-  # Split roughly in half. First half goes left (or top), second goes right
-  # (or bottom). Alternate split direction by depth for a grid feel —
-  # but herdr layout.apply just needs the tree, the actual direction is set
-  # per split node. We alternate: even depths split right, odd split down.
   local mid=$(( count / 2 ))
   local left_nodes right_nodes
   left_nodes="$(echo "$nodes" | jq ".[0:$mid]")"
   right_nodes="$(echo "$nodes" | jq ".[$mid:]")"
 
+  local next_depth=$(( depth + 1 ))
   local left_tree right_tree
-  left_tree="$(build_tree "$left_nodes")"
-  right_tree="$(build_tree "$right_nodes")"
+  left_tree="$(build_tree "$left_nodes" "$next_depth")"
+  right_tree="$(build_tree "$right_nodes" "$next_depth")"
 
-  # Decide split direction: if count > 2, use "right" for first split level
-  # (horizontal), then the recursion will alternate naturally.
-  local direction="right"
-  if [[ "$count" -le 2 ]]; then
+  # Alternate direction: even depths split horizontally, odd split vertically.
+  local direction
+  if (( depth % 2 == 0 )); then
     direction="right"
+  else
+    direction="down"
   fi
 
   jq -n --arg dir "$direction" \
@@ -81,7 +81,19 @@ build_tree() {
 # Main
 # ---------------------------------------------------------------------------
 
+check_deps() {
+  local missing=()
+  for cmd in scion herdr jq; do
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    log "Missing required commands: ${missing[*]}"
+    exit 1
+  fi
+}
+
 main() {
+  check_deps
   log "Building agent dashboard..."
 
   local agents

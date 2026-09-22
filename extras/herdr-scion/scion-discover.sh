@@ -36,7 +36,19 @@ existing_pane_labels() {
 # Main
 # ---------------------------------------------------------------------------
 
+check_deps() {
+  local missing=()
+  for cmd in scion herdr jq; do
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+  done
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    log "Missing required commands: ${missing[*]}"
+    exit 1
+  fi
+}
+
 main() {
+  check_deps
   log "Discovering running Scion agents..."
 
   local agents
