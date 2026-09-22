@@ -115,18 +115,11 @@ main() {
   # Sanitise: scion slugifies names, but we pass through as-is and let scion
   # handle validation.
 
-  # Step 3: Check for duplicate pane.
-  local existing
-  existing="$(herdr pane list --json 2>/dev/null \
-    | jq -r '.[].label // empty' 2>/dev/null \
-    | grep -xF "scion:${agent_name}" || true)"
-
-  if [[ -n "$existing" ]]; then
+  # Step 3: Check for duplicate pane (tracked via .agent field).
+  if pane_exists_for_agent "$agent_name"; then
     log "Pane already exists for $agent_name — focusing it."
     local pane_id
-    pane_id="$(herdr pane list --json 2>/dev/null \
-      | jq -r ".[] | select(.label == \"scion:${agent_name}\") | .pane_id" 2>/dev/null \
-      | head -1)"
+    pane_id="$(pane_id_for_agent "$agent_name")"
     if [[ -n "$pane_id" ]]; then
       herdr agent focus "$pane_id" 2>/dev/null || true
     fi
@@ -136,7 +129,6 @@ main() {
   # Step 4: Create pane with the attach wrapper in --start mode.
   log "Starting agent '$agent_name' from template '$selected_template'..."
   herdr pane split --direction right \
-    --label "scion:${agent_name}" \
     --env "SCION_AGENT=${agent_name}" \
     -- bash "${SCRIPT_DIR}/scion-attach-wrapper.sh" "$agent_name" --start "$selected_template"
 }

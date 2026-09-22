@@ -53,17 +53,29 @@ check_deps() {
 }
 
 # Check whether the agent is currently running.
+# Uses .slug // .name because slug is omitempty in local/podman mode.
 is_running() {
   scion list -r --format json 2>/dev/null \
-    | jq -e ".[] | select(.slug == \"$1\" and .phase == \"running\")" \
+    | jq -e ".[] | select((.slug // .name) == \"$1\" and .phase == \"running\")" \
     >/dev/null 2>&1
 }
 
 # Get the agent's current lifecycle phase (or "unknown").
 agent_phase() {
   scion list --format json 2>/dev/null \
-    | jq -r ".[] | select(.slug == \"$1\") | .phase // \"unknown\"" 2>/dev/null \
+    | jq -r ".[] | select((.slug // .name) == \"$1\") | .phase // \"unknown\"" 2>/dev/null \
     | head -1
+}
+
+# Register this pane with herdr so it can be tracked by the state bridge
+# and duplicate detection. Uses HERDR_PANE_ID set by herdr for child processes.
+register_pane() {
+  if [[ -n "${HERDR_PANE_ID:-}" ]]; then
+    herdr pane report-agent "$HERDR_PANE_ID" \
+      --source "scion:integration" \
+      --agent "scion/${SLUG}" \
+      --state idle 2>/dev/null || true
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -123,4 +135,5 @@ reconnect_loop() {
 # ---------------------------------------------------------------------------
 
 check_deps
+register_pane
 reconnect_loop

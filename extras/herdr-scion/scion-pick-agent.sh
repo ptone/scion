@@ -21,11 +21,12 @@ source "${SCRIPT_DIR}/scion-common.sh"
 
 log() { echo "[scion-pick] $*" >&2; }
 
-# Build a display line for each agent: "slug  (template, activity)"
+# Build a display line for each agent: "identifier  template  activity"
+# Uses .slug // .name because slug is omitempty in local/podman mode.
 agent_display_lines() {
   scion list -r --format json 2>/dev/null \
     | jq -r '.[] | select(.phase == "running")
-              | "\(.slug)\t\(.template // "-")\t\(.activity // "idle")"' 2>/dev/null
+              | "\(.slug // .name)\t\(.template // "-")\t\(.activity // "idle")"' 2>/dev/null
 }
 
 # Pick using fzf if available, otherwise a basic numbered menu on stderr/stdin.
@@ -95,19 +96,11 @@ main() {
     exit 0
   fi
 
-  # Check if a pane already exists for this agent.
-  local existing
-  existing="$(herdr pane list --json 2>/dev/null \
-    | jq -r '.[].label // empty' 2>/dev/null \
-    | grep -xF "scion:${selected}" || true)"
-
-  if [[ -n "$existing" ]]; then
+  # Check if a pane already exists for this agent (tracked via .agent field).
+  if pane_exists_for_agent "$selected"; then
     log "Pane already exists for $selected — focusing it."
-    # Find the pane_id and focus it.
     local pane_id
-    pane_id="$(herdr pane list --json 2>/dev/null \
-      | jq -r ".[] | select(.label == \"scion:${selected}\") | .pane_id" 2>/dev/null \
-      | head -1)"
+    pane_id="$(pane_id_for_agent "$selected")"
     if [[ -n "$pane_id" ]]; then
       herdr agent focus "$pane_id" 2>/dev/null || true
     fi
@@ -116,7 +109,6 @@ main() {
 
   log "Creating pane for agent: $selected"
   herdr pane split --direction right \
-    --label "scion:${selected}" \
     --env "SCION_AGENT=${selected}" \
     -- bash "${SCRIPT_DIR}/scion-attach-wrapper.sh" "$selected"
 }
