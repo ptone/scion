@@ -24,6 +24,11 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=scion-common.sh
+source "${SCRIPT_DIR}/scion-common.sh"
+
 POLL_INTERVAL="${SCION_BRIDGE_INTERVAL:-4}"
 PIDFILE="${SCION_BRIDGE_PIDFILE:-${HERDR_PLUGIN_STATE_DIR:-/tmp}/scion-state-bridge.pid}"
 
@@ -149,6 +154,7 @@ check_deps() {
 
 main() {
   check_deps
+  resolve_project_cwd
   log "Starting state bridge (poll interval: ${POLL_INTERVAL}s)."
   ensure_singleton
   trap cleanup EXIT INT TERM
