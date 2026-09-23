@@ -266,3 +266,162 @@ func TestSubstrateAgentManagerDelete_NoRecord(t *testing.T) {
 		t.Fatal("DeleteActorEgressPolicy was never called — Delete() silently no-opped instead of finding the record-less actor")
 	}
 }
+
+// TestSubstrateAgentManagerDelete_RecordlessAmbiguousSlugDeletesNothing is
+// the invariant a record-less List entry must never violate: a slug lookup
+// must never resolve to an actor whose ownership can't be verified. Two
+// different projects' actors, both record-less, both named "<project>--dev"
+// — an unscoped Delete("dev") must find neither, not pick one arbitrarily.
+// Before this fix, whichever actor ListActors happened to return second
+// would end up as List's sole "scion.name"="dev" entry (map iteration order
+// is undefined), so Delete deleted THAT ONE — a different project's actor —
+// instead of doing nothing. Both actor orderings are exercised as subtests;
+// running the whole test under a high -count is an additional check that
+// the outcome truly doesn't depend on map iteration order.
+func TestSubstrateAgentManagerDelete_RecordlessAmbiguousSlugDeletesNothing(t *testing.T) {
+	const (
+		atespaceA = "scion-aaaaaaaaaaaa"
+		actorA    = "projA--dev"
+		atespaceB = "scion-bbbbbbbbbbbb"
+		actorB    = "projB--dev"
+	)
+
+	for _, order := range []string{"A then B", "B then A"} {
+		t.Run(order, func(t *testing.T) {
+			fc := newFakeSubstrateControlClient()
+			if order == "A then B" {
+				fc.putActor(atespaceA, actorA, "uid-a")
+				fc.putActor(atespaceB, actorB, "uid-b")
+			} else {
+				fc.putActor(atespaceB, actorB, "uid-b")
+				fc.putActor(atespaceA, actorA, "uid-a")
+			}
+
+			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://unused"), nil, config.V1SubstrateConfig{})
+			mgr := NewManager(rt)
+			defer mgr.Close()
+
+			if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err != nil {
+				t.Fatalf(`Delete("dev") error = %v`, err)
+			}
+
+			fc.mu.Lock()
+			defer fc.mu.Unlock()
+			if len(fc.deleteActorCalls) != 0 {
+				t.Fatalf(`Delete("dev") called DeleteActor %v, want no calls at all (ambiguous slug, neither actor's ownership is verified)`, fc.deleteActorCalls)
+			}
+			if len(fc.deleteEgressCalls) != 0 {
+				t.Fatalf(`Delete("dev") called DeleteActorEgressPolicy %v, want no calls at all`, fc.deleteEgressCalls)
+			}
+			// Both actors must still be present — genuinely untouched, not
+			// merely "not the target of a recorded call".
+			if _, ok := fc.actors[atespaceA+"/"+actorA]; !ok {
+				t.Error("projA's actor was removed from the fake's own actor store")
+			}
+			if _, ok := fc.actors[atespaceB+"/"+actorB]; !ok {
+				t.Error("projB's actor was removed from the fake's own actor store")
+			}
+		})
+	}
+}
+
+// TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug is C1's
+// second required case: a record-EXISTS actor's real slug must resolve
+// correctly even when an unrelated, different-project, record-less actor
+// happens to invert to the same slug. Delete("dev") must remove only the
+// record-having actor; the record-less other-project actor must be
+// untouched.
+func TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug(t *testing.T) {
+	fc := newFakeSubstrateControlClient()
+	actorServer := newFakeSubstrateActorServer()
+	defer actorServer.Close()
+
+	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
+
+	// The record-less other-project actor, injected directly (never
+	// through this runtime's Run, so it genuinely has no record).
+	const (
+		otherAtespace = "scion-bbbbbbbbbbbb"
+		otherActor    = "projB--dev"
+	)
+	fc.putActor(otherAtespace, otherActor, "uid-other-project")
+
+	// The record-having actor, started for real.
+	cfg := scionruntime.RunConfig{
+		Name:         "projA--dev",
+		ProjectID:    "550e8400-e29b-41d4-a716-446655440020",
+		Image:        "us-docker.pkg.dev/proj/repo/scion-agent@sha256:" + strings.Repeat("a", 64),
+		UnixUsername: "scion",
+		NoAuth:       true,
+		Labels:       map[string]string{"scion.name": "dev", "scion.agent": "true"},
+	}
+	if _, err := rt.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	mgr := NewManager(rt)
+	defer mgr.Close()
+
+	if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err != nil {
+		t.Fatalf(`Delete("dev") error = %v`, err)
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	// AgentManager.Delete calls Runtime.Stop then Runtime.Delete, and for
+	// substrate Stop is Delete (same underlying call) — so 2 DeleteActor
+	// calls for one mgr.Delete() is expected. What matters is that EVERY
+	// one of them names the record-having actor, never the record-less
+	// other-project one.
+	if len(fc.deleteActorCalls) == 0 {
+		t.Fatal(`Delete("dev") called DeleteActor 0 times, want at least 1`)
+	}
+	for _, call := range fc.deleteActorCalls {
+		got := call.GetActor()
+		if got.GetName() != cfg.Name {
+			t.Errorf("DeleteActor actor = %s/%s, want the record-having %q, not the record-less other-project actor", got.GetAtespace(), got.GetName(), cfg.Name)
+		}
+	}
+	if _, ok := fc.actors[otherAtespace+"/"+otherActor]; !ok {
+		t.Error("the record-less other-project actor was removed — it must be untouched")
+	}
+}
+
+// TestSubstrateAgentManagerDelete_ThreeLevelActorNameNotMisread is C1's
+// raw-agent-name collision case: an agent literally named "b--c", started
+// in project "a", produces actor name "a--b--c" — indistinguishable, by the
+// string alone, from project "a--b" agent "c". A second, legitimate actor
+// "a--c" (project "a", agent "c") exists alongside it. Delete("c") must
+// resolve only to "a--c" and never touch "a--b--c".
+func TestSubstrateAgentManagerDelete_ThreeLevelActorNameNotMisread(t *testing.T) {
+	fc := newFakeSubstrateControlClient()
+	const atespace = "scion-proj"
+	fc.putActor(atespace, "a--b--c", "uid-abc")
+	fc.putActor(atespace, "a--c", "uid-ac")
+
+	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://unused"), nil, config.V1SubstrateConfig{})
+	mgr := NewManager(rt)
+	defer mgr.Close()
+
+	if _, err := mgr.Delete(context.Background(), "c", false, "", false); err != nil {
+		t.Fatalf(`Delete("c") error = %v`, err)
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	// AgentManager.Delete calls Runtime.Stop then Runtime.Delete, and for
+	// substrate Stop is Delete (same underlying call) — so 2 DeleteActor
+	// calls for one mgr.Delete() is expected; every one of them must name
+	// "a--c", never "a--b--c".
+	if len(fc.deleteActorCalls) == 0 {
+		t.Fatal(`Delete("c") called DeleteActor 0 times, want at least 1`)
+	}
+	for _, call := range fc.deleteActorCalls {
+		if got := call.GetActor().GetName(); got != "a--c" {
+			t.Errorf(`DeleteActor actor name = %q, want "a--c" ("a--b--c" must never match a lookup for "c")`, got)
+		}
+	}
+	if _, ok := fc.actors[atespace+"/a--b--c"]; !ok {
+		t.Error(`"a--b--c" was removed — it must be untouched by Delete("c")`)
+	}
+}

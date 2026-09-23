@@ -1110,6 +1110,223 @@ func TestSubstrateList_NameIsAgentSlugNotActorName(t *testing.T) {
 	})
 }
 
+// TestSubstrateSynthesizedAgentName covers substrateSynthesizedAgentName's
+// unambiguous-inversion rule directly: exactly one "--", both halves
+// non-empty, and the agent half already equal to its own slug.
+func TestSubstrateSynthesizedAgentName(t *testing.T) {
+	cases := []struct {
+		name          string
+		actorName     string
+		wantOK        bool
+		wantPrefix    string
+		wantAgentSlug string
+	}{
+		{"no separator at all", "orphaned-agent", false, "", ""},
+		{"exactly one separator", "myproj--sb-smoke-2", true, "myproj", "sb-smoke-2"},
+		{"two separators (ambiguous split point)", "a--b--c", false, "", ""},
+		{"three separators", "a--b--c--d", false, "", ""},
+		{"mixed-case agent half is not its own slug", "myproj--Sb-Smoke", false, "", ""},
+		{"non-slug agent half (underscore)", "myproj--agent_name", false, "", ""},
+		{"non-slug agent half (space)", "myproj--agent name", false, "", ""},
+		{"empty project half", "--agent", false, "", ""},
+		{"empty agent half", "proj--", false, "", ""},
+		{
+			"over-63-character agent half (Slugify truncates, so it can't equal itself)",
+			"proj--" + strings.Repeat("a", 70),
+			false, "", "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prefix, agentSlug, ok := substrateSynthesizedAgentName(tc.actorName)
+			if ok != tc.wantOK {
+				t.Fatalf("substrateSynthesizedAgentName(%q) ok = %v, want %v", tc.actorName, ok, tc.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if prefix != tc.wantPrefix || agentSlug != tc.wantAgentSlug {
+				t.Errorf("substrateSynthesizedAgentName(%q) = (%q, %q), want (%q, %q)",
+					tc.actorName, prefix, agentSlug, tc.wantPrefix, tc.wantAgentSlug)
+			}
+		})
+	}
+}
+
+// TestSubstrateList_RecordlessAmbiguousSlugFallsBackToActorName is C1's
+// core fail-closed case: two record-less actors in different projects
+// invert to the SAME candidate agent slug ("dev"). Neither's ownership of
+// that slug is verified (there's no record for either), so List must not
+// report either of them as "scion.name"="dev" — both must fall back to
+// their own (distinct) actor names, exactly the pre-fix behaviour, so a
+// caller-supplied "dev" lookup matches neither rather than picking one
+// arbitrarily. Run with both actor orderings: the tally this depends on
+// must not be order-dependent (map-based, not first-match-wins).
+func TestSubstrateList_RecordlessAmbiguousSlugFallsBackToActorName(t *testing.T) {
+	actorA := &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: "uid-a"},
+		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	}
+	actorB := &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: "uid-b"},
+		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	}
+
+	orderings := map[string][]*ateapipb.Actor{
+		"A then B": {actorA, actorB},
+		"B then A": {actorB, actorA},
+	}
+	for name, order := range orderings {
+		t.Run(name, func(t *testing.T) {
+			rec := &callRecorder{}
+			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+			defer closeServer()
+
+			fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+				return &ateapipb.ListActorsResponse{Actors: order}, nil
+			}
+
+			agents, err := rt.List(context.Background(), map[string]string{"scion.name": "dev"})
+			if err != nil {
+				t.Fatalf("List() error = %v", err)
+			}
+			if len(agents) != 0 {
+				t.Fatalf(`List(scion.name="dev") = %v, want no matches (ambiguous, neither actor's ownership of "dev" is verified)`, agents)
+			}
+
+			all, err := rt.List(context.Background(), map[string]string{"scion.agent": "true"})
+			if err != nil {
+				t.Fatalf("List() error = %v", err)
+			}
+			if len(all) != 2 {
+				t.Fatalf("List(scion.agent=true) = %v, want both actors present under their own names", all)
+			}
+			for _, a := range all {
+				if a.Name == "dev" {
+					t.Errorf("agent %+v has Name=\"dev\" synthesised despite the ambiguous collision", a)
+				}
+			}
+		})
+	}
+}
+
+// TestSubstrateList_RecordlessProjectScopedLookupDiscriminates is C1's
+// project-identity requirement: a project-ID-scoped List call must find
+// only the actor that actually lives in that project's atespace, even
+// though neither actor has an in-memory record and both would otherwise
+// invert to the ambiguous "dev" slug (see the test above). This is the
+// mechanism pkg/runtimebroker's resolveAgentRuntimeTarget uses
+// (List(filter) with "scion.project_id" set) to scope a lookup by project.
+func TestSubstrateList_RecordlessProjectScopedLookupDiscriminates(t *testing.T) {
+	const projAID = "aaaaaaaaaaaa" // substrateAtespaceName("aaaaaaaaaaaa") == "scion-aaaaaaaaaaaa"
+
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		return &ateapipb.ListActorsResponse{
+			Actors: []*ateapipb.Actor{
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: "uid-a"},
+					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: "uid-b"},
+					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+			},
+		}, nil
+	}
+
+	if got := substrateAtespaceName(projAID); got != "scion-aaaaaaaaaaaa" {
+		t.Fatalf("substrateAtespaceName(%q) = %q, want %q (test bug)", projAID, got, "scion-aaaaaaaaaaaa")
+	}
+
+	agents, err := rt.List(context.Background(), map[string]string{"scion.project_id": projAID})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("List(scion.project_id=%q) = %v, want exactly projA's actor", projAID, agents)
+	}
+	if agents[0].ContainerID != "scion-aaaaaaaaaaaa/projA--dev" {
+		t.Errorf("ContainerID = %q, want projA's actor, not projB's", agents[0].ContainerID)
+	}
+}
+
+// TestSubstrateList_RecordExistsAndRecordlessSameSlug is C1's second
+// required case: a record-EXISTS actor's real, independently-verified slug
+// must not be blanked out just because an unrelated record-less actor in a
+// different project happens to invert to the same candidate slug. The
+// record-having actor keeps "dev"; the record-less one falls back to its
+// own actor name (same fail-closed rule as above), so a "dev" lookup
+// resolves to exactly the record-having one and nothing else.
+func TestSubstrateList_RecordExistsAndRecordlessSameSlug(t *testing.T) {
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	const uid = "uid-with-record"
+	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		return &ateapipb.ListActorsResponse{
+			Actors: []*ateapipb.Actor{
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: uid},
+					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: "uid-no-record"},
+					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+			},
+		}, nil
+	}
+	substrateAgentStateMu.Lock()
+	substrateAgentRecords[uid] = &substrateAgentRecord{
+		Labels: map[string]string{"scion.name": "dev", "scion.agent": "true"},
+	}
+	substrateAgentStateMu.Unlock()
+
+	agents, err := rt.List(context.Background(), map[string]string{"scion.name": "dev"})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf(`List(scion.name="dev") = %v, want exactly the record-having actor`, agents)
+	}
+	if agents[0].ContainerID != "scion-aaaaaaaaaaaa/projA--dev" {
+		t.Errorf("ContainerID = %q, want the record-having projA actor, not the record-less projB one", agents[0].ContainerID)
+	}
+}
+
+// TestSubstrateList_ThreeLevelActorNameNotMisread is C1's raw-agent-name
+// collision case: agent "b--c" started in project "a" produces actor name
+// "a--b--c" (two "--" occurrences — an ambiguous split, so
+// substrateSynthesizedAgentName refuses to invert it and it keeps its full
+// actor name). A second, unrelated actor "a--c" (project "a", agent "c")
+// legitimately inverts to slug "c". A lookup for "c" must resolve only to
+// "a--c", never to "a--b--c".
+func TestSubstrateList_ThreeLevelActorNameNotMisread(t *testing.T) {
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		return &ateapipb.ListActorsResponse{
+			Actors: []*ateapipb.Actor{
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "a--b--c", Uid: "uid-abc"},
+					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "a--c", Uid: "uid-ac"},
+					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+			},
+		}, nil
+	}
+
+	agents, err := rt.List(context.Background(), map[string]string{"scion.name": "c"})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf(`List(scion.name="c") = %v, want exactly "a--c", not "a--b--c"`, agents)
+	}
+	if agents[0].ContainerID != "scion-proj/a--c" {
+		t.Errorf("ContainerID = %q, want \"scion-proj/a--c\" — \"a--b--c\" must never match a lookup for \"c\"", agents[0].ContainerID)
+	}
+}
+
 // -----------------------------------------------------------------------
 // NewSubstrateRuntime: process-wide memoization
 // -----------------------------------------------------------------------

@@ -200,18 +200,34 @@ func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error
 // pkg/runtimebroker) that need to exercise the real memoized-by-config
 // resolution path — pkg/runtime/factory.go's "substrate" case calling
 // NewSubstrateRuntime, exactly as pkg/agent.ResolveRuntime/GetRuntime do in
-// production — without dialing real ateapi/Kubernetes. Returns a restore
-// func; call it (e.g. via t.Cleanup) to put the previous builder back.
-// Mirrors this package's own tests reassigning substrateRuntimeBuilder
-// directly, which other packages cannot do since it is unexported.
+// production — without dialing real ateapi/Kubernetes.
+//
+// Also swaps substrateRuntimes (the memo NewSubstrateRuntime caches built
+// instances in) for a fresh, empty map, and restores both the builder and
+// the memo together in the returned func — mirroring
+// resetSubstrateRuntimeRegistryForTest, this package's own in-package
+// equivalent, which other packages cannot call since it is unexported.
+// Without this, a fake instance built under a test's builder (e.g. one
+// wired to an httptest server the test then closes) stays cached in the
+// process-wide memo under its config's key after the test ends, and a
+// later call with an equal config — in the same test's next iteration, a
+// different test, or a shuffled run — gets that stale fake back instead of
+// building a fresh one, hanging or failing against a server that no longer
+// exists.
+//
+// Call the returned func (e.g. via t.Cleanup) to restore the previous
+// builder and memo together.
 func SetSubstrateRuntimeBuilderForTest(builder func(config.V1SubstrateConfig) (*SubstrateRuntime, error)) (restore func()) {
 	substrateRuntimesMu.Lock()
-	prev := substrateRuntimeBuilder
+	prevBuilder := substrateRuntimeBuilder
+	prevRuntimes := substrateRuntimes
 	substrateRuntimeBuilder = builder
+	substrateRuntimes = make(map[string]*SubstrateRuntime)
 	substrateRuntimesMu.Unlock()
 	return func() {
 		substrateRuntimesMu.Lock()
-		substrateRuntimeBuilder = prev
+		substrateRuntimeBuilder = prevBuilder
+		substrateRuntimes = prevRuntimes
 		substrateRuntimesMu.Unlock()
 	}
 }
@@ -506,6 +522,14 @@ func (r *SubstrateRuntime) Stop(ctx context.Context, id string) error {
 const substrateAtespacePrefix = "scion-"
 
 // List implements phase1-spec.md §2.2 List row.
+//
+// Invariant this must never violate: a slug lookup must never resolve to an
+// actor whose ownership can't be verified. A no-op — a caller-supplied slug
+// matching nothing — is acceptable (ptone/scion#1819 tracks hardening that
+// generic call path further); resolving to the WRONG actor is not. See
+// substrateSynthesizedAgentName's doc for how a record-less entry's
+// "scion.name"/"scion.project" are derived (or deliberately withheld) to
+// hold that invariant.
 func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	var actors []*ateapipb.Actor
 	pageToken := ""
@@ -524,13 +548,50 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	substrateAgentStateMu.Lock()
 	defer substrateAgentStateMu.Unlock()
 
+	// First pass: tally, across every scion-managed actor in this listing,
+	// which "scion.name" value each would report — the real one from its
+	// record if it has one, or its candidate synthesized slug if not (only
+	// when the inversion is unambiguous; see substrateSynthesizedAgentName).
+	// A record-less actor's candidate is used in the second pass below only
+	// if it is the SOLE actor (record-having or not) that would produce
+	// that value — otherwise a caller-supplied slug lookup could resolve to
+	// either one, and neither's ownership of that slug is verified, so
+	// neither record-less candidate is trusted (the record-having one, if
+	// any, keeps its real, independently-verified slug either way).
+	type recordlessCandidate struct {
+		projectPrefix string
+		agentSlug     string
+		ok            bool
+	}
+	candidates := make(map[*ateapipb.Actor]recordlessCandidate)
+	slugCounts := make(map[string]int)
+	for _, actor := range actors {
+		if !strings.HasPrefix(actor.GetMetadata().GetAtespace(), substrateAtespacePrefix) {
+			continue
+		}
+		if rec := substrateAgentRecords[actor.GetMetadata().GetUid()]; rec != nil {
+			if realSlug := rec.Labels["scion.name"]; realSlug != "" {
+				slugCounts[realSlug]++
+			}
+			continue
+		}
+		prefix, slug, ok := substrateSynthesizedAgentName(actor.GetMetadata().GetName())
+		candidates[actor] = recordlessCandidate{projectPrefix: prefix, agentSlug: slug, ok: ok}
+		if ok {
+			slugCounts[slug]++
+		}
+	}
+
 	var agents []api.AgentInfo
 	for _, actor := range actors {
 		if !strings.HasPrefix(actor.GetMetadata().GetAtespace(), substrateAtespacePrefix) {
 			continue
 		}
 
+		actorName := actor.GetMetadata().GetName()
+		atespace := actor.GetMetadata().GetAtespace()
 		rec := substrateAgentRecords[actor.GetMetadata().GetUid()]
+		hasRecord := rec != nil
 
 		// Always synthesise the two labels the broker's own lookups depend
 		// on (pkg/runtimebroker resolves an agent by "scion.name" and lists
@@ -538,15 +599,11 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 		// this runtime instance has no in-memory record for the actor —
 		// e.g. right after a broker restart, which phase1-spec.md §2.2's
 		// List row accepts losing records for, but not losing the actor
-		// from List entirely. The "scion.name" default is a best-effort
-		// derivation (see substrateSynthesizedAgentName); when rec is
-		// non-nil, rec.Labels below carries the real one and overwrites it.
-		labels := map[string]string{
-			"scion.name":  substrateSynthesizedAgentName(actor.GetMetadata().GetName()),
-			"scion.agent": "true",
-		}
+		// from List entirely.
+		labels := map[string]string{"scion.agent": "true"}
 		var template, harnessConfig, project, projectID, image string
-		if rec != nil {
+		if hasRecord {
+			labels["scion.name"] = actorName // overwritten below by rec.Labels, which always has the real one
 			for k, v := range rec.Labels {
 				labels[k] = v
 			}
@@ -555,14 +612,29 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 			project = rec.Project
 			projectID = rec.ProjectID
 			image = rec.Image
+		} else {
+			c := candidates[actor]
+			if c.ok && slugCounts[c.agentSlug] == 1 {
+				labels["scion.name"] = c.agentSlug
+				project = c.projectPrefix
+				for k, v := range projectcompat.ProjectNameLabels(c.projectPrefix, true) {
+					labels[k] = v
+				}
+			} else {
+				// Fail closed: the pre-synthesis behaviour (the caller-
+				// supplied slug can never accidentally match this entry,
+				// since actor names always contain the atespace-scoping
+				// project prefix a real agent slug never would).
+				labels["scion.name"] = actorName
+			}
 		}
 
-		if !substrateLabelsMatch(labels, project, projectID, labelFilter) {
+		if !substrateLabelsMatch(labels, project, projectID, atespace, hasRecord, labelFilter) {
 			continue
 		}
 
 		agents = append(agents, api.AgentInfo{
-			ContainerID: actor.GetMetadata().GetAtespace() + "/" + actor.GetMetadata().GetName(),
+			ContainerID: atespace + "/" + actorName,
 			// Name is the agent slug (labels["scion.name"]), matching every
 			// other runtime's convention (e.g. DockerRuntime.List) — not
 			// the actor name, which is containerName(project, agent) and
@@ -586,34 +658,76 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	return agents, nil
 }
 
-// substrateSynthesizedAgentName derives a best-effort agent slug from an
-// actor's name, for use when List has no in-memory record to supply the
-// real one (e.g. right after a broker restart). The actor name is
-// containerName(projectName, agentName) = "<projectName>--<agentName>"
-// when projectName is non-empty (pkg/agent/run.go), or bare agentName
-// otherwise, so the inverse is: split off everything after the last "--"
-// and slugify it (slugifying normalizes case and any other difference
-// between the raw agent name used here and api.Slugify(agentName), the
-// value actually recorded in the "scion.name" label once a record exists).
+// substrateSynthesizedAgentName inverts containerName(projectSlug,
+// agentSlug) = "<projectSlug>--<agentSlug>" (pkg/agent/run.go) to recover
+// (projectSlug, agentSlug), for a record-less actor List has no in-memory
+// label record for (e.g. right after a broker restart). ok is true only
+// when the inversion is unambiguous:
 //
-// This is ambiguous only if a project name itself contains "--", which
-// project names sanitized from directory names in practice don't; if one
-// did, the derived slug would be wrong until a real in-memory record
-// replaces this guess (e.g. the next time this broker starts that agent),
-// which is inherent to this being a reconstructed guess rather than the
-// recorded value.
-func substrateSynthesizedAgentName(actorName string) string {
-	if idx := strings.LastIndex(actorName, "--"); idx >= 0 {
-		return api.Slugify(actorName[idx+2:])
+//   - actorName contains EXACTLY one "--". Zero occurrences means no
+//     project prefix was ever applied (containerName(_, "") never runs, but
+//     containerName("", agent) == agent does); two or more means the split
+//     point can't be determined — "a--b--c" could be project "a" agent
+//     "b--c", or project "a--b" agent "c", and there is no way to tell
+//     from the string alone which one actually happened.
+//   - both halves are non-empty.
+//   - the agent half is already exactly its own slug
+//     (api.Slugify(agentHalf) == agentHalf). A real agent slug always is,
+//     since it's recorded as api.Slugify(opts.Name) (run.go); a raw,
+//     unslugified agent name that happened to contain "--" (e.g. "b--c")
+//     would not match its own slugified form ("b-c"), which is exactly
+//     what would otherwise let "a--b--c" be misread as project "a" agent
+//     "b--c" — a real hazard, since containerName uses the raw agent name,
+//     not its slug (see run.go's containerName call site).
+//
+// When ok is false, the caller must not synthesise "scion.name" from this
+// actor at all: it must fall back to the actor name itself, which a real
+// agent slug can never equal (it always contains the "--" project
+// separator an agent slug never can, since api.Slugify never emits one).
+// That fallback is what keeps a record-less entry's ownership
+// unverifiable-but-safe rather than wrong: a caller-supplied slug lookup
+// then simply never matches it, rather than matching it by coincidence.
+//
+// This function only answers "can agentSlug be read off this actor name at
+// all" — it does NOT check whether agentSlug is safe to trust across the
+// whole listing (a second, different actor could coincidentally invert to
+// the same agentSlug in a different project). That cross-actor check is
+// List's job, using the (projectSlug, agentSlug, ok) this returns.
+func substrateSynthesizedAgentName(actorName string) (projectPrefix, agentSlug string, ok bool) {
+	first := strings.Index(actorName, "--")
+	if first < 0 || first != strings.LastIndex(actorName, "--") {
+		return "", "", false
 	}
-	return api.Slugify(actorName)
+	prefix, agent := actorName[:first], actorName[first+2:]
+	if prefix == "" || agent == "" {
+		return "", "", false
+	}
+	if api.Slugify(agent) != agent {
+		return "", "", false
+	}
+	return prefix, agent, true
 }
 
 // substrateLabelsMatch mirrors the label-filter pattern used by the other
 // runtimes (e.g. CloudRunSandboxRuntime.List): an entry with no explicit
 // label for a filtered project/project-id key still matches on the
 // synthesised project/projectID fields.
-func substrateLabelsMatch(labels map[string]string, project, projectID string, filter map[string]string) bool {
+//
+// atespace and hasRecord exist for exactly one case: a record-less entry
+// (hasRecord false) being matched against a project_id/grove_id filter. Its
+// project identity, if List could give it one at all, only ever comes from
+// the actor-name prefix (see substrateSynthesizedAgentName) — a project
+// SLUG, not a project ID; the two live in different namespaces and can't be
+// compared directly (a project ID's substrateAtespaceName is a truncated,
+// sanitized hash, not the slug itself). The actor's own atespace, though,
+// IS authoritative for its project: every actor lives in the atespace its
+// project ID produces (substrateAtespaceName), independent of any name
+// inferred from the actor's own name. So a project_id/grove_id filter on a
+// record-less entry is answered by recomputing that atespace from the
+// filter value and comparing it to the actor's actual one, not by
+// comparing to any stored label. A record-having entry needs none of this:
+// rec.ProjectID (passed in as projectID) is already the real value.
+func substrateLabelsMatch(labels map[string]string, project, projectID, atespace string, hasRecord bool, filter map[string]string) bool {
 	for k, v := range filter {
 		actual := labels[k]
 		if actual == "" {
@@ -621,6 +735,12 @@ func substrateLabelsMatch(labels map[string]string, project, projectID string, f
 			case projectcompat.LabelProject, projectcompat.LabelGrove:
 				actual = project
 			case projectcompat.LabelProjectID, projectcompat.LabelGroveID:
+				if !hasRecord {
+					if substrateAtespaceName(v) == atespace {
+						continue
+					}
+					return false
+				}
 				actual = projectID
 			}
 		}
