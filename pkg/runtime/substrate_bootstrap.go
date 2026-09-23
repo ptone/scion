@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +39,25 @@ const (
 	substrateHealthzPath   = "/scion/v1/healthz"
 	substrateBootstrapPath = "/scion/v1/bootstrap"
 	substrateExecPath      = "/scion/v1/exec"
+)
+
+// Per-request deadlines for router calls. RouterClient itself carries no
+// blanket timeout (see its doc comment), so every call here sets its own —
+// a single fixed client timeout can't fit both a quick healthz probe and an
+// exec whose timeout_s is caller-chosen and can legitimately run longer
+// than that (review round 1, Consider #8).
+const (
+	// healthzRequestTimeout bounds one GET /healthz attempt. waitForHealthz
+	// retries across its own outer timeout/backoff, so this only bounds a
+	// single attempt.
+	healthzRequestTimeout = 10 * time.Second
+	// bootstrapRequestTimeout bounds the one-shot POST /bootstrap call.
+	bootstrapRequestTimeout = 30 * time.Second
+	// execTimeoutSlack is added on top of the caller-requested exec
+	// timeout_s to get doExec's own context deadline, so the HTTP round
+	// trip has room for the server's own timeout_s enforcement plus
+	// network/processing overhead, instead of racing it.
+	execTimeoutSlack = 10 * time.Second
 )
 
 // healthzAwaitingBootstrap and healthzRunning are the two states substrate-serve's
@@ -145,6 +165,74 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	return env
 }
 
+// substrateSecretCandidates returns every value from cfg that must never
+// appear in an error string, keyed by the name/target that identifies it in
+// a redaction marker: harness env/telemetry env, cfg.Env, ResolvedAuth's
+// env vars, and both env-type and file-type ResolvedSecrets.
+//
+// This is deliberately its own function, not argv_redact.go's
+// externalEnvValues (written for cloudrun-sandbox's argv construction) and
+// not buildBootstrapEnv's output either:
+//
+//   - externalEnvValues only covers cfg.Env and Harness.GetEnv(), and
+//     cross-checks against a final env map — it silently has no coverage
+//     for ResolvedAuth.EnvVars or ResolvedSecrets at all, which is exactly
+//     what let real secret values reach an unredacted error (review round
+//     1, Required #3).
+//   - buildBootstrapEnv's output isn't reusable as-is either: it adds
+//     SCION_RUNTIME=substrate, a runtime-synthesised constant that is also
+//     a substring of every one of this runtime's own error-message
+//     prefixes ("substrate: ..."). Feeding that into redactEnvValues (a
+//     blunt substring replace over the whole error text) would rewrite
+//     "substrate" everywhere it appears, corrupting unrelated error
+//     messages. If buildBootstrapEnv or this function ever gains another
+//     synthesised constant, keep mirroring the *external* sources here
+//     rather than importing the other function's whole output, so this bug
+//     class can't recur silently.
+func substrateSecretCandidates(cfg RunConfig) map[string]string {
+	secrets := make(map[string]string)
+
+	if cfg.Harness != nil {
+		for k, v := range cfg.Harness.GetEnv(cfg.Name, util.GetHomeDir(cfg.UnixUsername), cfg.UnixUsername) {
+			if v != "" {
+				secrets[k] = v
+			}
+		}
+		if cfg.TelemetryEnabled {
+			for k, v := range cfg.Harness.GetTelemetryEnv() {
+				if v != "" {
+					secrets[k] = v
+				}
+			}
+		}
+	}
+
+	for _, e := range cfg.Env {
+		if k, v, ok := strings.Cut(e, "="); ok {
+			secrets[k] = v
+		}
+	}
+
+	if cfg.ResolvedAuth != nil {
+		for k, v := range cfg.ResolvedAuth.EnvVars {
+			secrets[k] = v
+		}
+	}
+
+	for _, s := range cfg.ResolvedSecrets {
+		if s.Type != "environment" && s.Type != "" && s.Type != "file" {
+			continue
+		}
+		key := s.Name
+		if key == "" {
+			key = s.Target
+		}
+		secrets[key] = s.Value
+	}
+
+	return secrets
+}
+
 // buildBootstrapFiles assembles the "files" array: ResolvedAuth.Files (read
 // from SourcePath) plus file-type ResolvedSecrets (content already resolved
 // in Value — no disk read needed).
@@ -225,6 +313,9 @@ func waitForHealthz(ctx context.Context, router *substrate.RouterClient, atespac
 }
 
 func getHealthz(ctx context.Context, router *substrate.RouterClient, atespace, actorName string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, healthzRequestTimeout)
+	defer cancel()
+
 	resp, err := router.Do(ctx, atespace, actorName, http.MethodGet, substrateHealthzPath, nil, nil)
 	if err != nil {
 		return "", err
@@ -241,12 +332,31 @@ func getHealthz(ctx context.Context, router *substrate.RouterClient, atespace, a
 	return hz.State, nil
 }
 
+// errBootstrapHijacked is returned by postBootstrap when the control server
+// answers 409: someone bootstrapped this actor before the broker's own
+// request landed.
+//
+// Under the Phase 1 fallback nonce (phase1-spec.md §5: any bearer accepted,
+// correctness resting on "first bootstrap wins" plus a NetworkPolicy
+// restricting router ingress to the broker namespace), the broker is
+// supposed to be the only caller that can ever reach this endpoint before
+// it is claimed — it sends its POST immediately after the actor reaches
+// RUNNING. A 409 on the broker's own first attempt therefore means another
+// caller reached the control server first: either the NetworkPolicy has a
+// gap, or something else in the broker's namespace raced it. That is not a
+// benign retry to swallow; it is the only signal Phase 1 has that the
+// fallback's trust assumption was violated, so Run treats it as a
+// compromise indicator (see Run's handling of this sentinel).
+var errBootstrapHijacked = errors.New("bootstrap rejected: actor was already bootstrapped by another caller")
+
 // postBootstrap sends the bootstrap payload through the router, authorized
-// with nonce (phase1-spec.md §2.1). A 409 means the actor was already
-// bootstrapped, which Run treats as success (idempotent retry after a
-// broker crash between bootstrap and returning); any other non-2xx status
-// is an error.
+// with nonce (phase1-spec.md §2.1). Any non-2xx status is an error; 409
+// specifically becomes errBootstrapHijacked (see its doc comment) rather
+// than being treated as an idempotent no-op.
 func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace, actorName, nonce string, req bootstrapRequest) error {
+	ctx, cancel := context.WithTimeout(ctx, bootstrapRequestTimeout)
+	defer cancel()
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("substrate: marshal bootstrap request: %w", err)
@@ -261,8 +371,11 @@ func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusConflict {
+	if resp.StatusCode == http.StatusOK {
 		return nil
+	}
+	if resp.StatusCode == http.StatusConflict {
+		return errBootstrapHijacked
 	}
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	return fmt.Errorf("substrate: bootstrap %s/%s failed: status %d: %s", atespace, actorName, resp.StatusCode, string(msg))
@@ -272,6 +385,14 @@ func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace
 // authorized with the actor's control_token (phase1-spec.md §2.2 Exec row).
 func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actorName, controlToken string, argv []string, user string, timeout time.Duration) (execResponse, error) {
 	var out execResponse
+
+	// The HTTP round trip needs longer than timeout_s itself: the control
+	// server enforces timeout_s server-side and then still has to write the
+	// response, and the request has to reach it and come back. Racing the
+	// client's deadline against the server's own enforcement is exactly
+	// what cut exec calls short before (review round 1, Consider #8).
+	ctx, cancel := context.WithTimeout(ctx, timeout+execTimeoutSlack)
+	defer cancel()
 
 	body, err := json.Marshal(execRequest{
 		Argv:     argv,
