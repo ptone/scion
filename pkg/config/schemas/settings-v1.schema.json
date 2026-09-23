@@ -263,7 +263,7 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["docker", "podman", "container", "kubernetes", "cloudrun", "cloudrun-instances", "cloudrun-sandbox"],
+          "enum": ["docker", "podman", "container", "kubernetes", "cloudrun", "cloudrun-instances", "cloudrun-sandbox", "substrate"],
           "description": "Runtime type. Defaults to the runtime entry name if omitted."
         },
         "host": { "type": "string" },

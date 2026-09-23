@@ -1018,6 +1018,52 @@ type V1CloudRunSandboxConfig struct {
 	SandboxBin string `json:"sandbox_bin,omitempty" yaml:"sandbox_bin,omitempty" koanf:"sandbox_bin"`
 }
 
+// V1SubstrateConfig holds Substrate runtime settings (substrate-integration
+// findings.md / phase1-spec.md §2.3). Substrate is a Kubernetes-hosted actor
+// runtime; scion agents run as Substrate "actors". Selection is explicit
+// only — there is no auto-detect branch in factory.go.
+type V1SubstrateConfig struct {
+	// APIEndpoint is the ateapi Control gRPC endpoint, e.g.
+	// "api.ate-system.svc:443".
+	APIEndpoint string `json:"api_endpoint,omitempty" yaml:"api_endpoint,omitempty" koanf:"api_endpoint"`
+	// RouterEndpoint is the atenet-router inbound endpoint the broker uses
+	// to reach an actor's control server, e.g.
+	// "atenet-router.ate-system.svc:80".
+	RouterEndpoint string `json:"router_endpoint,omitempty" yaml:"router_endpoint,omitempty" koanf:"router_endpoint"`
+	// TokenAudience is the audience requested for the in-cluster
+	// ServiceAccount TokenRequest used to authenticate to the ateapi
+	// Control API. Defaults to "api.ate-system.svc" when empty.
+	TokenAudience string `json:"token_audience,omitempty" yaml:"token_audience,omitempty" koanf:"token_audience"`
+	// CAFile is a path to a PEM CA bundle used to verify the ateapi/router
+	// server certificate.
+	CAFile string `json:"ca_file,omitempty" yaml:"ca_file,omitempty" koanf:"ca_file"`
+	// ClusterTrustBundle names a Kubernetes ClusterTrustBundle object
+	// holding the CA used to verify the ateapi/router server certificate.
+	// When both this and CAFile are set, the dialer prefers
+	// ClusterTrustBundle.
+	ClusterTrustBundle string `json:"cluster_trust_bundle,omitempty" yaml:"cluster_trust_bundle,omitempty" koanf:"cluster_trust_bundle"`
+	// SandboxClass selects the actor sandbox isolation technology
+	// ("gvisor" or "microvm"). Defaults to "gvisor" when empty.
+	SandboxClass string `json:"sandbox_class,omitempty" yaml:"sandbox_class,omitempty" koanf:"sandbox_class"`
+	// SandboxConfigName names the Substrate SandboxConfig CRD instance used
+	// by actor templates.
+	SandboxConfigName string `json:"sandbox_config_name,omitempty" yaml:"sandbox_config_name,omitempty" koanf:"sandbox_config_name"`
+	// WorkerSelector is copied into the ActorTemplate's workerSelector, to
+	// pin actors to a labeled WorkerPool.
+	WorkerSelector map[string]string `json:"worker_selector,omitempty" yaml:"worker_selector,omitempty" koanf:"worker_selector"`
+	// SnapshotStorage is the configured bucket/prefix used for the
+	// ActorTemplate's snapshotsConfig storage, e.g. "gs://bucket/prefix/".
+	SnapshotStorage string `json:"snapshot_storage,omitempty" yaml:"snapshot_storage,omitempty" koanf:"snapshot_storage"`
+	// EgressAllow lists additional hostnames/CIDRs allowed through the
+	// per-actor EgressPolicy, beyond the hub/git/model/telemetry hosts the
+	// runtime always adds.
+	EgressAllow []string `json:"egress_allow,omitempty" yaml:"egress_allow,omitempty" koanf:"egress_allow"`
+	// TemplateReadyTimeout bounds how long Run waits for a newly created
+	// ActorTemplate to become ready (a Go duration string, e.g. "10m").
+	// Defaults to 10 minutes when empty.
+	TemplateReadyTimeout string `json:"template_ready_timeout,omitempty" yaml:"template_ready_timeout,omitempty" koanf:"template_ready_timeout"`
+}
+
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
 type V1RuntimeConfig struct {
 	Type              string            `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
@@ -1034,6 +1080,8 @@ type V1RuntimeConfig struct {
 	CloudRunInstances *V1CloudRunInstancesConfig `json:"cloudrun_instances,omitempty" yaml:"cloudrun_instances,omitempty" koanf:"cloudrun_instances"`
 	// CloudRunSandbox holds Cloud Run Sandbox-specific settings when Type is "cloudrun-sandbox".
 	CloudRunSandbox *V1CloudRunSandboxConfig `json:"cloudrun_sandbox,omitempty" yaml:"cloudrun_sandbox,omitempty" koanf:"cloudrun_sandbox"`
+	// Substrate holds Substrate-specific settings when Type is "substrate".
+	Substrate *V1SubstrateConfig `json:"substrate,omitempty" yaml:"substrate,omitempty" koanf:"substrate"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to
