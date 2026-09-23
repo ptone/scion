@@ -1,0 +1,68 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Cloud Build configuration for building JUST the thick-prep image.
+# thick-prep is the Google Cloud Workstations base reconciled to the scion
+# base contract; scion-base is then built on top of it by cloudbuild-thick.yaml.
+# Architecture: amd64 only (the Cloud Workstations base has no arm64 variant).
+#
+# This exists because `--target thick-prep` previously resolved to
+# cloudbuild-thick.yaml, which is the FULL thick chain: it also rebuilds
+# scion-base, eight harnesses and the hub, and pushes all eleven to
+# $_REGISTRY:$_TAG. Asking for one image and getting eleven tag writes is a
+# real hazard when _TAG is left at its default of 'latest'. Every other
+# single-image target (core-base, scion-base, hub) already has its own scoped
+# config; thick-prep was the one that did not.
+#
+# The build step below is a byte-for-byte copy of the 'build-thick-prep' step
+# in cloudbuild-thick.yaml, so the artifact this produces is identical to the
+# one the full chain produces. Deliberately NOT restructured into the
+# split build/push form used by cloudbuild-core-base.yaml: that split exists
+# to dodge OAuth token expiry on multi-hour builds, and thick-prep is a
+# single-arch reconcile pass over an already-fat base. Keeping the step
+# identical means this file cannot drift into building a *different*
+# thick-prep than the thick chain does.
+steps:
+  # Pre-flight: verify push access to catch permission errors early
+  - name: 'gcr.io/cloud-builders/gcloud'
+    id: 'verify-registry'
+    entrypoint: 'bash'
+    args: ['image-build/scripts/verify-registry.sh', '$_REGISTRY']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'setup-buildx'
+    args: ['buildx', 'create', '--name', 'mybuilder', '--use']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'bootstrap-buildx'
+    args: ['buildx', 'inspect', '--bootstrap']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-thick-prep'
+    dir: 'image-build'
+    args: ['buildx', 'build', '--platform', 'linux/amd64', '-t', '$_REGISTRY/thick-prep:$_SHORT_SHA', '-t', '$_REGISTRY/thick-prep:$_TAG', '-f', 'thick-prep/Dockerfile', '--push', '.']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+substitutions:
+  _REGISTRY: 'us-central1-docker.pkg.dev/${PROJECT_ID}/public-docker'
+  _TAG: 'latest'
+options:
+  dynamicSubstitutions: true
+  machineType: 'E2_HIGHCPU_8'
+timeout: 3600s # 1 hour: one single-arch image, no harness fan-out

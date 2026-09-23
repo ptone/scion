@@ -50,7 +50,10 @@ cloud_build_config_for_target() {
     harnesses)  file="cloudbuild-harnesses.yaml" ;;
     hub)        file="cloudbuild-hub.yaml" ;;
     omni)      file="cloudbuild-omni.yaml" ;;
-    thick-prep) file="cloudbuild-thick.yaml" ;;
+    # thick-prep is the single image; thick is the whole chain built on top of
+    # it (thick-prep + scion-base + harnesses + hub). These mapped to the same
+    # file until 2026-09, so asking for one image pushed eleven.
+    thick-prep) file="cloudbuild-thick-prep.yaml" ;;
     thick)      file="cloudbuild-thick.yaml" ;;
     *)
       echo "cloud-build: no cloudbuild-*.yaml mapping for target '${target}'" >&2
@@ -64,6 +67,41 @@ cloud_build_config_for_target() {
     return 1
   fi
   echo "${path}"
+}
+
+# builder_describe_target <target>
+#
+# Optional hook, called by build-images.sh in target mode in place of the
+# per-image "Steps:" line. In target mode the orchestrator's resolved step
+# list is not what runs — the static YAML is — so printing the step list
+# there describes a code path that never executes.
+#
+# What it prints instead is the only thing that determines the outcome: which
+# config was selected, and which image tags that config WRITES. Note "writes":
+# a `--build-arg BASE_IMAGE=$_REGISTRY/scion-base:$_TAG` is a read, and
+# counting it would overstate the blast radius. Only `-t <ref>` pairs count.
+builder_describe_target() {
+  local target="$1"
+  local config
+  config="$(cloud_build_config_for_target "${target}")" || return 0
+
+  local steps images count
+  steps="$(grep -cE '^  - name: ' "${config}")"
+  # Both the inline-list and one-arg-per-line styles are single-quoted YAML
+  # scalars, so splitting on quotes tokenises either form identically.
+  images="$(awk '
+    /^[[:space:]]*#/ { next }
+    {
+      n = split($0, parts, "\x27")
+      for (i = 2; i <= n; i += 2) { tok[++t] = parts[i] }
+    }
+    END { for (i = 1; i < t; i++) if (tok[i] == "-t") print tok[i + 1] }
+  ' "${config}" | sed 's|.*/||; s|:.*||' | sort -u | tr '\n' ' ')"
+  images="${images% }"
+  count="$(echo "${images}" | wc -w | tr -d ' ')"
+
+  echo "Config:   ${config#"${IMAGE_BUILD_DIR}/"} (${steps} steps)"
+  echo "Pushes:   ${count} image(s): ${images:-<none>}"
 }
 
 # builder_run_target <target> <registry> <tag> <push>

@@ -251,8 +251,15 @@ echo "Tag:      ${TAG}${SHORT_SHA:+ (+ :${SHORT_SHA})}"
 if [[ "${BUILDER_MODE}" == "per-image" ]]; then
   echo "Platforms: ${PLATFORMS:-<native>}"
   echo "Push:     ${PUSH}"
+  echo "Steps:    ${STEPS[*]}"
+elif declare -f builder_describe_target >/dev/null 2>&1; then
+  # In target mode ${STEPS[*]} is NOT what runs: line ~345 hands the whole
+  # target to builder_run_target and never looks at the array. Printing it
+  # here reported "Steps: thick-prep" for an invocation that built and pushed
+  # eleven images, because the builder's static YAML — not resolve_targets —
+  # decides the work. Let the builder describe what it will actually do.
+  builder_describe_target "${TARGET}"
 fi
-echo "Steps:    ${STEPS[*]}"
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo "(dry-run: no commands will be executed)"
 fi

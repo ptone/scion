@@ -179,13 +179,27 @@ The `cloud-build` builder maps each `--target` to a static YAML file:
 | `harnesses` | `cloudbuild-harnesses.yaml` |
 | `hub` | `cloudbuild-hub.yaml` |
 | `omni` | `cloudbuild-omni.yaml` |
-| `thick-prep` | `cloudbuild-thick.yaml` (builds the full thick chain — see note below) |
+| `thick-prep` | `cloudbuild-thick-prep.yaml` |
 | `thick` | `cloudbuild-thick.yaml` |
 
-**Note:** `--target thick-prep` with `--builder cloud-build` builds the full thick
-chain (thick-prep + scion-base + harnesses + hub), since both `thick-prep` and
-`thick` map to the same `cloudbuild-thick.yaml`. With per-image builders
-(`local-docker`, `local-podman`), `--target thick-prep` builds only thick-prep.
+`--target thick-prep` builds only thick-prep under every builder. Until
+2026-09 it mapped to `cloudbuild-thick.yaml` — the same file as `thick` — so
+under `cloud-build` it built and pushed all eleven thick-chain images. That is
+fixed; the note that used to document the divergence is gone because the
+divergence is gone.
+
+The orchestrator prints what the selected config will actually write before it
+submits, so the blast radius of a target is visible without reading the YAML:
+
+```
+$ ./scripts/build-images.sh --builder cloud-build --target thick-prep --dry-run
+Config:   cloudbuild-thick-prep.yaml (4 steps)
+Pushes:   1 image(s): thick-prep
+```
+
+The `Pushes:` line counts `-t` tag arguments only, so a
+`--build-arg BASE_IMAGE=...` reference to an image the config does not write
+is not counted.
 
 **Builder divergence for `omni`:** Under `cloud-build`, the omni target builds the
 full chain from `thick-prep` (amd64 only, no buildx cache); under `local-docker`,
