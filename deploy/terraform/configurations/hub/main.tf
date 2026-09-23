@@ -29,6 +29,13 @@ module "shared_lookup" {
   share_name    = var.shared_share_name
 }
 
+locals {
+  # image_registry design §3.4: default computes to the shared AR repo from
+  # shared-lookup's real resource data (not a manually reconstructed
+  # string), overridable via var.image_registry for a variation.
+  image_registry = coalesce(var.image_registry, module.shared_lookup.shared.artifact_registry.repo_url)
+}
+
 module "cloudsql_database" {
   source = "../../modules/cloudsql-database"
 
@@ -73,6 +80,7 @@ module "hub_cloudrun" {
   region                       = var.region
   hub_name                     = var.hub_name
   hub_image                    = var.hub_image
+  image_registry               = local.image_registry
   hub_sa_email                 = module.hub_identity.hub_sa_email
   transport_sa_email           = module.hub_identity.transport_sa_email
   hub_iam_grants               = module.hub_identity.hub_iam_grants

@@ -1,4 +1,10 @@
 schema_version: "1"
+# Top level, NOT under server: (design §3.4/§3.6). Without this, bare agent
+# harness images (scion-claude:latest etc.) are never rewritten
+# (ResolveImageRegistry, settings_v1.go; pkg/agent/run.go), GKE pulls them
+# from Docker Hub where they don't exist, and agent start fails with
+# ImagePullBackOff.
+image_registry: ${image_registry}
 active_profile: remote
 profiles:
   # REQUIRED (tf-review B3, proven via config.LoadGlobalSettings): without

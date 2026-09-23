@@ -102,6 +102,7 @@ resource "google_secret_manager_secret_version" "settings" {
     nfs_uid             = var.nfs_uid
     nfs_gid             = var.nfs_gid
     nfs_subpath_root    = var.nfs_subpath_root
+    image_registry      = var.image_registry
   })
 }
 

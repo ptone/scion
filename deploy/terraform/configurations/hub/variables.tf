@@ -64,6 +64,12 @@ variable "hub_image" {
   type        = string
 }
 
+variable "image_registry" {
+  description = "Registry the hub rewrites bare agent harness images against (settings.yaml top-level image_registry — design §3.4, found before the tfha-h1 apply: without it, bare images like scion-claude:latest are never rewritten, GKE pulls them from Docker Hub where they don't exist, and phase 1 check 3 fails with ImagePullBackOff). Default null computes to the shared AR repo (<region>-docker.pkg.dev/<project>/<shared_prefix>-scion) from shared-lookup; override only for a variation that publishes agent images elsewhere."
+  type        = string
+  default     = null
+}
+
 variable "iap_oauth_client_id" {
   description = "OAuth client ID, optional (design §3.4 \"IAP and the OAuth client\"). Not a Terraform-managed prerequisite — see the README's \"IAP OAuth client\" section: discover the project's Google-managed client ID (works immediately for in-org users) or create a custom one in the console for cross-org, then re-apply. Null means the hub and IAP browser login work, but agent transport is disabled."
   type        = string

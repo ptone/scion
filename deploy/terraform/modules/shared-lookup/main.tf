@@ -35,3 +35,14 @@ data "google_container_cluster" "this" {
   location = var.region
   name     = "${var.shared_prefix}-agents"
 }
+
+# Added for image_registry (design §3.4/§3.6, found before the tfha-h1
+# apply): without a top-level image_registry in settings.yaml, the hub never
+# rewrites bare harness images (scion-claude:latest etc.) to the shared AR
+# repo, GKE pulls them from Docker Hub where they don't exist, and phase 1
+# check 3 (agent pod) fails with ImagePullBackOff.
+data "google_artifact_registry_repository" "scion" {
+  project       = var.project_id
+  location      = var.region
+  repository_id = "${var.shared_prefix}-scion"
+}

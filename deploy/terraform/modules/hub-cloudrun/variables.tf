@@ -28,6 +28,11 @@ variable "hub_image" {
   type        = string
 }
 
+variable "image_registry" {
+  description = "Registry the hub rewrites bare agent harness images against, rendered at the TOP LEVEL of settings.yaml (not under server: — design §3.4/§3.6). Without it, bare images like scion-claude:latest are never rewritten, GKE pulls them from Docker Hub where they don't exist, and agent start fails with ImagePullBackOff. Computed by the hub root from shared-lookup's real Artifact Registry resource; this module just renders whatever it's given."
+  type        = string
+}
+
 variable "hub_sa_email" {
   description = "Hub service account email (Cloud Run runtime identity)."
   type        = string
