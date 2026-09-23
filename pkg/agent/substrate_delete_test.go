@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
@@ -420,6 +421,98 @@ func TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug(t *testin
 			}
 			if _, ok := fc.actors[otherAtespace+"/"+otherActor]; !ok {
 				t.Error("the record-less other-project actor was removed — it must be untouched")
+			}
+		})
+	}
+}
+
+// TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed is
+// the record-HAVING counterpart to
+// TestSubstrateAgentManagerDelete_RecordlessAmbiguousSlugDeletesNothing:
+// two agents, both started for real (through Run, so each has a full
+// in-memory record with the realistic Project/ProjectID/ProjectPath a
+// hub-dispatched start actually produces — see
+// pkg/runtimebroker's runSubstrateAgentForProject for the same
+// convention), sharing the agent slug "dev" in two different projects.
+//
+// AgentManager.Delete's own internal Runtime.List call
+// (map[string]string{"scion.name": slug}) never carries a project-scoping
+// key — see manager.go — so this is exactly the shape the ambiguity guard
+// in SubstrateRuntime.List targets. Even though AgentInfo.ProjectPath is
+// now populated correctly (this round's fix), an unscoped Delete("dev")
+// still cannot tell the two apart at this call site: it must make zero
+// DeleteActor calls and leave both actors running, for both possible
+// ListActors return orders — a no-op, not a wrong-actor delete.
+func TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed(t *testing.T) {
+	for _, orderName := range []string{"projA first", "projB first"} {
+		t.Run(orderName, func(t *testing.T) {
+			fc := newFakeSubstrateControlClient()
+			actorServer := newFakeSubstrateActorServer()
+			defer actorServer.Close()
+
+			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
+
+			runProjectAgent := func(projectName, projectID, projectPath string) *ateapipb.Actor {
+				labels := map[string]string{"scion.name": "dev", "scion.agent": "true"}
+				for k, v := range projectcompat.ProjectNameLabels(projectName, true) {
+					labels[k] = v
+				}
+				for k, v := range projectcompat.ProjectIDLabels(projectID, true) {
+					labels[k] = v
+				}
+				cfg := scionruntime.RunConfig{
+					Name:         projectName + "--dev",
+					Project:      projectName,
+					ProjectID:    projectID,
+					Image:        "us-docker.pkg.dev/proj/repo/scion-agent@sha256:" + strings.Repeat("a", 64),
+					UnixUsername: "scion",
+					NoAuth:       true,
+					Labels:       labels,
+					Annotations:  projectcompat.ProjectPathLabels(projectPath, true),
+				}
+				if _, err := rt.Run(context.Background(), cfg); err != nil {
+					t.Fatalf("Run(%q) error = %v", cfg.Name, err)
+				}
+				fc.mu.Lock()
+				defer fc.mu.Unlock()
+				return fc.actors["scion-"+projectID+"/"+cfg.Name]
+			}
+
+			actorA := runProjectAgent("projA", "aaaaaaaaaaaa", "/projects/projA")
+			actorB := runProjectAgent("projB", "bbbbbbbbbbbb", "/projects/projB")
+			if actorA == nil || actorB == nil {
+				t.Fatalf("test setup: actorA=%v actorB=%v, want both non-nil", actorA, actorB)
+			}
+
+			fc.mu.Lock()
+			if orderName == "projA first" {
+				fc.forceListOrder = []*ateapipb.Actor{actorA, actorB}
+			} else {
+				fc.forceListOrder = []*ateapipb.Actor{actorB, actorA}
+			}
+			fc.mu.Unlock()
+
+			mgr := NewManager(rt)
+			defer mgr.Close()
+
+			// Unscoped: exactly the shape AgentManager.Delete's own internal
+			// Runtime.List call uses regardless of what projectPath the
+			// broker-level caller resolved (see deleteAgent, which passes
+			// this same value through) — an empty projectPath here.
+			if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err != nil {
+				t.Fatalf(`Delete("dev") error = %v`, err)
+			}
+
+			fc.mu.Lock()
+			defer fc.mu.Unlock()
+			if len(fc.deleteActorCalls) != 0 {
+				t.Fatalf(`Delete("dev") called DeleteActor %v, want zero calls (ambiguous slug across two projects — must fail closed even with ProjectPath set)`, fc.deleteActorCalls)
+			}
+			if _, ok := fc.actors["scion-aaaaaaaaaaaa/projA--dev"]; !ok {
+				t.Error("projA's actor was removed — it must be untouched")
+			}
+			if _, ok := fc.actors["scion-bbbbbbbbbbbb/projB--dev"]; !ok {
+				t.Error("projB's actor was removed — it must be untouched")
 			}
 		})
 	}

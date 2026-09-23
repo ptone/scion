@@ -79,8 +79,18 @@ type fakeSubstrateControlClient struct {
 
 	recorder *substrateEgressRecorder
 
-	mu     sync.Mutex
-	actors map[string]*ateapipb.Actor
+	mu               sync.Mutex
+	actors           map[string]*ateapipb.Actor
+	deleteActorCalls []*ateapipb.DeleteActorRequest
+
+	// forceListOrder, when non-nil, makes ListActors return exactly this
+	// slice in exactly this order instead of ranging over the (unordered)
+	// actors map — for a test that must exercise ListActors returning its
+	// actors in a specific, adversarial order deterministically, rather
+	// than relying on Go's randomized map iteration to happen to produce
+	// it on some fraction of runs. Mirrors pkg/agent's identically-named
+	// fake (substrate_delete_test.go).
+	forceListOrder []*ateapipb.Actor
 }
 
 func newFakeSubstrateControlClient(recorder *substrateEgressRecorder) *fakeSubstrateControlClient {
@@ -145,6 +155,9 @@ func (f *fakeSubstrateControlClient) GetActor(ctx context.Context, in *ateapipb.
 func (f *fakeSubstrateControlClient) ListActors(ctx context.Context, in *ateapipb.ListActorsRequest, opts ...grpc.CallOption) (*ateapipb.ListActorsResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.forceListOrder != nil {
+		return &ateapipb.ListActorsResponse{Actors: f.forceListOrder}, nil
+	}
 	var actors []*ateapipb.Actor
 	for _, a := range f.actors {
 		actors = append(actors, a)
@@ -155,6 +168,7 @@ func (f *fakeSubstrateControlClient) ListActors(ctx context.Context, in *ateapip
 func (f *fakeSubstrateControlClient) DeleteActor(ctx context.Context, in *ateapipb.DeleteActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.deleteActorCalls = append(f.deleteActorCalls, in)
 	delete(f.actors, in.GetActor().GetAtespace()+"/"+in.GetActor().GetName())
 	return &ateapipb.Actor{}, nil
 }

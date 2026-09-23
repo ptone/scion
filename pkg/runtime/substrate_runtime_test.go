@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
@@ -1262,6 +1263,94 @@ func TestSubstrateList_RecordExistsAndRecordlessSameSlug(t *testing.T) {
 			}
 			if agents[0].ContainerID != "scion-aaaaaaaaaaaa/projA--dev" {
 				t.Errorf("ContainerID = %q, want the record-having projA actor, not the record-less projB one", agents[0].ContainerID)
+			}
+		})
+	}
+}
+
+// TestSubstrateList_SameSlugDifferentProjects_UnscopedReturnsNothing pins
+// down the fail-closed ambiguity guard List's doc comment describes: two
+// record-having actors sharing the agent slug "dev" across different
+// projects (project A and project B, each with its own project name,
+// project ID, and project path). An unscoped-by-slug query
+// ("scion.name"="dev", no project-scoping key) is exactly the shape
+// AgentManager.Delete/Stop and LookupContainerID's own internal
+// Runtime.List calls always use (pkg/agent/manager.go,
+// pkg/runtimebroker/server.go) — regardless of whether their own caller
+// resolved a project. With two matching record-having actors and no way to
+// tell which one the caller means, List must return neither, never an
+// arbitrary one — for both possible ListActors return orders.
+func TestSubstrateList_SameSlugDifferentProjects_UnscopedReturnsNothing(t *testing.T) {
+	const (
+		uidA = "uid-projA-dev"
+		uidB = "uid-projB-dev"
+	)
+	actorA := &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: uidA},
+		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	}
+	actorB := &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: uidB},
+		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	}
+
+	orderings := map[string][]*ateapipb.Actor{
+		"projA first": {actorA, actorB},
+		"projB first": {actorB, actorA},
+	}
+	for name, order := range orderings {
+		t.Run(name, func(t *testing.T) {
+			rec := &callRecorder{}
+			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+			defer closeServer()
+
+			fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+				return &ateapipb.ListActorsResponse{Actors: order}, nil
+			}
+
+			substrateAgentStateMu.Lock()
+			substrateAgentRecords[uidA] = &substrateAgentRecord{
+				Labels:      map[string]string{"scion.name": "dev", "scion.agent": "true"},
+				Project:     "projA",
+				ProjectID:   "aaaaaaaaaaaa",
+				ProjectPath: "/projects/projA",
+			}
+			substrateAgentRecords[uidB] = &substrateAgentRecord{
+				Labels:      map[string]string{"scion.name": "dev", "scion.agent": "true"},
+				Project:     "projB",
+				ProjectID:   "bbbbbbbbbbbb",
+				ProjectPath: "/projects/projB",
+			}
+			substrateAgentStateMu.Unlock()
+			t.Cleanup(func() {
+				substrateAgentStateMu.Lock()
+				delete(substrateAgentRecords, uidA)
+				delete(substrateAgentRecords, uidB)
+				substrateAgentStateMu.Unlock()
+			})
+
+			agents, err := rt.List(context.Background(), map[string]string{"scion.name": "dev"})
+			if err != nil {
+				t.Fatalf("List() error = %v", err)
+			}
+			if len(agents) != 0 {
+				t.Fatalf(`List(scion.name="dev") = %v, want no matches (ambiguous: two record-having actors share this slug across different projects)`, agents)
+			}
+
+			// A project-scoped query for the same slug is unaffected by the
+			// guard and must still resolve — and now carries ProjectPath.
+			scoped, err := rt.List(context.Background(), map[string]string{
+				"scion.name":                 "dev",
+				projectcompat.LabelProjectID: "bbbbbbbbbbbb",
+			})
+			if err != nil {
+				t.Fatalf("List() scoped to projB error = %v", err)
+			}
+			if len(scoped) != 1 || scoped[0].ContainerID != "scion-bbbbbbbbbbbb/projB--dev" {
+				t.Fatalf("List(scion.name=dev, scion.project_id=projB) = %v, want exactly projB's actor", scoped)
+			}
+			if scoped[0].ProjectPath != "/projects/projB" {
+				t.Errorf("ProjectPath = %q, want %q", scoped[0].ProjectPath, "/projects/projB")
 			}
 		})
 	}
