@@ -441,3 +441,129 @@ covers.
 - Ad-hoc test confirmed the broker's `deploy/substrate/broker.yaml`
   ConfigMap settings pass `config.ValidateSettings` against the updated
   schema (Consider #10).
+
+---
+
+## Update: sb-rev-2 review round 2 (0 Critical, Required R1/R2)
+
+All 13 round-1 findings confirmed resolved by sb-rev-2. Two new Required
+findings and five Consider/Nit items, addressed below.
+
+### R1 (High): per-agent state was keyed on the wrong axis
+
+Round 1's memoization fix keyed `*SubstrateRuntime` instances (including
+`controlTokens`/`agentRecords`) per `V1SubstrateConfig`. That's correct for
+connections (a distinct config legitimately needs its own gRPC conn/CA), but
+wrong for per-agent state: the broker holds exactly one `"substrate"`
+auxiliary-runtime slot and re-resolves it from settings whenever the
+resolved config differs — an `egress_allow` edit, a second substrate
+profile, or even the same settings spelled differently. Each such
+resolution is a genuinely different instance under round 1's keying, so an
+agent started under the old config became unmessageable (`Exec` failing)
+under the new one, even though `List` still found it via the synthesised
+labels. Fixed by moving `controlTokens`/`agentRecords` into
+`substrateControlTokens`/`substrateAgentRecords`, package-level maps guarded
+by `substrateAgentStateMu` and shared by every instance regardless of
+config. Connections are still memoized per config — only per-agent state
+moved to process scope. Also fixed the `Exec` "no control token cached"
+error, which blamed "a broker restart" as the only loss condition — now
+accurate, since that genuinely is the only remaining one once state is
+process-wide.
+
+### R2 (High): egress_allow validator bypasses
+
+sb-rev-2's scratch test found several bypasses: trailing-dot FQDNs
+(`atenet-router.ate-system.svc.cluster.local.`) defeated suffix matching;
+Kubernetes short names (`atenet-router.ate-system` — the router itself —
+`kubernetes.default`, `metadata`) resolve through the cluster DNS search
+path and were never rejected; unspecified addresses (`0.0.0.0/8`, `::`) and
+non-canonical IP spellings (`0x7f000001`, `2130706433`, `127.1`, `[::1]`,
+`fe80::1%eth0`, `10.0.0.1:443`) all fell through to the hostname path, where
+they can't match any blocked suffix, and were accepted. Fixed per the
+review's 7-step recipe: normalize (trim/lowercase/strip one trailing dot)
+before any check; reject brackets/`%`/malformed CIDR/malformed bare-IPv6
+outright; reject numeric-IP-alias-shaped strings; reject single-label
+hostnames; reject hostnames whose last label is a well-known namespace name
+or is hyphenated without an `xn--` prefix (no public TLD is); add
+`0.0.0.0/8` and `::/128` to the blocked CIDRs. Every table row is now a test
+case (`TestValidateEgressAllow_RejectsBypasses`).
+
+### O2 (partial — accepted portion)
+
+Added `240.0.0.0/4` (Class E/reserved — GKE can use this for pod ranges),
+`2002::/16` (6to4), and `64:ff9b::/96` (NAT64) to the blocked CIDRs; the
+latter two embed IPv4 address space.
+
+**Declined for Phase 1, per sb-em:** requiring at least two non-wildcard
+labels and capping CIDR breadth for public ranges (e.g. rejecting
+`*.com`/`2000::/3`). `egress_allow` is operator-configured, not
+attacker-controlled input, and the threat model this validation exists for
+is in-cluster reach (keeping an actor off the router/other in-cluster
+services), not restricting how broad an operator's own external allowlist
+is. **Flagged as a Phase 2 item**: if `egress_allow` entries are ever
+sourced from something less trusted than the operator's own settings (e.g.
+templated from a less-trusted input), revisit both the wildcard-breadth and
+CIDR-breadth caps then.
+
+### Consider/Nit items
+
+- **O1(a):** `ResolvedAuth.Files` contents (credential JSON/tokens read
+  from `SourcePath`) are now a redaction candidate — round 1's "bootstrap-
+  file contents" call-out had never actually been implemented.
+- **O1(b):** redaction candidates are now keyed `"<source>:<name>"` instead
+  of bare name, so two different sources sharing a name (e.g. a file-type
+  `ResolvedSecret` named `GITHUB_TOKEN` alongside a `cfg.Env
+  GITHUB_TOKEN=...` entry) no longer collide and silently drop one source
+  from the redaction set.
+- **O3:** documented in `deploy/substrate/README.md`'s Phase 1 limitations:
+  memoizing the connection also pins the CA for the process's lifetime — a
+  CA rotation behind the same `ca_file`/`ClusterTrustBundle` name doesn't
+  take effect until the broker restarts. No reload code for Phase 1, per
+  sb-em; a proper fix (`GetConfigForClient`/`VerifyPeerCertificate`) is
+  Phase 2 scope.
+- **O4:** added `TestGetRuntime_Substrate_SettingsBased_Memoized`, driving
+  the memoization assertion through `GetRuntime`/
+  `config.LoadEffectiveSettings` (with `substrateRuntimeBuilder` stubbed)
+  instead of calling `NewSubstrateRuntime` directly, so a future `factory.go`
+  change bypassing the registry would be caught.
+- **O5:** the 409 cleanup-on-failure test case now puts a sentinel in
+  `cfg.Env` and asserts it's absent from the error, guarding against a
+  future change that wraps `errBootstrapHijacked` with cfg-derived context
+  and forgets to route it through `r.redact`.
+- **N1:** moved two doc comments back above the declarations they actually
+  document (`NewSubstrateRuntime`'s doc paragraph had drifted above the
+  `substrateRuntimesMu` var block; `List`'s doc comment had been displaced
+  by `substrateAtespacePrefix`'s).
+- **N2:** fixed — dropped the redundant second `r.cfg.Validate()` call in
+  `Run` (immediately before `CreateActorEgressPolicy`); `r.cfg` is
+  immutable within a single `Run` call, so the top-of-`Run` check already
+  covers it. (The settings-load-time half of N2 — `Validate`'s doc comment
+  overstating when it's called — was already accurate after this round's
+  edits; `NewSubstrateRuntime` is the actual call site, and that's what the
+  doc comment says.)
+- **N3:** sb-dev-2's file (`pkg/sciontool/substrate/server.go`), not
+  touched here.
+
+### Commit note
+
+Six commits this round: `egress_allow` validator fixes + O2 CIDRs (R2, O2);
+the O3 README doc; the O1 redaction fix; the R1 package-level state move
+(bundled with N1/N2 since they're in the same file/edit pass); the round's
+test additions; this log entry.
+
+### Gate results (this update)
+
+- `go build ./...`, `go vet ./...` — pass.
+- `go test ./pkg/runtime/...`, `go test ./pkg/config/...` — pass except the
+  same pre-existing `TestGetRuntime*`/env-leakage failures as before, **plus
+  the new `TestGetRuntime_Substrate_SettingsBased_Memoized` failing for the
+  identical reason** (it drives the same `GetRuntime` path the other four
+  already-known-flaky tests do). Confirmed clean — all of `pkg/runtime` and
+  `pkg/config` pass, including the new test — with every `SCION_*` env var
+  unset, matching sb-rev-2's own gate workaround.
+- `go test -race ./pkg/runtime/... -run Substrate` and
+  `go test -race ./pkg/runtime/substrate/...` — pass, no races (including
+  the new `substrateAgentStateMu`-guarded maps).
+- `GOGC=40 golangci-lint run --new-from-rev=main --concurrency=1
+  ./pkg/runtime/... ./pkg/config/...` — 0 issues.
+- `gofmt -l` on every changed file — clean.
