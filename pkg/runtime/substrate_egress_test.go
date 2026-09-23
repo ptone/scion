@@ -78,6 +78,28 @@ func TestSubstrateEgressHostnames_NoTelemetryEnv(t *testing.T) {
 	}
 }
 
+// TestSubstrateEgressHostnames_SendsNormalizedEgressAllowEntries is review
+// round 3's "validate what you send": ValidateEgressAllow accepts
+// egress_allow entries after normalizing them (lowercase, at most one
+// trailing dot), but Substrate's own HostnameRule requires exactly that
+// normalized form (lowercase, no trailing dot). Sending the merely-trimmed
+// raw entry instead would validate fine locally and then fail at the
+// Substrate API.
+func TestSubstrateEgressHostnames_SendsNormalizedEgressAllowEntries(t *testing.T) {
+	sc := config.V1SubstrateConfig{EgressAllow: []string{"GitHub.COM.", "  Registry.NPMJS.org  "}}
+	hosts := substrateEgressHostnames(RunConfig{}, map[string]string{}, sc)
+
+	if containsHost(hosts, "GitHub.COM.") || containsHost(hosts, "  Registry.NPMJS.org  ") {
+		t.Errorf("substrateEgressHostnames() = %v, sent an unnormalized egress_allow entry", hosts)
+	}
+	if !containsHost(hosts, "github.com") {
+		t.Errorf("substrateEgressHostnames() = %v, want the normalized form \"github.com\"", hosts)
+	}
+	if !containsHost(hosts, "registry.npmjs.org") {
+		t.Errorf("substrateEgressHostnames() = %v, want the normalized form \"registry.npmjs.org\"", hosts)
+	}
+}
+
 func containsHost(hosts []string, want string) bool {
 	for _, h := range hosts {
 		if h == want {

@@ -93,7 +93,14 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 	}
 
 	for _, h := range sc.EgressAllow {
-		add(h)
+		// Send exactly the string ValidateEgressAllow validated, not just a
+		// trimmed one: it validates the normalized form (lowercased, at
+		// most one trailing dot), and Substrate's own HostnameRule requires
+		// a lowercase name with no trailing dot. An entry like
+		// "GitHub.COM." passes validation but would be rejected by the
+		// Substrate API if sent unnormalized (review round 3, "validate
+		// what you send").
+		add(config.NormalizeEgressAllowEntry(h))
 	}
 
 	sort.Strings(hosts)
