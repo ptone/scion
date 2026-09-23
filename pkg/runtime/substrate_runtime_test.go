@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -357,7 +359,14 @@ func testSubstrateRunConfig() RunConfig {
 	}
 }
 
-func newTestSubstrateHarness(rec *callRecorder) (*SubstrateRuntime, *fakeControlClient, *fakeActorServer, func()) {
+// newTestSubstrateHarness resets the process-wide agent-state registry
+// (substrateControlTokens/substrateAgentRecords — package vars since review
+// round 2, Required R1) so each test starts clean and can't leak state into,
+// or pick up state left by, any other test that also uses this helper.
+func newTestSubstrateHarness(t *testing.T, rec *callRecorder) (*SubstrateRuntime, *fakeControlClient, *fakeActorServer, func()) {
+	t.Helper()
+	resetSubstrateAgentStateForTest(t)
+
 	fc := newFakeControlClient(rec)
 	fa := newFakeActorServer(rec)
 	server := httptest.NewServer(fa.handler())
@@ -368,13 +377,35 @@ func newTestSubstrateHarness(rec *callRecorder) (*SubstrateRuntime, *fakeControl
 	return rt, fc, fa, server.Close
 }
 
+// resetSubstrateAgentStateForTest clears the process-wide
+// substrateControlTokens/substrateAgentRecords maps for the duration of a
+// test, restoring their previous contents afterward — the same save/restore
+// pattern as resetSubstrateRuntimeRegistryForTest, for the same reason
+// (these are now shared by every SubstrateRuntime instance, so tests must
+// not leak state through them).
+func resetSubstrateAgentStateForTest(t *testing.T) {
+	t.Helper()
+	substrateAgentStateMu.Lock()
+	oldTokens := substrateControlTokens
+	oldRecords := substrateAgentRecords
+	substrateControlTokens = make(map[string]string)
+	substrateAgentRecords = make(map[string]*substrateAgentRecord)
+	substrateAgentStateMu.Unlock()
+	t.Cleanup(func() {
+		substrateAgentStateMu.Lock()
+		substrateControlTokens = oldTokens
+		substrateAgentRecords = oldRecords
+		substrateAgentStateMu.Unlock()
+	})
+}
+
 // -----------------------------------------------------------------------
 // Run: happy path
 // -----------------------------------------------------------------------
 
 func TestSubstrateRun_HappyPath(t *testing.T) {
 	rec := &callRecorder{}
-	rt, _, fa, closeServer := newTestSubstrateHarness(rec)
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
 	id, err := rt.Run(context.Background(), testSubstrateRunConfig())
@@ -422,9 +453,9 @@ func TestSubstrateRun_HappyPath(t *testing.T) {
 		t.Errorf("bootstrap env did not carry cfg.Env through: %v", fa.lastBootstrap.Env)
 	}
 
-	rt.mu.Lock()
-	_, hasToken := rt.controlTokens[id]
-	rt.mu.Unlock()
+	substrateAgentStateMu.Lock()
+	_, hasToken := substrateControlTokens[id]
+	substrateAgentStateMu.Unlock()
 	if !hasToken {
 		t.Error("control token was not cached for the returned id")
 	}
@@ -436,7 +467,7 @@ func TestSubstrateRun_HappyPath(t *testing.T) {
 
 func TestSubstrateRun_NonDigestImageError(t *testing.T) {
 	rec := &callRecorder{}
-	rt, _, _, closeServer := newTestSubstrateHarness(rec)
+	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
 	cfg := testSubstrateRunConfig()
@@ -466,12 +497,21 @@ func TestSubstrateRun_NonDigestImageError(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
+	// bootstrapHijackSentinel proves the 409 path's error is genuinely
+	// secret-free, not just free of the specific strings the other
+	// assertions happen to check (review round 2, Consider O5): the 409
+	// case below puts this in cfg.Env and asserts it is ABSENT from the
+	// error, guarding against a future change that wraps errBootstrapHijacked
+	// with cfg-derived context and forgets to route it through r.redact.
+	const bootstrapHijackSentinel = "FAKE-KEY-SENTINEL-bootstrap-hijack-not-a-real-credential"
+
 	cases := []struct {
-		name    string
-		inject  func(fc *fakeControlClient, fa *fakeActorServer)
-		setup   func(rt *SubstrateRuntime) // optional; runs after newTestSubstrateHarness, before Run
-		cfg     func(cfg RunConfig) RunConfig
-		wantErr string
+		name       string
+		inject     func(fc *fakeControlClient, fa *fakeActorServer)
+		setup      func(rt *SubstrateRuntime) // optional; runs after newTestSubstrateHarness, before Run
+		cfg        func(cfg RunConfig) RunConfig
+		wantErr    string
+		wantAbsent string // optional; asserts this string does NOT appear in the error
 	}{
 		{
 			name: "CreateActorEgressPolicy fails",
@@ -539,14 +579,19 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 			inject: func(fc *fakeControlClient, fa *fakeActorServer) {
 				fa.bootstrapStatus = http.StatusConflict
 			},
-			wantErr: "bootstrapped by another caller",
+			cfg: func(cfg RunConfig) RunConfig {
+				cfg.Env = append(cfg.Env, "BOOTSTRAP_HIJACK_SENTINEL_KEY="+bootstrapHijackSentinel)
+				return cfg
+			},
+			wantErr:    "bootstrapped by another caller",
+			wantAbsent: bootstrapHijackSentinel,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &callRecorder{}
-			rt, fc, fa, closeServer := newTestSubstrateHarness(rec)
+			rt, fc, fa, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
 			if tc.inject != nil {
 				tc.inject(fc, fa)
@@ -566,6 +611,9 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			if tc.wantAbsent != "" && strings.Contains(err.Error(), tc.wantAbsent) {
+				t.Errorf("CREDENTIAL LEAK: error = %v, want it to NOT contain %q", err, tc.wantAbsent)
 			}
 
 			calls := rec.list()
@@ -656,20 +704,20 @@ func TestSubstrateTemplateName_Stable(t *testing.T) {
 
 func TestSubstrateList_MappingAndLabelFilter(t *testing.T) {
 	rec := &callRecorder{}
-	rt, fc, _, closeServer := newTestSubstrateHarness(rec)
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
 	// Seed the in-memory record List needs, as Run() would.
-	rt.mu.Lock()
-	rt.agentRecords["uid-a"] = &substrateAgentRecord{
+	substrateAgentStateMu.Lock()
+	substrateAgentRecords["uid-a"] = &substrateAgentRecord{
 		Labels:  map[string]string{"scion.agent_id": "agent-a"},
 		Project: "proj-a",
 	}
-	rt.agentRecords["uid-b"] = &substrateAgentRecord{
+	substrateAgentRecords["uid-b"] = &substrateAgentRecord{
 		Labels:  map[string]string{"scion.agent_id": "agent-b"},
 		Project: "proj-b",
 	}
-	rt.mu.Unlock()
+	substrateAgentStateMu.Unlock()
 
 	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
 		return &ateapipb.ListActorsResponse{
@@ -737,13 +785,13 @@ func TestSubstrateList_MappingAndLabelFilter(t *testing.T) {
 
 func TestSubstrateExec_ErrorMapping(t *testing.T) {
 	rec := &callRecorder{}
-	rt, _, fa, closeServer := newTestSubstrateHarness(rec)
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
 	id := "scion-proj/agent-a"
-	rt.mu.Lock()
-	rt.controlTokens[id] = "tok-123"
-	rt.mu.Unlock()
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = "tok-123"
+	substrateAgentStateMu.Unlock()
 
 	fa.execResp = execResponse{Stdout: "partial output", Stderr: "command not found", ExitCode: 127}
 
@@ -761,7 +809,7 @@ func TestSubstrateExec_ErrorMapping(t *testing.T) {
 
 func TestSubstrateExec_NoCachedToken(t *testing.T) {
 	rec := &callRecorder{}
-	rt, _, _, closeServer := newTestSubstrateHarness(rec)
+	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
 	_, err := rt.Exec(context.Background(), "scion-proj/agent-unknown", []string{"true"})
@@ -772,13 +820,13 @@ func TestSubstrateExec_NoCachedToken(t *testing.T) {
 
 func TestSubstrateExec_Success(t *testing.T) {
 	rec := &callRecorder{}
-	rt, _, fa, closeServer := newTestSubstrateHarness(rec)
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
 	id := "scion-proj/agent-a"
-	rt.mu.Lock()
-	rt.controlTokens[id] = "tok-123"
-	rt.mu.Unlock()
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = "tok-123"
+	substrateAgentStateMu.Unlock()
 
 	fa.execResp = execResponse{Stdout: "hello", ExitCode: 0}
 
@@ -799,13 +847,26 @@ func TestSubstrateRun_ErrorDoesNotLeakEnvValues(t *testing.T) {
 	const (
 		envSentinel          = "FAKE-KEY-SENTINEL-cfg-env-not-a-real-credential"
 		resolvedAuthSentinel = "FAKE-KEY-SENTINEL-resolved-auth-not-a-real-credential"
+		authFileSentinel     = "FAKE-KEY-SENTINEL-resolved-auth-file-not-a-real-credential"
 		envSecretSentinel    = "FAKE-KEY-SENTINEL-env-secret-not-a-real-credential"
 		fileSecretSentinel   = "FAKE-KEY-SENTINEL-file-secret-not-a-real-credential"
+		// collidingSentinel is the value of a cfg.Env entry AND a file-type
+		// ResolvedSecret that share the same name ("COLLIDING_KEY"). Before
+		// review round 2's O1(b) fix, both were stored under the same bare
+		// map key, so adding the second silently dropped the first from the
+		// redaction set while its value stayed in the request.
+		collidingEnvSentinel    = "FAKE-KEY-SENTINEL-colliding-env-not-a-real-credential"
+		collidingSecretSentinel = "FAKE-KEY-SENTINEL-colliding-secret-not-a-real-credential"
 	)
 
 	rec := &callRecorder{}
-	rt, fc, _, closeServer := newTestSubstrateHarness(rec)
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
+
+	authFilePath := filepath.Join(t.TempDir(), "auth-file")
+	if err := os.WriteFile(authFilePath, []byte(authFileSentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Fail a step whose error text, in a naive implementation, might
 	// interpolate the whole request — resumeActor's error text stands in
@@ -815,18 +876,27 @@ func TestSubstrateRun_ErrorDoesNotLeakEnvValues(t *testing.T) {
 		return nil, status.Error(codes.Internal, "resume boom, env dump: "+
 			"CFG_ENV_KEY="+envSentinel+" "+
 			"RESOLVED_AUTH_KEY="+resolvedAuthSentinel+" "+
+			"RESOLVED_AUTH_FILE="+authFileSentinel+" "+
 			"ENV_SECRET_KEY="+envSecretSentinel+" "+
-			"FILE_SECRET_KEY="+fileSecretSentinel)
+			"FILE_SECRET_KEY="+fileSecretSentinel+" "+
+			"COLLIDING_KEY(env)="+collidingEnvSentinel+" "+
+			"COLLIDING_KEY(secret)="+collidingSecretSentinel)
 	}
 
 	cfg := testSubstrateRunConfig()
-	cfg.Env = append(cfg.Env, "CFG_ENV_KEY="+envSentinel)
+	cfg.Env = append(cfg.Env,
+		"CFG_ENV_KEY="+envSentinel,
+		"COLLIDING_KEY="+collidingEnvSentinel,
+	)
 	cfg.ResolvedAuth = &api.ResolvedAuth{
 		EnvVars: map[string]string{"RESOLVED_AUTH_KEY": resolvedAuthSentinel},
+		Files:   []api.FileMapping{{SourcePath: authFilePath, ContainerPath: "~/.creds/auth-file"}},
 	}
 	cfg.ResolvedSecrets = []api.ResolvedSecret{
 		{Name: "ENV_SECRET_KEY", Type: "environment", Target: "ENV_SECRET_KEY", Value: envSecretSentinel},
 		{Name: "FILE_SECRET_KEY", Type: "file", Target: "~/.creds/file-secret", Value: fileSecretSentinel},
+		// Same Name as the cfg.Env entry above, deliberately.
+		{Name: "COLLIDING_KEY", Type: "file", Target: "~/.creds/colliding", Value: collidingSecretSentinel},
 	}
 
 	_, err := rt.Run(context.Background(), cfg)
@@ -836,16 +906,19 @@ func TestSubstrateRun_ErrorDoesNotLeakEnvValues(t *testing.T) {
 	got := err.Error()
 
 	for name, sentinel := range map[string]string{
-		"cfg.Env":                envSentinel,
-		"ResolvedAuth.EnvVars":   resolvedAuthSentinel,
-		"ResolvedSecrets (env)":  envSecretSentinel,
-		"ResolvedSecrets (file)": fileSecretSentinel,
+		"cfg.Env":                    envSentinel,
+		"ResolvedAuth.EnvVars":       resolvedAuthSentinel,
+		"ResolvedAuth.Files content": authFileSentinel,
+		"ResolvedSecrets (env)":      envSecretSentinel,
+		"ResolvedSecrets (file)":     fileSecretSentinel,
+		"colliding cfg.Env":          collidingEnvSentinel,
+		"colliding ResolvedSecret":   collidingSecretSentinel,
 	} {
 		if strings.Contains(got, sentinel) {
 			t.Errorf("CREDENTIAL LEAK: Run() error contains the %s secret value.\nerror: %s", name, got)
 		}
 	}
-	for _, key := range []string{"CFG_ENV_KEY", "RESOLVED_AUTH_KEY", "ENV_SECRET_KEY", "FILE_SECRET_KEY"} {
+	for _, key := range []string{"CFG_ENV_KEY", "RESOLVED_AUTH_KEY", "ENV_SECRET_KEY", "FILE_SECRET_KEY", "COLLIDING_KEY"} {
 		if !strings.Contains(got, key) {
 			t.Errorf("redacted error does not name the redacted key %q.\nerror: %s", key, got)
 		}
@@ -861,7 +934,7 @@ func TestSubstrateRun_ErrorDoesNotLeakEnvValues(t *testing.T) {
 
 func TestSubstrateList_Pagination(t *testing.T) {
 	rec := &callRecorder{}
-	rt, fc, _, closeServer := newTestSubstrateHarness(rec)
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
 	var pageTokensSeen []string
@@ -904,7 +977,7 @@ func TestSubstrateList_Pagination(t *testing.T) {
 
 func TestSubstrateList_SkipsNonScionAtespaces(t *testing.T) {
 	rec := &callRecorder{}
-	rt, fc, _, closeServer := newTestSubstrateHarness(rec)
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
 	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
@@ -933,7 +1006,7 @@ func TestSubstrateList_SynthesisesNameAndAgentLabelsWithoutRecord(t *testing.T) 
 	// restarted. List must still expose "scion.name"/"scion.agent" so the
 	// broker's own by-name lookup succeeds (review round 1, Critical #1b).
 	rec := &callRecorder{}
-	rt, fc, _, closeServer := newTestSubstrateHarness(rec)
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
 	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
@@ -1090,5 +1163,165 @@ func TestNewSubstrateRuntime_DifferentConfigsGetDifferentInstances(t *testing.T)
 	}
 	if built != 2 {
 		t.Errorf("substrateRuntimeBuilder called %d times, want 2 (one per distinct config)", built)
+	}
+}
+
+// TestSubstrateAgentState_SharedAcrossConfigChange is review round 2's
+// Required R1 test: control tokens and agent records must be shared
+// process-wide, not per SubstrateRuntime instance, because the broker
+// resolves a genuinely new instance whenever settings change (or a second
+// substrate profile has different settings) — even though List's
+// synthesised scion.name/scion.agent labels mean the agent stays visible,
+// Exec (and any label lookup beyond those two) would break for every
+// pre-existing agent the moment the config changed, without this fix.
+func TestSubstrateAgentState_SharedAcrossConfigChange(t *testing.T) {
+	resetSubstrateRuntimeRegistryForTest(t)
+	resetSubstrateAgentStateForTest(t)
+
+	rec := &callRecorder{}
+	fc := newFakeControlClient(rec)
+	fa := newFakeActorServer(rec)
+	server := httptest.NewServer(fa.handler())
+	defer server.Close()
+
+	origBuilder := substrateRuntimeBuilder
+	// Both configs' instances talk to the same underlying fake ateapi/
+	// router, exactly as two SubstrateRuntime instances for the same real
+	// cluster would in production — they differ only in
+	// V1SubstrateConfig's Go value (egress_allow), which is what makes
+	// NewSubstrateRuntime treat them as separate connection-registry
+	// entries.
+	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
+		return newSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg), nil
+	}
+	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
+
+	cfgA := &config.V1SubstrateConfig{APIEndpoint: "api.example:443", RouterEndpoint: server.URL}
+	cfgB := &config.V1SubstrateConfig{APIEndpoint: "api.example:443", RouterEndpoint: server.URL, EgressAllow: []string{"api.example.com"}}
+
+	rtA, err := NewSubstrateRuntime(cfgA)
+	if err != nil {
+		t.Fatalf("NewSubstrateRuntime(cfgA) error = %v", err)
+	}
+
+	runCfg := testSubstrateRunConfig()
+	runCfg.Project = "proj-a"
+	id, err := rtA.Run(context.Background(), runCfg)
+	if err != nil {
+		t.Fatalf("rtA.Run() error = %v", err)
+	}
+
+	atespace, actorName, err := splitSubstrateID(id)
+	if err != nil {
+		t.Fatalf("splitSubstrateID(%q) error = %v", id, err)
+	}
+	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		return &ateapipb.ListActorsResponse{
+			Actors: []*ateapipb.Actor{
+				{
+					Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: fakeActorUID},
+					Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+				},
+			},
+		}, nil
+	}
+
+	// Simulates the broker resolving substrate again after an
+	// egress_allow edit (or a second profile with different settings) —
+	// a genuinely different SubstrateRuntime instance.
+	rtB, err := NewSubstrateRuntime(cfgB)
+	if err != nil {
+		t.Fatalf("NewSubstrateRuntime(cfgB) error = %v", err)
+	}
+	if rtA == rtB {
+		t.Fatal("NewSubstrateRuntime(cfgB) returned the same instance as cfgA — this test requires distinct instances to prove state is shared, not per-instance")
+	}
+
+	if _, err := rtB.Exec(context.Background(), id, []string{"true"}); err != nil {
+		t.Errorf("rtB.Exec() on rtA's agent error = %v, want the control token rtA cached to still work from rtB", err)
+	}
+
+	agents, err := rtB.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("rtB.List() error = %v", err)
+	}
+	if len(agents) != 1 || agents[0].Project != "proj-a" {
+		t.Errorf("rtB.List() = %v, want the project label from rtA's record (\"proj-a\")", agents)
+	}
+}
+
+// TestGetRuntime_Substrate_SettingsBased_Memoized is review round 2's
+// Consider O4: TestNewSubstrateRuntime_MemoizedAcrossCalls calls
+// NewSubstrateRuntime directly, which wouldn't catch a future factory.go
+// change that bypasses it (e.g. calling newSubstrateRuntimeFromConfig
+// directly). This drives the same assertion through GetRuntime/
+// config.LoadEffectiveSettings, the actual path pkg/runtimebroker exercises,
+// with substrateRuntimeBuilder stubbed so it needs no real cluster/network.
+func TestGetRuntime_Substrate_SettingsBased_Memoized(t *testing.T) {
+	resetSubstrateRuntimeRegistryForTest(t)
+
+	built := 0
+	origBuilder := substrateRuntimeBuilder
+	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
+		built++
+		return newSubstrateRuntimeForTest(newFakeControlClient(&callRecorder{}), substrate.NewRouterClient("http://unused"), nil, cfg), nil
+	}
+	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
+
+	t.Setenv("PATH", "")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	globalDir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(globalDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := `{
+		"schema_version": "1",
+		"active_profile": "substrate",
+		"runtimes": {
+			"substrate-prod": {
+				"type": "substrate",
+				"substrate": {
+					"api_endpoint": "api.ate-system.svc:443",
+					"router_endpoint": "http://atenet-router.ate-system.svc:80"
+				}
+			}
+		},
+		"profiles": {
+			"substrate": {
+				"runtime": "substrate-prod"
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.json"), []byte(settings), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldWd, _ := os.Getwd()
+	tmpWd := t.TempDir()
+	if err := os.Chdir(tmpWd); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	r1 := GetRuntime("", "")
+	rt1, ok := r1.(*SubstrateRuntime)
+	if !ok {
+		t.Fatalf("GetRuntime() = %T, want *SubstrateRuntime", r1)
+	}
+
+	r2 := GetRuntime("", "")
+	rt2, ok := r2.(*SubstrateRuntime)
+	if !ok {
+		t.Fatalf("GetRuntime() (second call) = %T, want *SubstrateRuntime", r2)
+	}
+
+	if rt1 != rt2 {
+		t.Error("GetRuntime() returned different SubstrateRuntime instances for the same settings-resolved config — memoization is bypassed somewhere on the factory path")
+	}
+	if built != 1 {
+		t.Errorf("substrateRuntimeBuilder called %d times via GetRuntime, want 1 (memoized)", built)
 	}
 }
