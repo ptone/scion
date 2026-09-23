@@ -24,17 +24,35 @@ surfaces beyond the cluster boundary.
 - **Enabling NetworkPolicy enforcement (Calico or GKE Dataplane V2) on an
   existing Substrate cluster that wasn't created with it is not a
   no-downtime, apply-and-go change.** Confirmed on `substrate-scion-test`
-  (relayed by substrate-lead): turning it on for a cluster that already has
-  running workers requires **rolling-restarting every worker pod**, and
-  **recreating every golden `ActorTemplate` snapshot** — snapshots taken
-  before enforcement was on fail `runsc restore` with **exit 128** once
-  enforcement is live, because the snapshotted process state doesn't match
-  the network namespace the sandbox restores into under policy enforcement.
+  (`infra/cluster.md`, "NetworkPolicy Enforcement (Calico)", relayed by
+  substrate-lead), which enforces via the **Calico** add-on, not Dataplane
+  V2:
+  1. Enable the add-on and enforcement:
+     `gcloud container clusters update <cluster> --update-addons=NetworkPolicy=ENABLED`,
+     then `--enable-network-policy`.
+  2. **Label existing nodes** `projectcalico.org/ds-ready=true` — the
+     rolling update that installs Calico does **not** auto-label nodes that
+     already existed, so `calico-node` never schedules onto them without
+     this step.
+  3. **Rolling-restart every pod that must be subject to policy**, not just
+     "the workers": at minimum `atenet-router` in `${ATE_SYSTEM_NAMESPACE}`,
+     the worker pods, and the `atelet` DaemonSet. Pods created before Calico
+     keep GKE's PTP CNI (no `cali*` interface) and get **no enforcement** —
+     **a router pod that was never restarted leaves
+     `atenet-router-restrict-ingress` completely unenforced**, silently,
+     while `kubectl get networkpolicy` still shows the object as applied.
+     This is the one control the §5 first-bootstrap-wins fallback depends
+     on; skipping the router in this restart is the failure mode that
+     matters most here, not an edge case.
+  4. **Recreate every golden `ActorTemplate` snapshot** — snapshots taken
+     before enforcement was on fail `runsc restore` with **exit 128** once
+     enforcement is live, because the snapshotted network namespace state
+     is incompatible with Calico's CNI.
   Plan this as a maintenance window with a template rebuild, not as a
-  same-day toggle, on any cluster where actors are already running.
-  See "Known Phase 1 limitations" below for the separate question of
-  whether enforcement is enabled at all (`gcloud container clusters
-  describe ... --format='value(networkConfig.datapathProvider)'`).
+  same-day toggle, on any cluster where actors are already running. See
+  "Known Phase 1 limitations" below for the separate question of whether
+  enforcement is enabled at all, and check `infra/cluster.md` for this
+  cluster's exact, already-executed procedure before repeating any of it.
 
 ## Placeholders
 
@@ -363,14 +381,29 @@ kubectl run netpol-probe --rm -it --restart=Never \
   verifying the *other* one exists and works — not just assuming Substrate
   applies it correctly — is not optional; see verification steps (c)–(e)
   above.
-- **NetworkPolicy enforcement requires GKE Dataplane V2 (or another
-  NetworkPolicy-enforcing CNI) to be enabled on the cluster.** A GKE cluster
-  created without Dataplane V2 and without the legacy Calico add-on silently
-  accepts NetworkPolicy objects and enforces none of them — `kubectl apply`
-  succeeds either way, which is exactly why the verification commands above
-  check actual traffic, not just object presence. Confirm via
-  `gcloud container clusters describe <cluster> --format='value(networkConfig.datapathProvider)'`
-  (expect `ADVANCED_DATAPATH`) before relying on this policy.
+- **NetworkPolicy enforcement requires GKE Dataplane V2 or the Calico
+  add-on to be enabled on the cluster.** A GKE cluster created without
+  either silently accepts NetworkPolicy objects and enforces none of them —
+  `kubectl apply` succeeds either way, which is exactly why the
+  verification commands above check actual traffic, not just object
+  presence. Checking only `datapathProvider` gives a **false negative on a
+  Calico cluster**: `substrate-scion-test` enforces via Calico, not
+  Dataplane V2, and reports `datapathProvider=LEGACY_DATAPATH` — reading
+  that alone and concluding enforcement is off would be wrong on exactly
+  the reference cluster this README is written against. Check both
+  signals:
+  ```sh
+  gcloud container clusters describe <cluster> --location=<location> --project=<project> \
+    --format='value(networkConfig.datapathProvider,networkPolicy.enabled,networkPolicy.provider)'
+  ```
+  Expect either `ADVANCED_DATAPATH` (Dataplane V2) **or** `True CALICO`
+  (`networkPolicy.enabled=True`, `networkPolicy.provider=CALICO`) — not
+  both, and not neither. Where available, also confirm
+  `addonsConfig.networkPolicyConfig.disabled` is `false` (a cluster can
+  have the add-on enabled per the fields above while a subsequent config
+  change disables it). See `infra/cluster.md`'s "NetworkPolicy Enforcement
+  (Calico)" section for what these fields actually read on the reference
+  cluster.
 - **Kubelet health-check probes are exempt from NetworkPolicy on GKE, by
   design, on both enforcement backends.** Neither the router's readiness/
   liveness probes (port 9090) nor the worker pod's `readyz` probe (port
