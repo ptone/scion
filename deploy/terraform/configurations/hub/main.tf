@@ -1,0 +1,105 @@
+provider "google" {
+  project = var.project_id
+  region  = var.region
+}
+
+provider "google-beta" {
+  project = var.project_id
+  region  = var.region
+}
+
+# The shared GKE cluster pre-exists (created by configurations/shared-infra),
+# so this is the well-behaved case for the provider-from-cluster problem:
+# nothing in this root creates or replaces the cluster (design §3.5).
+data "google_client_config" "me" {}
+
+provider "kubernetes" {
+  host                   = "https://${module.shared_lookup.shared.gke.endpoint}"
+  cluster_ca_certificate = base64decode(module.shared_lookup.shared.gke.ca_certificate)
+  token                  = data.google_client_config.me.access_token
+}
+
+module "shared_lookup" {
+  source = "../../modules/shared-lookup"
+
+  project_id    = var.project_id
+  region        = var.region
+  zone          = var.zone
+  shared_prefix = var.shared_prefix
+  share_name    = var.shared_share_name
+}
+
+module "cloudsql_database" {
+  source = "../../modules/cloudsql-database"
+
+  project_id    = var.project_id
+  instance_name = module.shared_lookup.shared.sql.instance_name
+  hub_name      = var.hub_name
+}
+
+module "hub_identity" {
+  source = "../../modules/hub-identity"
+
+  project_id = var.project_id
+  hub_name   = var.hub_name
+}
+
+module "agent_runtime_k8s" {
+  source = "../../modules/agent-runtime-k8s"
+
+  hub_name       = var.hub_name
+  project_id     = var.project_id
+  hub_sa_email   = module.hub_identity.hub_sa_email
+  agent_sa_email = module.hub_identity.agent_sa_email
+
+  nfs = {
+    server     = module.shared_lookup.shared.nfs.server
+    share_path = module.shared_lookup.shared.nfs.share_path
+  }
+
+  nfs_uid      = var.nfs_uid
+  nfs_gid      = var.nfs_gid
+  subpath_root = var.nfs_subpath_root
+  capacity     = var.nfs_capacity
+}
+
+module "hub_cloudrun" {
+  source = "../../modules/hub-cloudrun"
+
+  project_id         = var.project_id
+  project_number     = module.shared_lookup.shared.project_number
+  region             = var.region
+  hub_name           = var.hub_name
+  hub_image          = var.hub_image
+  hub_sa_email       = module.hub_identity.hub_sa_email
+  transport_sa_email = module.hub_identity.transport_sa_email
+
+  network_name = module.shared_lookup.shared.network.name
+  subnet_name  = module.shared_lookup.shared.network.subnet_name
+
+  sql_connection_name   = module.shared_lookup.shared.sql.connection_name
+  db_name               = module.cloudsql_database.db_name
+  db_user               = module.cloudsql_database.db_user
+  db_password_secret_id = module.cloudsql_database.password_secret_id
+
+  nfs_server = module.shared_lookup.shared.nfs.server
+  nfs_export = module.agent_runtime_k8s.nfs_export
+  pv_name    = module.agent_runtime_k8s.pv_name
+  namespace  = module.agent_runtime_k8s.namespace
+
+  gke = {
+    endpoint       = module.shared_lookup.shared.gke.endpoint
+    ca_certificate = module.shared_lookup.shared.gke.ca_certificate
+  }
+
+  iap_oauth_client_id               = var.iap_oauth_client_id
+  iap_oauth_client_secret_secret_id = var.iap_oauth_client_secret_secret_id
+  iap_members                       = var.iap_members
+  admin_emails                      = var.admin_emails
+
+  min_instances = var.min_instances
+  max_instances = var.max_instances
+  cpu           = var.cpu
+  memory        = var.memory
+  timeout       = var.timeout
+}

@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars (or pass -var-file) and fill in. See
+# deploy/terraform/README.md for the full prerequisite list.
+
+project_id  = "ptone-emblem"
+region      = "us-central1"
+zone        = "us-central1-a"
+name_prefix = "tfha"
+
+# Phase 1 validation defaults (smallest viable, ZONAL). Flip to REGIONAL only
+# once phase 2 HA hardening is underway (design §7).
+sql_availability_type = "ZONAL"
+
+# Leave true always outside a deliberate, documented teardown — see the
+# README's destroy runbook (design §3.10).
+deletion_protection = true
