@@ -247,6 +247,60 @@ kubectl apply --dry-run=client -f /tmp/broker.rendered.yaml
 kubectl apply --dry-run=server -f /tmp/broker.rendered.yaml   # catches RBAC/CRD-shape issues client-side can't
 ```
 
+## Broker API exposure
+
+The Deployment passes `--host=0.0.0.0` so the broker's own API (port 9800,
+used by the `readinessProbe`/`livenessProbe` below and by
+`scion runtime-broker status`) binds to all interfaces, not just loopback.
+Without it, a standalone broker in `--hosted` mode (no `--enable-hub`)
+binds to `127.0.0.1` by default — a safety net
+(`cmd/server_foreground.go:915-920`) so a *fresh* broker with no HMAC keys
+yet can still be reached locally by `scion runtime-broker register` before
+those keys exist. kubelet's probes connect to the **pod IP**, not to
+`127.0.0.1` inside the container's own network namespace, so that default
+made both probes fail with connection-refused. (`cfg.Hub.Host` is also set
+by this flag, but every code path that reads it is gated on
+`--enable-hub`/`--enable-web`, both false here, so it has no other effect —
+confirmed by reading `server_foreground.go`, not assumed.)
+
+**This is safe because the broker's own HMAC auth is unconditionally
+"strict mode."** `pkg/runtimebroker/server.go` hardcodes
+`BrokerAuthEnabled: true, BrokerAuthStrictMode: true` as the default (no
+flag or settings key turns strict mode off for this deployment) and, more
+importantly, **refuses to start at all** on a non-loopback host unless
+valid HMAC keys are already loaded (`validateBrokerAuthStartup`,
+`pkg/runtimebroker/server.go:816-819`) — it does not fall open to
+unauthenticated non-loopback listening under any configuration this
+manifest produces. Those keys come from the credentials Secret (see
+"Secret creation" above), loaded from the mounted
+`hub-credentials/<name>.json` before the broker's HTTP server starts
+listening. Practical consequence: if that Secret is missing or empty when
+the pod starts, the broker container now fails closed (crashes / restarts)
+rather than serving `:9800` unauthenticated — reinforcing, not weakening,
+why the Secret must exist before the Deployment's pod actually starts (see
+"Apply order" step 4).
+
+**Should there also be an ingress NetworkPolicy on the broker pod,
+restricting `:9800` to kubelet only?** Worth doing, but not added here.
+HMAC auth already means an unauthenticated caller can't actually perform
+broker RPCs, so this wouldn't close a real authorization gap — but binding
+to `0.0.0.0` does put the port in reach of every pod in the cluster that
+can route to the broker namespace (not just the intended callers: the
+node's kubelet, and the Hub reaching in for control-channel RPCs), which is
+a larger blast surface for probing, DoS, or a future auth regression than
+necessary. The reason it isn't added now: kubelet's own probe traffic is
+node-originated, not namespace-scoped (see the "Kubelet health-check
+probes are exempt" limitation below), so a policy restricting ingress to
+"the broker namespace and nothing else" would need to reason about that
+node-origin case explicitly rather than expressing "kubelet" as a
+`NetworkPolicy` peer at all — `NetworkPolicy` has no concept of "the
+kubelet" as a selector, only pod/namespace/IP block peers, and getting the
+IP-block form right (which CIDR actually is the node range, whether GKE
+exposes it consistently) needs cluster-specific input this manifest
+doesn't have. Track as a Phase 2 hardening item once that's confirmed
+rather than guessing at a policy that could break the probes it's supposed
+to still allow.
+
 ## Verification commands (once applied to a real cluster)
 
 ```sh
@@ -262,6 +316,14 @@ scion runtime-broker status --broker "${HUB_BROKER_ID}"
 # actually reaches ateapi — GetActor or ListActors calls should not fail
 # with a 401/PermissionDenied from ateapi's own auth):
 kubectl -n "${BROKER_NAMESPACE}" logs deploy/scion-substrate-broker | grep -i "substrate: mint ateapi token"
+
+# active_profile: substrate (in the ConfigMap) is doing its job: the
+# broker's own heartbeat should never fall back to auto-detecting a local
+# container runtime. Confirm no "docker ps failed" WARN appears — its
+# presence means the broker's primary manager resolved to something other
+# than substrate (e.g. active_profile missing or misspelled):
+kubectl -n "${BROKER_NAMESPACE}" logs deploy/scion-substrate-broker | grep -i "docker ps failed"
+# Expect: no output.
 
 # ---- Router NetworkPolicy: substrate-lead requires this actually verified
 # on the cluster, not just applied. Confirm the policy blocks an

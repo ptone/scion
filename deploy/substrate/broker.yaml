@@ -159,6 +159,20 @@ roleRef:
 # the secret (the legacy single-shared-secret auth mode); the per-connection
 # `hub-credentials/<name>.json` Secret below is what this deployment
 # actually authenticates with, so broker_token has no reason to appear here.
+#
+# active_profile: substrate makes the substrate profile the broker's
+# DEFAULT runtime, not just one it can resolve when a start request names
+# it explicitly. Without this, pkg/runtime.GetRuntime("", "") — used for
+# the broker's own primary agent.Manager, e.g. the one HeartbeatService
+# lists from every tick — resolves an empty profile name through
+# ResolveRuntime(""), which falls back to vs.ActiveProfile; with no
+# active_profile set, that fallback fails and GetRuntime falls all the way
+# through to Linux auto-detection, landing on "docker". The broker then
+# shells out to a docker binary that was never going to exist in this
+# image, producing a "docker ps failed" WARN on every single heartbeat.
+# Setting this is the fix, not a workaround: `runtimes`/`profiles` alone
+# only make substrate resolvable, `active_profile` is what makes it the
+# one actually used when nothing more specific is asked for.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -167,6 +181,7 @@ metadata:
 data:
   settings.yaml: |
     schema_version: "1"
+    active_profile: substrate
     server:
       broker:
         broker_id: "${HUB_BROKER_ID}"
@@ -238,6 +253,22 @@ spec:
             - "--hosted"
             - "--enable-runtime-broker"
             - "--runtime-broker-port=9800"
+            # Without an explicit --host, a standalone broker in --hosted mode
+            # (no --enable-hub) binds to 127.0.0.1 by design
+            # (cmd/server_foreground.go:915-920 — a safety net so a fresh
+            # broker can be reached by `scion runtime-broker register` on
+            # loopback before HMAC keys exist). That default breaks the
+            # readinessProbe/livenessProbe below: kubelet connects to the pod
+            # IP, not localhost inside the container's own netns, so a
+            # loopback-only listener refuses it with connection-refused.
+            # --host=0.0.0.0 sets cmd.Flags().Changed("host"), which skips
+            # that safety net and lets RuntimeBroker.Host fall through to its
+            # own default (0.0.0.0) — confirmed by reading
+            # server_foreground.go; cfg.Hub.Host is also set by this flag,
+            # but every read of it is gated on --enable-hub/--enable-web
+            # (both false here), so it has no effect. See the README's HMAC
+            # strict-mode note for why this bind is safe.
+            - "--host=0.0.0.0"
           env:
             - name: HOME
               value: /home/scion
