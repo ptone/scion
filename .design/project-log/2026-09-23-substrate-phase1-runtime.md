@@ -303,3 +303,141 @@ call order — gRPC calls and HTTP calls — is asserted together):
 (spec §5 — decided, see Decisions); `Suspender`/DATA-scope `Stop`, `$HOME`
 layout, PTY/attach, template GC, tag→digest resolution, `scion doctor` for
 substrate (all explicitly Phase 2+ per phase1-spec.md §3).
+
+---
+
+## Update: sb-dev task 2 (egress hardening) + review round 1 fixes
+
+Two follow-on rounds of work, on top of the Phase 1 slice above: a
+substrate-lead-directed security task (`briefs/sb-dev-task2.md`), and
+`sb-rev`'s review round 1 (`reviews/round-1-sb-rev.md`, verdict REQUEST
+CHANGES: 1 Critical, 4 Required, 6 Consider/Nit). The 409 fix is shared
+between the two (task2 item 1 and review Required #2 are the same finding,
+fixed once).
+
+### Threat rationale (task2 item 3)
+
+The Phase 1 bootstrap nonce (findings.md/phase1-spec.md §5) uses the
+documented fallback: the control server accepts the *first* caller to
+`POST /scion/v1/bootstrap`, with correctness resting on a NetworkPolicy
+restricting router ingress to the broker namespace, not on the nonce value
+itself. That means:
+
+1. **A 409 response is the only signal available that the fallback's trust
+   assumption was violated** — some caller other than the broker reached
+   the actor's bootstrap endpoint first. Treating it as success (the
+   pre-review behaviour) would leave the hub reporting a healthy, running
+   agent that is actually executing an attacker-supplied `start_cmd`/env as
+   root, with a `control_token` the broker doesn't hold. Task 2 item 1 /
+   review Required #2 fix this: 409 now deletes the actor and its egress
+   policy and fails `Run` with a secret-free error.
+2. **Even a legitimately-bootstrapped actor must not be able to reach the
+   router or other in-cluster services itself.** If it could, a compromised
+   or buggy agent process could call `/scion/v1/bootstrap` on *other*
+   actors, or otherwise poke at the control plane, regardless of whether the
+   NetworkPolicy holds. Task 2 item 2 / review Consider #10 fix this:
+   `egress_allow` (the operator-configurable extra hosts) can no longer be
+   a catch-all, a private/in-cluster CIDR, or an in-cluster DNS suffix,
+   validated at both settings-construction time and defensively again in
+   `Run`.
+
+Neither of these depends on whether the NetworkPolicy in
+`deploy/substrate/broker.yaml` turns out to have gaps — they're independent
+layers, per the brief's framing.
+
+### Review round 1 findings addressed
+
+- **Critical #1** — `SubstrateRuntime` was rebuilt (fresh `controlTokens`/
+  `agentRecords`, a new never-closed gRPC `ClientConn`) on every
+  `NewSubstrateRuntime` call, because the broker resolves substrate as an
+  *auxiliary* runtime (not the default profile) and re-resolves it from
+  settings on every `start`. A second agent would leave the first
+  unreachable/unlistable/undeletable. Fixed with process-wide memoization
+  (`substrateRuntimes`, keyed on a canonical JSON encoding of
+  `V1SubstrateConfig`) plus making `List` always synthesise
+  `scion.name`/`scion.agent` labels so a broker lookup by name survives a
+  missing in-memory record regardless. `substrateRuntimeBuilder` is a
+  package var so the memoization logic is unit-testable without a real
+  cluster.
+- **Required #2** (= task2 item 1) — bootstrap 409 now deletes the actor and
+  fails `Run` (`errBootstrapHijacked`), instead of being treated as
+  success.
+- **Required #3** — `redact` now covers `ResolvedAuth.EnvVars` and both
+  env- and file-type `ResolvedSecrets` (`substrateSecretCandidates`),
+  not just `cfg.Env`/harness env (`externalEnvValues`'s coverage, which was
+  written for cloudrun-sandbox's argv and was never extended for this
+  runtime's actual secret sources).
+- **Required #4** — the egress policy now adds a rule for
+  `SCION_OTEL_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT` /
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, checked independently, instead of
+  relying on `*.googleapis.com` to incidentally cover only the Cloud Trace
+  default.
+- **Required #5** — `List` now paginates (`next_page_token`) and skips
+  actors outside a `scion-`-prefixed atespace (an empty-atespace
+  `ListActors` call spans the whole cluster).
+- **Consider #6** — added the missing cleanup-on-failure cases:
+  `waitForHealthz` timeout and a `buildBootstrapFiles` read error (the
+  table test now also covers 409 as part of the Required #2 fix).
+- **Consider #7** — accepted the deviation from the spec's literal
+  hash-input list: `substrateTemplateName` now also hashes
+  `sandbox_config_name`, `worker_selector`, `snapshot_storage`, and the
+  *effective* resources (nil resolved against
+  `config.BuiltinDefaultResources()` before hashing, not hashed as `nil`).
+  These are all real `ActorTemplate` content that `buildActorTemplate`
+  bakes in; omitting them from the hash meant changing them in settings
+  silently reused a stale golden template.
+- **Consider #8** — `RouterClient` no longer carries a blanket HTTP
+  timeout; `getHealthz`/`postBootstrap`/`doExec` each set their own context
+  deadline (10s / 30s / `timeout_s`+10s) instead of racing a flat 30s
+  client timeout that was shorter than exec timeouts up to 60s.
+- **Consider #10** — added the `substrate` object to
+  `settings-v1.schema.json`'s `runtimeConfig` `$def` (verified with an
+  ad-hoc test that the broker's own `deploy/substrate/broker.yaml`
+  ConfigMap settings now pass `ValidateSettings`). Left
+  `cloudrun`/`cloudrun_instances`/`cloudrun_sandbox`'s equivalent
+  pre-existing gap alone — out of scope here, per the original decision in
+  this log's first section.
+- **Consider #11** — `substrateAtespaceName` now sanitises through
+  `sanitizeK8sShortNameFragment` (lowercase, replace non-alnum/hyphen with
+  `-`, trim leading/trailing `-`) instead of assuming a project ID's first
+  12 characters are already a valid Kubernetes short name.
+- **Nit #13** — `agentRecords.HarnessConfig` is now populated from
+  `cfg.Labels["scion.harness_config"]` (the same label key
+  `CloudRunSandboxRuntime.Run` already reads it from, via the existing
+  `labelValue` helper), instead of being permanently empty.
+- **#9, #12** are sb-dev-2's files (`pkg/sciontool/substrate/server.go`,
+  `deploy/substrate/broker.yaml`) — not touched here.
+- **FYI items** (reaper/exec race measured clean, `*.googleapis.com`
+  breadth, NetworkPolicy port-target confirmation, `RunInit`/keep-id
+  interaction) are informational; no action needed from this side.
+
+### Commit note
+
+These fixes land as 8 commits rather than one-per-finding: several findings
+(the Critical #1 memoization/List fix, the 409 handling, the redaction
+wiring, and the atespace/healthz/HarnessConfig fixes) all touch the same
+methods in `pkg/runtime/substrate_runtime.go` and were implemented in one
+editing pass, so true per-finding atomicity would have meant hand-splitting
+diffs after the fact rather than reviewable, working commits at each step.
+Grouped instead by file/theme (router timeout removal;
+`substrate_bootstrap.go`'s three fixes; template hash; telemetry egress;
+`egress_allow` validation + schema; the `substrate_runtime.go` bundle;
+tests), with each commit message enumerating every review finding it
+covers.
+
+### Gate results (this update)
+
+- `go build ./...`, `go vet ./...` — pass.
+- `go test ./pkg/runtime/...` — pass except the same 4 pre-existing
+  `TestGetRuntime*` failures noted above.
+- `go test ./pkg/config/...` — pass except the same pre-existing env-leakage
+  failures noted above (unchanged set).
+- `go test -race ./pkg/runtime/... -run Substrate` and
+  `go test -race ./pkg/runtime/substrate/...` — pass (the new
+  `substrateRuntimesMu`-guarded registry has no detected race).
+- `GOGC=40 golangci-lint run --new-from-rev=main --concurrency=1
+  ./pkg/runtime/... ./pkg/config/...` — 0 issues.
+- `gofmt -l` on every changed file — clean.
+- Ad-hoc test confirmed the broker's `deploy/substrate/broker.yaml`
+  ConfigMap settings pass `config.ValidateSettings` against the updated
+  schema (Consider #10).
