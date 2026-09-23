@@ -19,7 +19,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // TargetActorHeader is the header Substrate's inbound atenet-router uses to
@@ -36,8 +35,15 @@ type RouterClient struct {
 	// Endpoint is the router's base URL, e.g.
 	// "http://atenet-router.ate-system.svc:80".
 	Endpoint string
-	// HTTPClient performs the requests. Defaults to a client with a 30s
-	// timeout when nil (set by NewRouterClient).
+	// HTTPClient performs the requests. Defaults to a client with no
+	// blanket timeout when nil (set by NewRouterClient): callers set an
+	// appropriate deadline on the context passed to Do instead, because a
+	// single fixed timeout can't fit every call this client makes — an
+	// exec's timeout_s is caller-chosen and can legitimately exceed a
+	// short healthz/bootstrap deadline (see pkg/runtime's doExec, which
+	// derives its context deadline from timeout_s; a previous flat 30s
+	// client timeout cut off exec calls whose timeout_s was 60s — review
+	// round 1, Consider #8).
 	HTTPClient *http.Client
 }
 
@@ -45,7 +51,7 @@ type RouterClient struct {
 func NewRouterClient(endpoint string) *RouterClient {
 	return &RouterClient{
 		Endpoint:   strings.TrimRight(endpoint, "/"),
-		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		HTTPClient: &http.Client{},
 	}
 }
 
