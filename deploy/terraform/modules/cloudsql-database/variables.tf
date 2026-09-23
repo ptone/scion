@@ -23,3 +23,8 @@ variable "deletion_policy" {
   type        = string
   default     = null
 }
+
+variable "hub_sa_email" {
+  description = "Hub service account email, granted secretAccessor on this hub's db-password secret only (design §3.4 IAM scope rule — one of the 4 per-secret grants replacing the removed project-wide secretmanager.admin)."
+  type        = string
+}

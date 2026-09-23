@@ -37,4 +37,18 @@ resource "google_container_cluster" "this" {
   }
 
   deletion_protection = var.deletion_protection
+
+  # Literal, not variable-driven. GKE has no API-level deletion protection at
+  # all (container v1's Cluster has no such field) — the deletion_protection
+  # attribute above is Terraform-only, and terraform destroy skips lifecycle
+  # preconditions, so this is the one resource in the shared stack that most
+  # needs this guard: without it, nothing in Terraform stops a direct
+  # `terraform destroy -var deletion_protection=false`. Real protection
+  # against an out-of-band `gcloud container clusters delete` needs an IAM
+  # deny / org policy outside Terraform (ptone's call; residual risk, design
+  # §3.10/§9). Teardown needs a one-line commit removing this on a
+  # never-merged teardown branch (design §3.10 guardrails 5-8, Alt-N).
+  lifecycle {
+    prevent_destroy = true
+  }
 }

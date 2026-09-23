@@ -38,6 +38,16 @@ variable "transport_sa_email" {
   type        = string
 }
 
+variable "hub_iam_grants" {
+  description = "hub-identity's hub-SA IAM grant resources, passed through purely to create a depends_on ordering (design §3.5) for this module's own time_sleep.iam_propagation: the Cloud Run service must not boot before these grants have had time to propagate, or it gets a 403 with no retry."
+  type        = list(any)
+}
+
+variable "hub_iam_condition_expression" {
+  description = "hub-identity's conditioned secretmanager.admin expression, used only as a time_sleep trigger so the propagation wait re-arms if the condition ever changes (e.g. a different hub_name) rather than protecting only the very first apply."
+  type        = string
+}
+
 variable "network_name" {
   description = "VPC network name for Direct VPC egress (shared.network.name)."
   type        = string
@@ -87,6 +97,24 @@ variable "nfs_mount_root" {
 variable "pv_name" {
   description = "PersistentVolume/claim name for this hub's workspace share (agent-runtime-k8s output pv_name). Embedded in settings.yaml workspace_storage.nfs.shares[0].pv_name."
   type        = string
+}
+
+variable "nfs_uid" {
+  description = "uid the settings.yaml workspace_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's nfs_uid in the hub root — hardcoding this here separately from what actually chowns the export would silently split the two (found in review)."
+  type        = number
+  default     = 1000
+}
+
+variable "nfs_gid" {
+  description = "gid the settings.yaml workspace_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's nfs_gid in the hub root."
+  type        = number
+  default     = 1000
+}
+
+variable "nfs_subpath_root" {
+  description = "subpath_root the settings.yaml workspace_storage.nfs block advertises. Single-sourced with agent-runtime-k8s's subpath_root in the hub root."
+  type        = string
+  default     = "projects"
 }
 
 variable "namespace" {

@@ -25,6 +25,11 @@ variable "shared_share_name" {
   default     = "scion"
 }
 
+variable "state_prefix" {
+  description = "The GCS backend prefix this apply's state actually lives at (e.g. \"tfha/hubs/tfha-h1\"), passed alongside -backend-config=\"prefix=...\" at init time. Terraform cannot read its own backend config, so this is how hub_name's validation below catches applying hub_name=X's vars onto a different hub's state file."
+  type        = string
+}
+
 variable "hub_name" {
   description = "This hub's name. Every hub-scoped resource derives from it (design §3.8)."
   type        = string
@@ -33,17 +38,24 @@ variable "hub_name" {
     condition     = can(regex("^[a-z][a-z0-9-]{2,15}$", var.hub_name))
     error_message = "hub_name must match ^[a-z][a-z0-9-]{2,15}$ (design §3.8)."
   }
-}
 
-variable "state_prefix" {
-  description = "The GCS backend prefix this apply's state actually lives at (e.g. \"tfha/hubs/tfha-h1\"), passed alongside -backend-config=\"prefix=...\" at init time. Terraform cannot read its own backend config, so this is how the check below catches applying hub_name=X's vars onto a different hub's state file."
-  type        = string
-}
+  # Denylist by construction: hub_name must live in this project prefix's
+  # own namespace. Without this, values like "scion-hub" or "postgres" pass
+  # the regex above and collide with the live stack's own Cloud Run service
+  # name or the destroy_guard's literal database filter (found in review).
+  validation {
+    condition     = startswith(var.hub_name, "${var.shared_prefix}-")
+    error_message = "hub_name (\"${var.hub_name}\") must start with \"${var.shared_prefix}-\" (design §3.8) — this also rules out collisions with the live stack's own resource names."
+  }
 
-check "state_prefix_matches_hub" {
-  assert {
-    condition     = endswith(var.state_prefix, "/${var.hub_name}")
-    error_message = "state_prefix (\"${var.state_prefix}\") does not end with \"/${var.hub_name}\" — this looks like hub_name=${var.hub_name}'s vars are about to be applied onto a different hub's state. Re-run init with the matching -backend-config prefix, or fix -var hub_name."
+  # Cross-variable validation (needs Terraform >= 1.9, see versions.tf):
+  # state_prefix must exactly match this hub's expected backend prefix.
+  # A `check` block was considered and rejected (tf-review B5) — it only
+  # warns, so a mismatched apply would still proceed and silently apply
+  # hub_name=X's variables onto a different hub's state.
+  validation {
+    condition     = var.state_prefix == "${var.shared_prefix}/hubs/${var.hub_name}"
+    error_message = "state_prefix (\"${var.state_prefix}\") does not match \"${var.shared_prefix}/hubs/${var.hub_name}\" for hub_name=\"${var.hub_name}\" — this looks like hub_name's variables are about to be applied onto a different hub's state. Re-run init with the matching -backend-config prefix, or fix -var hub_name/-var state_prefix."
   }
 }
 

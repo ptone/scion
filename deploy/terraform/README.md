@@ -76,9 +76,11 @@ terraform -chdir=deploy/terraform/configurations/hub apply \
 
 `state_prefix` must always be passed and must equal the `-backend-config
 prefix` used at `init` — Terraform cannot read its own backend config back,
-so this is enforced by a `check` block in `configurations/hub`, not by
-convention alone. Getting it wrong fails the plan loudly instead of silently
-applying one hub's variables onto another hub's state.
+so this is enforced by a `hub_name` variable `validation` block in
+`configurations/hub` (not a `check` block: a `check` only warns, which would
+still let the apply proceed onto the wrong hub's state). Getting it wrong
+fails the plan loudly instead of silently applying one hub's variables onto
+another hub's state.
 
 Each further hub is just step 3 again with a new `hub_name`/prefix — the
 shared layer is untouched.
@@ -115,30 +117,101 @@ for SQL/Filestore.
 
 ## Destroy runbook
 
-**Order: every hub root first, then shared.** Never the reverse — and it's
-enforced, not just documented:
+**Order: every hub root first, then shared.** Never the reverse. This is
+enforced by several complementary, deliberately redundant layers (design
+§3.10) — `terraform destroy` skips lifecycle preconditions entirely (see
+"Why the interlock alone isn't enough" below), so no single one of these is
+sufficient on its own:
 
-1. For each hub, `terraform -chdir=configurations/hub destroy` (with that
-   hub's backend prefix and tfvars). This removes only that hub's resources;
-   it never touches shared infra, because the hub root only reads shared
-   infra via data sources.
+> **Prohibited, always, without exception (verbatim from the design):**
+> - Never run `terraform destroy -var deletion_protection=false` against
+>   `shared-infra` outside step 2 below.
+> - Never use `-target` together with `deletion_protection` on
+>   `shared-infra`.
+>
+> Both turn the API-level protection flags off on `tfha-pg`/`tfha-nfs` while
+> hubs may still be present, without ever evaluating `destroy_guard` (a
+> `-target` apply skips it because it isn't targeted; a plain `destroy`
+> skips it because Terraform doesn't evaluate preconditions on resources
+> being destroyed). Doing either is two deliberate deviations from this
+> runbook, not an accident — see the residual-risk note below.
+
+1. For each hub: empty its artifacts bucket, **noncurrent versions
+   included** — the bucket is versioned and deliberately has no
+   `force_destroy`, so `destroy` fails otherwise:
+   ```bash
+   gcloud storage rm -r --all-versions gs://<project>-<hub>-artifacts/**
+   ```
+   Then `terraform -chdir=configurations/hub destroy` (with that hub's
+   backend prefix and tfvars). This removes only that hub's resources; it
+   never touches shared infra, because the hub root only reads shared infra
+   via data sources.
 2. `terraform -chdir=configurations/shared-infra apply -var
-   deletion_protection=false ...`. A `terraform_data.destroy_guard`
-   precondition (`data.google_sql_databases` on the shared instance) makes
-   this apply **fail** while any hub database still exists — every hub
-   creates exactly one, so this is the proxy for "a hub still exists".
-3. `terraform -chdir=configurations/shared-infra destroy`.
-4. The operator (vm-deploy) compares a before/after `tfha*` resource
+   deletion_protection=false ...`. The `terraform_data.destroy_guard`
+   precondition makes this specific apply **fail** while any hub database
+   still exists on the shared Cloud SQL instance — every hub creates exactly
+   one, so this is the proxy for "a hub still exists".
+3. On a teardown branch (never merged to `main`), commit removing
+   `lifecycle { prevent_destroy = true }` from the three shared stateful
+   modules (`cloudsql-instance`, `filestore`, `gke-autopilot`). This is a
+   literal in each module, not a variable — Terraform doesn't allow a
+   variable-driven `prevent_destroy` — so intentional teardown costs a
+   one-line commit per module. That friction is intended for infra every
+   hub depends on.
+4. `terraform -chdir=configurations/shared-infra destroy`, from that branch.
+5. The operator (vm-deploy) compares a before/after `tfha*` resource
    inventory to confirm nothing outside the prefix was touched, and that
    nothing was left behind.
+
+**Why the interlock alone isn't enough, and why step 3 exists.** Guardrail
+2 above (`destroy_guard`) only protects the *state transition* from
+protected to unprotected — but `terraform destroy` never evaluates lifecycle
+preconditions on the resources it's destroying, `destroy_guard` included. A
+direct `terraform destroy -var deletion_protection=false` against
+`shared-infra` walks straight past it. What's left at that point: the
+API-level flags refuse `tfha-pg` and `tfha-nfs`, and the provider refuses
+`tfha-agents` by reading `deletion_protection` from state — but **nothing
+stops the Artifact Registry repo, the subnet, the PSA address, or the
+service-networking connection**, none of which carry any protection. The
+result is a *partial* destroy: the data resources survive, orphaned from
+their own network, with Terraform state disagreeing with reality — worse
+than a clean loss, because the natural recovery (re-apply) is exactly where
+an accidental adopt-then-destroy of live resources happens. `prevent_destroy`
+(step 3) closes this: it fails at **plan** time, before anything is applied,
+so a full (or `-target`) destroy of protected plumbing aborts entirely
+instead of partially succeeding.
+
+**Residual, not closed:** `apply -target=module.<x> -var
+deletion_protection=false` skips `destroy_guard` (it isn't targeted) and is
+an in-place *update*, which `prevent_destroy` doesn't cover — it can turn
+the API flags off on live shared resources with hubs still present, after
+which an out-of-band `gcloud … delete` would succeed. This needs two
+deliberate deviations from this runbook to reach; it is prohibited above,
+not enforced in config. GKE deletion protection is also Terraform-only (see
+"GKE deletion protection is Terraform-only" above) — an operator with
+`container.clusters.delete` (which vm-deploy's
+operator SA has today) can delete `tfha-agents` out-of-band regardless of
+any of this. Both are recorded as residual risk in the design doc §9, not
+omissions.
+
+## Troubleshooting
+
+**A 403 on a secret named `scion-hub-<h12>-...` shortly after the first
+`hub` apply** means IAM propagation, not a wrong condition: the hub SA's
+conditioned `secretmanager.admin` grant (hub-identity) can take longer than
+the built-in 120s guard (`time_sleep.hub_iam_propagation`) to become
+consistent. **Re-apply** — do not widen the IAM condition to work around it.
+Widening it is exactly the mistake this whole scoping exercise exists to
+prevent (see hub-identity's IAM scope rule comment).
 
 ## What's not here yet (see design §7)
 
 - Phase 2: a second hub, Cloud SQL `REGIONAL` + backups, `min_instances = 2`
   (pending an HA broker confirmation), `check` blocks asserting the
   deterministic URL/audience, bucket lifecycle.
-- Phase 3: `shared_overrides` for hand-built infra, IAM-condition-scoped
-  `secretmanager.admin`, moving the DB DSN to a secret env ref, per-module
-  READMEs (terraform-docs), typed `validation` blocks on every variable.
+- Phase 3: `shared_overrides` for hand-built infra, resolving OQ-7 (user-
+  and project-scope secrets have no per-hub prefix to condition on — see
+  hub-identity), moving the DB DSN to a secret env ref, per-module READMEs
+  (terraform-docs), typed `validation` blocks on every remaining variable.
 - Phase 4: this README grows prereq/rollout detail, CI (`fmt`/`validate`/
   `tflint`), and a link from `docs-site/.../hosted/ha/setup-gcp.md`.

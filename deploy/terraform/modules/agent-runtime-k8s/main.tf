@@ -107,6 +107,11 @@ resource "google_service_account_iam_member" "agent_workload_identity_user" {
 # Cloud Run mounts it, or the hub's Cloud Run revision fails to start.
 # Mounts the share ROOT with an inline nfs volume (Autopilot allows this for
 # a Job; no PV needed for the init step itself).
+#
+# Deliberately no ttl_seconds_after_finished (tf-review B4): a TTL garbage-
+# collects the Job, and every later plan would then re-create it, which
+# breaks A2's "second plan shows no changes". The completed Job stays in the
+# namespace; it costs nothing on Autopilot.
 resource "kubernetes_job_v1" "nfs_init" {
   metadata {
     name      = "${var.hub_name}-nfs-init"
@@ -114,8 +119,7 @@ resource "kubernetes_job_v1" "nfs_init" {
   }
 
   spec {
-    backoff_limit              = 3
-    ttl_seconds_after_finished = 300
+    backoff_limit = 3
 
     template {
       metadata {

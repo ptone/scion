@@ -34,3 +34,10 @@ resource "google_secret_manager_secret_version" "db_password" {
   secret      = google_secret_manager_secret.db_password.id
   secret_data = random_password.db.result
 }
+
+resource "google_secret_manager_secret_iam_member" "hub_reads_db_password" {
+  secret_id = google_secret_manager_secret.db_password.secret_id
+  project   = var.project_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${var.hub_sa_email}"
+}

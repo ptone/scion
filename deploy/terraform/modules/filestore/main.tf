@@ -25,4 +25,14 @@ resource "google_filestore_instance" "this" {
     modes        = ["MODE_IPV4"]
     connect_mode = "DIRECT_PEERING"
   }
+
+  # Literal, not variable-driven: terraform destroy skips lifecycle
+  # preconditions, so deletion_protection_enabled alone can't stop a direct
+  # `terraform destroy -var deletion_protection=false` from removing this
+  # once the API flag transition were to happen; this guards the operation
+  # itself. Teardown needs a one-line commit removing this on a
+  # never-merged teardown branch (design §3.10 guardrails 5-8, Alt-N).
+  lifecycle {
+    prevent_destroy = true
+  }
 }

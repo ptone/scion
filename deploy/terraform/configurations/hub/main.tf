@@ -35,13 +35,15 @@ module "cloudsql_database" {
   project_id    = var.project_id
   instance_name = module.shared_lookup.shared.sql.instance_name
   hub_name      = var.hub_name
+  hub_sa_email  = module.hub_identity.hub_sa_email
 }
 
 module "hub_identity" {
   source = "../../modules/hub-identity"
 
-  project_id = var.project_id
-  hub_name   = var.hub_name
+  project_id     = var.project_id
+  project_number = module.shared_lookup.shared.project_number
+  hub_name       = var.hub_name
 }
 
 module "agent_runtime_k8s" {
@@ -66,13 +68,15 @@ module "agent_runtime_k8s" {
 module "hub_cloudrun" {
   source = "../../modules/hub-cloudrun"
 
-  project_id         = var.project_id
-  project_number     = module.shared_lookup.shared.project_number
-  region             = var.region
-  hub_name           = var.hub_name
-  hub_image          = var.hub_image
-  hub_sa_email       = module.hub_identity.hub_sa_email
-  transport_sa_email = module.hub_identity.transport_sa_email
+  project_id                   = var.project_id
+  project_number               = module.shared_lookup.shared.project_number
+  region                       = var.region
+  hub_name                     = var.hub_name
+  hub_image                    = var.hub_image
+  hub_sa_email                 = module.hub_identity.hub_sa_email
+  transport_sa_email           = module.hub_identity.transport_sa_email
+  hub_iam_grants               = module.hub_identity.hub_iam_grants
+  hub_iam_condition_expression = module.hub_identity.hub_iam_condition_expression
 
   network_name = module.shared_lookup.shared.network.name
   subnet_name  = module.shared_lookup.shared.network.subnet_name
@@ -102,4 +106,24 @@ module "hub_cloudrun" {
   cpu           = var.cpu
   memory        = var.memory
   timeout       = var.timeout
+
+  # Single-sourced with agent-runtime-k8s above (design §3.4) — passing the
+  # same three values to both, rather than letting hub-cloudrun default them
+  # independently, is what stops the NFS tree being chowned one way while
+  # the hub is told another.
+  nfs_uid          = var.nfs_uid
+  nfs_gid          = var.nfs_gid
+  nfs_subpath_root = var.nfs_subpath_root
+
+  # Explicit ordering (tf-review B2): covers the nfs-init Job (the per-hub
+  # subdirectory must exist before the Cloud Run NFS mount attaches) and the
+  # database/user, and the hub SA's project-level IAM (hub-identity) needing
+  # to propagate before the first revision's boot attempt — none of which
+  # is otherwise guaranteed just because hub-cloudrun also consumes these
+  # modules' output attributes.
+  depends_on = [
+    module.agent_runtime_k8s,
+    module.cloudsql_database,
+    module.hub_identity,
+  ]
 }

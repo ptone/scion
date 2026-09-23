@@ -56,7 +56,7 @@ variable "capacity" {
 }
 
 variable "init_job_image" {
-  description = "Image for the nfs-init Job. Needs only a shell and coreutils (mkdir, chown); busybox is sufficient and avoids depending on hub_image."
+  description = "Image for the nfs-init Job. Needs only a shell and coreutils (mkdir, chown); busybox is sufficient and avoids depending on hub_image. Pinned by digest, not a mutable tag (found in review: a tag pulled from Docker Hub on an Autopilot node is subject to both rate limits and tag mutation). Digest is for busybox:1.36 (Docker-Content-Digest from registry-1.docker.io as of this commit); re-verify if bumping."
   type        = string
-  default     = "busybox:1.36"
+  default     = "busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 }

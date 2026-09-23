@@ -99,6 +99,9 @@ resource "google_secret_manager_secret_version" "settings" {
     nfs_export          = var.nfs_export
     pv_name             = var.pv_name
     namespace           = var.namespace
+    nfs_uid             = var.nfs_uid
+    nfs_gid             = var.nfs_gid
+    nfs_subpath_root    = var.nfs_subpath_root
   })
 }
 
@@ -137,6 +140,30 @@ resource "google_secret_manager_secret_iam_member" "hub_reads_kubeconfig" {
   project   = var.project_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${var.hub_sa_email}"
+}
+
+# --- IAM propagation guard (design §3.5, from OQ-8's ~70s measurement) ---
+#
+# IAM changes are eventually consistent, and the hub creates its
+# scion-hub-<h12>-* signing keys AT BOOT. A service created immediately
+# after its IAM would crash-loop with 403s on the very first apply. This is
+# purely a timer: it depends on every hub-SA IAM grant (hub-identity), waits,
+# and the Cloud Run service below depends on it. triggers include the
+# condition expression, so the sleep re-arms if that condition is ever
+# changed (e.g. a different hub) — a create-only sleep would protect only
+# the first apply and silently stop protecting a later condition change.
+# See the README troubleshooting note: a 403 on scion-hub-<h12>-... shortly
+# after a first apply is IAM propagation. Re-apply. Do NOT widen the
+# condition to work around it.
+resource "time_sleep" "iam_propagation" {
+  create_duration = "120s"
+
+  triggers = {
+    condition = var.hub_iam_condition_expression
+    hub_sa    = var.hub_sa_email
+  }
+
+  depends_on = [var.hub_iam_grants]
 }
 
 # --- Cloud Run v2 service ---
@@ -288,6 +315,22 @@ resource "google_cloud_run_v2_service" "hub" {
   lifecycle {
     ignore_changes = [client, client_version]
   }
+
+  # Explicit ordering (tf-review B2): nothing in the attributes above
+  # actually links the service to the secret *versions* or the hub SA's
+  # *IAM* propagating — only to the secret resources' IDs, which exist as
+  # soon as the (empty) secret is created, version or no version, IAM or no
+  # IAM. A revision that boots before its settings/kubeconfig version exists
+  # or before the hub SA can read them fails with no retry.
+  depends_on = [
+    google_secret_manager_secret_version.settings,
+    google_secret_manager_secret_version.kubeconfig,
+    google_secret_manager_secret_version.session_secret,
+    google_secret_manager_secret_iam_member.hub_reads_settings,
+    google_secret_manager_secret_iam_member.hub_reads_kubeconfig,
+    google_secret_manager_secret_iam_member.hub_reads_session_secret,
+    time_sleep.iam_propagation,
+  ]
 }
 
 resource "google_cloud_run_v2_service_iam_member" "iap_invoker" {
@@ -352,4 +395,15 @@ resource "google_iap_web_cloud_run_service_iam_member" "members" {
   cloud_run_service_name = google_cloud_run_v2_service.hub.name
   role                   = "roles/iap.httpsResourceAccessor"
   member                 = each.value
+}
+
+# Transport SA's IAP accessor, scoped to this hub's own service only (design
+# §3.4 — moved here from hub-identity's project-wide grant, which reached
+# every IAP-protected resource in the project including the live hubs).
+resource "google_iap_web_cloud_run_service_iam_member" "transport" {
+  project                = var.project_id
+  location               = var.region
+  cloud_run_service_name = google_cloud_run_v2_service.hub.name
+  role                   = "roles/iap.httpsResourceAccessor"
+  member                 = "serviceAccount:${var.transport_sa_email}"
 }

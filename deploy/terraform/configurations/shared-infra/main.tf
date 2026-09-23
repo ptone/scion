@@ -91,15 +91,40 @@ module "artifact_registry" {
 # creates exactly one (cloudsql-database), and never manages the instance
 # itself (reviewer check: google_sql_database_instance appears only in
 # modules/cloudsql-instance).
-data "google_sql_databases" "on_instance" {
-  project  = var.project_id
-  instance = module.cloudsql_instance.instance_name
+#
+# Required shape (corrected by tf-review, reproduced offline on TF 1.9.8):
+# evaluated at PLAN, with NO module dependency, tolerant of the instance not
+# existing yet. `instance = module.cloudsql_instance.instance_name` looks
+# more correct (a resource reference instead of a literal), but it is
+# exactly the bug: it defers this read to APPLY time, ordered *after* the
+# instance update. On `apply -var deletion_protection=false` with hubs still
+# present, `settings.deletion_protection_enabled` would flip off *before*
+# the precondition below fails — precisely the state transition this guard
+# exists to prevent. The literal name plus an existence check first is not a
+# style choice; do not "fix" it back to a module reference.
+data "google_sql_database_instances" "all" {
+  project = var.project_id
 }
 
 locals {
-  hub_dbs = [for d in data.google_sql_databases.on_instance.databases : d.name if d.name != "postgres"]
+  shared_pg_name   = "${var.name_prefix}-pg"
+  shared_pg_exists = contains([for i in data.google_sql_database_instances.all.instances : i.name], local.shared_pg_name)
 }
 
+data "google_sql_databases" "on_instance" {
+  count    = local.shared_pg_exists ? 1 : 0
+  project  = var.project_id
+  instance = local.shared_pg_name
+}
+
+locals {
+  hub_dbs = local.shared_pg_exists ? [
+    for d in data.google_sql_databases.on_instance[0].databases : d.name if d.name != "postgres"
+  ] : []
+}
+
+# No depends_on, deliberately: it would create exactly the apply-time
+# ordering this shape avoids.
 resource "terraform_data" "destroy_guard" {
   input = var.deletion_protection
 

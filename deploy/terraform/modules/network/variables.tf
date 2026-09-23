@@ -26,7 +26,7 @@ variable "subnet_cidr" {
 }
 
 variable "psa_prefix_length" {
-  description = "Prefix length of the reserved range used for the private services access (PSA) VPC peering connection (Cloud SQL, Filestore)."
+  description = "Prefix length of the reserved range used for the private services access (PSA) VPC peering connection. Consumed only by Cloud SQL's private IP — Filestore connects via DIRECT_PEERING and reserves its own range separately."
   type        = number
   default     = 16
 }

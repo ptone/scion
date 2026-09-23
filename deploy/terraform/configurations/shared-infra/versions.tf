@@ -1,5 +1,7 @@
 terraform {
-  required_version = ">= 1.6"
+  # Matches configurations/hub's floor (needed there for cross-variable
+  # validation); kept in sync rather than split per-root.
+  required_version = ">= 1.9"
 
   required_providers {
     google = {

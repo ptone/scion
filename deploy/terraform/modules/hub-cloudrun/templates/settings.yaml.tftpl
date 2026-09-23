@@ -1,5 +1,11 @@
 schema_version: "1"
 active_profile: remote
+profiles:
+  # REQUIRED (tf-review B3, proven via config.LoadGlobalSettings): without
+  # this, "remote" resolves to the embedded default 'kubernetes' runtime and
+  # the runtimes.remote block below (namespace, gke) is silently ignored.
+  remote:
+    runtime: remote
 server:
   mode: hosted
   hub:
@@ -43,12 +49,17 @@ server:
     backend: nfs
     nfs:
       mount_root: ${nfs_mount_root}
-      uid: 1000
-      gid: 1000
-      subpath_root: projects
+      uid: ${nfs_uid}
+      gid: ${nfs_gid}
+      subpath_root: ${nfs_subpath_root}
       shares: ${jsonencode([{ id = hub_name, server = nfs_server, export = nfs_export, pv_name = pv_name }])}
 runtimes:
   remote:
     type: kubernetes
-    gke: true
+    # false is deliberate (design §3.4 agent SA): true would build a
+    # SecretProviderClass that the agent SA can no longer read (no Secret
+    # Manager role at all, to close the cross-hub signing-key escalation
+    # vm-deploy found). Autopilot scheduling tolerance is auto-detected
+    # regardless (GKEAutoDetected), so nothing else depends on this being true.
+    gke: false
     namespace: ${namespace}
