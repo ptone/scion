@@ -8,10 +8,15 @@ variable "region" {
   type        = string
 }
 
-variable "name" {
-  description = "Name prefix for network resources. Every resource this module creates derives its name from this value (e.g. \"<name>-vpc\", \"<name>-subnet\", \"<name>-psa\")."
+variable "name_prefix" {
+  description = "Shared-infra name prefix. Every resource this module creates derives its name from this value (e.g. \"<name_prefix>-vpc\", \"<name_prefix>-subnet\", \"<name_prefix>-psa\")."
   type        = string
-  default     = "scion"
+  default     = "tfha"
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9]{1,7}$", var.name_prefix))
+    error_message = "name_prefix must match ^[a-z][a-z0-9]{1,7}$ (design §3.8)."
+  }
 }
 
 variable "subnet_cidr" {
