@@ -35,6 +35,15 @@ resource "google_secret_manager_secret_version" "db_password" {
   secret_data = random_password.db.result
 }
 
+
+# Unused by the running hub today (the DSN is embedded directly into the
+# settings secret by Terraform's own identity, via the data source in
+# hub-cloudrun) — kept anyway, scoped to this hub's own secret, because
+# phase 3's Alt-F end state (DSN via a secret env var instead of an
+# embedded plaintext DSN) needs the hub SA to read this secret at runtime.
+# When that lands, this grant must also join hub-cloudrun's
+# time_sleep.iam_propagation depends_on list (design §3.5) — it doesn't
+# today because nothing reads it at boot yet.
 resource "google_secret_manager_secret_iam_member" "hub_reads_db_password" {
   secret_id = google_secret_manager_secret.db_password.secret_id
   project   = var.project_id
