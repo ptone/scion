@@ -54,6 +54,20 @@ variable-shaped map with plain `${VAR}` substitution doesn't generalize to
 "no pin needed" the way an empty string does for the scalar placeholders
 above.)
 
+**`egress_allow` entries are validated, and rejected entries block the
+broker from starting an agent.** An actor's own `EgressPolicy` must never
+let it reach the router or other in-cluster services — that would defeat
+the NetworkPolicy above, which is what keeps the Phase 1 bootstrap-nonce
+fallback (§5) safe. `pkg/config.V1SubstrateConfig.Validate` (checked when
+the runtime is constructed, and again in `Run` before the `EgressPolicy` is
+created) rejects:
+
+- catch-alls: `all`, `*`, `0.0.0.0/0`, `::/0`, or any bare `*`-style entry;
+- any CIDR (or bare IP) overlapping a private/in-cluster/link-local/loopback
+  range: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`,
+  `169.254.0.0/16`, `127.0.0.0/8`, `fc00::/7`, `fe80::/10`, `::1/128`;
+- hostnames ending in `.svc`, `.cluster.local`, or `.internal`.
+
 ### `server.broker.broker_id` in the ConfigMap
 
 `HUB_BROKER_ID` fills `server.broker.broker_id`
