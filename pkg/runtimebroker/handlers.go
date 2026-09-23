@@ -2650,6 +2650,11 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 	if s.config.ForceRuntime != "" {
 		if s.config.ForceRuntime == s.runtime.Name() {
+			// ForceRuntime == "substrate" returns s.manager here,
+			// bypassing the per-profile substrate config resolution below
+			// entirely — a second substrate profile's config (e.g. its own
+			// egress_allow) is not reachable under ForceRuntime. See
+			// ptone/scion#1818.
 			return s.manager
 		}
 		s.auxiliaryRuntimesMu.RLock()

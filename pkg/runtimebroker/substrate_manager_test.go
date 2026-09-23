@@ -297,11 +297,11 @@ func TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig(t *testing.T) 
 	srv := New(cfg, defaultMgr, defaultRT)
 
 	// The default profile: resolveManagerForOpts no longer takes the
-	// type-string shortcut for substrate at all (substrate-lead's decided
-	// fix — no config-equality comparison either, to avoid a comparison
-	// that could itself drift out of sync), so this may or may not be
-	// srv.manager itself; either way it must be bound to substrate-prod's
-	// config and behave correctly.
+	// type-string shortcut for substrate at all — no config-equality
+	// comparison either, since a comparison could itself drift out of sync
+	// with whatever actually determines a distinct instance — so this may
+	// or may not be srv.manager itself; either way it must be bound to
+	// substrate-prod's config and behave correctly.
 	prodMgr := srv.resolveManagerForOpts(api.StartOptions{Name: "prod-agent", Profile: "substrate", ProjectPath: projectDir})
 	runSubstrateAgent(t, prodMgr, "proj--prod-agent", "prod-agent", "550e8400-e29b-41d4-a716-446655440010")
 
