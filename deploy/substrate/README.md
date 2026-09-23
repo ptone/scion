@@ -374,6 +374,23 @@ kubectl run netpol-probe --rm -it --restart=Never \
   Phase 1's minimal fixture (`phase1-spec.md` §2.4 explicitly scopes it this
   way); the polished chart is Phase 2.
 - **No in-cluster credential rotation.** See "Secret creation" step 3.
+- **The dialer's trust material (`ca_file`/`cluster_trust_bundle`) is pinned
+  for the broker process's lifetime, not re-read per agent start.**
+  `pkg/runtime.NewSubstrateRuntime` memoizes one `*SubstrateRuntime` (and its
+  gRPC `ClientConn`, dialed once) per distinct `V1SubstrateConfig` for the
+  life of the process — see the "process-wide memoization" comment on
+  `substrateRuntimesMu` in `pkg/runtime/substrate_runtime.go`. Before that
+  memoization existed, every agent start re-dialed and so re-read the CA.
+  Now, rotating the CA behind the same `ca_file` path, or re-keying the same
+  `ClusterTrustBundle` name, does not take effect until the broker process
+  restarts — the existing `ClientConn`'s TLS config was built once, at first
+  dial, and is never rebuilt. This is a known Phase 1 gap (review round 2,
+  Consider O3), not something this branch adds code to reload: a proper fix
+  would build the dialer's `tls.Config` with `GetConfigForClient` or
+  `VerifyPeerCertificate` so it re-reads the CA source per handshake, which
+  is Phase 2 scope. Until then, **a CA rotation on this cluster requires
+  restarting the broker Deployment** (a rolling restart is sufficient) to
+  pick it up.
 
 ## Files
 
