@@ -14,15 +14,15 @@ output "agent_sa_email" {
 }
 
 output "hub_iam_grants" {
-  description = "All hub-SA IAM grant resources, bundled purely as a depends_on handle (design §3.5) — hub-cloudrun's time_sleep.iam_propagation depends on this list, so a Cloud Run revision can't boot before these grants have had time to propagate."
+  description = "All hub-SA IAM grant resources' .id values, bundled purely as a depends_on handle (design §3.5) — hub-cloudrun's time_sleep.iam_propagation depends on this list, so a Cloud Run revision can't boot before these grants have had time to propagate. Deliberately .id (list(string)), not the whole resource objects: google_project_iam_member and google_service_account_iam_member have different attribute shapes (e.g. project vs. service_account_id), so a list(any) of the full objects fails type unification at the consuming module's typed variable boundary with \"all list elements must have the same type\" — reproduced credential-free with two different hashicorp/random resource types before fixing (tf-review). .id still carries the same dependency edge as the full object would."
   value = [
-    google_project_iam_member.hub_secretmanager_admin_hub_scope,
-    google_project_iam_member.hub_cloudsql_client,
-    google_project_iam_member.hub_cloudsql_instance_user,
-    google_project_iam_member.hub_container_cluster_viewer,
-    google_project_iam_member.hub_logging_log_writer,
-    google_service_account_iam_member.hub_mints_transport_tokens,
-    google_service_account_iam_member.hub_mints_own_tokens,
+    google_project_iam_member.hub_secretmanager_admin_hub_scope.id,
+    google_project_iam_member.hub_cloudsql_client.id,
+    google_project_iam_member.hub_cloudsql_instance_user.id,
+    google_project_iam_member.hub_container_cluster_viewer.id,
+    google_project_iam_member.hub_logging_log_writer.id,
+    google_service_account_iam_member.hub_mints_transport_tokens.id,
+    google_service_account_iam_member.hub_mints_own_tokens.id,
   ]
 }
 

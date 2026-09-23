@@ -163,7 +163,21 @@ resource "time_sleep" "iam_propagation" {
     hub_sa    = var.hub_sa_email
   }
 
-  depends_on = [var.hub_iam_grants]
+  # §3.5 says ALL hub-SA IAM members, not just hub-identity's project-level
+  # ones: Cloud Run checks secret access at revision *create* time, so this
+  # module's own per-secret accessor grants (settings/kubeconfig/session
+  # secret — all three read directly by the running container) matter just
+  # as much as the project-level grants passed in from hub-identity.
+  # cloudsql-database's db-password accessor is deliberately NOT included:
+  # the DSN is embedded directly into the rendered settings secret by
+  # Terraform's own identity (the data source above), so the running
+  # container never reads db-password itself — nothing to wait on there.
+  depends_on = [
+    var.hub_iam_grants,
+    google_secret_manager_secret_iam_member.hub_reads_settings,
+    google_secret_manager_secret_iam_member.hub_reads_kubeconfig,
+    google_secret_manager_secret_iam_member.hub_reads_session_secret,
+  ]
 }
 
 # --- Cloud Run v2 service ---

@@ -39,8 +39,8 @@ variable "transport_sa_email" {
 }
 
 variable "hub_iam_grants" {
-  description = "hub-identity's hub-SA IAM grant resources, passed through purely to create a depends_on ordering (design §3.5) for this module's own time_sleep.iam_propagation: the Cloud Run service must not boot before these grants have had time to propagate, or it gets a 403 with no retry."
-  type        = list(any)
+  description = "hub-identity's hub-SA IAM grant resources' .id values, passed through purely to create a depends_on ordering (design §3.5) for this module's own time_sleep.iam_propagation: the Cloud Run service must not boot before these grants have had time to propagate, or it gets a 403 with no retry. Deliberately list(string) of .id, not list(any) of the full resource objects: google_project_iam_member and google_service_account_iam_member have different attribute shapes, and a list(any) of the full objects fails type unification at this exact variable boundary with \"all list elements must have the same type\" (tf-review; reproduced credential-free with two different hashicorp/random resource types before fixing). .id still carries the same dependency edge."
+  type        = list(string)
 }
 
 variable "hub_iam_condition_expression" {

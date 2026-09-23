@@ -92,7 +92,10 @@ module "artifact_registry" {
 # itself (reviewer check: google_sql_database_instance appears only in
 # modules/cloudsql-instance).
 #
-# Required shape (corrected by tf-review, reproduced offline on TF 1.9.8):
+# Required shape (corrected by tf-review, reproduced offline on TF 1.9.8,
+# and confirmed live against ptone-emblem by vm-deploy — including a false
+# alarm on this exact block from a stale checkout, retracted once vm-deploy
+# re-ran against the actual commit: 23-resource plan, exit 0, no 403):
 # evaluated at PLAN, with NO module dependency, tolerant of the instance not
 # existing yet. `instance = module.cloudsql_instance.instance_name` looks
 # more correct (a resource reference instead of a literal), but it is
@@ -102,6 +105,12 @@ module "artifact_registry" {
 # the precondition below fails — precisely the state transition this guard
 # exists to prevent. The literal name plus an existence check first is not a
 # style choice; do not "fix" it back to a module reference.
+#
+# An intent-based alternative (`count = var.deletion_protection ? 0 : 1`,
+# skipping the existence probe) was considered and rejected: this
+# existence-based shape keys the guard on whether the instance is actually
+# there, so it stays live and accurate during normal operation rather than
+# only when someone is already trying to turn protection off.
 data "google_sql_database_instances" "all" {
   project = var.project_id
 }
