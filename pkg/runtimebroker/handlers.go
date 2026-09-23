@@ -1286,6 +1286,32 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		}
 	}
 
+	// Substrate-only: a project-scoped delete for an agent that has no
+	// matching entry in that project must not fall through to either (a)
+	// the project-blind hub-managed-project scan below, which takes only
+	// the bare agent name and would resolve projectPath to whichever
+	// project's directory it happens to find first, or (b)
+	// AgentManager.Delete's own internal, unscoped-by-slug Runtime.List
+	// call, which filters by "scion.name" alone (no project key — see
+	// manager.go) and would pick whichever same-slug actor ListActors
+	// happens to list first, regardless of project. Returning before
+	// either runs is deliberate: this must never resolve projectPath from
+	// a project-blind guess for substrate, not even to feed the
+	// soft-delete agent-info.json marking below. Every other runtime is
+	// unaffected: matchesAgent already scopes its own resolution by
+	// project the same way for them, and an unmatched request there falls
+	// through to the rest of this function exactly as before, unchanged.
+	//
+	// The hub's control-channel client already treats a 404 here as a
+	// successful, idempotent delete (pkg/hub/controlchannel_client.go's
+	// DeleteAgent returns nil for both a 2xx and a 404 response), so
+	// returning the existing not-found shape instead of silently
+	// no-opping through mgr.Delete does not block hub-side cleanup.
+	if rt.Name() == "substrate" && projectID != "" && !matched {
+		NotFound(w, "Agent")
+		return
+	}
+
 	// If no project path was found (container missing or no annotation), check
 	// hub-managed project directories for the agent's files. Without this,
 	// agents in hub-managed projects (~/.scion.projects/<slug>/) are silently
@@ -1312,28 +1338,6 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 				}
 			}
 		}
-	}
-
-	// Substrate-only: a project-scoped delete for an agent that has no
-	// matching entry in that project must not fall through to
-	// AgentManager.Delete's own internal, unscoped-by-slug Runtime.List
-	// call. That call filters by "scion.name" alone (no project key —
-	// see manager.go), so with projectPath empty (nothing here resolved
-	// one) it would pick whichever same-slug actor ListActors happens to
-	// list first, regardless of project — the wrong-actor case this gate
-	// exists for. Every other runtime is unaffected: matchesAgent already
-	// scopes its own resolution by project the same way for them, and an
-	// unmatched request there falls through to mgr.Delete exactly as
-	// before, unchanged.
-	//
-	// The hub's control-channel client already treats a 404 here as a
-	// successful, idempotent delete (pkg/hub/controlchannel_client.go's
-	// DeleteAgent returns nil for both a 2xx and a 404 response), so
-	// returning the existing not-found shape instead of silently
-	// no-opping through mgr.Delete does not block hub-side cleanup.
-	if rt.Name() == "substrate" && projectID != "" && !matched {
-		NotFound(w, "Agent")
-		return
 	}
 
 	_, err = mgr.Delete(ctx, id, deleteFiles, projectPath, removeBranch)

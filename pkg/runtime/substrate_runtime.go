@@ -544,7 +544,7 @@ const substrateAtespacePrefix = "scion-"
 // actors elsewhere share the same agent slug.
 //
 // Because AgentManager.Delete/Stop and LookupContainerID's own runtime
-// queries (pkg/agent/manager.go, pkg/runtimebroker/handlers.go) filter by
+// queries (pkg/agent/manager.go, pkg/runtimebroker/server.go) filter by
 // "scion.name" alone — they never add a project key here even when a
 // broker-level caller resolved one — an unscoped-by-slug query cannot rely
 // on ProjectPath to disambiguate two record-having actors that share a
@@ -604,7 +604,7 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	// (no scion.project/scion.grove or scion.project_id/scion.grove_id
 	// key), which is exactly the shape AgentManager.Delete/Stop and
 	// LookupContainerID's own runtime queries use (pkg/agent/manager.go,
-	// pkg/runtimebroker/handlers.go) — neither ever adds a project key to
+	// pkg/runtimebroker/server.go) — neither ever adds a project key to
 	// the filter it passes down here, even when the broker-level caller
 	// resolved one. If two or more record-having actors share that slug
 	// (only possible across different projects — see the per-project
@@ -614,9 +614,12 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	// than guess, every actor sharing that slug is excluded from an
 	// unscoped-by-slug result: the caller sees no match (a no-op) instead
 	// of a wrong-actor match. A project-scoped query for the same slug is
-	// unaffected. Record-less actors never reach here in the first place
-	// (see this function's doc comment) so they don't participate in the
-	// tally.
+	// unaffected. Record-less actors do reach this loop (the tally below
+	// ranges over every actor ListActors returned) but are skipped by the
+	// rec == nil check, so they never contribute a count; they also can't
+	// collide with a record-having actor's tally in the first place, since
+	// a record-less actor reports its own project-prefixed actor name as
+	// "scion.name" (see this function's doc comment), never a bare slug.
 	requestedName, hasNameFilter := labelFilter["scion.name"]
 	hasProjectScope := labelFilter[projectcompat.LabelProject] != "" ||
 		labelFilter[projectcompat.LabelGrove] != "" ||

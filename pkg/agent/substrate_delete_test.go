@@ -439,10 +439,10 @@ func TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug(t *testin
 // (map[string]string{"scion.name": slug}) never carries a project-scoping
 // key — see manager.go — so this is exactly the shape the ambiguity guard
 // in SubstrateRuntime.List targets. Even though AgentInfo.ProjectPath is
-// now populated correctly (this round's fix), an unscoped Delete("dev")
-// still cannot tell the two apart at this call site: it must make zero
-// DeleteActor calls and leave both actors running, for both possible
-// ListActors return orders — a no-op, not a wrong-actor delete.
+// populated correctly, an unscoped Delete("dev") still cannot tell the two
+// apart at this call site: it must make zero DeleteActor calls and leave
+// both actors running, for both possible ListActors return orders — a
+// no-op, not a wrong-actor delete.
 func TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed(t *testing.T) {
 	for _, orderName := range []string{"projA first", "projB first"} {
 		t.Run(orderName, func(t *testing.T) {
