@@ -75,15 +75,6 @@ type SubstrateRuntime struct {
 	router    *substrate.RouterClient
 	k8sClient kubernetes.Interface // for PodLogs (GetLogs) and the dialer's own TokenRequest calls
 
-	mu sync.Mutex
-	// controlTokens maps "<atespace>/<actor>" to the control_token minted at
-	// bootstrap (phase1-spec.md §2.2 step 8: "keep it in memory keyed by
-	// <atespace>/<actor>").
-	controlTokens map[string]string
-	// agentRecords maps actor UID to the label/metadata record synthesised
-	// at Run (phase1-spec.md §2.2 List row: "keyed by actor uid").
-	agentRecords map[string]*substrateAgentRecord
-
 	now   func() time.Time
 	sleep func(time.Duration)
 
@@ -94,25 +85,51 @@ type SubstrateRuntime struct {
 	healthzTimeout time.Duration
 }
 
-// NewSubstrateRuntime builds a SubstrateRuntime from settings, dialing
-// ateapi in-cluster (pkg/runtime/substrate.Dial) and building an in-cluster
-// Kubernetes client for pod logs. There is no auto-detect path for
-// substrate (phase1-spec.md §2.3): callers only reach this constructor when
-// a profile explicitly selects it.
+// substrateAgentStateMu guards substrateControlTokens and
+// substrateAgentRecords, which are shared process-wide across every
+// SubstrateRuntime instance regardless of which config produced it.
+//
+// Per-agent state must live at this scope, not on the SubstrateRuntime
+// instance: the broker resolves substrate as an auxiliary runtime keyed
+// only by Name() ("substrate") and holds exactly one such runtime at a
+// time, while NewSubstrateRuntime's memoization below is keyed per
+// V1SubstrateConfig — a config change (editing egress_allow,
+// snapshot_storage, ...), or a second substrate profile with different
+// settings, produces a genuinely different *SubstrateRuntime instance. If
+// control tokens and agent records lived on that instance instead of here,
+// an agent started under one config would become unreachable for
+// exec/list-with-project-labels the moment the broker resolved a different
+// config — the same failure class as round-1 Critical #1 (there, triggered
+// by every `start`; here, by a config change), now fixed by moving this
+// state to the one thing every instance shares: the process (review round
+// 2, Required R1).
+var (
+	substrateAgentStateMu sync.Mutex
+	// substrateControlTokens maps "<atespace>/<actor>" to the control_token
+	// minted at bootstrap (phase1-spec.md §2.2 step 8: "keep it in memory
+	// keyed by <atespace>/<actor>").
+	substrateControlTokens = make(map[string]string)
+	// substrateAgentRecords maps actor UID to the label/metadata record
+	// synthesised at Run (phase1-spec.md §2.2 List row: "keyed by actor
+	// uid").
+	substrateAgentRecords = make(map[string]*substrateAgentRecord)
+)
+
 // substrateRuntimesMu and substrateRuntimes memoize SubstrateRuntime
 // instances process-wide, keyed on a canonical encoding of the effective
-// V1SubstrateConfig (substrateRuntimeCacheKey).
+// V1SubstrateConfig (substrateRuntimeCacheKey). This is about connections,
+// not per-agent state (see substrateAgentStateMu above): each distinct
+// config gets its own gRPC ClientConn, router client, and CA, since those
+// legitimately differ per config, while per-agent state is shared by every
+// instance regardless of config.
 //
 // This exists because the broker treats substrate as an auxiliary runtime,
 // not its default one (findings.md/phase1-spec.md never made it the
 // default): pkg/runtimebroker resolves a fresh Runtime from settings via
 // GetRuntime on every `start` whose profile isn't the default, and would
-// otherwise call NewSubstrateRuntime again each time. Without memoization
-// that (a) discards controlTokens/agentRecords for every actor a previous
-// instance created — later operations (exec, logs, delete, stop) can no
-// longer find them — and (b) dials a brand new gRPC ClientConn that is
-// never closed, leaking one connection per agent start. See the review
-// finding this fixes (round 1, Critical #1).
+// otherwise call NewSubstrateRuntime again each time. Without memoization,
+// every call would dial a brand new gRPC ClientConn that is never closed,
+// leaking one connection per agent start (review round 1, Critical #1).
 var (
 	substrateRuntimesMu sync.Mutex
 	substrateRuntimes   = make(map[string]*SubstrateRuntime)
@@ -203,8 +220,6 @@ func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRunti
 		conn:           conn,
 		router:         substrate.NewRouterClient(sc.RouterEndpoint),
 		k8sClient:      k8sClient.Clientset,
-		controlTokens:  make(map[string]string),
-		agentRecords:   make(map[string]*substrateAgentRecord),
 		now:            time.Now,
 		sleep:          time.Sleep,
 		healthzTimeout: defaultHealthzTimeout,
@@ -219,8 +234,6 @@ func newSubstrateRuntimeForTest(client ateapipb.ControlClient, router *substrate
 		client:         client,
 		router:         router,
 		k8sClient:      k8sClient,
-		controlTokens:  make(map[string]string),
-		agentRecords:   make(map[string]*substrateAgentRecord),
 		now:            time.Now,
 		sleep:          func(time.Duration) {},
 		healthzTimeout: defaultHealthzTimeout,
@@ -302,15 +315,10 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		})
 	}
 
-	// Step 5: egress policy. Defense in depth: re-validate egress_allow
-	// immediately before building it, exactly at the point the review
-	// asked for (belt-and-suspenders with the check at the top of Run —
-	// r.cfg does not change between the two, but this is cheap and matches
-	// the reviewed instruction literally).
-	if err := r.cfg.Validate(); err != nil {
-		cleanup()
-		return "", err
-	}
+	// Step 5: egress policy. (r.cfg was already validated at the top of
+	// Run; r.cfg is immutable for the lifetime of this call, so revalidating
+	// it here would only ever re-check the same result — review round 2,
+	// Nit N2.)
 	env := buildBootstrapEnv(cfg)
 	hostnames := substrateEgressHostnames(cfg, env, r.cfg)
 	if _, err := r.client.CreateActorEgressPolicy(ctx, buildEgressPolicy(atespace, actorName, hostnames)); err != nil {
@@ -377,9 +385,9 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		return "", r.redact(cfg, err)
 	}
 
-	r.mu.Lock()
-	r.controlTokens[id] = controlToken
-	r.agentRecords[actorUID] = &substrateAgentRecord{
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = controlToken
+	substrateAgentRecords[actorUID] = &substrateAgentRecord{
 		Labels: cfg.Labels,
 		// scion.harness_config is the same label key
 		// CloudRunSandboxRuntime.Run populates HarnessConfig from — see
@@ -390,7 +398,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		ProjectID:     cfg.ProjectID,
 		Image:         cfg.Image,
 	}
-	r.mu.Unlock()
+	substrateAgentStateMu.Unlock()
 
 	// Step 9.
 	return id, nil
@@ -441,12 +449,12 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("substrate: delete actor %s: %w", id, err)
 	}
 
-	r.mu.Lock()
-	delete(r.controlTokens, id)
+	substrateAgentStateMu.Lock()
+	delete(substrateControlTokens, id)
 	if uid != "" {
-		delete(r.agentRecords, uid)
+		delete(substrateAgentRecords, uid)
 	}
-	r.mu.Unlock()
+	substrateAgentStateMu.Unlock()
 	return nil
 }
 
@@ -463,7 +471,6 @@ func (r *SubstrateRuntime) Stop(ctx context.Context, id string) error {
 	return r.Delete(ctx, id)
 }
 
-// List implements phase1-spec.md §2.2 List row.
 // substrateAtespacePrefix is the naming convention substrateAtespaceName
 // produces. List uses it to skip actors outside any scion-managed
 // atespace: ListActors with an empty atespace (List has no project context
@@ -472,6 +479,7 @@ func (r *SubstrateRuntime) Stop(ctx context.Context, id string) error {
 // tenants sharing the same Substrate install.
 const substrateAtespacePrefix = "scion-"
 
+// List implements phase1-spec.md §2.2 List row.
 func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	var actors []*ateapipb.Actor
 	pageToken := ""
@@ -487,8 +495,8 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 		}
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	substrateAgentStateMu.Lock()
+	defer substrateAgentStateMu.Unlock()
 
 	var agents []api.AgentInfo
 	for _, actor := range actors {
@@ -496,7 +504,7 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 			continue
 		}
 
-		rec := r.agentRecords[actor.GetMetadata().GetUid()]
+		rec := substrateAgentRecords[actor.GetMetadata().GetUid()]
 
 		// Always synthesise the two labels the broker's own lookups depend
 		// on (pkg/runtimebroker resolves an agent by "scion.name" and lists
@@ -637,11 +645,11 @@ func (r *SubstrateRuntime) Exec(ctx context.Context, id string, cmd []string) (s
 		return "", err
 	}
 
-	r.mu.Lock()
-	token, ok := r.controlTokens[id]
-	r.mu.Unlock()
+	substrateAgentStateMu.Lock()
+	token, ok := substrateControlTokens[id]
+	substrateAgentStateMu.Unlock()
 	if !ok {
-		return "", fmt.Errorf("substrate: no control token cached for %s (was it bootstrapped by this broker process? a broker restart loses it in Phase 1)", id)
+		return "", fmt.Errorf("substrate: no control token cached for %s (only the broker process that bootstrapped it holds this in memory; lost on that process's restart, or if a different broker process bootstrapped this actor)", id)
 	}
 
 	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, r.ExecUser(), defaultExecTimeout)
