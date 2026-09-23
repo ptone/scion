@@ -19,6 +19,23 @@ Substrate has no authorization on its control API or inbound router — see
 reach in over a LoadBalancer/Ingress that would expose those unauthenticated
 surfaces beyond the cluster boundary.
 
+## Operational prerequisites
+
+- **Enabling NetworkPolicy enforcement (Calico or GKE Dataplane V2) on an
+  existing Substrate cluster that wasn't created with it is not a
+  no-downtime, apply-and-go change.** Confirmed on `substrate-scion-test`
+  (relayed by substrate-lead): turning it on for a cluster that already has
+  running workers requires **rolling-restarting every worker pod**, and
+  **recreating every golden `ActorTemplate` snapshot** — snapshots taken
+  before enforcement was on fail `runsc restore` with **exit 128** once
+  enforcement is live, because the snapshotted process state doesn't match
+  the network namespace the sandbox restores into under policy enforcement.
+  Plan this as a maintenance window with a template rebuild, not as a
+  same-day toggle, on any cluster where actors are already running.
+  See "Known Phase 1 limitations" below for the separate question of
+  whether enforcement is enabled at all (`gcloud container clusters
+  describe ... --format='value(networkConfig.datapathProvider)'`).
+
 ## Placeholders
 
 Resolve every one of these before applying. None are secret; secrets are
@@ -26,7 +43,7 @@ handled separately (see "Secret creation" below).
 
 | Placeholder | Meaning | `substrate-scion-test` value (from `infra/cluster.md`) |
 |---|---|---|
-| `BROKER_NAMESPACE` | Namespace the broker Deployment and its RBAC live in | `scion-substrate-broker` (suggested — not cluster-specific) |
+| `BROKER_NAMESPACE` | Namespace the broker Deployment and its RBAC live in. **Also the value the router NetworkPolicy's `namespaceSelector` is pinned to** (`atenet-router-restrict-ingress`, templated as `${BROKER_NAMESPACE}`, not hardcoded) — see the callout below the table. | `scion-substrate-broker` (suggested — not cluster-specific) |
 | `BROKER_IMAGE` | Branch-built image containing the `scion` binary (see "Building the broker image") | `us-docker.pkg.dev/<project>/scion/broker@sha256:...` (build it yourself, see below) |
 | `ATE_SYSTEM_NAMESPACE` | Namespace hosting ateapi (`api.<ns>.svc:443`) and `atenet-router` | `ate-system` (upstream default, confirmed for this cluster) |
 | `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in, for the `pods`/`pods/log` RBAC (`GetLogs`) and for locating Substrate's own controller-generated worker `NetworkPolicy` (verification only — this manifest doesn't create it) | `scion-agents` (confirmed via `infra/cluster.md`; not `ate-system` — see the note this superseded, kept below for history) |
@@ -36,6 +53,22 @@ handled separately (see "Secret creation" below).
 | `CLUSTER_TRUST_BUNDLE_NAME` | The `ClusterTrustBundle` object verifying ateapi/router TLS | `servicedns.podcert.ate.dev:identity:primary-bundle` |
 | `SANDBOX_CONFIG_NAME` | The `SandboxConfig` CRD instance actor templates use | `gvisor-default` |
 | `SNAPSHOT_STORAGE_URI` | Bucket/prefix for actor snapshots | `gs://snapshot-substrate-scion-test` |
+
+**`BROKER_NAMESPACE` is baked into the router NetworkPolicy at apply time,
+not read live.** `atenet-router-restrict-ingress`'s `namespaceSelector`
+matches on `${BROKER_NAMESPACE}`'s resolved value — a literal namespace
+name in the rendered manifest, the same way every other placeholder here
+resolves once at `envsubst` time (see broker.yaml, the router
+`NetworkPolicy`'s `ingress[0].from[0].namespaceSelector`). If you later
+rename the broker's namespace, or redeploy the broker into a different one,
+that `NetworkPolicy` object still points at the *old* namespace until you
+re-render and re-apply it with the new value — the broker's Deployment
+moving does not update it. The symptom is exec/bootstrap timing out talking
+to the router (`atenet-router.${ATE_SYSTEM_NAMESPACE}.svc`) even though the
+broker pod itself looks healthy, because the router now refuses it. There
+is no live binding here to break in the other direction: nothing but this
+one `NetworkPolicy` object needs updating, but it does need updating,
+explicitly, as part of any namespace move.
 
 `worker_selector` and `egress_allow` are left as empty (`{}` / `[]`) in the
 ConfigMap rather than templated — edit `broker.yaml` directly if the cluster
