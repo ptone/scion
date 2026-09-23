@@ -25,9 +25,10 @@ import (
 
 // hardcodedModelEgressHosts are the harness model API hosts Phase 1
 // hardcodes (phase1-spec.md §2.2 step 5): Anthropic, plus Google auth and
-// Vertex. "*.googleapis.com" also covers the telemetry default
-// (cloudtrace.googleapis.com, findings.md §2) so no separate telemetry rule
-// is added unless egress_allow names one explicitly.
+// Vertex. "*.googleapis.com" also happens to cover the telemetry default
+// (cloudtrace.googleapis.com, findings.md §2), but substrateEgressHostnames
+// adds the actual configured telemetry endpoint as its own rule too — see
+// the telemetry section below.
 var hardcodedModelEgressHosts = []string{
 	"api.anthropic.com",
 	"oauth2.googleapis.com",
@@ -66,6 +67,25 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		}
 	} else if h := hostFromURLEnv(env, "SCION_GIT_CLONE_URL"); h != "" {
 		add(h)
+	}
+
+	// Telemetry endpoint host (phase1-spec.md §2.2 step 5: "the telemetry
+	// endpoint"). *.googleapis.com below happens to cover the Cloud Trace
+	// default (findings.md §2), but that's a coincidence of the default,
+	// not a rule: a self-hosted OTLP collector or the hub's own endpoint
+	// needs its own rule, so check every env var scion's telemetry stack
+	// actually uses rather than relying on the wildcard (review round 1,
+	// Required #4). Checked independently, not via a single
+	// hostFromURLEnv call, because a deployment could point different
+	// signals at different collectors.
+	for _, key := range []string{
+		"SCION_OTEL_ENDPOINT",                // pkg/sciontool/telemetry, pkg/util/logging: scion's own var.
+		"OTEL_EXPORTER_OTLP_ENDPOINT",        // OTel SDK standard var, if a harness sets it directly.
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", // OTel SDK per-signal override.
+	} {
+		if h := hostFromURLEnv(env, key); h != "" {
+			add(h)
+		}
 	}
 
 	for _, h := range hardcodedModelEgressHosts {
