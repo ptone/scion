@@ -23,10 +23,10 @@ surfaces beyond the cluster boundary.
 
 - **Enabling NetworkPolicy enforcement (Calico or GKE Dataplane V2) on an
   existing Substrate cluster that wasn't created with it is not a
-  no-downtime, apply-and-go change.** Confirmed on `substrate-scion-test`
-  (`infra/cluster.md`, "NetworkPolicy Enforcement (Calico)", relayed by
-  substrate-lead), which enforces via the **Calico** add-on, not Dataplane
-  V2:
+  no-downtime, apply-and-go change.** On `substrate-scion-test`
+  (`infra/cluster.md`, "NetworkPolicy Enforcement (Calico)"), which
+  enforces via the **Calico** add-on, not Dataplane V2, enabling it
+  required:
   1. Enable the add-on and enforcement:
      `gcloud container clusters update <cluster> --update-addons=NetworkPolicy=ENABLED`,
      then `--enable-network-policy`.
@@ -63,14 +63,14 @@ handled separately (see "Secret creation" below).
 |---|---|---|
 | `BROKER_NAMESPACE` | Namespace the broker Deployment and its RBAC live in. **Also the value the router NetworkPolicy's `namespaceSelector` is pinned to** (`atenet-router-restrict-ingress`, templated as `${BROKER_NAMESPACE}`, not hardcoded) — see the callout below the table. | `scion-substrate-broker` (suggested — not cluster-specific) |
 | `BROKER_IMAGE` | Branch-built image containing the `scion` binary (see "Building the broker image") | `us-docker.pkg.dev/<project>/scion/broker@sha256:...` (build it yourself, see below) |
-| `ATE_SYSTEM_NAMESPACE` | Namespace hosting ateapi (`api.<ns>.svc:443`) and `atenet-router` | `ate-system` (upstream default, confirmed for this cluster) |
-| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in, for the `pods`/`pods/log` RBAC (`GetLogs`) and for locating Substrate's own controller-generated worker `NetworkPolicy` (verification only — this manifest doesn't create it) | `scion-agents` (confirmed via `infra/cluster.md`; not `ate-system` — see the note this superseded, kept below for history) |
+| `ATE_SYSTEM_NAMESPACE` | Namespace hosting ateapi (`api.<ns>.svc:443`) and `atenet-router` | `ate-system` (upstream default) |
+| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in, for the `pods`/`pods/log` RBAC (`GetLogs`) and for locating Substrate's own controller-generated worker `NetworkPolicy` (verification only — this manifest doesn't create it) | `scion-agents` (per `infra/cluster.md`) |
 | `HUB_ENDPOINT` | The `scion-integration` hub's URL | from `infra/cluster.md` / your hub deployment — not a Substrate-specific value |
 | `HUB_BROKER_ID` | The broker's stable UUID from `scion runtime-broker register` (not secret — see below) | UUID printed by `register`; there is no fixed value until you actually register |
 | `HUB_CONNECTION_NAME` | The `--name` used at `register` time; also the credentials JSON filename | `scion-integration` (suggested) |
 | `CLUSTER_TRUST_BUNDLE_NAME` | The `ClusterTrustBundle` object verifying ateapi/router TLS | `servicedns.podcert.ate.dev:identity:primary-bundle` |
 | `SANDBOX_CONFIG_NAME` | The `SandboxConfig` CRD instance actor templates use | `gvisor-default` |
-| `WORKER_SELECTOR_KEY` / `WORKER_SELECTOR_VALUE` | One label key/value pinning actors to a `WorkerPool` — matched against **the `WorkerPool` object's own `metadata.labels`**, not any Pod label (see the callout below the table — this was a live-incident bug) | `pool` / `scion-agents` |
+| `WORKER_SELECTOR_KEY` / `WORKER_SELECTOR_VALUE` | One label key/value pinning actors to a `WorkerPool` — matched against **the `WorkerPool` object's own `metadata.labels`**, not any Pod label (see the callout below the table) | `pool` / `scion-agents` |
 | `SNAPSHOT_STORAGE_URI` | Bucket/prefix for actor snapshots | `gs://snapshot-substrate-scion-test` |
 
 **`BROKER_NAMESPACE` is baked into the router NetworkPolicy at apply time,
@@ -90,22 +90,20 @@ one `NetworkPolicy` object needs updating, but it does need updating,
 explicitly, as part of any namespace move.
 
 **`worker_selector` must match the target `WorkerPool`'s own registered
-labels, not any Kubernetes Pod label — getting this backwards was a real
-live-deploy bug, not a hypothetical one.** An earlier version of this
-manifest set `worker_selector: {ate.dev/worker-pool: scion-agents}`,
-copying the label `atecontroller` stamps onto the *generated worker Pods*
-(the one the router `NetworkPolicy`'s verification steps use, correctly,
-below). `workerSelector.matchLabels` on an `ActorTemplate` is matched
-against a **`WorkerPool` custom resource's own `metadata.labels`**
-instead — a completely different label set on a different object.
-Confirmed against upstream (`demos/multi-template/*.yaml.tmpl`: the demo's
-`WorkerPool` carries `metadata.labels: {workload: multi-template-shared}`,
-and the `ActorTemplate`s that select it use exactly that as
-`workerSelector.matchLabels`). Getting this wrong doesn't fail to apply —
+labels, not any Kubernetes Pod label.** `workerSelector.matchLabels` on an
+`ActorTemplate` is matched against a **`WorkerPool` custom resource's own
+`metadata.labels`** — not the label `atecontroller` separately stamps onto
+the *generated worker Pods* (`ate.dev/worker-pool=<pool-name>`, the one the
+router `NetworkPolicy` verification steps below use, correctly, for a
+different purpose). These are two different label sets on two different
+objects. See upstream `demos/multi-template/*.yaml.tmpl` for a worked
+example: the demo's `WorkerPool` carries
+`metadata.labels: {workload: multi-template-shared}`, and the
+`ActorTemplate`s that select it use exactly that as
+`workerSelector.matchLabels`. Getting this wrong doesn't fail to apply —
 the manifest renders and `kubectl apply` succeeds — it fails at runtime:
 `CreateActor` returns "no free workers" because zero `WorkerPool`s match
-the (wrong) selector, even though the pool that should have matched is
-sitting right there with capacity.
+the selector, even though a pool with capacity exists.
 
 **To find the correct value for your cluster:**
 ```sh
@@ -115,34 +113,17 @@ kubectl get workerpool -n "${SUBSTRATE_WORKER_NAMESPACE}" --show-labels
 kubectl get workerpool -n "${SUBSTRATE_WORKER_NAMESPACE}" \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels}{"\n"}{end}'
 ```
-(An earlier version of this command was
-`kubectl get workerpool -n <ns> -o yaml | grep -A5 '^  labels:'` — broken,
-and confirmed broken by actually running it: `-o yaml` with no object name
-returns a `List`, which nests every item's `metadata.labels` four spaces
-deep under `items[].metadata`, not the two the `grep` pattern assumed, so
-it silently printed nothing on this cluster too. `kubectl describe
-workerpool -n <ns> <name>` also shows labels, if you already know the
-pool's name.)
-
 Use one of the labels under that `WorkerPool` object's own `metadata`, not
-anything you find by inspecting the worker Pods it created. Ran the fixed
-`--show-labels` command directly against `substrate-scion-test`
-(read-only) to confirm rather than trust `infra/cluster.md` alone:
+anything you find by inspecting the worker Pods it created. Example output:
 ```
-$ kubectl get workerpool -n scion-agents --show-labels
-NAME           DESIRED   REPLICAS   READY   AGE    LABELS
-scion-agents   2         2                  155m   pool=scion-agents,workload=scion-agents
+NAME           ...   LABELS
+scion-agents   ...   pool=scion-agents,workload=scion-agents
 ```
-`pool=scion-agents` is exactly what `WORKER_SELECTOR_KEY`/
-`WORKER_SELECTOR_VALUE` are set to in the placeholder table above, and what
-`broker.yaml`'s ConfigMap now templates `worker_selector` from directly (no
-hand-edit step anymore — the previous round of this manifest left it as a
-post-render hand-edit specifically because it's a map rather than a
-scalar, and that extra step is exactly what let the wrong value ship
-unnoticed. A single required key/value pair templates fine with `${VAR}`;
-if a future cluster genuinely needs *no* pool pin, delete the
-`worker_selector` block from the rendered manifest by hand instead —
-that's a rarer case than "gets a pin wrong.").
+`pool=scion-agents` is what `WORKER_SELECTOR_KEY`/`WORKER_SELECTOR_VALUE`
+are set to in the placeholder table above, and what `broker.yaml`'s
+ConfigMap templates `worker_selector` from directly. If a cluster genuinely
+needs *no* pool pin, delete the `worker_selector` block from the rendered
+manifest by hand instead.
 
 **`egress_allow` entries are validated, and rejected entries block the
 broker from starting an agent.** An actor's own `EgressPolicy` must never
@@ -183,10 +164,10 @@ itself, which Phase 1 does not add.
 `scion runtime-broker register` run that produces the credentials Secret
 (`cmd/broker.go`'s `runBrokerRegister` writes it to the registering
 machine's global `settings.yaml`). It's a stable UUID, not a credential, so
-it's fine in a ConfigMap. This is confirmed as the *current* (non-deprecated)
-location: `settings_v1.go`'s legacy-key migration explicitly maps the old
-flat `hub.brokerId` to `server.broker.broker_id`
-("hub.brokerId is deprecated; moved to server.broker.broker_id").
+it's fine in a ConfigMap. This is the current (non-deprecated) location:
+`settings_v1.go`'s legacy-key migration maps the old flat `hub.brokerId` to
+`server.broker.broker_id` ("hub.brokerId is deprecated; moved to
+server.broker.broker_id").
 
 The same struct also has `broker_token` — that field **is** the secret (the
 older single-shared-secret auth mode) and must never go in this ConfigMap.
@@ -319,8 +300,8 @@ those keys exist. kubelet's probes connect to the **pod IP**, not to
 `127.0.0.1` inside the container's own network namespace, so that default
 made both probes fail with connection-refused. (`cfg.Hub.Host` is also set
 by this flag, but every code path that reads it is gated on
-`--enable-hub`/`--enable-web`, both false here, so it has no other effect —
-confirmed by reading `server_foreground.go`, not assumed.)
+`--enable-hub`/`--enable-web`, both false here, so it has no other effect
+in this deployment.)
 
 **This is safe because the broker's own HMAC auth is unconditionally
 "strict mode."** `pkg/runtimebroker/server.go` hardcodes
@@ -388,9 +369,9 @@ kubectl -n "${BROKER_NAMESPACE}" logs deploy/scion-substrate-broker | grep -i "s
 kubectl -n "${BROKER_NAMESPACE}" logs deploy/scion-substrate-broker | grep -i "docker ps failed"
 # Expect: no output.
 
-# ---- Router NetworkPolicy: substrate-lead requires this actually verified
-# on the cluster, not just applied. Confirm the policy blocks an
-# out-of-namespace caller and allows an in-namespace one: ----
+# ---- Router NetworkPolicy: verify this on the cluster, not just that it
+# applied. Confirm the policy blocks an out-of-namespace caller and allows
+# an in-namespace one: ----
 
 # (a) From a throwaway pod OUTSIDE the broker namespace: must be refused.
 kubectl run netpol-probe --rm -it --restart=Never \
@@ -413,10 +394,8 @@ kubectl run netpol-probe --rm -it --restart=Never \
 
 # ---- Worker-namespace NetworkPolicy: this manifest does NOT create one.
 # Substrate's own `atecontroller` WorkerPool controller auto-creates a
-# per-WorkerPool NetworkPolicy that already does this — and does it more
-# precisely than an earlier draft of this manifest did (see broker.yaml's
-# comment after the router NetworkPolicy for why a hand-written one here
-# was removed rather than kept as a redundant, weaker duplicate):
+# per-WorkerPool NetworkPolicy (see broker.yaml's comment after the router
+# NetworkPolicy for why this manifest does not also define one):
 # podSelector `ate.dev/worker-pool: <pool-name>`, ingress only from pods
 # labeled `app: atenet-router` *within* ATE_SYSTEM_NAMESPACE, all ports
 # (cmd/atecontroller/internal/controllers/networkpolicy_controller.go,
@@ -488,12 +467,11 @@ kubectl run netpol-probe --rm -it --restart=Never \
     WorkerPool restricting worker-pod ingress to pods labeled
     `app: atenet-router` within `ATE_SYSTEM_NAMESPACE`
     (`cmd/atecontroller/internal/controllers/networkpolicy_controller.go`
-    upstream). An earlier draft of this manifest also created a
-    hand-written worker policy; it was removed once this was confirmed —
-    NetworkPolicies on the same pods are OR'd, so a broader hand-written
-    one would only have *widened* access beyond what Substrate's own
-    tighter, purpose-built policy grants, undermining it rather than
-    reinforcing it.
+    upstream). Do not also define a hand-written `NetworkPolicy` for the
+    worker pods here: `NetworkPolicy` objects targeting the same pods are
+    OR'd together, so a broader hand-written policy would only *widen*
+    access beyond what Substrate's tighter, purpose-built one grants,
+    undermining it rather than reinforcing it.
 
   Neither policy alone is sufficient — the router policy is worthless if a
   worker pod is *also* reachable directly by pod IP from outside
@@ -529,9 +507,9 @@ kubectl run netpol-probe --rm -it --restart=Never \
   `addonsConfig.networkPolicyConfig.disabled` is `false` (a cluster can
   have the add-on enabled per the fields above while a subsequent config
   change disables it). `infra/cluster.md` documents that
-  `substrate-scion-test` enforces via Calico and how it was enabled, but
-  doesn't record this specific command's output — capture it from the
-  cluster directly rather than trust a guessed value here.
+  `substrate-scion-test` enforces via Calico and how it was enabled;
+  capture this specific command's output directly from the cluster to
+  confirm current state.
 - **Kubelet health-check probes are exempt from NetworkPolicy on GKE, by
   design, on both enforcement backends.** Neither the router's readiness/
   liveness probes (port 9090) nor the worker pod's `readyz` probe (port
@@ -562,8 +540,9 @@ kubectl run netpol-probe --rm -it --restart=Never \
   signal from anything in `deploy/substrate/`. There is nothing to
   "revisit" here on our side; this is a standing dependency to be aware of,
   not a gap this manifest could reasonably close by duplicating
-  Substrate's own policy (see broker.yaml's comment on why that was tried
-  and reverted).
+  Substrate's own policy (see broker.yaml's comment on the router
+  NetworkPolicy for why a hand-written duplicate would weaken, not
+  strengthen, this).
 - **No Helm chart, no template GC, no doctor integration.** This is
   Phase 1's minimal fixture (`phase1-spec.md` §2.4 explicitly scopes it this
   way); the polished chart is Phase 2.
@@ -573,16 +552,15 @@ kubectl run netpol-probe --rm -it --restart=Never \
   `pkg/runtime.NewSubstrateRuntime` memoizes one `*SubstrateRuntime` (and its
   gRPC `ClientConn`, dialed once) per distinct `V1SubstrateConfig` for the
   life of the process — see the "process-wide memoization" comment on
-  `substrateRuntimesMu` in `pkg/runtime/substrate_runtime.go`. Before that
-  memoization existed, every agent start re-dialed and so re-read the CA.
-  Now, rotating the CA behind the same `ca_file` path, or re-keying the same
+  `substrateRuntimesMu` in `pkg/runtime/substrate_runtime.go`. Rotating the
+  CA behind the same `ca_file` path, or re-keying the same
   `ClusterTrustBundle` name, does not take effect until the broker process
   restarts — the existing `ClientConn`'s TLS config was built once, at first
-  dial, and is never rebuilt. This is a known Phase 1 gap (review round 2,
-  Consider O3), not something this branch adds code to reload: a proper fix
-  would build the dialer's `tls.Config` with `GetConfigForClient` or
-  `VerifyPeerCertificate` so it re-reads the CA source per handshake, which
-  is Phase 2 scope. Until then, **a CA rotation on this cluster requires
+  dial, and is never rebuilt. This is a known Phase 1 gap, not something
+  this branch adds code to reload: a proper fix would build the dialer's
+  `tls.Config` with `GetConfigForClient` or `VerifyPeerCertificate` so it
+  re-reads the CA source per handshake, which is Phase 2 scope. Until then,
+  **a CA rotation on this cluster requires
   restarting the broker Deployment** (a rolling restart is sufficient) to
   pick it up.
 
