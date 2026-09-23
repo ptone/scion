@@ -414,3 +414,23 @@ No test in this branch exercises `deleteFiles=true` against the no-match gate's 
 **Fix:** the substrate-only 404 gate now runs immediately after the matching loop, before both the hub-managed-project fallback and the soft-delete marking block — for substrate, a no-match delete never resolves `projectPath` from a project-blind guess for any purpose, not just for `mgr.Delete`. This has no effect on the matched substrate path (the gate only fires when unmatched) or on any other runtime (the gate is still `rt.Name() == "substrate"`-gated only); the fallback and soft-delete blocks are otherwise completely unchanged and still run in their original order and shape for every other case.
 
 Per the instruction this was checked against: this is reachable within this branch's own new no-match path, for substrate, so it is closed here rather than merely reported. A parallel instance of the same project-blind fallback for a non-substrate runtime, or for `AgentManager`'s own generic call paths, is not touched — that is `pkg/agent`'s generic slug-matching hardening territory (ptone/scion#1819 family), out of scope here.
+
+### Addendum: the `'auto_expose_ports'` failures were an ambient environment variable, not a product bug
+
+Every "pre-existing, unrelated" failure set reported across this file's gate results — the settings-schema decode error `'auto_expose_ports' expected a map or struct, got "string"`, affecting any test that calls `config.LoadEffectiveSettings` — traced to a single cause: `SCION_AUTO_EXPOSE_PORTS=true` was set in the ambient shell environment this work ran in (this container is itself a scion-dispatched agent, so `SCION_*` env vars are injected the same way they'd be injected into any agent's container). Settings loading merges an env-var overlay on top of file-based settings, and `SCION_AUTO_EXPOSE_PORTS`'s string value collided with a settings field that expects a map/struct — nothing to do with substrate, this branch's changes, or any settings file's own content.
+
+**Confirmed by re-running every gate with the full `SCION_*` env and `CLAUDE_CODE_ENABLE_TELEMETRY` unset:**
+```
+for v in $(env|grep -o '^SCION_[A-Za-z0-9_]*'); do unset $v; done; unset CLAUDE_CODE_ENABLE_TELEMETRY
+```
+- `go build ./...` — pass.
+- `go vet` on `pkg/runtime/...`, `pkg/runtimebroker/...`, `pkg/agent/...`, `pkg/config/...` — pass, no output.
+- `gofmt -l` on every changed file — clean.
+- `go test -count=1` on all four package trees — **all green**, including `pkg/config`, `pkg/agent`, and every previously-"pre-existing-failure" test — `TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig` and `TestGetRuntime_Substrate_SettingsBased_Memoized` included. Confirmed directly by re-running `SCION_AUTO_EXPOSE_PORTS=true go test ...` against the now-on-disk-settings-based named-profile test below and reproducing the identical decode error on demand.
+- `go test -race -count=1` on `pkg/runtime`, `pkg/runtimebroker`, `pkg/agent` — all green **except one remaining failure**: `TestStreamLogsPropagatesListingErrors` in `pkg/runtime/cloudrun`, a genuine data race in `pkg/runtime/cloudrun/logs.go`'s background retry goroutine racing a test cleanup callback (`logs_test.go:104` writes, `logs.go:235`/`logs.go:148` reads, unsynchronized). Confirmed unrelated to environment variables (identical failure with or without the `SCION_*`/telemetry unset) and unrelated to substrate — this package is untouched by any work in this file's history.
+- `go test -count=50` on the substrate-related tests in all three touched packages — pass, no flakes, under the clean environment too.
+- `golangci-lint run --new-from-rev=c3b6e821d --concurrency=1 ./...` — 0 issues.
+
+**`TestSubstrateBroker_NoMatchGate_FiresForNamedSubstrateProfile` now goes through the real on-disk path**, since it's cheap and the underlying bug is now understood: it writes an actual `settings.json` per subtest (matching `TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig`'s shape) and calls `config.LoadEffectiveSettings` for real, rather than constructing a `*VersionedSettings` value in memory. It passes under a clean environment and fails with the documented decode error when `SCION_AUTO_EXPOSE_PORTS=true` is set — directly confirming the root cause.
+
+The one remaining failure (`pkg/runtime/cloudrun`'s pre-existing data race) is unrelated to this branch and not addressed here.

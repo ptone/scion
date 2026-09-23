@@ -593,19 +593,19 @@ func TestDeleteAgent_NonSubstrateRuntimeUnchanged(t *testing.T) {
 // call GetRuntime's "substrate" case makes (pkg/runtime/factory.go) — to
 // build the actual runtime instance from the resolved config.
 //
-// This builds the *VersionedSettings value in memory rather than writing
-// it to disk and going through config.LoadEffectiveSettings: at the time
-// this test was written, every settings.json/settings.yaml-file-backed
-// test in this environment fails to load at all ('auto_expose_ports'
-// expected a map or struct, got "string" — confirmed via a standalone
-// probe against config.LoadEffectiveSettings directly, and via this same
-// package's own pre-existing TestResolveManagerForOpts_
-// SubstrateProfilesGetTheirOwnConfig, which hits the identical decode
-// error and predates this task). VersionedSettings.ResolveRuntime and
-// runtime.NewSubstrateRuntime are unaffected by that decode bug — this
-// still exercises the real name-to-config-to-runtime resolution logic end
-// to end, just not the on-disk decode step, which is an unrelated,
-// pre-existing environment issue.
+// This goes through the real on-disk settings.json and
+// config.LoadEffectiveSettings, exactly like a live broker resolving a
+// project's configured profile — matching
+// TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig's settings
+// shape in substrate_manager_test.go. (An earlier version of this test
+// built the *VersionedSettings value in memory instead, to route around an
+// environment issue where SCION_AUTO_EXPOSE_PORTS being set in the
+// ambient environment made every settings-file load in this process fail
+// to decode — 'auto_expose_ports' expected a map or struct, got "string".
+// That was an environment misconfiguration, not a product bug: with
+// SCION_AUTO_EXPOSE_PORTS and the rest of the SCION_* env unset, this test
+// — and TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig — both
+// load settings from disk and pass normally.)
 //
 // Why this matters at all: SubstrateRuntime.Name() is a hardcoded literal
 // ("substrate") that never consults its config, so no settings-level name
@@ -617,28 +617,43 @@ func TestDeleteAgent_NonSubstrateRuntimeUnchanged(t *testing.T) {
 func TestSubstrateBroker_NoMatchGate_FiresForNamedSubstrateProfile(t *testing.T) {
 	for _, profileName := range []string{"substrate-prod", "substrate-nip"} {
 		t.Run(profileName, func(t *testing.T) {
-			vs := &config.VersionedSettings{
-				SchemaVersion: "1",
-				ActiveProfile: profileName,
-				Runtimes: map[string]config.V1RuntimeConfig{
-					profileName: {
-						Type: "substrate",
-						Substrate: &config.V1SubstrateConfig{
-							APIEndpoint:    "api.ate-system.svc:443",
-							RouterEndpoint: "http://atenet-router.ate-system.svc:80",
-							// Distinguishes this subtest's config from the
-							// other's, so SubstrateRuntime's process-wide
-							// memoization (keyed on an encoding of the
-							// config) builds a fresh instance per subtest
-							// instead of reusing one built under the
-							// other's fake client.
-							SnapshotStorage: "gs://bucket/" + profileName + "/",
-						},
-					},
+			projectDir := t.TempDir()
+			scionDir := filepath.Join(projectDir, ".scion")
+			if err := os.MkdirAll(scionDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			// Distinguishes each subtest's config from the other's, so
+			// SubstrateRuntime's process-wide memoization (keyed on an
+			// encoding of the config) builds a fresh instance per subtest
+			// instead of reusing one built under the other's fake client.
+			settings := `{
+				"schema_version": "1",
+				"active_profile": "` + profileName + `",
+				"runtimes": {
+					"` + profileName + `": {
+						"type": "substrate",
+						"substrate": {
+							"api_endpoint": "api.ate-system.svc:443",
+							"router_endpoint": "http://atenet-router.ate-system.svc:80",
+							"snapshot_storage": "gs://bucket/` + profileName + `/"
+						}
+					}
 				},
-				Profiles: map[string]config.V1ProfileConfig{
-					profileName: {Runtime: profileName},
-				},
+				"profiles": {
+					"` + profileName + `": {"runtime": "` + profileName + `"}
+				}
+			}`
+			if err := os.WriteFile(filepath.Join(scionDir, "settings.json"), []byte(settings), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			resolvedDir, err := config.GetResolvedProjectDir(projectDir)
+			if err != nil {
+				t.Fatalf("GetResolvedProjectDir error = %v", err)
+			}
+			vs, _, err := config.LoadEffectiveSettings(resolvedDir)
+			if err != nil {
+				t.Fatalf("LoadEffectiveSettings error = %v", err)
 			}
 			rtConfig, runtimeType, err := vs.ResolveRuntime(profileName)
 			if err != nil {
