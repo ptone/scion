@@ -116,7 +116,7 @@ No changes to `pkg/agent/manager.go`, `pkg/runtimebroker/handlers.go`'s `resolve
 
 ---
 
-## Follow-up: C1 — the record-less path must fail closed
+## Follow-up: the record-less path must fail closed
 
 Review found a critical gap in the D1 fix above: a record-less `List` entry carried no project identity at all, only a synthesized `"scion.name"`. Two different projects' actors that happened to produce the same synthesized slug (e.g. agent `dev` in project A and agent `dev` in project B, both started before a broker restart wiped their in-memory records) were indistinguishable to any caller that matches by slug — reproduced: an unscoped `Delete("dev")` deleted whichever of the two `ListActors` happened to return, non-deterministically. The pre-D1 code failed closed here (a no-op); the D1 fix as shipped failed open (a wrong-actor delete). The invariant this closes: **a slug lookup must never resolve to an actor whose ownership can't be verified.** A no-op is acceptable; a wrong-actor delete is not.
 
@@ -162,7 +162,7 @@ DeleteActor actor name = "a--b--c", want "a--c" ("a--b--c" must never match a lo
 
 **`-count=20`** on all new/changed `pkg/runtime` and `pkg/agent` substrate tests: pass, no flakes.
 
-## Follow-up: R2 — the D2 test left a stale fake in the process-wide memo
+## Follow-up: the profile-resolution test left a stale fake in the process-wide memo
 
 `SetSubstrateRuntimeBuilderForTest` swapped only the builder function; the `*SubstrateRuntime` instances a test built with it (each bound to an `httptest` server the test's own `t.Cleanup` later closes) stayed cached in `substrateRuntimes`, the process-wide memo `NewSubstrateRuntime` uses. Observed: `go test -count=2 -run TestResolveManagerForOpts_SubstrateProfiles ./pkg/runtimebroker/` failed after a 5-minute hang — the second run's `NewSubstrateRuntime` call for the same config got the first run's now-closed fake server back instead of building a fresh one.
 
@@ -170,7 +170,7 @@ DeleteActor actor name = "a--b--c", want "a--c" ("a--b--c" must never match a lo
 
 **Proof:** `go test -count=3 -run TestResolveManagerForOpts_Substrate ./pkg/runtimebroker/` — 3/3 pass, no hang (previously failed on the second iteration).
 
-## Follow-up: N1/N2 — remaining internal-process references
+## Follow-up: remaining internal-process references in comments and the log
 
 - `pkg/runtimebroker/substrate_manager_test.go`: a code comment cited an internal decision-maker instead of the technical reason. Replaced with "a comparison could itself drift out of sync with whatever actually determines a distinct instance" — the actual reason, already stated elsewhere in the same comment, without the citation.
 - This project log (the D2 section above): two lines named an internal role. Removed; the surrounding sentences already stated the technical reasoning without needing the attribution.
@@ -195,3 +195,79 @@ DeleteActor actor name = "a--b--c", want "a--c" ("a--b--c" must never match a lo
 - `pkg/runtimebroker/substrate_manager_test.go`: comment wording only.
 
 No changes to `pkg/agent/manager.go`, any other runtime, or the broker's generic (non-substrate-scoped) code paths. No `go.mod`/`go.sum` changes.
+
+---
+
+## Follow-up: a record-less actor is never resolvable by slug — synthesis removed
+
+The project-identity synthesis introduced by the previous follow-up (a record-less actor's agent slug and project labels, recovered from its actor name and verified against its own atespace) was itself found to be exploitable: verification only happened when the CALLING lookup's own filter happened to carry a project-ID key. Any lookup that selected an actor by slug alone — including the broker's actual `stopAgent`/`deleteAgent` call paths, which list agents unscoped at the runtime level and post-filter by project in broker memory — never exercised that verification at all. A single record-less actor in project A, with a same-slug request scoped to project B, resolved to project A's actor and could be stopped or deleted through it. Reproduced deterministically through the real broker handlers (`stopAgent`, `deleteAgent`, `LookupContainerID`), confirmed absent at the pre-D1 baseline, and confirmed a regression introduced by the synthesis work.
+
+**Decision: remove the synthesis entirely, rather than extend it further.** A record-less actor now reports `scion.name` equal to its own actor name — `containerName(project, agent)`, project-prefixed — exactly as before any recovery attempt existed, with no project labels synthesised either. `scion.agent=true` is still set, so the actor still appears in an unfiltered listing; it just can never be found by a bare slug or project filter. The record-having fix (a real in-memory record's slug is used as `AgentInfo.Name`) is unchanged and unaffected — this only concerns actors with no in-memory record for this runtime instance (e.g. right after a broker restart).
+
+This is a structural argument, not a patched special case: with record-less entries reporting their actor name (which always contains the project-prefixing separator a real agent slug can never contain), no query that matches by slug can ever match one, regardless of which project it's scoped to, which broker call path it goes through, or which of the broker's generic label-matching helpers are involved. Nothing in `pkg/agent`'s generic helpers needed to change for this — the class of bug they permit (treating an unlabeled entry as belonging to any project) simply never gets a chance to run, because the entry it would apply to never matches the initial slug filter in the first place.
+
+Consequence, accepted deliberately: a record-less actor cannot be stopped, deleted, exec'd into, or have its logs read by slug at all, from any project, until either its in-memory record is somehow restored or an operator identifies and removes it by other means (e.g. directly against the cluster). The durable fix is persisting agent records so they survive a broker restart in the first place; the generic slug-matching call path this exploited is tracked separately.
+
+### Removed
+
+- `substrateSynthesizedAgentName` and its unambiguous-inversion rule.
+- The two-pass tally in `List` that decided whether a record-less actor's candidate slug was safe to trust.
+- The atespace-based project-ID matching branch in `substrateLabelsMatch` (record-less entries never carry a project-ID-shaped label to match against anymore, so the branch had no remaining purpose); `substrateLabelsMatch` is back to its original four-parameter form.
+- Tests that only made sense with synthesis in place: a name-inversion unit-test table, a project-ID-scoped-lookup-discriminates test, and a three-level actor name test. Each is either removed or replaced by a test asserting the corresponding actor is now simply never matched.
+
+### Kept or added
+
+- The exact two-actor, same-slug, different-project scenario, both `ListActors` return orders: an unscoped delete finds neither actor.
+- A record-having actor's real slug is unaffected by an unrelated record-less actor whose actor name happens to end the same way — now exercised for both possible return orders deterministically (via a test-only override that replaces the fake's unordered map iteration with an explicit, chosen order), rather than relying on Go's randomized map iteration to happen to exercise the interesting order on some fraction of runs.
+- The record-having happy path (a real in-memory record's slug resolves and deletes correctly) is unchanged and still covered.
+- The unscoped record-less delete test now asserts a no-op (zero calls to the fake client, actor left in place) instead of asserting a successful delete.
+- New broker-level tests, added specifically for this follow-up: a real `*Server` bound to a real `*SubstrateRuntime` over the fake ateapi client, with a single record-less actor in project A, driving the actual `stopAgent`, `deleteAgent`, and `LookupContainerID` code paths with a request scoped to project B (must leave the actor untouched) and, separately, to project A itself (also untouched — the documented no-op, since nothing here can distinguish "the right project asked" from "an unverifiable actor exists" strongly enough to act on it).
+- The `List` doc comment now states the limitation directly: a record-less actor is never resolvable by slug, by design, and explains why an earlier attempt at recovering that resolution was reverted rather than iterated on further.
+
+### Fail-before evidence
+
+Runtime level, with the previous follow-up's synthesis code restored temporarily over today's test files:
+```
+Name = "orphaned-agent", want the actor name "myproj--orphaned-agent" ...
+List() with scion.name="sb-smoke-2" filter = [...one match...], want no matches (a record-less actor is never resolvable by slug)
+List(scion.project_id="aaaaaaaaaaaa") = [...one match...], want no matches (a record-less actor carries no project label to match, even for its own project)
+```
+
+Agent level, same temporary restoration:
+```
+DeleteActor called 2 times, want 0 (a record-less actor is never resolvable by slug)
+DeleteActorEgressPolicy called 2 times, want 0
+the record-less actor was removed — it must be untouched (documented no-op)
+```
+
+Broker level — the actual reported defect, reproduced through the real HTTP-facing handlers:
+```
+LookupContainerID("dev", projB) = "scion-aaaaaaaaaaaa/projA--dev", want "" — must never resolve to project A's actor
+projA's actor was removed by a project-B-scoped stop — it must be untouched
+projA's actor was removed by a project-B-scoped delete — it must be untouched
+LookupContainerID("dev", projA) = "scion-aaaaaaaaaaaa/projA--dev", want "" (documented no-op: a record-less actor is never resolvable by slug)
+projA's own actor was removed by a same-project stop — it must be untouched (documented no-op)
+projA's own actor was removed by a same-project delete — it must be untouched (documented no-op)
+```
+
+**Pass-after:** every test above passes; the broker-level tests specifically confirm the previously-reachable cross-project stop/delete/lookup no longer succeed, and that a same-project request is a clean no-op rather than an error.
+
+### Gate results (this follow-up)
+
+- `go build ./...` — pass.
+- `go vet` on `pkg/runtime/...`, `pkg/runtimebroker/...`, `pkg/agent/...`, `pkg/config/...` — pass, no output.
+- `gofmt -l` on every changed file — clean.
+- `go test -count=1` on the same package trees — all pass except the same pre-existing `TestNativeTelemetryPolicyEffectiveChildEnv/disabled` (`pkg/sciontool/supervisor`), not touched by this task.
+- `go test -race -count=1` on `pkg/runtime`, `pkg/runtimebroker`, `pkg/agent` — pass, no races.
+- `go test -count=50` on the new/changed substrate tests in all three packages — pass, no flakes.
+- `GOGC=40 golangci-lint run --new-from-rev=c3b6e821d --concurrency=1 ./...` — 0 issues.
+- Hygiene grep (`round [0-9]|sb-rev|sb-dev|sb-em|substrate-lead|finding #`, plus a second pass for bare finding-style references) over every file changed this follow-up — no hits, other than two pre-existing references in `pkg/runtimebroker/handlers.go` (an unrelated numbering scheme from before this branch existed, confirmed via history — not touched by this task).
+
+### Functions touched (this follow-up)
+
+- `pkg/runtime/substrate_runtime.go`: `SubstrateRuntime.List` (record-less entries no longer synthesise anything), `substrateLabelsMatch` (back to its original four-parameter form). `substrateSynthesizedAgentName` removed.
+- `pkg/runtime/substrate_runtime_test.go`: tests updated or replaced as described above.
+- `pkg/agent/substrate_delete_test.go`: tests updated or replaced as described above; added a deterministic-ordering override to the local fake client so an order-dependent scenario can be tested for both orders reliably.
+- `pkg/runtimebroker/substrate_cross_project_test.go` (new file): the broker-level regression tests described above.
+
+No changes to `pkg/agent/manager.go`, `pkg/runtimebroker/handlers.go`, any other runtime, or the broker's generic (non-substrate-scoped) code paths this follow-up. No `go.mod`/`go.sum` changes.
