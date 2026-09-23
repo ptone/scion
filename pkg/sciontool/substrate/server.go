@@ -246,16 +246,7 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 	if mode == 0 {
 		mode = defaultFileMode
 	}
-	if err := os.WriteFile(f.Path, content, mode); err != nil {
-		return err
-	}
-	// os.WriteFile's mode argument only applies to a newly created file's
-	// open(2) call, and even then is subject to the process umask. It has
-	// no effect at all on a file that already existed (e.g. baked into the
-	// image at a different mode) — WriteFile only truncates and rewrites
-	// its contents. Chmod explicitly so the bootstrap payload's requested
-	// mode always wins, regardless of umask or a pre-existing file.
-	if err := os.Chmod(f.Path, mode); err != nil {
+	if err := writeFileAtomicMode(dir, f.Path, content, mode, s.chownUID, s.chownGID); err != nil {
 		return err
 	}
 
@@ -263,9 +254,59 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 		for _, d := range created {
 			_ = os.Chown(d, s.chownUID, s.chownGID)
 		}
-		_ = os.Chown(f.Path, s.chownUID, s.chownGID)
 	}
 	return nil
+}
+
+// writeFileAtomicMode writes content to path without ever exposing it, even
+// transiently, at a mode wider than requested. A naive
+// os.WriteFile(path, content, mode) followed by os.Chmod(path, mode) — the
+// round 1 fix — has a real window between those two syscalls where a
+// pre-existing file at path (e.g. one baked into the image at a looser
+// mode, like 0644) holds the new secret content at its *old* mode. Anything
+// with read access under that old mode can read the secret during the
+// window (round 2 review finding N3, sb-rev-2).
+//
+// Instead: create a private temp file (os.CreateTemp defaults to 0600) in
+// the same directory as path (so the final rename lands on the same
+// filesystem and is therefore atomic — cross-filesystem renames are not),
+// fchmod and fchown it to the final target mode/owner *before* writing any
+// content, then rename it over path. By the time the content touches disk
+// the file already has its final permissions; the rename is atomic, so
+// there is never an instant where path exists with the new content under
+// the wrong mode or owner — including path not existing yet at all.
+func writeFileAtomicMode(dir, path string, content []byte, mode os.FileMode, uid, gid int) (err error) {
+	tmp, err := os.CreateTemp(dir, ".bootstrap-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	// Only clean up the temp file on failure: on success it has already
+	// been renamed to path, so tmpPath no longer refers to anything.
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err = tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if uid >= 0 && gid >= 0 {
+		if err = tmp.Chown(uid, gid); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+	}
+	if _, err = tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {

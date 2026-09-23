@@ -22,7 +22,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -241,6 +243,89 @@ func TestWriteBootstrapFile_EnforcesModeOnPreExistingFile(t *testing.T) {
 	if string(got) != "fresh" {
 		t.Errorf("content = %q, want %q", got, "fresh")
 	}
+}
+
+// TestWriteBootstrapFile_SetsModeAndOwnerAtomically covers review finding
+// N3 (round 2, sb-rev-2): the round 1 fix (os.WriteFile then os.Chmod) left
+// a window, for a pre-existing file, where the new secret content was
+// readable at the file's *old* mode between the two syscalls. This asserts
+// the write-to-temp-then-rename fix's outcome: the final file has exactly
+// the requested mode and owner, and the content is correct. (The absence of
+// a readable-at-wrong-mode window isn't itself observable from a
+// single-threaded test — what's verifiable and what actually matters here
+// is that writeFileAtomicMode never produces a file with the wrong
+// mode/owner, which this pins for both the fresh-file and
+// pre-existing-file cases.)
+func TestWriteBootstrapFile_SetsModeAndOwnerAtomically(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("ownership check uses syscall.Stat_t (Linux only)")
+	}
+
+	uid := os.Getuid()
+	gid := os.Getgid()
+
+	assertModeAndOwner := func(t *testing.T, path string, wantMode os.FileMode, wantContent string) {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if info.Mode().Perm() != wantMode {
+			t.Errorf("mode = %v, want %v", info.Mode().Perm(), wantMode)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatal("could not read platform-specific stat info")
+		}
+		if int(stat.Uid) != uid {
+			t.Errorf("uid = %d, want %d", stat.Uid, uid)
+		}
+		if int(stat.Gid) != gid {
+			t.Errorf("gid = %d, want %d", stat.Gid, gid)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if string(got) != wantContent {
+			t.Errorf("content = %q, want %q", got, wantContent)
+		}
+	}
+
+	t.Run("fresh file", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "fresh.json")
+
+		srv := NewServer(WithChownOwner(uid, gid))
+		f := BootstrapFile{
+			Path:       filePath,
+			Mode:       0o600,
+			ContentB64: base64.StdEncoding.EncodeToString([]byte("fresh-secret")),
+		}
+		if err := srv.writeBootstrapFile(f); err != nil {
+			t.Fatalf("writeBootstrapFile: %v", err)
+		}
+		assertModeAndOwner(t, filePath, 0o600, "fresh-secret")
+	})
+
+	t.Run("pre-existing file at a different mode", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "existing.json")
+		if err := os.WriteFile(filePath, []byte("stale"), 0o644); err != nil {
+			t.Fatalf("failed to pre-create file: %v", err)
+		}
+
+		srv := NewServer(WithChownOwner(uid, gid))
+		f := BootstrapFile{
+			Path:       filePath,
+			Mode:       0o640,
+			ContentB64: base64.StdEncoding.EncodeToString([]byte("replaced-secret")),
+		}
+		if err := srv.writeBootstrapFile(f); err != nil {
+			t.Fatalf("writeBootstrapFile: %v", err)
+		}
+		assertModeAndOwner(t, filePath, 0o640, "replaced-secret")
+	})
 }
 
 func TestBootstrap_RejectsRelativePath(t *testing.T) {
