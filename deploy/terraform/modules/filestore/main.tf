@@ -10,6 +10,9 @@ resource "google_filestore_instance" "this" {
   location = var.zone
   tier     = var.tier
 
+  deletion_protection_enabled = var.deletion_protection
+  deletion_protection_reason  = var.deletion_protection ? "Shared Filestore instance; hubs read it via shared-lookup. Flip deletion_protection to destroy (design §3.10)." : null
+
   file_shares {
     capacity_gb = var.capacity_gb
     name        = var.share_name

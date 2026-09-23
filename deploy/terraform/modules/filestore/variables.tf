@@ -41,3 +41,9 @@ variable "share_name" {
   type        = string
   default     = "scion"
 }
+
+variable "deletion_protection" {
+  description = "API-level deletion protection (google_filestore_instance.deletion_protection_enabled). This is shared infra: leave true except when intentionally tearing down the whole stack (design §3.10)."
+  type        = bool
+  default     = true
+}

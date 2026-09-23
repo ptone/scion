@@ -14,6 +14,8 @@ resource "google_sql_database_instance" "this" {
     edition           = var.edition
     availability_type = var.availability_type
 
+    deletion_protection_enabled = var.deletion_protection
+
     ip_configuration {
       ipv4_enabled    = false
       private_network = var.network_id

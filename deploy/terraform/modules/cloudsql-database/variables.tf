@@ -1,0 +1,25 @@
+variable "project_id" {
+  description = "GCP project ID."
+  type        = string
+}
+
+variable "instance_name" {
+  description = "Name of the shared Cloud SQL instance (shared.sql.instance_name from shared-lookup)."
+  type        = string
+}
+
+variable "hub_name" {
+  description = "Hub name. The database is \"<hub_name with - replaced by _>\" and the user is \"<hub_name>\"."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{2,15}$", var.hub_name))
+    error_message = "hub_name must match ^[a-z][a-z0-9-]{2,15}$ (design §3.8)."
+  }
+}
+
+variable "deletion_policy" {
+  description = "Optional google_sql_database deletion_policy override (e.g. \"ABANDON\"). Left unset (provider default) unless phase 1 validation shows DROP failing because the hub user owns objects; see the validation file's \"Design deltas\" section."
+  type        = string
+  default     = null
+}
