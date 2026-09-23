@@ -19,6 +19,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -44,25 +46,68 @@ const defaultTemplateReadyTimeout = 10 * time.Minute
 const templateReadyPollInterval = 5 * time.Second
 
 // substrateTemplateName computes the content-addressed ActorTemplate name
-// (phase1-spec.md §2.2 step 3): "scion-" + first 12 hex chars of
-// sha256(image digest + sandbox class + resources + snapshot scope +
-// substrate-serve/v1). Same inputs always produce the same name, so
-// concurrent Runs for the same effective template converge on one
+// (phase1-spec.md §2.2 step 3). Same inputs always produce the same name,
+// so concurrent Runs for the same effective template converge on one
 // CreateActorTemplate instead of racing to create distinct ones.
-func substrateTemplateName(imageDigest, sandboxClass string, resources *api.ResourceSpec) string {
+//
+// The hash covers every input that changes what buildActorTemplate
+// produces: image digest, sandbox class, sandbox config name, worker
+// selector, snapshot storage location, the *effective* resources (resolved
+// against config.BuiltinDefaultResources when resources is nil — hashing
+// the nil pointer as "" while buildActorTemplate substitutes a real default
+// would let a change to that default silently reuse the old golden
+// template), the hardcoded snapshot scope, and the entrypoint version. This
+// is a deliberate deviation from the spec's literal hash-input list (image
+// digest + sandbox class + resources + scope + entrypoint version only) —
+// see review round 1, Consider #7: those other fields are template content
+// too, and changing them in settings must not silently reuse a stale
+// golden template.
+func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) string {
+	effectiveResources := resources
+	if effectiveResources == nil {
+		effectiveResources = config.BuiltinDefaultResources()
+	}
+
 	h := sha256.New()
 	// hash.Hash.Write never returns an error (see the hash.Hash doc
 	// comment), so the error from Fprintf is deliberately discarded rather
 	// than checked.
-	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s",
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%s",
 		imageDigest,
-		sandboxClass,
-		resourcesCacheKey(resources),
+		sc.SandboxClass,
+		sc.SandboxConfigName,
+		workerSelectorCacheKey(sc.WorkerSelector),
+		sc.SnapshotStorage,
+		resourcesCacheKey(effectiveResources),
 		"DATA", // on_pause/on_commit scope, hardcoded for Phase 1
 		substrateServeEntrypointVersion,
 	)
 	sum := hex.EncodeToString(h.Sum(nil))
 	return "scion-" + sum[:12]
+}
+
+// workerSelectorCacheKey renders a worker-selector match-labels map into a
+// stable string for substrateTemplateName's hash input: sorted by key, so
+// map iteration order never changes the hash.
+func workerSelectorCacheKey(m map[string]string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(m[k])
+	}
+	return b.String()
 }
 
 // resourcesCacheKey renders a *api.ResourceSpec into a stable string for
