@@ -19,7 +19,7 @@ import (
 	"testing"
 )
 
-func TestValidateEgressAllow_Accepts(t *testing.T) {
+func TestValidateEgressAllow_AcceptsPublicHostnames(t *testing.T) {
 	cases := [][]string{
 		nil,
 		{},
@@ -27,9 +27,6 @@ func TestValidateEgressAllow_Accepts(t *testing.T) {
 		{"api.example.com"},
 		{"*.example.com"},
 		{"registry.npmjs.org", "pypi.org", "*.pypi.org"},
-		{"35.190.0.0/16"},       // external CIDR, no overlap
-		{"8.8.8.8"},             // external bare IP
-		{"2001:db8::/32"},       // external IPv6 CIDR, no overlap
 		{"  api.example.com  "}, // surrounding whitespace trimmed
 	}
 	for _, entries := range cases {
@@ -60,14 +57,30 @@ func TestValidateEgressAllow_RejectsCatchAlls(t *testing.T) {
 	}
 }
 
-func TestValidateEgressAllow_RejectsPrivateCIDROverlap(t *testing.T) {
+// TestValidateEgressAllow_RejectsAllIPAndCIDR is review round 4, Required
+// R4-2: Phase 1 rejects every IP address and CIDR, canonical or not,
+// public or private, with no exceptions — Substrate's own
+// HostnameRule.patterns (which is where every egress_allow entry that
+// passes validation ends up) explicitly rejects IP addresses, so an entry
+// that validated as an "allowed IP" could never actually be sent in the
+// first place. CIDRRule support is deferred past Phase 1.
+func TestValidateEgressAllow_RejectsAllIPAndCIDR(t *testing.T) {
 	cases := []string{
+		// Previously "accepted, no overlap" (round 1-3's overlap-based
+		// model) — now rejected regardless, since there is no longer an
+		// "allowed IP" category at all.
+		"35.190.0.0/16",
+		"8.8.8.8",
+		"2001:db8::/32",
+		"2001:4860:4860::8888",
+		"1.1.1.0/24",
+		// Previously rejected for overlapping a private/in-cluster range —
+		// still rejected, now for the blanket reason.
 		"10.0.0.0/8",
-		"10.1.2.0/24", // subset of 10.0.0.0/8
+		"10.1.2.0/24",
 		"172.16.0.0/12",
-		"172.20.1.0/24", // subset of 172.16.0.0/12
 		"192.168.0.0/16",
-		"192.168.1.1", // bare IP inside 192.168.0.0/16
+		"192.168.1.1",
 		"100.64.0.0/10",
 		"169.254.0.0/16",
 		"127.0.0.1",
@@ -76,11 +89,53 @@ func TestValidateEgressAllow_RejectsPrivateCIDROverlap(t *testing.T) {
 		"fe80::/10",
 		"::1",
 		"::1/128",
-		"8.0.0.0/6", // a supernet that CONTAINS 10.0.0.0/8 — overlap detected either direction
+		"8.0.0.0/6",
+		"0.0.0.0/8",
+		"::",
+		"240.0.0.0/4",
+		"2002::/16",
+		"64:ff9b::/96",
+		// Canonical per net/netip but still an IP — round 3's O-1 additions.
+		"::127.0.0.1",
+		"::7f00:1",
+		"64:ff9b:1::1",
+		"64:ff9b:1::/48",
+		"2001::1",
+		"2001::/32",
+		// IPv4-mapped IPv6, superset/subset forms — the overlap logic these
+		// exercised no longer exists, but they are still IP-shaped and
+		// still rejected.
+		"10.0.0.0/7",
+		"1.0.0.0/1",
+		"::ffff:10.0.0.1",
+		"::ffff:10.0.0.0/104",
 	}
 	for _, entry := range cases {
-		if err := ValidateEgressAllow([]string{entry}); err == nil {
-			t.Errorf("ValidateEgressAllow([%q]) = nil, want a private-range rejection", entry)
+		err := ValidateEgressAllow([]string{entry})
+		if err == nil {
+			t.Errorf("ValidateEgressAllow([%q]) = nil, want an IP/CIDR rejection", entry)
+			continue
+		}
+		if !strings.Contains(err.Error(), "IP/CIDR egress rules not supported in Phase 1") {
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to contain the exact Phase 1 IP/CIDR message", entry, err)
+		}
+	}
+}
+
+// TestValidateEgressAllow_IPRejectionNamesTheExactMessage double-checks the
+// three entries review round 4 explicitly asked to move from "accepted" to
+// "rejected with this exact message": 8.8.8.8, 2001:4860:4860::8888, and
+// 1.1.1.0/24 (all previously on the no-false-positive list — see
+// TestValidateEgressAllow_NoFalsePositives, which no longer includes them).
+func TestValidateEgressAllow_IPRejectionNamesTheExactMessage(t *testing.T) {
+	const wantMsg = "IP/CIDR egress rules not supported in Phase 1"
+	for _, entry := range []string{"8.8.8.8", "2001:4860:4860::8888", "1.1.1.0/24"} {
+		err := ValidateEgressAllow([]string{entry})
+		if err == nil {
+			t.Fatalf("ValidateEgressAllow([%q]) = nil, want a rejection", entry)
+		}
+		if !strings.Contains(err.Error(), wantMsg) {
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to contain %q", entry, err, wantMsg)
 		}
 	}
 }
@@ -106,13 +161,13 @@ func TestValidateEgressAllow_RejectsInClusterHostSuffixes(t *testing.T) {
 }
 
 func TestValidateEgressAllow_NamesTheOffendingEntryAmongValidOnes(t *testing.T) {
-	entries := []string{"api.example.com", "registry.npmjs.org", "10.0.0.0/8", "pypi.org"}
+	entries := []string{"api.example.com", "registry.npmjs.org", "foo.pod", "pypi.org"}
 	err := ValidateEgressAllow(entries)
 	if err == nil {
-		t.Fatal("ValidateEgressAllow() = nil, want an error for the embedded private CIDR")
+		t.Fatal("ValidateEgressAllow() = nil, want an error for the embedded non-public-suffix entry")
 	}
-	if !strings.Contains(err.Error(), "10.0.0.0/8") {
-		t.Errorf("error = %v, want it to name 10.0.0.0/8 specifically, not the whole list", err)
+	if !strings.Contains(err.Error(), "foo.pod") {
+		t.Errorf("error = %v, want it to name foo.pod specifically, not the whole list", err)
 	}
 }
 
@@ -184,23 +239,6 @@ func TestValidateEgressAllow_RejectsBypasses(t *testing.T) {
 	}
 }
 
-// TestValidateEgressAllow_CIDRLogicUnaffectedByFix confirms the existing
-// CIDR overlap/rejection logic sb-rev-2 confirmed sound is unaffected by
-// the fix: supersets, subsets, and IPv4-mapped IPv6 addresses.
-func TestValidateEgressAllow_CIDRLogicUnaffectedByFix(t *testing.T) {
-	cases := []string{
-		"10.0.0.0/7",          // superset of 10.0.0.0/8
-		"1.0.0.0/1",           // superset covering 127.0.0.0/8 and others
-		"::ffff:10.0.0.1",     // IPv4-mapped IPv6, maps into 10.0.0.0/8
-		"::ffff:10.0.0.0/104", // IPv4-mapped IPv6 CIDR
-	}
-	for _, entry := range cases {
-		if err := ValidateEgressAllow([]string{entry}); err == nil {
-			t.Errorf("ValidateEgressAllow([%q]) = nil, want a private-range rejection", entry)
-		}
-	}
-}
-
 // TestValidateEgressAllow_TrailingDotNormalization confirms normalization
 // doesn't over-reject: a trailing dot on an otherwise-fine public hostname
 // is stripped, not treated as an error, and case is folded too.
@@ -217,24 +255,39 @@ func TestValidateEgressAllow_TrailingDotNormalization(t *testing.T) {
 	}
 }
 
-// TestValidateEgressAllow_KnownNamespaceHeuristicAllowsPunycode confirms
-// the "no public TLD is hyphenated" heuristic doesn't reject a legitimate
-// IDNA punycode TLD.
-func TestValidateEgressAllow_KnownNamespaceHeuristicAllowsPunycode(t *testing.T) {
+// TestValidateEgressAllow_PunycodeTLD confirms a legitimate IDNA punycode
+// ccTLD (xn--p1ai is Russia's Cyrillic ".рф") passes the public-suffix
+// check like any other real, ICANN-delegated TLD.
+func TestValidateEgressAllow_PunycodeTLD(t *testing.T) {
 	if err := ValidateEgressAllow([]string{"example.xn--p1ai"}); err != nil {
 		t.Errorf("ValidateEgressAllow([example.xn--p1ai]) = %v, want nil (punycode TLD)", err)
 	}
 }
 
-// TestValidateEgressAllow_AllBypassesRounds1Through3 is the consolidated
-// regression suite review round 3 (substrate-lead's allowlist direction)
-// asked for: every bypass found across rounds 1, 2, and 3, in one table, so
-// the full history is locked in against the current (allowlist-first)
-// implementation rather than scattered across per-round test functions.
-// See the project log
-// (.design/project-log/2026-09-23-substrate-phase1-round3-fixes.md) for the
-// round-by-round provenance of each row.
-func TestValidateEgressAllow_AllBypassesRounds1Through3(t *testing.T) {
+// TestValidateEgressAllow_RejectsWildcardOverPublicSuffix is review round
+// 4's explicit wildcard rule: a leading "*." is allowed, but the remainder
+// must independently pass the same public-suffix rule. "*.com" and
+// "*.co.uk" are rejected because their remainder ("com", "co.uk") is
+// itself a public suffix with nothing beneath it; "*.example.com" passes
+// because "example.com" has "example" beneath the "com" suffix.
+func TestValidateEgressAllow_RejectsWildcardOverPublicSuffix(t *testing.T) {
+	for _, entry := range []string{"*.com", "*.co.uk"} {
+		if err := ValidateEgressAllow([]string{entry}); err == nil {
+			t.Errorf("ValidateEgressAllow([%q]) = nil, want a rejection (wildcard over a bare public suffix)", entry)
+		}
+	}
+	if err := ValidateEgressAllow([]string{"*.example.com"}); err != nil {
+		t.Errorf("ValidateEgressAllow([*.example.com]) = %v, want nil", err)
+	}
+}
+
+// TestValidateEgressAllow_AllBypassesRounds1Through4 is the consolidated
+// regression suite: every bypass found across all four review rounds, in
+// one table, so the full history stays locked in against whatever the
+// validator becomes next rather than being scattered across per-round test
+// functions. See the project log entries for
+// substrate-phase1-round{3,4}-fixes.md for round-by-round provenance.
+func TestValidateEgressAllow_AllBypassesRounds1Through4(t *testing.T) {
 	cases := []struct {
 		name  string
 		entry string
@@ -288,6 +341,33 @@ func TestValidateEgressAllow_AllBypassesRounds1Through3(t *testing.T) {
 		{"round3: numeric last label", "foo.123"},
 		{"round3: hex-shaped last label", "foo.0x7f"},
 		{"round3: space in label", "git hub.com"},
+
+		// --- Round 4 (R4-1: Kubernetes pod-IP DNS names and other
+		// TLD-shaped-but-not-public zones; R4-2: IP/CIDR entirely) ---
+		{"round4 R4-1: pod DNS name encoding the GCE metadata IP", "169-254-169-254.default.pod"},
+		{"round4 R4-1: pod DNS name encoding loopback", "127-0-0-1.default.pod"},
+		{"round4 R4-1: pod DNS name in a real namespace", "10-0-0-1.kube-system.pod"},
+		{"round4 R4-1: wildcard pod DNS name (every IPv4 via default ns)", "*.default.pod"},
+		{"round4 R4-1: RFC 8375 home.arpa local zone", "foo.home.arpa"},
+		{"round4 R4-1: .lan local zone", "foo.lan"},
+		{"round4 R4-1: .corp made-up zone", "foo.corp"},
+		{"round4 R4-1: .local (also caught by the suffix blocklist)", "foo.local"},
+		{"round4 R4-1: .internal (also caught by the suffix blocklist)", "foo.internal"},
+		{"round4 R4-1: not a real TLD (typo of .com)", "example.kom"},
+		{"round4 R4-2: bare public IP", "8.8.8.8"},
+		{"round4 R4-2: bare public IPv6", "2001:4860:4860::8888"},
+		{"round4 R4-2: public CIDR", "1.1.1.0/24"},
+
+		// --- Round 4, suffix-rule refinement (substrate-lead's approved
+		// "option A" refinement, same round): the whole .arpa TLD, and a
+		// bare/wildcarded PRIVATE-suffix platform domain with nothing
+		// beneath it. ---
+		{"round4 refinement: bare home.arpa", "home.arpa"},
+		{"round4 refinement: foo.home.arpa", "foo.home.arpa"},
+		{"round4 refinement: reverse DNS in-addr.arpa", "1.0.0.10.in-addr.arpa"},
+		{"round4 refinement: bare private-suffix platform domain", "googleapis.com"},
+		{"round4 refinement: wildcard over a private-suffix platform domain", "*.googleapis.com"},
+		{"round4 refinement: wildcard over github.io", "*.github.io"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -298,24 +378,99 @@ func TestValidateEgressAllow_AllBypassesRounds1Through3(t *testing.T) {
 	}
 }
 
+// TestValidateEgressAllow_R4_1RejectionReason spot-checks the rejection
+// REASON (not just that an error occurred) for a sample of the R4-1 rows —
+// review round 4's FYI asked for this "where you can". These must be
+// rejected specifically because their top-level domain fails the
+// ICANN-public-suffix check, not for some unrelated reason (e.g. the
+// hyphens in the pod-IP-encoding labels must not trip the LDH grammar
+// check instead — hyphens are valid mid-label).
+func TestValidateEgressAllow_R4_1RejectionReason(t *testing.T) {
+	cases := []string{
+		"169-254-169-254.default.pod",
+		"10-0-0-1.kube-system.pod",
+		"foo.lan",
+		"foo.corp",
+		"example.kom",
+	}
+	for _, entry := range cases {
+		err := ValidateEgressAllow([]string{entry})
+		if err == nil {
+			t.Fatalf("ValidateEgressAllow([%q]) = nil, want a rejection", entry)
+		}
+		if !strings.Contains(err.Error(), "ICANN-managed public suffix") {
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to reject for failing the public-suffix check specifically", entry, err)
+		}
+	}
+}
+
+// TestValidateEgressAllow_ArpaRejectionReason spot-checks the rejection
+// reason for the ".arpa" special case, which is rejected before the
+// generic ICANN-suffix check ever runs (see egressAllowSuffixOK's doc
+// comment: "arpa" IS itself ICANN-listed, so the generic check alone would
+// not catch it).
+func TestValidateEgressAllow_ArpaRejectionReason(t *testing.T) {
+	cases := []string{"home.arpa", "foo.home.arpa", "1.0.0.10.in-addr.arpa"}
+	for _, entry := range cases {
+		err := ValidateEgressAllow([]string{entry})
+		if err == nil {
+			t.Fatalf("ValidateEgressAllow([%q]) = nil, want a rejection", entry)
+		}
+		if !strings.Contains(err.Error(), "arpa") {
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to name the arpa special case", entry, err)
+		}
+	}
+}
+
+// TestValidateEgressAllow_PrivateSuffixPlatformRejectionReason spot-checks
+// the rejection reason for a bare or wildcarded PRIVATE-suffix platform
+// domain (googleapis.com, github.io): rejected because the domain IS its
+// own matched suffix, with nothing beneath it — not because the suffix
+// isn't ICANN-managed (it doesn't need to be, per the refinement).
+func TestValidateEgressAllow_PrivateSuffixPlatformRejectionReason(t *testing.T) {
+	cases := []string{"googleapis.com", "*.googleapis.com", "*.github.io"}
+	for _, entry := range cases {
+		err := ValidateEgressAllow([]string{entry})
+		if err == nil {
+			t.Fatalf("ValidateEgressAllow([%q]) = nil, want a rejection", entry)
+		}
+		if !strings.Contains(err.Error(), "itself a public suffix") {
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to reject because the entry IS its own suffix", entry, err)
+		}
+	}
+}
+
 // TestValidateEgressAllow_NoFalsePositives is review round 3's explicit
-// "no false positives" list (Addendum A), plus O-3's localhost/IDN/
-// uppercase coverage: legitimate public hostnames and IPs that the
-// allowlist grammar must keep accepting.
+// "no false positives" list plus round 4's N4-1 hex-alphabet-domain
+// additions and the suffix-rule refinement's required accepts
+// (storage.googleapis.com, foo.github.io — both on PRIVATE-section PSL
+// platforms, with a label beneath the platform's own suffix). The three
+// IP/CIDR entries (8.8.8.8, 2001:4860:4860::8888, 1.1.1.0/24) that were on
+// this list before round 4 are gone — see
+// TestValidateEgressAllow_IPRejectionNamesTheExactMessage, which asserts
+// they're now rejected.
 func TestValidateEgressAllow_NoFalsePositives(t *testing.T) {
 	cases := []string{
 		"api.anthropic.com",
 		"github.com",
 		"registry.npmjs.org",
-		"storage.googleapis.com",
 		"my-host.example.com",
 		"*.github.com",
-		"GitHub.COM.", // uppercase + trailing dot (O-3)
+		"GitHub.COM.", // uppercase + trailing dot
 		"xn--80ak6aa92e.com",
-		"foo.xn--p1ai", // IDNA punycode TLD (O-3)
-		"8.8.8.8",
-		"2001:4860:4860::8888",
-		"1.1.1.0/24",
+		"foo.xn--p1ai", // IDNA punycode TLD
+		// Suffix-rule refinement: real hostnames on PRIVATE-PSL-suffix
+		// multi-tenant platforms, with a label beneath the platform's own
+		// suffix.
+		"storage.googleapis.com",
+		"foo.github.io",
+		// N4-1: real, unrelated domains whose labels happen to spell
+		// hex-alphabet words. Must not be mistaken for an IP address.
+		"cafe.de",
+		"dead.beef.com",
+		"abc.de",
+		"fab.be",
+		"adcb.ae",
 	}
 	for _, entry := range cases {
 		if err := ValidateEgressAllow([]string{entry}); err != nil {
@@ -340,24 +495,6 @@ func TestValidateEgressAllow_LocalhostForms(t *testing.T) {
 	for _, entry := range cases {
 		if err := ValidateEgressAllow([]string{entry}); err == nil {
 			t.Errorf("ValidateEgressAllow([%q]) = nil, want a rejection (localhost form)", entry)
-		}
-	}
-}
-
-// TestValidateEgressAllow_O1CIDRs is review round 3's O-1: the three
-// additional IPv4-embedding IPv6 ranges added to the blocklist.
-func TestValidateEgressAllow_O1CIDRs(t *testing.T) {
-	cases := []string{
-		"::127.0.0.1",    // IPv4-compatible IPv6 (deprecated), in ::/96
-		"::7f00:1",       // same range, hex form
-		"64:ff9b:1::1",   // RFC 8215 local-use NAT64
-		"64:ff9b:1::/48", // same, as a CIDR
-		"2001::1",        // Teredo client address
-		"2001::/32",      // Teredo prefix itself
-	}
-	for _, entry := range cases {
-		if err := ValidateEgressAllow([]string{entry}); err == nil {
-			t.Errorf("ValidateEgressAllow([%q]) = nil, want a rejection (O-1 CIDR)", entry)
 		}
 	}
 }

@@ -94,13 +94,23 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 
 	for _, h := range sc.EgressAllow {
 		// Send exactly the string ValidateEgressAllow validated, not just a
-		// trimmed one: it validates the normalized form (lowercased, at
-		// most one trailing dot), and Substrate's own HostnameRule requires
-		// a lowercase name with no trailing dot. An entry like
-		// "GitHub.COM." passes validation but would be rejected by the
-		// Substrate API if sent unnormalized (review round 3, "validate
-		// what you send").
-		add(config.NormalizeEgressAllowEntry(h))
+		// trimmed one: NormalizeEgressAllowEntry validates AND returns the
+		// canonical form in one call, precisely so the two can never drift
+		// apart (rounds 3 and 4 of review each found a "validate what you
+		// send" gap of that shape). An entry like "GitHub.COM." validates
+		// fine but would be rejected by Substrate's API if sent
+		// unnormalized, since HostnameRule requires a lowercase name with
+		// no trailing dot.
+		//
+		// The error is ignored here, not silently: r.cfg.Validate() (called
+		// at the top of Run, before this is ever reached) already ran every
+		// sc.EgressAllow entry through this exact function, so an error
+		// here would mean Run's own guard was bypassed. Skip rather than
+		// panic or fail Run a second time for something that should be
+		// unreachable.
+		if normalized, err := config.NormalizeEgressAllowEntry(h); err == nil {
+			add(normalized)
+		}
 	}
 
 	sort.Strings(hosts)

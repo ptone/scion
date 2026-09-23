@@ -15,6 +15,8 @@
 package runtime
 
 import (
+	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -97,6 +99,93 @@ func TestSubstrateEgressHostnames_SendsNormalizedEgressAllowEntries(t *testing.T
 	}
 	if !containsHost(hosts, "registry.npmjs.org") {
 		t.Errorf("substrateEgressHostnames() = %v, want the normalized form \"registry.npmjs.org\"", hosts)
+	}
+}
+
+// TestSubstrateEgressHostnames_RejectsIPShapedEgressAllow is half of
+// review round 4's R4-2 test requirement: no IP or CIDR egress_allow entry
+// ever reaches substrateEgressHostnames' output, because
+// config.NormalizeEgressAllowEntry (called for every sc.EgressAllow entry)
+// now rejects all of them outright. See
+// TestBuildEgressPolicy_PatternsMatchInputVerbatim for the other half —
+// that buildEgressPolicy sends exactly this list, unmodified, so nothing
+// IP-shaped can be reintroduced downstream either.
+func TestSubstrateEgressHostnames_RejectsIPShapedEgressAllow(t *testing.T) {
+	sc := config.V1SubstrateConfig{EgressAllow: []string{
+		"8.8.8.8",
+		"10.0.0.0/8",
+		"2001:4860:4860::8888",
+		"api.example.com",
+	}}
+	hosts := substrateEgressHostnames(RunConfig{}, map[string]string{}, sc)
+
+	for _, h := range hosts {
+		if _, err := netip.ParseAddr(h); err == nil {
+			t.Errorf("substrateEgressHostnames() = %v, contains an IP address %q", hosts, h)
+		}
+		if strings.Contains(h, "/") {
+			t.Errorf("substrateEgressHostnames() = %v, contains a CIDR-shaped entry %q", hosts, h)
+		}
+	}
+	if containsHost(hosts, "8.8.8.8") || containsHost(hosts, "10.0.0.0/8") || containsHost(hosts, "2001:4860:4860::8888") {
+		t.Errorf("substrateEgressHostnames() = %v, an IP/CIDR egress_allow entry reached the pattern list", hosts)
+	}
+	if !containsHost(hosts, "api.example.com") {
+		t.Errorf("substrateEgressHostnames() = %v, want the valid hostname entry present", hosts)
+	}
+}
+
+// TestBuildEgressPolicy_PatternsMatchInputVerbatim is review round 4's
+// R4-2 buildEgressPolicy test: every string in hostnames lands in
+// HostnameRule.patterns, in order, unmodified — no re-normalization, no
+// mangling, and (paired with
+// TestSubstrateEgressHostnames_RejectsIPShapedEgressAllow, which keeps
+// IP/CIDR entries out of that input list in the first place) nothing
+// IP-shaped ever reaches Patterns. Also confirms CIDRRule is never set:
+// Phase 1 sends everything as HostnameRule.patterns or not at all (review
+// round 4, R4-2).
+func TestBuildEgressPolicy_PatternsMatchInputVerbatim(t *testing.T) {
+	hostnames := []string{"api.example.com", "*.github.com", "registry.npmjs.org"}
+	req := buildEgressPolicy("scion-proj", "agent-a", hostnames)
+
+	rules := req.GetEgressPolicy().GetRules()
+	if len(rules) != 1 {
+		t.Fatalf("buildEgressPolicy() = %d rules, want 1", len(rules))
+	}
+	if rules[0].GetCidrs() != nil {
+		t.Errorf("buildEgressPolicy() set a CIDRRule; Phase 1 never sends one")
+	}
+	patterns := rules[0].GetHostnames().GetPatterns()
+	if len(patterns) != len(hostnames) {
+		t.Fatalf("buildEgressPolicy() patterns = %v, want exactly %v", patterns, hostnames)
+	}
+	for i, want := range hostnames {
+		if patterns[i] != want {
+			t.Errorf("buildEgressPolicy() pattern[%d] = %q, want %q (verbatim passthrough)", i, patterns[i], want)
+		}
+	}
+}
+
+// TestSubstrateEgressPolicy_EndToEndNoIPPatterns wires
+// substrateEgressHostnames straight into buildEgressPolicy, the same way
+// Run does, and confirms end to end that an operator's IP/CIDR
+// egress_allow entries never appear in the actor's EgressPolicy, while a
+// hostname entry does — normalized.
+func TestSubstrateEgressPolicy_EndToEndNoIPPatterns(t *testing.T) {
+	sc := config.V1SubstrateConfig{EgressAllow: []string{
+		"8.8.8.8",
+		"10.0.0.0/8",
+		"GitHub.COM.",
+	}}
+	hosts := substrateEgressHostnames(RunConfig{}, map[string]string{}, sc)
+	req := buildEgressPolicy("scion-proj", "agent-a", hosts)
+	patterns := req.GetEgressPolicy().GetRules()[0].GetHostnames().GetPatterns()
+
+	if containsHost(patterns, "8.8.8.8") || containsHost(patterns, "10.0.0.0/8") {
+		t.Errorf("HostnameRule.patterns = %v, an IP/CIDR egress_allow entry reached it", patterns)
+	}
+	if !containsHost(patterns, "github.com") {
+		t.Errorf("HostnameRule.patterns = %v, want the normalized form of GitHub.COM.", patterns)
 	}
 }
 
