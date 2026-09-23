@@ -136,3 +136,92 @@ func TestV1SubstrateConfig_Validate(t *testing.T) {
 		t.Errorf("error = %v, want it to name the egress_allow field", err)
 	}
 }
+
+// TestValidateEgressAllow_RejectsBypasses covers every bypass sb-rev-2
+// (review round 2, Required R2) confirmed with a scratch test: each of
+// these returned nil from the pre-fix ValidateEgressAllow.
+func TestValidateEgressAllow_RejectsBypasses(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry string
+	}{
+		// Fix step 1: trailing-dot FQDNs defeat suffix matching.
+		{"trailing dot on .svc.cluster.local", "atenet-router.ate-system.svc.cluster.local."},
+		{"trailing dot, uppercase .SVC", "foo.SVC."},
+
+		// Fix step 5: Kubernetes short names via the cluster DNS search path.
+		{"router short name", "atenet-router.ate-system"},
+		{"api short name", "api.ate-system"},
+		{"kubernetes default short name", "kubernetes.default"},
+
+		// Fix step 4: single-label hostnames.
+		{"GCE metadata alias", "metadata"},
+		{"bare cluster domain", "cluster.local"}, // also caught by the .local suffix
+
+		// Fix step 6: unspecified addresses.
+		{"0.0.0.0/8 range", "0.0.0.0/8"},
+		{"IPv6 unspecified", "::"},
+
+		// Fix step 2/3: non-canonical IP spellings.
+		{"hex IP alias", "0x7f000001"},
+		{"decimal IP alias", "2130706433"},
+		{"partial dotted-quad", "127.1"},
+		{"bracketed IPv6", "[::1]"},
+		{"IPv6 with zone id", "fe80::1%eth0"},
+		{"host:port", "10.0.0.1:443"},
+
+		// O2 additions: reserved / IPv4-in-IPv6 transition ranges.
+		{"Class E reserved", "240.0.0.0/4"},
+		{"6to4", "2002::/16"},
+		{"NAT64", "64:ff9b::/96"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateEgressAllow([]string{tc.entry}); err == nil {
+				t.Errorf("ValidateEgressAllow([%q]) = nil, want a rejection (%s)", tc.entry, tc.name)
+			}
+		})
+	}
+}
+
+// TestValidateEgressAllow_CIDRLogicUnaffectedByFix confirms the existing
+// CIDR overlap/rejection logic sb-rev-2 confirmed sound is unaffected by
+// the fix: supersets, subsets, and IPv4-mapped IPv6 addresses.
+func TestValidateEgressAllow_CIDRLogicUnaffectedByFix(t *testing.T) {
+	cases := []string{
+		"10.0.0.0/7",          // superset of 10.0.0.0/8
+		"1.0.0.0/1",           // superset covering 127.0.0.0/8 and others
+		"::ffff:10.0.0.1",     // IPv4-mapped IPv6, maps into 10.0.0.0/8
+		"::ffff:10.0.0.0/104", // IPv4-mapped IPv6 CIDR
+	}
+	for _, entry := range cases {
+		if err := ValidateEgressAllow([]string{entry}); err == nil {
+			t.Errorf("ValidateEgressAllow([%q]) = nil, want a private-range rejection", entry)
+		}
+	}
+}
+
+// TestValidateEgressAllow_TrailingDotNormalization confirms normalization
+// doesn't over-reject: a trailing dot on an otherwise-fine public hostname
+// is stripped, not treated as an error, and case is folded too.
+func TestValidateEgressAllow_TrailingDotNormalization(t *testing.T) {
+	cases := []string{
+		"api.example.com.",
+		"API.EXAMPLE.COM",
+		"  api.example.com  ",
+	}
+	for _, entry := range cases {
+		if err := ValidateEgressAllow([]string{entry}); err != nil {
+			t.Errorf("ValidateEgressAllow([%q]) = %v, want nil", entry, err)
+		}
+	}
+}
+
+// TestValidateEgressAllow_KnownNamespaceHeuristicAllowsPunycode confirms
+// the "no public TLD is hyphenated" heuristic doesn't reject a legitimate
+// IDNA punycode TLD.
+func TestValidateEgressAllow_KnownNamespaceHeuristicAllowsPunycode(t *testing.T) {
+	if err := ValidateEgressAllow([]string{"example.xn--p1ai"}); err != nil {
+		t.Errorf("ValidateEgressAllow([example.xn--p1ai]) = %v, want nil (punycode TLD)", err)
+	}
+}
