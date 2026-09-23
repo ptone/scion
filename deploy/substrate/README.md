@@ -222,10 +222,15 @@ kubectl run netpol-probe --rm -it --restart=Never \
   "http://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc/scion/v1/healthz"
 
 # ---- Worker-namespace NetworkPolicy: the router policy above is only
-# meaningful if a worker/actor pod's :80 (sciontool substrate-serve) is NOT
-# also reachable directly, bypassing the router entirely. Verify that too,
-# with a real actor pod IP (start at least one agent on this profile
-# first): ----
+# meaningful if a worker pod is NOT also reachable directly, bypassing the
+# router entirely. Verify that too, with a real worker pod IP (start at
+# least one agent on this profile first). This policy allows ALL ports from
+# ate-system (see broker.yaml's comment for why it isn't scoped to a single
+# port — the worker pod's real network-facing port is the ateom container's
+# atunnel on :443, not the sandboxed actor's :80, which lives inside the
+# sandbox atunnel bridges into and isn't a directly-addressable pod-network
+# port at all). :8080 (readyz) below is a real, plain-HTTP port on the
+# ateom container itself, so it's a convenient one to probe with curl. ----
 
 WORKER_POD_IP=$(kubectl -n "${SUBSTRATE_WORKER_NAMESPACE}" get pods \
   -o jsonpath='{.items[0].status.podIP}')
@@ -234,18 +239,28 @@ WORKER_POD_IP=$(kubectl -n "${SUBSTRATE_WORKER_NAMESPACE}" get pods \
 kubectl run netpol-probe --rm -it --restart=Never \
   --namespace default \
   --image=curlimages/curl -- \
-  curl -sS --max-time 5 "http://${WORKER_POD_IP}:80/scion/v1/healthz"
-# Expect: a timeout/connection error. Any HTTP response (even a 4xx/5xx from
-# substrate-serve) means the packet reached the pod and the policy did NOT
-# block it.
+  curl -sS --max-time 5 "http://${WORKER_POD_IP}:8080/readyz"
+# Expect: a timeout/connection error. Any HTTP response (even a 4xx/5xx)
+# means the packet reached the pod and the policy did NOT block it.
 
 # (d) From a throwaway pod INSIDE ate-system: must connect (any HTTP
-# response, including a substrate-serve auth error, proves reachability).
+# response proves reachability, not just a 200).
 kubectl run netpol-probe --rm -it --restart=Never \
   --namespace "${ATE_SYSTEM_NAMESPACE}" \
   --image=curlimages/curl -- \
   curl -sS --max-time 5 -o /dev/null -w '%{http_code}\n' \
-  "http://${WORKER_POD_IP}:80/scion/v1/healthz"
+  "http://${WORKER_POD_IP}:8080/readyz"
+
+# (e) Confirm kubelet's own readiness probe against the same :8080/readyz
+# still works after applying the policy (it's node-originated, not
+# pod/namespace traffic, so it should be unaffected — but "should" is not
+# "is verified"):
+kubectl -n "${SUBSTRATE_WORKER_NAMESPACE}" get pods -o wide
+# READY should show the ateom container as Ready; if it flips to
+# Running-but-not-Ready right after applying this policy, kubelet probes are
+# NOT being exempted on this cluster's NetworkPolicy enforcement path and
+# this policy needs a real fix (e.g. an explicit allow for the node CIDR),
+# not just documentation.
 ```
 
 ## Known Phase 1 limitations
@@ -257,15 +272,20 @@ kubectl run netpol-probe --rm -it --restart=Never \
   (router ingress restricted to the broker namespace, worker ingress
   restricted to `ate-system`) prevent an unauthorized bootstrap. The two
   policies are not redundant — the router policy is worthless on its own if
-  a worker pod's :80 is *also* reachable directly by pod IP from outside
+  a worker pod is *also* reachable directly by pod IP from outside
   `ate-system`, bypassing the router (and the single-shot check with it)
   entirely; the worker-namespace policy is what actually closes that path
-  (round 1 review FYI, sb-rev). If either policy fails to apply, is
-  misconfigured, or GKE Dataplane V2 / Network Policy enforcement isn't
-  enabled on the cluster, **any pod that can reach a worker pod's IP, not
-  just the router, can bootstrap an actor before the broker does.** This is
-  why both verification steps above are not optional — an
-  applied-but-unverified policy is not a control.
+  (round 1 review FYI, sb-rev). It allows all ports from `ate-system` rather
+  than naming one — see broker.yaml's comment: the worker pod's real
+  network-facing port is the `ateom` container's atunnel on :443, not the
+  sandboxed actor's :80, which isn't a directly-addressable pod-network port
+  at all, so an earlier version of this policy that scoped to :80 would have
+  blocked real atunnel traffic while protecting nothing. If either policy
+  fails to apply, is misconfigured, or GKE Dataplane V2 / Network Policy
+  enforcement isn't enabled on the cluster, **any pod that can reach a
+  worker pod's IP, not just the router, can bootstrap an actor before the
+  broker does.** This is why both verification steps above are not
+  optional — an applied-but-unverified policy is not a control.
 - **NetworkPolicy enforcement requires GKE Dataplane V2 (or another
   NetworkPolicy-enforcing CNI) to be enabled on the cluster.** A GKE cluster
   created without Dataplane V2 and without the legacy Calico add-on silently
@@ -274,17 +294,28 @@ kubectl run netpol-probe --rm -it --restart=Never \
   check actual traffic, not just object presence. Confirm via
   `gcloud container clusters describe <cluster> --format='value(networkConfig.datapathProvider)'`
   (expect `ADVANCED_DATAPATH`) before relying on this policy.
-- **Metrics/monitoring scraping is not accounted for.** The NetworkPolicy
-  only opens the router's client-facing ports (8080/8443/8081/8444) to the
-  broker namespace. It does not add an explicit allow for Google Managed
+- **Kubelet health-check probes are exempt from NetworkPolicy on GKE, by
+  design, on both enforcement backends.** Neither the router's readiness/
+  liveness probes (port 9090) nor the worker pod's `readyz` probe (port
+  8080, see the worker-namespace verification step's item (e)) need an
+  explicit allow rule for this reason: GKE documents that kubelet's own
+  HTTP/TCP health checks originate from the node, not from a pod or
+  namespace, and are always permitted regardless of NetworkPolicy rules —
+  true for both the legacy Calico-based add-on and Dataplane V2 (Cilium).
+  This is a documented Kubernetes/GKE networking property, not something
+  specific to this manifest, but it's exactly the kind of thing that's easy
+  to get backwards when reasoning about "does restricting ingress break our
+  own health checks?" — hence verification step (e), rather than trusting
+  the documentation alone.
+- **Metrics/monitoring scraping is not accounted for.** The router
+  NetworkPolicy only opens its client-facing ports (8080/8443/8081/8444) to
+  the broker namespace; it does not add an explicit allow for Google Managed
   Prometheus scraping the Envoy sidecar's admin port (9901,
-  `atenet-router-monitoring.yaml` upstream) or for kubelet's own
-  readiness/liveness probes (port 9090). Most CNIs including GKE Dataplane V2
-  exempt node-originated kubelet probes from NetworkPolicy, so those should
-  keep working; GMP's collector traffic path is cluster-config-dependent —
-  if router metrics go missing after applying this policy, that's the first
-  thing to check, and this file's NetworkPolicy comment block has the
-  specifics.
+  `atenet-router-monitoring.yaml` upstream). GMP's collector traffic path is
+  cluster-config-dependent — if router metrics go missing after applying
+  this policy, that's the first thing to check. (No equivalent PodMonitoring
+  exists for worker/`ateom` pods in the upstream install, so there's nothing
+  analogous to account for on the worker-namespace policy.)
 - **Worker-namespace pod selector is unscoped (`podSelector: {}`).** The
   `scion-worker-restrict-ingress` NetworkPolicy applies to every pod in
   `SUBSTRATE_WORKER_NAMESPACE`, not just actor/worker pods specifically —

@@ -340,21 +340,53 @@ spec:
     # "Known Phase 1 limitations" before assuming this policy is complete on
     # your cluster.
 ---
-# Worker-namespace ingress restriction (round 1 review, sb-rev FYI): the §5
-# fallback nonce's whole security model rests on the router being the
-# *only* path to an actor's control server on :80 — the atenet-router
-# NetworkPolicy above is worthless if the same port is *also* reachable
-# directly by worker/actor pod IP from any other namespace, bypassing the
-# router (and the single-shot bootstrap check with it) entirely.
+# Worker-namespace ingress restriction (round 1 review, sb-rev FYI, then
+# round 2 correction from sb-em/substrate-lead): the §5 fallback nonce's
+# whole security model rests on the router being the *only* path to an
+# actor's control server — the atenet-router NetworkPolicy above is
+# worthless if the worker pod is *also* reachable directly by pod IP from
+# any other namespace, bypassing the router (and the single-shot bootstrap
+# check with it) entirely.
 #
-# This targets every pod in the worker namespace (no podSelector — Phase 1
-# has no confirmed, stable label for actor/worker pods specifically to
-# narrow it further; see README) and allows ingress only from the
-# ATE_SYSTEM_NAMESPACE, which is where both atenet-router (the intended
-# path to :80) and atelet (the node agent that manages the sandbox the
-# worker pod runs) live. Nothing outside ate-system — including the broker
-# namespace itself — has a legitimate reason to reach a worker pod directly;
-# the broker only ever talks to actors *through* the router.
+# Round 1 of this policy scoped ingress to TCP :80 only, on the assumption
+# that the actor control server's port is what's exposed at the pod network
+# level. That assumption was wrong, found by reading
+# cmd/atecontroller/internal/controllers/workerpool_apply.go upstream: the
+# worker pod's `ateom` container (not the sandboxed actor itself) is what
+# actually listens at the pod-network level — on :443 (`atunnel-listen-address`,
+# the real inbound port atenet-router's envoy dials as its
+# ORIGINAL_DST actor cluster target — see atenet-router.yaml's comment on
+# dialing "the actor's atunnel ingress server on :443"), :8443
+# (`atunnel-connect-listen-address`, CONNECT-tunneled traffic mirroring the
+# router's own 8081/8444), and :8080 (`readyz`, the container's own
+# readiness probe). substrate-serve's :80 lives *inside* the sandbox atunnel
+# bridges into, not as a directly-addressable pod-network port at all.
+# Restricting to :80 would therefore have blocked atunnel's real traffic on
+# :443/:8443 without providing the protection it was meant to (:80 was never
+# reachable at this level to begin with) — exactly the kind of break the
+# out-of-namespace verification demo would NOT have caught, since it
+# doesn't exercise real router→worker traffic.
+#
+# Fixed: allow the ATE_SYSTEM_NAMESPACE ingress on ALL ports (no `ports:`
+# stanza) instead of naming any. This still keeps every non-ate-system
+# caller off the worker pod entirely, which is the actual property the §5
+# fallback depends on, without having to track atunnel's exact port set
+# (and without guessing at atelet's own node-to-pod management traffic,
+# which upstream doesn't document as a fixed port list either). No
+# podSelector — Phase 1 has no confirmed, stable label for actor/worker
+# pods specifically to narrow it further (see README).
+#
+# Checked for any *non*-ate-system ingress need before locking this down:
+# grepped the full upstream manifests/ tree for a PodMonitoring or similar
+# targeting worker/ateom pods (the way atenet-router-monitoring.yaml targets
+# the router) — none exists in the core install (only the router has one).
+# kubelet's own readiness probe against :8080 (`readyz`, defined directly on
+# the ateom container in workerpool_apply.go) is node-originated, not
+# pod/namespace-sourced traffic — GKE documents this as always permitted
+# regardless of NetworkPolicy, for both the legacy Calico-based enforcement
+# path and Dataplane V2/Cilium, so it needs no allow rule here. Confirm this
+# holds on the actual cluster if router/worker health checks look wrong
+# after applying (see README verification step).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -369,14 +401,4 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: ${ATE_SYSTEM_NAMESPACE}
-      ports:
-        # The actor control server (sciontool substrate-serve, phase1-spec.md
-        # §2.1) listens on :80 — the port this policy exists to protect.
-        # Left unscoped beyond this one port deliberately: atelet's own
-        # node-to-sandbox management is not necessarily pod-network traffic
-        # at all (it runs on the same node), so this policy doesn't attempt
-        # to enumerate every port it might use — see README for the
-        # verification step that checks what actually matters here (:80
-        # unreachable from outside ate-system).
-        - protocol: TCP
-          port: 80
+      # Deliberately no `ports:` stanza — see the comment block above.
