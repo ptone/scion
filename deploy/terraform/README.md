@@ -40,13 +40,9 @@ reads it, by naming convention, through the `shared-lookup` module (no
    validation — see `phase1-validation.md`.)
 2. A GCS state bucket, versioned: `<project>-<name_prefix>-tfstate` (e.g.
    `ptone-emblem-tfha-tfstate`). Access limited to operators.
-3. An IAP OAuth web client, created by hand in the console (the IAP OAuth
-   Admin API no longer supports creating new clients via API/Terraform):
-   - Application type: Web application.
-   - Authorized redirect URI:
-     `https://iap.googleapis.com/v1/oauth/clientIds/<CLIENT_ID>:handleRedirect`.
-   - Store the client secret in Secret Manager (`<prefix>-oauth-client-secret`).
-   - One client can serve every hub under a given `name_prefix`.
+3. ~~An IAP OAuth web client~~ — **no longer a prerequisite** (ptone
+   decision, design §3.4/§5.1). See "IAP OAuth client" below: it's a
+   post-apply step, not something you need before the first apply.
 4. The hub image, built and pushed to the Artifact Registry repo that
    `shared-infra` creates. There is no single-apply bootstrap trick here (the
    two-root split already separates "create the repo" from "use the image"):
@@ -84,6 +80,57 @@ another hub's state.
 
 Each further hub is just step 3 again with a new `hub_name`/prefix — the
 shared layer is untouched.
+
+## IAP OAuth client
+
+`iap_enabled = true` on the Cloud Run service turns on direct IAP using the
+project's **Google-managed** OAuth client immediately — there is nothing to
+create, and no Terraform input is required for the first apply. Terraform
+manages no `google_iap_settings` and holds no OAuth client secret in state.
+
+`iap_oauth_client_id` (optional, default `null`) feeds exactly one thing:
+`settings.yaml`'s `auth.transport.oidc_audience` — the audience agents'
+transport tokens must present when calling the hub over IAP. With it unset,
+the hub and IAP browser login both work fine; only agent transport is
+disabled (a `check` block warns on every plan/apply until it's set).
+
+Two ways to get a real value, both post-apply:
+
+**(a) In-org (the common case): discover the Google-managed client ID,
+read-only, and re-apply.**
+
+The durable way to find it is the **console**: Security → Identity-Aware
+Proxy → the service's OAuth settings (or Google Auth Platform → Clients).
+A convenience command exists for the same read-only lookup:
+```bash
+gcloud alpha iap oauth-clients list projects/<project_number>/brands/<brand_number>
+```
+but treat it as just that — it currently prints its own March 2026
+shutdown warning, so don't depend on it as the only way to find the ID; the
+console is where to look if/when it stops working.
+
+This client exists in any project where IAP has ever been enabled —
+including `ptone-emblem` today — so in practice phase 1 can pass it on the
+*first* apply and wait on nothing. In a genuinely fresh project it only
+appears after IAP has been turned on by a first apply, so the flow there is
+apply → discover → re-apply with `-var iap_oauth_client_id=<id>`. Changing
+the value only re-renders the settings secret and rolls a new revision;
+nothing else changes.
+
+**(b) Cross-org: create a custom OAuth client in the console, set it on the
+service's IAP settings, and re-apply immediately.** The IAP OAuth Admin API
+no longer supports creating clients, so this is a console-only step:
+1. APIs & Services → Credentials → Create Credentials → OAuth client ID,
+   application type Web application.
+2. Authorized redirect URI:
+   `https://iap.googleapis.com/v1/oauth/clientIds/<CLIENT_ID>:handleRedirect`.
+3. On the Cloud Run service's IAP settings (Security → Identity-Aware Proxy
+   in the console), select this client.
+4. **Re-apply right away** with `-var iap_oauth_client_id=<new client
+   id>.apps.googleusercontent.com`. Until you do, IAP is already expecting
+   the new audience and agent transport fails — this is a real, named
+   outage window for agent traffic (not for human browser login, which IAP
+   handles independently of this setting), so don't leave it dangling.
 
 ## Everything is prefixed; nothing is adopted
 

@@ -131,13 +131,14 @@ variable "gke" {
 }
 
 variable "iap_oauth_client_id" {
-  description = "OAuth client ID (prereq, §5.1). Used both as settings.yaml's auth.transport.oidc_audience (design §8: NOT the IAP resource path) and as google_iap_settings.access_settings.oauth_settings.client_id, binding this dedicated client to this hub's Cloud Run IAP (OQ-2, resolved: supported from provider 8.0.0 via the cloud_run-<region> resource path — unvalidated client-side, confirmed against the live API in phase 1 validation)."
+  description = "OAuth client ID, optional (design §3.4 \"IAP and the OAuth client\", ptone 21:55: creating/binding a custom IAP OAuth client is a post-apply console step, not a Terraform input — the IAP OAuth Admin API is shut down for new clients anyway). Not a secret, not managed by Terraform. Feeds exactly one thing: settings.yaml's auth.transport.oidc_audience (design §8: NOT the IAP resource path) — the audience agents' transport tokens must present over IAP. When null, the hub and IAP browser login still work, but agent transport is disabled (transportauth.FromEnv returns a nil token source with no audience) — the check block below warns. Two real values: the project's Google-managed OAuth client ID (read-only discovery, works immediately for in-org users — see the README), or a custom client created by hand in the console for cross-org sign-in."
   type        = string
-}
+  default     = null
 
-variable "iap_oauth_client_secret_secret_id" {
-  description = "Secret Manager secret ID holding the OAuth client secret (prereq). Read via a data source and passed to google_iap_settings.access_settings.oauth_settings.client_secret. No write-only variant exists on this attribute in 8.4.0 (checked the schema: sensitive but state-stored), so — like the DB password and session secret — it ends up in this hub's Terraform state; accepted under the same §3.9 tradeoff."
-  type        = string
+  validation {
+    condition     = var.iap_oauth_client_id == null || can(regex("^[0-9a-zA-Z-]+\\.apps\\.googleusercontent\\.com$", var.iap_oauth_client_id))
+    error_message = "iap_oauth_client_id must be null or end in .apps.googleusercontent.com."
+  }
 }
 
 variable "iap_members" {

@@ -33,7 +33,9 @@ server:
         audience: ${iap_audience}
     transport:
       mode: iap
+%{ if iap_oauth_client_id != null ~}
       oidc_audience: ${iap_oauth_client_id}
+%{ endif ~}
       platform_auth_sa: ${transport_sa_email}
   oidc:
     enabled: true

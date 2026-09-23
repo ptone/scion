@@ -365,41 +365,25 @@ resource "google_cloud_run_v2_service_iam_member" "transport_invoker" {
   member   = "serviceAccount:${var.transport_sa_email}"
 }
 
-# --- IAP settings: bind the dedicated OAuth client (OQ-2) ---
+# --- IAP OAuth client: NOT managed by Terraform (ptone decision, 21:55) ---
 #
-# google_iap_settings.name has no client-side validation of its resource-path
-# patterns (empirically confirmed: `terraform validate`/`plan` accept an
-# arbitrary string there), and its documented pattern list never mentions a
-# Cloud Run form — only organizations/folders/projects/iap_web/compute*/
-# appengine*. But scripts/cloudrun/deploy.sh L292-306 successfully drives this
-# exact API via `gcloud iap settings set --resource-type=cloud-run`, whose
-# resource name is projects/<num>/iap_web/cloud_run-<region>/services/<svc>.
-# access_settings.oauth_settings.client_id/client_secret only exist in the
-# provider from 8.0.0 (absent in 6.x/7.x) — the reason the whole module set
-# is pinned to ~> 8.4. Whether the *API* accepts this name for a Cloud Run
-# service (as opposed to just the Terraform schema accepting the string) is
-# unverified without real credentials: phase 1 validation check 2/3 (IAP
-# login, transport token) is the empirical test. If apply rejects it, this
-# is the point to stop and report — no local-exec fallback (tf-lead/ptone
-# decision record: conv:5e2bb789-a863-45ec-a45c-b221904f7e1b).
-data "google_secret_manager_secret_version" "iap_oauth_client_secret" {
-  project           = var.project_id
-  secret            = var.iap_oauth_client_secret_secret_id
-  fetch_secret_data = true
-}
-
-resource "google_iap_settings" "hub" {
-  provider = google-beta
-  name     = "projects/${var.project_number}/iap_web/cloud_run-${var.region}/services/${var.hub_name}"
-
-  access_settings {
-    oauth_settings {
-      client_id     = var.iap_oauth_client_id
-      client_secret = data.google_secret_manager_secret_version.iap_oauth_client_secret.secret_data
-    }
+# `iap_enabled = true` above turns on direct IAP using the project's
+# Google-managed OAuth client, which works immediately for in-org users —
+# no client to create or bind. Terraform manages no google_iap_settings and
+# reads no OAuth client secret (OQ-2 is moot: this was the "is the
+# API-acceptance risk real" question for a resource that no longer exists
+# in this module — see phase1-validation.md for the retired investigation).
+# iap_oauth_client_id feeds exactly one thing, purely as data: the
+# settings.yaml transport.oidc_audience agents present over IAP (see the
+# variable's description and the check block below). A custom, console-
+# created OAuth client for cross-org sign-in is a post-apply user step
+# (README "IAP OAuth client") — Terraform never writes IAP OAuth settings,
+# so it can never overwrite the live hub's.
+check "transport_audience_configured" {
+  assert {
+    condition     = var.iap_oauth_client_id != null
+    error_message = "transport auth disabled until iap_oauth_client_id is set — see the README's \"IAP OAuth client\" section to discover the Google-managed client ID (or create a custom one for cross-org) and re-apply."
   }
-
-  depends_on = [google_cloud_run_v2_service.hub]
 }
 
 resource "google_iap_web_cloud_run_service_iam_member" "members" {

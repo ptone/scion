@@ -96,10 +96,9 @@ module "hub_cloudrun" {
     ca_certificate = module.shared_lookup.shared.gke.ca_certificate
   }
 
-  iap_oauth_client_id               = var.iap_oauth_client_id
-  iap_oauth_client_secret_secret_id = var.iap_oauth_client_secret_secret_id
-  iap_members                       = var.iap_members
-  admin_emails                      = var.admin_emails
+  iap_oauth_client_id = var.iap_oauth_client_id
+  iap_members         = var.iap_members
+  admin_emails        = var.admin_emails
 
   min_instances = var.min_instances
   max_instances = var.max_instances

@@ -65,13 +65,14 @@ variable "hub_image" {
 }
 
 variable "iap_oauth_client_id" {
-  description = "OAuth client ID prerequisite (§5.1). May be shared across hubs in this project prefix."
+  description = "OAuth client ID, optional (design §3.4 \"IAP and the OAuth client\"). Not a Terraform-managed prerequisite — see the README's \"IAP OAuth client\" section: discover the project's Google-managed client ID (works immediately for in-org users) or create a custom one in the console for cross-org, then re-apply. Null means the hub and IAP browser login work, but agent transport is disabled."
   type        = string
-}
+  default     = null
 
-variable "iap_oauth_client_secret_secret_id" {
-  description = "Secret Manager secret ID holding the OAuth client secret prerequisite."
-  type        = string
+  validation {
+    condition     = var.iap_oauth_client_id == null || can(regex("^[0-9a-zA-Z-]+\\.apps\\.googleusercontent\\.com$", var.iap_oauth_client_id))
+    error_message = "iap_oauth_client_id must be null or end in .apps.googleusercontent.com."
+  }
 }
 
 variable "iap_members" {
