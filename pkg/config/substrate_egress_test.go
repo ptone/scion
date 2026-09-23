@@ -57,18 +57,19 @@ func TestValidateEgressAllow_RejectsCatchAlls(t *testing.T) {
 	}
 }
 
-// TestValidateEgressAllow_RejectsAllIPAndCIDR is review round 4, Required
-// R4-2: Phase 1 rejects every IP address and CIDR, canonical or not,
-// public or private, with no exceptions — Substrate's own
-// HostnameRule.patterns (which is where every egress_allow entry that
-// passes validation ends up) explicitly rejects IP addresses, so an entry
-// that validated as an "allowed IP" could never actually be sent in the
-// first place. CIDRRule support is deferred past Phase 1.
+// TestValidateEgressAllow_RejectsAllIPAndCIDR confirms Phase 1 rejects every
+// IP address and CIDR, canonical or not, public or private, with no
+// exceptions — Substrate's own HostnameRule.patterns (which is where every
+// egress_allow entry that passes validation ends up) explicitly rejects IP
+// addresses, so an entry that validated as an "allowed IP" could never
+// actually be sent in the first place. CIDRRule support is deferred past
+// Phase 1.
 func TestValidateEgressAllow_RejectsAllIPAndCIDR(t *testing.T) {
 	cases := []string{
-		// Previously "accepted, no overlap" (round 1-3's overlap-based
-		// model) — now rejected regardless, since there is no longer an
-		// "allowed IP" category at all.
+		// Previously accepted by an earlier, overlap-based version of this
+		// validator that only rejected a CIDR/IP overlapping a
+		// private/in-cluster range — now rejected regardless, since there
+		// is no longer an "allowed IP" category at all.
 		"35.190.0.0/16",
 		"8.8.8.8",
 		"2001:db8::/32",
@@ -95,7 +96,8 @@ func TestValidateEgressAllow_RejectsAllIPAndCIDR(t *testing.T) {
 		"240.0.0.0/4",
 		"2002::/16",
 		"64:ff9b::/96",
-		// Canonical per net/netip but still an IP — round 3's O-1 additions.
+		// Canonical per net/netip but still an IP address, including
+		// IPv4-embedding IPv6 transition ranges.
 		"::127.0.0.1",
 		"::7f00:1",
 		"64:ff9b:1::1",
@@ -122,11 +124,10 @@ func TestValidateEgressAllow_RejectsAllIPAndCIDR(t *testing.T) {
 	}
 }
 
-// TestValidateEgressAllow_IPRejectionNamesTheExactMessage double-checks the
-// three entries review round 4 explicitly asked to move from "accepted" to
-// "rejected with this exact message": 8.8.8.8, 2001:4860:4860::8888, and
-// 1.1.1.0/24 (all previously on the no-false-positive list — see
-// TestValidateEgressAllow_NoFalsePositives, which no longer includes them).
+// TestValidateEgressAllow_IPRejectionNamesTheExactMessage double-checks that
+// these three entries, which an earlier version of this validator accepted
+// as public IPs (see TestValidateEgressAllow_NoFalsePositives, which no
+// longer includes them), are now rejected with this exact message.
 func TestValidateEgressAllow_IPRejectionNamesTheExactMessage(t *testing.T) {
 	const wantMsg = "IP/CIDR egress rules not supported in Phase 1"
 	for _, entry := range []string{"8.8.8.8", "2001:4860:4860::8888", "1.1.1.0/24"} {
@@ -192,9 +193,9 @@ func TestV1SubstrateConfig_Validate(t *testing.T) {
 	}
 }
 
-// TestValidateEgressAllow_RejectsBypasses covers every bypass sb-rev-2
-// (review round 2, Required R2) confirmed with a scratch test: each of
-// these returned nil from the pre-fix ValidateEgressAllow.
+// TestValidateEgressAllow_RejectsBypasses covers a set of bypasses
+// confirmed against an earlier version of this validator with a scratch
+// test: each of these returned nil from the pre-fix ValidateEgressAllow.
 func TestValidateEgressAllow_RejectsBypasses(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -225,7 +226,7 @@ func TestValidateEgressAllow_RejectsBypasses(t *testing.T) {
 		{"IPv6 with zone id", "fe80::1%eth0"},
 		{"host:port", "10.0.0.1:443"},
 
-		// O2 additions: reserved / IPv4-in-IPv6 transition ranges.
+		// Reserved / IPv4-in-IPv6 transition ranges.
 		{"Class E reserved", "240.0.0.0/4"},
 		{"6to4", "2002::/16"},
 		{"NAT64", "64:ff9b::/96"},
@@ -264,20 +265,20 @@ func TestValidateEgressAllow_PunycodeTLD(t *testing.T) {
 	}
 }
 
-// TestValidateEgressAllow_RejectsWildcardOverPublicSuffix is review round
-// 4's explicit wildcard rule: a leading "*." is allowed, but the remainder
-// must independently pass the same public-suffix rule. "*.com", "*.co",
-// "*.bd", and "*.co.uk" are rejected because their remainder is itself a
-// public suffix with nothing beneath it; "*.example.com" passes because
+// TestValidateEgressAllow_RejectsWildcardOverPublicSuffix is the explicit
+// wildcard rule: a leading "*." is allowed, but the remainder must
+// independently pass the same public-suffix rule. "*.com", "*.co", "*.bd",
+// and "*.co.uk" are rejected because their remainder is itself a public
+// suffix with nothing beneath it; "*.example.com" passes because
 // "example.com" has "example" beneath the "com" suffix.
 //
-// The single-label cases ("*.com", "*.co", "*.bd") also lock in review
-// round 5's N5-3 fix: before it, these were intercepted by the
-// single-label "not fully qualified" check instead of ever reaching the
-// public-suffix check, so the error named the wrong reason. Asserting the
-// "itself a public suffix" reason here (like the sibling
+// The single-label cases ("*.com", "*.co", "*.bd") also lock in the correct
+// rejection reason: a naive implementation could intercept these earlier
+// with the single-label "not fully qualified" check instead of ever
+// reaching the public-suffix check, which would name the wrong reason.
+// Asserting the "itself a public suffix" reason here (like the sibling
 // TestValidateEgressAllow_PrivateSuffixPlatformRejectionReason already does
-// for the bare, non-wildcard form) is what would have caught that drift.
+// for the bare, non-wildcard form) is what would catch that drift.
 func TestValidateEgressAllow_RejectsWildcardOverPublicSuffix(t *testing.T) {
 	for _, entry := range []string{"*.com", "*.co", "*.bd", "*.co.uk"} {
 		err := ValidateEgressAllow([]string{entry})
@@ -286,7 +287,7 @@ func TestValidateEgressAllow_RejectsWildcardOverPublicSuffix(t *testing.T) {
 			continue
 		}
 		if !strings.Contains(err.Error(), "itself a public suffix") {
-			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to reject because the remainder IS its own suffix (N5-3)", entry, err)
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to reject because the remainder IS its own suffix", entry, err)
 		}
 	}
 	if err := ValidateEgressAllow([]string{"*.example.com"}); err != nil {
@@ -294,18 +295,17 @@ func TestValidateEgressAllow_RejectsWildcardOverPublicSuffix(t *testing.T) {
 	}
 }
 
-// TestValidateEgressAllow_RejectsWildcardOverWildcardSuffix is review round
-// 5's N5-1: a wildcard entry is rejected not only when its remainder is
-// itself a bare public suffix (the check above), but also when the
-// remainder isn't itself a public suffix yet every single-label child of
-// it IS one, via a PSL *wildcard* rule — "run.app", "compute.amazonaws.com",
+// TestValidateEgressAllow_RejectsWildcardOverWildcardSuffix: a wildcard
+// entry is rejected not only when its remainder is itself a bare public
+// suffix (the check above), but also when the remainder isn't itself a
+// public suffix yet every single-label child of it IS one, via a PSL
+// *wildcard* rule — "run.app", "compute.amazonaws.com",
 // "compute-1.amazonaws.com", and "kawasaki.jp" are all real PSL wildcard
 // rules, so "foo.run.app" (say) is a specific, single-tenant host, but
 // "*.run.app" would grant every tenant on the platform, the same class of
 // over-grant a bare "*.googleapis.com" would be if "googleapis.com" weren't
 // already caught as a bare suffix. "*.github.io" and "*.googleapis.com"
-// stay rejected too (via the bare-suffix check, not this one) —
-// substrate-lead's explicit "keep these rejected" instruction.
+// stay rejected too (via the bare-suffix check, not this one).
 func TestValidateEgressAllow_RejectsWildcardOverWildcardSuffix(t *testing.T) {
 	cases := []string{
 		"*.run.app",
@@ -323,9 +323,9 @@ func TestValidateEgressAllow_RejectsWildcardOverWildcardSuffix(t *testing.T) {
 }
 
 // TestValidateEgressAllow_RejectsWildcardOverWildcardSuffixReason
-// spot-checks the N5-1 rejection reason for the entries that are rejected
-// specifically because of the new wildcard-over-wildcard-PSL-rule check
-// (not because the remainder is itself a bare public suffix — that's a
+// spot-checks the rejection reason for the entries that are rejected
+// specifically because of the wildcard-over-wildcard-PSL-rule check (not
+// because the remainder is itself a bare public suffix — that's a
 // different message, covered by TestValidateEgressAllow_RejectsWildcardOverPublicSuffix).
 func TestValidateEgressAllow_RejectsWildcardOverWildcardSuffixReason(t *testing.T) {
 	cases := []string{"*.run.app", "*.compute.amazonaws.com", "*.compute-1.amazonaws.com", "*.kawasaki.jp"}
@@ -335,33 +335,32 @@ func TestValidateEgressAllow_RejectsWildcardOverWildcardSuffixReason(t *testing.
 			t.Fatalf("ValidateEgressAllow([%q]) = nil, want a rejection", entry)
 		}
 		if !strings.Contains(err.Error(), "wildcard public-suffix rule") {
-			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to name the wildcard-PSL-rule reason (N5-1)", entry, err)
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to name the wildcard-PSL-rule reason", entry, err)
 		}
 	}
 }
 
-// TestValidateEgressAllow_AcceptsWildcardOnlyCcTLDs is review round 5's
-// N5-2: several real ccTLDs ("ck", "er", "fk", "jm", "kh", "mm", "np",
-// "pg") have only a wildcard rule in the PSL, no bare-TLD rule, so a naive
-// publicsuffix.PublicSuffix(tld) check wrongly reported them as
-// unmanaged. "www.ck" is a PSL *exception* to the "*.ck" wildcard rule (a
-// normal, directly-registrable host, not itself a further public suffix);
+// TestValidateEgressAllow_AcceptsWildcardOnlyCcTLDs: several real ccTLDs
+// ("ck", "er", "fk", "jm", "kh", "mm", "np", "pg") have only a wildcard
+// rule in the PSL, no bare-TLD rule, so a naive
+// publicsuffix.PublicSuffix(tld) check wrongly reports them as unmanaged.
+// "www.ck" is a PSL *exception* to the "*.ck" wildcard rule (a normal,
+// directly-registrable host, not itself a further public suffix);
 // "foo.com.np" and "example.com.jm" are ordinary hosts one label under
 // their platform's own wildcard-matched suffix ("com.np", "com.jm").
 func TestValidateEgressAllow_AcceptsWildcardOnlyCcTLDs(t *testing.T) {
 	cases := []string{"www.ck", "foo.com.np", "example.com.jm"}
 	for _, entry := range cases {
 		if err := ValidateEgressAllow([]string{entry}); err != nil {
-			t.Errorf("ValidateEgressAllow([%q]) = %v, want nil (N5-2: wildcard-only ccTLD)", entry, err)
+			t.Errorf("ValidateEgressAllow([%q]) = %v, want nil (wildcard-only ccTLD)", entry, err)
 		}
 	}
 }
 
-// TestValidateEgressAllow_RejectsOnion is the "special-use" fix from review
-// round 5: ".onion" (RFC 7686, Tor hidden-service addresses) is rejected
-// the same way ".arpa" is, via egressAllowSpecialUseTLDs — "onion" is
-// itself listed in the PSL's ICANN section, so the generic ICANN-suffix
-// check alone would not catch it.
+// TestValidateEgressAllow_RejectsOnion: ".onion" (RFC 7686, Tor
+// hidden-service addresses) is rejected the same way ".arpa" is, via
+// egressAllowSpecialUseTLDs — "onion" is itself listed in the PSL's ICANN
+// section, so the generic ICANN-suffix check alone would not catch it.
 func TestValidateEgressAllow_RejectsOnion(t *testing.T) {
 	for _, entry := range []string{"foo.onion", "*.onion"} {
 		err := ValidateEgressAllow([]string{entry})
@@ -398,12 +397,12 @@ func buildHostnameOfLength(total int) string {
 	return strings.Join(parts, ".")
 }
 
-// TestValidateEgressAllow_LengthLimit is review round 5's N5-4: the total
-// length of the exact string that would be sent (including a wildcard
-// prefix, if any) is capped at egressAllowMaxLength (253) characters, the
-// standard DNS presentation-form limit. idna.Lookup does not enforce this
-// on its own (it doesn't set VerifyDNSLength), so nothing did before this
-// fix — an over-length entry would pass local validation and only fail
+// TestValidateEgressAllow_LengthLimit: the total length of the exact string
+// that would be sent (including a wildcard prefix, if any) is capped at
+// egressAllowMaxLength (253) characters, the standard DNS presentation-form
+// limit. idna.Lookup does not enforce this on its own (it doesn't set
+// VerifyDNSLength), so nothing else in this validator does either — an
+// over-length entry would otherwise pass local validation and only fail
 // later, inside Substrate's own CreateActorEgressPolicy call.
 func TestValidateEgressAllow_LengthLimit(t *testing.T) {
 	at := buildHostnameOfLength(253)
@@ -440,30 +439,29 @@ func TestValidateEgressAllow_LengthLimit(t *testing.T) {
 	}
 }
 
-// TestValidateEgressAllow_AllBypassesRounds1Through5 is the consolidated
-// regression suite: every bypass found across all five review rounds, in
-// one table, so the full history stays locked in against whatever the
-// validator becomes next rather than being scattered across per-round test
-// functions. See the project log entries for
-// substrate-phase1-round{3,4,5,6}-fixes.md for round-by-round provenance.
+// TestValidateEgressAllow_KnownBypasses is the consolidated regression
+// suite: every bypass this validator has ever needed to close, in one
+// table, so the full history stays locked in against whatever the
+// validator becomes next rather than being scattered across many small test
+// functions.
 //
 // Each row also asserts wantReason, a substring of the actual rejection
-// message (review round 6, Nit-1): checking only err != nil, as this table
-// did through round 5, would not catch a row silently drifting onto a
-// different rejection rule than the one it's meant to exercise — exactly
-// the class of bug round 5's N5-3 was (a wildcard's single-label remainder
-// was rejected, correctly, but by the wrong rule, with a misleading
-// message). Every wantReason below is the reason the code actually
-// produces today, confirmed against a real run of the validator, not
-// assumed from the row's own label.
+// message: checking only err != nil would not catch a row silently
+// drifting onto a different rejection rule than the one it's meant to
+// exercise — a wildcard's single-label remainder, for instance, could be
+// rejected correctly but by the wrong rule, with a misleading message.
+// Every wantReason below is the reason the code actually produces today,
+// confirmed against a real run of the validator, not assumed from the
+// row's own label.
 //
-// Two round-4 row names ("also caught by the suffix blocklist", for
-// foo.local/foo.internal) were corrected this round (review round 6,
-// Nit-1): the ICANN-public-suffix check (rule 1) always runs before the
-// suffix blocklist inside validatePublicHostname, so the blocklist is
-// never actually reached for these two entries — it's a real second layer,
-// just not the layer that catches these particular rows.
-func TestValidateEgressAllow_AllBypassesRounds1Through5(t *testing.T) {
+// Two row names below ("also caught by the suffix blocklist", for
+// foo.local/foo.internal) were corrected to say "(rejected by the TLD
+// check, not the suffix blocklist)": the ICANN-public-suffix check (rule 1)
+// always runs before the suffix blocklist inside validatePublicHostname, so
+// the blocklist is never actually reached for these two entries — it's a
+// real second layer, just not the layer that catches these particular
+// rows.
+func TestValidateEgressAllow_KnownBypasses(t *testing.T) {
 	const (
 		reasonCatchAll        = "catch-all"
 		reasonIPCIDR          = "IP/CIDR"
@@ -483,114 +481,112 @@ func TestValidateEgressAllow_AllBypassesRounds1Through5(t *testing.T) {
 		entry      string
 		wantReason string
 	}{
-		// --- Round 1 (initial validator) ---
-		{"round1: all", "all", reasonCatchAll},
-		{"round1: bare wildcard", "*", reasonCatchAll},
-		{"round1: 0.0.0.0/0", "0.0.0.0/0", reasonCatchAll},
-		{"round1: ::/0", "::/0", reasonCatchAll},
-		{"round1: 10.0.0.0/8", "10.0.0.0/8", reasonIPCIDR},
-		{"round1: bare IP in 192.168/16", "192.168.1.1", reasonIPCIDR},
-		{"round1: .svc suffix", "atenet-router.ate-system.svc", reasonNotICANN},
-		{"round1: .cluster.local suffix", "api.ate-system.svc.cluster.local", reasonNotICANN},
-		{"round1: .internal suffix", "metadata.internal", reasonNotICANN},
+		// --- Catch-alls and in-cluster suffixes ---
+		{"catch-all: all", "all", reasonCatchAll},
+		{"catch-all: bare wildcard *", "*", reasonCatchAll},
+		{"catch-all: 0.0.0.0/0", "0.0.0.0/0", reasonCatchAll},
+		{"catch-all: ::/0", "::/0", reasonCatchAll},
+		{"IP/CIDR: 10.0.0.0/8", "10.0.0.0/8", reasonIPCIDR},
+		{"IP/CIDR: bare IP in 192.168/16", "192.168.1.1", reasonIPCIDR},
+		{"in-cluster suffix: .svc", "atenet-router.ate-system.svc", reasonNotICANN},
+		{"in-cluster suffix: .cluster.local", "api.ate-system.svc.cluster.local", reasonNotICANN},
+		{"in-cluster suffix: .internal", "metadata.internal", reasonNotICANN},
 
-		// --- Round 2 (trailing dot, k8s short names, non-canonical IPs) ---
-		{"round2: trailing dot on .svc.cluster.local", "atenet-router.ate-system.svc.cluster.local.", reasonNotICANN},
-		{"round2: trailing dot uppercase .SVC", "foo.SVC.", reasonNotICANN},
-		{"round2: router short name", "atenet-router.ate-system", reasonNotICANN},
-		{"round2: api short name", "api.ate-system", reasonNotICANN},
-		{"round2: kubernetes.default short name", "kubernetes.default", reasonNotICANN},
-		{"round2: GCE metadata alias", "metadata", reasonSingleLabel},
-		{"round2: bare cluster domain", "cluster.local", reasonNotICANN},
-		{"round2: 0.0.0.0/8", "0.0.0.0/8", reasonIPCIDR},
-		{"round2: IPv6 unspecified ::", "::", reasonIPCIDR},
-		{"round2: hex IP alias", "0x7f000001", reasonIPCIDR},
-		{"round2: decimal IP alias", "2130706433", reasonIPCIDR},
-		{"round2: partial dotted-quad", "127.1", reasonIPCIDR},
-		{"round2: bracketed IPv6", "[::1]", reasonUnsupportedChar},
-		{"round2: IPv6 zone id", "fe80::1%eth0", reasonUnsupportedChar},
-		{"round2: host:port", "10.0.0.1:443", reasonNotValidHost},
-		{"round2: Class E reserved", "240.0.0.0/4", reasonIPCIDR},
-		{"round2: 6to4", "2002::/16", reasonIPCIDR},
-		{"round2: NAT64 (well-known prefix)", "64:ff9b::/96", reasonIPCIDR},
+		// --- Trailing dots, Kubernetes short names via the cluster DNS
+		// search path, non-canonical IP spellings ---
+		{"trailing dot on .svc.cluster.local", "atenet-router.ate-system.svc.cluster.local.", reasonNotICANN},
+		{"trailing dot, uppercase .SVC", "foo.SVC.", reasonNotICANN},
+		{"Kubernetes short name: router", "atenet-router.ate-system", reasonNotICANN},
+		{"Kubernetes short name: api", "api.ate-system", reasonNotICANN},
+		{"Kubernetes short name: kubernetes.default", "kubernetes.default", reasonNotICANN},
+		{"single-label GCE metadata alias", "metadata", reasonSingleLabel},
+		{"bare cluster.local domain", "cluster.local", reasonNotICANN},
+		{"IP/CIDR: 0.0.0.0/8", "0.0.0.0/8", reasonIPCIDR},
+		{"IP/CIDR: IPv6 unspecified ::", "::", reasonIPCIDR},
+		{"IP/CIDR: hex IP alias", "0x7f000001", reasonIPCIDR},
+		{"IP/CIDR: decimal IP alias", "2130706433", reasonIPCIDR},
+		{"IP/CIDR: partial dotted-quad", "127.1", reasonIPCIDR},
+		{"unsupported character: bracketed IPv6", "[::1]", reasonUnsupportedChar},
+		{"unsupported character: IPv6 zone id", "fe80::1%eth0", reasonUnsupportedChar},
+		{"invalid hostname: host:port", "10.0.0.1:443", reasonNotValidHost},
+		{"IP/CIDR: Class E reserved", "240.0.0.0/4", reasonIPCIDR},
+		{"IP/CIDR: 6to4", "2002::/16", reasonIPCIDR},
+		{"IP/CIDR: NAT64 (well-known prefix)", "64:ff9b::/96", reasonIPCIDR},
 
-		// --- Round 3 (double trailing dot, mixed-radix IPs, IDN
-		// look-alikes, .localhost/localdomain) ---
-		{"round3: double trailing dot .svc", "foo.svc..", reasonInvalidLabel},
-		{"round3: double trailing dot full router FQDN", "atenet-router.ate-system.svc.cluster.local..", reasonInvalidLabel},
-		{"round3: double trailing dot kubernetes.default", "kubernetes.default..", reasonInvalidLabel},
-		{"round3: mixed hex/decimal loopback a", "0x7f.0.0.1", reasonIPCIDR},
-		{"round3: mixed hex/decimal loopback b", "0x7f.1", reasonIPCIDR},
-		{"round3: mixed hex/decimal loopback c", "127.0.0.0x1", reasonIPCIDR},
-		{"round3: mixed hex/decimal private", "10.0x0.0.1", reasonIPCIDR},
-		{"round3: all-hex-per-octet unspecified", "0x0.0x0.0x0.0x0", reasonIPCIDR},
-		{"round3: IDN ideographic full stop", "kubernetes.default。svc", reasonNotICANN},
-		{"round3: IDN fullwidth letters", "foo.ＳＶＣ", reasonNotICANN},
-		{"round3: .localhost suffix", "foo.localhost", reasonNotICANN},
-		{"round3: localhost.localdomain exact name", "localhost.localdomain", reasonNotICANN},
-		{"round3: too many labels, non-alpha last", "1.2.3.4.5", reasonIPCIDR},
-		{"round3: numeric last label", "foo.123", reasonNotICANN},
-		{"round3: hex-shaped last label", "foo.0x7f", reasonNotICANN},
-		{"round3: space in label", "git hub.com", reasonNotValidHost},
+		// --- Double trailing dots, mixed-radix IP spellings, IDN
+		// look-alikes, .localhost/localdomain ---
+		{"double trailing dot: .svc", "foo.svc..", reasonInvalidLabel},
+		{"double trailing dot: full router FQDN", "atenet-router.ate-system.svc.cluster.local..", reasonInvalidLabel},
+		{"double trailing dot: kubernetes.default", "kubernetes.default..", reasonInvalidLabel},
+		{"IP/CIDR: mixed hex/decimal loopback a", "0x7f.0.0.1", reasonIPCIDR},
+		{"IP/CIDR: mixed hex/decimal loopback b", "0x7f.1", reasonIPCIDR},
+		{"IP/CIDR: mixed hex/decimal loopback c", "127.0.0.0x1", reasonIPCIDR},
+		{"IP/CIDR: mixed hex/decimal private", "10.0x0.0.1", reasonIPCIDR},
+		{"IP/CIDR: all-hex-per-octet unspecified", "0x0.0x0.0x0.0x0", reasonIPCIDR},
+		{"IDN look-alike: ideographic full stop", "kubernetes.default。svc", reasonNotICANN},
+		{"IDN look-alike: fullwidth letters", "foo.ＳＶＣ", reasonNotICANN},
+		{"in-cluster/local suffix: .localhost", "foo.localhost", reasonNotICANN},
+		{"exact name: localhost.localdomain", "localhost.localdomain", reasonNotICANN},
+		{"IP/CIDR: too many dotted parts, all numeric", "1.2.3.4.5", reasonIPCIDR},
+		{"numeric last label (not a real TLD)", "foo.123", reasonNotICANN},
+		{"hex-shaped last label (not a real TLD)", "foo.0x7f", reasonNotICANN},
+		{"invalid hostname: space in label", "git hub.com", reasonNotValidHost},
 
-		// --- Round 4 (R4-1: Kubernetes pod-IP DNS names and other
-		// TLD-shaped-but-not-public zones; R4-2: IP/CIDR entirely) ---
-		{"round4 R4-1: pod DNS name encoding the GCE metadata IP", "169-254-169-254.default.pod", reasonNotICANN},
-		{"round4 R4-1: pod DNS name encoding loopback", "127-0-0-1.default.pod", reasonNotICANN},
-		{"round4 R4-1: pod DNS name in a real namespace", "10-0-0-1.kube-system.pod", reasonNotICANN},
-		{"round4 R4-1: wildcard pod DNS name (every IPv4 via default ns)", "*.default.pod", reasonNotICANN},
-		{"round4 R4-1: RFC 8375 home.arpa local zone", "foo.home.arpa", reasonArpa},
-		{"round4 R4-1: .lan local zone", "foo.lan", reasonNotICANN},
-		{"round4 R4-1: .corp made-up zone", "foo.corp", reasonNotICANN},
-		// Round 6, Nit-1: renamed from "(also caught by the suffix
-		// blocklist)" — the TLD-not-ICANN check (rule 1) always fires
-		// first, so the blocklist is never actually reached here.
-		{"round4 R4-1: .local (rejected by the TLD check, not the suffix blocklist)", "foo.local", reasonNotICANN},
-		{"round4 R4-1: .internal (rejected by the TLD check, not the suffix blocklist)", "foo.internal", reasonNotICANN},
-		{"round4 R4-1: not a real TLD (typo of .com)", "example.kom", reasonNotICANN},
-		{"round4 R4-2: bare public IP", "8.8.8.8", reasonIPCIDR},
-		{"round4 R4-2: bare public IPv6", "2001:4860:4860::8888", reasonIPCIDR},
-		{"round4 R4-2: public CIDR", "1.1.1.0/24", reasonIPCIDR},
+		// --- Kubernetes pod-IP DNS names and other TLD-shaped-but-not-public
+		// zones; IP/CIDR entirely ---
+		{"pod DNS name encoding the GCE metadata IP", "169-254-169-254.default.pod", reasonNotICANN},
+		{"pod DNS name encoding loopback", "127-0-0-1.default.pod", reasonNotICANN},
+		{"pod DNS name in a real namespace", "10-0-0-1.kube-system.pod", reasonNotICANN},
+		{"wildcard pod DNS name (every IPv4 via default ns)", "*.default.pod", reasonNotICANN},
+		{"RFC 8375 home.arpa local zone", "foo.home.arpa", reasonArpa},
+		{".lan local zone (not a real TLD)", "foo.lan", reasonNotICANN},
+		{".corp made-up zone (not a real TLD)", "foo.corp", reasonNotICANN},
+		// Rejected by the TLD check, not the suffix blocklist: the
+		// ICANN-public-suffix check (rule 1) always fires first for these,
+		// so the blocklist below it is never actually reached.
+		{".local zone (rejected by the TLD check, not the suffix blocklist)", "foo.local", reasonNotICANN},
+		{".internal zone (rejected by the TLD check, not the suffix blocklist)", "foo.internal", reasonNotICANN},
+		{"typo TLD: .kom (not a real TLD)", "example.kom", reasonNotICANN},
+		{"IP/CIDR: bare public IP", "8.8.8.8", reasonIPCIDR},
+		{"IP/CIDR: bare public IPv6", "2001:4860:4860::8888", reasonIPCIDR},
+		{"IP/CIDR: public CIDR", "1.1.1.0/24", reasonIPCIDR},
 
-		// --- Round 4, suffix-rule refinement (substrate-lead's approved
-		// "option A" refinement, same round): the whole .arpa TLD, and a
-		// bare/wildcarded PRIVATE-suffix platform domain with nothing
-		// beneath it. ---
-		{"round4 refinement: bare home.arpa", "home.arpa", reasonArpa},
-		{"round4 refinement: foo.home.arpa", "foo.home.arpa", reasonArpa},
-		{"round4 refinement: reverse DNS in-addr.arpa", "1.0.0.10.in-addr.arpa", reasonArpa},
-		{"round4 refinement: bare private-suffix platform domain", "googleapis.com", reasonItselfSuffix},
-		{"round4 refinement: wildcard over a private-suffix platform domain", "*.googleapis.com", reasonItselfSuffix},
-		{"round4 refinement: wildcard over github.io", "*.github.io", reasonItselfSuffix},
+		// --- The whole .arpa TLD, and a bare/wildcarded PRIVATE-suffix
+		// platform domain with nothing beneath it ---
+		{"special-use TLD: bare home.arpa", "home.arpa", reasonArpa},
+		{"special-use TLD: foo.home.arpa", "foo.home.arpa", reasonArpa},
+		{"special-use TLD: reverse DNS in-addr.arpa", "1.0.0.10.in-addr.arpa", reasonArpa},
+		{"PRIVATE-suffix platform domain, bare: googleapis.com", "googleapis.com", reasonItselfSuffix},
+		{"PRIVATE-suffix platform domain, wildcard: *.googleapis.com", "*.googleapis.com", reasonItselfSuffix},
+		{"PRIVATE-suffix platform domain, wildcard: *.github.io", "*.github.io", reasonItselfSuffix},
 
-		// --- Round 5 (N5-1: wildcard over a PSL *wildcard* rule; N5-2 is a
-		// false-positive fix, not a bypass, so it has no row here — see
-		// TestValidateEgressAllow_AcceptsWildcardOnlyCcTLDs instead;
-		// special-use: .onion; N5-3: single-label wildcard message fix,
-		// covered by TestValidateEgressAllow_RejectsWildcardOverPublicSuffix;
-		// N5-4: length cap) ---
-		{"round5 N5-1: wildcard over run.app (PSL wildcard rule)", "*.run.app", reasonWildcardSuffix},
-		{"round5 N5-1: wildcard over compute.amazonaws.com (PSL wildcard rule)", "*.compute.amazonaws.com", reasonWildcardSuffix},
-		{"round5 N5-1: wildcard over compute-1.amazonaws.com (PSL wildcard rule)", "*.compute-1.amazonaws.com", reasonWildcardSuffix},
-		{"round5 N5-1: wildcard over kawasaki.jp (PSL wildcard rule)", "*.kawasaki.jp", reasonWildcardSuffix},
-		{"round5 special-use: onion hidden service", "foo.onion", reasonOnion},
-		{"round5 special-use: wildcard over onion", "*.onion", reasonOnion},
-		{"round5 N5-4: 256-character hostname, over the DNS length limit", buildHostnameOfLength(256), reasonTooLong},
+		// --- Wildcard over a PSL wildcard rule; special-use .onion; length
+		// cap. (The wildcard-only-ccTLD false-positive fix is an accept,
+		// not a reject, so it's covered separately in
+		// TestValidateEgressAllow_AcceptsWildcardOnlyCcTLDs; the
+		// single-label wildcard message fix is covered in
+		// TestValidateEgressAllow_RejectsWildcardOverPublicSuffix.) ---
+		{"wildcard over a PSL wildcard rule: *.run.app", "*.run.app", reasonWildcardSuffix},
+		{"wildcard over a PSL wildcard rule: *.compute.amazonaws.com", "*.compute.amazonaws.com", reasonWildcardSuffix},
+		{"wildcard over a PSL wildcard rule: *.compute-1.amazonaws.com", "*.compute-1.amazonaws.com", reasonWildcardSuffix},
+		{"wildcard over a PSL wildcard rule: *.kawasaki.jp", "*.kawasaki.jp", reasonWildcardSuffix},
+		{"special-use TLD: onion hidden service", "foo.onion", reasonOnion},
+		{"special-use TLD: wildcard over onion", "*.onion", reasonOnion},
+		{"256-character hostname, over the DNS length limit", buildHostnameOfLength(256), reasonTooLong},
 
-		// --- Round 6, FYI-1: lock in that a single-label wildcard over an
-		// in-cluster/local suffix is rejected structurally (today, via
-		// rule 1 — none of these is any kind of PSL TLD at all), not merely
-		// because the suffix blocklist happens to also list it. The
-		// blocklist's HasSuffix(ascii, ".svc") check would not, on its
-		// own, match a bare "svc" (no leading dot's worth of a suffix to
-		// match against); rule 2 (ascii == its own matched suffix) would
-		// still catch it even if rule 1 didn't, since a single label is
-		// always its own public suffix — see egressAllowSuffixOK's doc and
-		// the round-5 project log's FYI-1 entry. ---
-		{"round6 FYI-1: wildcard over bare svc", "*.svc", reasonNotICANN},
-		{"round6 FYI-1: wildcard over bare local", "*.local", reasonNotICANN},
-		{"round6 FYI-1: wildcard over bare localhost", "*.localhost", reasonNotICANN},
-		{"round6 FYI-1: wildcard over bare internal", "*.internal", reasonNotICANN},
+		// --- A single-label wildcard over a bare in-cluster/local label is
+		// rejected structurally (today, via rule 1 — none of these is any
+		// kind of PSL TLD at all), not merely because the suffix blocklist
+		// happens to also list it. The blocklist's
+		// HasSuffix(ascii, ".svc") check would not, on its own, match a
+		// bare "svc" (no leading dot's worth of a suffix to match
+		// against); rule 2 (ascii == its own matched suffix) would still
+		// catch it even if rule 1 didn't, since a single label is always
+		// its own public suffix — see egressAllowSuffixOK's doc. ---
+		{"wildcard over a bare in-cluster label: *.svc", "*.svc", reasonNotICANN},
+		{"wildcard over a bare in-cluster label: *.local", "*.local", reasonNotICANN},
+		{"wildcard over a bare in-cluster label: *.localhost", "*.localhost", reasonNotICANN},
+		{"wildcard over a bare in-cluster label: *.internal", "*.internal", reasonNotICANN},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -605,14 +601,14 @@ func TestValidateEgressAllow_AllBypassesRounds1Through5(t *testing.T) {
 	}
 }
 
-// TestValidateEgressAllow_R4_1RejectionReason spot-checks the rejection
-// REASON (not just that an error occurred) for a sample of the R4-1 rows —
-// review round 4's FYI asked for this "where you can". These must be
-// rejected specifically because their top-level domain fails the
-// ICANN-public-suffix check, not for some unrelated reason (e.g. the
-// hyphens in the pod-IP-encoding labels must not trip the LDH grammar
-// check instead — hyphens are valid mid-label).
-func TestValidateEgressAllow_R4_1RejectionReason(t *testing.T) {
+// TestValidateEgressAllow_TLDNotICANNRejectionReason spot-checks the
+// rejection REASON (not just that an error occurred) for a sample of the
+// Kubernetes pod-DNS-name and made-up-zone rows. These must be rejected
+// specifically because their top-level domain fails the ICANN-public-suffix
+// check, not for some unrelated reason (e.g. the hyphens in the
+// pod-IP-encoding labels must not trip the LDH grammar check instead —
+// hyphens are valid mid-label).
+func TestValidateEgressAllow_TLDNotICANNRejectionReason(t *testing.T) {
 	cases := []string{
 		"169-254-169-254.default.pod",
 		"10-0-0-1.kube-system.pod",
@@ -653,7 +649,7 @@ func TestValidateEgressAllow_ArpaRejectionReason(t *testing.T) {
 // the rejection reason for a bare or wildcarded PRIVATE-suffix platform
 // domain (googleapis.com, github.io): rejected because the domain IS its
 // own matched suffix, with nothing beneath it — not because the suffix
-// isn't ICANN-managed (it doesn't need to be, per the refinement).
+// isn't ICANN-managed (it doesn't need to be).
 func TestValidateEgressAllow_PrivateSuffixPlatformRejectionReason(t *testing.T) {
 	cases := []string{"googleapis.com", "*.googleapis.com", "*.github.io"}
 	for _, entry := range cases {
@@ -667,16 +663,15 @@ func TestValidateEgressAllow_PrivateSuffixPlatformRejectionReason(t *testing.T) 
 	}
 }
 
-// TestValidateEgressAllow_NoFalsePositives is review round 3's explicit
-// "no false positives" list plus round 4's N4-1 hex-alphabet-domain
-// additions, the round-4 suffix-rule refinement's required accepts
-// (storage.googleapis.com, foo.github.io — both on PRIVATE-section PSL
-// platforms, with a label beneath the platform's own suffix), and round
-// 5's N5-2 wildcard-only-ccTLD accepts and N5-4 length-boundary accept. The
-// three IP/CIDR entries (8.8.8.8, 2001:4860:4860::8888, 1.1.1.0/24) that
-// were on this list before round 4 are gone — see
-// TestValidateEgressAllow_IPRejectionNamesTheExactMessage, which asserts
-// they're now rejected.
+// TestValidateEgressAllow_NoFalsePositives is the explicit "no false
+// positives" list: real, unrelated public hostnames that must not be
+// mistaken for anything this validator rejects — hex-alphabet domains,
+// PRIVATE-PSL-suffix platform hostnames with a label beneath the platform's
+// own suffix, wildcard-only ccTLDs, and the length boundary. The three
+// IP/CIDR entries (8.8.8.8, 2001:4860:4860::8888, 1.1.1.0/24) that used to
+// be on this list, back when this validator accepted public IPs, are gone
+// — see TestValidateEgressAllow_IPRejectionNamesTheExactMessage, which
+// asserts they're now rejected.
 func TestValidateEgressAllow_NoFalsePositives(t *testing.T) {
 	cases := []string{
 		"api.anthropic.com",
@@ -687,24 +682,23 @@ func TestValidateEgressAllow_NoFalsePositives(t *testing.T) {
 		"GitHub.COM.", // uppercase + trailing dot
 		"xn--80ak6aa92e.com",
 		"foo.xn--p1ai", // IDNA punycode TLD
-		// Suffix-rule refinement: real hostnames on PRIVATE-PSL-suffix
-		// multi-tenant platforms, with a label beneath the platform's own
-		// suffix.
+		// Real hostnames on PRIVATE-PSL-suffix multi-tenant platforms, with
+		// a label beneath the platform's own suffix.
 		"storage.googleapis.com",
 		"foo.github.io",
-		// N4-1: real, unrelated domains whose labels happen to spell
+		// Real, unrelated domains whose labels happen to spell
 		// hex-alphabet words. Must not be mistaken for an IP address.
 		"cafe.de",
 		"dead.beef.com",
 		"abc.de",
 		"fab.be",
 		"adcb.ae",
-		// N5-2: real ccTLDs whose only PSL rule is a wildcard, not a
-		// bare-TLD rule.
+		// Real ccTLDs whose only PSL rule is a wildcard, not a bare-TLD
+		// rule.
 		"www.ck",
 		"foo.com.np",
 		"example.com.jm",
-		// N5-4: right at the length limit, not over it.
+		// Right at the length limit, not over it.
 		buildHostnameOfLength(253),
 	}
 	for _, entry := range cases {
@@ -714,9 +708,9 @@ func TestValidateEgressAllow_NoFalsePositives(t *testing.T) {
 	}
 }
 
-// TestValidateEgressAllow_LocalhostForms is review round 3's O-3: dedicated
-// coverage for every "localhost"-shaped rejection, beyond what the combined
-// bypass table already exercises.
+// TestValidateEgressAllow_LocalhostForms dedicates coverage to every
+// "localhost"-shaped rejection, beyond what the combined bypass table
+// already exercises.
 func TestValidateEgressAllow_LocalhostForms(t *testing.T) {
 	cases := []string{
 		"localhost",

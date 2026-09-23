@@ -80,13 +80,12 @@ func TestSubstrateEgressHostnames_NoTelemetryEnv(t *testing.T) {
 	}
 }
 
-// TestSubstrateEgressHostnames_SendsNormalizedEgressAllowEntries is review
-// round 3's "validate what you send": ValidateEgressAllow accepts
-// egress_allow entries after normalizing them (lowercase, at most one
-// trailing dot), but Substrate's own HostnameRule requires exactly that
-// normalized form (lowercase, no trailing dot). Sending the merely-trimmed
-// raw entry instead would validate fine locally and then fail at the
-// Substrate API.
+// TestSubstrateEgressHostnames_SendsNormalizedEgressAllowEntries confirms
+// "validate what you send": ValidateEgressAllow accepts egress_allow
+// entries after normalizing them (lowercase, at most one trailing dot), but
+// Substrate's own HostnameRule requires exactly that normalized form
+// (lowercase, no trailing dot). Sending the merely-trimmed raw entry
+// instead would validate fine locally and then fail at the Substrate API.
 func TestSubstrateEgressHostnames_SendsNormalizedEgressAllowEntries(t *testing.T) {
 	sc := config.V1SubstrateConfig{EgressAllow: []string{"GitHub.COM.", "  Registry.NPMJS.org  "}}
 	hosts := substrateEgressHostnames(RunConfig{}, map[string]string{}, sc)
@@ -102,11 +101,10 @@ func TestSubstrateEgressHostnames_SendsNormalizedEgressAllowEntries(t *testing.T
 	}
 }
 
-// TestSubstrateEgressHostnames_RejectsIPShapedEgressAllow is half of
-// review round 4's R4-2 test requirement: no IP or CIDR egress_allow entry
-// ever reaches substrateEgressHostnames' output, because
-// config.NormalizeEgressAllowEntry (called for every sc.EgressAllow entry)
-// now rejects all of them outright. See
+// TestSubstrateEgressHostnames_RejectsIPShapedEgressAllow confirms no IP or
+// CIDR egress_allow entry ever reaches substrateEgressHostnames' output,
+// because config.NormalizeEgressAllowEntry (called for every
+// sc.EgressAllow entry) rejects all of them outright. See
 // TestBuildEgressPolicy_PatternsMatchInputVerbatim for the other half —
 // that buildEgressPolicy sends exactly this list, unmodified, so nothing
 // IP-shaped can be reintroduced downstream either.
@@ -135,15 +133,13 @@ func TestSubstrateEgressHostnames_RejectsIPShapedEgressAllow(t *testing.T) {
 	}
 }
 
-// TestBuildEgressPolicy_PatternsMatchInputVerbatim is review round 4's
-// R4-2 buildEgressPolicy test: every string in hostnames lands in
-// HostnameRule.patterns, in order, unmodified — no re-normalization, no
-// mangling, and (paired with
+// TestBuildEgressPolicy_PatternsMatchInputVerbatim confirms every string in
+// hostnames lands in HostnameRule.patterns, in order, unmodified — no
+// re-normalization, no mangling, and (paired with
 // TestSubstrateEgressHostnames_RejectsIPShapedEgressAllow, which keeps
 // IP/CIDR entries out of that input list in the first place) nothing
 // IP-shaped ever reaches Patterns. Also confirms CIDRRule is never set:
-// Phase 1 sends everything as HostnameRule.patterns or not at all (review
-// round 4, R4-2).
+// Phase 1 sends everything as HostnameRule.patterns or not at all.
 func TestBuildEgressPolicy_PatternsMatchInputVerbatim(t *testing.T) {
 	hostnames := []string{"api.example.com", "*.github.com", "registry.npmjs.org"}
 	req := buildEgressPolicy("scion-proj", "agent-a", hostnames)

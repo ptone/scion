@@ -360,9 +360,10 @@ func testSubstrateRunConfig() RunConfig {
 }
 
 // newTestSubstrateHarness resets the process-wide agent-state registry
-// (substrateControlTokens/substrateAgentRecords — package vars since review
-// round 2, Required R1) so each test starts clean and can't leak state into,
-// or pick up state left by, any other test that also uses this helper.
+// (substrateControlTokens/substrateAgentRecords — process-wide package vars,
+// see their doc comment) so each test starts clean and can't leak state
+// into, or pick up state left by, any other test that also uses this
+// helper.
 func newTestSubstrateHarness(t *testing.T, rec *callRecorder) (*SubstrateRuntime, *fakeControlClient, *fakeActorServer, func()) {
 	t.Helper()
 	resetSubstrateAgentStateForTest(t)
@@ -499,10 +500,10 @@ func TestSubstrateRun_NonDigestImageError(t *testing.T) {
 func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 	// bootstrapHijackSentinel proves the 409 path's error is genuinely
 	// secret-free, not just free of the specific strings the other
-	// assertions happen to check (review round 2, Consider O5): the 409
-	// case below puts this in cfg.Env and asserts it is ABSENT from the
-	// error, guarding against a future change that wraps errBootstrapHijacked
-	// with cfg-derived context and forgets to route it through r.redact.
+	// assertions happen to check: the 409 case below puts this in cfg.Env
+	// and asserts it is ABSENT from the error, guarding against a future
+	// change that wraps errBootstrapHijacked with cfg-derived context and
+	// forgets to route it through r.redact.
 	const bootstrapHijackSentinel = "FAKE-KEY-SENTINEL-bootstrap-hijack-not-a-real-credential"
 
 	cases := []struct {
@@ -851,10 +852,10 @@ func TestSubstrateRun_ErrorDoesNotLeakEnvValues(t *testing.T) {
 		envSecretSentinel    = "FAKE-KEY-SENTINEL-env-secret-not-a-real-credential"
 		fileSecretSentinel   = "FAKE-KEY-SENTINEL-file-secret-not-a-real-credential"
 		// collidingSentinel is the value of a cfg.Env entry AND a file-type
-		// ResolvedSecret that share the same name ("COLLIDING_KEY"). Before
-		// review round 2's O1(b) fix, both were stored under the same bare
-		// map key, so adding the second silently dropped the first from the
-		// redaction set while its value stayed in the request.
+		// ResolvedSecret that share the same name ("COLLIDING_KEY"). With a
+		// bare map key, both would be stored under the same key, so adding
+		// the second would silently drop the first from the redaction set
+		// while its value stayed in the request.
 		collidingEnvSentinel    = "FAKE-KEY-SENTINEL-colliding-env-not-a-real-credential"
 		collidingSecretSentinel = "FAKE-KEY-SENTINEL-colliding-secret-not-a-real-credential"
 	)
@@ -1004,7 +1005,7 @@ func TestSubstrateList_SynthesisesNameAndAgentLabelsWithoutRecord(t *testing.T) 
 	// No agentRecords entry at all for this actor — e.g. it was created by
 	// a different SubstrateRuntime instance, or this instance just
 	// restarted. List must still expose "scion.name"/"scion.agent" so the
-	// broker's own by-name lookup succeeds (review round 1, Critical #1b).
+	// broker's own by-name lookup succeeds.
 	rec := &callRecorder{}
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
@@ -1031,7 +1032,7 @@ func TestSubstrateList_SynthesisesNameAndAgentLabelsWithoutRecord(t *testing.T) 
 }
 
 // -----------------------------------------------------------------------
-// NewSubstrateRuntime: process-wide memoization (review round 1, Critical #1)
+// NewSubstrateRuntime: process-wide memoization
 // -----------------------------------------------------------------------
 
 // resetSubstrateRuntimeRegistryForTest clears the process-wide
@@ -1166,14 +1167,14 @@ func TestNewSubstrateRuntime_DifferentConfigsGetDifferentInstances(t *testing.T)
 	}
 }
 
-// TestSubstrateAgentState_SharedAcrossConfigChange is review round 2's
-// Required R1 test: control tokens and agent records must be shared
-// process-wide, not per SubstrateRuntime instance, because the broker
-// resolves a genuinely new instance whenever settings change (or a second
-// substrate profile has different settings) — even though List's
-// synthesised scion.name/scion.agent labels mean the agent stays visible,
-// Exec (and any label lookup beyond those two) would break for every
-// pre-existing agent the moment the config changed, without this fix.
+// TestSubstrateAgentState_SharedAcrossConfigChange confirms control tokens
+// and agent records are shared process-wide, not per SubstrateRuntime
+// instance, because the broker resolves a genuinely new instance whenever
+// settings change (or a second substrate profile has different settings) —
+// even though List's synthesised scion.name/scion.agent labels mean the
+// agent stays visible, Exec (and any label lookup beyond those two) would
+// break for every pre-existing agent the moment the config changed, without
+// this.
 func TestSubstrateAgentState_SharedAcrossConfigChange(t *testing.T) {
 	resetSubstrateRuntimeRegistryForTest(t)
 	resetSubstrateAgentStateForTest(t)
@@ -1250,11 +1251,11 @@ func TestSubstrateAgentState_SharedAcrossConfigChange(t *testing.T) {
 	}
 }
 
-// TestGetRuntime_Substrate_SettingsBased_Memoized is review round 2's
-// Consider O4: TestNewSubstrateRuntime_MemoizedAcrossCalls calls
-// NewSubstrateRuntime directly, which wouldn't catch a future factory.go
-// change that bypasses it (e.g. calling newSubstrateRuntimeFromConfig
-// directly). This drives the same assertion through GetRuntime/
+// TestGetRuntime_Substrate_SettingsBased_Memoized:
+// TestNewSubstrateRuntime_MemoizedAcrossCalls calls NewSubstrateRuntime
+// directly, which wouldn't catch a future factory.go change that bypasses
+// it (e.g. calling newSubstrateRuntimeFromConfig directly). This drives the
+// same assertion through GetRuntime/
 // config.LoadEffectiveSettings, the actual path pkg/runtimebroker exercises,
 // with substrateRuntimeBuilder stubbed so it needs no real cluster/network.
 func TestGetRuntime_Substrate_SettingsBased_Memoized(t *testing.T) {

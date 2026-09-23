@@ -260,12 +260,11 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 
 // writeFileAtomicMode writes content to path without ever exposing it, even
 // transiently, at a mode wider than requested. A naive
-// os.WriteFile(path, content, mode) followed by os.Chmod(path, mode) — the
-// round 1 fix — has a real window between those two syscalls where a
-// pre-existing file at path (e.g. one baked into the image at a looser
-// mode, like 0644) holds the new secret content at its *old* mode. Anything
-// with read access under that old mode can read the secret during the
-// window (round 2 review finding N3, sb-rev-2).
+// os.WriteFile(path, content, mode) followed by os.Chmod(path, mode) has a
+// real window between those two syscalls where a pre-existing file at path
+// (e.g. one baked into the image at a looser mode, like 0644) holds the new
+// secret content at its *old* mode. Anything with read access under that
+// old mode can read the secret during the window.
 //
 // Instead: create a private temp file (os.CreateTemp defaults to 0600) in
 // the same directory as path (so the final rename lands on the same
@@ -284,8 +283,7 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 // permission boundary. If substrate-serve ever runs as a non-root user
 // while a "scion" target uid/gid still exists, every bootstrap would fail
 // here with EPERM — chown(2) to an arbitrary uid/gid is root-only on Linux,
-// with no equivalent of file-owner-can-chgrp-to-own-groups (review round 3,
-// Consider O-2).
+// with no equivalent of file-owner-can-chgrp-to-own-groups.
 func writeFileAtomicMode(dir, path string, content []byte, mode os.FileMode, uid, gid int) (err error) {
 	tmp, err := os.CreateTemp(dir, ".bootstrap-tmp-*")
 	if err != nil {

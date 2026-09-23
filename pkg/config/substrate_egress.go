@@ -39,11 +39,11 @@ var egressAllowCatchAllValues = map[string]bool{
 // egressAllowBlockedHostSuffixes are hostname suffixes that always resolve
 // inside the cluster, via mDNS, or to loopback, regardless of what CIDR
 // range backs them at any given moment. Kept as a second layer on top of
-// the public-suffix check (review round 4, substrate-lead direction):
-// every one of these is already rejected by requiring an ICANN-managed
-// public suffix (none of "svc"/"cluster.local"/"internal"/"local"/
-// "localhost" is one), but an explicit list doesn't depend on the public
-// suffix list never changing to include one.
+// the public-suffix check below: every one of these is already rejected by
+// requiring an ICANN-managed public suffix (none of
+// "svc"/"cluster.local"/"internal"/"local"/"localhost" is one), but an
+// explicit list doesn't depend on the public suffix list never changing to
+// include one.
 var egressAllowBlockedHostSuffixes = []string{
 	".svc",
 	".cluster.local",
@@ -56,8 +56,7 @@ var egressAllowBlockedHostSuffixes = []string{
 // that resolve to loopback/local via convention rather than a suffix rule.
 var egressAllowBlockedHostNames = map[string]bool{
 	// The traditional /etc/hosts loopback alias on many Linux
-	// distributions; resolved locally regardless of DNS (review round 3,
-	// R-A).
+	// distributions; resolved locally regardless of DNS.
 	"localhost.localdomain": true,
 }
 
@@ -77,11 +76,11 @@ var egressAllowLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0
 // accounting, works out to 253 characters of dotted text without a trailing
 // dot). Counted against the exact string NormalizeEgressAllowEntry returns
 // — including a leading "*." wildcard prefix, since that's what's actually
-// sent — not just the hostname portion (review round 5, N5-4): idna.Lookup
-// doesn't set VerifyDNSLength, so nothing else in this file enforces it,
-// and an over-length entry that passed validation here would only fail
-// later, inside Substrate's own CreateActorEgressPolicy call, breaking the
-// "validated == sendable" invariant the round 3/4 fixes were about.
+// sent — not just the hostname portion: idna.Lookup doesn't set
+// VerifyDNSLength, so nothing else in this file enforces it, and an
+// over-length entry that passed validation here would only fail later,
+// inside Substrate's own CreateActorEgressPolicy call, which would break
+// the invariant that whatever validates here is guaranteed sendable.
 const egressAllowMaxLength = 253
 
 // egressAllowSpecialUseTLDs are top-level domains that ARE, or overlap
@@ -100,8 +99,7 @@ var egressAllowSpecialUseTLDs = map[string]string{
 	// "onion" appears in the PSL's ICANN section (so rule 1 alone would
 	// accept it too), but RFC 7686 reserves it for Tor hidden-service
 	// addresses: compliant resolvers return NXDOMAIN for it, and only
-	// Tor-aware software resolves it at all — never the public DNS
-	// (review round 5, "special-use").
+	// Tor-aware software resolves it at all — never the public DNS.
 	"onion": "the \"onion\" top-level domain is a special-use name for Tor hidden services (RFC 7686), not resolvable via the public DNS",
 }
 
@@ -127,66 +125,58 @@ func (s *V1SubstrateConfig) Validate() error {
 	return nil
 }
 
-// ValidateEgressAllow is allowlist-first (substrate-lead direction, review
-// rounds 3-5): Phase 1 accepts only public FQDNs — no IP addresses or
-// CIDRs at all (Substrate's own HostnameRule.patterns, which is what these
-// entries feed, explicitly rejects IP addresses; CIDRRule support is
-// deferred to a later phase, review round 4, R4-2). The full public-suffix
+// ValidateEgressAllow is allowlist-first: Phase 1 accepts only public FQDNs
+// — no IP addresses or CIDRs at all (Substrate's own HostnameRule.patterns,
+// which is what these entries feed, explicitly rejects IP addresses;
+// CIDRRule support is deferred to a later phase). The full public-suffix
 // acceptance rule is isolated in egressAllowSuffixOK; see its doc comment
 // for the exact checks (a special-use-TLD block ahead of everything else,
 // an ICANN-listed-TLD check, at least one label beneath the domain's own
 // matched suffix — ICANN or PRIVATE — and, for a wildcard entry only, a
 // third check against wildcard PSL rules).
 //
-// The public-suffix requirement replaced round 3's "last label is
-// alphabetic" rule, which is a proxy for "looks like a TLD" but not for "is
-// a real, publicly-delegated one" — it let through Kubernetes' own `pod`/
-// `svc` DNS zones, `home.arpa` (RFC 8375), and made-up zones like `lan`/
-// `corp`, all of which resolve inside a cluster or a local network rather
-// than on the public Internet (review round 4, R4-1: `169-254-169-254.
-// default.pod` resolves to the GKE metadata server on any cluster, no
-// cluster-specific knowledge required).
+// A "last label is alphabetic" check is not enough on its own: it looks
+// like a TLD but doesn't confirm the TLD is actually delegated on the
+// public Internet — it would let through Kubernetes' own `pod`/`svc` DNS
+// zones, `home.arpa` (RFC 8375), and made-up zones like `lan`/`corp`, all
+// of which resolve inside a cluster or a local network rather than the
+// public Internet. This matters concretely: `169-254-169-254.default.pod`
+// resolves to the GKE metadata server on any cluster, no cluster-specific
+// knowledge required. Checking the actual public suffix list catches all
+// of these, since none of "pod"/"svc"/"lan"/"corp"/"kom" is a real
+// top-level domain, ICANN-managed or otherwise.
 //
-// The rule went through one refinement in round 4 itself: the first
-// version required the domain's own matched suffix to be ICANN-managed,
-// which correctly rejected "pod"/"svc"/"lan"/"corp", but also rejected
-// legitimate hostnames on multi-tenant platforms whose PSL entry is in the
-// PRIVATE section rather than ICANN's — "storage.googleapis.com" (Google
-// Cloud) and "foo.github.io" (GitHub Pages) both fail an "ICANN suffix
-// only" check, since "googleapis.com" and "github.io" are PRIVATE PSL
-// entries. Substrate-lead's approved refinement splits the check in two:
-// the top-level domain alone must be ICANN-listed (a real TLD), but the
-// "at least one label beneath the suffix" check is evaluated against
-// whichever suffix — ICANN or PRIVATE — actually matches the full domain.
-// That accepts real hostnames on private-suffix platforms while still
-// rejecting the bare platform domain itself ("googleapis.com",
-// "*.googleapis.com", "*.github.io") and everything round 4 originally
-// targeted ("pod", "svc", "lan", "corp", the numeric typo "kom").
+// Requiring the domain's own matched suffix to be ICANN-managed rejects
+// "pod"/"svc"/"lan"/"corp" as needed, but would also reject legitimate
+// hostnames on multi-tenant platforms whose PSL entry is in the PRIVATE
+// section rather than ICANN's — "storage.googleapis.com" (Google Cloud)
+// and "foo.github.io" (GitHub Pages) both fail an "ICANN suffix only"
+// check, since "googleapis.com" and "github.io" are PRIVATE PSL entries.
+// Splitting the check in two avoids that: the top-level domain alone must
+// be ICANN-listed (a real TLD), but the "at least one label beneath the
+// suffix" check is evaluated against whichever suffix — ICANN or PRIVATE —
+// actually matches the full domain. That accepts real hostnames on
+// private-suffix platforms while still rejecting the bare platform domain
+// itself ("googleapis.com", "*.googleapis.com", "*.github.io") and every
+// made-up or in-cluster zone ("pod", "svc", "lan", "corp", the typo "kom").
 //
-// Round 5 (sb-rev-5) found and substrate-lead approved two more
-// refinements to the same public-suffix check, plus two smaller fixes, all
-// in egressAllowSuffixOK/validatePublicHostname:
-//
-//   - N5-1: a wildcard entry over a remainder that isn't itself a public
-//     suffix, but where every single-label child of it IS one (a PSL
-//     *wildcard* rule, like "*.run.app" or "*.compute.amazonaws.com"), is
-//     now rejected — that grants every tenant on the platform, the same
-//     class of problem a bare wildcard over "googleapis.com" is.
-//   - N5-2: TLD-ness is now decided from
-//     publicsuffix.PublicSuffix("x."+tld)'s icann flag, not
-//     publicsuffix.PublicSuffix(tld)'s — several real ccTLDs ("ck", "er",
-//     "fk", "jm", "kh", "mm", "np", "pg") have only a wildcard rule in the
-//     PSL and no bare-TLD rule, so checking the bare label alone gave a
-//     false-fails-closed rejection for every host under them.
-//   - special-use: ".onion" (RFC 7686, Tor hidden services) is rejected
-//     the same way ".arpa" is, via egressAllowSpecialUseTLDs — like
-//     "arpa", "onion" is itself ICANN-listed, so the generic check alone
-//     would not catch it.
-//   - N5-3: a single-label wildcard remainder ("*.com", "*.co", "*.bd")
-//     now reaches the public-suffix check and gets that check's message,
-//     instead of being intercepted earlier by the "not fully qualified"
-//     single-label message, which was misleading for a wildcard over a
-//     bare TLD.
+// A wildcard entry over a remainder that isn't itself a public suffix, but
+// where every single-label child of it IS one (a PSL *wildcard* rule, like
+// "*.run.app" or "*.compute.amazonaws.com"), is also rejected — that grants
+// every tenant on the platform, the same class of problem a bare wildcard
+// over "googleapis.com" is. TLD-ness itself is decided from
+// publicsuffix.PublicSuffix("x."+tld)'s icann flag, not
+// publicsuffix.PublicSuffix(tld)'s, because several real ccTLDs ("ck",
+// "er", "fk", "jm", "kh", "mm", "np", "pg") have only a wildcard rule in
+// the PSL and no bare-TLD rule, so checking the bare label alone gives a
+// false rejection for every host under them. ".onion" (RFC 7686, Tor
+// hidden services) is rejected the same way ".arpa" is, via
+// egressAllowSpecialUseTLDs: like "arpa", "onion" is itself ICANN-listed,
+// so the generic ICANN check alone would not catch it. A single-label
+// wildcard remainder ("*.com", "*.co", "*.bd") reaches the public-suffix
+// check and gets that check's message, rather than being intercepted
+// earlier by a "not fully qualified" single-label message, which would be
+// misleading for a wildcard over a bare TLD.
 //
 // Residual risk, not closed by this or any DNS-name-shape check: an
 // ICANN-valid public hostname can still be configured (by its owner, or by
@@ -201,21 +191,21 @@ func (s *V1SubstrateConfig) Validate() error {
 // A leading "*." wildcard label is accepted, but the remainder after it
 // must independently satisfy the same rule — "*.com", "*.co", "*.bd", and
 // "*.co.uk" are all rejected (the remainder is itself a public suffix with
-// no label beneath it, or — round 5's N5-1 — the remainder's own children
-// are all public suffixes via a PSL wildcard rule, as with
+// no label beneath it, or the remainder's own children are all public
+// suffixes via a PSL wildcard rule, as with
 // "*.run.app"/"*.compute.amazonaws.com"/"*.compute-1.amazonaws.com"/
 // "*.kawasaki.jp"), while "*.example.com" passes ("example.com" has
 // "example" beneath the "com" suffix, and "com" has no PSL wildcard rule).
 //
-// Entries are also capped at egressAllowMaxLength characters (round 5,
-// N5-4), counting a wildcard prefix if present, matching the standard DNS
-// presentation-form limit.
+// Entries are also capped at egressAllowMaxLength characters, counting a
+// wildcard prefix if present, matching the standard DNS presentation-form
+// limit.
 //
 // The existing in-cluster/loopback/local hostname suffix and exact-name
 // blocklists (egressAllowBlockedHostSuffixes, egressAllowBlockedHostNames)
-// remain as a second layer on top of the public-suffix check, per
-// substrate-lead's direction — redundant against everything the public
-// suffix list already excludes, but not dependent on it staying that way.
+// remain as a second layer on top of the public-suffix check — redundant
+// against everything the public suffix list already excludes, but not
+// dependent on it staying that way.
 //
 // Empty entries are ignored. The returned error names the offending entry
 // as originally written, before normalization.
@@ -233,8 +223,7 @@ func ValidateEgressAllow(entries []string) error {
 // (returns "", nil for an empty/whitespace-only entry, which callers
 // should skip). This function is deliberately both the validator and the
 // normalizer: the string it returns is exactly the string that passed
-// every check, so what's validated and what's sent cannot drift apart —
-// rounds 3 and 4 of review both found gaps of exactly that shape.
+// every check, so what's validated and what's sent cannot drift apart.
 // ValidateEgressAllow and pkg/runtime.substrateEgressHostnames both call
 // this; neither should reimplement or bypass it.
 func NormalizeEgressAllowEntry(raw string) (string, error) {
@@ -264,22 +253,20 @@ func NormalizeEgressAllowEntry(raw string) (string, error) {
 	if wildcard {
 		final = "*." + ascii
 	}
-	// N5-4: enforce the total length against the exact string about to be
+	// Enforce the total length against the exact string about to be
 	// returned (and sent), including a wildcard prefix — not just the
-	// hostname portion — since that's what "validated == sendable" means
-	// here, same as everywhere else in this function.
+	// hostname portion — so what's validated matches what's sendable, same
+	// as everywhere else in this function.
 	if len(final) > egressAllowMaxLength {
 		return "", fmt.Errorf("egress_allow entry %q is %d characters long, over the %d-character limit for a DNS name", raw, len(final), egressAllowMaxLength)
 	}
 	return final, nil
 }
 
-// egressAllowSuffixOK is THE public-suffix acceptance rule (substrate-lead's
-// approved refinement of the "option A" allowlist direction, review rounds
-// 4-5). Deliberately isolated in its own small function — nothing else in
-// this file depends on its internals — so this specific rule can be
-// swapped out on its own if it needs to change again, which it already has
-// twice now.
+// egressAllowSuffixOK is THE public-suffix acceptance rule. Deliberately
+// isolated in its own small function — nothing else in this file depends
+// on its internals — so this specific rule can be swapped out on its own
+// if it needs to change again.
 //
 // ascii is the candidate hostname (already IDNA-converted to ASCII, with
 // any leading "*." wildcard already stripped by the caller); labels is
@@ -297,17 +284,17 @@ func NormalizeEgressAllowEntry(raw string) (string, error) {
 //  1. The top-level domain (the last label) must itself be an
 //     ICANN-managed public suffix. Checked as
 //     publicsuffix.PublicSuffix("x."+lastLabel), not
-//     publicsuffix.PublicSuffix(lastLabel) (review round 5, N5-2): several
-//     real ccTLDs — "ck", "er", "fk", "jm", "kh", "mm", "np", "pg" — have
-//     only a wildcard rule ("*.ck") in the PSL, no bare-TLD rule, so
-//     PublicSuffix("ck") alone falls through to the unmanaged default and
-//     wrongly reports icann==false. Prepending a throwaway label makes the
-//     wildcard rule match, so the check works the same way for a
-//     wildcard-only ccTLD as for an ordinary one. This is what rejects
-//     Kubernetes' own DNS zones ("pod", "svc"), special-use and made-up
-//     zones ("lan", "corp"), and typos ("kom") — none of these is a real
-//     top-level domain at all, ICANN-managed or otherwise, whether checked
-//     bare or with a prepended label.
+//     publicsuffix.PublicSuffix(lastLabel): several real ccTLDs — "ck",
+//     "er", "fk", "jm", "kh", "mm", "np", "pg" — have only a wildcard rule
+//     ("*.ck") in the PSL, no bare-TLD rule, so PublicSuffix("ck") alone
+//     falls through to the unmanaged default and wrongly reports
+//     icann==false. Prepending a throwaway label makes the wildcard rule
+//     match, so the check works the same way for a wildcard-only ccTLD as
+//     for an ordinary one. This is what rejects Kubernetes' own DNS zones
+//     ("pod", "svc"), special-use and made-up zones ("lan", "corp"), and
+//     typos ("kom") — none of these is a real top-level domain at all,
+//     ICANN-managed or otherwise, whether checked bare or with a prepended
+//     label.
 //  2. The domain must have at least one label beneath its OWN matched
 //     public suffix — which may be a PRIVATE-section entry, not only an
 //     ICANN one. The public suffix list's PRIVATE section exists
@@ -322,8 +309,8 @@ func NormalizeEgressAllowEntry(raw string) (string, error) {
 //     still rejecting the bare platform domain and any wildcard directly
 //     over it.
 //
-// A third check applies only when wildcard is true (review round 5, N5-1):
-// some PSL suffixes are *wildcard* rules rather than bare ones — "run.app",
+// A third check applies only when wildcard is true: some PSL suffixes are
+// *wildcard* rules rather than bare ones — "run.app",
 // "compute.amazonaws.com", "compute-1.amazonaws.com", "kawasaki.jp" are
 // none of them a public suffix by themselves (so rule 2 lets them through:
 // "run.app" is a perfectly good specific host, one label under the "app"
@@ -365,13 +352,13 @@ func egressAllowSuffixOK(ascii string, labels []string, wildcard bool) (ok bool,
 // against the public-FQDN grammar, returning its canonical ASCII form.
 // wildcard reports whether the caller had a leading "*." — see
 // egressAllowSuffixOK's doc for why that changes the suffix check, and the
-// single-label case just below for why it changes that check too (review
-// round 5, N5-3): a bare single-label entry like "com" is rejected as "not
-// fully qualified", since a resolver could fold it into a search-domain
-// suffix — but a *wildcard* single-label remainder like "*.com" has no such
-// ambiguity (there's nothing to search-domain-expand under a wildcard), so
-// it's let through to egressAllowSuffixOK, which rejects it for the more
-// specific and more accurate reason that "com" is itself a public suffix.
+// single-label case just below for why it changes that check too: a bare
+// single-label entry like "com" is rejected as "not fully qualified", since
+// a resolver could fold it into a search-domain suffix — but a *wildcard*
+// single-label remainder like "*.com" has no such ambiguity (there's
+// nothing to search-domain-expand under a wildcard), so it's let through to
+// egressAllowSuffixOK, which rejects it for the more specific and more
+// accurate reason that "com" is itself a public suffix.
 func validatePublicHostname(raw, hostname string, wildcard bool) (string, error) {
 	ascii, err := idna.Lookup.ToASCII(hostname)
 	if err != nil {
@@ -428,8 +415,8 @@ func isBareWildcard(entry string) bool {
 // token must be pure decimal digits. Real, unrelated public hostnames
 // whose labels spell hex-legal words — "cafe.de", "dead.beef.com",
 // "abc.de", "fab.be", "adcb.ae" — are never mistaken for an IP address
-// this way (review round 4, N4-1: a broader character-class-only pattern
-// rejected all of these as false positives).
+// this way (a broader character-class-only pattern would reject all of
+// these as false positives).
 func looksLikeIPAttempt(entry string) bool {
 	if strings.Contains(entry, "/") {
 		if _, err := netip.ParsePrefix(entry); err == nil {

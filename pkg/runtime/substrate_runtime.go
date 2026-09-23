@@ -99,10 +99,10 @@ type SubstrateRuntime struct {
 // control tokens and agent records lived on that instance instead of here,
 // an agent started under one config would become unreachable for
 // exec/list-with-project-labels the moment the broker resolved a different
-// config — the same failure class as round-1 Critical #1 (there, triggered
-// by every `start`; here, by a config change), now fixed by moving this
-// state to the one thing every instance shares: the process (review round
-// 2, Required R1).
+// config — the same failure class as the per-instance gRPC connection
+// memoization bug below (there, triggered by every `start`; here, by a
+// config change), fixed the same way: moving this state to the one thing
+// every instance shares, the process.
 var (
 	substrateAgentStateMu sync.Mutex
 	// substrateControlTokens maps "<atespace>/<actor>" to the control_token
@@ -129,7 +129,7 @@ var (
 // GetRuntime on every `start` whose profile isn't the default, and would
 // otherwise call NewSubstrateRuntime again each time. Without memoization,
 // every call would dial a brand new gRPC ClientConn that is never closed,
-// leaking one connection per agent start (review round 1, Critical #1).
+// leaking one connection per agent start.
 var (
 	substrateRuntimesMu sync.Mutex
 	substrateRuntimes   = make(map[string]*SubstrateRuntime)
@@ -317,8 +317,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 
 	// Step 5: egress policy. (r.cfg was already validated at the top of
 	// Run; r.cfg is immutable for the lifetime of this call, so revalidating
-	// it here would only ever re-check the same result — review round 2,
-	// Nit N2.)
+	// it here would only ever re-check the same result.)
 	env := buildBootstrapEnv(cfg)
 	hostnames := substrateEgressHostnames(cfg, env, r.cfg)
 	if _, err := r.client.CreateActorEgressPolicy(ctx, buildEgressPolicy(atespace, actorName, hostnames)); err != nil {
@@ -406,18 +405,19 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 
 // bootstrapNonce is the single call site for the bootstrap request's bearer
 // value (brief instruction: "structure the code so the nonce source is one
-// function"). phase1-spec.md §5 leaves the choice between MintActorJWT
+// function"). phase1-spec.md §5 leaves open a choice between MintActorJWT
 // (verifiable actor identity via a systemInfo volume) and a fallback
 // (first-bootstrap-wins, secured by a NetworkPolicy restricting router
-// ingress to the broker namespace) to sb-em, pending sb-dev's finding.
+// ingress to the broker namespace), pending further investigation into
+// whether MintActorJWT is actually usable here.
 //
 // This is the fallback. It could not confirm MintActorJWT's alternative is
 // even possible from ateapi.proto alone: a systemInfo TrustBundleDataSource
 // projects a named, "allowlisted in atelet" trust bundle into the actor,
 // and whether one of those allowlisted names carries what's needed to
 // verify a substrate-issued actor JWT is opaque outside atelet's
-// implementation. Do not switch this to MintActorJWT without sb-em's
-// decision — see the project log and the finding reported to sb-em.
+// implementation. Do not switch this to MintActorJWT without confirming
+// that decision — see the project log for the open question this leaves.
 func (r *SubstrateRuntime) bootstrapNonce(ctx context.Context, atespace, actorName, actorUID string) (string, error) {
 	return generateControlToken()
 }
@@ -512,7 +512,7 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 		// this runtime instance has no in-memory record for the actor —
 		// e.g. right after a broker restart, which phase1-spec.md §2.2's
 		// List row accepts losing records for, but not losing the actor
-		// from List entirely (review round 1, Critical #1).
+		// from List entirely.
 		labels := map[string]string{
 			"scion.name":  actor.GetMetadata().GetName(),
 			"scion.agent": "true",
@@ -758,8 +758,7 @@ func isDigestPinned(image string) bool {
 // and '-', starting and ending with an alphanumeric character). A UUID
 // project ID is already valid as-is; this defends against any other project
 // ID shape (uppercase letters, underscores, a trailing '-' from truncating
-// mid-segment) producing an invalid atespace name — review round 1,
-// Consider #11.
+// mid-segment) producing an invalid atespace name.
 func substrateAtespaceName(projectID string) string {
 	s := projectID
 	if len(s) > 12 {

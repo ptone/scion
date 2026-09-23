@@ -45,7 +45,7 @@ const (
 // blanket timeout (see its doc comment), so every call here sets its own —
 // a single fixed client timeout can't fit both a quick healthz probe and an
 // exec whose timeout_s is caller-chosen and can legitimately run longer
-// than that (review round 1, Consider #8).
+// than that.
 const (
 	// healthzRequestTimeout bounds one GET /healthz attempt. waitForHealthz
 	// retries across its own outer timeout/backoff, so this only bounds a
@@ -98,7 +98,8 @@ type execRequest struct {
 
 // execResponse is the POST /scion/v1/exec body. Truncated flags that stdout
 // or stderr hit the 4 MiB per-stream cap (phase1-spec.md §2.1); the field
-// name is provisional pending sb-em/sb-dev-2 agreement (brief §Scope 5).
+// name is provisional pending confirmation of the exact wire-format
+// contract (brief §Scope 5).
 type execResponse struct {
 	Stdout    string `json:"stdout"`
 	Stderr    string `json:"stderr"`
@@ -119,8 +120,8 @@ const defaultFileMode = 0o600
 // cfg.Harness.GetEnv()/GetTelemetryEnv(), which every other runtime
 // includes (see buildCommonRunArgs, KubernetesRuntime.buildPod) and which
 // the harness needs to run at all (model, task and telemetry env are not
-// otherwise present in cfg.Env). Flagged to sb-em as a spec/behavior
-// question (see project log) rather than silently narrowed to the literal
+// otherwise present in cfg.Env). This inclusion is a spec/behavior question
+// (see the project log) rather than silently narrowed to the literal
 // formula, since narrowing it would ship a harness that cannot start.
 func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	env := make(map[string]string)
@@ -197,10 +198,9 @@ func substrateSecretCandidates(cfg RunConfig) map[string]string {
 	// "GITHUB_TOKEN=..." entry) — with a bare-name map, the second one
 	// added would silently overwrite the first map entry, and the
 	// overwritten source's value would stay in the request but drop out of
-	// the redaction set (review round 2, Consider O1(b)). The source
-	// prefix also makes the redaction marker in an error message more
-	// informative ("[value of secret_file:GITHUB_TOKEN redacted]" instead
-	// of just the name).
+	// the redaction set. The source prefix also makes the redaction marker
+	// in an error message more informative ("[value of
+	// secret_file:GITHUB_TOKEN redacted]" instead of just the name).
 	add := func(source, key, value string) {
 		if value == "" {
 			return
@@ -232,10 +232,8 @@ func substrateSecretCandidates(cfg RunConfig) map[string]string {
 		// ResolvedAuth.Files' contents (credential JSON, tokens, etc. read
 		// from SourcePath) go into the bootstrap payload the same as any
 		// other secret and are just as much a candidate for leaking into
-		// an error message (review round 1's original call-out, "bootstrap-
-		// file contents", was never actually covered — review round 2,
-		// Consider O1(a)). A read failure here is swallowed: it can't leak
-		// content it never read, and buildBootstrapFiles independently
+		// an error message. A read failure here is swallowed: it can't
+		// leak content it never read, and buildBootstrapFiles independently
 		// surfaces the read error (naming only the path, never content).
 		for _, f := range cfg.ResolvedAuth.Files {
 			if f.SourcePath == "" {
@@ -419,8 +417,8 @@ func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actor
 	// The HTTP round trip needs longer than timeout_s itself: the control
 	// server enforces timeout_s server-side and then still has to write the
 	// response, and the request has to reach it and come back. Racing the
-	// client's deadline against the server's own enforcement is exactly
-	// what cut exec calls short before (review round 1, Consider #8).
+	// client's deadline against the server's own enforcement would cut exec
+	// calls short.
 	ctx, cancel := context.WithTimeout(ctx, timeout+execTimeoutSlack)
 	defer cancel()
 

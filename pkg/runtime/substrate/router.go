@@ -41,9 +41,8 @@ type RouterClient struct {
 	// single fixed timeout can't fit every call this client makes — an
 	// exec's timeout_s is caller-chosen and can legitimately exceed a
 	// short healthz/bootstrap deadline (see pkg/runtime's doExec, which
-	// derives its context deadline from timeout_s; a previous flat 30s
-	// client timeout cut off exec calls whose timeout_s was 60s — review
-	// round 1, Consider #8).
+	// derives its context deadline from timeout_s; a flat 30s client
+	// timeout would cut off exec calls whose timeout_s was 60s).
 	HTTPClient *http.Client
 }
 

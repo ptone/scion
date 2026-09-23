@@ -202,14 +202,13 @@ func TestBootstrap_WritesFilesWithParentDirsAndEnv(t *testing.T) {
 	}
 }
 
-// TestWriteBootstrapFile_EnforcesModeOnPreExistingFile covers review finding
-// #9 (round 1, sb-rev): os.WriteFile's mode argument only applies to a
-// newly created file's open(2) call and has no effect on a file that
-// already exists (e.g. baked into the image at a different mode) — it only
-// truncates and rewrites contents. Without an explicit os.Chmod after the
-// write, a bootstrap payload requesting 0600 on a credential file that
-// already exists at a looser mode (e.g. 0644 from the image) would
-// silently leave it at 0644.
+// TestWriteBootstrapFile_EnforcesModeOnPreExistingFile confirms
+// os.WriteFile's mode argument only applies to a newly created file's
+// open(2) call and has no effect on a file that already exists (e.g. baked
+// into the image at a different mode) — it only truncates and rewrites
+// contents. Without an explicit os.Chmod after the write, a bootstrap
+// payload requesting 0600 on a credential file that already exists at a
+// looser mode (e.g. 0644 from the image) would silently leave it at 0644.
 func TestWriteBootstrapFile_EnforcesModeOnPreExistingFile(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "credential.json")
@@ -245,12 +244,12 @@ func TestWriteBootstrapFile_EnforcesModeOnPreExistingFile(t *testing.T) {
 	}
 }
 
-// TestWriteBootstrapFile_SetsModeAndOwnerAtomically covers review finding
-// N3 (round 2, sb-rev-2): the round 1 fix (os.WriteFile then os.Chmod) left
-// a window, for a pre-existing file, where the new secret content was
-// readable at the file's *old* mode between the two syscalls. This asserts
-// the write-to-temp-then-rename fix's outcome: the final file has exactly
-// the requested mode and owner, and the content is correct. (The absence of
+// TestWriteBootstrapFile_SetsModeAndOwnerAtomically confirms that a naive
+// os.WriteFile then os.Chmod sequence leaves a window, for a pre-existing
+// file, where the new secret content is readable at the file's *old* mode
+// between the two syscalls. This asserts the write-to-temp-then-rename
+// fix's outcome: the final file has exactly the requested mode and owner,
+// and the content is correct. (The absence of
 // a readable-at-wrong-mode window isn't itself observable from a
 // single-threaded test — what's verifiable and what actually matters here
 // is that writeFileAtomicMode never produces a file with the wrong

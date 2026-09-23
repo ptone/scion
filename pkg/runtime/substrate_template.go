@@ -58,10 +58,9 @@ const templateReadyPollInterval = 5 * time.Second
 // would let a change to that default silently reuse the old golden
 // template), the hardcoded snapshot scope, and the entrypoint version. This
 // is a deliberate deviation from the spec's literal hash-input list (image
-// digest + sandbox class + resources + scope + entrypoint version only) —
-// see review round 1, Consider #7: those other fields are template content
-// too, and changing them in settings must not silently reuse a stale
-// golden template.
+// digest + sandbox class + resources + scope + entrypoint version only):
+// those other fields are template content too, and changing them in
+// settings must not silently reuse a stale golden template.
 func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) string {
 	effectiveResources := resources
 	if effectiveResources == nil {

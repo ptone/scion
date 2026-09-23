@@ -88,7 +88,7 @@ metadata:
 rules:
   # resourceNames pins this to the one ClusterTrustBundle substrate.cluster_trust_bundle
   # actually names, for least privilege — the broker cannot read any other
-  # cluster's/tenant's trust bundle. Round 1 review finding #12 (sb-rev).
+  # cluster's/tenant's trust bundle.
   - apiGroups: ["certificates.k8s.io"]
     resources: ["clustertrustbundles"]
     resourceNames: ["${CLUSTER_TRUST_BUNDLE_NAME}"]
@@ -142,9 +142,9 @@ roleRef:
   name: scion-substrate-broker-pod-logs
   apiGroup: rbac.authorization.k8s.io
 ---
-# Settings file holding the substrate runtime profile (relayed by sb-dev via
-# sb-em, 2026-09-23). Mounted at $HOME/.scion/settings.yaml in the broker
-# container (config.GetGlobalDir() is always $HOME/.scion — see
+# Settings file holding the substrate runtime profile. Mounted at
+# $HOME/.scion/settings.yaml in the broker container (config.GetGlobalDir()
+# is always $HOME/.scion — see
 # pkg/config/paths.go — there is no path env override), so HOME must be set
 # to match the mountPath below (see the Deployment's env and volumeMounts).
 #

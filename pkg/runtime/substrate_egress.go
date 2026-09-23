@@ -74,10 +74,9 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 	// default (findings.md §2), but that's a coincidence of the default,
 	// not a rule: a self-hosted OTLP collector or the hub's own endpoint
 	// needs its own rule, so check every env var scion's telemetry stack
-	// actually uses rather than relying on the wildcard (review round 1,
-	// Required #4). Checked independently, not via a single
-	// hostFromURLEnv call, because a deployment could point different
-	// signals at different collectors.
+	// actually uses rather than relying on the wildcard. Checked
+	// independently, not via a single hostFromURLEnv call, because a
+	// deployment could point different signals at different collectors.
 	for _, key := range []string{
 		"SCION_OTEL_ENDPOINT",                // pkg/sciontool/telemetry, pkg/util/logging: scion's own var.
 		"OTEL_EXPORTER_OTLP_ENDPOINT",        // OTel SDK standard var, if a harness sets it directly.
