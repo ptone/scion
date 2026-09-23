@@ -80,9 +80,27 @@ Examples:
   sciontool init --grace-period=30s -- claude`,
 	DisableFlagParsing: false,
 	Run: func(cmd *cobra.Command, args []string) {
-		exitCode := runInit(args)
+		exitCode := RunInit(args, InitRunOptions{ForwardTermSignal: true})
 		os.Exit(exitCode)
 	},
+}
+
+// InitRunOptions configures a single invocation of RunInit. The zero value
+// matches `sciontool init`'s historical CLI behaviour except where noted.
+type InitRunOptions struct {
+	// ForwardTermSignal controls whether RunInit installs its own SIGTERM/
+	// SIGINT handler that runs pre-stop hooks and gracefully shuts down the
+	// child process. `sciontool init` (the CLI command) always sets this to
+	// true — that behaviour is unchanged.
+	//
+	// It must be false when RunInit is invoked in-process by
+	// `sciontool substrate-serve` (pkg/sciontool/substrate). substrate-serve
+	// is itself PID 1 there and owns SIGTERM handling: Phase 1 requires it
+	// to log SIGTERM without forwarding it (see phase1-spec.md §2.1 and
+	// findings.md D3 — full eviction handling is Phase 2). If RunInit also
+	// installed a SIGTERM handler in that mode, the two handlers would race
+	// on the same process signal and the harness could be killed anyway.
+	ForwardTermSignal bool
 }
 
 func init() {
@@ -99,7 +117,16 @@ func init() {
 	}
 }
 
-func runInit(args []string) int {
+// RunInit runs the sciontool init logic: it sets up the container user,
+// clones the workspace, runs lifecycle hooks, launches the child process
+// under supervision, and reports status/heartbeats to the Hub until the
+// child exits. It returns the process's intended exit code and never calls
+// os.Exit itself, so it is safe to call in-process from other entry points
+// (see InitRunOptions.ForwardTermSignal for the substrate-serve case).
+//
+// This is the exact logic `sciontool init -- <cmd>` runs; it is exported
+// so other subcommands can reuse it instead of forking a copy.
+func RunInit(args []string, opts InitRunOptions) int {
 	// Start the reaper goroutine for zombie process cleanup.
 	// This is critical when running as PID 1 in a container.
 	supervisor.StartReaper()
@@ -574,14 +601,23 @@ func runInit(args []string) int {
 	// requestedShutdown tracks whether the process received an intentional
 	// SIGTERM/SIGINT so classifyExit can distinguish a clean stop from a crash.
 	var requestedShutdown atomic.Bool
-	sigHandler := supervisor.NewSignalHandler(sup, cancel).
-		WithPreStopHook(func() error {
-			requestedShutdown.Store(true)
-			log.Info("Running pre-stop hooks...")
-			return lifecycleManager.RunPreStop()
-		})
-	sigHandler.Start()
-	defer sigHandler.Stop()
+	if opts.ForwardTermSignal {
+		sigHandler := supervisor.NewSignalHandler(sup, cancel).
+			WithPreStopHook(func() error {
+				requestedShutdown.Store(true)
+				log.Info("Running pre-stop hooks...")
+				return lifecycleManager.RunPreStop()
+			})
+		sigHandler.Start()
+		defer sigHandler.Stop()
+	} else {
+		// ForwardTermSignal=false (substrate-serve): the caller owns SIGTERM
+		// handling for the whole process, so RunInit must not also listen
+		// for it here — doing so would shut down the child out from under
+		// the caller's own (non-forwarding) signal handling. See
+		// InitRunOptions.ForwardTermSignal.
+		log.Info("Termination-signal forwarding disabled for this init run; the child will not be stopped on SIGTERM/SIGINT by this code path")
+	}
 
 	// Run the child process under supervision
 	// We use a goroutine to allow post-start hooks to run after process starts
@@ -665,15 +701,26 @@ func runInit(args []string) int {
 			})
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
 
-			go scionportforward.NewManager(hubClient).Run(ctx)
-			log.Info("Started port-forward tunnel manager")
+			// The Substrate runtime's egress is HTTP(S)-only and default-deny;
+			// WebSocket egress (the hub port-forward tunnel) is blocked there,
+			// so starting it would just spin retrying against 403s. Autoexpose
+			// depends on the same tunnel. Skip both when running under the
+			// substrate runtime (findings.md D1; phase1-spec.md §3). This is a
+			// Phase 1 limitation, not a permanent one — see §4.3b for the
+			// on-demand tunnel design that will eventually re-enable this.
+			if os.Getenv("SCION_RUNTIME") == "substrate" {
+				log.Info("SCION_RUNTIME=substrate: skipping port-forward tunnel manager and auto-expose (WebSocket egress is not available on Substrate)")
+			} else {
+				go scionportforward.NewManager(hubClient).Run(ctx)
+				log.Info("Started port-forward tunnel manager")
 
-			// Auto-expose: detect and register listening ports
-			if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
-				reconciler := autoexpose.NewReconciler(hubClient, autoExposeCfg)
-				reconciler.SetMessageClient(&hubMessageAdapter{client: hubClient})
-				go reconciler.Run(ctx)
-				log.Info("Started auto-expose port scanner (interval: %s, mode: %s)", autoExposeCfg.Interval, autoExposeCfg.FilterMode)
+				// Auto-expose: detect and register listening ports
+				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
+					reconciler := autoexpose.NewReconciler(hubClient, autoExposeCfg)
+					reconciler.SetMessageClient(&hubMessageAdapter{client: hubClient})
+					go reconciler.Run(ctx)
+					log.Info("Started auto-expose port scanner (interval: %s, mode: %s)", autoExposeCfg.Interval, autoExposeCfg.FilterMode)
+				}
 			}
 
 			// Read the agent token from the canonical token file (written by
