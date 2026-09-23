@@ -1058,17 +1058,18 @@ type V1SubstrateConfig struct {
 	// per-actor EgressPolicy, beyond the hub/git/model/telemetry hosts the
 	// runtime always adds.
 	//
-	// Validated by V1SubstrateConfig.Validate (called at settings-load time
-	// for the runtime and defensively again in Run before
-	// CreateActorEgressPolicy): entries must not be a catch-all ("all",
-	// "*", "0.0.0.0/0", "::/0", or a bare wildcard), must not overlap a
-	// private/in-cluster/link-local/loopback IP range (RFC 1918, CGNAT,
-	// link-local, loopback, and their IPv6 equivalents), and must not target
-	// a Kubernetes-internal DNS suffix (".svc", ".cluster.local",
-	// ".internal"). Substrate's egress default-deny plus the actor's
-	// EgressPolicy is what keeps an actor off the atenet-router and other
-	// in-cluster services (findings.md §6 threat model); a catch-all or an
-	// in-cluster range here would defeat that.
+	// Validated by V1SubstrateConfig.Validate, which NewSubstrateRuntime
+	// calls when the runtime is constructed, and Run calls again once at
+	// its start — not at settings-load time or by `scion config validate`
+	// (there is no generic settings-validation hook for this yet), and not
+	// a second time inside Run's egress-policy step (r.cfg is immutable for
+	// a single Run call, so one check per call is enough). See
+	// ValidateEgressAllow's doc comment for the exact rule set, which
+	// changes more often than this comment would otherwise be kept in sync
+	// with. Substrate's egress default-deny plus the actor's EgressPolicy
+	// is what keeps an actor off the atenet-router and other in-cluster
+	// services (findings.md §6 threat model); an entry that reaches either
+	// of those would defeat it.
 	EgressAllow []string `json:"egress_allow,omitempty" yaml:"egress_allow,omitempty" koanf:"egress_allow"`
 	// TemplateReadyTimeout bounds how long Run waits for a newly created
 	// ActorTemplate to become ready (a Go duration string, e.g. "10m").
