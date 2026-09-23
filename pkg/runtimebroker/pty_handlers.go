@@ -716,6 +716,7 @@ func newLocalPTYSession(ctx context.Context, agentID, containerID, runtimeCmd, e
 func (s *LocalPTYSession) Run() error {
 	isK8s := (s.runtimeCmd == "kubernetes" || s.runtimeCmd == "k8s") && s.k8sConfig != nil && s.k8sClientset != nil
 	isCloudRunSandbox := s.runtimeCmd == "cloudrun-sandbox"
+	isSubstrate := s.runtimeCmd == "substrate"
 
 	if isCloudRunSandbox {
 		if err := s.startCloudRunSandboxExec(); err != nil {
@@ -729,6 +730,11 @@ func (s *LocalPTYSession) Run() error {
 		// Fall through to the same read/write/resize loop as Docker.
 	} else if isK8s {
 		return s.runK8sExec()
+	} else if isSubstrate {
+		// Substrate has no exec/attach/TTY primitive in Phase 1 (findings.md
+		// §3, phase1-spec.md §2.2); return a clean error instead of falling
+		// through to docker exec, which would fail confusingly.
+		return fmt.Errorf("attach not yet supported on substrate")
 	} else {
 		// Activate set-titles for existing sessions that predate the template change.
 		// Best-effort — failure doesn't block attach.
@@ -1156,6 +1162,7 @@ func (h *StreamPTYHandler) Run() error {
 	}
 	isK8s := (runtimeCmd == "kubernetes" || runtimeCmd == "k8s") && h.k8sConfig != nil && h.k8sClientset != nil
 	isCloudRunSandbox := runtimeCmd == "cloudrun-sandbox"
+	isSubstrate := runtimeCmd == "substrate"
 
 	if isCloudRunSandbox {
 		if err := h.startCloudRunSandboxExec(); err != nil {
@@ -1168,6 +1175,11 @@ func (h *StreamPTYHandler) Run() error {
 		// Fall through to the same read/write/resize loop as Docker.
 	} else if isK8s {
 		return h.runK8sExec()
+	} else if isSubstrate {
+		// Substrate has no exec/attach/TTY primitive in Phase 1 (findings.md
+		// §3, phase1-spec.md §2.2); return a clean error instead of falling
+		// through to docker exec, which would fail confusingly.
+		return fmt.Errorf("attach not yet supported on substrate")
 	} else {
 		// Activate set-titles for existing sessions that predate the template change.
 		// Best-effort — failure doesn't block attach.
