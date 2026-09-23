@@ -225,3 +225,139 @@ func TestValidateEgressAllow_KnownNamespaceHeuristicAllowsPunycode(t *testing.T)
 		t.Errorf("ValidateEgressAllow([example.xn--p1ai]) = %v, want nil (punycode TLD)", err)
 	}
 }
+
+// TestValidateEgressAllow_AllBypassesRounds1Through3 is the consolidated
+// regression suite review round 3 (substrate-lead's allowlist direction)
+// asked for: every bypass found across rounds 1, 2, and 3, in one table, so
+// the full history is locked in against the current (allowlist-first)
+// implementation rather than scattered across per-round test functions.
+// See the project log
+// (.design/project-log/2026-09-23-substrate-phase1-round3-fixes.md) for the
+// round-by-round provenance of each row.
+func TestValidateEgressAllow_AllBypassesRounds1Through3(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry string
+	}{
+		// --- Round 1 (initial validator) ---
+		{"round1: all", "all"},
+		{"round1: bare wildcard", "*"},
+		{"round1: 0.0.0.0/0", "0.0.0.0/0"},
+		{"round1: ::/0", "::/0"},
+		{"round1: 10.0.0.0/8", "10.0.0.0/8"},
+		{"round1: bare IP in 192.168/16", "192.168.1.1"},
+		{"round1: .svc suffix", "atenet-router.ate-system.svc"},
+		{"round1: .cluster.local suffix", "api.ate-system.svc.cluster.local"},
+		{"round1: .internal suffix", "metadata.internal"},
+
+		// --- Round 2 (trailing dot, k8s short names, non-canonical IPs) ---
+		{"round2: trailing dot on .svc.cluster.local", "atenet-router.ate-system.svc.cluster.local."},
+		{"round2: trailing dot uppercase .SVC", "foo.SVC."},
+		{"round2: router short name", "atenet-router.ate-system"},
+		{"round2: api short name", "api.ate-system"},
+		{"round2: kubernetes.default short name", "kubernetes.default"},
+		{"round2: GCE metadata alias", "metadata"},
+		{"round2: bare cluster domain", "cluster.local"},
+		{"round2: 0.0.0.0/8", "0.0.0.0/8"},
+		{"round2: IPv6 unspecified ::", "::"},
+		{"round2: hex IP alias", "0x7f000001"},
+		{"round2: decimal IP alias", "2130706433"},
+		{"round2: partial dotted-quad", "127.1"},
+		{"round2: bracketed IPv6", "[::1]"},
+		{"round2: IPv6 zone id", "fe80::1%eth0"},
+		{"round2: host:port", "10.0.0.1:443"},
+		{"round2: Class E reserved", "240.0.0.0/4"},
+		{"round2: 6to4", "2002::/16"},
+		{"round2: NAT64 (well-known prefix)", "64:ff9b::/96"},
+
+		// --- Round 3 (double trailing dot, mixed-radix IPs, IDN
+		// look-alikes, .localhost/localdomain) ---
+		{"round3: double trailing dot .svc", "foo.svc.."},
+		{"round3: double trailing dot full router FQDN", "atenet-router.ate-system.svc.cluster.local.."},
+		{"round3: double trailing dot kubernetes.default", "kubernetes.default.."},
+		{"round3: mixed hex/decimal loopback a", "0x7f.0.0.1"},
+		{"round3: mixed hex/decimal loopback b", "0x7f.1"},
+		{"round3: mixed hex/decimal loopback c", "127.0.0.0x1"},
+		{"round3: mixed hex/decimal private", "10.0x0.0.1"},
+		{"round3: all-hex-per-octet unspecified", "0x0.0x0.0x0.0x0"},
+		{"round3: IDN ideographic full stop", "kubernetes.default。svc"},
+		{"round3: IDN fullwidth letters", "foo.ＳＶＣ"},
+		{"round3: .localhost suffix", "foo.localhost"},
+		{"round3: localhost.localdomain exact name", "localhost.localdomain"},
+		{"round3: too many labels, non-alpha last", "1.2.3.4.5"},
+		{"round3: numeric last label", "foo.123"},
+		{"round3: hex-shaped last label", "foo.0x7f"},
+		{"round3: space in label", "git hub.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateEgressAllow([]string{tc.entry}); err == nil {
+				t.Errorf("ValidateEgressAllow([%q]) = nil, want a rejection (%s)", tc.entry, tc.name)
+			}
+		})
+	}
+}
+
+// TestValidateEgressAllow_NoFalsePositives is review round 3's explicit
+// "no false positives" list (Addendum A), plus O-3's localhost/IDN/
+// uppercase coverage: legitimate public hostnames and IPs that the
+// allowlist grammar must keep accepting.
+func TestValidateEgressAllow_NoFalsePositives(t *testing.T) {
+	cases := []string{
+		"api.anthropic.com",
+		"github.com",
+		"registry.npmjs.org",
+		"storage.googleapis.com",
+		"my-host.example.com",
+		"*.github.com",
+		"GitHub.COM.", // uppercase + trailing dot (O-3)
+		"xn--80ak6aa92e.com",
+		"foo.xn--p1ai", // IDNA punycode TLD (O-3)
+		"8.8.8.8",
+		"2001:4860:4860::8888",
+		"1.1.1.0/24",
+	}
+	for _, entry := range cases {
+		if err := ValidateEgressAllow([]string{entry}); err != nil {
+			t.Errorf("ValidateEgressAllow([%q]) = %v, want nil (no false positive)", entry, err)
+		}
+	}
+}
+
+// TestValidateEgressAllow_LocalhostForms is review round 3's O-3: dedicated
+// coverage for every "localhost"-shaped rejection, beyond what the combined
+// bypass table already exercises.
+func TestValidateEgressAllow_LocalhostForms(t *testing.T) {
+	cases := []string{
+		"localhost",
+		"LOCALHOST",
+		"localhost.",
+		"foo.localhost",
+		"FOO.LOCALHOST",
+		"localhost.localdomain",
+		"LOCALHOST.LOCALDOMAIN",
+	}
+	for _, entry := range cases {
+		if err := ValidateEgressAllow([]string{entry}); err == nil {
+			t.Errorf("ValidateEgressAllow([%q]) = nil, want a rejection (localhost form)", entry)
+		}
+	}
+}
+
+// TestValidateEgressAllow_O1CIDRs is review round 3's O-1: the three
+// additional IPv4-embedding IPv6 ranges added to the blocklist.
+func TestValidateEgressAllow_O1CIDRs(t *testing.T) {
+	cases := []string{
+		"::127.0.0.1",    // IPv4-compatible IPv6 (deprecated), in ::/96
+		"::7f00:1",       // same range, hex form
+		"64:ff9b:1::1",   // RFC 8215 local-use NAT64
+		"64:ff9b:1::/48", // same, as a CIDR
+		"2001::1",        // Teredo client address
+		"2001::/32",      // Teredo prefix itself
+	}
+	for _, entry := range cases {
+		if err := ValidateEgressAllow([]string{entry}); err == nil {
+			t.Errorf("ValidateEgressAllow([%q]) = nil, want a rejection (O-1 CIDR)", entry)
+		}
+	}
+}
