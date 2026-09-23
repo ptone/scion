@@ -109,21 +109,40 @@ sitting right there with capacity.
 
 **To find the correct value for your cluster:**
 ```sh
-kubectl get workerpool -n "${SUBSTRATE_WORKER_NAMESPACE}" -o yaml | grep -A5 '^  labels:'
+kubectl get workerpool -n "${SUBSTRATE_WORKER_NAMESPACE}" --show-labels
+
+# Or, to extract just name + labels for scripting:
+kubectl get workerpool -n "${SUBSTRATE_WORKER_NAMESPACE}" \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels}{"\n"}{end}'
 ```
-Use one of the labels under that `WorkerPool` object's own `metadata`,
-not anything you find by inspecting the worker Pods it created. For
-`substrate-scion-test`, `infra/cluster.md` records the `scion-agents`
-`WorkerPool`'s own label as `pool: scion-agents` — that's
-`WORKER_SELECTOR_KEY=pool`, `WORKER_SELECTOR_VALUE=scion-agents` in the
-table above, and what `broker.yaml`'s ConfigMap now templates
-`worker_selector` from directly (no hand-edit step anymore — the previous
-round of this manifest left it as a post-render hand-edit specifically
-because it's a map rather than a scalar, and that extra step is exactly
-what let the wrong value ship unnoticed. A single required key/value pair
-templates fine with `${VAR}`; if a future cluster genuinely needs *no*
-pool pin, delete the `worker_selector` block from the rendered manifest
-by hand instead — that's a rarer case than "gets a pin wrong.").
+(An earlier version of this command was
+`kubectl get workerpool -n <ns> -o yaml | grep -A5 '^  labels:'` — broken,
+and confirmed broken by actually running it: `-o yaml` with no object name
+returns a `List`, which nests every item's `metadata.labels` four spaces
+deep under `items[].metadata`, not the two the `grep` pattern assumed, so
+it silently printed nothing on this cluster too. `kubectl describe
+workerpool -n <ns> <name>` also shows labels, if you already know the
+pool's name.)
+
+Use one of the labels under that `WorkerPool` object's own `metadata`, not
+anything you find by inspecting the worker Pods it created. Ran the fixed
+`--show-labels` command directly against `substrate-scion-test`
+(read-only) to confirm rather than trust `infra/cluster.md` alone:
+```
+$ kubectl get workerpool -n scion-agents --show-labels
+NAME           DESIRED   REPLICAS   READY   AGE    LABELS
+scion-agents   2         2                  155m   pool=scion-agents,workload=scion-agents
+```
+`pool=scion-agents` is exactly what `WORKER_SELECTOR_KEY`/
+`WORKER_SELECTOR_VALUE` are set to in the placeholder table above, and what
+`broker.yaml`'s ConfigMap now templates `worker_selector` from directly (no
+hand-edit step anymore — the previous round of this manifest left it as a
+post-render hand-edit specifically because it's a map rather than a
+scalar, and that extra step is exactly what let the wrong value ship
+unnoticed. A single required key/value pair templates fine with `${VAR}`;
+if a future cluster genuinely needs *no* pool pin, delete the
+`worker_selector` block from the rendered manifest by hand instead —
+that's a rarer case than "gets a pin wrong.").
 
 **`egress_allow` entries are validated, and rejected entries block the
 broker from starting an agent.** An actor's own `EgressPolicy` must never
