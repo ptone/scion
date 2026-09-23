@@ -371,7 +371,7 @@ func newTestSubstrateHarness(t *testing.T, rec *callRecorder) (*SubstrateRuntime
 	fc := newFakeControlClient(rec)
 	fa := newFakeActorServer(rec)
 	server := httptest.NewServer(fa.handler())
-	rt := newSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, config.V1SubstrateConfig{
+	rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, config.V1SubstrateConfig{
 		SnapshotStorage:   "gs://bucket/prefix/",
 		SandboxConfigName: "gvisor-default",
 	})
@@ -1031,6 +1031,85 @@ func TestSubstrateList_SynthesisesNameAndAgentLabelsWithoutRecord(t *testing.T) 
 	}
 }
 
+// TestSubstrateList_NameIsAgentSlugNotActorName is the regression test for
+// the bug ptone/scion#1819 tracks in general (AgentManager.Delete/Stop
+// silently no-op when Runtime.List can't find a matching agent): the actor
+// name is containerName(project, agent) = "<project>--<agent>"
+// (pkg/agent/run.go), so if AgentInfo.Name echoed the actor name back
+// verbatim, it would never match the bare agent slug a caller like
+// AgentManager.Delete looks up by — exactly what DockerRuntime.List
+// (labels["scion.name"], falling back to the raw container name only when
+// that label is absent) avoids. Covers both the record and no-record paths,
+// since they synthesise "scion.name" differently (rec.Labels vs
+// substrateSynthesizedAgentName).
+func TestSubstrateList_NameIsAgentSlugNotActorName(t *testing.T) {
+	const (
+		atespace  = "scion-proj"
+		actorName = "myproj--sb-smoke-2" // containerName("myproj", "sb-smoke-2")
+		agentSlug = "sb-smoke-2"
+	)
+
+	t.Run("record exists", func(t *testing.T) {
+		rec := &callRecorder{}
+		rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+		defer closeServer()
+
+		const uid = "uid-with-record"
+		fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+			return &ateapipb.ListActorsResponse{
+				Actors: []*ateapipb.Actor{
+					{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: uid},
+						Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+				},
+			}, nil
+		}
+		substrateAgentStateMu.Lock()
+		substrateAgentRecords[uid] = &substrateAgentRecord{
+			Labels: map[string]string{"scion.name": agentSlug, "scion.agent": "true"},
+		}
+		substrateAgentStateMu.Unlock()
+
+		agents, err := rt.List(context.Background(), map[string]string{"scion.name": agentSlug})
+		if err != nil {
+			t.Fatalf("List() error = %v", err)
+		}
+		if len(agents) != 1 {
+			t.Fatalf("List() with scion.name=%q filter = %v, want exactly the one matching actor", agentSlug, agents)
+		}
+		if agents[0].Name != agentSlug {
+			t.Errorf("Name = %q, want the agent slug %q (not the actor name %q)", agents[0].Name, agentSlug, actorName)
+		}
+	})
+
+	t.Run("no record (simulated broker restart)", func(t *testing.T) {
+		rec := &callRecorder{}
+		rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+		defer closeServer()
+
+		fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+			return &ateapipb.ListActorsResponse{
+				Actors: []*ateapipb.Actor{
+					{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: "uid-no-record"},
+						Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+				},
+			}, nil
+		}
+		// Deliberately no substrateAgentRecords entry for "uid-no-record" —
+		// List must derive "scion.name" from the actor name instead.
+
+		agents, err := rt.List(context.Background(), map[string]string{"scion.name": agentSlug})
+		if err != nil {
+			t.Fatalf("List() error = %v", err)
+		}
+		if len(agents) != 1 {
+			t.Fatalf("List() with scion.name=%q filter = %v, want exactly the one matching actor", agentSlug, agents)
+		}
+		if agents[0].Name != agentSlug {
+			t.Errorf("Name = %q, want the derived agent slug %q (not the actor name %q)", agents[0].Name, agentSlug, actorName)
+		}
+	})
+}
+
 // -----------------------------------------------------------------------
 // NewSubstrateRuntime: process-wide memoization
 // -----------------------------------------------------------------------
@@ -1065,7 +1144,7 @@ func TestNewSubstrateRuntime_MemoizedAcrossCalls(t *testing.T) {
 	origBuilder := substrateRuntimeBuilder
 	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
 		built++
-		return newSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg), nil
+		return NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg), nil
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
 
@@ -1144,7 +1223,7 @@ func TestNewSubstrateRuntime_DifferentConfigsGetDifferentInstances(t *testing.T)
 	origBuilder := substrateRuntimeBuilder
 	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
 		built++
-		return newSubstrateRuntimeForTest(newFakeControlClient(&callRecorder{}), substrate.NewRouterClient("http://unused"), nil, cfg), nil
+		return NewSubstrateRuntimeForTest(newFakeControlClient(&callRecorder{}), substrate.NewRouterClient("http://unused"), nil, cfg), nil
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
 
@@ -1193,7 +1272,7 @@ func TestSubstrateAgentState_SharedAcrossConfigChange(t *testing.T) {
 	// NewSubstrateRuntime treat them as separate connection-registry
 	// entries.
 	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
-		return newSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg), nil
+		return NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg), nil
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
 
@@ -1265,7 +1344,7 @@ func TestGetRuntime_Substrate_SettingsBased_Memoized(t *testing.T) {
 	origBuilder := substrateRuntimeBuilder
 	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
 		built++
-		return newSubstrateRuntimeForTest(newFakeControlClient(&callRecorder{}), substrate.NewRouterClient("http://unused"), nil, cfg), nil
+		return NewSubstrateRuntimeForTest(newFakeControlClient(&callRecorder{}), substrate.NewRouterClient("http://unused"), nil, cfg), nil
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
 

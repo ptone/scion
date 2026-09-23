@@ -226,9 +226,13 @@ func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRunti
 	}, nil
 }
 
-// newSubstrateRuntimeForTest builds a SubstrateRuntime with injected
-// dependencies and no real network/cluster access, for unit tests.
-func newSubstrateRuntimeForTest(client ateapipb.ControlClient, router *substrate.RouterClient, k8sClient kubernetes.Interface, cfg config.V1SubstrateConfig) *SubstrateRuntime {
+// NewSubstrateRuntimeForTest builds a SubstrateRuntime with injected
+// dependencies and no real network/cluster access, for unit tests. Exported
+// so tests in other packages (e.g. pkg/agent, pkg/runtimebroker) can drive a
+// real SubstrateRuntime — List/Delete/Run's actual logic, not a
+// reimplementation of it — through a fake ateapipb.ControlClient and
+// substrate.RouterClient, the same way this package's own tests do.
+func NewSubstrateRuntimeForTest(client ateapipb.ControlClient, router *substrate.RouterClient, k8sClient kubernetes.Interface, cfg config.V1SubstrateConfig) *SubstrateRuntime {
 	return &SubstrateRuntime{
 		cfg:            cfg,
 		client:         client,
@@ -512,9 +516,11 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 		// this runtime instance has no in-memory record for the actor —
 		// e.g. right after a broker restart, which phase1-spec.md §2.2's
 		// List row accepts losing records for, but not losing the actor
-		// from List entirely.
+		// from List entirely. The "scion.name" default is a best-effort
+		// derivation (see substrateSynthesizedAgentName); when rec is
+		// non-nil, rec.Labels below carries the real one and overwrites it.
 		labels := map[string]string{
-			"scion.name":  actor.GetMetadata().GetName(),
+			"scion.name":  substrateSynthesizedAgentName(actor.GetMetadata().GetName()),
 			"scion.agent": "true",
 		}
 		var template, harnessConfig, project, projectID, image string
@@ -534,8 +540,17 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 		}
 
 		agents = append(agents, api.AgentInfo{
-			ContainerID:   actor.GetMetadata().GetAtespace() + "/" + actor.GetMetadata().GetName(),
-			Name:          actor.GetMetadata().GetName(),
+			ContainerID: actor.GetMetadata().GetAtespace() + "/" + actor.GetMetadata().GetName(),
+			// Name is the agent slug (labels["scion.name"]), matching every
+			// other runtime's convention (e.g. DockerRuntime.List) — not
+			// the actor name, which is containerName(project, agent) and
+			// therefore project-prefixed. AgentManager.Delete/Stop
+			// (pkg/agent/manager.go) match a caller-supplied agent ID
+			// against Name, so a project-prefixed Name never matches and
+			// both silently no-op instead of deleting anything
+			// (ptone/scion#1819 tracks hardening that call path in
+			// general; this is the substrate-specific root cause).
+			Name:          labels["scion.name"],
 			Runtime:       r.Name(),
 			Phase:         substratePhase(actor.GetStatus().GetState()),
 			Labels:        labels,
@@ -547,6 +562,29 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 		})
 	}
 	return agents, nil
+}
+
+// substrateSynthesizedAgentName derives a best-effort agent slug from an
+// actor's name, for use when List has no in-memory record to supply the
+// real one (e.g. right after a broker restart). The actor name is
+// containerName(projectName, agentName) = "<projectName>--<agentName>"
+// when projectName is non-empty (pkg/agent/run.go), or bare agentName
+// otherwise, so the inverse is: split off everything after the last "--"
+// and slugify it (slugifying normalizes case and any other difference
+// between the raw agent name used here and api.Slugify(agentName), the
+// value actually recorded in the "scion.name" label once a record exists).
+//
+// This is ambiguous only if a project name itself contains "--", which
+// project names sanitized from directory names in practice don't; if one
+// did, the derived slug would be wrong until a real in-memory record
+// replaces this guess (e.g. the next time this broker starts that agent),
+// which is inherent to this being a reconstructed guess rather than the
+// recorded value.
+func substrateSynthesizedAgentName(actorName string) string {
+	if idx := strings.LastIndex(actorName, "--"); idx >= 0 {
+		return api.Slugify(actorName[idx+2:])
+	}
+	return api.Slugify(actorName)
 }
 
 // substrateLabelsMatch mirrors the label-filter pattern used by the other
