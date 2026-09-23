@@ -194,6 +194,28 @@ func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error
 	return rt, nil
 }
 
+// SetSubstrateRuntimeBuilderForTest overrides the process-wide constructor
+// NewSubstrateRuntime uses to build a fresh *SubstrateRuntime for a config
+// it hasn't seen before, for tests in other packages (e.g.
+// pkg/runtimebroker) that need to exercise the real memoized-by-config
+// resolution path — pkg/runtime/factory.go's "substrate" case calling
+// NewSubstrateRuntime, exactly as pkg/agent.ResolveRuntime/GetRuntime do in
+// production — without dialing real ateapi/Kubernetes. Returns a restore
+// func; call it (e.g. via t.Cleanup) to put the previous builder back.
+// Mirrors this package's own tests reassigning substrateRuntimeBuilder
+// directly, which other packages cannot do since it is unexported.
+func SetSubstrateRuntimeBuilderForTest(builder func(config.V1SubstrateConfig) (*SubstrateRuntime, error)) (restore func()) {
+	substrateRuntimesMu.Lock()
+	prev := substrateRuntimeBuilder
+	substrateRuntimeBuilder = builder
+	substrateRuntimesMu.Unlock()
+	return func() {
+		substrateRuntimesMu.Lock()
+		substrateRuntimeBuilder = prev
+		substrateRuntimesMu.Unlock()
+	}
+}
+
 // newSubstrateRuntimeFromConfig builds a fresh SubstrateRuntime by dialing
 // ateapi and building an in-cluster Kubernetes client. This is
 // substrateRuntimeBuilder's production implementation.
