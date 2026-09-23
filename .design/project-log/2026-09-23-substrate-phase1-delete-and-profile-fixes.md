@@ -271,3 +271,55 @@ projA's own actor was removed by a same-project delete — it must be untouched 
 - `pkg/runtimebroker/substrate_cross_project_test.go` (new file): the broker-level regression tests described above.
 
 No changes to `pkg/agent/manager.go`, `pkg/runtimebroker/handlers.go`, any other runtime, or the broker's generic (non-substrate-scoped) code paths this follow-up. No `go.mod`/`go.sum` changes.
+
+---
+
+## Follow-up: two record-having same-slug agents in different projects — the delete-leak fix's own wrong-actor case
+
+Making `AgentInfo.Name = labels["scion.name"]` for record-having actors (the D1 fix above) fixed the original delete-leak, but opened a new, narrower wrong-actor case: `SubstrateRuntime.List` never set `AgentInfo.ProjectPath`, so a broker-level caller resolving a project-scoped delete always got back an empty project path, which meant `AgentManager.Delete`'s `deletionProjectName` stayed empty too, which meant its project-matching check never engaged — a project-B-scoped `deleteAgent("dev", …)` could delete project A's `dev` actor instead, depending on `ListActors` return order (reproduced deterministically below). At the pre-D1 baseline this same request was already a no-op (safe, if unhelpful); after D1, it became an active wrong-actor delete.
+
+**Fix, part one — carry the project path on the record.** `RunConfig` has no dedicated project-path field (unlike `Project`/`ProjectID`); `pkg/agent/run.go`'s `Start` carries it as an annotation instead (`projectcompat.ProjectPathLabels(projectDir, true)`, set unconditionally once the project directory resolves — this runs identically whether the start was dispatched by the hub or invoked locally; there is no separate code path for either). `SubstrateRuntime.Run` now reads it the same way `DockerRuntime.List`/`K8sRuntime.List` do — `projectcompat.ProjectPathFromLabels(cfg.Annotations)`, falling back to `cfg.Labels` — and stores it on `substrateAgentRecord`. `List` sets `AgentInfo.ProjectPath` from the record. On its own, this fix is sufficient to make a correctly project-scoped delete resolve the right actor: `deleteAgent`'s own first, unscoped-by-slug listing call (`{"scion.agent": "true"}`, filtered client-side by project ID) already picked the right actor even before this fix, so it now also picks up that actor's real, correct project path and passes it through to `AgentManager.Delete` correctly.
+
+**Fix, part two — fail closed for an unscoped same-slug query, unconditionally.** `AgentManager.Delete`/`Stop`'s own *internal* `Runtime.List` call (`pkg/agent/manager.go`) and `LookupContainerID`'s internal `manager.List` call (`pkg/runtimebroker/server.go`) both filter by `"scion.name"` alone — neither ever adds a project-scoping key to the map passed into `Runtime.List`, regardless of what project the outer, broker-level caller resolved. This means part one's fix, while necessary, isn't sufficient at those specific call sites: an unscoped-by-slug query still has no way to distinguish two record-having actors that share a slug across different projects. `SubstrateRuntime.List` now tallies record-having actors by slug and, when the incoming filter has a `"scion.name"` key but no project-scoping key (`scion.project`/`scion.grove`/`scion.project_id`/`scion.grove_id`) and more than one record-having actor shares the requested slug, excludes all of them from the result rather than returning an arbitrary one. A query that does carry a project-scoping key is unaffected, and the tally never triggers when a slug is unique (the overwhelming common case), so this fix has no effect on ordinary single-project usage.
+
+**Reported consequence, as required:** because `AgentManager.Delete`, `AgentManager.Stop`, and `LookupContainerID`'s own internal `Runtime.List` calls are unscoped by project at that layer, the guard makes `deleteAgent`, `stopAgent`, and `LookupContainerID` all become **no-ops** for the specific "two record-having actors share an identical slug in different projects" scenario — even when the broker-level caller correctly resolved the right project. This holds regardless of which of the two projects the caller was scoped to. A no-op here means: `deleteAgent`/`stopAgent` make zero `DeleteActor` calls and leave both actors running (HTTP 204 is still returned — the broker's not-found/success semantics for this path are unchanged by this fix); `LookupContainerID` returns a not-found error instead of either actor's container ID. This is deliberate: a failed or no-op action is acceptable here, a wrong-actor action is not. The single-project case (one agent per slug, the common case) is completely unaffected by this trade-off — see the D1 happy-path test, which still passes unchanged.
+
+### Kept or added
+
+- `substrateAgentRecord.ProjectPath` and `AgentInfo.ProjectPath`, populated as described above.
+- The ambiguity guard in `List`, tallying record-having actors by slug and excluding all of them from an unscoped-by-slug result when more than one shares the requested slug.
+- Runtime-level test: two record-having actors sharing a slug across two projects — an unscoped `List({"scion.name": "dev"})` returns nothing (both `ListActors` orders), while a project-scoped `List` for the same slug still resolves the correct actor and reports the correct `ProjectPath`.
+- Agent-level test: the same two-actor, two-project scenario, started for real through `Run` with the same labels/annotations a real `Start` call produces — `AgentManager.Delete("dev", …, "")` makes zero `DeleteActor` calls, both actors left running, both `ListActors` orders.
+- Broker-level tests, driving the real `deleteAgent` and `LookupContainerID` code paths against a real `*Server`/`*SubstrateRuntime`: the wrong-actor delete reproduced and confirmed fail-before on the pre-fix code (a project-B-scoped delete removed project A's actor, 100% reproducible with a forced `ListActors` order); after the fix, the same request makes zero `DeleteActor` calls and both actors survive, in both directions (project-A-scoped and project-B-scoped) and both forced orders; `LookupContainerID` scoped to either project returns not-found rather than either actor's container ID. A control test confirms the ordinary single-project case (one agent for the slug) still deletes normally — `AgentInfo.ProjectPath` populated, tally never exceeds one, guard never engages.
+
+### Fail-before evidence
+
+Broker level, pre-fix code (`HEAD` at the point this follow-up started) with today's new test:
+```
+deleteAgent("dev", projB) called DeleteActor [actor:{atespace:"scion-aaaaaaaaaaaa" name:"proja--dev"} any_state:true actor:{atespace:"scion-aaaaaaaaaaaa" name:"proja--dev"} any_state:true], want zero (ambiguous slug across two projects must fail closed)
+projA's actor was removed by a project-B-scoped delete — it must never be the wrong-actor target
+```
+(and the mirror, with the other forced `ListActors` order, deleting project B's actor instead when scoped to project B — i.e. only "correct" by accident of order, not by any actual project check.)
+
+**Pass-after:** the same test, against the fixed code, makes zero `DeleteActor` calls and leaves both actors in place, for both forced orders and both delete directions.
+
+### Gate results (this follow-up)
+
+- `go build ./...` — pass.
+- `go vet` on `pkg/runtime/...`, `pkg/runtimebroker/...`, `pkg/agent/...`, `pkg/config/...` — pass, no output.
+- `gofmt -l` on every changed file — clean.
+- `go test -count=1` on the same four package trees — all substrate-related tests pass. `pkg/config`, `pkg/agent`, `pkg/runtime`, and `pkg/runtimebroker` each have a set of pre-existing, unrelated failures (a settings-schema decode error, `'auto_expose_ports' expected a map or struct, got "string"`, affecting harness/settings/env-gather tests) — confirmed identical on the pre-this-follow-up baseline by stashing this follow-up's changes and re-running, so not introduced or touched by this work.
+- `go test -race -count=1` on `pkg/runtime`, `pkg/runtimebroker`, `pkg/agent` — same pre-existing failures only, no data races in any substrate code; one pre-existing, confirmed-baseline data race in `pkg/runtime/cloudrun` (unrelated package, not touched here).
+- `go test -count=50` on every new/changed substrate test in all three packages — pass, no flakes.
+- `golangci-lint run --new-from-rev=c3b6e821d --concurrency=1 ./...` — 0 issues.
+- Hygiene greps over every file changed this follow-up — no hits.
+
+### Functions touched (this follow-up)
+
+- `pkg/runtime/substrate_runtime.go`: `substrateAgentRecord` (new `ProjectPath` field), `SubstrateRuntime.Run` (computes and stores it), `SubstrateRuntime.List` (sets `AgentInfo.ProjectPath`; adds the unscoped-by-slug ambiguity guard); doc comments updated on both.
+- `pkg/runtime/substrate_runtime_test.go`: new runtime-level test for the guard and `ProjectPath`.
+- `pkg/agent/substrate_delete_test.go`: new agent-level test for the guard, using realistic hub-dispatched-shaped labels/annotations.
+- `pkg/runtimebroker/substrate_manager_test.go`: added `forceListOrder` (and `deleteActorCalls` recording) to the package's fake ateapi client, mirroring the equivalent fake already in `pkg/agent`.
+- `pkg/runtimebroker/substrate_cross_project_test.go`: new helpers (`runSubstrateAgentForProject`, `testProjectScionDir`) and new broker-level tests for the guard, the D1 happy-path control, and `LookupContainerID`'s corresponding no-op.
+
+No changes to `pkg/agent/manager.go`, `pkg/runtimebroker/handlers.go`, any other runtime, or the broker's generic (non-substrate-scoped) code paths this follow-up. No `go.mod`/`go.sum` changes.
