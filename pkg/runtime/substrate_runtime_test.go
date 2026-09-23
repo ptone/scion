@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -468,6 +469,8 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 	cases := []struct {
 		name    string
 		inject  func(fc *fakeControlClient, fa *fakeActorServer)
+		setup   func(rt *SubstrateRuntime) // optional; runs after newTestSubstrateHarness, before Run
+		cfg     func(cfg RunConfig) RunConfig
 		wantErr string
 	}{
 		{
@@ -501,11 +504,42 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 			wantErr: "crashed",
 		},
 		{
+			name: "healthz never reaches awaiting-bootstrap (timeout)",
+			inject: func(fc *fakeControlClient, fa *fakeActorServer) {
+				fa.healthzState = healthzRunning
+			},
+			setup: func(rt *SubstrateRuntime) {
+				// Real time.Now()-based deadline (waitForHealthz doesn't use
+				// r.now), so keep this short enough to actually finish.
+				rt.healthzTimeout = 20 * time.Millisecond
+			},
+			wantErr: "did not reach healthz state",
+		},
+		{
+			name: "buildBootstrapFiles read error",
+			cfg: func(cfg RunConfig) RunConfig {
+				cfg.ResolvedAuth = &api.ResolvedAuth{
+					Files: []api.FileMapping{
+						{SourcePath: "/nonexistent/does-not-exist", ContainerPath: "~/.creds/token"},
+					},
+				}
+				return cfg
+			},
+			wantErr: "read auth file",
+		},
+		{
 			name: "bootstrap fails",
 			inject: func(fc *fakeControlClient, fa *fakeActorServer) {
 				fa.bootstrapStatus = http.StatusInternalServerError
 			},
 			wantErr: "bootstrap",
+		},
+		{
+			name: "bootstrap hijacked (409)",
+			inject: func(fc *fakeControlClient, fa *fakeActorServer) {
+				fa.bootstrapStatus = http.StatusConflict
+			},
+			wantErr: "bootstrapped by another caller",
 		},
 	}
 
@@ -514,9 +548,19 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 			rec := &callRecorder{}
 			rt, fc, fa, closeServer := newTestSubstrateHarness(rec)
 			defer closeServer()
-			tc.inject(fc, fa)
+			if tc.inject != nil {
+				tc.inject(fc, fa)
+			}
+			if tc.setup != nil {
+				tc.setup(rt)
+			}
 
-			_, err := rt.Run(context.Background(), testSubstrateRunConfig())
+			runCfg := testSubstrateRunConfig()
+			if tc.cfg != nil {
+				runCfg = tc.cfg(runCfg)
+			}
+
+			_, err := rt.Run(context.Background(), runCfg)
 			if err == nil {
 				t.Fatal("Run() expected an error, got nil")
 			}
@@ -551,9 +595,14 @@ func containsCall(calls []string, name string) bool {
 func TestSubstrateTemplateName_Stable(t *testing.T) {
 	resources := &api.ResourceSpec{Limits: api.ResourceList{CPU: "2", Memory: "4Gi"}}
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
+	baseCfg := config.V1SubstrateConfig{
+		SandboxClass:      "gvisor",
+		SandboxConfigName: "gvisor-default",
+		SnapshotStorage:   "gs://bucket/prefix/",
+	}
 
-	n1 := substrateTemplateName(image, "gvisor", resources)
-	n2 := substrateTemplateName(image, "gvisor", resources)
+	n1 := substrateTemplateName(image, baseCfg, resources)
+	n2 := substrateTemplateName(image, baseCfg, resources)
 	if n1 != n2 {
 		t.Errorf("substrateTemplateName() not stable: %q != %q", n1, n2)
 	}
@@ -561,14 +610,43 @@ func TestSubstrateTemplateName_Stable(t *testing.T) {
 		t.Errorf("substrateTemplateName() = %q, want scion- prefix", n1)
 	}
 
-	n3 := substrateTemplateName(image, "microvm", resources)
+	microVMCfg := baseCfg
+	microVMCfg.SandboxClass = "microvm"
+	n3 := substrateTemplateName(image, microVMCfg, resources)
 	if n1 == n3 {
 		t.Error("substrateTemplateName() did not change with sandbox class")
 	}
 
-	n4 := substrateTemplateName(image, "gvisor", &api.ResourceSpec{Limits: api.ResourceList{CPU: "4"}})
+	n4 := substrateTemplateName(image, baseCfg, &api.ResourceSpec{Limits: api.ResourceList{CPU: "4"}})
 	if n1 == n4 {
 		t.Error("substrateTemplateName() did not change with resources")
+	}
+
+	n5 := substrateTemplateName(image, baseCfg, nil)
+	n6 := substrateTemplateName(image, baseCfg, config.BuiltinDefaultResources())
+	if n5 != n6 {
+		t.Error("substrateTemplateName() with nil resources did not match the resolved default resources (buildActorTemplate substitutes BuiltinDefaultResources for nil)")
+	}
+
+	configNameCfg := baseCfg
+	configNameCfg.SandboxConfigName = "other-config"
+	n7 := substrateTemplateName(image, configNameCfg, resources)
+	if n1 == n7 {
+		t.Error("substrateTemplateName() did not change with sandbox_config_name")
+	}
+
+	workerSelectorCfg := baseCfg
+	workerSelectorCfg.WorkerSelector = map[string]string{"pool": "scion-agents"}
+	n8 := substrateTemplateName(image, workerSelectorCfg, resources)
+	if n1 == n8 {
+		t.Error("substrateTemplateName() did not change with worker_selector")
+	}
+
+	snapshotCfg := baseCfg
+	snapshotCfg.SnapshotStorage = "gs://other-bucket/prefix/"
+	n9 := substrateTemplateName(image, snapshotCfg, resources)
+	if n1 == n9 {
+		t.Error("substrateTemplateName() did not change with snapshot_storage")
 	}
 }
 
@@ -718,7 +796,12 @@ func TestSubstrateExec_Success(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestSubstrateRun_ErrorDoesNotLeakEnvValues(t *testing.T) {
-	const sentinel = "FAKE-KEY-SENTINEL-not-a-real-credential"
+	const (
+		envSentinel          = "FAKE-KEY-SENTINEL-cfg-env-not-a-real-credential"
+		resolvedAuthSentinel = "FAKE-KEY-SENTINEL-resolved-auth-not-a-real-credential"
+		envSecretSentinel    = "FAKE-KEY-SENTINEL-env-secret-not-a-real-credential"
+		fileSecretSentinel   = "FAKE-KEY-SENTINEL-file-secret-not-a-real-credential"
+	)
 
 	rec := &callRecorder{}
 	rt, fc, _, closeServer := newTestSubstrateHarness(rec)
@@ -726,26 +809,286 @@ func TestSubstrateRun_ErrorDoesNotLeakEnvValues(t *testing.T) {
 
 	// Fail a step whose error text, in a naive implementation, might
 	// interpolate the whole request — resumeActor's error text stands in
-	// for a hypothetical verbose upstream error.
+	// for a hypothetical verbose upstream error that echoes back
+	// everything the runtime sent it, regardless of source.
 	fc.resumeActor = func(*ateapipb.ResumeActorRequest) (*ateapipb.ResumeActorResponse, error) {
-		return nil, status.Error(codes.Internal, "resume boom, env dump: ANTHROPIC_API_KEY="+sentinel)
+		return nil, status.Error(codes.Internal, "resume boom, env dump: "+
+			"CFG_ENV_KEY="+envSentinel+" "+
+			"RESOLVED_AUTH_KEY="+resolvedAuthSentinel+" "+
+			"ENV_SECRET_KEY="+envSecretSentinel+" "+
+			"FILE_SECRET_KEY="+fileSecretSentinel)
 	}
 
 	cfg := testSubstrateRunConfig()
-	cfg.Env = append(cfg.Env, "ANTHROPIC_API_KEY="+sentinel)
+	cfg.Env = append(cfg.Env, "CFG_ENV_KEY="+envSentinel)
+	cfg.ResolvedAuth = &api.ResolvedAuth{
+		EnvVars: map[string]string{"RESOLVED_AUTH_KEY": resolvedAuthSentinel},
+	}
+	cfg.ResolvedSecrets = []api.ResolvedSecret{
+		{Name: "ENV_SECRET_KEY", Type: "environment", Target: "ENV_SECRET_KEY", Value: envSecretSentinel},
+		{Name: "FILE_SECRET_KEY", Type: "file", Target: "~/.creds/file-secret", Value: fileSecretSentinel},
+	}
 
 	_, err := rt.Run(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("Run() expected an error, got nil")
 	}
 	got := err.Error()
-	if strings.Contains(got, sentinel) {
-		t.Errorf("CREDENTIAL LEAK: Run() error contains the secret value.\nerror: %s", got)
+
+	for name, sentinel := range map[string]string{
+		"cfg.Env":                envSentinel,
+		"ResolvedAuth.EnvVars":   resolvedAuthSentinel,
+		"ResolvedSecrets (env)":  envSecretSentinel,
+		"ResolvedSecrets (file)": fileSecretSentinel,
+	} {
+		if strings.Contains(got, sentinel) {
+			t.Errorf("CREDENTIAL LEAK: Run() error contains the %s secret value.\nerror: %s", name, got)
+		}
 	}
-	if !strings.Contains(got, "ANTHROPIC_API_KEY") {
-		t.Errorf("redacted error does not name the redacted key.\nerror: %s", got)
+	for _, key := range []string{"CFG_ENV_KEY", "RESOLVED_AUTH_KEY", "ENV_SECRET_KEY", "FILE_SECRET_KEY"} {
+		if !strings.Contains(got, key) {
+			t.Errorf("redacted error does not name the redacted key %q.\nerror: %s", key, got)
+		}
 	}
 	if !strings.Contains(got, "resume boom") {
 		t.Errorf("error is no longer useful: diagnostic text was also removed.\nerror: %s", got)
+	}
+}
+
+// -----------------------------------------------------------------------
+// List: pagination and cross-tenant atespace filtering
+// -----------------------------------------------------------------------
+
+func TestSubstrateList_Pagination(t *testing.T) {
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(rec)
+	defer closeServer()
+
+	var pageTokensSeen []string
+	fc.listActors = func(req *ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		pageTokensSeen = append(pageTokensSeen, req.GetPageToken())
+		switch req.GetPageToken() {
+		case "":
+			return &ateapipb.ListActorsResponse{
+				Actors: []*ateapipb.Actor{
+					{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "agent-a", Uid: "uid-a"},
+						Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+				},
+				NextPageToken: "page-2",
+			}, nil
+		case "page-2":
+			return &ateapipb.ListActorsResponse{
+				Actors: []*ateapipb.Actor{
+					{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "agent-b", Uid: "uid-b"},
+						Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+				},
+				NextPageToken: "",
+			}, nil
+		default:
+			t.Fatalf("unexpected page token %q", req.GetPageToken())
+			return nil, nil
+		}
+	}
+
+	agents, err := rt.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("List() returned %d agents, want 2 (one per page); got %v", len(agents), agents)
+	}
+	if len(pageTokensSeen) != 2 || pageTokensSeen[0] != "" || pageTokensSeen[1] != "page-2" {
+		t.Errorf("ListActors called with page tokens %v, want [\"\", \"page-2\"]", pageTokensSeen)
+	}
+}
+
+func TestSubstrateList_SkipsNonScionAtespaces(t *testing.T) {
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(rec)
+	defer closeServer()
+
+	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		return &ateapipb.ListActorsResponse{
+			Actors: []*ateapipb.Actor{
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "agent-a", Uid: "uid-a"},
+					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: "other-tenant", Name: "not-ours", Uid: "uid-x"},
+					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+			},
+		}, nil
+	}
+
+	agents, err := rt.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(agents) != 1 || agents[0].Name != "agent-a" {
+		t.Errorf("List() = %v, want only agent-a (the other actor's atespace doesn't start with \"scion-\")", agents)
+	}
+}
+
+func TestSubstrateList_SynthesisesNameAndAgentLabelsWithoutRecord(t *testing.T) {
+	// No agentRecords entry at all for this actor — e.g. it was created by
+	// a different SubstrateRuntime instance, or this instance just
+	// restarted. List must still expose "scion.name"/"scion.agent" so the
+	// broker's own by-name lookup succeeds (review round 1, Critical #1b).
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(rec)
+	defer closeServer()
+
+	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		return &ateapipb.ListActorsResponse{
+			Actors: []*ateapipb.Actor{
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "orphaned-agent", Uid: "uid-orphan"},
+					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+			},
+		}, nil
+	}
+
+	agents, err := rt.List(context.Background(), map[string]string{"scion.name": "orphaned-agent"})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("List() with scion.name filter = %v, want exactly the orphaned actor (no record needed)", agents)
+	}
+	if agents[0].Labels["scion.agent"] != "true" {
+		t.Errorf("agent Labels[scion.agent] = %q, want \"true\"", agents[0].Labels["scion.agent"])
+	}
+}
+
+// -----------------------------------------------------------------------
+// NewSubstrateRuntime: process-wide memoization (review round 1, Critical #1)
+// -----------------------------------------------------------------------
+
+// resetSubstrateRuntimeRegistryForTest clears the process-wide
+// substrateRuntimes registry for the duration of a test, restoring it
+// afterward so this test can't leak state into (or pick up state left by)
+// any other test.
+func resetSubstrateRuntimeRegistryForTest(t *testing.T) {
+	t.Helper()
+	substrateRuntimesMu.Lock()
+	old := substrateRuntimes
+	substrateRuntimes = make(map[string]*SubstrateRuntime)
+	substrateRuntimesMu.Unlock()
+	t.Cleanup(func() {
+		substrateRuntimesMu.Lock()
+		substrateRuntimes = old
+		substrateRuntimesMu.Unlock()
+	})
+}
+
+func TestNewSubstrateRuntime_MemoizedAcrossCalls(t *testing.T) {
+	resetSubstrateRuntimeRegistryForTest(t)
+
+	rec := &callRecorder{}
+	fc := newFakeControlClient(rec)
+	fa := newFakeActorServer(rec)
+	server := httptest.NewServer(fa.handler())
+	defer server.Close()
+
+	built := 0
+	origBuilder := substrateRuntimeBuilder
+	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
+		built++
+		return newSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg), nil
+	}
+	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
+
+	cfg := &config.V1SubstrateConfig{
+		APIEndpoint:    "api.ate-system.svc:443",
+		RouterEndpoint: server.URL,
+	}
+
+	// Simulates the broker's first `scion start`: GetRuntime resolves a
+	// fresh substrate runtime and Run()s an agent on it.
+	rt1, err := NewSubstrateRuntime(cfg)
+	if err != nil {
+		t.Fatalf("NewSubstrateRuntime() error = %v", err)
+	}
+	id, err := rt1.Run(context.Background(), testSubstrateRunConfig())
+	if err != nil {
+		t.Fatalf("rt1.Run() error = %v", err)
+	}
+
+	// newFakeControlClient's default listActors doesn't track what
+	// createActor "created" — it's a canned response, not an in-memory
+	// store. Point it at the actor Run() just created so List can find it;
+	// this only stands in for what a real ateapi ListActors would already
+	// return.
+	atespace, actorName, err := splitSubstrateID(id)
+	if err != nil {
+		t.Fatalf("splitSubstrateID(%q) error = %v", id, err)
+	}
+	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		return &ateapipb.ListActorsResponse{
+			Actors: []*ateapipb.Actor{
+				{
+					Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: fakeActorUID},
+					Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+				},
+			},
+		}, nil
+	}
+
+	// Simulates a second `scion start`: the broker resolves substrate again
+	// (findings review: it's an auxiliary runtime, rebuilt on every start
+	// that isn't the default profile).
+	rt2, err := NewSubstrateRuntime(cfg)
+	if err != nil {
+		t.Fatalf("NewSubstrateRuntime() (second call) error = %v", err)
+	}
+
+	if rt1 != rt2 {
+		t.Fatal("NewSubstrateRuntime() returned different instances for the same config — state (control tokens, agent records, the gRPC conn) is not shared")
+	}
+	if built != 1 {
+		t.Errorf("substrateRuntimeBuilder called %d times, want 1 (memoized)", built)
+	}
+
+	// The critical behavioural proof: an operation against the "new"
+	// resolved instance (rt2, as the broker would use for e.g. `scion
+	// message`/`scion delete` on the first agent) must still see the agent
+	// rt1 created — this is exactly what broke before memoization.
+	agents, err := rt2.List(context.Background(), map[string]string{"scion.name": "test-agent"})
+	if err != nil {
+		t.Fatalf("rt2.List() error = %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("rt2.List({scion.name: test-agent}) = %v, want to find the agent rt1 created", agents)
+	}
+
+	if _, err := rt2.Exec(context.Background(), id, []string{"true"}); err != nil {
+		t.Errorf("rt2.Exec() on rt1's agent error = %v, want the control token cached by rt1 to still work", err)
+	}
+}
+
+func TestNewSubstrateRuntime_DifferentConfigsGetDifferentInstances(t *testing.T) {
+	resetSubstrateRuntimeRegistryForTest(t)
+
+	built := 0
+	origBuilder := substrateRuntimeBuilder
+	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
+		built++
+		return newSubstrateRuntimeForTest(newFakeControlClient(&callRecorder{}), substrate.NewRouterClient("http://unused"), nil, cfg), nil
+	}
+	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
+
+	cfgA := &config.V1SubstrateConfig{APIEndpoint: "a.example:443", RouterEndpoint: "http://a"}
+	cfgB := &config.V1SubstrateConfig{APIEndpoint: "b.example:443", RouterEndpoint: "http://b"}
+
+	rtA, err := NewSubstrateRuntime(cfgA)
+	if err != nil {
+		t.Fatalf("NewSubstrateRuntime(cfgA) error = %v", err)
+	}
+	rtB, err := NewSubstrateRuntime(cfgB)
+	if err != nil {
+		t.Fatalf("NewSubstrateRuntime(cfgB) error = %v", err)
+	}
+	if rtA == rtB {
+		t.Error("NewSubstrateRuntime() returned the same instance for two different configs")
+	}
+	if built != 2 {
+		t.Errorf("substrateRuntimeBuilder called %d times, want 2 (one per distinct config)", built)
 	}
 }
