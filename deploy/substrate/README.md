@@ -111,13 +111,31 @@ let it reach the router or other in-cluster services — that would defeat
 the NetworkPolicy above, which is what keeps the Phase 1 bootstrap-nonce
 fallback (§5) safe. `pkg/config.V1SubstrateConfig.Validate` (checked when
 the runtime is constructed, and again in `Run` before the `EgressPolicy` is
-created) rejects:
+created) takes an allowlist-first approach: Phase 1 accepts *only* public
+FQDNs (optionally wildcarded as `*.example.com`), and rejects everything
+else, including:
 
+- any IP address or CIDR, bare or wildcarded, IPv4 or IPv6 — Phase 1 has no
+  IP/CIDR egress support at all, not even for public addresses;
 - catch-alls: `all`, `*`, `0.0.0.0/0`, `::/0`, or any bare `*`-style entry;
-- any CIDR (or bare IP) overlapping a private/in-cluster/link-local/loopback
-  range: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`,
-  `169.254.0.0/16`, `127.0.0.0/8`, `fc00::/7`, `fe80::/10`, `::1/128`;
-- hostnames ending in `.svc`, `.cluster.local`, or `.internal`.
+- a hostname whose top-level domain isn't a real, ICANN-delegated one (this
+  also catches Kubernetes-internal-shaped names like `*.default.pod` or
+  `10-0-0-1.kube-system.pod`, and reserved zones like `home.arpa`, `.lan`,
+  `.corp`, `.local`, `.internal`, `.localhost`);
+- a hostname that is itself a public suffix rather than a name beneath one
+  — including private/multi-tenant-platform suffixes such as
+  `googleapis.com` or `github.io` (`storage.googleapis.com` and
+  `foo.github.io` are still accepted; `googleapis.com` and `*.github.io`
+  are not);
+- hostnames ending in `.svc`, `.cluster.local`, `.internal`, `.local`, or
+  `.localhost`.
+
+See `ValidateEgressAllow`'s doc comment (`pkg/config/substrate_egress.go`)
+for the exact rule set. None of this protects against a validly-public
+hostname later resolving to a private or in-cluster address — DNS
+rebinding, or a service like nip.io/sslip.io that does this by design.
+Closing that gap requires a post-resolution check by the egress proxy
+itself, which Phase 1 does not add.
 
 ### `server.broker.broker_id` in the ConfigMap
 

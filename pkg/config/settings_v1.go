@@ -1058,18 +1058,32 @@ type V1SubstrateConfig struct {
 	// per-actor EgressPolicy, beyond the hub/git/model/telemetry hosts the
 	// runtime always adds.
 	//
+	// Phase 1 accepts only public FQDNs here — no IP addresses or CIDRs at
+	// all (Substrate's own HostnameRule, which is where every entry ends
+	// up, rejects IP addresses outright), and only a hostname whose
+	// top-level domain is a real, ICANN-delegated one, with at least one
+	// label beneath its actual matched suffix (which may be a private
+	// multi-tenant-platform suffix like "googleapis.com"/"github.io", not
+	// only an ICANN one). See ValidateEgressAllow's doc comment for the
+	// exact rule set, which changes more often than this comment would
+	// otherwise be kept in sync with.
+	//
+	// Residual risk this does not close: a validly-public hostname can
+	// still be made to resolve to a private or in-cluster address (DNS
+	// rebinding, or services like nip.io/sslip.io that do this by design).
+	// Only a check by the egress proxy itself, after DNS resolution,
+	// against the address actually connected to, can close that gap.
+	//
 	// Validated by V1SubstrateConfig.Validate, which NewSubstrateRuntime
 	// calls when the runtime is constructed, and Run calls again once at
 	// its start — not at settings-load time or by `scion config validate`
 	// (there is no generic settings-validation hook for this yet), and not
 	// a second time inside Run's egress-policy step (r.cfg is immutable for
-	// a single Run call, so one check per call is enough). See
-	// ValidateEgressAllow's doc comment for the exact rule set, which
-	// changes more often than this comment would otherwise be kept in sync
-	// with. Substrate's egress default-deny plus the actor's EgressPolicy
-	// is what keeps an actor off the atenet-router and other in-cluster
-	// services (findings.md §6 threat model); an entry that reaches either
-	// of those would defeat it.
+	// a single Run call, so one check per call is enough). Substrate's
+	// egress default-deny plus the actor's EgressPolicy is what keeps an
+	// actor off the atenet-router and other in-cluster services
+	// (findings.md §6 threat model); an entry that reaches either of those
+	// would defeat it.
 	EgressAllow []string `json:"egress_allow,omitempty" yaml:"egress_allow,omitempty" koanf:"egress_allow"`
 	// TemplateReadyTimeout bounds how long Run waits for a newly created
 	// ActorTemplate to become ready (a Go duration string, e.g. "10m").
