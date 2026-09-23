@@ -1065,6 +1065,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
+default_harness_config: antigravity
 image_registry: \"${IMAGE_REGISTRY}\"
 server:
   hub:
@@ -1473,6 +1474,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
+default_harness_config: antigravity
 image_registry: \"${IMAGE_REGISTRY}\"
 server:
   hub:
