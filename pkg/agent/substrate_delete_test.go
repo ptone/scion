@@ -47,6 +47,14 @@ type fakeSubstrateControlClient struct {
 	actors            map[string]*ateapipb.Actor // key: "<atespace>/<name>"
 	deleteActorCalls  []*ateapipb.DeleteActorRequest
 	deleteEgressCalls []*ateapipb.DeleteActorEgressPolicyRequest
+
+	// forceListOrder, when non-nil, makes ListActors return exactly this
+	// slice in exactly this order instead of ranging over the (unordered)
+	// actors map — for a test that must exercise ListActors returning its
+	// actors in a specific, adversarial order deterministically, rather
+	// than relying on Go's randomized map iteration to happen to produce
+	// it on some fraction of runs.
+	forceListOrder []*ateapipb.Actor
 }
 
 func newFakeSubstrateControlClient() *fakeSubstrateControlClient {
@@ -119,6 +127,9 @@ func (f *fakeSubstrateControlClient) GetActor(ctx context.Context, in *ateapipb.
 func (f *fakeSubstrateControlClient) ListActors(ctx context.Context, in *ateapipb.ListActorsRequest, opts ...grpc.CallOption) (*ateapipb.ListActorsResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.forceListOrder != nil {
+		return &ateapipb.ListActorsResponse{Actors: f.forceListOrder}, nil
+	}
 	var actors []*ateapipb.Actor
 	for _, a := range f.actors {
 		actors = append(actors, a)
@@ -226,15 +237,18 @@ func TestSubstrateAgentManagerDelete_RecordExists(t *testing.T) {
 	}
 }
 
-// TestSubstrateAgentManagerDelete_NoRecord is D1's second required case: an
-// actor with no in-memory agent record at all, simulating a broker restart
-// (phase1-spec.md §2.2's List row explicitly accepts losing records across
-// a restart, but not losing the actor from List, or from Delete, entirely).
-// The actor here is injected directly into the fake client, never through
-// this SubstrateRuntime's own Run, so — unlike the record-exists case —
-// there is genuinely no substrateAgentRecords entry for it; List must
-// derive the "scion.name" label used for the match from the actor name
-// itself.
+// TestSubstrateAgentManagerDelete_NoRecord is the documented, deliberate
+// no-op case: an actor with no in-memory agent record at all, simulating a
+// broker restart (phase1-spec.md §2.2's List row explicitly accepts losing
+// records across a restart). The actor here is injected directly into the
+// fake client, never through this SubstrateRuntime's own Run, so there is
+// genuinely no substrateAgentRecords entry for it.
+//
+// A record-less actor is never resolvable by its bare agent slug — see
+// pkg/runtime/substrate_runtime.go's List doc comment for why an earlier
+// attempt at making this work was reverted — so Delete by slug always
+// no-ops for it: zero DeleteActor/DeleteActorEgressPolicy calls, and the
+// actor itself is left running.
 func TestSubstrateAgentManagerDelete_NoRecord(t *testing.T) {
 	fc := newFakeSubstrateControlClient()
 	const (
@@ -255,15 +269,14 @@ func TestSubstrateAgentManagerDelete_NoRecord(t *testing.T) {
 
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
-	if len(fc.deleteActorCalls) == 0 {
-		t.Fatal("DeleteActor was never called — Delete() silently no-opped instead of finding the record-less actor")
+	if len(fc.deleteActorCalls) != 0 {
+		t.Errorf("DeleteActor called %d times, want 0 (a record-less actor is never resolvable by slug)", len(fc.deleteActorCalls))
 	}
-	got := fc.deleteActorCalls[len(fc.deleteActorCalls)-1].GetActor()
-	if got.GetAtespace() != atespace || got.GetName() != actorName {
-		t.Errorf("DeleteActor actor = %s/%s, want %s/%s", got.GetAtespace(), got.GetName(), atespace, actorName)
+	if len(fc.deleteEgressCalls) != 0 {
+		t.Errorf("DeleteActorEgressPolicy called %d times, want 0", len(fc.deleteEgressCalls))
 	}
-	if len(fc.deleteEgressCalls) == 0 {
-		t.Fatal("DeleteActorEgressPolicy was never called — Delete() silently no-opped instead of finding the record-less actor")
+	if _, ok := fc.actors[atespace+"/"+actorName]; !ok {
+		t.Error("the record-less actor was removed — it must be untouched (documented no-op)")
 	}
 }
 
@@ -325,103 +338,89 @@ func TestSubstrateAgentManagerDelete_RecordlessAmbiguousSlugDeletesNothing(t *te
 	}
 }
 
-// TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug is C1's
-// second required case: a record-EXISTS actor's real slug must resolve
-// correctly even when an unrelated, different-project, record-less actor
-// happens to invert to the same slug. Delete("dev") must remove only the
-// record-having actor; the record-less other-project actor must be
-// untouched.
+// TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug
+// confirms a record-EXISTS actor's real slug resolves correctly even when
+// an unrelated, different-project, record-less actor's actor name happens
+// to end the same way. Delete("dev") must remove only the record-having
+// actor; the record-less other-project actor — never a candidate for
+// "scion.name"="dev" at all, since a record-less actor always reports its
+// full actor name — must be untouched. Run for both ListActors return
+// orders, forced deterministically rather than left to Go's randomized map
+// iteration, since this is exactly the kind of bug that only shows up for
+// one order.
 func TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug(t *testing.T) {
-	fc := newFakeSubstrateControlClient()
-	actorServer := newFakeSubstrateActorServer()
-	defer actorServer.Close()
-
-	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
-
-	// The record-less other-project actor, injected directly (never
-	// through this runtime's Run, so it genuinely has no record).
 	const (
 		otherAtespace = "scion-bbbbbbbbbbbb"
 		otherActor    = "projB--dev"
 	)
-	fc.putActor(otherAtespace, otherActor, "uid-other-project")
 
-	// The record-having actor, started for real.
-	cfg := scionruntime.RunConfig{
-		Name:         "projA--dev",
-		ProjectID:    "550e8400-e29b-41d4-a716-446655440020",
-		Image:        "us-docker.pkg.dev/proj/repo/scion-agent@sha256:" + strings.Repeat("a", 64),
-		UnixUsername: "scion",
-		NoAuth:       true,
-		Labels:       map[string]string{"scion.name": "dev", "scion.agent": "true"},
-	}
-	if _, err := rt.Run(context.Background(), cfg); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
+	for _, orderName := range []string{"record-having first", "record-less first"} {
+		t.Run(orderName, func(t *testing.T) {
+			fc := newFakeSubstrateControlClient()
+			actorServer := newFakeSubstrateActorServer()
+			defer actorServer.Close()
 
-	mgr := NewManager(rt)
-	defer mgr.Close()
+			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
 
-	if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err != nil {
-		t.Fatalf(`Delete("dev") error = %v`, err)
-	}
+			// The record-less other-project actor, injected directly (never
+			// through this runtime's Run, so it genuinely has no record).
+			fc.putActor(otherAtespace, otherActor, "uid-other-project")
 
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	// AgentManager.Delete calls Runtime.Stop then Runtime.Delete, and for
-	// substrate Stop is Delete (same underlying call) — so 2 DeleteActor
-	// calls for one mgr.Delete() is expected. What matters is that EVERY
-	// one of them names the record-having actor, never the record-less
-	// other-project one.
-	if len(fc.deleteActorCalls) == 0 {
-		t.Fatal(`Delete("dev") called DeleteActor 0 times, want at least 1`)
-	}
-	for _, call := range fc.deleteActorCalls {
-		got := call.GetActor()
-		if got.GetName() != cfg.Name {
-			t.Errorf("DeleteActor actor = %s/%s, want the record-having %q, not the record-less other-project actor", got.GetAtespace(), got.GetName(), cfg.Name)
-		}
-	}
-	if _, ok := fc.actors[otherAtespace+"/"+otherActor]; !ok {
-		t.Error("the record-less other-project actor was removed — it must be untouched")
-	}
-}
+			// The record-having actor, started for real.
+			cfg := scionruntime.RunConfig{
+				Name:         "projA--dev",
+				ProjectID:    "550e8400-e29b-41d4-a716-446655440020",
+				Image:        "us-docker.pkg.dev/proj/repo/scion-agent@sha256:" + strings.Repeat("a", 64),
+				UnixUsername: "scion",
+				NoAuth:       true,
+				Labels:       map[string]string{"scion.name": "dev", "scion.agent": "true"},
+			}
+			if _, err := rt.Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
 
-// TestSubstrateAgentManagerDelete_ThreeLevelActorNameNotMisread is C1's
-// raw-agent-name collision case: an agent literally named "b--c", started
-// in project "a", produces actor name "a--b--c" — indistinguishable, by the
-// string alone, from project "a--b" agent "c". A second, legitimate actor
-// "a--c" (project "a", agent "c") exists alongside it. Delete("c") must
-// resolve only to "a--c" and never touch "a--b--c".
-func TestSubstrateAgentManagerDelete_ThreeLevelActorNameNotMisread(t *testing.T) {
-	fc := newFakeSubstrateControlClient()
-	const atespace = "scion-proj"
-	fc.putActor(atespace, "a--b--c", "uid-abc")
-	fc.putActor(atespace, "a--c", "uid-ac")
+			fc.mu.Lock()
+			var recordHaving, recordLess *ateapipb.Actor
+			for key, a := range fc.actors {
+				if key == otherAtespace+"/"+otherActor {
+					recordLess = a
+				} else {
+					recordHaving = a
+				}
+			}
+			if orderName == "record-having first" {
+				fc.forceListOrder = []*ateapipb.Actor{recordHaving, recordLess}
+			} else {
+				fc.forceListOrder = []*ateapipb.Actor{recordLess, recordHaving}
+			}
+			fc.mu.Unlock()
 
-	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://unused"), nil, config.V1SubstrateConfig{})
-	mgr := NewManager(rt)
-	defer mgr.Close()
+			mgr := NewManager(rt)
+			defer mgr.Close()
 
-	if _, err := mgr.Delete(context.Background(), "c", false, "", false); err != nil {
-		t.Fatalf(`Delete("c") error = %v`, err)
-	}
+			if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err != nil {
+				t.Fatalf(`Delete("dev") error = %v`, err)
+			}
 
-	fc.mu.Lock()
-	defer fc.mu.Unlock()
-	// AgentManager.Delete calls Runtime.Stop then Runtime.Delete, and for
-	// substrate Stop is Delete (same underlying call) — so 2 DeleteActor
-	// calls for one mgr.Delete() is expected; every one of them must name
-	// "a--c", never "a--b--c".
-	if len(fc.deleteActorCalls) == 0 {
-		t.Fatal(`Delete("c") called DeleteActor 0 times, want at least 1`)
-	}
-	for _, call := range fc.deleteActorCalls {
-		if got := call.GetActor().GetName(); got != "a--c" {
-			t.Errorf(`DeleteActor actor name = %q, want "a--c" ("a--b--c" must never match a lookup for "c")`, got)
-		}
-	}
-	if _, ok := fc.actors[atespace+"/a--b--c"]; !ok {
-		t.Error(`"a--b--c" was removed — it must be untouched by Delete("c")`)
+			fc.mu.Lock()
+			defer fc.mu.Unlock()
+			// AgentManager.Delete calls Runtime.Stop then Runtime.Delete, and
+			// for substrate Stop is Delete (same underlying call) — so 2
+			// DeleteActor calls for one mgr.Delete() is expected. What
+			// matters is that EVERY one of them names the record-having
+			// actor, never the record-less other-project one.
+			if len(fc.deleteActorCalls) == 0 {
+				t.Fatal(`Delete("dev") called DeleteActor 0 times, want at least 1`)
+			}
+			for _, call := range fc.deleteActorCalls {
+				got := call.GetActor()
+				if got.GetName() != cfg.Name {
+					t.Errorf("DeleteActor actor = %s/%s, want the record-having %q, not the record-less other-project actor", got.GetAtespace(), got.GetName(), cfg.Name)
+				}
+			}
+			if _, ok := fc.actors[otherAtespace+"/"+otherActor]; !ok {
+				t.Error("the record-less other-project actor was removed — it must be untouched")
+			}
+		})
 	}
 }

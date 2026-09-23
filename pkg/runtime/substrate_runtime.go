@@ -523,13 +523,30 @@ const substrateAtespacePrefix = "scion-"
 
 // List implements phase1-spec.md §2.2 List row.
 //
-// Invariant this must never violate: a slug lookup must never resolve to an
-// actor whose ownership can't be verified. A no-op — a caller-supplied slug
-// matching nothing — is acceptable (ptone/scion#1819 tracks hardening that
-// generic call path further); resolving to the WRONG actor is not. See
-// substrateSynthesizedAgentName's doc for how a record-less entry's
-// "scion.name"/"scion.project" are derived (or deliberately withheld) to
-// hold that invariant.
+// Known limitation, by design: a record-less actor (this runtime instance
+// has no in-memory agent record for it — e.g. right after a broker
+// restart) is reported under its actor name, containerName(project, agent)
+// = "<project>--<agent>" (pkg/agent/run.go), not its agent slug, and with
+// no project labels. It therefore never matches a caller-supplied slug or
+// project filter, and Delete/Stop/Exec/Logs for it become a no-op rather
+// than acting on it — but it still appears in an unfiltered
+// "scion.agent=true" listing, so it isn't lost entirely.
+//
+// This is deliberate, not an oversight: an earlier version of this
+// function tried to recover the agent slug from the actor name (inverting
+// containerName) so a record-less actor could still be found by slug.
+// That construction could not be made to fail closed against every
+// project-scoped caller (a lookup scoped to project B could still resolve
+// to project A's sole record-less actor for the same slug, since nothing
+// here could verify which project a record-less actor actually belonged
+// to strongly enough for every caller). Rather than accept that risk, this
+// reports record-less actors exactly as before any such recovery existed:
+// never resolvable by slug, so a wrong-actor action is structurally
+// impossible, at the cost of requiring an operator to re-identify (or
+// simply restart) a record-less actor by hand. ptone/scion#1819 tracks
+// hardening the generic slug-matching call path in pkg/agent; the durable
+// fix here is persisting agent records so they survive a broker restart in
+// the first place (Phase 2), not reconstructing them from the actor name.
 func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	var actors []*ateapipb.Actor
 	pageToken := ""
@@ -548,40 +565,6 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	substrateAgentStateMu.Lock()
 	defer substrateAgentStateMu.Unlock()
 
-	// First pass: tally, across every scion-managed actor in this listing,
-	// which "scion.name" value each would report — the real one from its
-	// record if it has one, or its candidate synthesized slug if not (only
-	// when the inversion is unambiguous; see substrateSynthesizedAgentName).
-	// A record-less actor's candidate is used in the second pass below only
-	// if it is the SOLE actor (record-having or not) that would produce
-	// that value — otherwise a caller-supplied slug lookup could resolve to
-	// either one, and neither's ownership of that slug is verified, so
-	// neither record-less candidate is trusted (the record-having one, if
-	// any, keeps its real, independently-verified slug either way).
-	type recordlessCandidate struct {
-		projectPrefix string
-		agentSlug     string
-		ok            bool
-	}
-	candidates := make(map[*ateapipb.Actor]recordlessCandidate)
-	slugCounts := make(map[string]int)
-	for _, actor := range actors {
-		if !strings.HasPrefix(actor.GetMetadata().GetAtespace(), substrateAtespacePrefix) {
-			continue
-		}
-		if rec := substrateAgentRecords[actor.GetMetadata().GetUid()]; rec != nil {
-			if realSlug := rec.Labels["scion.name"]; realSlug != "" {
-				slugCounts[realSlug]++
-			}
-			continue
-		}
-		prefix, slug, ok := substrateSynthesizedAgentName(actor.GetMetadata().GetName())
-		candidates[actor] = recordlessCandidate{projectPrefix: prefix, agentSlug: slug, ok: ok}
-		if ok {
-			slugCounts[slug]++
-		}
-	}
-
 	var agents []api.AgentInfo
 	for _, actor := range actors {
 		if !strings.HasPrefix(actor.GetMetadata().GetAtespace(), substrateAtespacePrefix) {
@@ -591,19 +574,18 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 		actorName := actor.GetMetadata().GetName()
 		atespace := actor.GetMetadata().GetAtespace()
 		rec := substrateAgentRecords[actor.GetMetadata().GetUid()]
-		hasRecord := rec != nil
 
-		// Always synthesise the two labels the broker's own lookups depend
-		// on (pkg/runtimebroker resolves an agent by "scion.name" and lists
-		// all agents by "scion.agent"), so those lookups succeed even when
-		// this runtime instance has no in-memory record for the actor —
-		// e.g. right after a broker restart, which phase1-spec.md §2.2's
-		// List row accepts losing records for, but not losing the actor
-		// from List entirely.
-		labels := map[string]string{"scion.agent": "true"}
+		// "scion.agent" is always set (pkg/runtimebroker lists all agents
+		// by it), so a record-less actor still appears in an unfiltered
+		// listing even though — see this function's doc comment — it
+		// never carries a slug or project identity a caller can filter or
+		// match by.
+		labels := map[string]string{
+			"scion.name":  actorName,
+			"scion.agent": "true",
+		}
 		var template, harnessConfig, project, projectID, image string
-		if hasRecord {
-			labels["scion.name"] = actorName // overwritten below by rec.Labels, which always has the real one
+		if rec != nil {
 			for k, v := range rec.Labels {
 				labels[k] = v
 			}
@@ -612,24 +594,9 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 			project = rec.Project
 			projectID = rec.ProjectID
 			image = rec.Image
-		} else {
-			c := candidates[actor]
-			if c.ok && slugCounts[c.agentSlug] == 1 {
-				labels["scion.name"] = c.agentSlug
-				project = c.projectPrefix
-				for k, v := range projectcompat.ProjectNameLabels(c.projectPrefix, true) {
-					labels[k] = v
-				}
-			} else {
-				// Fail closed: the pre-synthesis behaviour (the caller-
-				// supplied slug can never accidentally match this entry,
-				// since actor names always contain the atespace-scoping
-				// project prefix a real agent slug never would).
-				labels["scion.name"] = actorName
-			}
 		}
 
-		if !substrateLabelsMatch(labels, project, projectID, atespace, hasRecord, labelFilter) {
+		if !substrateLabelsMatch(labels, project, projectID, labelFilter) {
 			continue
 		}
 
@@ -643,7 +610,12 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 			// against Name, so a project-prefixed Name never matches and
 			// both silently no-op instead of deleting anything
 			// (ptone/scion#1819 tracks hardening that call path in
-			// general; this is the substrate-specific root cause).
+			// general; this is the substrate-specific root cause). This
+			// only ever differs from the actor name for a record-having
+			// actor (labels["scion.name"] above is overwritten by
+			// rec.Labels, which always has the real one); see this
+			// function's doc comment for why a record-less actor is
+			// deliberately not given the same treatment.
 			Name:          labels["scion.name"],
 			Runtime:       r.Name(),
 			Phase:         substratePhase(actor.GetStatus().GetState()),
@@ -658,76 +630,11 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	return agents, nil
 }
 
-// substrateSynthesizedAgentName inverts containerName(projectSlug,
-// agentSlug) = "<projectSlug>--<agentSlug>" (pkg/agent/run.go) to recover
-// (projectSlug, agentSlug), for a record-less actor List has no in-memory
-// label record for (e.g. right after a broker restart). ok is true only
-// when the inversion is unambiguous:
-//
-//   - actorName contains EXACTLY one "--". Zero occurrences means no
-//     project prefix was ever applied (containerName(_, "") never runs, but
-//     containerName("", agent) == agent does); two or more means the split
-//     point can't be determined — "a--b--c" could be project "a" agent
-//     "b--c", or project "a--b" agent "c", and there is no way to tell
-//     from the string alone which one actually happened.
-//   - both halves are non-empty.
-//   - the agent half is already exactly its own slug
-//     (api.Slugify(agentHalf) == agentHalf). A real agent slug always is,
-//     since it's recorded as api.Slugify(opts.Name) (run.go); a raw,
-//     unslugified agent name that happened to contain "--" (e.g. "b--c")
-//     would not match its own slugified form ("b-c"), which is exactly
-//     what would otherwise let "a--b--c" be misread as project "a" agent
-//     "b--c" — a real hazard, since containerName uses the raw agent name,
-//     not its slug (see run.go's containerName call site).
-//
-// When ok is false, the caller must not synthesise "scion.name" from this
-// actor at all: it must fall back to the actor name itself, which a real
-// agent slug can never equal (it always contains the "--" project
-// separator an agent slug never can, since api.Slugify never emits one).
-// That fallback is what keeps a record-less entry's ownership
-// unverifiable-but-safe rather than wrong: a caller-supplied slug lookup
-// then simply never matches it, rather than matching it by coincidence.
-//
-// This function only answers "can agentSlug be read off this actor name at
-// all" — it does NOT check whether agentSlug is safe to trust across the
-// whole listing (a second, different actor could coincidentally invert to
-// the same agentSlug in a different project). That cross-actor check is
-// List's job, using the (projectSlug, agentSlug, ok) this returns.
-func substrateSynthesizedAgentName(actorName string) (projectPrefix, agentSlug string, ok bool) {
-	first := strings.Index(actorName, "--")
-	if first < 0 || first != strings.LastIndex(actorName, "--") {
-		return "", "", false
-	}
-	prefix, agent := actorName[:first], actorName[first+2:]
-	if prefix == "" || agent == "" {
-		return "", "", false
-	}
-	if api.Slugify(agent) != agent {
-		return "", "", false
-	}
-	return prefix, agent, true
-}
-
 // substrateLabelsMatch mirrors the label-filter pattern used by the other
 // runtimes (e.g. CloudRunSandboxRuntime.List): an entry with no explicit
 // label for a filtered project/project-id key still matches on the
 // synthesised project/projectID fields.
-//
-// atespace and hasRecord exist for exactly one case: a record-less entry
-// (hasRecord false) being matched against a project_id/grove_id filter. Its
-// project identity, if List could give it one at all, only ever comes from
-// the actor-name prefix (see substrateSynthesizedAgentName) — a project
-// SLUG, not a project ID; the two live in different namespaces and can't be
-// compared directly (a project ID's substrateAtespaceName is a truncated,
-// sanitized hash, not the slug itself). The actor's own atespace, though,
-// IS authoritative for its project: every actor lives in the atespace its
-// project ID produces (substrateAtespaceName), independent of any name
-// inferred from the actor's own name. So a project_id/grove_id filter on a
-// record-less entry is answered by recomputing that atespace from the
-// filter value and comparing it to the actor's actual one, not by
-// comparing to any stored label. A record-having entry needs none of this:
-// rec.ProjectID (passed in as projectID) is already the real value.
-func substrateLabelsMatch(labels map[string]string, project, projectID, atespace string, hasRecord bool, filter map[string]string) bool {
+func substrateLabelsMatch(labels map[string]string, project, projectID string, filter map[string]string) bool {
 	for k, v := range filter {
 		actual := labels[k]
 		if actual == "" {
@@ -735,12 +642,6 @@ func substrateLabelsMatch(labels map[string]string, project, projectID, atespace
 			case projectcompat.LabelProject, projectcompat.LabelGrove:
 				actual = project
 			case projectcompat.LabelProjectID, projectcompat.LabelGroveID:
-				if !hasRecord {
-					if substrateAtespaceName(v) == atespace {
-						continue
-					}
-					return false
-				}
 				actual = projectID
 			}
 		}
