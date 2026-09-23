@@ -86,8 +86,12 @@ kind: ClusterRole
 metadata:
   name: scion-substrate-broker-ctb-reader
 rules:
+  # resourceNames pins this to the one ClusterTrustBundle substrate.cluster_trust_bundle
+  # actually names, for least privilege — the broker cannot read any other
+  # cluster's/tenant's trust bundle. Round 1 review finding #12 (sb-rev).
   - apiGroups: ["certificates.k8s.io"]
     resources: ["clustertrustbundles"]
+    resourceNames: ["${CLUSTER_TRUST_BUNDLE_NAME}"]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -335,3 +339,44 @@ spec:
     # traffic in the same way — see the comment block above and the README's
     # "Known Phase 1 limitations" before assuming this policy is complete on
     # your cluster.
+---
+# Worker-namespace ingress restriction (round 1 review, sb-rev FYI): the §5
+# fallback nonce's whole security model rests on the router being the
+# *only* path to an actor's control server on :80 — the atenet-router
+# NetworkPolicy above is worthless if the same port is *also* reachable
+# directly by worker/actor pod IP from any other namespace, bypassing the
+# router (and the single-shot bootstrap check with it) entirely.
+#
+# This targets every pod in the worker namespace (no podSelector — Phase 1
+# has no confirmed, stable label for actor/worker pods specifically to
+# narrow it further; see README) and allows ingress only from the
+# ATE_SYSTEM_NAMESPACE, which is where both atenet-router (the intended
+# path to :80) and atelet (the node agent that manages the sandbox the
+# worker pod runs) live. Nothing outside ate-system — including the broker
+# namespace itself — has a legitimate reason to reach a worker pod directly;
+# the broker only ever talks to actors *through* the router.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scion-worker-restrict-ingress
+  namespace: ${SUBSTRATE_WORKER_NAMESPACE}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ${ATE_SYSTEM_NAMESPACE}
+      ports:
+        # The actor control server (sciontool substrate-serve, phase1-spec.md
+        # §2.1) listens on :80 — the port this policy exists to protect.
+        # Left unscoped beyond this one port deliberately: atelet's own
+        # node-to-sandbox management is not necessarily pod-network traffic
+        # at all (it runs on the same node), so this policy doesn't attempt
+        # to enumerate every port it might use — see README for the
+        # verification step that checks what actually matters here (:80
+        # unreachable from outside ate-system).
+        - protocol: TCP
+          port: 80

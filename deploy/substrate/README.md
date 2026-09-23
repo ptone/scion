@@ -24,22 +24,35 @@ surfaces beyond the cluster boundary.
 Resolve every one of these before applying. None are secret; secrets are
 handled separately (see "Secret creation" below).
 
-| Placeholder | Meaning | Example / suggested default |
+| Placeholder | Meaning | `substrate-scion-test` value (from `infra/cluster.md`) |
 |---|---|---|
-| `BROKER_NAMESPACE` | Namespace the broker Deployment and its RBAC live in | `scion-substrate-broker` |
-| `BROKER_IMAGE` | Branch-built image containing the `scion` binary (see "Building the broker image") | `us-docker.pkg.dev/<project>/scion/broker@sha256:...` |
-| `ATE_SYSTEM_NAMESPACE` | Namespace hosting ateapi (`api.<ns>.svc:443`) and `atenet-router` | `ate-system` (upstream default; confirm against `infra/cluster.md`) |
-| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in, for the `pods`/`pods/log` RBAC (`GetLogs`) | **unconfirmed** — placeholder default `ate-system`; the upstream install doesn't make this obvious from the manifests alone (atelet, the node agent that owns worker pods, itself runs in `ate-system`, but that doesn't guarantee actor worker pods land there too). Confirm against `infra/cluster.md` before applying. |
-| `HUB_ENDPOINT` | The `scion-integration` hub's URL | `https://scion-integration.<domain>` |
-| `HUB_BROKER_ID` | The broker's stable UUID from `scion runtime-broker register` (not secret — see below) | UUID printed by `register` |
-| `HUB_CONNECTION_NAME` | The `--name` used at `register` time; also the credentials JSON filename | `scion-integration` |
-| `CLUSTER_TRUST_BUNDLE_NAME` | The `ClusterTrustBundle` object verifying ateapi/router TLS | from `infra/cluster.md` |
-| `SANDBOX_CONFIG_NAME` | The `SandboxConfig` CRD instance actor templates use | from `infra/cluster.md` |
-| `SNAPSHOT_STORAGE_URI` | Bucket/prefix for actor snapshots | `gs://<bucket>/<prefix>/` |
+| `BROKER_NAMESPACE` | Namespace the broker Deployment and its RBAC live in | `scion-substrate-broker` (suggested — not cluster-specific) |
+| `BROKER_IMAGE` | Branch-built image containing the `scion` binary (see "Building the broker image") | `us-docker.pkg.dev/<project>/scion/broker@sha256:...` (build it yourself, see below) |
+| `ATE_SYSTEM_NAMESPACE` | Namespace hosting ateapi (`api.<ns>.svc:443`) and `atenet-router` | `ate-system` (upstream default, confirmed for this cluster) |
+| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in, for the `pods`/`pods/log` RBAC (`GetLogs`) and the worker-namespace `NetworkPolicy` | `scion-agents` (confirmed via `infra/cluster.md`; not `ate-system` — see the note this superseded, kept below for history) |
+| `HUB_ENDPOINT` | The `scion-integration` hub's URL | from `infra/cluster.md` / your hub deployment — not a Substrate-specific value |
+| `HUB_BROKER_ID` | The broker's stable UUID from `scion runtime-broker register` (not secret — see below) | UUID printed by `register`; there is no fixed value until you actually register |
+| `HUB_CONNECTION_NAME` | The `--name` used at `register` time; also the credentials JSON filename | `scion-integration` (suggested) |
+| `CLUSTER_TRUST_BUNDLE_NAME` | The `ClusterTrustBundle` object verifying ateapi/router TLS | `servicedns.podcert.ate.dev:identity:primary-bundle` |
+| `SANDBOX_CONFIG_NAME` | The `SandboxConfig` CRD instance actor templates use | `gvisor-default` |
+| `SNAPSHOT_STORAGE_URI` | Bucket/prefix for actor snapshots | `gs://snapshot-substrate-scion-test` |
 
 `worker_selector` and `egress_allow` are left as empty (`{}` / `[]`) in the
 ConfigMap rather than templated — edit `broker.yaml` directly if the cluster
-needs a `WorkerPool` pin or extra egress hosts once `infra/cluster.md` lands.
+needs a `WorkerPool` pin or extra egress hosts. For `substrate-scion-test`,
+`infra/cluster.md` names a worker pool pin:
+
+```yaml
+worker_selector:
+  ate.dev/worker-pool: scion-agents
+```
+
+Replace the ConfigMap's `worker_selector: {}` line with the above before
+applying to this cluster. (This is left as a hand-edit rather than an
+envsubst placeholder because it's a map, not a scalar — templating a
+variable-shaped map with plain `${VAR}` substitution doesn't generalize to
+"no pin needed" the way an empty string does for the scalar placeholders
+above.)
 
 ### `server.broker.broker_id` in the ConfigMap
 
@@ -115,18 +128,22 @@ the ConfigMap.
 
 ```sh
 # 1. Resolve placeholders (envsubst reads ${VAR} from the environment).
+# Values below are the substrate-scion-test example from infra/cluster.md;
+# substitute your own cluster's values elsewhere.
 export BROKER_NAMESPACE=scion-substrate-broker
 export BROKER_IMAGE=...
 export ATE_SYSTEM_NAMESPACE=ate-system
-export SUBSTRATE_WORKER_NAMESPACE=ate-system   # confirm against infra/cluster.md
+export SUBSTRATE_WORKER_NAMESPACE=scion-agents
 export HUB_ENDPOINT=...
 export HUB_BROKER_ID=...
 export HUB_CONNECTION_NAME=scion-integration
-export CLUSTER_TRUST_BUNDLE_NAME=...
-export SANDBOX_CONFIG_NAME=...
-export SNAPSHOT_STORAGE_URI=gs://.../
+export CLUSTER_TRUST_BUNDLE_NAME='servicedns.podcert.ate.dev:identity:primary-bundle'
+export SANDBOX_CONFIG_NAME=gvisor-default
+export SNAPSHOT_STORAGE_URI=gs://snapshot-substrate-scion-test
 
 envsubst < deploy/substrate/broker.yaml > /tmp/broker.rendered.yaml
+# Then hand-edit /tmp/broker.rendered.yaml's ConfigMap worker_selector: {}
+# to `{ate.dev/worker-pool: scion-agents}` — see the placeholder table above.
 
 # 2. Validate before touching the cluster (see "Validation" below).
 
@@ -158,7 +175,7 @@ access at all. Two options that don't require one:
 # cluster existed): https://github.com/yannh/kubeconform
 go install github.com/yannh/kubeconform/cmd/kubeconform@latest
 kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/broker.rendered.yaml
-# => Summary: 11 resources found in 1 file - Valid: 11, Invalid: 0, Errors: 0, Skipped: 0
+# => Summary: 12 resources found in 1 file - Valid: 12, Invalid: 0, Errors: 0, Skipped: 0
 
 # Once you *do* have cluster access:
 kubectl apply --dry-run=client -f /tmp/broker.rendered.yaml
@@ -203,6 +220,32 @@ kubectl run netpol-probe --rm -it --restart=Never \
   --image=curlimages/curl -- \
   curl -sS --max-time 5 -o /dev/null -w '%{http_code}\n' \
   "http://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc/scion/v1/healthz"
+
+# ---- Worker-namespace NetworkPolicy: the router policy above is only
+# meaningful if a worker/actor pod's :80 (sciontool substrate-serve) is NOT
+# also reachable directly, bypassing the router entirely. Verify that too,
+# with a real actor pod IP (start at least one agent on this profile
+# first): ----
+
+WORKER_POD_IP=$(kubectl -n "${SUBSTRATE_WORKER_NAMESPACE}" get pods \
+  -o jsonpath='{.items[0].status.podIP}')
+
+# (c) From a throwaway pod OUTSIDE ate-system: must be refused.
+kubectl run netpol-probe --rm -it --restart=Never \
+  --namespace default \
+  --image=curlimages/curl -- \
+  curl -sS --max-time 5 "http://${WORKER_POD_IP}:80/scion/v1/healthz"
+# Expect: a timeout/connection error. Any HTTP response (even a 4xx/5xx from
+# substrate-serve) means the packet reached the pod and the policy did NOT
+# block it.
+
+# (d) From a throwaway pod INSIDE ate-system: must connect (any HTTP
+# response, including a substrate-serve auth error, proves reachability).
+kubectl run netpol-probe --rm -it --restart=Never \
+  --namespace "${ATE_SYSTEM_NAMESPACE}" \
+  --image=curlimages/curl -- \
+  curl -sS --max-time 5 -o /dev/null -w '%{http_code}\n' \
+  "http://${WORKER_POD_IP}:80/scion/v1/healthz"
 ```
 
 ## Known Phase 1 limitations
@@ -210,13 +253,19 @@ kubectl run netpol-probe --rm -it --restart=Never \
 - **Bootstrap auth is the §5 fallback, not the identity-derived nonce.**
   `sciontool substrate-serve` (this branch) defaults to
   `FirstBootstrapWinsVerifier`: any bearer token is accepted, and only the
-  single-shot "first bootstrap wins" check plus this NetworkPolicy prevent an
-  unauthorized bootstrap. If the NetworkPolicy fails to apply, is
+  single-shot "first bootstrap wins" check plus the two NetworkPolicies
+  (router ingress restricted to the broker namespace, worker ingress
+  restricted to `ate-system`) prevent an unauthorized bootstrap. The two
+  policies are not redundant — the router policy is worthless on its own if
+  a worker pod's :80 is *also* reachable directly by pod IP from outside
+  `ate-system`, bypassing the router (and the single-shot check with it)
+  entirely; the worker-namespace policy is what actually closes that path
+  (round 1 review FYI, sb-rev). If either policy fails to apply, is
   misconfigured, or GKE Dataplane V2 / Network Policy enforcement isn't
-  enabled on the cluster, **any pod that can reach `atenet-router` in the
-  cluster can bootstrap an actor before the broker does.** This is why the
-  verification step above is not optional — an applied-but-unverified policy
-  is not a control.
+  enabled on the cluster, **any pod that can reach a worker pod's IP, not
+  just the router, can bootstrap an actor before the broker does.** This is
+  why both verification steps above are not optional — an
+  applied-but-unverified policy is not a control.
 - **NetworkPolicy enforcement requires GKE Dataplane V2 (or another
   NetworkPolicy-enforcing CNI) to be enabled on the cluster.** A GKE cluster
   created without Dataplane V2 and without the legacy Calico add-on silently
@@ -236,8 +285,13 @@ kubectl run netpol-probe --rm -it --restart=Never \
   if router metrics go missing after applying this policy, that's the first
   thing to check, and this file's NetworkPolicy comment block has the
   specifics.
-- **Worker namespace is an unconfirmed placeholder** (see the
-  `SUBSTRATE_WORKER_NAMESPACE` row above).
+- **Worker-namespace pod selector is unscoped (`podSelector: {}`).** The
+  `scion-worker-restrict-ingress` NetworkPolicy applies to every pod in
+  `SUBSTRATE_WORKER_NAMESPACE`, not just actor/worker pods specifically —
+  Phase 1 has no confirmed, stable label to narrow it further. If that
+  namespace ever hosts non-actor workloads that legitimately need broader
+  ingress, this policy will also restrict those; revisit once a real
+  actor-pod label is confirmed.
 - **No Helm chart, no template GC, no doctor integration.** This is
   Phase 1's minimal fixture (`phase1-spec.md` §2.4 explicitly scopes it this
   way); the polished chart is Phase 2.
@@ -247,5 +301,7 @@ kubectl run netpol-probe --rm -it --restart=Never \
 
 - `broker.yaml` — Namespace, ServiceAccount, RBAC (TokenRequest-on-self,
   ClusterTrustBundle read, worker-namespace pod/log read), ConfigMap
-  (substrate runtime profile), Deployment, and the router NetworkPolicy.
+  (substrate runtime profile), Deployment, and the two NetworkPolicies
+  (router ingress restricted to the broker namespace; worker-namespace
+  ingress restricted to `ate-system`).
 - This README.

@@ -249,6 +249,15 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 	if err := os.WriteFile(f.Path, content, mode); err != nil {
 		return err
 	}
+	// os.WriteFile's mode argument only applies to a newly created file's
+	// open(2) call, and even then is subject to the process umask. It has
+	// no effect at all on a file that already existed (e.g. baked into the
+	// image at a different mode) — WriteFile only truncates and rewrites
+	// its contents. Chmod explicitly so the bootstrap payload's requested
+	// mode always wins, regardless of umask or a pre-existing file.
+	if err := os.Chmod(f.Path, mode); err != nil {
+		return err
+	}
 
 	if s.chownUID >= 0 && s.chownGID >= 0 {
 		for _, d := range created {

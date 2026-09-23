@@ -200,6 +200,49 @@ func TestBootstrap_WritesFilesWithParentDirsAndEnv(t *testing.T) {
 	}
 }
 
+// TestWriteBootstrapFile_EnforcesModeOnPreExistingFile covers review finding
+// #9 (round 1, sb-rev): os.WriteFile's mode argument only applies to a
+// newly created file's open(2) call and has no effect on a file that
+// already exists (e.g. baked into the image at a different mode) — it only
+// truncates and rewrites contents. Without an explicit os.Chmod after the
+// write, a bootstrap payload requesting 0600 on a credential file that
+// already exists at a looser mode (e.g. 0644 from the image) would
+// silently leave it at 0644.
+func TestWriteBootstrapFile_EnforcesModeOnPreExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "credential.json")
+
+	// Pre-create the file at a looser mode, as if baked into the image.
+	if err := os.WriteFile(filePath, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("failed to pre-create file: %v", err)
+	}
+
+	srv := NewServer(WithChownOwner(-1, -1))
+	f := BootstrapFile{
+		Path:       filePath,
+		Mode:       0o600,
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("fresh")),
+	}
+	if err := srv.writeBootstrapFile(f); err != nil {
+		t.Fatalf("writeBootstrapFile: %v", err)
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600 (pre-existing file's mode must not survive)", info.Mode().Perm())
+	}
+	got, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "fresh" {
+		t.Errorf("content = %q, want %q", got, "fresh")
+	}
+}
+
 func TestBootstrap_RejectsRelativePath(t *testing.T) {
 	srv := NewServer(
 		WithChownOwner(-1, -1),
