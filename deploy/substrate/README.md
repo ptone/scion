@@ -70,6 +70,7 @@ handled separately (see "Secret creation" below).
 | `HUB_CONNECTION_NAME` | The `--name` used at `register` time; also the credentials JSON filename | `scion-integration` (suggested) |
 | `CLUSTER_TRUST_BUNDLE_NAME` | The `ClusterTrustBundle` object verifying ateapi/router TLS | `servicedns.podcert.ate.dev:identity:primary-bundle` |
 | `SANDBOX_CONFIG_NAME` | The `SandboxConfig` CRD instance actor templates use | `gvisor-default` |
+| `WORKER_SELECTOR_KEY` / `WORKER_SELECTOR_VALUE` | One label key/value pinning actors to a `WorkerPool` — matched against **the `WorkerPool` object's own `metadata.labels`**, not any Pod label (see the callout below the table — this was a live-incident bug) | `pool` / `scion-agents` |
 | `SNAPSHOT_STORAGE_URI` | Bucket/prefix for actor snapshots | `gs://snapshot-substrate-scion-test` |
 
 **`BROKER_NAMESPACE` is baked into the router NetworkPolicy at apply time,
@@ -88,22 +89,41 @@ is no live binding here to break in the other direction: nothing but this
 one `NetworkPolicy` object needs updating, but it does need updating,
 explicitly, as part of any namespace move.
 
-`worker_selector` and `egress_allow` are left as empty (`{}` / `[]`) in the
-ConfigMap rather than templated — edit `broker.yaml` directly if the cluster
-needs a `WorkerPool` pin or extra egress hosts. For `substrate-scion-test`,
-`infra/cluster.md` names a worker pool pin:
+**`worker_selector` must match the target `WorkerPool`'s own registered
+labels, not any Kubernetes Pod label — getting this backwards was a real
+live-deploy bug, not a hypothetical one.** An earlier version of this
+manifest set `worker_selector: {ate.dev/worker-pool: scion-agents}`,
+copying the label `atecontroller` stamps onto the *generated worker Pods*
+(the one the router `NetworkPolicy`'s verification steps use, correctly,
+below). `workerSelector.matchLabels` on an `ActorTemplate` is matched
+against a **`WorkerPool` custom resource's own `metadata.labels`**
+instead — a completely different label set on a different object.
+Confirmed against upstream (`demos/multi-template/*.yaml.tmpl`: the demo's
+`WorkerPool` carries `metadata.labels: {workload: multi-template-shared}`,
+and the `ActorTemplate`s that select it use exactly that as
+`workerSelector.matchLabels`). Getting this wrong doesn't fail to apply —
+the manifest renders and `kubectl apply` succeeds — it fails at runtime:
+`CreateActor` returns "no free workers" because zero `WorkerPool`s match
+the (wrong) selector, even though the pool that should have matched is
+sitting right there with capacity.
 
-```yaml
-worker_selector:
-  ate.dev/worker-pool: scion-agents
+**To find the correct value for your cluster:**
+```sh
+kubectl get workerpool -n "${SUBSTRATE_WORKER_NAMESPACE}" -o yaml | grep -A5 '^  labels:'
 ```
-
-Replace the ConfigMap's `worker_selector: {}` line with the above before
-applying to this cluster. (This is left as a hand-edit rather than an
-envsubst placeholder because it's a map, not a scalar — templating a
-variable-shaped map with plain `${VAR}` substitution doesn't generalize to
-"no pin needed" the way an empty string does for the scalar placeholders
-above.)
+Use one of the labels under that `WorkerPool` object's own `metadata`,
+not anything you find by inspecting the worker Pods it created. For
+`substrate-scion-test`, `infra/cluster.md` records the `scion-agents`
+`WorkerPool`'s own label as `pool: scion-agents` — that's
+`WORKER_SELECTOR_KEY=pool`, `WORKER_SELECTOR_VALUE=scion-agents` in the
+table above, and what `broker.yaml`'s ConfigMap now templates
+`worker_selector` from directly (no hand-edit step anymore — the previous
+round of this manifest left it as a post-render hand-edit specifically
+because it's a map rather than a scalar, and that extra step is exactly
+what let the wrong value ship unnoticed. A single required key/value pair
+templates fine with `${VAR}`; if a future cluster genuinely needs *no*
+pool pin, delete the `worker_selector` block from the rendered manifest
+by hand instead — that's a rarer case than "gets a pin wrong.").
 
 **`egress_allow` entries are validated, and rejected entries block the
 broker from starting an agent.** An actor's own `EgressPolicy` must never
@@ -222,11 +242,13 @@ export HUB_BROKER_ID=...
 export HUB_CONNECTION_NAME=scion-integration
 export CLUSTER_TRUST_BUNDLE_NAME='servicedns.podcert.ate.dev:identity:primary-bundle'
 export SANDBOX_CONFIG_NAME=gvisor-default
+# WORKER_SELECTOR_KEY/VALUE must match the target WorkerPool's own
+# metadata.labels, NOT a Pod label — see the placeholder table's callout.
+export WORKER_SELECTOR_KEY=pool
+export WORKER_SELECTOR_VALUE=scion-agents
 export SNAPSHOT_STORAGE_URI=gs://snapshot-substrate-scion-test
 
 envsubst < deploy/substrate/broker.yaml > /tmp/broker.rendered.yaml
-# Then hand-edit /tmp/broker.rendered.yaml's ConfigMap worker_selector: {}
-# to `{ate.dev/worker-pool: scion-agents}` — see the placeholder table above.
 
 # 2. Validate before touching the cluster (see "Validation" below).
 

@@ -196,7 +196,21 @@ data:
           cluster_trust_bundle: ${CLUSTER_TRUST_BUNDLE_NAME}
           sandbox_class: gvisor
           sandbox_config_name: ${SANDBOX_CONFIG_NAME}
-          worker_selector: {}
+          # workerSelector is matched against the target WorkerPool custom
+          # resource's own metadata.labels — NOT any Kubernetes Pod label,
+          # and NOT the ate.dev/worker-pool label atecontroller stamps onto
+          # generated worker pods (that one exists for k8s-native pod
+          # selection — NetworkPolicy podSelectors, etc. — and has nothing
+          # to do with ActorTemplate-to-WorkerPool matching). Confirmed
+          # against upstream (demos/multi-template/*.yaml.tmpl: a
+          # WorkerPool's own `metadata.labels` is exactly what
+          # `workerSelector.matchLabels` on the consuming ActorTemplate
+          # matches against). Getting this wrong doesn't fail to apply —
+          # CreateActor fails at runtime with "no free workers" because
+          # zero WorkerPools match. See the README for how to read the
+          # correct value off the actual WorkerPool object.
+          worker_selector:
+            ${WORKER_SELECTOR_KEY}: "${WORKER_SELECTOR_VALUE}"
           snapshot_storage: ${SNAPSHOT_STORAGE_URI}
           egress_allow: []
           template_ready_timeout: 10m
