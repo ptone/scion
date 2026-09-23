@@ -1106,8 +1106,8 @@ func TestNewSubstrateRuntime_MemoizedAcrossCalls(t *testing.T) {
 	}
 
 	// Simulates a second `scion start`: the broker resolves substrate again
-	// (findings review: it's an auxiliary runtime, rebuilt on every start
-	// that isn't the default profile).
+	// (it's an auxiliary runtime, rebuilt on every start that isn't the
+	// default profile).
 	rt2, err := NewSubstrateRuntime(cfg)
 	if err != nil {
 		t.Fatalf("NewSubstrateRuntime() (second call) error = %v", err)

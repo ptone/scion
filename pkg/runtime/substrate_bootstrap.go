@@ -178,8 +178,7 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 //   - externalEnvValues only covers cfg.Env and Harness.GetEnv(), and
 //     cross-checks against a final env map — it silently has no coverage
 //     for ResolvedAuth.EnvVars or ResolvedSecrets at all, which is exactly
-//     what let real secret values reach an unredacted error (review round
-//     1, Required #3).
+//     what let real secret values reach an unredacted error.
 //   - buildBootstrapEnv's output isn't reusable as-is either: it adds
 //     SCION_RUNTIME=substrate, a runtime-synthesised constant that is also
 //     a substring of every one of this runtime's own error-message

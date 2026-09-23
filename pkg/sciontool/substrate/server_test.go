@@ -202,13 +202,12 @@ func TestBootstrap_WritesFilesWithParentDirsAndEnv(t *testing.T) {
 	}
 }
 
-// TestWriteBootstrapFile_EnforcesModeOnPreExistingFile confirms
-// os.WriteFile's mode argument only applies to a newly created file's
-// open(2) call and has no effect on a file that already exists (e.g. baked
-// into the image at a different mode) — it only truncates and rewrites
-// contents. Without an explicit os.Chmod after the write, a bootstrap
-// payload requesting 0600 on a credential file that already exists at a
-// looser mode (e.g. 0644 from the image) would silently leave it at 0644.
+// TestWriteBootstrapFile_EnforcesModeOnPreExistingFile asserts that writing
+// to a file that already exists at a looser mode (as if baked into the
+// image) still ends with exactly the requested mode and the new content —
+// not the pre-existing file's mode or content. os.WriteFile's mode argument
+// only applies to a newly created file's open(2) call and has no effect on
+// a file that already exists; it only truncates and rewrites contents.
 func TestWriteBootstrapFile_EnforcesModeOnPreExistingFile(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "credential.json")
@@ -244,17 +243,13 @@ func TestWriteBootstrapFile_EnforcesModeOnPreExistingFile(t *testing.T) {
 	}
 }
 
-// TestWriteBootstrapFile_SetsModeAndOwnerAtomically confirms that a naive
-// os.WriteFile then os.Chmod sequence leaves a window, for a pre-existing
-// file, where the new secret content is readable at the file's *old* mode
-// between the two syscalls. This asserts the write-to-temp-then-rename
-// fix's outcome: the final file has exactly the requested mode and owner,
-// and the content is correct. (The absence of
-// a readable-at-wrong-mode window isn't itself observable from a
-// single-threaded test — what's verifiable and what actually matters here
-// is that writeFileAtomicMode never produces a file with the wrong
-// mode/owner, which this pins for both the fresh-file and
-// pre-existing-file cases.)
+// TestWriteBootstrapFile_SetsModeAndOwnerAtomically asserts that
+// writeFileAtomicMode's write-to-temp-then-rename result has exactly the
+// requested mode, owner, and content, for both a fresh file and a
+// pre-existing one. (The absence of a readable-at-wrong-mode window during
+// the write isn't itself observable from a single-threaded test — what's
+// verifiable, and what this pins, is that the function never produces a
+// file with the wrong mode or owner once it returns.)
 func TestWriteBootstrapFile_SetsModeAndOwnerAtomically(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("ownership check uses syscall.Stat_t (Linux only)")

@@ -368,7 +368,11 @@ func TestValidateEgressAllow_RejectsOnion(t *testing.T) {
 			t.Errorf("ValidateEgressAllow([%q]) = nil, want a rejection (special-use .onion)", entry)
 			continue
 		}
-		if !strings.Contains(err.Error(), "onion") {
+		// "onion" alone would trivially match: it's already in the quoted
+		// entry itself ("foo.onion", "*.onion"), so it wouldn't actually
+		// confirm the special-use check fired rather than some unrelated
+		// rejection. Check for the reason text instead.
+		if !strings.Contains(err.Error(), "Tor hidden services") {
 			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to name the onion special case", entry, err)
 		}
 	}
@@ -453,14 +457,6 @@ func TestValidateEgressAllow_LengthLimit(t *testing.T) {
 // Every wantReason below is the reason the code actually produces today,
 // confirmed against a real run of the validator, not assumed from the
 // row's own label.
-//
-// Two row names below ("also caught by the suffix blocklist", for
-// foo.local/foo.internal) were corrected to say "(rejected by the TLD
-// check, not the suffix blocklist)": the ICANN-public-suffix check (rule 1)
-// always runs before the suffix blocklist inside validatePublicHostname, so
-// the blocklist is never actually reached for these two entries — it's a
-// real second layer, just not the layer that catches these particular
-// rows.
 func TestValidateEgressAllow_KnownBypasses(t *testing.T) {
 	const (
 		reasonCatchAll        = "catch-all"
@@ -470,11 +466,16 @@ func TestValidateEgressAllow_KnownBypasses(t *testing.T) {
 		reasonSingleLabel     = "single-label hostname"
 		reasonInvalidLabel    = "invalid DNS label"
 		reasonNotValidHost    = "valid hostname"
-		reasonArpa            = "arpa"
-		reasonItselfSuffix    = "itself a public suffix"
-		reasonWildcardSuffix  = "wildcard public-suffix rule"
-		reasonOnion           = "onion"
-		reasonTooLong         = "253-character limit"
+		// reasonArpa and reasonOnion are message-specific, not just the bare
+		// TLD name: "arpa"/"onion" alone would trivially match, since
+		// they're already part of the quoted entry itself (e.g.
+		// "home.arpa", "foo.onion"), which wouldn't actually confirm the
+		// special-use check fired rather than some unrelated rejection.
+		reasonArpa           = "reserved for special-use"
+		reasonItselfSuffix   = "itself a public suffix"
+		reasonWildcardSuffix = "wildcard public-suffix rule"
+		reasonOnion          = "Tor hidden services"
+		reasonTooLong        = "253-character limit"
 	)
 	cases := []struct {
 		name       string
@@ -639,7 +640,11 @@ func TestValidateEgressAllow_ArpaRejectionReason(t *testing.T) {
 		if err == nil {
 			t.Fatalf("ValidateEgressAllow([%q]) = nil, want a rejection", entry)
 		}
-		if !strings.Contains(err.Error(), "arpa") {
+		// "arpa" alone would trivially match: it's already in the quoted
+		// entry itself (every case here ends in ".arpa"), so it wouldn't
+		// actually confirm the special-use check fired rather than some
+		// unrelated rejection. Check for the reason text instead.
+		if !strings.Contains(err.Error(), "reserved for special-use") {
 			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to name the arpa special case", entry, err)
 		}
 	}

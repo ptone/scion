@@ -95,11 +95,11 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		// Send exactly the string ValidateEgressAllow validated, not just a
 		// trimmed one: NormalizeEgressAllowEntry validates AND returns the
 		// canonical form in one call, precisely so the two can never drift
-		// apart (rounds 3 and 4 of review each found a "validate what you
-		// send" gap of that shape). An entry like "GitHub.COM." validates
-		// fine but would be rejected by Substrate's API if sent
-		// unnormalized, since HostnameRule requires a lowercase name with
-		// no trailing dot.
+		// apart. If validation and the sent form were computed
+		// independently instead, they could disagree: an entry like
+		// "GitHub.COM." validates fine but would be rejected by Substrate's
+		// API if sent merely trimmed rather than fully normalized, since
+		// HostnameRule requires a lowercase name with no trailing dot.
 		//
 		// The error is ignored here, not silently: r.cfg.Validate() (called
 		// at the top of Run, before this is ever reached) already ran every
