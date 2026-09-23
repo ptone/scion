@@ -1,0 +1,54 @@
+schema_version: "1"
+active_profile: remote
+server:
+  mode: hosted
+  hub:
+    port: 8080
+    public_url: ${public_url}
+    gcp_project_id: ${project_id}
+    hub_id: ${hub_name}
+    admin_emails: ${jsonencode(admin_emails)}
+  database:
+    driver: postgres
+    url: postgres://${db_user}:${urlencode(db_password)}@/${db_name}?host=/cloudsql/${sql_connection_name}
+    max_open_conns: 10
+    max_idle_conns: 5
+    conn_max_idle_time: 5m
+  storage:
+    provider: gcs
+    bucket: ${bucket}
+  secrets:
+    backend: gcpsm
+    gcp_project_id: ${project_id}
+  auth:
+    mode: proxy
+    proxy:
+      provider: iap
+      iap:
+        audience: ${iap_audience}
+    transport:
+      mode: iap
+      oidc_audience: ${iap_oauth_client_id}
+      platform_auth_sa: ${transport_sa_email}
+  oidc:
+    enabled: true
+    token_lifetime: 15m
+  broker:
+    enabled: true
+    port: 9800
+    host: 127.0.0.1
+    broker_id: ${hub_name}-broker
+    auto_provide: true
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: ${nfs_mount_root}
+      uid: 1000
+      gid: 1000
+      subpath_root: projects
+      shares: ${jsonencode([{ id = hub_name, server = nfs_server, export = nfs_export, pv_name = pv_name }])}
+runtimes:
+  remote:
+    type: kubernetes
+    gke: true
+    namespace: ${namespace}
