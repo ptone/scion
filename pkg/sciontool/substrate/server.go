@@ -275,6 +275,17 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 // the file already has its final permissions; the rename is atomic, so
 // there is never an instant where path exists with the new content under
 // the wrong mode or owner — including path not existing yet at all.
+//
+// The fchown call failing is fatal (the caller aborts the whole bootstrap),
+// not best-effort: this assumes substrate-serve runs as root in the actor,
+// so chown(2) to the target scion uid/gid should always succeed, and a
+// failure signals something genuinely wrong (a read-only or foreign
+// filesystem, an unexpected capability drop) rather than an expected
+// permission boundary. If substrate-serve ever runs as a non-root user
+// while a "scion" target uid/gid still exists, every bootstrap would fail
+// here with EPERM — chown(2) to an arbitrary uid/gid is root-only on Linux,
+// with no equivalent of file-owner-can-chgrp-to-own-groups (review round 3,
+// Consider O-2).
 func writeFileAtomicMode(dir, path string, content []byte, mode os.FileMode, uid, gid int) (err error) {
 	tmp, err := os.CreateTemp(dir, ".bootstrap-tmp-*")
 	if err != nil {
