@@ -198,7 +198,7 @@ resource "google_cloud_run_v2_service" "hub" {
 
   template {
     service_account       = var.hub_sa_email
-    execution_environment = "GEN2" # required for NFS volumes
+    execution_environment = "EXECUTION_ENVIRONMENT_GEN2" # required for NFS volumes; provider 8.4 rejects the short "GEN2" form
     session_affinity      = true
     timeout               = var.timeout
 
