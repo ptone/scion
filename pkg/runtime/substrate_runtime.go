@@ -20,6 +20,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -85,11 +86,61 @@ type SubstrateRuntime struct {
 
 	now   func() time.Time
 	sleep func(time.Duration)
+
+	// healthzTimeout bounds how long Run waits for the control server to
+	// report awaiting-bootstrap. A struct field (rather than always using
+	// defaultHealthzTimeout directly) so tests can shrink it and exercise
+	// the timeout path in well under defaultHealthzTimeout's 5 minutes.
+	healthzTimeout time.Duration
 }
 
 // NewSubstrateRuntime builds a SubstrateRuntime from settings, dialing
 // ateapi in-cluster (pkg/runtime/substrate.Dial) and building an in-cluster
 // Kubernetes client for pod logs. There is no auto-detect path for
+// substrate (phase1-spec.md §2.3): callers only reach this constructor when
+// a profile explicitly selects it.
+// substrateRuntimesMu and substrateRuntimes memoize SubstrateRuntime
+// instances process-wide, keyed on a canonical encoding of the effective
+// V1SubstrateConfig (substrateRuntimeCacheKey).
+//
+// This exists because the broker treats substrate as an auxiliary runtime,
+// not its default one (findings.md/phase1-spec.md never made it the
+// default): pkg/runtimebroker resolves a fresh Runtime from settings via
+// GetRuntime on every `start` whose profile isn't the default, and would
+// otherwise call NewSubstrateRuntime again each time. Without memoization
+// that (a) discards controlTokens/agentRecords for every actor a previous
+// instance created — later operations (exec, logs, delete, stop) can no
+// longer find them — and (b) dials a brand new gRPC ClientConn that is
+// never closed, leaking one connection per agent start. See the review
+// finding this fixes (round 1, Critical #1).
+var (
+	substrateRuntimesMu sync.Mutex
+	substrateRuntimes   = make(map[string]*SubstrateRuntime)
+)
+
+// substrateRuntimeBuilder constructs a fresh *SubstrateRuntime for cfg
+// (dialing ateapi and building a Kubernetes client). It is a package
+// variable so tests can replace it with a fake and exercise the
+// memoization/registry logic in NewSubstrateRuntime without real network or
+// cluster access.
+var substrateRuntimeBuilder = newSubstrateRuntimeFromConfig
+
+// substrateRuntimeCacheKey returns a canonical, deterministic string key for
+// cfg. encoding/json sorts map keys and has no other source of
+// nondeterminism for this struct (all fields are strings, a string map, or
+// a string slice), so two configs with the same field values always produce
+// the same key regardless of construction order.
+func substrateRuntimeCacheKey(cfg config.V1SubstrateConfig) (string, error) {
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("substrate: encode config for runtime memoization: %w", err)
+	}
+	return string(b), nil
+}
+
+// NewSubstrateRuntime returns the process-wide SubstrateRuntime for sc,
+// building one on first use and reusing it on every subsequent call with an
+// equal config (see substrateRuntimesMu). There is no auto-detect path for
 // substrate (phase1-spec.md §2.3): callers only reach this constructor when
 // a profile explicitly selects it.
 func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error) {
@@ -102,7 +153,34 @@ func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error
 	if sc.RouterEndpoint == "" {
 		return nil, fmt.Errorf("substrate: runtimes.<name>.substrate.router_endpoint is required")
 	}
+	if err := sc.Validate(); err != nil {
+		return nil, err
+	}
 
+	key, err := substrateRuntimeCacheKey(*sc)
+	if err != nil {
+		return nil, err
+	}
+
+	substrateRuntimesMu.Lock()
+	defer substrateRuntimesMu.Unlock()
+
+	if rt, ok := substrateRuntimes[key]; ok {
+		return rt, nil
+	}
+
+	rt, err := substrateRuntimeBuilder(*sc)
+	if err != nil {
+		return nil, err
+	}
+	substrateRuntimes[key] = rt
+	return rt, nil
+}
+
+// newSubstrateRuntimeFromConfig builds a fresh SubstrateRuntime by dialing
+// ateapi and building an in-cluster Kubernetes client. This is
+// substrateRuntimeBuilder's production implementation.
+func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRuntime, error) {
 	k8sClient, err := k8s.NewClientWithContext("", "")
 	if err != nil {
 		return nil, fmt.Errorf("substrate: build Kubernetes client: %w", err)
@@ -120,15 +198,16 @@ func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error
 	}
 
 	return &SubstrateRuntime{
-		cfg:           *sc,
-		client:        substrate.NewControlClient(conn),
-		conn:          conn,
-		router:        substrate.NewRouterClient(sc.RouterEndpoint),
-		k8sClient:     k8sClient.Clientset,
-		controlTokens: make(map[string]string),
-		agentRecords:  make(map[string]*substrateAgentRecord),
-		now:           time.Now,
-		sleep:         time.Sleep,
+		cfg:            sc,
+		client:         substrate.NewControlClient(conn),
+		conn:           conn,
+		router:         substrate.NewRouterClient(sc.RouterEndpoint),
+		k8sClient:      k8sClient.Clientset,
+		controlTokens:  make(map[string]string),
+		agentRecords:   make(map[string]*substrateAgentRecord),
+		now:            time.Now,
+		sleep:          time.Sleep,
+		healthzTimeout: defaultHealthzTimeout,
 	}, nil
 }
 
@@ -136,14 +215,15 @@ func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error
 // dependencies and no real network/cluster access, for unit tests.
 func newSubstrateRuntimeForTest(client ateapipb.ControlClient, router *substrate.RouterClient, k8sClient kubernetes.Interface, cfg config.V1SubstrateConfig) *SubstrateRuntime {
 	return &SubstrateRuntime{
-		cfg:           cfg,
-		client:        client,
-		router:        router,
-		k8sClient:     k8sClient,
-		controlTokens: make(map[string]string),
-		agentRecords:  make(map[string]*substrateAgentRecord),
-		now:           time.Now,
-		sleep:         func(time.Duration) {},
+		cfg:            cfg,
+		client:         client,
+		router:         router,
+		k8sClient:      k8sClient,
+		controlTokens:  make(map[string]string),
+		agentRecords:   make(map[string]*substrateAgentRecord),
+		now:            time.Now,
+		sleep:          func(time.Duration) {},
+		healthzTimeout: defaultHealthzTimeout,
 	}
 }
 
@@ -158,6 +238,15 @@ func (r *SubstrateRuntime) ExecUser() string { return "scion" }
 // CreateActor triggers best-effort cleanup (delete the actor and its
 // egress policy) before returning.
 func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
+	// Fail fast on a misconfigured egress_allow before touching the control
+	// plane at all. NewSubstrateRuntime already validates this at
+	// construction time; this is a defensive re-check in case a
+	// SubstrateRuntime was ever built by another path (e.g. tests) that
+	// skipped it.
+	if err := r.cfg.Validate(); err != nil {
+		return "", err
+	}
+
 	atespace := substrateAtespaceName(cfg.ProjectID)
 	actorName := cfg.Name
 	id := atespace + "/" + actorName
@@ -173,7 +262,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	}
 
 	// Step 3: content-addressed template, created + waited-ready if new.
-	templateName := substrateTemplateName(cfg.Image, r.cfg.SandboxClass, cfg.Resources)
+	templateName := substrateTemplateName(cfg.Image, r.cfg, cfg.Resources)
 	tmpl := buildActorTemplate(atespace, templateName, cfg.Image, r.cfg, cfg.Resources)
 	if err := ensureActorTemplate(ctx, r.client, atespace, templateName, tmpl, templateReadyTimeout(r.cfg), r.sleep); err != nil {
 		return "", r.redact(cfg, err)
@@ -213,7 +302,15 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		})
 	}
 
-	// Step 5: egress policy.
+	// Step 5: egress policy. Defense in depth: re-validate egress_allow
+	// immediately before building it, exactly at the point the review
+	// asked for (belt-and-suspenders with the check at the top of Run —
+	// r.cfg does not change between the two, but this is cheap and matches
+	// the reviewed instruction literally).
+	if err := r.cfg.Validate(); err != nil {
+		cleanup()
+		return "", err
+	}
 	env := buildBootstrapEnv(cfg)
 	hostnames := substrateEgressHostnames(cfg, env, r.cfg)
 	if _, err := r.client.CreateActorEgressPolicy(ctx, buildEgressPolicy(atespace, actorName, hostnames)); err != nil {
@@ -234,7 +331,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	}
 
 	// Step 7: wait for the control server to be awaiting bootstrap.
-	if err := waitForHealthz(ctx, r.router, atespace, actorName, healthzAwaitingBootstrap, defaultHealthzTimeout, r.sleep); err != nil {
+	if err := waitForHealthz(ctx, r.router, atespace, actorName, healthzAwaitingBootstrap, r.healthzTimeout, r.sleep); err != nil {
 		cleanup()
 		return "", r.redact(cfg, err)
 	}
@@ -266,6 +363,16 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		StartCmd:     startCmd,
 		ControlToken: controlToken,
 	}); err != nil {
+		if errors.Is(err, errBootstrapHijacked) {
+			// Treat as a compromise indicator, not a retry: delete the
+			// actor and its egress policy so nothing keeps running under
+			// config it never should have received, and fail loudly. See
+			// errBootstrapHijacked's doc comment for the threat model.
+			runtimeLog.Error("substrate: bootstrap hijack detected, deleting actor as a precaution",
+				"atespace", atespace, "actor", actorName)
+			cleanup()
+			return "", fmt.Errorf("substrate: actor %s was bootstrapped by another caller before this broker's request reached it; deleted as a precaution", id)
+		}
 		cleanup()
 		return "", r.redact(cfg, err)
 	}
@@ -273,11 +380,15 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	r.mu.Lock()
 	r.controlTokens[id] = controlToken
 	r.agentRecords[actorUID] = &substrateAgentRecord{
-		Labels:    cfg.Labels,
-		Template:  cfg.Template,
-		Project:   cfg.Project,
-		ProjectID: cfg.ProjectID,
-		Image:     cfg.Image,
+		Labels: cfg.Labels,
+		// scion.harness_config is the same label key
+		// CloudRunSandboxRuntime.Run populates HarnessConfig from — see
+		// labelValue and its use in cloudrun_sandbox_runtime.go.
+		HarnessConfig: labelValue(cfg.Labels, "scion.harness_config"),
+		Template:      cfg.Template,
+		Project:       cfg.Project,
+		ProjectID:     cfg.ProjectID,
+		Image:         cfg.Image,
 	}
 	r.mu.Unlock()
 
@@ -353,23 +464,53 @@ func (r *SubstrateRuntime) Stop(ctx context.Context, id string) error {
 }
 
 // List implements phase1-spec.md §2.2 List row.
+// substrateAtespacePrefix is the naming convention substrateAtespaceName
+// produces. List uses it to skip actors outside any scion-managed
+// atespace: ListActors with an empty atespace (List has no project context
+// to scope it to — the spec's literal "ListActors(atespace)" can't be
+// applied here) lists across the whole cluster, which may host other
+// tenants sharing the same Substrate install.
+const substrateAtespacePrefix = "scion-"
+
 func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-	resp, err := r.client.ListActors(ctx, &ateapipb.ListActorsRequest{})
-	if err != nil {
-		return nil, fmt.Errorf("substrate: list actors: %w", err)
+	var actors []*ateapipb.Actor
+	pageToken := ""
+	for {
+		resp, err := r.client.ListActors(ctx, &ateapipb.ListActorsRequest{PageToken: pageToken})
+		if err != nil {
+			return nil, fmt.Errorf("substrate: list actors: %w", err)
+		}
+		actors = append(actors, resp.GetActors()...)
+		pageToken = resp.GetNextPageToken()
+		if pageToken == "" {
+			break
+		}
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	var agents []api.AgentInfo
-	for _, actor := range resp.GetActors() {
+	for _, actor := range actors {
+		if !strings.HasPrefix(actor.GetMetadata().GetAtespace(), substrateAtespacePrefix) {
+			continue
+		}
+
 		rec := r.agentRecords[actor.GetMetadata().GetUid()]
 
-		var labels map[string]string
+		// Always synthesise the two labels the broker's own lookups depend
+		// on (pkg/runtimebroker resolves an agent by "scion.name" and lists
+		// all agents by "scion.agent"), so those lookups succeed even when
+		// this runtime instance has no in-memory record for the actor —
+		// e.g. right after a broker restart, which phase1-spec.md §2.2's
+		// List row accepts losing records for, but not losing the actor
+		// from List entirely (review round 1, Critical #1).
+		labels := map[string]string{
+			"scion.name":  actor.GetMetadata().GetName(),
+			"scion.agent": "true",
+		}
 		var template, harnessConfig, project, projectID, image string
 		if rec != nil {
-			labels = make(map[string]string, len(rec.Labels))
 			for k, v := range rec.Labels {
 				labels[k] = v
 			}
@@ -594,9 +735,7 @@ func (r *SubstrateRuntime) redact(cfg RunConfig, err error) error {
 	if err == nil {
 		return nil
 	}
-	env := buildBootstrapEnv(cfg)
-	secrets := externalEnvValues(cfg, env)
-	return errors.New(redactEnvValues(err.Error(), secrets))
+	return errors.New(redactEnvValues(err.Error(), substrateSecretCandidates(cfg)))
 }
 
 // isDigestPinned reports whether image is pinned by digest
@@ -606,13 +745,41 @@ func isDigestPinned(image string) bool {
 }
 
 // substrateAtespaceName computes "scion-<first 12 chars of projectID>"
-// (phase1-spec.md §2.2 step 1).
+// (phase1-spec.md §2.2 step 1), sanitised to a valid Kubernetes short name
+// (ResourceMetadata.atespace's k8s-short-name format: lowercase alphanumeric
+// and '-', starting and ending with an alphanumeric character). A UUID
+// project ID is already valid as-is; this defends against any other project
+// ID shape (uppercase letters, underscores, a trailing '-' from truncating
+// mid-segment) producing an invalid atespace name — review round 1,
+// Consider #11.
 func substrateAtespaceName(projectID string) string {
 	s := projectID
 	if len(s) > 12 {
 		s = s[:12]
 	}
-	return "scion-" + s
+	return "scion-" + sanitizeK8sShortNameFragment(s)
+}
+
+// sanitizeK8sShortNameFragment lowercases s and replaces every character
+// that isn't a lowercase letter, digit, or '-' with '-', then trims leading
+// and trailing '-' (a k8s-short-name segment must start and end with an
+// alphanumeric character). An all-invalid or empty input becomes "x" so the
+// result is never empty.
+func sanitizeK8sShortNameFragment(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	trimmed := strings.Trim(b.String(), "-")
+	if trimmed == "" {
+		return "x"
+	}
+	return trimmed
 }
 
 // splitSubstrateID splits a runtime ID of the form "<atespace>/<actor>",
