@@ -51,7 +51,10 @@ const templateReadyPollInterval = 5 * time.Second
 // CreateActorTemplate instead of racing to create distinct ones.
 func substrateTemplateName(imageDigest, sandboxClass string, resources *api.ResourceSpec) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%s",
+	// hash.Hash.Write never returns an error (see the hash.Hash doc
+	// comment), so the error from Fprintf is deliberately discarded rather
+	// than checked.
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s",
 		imageDigest,
 		sandboxClass,
 		resourcesCacheKey(resources),

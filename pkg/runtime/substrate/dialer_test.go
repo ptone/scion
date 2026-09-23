@@ -83,7 +83,7 @@ func TestServerTLSConfig_CAFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	client := kubefake.NewSimpleClientset()
+	client := kubefake.NewClientset()
 	cfg := DialerConfig{APIEndpoint: "api.ate-system.svc:443", CAFile: caFile}
 
 	tlsCfg, err := serverTLSConfig(context.Background(), client, cfg)
@@ -103,7 +103,7 @@ func TestServerTLSConfig_CAFile(t *testing.T) {
 
 func TestServerTLSConfig_ClusterTrustBundle(t *testing.T) {
 	caPEM := generateTestCAPEM(t)
-	client := kubefake.NewSimpleClientset(&certsv1beta1.ClusterTrustBundle{
+	client := kubefake.NewClientset(&certsv1beta1.ClusterTrustBundle{
 		ObjectMeta: metav1.ObjectMeta{Name: "ate-root"},
 		Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: string(caPEM)},
 	})
@@ -123,7 +123,7 @@ func TestServerTLSConfig_ClusterTrustBundlePreferredOverCAFile(t *testing.T) {
 	// that does not exist — if the function fell back to CAFile it would
 	// fail to read it, so success here proves ClusterTrustBundle was used.
 	caPEM := generateTestCAPEM(t)
-	client := kubefake.NewSimpleClientset(&certsv1beta1.ClusterTrustBundle{
+	client := kubefake.NewClientset(&certsv1beta1.ClusterTrustBundle{
 		ObjectMeta: metav1.ObjectMeta{Name: "ate-root"},
 		Spec:       certsv1beta1.ClusterTrustBundleSpec{TrustBundle: string(caPEM)},
 	})
@@ -139,7 +139,7 @@ func TestServerTLSConfig_ClusterTrustBundlePreferredOverCAFile(t *testing.T) {
 }
 
 func TestServerTLSConfig_NeitherConfigured(t *testing.T) {
-	client := kubefake.NewSimpleClientset()
+	client := kubefake.NewClientset()
 	cfg := DialerConfig{APIEndpoint: "api.ate-system.svc:443"}
 	_, err := serverTLSConfig(context.Background(), client, cfg)
 	if err == nil {
@@ -153,7 +153,7 @@ func TestServerTLSConfig_EmptyCAFileContents(t *testing.T) {
 	if err := os.WriteFile(caFile, []byte("not a certificate"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	client := kubefake.NewSimpleClientset()
+	client := kubefake.NewClientset()
 	cfg := DialerConfig{APIEndpoint: "api.ate-system.svc:443", CAFile: caFile}
 	if _, err := serverTLSConfig(context.Background(), client, cfg); err == nil {
 		t.Fatal("serverTLSConfig() expected an error for a CA file with no valid certificates, got nil")
@@ -169,7 +169,7 @@ func fixedClock(t time.Time) func() time.Time {
 func TestTokenSource_CachesUntilNearExpiry(t *testing.T) {
 	now := time.Now()
 	calls := 0
-	client := kubefake.NewSimpleClientset()
+	client := kubefake.NewClientset()
 	client.PrependReactor("create", "serviceaccounts", func(action clienttesting.Action) (bool, k8sruntime.Object, error) {
 		if action.GetSubresource() != "token" {
 			return false, nil, nil
@@ -202,7 +202,7 @@ func TestTokenSource_CachesUntilNearExpiry(t *testing.T) {
 func TestTokenSource_RefreshesBeforeExpiry(t *testing.T) {
 	now := time.Now()
 	tokenNum := 0
-	client := kubefake.NewSimpleClientset()
+	client := kubefake.NewClientset()
 	client.PrependReactor("create", "serviceaccounts", func(action clienttesting.Action) (bool, k8sruntime.Object, error) {
 		if action.GetSubresource() != "token" {
 			return false, nil, nil
@@ -237,7 +237,7 @@ func TestTokenSource_RefreshesBeforeExpiry(t *testing.T) {
 }
 
 func TestTokenSource_EmptyTokenIsError(t *testing.T) {
-	client := kubefake.NewSimpleClientset()
+	client := kubefake.NewClientset()
 	client.PrependReactor("create", "serviceaccounts", func(action clienttesting.Action) (bool, k8sruntime.Object, error) {
 		if action.GetSubresource() != "token" {
 			return false, nil, nil
