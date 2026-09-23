@@ -266,14 +266,27 @@ func TestValidateEgressAllow_PunycodeTLD(t *testing.T) {
 
 // TestValidateEgressAllow_RejectsWildcardOverPublicSuffix is review round
 // 4's explicit wildcard rule: a leading "*." is allowed, but the remainder
-// must independently pass the same public-suffix rule. "*.com" and
-// "*.co.uk" are rejected because their remainder ("com", "co.uk") is
-// itself a public suffix with nothing beneath it; "*.example.com" passes
-// because "example.com" has "example" beneath the "com" suffix.
+// must independently pass the same public-suffix rule. "*.com", "*.co",
+// "*.bd", and "*.co.uk" are rejected because their remainder is itself a
+// public suffix with nothing beneath it; "*.example.com" passes because
+// "example.com" has "example" beneath the "com" suffix.
+//
+// The single-label cases ("*.com", "*.co", "*.bd") also lock in review
+// round 5's N5-3 fix: before it, these were intercepted by the
+// single-label "not fully qualified" check instead of ever reaching the
+// public-suffix check, so the error named the wrong reason. Asserting the
+// "itself a public suffix" reason here (like the sibling
+// TestValidateEgressAllow_PrivateSuffixPlatformRejectionReason already does
+// for the bare, non-wildcard form) is what would have caught that drift.
 func TestValidateEgressAllow_RejectsWildcardOverPublicSuffix(t *testing.T) {
-	for _, entry := range []string{"*.com", "*.co.uk"} {
-		if err := ValidateEgressAllow([]string{entry}); err == nil {
+	for _, entry := range []string{"*.com", "*.co", "*.bd", "*.co.uk"} {
+		err := ValidateEgressAllow([]string{entry})
+		if err == nil {
 			t.Errorf("ValidateEgressAllow([%q]) = nil, want a rejection (wildcard over a bare public suffix)", entry)
+			continue
+		}
+		if !strings.Contains(err.Error(), "itself a public suffix") {
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to reject because the remainder IS its own suffix (N5-3)", entry, err)
 		}
 	}
 	if err := ValidateEgressAllow([]string{"*.example.com"}); err != nil {
@@ -281,13 +294,159 @@ func TestValidateEgressAllow_RejectsWildcardOverPublicSuffix(t *testing.T) {
 	}
 }
 
-// TestValidateEgressAllow_AllBypassesRounds1Through4 is the consolidated
-// regression suite: every bypass found across all four review rounds, in
+// TestValidateEgressAllow_RejectsWildcardOverWildcardSuffix is review round
+// 5's N5-1: a wildcard entry is rejected not only when its remainder is
+// itself a bare public suffix (the check above), but also when the
+// remainder isn't itself a public suffix yet every single-label child of
+// it IS one, via a PSL *wildcard* rule — "run.app", "compute.amazonaws.com",
+// "compute-1.amazonaws.com", and "kawasaki.jp" are all real PSL wildcard
+// rules, so "foo.run.app" (say) is a specific, single-tenant host, but
+// "*.run.app" would grant every tenant on the platform, the same class of
+// over-grant a bare "*.googleapis.com" would be if "googleapis.com" weren't
+// already caught as a bare suffix. "*.github.io" and "*.googleapis.com"
+// stay rejected too (via the bare-suffix check, not this one) —
+// substrate-lead's explicit "keep these rejected" instruction.
+func TestValidateEgressAllow_RejectsWildcardOverWildcardSuffix(t *testing.T) {
+	cases := []string{
+		"*.run.app",
+		"*.compute.amazonaws.com",
+		"*.compute-1.amazonaws.com",
+		"*.kawasaki.jp",
+		"*.github.io",
+		"*.googleapis.com",
+	}
+	for _, entry := range cases {
+		if err := ValidateEgressAllow([]string{entry}); err == nil {
+			t.Errorf("ValidateEgressAllow([%q]) = nil, want a rejection (wildcard over a PSL wildcard rule)", entry)
+		}
+	}
+}
+
+// TestValidateEgressAllow_RejectsWildcardOverWildcardSuffixReason
+// spot-checks the N5-1 rejection reason for the entries that are rejected
+// specifically because of the new wildcard-over-wildcard-PSL-rule check
+// (not because the remainder is itself a bare public suffix — that's a
+// different message, covered by TestValidateEgressAllow_RejectsWildcardOverPublicSuffix).
+func TestValidateEgressAllow_RejectsWildcardOverWildcardSuffixReason(t *testing.T) {
+	cases := []string{"*.run.app", "*.compute.amazonaws.com", "*.compute-1.amazonaws.com", "*.kawasaki.jp"}
+	for _, entry := range cases {
+		err := ValidateEgressAllow([]string{entry})
+		if err == nil {
+			t.Fatalf("ValidateEgressAllow([%q]) = nil, want a rejection", entry)
+		}
+		if !strings.Contains(err.Error(), "wildcard public-suffix rule") {
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to name the wildcard-PSL-rule reason (N5-1)", entry, err)
+		}
+	}
+}
+
+// TestValidateEgressAllow_AcceptsWildcardOnlyCcTLDs is review round 5's
+// N5-2: several real ccTLDs ("ck", "er", "fk", "jm", "kh", "mm", "np",
+// "pg") have only a wildcard rule in the PSL, no bare-TLD rule, so a naive
+// publicsuffix.PublicSuffix(tld) check wrongly reported them as
+// unmanaged. "www.ck" is a PSL *exception* to the "*.ck" wildcard rule (a
+// normal, directly-registrable host, not itself a further public suffix);
+// "foo.com.np" and "example.com.jm" are ordinary hosts one label under
+// their platform's own wildcard-matched suffix ("com.np", "com.jm").
+func TestValidateEgressAllow_AcceptsWildcardOnlyCcTLDs(t *testing.T) {
+	cases := []string{"www.ck", "foo.com.np", "example.com.jm"}
+	for _, entry := range cases {
+		if err := ValidateEgressAllow([]string{entry}); err != nil {
+			t.Errorf("ValidateEgressAllow([%q]) = %v, want nil (N5-2: wildcard-only ccTLD)", entry, err)
+		}
+	}
+}
+
+// TestValidateEgressAllow_RejectsOnion is the "special-use" fix from review
+// round 5: ".onion" (RFC 7686, Tor hidden-service addresses) is rejected
+// the same way ".arpa" is, via egressAllowSpecialUseTLDs — "onion" is
+// itself listed in the PSL's ICANN section, so the generic ICANN-suffix
+// check alone would not catch it.
+func TestValidateEgressAllow_RejectsOnion(t *testing.T) {
+	for _, entry := range []string{"foo.onion", "*.onion"} {
+		err := ValidateEgressAllow([]string{entry})
+		if err == nil {
+			t.Errorf("ValidateEgressAllow([%q]) = nil, want a rejection (special-use .onion)", entry)
+			continue
+		}
+		if !strings.Contains(err.Error(), "onion") {
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to name the onion special case", entry, err)
+		}
+	}
+}
+
+// buildHostnameOfLength returns a syntactically valid hostname (LDH labels,
+// each at most 63 characters, ending in ".com") whose ASCII presentation
+// form is exactly total characters long — used to probe
+// egressAllowMaxLength's boundary precisely, rather than approximately.
+func buildHostnameOfLength(total int) string {
+	const tld = "com"
+	remaining := total - len(tld) - 1 // -1 for the dot immediately before "com"
+	var parts []string
+	for remaining > 0 {
+		n := remaining
+		if n > 63 {
+			n = 63
+		}
+		parts = append(parts, strings.Repeat("a", n))
+		remaining -= n
+		if remaining > 0 {
+			remaining-- // the dot that will separate this label from the next
+		}
+	}
+	parts = append(parts, tld)
+	return strings.Join(parts, ".")
+}
+
+// TestValidateEgressAllow_LengthLimit is review round 5's N5-4: the total
+// length of the exact string that would be sent (including a wildcard
+// prefix, if any) is capped at egressAllowMaxLength (253) characters, the
+// standard DNS presentation-form limit. idna.Lookup does not enforce this
+// on its own (it doesn't set VerifyDNSLength), so nothing did before this
+// fix — an over-length entry would pass local validation and only fail
+// later, inside Substrate's own CreateActorEgressPolicy call.
+func TestValidateEgressAllow_LengthLimit(t *testing.T) {
+	at := buildHostnameOfLength(253)
+	if got := len(at); got != 253 {
+		t.Fatalf("buildHostnameOfLength(253) has length %d, want 253 (test bug)", got)
+	}
+	if err := ValidateEgressAllow([]string{at}); err != nil {
+		t.Errorf("ValidateEgressAllow([<253-char hostname>]) = %v, want nil (at the limit)", err)
+	}
+
+	over := buildHostnameOfLength(256)
+	if got := len(over); got != 256 {
+		t.Fatalf("buildHostnameOfLength(256) has length %d, want 256 (test bug)", got)
+	}
+	err := ValidateEgressAllow([]string{over})
+	if err == nil {
+		t.Fatal("ValidateEgressAllow([<256-char hostname>]) = nil, want a rejection (over the limit)")
+	}
+	if !strings.Contains(err.Error(), "253-character limit") {
+		t.Errorf("error = %v, want it to name the length limit", err)
+	}
+
+	// A wildcard prefix counts toward the limit too: a 252-char hostname is
+	// fine bare (253 total isn't reached), but "*." pushes a 252-char
+	// remainder's total to 254 — over the limit — since the length check
+	// is against the string actually sent, wildcard prefix included.
+	remainder := buildHostnameOfLength(252)
+	wildcardEntry := "*." + remainder
+	if got := len(wildcardEntry); got != 254 {
+		t.Fatalf("len(%q) = %d, want 254 (test bug)", wildcardEntry, got)
+	}
+	if err := ValidateEgressAllow([]string{wildcardEntry}); err == nil {
+		t.Error("ValidateEgressAllow([<252-char remainder with *. prefix>]) = nil, want a rejection (254 chars sent, over the limit)")
+	}
+}
+
+// TestValidateEgressAllow_AllBypassesRounds1Through5 is the consolidated
+// regression suite: every bypass found across all five review rounds, in
 // one table, so the full history stays locked in against whatever the
 // validator becomes next rather than being scattered across per-round test
 // functions. See the project log entries for
-// substrate-phase1-round{3,4}-fixes.md for round-by-round provenance.
-func TestValidateEgressAllow_AllBypassesRounds1Through4(t *testing.T) {
+// substrate-phase1-round{3,4,5}-fixes.md for round-by-round provenance.
+func TestValidateEgressAllow_AllBypassesRounds1Through5(t *testing.T) {
 	cases := []struct {
 		name  string
 		entry string
@@ -368,6 +527,20 @@ func TestValidateEgressAllow_AllBypassesRounds1Through4(t *testing.T) {
 		{"round4 refinement: bare private-suffix platform domain", "googleapis.com"},
 		{"round4 refinement: wildcard over a private-suffix platform domain", "*.googleapis.com"},
 		{"round4 refinement: wildcard over github.io", "*.github.io"},
+
+		// --- Round 5 (N5-1: wildcard over a PSL *wildcard* rule; N5-2 is a
+		// false-positive fix, not a bypass, so it has no row here — see
+		// TestValidateEgressAllow_AcceptsWildcardOnlyCcTLDs instead;
+		// special-use: .onion; N5-3: single-label wildcard message fix,
+		// covered by TestValidateEgressAllow_RejectsWildcardOverPublicSuffix;
+		// N5-4: length cap) ---
+		{"round5 N5-1: wildcard over run.app (PSL wildcard rule)", "*.run.app"},
+		{"round5 N5-1: wildcard over compute.amazonaws.com (PSL wildcard rule)", "*.compute.amazonaws.com"},
+		{"round5 N5-1: wildcard over compute-1.amazonaws.com (PSL wildcard rule)", "*.compute-1.amazonaws.com"},
+		{"round5 N5-1: wildcard over kawasaki.jp (PSL wildcard rule)", "*.kawasaki.jp"},
+		{"round5 special-use: onion hidden service", "foo.onion"},
+		{"round5 special-use: wildcard over onion", "*.onion"},
+		{"round5 N5-4: 256-character hostname, over the DNS length limit", buildHostnameOfLength(256)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -442,11 +615,12 @@ func TestValidateEgressAllow_PrivateSuffixPlatformRejectionReason(t *testing.T) 
 
 // TestValidateEgressAllow_NoFalsePositives is review round 3's explicit
 // "no false positives" list plus round 4's N4-1 hex-alphabet-domain
-// additions and the suffix-rule refinement's required accepts
+// additions, the round-4 suffix-rule refinement's required accepts
 // (storage.googleapis.com, foo.github.io — both on PRIVATE-section PSL
-// platforms, with a label beneath the platform's own suffix). The three
-// IP/CIDR entries (8.8.8.8, 2001:4860:4860::8888, 1.1.1.0/24) that were on
-// this list before round 4 are gone — see
+// platforms, with a label beneath the platform's own suffix), and round
+// 5's N5-2 wildcard-only-ccTLD accepts and N5-4 length-boundary accept. The
+// three IP/CIDR entries (8.8.8.8, 2001:4860:4860::8888, 1.1.1.0/24) that
+// were on this list before round 4 are gone — see
 // TestValidateEgressAllow_IPRejectionNamesTheExactMessage, which asserts
 // they're now rejected.
 func TestValidateEgressAllow_NoFalsePositives(t *testing.T) {
@@ -471,6 +645,13 @@ func TestValidateEgressAllow_NoFalsePositives(t *testing.T) {
 		"abc.de",
 		"fab.be",
 		"adcb.ae",
+		// N5-2: real ccTLDs whose only PSL rule is a wildcard, not a
+		// bare-TLD rule.
+		"www.ck",
+		"foo.com.np",
+		"example.com.jm",
+		// N5-4: right at the length limit, not over it.
+		buildHostnameOfLength(253),
 	}
 	for _, entry := range cases {
 		if err := ValidateEgressAllow([]string{entry}); err != nil {
