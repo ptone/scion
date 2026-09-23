@@ -191,43 +191,73 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 //     class can't recur silently.
 func substrateSecretCandidates(cfg RunConfig) map[string]string {
 	secrets := make(map[string]string)
+	// add keys by "<source>:<name>" rather than bare name. Two different
+	// sources can legitimately use the same name (e.g. a file-type
+	// ResolvedSecret named "GITHUB_TOKEN" alongside a cfg.Env
+	// "GITHUB_TOKEN=..." entry) — with a bare-name map, the second one
+	// added would silently overwrite the first map entry, and the
+	// overwritten source's value would stay in the request but drop out of
+	// the redaction set (review round 2, Consider O1(b)). The source
+	// prefix also makes the redaction marker in an error message more
+	// informative ("[value of secret_file:GITHUB_TOKEN redacted]" instead
+	// of just the name).
+	add := func(source, key, value string) {
+		if value == "" {
+			return
+		}
+		secrets[source+":"+key] = value
+	}
 
 	if cfg.Harness != nil {
 		for k, v := range cfg.Harness.GetEnv(cfg.Name, util.GetHomeDir(cfg.UnixUsername), cfg.UnixUsername) {
-			if v != "" {
-				secrets[k] = v
-			}
+			add("harness_env", k, v)
 		}
 		if cfg.TelemetryEnabled {
 			for k, v := range cfg.Harness.GetTelemetryEnv() {
-				if v != "" {
-					secrets[k] = v
-				}
+				add("telemetry_env", k, v)
 			}
 		}
 	}
 
 	for _, e := range cfg.Env {
 		if k, v, ok := strings.Cut(e, "="); ok {
-			secrets[k] = v
+			add("cfg_env", k, v)
 		}
 	}
 
 	if cfg.ResolvedAuth != nil {
 		for k, v := range cfg.ResolvedAuth.EnvVars {
-			secrets[k] = v
+			add("resolved_auth_env", k, v)
+		}
+		// ResolvedAuth.Files' contents (credential JSON, tokens, etc. read
+		// from SourcePath) go into the bootstrap payload the same as any
+		// other secret and are just as much a candidate for leaking into
+		// an error message (review round 1's original call-out, "bootstrap-
+		// file contents", was never actually covered — review round 2,
+		// Consider O1(a)). A read failure here is swallowed: it can't leak
+		// content it never read, and buildBootstrapFiles independently
+		// surfaces the read error (naming only the path, never content).
+		for _, f := range cfg.ResolvedAuth.Files {
+			if f.SourcePath == "" {
+				continue
+			}
+			if data, err := os.ReadFile(f.SourcePath); err == nil {
+				add("resolved_auth_file", f.ContainerPath, string(data))
+			}
 		}
 	}
 
 	for _, s := range cfg.ResolvedSecrets {
-		if s.Type != "environment" && s.Type != "" && s.Type != "file" {
-			continue
-		}
 		key := s.Name
 		if key == "" {
 			key = s.Target
 		}
-		secrets[key] = s.Value
+		switch s.Type {
+		case "environment", "":
+			add("secret_env", key, s.Value)
+		case "file":
+			add("secret_file", key, s.Value)
+		}
 	}
 
 	return secrets
