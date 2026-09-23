@@ -269,10 +269,14 @@ confirmed by reading `server_foreground.go`, not assumed.)
 flag or settings key turns strict mode off for this deployment) and, more
 importantly, **refuses to start at all** on a non-loopback host unless
 valid HMAC keys are already loaded (`validateBrokerAuthStartup`,
-`pkg/runtimebroker/server.go:816-819`) — it does not fall open to
-unauthenticated non-loopback listening under any configuration this
-manifest produces. Those keys come from the credentials Secret (see
-"Secret creation" above), loaded from the mounted
+`pkg/runtimebroker/server.go`). With `hub_endpoint` set in the ConfigMap,
+`HubEnabled` is true, so the branch that actually runs here is the
+hub-mode one at `:805-809` ("...in hub mode requires HMAC auth keys");
+the general non-loopback check at `:816-819` is the one that would apply
+if `HubEnabled` were false. Both refuse to start rather than fall open —
+it does not fall open to unauthenticated non-loopback listening under any
+configuration this manifest produces. Those keys come from the credentials
+Secret (see "Secret creation" above), loaded from the mounted
 `hub-credentials/<name>.json` before the broker's HTTP server starts
 listening. Practical consequence: if that Secret is missing or empty when
 the pod starts, the broker container now fails closed (crashes / restarts)
@@ -449,23 +453,26 @@ kubectl run netpol-probe --rm -it --restart=Never \
   `kubectl apply` succeeds either way, which is exactly why the
   verification commands above check actual traffic, not just object
   presence. Checking only `datapathProvider` gives a **false negative on a
-  Calico cluster**: `substrate-scion-test` enforces via Calico, not
-  Dataplane V2, and reports `datapathProvider=LEGACY_DATAPATH` — reading
-  that alone and concluding enforcement is off would be wrong on exactly
-  the reference cluster this README is written against. Check both
-  signals:
+  Calico cluster**: `substrate-scion-test` enforces via Calico
+  (`infra/cluster.md`, "NetworkPolicy Enforcement (Calico)"), and Calico
+  clusters don't report `datapathProvider=ADVANCED_DATAPATH` — that field
+  only reflects Dataplane V2. Reading `datapathProvider` alone and
+  concluding enforcement is off would be wrong on exactly the reference
+  cluster this README is written against. Check both signals:
   ```sh
   gcloud container clusters describe <cluster> --location=<location> --project=<project> \
     --format='value(networkConfig.datapathProvider,networkPolicy.enabled,networkPolicy.provider)'
   ```
-  Expect either `ADVANCED_DATAPATH` (Dataplane V2) **or** `True CALICO`
-  (`networkPolicy.enabled=True`, `networkPolicy.provider=CALICO`) — not
+  The command prints tab-separated fields in that order. Expect either
+  `datapathProvider=ADVANCED_DATAPATH` (Dataplane V2), **or**
+  `networkPolicy.enabled=True` and `networkPolicy.provider=CALICO` — not
   both, and not neither. Where available, also confirm
   `addonsConfig.networkPolicyConfig.disabled` is `false` (a cluster can
   have the add-on enabled per the fields above while a subsequent config
-  change disables it). See `infra/cluster.md`'s "NetworkPolicy Enforcement
-  (Calico)" section for what these fields actually read on the reference
-  cluster.
+  change disables it). `infra/cluster.md` documents that
+  `substrate-scion-test` enforces via Calico and how it was enabled, but
+  doesn't record this specific command's output — capture it from the
+  cluster directly rather than trust a guessed value here.
 - **Kubelet health-check probes are exempt from NetworkPolicy on GKE, by
   design, on both enforcement backends.** Neither the router's readiness/
   liveness probes (port 9090) nor the worker pod's `readyz` probe (port
