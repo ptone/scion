@@ -64,6 +64,7 @@ type substrateAgentRecord struct {
 	HarnessConfig string
 	Project       string
 	ProjectID     string
+	ProjectPath   string
 	Image         string
 }
 
@@ -426,6 +427,18 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		return "", r.redact(cfg, err)
 	}
 
+	// The project path isn't a RunConfig field of its own (unlike Project/
+	// ProjectID) — pkg/agent/run.go carries it as an annotation
+	// ("scion.project_path", set unconditionally by Start from the
+	// resolved project directory, hub-dispatched or not), the same
+	// convention DockerRuntime.List (docker.go) and K8sRuntime.List
+	// (k8s_runtime.go) read it by, annotations first and falling back to
+	// labels for a caller that only set the label.
+	projectPath := projectcompat.ProjectPathFromLabels(cfg.Annotations)
+	if projectPath == "" {
+		projectPath = projectcompat.ProjectPathFromLabels(cfg.Labels)
+	}
+
 	substrateAgentStateMu.Lock()
 	substrateControlTokens[id] = controlToken
 	substrateAgentRecords[actorUID] = &substrateAgentRecord{
@@ -437,6 +450,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		Template:      cfg.Template,
 		Project:       cfg.Project,
 		ProjectID:     cfg.ProjectID,
+		ProjectPath:   projectPath,
 		Image:         cfg.Image,
 	}
 	substrateAgentStateMu.Unlock()
@@ -523,6 +537,26 @@ const substrateAtespacePrefix = "scion-"
 
 // List implements phase1-spec.md §2.2 List row.
 //
+// AgentInfo.ProjectPath is populated from the record's ProjectPath (set at
+// Run time from cfg.Annotations, falling back to cfg.Labels — see Run),
+// mirroring DockerRuntime.List and K8sRuntime.List, so a project-scoped
+// caller resolves against the correct project even when two record-having
+// actors elsewhere share the same agent slug.
+//
+// Because AgentManager.Delete/Stop and LookupContainerID's own runtime
+// queries (pkg/agent/manager.go, pkg/runtimebroker/handlers.go) filter by
+// "scion.name" alone — they never add a project key here even when a
+// broker-level caller resolved one — an unscoped-by-slug query cannot rely
+// on ProjectPath to disambiguate two record-having actors that share a
+// slug across different projects. For that specific shape (a "scion.name"
+// filter present, no project-scoping key in labelFilter, and more than one
+// record-having actor sharing the requested slug), every such actor is
+// excluded from the result: the caller sees no match rather than an
+// arbitrary (and potentially wrong-project) one. This means an unscoped
+// same-slug Delete/Stop/LookupContainerID becomes a no-op — never a
+// wrong-actor action — in that scenario; a query that does carry a project
+// key is unaffected.
+//
 // Known limitation, by design: a record-less actor (this runtime instance
 // has no in-memory agent record for it — e.g. right after a broker
 // restart) is reported under its actor name, containerName(project, agent)
@@ -565,6 +599,43 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	substrateAgentStateMu.Lock()
 	defer substrateAgentStateMu.Unlock()
 
+	// Ambiguity guard: labelFilter identifies a caller looking for one
+	// specific agent slug ("scion.name") without narrowing to a project
+	// (no scion.project/scion.grove or scion.project_id/scion.grove_id
+	// key), which is exactly the shape AgentManager.Delete/Stop and
+	// LookupContainerID's own runtime queries use (pkg/agent/manager.go,
+	// pkg/runtimebroker/handlers.go) — neither ever adds a project key to
+	// the filter it passes down here, even when the broker-level caller
+	// resolved one. If two or more record-having actors share that slug
+	// (only possible across different projects — see the per-project
+	// uniqueness this runtime otherwise relies on), an unscoped query has
+	// no way to pick the right one, and picking one arbitrarily (e.g.
+	// ListActors order) risks acting on the wrong project's agent. Rather
+	// than guess, every actor sharing that slug is excluded from an
+	// unscoped-by-slug result: the caller sees no match (a no-op) instead
+	// of a wrong-actor match. A project-scoped query for the same slug is
+	// unaffected. Record-less actors never reach here in the first place
+	// (see this function's doc comment) so they don't participate in the
+	// tally.
+	requestedName, hasNameFilter := labelFilter["scion.name"]
+	hasProjectScope := labelFilter[projectcompat.LabelProject] != "" ||
+		labelFilter[projectcompat.LabelGrove] != "" ||
+		labelFilter[projectcompat.LabelProjectID] != "" ||
+		labelFilter[projectcompat.LabelGroveID] != ""
+
+	slugCounts := make(map[string]int)
+	if hasNameFilter && !hasProjectScope {
+		for _, actor := range actors {
+			rec := substrateAgentRecords[actor.GetMetadata().GetUid()]
+			if rec == nil {
+				continue
+			}
+			if name := rec.Labels["scion.name"]; name != "" {
+				slugCounts[name]++
+			}
+		}
+	}
+
 	var agents []api.AgentInfo
 	for _, actor := range actors {
 		if !strings.HasPrefix(actor.GetMetadata().GetAtespace(), substrateAtespacePrefix) {
@@ -584,7 +655,7 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 			"scion.name":  actorName,
 			"scion.agent": "true",
 		}
-		var template, harnessConfig, project, projectID, image string
+		var template, harnessConfig, project, projectID, projectPath, image string
 		if rec != nil {
 			for k, v := range rec.Labels {
 				labels[k] = v
@@ -593,7 +664,13 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 			harnessConfig = rec.HarnessConfig
 			project = rec.Project
 			projectID = rec.ProjectID
+			projectPath = rec.ProjectPath
 			image = rec.Image
+		}
+
+		if rec != nil && hasNameFilter && !hasProjectScope &&
+			labels["scion.name"] == requestedName && slugCounts[requestedName] > 1 {
+			continue
 		}
 
 		if !substrateLabelsMatch(labels, project, projectID, labelFilter) {
@@ -624,6 +701,7 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 			HarnessConfig: harnessConfig,
 			Project:       project,
 			ProjectID:     projectID,
+			ProjectPath:   projectPath,
 			Image:         image,
 		})
 	}
