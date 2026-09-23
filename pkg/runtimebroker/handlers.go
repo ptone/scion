@@ -1266,10 +1266,11 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	softDelete := query.Get("softDelete") == "true"
 
 	// Resolve the correct manager for this agent (may be on an auxiliary runtime)
-	mgr := s.resolveManagerForAgent(ctx, id, projectID)
+	mgr, rt := s.resolveAgentRuntimeTarget(ctx, id, projectID)
 
 	// Get the agent's project path and project ID before stopping (needed for file deletion and logging)
 	var projectPath, agentProjectID string
+	matched := false
 	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err == nil {
 		for _, a := range agents {
@@ -1279,6 +1280,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 				if agentProjectID == "" {
 					agentProjectID = a.Project
 				}
+				matched = true
 				break
 			}
 		}
@@ -1310,6 +1312,28 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 				}
 			}
 		}
+	}
+
+	// Substrate-only: a project-scoped delete for an agent that has no
+	// matching entry in that project must not fall through to
+	// AgentManager.Delete's own internal, unscoped-by-slug Runtime.List
+	// call. That call filters by "scion.name" alone (no project key —
+	// see manager.go), so with projectPath empty (nothing here resolved
+	// one) it would pick whichever same-slug actor ListActors happens to
+	// list first, regardless of project — the wrong-actor case this gate
+	// exists for. Every other runtime is unaffected: matchesAgent already
+	// scopes its own resolution by project the same way for them, and an
+	// unmatched request there falls through to mgr.Delete exactly as
+	// before, unchanged.
+	//
+	// The hub's control-channel client already treats a 404 here as a
+	// successful, idempotent delete (pkg/hub/controlchannel_client.go's
+	// DeleteAgent returns nil for both a 2xx and a 404 response), so
+	// returning the existing not-found shape instead of silently
+	// no-opping through mgr.Delete does not block hub-side cleanup.
+	if rt.Name() == "substrate" && projectID != "" && !matched {
+		NotFound(w, "Agent")
+		return
 	}
 
 	_, err = mgr.Delete(ctx, id, deleteFiles, projectPath, removeBranch)

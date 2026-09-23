@@ -323,3 +323,61 @@ projA's actor was removed by a project-B-scoped delete — it must never be the 
 - `pkg/runtimebroker/substrate_cross_project_test.go`: new helpers (`runSubstrateAgentForProject`, `testProjectScionDir`) and new broker-level tests for the guard, the D1 happy-path control, and `LookupContainerID`'s corresponding no-op.
 
 No changes to `pkg/agent/manager.go`, `pkg/runtimebroker/handlers.go`, any other runtime, or the broker's generic (non-substrate-scoped) code paths this follow-up. No `go.mod`/`go.sum` changes.
+
+---
+
+## Follow-up (prepared, not yet merged): `deleteAgent` still fell through to the unscoped delete when the requested project had no match at all
+
+The previous follow-up's fix (`ProjectPath` tracking plus the unscoped-by-slug ambiguity guard) closes the case where the requested project's own record-having actor exists alongside another project's same-slug one. It does not close a narrower variant: a project-B-scoped `deleteAgent("dev", …)` when project B has **no** record-having `dev` of its own at all — never started on this broker, already deleted, or record-less — while project A does. `deleteAgent`'s own `matchesAgent` loop correctly finds no entry for project B (it checks project ID, so project A's entry never matches a project-B request), so `projectPath` stays `""`. Before this follow-up, `deleteAgent` still called `mgr.Delete(id, …, "", …)` anyway; `AgentManager.Delete`'s internal `Runtime.List` call is unscoped by project (`pkg/agent/manager.go`, filters by `"scion.name"` alone), so with an empty `deletionProjectName` its own project-matching check never engaged, and it deleted whichever same-slug actor `ListActors` happened to return first — project A's, the wrong one, reproduced deterministically below.
+
+**Fix, gated to substrate exactly like the D2 fix, `pkg/runtimebroker/handlers.go`'s `deleteAgent`:** the existing `matchesAgent` loop now also records whether it found a match at all (`matched`). Right before the `mgr.Delete` call, if the resolved runtime's `Name()` is `"substrate"`, the request carries a `projectID`, and no entry matched: return the existing not-found shape (`NotFound(w, "Agent")`) without calling `mgr.Delete` at all, instead of falling through to its unscoped internal lookup. `deleteAgent` now resolves via `resolveAgentRuntimeTarget` (which already existed, returning both the manager and its runtime) instead of `resolveManagerForAgent` (which just discards the runtime half of the same call) — the manager value handed to every other line is identical either way, so this is not itself a behavior change for any runtime.
+
+When an entry *does* match, nothing changes: `deleteAgent` already resolved that entry's real `ProjectPath` (the previous follow-up's fix) and passes it to `mgr.Delete`, which scopes `AgentManager.Delete`'s `deletionProjectName` + `matchAgentProject` check to exactly that entry — this was already correct before this follow-up for the "both projects have their own same-slug agent" case; only the "no match in the requested project at all" gap needed closing.
+
+**Why this targets only the matched entry, not a guess:** `mgr.Delete` is still invoked with the caller's bare agent ID (never a `ContainerID`, which `AgentManager.Delete`'s `"scion.name"` filter wouldn't find anyway — `AgentManager` itself is unchanged and untouched by this fix) and the real, resolved `ProjectPath` of the one entry `matchesAgent` verified belongs to the requested project. The new gate only ever *prevents* a call that would otherwise run unscoped; it never redirects `mgr.Delete` toward a specific `ContainerID` or otherwise widens what `AgentManager` can act on.
+
+**Every other runtime type is unaffected by construction, not just by testing:** the new gate is an `if rt.Name() == "substrate" && …` condition placed after the existing matching loop and before the existing `mgr.Delete` call; for any other runtime it is always false, so `mgr.Delete` is reached with exactly the same arguments as before this fix, on exactly the same code path. Confirmed both by a diff review (the only change with a behavioral effect for any other runtime is switching from `resolveManagerForAgent` to `resolveAgentRuntimeTarget`, which returns the identical manager value — `resolveManagerForAgent` is defined as exactly that call, discarding the runtime half) and by a dedicated test using a mock runtime whose sole listed agent belongs to a different project than the request: for a non-substrate `Name()`, `deleteAgent` still falls through to `mgr.Delete` and the underlying `Runtime.Delete` is still invoked, unchanged.
+
+**Hub expectations, checked rather than assumed:** `pkg/hub/controlchannel_client.go`'s `ControlChannelBrokerClient.DeleteAgent` (lines 225–245) already comments "Allow 404 for idempotent delete" and returns `nil` for both a 2xx and a 404 response from this same endpoint — the hub's own delete path already treats "already gone" and "successfully deleted" as the same outcome. Returning `NotFound` instead of silently no-opping through `mgr.Delete` therefore does not change what the hub does with the result; hub-side cleanup (e.g. removing its own agent record) proceeds either way.
+
+**Trade-off worth noting:** `mgr.Delete`'s `deleteFiles` branch (in `AgentManager.Delete`, unchanged) currently runs unconditionally once `Runtime.List`/`Stop`/`Delete` are reached, regardless of whether a container was actually found — so, generically, a `deleteFiles=true` request for an agent that's already gone still attempts local file cleanup today. Skipping the `mgr.Delete` call entirely for the new substrate no-match case also skips that file-cleanup attempt for this narrow scenario (project-scoped substrate delete, no matching entry in that project). This wasn't called out as a requirement and no test currently exercises `deleteFiles=true` against this exact gate; flagged here for visibility rather than silently accepted.
+
+### Tests added (all broker-level, real `*Server` + `*SubstrateRuntime`, or a mock runtime for the non-substrate control)
+
+- Record-having project A `dev` only; `deleteAgent("dev", projB)` → zero `DeleteActor` calls, project A's actor survives, and the response is now `404` instead of `204`. The reviewer's exact repro; both a real `ListActors` order and its reverse, forced deterministically.
+- The same, with project B holding a record-less actor instead of nothing — `matchesAgent` never matches a record-less actor by slug at all, so this fails closed the same way.
+- Record-having project B `dev` only; `deleteAgent("dev", projB)` → deletes project B's actor normally (the D1 happy path, confirming the gate does not fire when a genuine match exists).
+- A mock (non-substrate) runtime whose sole listed agent belongs to a different project than the request: `deleteAgent` still falls through to `mgr.Delete` and `Runtime.Delete` is still invoked — proving the gate has no effect outside substrate.
+- The previous follow-up's "both projects have their own same-slug `dev`" test (delete for project B is a no-op via the ambiguity guard, neither actor deleted) re-run unchanged against this fix — still passes: that case was already handled entirely inside `SubstrateRuntime.List`, before `deleteAgent`'s own matching loop even runs, and remains untouched by this change.
+
+### Fail-before evidence
+
+Broker level, against the pre-this-follow-up code, forced `ListActors` order (both directions gave the same result):
+```
+deleteAgent("dev", projB) status = 204, want 404 (not-found, no matching entry in project B)
+deleteAgent("dev", projB) called DeleteActor [actor:{atespace:"scion-aaaaaaaaaaaa" name:"proja--dev"} any_state:true actor:{atespace:"scion-aaaaaaaaaaaa" name:"proja--dev"} any_state:true], want zero — project B has no "dev" of its own, project A's must never be the fallback target
+projA's actor was removed by a project-B-scoped delete that had no matching entry in project B — it must never be the wrong-actor target
+```
+and the same shape for the record-less-project-B variant.
+
+**Pass-after:** both tests pass against the fixed code — zero `DeleteActor` calls, project A's actor survives, response is `404`.
+
+### Gate results (this follow-up)
+
+- `go build ./...` — pass.
+- `go vet` on `pkg/runtime/...`, `pkg/runtimebroker/...`, `pkg/agent/...`, `pkg/config/...` — pass, no output.
+- `gofmt -l` on every changed file — clean.
+- `go test -count=1` on the same four package trees — all substrate-related tests pass; the same pre-existing, unrelated failure set as the previous follow-up (the `'auto_expose_ports'` settings-schema decode error affecting harness/settings/env-gather tests) — confirmed identical on the pre-this-follow-up baseline, not introduced by this work.
+- `go test -race -count=1` on `pkg/runtime`, `pkg/runtimebroker`, `pkg/agent` — same pre-existing failures only, no new data races; the same pre-existing, confirmed-baseline data race in `pkg/runtime/cloudrun` (unrelated package, not touched here).
+- `go test -count=50` on every new/changed test — pass, no flakes.
+- `golangci-lint run --new-from-rev=c3b6e821d --concurrency=1 ./...` — 0 issues.
+- Hygiene greps over every file changed this follow-up — no hits (two pre-existing, unrelated `N1-7` references in `handlers.go`, confirmed via `git blame` to predate this branch — not touched by this task).
+
+### Functions touched (this follow-up)
+
+- `pkg/runtimebroker/handlers.go`: `deleteAgent` only — resolves via `resolveAgentRuntimeTarget` instead of `resolveManagerForAgent` (identical manager value either way), tracks whether the matching loop found an entry, and gates the existing `mgr.Delete` call on that for substrate specifically.
+- `pkg/runtimebroker/substrate_cross_project_test.go`: new broker-level tests described above, plus one mock-runtime test for the non-substrate control.
+
+`pkg/agent/manager.go` is unchanged. Every other runtime's `deleteAgent` code path is unchanged by construction (see above) and confirmed unchanged by test. No `go.mod`/`go.sum` changes.
+
+**Status: prepared on a local branch, not yet reviewed or merged.** This section documents what was prepared, pending go/no-go.
