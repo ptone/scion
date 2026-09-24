@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -697,6 +698,84 @@ func TestSubstrateTemplateName_Stable(t *testing.T) {
 	n9 := substrateTemplateName(image, snapshotCfg, resources)
 	if n1 == n9 {
 		t.Error("substrateTemplateName() did not change with snapshot_storage")
+	}
+}
+
+// TestBuildActorTemplate_SecurityContextGrantsExactlySetuidSetgid confirms
+// the container's SecurityContext carries exactly the two capabilities
+// su (execAsUserCmd) needs to drop from Substrate's forced UID 0 to the
+// scion user — no more, no less. "ALL" is rejected by Substrate and drop
+// is applied before add, so this must name each capability explicitly
+// rather than lean on a default set.
+func TestBuildActorTemplate_SecurityContextGrantsExactlySetuidSetgid(t *testing.T) {
+	image := "repo/image@sha256:" + strings.Repeat("b", 64)
+	tmpl := buildActorTemplate("scion-test", "scion-abc123", image, config.V1SubstrateConfig{}, nil)
+
+	if len(tmpl.GetContainers()) != 1 {
+		t.Fatalf("Containers = %d, want 1", len(tmpl.GetContainers()))
+	}
+	sc := tmpl.GetContainers()[0].GetSecurityContext()
+	if sc == nil {
+		t.Fatal("Container.SecurityContext is nil, want Capabilities.Add = [SETUID, SETGID]")
+	}
+	caps := sc.GetCapabilities()
+	if caps == nil {
+		t.Fatal("SecurityContext.Capabilities is nil, want Add = [SETUID, SETGID]")
+	}
+	want := []string{"SETUID", "SETGID"}
+	if !slices.Equal(caps.GetAdd(), want) {
+		t.Errorf("Capabilities.Add = %v, want %v", caps.GetAdd(), want)
+	}
+	if len(caps.GetDrop()) != 0 {
+		t.Errorf("Capabilities.Drop = %v, want empty — this template only ever adds", caps.GetDrop())
+	}
+}
+
+// TestSubstrateTemplateName_ChangesWithCapabilitySet confirms the
+// capabilities buildActorTemplate grants are part of the template's
+// content-address: an existing golden template built before a capability
+// change must not be silently reused after one, since it would still be
+// running with the old (missing) capabilities.
+func TestSubstrateTemplateName_ChangesWithCapabilitySet(t *testing.T) {
+	image := "repo/image@sha256:" + strings.Repeat("b", 64)
+	cfg := config.V1SubstrateConfig{SandboxClass: "gvisor"}
+
+	before := substrateTemplateName(image, cfg, nil)
+
+	original := substrateContainerCapabilitiesAdd
+	substrateContainerCapabilitiesAdd = append([]string{}, original...)
+	t.Cleanup(func() { substrateContainerCapabilitiesAdd = original })
+
+	// Same capability set: hash must not change from this alone.
+	same := substrateTemplateName(image, cfg, nil)
+	if before != same {
+		t.Errorf("substrateTemplateName() changed with no actual capability-set change: %q != %q", before, same)
+	}
+
+	substrateContainerCapabilitiesAdd = []string{"SETUID", "SETGID", "CHOWN"}
+	after := substrateTemplateName(image, cfg, nil)
+	if before == after {
+		t.Error("substrateTemplateName() did not change when the capability set changed — an existing golden template would be silently reused without the new capability")
+	}
+}
+
+// TestBuildBootstrapEnv_SetsHostUIDGIDForPrivilegeDrop confirms the
+// bootstrap env carries SCION_HOST_UID/GID — without them, `sciontool
+// init`'s setupHostUser takes its "not configured, skip user setup" branch
+// and leaves the whole process tree at UID 0 even once the container has
+// the SETUID/SETGID capabilities to actually perform the drop. Substrate's
+// workspace is never bind-mounted from the invoking broker's own
+// filesystem (unlike Docker/Podman), so there is no host UID to
+// synchronize with — 1000 is the actor image's own baked-in "scion" user
+// (image-build/scion-base/Dockerfile: `useradd -u 1000 scion`), used
+// unconditionally.
+func TestBuildBootstrapEnv_SetsHostUIDGIDForPrivilegeDrop(t *testing.T) {
+	env := buildBootstrapEnv(RunConfig{})
+	if got := env["SCION_HOST_UID"]; got != "1000" {
+		t.Errorf(`buildBootstrapEnv()["SCION_HOST_UID"] = %q, want "1000"`, got)
+	}
+	if got := env["SCION_HOST_GID"]; got != "1000" {
+		t.Errorf(`buildBootstrapEnv()["SCION_HOST_GID"] = %q, want "1000"`, got)
 	}
 }
 

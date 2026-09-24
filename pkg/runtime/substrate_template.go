@@ -36,6 +36,21 @@ import (
 // silently reusing a golden snapshot built against the old one.
 const substrateServeEntrypointVersion = "substrate-serve/v1"
 
+// substrateContainerCapabilitiesAdd lists the Linux capabilities
+// buildActorTemplate grants on top of Substrate's default set. It is a
+// single source of truth shared with substrateTemplateName's hash input
+// (below), so the two can never drift apart: any future change here also
+// changes the template's content-address, forcing a new golden template
+// instead of silently reusing one built without the capabilities a code
+// change just added or removed.
+//
+// SETUID and SETGID: Substrate always starts the actor process as UID 0 /
+// GID 0 with a minimal default capability set (AUDIT_WRITE, KILL,
+// NET_BIND_SERVICE) that doesn't include them — see buildActorTemplate's
+// comment on the container's SecurityContext for why scion needs them
+// anyway (su, not root, still runs the harness and exec).
+var substrateContainerCapabilitiesAdd = []string{"SETUID", "SETGID"}
+
 // defaultTemplateReadyTimeout bounds how long Run waits for a newly created
 // ActorTemplate's golden snapshot to become ready, when
 // V1SubstrateConfig.TemplateReadyTimeout is unset.
@@ -56,11 +71,13 @@ const templateReadyPollInterval = 5 * time.Second
 // against config.BuiltinDefaultResources when resources is nil — hashing
 // the nil pointer as "" while buildActorTemplate substitutes a real default
 // would let a change to that default silently reuse the old golden
-// template), the hardcoded snapshot scope, and the entrypoint version. This
-// is a deliberate deviation from the spec's literal hash-input list (image
-// digest + sandbox class + resources + scope + entrypoint version only):
-// those other fields are template content too, and changing them in
-// settings must not silently reuse a stale golden template.
+// template), the hardcoded snapshot scope, the container's added
+// capabilities, and the entrypoint version. This is a deliberate deviation
+// from the spec's literal hash-input list (image digest + sandbox class +
+// resources + scope + entrypoint version only): those other fields are
+// template content too, and changing them in settings — or in this
+// runtime's own code, for the capability set — must not silently reuse a
+// stale golden template.
 func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) string {
 	effectiveResources := resources
 	if effectiveResources == nil {
@@ -71,7 +88,7 @@ func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, reso
 	// hash.Hash.Write never returns an error (see the hash.Hash doc
 	// comment), so the error from Fprintf is deliberately discarded rather
 	// than checked.
-	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%s",
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%s|%s",
 		imageDigest,
 		sc.SandboxClass,
 		sc.SandboxConfigName,
@@ -79,6 +96,7 @@ func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, reso
 		sc.SnapshotStorage,
 		resourcesCacheKey(effectiveResources),
 		"DATA", // on_pause/on_commit scope, hardcoded for Phase 1
+		strings.Join(substrateContainerCapabilitiesAdd, ","),
 		substrateServeEntrypointVersion,
 	)
 	sum := hex.EncodeToString(h.Sum(nil))
@@ -157,6 +175,27 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				Env:     nil, // no secrets, ever (findings.md §4.2)
 				VolumeMounts: []*ateapipb.VolumeMount{
 					{Name: "workspace", MountPath: "/workspace"},
+				},
+				// Substrate always starts the actor process as UID 0 / GID 0
+				// (ContainerSpec has no user field — agent-substrate/substrate
+				// internal/ocispec/ocispec.go) with a minimal default
+				// capability set (AUDIT_WRITE, KILL, NET_BIND_SERVICE —
+				// cmd/atelet/oci.go) that does not include SETUID/SETGID.
+				// scion never runs the harness or exec as root: execAsUserCmd
+				// (sciontool substrate-serve) uses `su - scion`, and su itself
+				// needs CAP_SETUID/CAP_SETGID to drop to that user (the
+				// setgroups(2) call su makes before dropping privileges fails
+				// with EPERM otherwise) — the same capabilities Docker's
+				// default set already grants, which is why this only surfaces
+				// on Substrate. These are added here, not assumed from a
+				// container default, so they apply inside the gVisor sentry
+				// the actor runs in; su drops them (along with every other
+				// capability) for the scion process tree it execs into, so
+				// nothing scion-owned ever runs privileged.
+				SecurityContext: &ateapipb.SecurityContext{
+					Capabilities: &ateapipb.Capabilities{
+						Add: substrateContainerCapabilitiesAdd,
+					},
 				},
 				Resources: &ateapipb.Resources{Limits: limits},
 			},
