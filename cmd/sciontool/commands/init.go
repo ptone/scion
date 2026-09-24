@@ -129,7 +129,7 @@ type InitRunOptions struct {
 var errPrivilegeDropRequired = errors.New("privilege drop to the scion user did not happen; refusing to start the harness as root")
 
 // requirePrivilegeDropOrFail implements RequirePrivilegeDrop's fail-closed
-// check (ADDENDUM: substrate must never run the harness as root). It is a
+// check: substrate must never run the harness as root. It is a
 // plain function of setupHostUser's own result, not a reimplementation of
 // its logic: on substrate, targetUID stays 0 (root) if and only if
 // setupHostUser could not complete a real privilege drop (see
@@ -140,6 +140,96 @@ var errPrivilegeDropRequired = errors.New("privilege drop to the scion user did 
 func requirePrivilegeDropOrFail(targetUID int, requirePrivilegeDrop bool) error {
 	if requirePrivilegeDrop && targetUID == 0 {
 		return errPrivilegeDropRequired
+	}
+	return nil
+}
+
+// exitCodePrivilegeDropRequired is the sentinel RunInit returns when
+// requirePrivilegeDropOrFail trips — never returned for any other reason.
+// substrate-serve's InitRunner (substrate_serve.go) checks for exactly this
+// value, not "any non-zero code," before calling os.Exit: every other
+// RunInit failure that also returns before the harness launches (staged-
+// secrets decode, git clone, required pre-start hooks, harness manifest
+// parsing, ...) already reports through statusHandler/the Hub the same way,
+// and is expected to leave substrate-serve's control server up so a caller
+// can still reach exec/healthz for diagnosis. Only the privilege-drop gate
+// needs PID 1 itself to die, and only as defence in depth: the synchronous
+// bootstrap precondition (pkg/sciontool/substrate.PrivilegeDropChecker) is
+// expected to catch this first, before /bootstrap ever responds 200 — which
+// is what actually makes Run() itself return an error and the broker delete
+// the actor, since a plain PID 1 exit happens after the 200 has already
+// gone out. If this sentinel is ever returned anyway, RunInit already
+// reported PhaseError to the Hub and to the local agent-info state (below),
+// the same way the git-clone failure path does.
+const exitCodePrivilegeDropRequired = 17
+
+// privilegeDropPreconditionDeps groups checkPrivilegeDropFeasible's external
+// dependencies so tests can substitute all of them, rather than depending on
+// the real capability set, "scion" user, or process environment a unit test
+// runs in — the same reasoning as requirePrivilegeDropOrFail's separation
+// from setupHostUser.
+type privilegeDropPreconditionDeps struct {
+	hasCapSetUID func() bool
+	hasCapSetGID func() bool
+	lookupUser   func(string) (*user.User, error)
+	getenv       func(string) string
+}
+
+// defaultPrivilegeDropPreconditionDeps wires checkPrivilegeDropFeasible to
+// the real process: /proc/self/status, the real "scion" user, and the real
+// environment.
+var defaultPrivilegeDropPreconditionDeps = privilegeDropPreconditionDeps{
+	hasCapSetUID: hasCapSetUID,
+	hasCapSetGID: hasCapSetGID,
+	lookupUser:   user.Lookup,
+	getenv:       os.Getenv,
+}
+
+// errPrivilegeDropPrecondition is checkPrivilegeDropFeasible's only error:
+// deliberately generic and secret-free, since it crosses into
+// pkg/sciontool/substrate's HTTP response body (see PrivilegeDropChecker's
+// doc comment) rather than staying in a local log line. The precondition
+// check that actually failed is logged separately, server-side, by the
+// caller.
+var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not met: CAP_SETUID/CAP_SETGID, the scion user, or SCION_HOST_UID/GID were not all available")
+
+// checkPrivilegeDropFeasible is substrate-serve's synchronous /bootstrap
+// precondition (pkg/sciontool/substrate.PrivilegeDropChecker): it lets
+// handleBootstrap refuse the request itself, before it ever responds 200,
+// so a caller that can't actually drop privileges gets Run() returning an
+// error and the actor deleted, the same way any other bootstrap failure
+// does — rather than a harness that silently never starts inside an actor
+// the broker still believes is running. It must be cheap and side-effect-
+// free — no sed, no usermod — so it deliberately does not reimplement
+// setupHostUser's realignment; it only re-checks the three conditions that
+// can each independently make that realignment silently produce nothing:
+//   - CAP_SETUID and CAP_SETGID effective (su, and the supervisor's own
+//     syscall.Credential drop, both need both);
+//   - the "scion" user resolvable at all;
+//   - SCION_HOST_UID/GID present and parseable (buildBootstrapEnv sets these
+//     into req.Env, applied to the process environment by handleBootstrap
+//     just before this runs — see substrate_bootstrap.go).
+//
+// This does not guarantee setupHostUser's usermod/sed realignment will
+// succeed (e.g. a corrupted /etc/passwd could still fail it) — that residual
+// gap is exactly why requirePrivilegeDropOrFail stays as defence in depth in
+// RunInit itself.
+func checkPrivilegeDropFeasible(d privilegeDropPreconditionDeps) error {
+	if !d.hasCapSetUID() || !d.hasCapSetGID() {
+		return errPrivilegeDropPrecondition
+	}
+	if _, err := d.lookupUser("scion"); err != nil {
+		return errPrivilegeDropPrecondition
+	}
+	hostUID, hostGID := d.getenv("SCION_HOST_UID"), d.getenv("SCION_HOST_GID")
+	if hostUID == "" || hostGID == "" {
+		return errPrivilegeDropPrecondition
+	}
+	if _, err := strconv.Atoi(hostUID); err != nil {
+		return errPrivilegeDropPrecondition
+	}
+	if _, err := strconv.Atoi(hostGID); err != nil {
+		return errPrivilegeDropPrecondition
 	}
 	return nil
 }
@@ -155,6 +245,58 @@ func init() {
 		if d, err := time.ParseDuration(envGrace); err == nil {
 			gracePeriod = d
 		}
+	}
+}
+
+// resolveAgentHome resolves the scion user's home directory for agent state
+// files (agent-info.json, hooks, etc.). Init runs as root (HOME=/root), but
+// this must point at the scion user's home whenever a drop actually
+// happened (or would have, in rootless mode) so status/hook files land
+// where the agent process that reads them expects.
+//
+// Extracted from RunInit's body so the privilege-drop fail-closed path
+// (which returns before RunInit's own agentHome resolution) and RunInit's
+// normal continuation share one implementation instead of two copies that
+// could drift apart.
+func resolveAgentHome(targetUID int, rootless bool) string {
+	agentHome := os.Getenv("HOME")
+	if targetUID != 0 {
+		if scionUser, err := user.LookupId(strconv.Itoa(targetUID)); err == nil {
+			agentHome = scionUser.HomeDir
+		} else {
+			log.Debug("Could not look up user for UID %d: %v", targetUID, err)
+		}
+	} else if rootless {
+		if scionUser, err := user.Lookup("scion"); err == nil {
+			agentHome = scionUser.HomeDir
+		} else {
+			log.Debug("Could not look up scion user in rootless mode: %v", err)
+		}
+	}
+	return agentHome
+}
+
+// reportPrivilegeDropFailure reports a requirePrivilegeDropOrFail failure
+// the same way RunInit's git-clone failure path does: local agent-info
+// state to PhaseError with a message, plus a best-effort direct Hub report
+// (the broker heartbeat is the fallback if that call fails or the Hub isn't
+// configured). Extracted so this reporting is testable with a plain temp
+// directory, independent of setupHostUser's real-environment-dependent
+// agentHome resolution.
+func reportPrivilegeDropFailure(agentHome string, cause error) {
+	statusHandler := handlers.NewStatusHandler()
+	statusHandler.StatusPath = filepath.Join(agentHome, "agent-info.json")
+	errMsg := cause.Error() // errPrivilegeDropRequired is fixed and secret-free
+	_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
+	_ = statusHandler.SetMessage(errMsg)
+	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
+		hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if hubErr := hubClient.ReportState(hubCtx, state.PhaseError, "", errMsg); hubErr != nil {
+			log.Error("Failed to report privilege-drop failure to Hub: %v", hubErr)
+		}
+		hubCancel()
+	} else {
+		log.Info("Hub client not configured, privilege-drop failure will be relayed via broker heartbeat")
 	}
 }
 
@@ -197,7 +339,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	}
 
 	// Set up scion user UID/GID to match host user
-	targetUID, targetGID, rootless := setupHostUser()
+	targetUID, targetGID, rootless := setupHostUser(opts.RequirePrivilegeDrop)
 	log.Info("setupHostUser result: targetUID=%d, targetGID=%d, rootless=%v (now euid=%d, egid=%d)", targetUID, targetGID, rootless, os.Geteuid(), os.Getegid())
 
 	// Fail closed rather than start the harness as root (see
@@ -206,7 +348,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// reason (missing capability, unmapped UID, etc.).
 	if err := requirePrivilegeDropOrFail(targetUID, opts.RequirePrivilegeDrop); err != nil {
 		log.Error("%v", err)
-		return 1
+		// Report the failure the same way the git-clone failure path below
+		// does (local agent-info state to PhaseError, plus a best-effort
+		// direct Hub report), instead of only logging it — see
+		// exitCodePrivilegeDropRequired's doc comment for why this is
+		// defence in depth rather than the primary fail-closed mechanism.
+		reportPrivilegeDropFailure(resolveAgentHome(targetUID, rootless), err)
+		return exitCodePrivilegeDropRequired
 	}
 
 	// Chown the log file so the scion user can write to it even if it was created by root
@@ -220,22 +368,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// (HOME=/root), but agent-info.json and other agent state files live
 	// in the scion user's home directory. This must happen before the
 	// StatusHandler is created so it writes to the correct path.
-	// In rootless mode, targetUID is 0 but we still need the scion user's
-	// home directory since the child process environment will use it.
-	agentHome := os.Getenv("HOME")
-	if targetUID != 0 {
-		if scionUser, err := user.LookupId(strconv.Itoa(targetUID)); err == nil {
-			agentHome = scionUser.HomeDir
-		} else {
-			log.Debug("Could not look up user for UID %d: %v", targetUID, err)
-		}
-	} else if rootless {
-		if scionUser, err := user.Lookup("scion"); err == nil {
-			agentHome = scionUser.HomeDir
-		} else {
-			log.Debug("Could not look up scion user in rootless mode: %v", err)
-		}
-	}
+	agentHome := resolveAgentHome(targetUID, rootless)
 
 	// Stage secrets from the SCION_STAGED_SECRETS env var. The broker
 	// serializes file and variable secrets into this single base64 blob
@@ -755,9 +888,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 			// WebSocket egress (the hub port-forward tunnel) is blocked there,
 			// so starting it would just spin retrying against 403s. Autoexpose
 			// depends on the same tunnel. Skip both when running under the
-			// substrate runtime (findings.md D1; phase1-spec.md §3). This is a
-			// Phase 1 limitation, not a permanent one — see §4.3b for the
-			// on-demand tunnel design that will eventually re-enable this.
+			// substrate runtime (phase1-spec.md §3). This is a Phase 1
+			// limitation, not a permanent one — see §4.3b for the on-demand
+			// tunnel design that will eventually re-enable this.
 			if os.Getenv("SCION_RUNTIME") == "substrate" {
 				log.Info("SCION_RUNTIME=substrate: skipping port-forward tunnel manager and auto-expose (WebSocket egress is not available on Substrate)")
 			} else {
@@ -1427,7 +1560,27 @@ func watchLimitsTriggerFile(ctx context.Context, ch chan<- struct{}) {
 	}
 }
 
-func setupHostUser() (int, int, bool) {
+// scionUserLookup resolves the "scion" system user. It is a package var
+// (rather than calling user.Lookup directly) purely so adjustScionUser's
+// requirePrivilegeDrop-gated fail-closed checks can be exercised in a unit
+// test without needing a real "scion" user on the machine running the
+// test — the same reasoning as requirePrivilegeDropOrFail's separation from
+// setupHostUser.
+var scionUserLookup = user.Lookup
+
+// runDirectSetUID is directSetUID's call site as a package var, for the same
+// reason as scionUserLookup: adjustScionUser's control flow around a failed
+// rewrite is unit-tested without ever touching real system files.
+var runDirectSetUID = directSetUID
+
+// setupHostUser realigns the container's "scion" user to SCION_HOST_UID/GID
+// so the harness (and, for substrate, execAsUserCmd) can drop privileges
+// from root to it. requirePrivilegeDrop is RunInit's own
+// InitRunOptions.RequirePrivilegeDrop, threaded through so the stricter
+// fail-closed checks in adjustScionUser only apply under it — see
+// adjustScionUser's doc comment for why this must not change any other
+// runtime's return value.
+func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 	// Only run privilege operations if we're root. When running under
 	// --userns=keep-id (rootless Podman), PID 1 starts as the scion user
 	// (UID 1000) rather than root. In that case, no usermod/groupmod/chown
@@ -1530,8 +1683,32 @@ func setupHostUser() (int, int, bool) {
 		return 0, 0, true
 	}
 
+	return adjustScionUser(uid, gid, hostUID, hostGID, requirePrivilegeDrop)
+}
+
+// adjustScionUser realigns the "scion" user to (uid, gid) — matching an
+// existing entry, or editing /etc/passwd and /etc/group via usermod/groupmod
+// or a direct sed fallback — and returns setupHostUser's (targetUID,
+// targetGID, rootless) result.
+//
+// Split out from setupHostUser so it's testable without needing to be root
+// or pass the capability/env preconditions above it in setupHostUser (same
+// reasoning as requirePrivilegeDropOrFail).
+//
+// requirePrivilegeDrop gates every fail-closed check added here: a "scion
+// user not found" that setupHostUser used to just log and push through, a
+// directSetUID rewrite that silently matched nothing, and a post-adjust
+// verify that doesn't show the target UID/GID. Under it, each of
+// those returns (0, 0, false) instead of the historical (uid, gid, false) —
+// which requirePrivilegeDropOrFail then turns into a fail-closed refusal to
+// start the harness, reported through RunInit's own failure path. Without
+// it (every runtime except substrate-serve), this function's return value
+// is byte-identical to before this change: the same silent "report success
+// anyway" fallback other runtimes have relied on stays exactly as it was,
+// per the brief's rule not to change other runtimes' behaviour.
+func adjustScionUser(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop bool) (int, int, bool) {
 	// Skip if UID/GID already match (1001 is the default)
-	currentInfo, _ := user.Lookup("scion")
+	currentInfo, lookupErr := scionUserLookup("scion")
 	if currentInfo != nil {
 		currentUID, _ := strconv.Atoi(currentInfo.Uid)
 		currentGID, _ := strconv.Atoi(currentInfo.Gid)
@@ -1541,16 +1718,25 @@ func setupHostUser() (int, int, bool) {
 			return uid, gid, false
 		}
 	} else {
-		log.Error("scion user not found in system")
+		log.Error("scion user not found in system: %v", lookupErr)
+		if requirePrivilegeDrop {
+			return 0, 0, false
+		}
 	}
 
 	log.Info("Adjusting scion user to UID=%d, GID=%d", uid, gid)
 
 	if useDirectPasswdEdit() {
 		log.Info("Using direct /etc/passwd edit (avoiding slow usermod on this runtime)")
-		if err := directSetUID("scion", hostUID, hostGID); err != nil {
+		if err := runDirectSetUID("scion", hostUID, hostGID); err != nil {
 			log.Error("Direct passwd/group edit failed: %v", err)
-			return 0, 0, false
+			if requirePrivilegeDrop || !errors.Is(err, errPasswdEntryNotRewritten) {
+				return 0, 0, false
+			}
+			// requirePrivilegeDrop is false and the only problem was the new
+			// "nothing to rewrite" detection: preserve the historical
+			// non-substrate behaviour of falling through to the verify step
+			// below (which, also gated on requirePrivilegeDrop, just logs).
 		}
 	} else {
 		// Modify group first (if different from current)
@@ -1565,21 +1751,40 @@ func setupHostUser() (int, int, bool) {
 			// because it tries a recursive chown that the filesystem rejects.
 			// Fall back to direct /etc/passwd editing which skips recursive chown.
 			log.Info("usermod failed (exit: %v), falling back to direct passwd edit", err)
-			if err := directSetUID("scion", hostUID, hostGID); err != nil {
+			if err := runDirectSetUID("scion", hostUID, hostGID); err != nil {
 				log.Error("Direct passwd/group fallback also failed: %v", err)
-				return 0, 0, false
+				if requirePrivilegeDrop || !errors.Is(err, errPasswdEntryNotRewritten) {
+					return 0, 0, false
+				}
 			}
 		}
 	}
 
-	// Verify the change
-	if updatedInfo, err := user.Lookup("scion"); err == nil {
+	// Verify the change actually landed.
+	updatedInfo, verifyErr := scionUserLookup("scion")
+	if verifyErr == nil {
 		log.Info("Successfully adjusted scion user: UID=%s, GID=%s", updatedInfo.Uid, updatedInfo.Gid)
 	} else {
-		log.Error("Failed to verify scion user after adjustment: %v", err)
+		log.Error("Failed to verify scion user after adjustment: %v", verifyErr)
+	}
+	if requirePrivilegeDrop && !verifiedUserMatches(updatedInfo, verifyErr, uid, gid) {
+		log.Error("Post-adjust verify failed: scion user does not show UID=%d GID=%d", uid, gid)
+		return 0, 0, false
 	}
 
 	return uid, gid, false
+}
+
+// verifiedUserMatches reports whether a scionUserLookup("scion") result
+// (post-adjustment) actually shows the target uid/gid — used by
+// adjustScionUser's requirePrivilegeDrop-gated verify step.
+func verifiedUserMatches(u *user.User, lookupErr error, uid, gid int) bool {
+	if lookupErr != nil || u == nil {
+		return false
+	}
+	gotUID, errU := strconv.Atoi(u.Uid)
+	gotGID, errG := strconv.Atoi(u.Gid)
+	return errU == nil && errG == nil && gotUID == uid && gotGID == gid
 }
 
 // useDirectPasswdEdit returns true when usermod should be avoided in favor of
@@ -1599,27 +1804,52 @@ func useDirectPasswdEdit() bool {
 	return false
 }
 
+// errPasswdEntryNotRewritten is returned by directSetUID when username has
+// no entry in the target file at all: sed's substitute command exits 0
+// whether or not any line matched, so without an explicit pre-check, a
+// missing user silently produces no error, and the (uid, gid) the caller
+// believes it just set were never written anywhere on disk — the harness
+// would then run under a raw UID with no passwd entry at all. Wrapped with
+// the file path via %w so errors.Is still matches it after fmt.Errorf.
+var errPasswdEntryNotRewritten = errors.New("no matching entry found to rewrite")
+
 // directSetUID modifies /etc/passwd and /etc/group directly to change a user's
 // UID and GID without the recursive chown that usermod performs. This also
 // chowns the user's home directory and its immediate contents so ownership is
 // correct. The home directory should only contain skeleton files from useradd,
 // so this is fast even on fuse-overlayfs.
 func directSetUID(username, newUID, newGID string) error {
+	return directSetUIDAt(username, newUID, newGID, "/etc/group", "/etc/passwd", fmt.Sprintf("/home/%s", username))
+}
+
+// directSetUIDAt is directSetUID with its file paths as parameters, so a
+// test can exercise the "no entry to rewrite" detection against a temp file
+// instead of the real /etc/group and /etc/passwd.
+func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir string) error {
+	// sed -i's substitute command exits 0 regardless of whether it matched
+	// anything, so confirm the entry exists first — otherwise a missing
+	// "scion" user would slip through both edits below with no error at all.
+	if !passwdFileHasEntry(groupPath, username) {
+		return fmt.Errorf("%s: %w", groupPath, errPasswdEntryNotRewritten)
+	}
 	// Update /etc/group: replace the GID (3rd field) for the matching group
 	groupSed := exec.Command("sed", "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:/\1%s:/`, username, newGID),
-		"/etc/group")
+		groupPath)
 	if out, err := groupSed.CombinedOutput(); err != nil {
-		return fmt.Errorf("sed /etc/group: %w (output: %s)", err, string(out))
+		return fmt.Errorf("sed %s: %w (output: %s)", groupPath, err, string(out))
 	}
 
+	if !passwdFileHasEntry(passwdPath, username) {
+		return fmt.Errorf("%s: %w", passwdPath, errPasswdEntryNotRewritten)
+	}
 	// Update /etc/passwd: replace both UID (3rd field) and GID (4th field)
 	// Format: username:x:UID:GID:...
 	passwdSed := exec.Command("sed", "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:[0-9]+:/\1%s:%s:/`, username, newUID, newGID),
-		"/etc/passwd")
+		passwdPath)
 	if out, err := passwdSed.CombinedOutput(); err != nil {
-		return fmt.Errorf("sed /etc/passwd: %w (output: %s)", err, string(out))
+		return fmt.Errorf("sed %s: %w (output: %s)", passwdPath, err, string(out))
 	}
 
 	// Chown the home directory and its immediate contents (skeleton files).
@@ -1628,7 +1858,6 @@ func directSetUID(username, newUID, newGID string) error {
 	// from /etc/skel at this point.
 	uid := mustAtoi(newUID)
 	gid := mustAtoi(newGID)
-	homeDir := fmt.Sprintf("/home/%s", username)
 	if err := os.Chown(homeDir, uid, gid); err != nil {
 		log.Debug("Failed to chown home directory %s: %v", homeDir, err)
 	}
@@ -1648,6 +1877,24 @@ func directSetUID(username, newUID, newGID string) error {
 func mustAtoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
+}
+
+// passwdFileHasEntry reports whether path (a /etc/passwd- or /etc/group-
+// formatted file) has a line for username, i.e. one starting with
+// "username:". Returns false (not an error) if the file can't be read,
+// since that's just as much "nothing to rewrite" as the entry being absent.
+func passwdFileHasEntry(path, username string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	prefix := username + ":"
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // isUIDMapped checks whether uid is a valid container UID by reading
@@ -2364,6 +2611,32 @@ func hasCapSetUID() bool {
 // parseCapSetUID parses the content of /proc/self/status and returns true
 // if CAP_SETUID (bit 7) is present in the effective capability set.
 func parseCapSetUID(statusContent string) bool {
+	return parseCapBit(statusContent, 7) // CAP_SETUID = bit 7
+}
+
+// hasCapSetGID is CAP_SETGID's counterpart to hasCapSetUID. su (and the
+// supervisor's own syscall.Credential drop — see substrate_template.go's WHY
+// comment) needs both SETUID and SETGID to leave root; checking only
+// CAP_SETUID would miss an actor granted the wrong single capability.
+func hasCapSetGID() bool {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	return parseCapSetGID(string(data))
+}
+
+// parseCapSetGID parses the content of /proc/self/status and returns true
+// if CAP_SETGID (bit 6) is present in the effective capability set.
+func parseCapSetGID(statusContent string) bool {
+	return parseCapBit(statusContent, 6) // CAP_SETGID = bit 6
+}
+
+// parseCapBit parses /proc/self/status content and returns whether the given
+// bit is set in the effective capability set (CapEff). Shared by
+// parseCapSetUID and parseCapSetGID so the two can never drift in how they
+// read the file.
+func parseCapBit(statusContent string, bit uint) bool {
 	for _, line := range strings.Split(statusContent, "\n") {
 		if strings.HasPrefix(line, "CapEff:") {
 			hexStr := strings.TrimSpace(strings.TrimPrefix(line, "CapEff:"))
@@ -2371,7 +2644,7 @@ func parseCapSetUID(statusContent string) bool {
 			if err != nil {
 				return false
 			}
-			return caps&(1<<7) != 0 // CAP_SETUID = bit 7
+			return caps&(1<<bit) != 0
 		}
 	}
 	return false

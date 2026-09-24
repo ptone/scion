@@ -18,11 +18,13 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -335,6 +337,77 @@ func TestBootstrap_RejectsRelativePath(t *testing.T) {
 	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 for an invalid bootstrap file path", rec.Code)
+	}
+}
+
+// TestBootstrap_PrivilegeDropPreconditionFails_RejectsWithoutStartingInit
+// proves the serve side of PrivilegeDropChecker's contract: when it rejects
+// the bootstrap, the response must be non-2xx
+// (so the broker's postBootstrap treats it as a failure and Run's existing
+// cleanup deletes the actor — see PrivilegeDropChecker's doc comment) and
+// the init runner must never be invoked, since the harness must not start.
+func TestBootstrap_PrivilegeDropPreconditionFails_RejectsWithoutStartingInit(t *testing.T) {
+	var initCalled bool
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithPrivilegeDropChecker(func() error {
+			return errors.New("CAP_SETUID absent and this message must never reach the client")
+		}),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int {
+			initCalled = true
+			return 0
+		}),
+	)
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd:     "true",
+		ControlToken: "tok",
+	})
+
+	if rec.Code == http.StatusOK || rec.Code < 400 {
+		t.Fatalf("status = %d, want a non-2xx failure", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "CAP_SETUID") {
+		t.Errorf("response body leaked the checker's underlying error: %q", rec.Body.String())
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != privilegeDropPreconditionFailedMsg {
+		t.Errorf("response body = %q, want the fixed message %q", got, privilegeDropPreconditionFailedMsg)
+	}
+
+	// Give any wrongly-started goroutine a moment to flip the flag before
+	// asserting it never did.
+	time.Sleep(20 * time.Millisecond)
+	if initCalled {
+		t.Error("init runner was invoked despite the privilege-drop precondition failing; the harness must never start")
+	}
+}
+
+// TestBootstrap_PrivilegeDropPreconditionPasses_StartsInit is the control
+// for the test above: a nil-returning checker must not change today's
+// behaviour (200, init runner invoked).
+func TestBootstrap_PrivilegeDropPreconditionPasses_StartsInit(t *testing.T) {
+	initCh := make(chan struct{}, 1)
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithPrivilegeDropChecker(func() error { return nil }),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int {
+			initCh <- struct{}{}
+			return 0
+		}),
+	)
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd:     "true",
+		ControlToken: "tok",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case <-initCh:
+	case <-time.After(2 * time.Second):
+		t.Error("init runner was never invoked despite the precondition passing")
 	}
 }
 

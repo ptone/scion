@@ -571,6 +571,17 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 			wantErr: "read auth file",
 		},
 		{
+			// This is also the broker-side proof that the privilege drop
+			// failing closed actually fails the agent: substrate-serve's
+			// synchronous privilege-drop precondition (pkg/sciontool/
+			// substrate.PrivilegeDropChecker) fails a bootstrap by returning exactly
+			// this shape of response — a non-2xx from POST /bootstrap — and
+			// the broker cannot tell that failure apart from any other
+			// bootstrap failure. postBootstrap already treats every non-2xx
+			// as an error (substrate_bootstrap.go), so this case (and the
+			// cleanup/DeleteActor assertion below, common to every case in
+			// this table) is what "Run() returns an error and the actor is
+			// deleted" actually reduces to on the broker side.
 			name: "bootstrap fails",
 			inject: func(fc *fakeControlClient, fa *fakeActorServer) {
 				fa.bootstrapStatus = http.StatusInternalServerError

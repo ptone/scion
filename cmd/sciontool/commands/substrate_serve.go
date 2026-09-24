@@ -54,6 +54,60 @@ func init() {
 		"Address to listen on (the router targets :80 by default; overridable for tests)")
 }
 
+// substrateServeInitOptions returns the InitRunOptions substrate-serve's
+// InitRunner passes to RunInit for one child invocation. Extracted so a test
+// can assert RequirePrivilegeDrop: true is actually wired here, rather than
+// only testing RunInit's own requirePrivilegeDropOrFail predicate in
+// isolation — flipping this to false would silently let the harness start
+// as root, and nothing about testing runSubstrateServe's full HTTP server
+// would otherwise catch it.
+func substrateServeInitOptions(forwardTermSignal bool) InitRunOptions {
+	// RequirePrivilegeDrop: true — substrate always starts the actor as UID
+	// 0, so a failed/skipped privilege drop can only mean "still root,"
+	// never a legitimate rootless outcome (see
+	// InitRunOptions.RequirePrivilegeDrop). This is a flag passed here at
+	// the substrate-serve entry path, not an env var a workload could set
+	// itself.
+	return InitRunOptions{ForwardTermSignal: forwardTermSignal, RequirePrivilegeDrop: true}
+}
+
+// exitOnPrivilegeDropSentinel is substrate-serve's InitRunner-wrapping
+// defence in depth (see exitCodePrivilegeDropRequired's doc comment): if
+// RunInit ever returns that specific sentinel, it calls exit(code) so PID 1
+// itself dies, rather than leaving substrate-serve's control server up
+// having started nothing. Any other code (0, or the harness's own once one
+// actually launched) is left alone. exit is a parameter so a test can drive
+// this without an actual os.Exit call terminating the test binary.
+func exitOnPrivilegeDropSentinel(exitCode int, exit func(int)) {
+	if exitCode == exitCodePrivilegeDropRequired {
+		exit(exitCode)
+	}
+}
+
+// substrateServePrivilegeDropChecker is the substrate.PrivilegeDropChecker
+// substrate-serve wires into its Server (see checkPrivilegeDropFeasible's
+// doc comment for what it actually checks).
+func substrateServePrivilegeDropChecker() error {
+	return checkPrivilegeDropFeasible(defaultPrivilegeDropPreconditionDeps)
+}
+
+// newSubstrateServeServer builds the *substrate.Server substrate-serve
+// mounts, wiring both the init runner and the privilege-drop precondition
+// (see PrivilegeDropChecker's doc comment). Extracted so a test can drive
+// the exact same wiring runSubstrateServe uses — including a missing or
+// disabled precondition regressing back to Phase 1's silent behaviour —
+// without starting an HTTP listener.
+func newSubstrateServeServer() *substrate.Server {
+	return substrate.NewServer(
+		substrate.WithPrivilegeDropChecker(substrateServePrivilegeDropChecker),
+		substrate.WithInitRunner(func(argv []string, forwardTermSignal bool) int {
+			exitCode := RunInit(argv, substrateServeInitOptions(forwardTermSignal))
+			exitOnPrivilegeDropSentinel(exitCode, os.Exit)
+			return exitCode
+		}),
+	)
+}
+
 func runSubstrateServe(addr string) int {
 	// substrate-serve is PID 1 inside the actor: reap reparented zombies the
 	// same way `sciontool init` does. RunInit (invoked after bootstrap)
@@ -62,17 +116,7 @@ func runSubstrateServe(addr string) int {
 	// the awaiting-bootstrap window before RunInit ever runs.
 	supervisor.StartReaper()
 
-	srv := substrate.NewServer(
-		substrate.WithInitRunner(func(argv []string, forwardTermSignal bool) int {
-			// RequirePrivilegeDrop: true — substrate always starts the actor
-			// as UID 0, so a failed/skipped privilege drop can only mean
-			// "still root," never a legitimate rootless outcome (see
-			// InitRunOptions.RequirePrivilegeDrop). This is a flag passed
-			// here at the substrate-serve entry path, not an env var a
-			// workload could set itself.
-			return RunInit(argv, InitRunOptions{ForwardTermSignal: forwardTermSignal, RequirePrivilegeDrop: true})
-		}),
-	)
+	srv := newSubstrateServeServer()
 
 	httpServer := &http.Server{
 		Addr:    addr,

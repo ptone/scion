@@ -44,6 +44,14 @@ const (
 
 	// defaultFileMode is used when a bootstrap file entry omits mode (0).
 	defaultFileMode = 0o644
+
+	// privilegeDropPreconditionFailedMsg is the fixed, secret-free response
+	// body when PrivilegeDropChecker rejects a bootstrap (see its doc
+	// comment). It never includes the checker's own error, which is
+	// cmd-layer-defined and outside this package's control: the real reason
+	// (missing capability, missing scion user, unset SCION_HOST_UID/GID) is
+	// only logged server-side.
+	privilegeDropPreconditionFailedMsg = "bootstrap rejected: privilege-drop precondition failed"
 )
 
 // InitRunner runs the equivalent of `sciontool init -- <argv...>` in
@@ -57,12 +65,39 @@ const (
 // the init logic required by phase1-spec.md §2.1.
 type InitRunner func(argv []string, forwardTermSignal bool) int
 
+// PrivilegeDropChecker is InitRunner's synchronous companion: when the
+// privilege drop that setupHostUser is about to attempt cannot succeed,
+// Run() must return an error and the broker must delete the actor, not just
+// avoid starting the harness. Exiting the actor's PID 1 after the fact is
+// too late, because /bootstrap has already answered 200 by then.
+//
+// handleBootstrap calls this synchronously — after req.Env has been applied
+// to the process environment (so SCION_HOST_UID/GID are visible), but
+// before it commits to a 200 response or starts the in-process init — and
+// treats a non-nil error as a bootstrap failure: a non-2xx response, with
+// the init runner never invoked. The broker's postBootstrap already treats
+// any non-2xx as an error, and Run already runs its cleanup() (delete the
+// actor and its egress policy) on any postBootstrap error, so wiring the
+// check in here reuses that existing failure path end to end rather than
+// adding new plumbing to pkg/runtime.
+//
+// The concrete implementation lives in the cmd layer (same reason as
+// InitRunner: this package must never import cmd/sciontool/commands) and is
+// deliberately cheap and side-effect-free — it re-checks that setupHostUser's
+// realignment is expected to succeed (capabilities, the scion user, the
+// host UID/GID) without performing it a second time.
+//
+// Optional: a Server built without one (e.g. most existing tests, and any
+// runtime other than substrate-serve) skips the check entirely.
+type PrivilegeDropChecker func() error
+
 // Server implements the `sciontool substrate-serve` control server
 // (phase1-spec.md §2.1): healthz, one-shot bootstrap, and authenticated
 // exec. /pty, /rehydrate and /tunnel/open are out of scope for Phase 1.
 type Server struct {
-	nonceVerifier NonceVerifier
-	runInit       InitRunner
+	nonceVerifier      NonceVerifier
+	runInit            InitRunner
+	privilegeDropCheck PrivilegeDropChecker
 
 	// chownUID/chownGID own bootstrap-written files and directories,
 	// matching the "scion" user's ownership. -1 means "don't chown"
@@ -89,6 +124,13 @@ func WithNonceVerifier(v NonceVerifier) Option {
 // bootstrap requests; tests that only exercise auth/state may omit it.
 func WithInitRunner(r InitRunner) Option {
 	return func(s *Server) { s.runInit = r }
+}
+
+// WithPrivilegeDropChecker sets the synchronous precondition handleBootstrap
+// runs before committing to 200 OK and starting the in-process init. See
+// PrivilegeDropChecker's doc comment.
+func WithPrivilegeDropChecker(c PrivilegeDropChecker) Option {
+	return func(s *Server) { s.privilegeDropCheck = c }
 }
 
 // WithChownOwner overrides the uid/gid used to chown bootstrap-written
@@ -205,6 +247,20 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	for k, v := range req.Env {
 		if err := os.Setenv(k, v); err != nil {
 			log.Error("bootstrap: failed to set env var %s: %v", k, err)
+		}
+	}
+
+	// Synchronous privilege-drop precondition (see PrivilegeDropChecker's
+	// doc comment): must run after req.Env lands in the process environment
+	// (SCION_HOST_UID/GID come from there) and before the response commits
+	// to 200 or the init runner starts. bootstrapped/controlToken are left
+	// as already claimed above — Phase 1 has no bootstrap retry, and the
+	// broker is expected to delete this actor on the non-2xx response below.
+	if s.privilegeDropCheck != nil {
+		if err := s.privilegeDropCheck(); err != nil {
+			log.Error("bootstrap: privilege-drop precondition failed: %v", redactErr(err))
+			http.Error(w, privilegeDropPreconditionFailedMsg, http.StatusInternalServerError)
+			return
 		}
 	}
 

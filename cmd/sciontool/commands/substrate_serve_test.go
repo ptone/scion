@@ -67,6 +67,18 @@ func TestSubstrateServeCommand_Integration_SIGTERMNotForwarded(t *testing.T) {
 	// issue #123 / scrubHubEnv's use in TestInitCommand_Integration.
 	scrubHubEnv(t)
 
+	// substrate-serve's synchronous /bootstrap precondition
+	// (checkPrivilegeDropFeasible) deliberately refuses to bootstrap
+	// without CAP_SETUID/CAP_SETGID, which this integration test's
+	// unprivileged subprocess never has (unlike a real Substrate actor,
+	// which is granted exactly those two capabilities — see
+	// substrate_template.go). This test is about SIGTERM handling, not the
+	// privilege drop, so skip rather than fail when the environment can't
+	// satisfy a precondition this test was never exercising on purpose.
+	if !hasCapSetUID() || !hasCapSetGID() {
+		t.Skip("skipping: this environment lacks CAP_SETUID/CAP_SETGID, so the bootstrap privilege-drop precondition would reject the request before this test's real subject (SIGTERM handling) is ever reached")
+	}
+
 	binPath := filepath.Join(t.TempDir(), "sciontool-test")
 	buildCmd := exec.Command("go", "build", "-buildvcs=false", "-o", binPath, "../")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
@@ -99,7 +111,10 @@ func TestSubstrateServeCommand_Integration_SIGTERMNotForwarded(t *testing.T) {
 	// test doesn't collide with an unrelated "sleep" process on the runner.
 	const marker = "60013"
 	bootstrapBody, err := json.Marshal(map[string]any{
-		"env":           map[string]string{},
+		// SCION_HOST_UID/GID: satisfies checkPrivilegeDropFeasible's
+		// precondition alongside the CAP_SETUID/CAP_SETGID skip above — a
+		// real Substrate bootstrap always sets these (buildBootstrapEnv).
+		"env":           map[string]string{"SCION_HOST_UID": "1000", "SCION_HOST_GID": "1000"},
 		"files":         []any{},
 		"start_cmd":     "sleep " + marker,
 		"control_token": controlToken,
