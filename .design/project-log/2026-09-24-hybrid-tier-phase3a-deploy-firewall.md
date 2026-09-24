@@ -109,13 +109,19 @@ always has, with no change to the exit code. With hybrid rules queued, "the VM i
 positive, project-wide answer (an `instances list` by name, not scoped to any particular zone)
 rather than an inference from a `describe` or `delete` call that merely failed, which could just
 as easily mean a guessed-wrong zone or a transient error as an actually-absent VM; anything short
-of a positive answer keeps both rules and fails the run, reporting what's known. Deletion order is
-the reverse of creation — the allow rule first, then the deny rule — and deletion stops at the
-first rule that isn't confirmed gone (a failed `delete` re-checked with a fresh `list`, so only a
-positive not-found counts), so the deny rule can never be deleted after the allow rule's own
-delete failed or came back uncertain. A rule whose delete call fails is reported as a failure, and
-the final summary only lists rules actually confirmed gone, never one that failed to delete. The
-cluster itself is never deleted, under any circumstance.
+of a positive answer keeps both rules and fails the run, reporting what's known. That list call
+also forces a partial result to be a hard error rather than a silent success: without `--zones`
+it's a project-wide AggregatedList, and the SDK's default behavior downgrades an unreachable zone
+to a warning and an empty-but-successful result, which would otherwise misread the exact zone
+outage that could have caused the VM delete to fail in the first place as "the VM is gone".
+Deletion order is the reverse of creation — the allow rule first, then the deny rule — and
+deletion stops at the first rule that isn't confirmed gone (a failed `delete` re-checked with a
+fresh `list`, so only a positive not-found counts), so the deny rule can never be deleted after
+the allow rule's own delete failed or came back uncertain; every rule left queued behind a stopped
+delete is printed as not attempted, not just silently omitted from the summary. A rule whose
+delete call fails is reported as a failure, and the final summary only lists rules actually
+confirmed gone, never one that failed to delete. The cluster itself is never deleted, under any
+circumstance.
 
 ## Tests
 
@@ -162,7 +168,11 @@ queued (a tier-off VM delete failure still warns and continues unchanged), and a
 reported as a failure rather than "deleted." The tier-off case is covered at both levels for both
 a fresh deploy and a redeploy against an already-existing VM: no `gke_target`, no cluster calls,
 no `add-tags`, no hybrid firewall-rule calls, and (for a fresh VM) an unchanged `instances create`
-invocation.
+invocation. Re-running teardown after the VM is already gone -- the recovery path deploy.sh's own
+"Keeping..." message points an operator to -- is covered directly, as is an unreachable zone
+during the VM-gone check never being misread as "gone." The interactive path (no `--config`,
+answering prompts on stdin) is also covered at the `deploy.sh` level for the no-Python,
+no-hybrid-rules case, alongside the existing function-level coverage.
 
 Both `deploy.sh` and `hybrid-tier.sh` use `${arr[@]+"${arr[@]}"}` rather than a bare
 `"${arr[@]}"` for every array that can legitimately be empty, since the bare form is an
