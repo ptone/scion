@@ -86,6 +86,15 @@ set_instances_list_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/instances-list-should-fail"
 }
 
+# set_instances_list_zone_unreachable — every `instances list` call
+# simulates a real AggregatedList with one UNREACHABLE zone: exit 0 with
+# the VM missing from stdout and a warning on stderr, unless the caller
+# set CLOUDSDK_COMPUTE_ALLOW_PARTIAL_ERROR=false, in which case it's a
+# hard error (exit 1) instead -- matching real gcloud's own behavior.
+set_instances_list_zone_unreachable() {
+  touch "${GCLOUD_STUB_STATE_DIR}/instances-list-zone-unreachable"
+}
+
 # set_firewall_delete_will_fail NAME — the next `firewall-rules delete`
 # call for this rule fails instead of succeeding (the rule's JSON stays
 # present in stub state, matching a real failed delete rather than one

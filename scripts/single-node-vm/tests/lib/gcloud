@@ -33,7 +33,12 @@ set -euo pipefail
 : "${GCLOUD_STUB_STATE_DIR:?GCLOUD_STUB_STATE_DIR must be set}"
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON="${PYTHON:-python3}"
+# Deliberately its own variable, not "${PYTHON:-python3}": a test that
+# sets PYTHON for deploy.sh's own process (to simulate a missing
+# interpreter) exports it to every child process deploy.sh execs,
+# including this stub -- which needs a real interpreter for its own JSON
+# handling regardless of what deploy.sh is being tested against.
+PYTHON="${GCLOUD_STUB_PYTHON:-python3}"
 
 mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
   "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates" \
@@ -129,6 +134,12 @@ case "${1:-} ${2:-}" in
 esac
 
 case "${1:-} ${2:-} ${3:-}" in
+  "config get-value project")
+    # Only the interactive path (no --config) asks for this: PROJECT_ID
+    # otherwise comes straight from the config file.
+    echo "demo-project"
+    exit 0
+    ;;
   "compute firewall-rules describe")
     require_project "$@"
     name="${4:-}"
@@ -216,6 +227,19 @@ print(json.dumps(out))
       echo "gcloud-stub: simulated transient instances list failure" >&2
       exit 1
     fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/instances-list-zone-unreachable" ]]; then
+      # Emulates a real AggregatedList (no --zones) hitting an UNREACHABLE
+      # zone: with the SDK's default compute/allow_partial_error=true,
+      # that's downgraded to a stderr warning and exit 0 with the
+      # unreachable zone's instances (including this one) missing from
+      # stdout. Only CLOUDSDK_COMPUTE_ALLOW_PARTIAL_ERROR=false makes it a
+      # hard error, matching real gcloud.
+      echo "gcloud-stub: (simulated) Some requests did not succeed: - Failed to fetch some zones: ('Unreachable')" >&2
+      if [[ "${CLOUDSDK_COMPUTE_ALLOW_PARTIAL_ERROR:-}" == "false" ]]; then
+        exit 1
+      fi
+      exit 0
+    fi
     filter="$(get_flag filter "$@")" || filter=""
     format="$(get_flag format "$@")" || format=""
     name="${filter#name=}"
@@ -230,6 +254,7 @@ print(json.dumps(out))
     exit 0
     ;;
   "compute instances describe")
+    require_project "$@"
     require_flag zone "$@"
     name="${4:-}"
     # Same sentinel purpose as the "instances create" case below: this is
@@ -316,6 +341,7 @@ print(json.dumps(out))
       cat "$f"
       exit 0
     fi
+    echo "gcloud-stub: instance template ${key} not found" >&2
     exit 1
     ;;
   *)
