@@ -540,6 +540,7 @@ Per the explicit instruction to start with exactly `SETUID`/`SETGID` and add any
 
 - **`CAP_CHOWN` — near-certain, not added.** Once `setupHostUser` returns `targetUID=1000` (this fix's success path), `RunInit` unconditionally calls `log.Chown(targetUID, targetGID)` on the log file (`init.go:163-166` — `if targetUID != 0`, no other condition) to hand it from root to scion. Substrate's capability set does not include `CAP_CHOWN`, and changing a file's owner to an arbitrary different UID requires it regardless of the caller's own UID once a process's capabilities are restricted (exactly the property that made `SETUID`/`SETGID` necessary for `su` in the first place — traditional "UID 0 can do anything" semantics do not apply here). Several other `os.Chown` calls exist further down the same conditional path (hub token file `init.go:731`, GitHub token/expiry `init.go:802`/`825`, resource limits file `init.go:907`, workspace ownership via `ensureWorkspaceOwnership` `init.go:1985` and `chownTreeRootOwned` `init.go:1962`, env file `init.go:2179-2180`) — same capability, same reasoning, listed for completeness rather than as separate findings. This is left out of this change only because of the explicit "start with exactly two" instruction; it is expected to surface on the very first live substrate run that reaches this code path (any agent, since the log-file chown is unconditional), and should be a fast, low-risk follow-up once confirmed live rather than a speculative addition here.
 - **`CAP_DAC_OVERRIDE` / `CAP_FOWNER` — candidates only, not added, no code citation found.** These would matter if `RunInit` (still UID 0 at this point, before the supervisor's `Credential` drop takes effect on the *child*) ever writes to a file or directory after that file has already been chowned to `scion` and is no longer world/group-writable. Confirming this would require tracing every write call that follows every chown call across `init.go`'s ~2000 lines, which was not done exhaustively here — flagged for live confirmation rather than guessed at.
+  **`CAP_DAC_OVERRIDE` was later confirmed live and added — see the "DAC_OVERRIDE" follow-up below** for the specific write-after-chown case (the rootfs fixup's home chown, landing before `RunInit`'s own root-phase writes into it) and why an earlier live probe missed it.
 
 ### Tests
 
@@ -1285,3 +1286,174 @@ Not run, per the standing rule: TestMain stub/redirect removal, and the
 No changes to `pkg/sciontool/substrate` (the `Server`/`handleBootstrap`
 wiring itself is untouched — only the cmd-layer functions it calls), no
 `go.mod`/`go.sum` changes.
+
+## Follow-up 7: DAC_OVERRIDE — a live failure at the Follow-up 6 head, and why an earlier probe missed it
+
+### The live failure and root cause
+
+A full live run at the Follow-up 6 head (`c70738eb6` plus that follow-up's
+own commits) failed: `/healthz` reported `init-failed`, and the init log
+stopped immediately after the `"setupHostUser result"` line — no further
+progress, no explicit permission-denied line visible. The actor's `CapEff`
+was `CHOWN, KILL, SETGID, SETUID, NET_BIND_SERVICE, AUDIT_WRITE` — every
+capability in `substratecaps.Required` at that point, and no
+`DAC_OVERRIDE`.
+
+Root cause, two independent defects landing on the same code path:
+
+1. **The rootfs fixup's home chown blocks `RunInit`'s own root-phase
+   writes into the same directory.** The startup fixup
+   (`fixupRootfsForScion`) chowns `$HOME` to the scion user at mode `0700`
+   before `RunInit` ever runs. `RunInit` itself still runs as UID 0 up to
+   the supervisor's `Credential` drop, and in that root phase it writes
+   into that same, now-`scion`-owned, `0700` directory:
+   `stagedsecrets.Write(agentHome, staged)` (`init.go` ~:470), followed by
+   `agent-info.json`, hooks, and (on any earlier failure)
+   `reportInitFailure`'s own local write. Without `CAP_DAC_OVERRIDE`, root
+   is subject to the same permission check as any other non-owning uid
+   against a directory it doesn't own — the same "still UID 0 isn't still
+   all-powerful" property that made `SETUID`/`SETGID`/`CHOWN` necessary in
+   the first place — so every one of those writes fails.
+2. **A second, independent defect hid the first.** `log.Chown(targetUID,
+   targetGID)` (`init.go` ~:443) hands the log file (mode `0644`) to the
+   scion user immediately before the writes above, once `targetUID != 0`.
+   Root can then no longer append to it either, so every init log line
+   after that chown is silently lost — which is exactly why the live log
+   stopped right after `"setupHostUser result"` with no visible error: the
+   error was logged, just not anywhere still writable.
+
+### Fix: add DAC_OVERRIDE; keep both fixups and the log chown unchanged
+
+`substrate-lead`'s decision: add `DAC_OVERRIDE` (`CAP_DAC_OVERRIDE`, bit 1)
+to `pkg/substratecaps.Required`. Keep the `/` chmod and the home chown in
+both fixup call sites exactly as they are — no log-permission hack, no
+narrowing of what the fixup or the checker cover. `substratecaps.Required`
+is the single source of truth `buildActorTemplate` and
+`checkPrivilegeDropFeasible` both derive from (see the package's own doc
+comment), so this one addition automatically: grants the capability on the
+actor's `SecurityContext`, changes `substrateTemplateName`'s content-address
+(forcing a new golden template rather than silently reusing one built
+without it), and adds a `DAC_OVERRIDE` subtest to
+`TestCheckPrivilegeDropFeasible_EveryRequiredCapabilityIsChecked` — no
+second implementation to keep in sync.
+
+### The earlier "DAC_OVERRIDE: no effect" probe was confounded by a different, still-unfixed blocker
+
+Before the Follow-up 4 rootfs fixup existed, an earlier live probe tried
+granting `DAC_OVERRIDE` and observed no effect, so it was left out (see the
+"Extra capabilities" note above, from that same era: "candidates only, not
+added, no code citation found"). At that time `/` itself came up `0700
+root:root` (the overlay-root condition `fixupRootfsForScion`'s chmod later
+corrects) — a *different* blocker that fails the scion user's own
+traversal into `$HOME` regardless of what root can or can't write once
+inside it. With `/` still impassable, the actor never got far enough for
+the home-chown/root-write interaction above to matter, so adding
+`DAC_OVERRIDE` genuinely changed nothing observable at that point — not
+because it was unneeded, but because a separate, still-present defect was
+masking the one it would have fixed. Once the `/` chmod and the home chown
+both landed (Follow-up 4) and the live run got past them, this defect
+became reachable, and did fail live as described above.
+
+### The log-visibility latent defect
+
+Independent of `DAC_OVERRIDE`: `log.Chown` handing the log file to the
+scion user while `RunInit` still has root-phase writes ahead of it is a
+standing trap — *any* root-phase write failure after that point becomes
+invisible in the log, not just the home-directory one this defect happened
+to surface. `DAC_OVERRIDE` resolves the immediate symptom (root can write
+into the `scion`-owned, `0700` `$HOME` again, which also covers appending
+to the now-`scion`-owned log file, since that append is exactly the kind of
+write `DAC_OVERRIDE` is for), but the ordering itself — chowning the log
+before every root-phase write that might still need to log a failure — is
+unchanged and stays a latent sharp edge for any future root-phase write
+that isn't covered by a capability. Left as-is per the binding decision (no
+log-permission hack in this change); flagged here for whoever next touches
+this ordering.
+
+### Mutation (real env, `agent-info.json` hash before/after)
+
+Hash `d06f10cd3412…` unchanged before and after (0 changes), mutation
+applied as a scoped source edit, run, and reverted (`diff` confirmed
+byte-identical afterward):
+
+| Mutation | Guarding test | Result |
+|---|---|---|
+| `DAC_OVERRIDE` entry removed from `substratecaps.Required` | `TestRequired_IncludesDACOverride` (new) | Failed as expected. Every *other* existing test in the suite — `TestNames_MatchesRequiredInOrder`, `TestRequired_EveryEntryHasNameBitAndReason`, `TestCheckPrivilegeDropFeasible_EveryRequiredCapabilityIsChecked`, `TestBuildActorTemplate_SecurityContextGrantsExactlyRequiredCapabilities` — derives its expectation from `Required` itself, so none of them would have caught this removal; `TestRequired_IncludesDACOverride` is the one guard added specifically for that gap. |
+
+Additionally, with `Required` intact: `TestCheckPrivilegeDropFeasible_EveryRequiredCapabilityIsChecked/DAC_OVERRIDE`
+runs the checker with a fake `hasCapBit` reporting bit 1 absent (a stand-in
+for `CapEff` lacking `DAC_OVERRIDE`) and confirms
+`checkPrivilegeDropFeasible` rejects with `errPrivilegeDropPrecondition` —
+this is the "run the checker with CapEff lacking bit 1" proof, at the unit
+level (this container has no way to actually drop a single capability bit
+from its own real `CapEff` to demonstrate this any more directly). Not run,
+per the standing rule: TestMain stub/redirect removal, and the
+`testing.Testing()` gate removal.
+
+### Tests added
+
+- `pkg/substratecaps/substratecaps_test.go`:
+  `TestRequired_IncludesDACOverride` (pins the entry and its `EffBit`).
+- `cmd/sciontool/commands/init_privilege_drop_test.go`: two new
+  `TestParseCapBit` cases (bit 1 present/absent), covering the specific
+  bit `DAC_OVERRIDE` occupies.
+- `TestCheckPrivilegeDropFeasible_EveryRequiredCapabilityIsChecked` and
+  `TestBuildActorTemplate_SecurityContextGrantsExactlyRequiredCapabilities`
+  needed no changes — both already derive from `substratecaps.Required`
+  generically and now cover `DAC_OVERRIDE` automatically.
+
+### Stale-comment sweep
+
+Grepped for `SETUID.*SETGID.*CHOWN`, `0x..c1`/`00000000000000c1`-style
+literals, and "exactly three"/"complete set" phrasing across
+`pkg/substratecaps`, `pkg/runtime`, and `cmd/sciontool/commands`. Found one
+comment that explicitly enumerated the old three-capability set as if it
+were exhaustive (`substrate_serve_test.go`'s integration-test skip loop,
+"SETUID, SETGID, CHOWN — not just \"those two\", now that CHOWN was
+added"); reworded to describe the loop generically instead of naming a
+fixed list, so it can't go stale again the next time a capability is added.
+No other hardcoded enumeration or cap-count assumption found in code (a
+mutation test in `pkg/runtime/substrate_runtime_test.go` sets
+`substrateContainerCapabilitiesAdd` to an arbitrary 4-element list to prove
+the template hash reacts to *any* capability-set change — unrelated to the
+real set's size and needed no update). Historical narrative in this log
+file (e.g. the Follow-up 1 "Extra capabilities" note, the Follow-up 3 "(A)"
+section) is left as the record of what was true and decided at the time,
+with a pointer added at the "Extra capabilities" note above rather than
+rewritten.
+
+### Gates (`SCION_*` and `CLAUDE_CODE_ENABLE_TELEMETRY` unset)
+
+- `go build ./...` — pass.
+- `GOOS=darwin go vet ./cmd/sciontool/commands/` — pass.
+- `go vet ./...` — pass, no output.
+- `go test -count=1 ./cmd/sciontool/... ./pkg/sciontool/... ./pkg/runtime/... ./pkg/runtimebroker/... ./pkg/substratecaps/...` — all pass.
+- `go test -race -count=1 ./cmd/sciontool/commands/... ./pkg/runtime/...` —
+  `cmd/sciontool/commands` and `pkg/runtime` pass; `pkg/runtime/cloudrun`'s
+  `TestStreamLogsPropagatesListingErrors` hit the previously-documented
+  pre-existing data race (Follow-up 1's gate results already note it);
+  reconfirmed pre-existing by reproducing it identically in a throwaway
+  worktree at the unmodified `c70738eb6`, a file this change never
+  touches.
+- `golangci-lint run --new-from-rev=c3b6e821d ./...` — 0 issues.
+- `make check-custom` — same pre-existing hits as every prior round, zero
+  in touched files.
+- `go test -count=50 -shuffle=on -timeout=25m ./cmd/sciontool/commands/...`
+  — see the report to sb-em for this run's seed and result.
+
+### Functions/files touched (this follow-up)
+
+- `pkg/substratecaps/substratecaps.go`: new `DAC_OVERRIDE` entry in
+  `Required`.
+- `pkg/substratecaps/substratecaps_test.go`: new
+  `TestRequired_IncludesDACOverride`.
+- `cmd/sciontool/commands/init_privilege_drop_test.go`: two new
+  `TestParseCapBit` cases.
+- `cmd/sciontool/commands/substrate_serve_test.go`: reworded one comment
+  (no behaviour change).
+- This file: the "Extra capabilities" pointer and this section.
+
+No changes to `pkg/runtime/substrate_template.go`,
+`cmd/sciontool/commands/init.go`'s `log.Chown`/`stagedsecrets.Write` call
+sites, or either rootfs-fixup call site — the capability list is the only
+production code that changed. No `go.mod`/`go.sum` changes.
