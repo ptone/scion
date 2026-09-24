@@ -51,8 +51,9 @@ func doSubstrateServeJSON(t *testing.T, srv interface{ Handler() http.Handler },
 
 // TestParseCapBit covers parseCapBit generically (the function hasCapBit
 // uses to check any capability in substratecaps.Required, not just
-// SETUID) — bit 6 (CAP_SETGID) and bit 0 (CAP_CHOWN) alongside a few edge
-// cases, complementing TestParseCapSetUID's bit-7-specific coverage.
+// SETUID) — bit 6 (CAP_SETGID), bit 1 (CAP_DAC_OVERRIDE) and bit 0
+// (CAP_CHOWN) alongside a few edge cases, complementing TestParseCapSetUID's
+// bit-7-specific coverage.
 func TestParseCapBit(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -82,6 +83,18 @@ func TestParseCapBit(t *testing.T) {
 			name:  "bit 0 (CHOWN) set",
 			input: "CapEff:\t0000000000000001\n",
 			bit:   0,
+			want:  true,
+		},
+		{
+			name:  "bit 1 (DAC_OVERRIDE) absent (SETUID/SETGID/CHOWN set, DAC_OVERRIDE not)",
+			input: "CapEff:\t00000000000000c1\n",
+			bit:   1,
+			want:  false,
+		},
+		{
+			name:  "bit 1 (DAC_OVERRIDE) present",
+			input: "CapEff:\t0000000000000002\n",
+			bit:   1,
 			want:  true,
 		},
 		{

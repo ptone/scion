@@ -75,8 +75,9 @@ func TestSubstrateServeCommand_Integration_SIGTERMNotForwarded(t *testing.T) {
 
 	// substrate-serve's synchronous /bootstrap precondition
 	// (checkPrivilegeDropFeasible) deliberately refuses to bootstrap
-	// without every capability in substratecaps.Required (SETUID, SETGID,
-	// CHOWN — not just "those two", now that CHOWN was added), which this
+	// without every capability in substratecaps.Required — checked here by
+	// iterating that shared list, not a hardcoded subset, so this test
+	// tracks it automatically as capabilities are added — which this
 	// integration test's unprivileged subprocess never has (unlike a real
 	// Substrate actor, which is granted exactly that set — see
 	// substrate_template.go). This test is about SIGTERM handling, not the

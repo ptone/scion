@@ -75,6 +75,11 @@ var Required = []Capability{
 		EffBit: 0,
 		Why:    `Observed live: "Failed to chown log file: chown /home/scion/agent.log: operation not permitted" and "Failed to chown workspace to UID=1000 GID=1000: chown /workspace: operation not permitted", followed by "Git clone failed: git init failed" and init exiting 1. RunInit unconditionally chowns the log file (log.Chown) and the workspace/home tree (chownTreeRootOwned/ensureWorkspaceOwnership) from root to the scion user once a drop is expected, and chown(2) to an arbitrary uid/gid needs CAP_CHOWN once a process's capability set is restricted — the same "still UID 0 isn't still all-powerful" property that made SETUID/SETGID necessary for su in the first place.`,
 	},
+	{
+		Name:   "DAC_OVERRIDE",
+		EffBit: 1,
+		Why:    `Observed live: healthz reports init-failed and the init log stops right after "setupHostUser result", with no further lines. Root cause: the rootfs fixup chowns $HOME to the scion user (mode 0700) before RunInit's own root-phase writes into it (stagedsecrets.Write, then agent-info.json, hooks, and reportInitFailure's own local write) — without CAP_DAC_OVERRIDE, root is subject to the same permission check as any other non-owning uid against a 0700 directory it doesn't own, so every one of those writes fails. A second, independent defect hid the first: log.Chown hands the log file (mode 0644) to the scion user immediately before this, so root can no longer append to it either once the drop is underway, silently dropping every later log line rather than reporting the real failure. DAC_OVERRIDE fixes both, without changing either chown.`,
+	},
 }
 
 // Names returns the plain capability names, in Required's order — what

@@ -56,3 +56,19 @@ func TestRequired_EveryEntryHasNameBitAndReason(t *testing.T) {
 		t.Error("Required is empty")
 	}
 }
+
+// TestRequired_IncludesDACOverride pins DAC_OVERRIDE (CAP_DAC_OVERRIDE, bit
+// 1) in Required: removing it would leave every other test in this package
+// passing (they all derive their expectations from Required itself), so
+// this is the one guard that actually fails if it's dropped.
+func TestRequired_IncludesDACOverride(t *testing.T) {
+	for _, c := range Required {
+		if c.Name == "DAC_OVERRIDE" {
+			if c.EffBit != 1 {
+				t.Errorf("DAC_OVERRIDE EffBit = %d, want 1 (CAP_DAC_OVERRIDE)", c.EffBit)
+			}
+			return
+		}
+	}
+	t.Error("Required does not include DAC_OVERRIDE")
+}
