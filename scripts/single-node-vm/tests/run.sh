@@ -43,7 +43,7 @@ source "${TIER_DIR}/hybrid-tier.sh"
 # shellcheck source=scripts/single-node-vm/tests/test_hybrid_tier.sh
 source "${SCRIPT_DIR}/test_hybrid_tier.sh"
 
-TEST_NAMES=($(declare -F | awk '{print $3}' | grep '^test_' | sort))
+mapfile -t TEST_NAMES < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
 
 for CURRENT_TEST in "${TEST_NAMES[@]}"; do
   "$CURRENT_TEST"
