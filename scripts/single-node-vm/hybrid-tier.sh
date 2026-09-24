@@ -1326,32 +1326,36 @@ hybrid_internal_ip_name() {
 #
 # Sets HYBRID_INTERNAL_IP_STATUS (found/absent/unknown),
 # HYBRID_INTERNAL_IP_ADDR, HYBRID_INTERNAL_IP_DESC, and, on unknown,
-# HYBRID_INTERNAL_IP_ERR. Returns 0 only when found. Same
-# not-found-vs-unknown distinction as every other ownership check in
-# this file: unknown is never treated as absent.
+# HYBRID_INTERNAL_IP_ERR. Returns 0 only when found. Uses a `list` call
+# rather than `describe` + error-text matching -- the same positive-
+# absence pattern the firewall rules' own ownership checks use
+# (_hybrid_firewall_rule_absent): a list that succeeds AND comes back
+# empty is the only thing that counts as "absent"; a list failure is
+# "unknown", never treated as absent. Same not-found-vs-unknown
+# distinction as every other ownership check in this file.
 _hybrid_internal_ip_get() {
   local name="$1" project_id="$2" region="$3"
-  local err_file json
+  local err_file list_json
   err_file="$(mktemp)"
   HYBRID_INTERNAL_IP_ADDR=""
   HYBRID_INTERNAL_IP_DESC=""
   HYBRID_INTERNAL_IP_ERR=""
-  if json="$(gcloud compute addresses describe "$name" --region="$region" \
-      --project="$project_id" --format=json 2>"${err_file}")"; then
-    HYBRID_INTERNAL_IP_STATUS="found"
-    HYBRID_INTERNAL_IP_ADDR="$(echo "$json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('address') or '')")"
-    HYBRID_INTERNAL_IP_DESC="$(echo "$json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
-    rm -f "${err_file}"
-    return 0
-  fi
-  if _hybrid_gcloud_not_found "$(cat "${err_file}")"; then
-    HYBRID_INTERNAL_IP_STATUS="absent"
-  else
+  if ! list_json="$(gcloud compute addresses list --project="$project_id" \
+      --filter="name=(${name}) region:${region}" --format=json 2>"${err_file}")"; then
     HYBRID_INTERNAL_IP_STATUS="unknown"
     HYBRID_INTERNAL_IP_ERR="$(cat "${err_file}")"
+    rm -f "${err_file}"
+    return 1
   fi
   rm -f "${err_file}"
-  return 1
+  if [[ "$list_json" == "[]" ]]; then
+    HYBRID_INTERNAL_IP_STATUS="absent"
+    return 1
+  fi
+  HYBRID_INTERNAL_IP_STATUS="found"
+  HYBRID_INTERNAL_IP_ADDR="$(echo "$list_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('address') or '')")"
+  HYBRID_INTERNAL_IP_DESC="$(echo "$list_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('description') or '')")"
+  return 0
 }
 
 # hybrid_ensure_internal_ip_new_vm HUB_NAME PROJECT_ID REGION SUBNET
