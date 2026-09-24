@@ -456,6 +456,65 @@ test_nfs_export_script_installs_server_package_if_needed() {
   assert_contains "$script" "apt-get install -y nfs-kernel-server" "must actually install the package"
 }
 
+# =====================================================================
+# settings.yaml's server.shared_dir_storage block: the render function
+# itself, and the conditional-splice mechanism deploy.sh uses to include
+# it only when the tier is on, with zero bytes of difference otherwise.
+# =====================================================================
+
+test_settings_shared_dir_storage_yaml_fields() {
+  local yaml
+  yaml="$(hybrid_settings_shared_dir_storage_yaml "10.128.0.5" "/srv/scion-shared" "scion-hub-demohub-shared")"
+  assert_contains "$yaml" "backend: nfs" "backend must be nfs"
+  assert_contains "$yaml" 'mount_root: "/srv/scion-shared"' "mount_root must be the export root"
+  assert_contains "$yaml" 'subpath_root: "projects"' "subpath_root must be the fixed projects subdirectory"
+  assert_contains "$yaml" 'server: "10.128.0.5"' "the share's server must be the VM's internal IP"
+  assert_contains "$yaml" 'export: "/srv/scion-shared"' "the share's export path must be the export root"
+  assert_contains "$yaml" 'pv_name: "scion-hub-demohub-shared"' "the share's pv_name must be the PV this hub's pods bind to"
+  assert_contains "$yaml" 'id: "shared"' "the share must have a stable id"
+}
+
+test_settings_shared_dir_storage_yaml_indented_under_server() {
+  local yaml first_line
+  yaml="$(hybrid_settings_shared_dir_storage_yaml "10.128.0.5" "/srv/scion-shared" "scion-hub-demohub-shared")"
+  first_line="$(echo "$yaml" | head -1)"
+  assert_eq "  shared_dir_storage:" "$first_line" \
+    "must be indented two spaces, to nest directly under server: alongside hub:/storage:/etc."
+}
+
+# The exact conditional-splice pattern deploy.sh uses to include this
+# block in settings.yaml only when it's non-empty, with no byte of
+# difference (not even a blank line) when it's empty -- mirrored here
+# rather than driving deploy.sh's own SSH-bound heredoc directly.
+test_settings_shared_dir_storage_splice_tier_off_is_byte_identical() {
+  local rendered
+  local hybrid_block=""
+  rendered="$(cat <<EOF
+  auth:
+    mode: dev
+${hybrid_block:+${hybrid_block}
+}  listen_port: 8080
+EOF
+)"
+  assert_eq "$(printf '  auth:\n    mode: dev\n  listen_port: 8080')" "$rendered" \
+    "tier off must produce exactly the pre-existing text, with no blank line or other artifact"
+}
+
+test_settings_shared_dir_storage_splice_tier_on_includes_block() {
+  local rendered
+  local hybrid_block
+  hybrid_block="$(hybrid_settings_shared_dir_storage_yaml "10.128.0.5" "/srv/scion-shared" "scion-hub-demohub-shared")"
+  rendered="$(cat <<EOF
+  auth:
+    mode: dev
+${hybrid_block:+${hybrid_block}
+}  listen_port: 8080
+EOF
+)"
+  assert_contains "$rendered" "shared_dir_storage:" "tier on must splice the block in"
+  assert_contains "$rendered" "  listen_port: 8080" "the rest of the block must still follow, unchanged"
+}
+
 test_cloud_run_label_args_new_service_gets_label() {
   fresh_gcloud_state
   local args

@@ -1202,6 +1202,32 @@ if [[ "$CLOUD_INIT_OK" != "true" ]]; then
 fi
 echo "  Cloud-init completed."
 
+# --- Get VM internal IP ---
+# Read once, here (right after the VM is confirmed up, rather than later
+# in Phase 4), since it's needed for both the NFS/k8s hybrid-tier setup
+# below and settings.yaml's dev-mode write in Phase 3, which happens
+# before Phase 4 -- not just the proxy-mode write Phase 4 makes.
+info "Getting VM internal IP..."
+VM_IP="$(gcloud compute instances describe "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --format="get(networkInterfaces[0].networkIP)")"
+if [[ -z "$VM_IP" ]]; then
+  err "Could not retrieve VM internal IP for ${INSTANCE_NAME}"
+  exit 1
+fi
+echo "  VM internal IP: ${VM_IP}"
+
+# --- Hybrid tier: settings.yaml shared_dir_storage block ---
+# Rendered once, here, and spliced into both settings.yaml writes below
+# (dev mode in Phase 3, proxy mode in Phase 5) so they stay in sync.
+# Empty when the tier is off, so both writes render byte-identical to
+# before this existed.
+HYBRID_SHARED_DIR_STORAGE_YAML=""
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  HYBRID_SHARED_DIR_STORAGE_YAML="$(hybrid_settings_shared_dir_storage_yaml \
+    "$VM_IP" "$HYBRID_NFS_EXPORT_ROOT" "$(hybrid_k8s_pv_name "$HUB_NAME")")"
+fi
+
 # --- Hybrid tier: NFS squash identity, server, and export ---
 # A tier-gated remote step, run here (once cloud-init has created the
 # "scion" user and group the squash identity's primary group and export
@@ -1367,7 +1393,8 @@ ${ADMIN_EMAIL:+    admin_emails:
     backend: local
   auth:
     mode: dev
-  listen_port: 8080
+${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
+}  listen_port: 8080
 SETTINGSEOF
   "
 
@@ -1589,21 +1616,10 @@ fi
 # ===================================================================
 section "Phase 4: IAP Proxy"
 
-# --- Get VM internal IP ---
-info "Getting VM internal IP..."
-VM_IP="$(gcloud compute instances describe "${INSTANCE_NAME}" \
-  --zone="${ZONE}" --project="${PROJECT_ID}" \
-  --format="get(networkInterfaces[0].networkIP)")"
-if [[ -z "$VM_IP" ]]; then
-  err "Could not retrieve VM internal IP for ${INSTANCE_NAME}"
-  exit 1
-fi
-echo "  VM internal IP: ${VM_IP}"
-
 # --- Hybrid tier: Kubernetes objects (PV, namespace, PVC) ---
 # Unlike the firewall rules and NFS export, the PV's identity includes
-# the VM's own internal IP, which isn't known until the VM exists -- so
-# this runs here, once VM_IP is read, rather than earlier in Phase 2
+# the VM's own internal IP (read back in Phase 3, above, once the VM is
+# confirmed up) -- so this runs here rather than earlier in Phase 2
 # alongside the firewall checks.
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
   info "Ensuring hybrid-tier Kubernetes objects (if needed)..."
@@ -1806,7 +1822,8 @@ ${ADMIN_EMAIL:+    admin_emails:
       provider: iap
       iap:
         audience: \"${IAP_AUDIENCE}\"
-  listen_port: 8080
+${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
+}  listen_port: 8080
 SETTINGSEOF
   "
 echo "  settings.yaml updated (auth mode: proxy, provider: iap)."
