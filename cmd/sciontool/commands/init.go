@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
@@ -144,23 +145,21 @@ func requirePrivilegeDropOrFail(targetUID int, requirePrivilegeDrop bool) error 
 	return nil
 }
 
-// exitCodePrivilegeDropRequired is the sentinel RunInit returns when
+// exitCodePrivilegeDropRequired is the exit code RunInit returns when
 // requirePrivilegeDropOrFail trips — never returned for any other reason.
-// substrate-serve's InitRunner (substrate_serve.go) checks for exactly this
-// value, not "any non-zero code," before calling os.Exit: every other
-// RunInit failure that also returns before the harness launches (staged-
-// secrets decode, git clone, required pre-start hooks, harness manifest
-// parsing, ...) already reports through statusHandler/the Hub the same way,
-// and is expected to leave substrate-serve's control server up so a caller
-// can still reach exec/healthz for diagnosis. Only the privilege-drop gate
-// needs PID 1 itself to die, and only as defence in depth: the synchronous
-// bootstrap precondition (pkg/sciontool/substrate.PrivilegeDropChecker) is
-// expected to catch this first, before /bootstrap ever responds 200 — which
-// is what actually makes Run() itself return an error and the broker delete
-// the actor, since a plain PID 1 exit happens after the 200 has already
-// gone out. If this sentinel is ever returned anyway, RunInit already
-// reported PhaseError to the Hub and to the local agent-info state (below),
-// the same way the git-clone failure path does.
+// It stays a distinct value (rather than a plain 1) purely so an operator
+// reading substrate-serve's own exit code can tell which failure this was;
+// substrate-serve's InitRunner (substrate_serve.go) itself now reacts to
+// any non-zero RunInit exit code the same way (see exitOnNonZeroInit), not
+// just this one. The synchronous bootstrap precondition
+// (pkg/sciontool/substrate.PrivilegeDropChecker) is expected to catch a
+// missing privilege drop before /bootstrap ever responds 200 — which is
+// what actually makes Run() itself return an error and the broker delete
+// the actor, since a PID 1 exit happens after the 200 has already gone
+// out — so reaching this at all is already defence in depth. Either way,
+// RunInit reports PhaseError to the Hub and to the local agent-info state
+// (below) before returning it, the same way the git-clone failure path
+// does.
 const exitCodePrivilegeDropRequired = 17
 
 // privilegeDropPreconditionDeps groups checkPrivilegeDropFeasible's external
@@ -169,20 +168,23 @@ const exitCodePrivilegeDropRequired = 17
 // runs in — the same reasoning as requirePrivilegeDropOrFail's separation
 // from setupHostUser.
 type privilegeDropPreconditionDeps struct {
-	hasCapSetUID func() bool
-	hasCapSetGID func() bool
-	lookupUser   func(string) (*user.User, error)
-	getenv       func(string) string
+	// hasCapBit checks one capability bit (see substratecaps.Capability.
+	// EffBit) at a time, rather than one bool field per capability, so
+	// checkPrivilegeDropFeasible can iterate substratecaps.Required in
+	// full without this struct having to grow a field — and a test having
+	// to remember to fill it in — every time that list does.
+	hasCapBit  func(bit uint) bool
+	lookupUser func(string) (*user.User, error)
+	getenv     func(string) string
 }
 
 // defaultPrivilegeDropPreconditionDeps wires checkPrivilegeDropFeasible to
 // the real process: /proc/self/status, the real "scion" user, and the real
 // environment.
 var defaultPrivilegeDropPreconditionDeps = privilegeDropPreconditionDeps{
-	hasCapSetUID: hasCapSetUID,
-	hasCapSetGID: hasCapSetGID,
-	lookupUser:   user.Lookup,
-	getenv:       os.Getenv,
+	hasCapBit:  hasCapBit,
+	lookupUser: user.Lookup,
+	getenv:     os.Getenv,
 }
 
 // errPrivilegeDropPrecondition is checkPrivilegeDropFeasible's only error:
@@ -191,7 +193,7 @@ var defaultPrivilegeDropPreconditionDeps = privilegeDropPreconditionDeps{
 // doc comment) rather than staying in a local log line. The precondition
 // check that actually failed is logged separately, server-side, by the
 // caller.
-var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not met: CAP_SETUID/CAP_SETGID, the scion user, or SCION_HOST_UID/GID were not all available")
+var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not met: a required capability, the scion user, or SCION_HOST_UID/GID were not all available")
 
 // checkPrivilegeDropFeasible is substrate-serve's synchronous /bootstrap
 // precondition (pkg/sciontool/substrate.PrivilegeDropChecker): it lets
@@ -201,10 +203,14 @@ var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not m
 // does — rather than a harness that silently never starts inside an actor
 // the broker still believes is running. It must be cheap and side-effect-
 // free — no sed, no usermod — so it deliberately does not reimplement
-// setupHostUser's realignment; it only re-checks the three conditions that
-// can each independently make that realignment silently produce nothing:
-//   - CAP_SETUID and CAP_SETGID effective (su, and the supervisor's own
-//     syscall.Credential drop, both need both);
+// setupHostUser's realignment; it only re-checks the conditions that can
+// each independently make that realignment silently produce nothing:
+//   - every capability in substratecaps.Required effective — not just
+//     SETUID/SETGID: a template built without one of them (e.g. CHOWN)
+//     must fail here, synchronously, rather than pass this check and die
+//     deep inside RunInit once the harness is already supposed to be
+//     starting (proven live at 017adc1b5 — see substratecaps.Required's
+//     CHOWN entry for the exact log lines);
 //   - the "scion" user resolvable at all;
 //   - SCION_HOST_UID/GID present and parseable (buildBootstrapEnv sets these
 //     into req.Env, applied to the process environment by handleBootstrap
@@ -215,8 +221,10 @@ var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not m
 // gap is exactly why requirePrivilegeDropOrFail stays as defence in depth in
 // RunInit itself.
 func checkPrivilegeDropFeasible(d privilegeDropPreconditionDeps) error {
-	if !d.hasCapSetUID() || !d.hasCapSetGID() {
-		return errPrivilegeDropPrecondition
+	for _, c := range substratecaps.Required {
+		if !d.hasCapBit(c.EffBit) {
+			return errPrivilegeDropPrecondition
+		}
 	}
 	if _, err := d.lookupUser("scion"); err != nil {
 		return errPrivilegeDropPrecondition
@@ -276,27 +284,36 @@ func resolveAgentHome(targetUID int, rootless bool) string {
 	return agentHome
 }
 
-// reportPrivilegeDropFailure reports a requirePrivilegeDropOrFail failure
-// the same way RunInit's git-clone failure path does: local agent-info
-// state to PhaseError with a message, plus a best-effort direct Hub report
-// (the broker heartbeat is the fallback if that call fails or the Hub isn't
-// configured). Extracted so this reporting is testable with a plain temp
+// reportInitFailure reports a RunInit failure the same way the git-clone
+// failure path pioneered: local agent-info state to PhaseError with a
+// message, plus a best-effort direct Hub report (the broker heartbeat is
+// the fallback if that call fails or the Hub isn't configured). cause's
+// message ends up in the response substrate-serve's control server may
+// expose and in the Hub-visible message, so callers must only pass fixed,
+// secret-free errors (as errPrivilegeDropRequired and every caller below
+// do) — never one built from raw command output or file contents.
+//
+// Shared by every RunInit failure path that needs to report before
+// returning, rather than each constructing its own StatusHandler: this is
+// what makes it possible to close a "some early-return paths report,
+// others silently don't" gap in one place. Extracted (originally as
+// reportPrivilegeDropFailure) so it's testable with a plain temp
 // directory, independent of setupHostUser's real-environment-dependent
 // agentHome resolution.
-func reportPrivilegeDropFailure(agentHome string, cause error) {
+func reportInitFailure(agentHome string, cause error) {
 	statusHandler := handlers.NewStatusHandler()
 	statusHandler.StatusPath = filepath.Join(agentHome, "agent-info.json")
-	errMsg := cause.Error() // errPrivilegeDropRequired is fixed and secret-free
+	errMsg := cause.Error()
 	_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
 	_ = statusHandler.SetMessage(errMsg)
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if hubErr := hubClient.ReportState(hubCtx, state.PhaseError, "", errMsg); hubErr != nil {
-			log.Error("Failed to report privilege-drop failure to Hub: %v", hubErr)
+			log.Error("Failed to report init failure to Hub: %v", hubErr)
 		}
 		hubCancel()
 	} else {
-		log.Info("Hub client not configured, privilege-drop failure will be relayed via broker heartbeat")
+		log.Info("Hub client not configured, init failure will be relayed via broker heartbeat")
 	}
 }
 
@@ -353,7 +370,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// direct Hub report), instead of only logging it — see
 		// exitCodePrivilegeDropRequired's doc comment for why this is
 		// defence in depth rather than the primary fail-closed mechanism.
-		reportPrivilegeDropFailure(resolveAgentHome(targetUID, rootless), err)
+		reportInitFailure(resolveAgentHome(targetUID, rootless), err)
 		return exitCodePrivilegeDropRequired
 	}
 
@@ -381,10 +398,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 		staged, err := stagedsecrets.Decode(encoded)
 		if err != nil {
 			log.Error("Failed to decode staged secrets: %v", err)
+			// Structural (base64/JSON) decode errors, never secret content —
+			// same reasoning as the git-clone failure message below.
+			reportInitFailure(agentHome, fmt.Errorf("failed to decode staged secrets: %w", err))
 			return 1
 		}
 		if err := stagedsecrets.Write(agentHome, staged); err != nil {
 			log.Error("Failed to write staged secrets: %v", err)
+			reportInitFailure(agentHome, fmt.Errorf("failed to write staged secrets: %w", err))
 			return 1
 		}
 		_ = os.Unsetenv(stagedsecrets.EnvVar)
@@ -494,6 +515,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		log.Error("Failed to load harness manifest: %v", harnessReqErr)
 		// Treat parse errors on a present manifest as fatal — the harness
 		// staged something we cannot interpret.
+		reportInitFailure(agentHome, fmt.Errorf("failed to load harness manifest: %w", harnessReqErr))
 		return 1
 	}
 
@@ -598,14 +620,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 		if err != nil {
 			log.Error("Failed to load harness env overlay %s: %v", overlayPath, err)
 			if harnessReq.Required {
-				_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
-				_ = statusHandler.SetMessage(fmt.Sprintf("invalid harness env overlay: %v", err))
+				reportInitFailure(agentHome, fmt.Errorf("invalid harness env overlay: %w", err))
 				return 1
 			}
 		} else if len(overlay) > 0 {
 			if policy, ok := overlay[hooks.NativeTelemetryPolicyKey]; ok {
 				if policy != "enabled" && policy != "disabled" {
 					log.Error("Invalid native telemetry policy marker")
+					reportInitFailure(agentHome, errors.New("invalid native telemetry policy marker in harness env overlay"))
 					return 1
 				}
 				nativeTelemetryPolicy = policy
@@ -833,6 +855,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// Child exited immediately - likely a startup error
 		if result.err != nil {
 			log.Error("Child exited immediately with error: %v (uid=%d, gid=%d)", result.err, os.Geteuid(), os.Getegid())
+			reportInitFailure(agentHome, fmt.Errorf("child process failed to start: %w", result.err))
 			return 1
 		}
 		log.Info("Child exited immediately with code %d (uid=%d, gid=%d)", result.code, os.Geteuid(), os.Getegid())
@@ -1289,6 +1312,7 @@ waitLoop:
 
 	if result.err != nil {
 		log.Error("Supervisor error: %v", result.err)
+		reportInitFailure(agentHome, fmt.Errorf("supervisor error: %w", result.err))
 		return 1
 	}
 
@@ -2646,10 +2670,22 @@ func parseCapSetGID(statusContent string) bool {
 	return parseCapBit(statusContent, 6) // CAP_SETGID = bit 6
 }
 
+// hasCapBit is hasCapSetUID/hasCapSetGID's generalization to an arbitrary
+// capability bit (see substratecaps.Capability.EffBit), used by
+// checkPrivilegeDropFeasible to verify substratecaps.Required in full —
+// not just SETUID/SETGID — without a hardcoded function per capability.
+func hasCapBit(bit uint) bool {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	return parseCapBit(string(data), bit)
+}
+
 // parseCapBit parses /proc/self/status content and returns whether the given
 // bit is set in the effective capability set (CapEff). Shared by
-// parseCapSetUID and parseCapSetGID so the two can never drift in how they
-// read the file.
+// parseCapSetUID and parseCapSetGID (and hasCapBit) so they can never drift
+// in how they read the file.
 func parseCapBit(statusContent string, bit uint) bool {
 	for _, line := range strings.Split(statusContent, "\n") {
 		if strings.HasPrefix(line, "CapEff:") {

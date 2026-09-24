@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
+	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
@@ -712,13 +713,14 @@ func TestSubstrateTemplateName_Stable(t *testing.T) {
 	}
 }
 
-// TestBuildActorTemplate_SecurityContextGrantsExactlySetuidSetgid confirms
-// the container's SecurityContext carries exactly the two capabilities
-// su (execAsUserCmd) needs to drop from Substrate's forced UID 0 to the
-// scion user — no more, no less. "ALL" is rejected by Substrate and drop
-// is applied before add, so this must name each capability explicitly
+// TestBuildActorTemplate_SecurityContextGrantsExactlyRequiredCapabilities
+// confirms the container's SecurityContext carries exactly
+// substratecaps.Required — no more, no less, and in particular never
+// silently falls back to fewer capabilities than checkPrivilegeDropFeasible
+// (cmd/sciontool/commands) verifies. "ALL" is rejected by Substrate and
+// drop is applied before add, so this must name each capability explicitly
 // rather than lean on a default set.
-func TestBuildActorTemplate_SecurityContextGrantsExactlySetuidSetgid(t *testing.T) {
+func TestBuildActorTemplate_SecurityContextGrantsExactlyRequiredCapabilities(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
 	tmpl := buildActorTemplate("scion-test", "scion-abc123", image, config.V1SubstrateConfig{}, nil)
 
@@ -727,15 +729,15 @@ func TestBuildActorTemplate_SecurityContextGrantsExactlySetuidSetgid(t *testing.
 	}
 	sc := tmpl.GetContainers()[0].GetSecurityContext()
 	if sc == nil {
-		t.Fatal("Container.SecurityContext is nil, want Capabilities.Add = [SETUID, SETGID]")
+		t.Fatalf("Container.SecurityContext is nil, want Capabilities.Add = %v", substratecaps.Names())
 	}
 	caps := sc.GetCapabilities()
 	if caps == nil {
-		t.Fatal("SecurityContext.Capabilities is nil, want Add = [SETUID, SETGID]")
+		t.Fatalf("SecurityContext.Capabilities is nil, want Add = %v", substratecaps.Names())
 	}
-	want := []string{"SETUID", "SETGID"}
+	want := substratecaps.Names()
 	if !slices.Equal(caps.GetAdd(), want) {
-		t.Errorf("Capabilities.Add = %v, want %v", caps.GetAdd(), want)
+		t.Errorf("Capabilities.Add = %v, want %v (substratecaps.Required)", caps.GetAdd(), want)
 	}
 	if len(caps.GetDrop()) != 0 {
 		t.Errorf("Capabilities.Drop = %v, want empty — this template only ever adds", caps.GetDrop())
@@ -763,7 +765,7 @@ func TestSubstrateTemplateName_ChangesWithCapabilitySet(t *testing.T) {
 		t.Errorf("substrateTemplateName() changed with no actual capability-set change: %q != %q", before, same)
 	}
 
-	substrateContainerCapabilitiesAdd = []string{"SETUID", "SETGID", "CHOWN"}
+	substrateContainerCapabilitiesAdd = []string{"SETUID", "SETGID", "CHOWN", "FOWNER"}
 	after := substrateTemplateName(image, cfg, nil)
 	if before == after {
 		t.Error("substrateTemplateName() did not change when the capability set changed — an existing golden template would be silently reused without the new capability")

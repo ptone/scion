@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -38,20 +39,18 @@ import (
 const substrateServeEntrypointVersion = "substrate-serve/v1"
 
 // substrateContainerCapabilitiesAdd lists the Linux capabilities
-// buildActorTemplate grants on top of Substrate's default set. It is a
-// single source of truth shared with substrateTemplateName's hash input
-// (below), so the two can never drift apart: any future change here also
-// changes the template's content-address, forcing a new golden template
-// instead of silently reusing one built without the capabilities a code
-// change just added or removed.
-//
-// SETUID and SETGID: Substrate always starts the actor process as UID 0 /
-// GID 0 with a minimal default capability set (AUDIT_WRITE, KILL,
-// NET_BIND_SERVICE) that doesn't include them — see buildActorTemplate's
-// comment on the container's SecurityContext for why scion needs them
-// anyway: both the supervisor's own privilege drop and su (via
-// execAsUserCmd) need them to leave root.
-var substrateContainerCapabilitiesAdd = []string{"SETUID", "SETGID"}
+// buildActorTemplate grants on top of Substrate's default set. It is
+// substratecaps.Names() — the single source of truth shared with
+// checkPrivilegeDropFeasible (cmd/sciontool/commands), so the template and
+// the /bootstrap precondition that verifies it can never drift apart — see
+// package substratecaps's doc comment for why a leaf package, and
+// substratecaps.Required for what each capability is for and the evidence
+// behind it. This is also the hash input for substrateTemplateName
+// (below), so any future change here also changes the template's
+// content-address, forcing a new golden template instead of silently
+// reusing one built without the capabilities a code change just added or
+// removed.
+var substrateContainerCapabilitiesAdd = substratecaps.Names()
 
 // defaultTemplateReadyTimeout bounds how long Run waits for a newly created
 // ActorTemplate's golden snapshot to become ready, when
@@ -182,23 +181,23 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				// (ContainerSpec has no user field — agent-substrate/substrate
 				// internal/ocispec/ocispec.go) with a minimal default
 				// capability set (AUDIT_WRITE, KILL, NET_BIND_SERVICE —
-				// cmd/atelet/oci.go) that does not include SETUID/SETGID.
-				// scion never runs the harness or exec as root, and two
-				// separate consumers both need CAP_SETUID/CAP_SETGID to drop
-				// from root to the scion user: the supervisor's own
-				// syscall.Credential drop (pkg/sciontool/supervisor/
-				// supervisor.go's Run, ~lines 113-150 — exec.Cmd performs
-				// setgroups(2)/setgid(2)/setuid(2) under the hood for a
-				// Credential-bearing child) for the harness process itself,
-				// and su (via execAsUserCmd, used for `sciontool substrate-
-				// serve exec`), which fails its own setgroups(2) call with
-				// EPERM otherwise — the same capabilities Docker's default
-				// set already grants, which is why this only surfaces on
-				// Substrate. These are added here, not assumed from a
-				// container default, so they apply inside the gVisor sentry
-				// the actor runs in; su drops them (along with every other
-				// capability) for the scion process tree it execs into, so
-				// nothing scion-owned ever runs privileged.
+				// cmd/atelet/oci.go) that does not include any of
+				// substratecaps.Required. scion never runs the harness or
+				// exec as root, and dropping from root to the scion user —
+				// via the supervisor's own syscall.Credential drop
+				// (pkg/sciontool/supervisor/supervisor.go's Run, ~lines
+				// 113-150) and su (via execAsUserCmd, used for `sciontool
+				// substrate-serve exec`) — as well as RunInit's own chowns of
+				// the log file and workspace immediately after that drop,
+				// all need capabilities this default set doesn't grant. See
+				// substratecaps.Required for exactly which ones and the
+				// evidence behind each — the same capabilities Docker's
+				// default set already grants, which is why this only
+				// surfaces on Substrate. These are added here, not assumed
+				// from a container default, so they apply inside the gVisor
+				// sentry the actor runs in; su drops them (along with every
+				// other capability) for the scion process tree it execs
+				// into, so nothing scion-owned ever runs privileged.
 				SecurityContext: &ateapipb.SecurityContext{
 					Capabilities: &ateapipb.Capabilities{
 						// Clone, not the package-level slice itself: any

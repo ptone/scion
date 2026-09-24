@@ -71,15 +71,35 @@ func substrateServeInitOptions(forwardTermSignal bool) InitRunOptions {
 	return InitRunOptions{ForwardTermSignal: forwardTermSignal, RequirePrivilegeDrop: true}
 }
 
-// exitOnPrivilegeDropSentinel is substrate-serve's InitRunner-wrapping
-// defence in depth (see exitCodePrivilegeDropRequired's doc comment): if
-// RunInit ever returns that specific sentinel, it calls exit(code) so PID 1
+// exitOnNonZeroInit is substrate-serve's InitRunner-wrapping fail-loud
+// mechanism: any non-zero RunInit exit code calls exit(code) so PID 1
 // itself dies, rather than leaving substrate-serve's control server up
-// having started nothing. Any other code (0, or the harness's own once one
-// actually launched) is left alone. exit is a parameter so a test can drive
-// this without an actual os.Exit call terminating the test binary.
-func exitOnPrivilegeDropSentinel(exitCode int, exit func(int)) {
-	if exitCode == exitCodePrivilegeDropRequired {
+// reporting "running" over an actor that has nothing left happening
+// inside it. This was originally scoped to only the privilege-drop
+// sentinel (exitCodePrivilegeDropRequired); it was widened after a live
+// git-clone failure ("in-process init exited with code 1") left an actor
+// showing "running" the same way, proving the gap wasn't unique to the
+// privilege-drop path.
+//
+// Exit code 0 is the one case deliberately left alone: it is RunInit's
+// literal definition of nothing having gone wrong, whether that's the
+// supervised harness process exiting cleanly on its own or (today, since
+// nothing else ever asks it to stop — substrate-serve does not forward
+// SIGTERM to the harness, see runSubstrateServe) any other 0 exit RunInit
+// produces. Every RunInit failure that returns a specific non-zero
+// path — before the harness ever launches (staged secrets, git clone,
+// harness manifest, the privilege-drop gate, ...) or after it launched and
+// then crashed or hit its limits — already calls reportInitFailure (or,
+// for limits/crash classification, RunInit's own end-of-run reporting)
+// before returning, so this never needs to guess at a message: it only
+// adds the PID 1 exit, which is the one signal Substrate's own process
+// supervision observes regardless of whether any of those Hub calls
+// actually got through.
+//
+// exit is a parameter so a test can drive this without an actual os.Exit
+// call terminating the test binary.
+func exitOnNonZeroInit(exitCode int, exit func(int)) {
+	if exitCode != 0 {
 		exit(exitCode)
 	}
 }
@@ -102,7 +122,7 @@ func newSubstrateServeServer() *substrate.Server {
 		substrate.WithPrivilegeDropChecker(substrateServePrivilegeDropChecker),
 		substrate.WithInitRunner(func(argv []string, forwardTermSignal bool) int {
 			exitCode := RunInit(argv, substrateServeInitOptions(forwardTermSignal))
-			exitOnPrivilegeDropSentinel(exitCode, os.Exit)
+			exitOnNonZeroInit(exitCode, os.Exit)
 			return exitCode
 		}),
 	)

@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 )
 
 // doSubstrateServeJSON drives an HTTP request through a *substrate.Server's
@@ -80,17 +82,27 @@ func TestHasCapSetGID_ParsesEffectiveCapabilities(t *testing.T) {
 }
 
 // fakePrivilegeDropDeps builds privilegeDropPreconditionDeps with every
-// dependency controllable, defaulting to a fully-feasible environment so
-// each test case only needs to override the one thing it's testing.
+// dependency controllable, defaulting to a fully-feasible environment (every
+// capability present) so each test case only needs to override the one
+// thing it's testing.
 func fakePrivilegeDropDeps(t *testing.T) privilegeDropPreconditionDeps {
 	t.Helper()
 	env := map[string]string{"SCION_HOST_UID": "1000", "SCION_HOST_GID": "1000"}
 	return privilegeDropPreconditionDeps{
-		hasCapSetUID: func() bool { return true },
-		hasCapSetGID: func() bool { return true },
-		lookupUser:   func(string) (*user.User, error) { return &user.User{Username: "scion", Uid: "1000", Gid: "1000"}, nil },
-		getenv:       func(k string) string { return env[k] },
+		hasCapBit:  func(uint) bool { return true },
+		lookupUser: func(string) (*user.User, error) { return &user.User{Username: "scion", Uid: "1000", Gid: "1000"}, nil },
+		getenv:     func(k string) string { return env[k] },
 	}
+}
+
+// fakeHasCapBitMissing returns a hasCapBit fake that reports every bit
+// present except the ones listed.
+func fakeHasCapBitMissing(missing ...uint) func(uint) bool {
+	missingSet := make(map[uint]bool, len(missing))
+	for _, b := range missing {
+		missingSet[b] = true
+	}
+	return func(bit uint) bool { return !missingSet[bit] }
 }
 
 func TestCheckPrivilegeDropFeasible_AllPresent_Passes(t *testing.T) {
@@ -99,19 +111,28 @@ func TestCheckPrivilegeDropFeasible_AllPresent_Passes(t *testing.T) {
 	}
 }
 
-func TestCheckPrivilegeDropFeasible_MissingCapSetUID_Fails(t *testing.T) {
-	d := fakePrivilegeDropDeps(t)
-	d.hasCapSetUID = func() bool { return false }
-	if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
-		t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition", err)
-	}
-}
-
-func TestCheckPrivilegeDropFeasible_MissingCapSetGID_Fails(t *testing.T) {
-	d := fakePrivilegeDropDeps(t)
-	d.hasCapSetGID = func() bool { return false }
-	if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
-		t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition", err)
+// TestCheckPrivilegeDropFeasible_EveryRequiredCapabilityIsChecked is (A)'s
+// direct proof that checkPrivilegeDropFeasible verifies the FULL committed
+// capability set (substratecaps.Required), not a hardcoded SETUID/SETGID
+// pair: for each capability in that shared list, simulating just that one
+// missing must trip the precondition. Because both this loop and
+// checkPrivilegeDropFeasible's own loop iterate the same substratecaps.
+// Required slice, a capability added there is automatically covered here
+// too — this is what "can never drift apart" means in practice.
+//
+// Mutation check performed: temporarily hardcoding
+// checkPrivilegeDropFeasible's loop to only
+// `!d.hasCapBit(7) || !d.hasCapBit(6)` (the old SETUID/SETGID-only check)
+// makes this test's "CHOWN" subtest fail (confirmed locally, reverted).
+func TestCheckPrivilegeDropFeasible_EveryRequiredCapabilityIsChecked(t *testing.T) {
+	for _, c := range substratecaps.Required {
+		t.Run(c.Name, func(t *testing.T) {
+			d := fakePrivilegeDropDeps(t)
+			d.hasCapBit = fakeHasCapBitMissing(c.EffBit)
+			if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
+				t.Errorf("checkPrivilegeDropFeasible() = %v with only %s (bit %d) missing, want errPrivilegeDropPrecondition", err, c.Name, c.EffBit)
+			}
+		})
 	}
 }
 
@@ -168,32 +189,33 @@ func TestSubstrateServeInitOptions_RequiresPrivilegeDrop(t *testing.T) {
 	}
 }
 
-func TestExitOnPrivilegeDropSentinel_SentinelExits(t *testing.T) {
-	var gotCode int
-	var called bool
-	exitOnPrivilegeDropSentinel(exitCodePrivilegeDropRequired, func(code int) {
-		called = true
-		gotCode = code
-	})
-	if !called {
-		t.Fatal("exit was not called for exitCodePrivilegeDropRequired")
-	}
-	if gotCode != exitCodePrivilegeDropRequired {
-		t.Errorf("exit called with %d, want %d", gotCode, exitCodePrivilegeDropRequired)
+// TestExitOnNonZeroInit_NonZeroExits covers every non-zero code this can
+// plausibly see: the privilege-drop sentinel, a plain 1 (most RunInit
+// failure paths), and a couple of harness-style codes (137 = 128+SIGKILL,
+// a common "container was killed" convention) — all of them must exit.
+func TestExitOnNonZeroInit_NonZeroExits(t *testing.T) {
+	for _, code := range []int{1, 2, 17, exitCodePrivilegeDropRequired, 137} {
+		var gotCode int
+		var called bool
+		exitOnNonZeroInit(code, func(c int) {
+			called = true
+			gotCode = c
+		})
+		if !called {
+			t.Errorf("exit was not called for code %d", code)
+		}
+		if gotCode != code {
+			t.Errorf("exit called with %d, want %d", gotCode, code)
+		}
 	}
 }
 
-// TestExitOnPrivilegeDropSentinel_OtherCodesDoNotExit is the counterpart
-// proving this is NOT "any non-zero code" — see
-// exitCodePrivilegeDropRequired's doc comment for why 0 (success) and any
-// other code (the harness's own exit code, once one actually launched) must
-// never trigger os.Exit here.
-func TestExitOnPrivilegeDropSentinel_OtherCodesDoNotExit(t *testing.T) {
-	for _, code := range []int{0, 1, 2, 137} {
-		exitOnPrivilegeDropSentinel(code, func(int) {
-			t.Errorf("exit was called for code %d, want no call", code)
-		})
-	}
+// TestExitOnNonZeroInit_ZeroDoesNotExit is the one deliberate exception —
+// see exitOnNonZeroInit's doc comment for why 0 alone is left alone.
+func TestExitOnNonZeroInit_ZeroDoesNotExit(t *testing.T) {
+	exitOnNonZeroInit(0, func(int) {
+		t.Error("exit was called for code 0, want no call")
+	})
 }
 
 // TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap
@@ -228,19 +250,19 @@ func TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap(t *te
 // drives the actual RunInit, not a stub).
 // -----------------------------------------------------------------------
 
-// TestReportPrivilegeDropFailure_WritesPhaseErrorAndMessage proves the
-// defence-in-depth reporting requirement: on a
-// requirePrivilegeDropOrFail failure, RunInit must report PhaseError to
-// local agent-info state (the same way the git-clone failure path does),
+// TestReportInitFailure_WritesPhaseErrorAndMessage proves the shared
+// reporting helper every RunInit failure path (including the privilege-drop
+// defence-in-depth check) calls: it must report PhaseError to local
+// agent-info state (the same way the git-clone failure path pioneered),
 // not just log it. Driven directly against a temp directory rather than
 // through RunInit's real setupHostUser/resolveAgentHome, which resolve
 // against whatever "scion" user (if any) actually exists on the machine
 // running the test.
-func TestReportPrivilegeDropFailure_WritesPhaseErrorAndMessage(t *testing.T) {
+func TestReportInitFailure_WritesPhaseErrorAndMessage(t *testing.T) {
 	scrubHubEnv(t)
 	tmpHome := t.TempDir()
 
-	reportPrivilegeDropFailure(tmpHome, errPrivilegeDropRequired)
+	reportInitFailure(tmpHome, errPrivilegeDropRequired)
 
 	raw, err := os.ReadFile(filepath.Join(tmpHome, "agent-info.json"))
 	if err != nil {
@@ -271,7 +293,7 @@ func TestReportPrivilegeDropFailure_WritesPhaseErrorAndMessage(t *testing.T) {
 // those branches ever produce a non-zero targetUID without
 // SCION_HOST_UID/GID set. It asserts only the sentinel return code, which
 // is independent of where resolveAgentHome happens to land on this
-// particular machine (see TestReportPrivilegeDropFailure_* for that part).
+// particular machine (see TestReportInitFailure_* for that part).
 func TestRunInit_PrivilegeDropFailure_ReturnsSentinel(t *testing.T) {
 	scrubHubEnv(t)
 	t.Setenv("SCION_HOST_UID", "")
@@ -281,6 +303,41 @@ func TestRunInit_PrivilegeDropFailure_ReturnsSentinel(t *testing.T) {
 	got := RunInit([]string{"true"}, InitRunOptions{ForwardTermSignal: false, RequirePrivilegeDrop: true})
 	if got != exitCodePrivilegeDropRequired {
 		t.Fatalf("RunInit() = %d, want exitCodePrivilegeDropRequired (%d)", got, exitCodePrivilegeDropRequired)
+	}
+}
+
+// TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure drives the real
+// RunInit through a *different* pre-launch failure path than the
+// privilege-drop gate (round-13 follow-up item B: "ANY non-zero in-process
+// init exit... must not be limited to the privilege-drop sentinel") to
+// prove reportInitFailure was actually wired at this call site, not just
+// the privilege-drop one. SCION_STAGED_SECRETS holding undecodable data
+// makes stagedsecrets.Decode fail before anything else in RunInit runs.
+func TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure(t *testing.T) {
+	scrubHubEnv(t)
+	t.Setenv("SCION_HOST_UID", "")
+	t.Setenv("SCION_HOST_GID", "")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv(stagedsecrets.EnvVar, "not valid base64 or json!!!")
+
+	got := RunInit([]string{"true"}, InitRunOptions{ForwardTermSignal: false})
+	if got == 0 {
+		t.Fatal("RunInit() = 0, want non-zero for an undecodable SCION_STAGED_SECRETS payload")
+	}
+
+	raw, err := os.ReadFile(filepath.Join(tmpHome, "agent-info.json"))
+	if err != nil {
+		t.Fatalf("expected agent-info.json to be written: %v", err)
+	}
+	var info struct {
+		Phase string `json:"phase"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		t.Fatalf("unmarshal agent-info.json %q: %v", raw, err)
+	}
+	if info.Phase != string(state.PhaseError) {
+		t.Errorf("agent-info.json phase = %q, want %q", info.Phase, state.PhaseError)
 	}
 }
 
