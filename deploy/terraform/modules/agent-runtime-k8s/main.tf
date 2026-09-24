@@ -166,6 +166,22 @@ resource "kubernetes_job_v1" "nfs_init" {
   }
 }
 
+# storage_class_name = "" does not bind on GKE: the cluster's default-class
+# admission controller sets an unset/empty PVC storage class to the default
+# (standard-rwo), which never matches this static NFS PV. Found in the
+# first hub apply attempt (F-93). A dedicated no-provisioner StorageClass,
+# referenced explicitly by both the PV and the PVC, is the fix — it's the
+# standard pattern for static/pre-provisioned volumes.
+resource "kubernetes_storage_class_v1" "nfs" {
+  metadata {
+    name = "${var.hub_name}-nfs"
+  }
+
+  storage_provisioner = "kubernetes.io/no-provisioner"
+  reclaim_policy      = "Retain"
+  volume_binding_mode = "Immediate"
+}
+
 resource "kubernetes_persistent_volume" "this" {
   metadata {
     name = "${var.hub_name}-nfs"
@@ -177,7 +193,7 @@ resource "kubernetes_persistent_volume" "this" {
     }
     access_modes                     = ["ReadWriteMany"]
     persistent_volume_reclaim_policy = "Retain"
-    storage_class_name               = ""
+    storage_class_name               = kubernetes_storage_class_v1.nfs.metadata[0].name
     mount_options                    = ["vers=3", "hard", "nconnect=4"]
 
     persistent_volume_source {
@@ -199,7 +215,7 @@ resource "kubernetes_persistent_volume_claim" "this" {
 
   spec {
     access_modes       = ["ReadWriteMany"]
-    storage_class_name = ""
+    storage_class_name = kubernetes_storage_class_v1.nfs.metadata[0].name
     volume_name        = kubernetes_persistent_volume.this.metadata[0].name
 
     resources {
