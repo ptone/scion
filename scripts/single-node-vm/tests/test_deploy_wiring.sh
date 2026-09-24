@@ -37,8 +37,11 @@ INSTANCE_NAME="scion-hub-${HUB}"
 # GKE_TARGET_JSON_FRAGMENT, if given, must be a leading-comma JSON
 # fragment like `, "gke_target": {...}` to splice in before the closing
 # brace.
+# IMAGE_SOURCE/IMAGE_REGISTRY default to "build"/"" (the pre-existing
+# fixture shape); tier-on create tests must override to "registry" plus
+# a real-looking path, since the tier now refuses source=build.
 base_config_json() {
-  local hub="$1" extra="${2:-}"
+  local hub="$1" extra="${2:-}" image_source="${3:-build}" image_registry="${4:-}"
   cat <<EOF
 {
   "hub_name": "${hub}",
@@ -47,7 +50,7 @@ base_config_json() {
   "machine_size": "small",
   "disk_size_gb": 200,
   "chat_plugins": [],
-  "container_images": {"source": "build", "registry": "", "force_rebuild": false},
+  "container_images": {"source": "${image_source}", "registry": "${image_registry}", "force_rebuild": false},
   "admin_email": "admin@example.com",
   "update_policy": "auto",
   "release_channel": "nightly"${extra}
@@ -278,7 +281,7 @@ test_deploy_create_tier_on_tags_new_vm() {
   seed_cluster "mycluster" "default" "mig-a"
   seed_mig "mig-a" "template-a"
   seed_template "template-a" "gke-mycluster-abc123-node"
-  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local log create_line
   log="$(gcloud_log)"
   create_line="$(echo "$log" | grep 'compute instances create' | head -1)"
@@ -296,7 +299,7 @@ test_deploy_create_tier_on_existing_vm_gets_add_tags() {
   seed_cluster "mycluster" "default" "mig-a"
   seed_mig "mig-a" "template-a"
   seed_template "template-a" "gke-mycluster-abc123-node"
-  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local log
   log="$(gcloud_log)"
   assert_eq "0" "$(echo "$log" | grep -c 'compute instances create' || true)" \
@@ -314,7 +317,7 @@ test_deploy_create_discovery_before_first_create() {
   seed_cluster "mycluster" "default" "mig-a"
   seed_mig "mig-a" "template-a"
   seed_template "template-a" "gke-mycluster-abc123-node"
-  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local log discover_line first_create_line
   log="$(gcloud_log)"
   discover_line="$(line_number 'container clusters describe' "$log")"
@@ -420,7 +423,7 @@ test_deploy_create_api_check_tier_on_adds_container() {
   seed_cluster "mycluster" "default" "mig-a"
   seed_mig "mig-a" "template-a"
   seed_template "template-a" "gke-mycluster-abc123-node"
-  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local enable_line
   enable_line="$(gcloud_log | grep 'services enable' | head -1)"
   assert_eq "1" "$(gcloud_log | grep -c 'services enable' || true)" "exactly one enable call, for container only"
@@ -450,7 +453,7 @@ test_deploy_create_api_check_list_failure_tier_on_fails_actionably() {
   set_services_list_will_fail
   local config_file
   config_file="$(mktemp)"
-  printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)")" > "$config_file"
+  printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" > "$config_file"
   local log rc
   log="$(timeout 10 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
   rc=$?
@@ -460,6 +463,38 @@ test_deploy_create_api_check_list_failure_tier_on_fails_actionably() {
   assert_eq "0" "$(gcloud_log | grep -c 'compute instances create' || true)" \
     "nothing should be created when the API check can't tell what's missing, tier on"
   assert_contains "$log" "serviceusage" "the message should explain why an unknown API state is refused, not just fail silently"
+}
+
+# =====================================================================
+# GKE nodes can't pull from the VM's local Docker store: tier-on refuses
+# container_images.source=build (and any localhost/ registry) before any
+# create. The refusal check itself doesn't distinguish config-mode from
+# interactive-mode input -- both set the same IMAGE_SOURCE/IMAGE_REGISTRY
+# variables the check reads -- so this is covered once, in config mode,
+# where it can run fast and deterministically; the interactive image
+# prompt (Question 6) feeds the identical two variables.
+# =====================================================================
+
+test_deploy_create_tier_on_source_build_refused() {
+  fresh_gcloud_state
+  local config_file
+  config_file="$(mktemp)"
+  printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)")" > "$config_file"
+  local log rc
+  log="$(timeout 10 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
+  rc=$?
+  rm -f "$config_file"
+  assert_true "$([[ "$rc" -ne 0 && "$rc" -ne 124 ]] && echo true || echo false)" \
+    "tier-on with source=build must be refused fast, not hang until the create-mode timeout"
+  assert_eq "0" "$(gcloud_log | grep -c 'compute instances create' || true)" "nothing should be created"
+  assert_contains "$log" "cannot pull images" "the message should explain why"
+}
+
+test_deploy_create_tier_off_source_build_unaffected() {
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB")"
+  assert_true "$([[ -f "${GCLOUD_STUB_STATE_DIR}/vm-create-happened" ]] && echo true || echo false)" \
+    "tier-off must still reach VM creation with the default source=build config, unaffected by this refusal"
 }
 
 # =====================================================================
