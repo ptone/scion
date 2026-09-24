@@ -754,6 +754,16 @@ fi
 hybrid_read_config "$PROJECT_ID" "$HUB_NAME"
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
   echo "  Hybrid tier: enabled (GKE cluster: ${GKE_NAME}, location: ${GKE_LOCATION})"
+  # GKE nodes pull the agent image from the registry named in
+  # settings.yaml's image_registry field; they have no access to the VM's
+  # own localhost image store, which is exactly where container_images.
+  # source=build puts it. Refused here, before any create, rather than
+  # left to fail confusingly once a pod actually tries to pull it.
+  if [[ "$IMAGE_SOURCE" == "build" || "$IMAGE_REGISTRY" == localhost/* ]]; then
+    err "The hybrid tier is on, but container_images.source is 'build' (registry: ${IMAGE_REGISTRY}). GKE nodes cannot pull images from the VM's local Docker store."
+    err "Set container_images.source to 'registry' and container_images.registry to a registry the cluster's node service account can read (for example an Artifact Registry repository with artifactregistry.reader granted to that service account)."
+    exit 1
+  fi
 fi
 
 # Derived values
