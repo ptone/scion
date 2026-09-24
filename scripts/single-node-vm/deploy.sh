@@ -321,6 +321,17 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   fi
   TEARDOWN_HAD_FAILURE=false
 
+  # Hybrid tier: the static internal IP reservation, checked the same
+  # way as the firewall rules -- unconditionally, even with the tier off
+  # in the current config, and aborting the whole teardown before any
+  # delete on an unmarked same-name match.
+  echo ""
+  echo "Checking hybrid-tier internal IP reservation ownership:"
+  hybrid_internal_ip_teardown_check "$HUB_NAME" "$PROJECT_ID" "$REGION"
+  if [[ "$HYBRID_INTERNAL_IP_TEARDOWN_FAILED" == "true" ]]; then
+    exit 1
+  fi
+
   # Hybrid tier (Kubernetes objects): gke_target.name is read directly,
   # never via the interactive hybrid_read_config, since a --delete run
   # must never prompt to enable the tier. Absent gke_target.name means
@@ -1230,9 +1241,9 @@ if [[ "$HYBRID_ENABLED" == "true" ]]; then
 fi
 
 # --- Create VM ---
-VM_TAGS_ARGS=()
+VM_EXTRA_CREATE_ARGS=()
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
-  VM_TAGS_ARGS=(--tags="$(hybrid_vm_tag "$HUB_NAME")")
+  VM_EXTRA_CREATE_ARGS=(--tags="$(hybrid_vm_tag "$HUB_NAME")")
 fi
 
 info "Creating GCE VM (if needed)..."
@@ -1242,8 +1253,21 @@ if gcloud compute instances describe "${INSTANCE_NAME}" \
   if [[ "$HYBRID_ENABLED" == "true" ]]; then
     info "Ensuring hybrid-tier network tag on existing VM..."
     hybrid_apply_vm_tag "${INSTANCE_NAME}" "${ZONE}" "${PROJECT_ID}" "${HUB_NAME}"
+    # The PV's NFS server field and the GKE-facing hub URL both need one
+    # stable address, so an existing VM's current (so far ephemeral)
+    # internal IP is promoted to a static reservation here, before
+    # anything downstream reads it.
+    EXISTING_VM_IP="$(gcloud compute instances describe "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --format="get(networkInterfaces[0].networkIP)")"
+    hybrid_ensure_internal_ip_existing_vm "${HUB_NAME}" "${PROJECT_ID}" "${REGION}" "default" \
+      "${EXISTING_VM_IP}" "${INSTANCE_NAME}" "${ZONE}"
   fi
 else
+  if [[ "$HYBRID_ENABLED" == "true" ]]; then
+    hybrid_ensure_internal_ip_new_vm "${HUB_NAME}" "${PROJECT_ID}" "${REGION}" "default"
+    VM_EXTRA_CREATE_ARGS+=(--private-network-ip="${HYBRID_INTERNAL_IP}")
+  fi
   gcloud compute instances create "${INSTANCE_NAME}" \
     --zone="${ZONE}" \
     --project="${PROJECT_ID}" \
@@ -1256,9 +1280,17 @@ else
     --image-project=ubuntu-os-cloud \
     --metadata-from-file=user-data="${SCRIPT_DIR}/cloud-init.yaml" \
     --labels="scion-deployment=${HUB_NAME}" \
-    ${VM_TAGS_ARGS[@]+"${VM_TAGS_ARGS[@]}"} \
+    ${VM_EXTRA_CREATE_ARGS[@]+"${VM_EXTRA_CREATE_ARGS[@]}"} \
     --quiet
   echo "  Created VM: ${INSTANCE_NAME} (zone: ${ZONE})"
+fi
+
+# --- Hub URL guard (post-create half) ---
+# GKE agent pods reach the hub at http://<internal-ip>:8080 over the
+# VPC; there is no other shape this tier supports. See hybrid_hub_url_
+# guard_verify's own comment for what this does and doesn't cover.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  hybrid_hub_url_guard_verify "$HUB_NAME" "$PROJECT_ID" "$REGION"
 fi
 
 # --- Wait for SSH readiness (avoids race on initial boot) ---
@@ -1321,11 +1353,20 @@ echo "  Cloud-init completed."
 # Read once, here (right after the VM is confirmed up, rather than later
 # in Phase 4), since it's needed for both the NFS/k8s hybrid-tier setup
 # below and settings.yaml's dev-mode write in Phase 3, which happens
-# before Phase 4 -- not just the proxy-mode write Phase 4 makes.
+# before Phase 4 -- not just the proxy-mode write Phase 4 makes. With the
+# hybrid tier on, this is the static reservation resolved above (reserved
+# for a new VM, promoted or verified for an existing one) -- not a fresh
+# describe of the VM's own (ephemeral, could change on any recreate)
+# networkIP -- since the whole point of the reservation is that nothing
+# downstream depends on that ephemeral value again.
 info "Getting VM internal IP..."
-VM_IP="$(gcloud compute instances describe "${INSTANCE_NAME}" \
-  --zone="${ZONE}" --project="${PROJECT_ID}" \
-  --format="get(networkInterfaces[0].networkIP)")"
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  VM_IP="$HYBRID_INTERNAL_IP"
+else
+  VM_IP="$(gcloud compute instances describe "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --format="get(networkInterfaces[0].networkIP)")"
+fi
 if [[ -z "$VM_IP" ]]; then
   err "Could not retrieve VM internal IP for ${INSTANCE_NAME}"
   exit 1

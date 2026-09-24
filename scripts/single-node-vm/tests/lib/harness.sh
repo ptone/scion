@@ -333,9 +333,61 @@ body = {
     'network': network,
     'subnetwork': 'default-subnet',
     'nodePools': [{'instanceGroupUrls': migs}] if migs else [],
+    # A default pod CIDR, agreeing between both fields hybrid_discover
+    # cross-checks, so existing fixtures that don't care about the
+    # actual pod CIDR value don't all need updating -- same rationale as
+    # seed_subnet's own implicit default below.
+    'clusterIpv4Cidr': '10.52.0.0/14',
+    'ipAllocationPolicy': {'clusterIpv4CidrBlock': '10.52.0.0/14'},
 }
 print(json.dumps(body))
 " "$network" "$@" > "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json"
+}
+
+# seed_pod_cidr NAME CIDR — overrides both clusterIpv4Cidr and
+# ipAllocationPolicy.clusterIpv4CidrBlock on an already-seeded cluster
+# fixture to the same explicit value, for tests that care about the
+# actual pod CIDR hybrid_discover reads.
+seed_pod_cidr() {
+  local name="$1" cidr="$2"
+  "$PYTHON" -c "
+import json, sys
+p = sys.argv[1]
+cidr = sys.argv[2]
+d = json.load(open(p))
+d['clusterIpv4Cidr'] = cidr
+d['ipAllocationPolicy'] = {'clusterIpv4CidrBlock': cidr}
+json.dump(d, open(p, 'w'))
+" "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json" "$cidr"
+}
+
+# seed_pod_cidr_mismatch NAME CIDR ALT_CIDR — sets clusterIpv4Cidr and
+# ipAllocationPolicy.clusterIpv4CidrBlock to two DIFFERENT values, for
+# the "the two disagree" refusal test.
+seed_pod_cidr_mismatch() {
+  local name="$1" cidr="$2" alt_cidr="$3"
+  "$PYTHON" -c "
+import json, sys
+p, cidr, alt = sys.argv[1:4]
+d = json.load(open(p))
+d['clusterIpv4Cidr'] = cidr
+d['ipAllocationPolicy'] = {'clusterIpv4CidrBlock': alt}
+json.dump(d, open(p, 'w'))
+" "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json" "$cidr" "$alt_cidr"
+}
+
+# seed_pod_cidr_missing NAME — removes both pod-CIDR fields entirely,
+# for the "absent" refusal test.
+seed_pod_cidr_missing() {
+  local name="$1"
+  "$PYTHON" -c "
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d.pop('clusterIpv4Cidr', None)
+d.pop('ipAllocationPolicy', None)
+json.dump(d, open(p, 'w'))
+" "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json"
 }
 
 # seed_cluster_no_pools NAME NETWORK — a cluster with zero node pools

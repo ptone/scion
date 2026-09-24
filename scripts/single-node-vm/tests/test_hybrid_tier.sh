@@ -12,6 +12,7 @@ PROJECT="demo-project"
 NETWORK="default"
 ALLOW_NAME="scion-hub-${HUB}-nfs-allow"
 DENY_NAME="scion-hub-${HUB}-nfs-deny"
+HUB_ALLOW_NAME="scion-hub-${HUB}-hub-allow"
 TARGET_TAG="scion-hub-${HUB}-nfs"
 MARKER="scion-deployment=${HUB}"
 
@@ -1289,6 +1290,7 @@ test_k8s_teardown_delete_all_succeed() {
 test_firewall_rules_created_with_names_marker_tag_and_shape() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
   hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
 
   assert_eq "$ALLOW_NAME" "$HYBRID_ALLOW_NAME" "allow rule name"
@@ -1326,6 +1328,7 @@ test_firewall_rules_created_with_names_marker_tag_and_shape() {
 test_firewall_rules_idempotent_across_two_runs() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
   hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
   hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
   local log
@@ -1339,18 +1342,22 @@ test_firewall_rules_idempotent_across_two_runs() {
 test_firewall_rule_reused_when_marked_and_matching() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
   seed_firewall_rule_json "$ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "2049" \
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+    "" "$GKE_POD_CIDR" "$TARGET_TAG" "900"
   hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
   assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" \
-    "an already-marked, matching-spec rule pair must not be recreated"
+    "an already-marked, matching-spec rule triple must not be recreated"
 }
 
 test_firewall_rule_refused_when_unmarked() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
   seed_firewall_rule_desc_only "$ALLOW_NAME" "some other unrelated rule"
   run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unmarked name collision must fail the run"
@@ -1362,6 +1369,7 @@ test_firewall_rule_refused_when_unmarked() {
 test_firewall_marker_check_is_exact_not_substring() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
   seed_firewall_rule_desc_only "$ALLOW_NAME" "scion-deployment=${HUB}2"
   run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
@@ -1380,6 +1388,7 @@ test_firewall_marker_check_is_exact_not_substring() {
 test_drift_widened_allow_source_fails_with_remediation() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
   # Drifted: source is some other tag than the currently discovered one --
   # the realistic case is a recreated cluster whose new node tag no longer
   # matches what the rule was created with.
@@ -1400,6 +1409,7 @@ test_drift_widened_allow_source_fails_with_remediation() {
 test_drift_lower_deny_priority_fails_with_remediation() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
   seed_firewall_rule_json "$ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "2049" \
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   # Drifted: priority lowered from 950.
@@ -1417,6 +1427,7 @@ test_drift_lower_deny_priority_fails_with_remediation() {
 test_drift_action_change_offers_delete_but_not_update() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
   # Drifted: someone flipped the allow rule to DENY. `update` cannot
   # change action, so only the delete remediation should be offered.
   seed_firewall_rule_json "$ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
@@ -1448,6 +1459,7 @@ test_apply_vm_tag_idempotent() {
 test_reenable_on_preexisting_nonhybrid_hub() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
   # No pre-existing firewall-rules state: this hub predates the hybrid tier,
   # so the two rules don't exist yet even though the VM/hub itself does.
   hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
@@ -1513,6 +1525,7 @@ test_teardown_delete_only_deletes_queued() {
 test_firewall_rules_created_deny_before_allow() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
   hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
   local log allow_line_num deny_line_num
   log="$(gcloud_log)"

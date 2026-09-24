@@ -42,7 +42,8 @@ PYTHON="${GCLOUD_STUB_PYTHON:-python3}"
 
 mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
   "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates" \
-  "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets" "${GCLOUD_STUB_STATE_DIR}/run-services"
+  "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets" "${GCLOUD_STUB_STATE_DIR}/run-services" \
+  "${GCLOUD_STUB_STATE_DIR}/addresses"
 
 printf '%s\n' "$*" >> "$GCLOUD_STUB_LOG"
 
@@ -369,6 +370,73 @@ print(json.dumps(out))
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/router-exists" ]]; then
       exit 0
     fi
+    exit 1
+    ;;
+  "compute addresses list")
+    require_project "$@"
+    filter="$(get_flag filter "$@")" || filter=""
+    # Filter is "name=(NAME) region:REGION" -- pull NAME out of the
+    # name=(...) clause; the region clause is unused by the stub (each
+    # fixture file is already keyed by name only, names are unique).
+    name="${filter#*name=(}"
+    name="${name%%)*}"
+    f="${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+    if [[ -f "${f}.list-error" ]]; then
+      err_msg="$(cat "${f}.list-error")"
+      echo "${err_msg:-gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED listing addresses}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      echo "[$(cat "$f")]"
+    else
+      echo "[]"
+    fi
+    exit 0
+    ;;
+  "compute addresses describe")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+    if [[ -f "${f}.describe-error" ]]; then
+      err_msg="$(cat "${f}.describe-error")"
+      echo "${err_msg:-gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED describe error for address ${name}}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      exit 0
+    fi
+    echo "gcloud-stub: ERROR: (gcloud.compute.addresses.describe) Could not fetch resource: - The resource 'projects/${GCLOUD_STUB_PROJECT:-demo-project}/regions/x/addresses/${name}' was not found" >&2
+    exit 1
+    ;;
+  "compute addresses create")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    addr="$(get_flag addresses "$@")" || addr="10.128.0.9"
+    desc="$(get_flag description "$@")" || desc=""
+    "$PYTHON" -c "
+import json, sys
+addr, desc = sys.argv[1:3]
+print(json.dumps({'address': addr, 'description': desc}))
+" "$addr" "$desc" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+    exit 0
+    ;;
+  "compute addresses delete")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+    if [[ -f "${f}.delete-fail" ]]; then
+      echo "gcloud-stub: simulated delete failure for address ${name}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      rm -f "$f"
+      exit 0
+    fi
+    echo "gcloud-stub: address ${name} not found" >&2
     exit 1
     ;;
   "compute routers create")
