@@ -1302,13 +1302,18 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	// project the same way for them, and an unmatched request there falls
 	// through to the rest of this function exactly as before, unchanged.
 	//
-	// The hub's control-channel client already treats a 404 here as a
-	// successful, idempotent delete (pkg/hub/controlchannel_client.go's
-	// DeleteAgent returns nil for both a 2xx and a 404 response), so
-	// returning the existing not-found shape instead of silently
-	// no-opping through mgr.Delete does not block hub-side cleanup.
+	// This returns 204, not 404: the agent is genuinely absent from the
+	// requested project, so this is an idempotent delete, and the control
+	// channel's doRequest (pkg/hub/controlchannel_client.go) turns every
+	// response with a status of 400 or above into an error regardless of
+	// which code it is, so a 404 here would surface as a hub-side error
+	// (seen live as a 502) rather than the success this actually is.
+	// ptone/scion#1846 fixes that on the hub side; once it lands, this
+	// gate's status code is its call to make, not this one's.
 	if rt.Name() == "substrate" && projectID != "" && !matched {
-		NotFound(w, "Agent")
+		s.agentLifecycleLog.Info("Substrate delete: no matching agent in this project, treating as already deleted",
+			"agent_id", id, "project_id", projectID)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
