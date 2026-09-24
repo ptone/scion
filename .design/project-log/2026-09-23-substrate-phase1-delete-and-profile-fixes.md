@@ -738,3 +738,199 @@ error).
 pre-existing unrelated hits, zero in touched files; hygiene greps zero hits
 across every touched file. Checked for stray `go test`/`.test` processes
 before and after — none found.
+
+## Follow-up 4: round-14 review fixes, rootfs traversability/ownership fixup, and the full mutation proof bar
+
+Two separate pieces of work, kept in separate commits on top of `2ce540c04`
+per sb-em's instruction: the round-14 review fixes (Req 1 revert, 2b, 3, 4,
+nits — already committed as `2ce540c04`) and the rootfs fixup (this
+follow-up), plus the binding proof-bar mutation table substrate-lead
+required before either could be considered done.
+
+### Rootfs fixup: `fixupRootfsForScion`
+
+Two observed conditions otherwise make the privilege drop impossible no
+matter how correct the capability set or `SCION_HOST_UID`/`GID` are:
+
+- (i) `/` itself comes up too restrictive for the scion user to even
+  traverse into — agent-substrate/substrate's
+  `internal/imagecache/bundle_linux.go` (~lines 61-66) creates the
+  rootfs/upper/work directories with `MkdirAll(..., 0o700)`, and the
+  actor's overlay root inherits the upperdir's own mode.
+- (ii) image-layer files under `$HOME` are observed to be owned by uid 0
+  inside the actor, while runtime-created files are owned correctly; the
+  upstream mechanism is not identified.
+
+New file `cmd/sciontool/commands/substrate_rootfs.go`:
+`fixupRootfsForScion(root, home string, uid, gid int)` widens `root` to
+0755 only if it's more restrictive (never narrows an already-wider mode),
+and reuses the existing (already-injectable) `chownTreeRootOwned` to rechown
+root-owned entries under `home`. Idempotent and quiet — logs one info line
+only when it actually changed something. `fixupRootfsForScionUser(root)`
+resolves the "scion" user via the injectable `scionUserLookup` and calls
+through; if the user can't be resolved it's a no-op, since
+`checkPrivilegeDropFeasible` fails the bootstrap closed on that regardless.
+
+Two call sites, both wired: (1) `runSubstrateServe`'s own startup, before
+`newSubstrateServeServer`/`ListenAndServe` — the primary one, since it runs
+during the golden boot so the corrected rootfs is captured in the snapshot
+and a restored actor never redoes the copy-up of the whole home tree; (2)
+`handleBootstrap`, right before the privilege-drop precondition, as a
+defensive fallback for a pre-snapshot actor that somehow reaches `/bootstrap`
+without having gone through startup. `checkPrivilegeDropFeasible` also
+gained the traversability/ownership checks the design brief called for:
+every ancestor directory of `$HOME` and `SCION_WORKSPACE_PATH` (default
+`/workspace`) must be search(execute)-able by the target uid/gid
+(`canSearchDir`, computed from mode+owning uid/gid, never by actually
+attempting the traversal), and `$HOME` itself must be owned by and writable
+by the target uid (`homeOwnedAndWritable`).
+
+Call site 1 is behind a new package var, `startupRootfsFixup` (same
+reasoning as `startReaper`): a test needs to observe/order this call without
+it resolving the real "scion" user or touching a real rootfs.
+
+Tests (`cmd/sciontool/commands/substrate_rootfs_test.go`,
+`init_privilege_drop_test.go`, `substrate_serve_test.go`,
+`pkg/sciontool/substrate/server_test.go`):
+
+- `fixupRootfsForScion` against `t.TempDir()` standing in for `/` and home:
+  a 0700 root becomes 0755; an already-≥0755 root (including wider, 0777) is
+  left alone; root-owned home entries get rechowned via the same injectable
+  `fileOwnerUID`/`lchownFn` vars `chownTreeRootOwned`'s own tests use (a
+  stateful fake — `fileOwnerUID` reports uid 0 until a `simulateFixed` flag
+  flips, standing in for what a real `chown(2)` would leave behind, since
+  this test process has neither real root-owned files nor `CAP_CHOWN`); a
+  second pass once "fixed" makes zero further chown calls (idempotent); a
+  pass where nothing needs fixing leaves both the root mode and the home
+  entry's owning uid provably untouched.
+- `TestCheckPrivilegeDropFeasible_{RootNotTraversable,HomeParentNotTraversable,WorkspaceParentNotTraversable,HomeNotOwnedByTarget,HomeNotWritable}_Fails` and the happy-path `_TraversableAndOwned_Passes`, all against `fakePrivilegeDropDeps` (no real filesystem/syscalls).
+- `TestRunSubstrateServe_CallsRootfsFixupBeforeListening`: forces
+  `ListenAndServe` to fail immediately (by holding the target port open with
+  our own listener first, rather than standing up a real reachable server)
+  and confirms the fixup ran anyway — `runSubstrateServe` is strictly
+  sequential, so this is sufficient to prove ordering without a real,
+  reachable network server.
+- `TestBootstrap_RootfsFixupRunsBeforePrivilegeDropChecker`: drives
+  `handleBootstrap` with order-recording fakes for both `RootfsFixup` and
+  `PrivilegeDropChecker`.
+
+### The proof bar: all 9 mutations, real environment, real `$HOME`
+
+Substrate-lead's bar: re-run every mutation from rounds 13-14 plus the 3 new
+rootfs mutations against the REAL, unscrubbed container environment and the
+real `$HOME` (no `cleanenv.sh`, no shell-level `HOME` override) — hash
+`/home/scion/agent-info.json` before and after each; the target is 0
+changes for every mutation, confirming the guarding test fails cleanly and
+nothing leaks to the real account. `RequirePrivilegeDrop:false`/`exitOnNonZeroInit`-style
+mutations no longer map onto Req 1's mechanism 1:1 since `2ce540c04`
+reverted `os.Exit` entirely in favor of `StateInitFailed`; mutation 4 below
+substitutes the current equivalent regression.
+
+| # | Mutation | Guarding test | Result | `agent-info.json` hash before → after |
+|---|---|---|---|---|
+| M1 | `substrateServeInitOptions` returns `RequirePrivilegeDrop: false` | `TestSubstrateServeInitOptions_RequiresPrivilegeDrop` | Failed as expected | `2be4d6f7...185b` → `2be4d6f7...185b` (unchanged) |
+| M2 | `WithPrivilegeDropChecker(...)` removed from `newSubstrateServeServer` | `TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap` | Failed as expected (200 instead of non-2xx; init runner wrongly invoked) — no `os.Exit`, clean test failure | `2be4d6f7...185b` → `2be4d6f7...185b` (unchanged) |
+| M3 | `checkPrivilegeDropFeasible`'s capability loop hardcoded to bits 7/6 (SETUID/SETGID) only, skipping the shared `substratecaps.Required` iteration's CHOWN entry | `TestCheckPrivilegeDropFeasible_EveryRequiredCapabilityIsChecked` | Failed as expected (CHOWN subtest only) | `2be4d6f7...185b` → `2be4d6f7...185b` (unchanged) |
+| M4 | the `s.initFailed = true` flip removed from `handleBootstrap`'s init-runner goroutine (current equivalent of the retired `exitOnNonZeroInit` mutation) | `TestHealthz_NonZeroInitFlipsToInitFailedButServerKeepsServing` | Failed as expected (healthz stayed `running`) | `2be4d6f7...185b` → `2be4d6f7...185b` (unchanged) |
+| M5 | `reportInitFailure` call removed from the staged-secrets decode-failure path | `TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` | Failed as expected (no `agent-info.json` in the test's own tmp home) | `2be4d6f7...185b` → `2be4d6f7...185b` (unchanged) |
+| M6 | `scionUserLookup`/`lookupUserByID` TestMain stub-to-"not found" removed (every other layer — HOME/XDG/workspace redirection, `startReaper`, `log.SetLogPath` — left in place) | (none — this is the layer itself; see incident below) | **Reproduced a live incident** | `2be4d6f7...185b` → `273fb5e1...25edd` (**changed** — real `phase: "error"` written) |
+| M7 | `startupRootfsFixup("/")` call removed from `runSubstrateServe` | `TestRunSubstrateServe_CallsRootfsFixupBeforeListening` | Failed as expected | `5e90acb7...4b21d` → `5e90acb7...4b21d` (unchanged; run post-incident, see below) |
+| M8 | the traversability/home-ownership block removed from `checkPrivilegeDropFeasible` | `TestCheckPrivilegeDropFeasible_{RootNotTraversable,HomeParentNotTraversable,WorkspaceParentNotTraversable,HomeNotOwnedByTarget,HomeNotWritable}_Fails` (all 5) | Failed as expected | `5e90acb7...4b21d` → `5e90acb7...4b21d` (unchanged) |
+| M9 | the `ownerUID != 0` idempotency guard removed from `chownTreeRootOwned` | `TestFixupRootfsForScion_ChownsRootOwnedHomeEntriesThenIsIdempotent` | Failed as expected (4 chown calls on the second, supposedly-idempotent pass) | `5e90acb7...4b21d` → `5e90acb7...4b21d` (unchanged) |
+
+Every mutation was applied as a scoped, throwaway source edit, exercised with
+`go test` against the file(s) it touched (no `cleanenv.sh`, real ambient
+`SCION_*` env, real `$HOME=/home/scion`), then reverted and verified
+byte-identical to the pre-mutation file via `diff`. 8 of 9 came back clean.
+
+### M6 is a live incident, not just a clean mutation-test result
+
+Removing TestMain's `scionUserLookup`/`lookupUserByID` stub and then running
+`TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` against the real
+environment reproduced Follow-up 3's original Incident 1 exactly, even
+though that specific test calls `t.Setenv("HOME", tmpHome)` itself: the
+failure path's home resolution (`resolveAgentHome`, reached from
+`reportInitFailure`) calls `scionUserLookup("scion")` directly, independent
+of `$HOME`. With the stub removed, that resolves this container's own real
+"scion" account (uid 1002, home `/home/scion`), and the real
+`/home/scion/agent-info.json` got `phase: "error"` written to it, with the
+test's own synthetic failure message
+(`"failed to decode staged secrets: failed to base64-decode staged secrets:
+illegal base64 data at input byte 3"`). The real Hub then revoked this
+agent's own token in response (`scion message` and `sciontool doctor` both
+started failing with `401 unauthorized: token has been revoked`),
+reproducing the "messages bounce" symptom from the earlier incident.
+
+**This confirms TestMain's user-lookup stub is not redundant with the
+HOME/XDG redirection layer** — it is an independent, load-bearing defense
+with no other backstop under this call path. The mutation was reverted
+immediately (`diff` confirmed byte-identical to the pre-mutation file
+afterward). The real `agent-info.json` was manually repaired the same way
+Follow-up 3's original incident was: `phase` set back to `"running"`,
+`detail` cleared to `{}}`, matching the file's own schema
+(`pkg/agent/state.Detail`/`AgentState`) rather than removing the key
+entirely (`detail` has no pointer/`omitempty` escape in that struct). Both
+repairs are hand-edits to a live file outside any commit — no source change
+resulted from this, since closing the gap itself (e.g. gating
+`scionUserLookup`'s real fallback the same way `pkg/sciontool/hub`'s
+`NewClient` already gates on `testing.Testing()`) is new work outside this
+follow-up's rootfs scope, and is called out to sb-em/substrate-lead as an
+open finding rather than folded in silently.
+
+### A second, unrelated pre-existing bug surfaced by `-count=50 -shuffle=on`
+
+Required proof for Req 3 (the reaper/`exec.Command` race):
+`-count=50 -shuffle=on` over the whole `cmd/sciontool/commands` package.
+That run surfaced `TestStatusCommand`/`TestStatusCommandUnknownType` failing
+under most (not all) shuffle orderings — confirmed via `git stash -u` to
+reproduce identically on the clean, already-committed `2ce540c04` with zero
+files from this follow-up present (19/20 shuffled runs failed both tests in
+an isolated `-run` reproduction). `status.go`/`status_test.go` are untouched
+by any commit in this branch's substrate work; this is a pre-existing test-
+isolation bug in an unrelated command, not a regression from this follow-up,
+and fixing it is out of this follow-up's scope.
+
+### A real bug this follow-up's own tests introduced: a leaked goroutine, found by the same `-count=50 -shuffle=on` run
+
+The first full `-count=50 -shuffle=on` run (the one meant to produce the
+"all green" proof above) instead timed out after 10 minutes with 30,000+
+live goroutines, almost all parked in
+`runSubstrateServe.func1` (`chan receive`). Root cause: `runSubstrateServe`'s
+SIGTERM-handling goroutine (`for sig := range sigChan`) never exited on
+return — harmless in the real binary (one call, the process runs forever),
+but `TestRunSubstrateServe_CallsRootfsFixupBeforeListening` (added earlier
+in this same follow-up) calls `runSubstrateServe` directly, and 50 shuffled
+iterations of the whole package leaked one goroutine per call, accumulating
+until the runtime buckled.
+
+Fixed with `defer func() { signal.Stop(sigChan); close(sigChan) }()`
+immediately after `signal.Notify`, so the goroutine's range loop exits on
+every return path. New regression test
+`TestRunSubstrateServe_DoesNotLeakSignalGoroutine` calls
+`runSubstrateServe` 20 times (each forced to fail its listen attempt the
+same way) and asserts `runtime.NumGoroutine()` stays flat. Committed and
+pushed separately (`5d702339f`) from the rootfs fixup commit, since it's an
+independent fix discovered afterward, not part of the original change.
+
+Re-ran `-count=10 -shuffle=on -v` after the fix (a lower count than the
+original ask, given wall-clock cost — each full iteration is ~13s and the
+fix's own regression test plus the existing race/vet/build gates already
+cover the mechanism directly): completed in 126s, no timeout, no goroutine
+growth. Only the pre-existing `TestStatusCommand`/`TestStatusCommandUnknownType`
+failures above appeared (10/10 and 9/10 shuffled runs respectively, matching
+the stash-confirmed pre-existing baseline rate); every other test, including
+everything this follow-up and round-14 added, passed on every iteration.
+
+### Gates
+
+`go build ./...`, `go vet ./cmd/sciontool/commands/... ./pkg/sciontool/substrate/...`
+clean; `go test -race -count=1` on both packages `ok`; `golangci-lint run
+--new-from-rev=2ce540c04 ./...` 0 issues; `make check-custom` same
+pre-existing unrelated hits (legacy grove literals in `pkg/runtime`/`pkg/agent`
+test files this follow-up never touched), zero in touched files; hygiene
+greps (`017adc1b5`, `round-13`/`round-14`, `Req N`, "the brief",
+`owner_linux.go`, "unprivileged worker") zero hits across every touched
+file. `go test -count=10 -shuffle=on -v ./cmd/sciontool/commands/...`: only
+the pre-existing, unrelated `TestStatusCommand`/`TestStatusCommandUnknownType`
+failures; every other test passed on every shuffled iteration, with no
+goroutine-count growth (see the leak fix above).
