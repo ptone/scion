@@ -226,6 +226,15 @@ today: no `system-info` volume, no `/run/ate` mount, no Env — and it also
 leaves `substrateTemplateName`'s content-address unchanged, so a plain
 install's existing golden templates keep being reused rather than rebuilt.
 
+**When set, the image needs util-linux ≥ 2.35** (`su`'s
+`-w`/`--whitelist-environment` flag, `pkg/sciontool/substrate/execuser.go`).
+This carries the CA-bundle vars across the `su -` login shell that
+`sciontool substrate-serve exec` (the broker exec endpoint, `scion look`,
+and `/scion/v1/exec` directly) would otherwise reset. scion's images
+satisfy this already (Debian trixie ships util-linux 2.38). Plain installs
+are unaffected either way: `-w` is only ever added when a CA-bundle var is
+actually set, which never happens without `egress_trust_bundle` configured.
+
 ### `server.broker.broker_id` in the ConfigMap
 
 `HUB_BROKER_ID` fills `server.broker.broker_id`
