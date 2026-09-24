@@ -54,7 +54,10 @@
 #   disk_size_gb                 Boot disk size in GB.
 #   chat_plugins                 List of: telegram, discord, slack, teams.
 #   container_images.source      "registry" (pre-built images) or "build"
-#                                 (build on the VM).
+#                                 (build on the VM). "build" is refused
+#                                 when gke_target.name is set: GKE nodes
+#                                 cannot pull from the VM's local Docker
+#                                 store, which is what "build" uses.
 #   container_images.registry    Registry path; required when source is
 #                                 "registry" (e.g. us-docker.pkg.dev/PROJECT/scion).
 #   container_images.force_rebuild

@@ -194,13 +194,17 @@ Closing the residual end to end requires:
 
 1. provisioning a dedicated NFS squash uid, in the `scion` group but distinct
    from the broker's own uid, and pointing the export's `anonuid=`/`anongid=`
-   at it — infrastructure work, not broker code, tracked for the Phase 3
-   `deploy.sh` tier option (new deployments) and as a separate ops action for
-   existing deployments;
+   at it — infrastructure work, not broker code. The Phase 3 `deploy.sh`
+   tier option now does this for every new deployment (see
+   `docs/deploy/agent-runbook-single-node-vm.md`'s Hybrid Tier section);
+   an existing deployment's export still needs this as a separate ops
+   action, and the fix-up recipe below for any directories created before
+   the switch;
 2. verifying end to end in a scratch-project validation with that dedicated
    identity in place.
 
-Until both are done, treat `ptone/scion#1794` as **open**.
+Until both are done for a given deployment, treat `ptone/scion#1794` as
+**open** for it.
 
 **Existing directories created under Phase 1** (mode `2775`, no ACL, before
 this hardening shipped) are not retroactively fixed by an automatic migration
@@ -640,8 +644,9 @@ non-production environment first.
 ## References
 
 - `ptone/scion#1777` — the tracking issue for the hybrid tier work.
-- `ptone/scion#1794` — E2 hardening (dedicated squash uid), required before
-  the Phase 3 `deploy.sh` tier option ships.
+- `ptone/scion#1794` — E2 hardening (dedicated squash uid). The Phase 3
+  `deploy.sh` tier option (`docs/deploy/agent-runbook-single-node-vm.md`)
+  provisions this for new deployments; see above for existing ones.
 - `ptone/scion#1802` — shared-dir cleanup on project deletion (the NFS side
   is handled starting Phase 2; the local backend and workspace directory
   cleanup remain tracked on that issue).
