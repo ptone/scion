@@ -29,6 +29,9 @@ type mockControlChannelTunnel struct {
 	connected   bool
 	lastBroker  string
 	lastRequest *wsprotocol.RequestEnvelope
+	// statusCode overrides the tunneled response's status, for a test that
+	// needs a specific one (e.g. 204). Zero means http.StatusOK.
+	statusCode int
 }
 
 func (m *mockControlChannelTunnel) IsConnected(string) bool {
@@ -38,7 +41,11 @@ func (m *mockControlChannelTunnel) IsConnected(string) bool {
 func (m *mockControlChannelTunnel) TunnelRequest(_ context.Context, brokerID string, req *wsprotocol.RequestEnvelope) (*wsprotocol.ResponseEnvelope, error) {
 	m.lastBroker = brokerID
 	m.lastRequest = req
-	return wsprotocol.NewResponseEnvelope(req.RequestID, http.StatusOK, nil, nil), nil
+	status := m.statusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return wsprotocol.NewResponseEnvelope(req.RequestID, status, nil, nil), nil
 }
 
 type mockBrokerSigner struct {
@@ -90,6 +97,28 @@ func TestControlChannelBrokerClient_DeleteAgentSignsTunneledRequest(t *testing.T
 	}
 	if got := tunnel.lastRequest.Query; got != "deleteFiles=true&removeBranch=false" {
 		t.Fatalf("unexpected query: %s", got)
+	}
+}
+
+// TestControlChannelBrokerClient_DeleteAgent_204ReturnsNil confirms a 204
+// tunneled response is treated as an ordinary success: doRequest only
+// turns a status of 400 or above into an error, so a 204 — unlike a 404 —
+// never reaches, let alone needs, DeleteAgent's own "allow 404" handling.
+// This is why the runtime broker's substrate no-match delete gate returns
+// 204 rather than 404 (see pkg/runtimebroker/handlers.go's deleteAgent):
+// a 404 from that endpoint is indistinguishable, at this layer, from a
+// genuine broker-side error.
+func TestControlChannelBrokerClient_DeleteAgent_204ReturnsNil(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true, statusCode: http.StatusNoContent}
+	signer := &mockBrokerSigner{}
+	client := &ControlChannelBrokerClient{
+		manager: tunnel,
+		signer:  signer,
+	}
+
+	err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "project-1", false, false, false, time.Time{})
+	if err != nil {
+		t.Fatalf("DeleteAgent returned error for a 204 response: %v", err)
 	}
 }
 

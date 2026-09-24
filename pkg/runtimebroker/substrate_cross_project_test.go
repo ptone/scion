@@ -15,7 +15,10 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -398,9 +401,10 @@ func TestSubstrateBroker_UniqueSlugDeleteStillSucceeds(t *testing.T) {
 // happened to return — project A's, the wrong one.
 //
 // Now, for substrate specifically, deleteAgent recognizes "no matching
-// entry in the requested project" and returns not-found without ever
-// calling mgr.Delete, so AgentManager.Delete's unscoped List is never
-// reached for this request at all.
+// entry in the requested project" and returns 204 (an idempotent delete —
+// the agent is genuinely absent from this project) without ever calling
+// mgr.Delete, so AgentManager.Delete's unscoped List is never reached for
+// this request at all.
 func TestSubstrateBroker_UnscopedDeleteNoMatchInProject_FailsClosed(t *testing.T) {
 	const (
 		atespaceA = "scion-aaaaaaaaaaaa"
@@ -430,8 +434,8 @@ func TestSubstrateBroker_UnscopedDeleteNoMatchInProject_FailsClosed(t *testing.T
 			req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
 			srv.deleteAgent(w, req, "dev", projBID)
 
-			if w.Code != http.StatusNotFound {
-				t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (not-found, no matching entry in project B)`, w.Code, http.StatusNotFound)
+			if w.Code != http.StatusNoContent {
+				t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (idempotent: no matching entry in project B)`, w.Code, http.StatusNoContent)
 			}
 
 			fc.mu.Lock()
@@ -473,8 +477,8 @@ func TestSubstrateBroker_UnscopedDeleteNoMatchInProject_RecordlessOtherProject(t
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
 	srv.deleteAgent(w, req, "dev", projBID)
 
-	if w.Code != http.StatusNotFound {
-		t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (not-found, no record-having match in project B)`, w.Code, http.StatusNotFound)
+	if w.Code != http.StatusNoContent {
+		t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (idempotent: no record-having match in project B)`, w.Code, http.StatusNoContent)
 	}
 
 	fc.mu.Lock()
@@ -490,13 +494,12 @@ func TestSubstrateBroker_UnscopedDeleteNoMatchInProject_RecordlessOtherProject(t
 	}
 }
 
-// TestSubstrateBroker_ScopedDeleteMatchesOwnProject_D1HappyPath is the
-// mirror of the no-match cases above and of the review's exact repro:
-// project B genuinely has its own record-having "dev" — matchesAgent finds
-// it, deleteAgent's substrate-only gate does not fire (a match was found),
-// and the delete proceeds and succeeds normally, scoped to project B by
-// its resolved ProjectPath exactly as before this fix.
-func TestSubstrateBroker_ScopedDeleteMatchesOwnProject_D1HappyPath(t *testing.T) {
+// TestSubstrateBroker_ScopedDeleteMatchesOwnProject is the mirror of the
+// no-match cases above: project B genuinely has its own record-having
+// "dev" — matchesAgent finds it, deleteAgent's substrate-only gate does
+// not fire (a match was found), and the delete proceeds and succeeds
+// normally, scoped to project B by its resolved ProjectPath.
+func TestSubstrateBroker_ScopedDeleteMatchesOwnProject(t *testing.T) {
 	const (
 		atespaceB = "scion-bbbbbbbbbbbb"
 		actorB    = "projb--dev"
@@ -582,37 +585,21 @@ func TestDeleteAgent_NonSubstrateRuntimeUnchanged(t *testing.T) {
 // TestSubstrateBroker_NoMatchGate_FiresForNamedSubstrateProfile proves the
 // substrate-only gate isn't accidentally scoped to this file's own
 // test-only construction (runtime.NewSubstrateRuntimeForTest, always
-// literally "substrate" by definition): it exercises the real
-// settings-driven name-to-config-to-runtime resolution path a live broker
-// uses for a NAMED substrate profile — config.VersionedSettings.
-// ResolveRuntime (the exact method resolveManagerForOpts and
-// runtime.GetRuntime call) for two differently-named runtimes matching the
-// live settings shape from the D2 report ("substrate-prod", "substrate-nip"
-// — see TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig in
-// substrate_manager_test.go), then runtime.NewSubstrateRuntime — the exact
-// call GetRuntime's "substrate" case makes (pkg/runtime/factory.go) — to
-// build the actual runtime instance from the resolved config.
+// literally "substrate" by definition). It builds the runtime the same way
+// GetRuntime's "substrate" case does for a real, on-disk settings.json —
+// config.LoadEffectiveSettings, then VersionedSettings.ResolveRuntime, then
+// runtime.NewSubstrateRuntime (pkg/runtime/factory.go) — for two
+// differently-named runtime entries ("substrate-prod", "substrate-nip",
+// matching TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig's
+// settings shape in substrate_manager_test.go), and confirms the resulting
+// runtime's Name() is "substrate" for both.
 //
-// This goes through the real on-disk settings.json and
-// config.LoadEffectiveSettings, exactly like a live broker resolving a
-// project's configured profile — matching
-// TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig's settings
-// shape in substrate_manager_test.go. (An earlier version of this test
-// built the *VersionedSettings value in memory instead, to route around an
-// environment issue where SCION_AUTO_EXPOSE_PORTS being set in the
-// ambient environment made every settings-file load in this process fail
-// to decode — 'auto_expose_ports' expected a map or struct, got "string".
-// That was an environment misconfiguration, not a product bug: with
-// SCION_AUTO_EXPOSE_PORTS and the rest of the SCION_* env unset, this test
-// — and TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig — both
-// load settings from disk and pass normally.)
-//
-// Why this matters at all: SubstrateRuntime.Name() is a hardcoded literal
+// Why this matters: SubstrateRuntime.Name() is a hardcoded literal
 // ("substrate") that never consults its config, so no settings-level name
 // can structurally change what it reports — but that guarantee is worth
 // pinning down with a real test through the real resolution path rather
 // than asserted from reading the one-line method alone, since it is
-// exactly what the new deleteAgent gate depends on to engage at all for a
+// exactly what the deleteAgent gate depends on to engage at all for a
 // non-default-named substrate profile.
 func TestSubstrateBroker_NoMatchGate_FiresForNamedSubstrateProfile(t *testing.T) {
 	for _, profileName := range []string{"substrate-prod", "substrate-nip"} {
@@ -709,8 +696,8 @@ func TestSubstrateBroker_NoMatchGate_FiresForNamedSubstrateProfile(t *testing.T)
 			req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
 			srv.deleteAgent(w, req, "dev", projBID)
 
-			if w.Code != http.StatusNotFound {
-				t.Errorf(`deleteAgent("dev", projB) status = %d, want %d — the substrate-only gate must fire for a named profile (%q) too, not just this file's directly-constructed test runtimes`, w.Code, http.StatusNotFound, profileName)
+			if w.Code != http.StatusNoContent {
+				t.Errorf(`deleteAgent("dev", projB) status = %d, want %d — the substrate-only gate must fire for a named profile (%q) too, not just this file's directly-constructed test runtimes`, w.Code, http.StatusNoContent, profileName)
 			}
 			fc.mu.Lock()
 			defer fc.mu.Unlock()
@@ -729,10 +716,11 @@ func TestSubstrateBroker_NoMatchGate_FiresForNamedSubstrateProfile(t *testing.T)
 // also has a second, older fallback — findAgentInHubManagedProjects — that
 // activates when "if projectPath == "" && deleteFiles" (handlers.go). That
 // fallback takes only the bare agent name, no project identifier, and
-// returns the FIRST hub-managed project directory (under
-// ~/.scion/projects/*or*/groves/*) that happens to contain an
-// "agents/<name>" entry — exactly the kind of project-blind, order-
-// dependent resolution the ambiguity guard above exists to avoid.
+// returns the FIRST hub-managed project directory (findAgentInHubManagedProjects
+// walks every global project directory, current and legacy-named) that
+// happens to contain an "agents/<name>" entry — exactly the kind of
+// project-blind, order-dependent resolution the ambiguity guard above
+// exists to avoid.
 //
 // For a MATCHED substrate entry, though, this fallback is unreachable: the
 // matching loop already set projectPath from the matched entry's own
@@ -838,8 +826,8 @@ func TestSubstrateBroker_NoMatchDelete_NeverMarksWrongProjectAgentInfo(t *testin
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev?deleteFiles=true&softDelete=true", nil)
 	srv.deleteAgent(w, req, "dev", projBID)
 
-	if w.Code != http.StatusNotFound {
-		t.Errorf(`deleteAgent("dev", projB, deleteFiles=true, softDelete=true) status = %d, want %d`, w.Code, http.StatusNotFound)
+	if w.Code != http.StatusNoContent {
+		t.Errorf(`deleteAgent("dev", projB, deleteFiles=true, softDelete=true) status = %d, want %d`, w.Code, http.StatusNoContent)
 	}
 	got, err := os.ReadFile(agentInfoPath)
 	if err != nil {
@@ -852,5 +840,62 @@ func TestSubstrateBroker_NoMatchDelete_NeverMarksWrongProjectAgentInfo(t *testin
 	defer fc.mu.Unlock()
 	if _, ok := fc.actors[atespaceA+"/"+actorA]; !ok {
 		t.Error("projA's actor was removed — it must be untouched")
+	}
+}
+
+// captureAgentLifecycleLogs redirects the default slog logger into a
+// buffer for the duration of the test. s.agentLifecycleLog
+// (pkg/runtimebroker/server.go) is built from slog.Default() once, at
+// New() time (logging.Subsystem just wraps whatever the current default
+// is), so this must run before the *Server under test is constructed to
+// see its output.
+func captureAgentLifecycleLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+// TestSubstrateBroker_NoMatchDelete_LogsAtInfo confirms the no-match gate's
+// silent no-op is still visible in broker logs: an info-level line naming
+// the agent slug and project ID, no secrets, so an operator can tell a
+// substrate delete resolved to "already gone" rather than the request
+// simply vanishing.
+func TestSubstrateBroker_NoMatchDelete_LogsAtInfo(t *testing.T) {
+	buf := captureAgentLifecycleLogs(t)
+
+	const (
+		projAID = "aaaaaaaaaaaa"
+		projBID = "bbbbbbbbbbbb"
+	)
+	srv, _ := newTestSubstrateBrokerServer(t)
+	runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
+	srv.deleteAgent(w, req, "dev", projBID)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("deleteAgent status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+
+	found := false
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line is not JSON: %q: %v", line, err)
+		}
+		if rec["level"] == "INFO" && rec["agent_id"] == "dev" && rec["project_id"] == projBID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no info-level log line with agent_id=%q project_id=%q found; log output:\n%s", "dev", projBID, buf.String())
 	}
 }
