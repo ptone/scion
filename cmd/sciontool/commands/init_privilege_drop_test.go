@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
@@ -220,19 +221,29 @@ func TestExitOnNonZeroInit_ZeroDoesNotExit(t *testing.T) {
 
 // TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap
 // drives the exact server construction runSubstrateServe uses (real
-// PrivilegeDropChecker, real InitRunner) and proves the wiring itself: with
+// PrivilegeDropChecker; a stubbed init runner and exit func — see
+// newSubstrateServeServer's doc comment for why those two are never the
+// real RunInit/os.Exit in a test) and proves the wiring itself: with
 // SCION_HOST_UID/GID absent from the process environment, the deterministic
 // branch of checkPrivilegeDropFeasible, the bootstrap must be rejected
-// without ever invoking RunInit. If WithPrivilegeDropChecker were ever
-// dropped from newSubstrateServeServer, this test would instead see 200 and
-// fail — this is the "disabling the precondition must fail a test" mutation
-// check.
+// without ever invoking the init runner. If WithPrivilegeDropChecker were
+// ever dropped from newSubstrateServeServer, this test would instead see
+// 200 and its own assertions would fail — cleanly, as a normal test
+// failure, not by driving a real RunInit and a real os.Exit — this is the
+// "disabling the precondition must fail a test" mutation check.
 func TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv("SCION_HOST_GID", "")
 	scrubHubEnv(t)
 
-	srv := newSubstrateServeServer()
+	var initCalled, exitCalled bool
+	stubRunInit := func(argv []string, opts InitRunOptions) int {
+		initCalled = true
+		return 0
+	}
+	stubExit := func(int) { exitCalled = true }
+
+	srv := newSubstrateServeServer(stubRunInit, stubExit)
 	rec := doSubstrateServeJSON(t, srv, "POST", "/scion/v1/bootstrap", "any-token", map[string]any{
 		"env":           map[string]string{},
 		"files":         []any{},
@@ -241,7 +252,17 @@ func TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap(t *te
 	})
 
 	if rec.Code == 200 || rec.Code < 400 {
-		t.Fatalf("status = %d, want a non-2xx rejection (SCION_HOST_UID/GID are unset)", rec.Code)
+		t.Errorf("status = %d, want a non-2xx rejection (SCION_HOST_UID/GID are unset)", rec.Code)
+	}
+	// Give any wrongly-started goroutine a moment to flip the flags before
+	// asserting they never did (the real init runner call happens
+	// asynchronously — see handleBootstrap).
+	time.Sleep(20 * time.Millisecond)
+	if initCalled {
+		t.Error("the init runner was invoked despite the privilege-drop precondition failing; the harness must never start")
+	}
+	if exitCalled {
+		t.Error("exit was invoked despite the precondition failing before init ever ran")
 	}
 }
 

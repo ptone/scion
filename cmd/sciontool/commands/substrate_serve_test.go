@@ -89,7 +89,15 @@ func TestSubstrateServeCommand_Integration_SIGTERMNotForwarded(t *testing.T) {
 	baseURL := "http://" + addr
 
 	cmd := exec.Command(binPath, "substrate-serve", "--addr", addr)
-	cmd.Env = filterHubEnv(os.Environ())
+	// HOME is redirected to a throwaway directory as defence in depth: this
+	// test's subprocess is expected to only exercise the happy path (a
+	// successful bootstrap), but if a future change ever made it reach a
+	// RunInit failure, reportInitFailure's agentHome fallback must not
+	// resolve to this machine's real, ambient $HOME (see TestMain's own
+	// HOME redirection in this package for the incident this defends
+	// against — a subprocess isn't automatically covered by that, since it
+	// gets a fresh environment from cmd.Env, not the test binary's own).
+	cmd.Env = append(filterHubEnv(os.Environ()), "HOME="+t.TempDir())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

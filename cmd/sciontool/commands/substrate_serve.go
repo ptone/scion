@@ -117,12 +117,23 @@ func substrateServePrivilegeDropChecker() error {
 // the exact same wiring runSubstrateServe uses — including a missing or
 // disabled precondition regressing back to Phase 1's silent behaviour —
 // without starting an HTTP listener.
-func newSubstrateServeServer() *substrate.Server {
+//
+// runInit and exit are parameters, not the real RunInit/os.Exit called
+// directly, precisely so a test exercising this wiring can never reach the
+// real RunInit or the real process exit. A test that stubs both and then
+// removes WithPrivilegeDropChecker (the regression this wiring exists to
+// catch) must see its stub called and fail on that assertion — not have
+// the real RunInit write this machine's real agent-info.json and the real
+// os.Exit kill the test binary out from under it, which is exactly what
+// happened before this was parameterized: bootstrap wrongly returning 200
+// under that mutation drove the real RunInit for real, in-process,
+// including its own os.Exit on failure.
+func newSubstrateServeServer(runInit func(argv []string, opts InitRunOptions) int, exit func(int)) *substrate.Server {
 	return substrate.NewServer(
 		substrate.WithPrivilegeDropChecker(substrateServePrivilegeDropChecker),
 		substrate.WithInitRunner(func(argv []string, forwardTermSignal bool) int {
-			exitCode := RunInit(argv, substrateServeInitOptions(forwardTermSignal))
-			exitOnNonZeroInit(exitCode, os.Exit)
+			exitCode := runInit(argv, substrateServeInitOptions(forwardTermSignal))
+			exitOnNonZeroInit(exitCode, exit)
 			return exitCode
 		}),
 	)
@@ -136,7 +147,7 @@ func runSubstrateServe(addr string) int {
 	// the awaiting-bootstrap window before RunInit ever runs.
 	supervisor.StartReaper()
 
-	srv := newSubstrateServeServer()
+	srv := newSubstrateServeServer(RunInit, os.Exit)
 
 	httpServer := &http.Server{
 		Addr:    addr,
