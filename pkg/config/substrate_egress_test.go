@@ -194,9 +194,8 @@ func TestV1SubstrateConfig_Validate(t *testing.T) {
 }
 
 // TestValidateEgressTrustBundle covers ValidateEgressTrustBundle's three
-// required cases directly (empty OK, the one supported name OK, anything
-// else rejected naming the supported value) — see the Tests section of the
-// sb-dev-mitm brief.
+// required cases directly: empty OK, the one supported name OK, anything
+// else rejected naming the supported value.
 func TestValidateEgressTrustBundle(t *testing.T) {
 	if err := ValidateEgressTrustBundle(""); err != nil {
 		t.Errorf("ValidateEgressTrustBundle(\"\") = %v, want nil (off)", err)

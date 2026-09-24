@@ -179,18 +179,37 @@ projects the gateway's CA to `/run/ate/trust-bundle.pem`, and points
 `docs/egress-trust-bundle.md` in agent-substrate/substrate for the full
 guide, including every runtime's own env var.
 
-**`SSL_CERT_DIR=/run/ate` is deliberate**, not an oversight: under sdsmint
-every TLS origin the actor can reach — the hub included — is fronted by the
-gateway, so the base image's public roots in `/etc/ssl/certs` are dead
-weight. Pointing `SSL_CERT_DIR` at the projection too, instead of leaving it
-at its default, makes the gateway CA the actor's *only* trust anchor, so a
-successful HTTPS fetch (a `200`, not a TLS error) is positive proof the
-projected bundle did the validating — not a public root happening to also
-work. **Node ignores `SSL_CERT_DIR` entirely** (it has no OpenSSL-backed
-default-directory concept), so `NODE_EXTRA_CA_CERTS` — which is *additive*
-to Node's own bundled roots, not a replacement — is still required for it
-separately; nothing about setting `SSL_CERT_DIR` narrows what a Node
-process trusts.
+**`SSL_CERT_DIR=/run/ate` is set deliberately, not left at its default.**
+`SSL_CERT_DIR` makes the gateway CA **exclusive for Go and Python `ssl`**
+(`crypto/x509`'s `SystemCertPool` and OpenSSL's default-path lookup both
+*replace* their default directory list with it, rather than adding to it),
+and it is **additive or ignored for curl, git and Node**. What it buys:
+sciontool's own Go client trusts only the gateway CA, so a hub status
+report succeeding is positive proof for Go, and a path that bypasses the
+gateway fails closed with a TLS error rather than silently trusting a
+public root. The cost: if the hub is ever reached without the gateway
+re-originating the connection, status reports fail TLS.
+
+It does **not** give the same guarantee for curl, git, or Node:
+
+- **curl and git** on Debian (the base image, trixie) are both built
+  against libcurl with `--with-ca-path=/etc/ssl/certs` compiled in; libcurl
+  passes that CApath to OpenSSL explicitly, so `SSL_CERT_DIR` is never
+  consulted and both still trust the full public root set *in addition to*
+  the gateway CA. (OpenSSL's CApath lookup also needs certificates under
+  subject-hash filenames — `<hash>.0` — so `/run/ate`, holding only
+  `trust-bundle.pem`, would contribute nothing through CApath even where
+  `SSL_CERT_DIR` is honored.) `CURL_CA_BUNDLE`/`GIT_SSL_CAINFO` still add
+  the gateway CA as a trusted anchor for both — the config isn't broken —
+  but a `curl`/`git` success on its own is not proof the gateway did the
+  validating: a passthrough connection straight to the real origin would
+  succeed too. To prove it, check the certificate issuer in `curl -sv`
+  output (it should be the gateway CA, not the origin's own), or force curl
+  to use only the projected bundle:
+  `curl --capath /nonexistent --cacert /run/ate/trust-bundle.pem ...`.
+- **Node** keeps its own bundled public roots regardless of `SSL_CERT_DIR`
+  (which it doesn't read at all); `NODE_EXTRA_CA_CERTS` is additive on top
+  of them, never a replacement.
 
 **Setting this on a plain (non-sdsmint) install breaks every actor.**
 Nothing backs the `egress-mitm.ate.dev` `ClusterTrustBundle` on a plain

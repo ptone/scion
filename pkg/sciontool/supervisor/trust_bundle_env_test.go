@@ -12,10 +12,11 @@ import (
 	"time"
 )
 
-// TestSupervisor_HarnessChildInheritsCABundleEnv proves the env-propagation
-// leg of sb-dev-mitm's egress_trust_bundle brief: "harness child via the
-// supervisor credential drop (Node: NODE_EXTRA_CA_CERTS)". Run's env
-// construction for a privilege-dropped child (config.Username set, and
+// TestSupervisor_HarnessChildInheritsCABundleEnv proves the harness-child
+// leg of the egress_trust_bundle env-propagation path: the harness child
+// needs NODE_EXTRA_CA_CERTS (and the other CA-bundle vars) to survive the
+// supervisor's privilege-dropped exec. Run's env construction for a
+// privilege-dropped child (config.Username set, and
 // either UID>0 or Rootless — supervisor.go's Run, ~lines 123-136) starts
 // from os.Environ() and only ever touches HOME/USER/LOGNAME (setEnvVar);
 // everything else, including the CA-bundle vars buildActorTemplate sets on
