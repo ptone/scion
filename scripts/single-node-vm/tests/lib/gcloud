@@ -19,12 +19,13 @@
 # lookups are stored as plain-text fixtures keyed by the last path
 # segment of whatever URL or name was passed in.
 #
-# --project is required on every call that takes it in the real gcloud
-# CLI; this stub asserts it is present (and non-empty) on every create
-# and on the cluster describe, and fails loudly (not just "not found")
-# if it's missing -- a missing --project on a mutating call is exactly
-# the kind of bug this suite exists to catch before it reaches a script
-# that only gets tested by hand.
+# --project and --zone are required on every call that takes them in the
+# real gcloud CLI; this stub asserts they're present (and non-empty)
+# everywhere hybrid-tier.sh or deploy.sh is expected to pass them --
+# --project on every create/list/delete/describe, --zone on every
+# per-instance call -- and fails loudly (not just "not found") if one is
+# missing, rather than silently falling back to an ambient default the
+# way real gcloud would.
 
 set -euo pipefail
 
@@ -54,17 +55,24 @@ get_flag() {
   return 1
 }
 
-# require_project "$@" — fails loudly if --project=... is missing or empty.
-require_project() {
-  local p
-  p="$(get_flag project "$@")" || {
-    echo "gcloud-stub: missing --project on: $*" >&2
+# require_flag KEY "$@" — fails loudly if --KEY=... is missing or empty.
+require_flag() {
+  local key="$1"
+  shift
+  local v
+  v="$(get_flag "$key" "$@")" || {
+    echo "gcloud-stub: missing --${key} on: $*" >&2
     exit 1
   }
-  if [[ -z "$p" ]]; then
-    echo "gcloud-stub: empty --project on: $*" >&2
+  if [[ -z "$v" ]]; then
+    echo "gcloud-stub: empty --${key} on: $*" >&2
     exit 1
   fi
+}
+
+# require_project "$@" — fails loudly if --project=... is missing or empty.
+require_project() {
+  require_flag project "$@"
 }
 
 # last_segment URL_OR_NAME — the basename, used as the fixture lookup key
@@ -86,6 +94,7 @@ case "${1:-} ${2:-} ${3:-} ${4:-}" in
       cat "$f"
       exit 0
     fi
+    echo "gcloud-stub: managed instance group ${key} not found" >&2
     exit 1
     ;;
   "compute routers nats describe")
@@ -121,6 +130,7 @@ esac
 
 case "${1:-} ${2:-} ${3:-}" in
   "compute firewall-rules describe")
+    require_project "$@"
     name="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
     if [[ -f "$f" ]]; then
@@ -156,6 +166,7 @@ case "${1:-} ${2:-} ${3:-}" in
     exit 0
     ;;
   "compute firewall-rules delete")
+    require_project "$@"
     name="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
     if [[ -f "${f}.delete-fail" ]]; then
@@ -170,6 +181,7 @@ case "${1:-} ${2:-} ${3:-}" in
     exit 1
     ;;
   "compute firewall-rules list")
+    require_project "$@"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/firewall-rules-list-should-fail" ]]; then
       echo "gcloud-stub: simulated list failure (permission denied)" >&2
       exit 1
@@ -195,24 +207,43 @@ print(json.dumps(out))
     ;;
   "compute instances add-tags")
     require_project "$@"
+    require_flag zone "$@"
     exit 0
     ;;
   "compute instances list")
+    require_project "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/instances-list-should-fail" ]]; then
+      echo "gcloud-stub: simulated transient instances list failure" >&2
+      exit 1
+    fi
     filter="$(get_flag filter "$@")" || filter=""
+    format="$(get_flag format "$@")" || format=""
     name="${filter#name=}"
     f="${GCLOUD_STUB_STATE_DIR}/instances/${name}"
     if [[ -f "$f" ]]; then
-      cat "$f"
+      if [[ "$format" == "value(name)" ]]; then
+        echo "$name"
+      else
+        cat "$f"
+      fi
     fi
     exit 0
     ;;
   "compute instances describe")
+    require_flag zone "$@"
     name="${4:-}"
+    # Same sentinel purpose as the "instances create" case below: this is
+    # always the call deploy.sh makes right before branching into either
+    # "create a new VM" or "tag the existing one", so it marks the point
+    # a create-mode wiring test has seen everything interesting on either
+    # branch, whether or not a new VM actually gets created.
+    touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
     [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}" ]] && exit 0
     exit 1
     ;;
   "compute instances delete")
     require_project "$@"
+    require_flag zone "$@"
     name="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/instances/${name}"
     if [[ -f "${f}.delete-fail" ]]; then
@@ -230,6 +261,11 @@ print(json.dumps(out))
     require_project "$@"
     name="${4:-}"
     echo "us-central1-b" > "${GCLOUD_STUB_STATE_DIR}/instances/${name}"
+    # A sentinel the create-mode wiring tests poll for, so they can stop
+    # deploy.sh right after VM creation instead of waiting out its SSH
+    # retry loop (which this stub's unhandled `compute ssh` case makes
+    # fail immediately, but deploy.sh still sleeps between attempts).
+    touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
     exit 0
     ;;
   "compute zones list")
