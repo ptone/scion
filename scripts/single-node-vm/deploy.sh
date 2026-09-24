@@ -66,6 +66,19 @@
 #                                 binary auto-update feature.
 #   release_channel              stable, preview, or nightly. Defaults to
 #                                 nightly if not specified.
+#   gke_target.name              Name of an existing GKE cluster to attach
+#                                 as a second, Kubernetes-based runtime
+#                                 (hybrid tier). Optional; when absent (the
+#                                 default), the hybrid tier is off and
+#                                 behaviour is unchanged. The cluster is a
+#                                 manual prerequisite: this script only ever
+#                                 attaches to it, never creates or deletes
+#                                 it.
+#   gke_target.location          Zone or region of the cluster. Required
+#                                 when gke_target.name is set.
+#   gke_target.project           Project the cluster lives in. Defaults to
+#                                 project_id. A cluster in a different
+#                                 project is not supported yet.
 
 set -euo pipefail
 
@@ -204,6 +217,14 @@ if [[ -n "$CONFIG_FILE" ]]; then
   info "Using config file: $CONFIG_FILE"
 fi
 
+# Hybrid tier (optional GKE attach target): see hybrid-tier.sh. Sourced here,
+# after config_get/config_prompt/info/warn/err are defined, since it uses
+# all of them. HYBRID_ENABLED defaults to false until hybrid_read_config
+# runs below.
+HYBRID_ENABLED=false
+# shellcheck source=scripts/single-node-vm/hybrid-tier.sh
+source "${SCRIPT_DIR}/hybrid-tier.sh"
+
 # ---------------------------------------------------------------------------
 # Teardown flow (--delete)
 # ---------------------------------------------------------------------------
@@ -257,6 +278,22 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   SA_NAME="scion-hub-${HUB_NAME}"
   SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
+  # Hybrid tier: classify the two NFS firewall rules (if either exists) by
+  # marker ownership before printing or deleting anything. An unmarked name
+  # match means HUB_NAME can no longer be trusted to identify only
+  # resources this deployment owns, so the whole teardown aborts below --
+  # not just the two hybrid rules -- rather than proceeding to delete other
+  # resources under a name that turned out to be ambiguous.
+  hybrid_teardown_check "$HUB_NAME" "$PROJECT_ID"
+  if [[ "$HYBRID_TEARDOWN_FAILED" == "true" ]]; then
+    err "Refusing to tear down: the following firewall rule(s) match this hub's naming but do not carry this deployment's marker, so ownership can't be confirmed:"
+    for name in "${HYBRID_TEARDOWN_SKIP[@]}"; do
+      err "  ${name}"
+    done
+    err "Resolve the naming collision manually, then re-run teardown."
+    exit 1
+  fi
+
   echo ""
   echo "The following resources will be deleted:"
   echo "  Cloud Run service: ${PROXY_SERVICE} (region: ${REGION})"
@@ -265,6 +302,11 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
+  if [[ ${#HYBRID_TEARDOWN_DELETE[@]} -gt 0 ]]; then
+    for name in "${HYBRID_TEARDOWN_DELETE[@]}"; do
+      echo "  Firewall rule:     ${name} (hybrid tier)"
+    done
+  fi
   echo ""
   if [[ -n "$CONFIG_FILE" && ! -t 0 ]]; then
     info "Non-interactive mode: proceeding with teardown."
@@ -331,6 +373,11 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     warn "Firewall rule ${FW_RULE_NAME} not found or already deleted."
   fi
 
+  if [[ ${#HYBRID_TEARDOWN_DELETE[@]} -gt 0 ]]; then
+    info "Deleting hybrid-tier firewall rules..."
+    hybrid_teardown_delete "$PROJECT_ID"
+  fi
+
   echo ""
   echo -e "${BOLD}=== Teardown Complete ===${RESET}"
   echo ""
@@ -340,6 +387,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Deleted Cloud Router:      ${ROUTER_NAME}"
   echo "  Deleted service account:   ${SA_EMAIL}"
   echo "  Deleted firewall rule:     ${FW_RULE_NAME}"
+  for name in "${HYBRID_TEARDOWN_DELETE[@]}"; do
+    echo "  Deleted firewall rule:     ${name}"
+  done
   exit 0
 fi
 
@@ -575,6 +625,12 @@ else
     3) UPDATE_POLICY="disabled" ;;
     *) UPDATE_POLICY="auto" ;;
   esac
+fi
+
+# --- Hybrid tier (optional GKE attach target) ---
+hybrid_read_config "$PROJECT_ID"
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  echo "  Hybrid tier: enabled (GKE cluster: ${GKE_NAME}, location: ${GKE_LOCATION})"
 fi
 
 # Derived values
@@ -870,11 +926,32 @@ else
   echo "  Created firewall rule: ${FW_RULE_NAME}"
 fi
 
+# --- Hybrid tier: discovery + NFS firewall rules ---
+# Read-only discovery, then the two rules, both before the VM is created so
+# a discovery or ownership failure never leaves a half-created deployment.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Discovering GKE cluster network and node tag..."
+  hybrid_discover "default"
+  echo "  Node network tag: ${GKE_NODE_TAG}"
+
+  info "Creating hybrid-tier NFS firewall rules (if needed)..."
+  hybrid_ensure_firewall_rules "$HUB_NAME" "$PROJECT_ID" "default"
+fi
+
 # --- Create VM ---
+VM_TAGS_ARGS=()
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  VM_TAGS_ARGS=(--tags="$(hybrid_vm_tag "$HUB_NAME")")
+fi
+
 info "Creating GCE VM (if needed)..."
 if gcloud compute instances describe "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" &>/dev/null; then
   echo "  VM already exists: ${INSTANCE_NAME}"
+  if [[ "$HYBRID_ENABLED" == "true" ]]; then
+    info "Ensuring hybrid-tier network tag on existing VM..."
+    hybrid_apply_vm_tag "${INSTANCE_NAME}" "${ZONE}" "${PROJECT_ID}" "${HUB_NAME}"
+  fi
 else
   gcloud compute instances create "${INSTANCE_NAME}" \
     --zone="${ZONE}" \
@@ -887,6 +964,7 @@ else
     --image-family=ubuntu-2204-lts \
     --image-project=ubuntu-os-cloud \
     --metadata-from-file=user-data="${SCRIPT_DIR}/cloud-init.yaml" \
+    "${VM_TAGS_ARGS[@]}" \
     --quiet
   echo "  Created VM: ${INSTANCE_NAME} (zone: ${ZONE})"
 fi

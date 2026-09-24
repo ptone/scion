@@ -12,5 +12,10 @@
   },
   "admin_email": "",
   "update_policy": "auto",
-  "release_channel": ""
+  "release_channel": "",
+  "gke_target": {
+    "name": "",
+    "location": "",
+    "project": ""
+  }
 }
