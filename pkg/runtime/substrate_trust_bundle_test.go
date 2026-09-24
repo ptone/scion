@@ -24,21 +24,22 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
+	"github.com/GoogleCloudPlatform/scion/pkg/substrateenv"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
 // -----------------------------------------------------------------------
-// egress_trust_bundle: golden template, off (sb-dev-mitm brief §"Tests")
+// egress_trust_bundle: golden template, off
 // -----------------------------------------------------------------------
 
 // TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden pins
 // buildActorTemplate's output with EgressTrustBundle unset (the default)
 // against the exact template shape the function produced before
 // egress_trust_bundle existed: no system-info volume, no /run/ate mount,
-// Env nil. This is the "off means exact current behaviour" golden test the
-// brief requires — want is hand-built to mirror buildActorTemplate's
-// pre-change source (cf8a1487f), not derived from the function under test,
-// so a regression that silently changes the unset-case shape is caught here
+// Env nil. This is the "off means exact current behaviour" golden test —
+// want is hand-built to mirror the pre-change source, before
+// egress_trust_bundle existed, not derived from the function under test, so
+// a regression that silently changes the unset-case shape is caught here
 // rather than compared against itself.
 func TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("c", 64)
@@ -162,57 +163,123 @@ func TestBuildActorTemplate_EgressTrustBundleSet(t *testing.T) {
 	}
 }
 
+// TestBuildActorTemplate_EnvNamesMatchSharedTrustBundleVarNames is the
+// template-side half of the tie between buildActorTemplate's Env and
+// pkg/sciontool/substrate's execAsUserCmd -w candidate list
+// (TestExecAsUserCmd_CandidateNamesMatchTemplateEnvNames covers the other
+// half): both derive from substrateenv.TrustBundleVarNames directly, so a
+// name added to the template without updating that shared slice (or vice
+// versa) is caught here rather than surfacing as exec silently losing a
+// var the template already carries.
+func TestBuildActorTemplate_EnvNamesMatchSharedTrustBundleVarNames(t *testing.T) {
+	image := "repo/image@sha256:" + strings.Repeat("f", 64)
+	sc := config.V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"}
+
+	tmpl := buildActorTemplate("scion-test", "scion-fedcba", image, sc, nil)
+
+	gotNames := make([]string, len(tmpl.GetContainers()[0].GetEnv()))
+	for i, e := range tmpl.GetContainers()[0].GetEnv() {
+		gotNames[i] = e.GetName()
+	}
+	if !slices.Equal(gotNames, substrateenv.TrustBundleVarNames) {
+		t.Errorf("buildActorTemplate() Env names = %v, want substrateenv.TrustBundleVarNames = %v", gotNames, substrateenv.TrustBundleVarNames)
+	}
+}
+
 // -----------------------------------------------------------------------
 // substrateTemplateName: unchanged when unset, different when set
 // -----------------------------------------------------------------------
 
-// egressTrustBundleHashFixture is the shared config/image/resources fixture
-// TestSubstrateTemplateName_UnchangedWhenEgressTrustBundleUnset and
-// TestSubstrateTemplateName_ChangesWhenEgressTrustBundleSet both hash, so
-// the only difference between the two cases is EgressTrustBundle itself.
-func egressTrustBundleHashFixture() (image string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) {
-	image = "repo/image@sha256:" + strings.Repeat("e", 64)
-	sc = config.V1SubstrateConfig{
-		SandboxClass:      "gvisor",
-		SandboxConfigName: "gvisor-default",
-		SnapshotStorage:   "gs://bucket/prefix/",
+// substrateTemplateNameFixture is one row of the table-driven
+// substrateTemplateName tests below: an image/config/resources input, and
+// the literal name substrateTemplateName produces for it with
+// EgressTrustBundle unset, computed once (before egress_trust_bundle
+// existed as a hash input in the "base" case, and from the current,
+// already-shipped hash formula for the others, since they were added after
+// the field existed and so cannot pin a "pre-change" value — see each row's
+// comment).
+type substrateTemplateNameFixture struct {
+	name      string
+	image     string
+	sc        config.V1SubstrateConfig
+	resources *api.ResourceSpec
+	wantUnset string
+}
+
+func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
+	return []substrateTemplateNameFixture{
+		{
+			// The original fixture: pins the literal computed before
+			// egress_trust_bundle existed as a hash input at all, against
+			// the exact image/sandbox/config-name/snapshot-storage/
+			// resources shape substrateTemplateName has always hashed. A
+			// regression that starts hashing EgressTrustBundle
+			// unconditionally (e.g. always as a 10th "%s" field, "" when
+			// unset) would change this literal even though the setting is
+			// off — exactly the silent golden-template reuse break this
+			// pin exists to catch.
+			name:  "base",
+			image: "repo/image@sha256:" + strings.Repeat("e", 64),
+			sc: config.V1SubstrateConfig{
+				SandboxClass:      "gvisor",
+				SandboxConfigName: "gvisor-default",
+				SnapshotStorage:   "gs://bucket/prefix/",
+			},
+			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "2", Memory: "4Gi"}},
+			wantUnset: "scion-52ec9dfe17f8",
+		},
+		{
+			// Worker selector set, resources nil (so buildActorTemplate's
+			// own nil->BuiltinDefaultResources() substitution is exercised
+			// in the hash input too). Strengthens the plain-install pin
+			// across a second, materially different fixture shape.
+			name:  "worker selector, nil resources",
+			image: "repo/image@sha256:" + strings.Repeat("g", 64),
+			sc: config.V1SubstrateConfig{
+				SandboxClass:      "gvisor",
+				SandboxConfigName: "gvisor-default",
+				WorkerSelector:    map[string]string{"pool": "scion-agents"},
+				SnapshotStorage:   "gs://bucket/prefix/",
+			},
+			resources: nil,
+			wantUnset: "scion-3b33f56da495",
+		},
 	}
-	resources = &api.ResourceSpec{Limits: api.ResourceList{CPU: "2", Memory: "4Gi"}}
-	return image, sc, resources
 }
 
 // TestSubstrateTemplateName_UnchangedWhenEgressTrustBundleUnset pins the
-// literal name substrateTemplateName produces for the fixture config with
-// EgressTrustBundle unset — computed once, before egress_trust_bundle
-// existed as a hash input, against the exact same
-// image/sandbox/config-name/snapshot-storage/resources fixture. A
-// regression that starts hashing EgressTrustBundle unconditionally (e.g.
-// always as a 10th "%s" field, "" when unset) would change this literal
-// even though the setting is off — exactly the silent golden-template
-// reuse break the brief requires this catches.
+// literal name substrateTemplateName produces, with EgressTrustBundle
+// unset, across a table of fixture configs (round-18 review N-1: a worker
+// selector and nil resources, on top of the original single fixture).
 func TestSubstrateTemplateName_UnchangedWhenEgressTrustBundleUnset(t *testing.T) {
-	image, sc, resources := egressTrustBundleHashFixture()
-	const wantName = "scion-52ec9dfe17f8"
-
-	got := substrateTemplateName(image, sc, resources)
-	if got != wantName {
-		t.Errorf("substrateTemplateName() with EgressTrustBundle unset = %q, want pinned pre-change value %q", got, wantName)
+	for _, tc := range substrateTemplateNameFixtures() {
+		t.Run(tc.name, func(t *testing.T) {
+			got := substrateTemplateName(tc.image, tc.sc, tc.resources)
+			if got != tc.wantUnset {
+				t.Errorf("substrateTemplateName() with EgressTrustBundle unset = %q, want pinned value %q", got, tc.wantUnset)
+			}
+		})
 	}
 }
 
 // TestSubstrateTemplateName_ChangesWhenEgressTrustBundleSet confirms
-// setting EgressTrustBundle changes the template's content-address — an
-// existing golden template built before the setting was turned on must not
-// be silently reused once it is, since it lacks the volume/mount/env a
-// resumed or newly-scheduled actor would otherwise need.
+// setting EgressTrustBundle changes the template's content-address, across
+// the same fixture table — an existing golden template built before the
+// setting was turned on must not be silently reused once it is, since it
+// lacks the volume/mount/env a resumed or newly-scheduled actor would
+// otherwise need.
 func TestSubstrateTemplateName_ChangesWhenEgressTrustBundleSet(t *testing.T) {
-	image, sc, resources := egressTrustBundleHashFixture()
-	before := substrateTemplateName(image, sc, resources)
+	for _, tc := range substrateTemplateNameFixtures() {
+		t.Run(tc.name, func(t *testing.T) {
+			before := substrateTemplateName(tc.image, tc.sc, tc.resources)
 
-	sc.EgressTrustBundle = "egress-mitm.ate.dev"
-	after := substrateTemplateName(image, sc, resources)
+			sc := tc.sc
+			sc.EgressTrustBundle = "egress-mitm.ate.dev"
+			after := substrateTemplateName(tc.image, sc, tc.resources)
 
-	if before == after {
-		t.Error("substrateTemplateName() did not change when EgressTrustBundle was set — an existing golden template would be silently reused without the trust-bundle volume/mount/env")
+			if before == after {
+				t.Error("substrateTemplateName() did not change when EgressTrustBundle was set — an existing golden template would be silently reused without the trust-bundle volume/mount/env")
+			}
+		})
 	}
 }

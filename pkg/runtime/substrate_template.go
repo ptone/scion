@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
+	"github.com/GoogleCloudPlatform/scion/pkg/substrateenv"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -229,25 +230,33 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 		// and SSL_CERT_DIR are all fixed, non-secret paths into the
 		// projected bundle — never per-agent config or a secret, so setting
 		// them here does not weaken the "Env carries no secrets" invariant
-		// above.
+		// above. The names come from substrateenv.TrustBundleVarNames, the
+		// single source of truth shared with
+		// pkg/sciontool/substrate's execAsUserCmd (which of these names
+		// `su -w` must preserve across the `su -` login-shell env reset for
+		// exec-invoked commands) — see that package's doc comment.
 		//
-		// SSL_CERT_DIR=/run/ate is deliberate (substrate-lead decision):
-		// under sdsmint, every TLS origin the actor can reach — the hub
-		// included — is fronted by the gateway, so the base image's public
-		// roots in /etc/ssl/certs are dead weight; pointing SSL_CERT_DIR at
-		// the projection too, instead of leaving it at its default, makes
-		// the gateway CA the actor's ONLY anchor, so an HTTP 200 is positive
-		// proof the projected bundle did the validating rather than a
-		// public root happening to also work (docs/egress-trust-bundle.md).
-		// Node ignores SSL_CERT_DIR entirely — see the README note this
-		// links to — so NODE_EXTRA_CA_CERTS (additive to Node's bundled
-		// roots, not a replacement) is still required for it separately.
-		trustBundleEnv = []*ateapipb.EnvVar{
-			{Name: "NODE_EXTRA_CA_CERTS", Value: substrateTrustBundleFile},
-			{Name: "GIT_SSL_CAINFO", Value: substrateTrustBundleFile},
-			{Name: "SSL_CERT_FILE", Value: substrateTrustBundleFile},
-			{Name: "CURL_CA_BUNDLE", Value: substrateTrustBundleFile},
-			{Name: "SSL_CERT_DIR", Value: substrateTrustBundleMountPath},
+		// SSL_CERT_DIR=/run/ate is set deliberately, not left at its
+		// default. SSL_CERT_DIR makes the gateway CA exclusive for Go and Python
+		// `ssl` (crypto/x509's SystemCertPool and OpenSSL's default-path
+		// lookup both replace their default directory list with it); it is
+		// additive or ignored for curl, git, and Node — see
+		// deploy/substrate/README.md's egress_trust_bundle section for why
+		// (Debian's curl/git are built with a compiled-in CApath and never
+		// consult SSL_CERT_DIR; Node doesn't read it at all). What it buys:
+		// sciontool's own Go client trusts only the gateway CA, so a hub
+		// status report succeeding is positive proof for Go, and a path
+		// that bypasses the gateway fails closed rather than silently
+		// trusting public roots. The cost: if the hub is ever reached
+		// without the gateway re-originating the connection, status
+		// reports fail TLS.
+		trustBundleEnv = make([]*ateapipb.EnvVar, 0, len(substrateenv.TrustBundleVarNames))
+		for _, name := range substrateenv.TrustBundleVarNames {
+			value := substrateTrustBundleFile
+			if name == "SSL_CERT_DIR" {
+				value = substrateTrustBundleMountPath
+			}
+			trustBundleEnv = append(trustBundleEnv, &ateapipb.EnvVar{Name: name, Value: value})
 		}
 	}
 
