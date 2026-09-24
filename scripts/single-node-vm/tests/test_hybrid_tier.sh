@@ -19,7 +19,7 @@ MARKER="scion-deployment=${HUB}"
 test_tier_off_no_gcloud_calls() {
   fresh_gcloud_state
   CONFIG["gke_target.name"]=""
-  hybrid_read_config "$PROJECT"
+  hybrid_read_config "$PROJECT" "$HUB"
   assert_eq "false" "$HYBRID_ENABLED" "tier should be off when gke_target.name is absent"
   assert_eq "0" "$(gcloud_call_count)" "no gcloud call should happen reading config alone"
 }
@@ -30,7 +30,7 @@ test_config_project_mismatch_refused() {
   CONFIG["gke_target.name"]="mycluster"
   CONFIG["gke_target.location"]="us-central1"
   CONFIG["gke_target.project"]="other-project"
-  run_expect_fail hybrid_read_config "$PROJECT"
+  run_expect_fail hybrid_read_config "$PROJECT" "$HUB"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "mismatched gke_target.project must fail the run"
   assert_contains "$RUN_OUTPUT" "other-project" "error should name the offending project"
 }
@@ -39,7 +39,7 @@ test_config_project_mismatch_refused() {
 test_config_missing_location_refused() {
   fresh_gcloud_state
   CONFIG["gke_target.name"]="mycluster"
-  run_expect_fail hybrid_read_config "$PROJECT"
+  run_expect_fail hybrid_read_config "$PROJECT" "$HUB"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "missing gke_target.location must fail the run"
   # Specifically the "is required" check, not merely that the later regex
   # validation also happens to reject an empty string with a message that
@@ -55,10 +55,63 @@ test_config_enables_tier() {
   CONFIG["gke_target.name"]="mycluster"
   # shellcheck disable=SC2034 # read by config_get (harness.sh) via hybrid_read_config
   CONFIG["gke_target.location"]="us-central1"
-  hybrid_read_config "$PROJECT"
+  hybrid_read_config "$PROJECT" "$HUB"
   assert_eq "true" "$HYBRID_ENABLED" "tier should be on when name+location are set"
   assert_eq "mycluster" "$GKE_NAME" "GKE_NAME should come from config"
   assert_eq "$PROJECT" "$GKE_PROJECT" "GKE_PROJECT should default to the hub's project"
+  assert_eq "scion-hub-${HUB}" "$GKE_NAMESPACE" "GKE_NAMESPACE should default to scion-hub-<hub> when not set in config"
+  assert_eq "scion-hub-${HUB}-shared" "$GKE_PVC_NAME" "GKE_PVC_NAME should default to scion-hub-<hub>-shared when not set in config"
+}
+
+test_config_namespace_and_pvc_name_from_config() {
+  fresh_gcloud_state
+  CONFIG["gke_target.name"]="mycluster"
+  # shellcheck disable=SC2034 # read by config_get (harness.sh) via hybrid_read_config
+  CONFIG["gke_target.location"]="us-central1"
+  CONFIG["gke_target.namespace"]="custom-ns"
+  CONFIG["gke_target.pvc_name"]="custom-pvc"
+  hybrid_read_config "$PROJECT" "$HUB"
+  assert_eq "custom-ns" "$GKE_NAMESPACE" "an explicit gke_target.namespace must override the default"
+  assert_eq "custom-pvc" "$GKE_PVC_NAME" "an explicit gke_target.pvc_name must override the default"
+}
+
+test_config_namespace_invalid_refused() {
+  fresh_gcloud_state
+  CONFIG["gke_target.name"]="mycluster"
+  # shellcheck disable=SC2034 # read by config_get (harness.sh) via hybrid_read_config
+  CONFIG["gke_target.location"]="us-central1"
+  CONFIG["gke_target.namespace"]="Not_Valid"
+  run_expect_fail hybrid_read_config "$PROJECT" "$HUB"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an invalid namespace name must be refused"
+  assert_contains "$RUN_OUTPUT" "gke_target.namespace" "error should name the offending field"
+}
+
+test_config_pvc_name_invalid_refused() {
+  fresh_gcloud_state
+  CONFIG["gke_target.name"]="mycluster"
+  # shellcheck disable=SC2034 # read by config_get (harness.sh) via hybrid_read_config
+  CONFIG["gke_target.location"]="us-central1"
+  CONFIG["gke_target.pvc_name"]="Not_Valid"
+  run_expect_fail hybrid_read_config "$PROJECT" "$HUB"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an invalid PVC name must be refused"
+  assert_contains "$RUN_OUTPUT" "gke_target.pvc_name" "error should name the offending field"
+}
+
+test_k8s_ensure_objects_uses_hybrid_read_config_override() {
+  fresh_gcloud_state
+  CONFIG["gke_target.name"]="mycluster"
+  # shellcheck disable=SC2034 # read by config_get (harness.sh) via hybrid_read_config
+  CONFIG["gke_target.location"]="us-central1"
+  CONFIG["gke_target.namespace"]="custom-ns"
+  CONFIG["gke_target.pvc_name"]="custom-pvc"
+  hybrid_read_config "$PROJECT" "$HUB"
+  hybrid_k8s_setup_kubeconfig
+  hybrid_k8s_ensure_objects "$HUB" "$K8S_VM_IP"
+  assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/namespace/custom-ns.json" ]] && echo true || echo false)" \
+    "the namespace set via hybrid_read_config (interactive-prompt-capable) must be the one actually used, not just the default"
+  assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/pvc/custom-ns__custom-pvc.json" ]] && echo true || echo false)" \
+    "the PVC name set via hybrid_read_config must be the one actually used"
+  rm -f "$HYBRID_KUBECONFIG"
 }
 
 # =====================================================================
@@ -1555,7 +1608,7 @@ test_config_name_leading_hyphen_refused() {
   fresh_gcloud_state
   CONFIG["gke_target.name"]="-mycluster"
   CONFIG["gke_target.location"]="us-central1"
-  run_expect_fail hybrid_read_config "$PROJECT"
+  run_expect_fail hybrid_read_config "$PROJECT" "$HUB"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a leading hyphen must be refused"
   assert_contains "$RUN_OUTPUT" "not a valid GKE cluster name" "error should name the field"
 }
@@ -1564,7 +1617,7 @@ test_config_name_uppercase_refused() {
   fresh_gcloud_state
   CONFIG["gke_target.name"]="MyCluster"
   CONFIG["gke_target.location"]="us-central1"
-  run_expect_fail hybrid_read_config "$PROJECT"
+  run_expect_fail hybrid_read_config "$PROJECT" "$HUB"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an uppercase cluster name must be refused"
 }
 
@@ -1572,7 +1625,7 @@ test_config_name_trailing_hyphen_refused() {
   fresh_gcloud_state
   CONFIG["gke_target.name"]="mycluster-"
   CONFIG["gke_target.location"]="us-central1"
-  run_expect_fail hybrid_read_config "$PROJECT"
+  run_expect_fail hybrid_read_config "$PROJECT" "$HUB"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a trailing hyphen must be refused"
 }
 
@@ -1580,7 +1633,7 @@ test_config_location_invalid_refused() {
   fresh_gcloud_state
   CONFIG["gke_target.name"]="mycluster"
   CONFIG["gke_target.location"]="us-central"
-  run_expect_fail hybrid_read_config "$PROJECT"
+  run_expect_fail hybrid_read_config "$PROJECT" "$HUB"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a location missing its trailing digits must be refused"
   assert_contains "$RUN_OUTPUT" "not a valid GCP zone or region" "error should name the field"
 }
@@ -1590,7 +1643,7 @@ test_config_project_invalid_refused() {
   CONFIG["gke_target.name"]="mycluster"
   CONFIG["gke_target.location"]="us-central1"
   CONFIG["gke_target.project"]="Not_A_Valid_Project"
-  run_expect_fail hybrid_read_config "$PROJECT"
+  run_expect_fail hybrid_read_config "$PROJECT" "$HUB"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an invalid project ID must be refused"
   assert_contains "$RUN_OUTPUT" "not a valid GCP project ID" "error should name the field"
 }
@@ -1602,7 +1655,7 @@ test_config_python_preflight_refused() {
   CONFIG["gke_target.location"]="us-central1"
   local saved_python="$PYTHON"
   PYTHON="/nonexistent/python3"
-  run_expect_fail hybrid_read_config "$PROJECT"
+  run_expect_fail hybrid_read_config "$PROJECT" "$HUB"
   PYTHON="$saved_python"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a missing python interpreter must be refused when the tier is enabled"
   assert_contains "$RUN_OUTPUT" "Python interpreter" "error should name the problem"
