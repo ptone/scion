@@ -650,3 +650,91 @@ Delivered separately, in the scratchpad, not in this repo: `infra/live-negative-
 - `pkg/agent/substrate_delete_test.go`, `cmd/sciontool/commands/init.go` (the port-forward/autoexpose comment): comment-only nit cleanup.
 
 No changes to the delete paths, to any capability beyond what was already granted, or to any other runtime's behaviour.
+
+## Follow-up 3: hermeticity incident, full capability verification, generalized fail-loud
+
+### Incident: a test wrote this branch's own real agent status to the real Hub
+
+`TestRunInit_PrivilegeDropFailure_ReturnsSentinel` drove the real `RunInit`.
+`setupHostUser`'s rootless branch and `resolveAgentHome` both fall back to a
+real `user.Lookup("scion")`, ignoring `$HOME`, whenever the process isn't
+UID 0. This dev/test container's actual system user happens to be named
+"scion", so that real lookup succeeded and the test wrote
+`agent-info.json` with `phase: "error"` to the container's own, real
+`/home/scion` — not the test's `t.TempDir()`. Something outside the test
+process (this container's own agent supervision, reading that file) relayed
+the contamination to the real Hub, which put this branch's own agent into
+phase ERROR and rejected inbound messages for about 35 minutes. It
+recurred once more, self-inflicted, while isolating the mechanism (see the
+mutation check below).
+
+**Fix**, two independent layers, both required (per a binding instruction
+from substrate-lead: tests must be unable to reach a real Hub or write real
+agent state even when the ambient environment has real credentials/UIDs
+set):
+
+- Every "scion"/by-UID lookup in `cmd/sciontool/commands`
+  (`setupHostUser`'s rootless and keep-id branches, `resolveAgentHome`,
+  `gitCloneWorkspace`'s fallback) now goes through the existing
+  `scionUserLookup` package var plus a new `lookupUserByID` var, instead of
+  calling `user.Lookup`/`user.LookupId` directly. No production behaviour
+  change (the vars default to the real functions).
+- A new `TestMain` in `cmd/sciontool/commands` (mirrored, lighter, in
+  `pkg/sciontool/substrate`) clears every Hub/token/agent-identity env var
+  plus `SCION_HOST_UID/GID/SCION_KEEPID_UID` for the whole test binary, and
+  defaults `scionUserLookup`/`lookupUserByID` to "not found" for the whole
+  run — a single test's `t.Setenv` only protects that one test.
+
+**Proof:** ran the full `cmd/sciontool/commands` suite with the real,
+completely unscrubbed container environment (39 real `SCION_*` vars,
+including the real `SCION_HUB_ENDPOINT`) — real `agent-info.json` content
+hash unchanged. Ran it again with `SCION_HUB_ENDPOINT`/`SCION_HUB_URL`
+pointed at a local listener that logs any hit and fails, plus
+`SCION_AUTH_TOKEN`/`SCION_AGENT_ID` set to real-looking values — zero hits.
+**Mutation check:** removed the `scionUserLookup`/`lookupUserByID`
+override from `TestMain` (env-clearing left in place) and re-ran the same
+test — it reproduced the incident exactly, confirming which half of the
+fix is load-bearing. Reverted; the real file was manually repaired
+afterward (`phase` back to `"running"`, stray `detail` cleared).
+
+### (A): PrivilegeDropChecker now verifies the full capability set
+
+Previously checked only `SETUID`/`SETGID`. New leaf package
+`pkg/substratecaps` (no dependencies beyond the standard library, so both
+`pkg/runtime` and `cmd/sciontool/commands` can import it without an import
+cycle or pulling in the other's dependencies) is the single shared
+definition — name, `CapEff` bit, and a cited reason per capability.
+`buildActorTemplate` and `checkPrivilegeDropFeasible` both derive from it
+now, so they cannot drift apart. Wired with `[SETUID, SETGID, CHOWN]`;
+`CHOWN` is proven live at 017adc1b5 ("Failed to chown log file... operation
+not permitted", "Failed to chown workspace... operation not permitted",
+then "Git clone failed: git init failed").
+
+### (B): any non-zero in-process init exit fails loud, not only the sentinel
+
+`exitOnPrivilegeDropSentinel` → `exitOnNonZeroInit`: substrate-serve's
+`InitRunner` wrapper now calls `os.Exit` for any non-zero `RunInit` exit
+code, not just the privilege-drop sentinel — proven necessary by the same
+017adc1b5 log line ("in-process init exited with code 1" from the
+git-clone failure, which already reported `PhaseError` but never made
+PID 1 exit). Exit code 0 is the one deliberate exception (RunInit's own
+definition of "nothing went wrong"); `RunInit`'s existing crash/limits-
+exceeded classification (`classifyExit`) is untouched. `reportInitFailure`
+(renamed from `reportPrivilegeDropFailure`) is now also called from every
+`RunInit` early-return path that previously had no reporting at all
+(staged secrets decode/write, harness manifest parse, invalid harness env
+overlay/telemetry marker, immediate child-start failure, a supervisor-level
+error).
+
+### Gates (`SCION_*` and `CLAUDE_CODE_ENABLE_TELEMETRY` unset)
+
+`go build ./...`, `go vet ./...` clean; `go test -count=1` on
+`pkg/runtime/...`, `pkg/runtimebroker/...`, `pkg/agent/...`,
+`pkg/config/...`, `pkg/sciontool/...`, `cmd/sciontool/...`,
+`pkg/substratecaps/...` all `ok`; `go test -race -count=1` on
+`cmd/sciontool/commands/...`, `pkg/sciontool/substrate/...`,
+`pkg/substratecaps/...` all `ok`; `golangci-lint run
+--new-from-rev=c3b6e821d ./...` 0 issues; `make check-custom` same
+pre-existing unrelated hits, zero in touched files; hygiene greps zero hits
+across every touched file. Checked for stray `go test`/`.test` processes
+before and after — none found.
