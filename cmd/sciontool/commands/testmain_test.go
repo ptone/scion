@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
 // errScionUserLookupDisabledInTests is what scionUserLookup/lookupUserByID
@@ -62,6 +63,17 @@ var errScionUserLookupDisabledInTests = errors.New("scionUserLookup/lookupUserBy
 // itself, racing os/exec's own wait() and failing it with ECHILD. See
 // startReaper's own doc comment.
 //
+// Incident 4: every RunInit-driving test in this package was appending
+// real lines to this container's own real /home/scion/agent.log the whole
+// time. pkg/sciontool/log's write() lazily calls Init() on first use if no
+// path has been set, and Init() defaults to "/home/scion/agent.log"
+// whenever that directory exists — true on any machine where "scion" is a
+// real account, exactly the condition behind incidents 1-2. This is a
+// diagnostic log, not something a heartbeat relays to the Hub, so the
+// blast radius is smaller than incidents 1-2, but it is still a real file
+// on a real, possibly shared machine that tests were writing into by
+// accident.
+//
 // Layers, all required:
 //
 //  1. Every SCION_HUB*/token/agent-identity env var, plus SCION_HOST_UID/GID
@@ -94,6 +106,9 @@ var errScionUserLookupDisabledInTests = errors.New("scionUserLookup/lookupUserBy
 //     (incident 3), so a test driving RunInit never installs the
 //     process-wide zombie reaper that steals other tests' exec.Command
 //     children.
+//  5. log.SetLogPath redirects pkg/sciontool/log's own file target to the
+//     same per-binary temp directory (incident 4), before any log call in
+//     this binary can lazily Init() itself against the real path.
 func TestMain(m *testing.M) {
 	envVarsToClear := append(append([]string{}, hubEnvVars...),
 		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID")
@@ -120,6 +135,7 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("XDG_CACHE_HOME", filepath.Join(tmpHome, ".cache"))
 	_ = os.Setenv("XDG_STATE_HOME", filepath.Join(tmpHome, ".local", "state"))
 	_ = os.Setenv("SCION_WORKSPACE_PATH", filepath.Join(tmpHome, "workspace"))
+	log.SetLogPath(filepath.Join(tmpHome, "agent.log"))
 
 	// hub.ReadTokenFile resolves its own home directory independently of
 	// $HOME: resolveTokenHome (pkg/sciontool/hub) prefers a real
