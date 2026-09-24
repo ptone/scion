@@ -270,6 +270,53 @@ test_discover_node_subnet_accepts_slash_8_boundary() {
 }
 
 # =====================================================================
+# NFS export: the fsid and export-line renderers are pure functions
+# (no gcloud or SSH calls), directly unit-testable.
+# =====================================================================
+
+test_nfs_export_line_renders_expected_options() {
+  local line
+  line="$(hybrid_nfs_export_line "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123")"
+  assert_eq "/srv/scion-shared 10.128.0.0/20(rw,sync,no_subtree_check,all_squash,anonuid=6001,anongid=6000,sec=sys,fsid=abc123)" \
+    "$line" "the export line must render every required option in the expected shape"
+}
+
+test_nfs_export_line_uses_given_cidr_not_hardcoded() {
+  local line
+  line="$(hybrid_nfs_export_line "/srv/scion-shared" "10.4.0.0/22" "6001" "6000" "abc123")"
+  assert_contains "$line" "10.4.0.0/22" "the export line must use the actual discovered CIDR"
+}
+
+test_nfs_export_line_anonuid_and_anongid_are_distinct_values() {
+  local line
+  line="$(hybrid_nfs_export_line "/srv/scion-shared" "10.128.0.0/20" "6001" "1000" "abc123")"
+  assert_contains "$line" "anonuid=6001" "anonuid must be the squash uid, not the scion gid"
+  assert_contains "$line" "anongid=1000" "anongid must be the scion group's gid -- there is no separate squash group"
+}
+
+test_nfs_fsid_deterministic_for_same_hub() {
+  local first second
+  first="$(hybrid_nfs_fsid "demohub")"
+  second="$(hybrid_nfs_fsid "demohub")"
+  assert_eq "$first" "$second" "the fsid must be stable across calls (and so across re-runs) for the same hub"
+}
+
+test_nfs_fsid_differs_per_hub() {
+  local hub1 hub2
+  hub1="$(hybrid_nfs_fsid "hub-one")"
+  hub2="$(hybrid_nfs_fsid "hub-two")"
+  assert_true "$([[ "$hub1" != "$hub2" ]] && echo true || echo false)" \
+    "different hubs must never collide on the same fsid"
+}
+
+test_nfs_fsid_is_a_well_formed_uuid() {
+  local fsid
+  fsid="$(hybrid_nfs_fsid "demohub")"
+  assert_true "$([[ "$fsid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && echo true || echo false)" \
+    "the fsid must be a well-formed UUID, which nfs-utils accepts for fsid="
+}
+
+# =====================================================================
 # Firewall rules: names, marker, target tag, shape, reuse, and
 # spec-drift verification on reuse.
 # =====================================================================

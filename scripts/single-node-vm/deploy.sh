@@ -1090,6 +1090,55 @@ if [[ "$CLOUD_INIT_OK" != "true" ]]; then
 fi
 echo "  Cloud-init completed."
 
+# --- Hybrid tier: NFS squash identity, server, and export ---
+# A tier-gated remote step, run here (once cloud-init has created the
+# "scion" user and group the squash identity's primary group and export
+# ownership depend on) rather than added to cloud-init.yaml itself, which
+# is shared with every deployment: this keeps the tier-off path
+# byte-for-byte unchanged. Always redone on every re-run, tier on: it's
+# cheap, and it's how the export stays in sync if the cluster's node
+# subnet CIDR ever changes.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Creating the NFS squash identity (if needed)..."
+  SQUASH_IDS=$(gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
+      set -e
+      id ${HYBRID_NFS_SQUASH_USER} >/dev/null 2>&1 || sudo useradd -r -M -N -g scion -s /usr/sbin/nologin ${HYBRID_NFS_SQUASH_USER}
+      SQUASH_UID=\$(id -u ${HYBRID_NFS_SQUASH_USER})
+      SCION_UID=\$(id -u scion)
+      SCION_GID=\$(getent group scion | cut -d: -f3)
+      if [ \"\$SQUASH_UID\" = \"\$SCION_UID\" ]; then
+        echo 'The NFS squash uid must not equal the scion (broker) uid.' >&2
+        exit 1
+      fi
+      echo \"\${SQUASH_UID}:\${SCION_GID}\"
+    " 2>/dev/null)
+  SQUASH_UID="${SQUASH_IDS%%:*}"
+  SQUASH_GID="${SQUASH_IDS##*:}"
+  echo "  Squash uid: ${SQUASH_UID} (scion group gid: ${SQUASH_GID})"
+
+  info "Installing the NFS server and export (if needed)..."
+  NFS_FSID="$(hybrid_nfs_fsid "$HUB_NAME")"
+  NFS_EXPORT_LINE="$(hybrid_nfs_export_line "$HYBRID_NFS_EXPORT_ROOT" "$GKE_NODE_SUBNET_CIDR" "$SQUASH_UID" "$SQUASH_GID" "$NFS_FSID")"
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
+      set -e
+      sudo mkdir -p ${HYBRID_NFS_EXPORT_ROOT}
+      sudo chown scion:scion ${HYBRID_NFS_EXPORT_ROOT}
+      sudo chmod 2755 ${HYBRID_NFS_EXPORT_ROOT}
+      if ! dpkg -s nfs-kernel-server >/dev/null 2>&1; then
+        sudo apt-get update -y
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nfs-kernel-server
+      fi
+      echo '${NFS_EXPORT_LINE}' | sudo tee /etc/exports.d/scion-hub-${HUB_NAME}.exports > /dev/null
+      sudo exportfs -ra
+      sudo systemctl enable --now nfs-kernel-server
+      echo 'NFS export configured.'
+    "
+fi
+
 # ===================================================================
 # Phase 3: VM Setup
 # ===================================================================
