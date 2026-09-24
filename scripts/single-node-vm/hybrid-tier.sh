@@ -585,15 +585,20 @@ print(uuid.uuid5(uuid.NAMESPACE_DNS, 'scion-hub-' + sys.argv[1] + '.nfs-export')
 # `sync` (required so both Docker and GKE writers see consistent state),
 # `no_subtree_check`, `all_squash` to the given anonuid/anongid, `sec=sys`
 # (this tier's authorization is by source IP -- see the docs, not by NFS
-# auth), and the given fsid. There is no separate squash group: anongid is
-# the "scion" group's own gid, since the Phase 2 leaf ACL grants that
-# group access, and a different anongid would make GKE's writes invisible
-# to it. Pure string rendering -- no gcloud or SSH calls -- so it's
-# directly unit-testable; the caller is responsible for actually reading
-# the anonuid/anongid off the VM and writing the result to a file.
+# auth), `mp` (mountpoint-only: knfsd itself refuses to serve EXPORT_ROOT
+# unless it's currently a mountpoint), and the given fsid. `mp` is the
+# export-side half of the fail-closed guarantee the caller's mount check
+# provides at provisioning time -- it also covers a mount that fails on a
+# later reboot, which a one-time provisioning check can't. There is no
+# separate squash group: anongid is the "scion" group's own gid, since
+# the Phase 2 leaf ACL grants that group access, and a different anongid
+# would make GKE's writes invisible to it. Pure string rendering -- no
+# gcloud or SSH calls -- so it's directly unit-testable; the caller is
+# responsible for actually reading the anonuid/anongid off the VM and
+# writing the result to a file.
 hybrid_nfs_export_line() {
   local export_root="$1" cidr="$2" anonuid="$3" anongid="$4" fsid="$5"
-  echo "${export_root} ${cidr}(rw,sync,no_subtree_check,all_squash,anonuid=${anonuid},anongid=${anongid},sec=sys,fsid=${fsid})"
+  echo "${export_root} ${cidr}(rw,sync,no_subtree_check,all_squash,anonuid=${anonuid},anongid=${anongid},sec=sys,mp,fsid=${fsid})"
 }
 
 # hybrid_nfs_squash_identity_script SQUASH_USER
@@ -667,14 +672,20 @@ SCRIPT
 #      existing image file is never re-created or re-mkfs'd, since doing
 #      so would destroy whatever the export already holds;
 #   2. adds an /etc/fstab entry loop-mounting that image at EXPORT_ROOT,
-#      with x-systemd.before=nfs-server.service so systemd's fstab
-#      generator orders the mount before the NFS server unit, then mounts
-#      it if it isn't already;
+#      with BOTH x-systemd.before=nfs-server.service (orders the mount
+#      before the NFS server unit) AND x-systemd.required-by=
+#      nfs-server.service (makes it an actual dependency, not just an
+#      ordering) -- before= alone only orders the units; on a failed
+#      mount it would let nfs-server start anyway and export whatever's
+#      really at EXPORT_ROOT (the boot disk's root filesystem), exactly
+#      the exposure this dedicated filesystem exists to close. Then
+#      mounts it if it isn't already;
 #   3. fails closed -- before writing or activating anything below --
-#      if EXPORT_ROOT is not actually a mountpoint after that: serving
-#      the export from the boot disk's root filesystem by accident (a
-#      failed mount silently falling through) is exactly the exposure a
-#      dedicated filesystem exists to close;
+#      if EXPORT_ROOT is not actually a mountpoint after that: this is
+#      the deploy-time half of the guarantee; the exports line's own
+#      `mp` option (see hybrid_nfs_export_line) is the export-side half,
+#      and additionally covers a mount that fails on a later reboot,
+#      which this one-time check can't;
 #   4. sets ownership/mode on the now-mounted export root (scion:scion,
 #      mode 2755 so the squash uid can't write it), installs
 #      nfs-kernel-server if it isn't already, disables NFSv2/v3 and UDP
@@ -705,7 +716,7 @@ if [ ! -e ${image_path} ]; then
 fi
 sudo mkdir -p ${export_root}
 if ! grep -qF "${image_path} " /etc/fstab; then
-  echo "${image_path} ${export_root} ext4 loop,x-systemd.before=nfs-server.service 0 2" | sudo tee -a /etc/fstab > /dev/null
+  echo "${image_path} ${export_root} ext4 loop,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 2" | sudo tee -a /etc/fstab > /dev/null
   sudo systemctl daemon-reload
 fi
 if ! mountpoint -q ${export_root}; then
