@@ -530,6 +530,38 @@ echo 'NFS export configured.'
 SCRIPT
 }
 
+# hybrid_settings_shared_dir_storage_yaml VM_IP EXPORT_ROOT PV_NAME
+#
+# Renders the server.shared_dir_storage block for settings.yaml (the
+# schema from pkg/config/settings_v1.go's V1SharedDirStorageConfig/
+# V1NFSConfig/V1NFSShare), indented to nest under "server:" at the same
+# level as its existing "hub:"/"storage:"/etc. keys. backend is "nfs";
+# nfs.mount_root and the one share's "export" are both the VM's export
+# root, since the broker reads it directly as a local path on this same
+# VM while GKE pods reach it over NFS at that same server path;
+# subpath_root is the fixed "projects" subdirectory every project's
+# shared-dirs live under; the share's id is a stable label (there is
+# only ever one share per hub) and pv_name is the PV this hub's pods
+# actually bind to. Pure string rendering -- no gcloud, kubectl, or SSH
+# calls -- so it's directly unit-testable; the caller only calls this
+# when the tier is on, and splices its output into an otherwise-
+# unchanged settings.yaml render.
+hybrid_settings_shared_dir_storage_yaml() {
+  local vm_ip="$1" export_root="$2" pv_name="$3"
+  cat <<YAML
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: "${export_root}"
+      subpath_root: "projects"
+      shares:
+        - id: "shared"
+          server: "${vm_ip}"
+          export: "${export_root}"
+          pv_name: "${pv_name}"
+YAML
+}
+
 # hybrid_cloud_run_label_args SERVICE_NAME PROJECT_ID REGION HUB_NAME
 #
 # Echoes the --labels=... argument to pass to `gcloud run deploy`, or
