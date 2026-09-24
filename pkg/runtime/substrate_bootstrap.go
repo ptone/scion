@@ -163,6 +163,27 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	// never connect.
 	env["SCION_RUNTIME"] = "substrate"
 
+	// SCION_HOST_UID/GID: every other runtime sets these (buildCommonRunArgs,
+	// KubernetesRuntime.buildPod) so `sciontool init`'s setupHostUser can
+	// drop the actor's init/harness/tmux process from root to the "scion"
+	// user before the supervisor launches the harness (pkg/sciontool/
+	// supervisor: it only attempts the drop when UID/GID are both > 0).
+	// Without them, setupHostUser's "SCION_HOST_UID/GID not set" branch
+	// leaves the whole process tree at UID 0 — the harness and tmux would
+	// run as root even with the container's own SETUID/SETGID capabilities
+	// in place, since the drop is never attempted in the first place.
+	//
+	// Unlike Docker/Podman (where these normally mirror the broker host's
+	// own UID/GID for bind-mount permission parity) or the NFS backend
+	// (where they're a stable, node-independent identity for a shared
+	// filesystem), Substrate's workspace is never bind-mounted from the
+	// invoking broker's own filesystem at all — there is no host UID to
+	// synchronize with. The stable default (1000:1000, matching the actor
+	// image's built-in "scion" user, the same fallback the NFS backend uses
+	// elsewhere) is the only value that makes sense here, unconditionally.
+	env["SCION_HOST_UID"] = "1000"
+	env["SCION_HOST_GID"] = "1000"
+
 	return env
 }
 
