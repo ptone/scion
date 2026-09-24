@@ -17,6 +17,15 @@ provider "kubernetes" {
   host                   = "https://${module.shared_lookup.shared.gke.endpoint}"
   cluster_ca_certificate = base64decode(module.shared_lookup.shared.gke.ca_certificate)
   token                  = data.google_client_config.me.access_token
+
+  # Autopilot's warden webhook stamps autopilot.gke.io/* annotations
+  # (warden-version, resource-adjustment, ...) onto objects it admits —
+  # agent pods and the namespace will collect these too, not just the
+  # nfs-init Job. Handled provider-wide rather than per-resource
+  # ignore_changes, since it's a cluster-wide Autopilot behavior (design
+  # §3.4/§3.5, added after vm-deploy live-planned this against the real
+  # cluster).
+  ignore_annotations = ["^autopilot\\.gke\\.io/.*"]
 }
 
 module "shared_lookup" {

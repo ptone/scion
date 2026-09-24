@@ -167,18 +167,34 @@ resource "kubernetes_job_v1" "nfs_init" {
 
   # Autopilot's warden webhook injects fields into the pod template at
   # create time (a seccomp profile, dropped container capabilities,
-  # allow_privilege_escalation, an arch toleration, and resource requests)
-  # that aren't in this config. Since the pod template is immutable, every
-  # subsequent plan sees those injected values as drift and wants to replace
-  # the whole Job — failing A2's "second plan, no changes". Ignore exactly
-  # the paths Autopilot injects; nothing broader, and none of these values
-  # are declared in config on purpose (design §3.4, updated after vm-deploy's
-  # first real plan).
+  # allow_privilege_escalation, and an arch toleration) that aren't in this
+  # config. Since the pod template is immutable, every subsequent plan sees
+  # those injected values as drift and wants to replace the whole Job —
+  # failing A2's "second plan, no changes". Ignore exactly the three spec
+  # paths Autopilot injects into; nothing broader, and none of these values
+  # are declared in config on purpose (design §3.4, updated twice after
+  # vm-deploy live-planned both variants against the real cluster: the
+  # spec-level paths alone are sufficient here — container[0].resources
+  # showed no drift and was dropped from this list).
+  #
+  # The warden also stamps two annotations on the object
+  # (autopilot.gke.io/warden-version, .../resource-adjustment), which is
+  # handled provider-wide in configurations/hub's kubernetes provider block
+  # (ignore_annotations), not per-resource here — it's a cluster-wide
+  # Autopilot behavior that will also touch agent pods and the namespace,
+  # not something specific to this one Job.
+  #
+  # Caveat (vm-deploy): ignoring the whole security_context blocks means
+  # our own declared run_as_user/run_as_group = 0 is also frozen after
+  # first apply — if that ever needs to change, this ignore_changes entry
+  # has to be edited (or removed and reapplied) alongside it. Narrower
+  # per-field paths aren't an option here: the warden injects into the same
+  # blocks we set fields in, so there's no way to ignore only its fields
+  # and not ours within security_context.
   lifecycle {
     ignore_changes = [
       spec[0].template[0].spec[0].security_context,
       spec[0].template[0].spec[0].container[0].security_context,
-      spec[0].template[0].spec[0].container[0].resources,
       spec[0].template[0].spec[0].toleration,
     ]
   }
