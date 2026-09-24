@@ -631,6 +631,14 @@ running this tier:
   root filesystem, not a dedicated filesystem's own root** (see Security
   posture and Boot-disk trade-offs above for what that costs, and how to
   export a dedicated filesystem root instead).
+- **The Phase 3 `deploy.sh` tier option reserves a static internal IP for
+  the hub VM and opens tcp:8080 to it from the cluster's pod CIDR, but
+  nothing yet configures the `gke` runtime to send agents to that address**
+  (`docs/deploy/agent-runbook-single-node-vm.md`, items 2 and 5 under
+  "Enabling the tier does five things"). GKE agent pods reach the hub at
+  whatever endpoint the hub process otherwise resolves for every runtime
+  alike; a distinct, `gke`-profile-scoped hub endpoint pointed at the
+  reserved internal IP would need a hub code change this tier doesn't make.
 
 **Open question, not built:** the auxiliary Kubernetes runtime's behavior when
 GKE credentials are broken or unreachable at hub startup (whether it degrades

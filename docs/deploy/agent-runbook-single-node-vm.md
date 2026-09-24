@@ -345,16 +345,27 @@ Enabling the tier does five things, all additive:
    distinct tag matches that pattern, the script refuses to guess and
    fails, listing whatever candidates it found. If the cluster can't be
    found or its network doesn't match, it also fails, before creating
-   anything.
-2. **Firewall rules and VM tag.** Two firewall rules are created, both
-   scoped to this hub by an exact `scion-deployment=<hub_name>` marker in
-   their description and a `scion-hub-<hub_name>-nfs` target tag, which the
-   hub VM also receives (at creation, or via an idempotent `add-tags` on an
-   existing VM):
+   anything. The same cluster description is also used to read the
+   cluster's pod CIDR (`clusterIpv4Cidr`, cross-checked against
+   `ipAllocationPolicy.clusterIpv4CidrBlock` — the script fails if the two
+   disagree or if the range is missing, broader than `/8`, or not valid
+   IPv4), which is what scopes the hub-allow firewall rule below to pod
+   traffic rather than to `0.0.0.0/0`.
+2. **Firewall rules, VM tag, and a static internal IP.** Three firewall
+   rules are created, all scoped to this hub by an exact
+   `scion-deployment=<hub_name>` marker in their description and a
+   `scion-hub-<hub_name>-nfs` target tag, which the hub VM also receives
+   (at creation, or via an idempotent `add-tags` on an existing VM):
    - `scion-hub-<hub_name>-nfs-allow` — allows tcp:2049 (NFS) from the
      cluster's discovered node tag, priority 900.
    - `scion-hub-<hub_name>-nfs-deny` — denies tcp:2049 from everywhere
      else (`0.0.0.0/0`), priority 950.
+   - `scion-hub-<hub_name>-hub-allow` — allows tcp:8080 from the cluster's
+     discovered pod CIDR, priority 900. Unlike the NFS pair, this rule has
+     no paired deny: port 8080 is already reachable VPC-internally as part
+     of this tier's existing base posture (the single-node VM's own IAP
+     proxy setup), so this rule only narrows how pods specifically reach
+     it, it does not newly expose anything.
 
    The deny rule is created first, then the allow rule, so an interrupted
    run can never leave the allow rule in place without its paired deny.
@@ -368,11 +379,30 @@ Enabling the tier does five things, all additive:
    target tags, priority, network) against what this tier expects, and
    fails — listing exactly what differs, plus the commands to fix it —
    rather than silently correcting a rule that has drifted from that spec
-   (for example, after the cluster was recreated with a new node tag).
-   The fix-it commands include an in-place `update` only when running it
-   would converge to exactly the expected rule; otherwise only a delete
-   command is offered (deploy.sh recreates the rule correctly on the next
-   run). Nothing is ever auto-corrected.
+   (for example, after the cluster was recreated with a new node tag or
+   pod CIDR). The fix-it commands include an in-place `update` only when
+   running it would converge to exactly the expected rule; otherwise only
+   a delete command is offered (deploy.sh recreates the rule correctly on
+   the next run). Nothing is ever auto-corrected.
+
+   The hub VM's internal IP is also reserved as a static address,
+   `scion-hub-<hub_name>-internal-ip`, marked the same way as the other
+   base resources — an exact `scion-deployment=<hub_name>` description,
+   the same marker mechanism the firewall rules, router, and service
+   account already use. On a fresh VM, a free address is reserved first
+   and the VM is created with `--private-network-ip` pinned to it; on an
+   existing VM, its current internal IP is promoted into a reservation of
+   the same name (`gcloud compute addresses create ... --addresses
+   <current-ip>`), and the script re-reads the VM afterward to confirm the
+   IP didn't change. Either way the VM's internal IP is now guaranteed
+   stable across recreates of everything else in the project. A reserved
+   address with this name that doesn't carry the marker, or whose
+   reserved IP no longer matches the VM's actual IP, fails the run with
+   the mismatch and the remediation, exactly like a drifted firewall rule
+   — never auto-corrected. Reserving this address is what makes the
+   hub-allow rule above meaningful: it fixes the one thing (the VM's own
+   address) that the rule's pod-CIDR source range doesn't already pin
+   down.
 
 3. **NFS server and export.** Discovery also reads the cluster's node
    subnet's primary IP range (never the pod CIDR), refusing anything
@@ -420,7 +450,8 @@ Enabling the tier does five things, all additive:
    `nfs`, pointing at the VM's export and the PV the Kubernetes objects
    above create) using the schema already defined for it in the runtime's
    own settings package. The `gke` runtime and profile settings are not
-   written yet — see Known limits below.
+   written yet, so nothing yet tells the hub's `gke` runtime to point GKE
+   agents at the internal IP reserved in item 2 — see Known limits below.
 
 Re-running the deploy script against an existing hub that predates the
 hybrid tier works the same way as any other re-run: the base VM, Cloud Run
@@ -458,43 +489,50 @@ deployment.
 ### Teardown (`--delete`)
 
 **Base-resource adoption and teardown are unchanged by this tier**, except
-that `--delete` always checks for (and, if marked, removes) the two hybrid
-firewall rules by name, whether or not the current config has the tier
-enabled — teardown has no other way to know whether the tier was ever
-turned on for this hub. This adds one read-only `firewall-rules list` call
-to every `--delete` run and, rarely, can make it refuse to proceed (see
-below); it does not change what gets deleted for a hub that never had the
-tier on. A VM delete failure with no hybrid rules present also still
-warns and continues, exactly as it always has; only with hybrid rules
-present does a VM delete failure or an unconfirmed VM state fail the run
-(see below).
+that `--delete` always checks for (and, if marked, removes) the three
+hybrid firewall rules and the static internal IP reservation, all by
+name, whether or not the current config has the tier enabled — teardown
+has no other way to know whether the tier was ever turned on for this
+hub. This adds one read-only `firewall-rules list` call and one read-only
+`addresses list` call to every `--delete` run and, rarely, can make it
+refuse to proceed (see below); it does not change what gets deleted for a
+hub that never had the tier on. A VM delete failure with nothing
+hybrid-tier present also still warns and continues, exactly as it always
+has; only with hybrid-tier resources present does a VM delete failure or
+an unconfirmed VM state fail the run (see below).
 
-Before deleting anything, `--delete` looks up the two hybrid firewall
-rules and prints a classification line for each one found:
-`  found (marked): <name>` for a rule carrying this hub's exact marker, or
-`  SKIPPED (unmarked): <name>` for a name match that doesn't. Any SKIPPED
-line fails the whole teardown run before any resource is deleted (not
-just the two hybrid rules), since a naming collision on those two names
-means the hub name can no longer be trusted to identify only resources
-this deployment owns. The same applies if the check itself can't complete
-(a permissions error, for example): an unknown ownership state is treated
-as a failure, never as "nothing to protect."
+Before deleting anything, `--delete` looks up the three hybrid firewall
+rules and the internal IP reservation and prints a classification line
+for each one found: `  found (marked): <name>` for a resource carrying
+this hub's exact marker, or `  SKIPPED (unmarked): <name>` for a name
+match that doesn't. Any SKIPPED line fails the whole teardown run before
+any resource is deleted (not just the hybrid ones), since a naming
+collision on one of these names means the hub name can no longer be
+trusted to identify only resources this deployment owns. The same
+applies if either check itself can't complete (a permissions error, for
+example): an unknown ownership state is treated as a failure, never as
+"nothing to protect."
 
-Marked rules are deleted only once the hub VM is confirmed gone: deleted
-successfully, or positively confirmed absent project-wide, not merely
-inferred from a delete or describe call that happened to fail (which
-could just as easily mean a wrong zone or a transient error) — never
-while the VM might still exist or its fate is unknown, so the deny rule
-stays in effect for as long as the VM could still be reachable. If the VM
-fails to delete, or its absence can't be confirmed, both hybrid rules are
-kept and the run reports the failure. Deletion order is the reverse of
-creation: the allow rule first, then the deny rule, and deletion stops at
-the first rule that isn't confirmed gone, so the deny rule is never
-deleted after the allow rule's own delete failed. If a marked rule has
+Marked firewall rules and the marked internal IP reservation are deleted
+only once the hub VM is confirmed gone: deleted successfully, or
+positively confirmed absent project-wide, not merely inferred from a
+delete or describe call that happened to fail (which could just as
+easily mean a wrong zone or a transient error) — never while the VM
+might still exist or its fate is unknown, so the deny rule stays in
+effect, and the reservation stays in place, for as long as the VM could
+still be reachable (the reservation is also still attached to the VM's
+network interface until the VM itself is gone, so deleting it earlier
+would fail regardless). If the VM fails to delete, or its absence can't
+be confirmed, all of the hybrid rules and the reservation are kept and
+the run reports the failure, naming the reservation as kept rather than
+omitting it silently. Firewall deletion order is the reverse of
+creation: the allow rules first, then the deny rule, and deletion stops
+at the first rule that isn't confirmed gone, so the deny rule is never
+deleted after an allow rule's own delete failed. If a marked rule has
 drifted from its expected spec in a way only a delete can fix, and that
-rule is the deny rule, the printed remediation deletes the allow rule
+rule is the deny rule, the printed remediation deletes the allow rules
 first, then the deny rule, then re-runs deploy.sh — never advice that
-would leave the allow rule in place with no deny. The GKE cluster itself
+would leave an allow rule in place with no deny. The GKE cluster itself
 is never deleted by this script, under any circumstance.
 
 If `gke_target.name` is set, `--delete` also tears down the Kubernetes
@@ -865,7 +903,8 @@ bash scripts/single-node-vm/deploy.sh --delete
 | Cloud Router | `scion-hub-HUB_NAME-router` |
 | Service account | `scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com` |
 | IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` |
-| *If the hybrid tier is on:* NFS allow/deny firewall rules | `scion-hub-HUB_NAME-nfs-allow`, `scion-hub-HUB_NAME-nfs-deny` |
+| *If the hybrid tier is on:* NFS allow/deny, hub-allow firewall rules | `scion-hub-HUB_NAME-nfs-allow`, `scion-hub-HUB_NAME-nfs-deny`, `scion-hub-HUB_NAME-hub-allow` |
+| *If the hybrid tier is on:* static internal IP reservation | `scion-hub-HUB_NAME-internal-ip` |
 | *If the hybrid tier is on:* PersistentVolumeClaim, PersistentVolume | `gke_target.pvc_name` (default `scion-hub-HUB_NAME-shared`), `scion-hub-HUB_NAME-shared` |
 | *If the hybrid tier is on and this deployment created it:* Kubernetes namespace | `gke_target.namespace` (default `scion-hub-HUB_NAME`) |
 
