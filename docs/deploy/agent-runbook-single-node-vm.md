@@ -216,6 +216,7 @@ the user does not have a preference. Validate each answer before moving on.
 | 8 | Update policy | `auto` | Must be `auto`, `notify`, or `disabled`. Explain: **auto** = install updates automatically (recommended). **notify** = check for updates, show banner in admin UI. **disabled** = no automatic checking. | `update_policy` |
 | 9 | Release channel | `nightly` | Must be `stable`, `preview`, or `nightly`. Defaults to nightly — only ask if the user wants to override. **stable** = GA releases. **preview** = pre-releases (rc, alpha, beta). **nightly** = nightly builds. | `release_channel` |
 | 10 | Chat plugins | none (empty list) | Each must be one of: `telegram`, `discord`, `slack`, `teams`. Multiple allowed. | `chat_plugins` |
+| 11 | Attach a GKE cluster (hybrid tier)? | No | Only ask if the user mentions running agents on Kubernetes. If yes: cluster name, location (zone or region), and project (default: same as `project_id`; a different project is not supported yet). The cluster must already exist and be on the same VPC network as the hub VM (`default`, today) — this script never creates or deletes a cluster. | `gke_target.name`, `gke_target.location`, `gke_target.project` |
 
 ---
 
@@ -242,7 +243,12 @@ Write the file to `/tmp/scion-deploy-config.json`.
   },
   "admin_email": "ADMIN_EMAIL",
   "update_policy": "UPDATE_POLICY",
-  "release_channel": "RELEASE_CHANNEL"
+  "release_channel": "RELEASE_CHANNEL",
+  "gke_target": {
+    "name": "GKE_NAME",
+    "location": "GKE_LOCATION",
+    "project": "GKE_PROJECT"
+  }
 }
 ```
 
@@ -261,6 +267,9 @@ Replace each placeholder with the gathered value:
 | `ADMIN_EMAIL` | Question 7 answer |
 | `UPDATE_POLICY` | Question 8 answer |
 | `RELEASE_CHANNEL` | Question 9 answer if the user explicitly chose a channel, otherwise `""` (defaults to nightly) |
+| `GKE_NAME` | Question 11 answer, or `""` if the hybrid tier was declined (omit the whole `gke_target` block in that case) |
+| `GKE_LOCATION` | Question 11 answer |
+| `GKE_PROJECT` | Question 11 answer, or `""` to default to `PROJECT_ID` |
 
 Write the file (substituting the gathered values into the template above,
 in place of `# (insert populated JSON here)`):
@@ -280,6 +289,73 @@ python3 -c "import json; json.load(open('/tmp/scion-deploy-config.json'))" && ec
 **If validation fails:** Fix the JSON syntax and retry.
 
 Show the user the generated config and ask them to confirm before proceeding.
+
+---
+
+## Hybrid Tier (Optional): GKE Attach and NFS Firewall Rules
+
+This applies only if the user answered yes to Question 11. Skip this whole
+section otherwise — with `gke_target` absent from the config, the deploy
+script's behavior is unchanged from the rest of this runbook.
+
+### What it does
+
+The hybrid tier attaches an **existing** GKE cluster as a second runtime
+alongside the VM, so agents can run in either place while sharing project
+scratchpads over NFS served from the hub VM. `deploy.sh` never creates or
+deletes the cluster itself — it is always a manual prerequisite the user
+sets up beforehand, in the same GCP project as the hub and on the hub VM's
+network (`default`, today).
+
+Enabling the tier does two things, both additive:
+
+1. **Discovery.** Before creating anything, the script confirms the cluster
+   exists, checks that its network matches the hub VM's, and discovers the
+   cluster's node network tag with a read-only `gcloud` call. This works
+   the same way for a Standard cluster (nodes named `gke-<cluster>-...`)
+   and an Autopilot cluster (nodes named `gk3-<cluster>-...`): it lists
+   Compute Engine instances whose name matches either prefix for the
+   configured cluster name and reads the tags already present on one of
+   them. If the cluster can't be found, its network doesn't match, or no
+   node tag can be discovered, the script fails with an actionable message
+   before creating anything.
+2. **Firewall rules and VM tag.** Two firewall rules are created, both
+   scoped to this hub by an exact `scion-deployment=<hub_name>` marker in
+   their description and a `scion-hub-<hub_name>-nfs` target tag, which the
+   hub VM also receives (at creation, or via an idempotent `add-tags` on an
+   existing VM):
+   - `scion-hub-<hub_name>-nfs-allow` — allows tcp:2049 (NFS) from the
+     cluster's discovered node tag, priority 900.
+   - `scion-hub-<hub_name>-nfs-deny` — denies tcp:2049 from everywhere
+     else (`0.0.0.0/0`), priority 950.
+
+   If a firewall rule with one of these names already exists but doesn't
+   carry the exact marker, the script refuses to touch it and fails rather
+   than adopting a rule it doesn't recognize as its own.
+
+Re-running the deploy script against an existing hub that predates the
+hybrid tier works the same way as any other re-run: the base VM, Cloud Run
+proxy, router, NAT and service account are adopted exactly as they are
+today, and the two hybrid firewall rules (and the VM tag) are added on
+top, freshly, with their markers.
+
+### Teardown (`--delete`)
+
+**Base-resource adoption and teardown are unchanged by this tier.** The
+`--delete` flow adds one thing: before deleting anything, it looks up the
+two hybrid firewall rules by name. Rules carrying this hub's exact marker
+are deleted along with everything else; a name match without the marker is
+listed as **SKIPPED** and fails the whole teardown run before any resource
+is deleted, since a naming collision on those two names means the hub name
+can no longer be trusted to identify only resources this deployment owns.
+The GKE cluster itself is never deleted by this script, under any
+circumstance.
+
+### Testing this locally
+
+`scripts/single-node-vm/tests/run.sh` runs the hybrid-tier logic against a
+stubbed `gcloud` — no GCP project is contacted. Useful when validating a
+change to `hybrid-tier.sh` before a real deployment.
 
 ---
 
