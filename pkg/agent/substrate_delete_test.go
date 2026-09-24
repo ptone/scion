@@ -169,7 +169,7 @@ func newFakeSubstrateActorServer() *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
-// TestSubstrateAgentManagerDelete_RecordExists is D1's regression test for
+// TestSubstrateAgentManagerDelete_RecordExists is a regression test for
 // the live-cluster defect where `scion delete` never removed the Substrate
 // actor: AgentManager.Delete (pkg/agent/manager.go) resolves the caller's
 // agent slug to a container via Runtime.List, matching on AgentInfo.Name.

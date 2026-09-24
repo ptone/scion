@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -48,7 +49,8 @@ const substrateServeEntrypointVersion = "substrate-serve/v1"
 // GID 0 with a minimal default capability set (AUDIT_WRITE, KILL,
 // NET_BIND_SERVICE) that doesn't include them — see buildActorTemplate's
 // comment on the container's SecurityContext for why scion needs them
-// anyway (su, not root, still runs the harness and exec).
+// anyway: both the supervisor's own privilege drop and su (via
+// execAsUserCmd) need them to leave root.
 var substrateContainerCapabilitiesAdd = []string{"SETUID", "SETGID"}
 
 // defaultTemplateReadyTimeout bounds how long Run waits for a newly created
@@ -181,20 +183,32 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				// internal/ocispec/ocispec.go) with a minimal default
 				// capability set (AUDIT_WRITE, KILL, NET_BIND_SERVICE —
 				// cmd/atelet/oci.go) that does not include SETUID/SETGID.
-				// scion never runs the harness or exec as root: execAsUserCmd
-				// (sciontool substrate-serve) uses `su - scion`, and su itself
-				// needs CAP_SETUID/CAP_SETGID to drop to that user (the
-				// setgroups(2) call su makes before dropping privileges fails
-				// with EPERM otherwise) — the same capabilities Docker's
-				// default set already grants, which is why this only surfaces
-				// on Substrate. These are added here, not assumed from a
+				// scion never runs the harness or exec as root, and two
+				// separate consumers both need CAP_SETUID/CAP_SETGID to drop
+				// from root to the scion user: the supervisor's own
+				// syscall.Credential drop (pkg/sciontool/supervisor/
+				// supervisor.go's Run, ~lines 113-150 — exec.Cmd performs
+				// setgroups(2)/setgid(2)/setuid(2) under the hood for a
+				// Credential-bearing child) for the harness process itself,
+				// and su (via execAsUserCmd, used for `sciontool substrate-
+				// serve exec`), which fails its own setgroups(2) call with
+				// EPERM otherwise — the same capabilities Docker's default
+				// set already grants, which is why this only surfaces on
+				// Substrate. These are added here, not assumed from a
 				// container default, so they apply inside the gVisor sentry
 				// the actor runs in; su drops them (along with every other
 				// capability) for the scion process tree it execs into, so
 				// nothing scion-owned ever runs privileged.
 				SecurityContext: &ateapipb.SecurityContext{
 					Capabilities: &ateapipb.Capabilities{
-						Add: substrateContainerCapabilitiesAdd,
+						// Clone, not the package-level slice itself: any
+						// caller that mutated tmpl...Capabilities.Add in
+						// place would otherwise corrupt
+						// substrateContainerCapabilitiesAdd for every future
+						// template built in this process, silently changing
+						// what substrateTemplateName hashes without changing
+						// the hash input's own value.
+						Add: slices.Clone(substrateContainerCapabilitiesAdd),
 					},
 				},
 				Resources: &ateapipb.Resources{Limits: limits},
