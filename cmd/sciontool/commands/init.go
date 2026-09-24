@@ -261,13 +261,13 @@ func init() {
 func resolveAgentHome(targetUID int, rootless bool) string {
 	agentHome := os.Getenv("HOME")
 	if targetUID != 0 {
-		if scionUser, err := user.LookupId(strconv.Itoa(targetUID)); err == nil {
+		if scionUser, err := lookupUserByID(strconv.Itoa(targetUID)); err == nil {
 			agentHome = scionUser.HomeDir
 		} else {
 			log.Debug("Could not look up user for UID %d: %v", targetUID, err)
 		}
 	} else if rootless {
-		if scionUser, err := user.Lookup("scion"); err == nil {
+		if scionUser, err := scionUserLookup("scion"); err == nil {
 			agentHome = scionUser.HomeDir
 		} else {
 			log.Debug("Could not look up scion user in rootless mode: %v", err)
@@ -1561,12 +1561,26 @@ func watchLimitsTriggerFile(ctx context.Context, ch chan<- struct{}) {
 }
 
 // scionUserLookup resolves the "scion" system user. It is a package var
-// (rather than calling user.Lookup directly) purely so adjustScionUser's
+// (rather than calling user.Lookup directly) both so adjustScionUser's
 // requirePrivilegeDrop-gated fail-closed checks can be exercised in a unit
 // test without needing a real "scion" user on the machine running the
 // test — the same reasoning as requirePrivilegeDropOrFail's separation from
-// setupHostUser.
+// setupHostUser — and, just as importantly, so a test binary that overrides
+// this once (see the package's TestMain) can guarantee that no test-driven
+// codepath ever resolves the *real* "scion" account's home directory. On a
+// machine where "scion" happens to be a real system user (an actor
+// container's own base image, or a dev container running as that user),
+// letting resolveAgentHome/setupHostUser fall through to a real
+// user.Lookup("scion") means a test can end up writing agent-info.json (or
+// reading the Hub token file) at the real, live path — silently changing
+// this agent's own reported status. Every "scion" lookup in this file goes
+// through this var for that reason, not just the ones adjustScionUser uses.
 var scionUserLookup = user.Lookup
+
+// lookupUserByID resolves a user by numeric UID. Same reasoning as
+// scionUserLookup: resolveAgentHome's targetUID != 0 branch must be
+// overridable so a test can never resolve a real account's home directory.
+var lookupUserByID = user.LookupId
 
 // runDirectSetUID is directSetUID's call site as a package var, for the same
 // reason as scionUserLookup: adjustScionUser's control flow around a failed
@@ -1589,7 +1603,7 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 	// rootless=true so the supervisor sets HOME/USER/LOGNAME without
 	// attempting a credential drop.
 	if os.Getuid() != 0 {
-		if scionUser, err := user.Lookup("scion"); err == nil {
+		if scionUser, err := scionUserLookup("scion"); err == nil {
 			scionUID, _ := strconv.Atoi(scionUser.Uid)
 			if os.Getuid() == scionUID {
 				log.Info("Already running as scion user (UID %d) in rootless mode, skipping privilege operations", scionUID)
@@ -1646,7 +1660,7 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 		log.Debug("Keep-id env detected: SCION_KEEPID_UID=%s, current euid=%d, egid=%d", keepIDStr, os.Geteuid(), os.Getegid())
 		keepIDUID, parseErr := strconv.Atoi(keepIDStr)
 		if parseErr == nil {
-			if scionUser, err := user.Lookup("scion"); err == nil {
+			if scionUser, err := scionUserLookup("scion"); err == nil {
 				scionUID, _ := strconv.Atoi(scionUser.Uid)
 				scionGID, _ := strconv.Atoi(scionUser.Gid)
 				log.Debug("Keep-id: scion user lookup: UID=%d, GID=%d, keepIDUID=%d", scionUID, scionGID, keepIDUID)
@@ -1955,7 +1969,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 	// back to the scion user so that cloned files are owned by the container
 	// user rather than root.
 	if uid == 0 {
-		if scionUser, err := user.Lookup("scion"); err == nil {
+		if scionUser, err := scionUserLookup("scion"); err == nil {
 			uid, _ = strconv.Atoi(scionUser.Uid)
 			gid, _ = strconv.Atoi(scionUser.Gid)
 			log.Info("Falling back to scion user UID=%d GID=%d for git clone", uid, gid)
