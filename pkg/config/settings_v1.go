@@ -1085,6 +1085,30 @@ type V1SubstrateConfig struct {
 	// (findings.md §6 threat model); an entry that reaches either of those
 	// would defeat it.
 	EgressAllow []string `json:"egress_allow,omitempty" yaml:"egress_allow,omitempty" koanf:"egress_allow"`
+	// EgressTrustBundle names a Substrate trust bundle to project into every
+	// actor as a system-info volume, so the actor can validate the egress
+	// gateway's own TLS certificate (docs/egress-trust-bundle.md, vendored
+	// Substrate d277088b).
+	//
+	// Required iff the cluster runs the sdsmint egress gateway
+	// (`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`) and
+	// the actor makes any HTTPS/TLS request: under sdsmint, the gateway
+	// terminates every TLS connection and re-originates it with a per-SNI
+	// leaf certificate chained to its own CA, which the actor otherwise has
+	// no way to validate. Setting this on a plain (non-sdsmint) install
+	// breaks every actor instead: nothing backs the named
+	// ClusterTrustBundle, so the actor fails to start (see
+	// V1SubstrateConfig.Validate and buildActorTemplate's doc comment).
+	//
+	// Empty (the default) is off, and off is byte-identical to today: no
+	// system-info volume, no mount, no env. Validated by
+	// V1SubstrateConfig.Validate: when non-empty it must be exactly
+	// "egress-mitm.ate.dev", the only trust bundle name Substrate d277088b
+	// supports. Kept as a string validated against a one-name allowlist,
+	// not a bool, deliberately: it mirrors Substrate's own
+	// trustBundle.name, and a future additional name needs only an
+	// allowlist entry here, not a schema change.
+	EgressTrustBundle string `json:"egress_trust_bundle,omitempty" yaml:"egress_trust_bundle,omitempty" koanf:"egress_trust_bundle"`
 	// TemplateReadyTimeout bounds how long Run waits for a newly created
 	// ActorTemplate to become ready (a Go duration string, e.g. "10m").
 	// Defaults to 10 minutes when empty.

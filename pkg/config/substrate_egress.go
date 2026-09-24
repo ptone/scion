@@ -122,7 +122,37 @@ func (s *V1SubstrateConfig) Validate() error {
 	if err := ValidateEgressAllow(s.EgressAllow); err != nil {
 		return fmt.Errorf("runtimes.<name>.substrate.egress_allow: %w", err)
 	}
+	if err := ValidateEgressTrustBundle(s.EgressTrustBundle); err != nil {
+		return fmt.Errorf("runtimes.<name>.substrate.egress_trust_bundle: %w", err)
+	}
 	return nil
+}
+
+// supportedEgressTrustBundle is the only trust bundle name the vendored
+// Substrate version (d277088b) resolves — see
+// docs/egress-trust-bundle.md and demos/egress/egress-mitm-template.yaml.tmpl
+// in agent-substrate/substrate. Kept as a single named constant rather than
+// a slice: ValidateEgressTrustBundle's doc comment explains why a future
+// second name is meant to grow this into an allowlist, not change the
+// field's type.
+const supportedEgressTrustBundle = "egress-mitm.ate.dev"
+
+// ValidateEgressTrustBundle rejects an egress_trust_bundle value that is not
+// empty (off) and not exactly supportedEgressTrustBundle — the only name
+// Substrate d277088b's atelet actually resolves. An unsupported name would
+// not fail here; it would fail much later and much less clearly, at actor
+// start, with atelet's own "ClusterTrustBundle ... not found" (a name not on
+// its allowlist gets the same wording as one simply missing from the
+// cluster) or "is not supported by this deployment" error — see
+// docs/egress-trust-bundle.md's "Operational notes" table. Failing fast here
+// with an error that names the one supported value is strictly better than
+// forwarding an actor-start failure the operator would have to go dig a log
+// line out for.
+func ValidateEgressTrustBundle(name string) error {
+	if name == "" || name == supportedEgressTrustBundle {
+		return nil
+	}
+	return fmt.Errorf("egress_trust_bundle %q is not supported; the only trust bundle name Substrate supports is %q", name, supportedEgressTrustBundle)
 }
 
 // ValidateEgressAllow is allowlist-first: Phase 1 accepts only public FQDNs

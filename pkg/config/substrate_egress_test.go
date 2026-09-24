@@ -193,6 +193,58 @@ func TestV1SubstrateConfig_Validate(t *testing.T) {
 	}
 }
 
+// TestValidateEgressTrustBundle covers ValidateEgressTrustBundle's three
+// required cases directly (empty OK, the one supported name OK, anything
+// else rejected naming the supported value) — see the Tests section of the
+// sb-dev-mitm brief.
+func TestValidateEgressTrustBundle(t *testing.T) {
+	if err := ValidateEgressTrustBundle(""); err != nil {
+		t.Errorf("ValidateEgressTrustBundle(\"\") = %v, want nil (off)", err)
+	}
+	if err := ValidateEgressTrustBundle("egress-mitm.ate.dev"); err != nil {
+		t.Errorf("ValidateEgressTrustBundle(%q) = %v, want nil", "egress-mitm.ate.dev", err)
+	}
+
+	err := ValidateEgressTrustBundle("my-own-bundle")
+	if err == nil {
+		t.Fatal("ValidateEgressTrustBundle(\"my-own-bundle\") = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "my-own-bundle") {
+		t.Errorf("error = %v, want it to name the offending value", err)
+	}
+	if !strings.Contains(err.Error(), "egress-mitm.ate.dev") {
+		t.Errorf("error = %v, want it to name the supported value", err)
+	}
+}
+
+// TestV1SubstrateConfig_Validate_EgressTrustBundle exercises the field
+// through V1SubstrateConfig.Validate (not just the standalone validator
+// function), the same way TestV1SubstrateConfig_Validate does for
+// egress_allow above.
+func TestV1SubstrateConfig_Validate_EgressTrustBundle(t *testing.T) {
+	empty := &V1SubstrateConfig{}
+	if err := empty.Validate(); err != nil {
+		t.Errorf("Validate() with EgressTrustBundle unset = %v, want nil", err)
+	}
+
+	ok := &V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"}
+	if err := ok.Validate(); err != nil {
+		t.Errorf("Validate() with EgressTrustBundle = %q, want nil, got %v", ok.EgressTrustBundle, err)
+	}
+
+	bad := &V1SubstrateConfig{EgressTrustBundle: "not-the-real-bundle"}
+	err := bad.Validate()
+	if err == nil {
+		t.Fatal("Validate() with an unsupported EgressTrustBundle = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "egress_trust_bundle") {
+		t.Errorf("error = %v, want it to name the egress_trust_bundle field", err)
+	}
+	if !strings.Contains(err.Error(), "egress-mitm.ate.dev") {
+		t.Errorf("error = %v, want it to name the one supported value", err)
+	}
+}
+
 // TestValidateEgressAllow_RejectsBypasses covers a set of bypasses
 // confirmed against an earlier version of this validator with a scratch
 // test: each of these returned nil from the pre-fix ValidateEgressAllow.
