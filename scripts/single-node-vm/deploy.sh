@@ -461,22 +461,24 @@ if [[ "$DELETE_MODE" == "true" ]]; then
       warn "Cloud Run service ${PROXY_SERVICE} not found or already deleted."
     fi
 
-    # The hybrid NFS firewall rules are only safe to delete once this VM
-    # is confirmed gone. With the tier off (no hybrid rules queued), a VM
-    # delete failure warns and continues exactly as it always has --
-    # nothing downstream depends on the VM's fate. With the tier on,
-    # "gone" must be a positive, project-wide answer rather than inferred
-    # from a `describe` in a possibly-wrong zone (ZONE above falls back
-    # to a guess when its own discovery call fails): a non-zero exit from
-    # the check itself means unknown, and unknown is never treated as
-    # gone.
+    # The hybrid NFS/hub-allow firewall rules and the static internal IP
+    # reservation are only safe to delete once this VM is confirmed gone
+    # (the reservation is still attached to the VM's NIC until the VM
+    # itself is deleted, so deleting it earlier would fail anyway). With
+    # the tier off (nothing hybrid-tier queued), a VM delete failure
+    # warns and continues exactly as it always has -- nothing downstream
+    # depends on the VM's fate. With the tier on, "gone" must be a
+    # positive, project-wide answer rather than inferred from a
+    # `describe` in a possibly-wrong zone (ZONE above falls back to a
+    # guess when its own discovery call fails): a non-zero exit from the
+    # check itself means unknown, and unknown is never treated as gone.
     info "Deleting GCE VM..."
     if gcloud compute instances delete "${INSTANCE_NAME}" \
         --zone="${ZONE}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
       echo "  Deleted: ${INSTANCE_NAME}"
       VM_GONE=true
       VM_DELETED=true
-    elif [[ ${#HYBRID_TEARDOWN_DELETE[@]} -eq 0 ]]; then
+    elif [[ ${#HYBRID_TEARDOWN_DELETE[@]} -eq 0 && "${HYBRID_INTERNAL_IP_TEARDOWN_READY:-false}" != "true" ]]; then
       warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
       VM_GONE=true
     else
@@ -561,6 +563,14 @@ if [[ "$DELETE_MODE" == "true" ]]; then
         TEARDOWN_HAD_FAILURE=true
       fi
     fi
+
+    if [[ "$HYBRID_INTERNAL_IP_TEARDOWN_READY" == "true" ]]; then
+      info "Deleting hybrid-tier internal IP reservation..."
+      hybrid_internal_ip_teardown_delete "$PROJECT_ID" "$REGION" "$VM_GONE"
+      if [[ "$HYBRID_INTERNAL_IP_DELETE_FAILED" == "true" ]]; then
+        TEARDOWN_HAD_FAILURE=true
+      fi
+    fi
   else
     TEARDOWN_HAD_FAILURE=true
   fi
@@ -612,6 +622,13 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   for name in ${HYBRID_TEARDOWN_DELETED[@]+"${HYBRID_TEARDOWN_DELETED[@]}"}; do
     echo "  Deleted firewall rule:     ${name}"
   done
+  if [[ -n "${HYBRID_INTERNAL_IP_TEARDOWN_NAME:-}" ]]; then
+    if [[ "${HYBRID_INTERNAL_IP_DELETED:-false}" == "true" ]]; then
+      echo "  Deleted internal IP:       ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}"
+    elif [[ "${HYBRID_INTERNAL_IP_TEARDOWN_READY:-false}" == "true" ]]; then
+      echo "  Kept internal IP:          ${HYBRID_INTERNAL_IP_TEARDOWN_NAME} (delete failed or not attempted)"
+    fi
+  fi
   if [[ "$TEARDOWN_HAD_FAILURE" == "true" ]]; then
     err "Teardown completed with at least one failure reported above."
     exit 1

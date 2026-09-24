@@ -80,6 +80,20 @@ readonly HYBRID_NFS_EXPORT_ROOT="/srv/scion-shared"
 # shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
 readonly HYBRID_NFS_IMAGE_PATH="/var/lib/scion-nfs/export.img"
 
+# Marker types, all the exact token "scion-deployment=<hub_name>", by
+# resource kind (matches the base-resource marker convention deploy.sh
+# itself already uses for the VM, Cloud Run proxy, service account, and
+# Cloud Router):
+#   firewall rule -> description       (see hybrid_ensure_firewall_rules)
+#   static internal IP address -> description
+#                                       (see hybrid_ensure_internal_ip_new_vm /
+#                                       _existing_vm)
+#   Kubernetes namespace/PV/PVC -> label
+#                                       (see hybrid_k8s_preflight)
+# This marker is purely informational for ownership checks: it is never
+# checked or corrected on resources this tier doesn't itself create or
+# adopt.
+
 # _hybrid_gcloud_not_found TEXT
 #
 # True only for gcloud's own specific "genuinely absent" signal: a

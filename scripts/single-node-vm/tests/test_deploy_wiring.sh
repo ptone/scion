@@ -294,6 +294,59 @@ test_deploy_delete_list_failure_aborts_before_any_delete() {
     "no delete call of any kind should be logged when the list call itself failed"
 }
 
+# Internal IP reservation teardown wiring: the deploy.sh-level equivalent
+# of the hybrid_internal_ip_teardown_check/_delete function-level tests
+# in test_hybrid_tier.sh, covering the wiring those tests can't reach --
+# whether deploy.sh actually calls the check before any delete, gates the
+# reservation's delete on VM_GONE, and reports it in the final summary.
+test_deploy_delete_internal_ip_unmarked_aborts_before_any_delete() {
+  fresh_gcloud_state
+  seed_address_unmarked "scion-hub-${HUB}-internal-ip" "10.128.0.42"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "1" "$DEPLOY_RC" "an unmarked internal-IP reservation name match must fail the teardown run"
+  assert_eq "0" "$(gcloud_log | grep -c ' delete' || true)" \
+    "no delete call of any kind should be logged before the abort"
+}
+
+test_deploy_delete_internal_ip_deleted_when_vm_already_gone() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.42" "scion-deployment=${HUB}"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "0" "$DEPLOY_RC" "teardown must succeed once the VM is confirmed gone"
+  assert_eq "1" "$(gcloud_log | grep -c "addresses delete scion-hub-${HUB}-internal-ip" || true)" \
+    "the internal IP reservation must be deleted once the VM is positively confirmed gone"
+  assert_contains "$DEPLOY_LOG" "Deleted internal IP:       scion-hub-${HUB}-internal-ip" \
+    "the summary must report the reservation as deleted"
+}
+
+test_deploy_delete_internal_ip_kept_when_vm_not_gone() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  set_instance_delete_will_fail "$INSTANCE_NAME"
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.42" "scion-deployment=${HUB}"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "1" "$DEPLOY_RC" "a VM delete failure must make teardown exit non-zero"
+  assert_eq "0" "$(gcloud_log | grep -c "addresses delete scion-hub-${HUB}-internal-ip" || true)" \
+    "the internal IP reservation must not be deleted when the VM delete failed"
+  assert_contains "$DEPLOY_LOG" "isn't confirmed yet" \
+    "deploy.sh should report why the reservation was kept"
+  assert_contains "$DEPLOY_LOG" "Kept internal IP:          scion-hub-${HUB}-internal-ip" \
+    "the summary must report the reservation as kept"
+}
+
+test_deploy_delete_internal_ip_order_after_vm() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.42" "scion-deployment=${HUB}"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  local log vm_line addr_line
+  log="$(gcloud_log)"
+  vm_line="$(line_number "compute instances delete ${INSTANCE_NAME}" "$log")"
+  addr_line="$(line_number "addresses delete scion-hub-${HUB}-internal-ip" "$log")"
+  assert_true "$([[ -n "$vm_line" && -n "$addr_line" && "$vm_line" -lt "$addr_line" ]] && echo true || echo false)" \
+    "the VM delete must precede the internal IP reservation delete"
+}
+
 # =====================================================================
 # Create-mode wiring
 # =====================================================================
