@@ -428,6 +428,62 @@ test_cloud_run_label_args_describe_error_fails_safe_no_label() {
     "a describe error that isn't NOT_FOUND must fail safe toward assuming the service exists (no label), not toward labeling it"
 }
 
+test_cloud_run_label_args_permission_masked_not_found_fails_safe() {
+  fresh_gcloud_state
+  set_run_service_describe_permission_masked "demohub-iap-proxy"
+  local args
+  args="$(hybrid_cloud_run_label_args "demohub-iap-proxy" "$PROJECT" "us-central1" "demohub")"
+  assert_eq "" "$args" \
+    "a permission-denied message that also happens to say 'not found' must never be read as NOT_FOUND"
+}
+
+# =====================================================================
+# Not-found matching: tightened to gcloud's/kubectl's own specific
+# signals, never a bare "not found" substring, since some permission-
+# denied responses are deliberately worded to avoid confirming whether a
+# resource exists (for example "...not found or permission denied").
+# =====================================================================
+
+test_gcloud_not_found_matches_NOT_FOUND_token() {
+  assert_true "$(_hybrid_gcloud_not_found 'gcloud-stub: NOT_FOUND: Cluster x not found' && echo true || echo false)" \
+    "a NOT_FOUND status token must be recognized"
+}
+
+test_gcloud_not_found_matches_404_code() {
+  assert_true "$(_hybrid_gcloud_not_found 'ResponseError: code=404, message=Not Found' && echo true || echo false)" \
+    "an HTTP 404 code must be recognized"
+}
+
+test_gcloud_not_found_matches_requested_entity_message() {
+  assert_true "$(_hybrid_gcloud_not_found 'gcloud-stub: NOT_FOUND: Requested entity was not found.' && echo true || echo false)" \
+    "the literal 'Requested entity was not found' message must be recognized"
+}
+
+test_gcloud_not_found_rejects_permission_masked_message() {
+  assert_true "$(_hybrid_gcloud_not_found 'Cluster x not found or permission denied' && echo false || echo true)" \
+    "a permission-denied message that also happens to say 'not found' must never be read as NOT_FOUND"
+}
+
+test_gcloud_not_found_rejects_forbidden_message() {
+  assert_true "$(_hybrid_gcloud_not_found 'ERROR: 403 Forbidden: resource not found' && echo false || echo true)" \
+    "a forbidden message must never be read as NOT_FOUND, even if it also mentions 'not found'"
+}
+
+test_gcloud_not_found_rejects_bare_substring() {
+  assert_true "$(_hybrid_gcloud_not_found 'the widget was not found in the drawer' && echo false || echo true)" \
+    "a bare 'not found' substring with none of gcloud's own signals must not match"
+}
+
+test_kubectl_not_found_matches_NotFound_reason() {
+  assert_true "$(_hybrid_kubectl_not_found 'Error from server (NotFound): persistentvolumes "x" not found' && echo true || echo false)" \
+    "kubectl's own (NotFound) reason token must be recognized"
+}
+
+test_kubectl_not_found_rejects_permission_masked_message() {
+  assert_true "$(_hybrid_kubectl_not_found 'Error from server: pv "x" not found or permission denied' && echo false || echo true)" \
+    "a permission-denied message that also happens to say 'not found' must never be read as NotFound"
+}
+
 # =====================================================================
 # Kubernetes objects: naming, kubeconfig setup, manifest rendering,
 # create/refuse/drift, and teardown. No test here contacts a real
@@ -607,6 +663,17 @@ test_k8s_ensure_get_error_on_pv_fails_closed() {
   set_k8s_get_error pv "$K8S_PV"
   run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unknown PV state must fail closed, not be treated as absent"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_get_permission_masked_on_pv_fails_closed_not_absent() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  set_k8s_get_permission_masked pv "$K8S_PV"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a permission-denied message that also says 'not found' must fail closed, not be treated as absent (which would create a duplicate PV)"
   rm -f "$HYBRID_KUBECONFIG"
 }
 

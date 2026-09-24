@@ -64,6 +64,37 @@ readonly HYBRID_NFS_SQUASH_USER="scion-nfs"
 # shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
 readonly HYBRID_NFS_EXPORT_ROOT="/srv/scion-shared"
 
+# _hybrid_gcloud_not_found TEXT
+#
+# True only for gcloud's own specific "genuinely absent" signal: a
+# NOT_FOUND status token, a 404 code, or the literal "Requested entity
+# was not found" message -- never a bare "not found" substring. Some
+# permission-denied responses are deliberately worded to avoid
+# confirming a resource's existence to a caller who can't see it (for
+# example "...not found or permission denied"), and those must never be
+# treated as "gone": anything mentioning permission or forbidden is
+# excluded outright, checked first, before the not-found signal itself.
+_hybrid_gcloud_not_found() {
+  local text="$1"
+  if echo "$text" | grep -qiE 'permission|forbidden'; then
+    return 1
+  fi
+  echo "$text" | grep -qE '(^|[^A-Za-z_])NOT_FOUND($|[^A-Za-z_])|(^|[^0-9])404($|[^0-9])|Requested entity was not found'
+}
+
+# _hybrid_kubectl_not_found TEXT
+#
+# True only for kubectl's own specific NotFound reason token
+# ("Error from server (NotFound): ..."), with the same permission/
+# forbidden exclusion as _hybrid_gcloud_not_found above.
+_hybrid_kubectl_not_found() {
+  local text="$1"
+  if echo "$text" | grep -qiE 'permission|forbidden'; then
+    return 1
+  fi
+  echo "$text" | grep -qE '\(NotFound\)'
+}
+
 # hybrid_read_config PROJECT_ID
 #
 # Reads gke_target.{name,location,project} via the caller's config_get. In
@@ -501,7 +532,7 @@ hybrid_cloud_run_label_args() {
     return 0
   fi
   local not_found=false
-  grep -qi 'not_found\|not found' "${describe_err}" && not_found=true
+  _hybrid_gcloud_not_found "$(cat "${describe_err}")" && not_found=true
   rm -f "${describe_err}"
   if [[ "$not_found" == "true" ]]; then
     echo "--labels=scion-deployment=${hub_name}"
@@ -1155,7 +1186,7 @@ _hybrid_k8s_get() {
     return 0
   fi
   K8S_GET_JSON=""
-  if grep -qi 'notfound\|not found' "${err_file}"; then
+  if _hybrid_kubectl_not_found "$(cat "${err_file}")"; then
     K8S_GET_STATUS="absent"
   else
     K8S_GET_STATUS="unknown"

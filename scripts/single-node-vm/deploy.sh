@@ -346,7 +346,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
         exit 1
       fi
       HYBRID_K8S_TEARDOWN_READY=true
-    elif grep -qi 'not_found\|not found' "${CLUSTER_DESCRIBE_ERR}"; then
+    elif _hybrid_gcloud_not_found "$(cat "${CLUSTER_DESCRIBE_ERR}")"; then
       echo "  GKE cluster ${GKE_NAME} not found; its Kubernetes objects went with it."
     else
       err "Could not confirm whether GKE cluster ${GKE_NAME} still exists:"
