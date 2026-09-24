@@ -38,11 +38,12 @@ instance template — present even when a pool currently has zero running instan
 idle Autopilot pool. Among those tags it selects the one matching the pattern GKE itself uses
 for a node's firewall-purpose tag, `gke-<suffix>-node`, which is the same pattern for both a
 Standard and an Autopilot cluster. Zero or more than one distinct match refuses to guess and
-fails, naming the cluster and listing every tag it found, including how many instance groups'
-templates could not even be read (a permissions gap, for instance) rather than reporting that
-as an ordinary tag mismatch. Every discovery failure surfaces the underlying `gcloud` error
-text rather than assuming "not found," since a permission or API error looks nothing like a
-missing cluster and needs a different fix. Discovery runs immediately after the required APIs
+fails, naming the cluster and listing every tag it found. If any instance group or its template
+can't be read at all, discovery also fails outright, even when the readable ones already yield
+exactly one candidate: a group it couldn't see could carry a second, different tag, and a
+partial view is never treated as a complete one. Every discovery failure surfaces the underlying
+`gcloud` error text rather than assuming "not found," since a permission or API error looks
+nothing like a missing cluster and needs a different fix. Discovery runs immediately after the required APIs
 are enabled, before any of the rest of the deployment's resources (service account, IAM
 bindings, Cloud Router, Cloud NAT, the IAP SSH firewall rule) are created, so a bad cluster
 name, a network mismatch, or an undiscoverable tag never leaves any of those behind.
@@ -77,31 +78,44 @@ mismatch fails the run, lists exactly which fields differ, and prints the comman
 always a delete (so the next `deploy.sh` run recreates the rule correctly), plus a direct
 `update` command, but only when applying it would converge to exactly the expected rule (every
 other field already matches, and nothing needs to be cleared) rather than leaving some other
-drifted field in place. Nothing is ever auto-corrected: a hand-edited rule under this
-deployment's marker is exactly what an operator should see reported back, since the rule's
-meaning comes from those fields.
+drifted field in place. When the drifted rule is the deny rule and only a delete is possible, the
+remediation is the full order-preserving sequence — delete the allow rule, delete the deny rule,
+re-run `deploy.sh` — never advice that would leave the allow rule in place with no deny, even
+temporarily. Nothing is ever auto-corrected: a hand-edited rule under this deployment's marker is
+exactly what an operator should see reported back, since the rule's meaning comes from those
+fields.
 
 ## Teardown (`--delete`)
 
-The existing static deletion-list block gains one more check, run before anything is printed or
+`--delete` now validates `hub_name` against the same pattern the create path already enforces,
+since the value reaches a `firewall-rules list --filter` expression. The existing static
+deletion-list block gains one more check, run before anything is printed or
 deleted, and factored into its own function (`hybrid_teardown_preflight`) so it has direct test
 coverage of its own: a single `firewall-rules list` call (rather than one `describe` per rule)
 looks up both hybrid firewall rules by name and classifies each as **found, marked** (queued for
 deletion, printed as `found (marked): <name>`) or **found, unmarked** (printed as `SKIPPED
 (unmarked): <name>`); a name not present at all is simply not queued. A non-zero exit from the
 list call itself is treated as a failure, not as "no rules exist" — an unknown ownership state
-must never look identical to nothing needing protection. Either an unmarked name match or a
-failed list call fails the whole teardown run before anything is deleted, not just the two
-hybrid rules — a naming collision, or an inability to even check, means the hub name can no
-longer be trusted to identify only resources this deployment owns, so nothing else proceeds
-safely from that point either.
+must never look identical to nothing needing protection. When nothing matched at all, the check
+never even needs a JSON parser, so it doesn't require `$PYTHON`; when something did match, it
+does, and a missing interpreter is reported as its own clear error rather than being misdiagnosed
+as an unmarked-rule collision. Either an unmarked name match or a failed list call fails the whole
+teardown run before anything is deleted, not just the two hybrid rules — a naming collision, or
+an inability to even check, means the hub name can no longer be trusted to identify only
+resources this deployment owns, so nothing else proceeds safely from that point either.
 
-Marked rules are deleted only once the hub VM delete has succeeded or the VM is confirmed
-already absent; if the VM fails to delete, both hybrid rules are kept and the run reports the
-failure rather than silently leaving the VM tagged with no deny rule in place. Deletion order is
-the reverse of creation — the allow rule first, then the deny rule. A rule whose delete call
-fails is reported as a failure, and the final summary only lists rules actually confirmed gone,
-never one that failed to delete. The cluster itself is never deleted, under any circumstance.
+With no hybrid rules queued for deletion, a VM delete failure warns and continues exactly as it
+always has, with no change to the exit code. With hybrid rules queued, "the VM is gone" is a
+positive, project-wide answer (an `instances list` by name, not scoped to any particular zone)
+rather than an inference from a `describe` or `delete` call that merely failed, which could just
+as easily mean a guessed-wrong zone or a transient error as an actually-absent VM; anything short
+of a positive answer keeps both rules and fails the run, reporting what's known. Deletion order is
+the reverse of creation — the allow rule first, then the deny rule — and deletion stops at the
+first rule that isn't confirmed gone (a failed `delete` re-checked with a fresh `list`, so only a
+positive not-found counts), so the deny rule can never be deleted after the allow rule's own
+delete failed or came back uncertain. A rule whose delete call fails is reported as a failure, and
+the final summary only lists rules actually confirmed gone, never one that failed to delete. The
+cluster itself is never deleted, under any circumstance.
 
 ## Tests
 
@@ -115,7 +129,11 @@ subprocess against the same stub, to cover the parts of the integration a functi
 can't reach (whether `deploy.sh` actually gates discovery, `--tags`, and `add-tags` on the tier
 being enabled, and the exact ordering of its teardown calls). Both layers use a stubbed `gcloud`
 on `PATH` that records every invocation and serves fixtures — no test ever contacts GCP. Each
-test runs in its own subshell so one unexpected early exit can't end the rest of the suite.
+test runs in its own subshell so one unexpected early exit can't end the rest of the suite. A
+create-mode `deploy.sh` subprocess only needs to run through its VM-exists check, not a full
+simulated deploy (which would have to get past an SSH-readiness retry loop with real sleeps), so
+those tests run it in the background and stop it as soon as the stub signals that check happened,
+rather than waiting out a fixed timeout.
 
 Coverage includes: rule names, the marker on every created rule (including that the marker
 check is an exact match, not a substring or prefix, so a prefix-colliding hub name or a marker
@@ -128,14 +146,23 @@ pair of prefix-colliding cluster names, a multi-tag template, a tag that only co
 expected pattern as a substring, a zero-instance pool, one unreadable instance group alongside a
 readable one, all instance groups unreadable, and the zero- and multiple-candidate refusals),
 the network-mismatch refusal, the pre-existing non-hybrid-hub re-run case at both the function
-and the `deploy.sh` level, an idempotent create-then-reuse round trip, one drift test per
-security-relevant field (asserting the field is named, the delete remediation is always present,
-and the update remediation is present only where it would converge), teardown's
-found/SKIPPED/fail-the-run classification and its ordering relative to `deploy.sh`'s deletes (the
-ownership check before any delete, the hybrid rules only after the VM, allow before deny, a VM
-delete failure keeping both rules, a delete failure reported as a failure rather than "deleted"),
-and the tier-off case at both levels (config absent, zero hybrid-related `gcloud` calls, and an
-unchanged `instances create` invocation).
+and the `deploy.sh` level, an idempotent create-then-reuse round trip, and at least one drift
+test for every field the spec check compares (direction, action, every allow/deny entry,
+disabled, priority, network, source tags, source ranges, source and target service accounts, and
+destination ranges, on both the allow and the deny rule where the two sides differ), each
+asserting the field is named, the delete remediation is always present, and the update
+remediation is present only where it would converge — including the deny-specific
+allow-then-deny-then-re-run sequence when only a delete is possible. Teardown coverage includes
+its found/SKIPPED/fail-the-run classification, needing `$PYTHON` only when something matched,
+and its ordering relative to `deploy.sh`'s deletes: the ownership check before any delete, the
+hybrid rules only after the VM is positively confirmed gone (not merely inferred from a failed
+call), deletion stopping at the first rule that isn't confirmed gone so the deny is never deleted
+after the allow's delete failed, a VM delete failure keeping both rules only when hybrid rules are
+queued (a tier-off VM delete failure still warns and continues unchanged), and a delete failure
+reported as a failure rather than "deleted." The tier-off case is covered at both levels for both
+a fresh deploy and a redeploy against an already-existing VM: no `gke_target`, no cluster calls,
+no `add-tags`, no hybrid firewall-rule calls, and (for a fresh VM) an unchanged `instances create`
+invocation.
 
 Both `deploy.sh` and `hybrid-tier.sh` use `${arr[@]+"${arr[@]}"}` rather than a bare
 `"${arr[@]}"` for every array that can legitimately be empty, since the bare form is an
