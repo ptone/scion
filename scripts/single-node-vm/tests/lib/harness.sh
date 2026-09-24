@@ -57,7 +57,7 @@ fresh_gcloud_state() {
   GCLOUD_STUB_LOG="$(mktemp)"
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
     "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates" \
-    "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets"
+    "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets" "${GCLOUD_STUB_STATE_DIR}/run-services"
   export GCLOUD_STUB_STATE_DIR GCLOUD_STUB_LOG
 }
 
@@ -117,6 +117,23 @@ set_router_exists() {
 }
 set_service_account_exists() {
   touch "${GCLOUD_STUB_STATE_DIR}/service-account-exists"
+}
+
+# seed_run_service_exists NAME — the next `run services describe` call
+# for this service succeeds (simulating a redeploy of an existing
+# service). Without this, the stub reports NOT_FOUND.
+seed_run_service_exists() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.exists"
+}
+
+# set_run_service_describe_error NAME — the next `run services describe`
+# call for this service fails with a non-not-found error (a permissions
+# problem, for example), so the fail-safe "assume it exists, don't
+# label" branch can be tested directly.
+set_run_service_describe_error() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.describe-error"
 }
 
 # set_firewall_delete_will_fail NAME — the next `firewall-rules delete`

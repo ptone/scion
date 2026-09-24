@@ -42,7 +42,7 @@ PYTHON="${GCLOUD_STUB_PYTHON:-python3}"
 
 mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
   "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates" \
-  "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets"
+  "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets" "${GCLOUD_STUB_STATE_DIR}/run-services"
 
 printf '%s\n' "$*" >> "$GCLOUD_STUB_LOG"
 
@@ -367,6 +367,20 @@ print(json.dumps(out))
     ;;
   "run services delete")
     exit 0
+    ;;
+  "run services describe")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.describe-error" ]]; then
+      echo "gcloud-stub: PERMISSION_DENIED: simulated non-not-found describe error" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists" ]]; then
+      exit 0
+    fi
+    echo "gcloud-stub: NOT_FOUND: Requested entity was not found." >&2
+    exit 1
     ;;
   "container clusters describe")
     require_project "$@"
