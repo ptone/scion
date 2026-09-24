@@ -347,10 +347,10 @@ func TestRunSubstrateServe_RootfsFixupEnvUnset_CallSite1Runs(t *testing.T) {
 }
 
 // TestSubstrateServeRootfsFixup_SkipEnv proves skipRootfsFixupEnv also gates
-// call site 2 (the /bootstrap fallback) — this is Required 2's fix: before
-// it, only call site 1 was gated, and TestSubstrateServeCommand_Integration_
-// SIGTERMNotForwarded's real subprocess (which POSTs /bootstrap) still ran
-// this call site against a real "/" and real "scion" home.
+// call site 2 (the /bootstrap fallback), not just call site 1 —
+// TestSubstrateServeCommand_Integration_SIGTERMNotForwarded's real
+// subprocess POSTs /bootstrap, which reaches this call site against a real
+// "/" and real "scion" home whenever it isn't gated the same way.
 func TestSubstrateServeRootfsFixup_SkipEnv(t *testing.T) {
 	t.Setenv(skipRootfsFixupEnv, "1")
 	orig := bootstrapRootfsFixup
@@ -386,10 +386,10 @@ func TestSubstrateServeRootfsFixup_EnvUnset_Runs(t *testing.T) {
 }
 
 // TestCheckPrivilegeDropFeasible_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs
-// is the binding condition on Required 2 (substrate-lead): skipRootfsFixupEnv
-// must skip ONLY the fixup, never the privilege-drop precondition. With the
-// env set and a rootfs that still needs the fixup (here: $HOME not owned by
-// the target uid, exactly what fixupRootfsForScion would have corrected),
+// pins the binding invariant on skipRootfsFixupEnv: it must skip ONLY the
+// fixup, never the privilege-drop precondition. With the env set and a
+// rootfs that still needs the fixup (here: $HOME not owned by the target
+// uid, exactly what fixupRootfsForScion would have corrected),
 // checkPrivilegeDropFeasible — substrate-serve's synchronous /bootstrap
 // precondition, wired independently of skipRootfsFixupEnv — must still
 // reject. This proves the knob can only make bootstrap fail closed sooner,
