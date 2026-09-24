@@ -324,6 +324,86 @@ test_deploy_create_discovery_before_first_create() {
 }
 
 # =====================================================================
+# API check: enable only what's missing, never the whole list when
+# nothing needs it, and add container.googleapis.com when the tier is
+# on. This is the second deliberate tier-off behavior change (the first
+# is base markers on create, below): a validation runner without
+# serviceusage.services.enable must never see an enable call for an API
+# that's already on.
+# =====================================================================
+
+test_deploy_create_api_check_all_enabled_no_enable_call() {
+  fresh_gcloud_state
+  seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
+    cloudbuild.googleapis.com artifactregistry.googleapis.com
+  run_deploy_create "$(base_config_json "$HUB")"
+  assert_eq "0" "$(gcloud_log | grep -c 'services enable' || true)" \
+    "nothing missing must mean no enable call at all, not an enable call with zero APIs"
+}
+
+test_deploy_create_api_check_missing_enables_exact_set() {
+  fresh_gcloud_state
+  seed_enabled_apis compute.googleapis.com iap.googleapis.com artifactregistry.googleapis.com
+  run_deploy_create "$(base_config_json "$HUB")"
+  local enable_line
+  enable_line="$(gcloud_log | grep 'services enable' | head -1)"
+  assert_eq "1" "$(gcloud_log | grep -c 'services enable' || true)" "exactly one enable call for the missing set"
+  assert_contains "$enable_line" "run.googleapis.com" "the enable call must include a missing API"
+  assert_contains "$enable_line" "cloudbuild.googleapis.com" "the enable call must include the other missing API"
+  assert_not_contains "$enable_line" "compute.googleapis.com" "an already-enabled API must not be re-enabled"
+  assert_not_contains "$enable_line" "artifactregistry.googleapis.com" "an already-enabled API must not be re-enabled"
+}
+
+test_deploy_create_api_check_tier_on_adds_container() {
+  fresh_gcloud_state
+  seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
+    cloudbuild.googleapis.com artifactregistry.googleapis.com
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_mig "mig-a" "template-a"
+  seed_template "template-a" "gke-mycluster-abc123-node"
+  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  local enable_line
+  enable_line="$(gcloud_log | grep 'services enable' | head -1)"
+  assert_eq "1" "$(gcloud_log | grep -c 'services enable' || true)" "exactly one enable call, for container only"
+  assert_contains "$enable_line" "container.googleapis.com" \
+    "the hybrid tier needs container.googleapis.com enabled"
+  assert_not_contains "$enable_line" "compute.googleapis.com" \
+    "the base APIs are already enabled and must not be re-enabled"
+}
+
+test_deploy_create_api_check_list_failure_tier_off_falls_back_to_unconditional_enable() {
+  fresh_gcloud_state
+  set_services_list_will_fail
+  run_deploy_create "$(base_config_json "$HUB")"
+  local enable_line
+  enable_line="$(gcloud_log | grep 'services enable' | head -1)"
+  assert_contains "$enable_line" "compute.googleapis.com" \
+    "tier-off must fall back to enabling the whole base list when it can't list what's already enabled"
+  assert_contains "$enable_line" "artifactregistry.googleapis.com" "the fallback enable call must include every base API"
+  local create_line
+  create_line="$(gcloud_log | grep 'compute instances create' | head -1)"
+  assert_true "$([[ -n "$create_line" ]] && echo true || echo false)" \
+    "the run must still reach VM creation despite the list failure, tier off"
+}
+
+test_deploy_create_api_check_list_failure_tier_on_fails_actionably() {
+  fresh_gcloud_state
+  set_services_list_will_fail
+  local config_file
+  config_file="$(mktemp)"
+  printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)")" > "$config_file"
+  local log rc
+  log="$(timeout 10 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
+  rc=$?
+  rm -f "$config_file"
+  assert_true "$([[ "$rc" -ne 0 && "$rc" -ne 124 ]] && echo true || echo false)" \
+    "the tier-on run must fail fast on a list failure, not hang until the create-mode timeout"
+  assert_eq "0" "$(gcloud_log | grep -c 'compute instances create' || true)" \
+    "nothing should be created when the API check can't tell what's missing, tier on"
+  assert_contains "$log" "serviceusage" "the message should explain why an unknown API state is refused, not just fail silently"
+}
+
+# =====================================================================
 # VM-gone must be a positive, project-wide answer when
 # hybrid rules are queued, and tier-off teardown keeps warning and
 # continuing on a VM delete failure exactly as it always has.

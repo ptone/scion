@@ -95,6 +95,20 @@ set_instances_list_zone_unreachable() {
   touch "${GCLOUD_STUB_STATE_DIR}/instances-list-zone-unreachable"
 }
 
+# seed_enabled_apis API... — overrides the stub's "everything is already
+# enabled" default for `services list --enabled` with an explicit set, so
+# a test can make some (or all) required APIs come back as missing.
+seed_enabled_apis() {
+  printf '%s\n' "$@" > "${GCLOUD_STUB_STATE_DIR}/enabled-apis.txt"
+}
+
+# set_services_list_will_fail — the next `services list` call fails
+# (simulating a runner without serviceusage.services.list), so the API
+# check can't tell what's already enabled.
+set_services_list_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/services-list-should-fail"
+}
+
 # set_firewall_delete_will_fail NAME — the next `firewall-rules delete`
 # call for this rule fails instead of succeeding (the rule's JSON stays
 # present in stub state, matching a real failed delete rather than one
