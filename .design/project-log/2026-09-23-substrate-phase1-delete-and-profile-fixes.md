@@ -490,3 +490,83 @@ Live testing over the hub's control channel showed a delete-after-stop on a subs
 - `pkg/hub/controlchannel_client_test.go`: added a configurable status code to the existing mock tunnel and one new test for the 204 case.
 
 No changes to `pkg/agent/manager.go`, `AgentManager.Delete`/`.Stop`, the ambiguity guard's own logic (only its label-key lookup was refactored, not its behavior), or any other runtime. No `go.mod`/`go.sum` changes.
+
+---
+
+## Follow-up: exec/su and the harness ran as root on substrate before this fix
+
+Live testing found every exec into a substrate actor failing: `sciontool substrate-serve /scion/v1/exec` (`pkg/sciontool/substrate/exec.go`) runs `execAsUserCmd` → `su - scion`, which failed inside the actor with `cannot set groups: Operation not permitted`. Root cause, from Substrate's own source: the actor process is always started as UID 0 / GID 0 (`ContainerSpec` has no user field), with a default capability set of only `AUDIT_WRITE`, `KILL`, `NET_BIND_SERVICE` — no `CAP_SETUID`/`CAP_SETGID`, which `su`'s own `setgroups(2)` call needs to drop privileges.
+
+**Fix: grant the two capabilities `su` needs, explicitly.** `buildActorTemplate` (`pkg/runtime/substrate_template.go`) now sets `Container.SecurityContext.Capabilities.Add = ["SETUID", "SETGID"]` on the ActorTemplate the runtime builds, using the vendored `third_party/ateapipb` `SecurityContext`/`Capabilities` types. Substrate applies `Drop` before `Add` and rejects `"ALL"`, so each capability is named explicitly rather than assumed from a default set. `execAsUserCmd`'s `su`-based flow (pkg/sciontool/substrate/exec.go, pkg/sciontool/substrate/execuser.go) is unchanged — this only grants what it already needed, the same two capabilities Docker's own default capability set already includes (which is why this defect is Substrate-specific). These capabilities apply inside the gVisor sentry the actor runs in, not the host; `su` itself clears them (along with everything else) for the scion process tree it execs into, so nothing scion-owned ever runs privileged.
+
+The capability set is a single package-level value (`substrateContainerCapabilitiesAdd`), shared between `buildActorTemplate` (what gets requested) and `substrateTemplateName`'s content-address hash (`pkg/runtime/substrate_template.go`): **the capabilities are now part of the template-hash inputs**, so an existing golden template built before this fix is never silently reused after it (which would otherwise mean the fix shipped in code but never actually reached a running actor) — the same class of "settings changed but the golden template didn't" risk a second-profile `egress_allow` change was found to have earlier in this project.
+
+### (C) Investigation: does the harness/tmux run as root today?
+
+Traced by code, file:line, the full path from `sciontool substrate-serve`'s bootstrap handler to the harness actually starting:
+
+1. `pkg/sciontool/substrate/server.go` bootstrap handler starts `s.runInit(childArgs, false)` — the same `RunInit` the `sciontool init` CLI command uses (`cmd/sciontool/commands/substrate_serve.go`'s `WithInitRunner`).
+2. `RunInit` (`cmd/sciontool/commands/init.go:159`, prior to this fix) calls `setupHostUser()` to compute the UID/GID the harness should run as.
+3. `setupHostUser` (`init.go:1400-1408`): reads `/proc/self/status`'s `CapEff` (`hasCapSetUID`, `init.go:2306-2312`, checking bit 7 = `CAP_SETUID`). Without the capability — Substrate's state before this fix — it logs "Running as root but CAP_SETUID is absent (restricted sandbox)" and returns `(0, 0, rootless=true)` immediately, before ever checking anything else.
+4. Back in `RunInit`, this `(targetUID=0, ...)` result is threaded into `supervisor.Config{UID: targetUID, GID: targetGID, ...}` (`init.go:~586-589`) and handed to the supervisor that actually launches the harness/tmux child process.
+5. `pkg/sciontool/supervisor/supervisor.go:113-120`: `if s.config.UID > 0 && s.config.GID > 0 { s.cmd.SysProcAttr.Credential = &syscall.Credential{...} }` — the privilege-drop `Credential` is only ever attached when both are `> 0`. With `UID=0`, this is skipped entirely; the supervisor only sets `HOME`/`USER`/`LOGNAME=scion` (`supervisor.go:128`) — cosmetic env vars, not a real privilege drop. The child process inherits the current (root) credentials.
+
+**Conclusion: yes, the harness and tmux ran as root on substrate before this fix.** This is the second defect the investigation was checking for.
+
+**Does adding SETUID+SETGID alone fix it? Traced: no, not by itself.** With the capabilities granted, `hasCapSetUID()` (step 3) does return `true`, so `setupHostUser` no longer takes that immediate "capability absent" exit — but the very next check it reaches (`init.go:1410-1416`, prior to this fix) is `hostUID := os.Getenv("SCION_HOST_UID")` / `hostGID := os.Getenv("SCION_HOST_GID")`; if either is empty, it returns `(0, 0, rootless=false)` — still `targetUID=0`, still no `Credential` set at step 5, just a different one of `setupHostUser`'s several "stay at UID 0" exits. **Substrate's own bootstrap env never set these two variables at all**: every other runtime sets them via `buildCommonRunArgs` (`pkg/runtime/common.go:378-390`, used by `docker.go`/`podman.go`/`apple_container.go`) or an equivalent in `KubernetesRuntime.buildPod`, but Substrate's env-building path, `buildBootstrapEnv` (`pkg/runtime/substrate_bootstrap.go`), is entirely separate and never called that helper.
+
+**Second fix, required to make the capability grant actually take effect: set `SCION_HOST_UID`/`SCION_HOST_GID` in the bootstrap env.** `buildBootstrapEnv` now sets both to `"1000"` unconditionally — matching the actor image's own baked-in `scion` user (`image-build/scion-base/Dockerfile`: `useradd -m -s /bin/zsh -u 1000 scion`, confirmed by reading the Dockerfile directly). Unlike Docker/Podman (where these normally mirror the *broker host's* own UID/GID for bind-mount permission parity) or the NFS backend (a stable, node-independent identity for a shared filesystem), Substrate's workspace is never bind-mounted from the invoking broker's own filesystem at all, so there is no host UID to synchronize with — the image's own default is the only value that makes sense here.
+
+With both fixes in place: `hasCapSetUID()` is true, `SCION_HOST_UID`/`GID` are both `"1000"` (non-empty), and since `1000` already matches the scion user's existing, baked-in UID/GID exactly, `setupHostUser` hits its "already correct, nothing to change" shortcut (`init.go:1483-1492`) — no `usermod`/`groupmod`/`chown`-of-home-directory dance needed at all — and returns `(1000, 1000, false)`. `supervisor.Config.UID/GID` are both `1000 > 0`, so `supervisor.go:113-120`'s `Credential{Uid: 1000, Gid: 1000}` **is** set, and the harness/tmux child process actually execs as the `scion` user via a real `setuid`/`setgid` syscall pair — which needs exactly the `CAP_SETUID`/`CAP_SETGID` this fix already grants.
+
+### Fail-closed (binding decision, folded into this same change)
+
+Silently falling back to "run as root" — `setupHostUser`'s existing behavior, still correct and unchanged for every other runtime (rootless Podman relies on it) — is not acceptable for substrate: scion never runs the harness or exec as root. `cmd/sciontool/commands/init.go` adds `InitRunOptions.RequirePrivilegeDrop`, a flag substrate-serve's own `WithInitRunner` callback sets (`cmd/sciontool/commands/substrate_serve.go`) — deliberately a flag passed at that one call site, not an environment variable a workload could set itself. `RunInit` checks it immediately after `setupHostUser` returns:
+
+```go
+if err := requirePrivilegeDropOrFail(targetUID, opts.RequirePrivilegeDrop); err != nil {
+    log.Error("%v", err)
+    return 1
+}
+```
+
+`requirePrivilegeDropOrFail(targetUID, requirePrivilegeDrop)` is a small, standalone, directly-testable function of `setupHostUser`'s own result — not a reimplementation of its branching — returning a fixed, secret-free sentinel error whenever `requirePrivilegeDrop` is set and `targetUID` is still `0`. Substrate always starts the actor as UID 0, so — unlike other runtimes, where staying at UID 0 can legitimately mean "already unprivileged" (rootless Podman/keep-id) — a substrate agent reaching `targetUID == 0` after `setupHostUser` can only mean the drop never happened. `RunInit` returns before the supervisor (and therefore the harness) is ever started. This exits the actor's PID 1 (`substrate-serve`) non-zero from the bootstrap goroutine; the actor becomes visibly unhealthy to Substrate's own control plane, which is how the broker's existing `Run()` failure handling (already deletes the actor on a failed/timed-out bootstrap, no secrets in the error) picks it up — no new broker-side error path was needed for this.
+
+One known, accepted limitation: `setupHostUser`'s `SCION_KEEPID_UID` (rootless Podman keep-id) branch also returns `targetUID=0` on its own *success* path, since it drops privileges via a direct `syscall.Setuid`/`Setgid` call internally rather than deferring to the supervisor's `Credential`. `requirePrivilegeDropOrFail` cannot distinguish that from a real failure by return value alone, so it would fail closed there too. This is not reachable for substrate today — that env var is Podman-specific and substrate's bootstrap never sets it — and failing closed on it would be overly conservative rather than wrong (the actual drop likely already succeeded), so it was left as a documented edge case rather than engineered around.
+
+### Extra capabilities beyond SETUID/SETGID: one near-certain candidate, two unconfirmed
+
+Per the explicit instruction to start with exactly `SETUID`/`SETGID` and add anything else only with a code-cited reason (preferring live proof over speculative addition), this change ships with only those two. Investigated further, for the record:
+
+- **`CAP_CHOWN` — near-certain, not added.** Once `setupHostUser` returns `targetUID=1000` (this fix's success path), `RunInit` unconditionally calls `log.Chown(targetUID, targetGID)` on the log file (`init.go:163-166` — `if targetUID != 0`, no other condition) to hand it from root to scion. Substrate's capability set does not include `CAP_CHOWN`, and changing a file's owner to an arbitrary different UID requires it regardless of the caller's own UID once a process's capabilities are restricted (exactly the property that made `SETUID`/`SETGID` necessary for `su` in the first place — traditional "UID 0 can do anything" semantics do not apply here). Several other `os.Chown` calls exist further down the same conditional path (hub token file `init.go:731`, GitHub token/expiry `init.go:802`/`825`, resource limits file `init.go:907`, workspace ownership via `ensureWorkspaceOwnership` `init.go:1985` and `chownTreeRootOwned` `init.go:1962`, env file `init.go:2179-2180`) — same capability, same reasoning, listed for completeness rather than as separate findings. This is left out of this change only because of the explicit "start with exactly two" instruction; it is expected to surface on the very first live substrate run that reaches this code path (any agent, since the log-file chown is unconditional), and should be a fast, low-risk follow-up once confirmed live rather than a speculative addition here.
+- **`CAP_DAC_OVERRIDE` / `CAP_FOWNER` — candidates only, not added, no code citation found.** These would matter if `RunInit` (still UID 0 at this point, before the supervisor's `Credential` drop takes effect on the *child*) ever writes to a file or directory after that file has already been chowned to `scion` and is no longer world/group-writable. Confirming this would require tracing every write call that follows every chown call across `init.go`'s ~2000 lines, which was not done exhaustively here — flagged for live confirmation rather than guessed at.
+
+### Tests
+
+- `TestBuildActorTemplate_SecurityContextGrantsExactlySetuidSetgid` (`pkg/runtime/substrate_runtime_test.go`): the built `ActorTemplate` carries exactly `Capabilities.Add = ["SETUID", "SETGID"]` and an empty `Drop`.
+- `TestSubstrateTemplateName_ChangesWithCapabilitySet`: the template hash is unchanged when the capability set is unchanged, and changes when it is (using the shared package-level value directly, restored via `t.Cleanup`).
+- `TestBuildBootstrapEnv_SetsHostUIDGIDForPrivilegeDrop`: `SCION_HOST_UID`/`SCION_HOST_GID` are both `"1000"` in the bootstrap env.
+- `TestRequirePrivilegeDropOrFail_SubstrateFailsClosed` / `_SubstrateSucceedsWhenDropped` / `_NonSubstrateRootlessUnchanged` (`cmd/sciontool/commands/init_test.go`): the fail-closed gate fires exactly when `RequirePrivilegeDrop` is set and the drop didn't happen, succeeds when it did, and is a complete no-op when unset (the non-substrate control — every other runtime's rootless fallback is untouched).
+- Full `cmd/sciontool/...` and `pkg/sciontool/...` suites re-run green (parity for every other runtime's `sciontool init` path), alongside the four required package trees.
+
+### Gate results (this follow-up, `SCION_*` and `CLAUDE_CODE_ENABLE_TELEMETRY` unset)
+
+- `go build ./...` — pass.
+- `go vet` on `pkg/runtime/...`, `pkg/runtimebroker/...`, `pkg/agent/...`, `pkg/config/...`, `cmd/sciontool/...`, `pkg/sciontool/...` — pass, no output.
+- `gofmt -l` on every changed file — clean.
+- `go test -count=1` on `pkg/runtime/...`, `pkg/runtimebroker/...`, `pkg/agent/...`, `pkg/config/...`, `cmd/sciontool/...`, `pkg/sciontool/...` — all pass.
+- `go test -race -count=1` on the same trees — pass, with two confirmed pre-existing, unrelated flakes: the previously-noted `pkg/runtime/cloudrun` data race, and a newly-encountered one in `pkg/sciontool/supervisor` (`TestSignalHandler_WithoutPreStopHook`) — reproduced identically on the pre-this-follow-up baseline (2 of 4 runs) with zero code from this follow-up even touching that package; not addressed here.
+- `go test -count=50` on every new test — pass, no flakes.
+- `golangci-lint run --new-from-rev=c3b6e821d --concurrency=1 ./...` — 0 issues.
+- `make check-custom` — same pre-existing, unrelated NFS shared-dir-storage hits as before; zero hits in any file this branch touches.
+- Hygiene greps — no hits introduced by this follow-up. One pre-existing, unrelated match survives in a file this follow-up otherwise touches: `cmd/sciontool/commands/init.go:758` cites `findings.md D1` (the design doc's own defect-numbering section, not a review artifact), confirmed via `git blame` to predate this follow-up and untouched by it — the same category as the already-reported `handlers.go` `N1-7` hits.
+
+### Functions touched (this follow-up)
+
+- `pkg/runtime/substrate_template.go`: `buildActorTemplate` (SecurityContext/Capabilities), `substrateTemplateName` (hash input), new `substrateContainerCapabilitiesAdd`.
+- `pkg/runtime/substrate_bootstrap.go`: `buildBootstrapEnv` (SCION_HOST_UID/GID).
+- `cmd/sciontool/commands/init.go`: `InitRunOptions` (new field), `RunInit` (the fail-closed check), new `errPrivilegeDropRequired`/`requirePrivilegeDropOrFail`.
+- `cmd/sciontool/commands/substrate_serve.go`: sets `RequirePrivilegeDrop: true` at the one call site that constructs substrate-serve's `InitRunner`.
+- `pkg/runtime/substrate_runtime_test.go`, `cmd/sciontool/commands/init_test.go`: new tests described above.
+
+No changes to `pkg/sciontool/supervisor` (its own privilege-drop and rootless-fallback logic is unchanged — only its inputs, from `RunInit`, changed for substrate specifically), `execAsUserCmd`/`ExecAsUserCmd`, or any other runtime's `RunConfig`/env-building path. No `go.mod`/`go.sum` changes.
