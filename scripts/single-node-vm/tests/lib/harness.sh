@@ -57,7 +57,8 @@ fresh_gcloud_state() {
   GCLOUD_STUB_LOG="$(mktemp)"
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
     "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates" \
-    "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets" "${GCLOUD_STUB_STATE_DIR}/run-services"
+    "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets" "${GCLOUD_STUB_STATE_DIR}/run-services" \
+    "${GCLOUD_STUB_STATE_DIR}/addresses"
   export GCLOUD_STUB_STATE_DIR GCLOUD_STUB_LOG
   KUBECTL_STUB_STATE_DIR="$(mktemp -d)"
   KUBECTL_STUB_LOG="$(mktemp)"
@@ -302,6 +303,35 @@ seed_firewall_rule_desc_only() {
   "$PYTHON" "${HARNESS_LIB_DIR}/firewall-rule-json.py" \
     "$2" "default" "INGRESS" "ALLOW" "tcp" "2049" "" "" "" "900" \
     > "${GCLOUD_STUB_STATE_DIR}/firewall-rules/$1.json"
+}
+
+# seed_address NAME ADDRESS DESC — a pre-existing static internal address
+# reservation with the given address and description.
+seed_address() {
+  local name="$1" address="$2" desc="$3"
+  "$PYTHON" -c "
+import json, sys
+addr, desc = sys.argv[1:3]
+print(json.dumps({'address': addr, 'description': desc}))
+" "$address" "$desc" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+}
+
+# seed_address_unmarked NAME ADDRESS — a pre-existing reservation with no
+# marker description, for the "refuse to adopt" test.
+seed_address_unmarked() {
+  seed_address "$1" "$2" "some other unrelated reservation"
+}
+
+# set_address_delete_will_fail NAME — the next `compute addresses delete`
+# call for this reservation fails instead of succeeding.
+set_address_delete_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/addresses/$1.json.delete-fail"
+}
+
+# set_address_list_will_fail NAME — the next `compute addresses list`
+# call filtered to this name fails instead of returning a result.
+set_address_list_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/addresses/$1.json.list-error"
 }
 
 # seed_firewall_rule_json NAME DESC NETWORK DIRECTION ACTION PROTO PORTS \
