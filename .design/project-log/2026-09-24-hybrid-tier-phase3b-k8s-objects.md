@@ -7,12 +7,12 @@ stacked on the Phase 2 PR).
 
 Builds on the previous slice's NFS server and export by adding the Kubernetes side: the
 PersistentVolume, namespace, and PersistentVolumeClaim that let GKE pods actually mount the
-shared tree, plus their marker-based ownership rules and teardown. Also closes a test-coverage
-gap flagged at the end of the previous slice: the remote NFS/squash script and the Cloud Run
-first-create label decision are now rendered by pure, directly unit-tested functions instead of
-living only as inline strings past the point the wiring test suite can reach.
+shared tree, plus their marker-based ownership rules and teardown. Also improves test coverage
+for the earlier slice: the remote NFS/squash script and the Cloud Run first-create label decision
+are now rendered by pure, directly unit-tested functions instead of living only as inline strings
+past the point the wiring test suite can reach.
 
-## Closing the previous slice's coverage gap
+## Making the NFS/squash script and Cloud Run label decision directly testable
 
 The squash-identity creation and NFS export/server setup are now rendered by two pure functions
 in `hybrid-tier.sh` (no gcloud, kubectl, or SSH calls of their own): one renders the identity
@@ -95,8 +95,8 @@ including the `KUBECONFIG` value it ran with, and serves object fixtures from pl
 and a small helper that turns one of this module's own rendered manifests into the minimal JSON
 `kubectl get -o json` would return, so the object-management code's JSON parsing runs unmodified
 against the stub. Coverage includes: every manifest's fields (names, markers, server/path,
-claimRef pinning, reclaim policy, mount options, access mode); the R3 refusal on an unmarked PV
-or PVC and the unmarked-namespace-used-not-labeled case; PV and PVC drift detection with
+claimRef pinning, reclaim policy, mount options, access mode); the marker refusal on an unmarked
+PV or PVC and the unmarked-namespace-used-not-labeled case; PV and PVC drift detection with
 remediation; that matching, marked objects are reused rather than recreated; teardown's
 found/SKIPPED classification, its abort rules (unmarked PVC/PV aborts, unmarked namespace
 doesn't, an unknown check result aborts), its deletion order and stop-at-first-failure behavior;
