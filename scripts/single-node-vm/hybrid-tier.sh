@@ -59,40 +59,148 @@
 # upper-dir-symlink-plant vector the dedicated identity exists to close.
 # shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
 readonly HYBRID_NFS_SQUASH_USER="scion-nfs"
-# The NFS export root: a plain directory on the VM's boot disk (per the
-# design's boot-disk provisioning choice), not a separate mounted volume.
+# The NFS export root: the mount point of a dedicated, size-capped ext4
+# filesystem, loop-mounted from a single image file that itself lives on
+# the VM's boot disk (per the design's boot-disk provisioning choice).
+# The export root is the ROOT of that filesystem, not a subdirectory of
+# it: with no_subtree_check (required so NFSv4 file handles survive a
+# restart), a subdirectory export lets a forged file handle reach any
+# inode on the whole containing filesystem. Giving the export its own
+# filesystem means there is nothing else on that filesystem for a forged
+# handle to reach.
 # shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
 readonly HYBRID_NFS_EXPORT_ROOT="/srv/scion-shared"
+# The backing image file for the export filesystem above. Lives on the
+# boot disk, outside the export root itself. Created once, at whatever
+# size gke_target.shared_dir_image_size_gb (default 20) specifies; never
+# re-created or shrunk on a later run. Growing it later is a manual,
+# documented operation (grow the file, then resize2fs) -- see
+# docs/deploy/hybrid-tier.md.
+# shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
+readonly HYBRID_NFS_IMAGE_PATH="/var/lib/scion-nfs/export.img"
 
 # _hybrid_gcloud_not_found TEXT
 #
 # True only for gcloud's own specific "genuinely absent" signal: a
-# NOT_FOUND status token, a 404 code, or the literal "Requested entity
-# was not found" message -- never a bare "not found" substring. Some
+# bounded NOT_FOUND status token, a "code=404" ResponseError, or an
+# "HTTP 404" status line -- never a bare "404" substring, which shows up
+# in plenty of text that has nothing to do with absence: a cluster
+# literally named "hub-404", a project ID like "team-404-prod" inside a
+# URL, "Timeout after 404 seconds", or a proxy's own unrelated status
+# line mentioning a request id that happens to contain "404". Some
 # permission-denied responses are deliberately worded to avoid
 # confirming a resource's existence to a caller who can't see it (for
 # example "...not found or permission denied"), and those must never be
 # treated as "gone": anything mentioning permission or forbidden is
 # excluded outright, checked first, before the not-found signal itself.
+# A suggestion response ("Did you mean ...") means gcloud found
+# something close enough to suggest, which is not the same as
+# confirming the requested name is absent, so that's excluded too.
 _hybrid_gcloud_not_found() {
   local text="$1"
   if echo "$text" | grep -qiE 'permission|forbidden'; then
     return 1
   fi
-  echo "$text" | grep -qE '(^|[^A-Za-z_])NOT_FOUND($|[^A-Za-z_])|(^|[^0-9])404($|[^0-9])|Requested entity was not found'
+  if echo "$text" | grep -qiE 'did you mean'; then
+    return 1
+  fi
+  echo "$text" | grep -qE 'code=404\b|\bHTTP 404\b|(^|[^A-Za-z0-9_])NOT_FOUND($|[^A-Za-z0-9_])'
 }
 
 # _hybrid_kubectl_not_found TEXT
 #
-# True only for kubectl's own specific NotFound reason token
-# ("Error from server (NotFound): ..."), with the same permission/
-# forbidden exclusion as _hybrid_gcloud_not_found above.
+# True only for kubectl's own specific "genuinely absent" signal for a
+# named object: "Error from server (NotFound): <kind> "<name>" not
+# found" -- requiring the quoted kind and name, not just the bare
+# "(NotFound)" reason token. kubectl also returns "Error from server
+# (NotFound): the server could not find the requested resource" when
+# the API server itself doesn't recognize the requested endpoint (a
+# stale kubectl/server version skew, for example) -- that carries the
+# same "(NotFound)" token but says nothing about whether the object this
+# call was actually checking for exists, so it must never read as
+# absent, and the kind/name requirement above already excludes it. Same
+# permission/forbidden exclusion as _hybrid_gcloud_not_found above.
 _hybrid_kubectl_not_found() {
   local text="$1"
   if echo "$text" | grep -qiE 'permission|forbidden'; then
     return 1
   fi
-  echo "$text" | grep -qE '\(NotFound\)'
+  echo "$text" | grep -qE 'Error from server \(NotFound\): [A-Za-z.]+ "[^"]+" not found'
+}
+
+# _hybrid_registry_is_loopback REGISTRY
+#
+# True if REGISTRY's host component names this VM itself (localhost,
+# 127.0.0.0/8, ::1, or 0.0.0.0), with or without a port -- every spelling
+# that resolves to the node a GKE pod is scheduled on, not to any
+# external registry. Takes the part of REGISTRY before its first '/'
+# (the host[:port]), strips an IPv6 literal's brackets first (so a port
+# after "]" is never confused with the host itself), then strips a
+# ":port" suffix from whatever's left. A bare "localhost/..." was the
+# only spelling the tier used to refuse; "localhost:PORT/...",
+# "127.0.0.1/...", "127.0.0.1:PORT/...", "[::1]/..." and
+# "[::1]:PORT/..." all reach the same place on a GKE node and must be
+# refused identically.
+_hybrid_registry_is_loopback() {
+  local registry="$1" host
+  host="${registry%%/*}"
+  if [[ "$host" == \[*\]* ]]; then
+    host="${host#\[}"
+    host="${host%%\]*}"
+  else
+    host="${host%%:*}"
+  fi
+  case "$host" in
+    localhost|127.*|0.0.0.0|::1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# _hybrid_validate_target_fields NAME LOCATION RESOLVED_PROJECT NAMESPACE \
+#   PVC_NAME PROJECT_ID
+#
+# The gke_target.* field-syntax and project-match validation shared by
+# both hybrid_read_config (create, below) and deploy.sh's --delete path:
+# a malformed or foreign-project cluster reference must be refused the
+# same way regardless of which path read it, rather than create-mode
+# validating strictly while delete-mode reads the same fields with none
+# of these checks. RESOLVED_PROJECT is the caller's already-defaulted
+# value (gke_target.project if set, else PROJECT_ID), not the raw config
+# value, so this only ever sees one project value, not two. Exits
+# non-zero with an actionable, field-naming message on the first problem
+# found. Never touches HYBRID_ENABLED or any GKE_* global itself -- the
+# caller is responsible for those.
+_hybrid_validate_target_fields() {
+  local name="$1" location="$2" resolved_project="$3" namespace="$4" pvc_name="$5" project_id="$6"
+
+  if [[ -z "$location" ]]; then
+    err "gke_target.location is required when gke_target.name is set."
+    exit 1
+  fi
+  if ! [[ "$name" =~ ^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$ ]]; then
+    err "gke_target.name '${name}' is not a valid GKE cluster name (lowercase letters, digits and hyphens; must start with a letter and not end with a hyphen)."
+    exit 1
+  fi
+  if ! [[ "$location" =~ ^[a-z]+-[a-z]+[0-9]+(-[a-z])?$ ]]; then
+    err "gke_target.location '${location}' is not a valid GCP zone or region."
+    exit 1
+  fi
+  if ! [[ "$resolved_project" =~ ^[a-z][-a-z0-9]{4,28}[a-z0-9]$ ]]; then
+    err "gke_target.project '${resolved_project}' is not a valid GCP project ID."
+    exit 1
+  fi
+  if ! [[ "$namespace" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+    err "gke_target.namespace '${namespace}' is not a valid Kubernetes namespace name (lowercase alphanumeric and hyphens, must start and end with an alphanumeric, max 63 characters)."
+    exit 1
+  fi
+  if ! [[ "$pvc_name" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+    err "gke_target.pvc_name '${pvc_name}' is not a valid Kubernetes object name (lowercase alphanumeric and hyphens, must start and end with an alphanumeric, max 63 characters)."
+    exit 1
+  fi
+  if [[ "$resolved_project" != "$project_id" ]]; then
+    err "gke_target.project ('${resolved_project}') must match this hub's project ('${project_id}'). Attaching a cluster in a different project is not supported yet."
+    exit 1
+  fi
 }
 
 # hybrid_read_config PROJECT_ID HUB_NAME
@@ -114,7 +222,7 @@ _hybrid_kubectl_not_found() {
 # on it for every gcloud JSON response it reads).
 hybrid_read_config() {
   local project_id="$1" hub_name="$2"
-  local cfg_name cfg_location cfg_project cfg_namespace cfg_pvc_name
+  local cfg_name cfg_location cfg_project cfg_namespace cfg_pvc_name cfg_image_size_gb
   local hybrid_choice
   local default_namespace default_pvc_name
   default_namespace="$(hybrid_k8s_default_namespace "$hub_name")"
@@ -125,6 +233,7 @@ hybrid_read_config() {
   cfg_project="$(config_get 'gke_target.project' '')"
   cfg_namespace="$(config_get 'gke_target.namespace' "$default_namespace")"
   cfg_pvc_name="$(config_get 'gke_target.pvc_name' "$default_pvc_name")"
+  cfg_image_size_gb="$(config_get 'gke_target.shared_dir_image_size_gb' '20')"
 
   if [[ -z "$cfg_name" && -z "${CONFIG_FILE:-}" ]]; then
     echo ""
@@ -143,37 +252,13 @@ hybrid_read_config() {
     return 0
   fi
 
-  if [[ -z "$cfg_location" ]]; then
-    err "gke_target.location is required when gke_target.name is set."
-    exit 1
-  fi
-
-  if ! [[ "$cfg_name" =~ ^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$ ]]; then
-    err "gke_target.name '${cfg_name}' is not a valid GKE cluster name (lowercase letters, digits and hyphens; must start with a letter and not end with a hyphen)."
-    exit 1
-  fi
-  if ! [[ "$cfg_location" =~ ^[a-z]+-[a-z]+[0-9]+(-[a-z])?$ ]]; then
-    err "gke_target.location '${cfg_location}' is not a valid GCP zone or region."
-    exit 1
-  fi
-  if [[ -n "$cfg_project" ]] && ! [[ "$cfg_project" =~ ^[a-z][-a-z0-9]{4,28}[a-z0-9]$ ]]; then
-    err "gke_target.project '${cfg_project}' is not a valid GCP project ID."
-    exit 1
-  fi
-  if ! [[ "$cfg_namespace" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
-    err "gke_target.namespace '${cfg_namespace}' is not a valid Kubernetes namespace name (lowercase alphanumeric and hyphens, must start and end with an alphanumeric, max 63 characters)."
-    exit 1
-  fi
-  if ! [[ "$cfg_pvc_name" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
-    err "gke_target.pvc_name '${cfg_pvc_name}' is not a valid Kubernetes object name (lowercase alphanumeric and hyphens, must start and end with an alphanumeric, max 63 characters)."
-    exit 1
-  fi
-
   GKE_NAME="$cfg_name"
   GKE_LOCATION="$cfg_location"
   GKE_PROJECT="${cfg_project:-$project_id}"
-  if [[ "$GKE_PROJECT" != "$project_id" ]]; then
-    err "gke_target.project ('${GKE_PROJECT}') must match this hub's project ('${project_id}'). Attaching a cluster in a different project is not supported yet."
+  _hybrid_validate_target_fields "$cfg_name" "$cfg_location" "$GKE_PROJECT" "$cfg_namespace" "$cfg_pvc_name" "$project_id"
+
+  if ! [[ "$cfg_image_size_gb" =~ ^[1-9][0-9]*$ ]]; then
+    err "gke_target.shared_dir_image_size_gb '${cfg_image_size_gb}' must be a positive integer (gigabytes)."
     exit 1
   fi
 
@@ -188,6 +273,8 @@ hybrid_read_config() {
   GKE_NAMESPACE="$cfg_namespace"
   # shellcheck disable=SC2034 # read by hybrid_k8s_ensure_objects/_teardown_check as an override
   GKE_PVC_NAME="$cfg_pvc_name"
+  # shellcheck disable=SC2034 # read by deploy.sh, passed to hybrid_nfs_export_script
+  HYBRID_SHARED_DIR_IMAGE_SIZE_GB="$cfg_image_size_gb"
 }
 
 # _hybrid_cluster_ref — a "name (project: P, location: L)" string for
@@ -473,22 +560,51 @@ hybrid_nfs_export_line() {
 #
 # Renders the remote script that idempotently creates the dedicated NFS
 # squash identity (a system account, no home, no login shell, primary
-# group "scion") if it doesn't already exist, then asserts its uid
-# differs from the "scion" (broker) user's own uid -- squashing every
-# NFS client to the broker's own identity would let any pod that can
-# reach the export act as the broker on the shared tree -- and, only on
-# success, prints "SQUASH_UID:SCION_GID" for the caller to capture. Pure
-# string rendering -- no gcloud or SSH calls -- so it's directly
-# unit-testable; the caller (deploy.sh) is responsible for actually
-# running the result over SSH.
+# group "scion") if it doesn't already exist, then validates it --
+# whether freshly created just now or pre-existing from an earlier run --
+# against every property the squash identity's security purpose depends
+# on: uid not 0, uid in the system range (below /etc/login.defs'
+# SYS_UID_MAX, defaulting to 999 when that file or key is missing, same
+# as useradd's own default), primary group exactly "scion", login shell
+# /usr/sbin/nologin, and (as before) a uid distinct from the "scion"
+# (broker) user's own -- squashing every NFS client to the broker's own
+# identity would let any pod that can reach the export act as the broker
+# on the shared tree. A pre-existing account that fails any of these was
+# not created by this script and is refused outright rather than reused,
+# since silently squashing to it could be squashing to something with
+# far more privilege than intended. Only on success does it print
+# "SQUASH_UID:SCION_GID" for the caller to capture. Pure string
+# rendering -- no gcloud or SSH calls -- so it's directly unit-testable;
+# the caller (deploy.sh) is responsible for actually running the result
+# over SSH.
 hybrid_nfs_squash_identity_script() {
   local squash_user="$1"
   cat <<SCRIPT
 set -euo pipefail
 id ${squash_user} >/dev/null 2>&1 || sudo useradd -r -M -N -g scion -s /usr/sbin/nologin ${squash_user}
 SQUASH_UID=\$(id -u ${squash_user})
+SQUASH_GROUP=\$(id -gn ${squash_user})
+SQUASH_SHELL=\$(getent passwd ${squash_user} | cut -d: -f7)
+SYS_UID_MAX=\$(awk -F'[ \\t]+' '\$1 == "SYS_UID_MAX" {print \$2}' /etc/login.defs 2>/dev/null | tail -1)
+case "\$SYS_UID_MAX" in ''|*[!0-9]*) SYS_UID_MAX=999 ;; esac
 SCION_UID=\$(id -u scion)
 SCION_GID=\$(getent group scion | cut -d: -f3)
+if [ "\$SQUASH_UID" -eq 0 ]; then
+  echo "The NFS squash user (${squash_user}) must not be uid 0." >&2
+  exit 1
+fi
+if [ "\$SQUASH_UID" -gt "\$SYS_UID_MAX" ]; then
+  echo "The NFS squash user (${squash_user})'s uid (\$SQUASH_UID) must be a system uid (<= \$SYS_UID_MAX)." >&2
+  exit 1
+fi
+if [ "\$SQUASH_GROUP" != "scion" ]; then
+  echo "The NFS squash user (${squash_user})'s primary group must be scion, found '\$SQUASH_GROUP'." >&2
+  exit 1
+fi
+if [ "\$SQUASH_SHELL" != "/usr/sbin/nologin" ]; then
+  echo "The NFS squash user (${squash_user})'s login shell must be /usr/sbin/nologin, found '\$SQUASH_SHELL'." >&2
+  exit 1
+fi
 if [ "\$SQUASH_UID" = "\$SCION_UID" ]; then
   echo 'The NFS squash uid must not equal the scion (broker) uid.' >&2
   exit 1
@@ -497,68 +613,132 @@ echo "\${SQUASH_UID}:\${SCION_GID}"
 SCRIPT
 }
 
-# hybrid_nfs_export_script EXPORT_ROOT CIDR ANONUID ANONGID FSID HUB_NAME
+# hybrid_nfs_export_script EXPORT_ROOT CIDR ANONUID ANONGID FSID HUB_NAME \
+#   IMAGE_PATH IMAGE_SIZE_GB
 #
-# Renders the remote script that idempotently creates the export root
-# (owned scion:scion, mode 2755 so the squash uid can't write it),
-# installs nfs-kernel-server if it isn't already, writes this hub's own
-# file under /etc/exports.d/ (using hybrid_nfs_export_line for the
-# rendered line, so the two stay in sync), re-exports, and enables and
-# starts the service. Always rewrites the file and re-exports, which is
-# how the export picks up a changed CIDR on re-run with no separate
-# drift detection needed. Pure string rendering -- no gcloud or SSH
-# calls -- so it's directly unit-testable; the caller is responsible for
-# actually running the result over SSH, after the squash identity script
-# above has already run.
+# IMAGE_PATH is a parameter (rather than reading the HYBRID_NFS_IMAGE_PATH
+# constant directly) purely so tests can point it at a throwaway temp
+# path when executing the rendered script for real -- the real caller
+# (deploy.sh) always passes $HYBRID_NFS_IMAGE_PATH.
+#
+# Renders the remote script that idempotently:
+#   1. creates the backing image file (IMAGE_PATH) at IMAGE_SIZE_GB
+#      gigabytes and formats it ext4, but ONLY the first time -- an
+#      existing image file is never re-created or re-mkfs'd, since doing
+#      so would destroy whatever the export already holds;
+#   2. adds an /etc/fstab entry loop-mounting that image at EXPORT_ROOT,
+#      with x-systemd.before=nfs-server.service so systemd's fstab
+#      generator orders the mount before the NFS server unit, then mounts
+#      it if it isn't already;
+#   3. fails closed -- before writing or activating anything below --
+#      if EXPORT_ROOT is not actually a mountpoint after that: serving
+#      the export from the boot disk's root filesystem by accident (a
+#      failed mount silently falling through) is exactly the exposure a
+#      dedicated filesystem exists to close;
+#   4. sets ownership/mode on the now-mounted export root (scion:scion,
+#      mode 2755 so the squash uid can't write it), installs
+#      nfs-kernel-server if it isn't already, disables NFSv2/v3 and UDP
+#      via /etc/nfs.conf.d (this tier is NFSv4/TCP-only) and masks
+#      rpcbind (unneeded once v2/v3 are off), writes this hub's own file
+#      under /etc/exports.d/ (using hybrid_nfs_export_line for the
+#      rendered line, so the two stay in sync), re-exports, and enables
+#      and starts the server under its canonical unit name (nfs-server;
+#      nfs-kernel-server is only the Debian/Ubuntu package name).
+# Always rewrites the exports file and re-exports, which is how the
+# export picks up a changed CIDR on re-run with no separate drift
+# detection needed. Pure string rendering -- no gcloud or SSH calls --
+# so it's directly unit-testable; the caller is responsible for actually
+# running the result over SSH, after the squash identity script above
+# has already run.
 hybrid_nfs_export_script() {
-  local export_root="$1" cidr="$2" anonuid="$3" anongid="$4" fsid="$5" hub_name="$6"
-  local export_line
+  local export_root="$1" cidr="$2" anonuid="$3" anongid="$4" fsid="$5" hub_name="$6" \
+    image_path="$7" image_size_gb="$8"
+  local export_line image_dir
   export_line="$(hybrid_nfs_export_line "$export_root" "$cidr" "$anonuid" "$anongid" "$fsid")"
+  image_dir="$(dirname "$image_path")"
   cat <<SCRIPT
 set -euo pipefail
+sudo mkdir -p ${image_dir}
+if [ ! -e ${image_path} ]; then
+  sudo truncate -s ${image_size_gb}G ${image_path}
+  sudo mkfs.ext4 -F -q ${image_path}
+fi
 sudo mkdir -p ${export_root}
+if ! grep -qF "${image_path} " /etc/fstab; then
+  echo "${image_path} ${export_root} ext4 loop,x-systemd.before=nfs-server.service 0 2" | sudo tee -a /etc/fstab > /dev/null
+  sudo systemctl daemon-reload
+fi
+if ! mountpoint -q ${export_root}; then
+  sudo mount ${export_root}
+fi
+if ! mountpoint -q ${export_root}; then
+  echo "${export_root} is not a mountpoint after attempting to mount ${image_path}; refusing to write or activate the NFS export on the boot disk's root filesystem instead." >&2
+  exit 1
+fi
 sudo chown scion:scion ${export_root}
 sudo chmod 2755 ${export_root}
+sudo install -d -m 0755 /etc/exports.d
 if ! dpkg -s nfs-kernel-server >/dev/null 2>&1; then
   sudo apt-get update -y
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nfs-kernel-server
 fi
+sudo install -d -m 0755 /etc/nfs.conf.d
+cat <<'NFSCONF' | sudo tee /etc/nfs.conf.d/scion-hub.conf > /dev/null
+[nfsd]
+vers2=n
+vers3=n
+udp=n
+NFSCONF
+sudo systemctl mask --now rpcbind.service rpcbind.socket || true
 echo '${export_line}' | sudo tee /etc/exports.d/scion-hub-${hub_name}.exports > /dev/null
 sudo exportfs -ra
-sudo systemctl enable --now nfs-kernel-server
+sudo systemctl enable --now nfs-server
 echo 'NFS export configured.'
 SCRIPT
 }
 
-# hybrid_settings_shared_dir_storage_yaml VM_IP EXPORT_ROOT PV_NAME
+# hybrid_settings_shared_dir_storage_yaml VM_IP EXPORT_ROOT PVC_NAME
 #
 # Renders the server.shared_dir_storage block for settings.yaml (the
 # schema from pkg/config/settings_v1.go's V1SharedDirStorageConfig/
 # V1NFSConfig/V1NFSShare), indented to nest under "server:" at the same
-# level as its existing "hub:"/"storage:"/etc. keys. backend is "nfs";
-# nfs.mount_root and the one share's "export" are both the VM's export
-# root, since the broker reads it directly as a local path on this same
-# VM while GKE pods reach it over NFS at that same server path;
+# level as its existing "hub:"/"storage:"/etc. keys. backend is "nfs".
+#
+# The Docker broker on this same VM computes its local mount path as
+# filepath.Join(mount_root, shares[0].id) (see
+# pkg/runtime/workspace_backend_nfs.go) -- so mount_root and id are set
+# to EXPORT_ROOT's parent directory and base name respectively, the only
+# split that makes mount_root/id resolve back to EXPORT_ROOT itself, the
+# same path the share's own "export" field (and the PV's nfs.path) name.
+# Getting this wrong doesn't fail loudly: it just gives Docker and GKE
+# two different trees on what's supposed to be the same shared directory.
+#
 # subpath_root is the fixed "projects" subdirectory every project's
-# shared-dirs live under; the share's id is a stable label (there is
-# only ever one share per hub) and pv_name is the PV this hub's pods
-# actually bind to. Pure string rendering -- no gcloud, kubectl, or SSH
-# calls -- so it's directly unit-testable; the caller only calls this
-# when the tier is on, and splices its output into an otherwise-
-# unchanged settings.yaml render.
+# shared-dirs live under. PVC_NAME is the PersistentVolumeClaim this
+# hub's GKE pods actually bind to -- despite the YAML field's own name,
+# "pv_name" is consumed as the pod spec's claimName (see
+# pkg/runtime/k8s_runtime.go), not the PersistentVolume's own name, so
+# the caller must pass the resolved PVC name here, not the PV name.
+# Pure string rendering -- no gcloud, kubectl, or SSH calls -- so it's
+# directly unit-testable; the caller only calls this when the tier is
+# on, and splices its output into an otherwise-unchanged settings.yaml
+# render.
 hybrid_settings_shared_dir_storage_yaml() {
-  local vm_ip="$1" export_root="$2" pv_name="$3"
+  local vm_ip="$1" export_root="$2" pvc_name="$3"
+  local mount_root share_id
+  mount_root="$(dirname "$export_root")"
+  share_id="$(basename "$export_root")"
   cat <<YAML
   shared_dir_storage:
     backend: nfs
     nfs:
-      mount_root: "${export_root}"
+      mount_root: "${mount_root}"
       subpath_root: "projects"
       shares:
-        - id: "shared"
+        - id: "${share_id}"
           server: "${vm_ip}"
           export: "${export_root}"
-          pv_name: "${pv_name}"
+          pv_name: "${pvc_name}"
 YAML
 }
 
@@ -567,28 +747,30 @@ YAML
 # Echoes the --labels=... argument to pass to `gcloud run deploy`, or
 # nothing, based on whether the service already exists: the base-marker
 # convention is additive and create-only, so the label is only added
-# when this is the first create. `gcloud run services describe` failing
-# is ambiguous between "doesn't exist yet" (NOT_FOUND) and some other
-# problem (a permissions error, for example) -- its exit code alone
-# doesn't distinguish them, so this checks the error text. Anything
-# other than a clear NOT_FOUND fails safe toward "assume it exists" (no
-# label), on the reasoning that a missing marker is corrected by
-# nothing, while a wrong marker on an existing, unrelated service is not
-# easily undone.
+# when this is the first create. `describe` failing only means "not
+# found by that exact call"; it is not itself a positive absence signal
+# (a permissions error looks the same from the exit code alone, and
+# real Cloud Run 404 text -- "Cannot find service [X]" -- carries none
+# of the NOT_FOUND/404 tokens gcloud's other APIs use, so text-matching
+# describe's error here would silently never fire). Absence is instead
+# confirmed the same way every other "is this really gone" check in this
+# file confirms it: a `list` call that both succeeds and comes back
+# empty. Any other outcome -- the service is listed, or the list call
+# itself fails -- fails safe toward "assume it exists" (no label), on
+# the reasoning that a missing marker is corrected by nothing, while a
+# wrong marker on an existing, unrelated service is not easily undone.
 hybrid_cloud_run_label_args() {
   local service_name="$1" project_id="$2" region="$3" hub_name="$4"
-  local describe_err
-  describe_err="$(mktemp)"
   if gcloud run services describe "$service_name" \
-      --project="$project_id" --region="$region" >/dev/null 2>"${describe_err}"; then
-    rm -f "${describe_err}"
+      --project="$project_id" --region="$region" >/dev/null 2>/dev/null; then
     return 0
   fi
-  local not_found=false
-  _hybrid_gcloud_not_found "$(cat "${describe_err}")" && not_found=true
-  rm -f "${describe_err}"
-  if [[ "$not_found" == "true" ]]; then
-    echo "--labels=scion-deployment=${hub_name}"
+  local list_output
+  if list_output="$(gcloud run services list --project="$project_id" --region="$region" \
+      --filter="metadata.name=${service_name}" --format="value(metadata.name)" 2>/dev/null)"; then
+    if [[ -z "$list_output" ]]; then
+      echo "--labels=scion-deployment=${hub_name}"
+    fi
   fi
 }
 
@@ -1099,16 +1281,24 @@ hybrid_k8s_default_pvc_name() {
 
 # hybrid_k8s_setup_kubeconfig
 #
-# Preflights that kubectl is present (only ever called when the tier is
-# on), then runs `gcloud container clusters get-credentials` into a
-# fresh, task-private temporary file and sets HYBRID_KUBECONFIG to its
-# path. The caller (deploy.sh) is responsible for removing that file on
-# exit; every subsequent kubectl call in this file sets
-# KUBECONFIG="$HYBRID_KUBECONFIG" explicitly rather than relying on an
-# ambient default.
+# Preflights that kubectl AND the gke-gcloud-auth-plugin are both present
+# (only ever called when the tier is on) -- GKE's own credential plugin,
+# required by `gcloud container clusters get-credentials` since kubectl
+# client-go dropped built-in GCP auth; kubectl alone being present is not
+# enough, and its absence otherwise surfaces as a confusing runtime
+# authentication failure rather than a clear preflight message -- then
+# runs get-credentials into a fresh, task-private temporary file and
+# sets HYBRID_KUBECONFIG to its path. The caller (deploy.sh) is
+# responsible for removing that file on exit; every subsequent kubectl
+# call in this file sets KUBECONFIG="$HYBRID_KUBECONFIG" explicitly
+# rather than relying on an ambient default.
 hybrid_k8s_setup_kubeconfig() {
   if ! command -v kubectl &>/dev/null; then
     err "kubectl is required for the hybrid tier's Kubernetes objects but was not found."
+    exit 1
+  fi
+  if ! command -v gke-gcloud-auth-plugin &>/dev/null; then
+    err "gke-gcloud-auth-plugin is required for the hybrid tier's Kubernetes objects but was not found. See docs/deploy/agent-runbook-single-node-vm.md for how to install it."
     exit 1
   fi
   HYBRID_KUBECONFIG="$(mktemp)"
@@ -1249,18 +1439,122 @@ _hybrid_k8s_get() {
   return 1
 }
 
+# hybrid_k8s_preflight HUB_NAME
+#
+# Everything about the hybrid tier's Kubernetes objects that does NOT
+# depend on the hub VM's IP address, meant to be called right after
+# hybrid_discover -- before the VM, the NFS server/export, or any other
+# Phase 2 resource is created, alongside the firewall-rule checks:
+# kubectl and the gke-gcloud-auth-plugin are present, credentials can be
+# fetched into a task-private kubeconfig (hybrid_k8s_setup_kubeconfig,
+# which sets HYBRID_KUBECONFIG), and a PRE-EXISTING PV or PVC with the
+# target name carries this deployment's marker label and matches every
+# identity field that doesn't depend on the VM's IP (path, claimRef,
+# reclaim policy for the PV; the bound volume name for the PVC) --
+# refusing before anything else is created if not, rather than only
+# after the VM, NFS export, and firewall rules already exist. Only once
+# both of those checks pass does it create the namespace if it's
+# missing: namespace creation doesn't depend on the VM's IP either, so
+# there's no reason to defer it to Phase 4, but it must come after the
+# PV/PVC checks so a refusal never leaves a freshly created namespace
+# behind it. An existing, unmarked namespace is used as-is: never
+# labeled, never adopted, never refused, since reusing an existing
+# namespace is allowed.
+#
+# Deliberately does not check or create the PV's "server" field (the VM
+# IP) or create an absent PV/PVC -- those depend on the VM's IP and stay
+# in hybrid_k8s_ensure_objects (Phase 4, below), which re-validates
+# everything this function already checked plus the IP-dependent parts,
+# so calling this first is what makes that later, fuller check almost
+# always a no-op confirmation rather than the first opportunity to
+# refuse.
+hybrid_k8s_preflight() {
+  local hub_name="$1"
+  local namespace pvc_name pv_name
+
+  hybrid_k8s_setup_kubeconfig
+
+  namespace="${GKE_NAMESPACE:-$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")}"
+  pvc_name="${GKE_PVC_NAME:-$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$hub_name")")}"
+  pv_name="$(hybrid_k8s_pv_name "$hub_name")"
+
+  if _hybrid_k8s_get pv "$pv_name"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      err "Persistent volume ${pv_name} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    local act_path act_claim_ns act_claim_name act_reclaim
+    act_path="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('nfs',{}).get('path') or '')")"
+    act_claim_ns="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('claimRef',{}).get('namespace') or '')")"
+    act_claim_name="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('claimRef',{}).get('name') or '')")"
+    act_reclaim="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('persistentVolumeReclaimPolicy') or '')")"
+    local -a mismatches=()
+    [[ "$act_path" != "$HYBRID_NFS_EXPORT_ROOT" ]] && mismatches+=("path: expected '${HYBRID_NFS_EXPORT_ROOT}', found '${act_path}'")
+    [[ "$act_claim_ns" != "$namespace" ]] && mismatches+=("claimRef.namespace: expected '${namespace}', found '${act_claim_ns}'")
+    [[ "$act_claim_name" != "$pvc_name" ]] && mismatches+=("claimRef.name: expected '${pvc_name}', found '${act_claim_name}'")
+    [[ "$act_reclaim" != "Retain" ]] && mismatches+=("persistentVolumeReclaimPolicy: expected 'Retain', found '${act_reclaim}'")
+    if [[ ${#mismatches[@]} -gt 0 ]]; then
+      err "Persistent volume ${pv_name} carries this deployment's marker but its spec has drifted from what this tier expects:"
+      local m
+      for m in "${mismatches[@]}"; do
+        err "  ${m}"
+      done
+      err "Refusing to auto-correct. Delete the PVC, then the PV, then re-run deploy.sh:"
+      err "  kubectl delete pvc ${pvc_name} -n ${namespace}"
+      err "  kubectl delete pv ${pv_name}"
+      exit 1
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistent volume ${pv_name}: ${K8S_GET_ERR}"
+    exit 1
+  fi
+
+  if _hybrid_k8s_get pvc "$pvc_name" -n "$namespace"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      err "Persistent volume claim ${pvc_name} in namespace ${namespace} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    local act_volume
+    act_volume="$(echo "$K8S_GET_JSON" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d.get('spec',{}).get('volumeName') or '')")"
+    if [[ "$act_volume" != "$pv_name" ]]; then
+      err "Persistent volume claim ${pvc_name} carries this deployment's marker but is bound to '${act_volume}', not the expected '${pv_name}'."
+      err "Refusing to auto-correct. Delete the PVC, then the PV, then re-run deploy.sh:"
+      err "  kubectl delete pvc ${pvc_name} -n ${namespace}"
+      err "  kubectl delete pv ${pv_name}"
+      exit 1
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check persistent volume claim ${pvc_name}: ${K8S_GET_ERR}"
+    exit 1
+  fi
+
+  if _hybrid_k8s_get namespace "$namespace"; then
+    if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" != "$hub_name" ]]; then
+      warn "Namespace ${namespace} already exists without this deployment's marker; using it as-is, not labeling or adopting it."
+    fi
+  elif [[ "$K8S_GET_STATUS" == "unknown" ]]; then
+    err "Could not check namespace ${namespace}: ${K8S_GET_ERR}"
+    exit 1
+  else
+    hybrid_k8s_namespace_manifest "$namespace" "$hub_name" | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
+    echo "  Created namespace: ${namespace}"
+  fi
+}
+
 # hybrid_k8s_ensure_objects HUB_NAME VM_IP
 #
 # Ensures the namespace, PV, and PVC exist with the expected identity,
 # creating whichever are missing. Refuses to proceed if an existing PV
 # or PVC with the target name lacks this deployment's marker label
-# (R3), or if a marked one has drifted from its expected identity (a
-# changed VM IP after a VM recreate is the expected way for the PV to
-# drift -- see the printed remediation; never auto-corrected, matching
-# the firewall rules' own policy). An existing, unmarked namespace is
-# used as-is: never labeled, never adopted, never refused, since reusing
-# an existing namespace is allowed. Requires HYBRID_KUBECONFIG to
-# already be set.
+# (the same marker refusal hybrid_k8s_preflight above already checked
+# for the non-IP-dependent fields; this repeats it because it's also
+# reachable on its own from --config-driven re-runs and tests), or if a
+# marked one has drifted from its expected identity (a changed VM IP
+# after a VM recreate is the expected way for the PV to drift -- see the
+# printed remediation; never auto-corrected, matching the firewall
+# rules' own policy). An existing, unmarked namespace is used as-is:
+# never labeled, never adopted, never refused, since reusing an existing
+# namespace is allowed. Requires HYBRID_KUBECONFIG to already be set.
 hybrid_k8s_ensure_objects() {
   local hub_name="$1" vm_ip="$2"
   local namespace pvc_name pv_name
@@ -1280,7 +1574,7 @@ hybrid_k8s_ensure_objects() {
     err "Could not check namespace ${namespace}: ${K8S_GET_ERR}"
     exit 1
   else
-    hybrid_k8s_namespace_manifest "$namespace" "$hub_name" | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl apply -f - >/dev/null
+    hybrid_k8s_namespace_manifest "$namespace" "$hub_name" | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
     echo "  Created namespace: ${namespace}"
   fi
 
@@ -1317,7 +1611,7 @@ hybrid_k8s_ensure_objects() {
     exit 1
   else
     hybrid_k8s_pv_manifest "$pv_name" "$hub_name" "$vm_ip" "$HYBRID_NFS_EXPORT_ROOT" "$namespace" "$pvc_name" \
-      | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl apply -f - >/dev/null
+      | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
     echo "  Created persistent volume: ${pv_name}"
   fi
 
@@ -1340,9 +1634,48 @@ hybrid_k8s_ensure_objects() {
     exit 1
   else
     hybrid_k8s_pvc_manifest "$pvc_name" "$namespace" "$hub_name" "$pv_name" \
-      | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl apply -f - >/dev/null
+      | KUBECONFIG="$HYBRID_KUBECONFIG" kubectl create -f - >/dev/null
     echo "  Created persistent volume claim: ${pvc_name} (namespace: ${namespace})"
   fi
+}
+
+# _hybrid_k8s_pods_using_pvc PVC_NAME NAMESPACE
+#
+# Sets K8S_PODS_USING_PVC to a newline-separated list of every pod in
+# NAMESPACE that mounts PVC_NAME via a persistentVolumeClaim volume
+# (empty means none) and returns 0, or, on a list failure, sets
+# K8S_PODS_CHECK_ERR and returns 1 -- the caller must treat that the
+# same as "unknown", never as "none found". A plain function call, not
+# invoked via command substitution: the caller needs both of these
+# globals, and command substitution would run this in a subshell,
+# losing whichever one it didn't capture as stdout. Requires
+# HYBRID_KUBECONFIG to already be set.
+_hybrid_k8s_pods_using_pvc() {
+  local pvc_name="$1" namespace="$2"
+  local err_file pods_json
+  err_file="$(mktemp)"
+  K8S_PODS_CHECK_ERR=""
+  K8S_PODS_USING_PVC=""
+  if ! pods_json="$(KUBECONFIG="$HYBRID_KUBECONFIG" kubectl get pods -n "$namespace" -o json 2>"${err_file}")"; then
+    K8S_PODS_CHECK_ERR="$(cat "${err_file}")"
+    rm -f "${err_file}"
+    return 1
+  fi
+  rm -f "${err_file}"
+  K8S_PODS_USING_PVC="$(echo "$pods_json" | "$PYTHON" -c "
+import json, sys
+pvc = sys.argv[1]
+d = json.load(sys.stdin)
+names = []
+for pod in d.get('items') or []:
+    for vol in pod.get('spec', {}).get('volumes') or []:
+        claim = vol.get('persistentVolumeClaim') or {}
+        if claim.get('claimName') == pvc:
+            names.append(pod.get('metadata', {}).get('name', '?'))
+            break
+print('\n'.join(names))
+" "$pvc_name")"
+  return 0
 }
 
 # hybrid_k8s_teardown_check HUB_NAME
@@ -1356,6 +1689,14 @@ hybrid_k8s_ensure_objects() {
 # allowed on create too. Any check that itself fails (not just "not
 # found") also aborts: unknown is never treated as gone. Requires
 # HYBRID_KUBECONFIG to already be set.
+#
+# Before queuing a marked PVC for deletion, also refuses outright if any
+# pod in its namespace still mounts it: `kubectl delete pvc` blocks
+# indefinitely under its own storage-protection finalizer while a pod
+# references the claim, and the pods that would do so here are exactly
+# the GKE agent pods this tier exists to run -- deleting under a live
+# agent would hang the whole teardown rather than fail it cleanly, so
+# this catches it up front with an actionable message instead.
 hybrid_k8s_teardown_check() {
   local hub_name="$1"
   HYBRID_K8S_NAMESPACE="${GKE_NAMESPACE:-$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")}"
@@ -1367,7 +1708,19 @@ hybrid_k8s_teardown_check() {
   if _hybrid_k8s_get pvc "$HYBRID_K8S_PVC_NAME" -n "$HYBRID_K8S_NAMESPACE"; then
     if [[ "$(_hybrid_k8s_label "$K8S_GET_JSON")" == "$hub_name" ]]; then
       echo "  found (marked): persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}"
-      HYBRID_K8S_TEARDOWN_DELETE+=("pvc")
+      if ! _hybrid_k8s_pods_using_pvc "$HYBRID_K8S_PVC_NAME" "$HYBRID_K8S_NAMESPACE"; then
+        err "Could not check whether any pod in namespace ${HYBRID_K8S_NAMESPACE} still references persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}: ${K8S_PODS_CHECK_ERR}"
+        HYBRID_K8S_TEARDOWN_FAILED=true
+      elif [[ -n "$K8S_PODS_USING_PVC" ]]; then
+        err "Refusing to tear down: the following pod(s) in namespace ${HYBRID_K8S_NAMESPACE} still mount persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}. Stop those agents first, then re-run teardown:"
+        local p
+        while IFS= read -r p; do
+          [[ -n "$p" ]] && err "  pod/${p}"
+        done <<< "$K8S_PODS_USING_PVC"
+        HYBRID_K8S_TEARDOWN_FAILED=true
+      else
+        HYBRID_K8S_TEARDOWN_DELETE+=("pvc")
+      fi
     else
       echo "  SKIPPED (unmarked): persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}"
       HYBRID_K8S_TEARDOWN_FAILED=true
@@ -1410,7 +1763,13 @@ hybrid_k8s_teardown_check() {
 # namespace-if-marked), stopping at the first failure and recording
 # every kind from that point on in HYBRID_K8S_TEARDOWN_DELETE_FAILED --
 # the same stop-at-first-failure policy as the firewall rules' own
-# teardown delete.
+# teardown delete. Every delete carries an explicit --timeout: the pod
+# preflight in hybrid_k8s_teardown_check above should already have
+# refused before this ever runs against a PVC a live pod still mounts,
+# but a bounded timeout is the backstop if a pod attaches in the window
+# between that check and this delete, or the object doesn't finish
+# terminating for some other reason -- a `delete` that hangs is treated
+# as a failure exactly like one that errors immediately.
 hybrid_k8s_teardown_delete() {
   HYBRID_K8S_TEARDOWN_DELETED=()
   HYBRID_K8S_TEARDOWN_DELETE_FAILED=()
@@ -1429,7 +1788,7 @@ hybrid_k8s_teardown_delete() {
       namespace) name="$HYBRID_K8S_NAMESPACE" ;;
     esac
     delete_err="$(mktemp)"
-    if KUBECONFIG="$HYBRID_KUBECONFIG" kubectl delete "$kind" "$name" \
+    if KUBECONFIG="$HYBRID_KUBECONFIG" kubectl delete "$kind" "$name" --timeout=60s \
         ${ns_args[@]+"${ns_args[@]}"} 2>"${delete_err}"; then
       echo "  Deleted: ${kind}/${name}"
       HYBRID_K8S_TEARDOWN_DELETED+=("${kind}")

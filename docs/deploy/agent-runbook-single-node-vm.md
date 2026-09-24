@@ -323,6 +323,12 @@ anything is created:
   tier is on.
 - The base required APIs, plus `container.googleapis.com`; see
   [2.3 Required APIs](#23-required-apis).
+- `kubectl` and the `gke-gcloud-auth-plugin` (`gcloud components install
+  gke-gcloud-auth-plugin`, or your package manager's equivalent) on the
+  machine running `deploy.sh` — required for every Kubernetes object check
+  this tier makes, both on create and on `--delete`; their absence is
+  checked before the first `kubectl` call, with an actionable message
+  naming whichever is missing.
 
 Enabling the tier does five things, all additive:
 
@@ -372,23 +378,42 @@ Enabling the tier does five things, all additive:
    subnet's primary IP range (never the pod CIDR), refusing anything
    `0.0.0.0/0` or broader than `/8`. Once the VM exists, a dedicated
    `scion-nfs` system account (no login shell, no home, primary group
-   `scion`) is created for NFS's `all_squash` identity, distinct from the
-   `scion` broker account -- the deploy asserts they have different uids
-   and refuses to continue otherwise. `nfs-kernel-server` is installed and
-   a per-hub file under `/etc/exports.d/` exports `/srv/scion-shared` to
-   just the node subnet, squashing every client to that dedicated
-   identity. There's no separate teardown for the export: it's deleted
-   along with the VM.
+   `scion`, a system-range uid distinct from both `scion`'s own uid and
+   uid 0) is created for NFS's `all_squash` identity -- or, if it already
+   existed from an earlier run, validated against those same properties,
+   refusing to continue if a pre-existing account doesn't meet them.
+   `/srv/scion-shared` (the export root) is the root of its own
+   dedicated, size-capped ext4 filesystem (default 20G, configurable via
+   `gke_target.shared_dir_image_size_gb`), loop-mounted from a single
+   image file that itself lives on the VM's boot disk; the image is
+   created and formatted only the first time, never re-created on a later
+   run, and the export is only ever written or activated once the mount
+   is confirmed. Growing it later is a manual, documented operation (grow
+   the image file, then `resize2fs`) -- this script never shrinks it.
+   `nfs-kernel-server` is installed, NFSv2/v3 and UDP are disabled (this
+   tier is NFSv4/TCP-only) and `rpcbind` is masked, and a per-hub file
+   under `/etc/exports.d/` exports the mounted root to just the node
+   subnet, squashing every client to the dedicated identity. There's no
+   separate teardown for the export or its backing image file: both are
+   deleted along with the VM's boot disk.
 4. **Kubernetes objects.** A cluster-scoped PersistentVolume
    (`scion-hub-<hub_name>-shared`), a namespace (default
    `scion-hub-<hub_name>`), and a PersistentVolumeClaim in that namespace
-   (default `scion-hub-<hub_name>-shared`, bound to the PV) are created
-   once the VM's IP is known, all labeled `scion-deployment=<hub_name>`.
-   An existing PV or PVC with the target name but no marker refuses the
-   run; a marked one whose identity has drifted (the NFS server IP after a
-   VM recreate, for example) also refuses, with the fields that differ and
-   the remediation. An existing, unmarked namespace is used as-is and
-   never adopted or deleted.
+   (default `scion-hub-<hub_name>-shared`, bound to the PV) are all
+   labeled `scion-deployment=<hub_name>`. The ownership checks run in two
+   parts: everything that doesn't depend on the VM's IP -- kubectl/plugin
+   presence, credentials, whether an existing PV or PVC with the target
+   name carries this deployment's marker, and every identity field except
+   the PV's NFS server address -- runs right after discovery, before the
+   VM, NFS export, or firewall rules are created, and creates the
+   namespace at that point if it's missing (once the PV/PVC checks pass).
+   The PV and PVC themselves are created once the VM's IP is known,
+   later, since the PV's identity includes it. An existing PV or PVC with
+   the target name but no marker refuses the run, as early as the PV/PVC
+   marker check above can catch it; a marked one whose identity has
+   drifted (the NFS server IP after a VM recreate, for example) also
+   refuses, with the fields that differ and the remediation. An existing,
+   unmarked namespace is used as-is and never adopted or deleted.
 
 5. **settings.yaml.** Both writes (the initial dev-mode one and the later
    proxy-mode update) add a `server.shared_dir_storage` block (backend
@@ -473,17 +498,33 @@ would leave the allow rule in place with no deny. The GKE cluster itself
 is never deleted by this script, under any circumstance.
 
 If `gke_target.name` is set, `--delete` also tears down the Kubernetes
-objects, before any base resource: the PVC, then the PV, then the
+objects first, before any base resource: the PVC, then the PV, then the
 namespace (only if it carries this deployment's marker -- an unmarked,
-reused namespace is never deleted). The same found/SKIPPED classification
-and abort-before-any-delete rule applies to the PVC and PV; an unmarked
+reused namespace is never deleted). Before deleting a marked PVC, the
+teardown also refuses if any pod in its namespace still mounts it (the
+GKE agent pods this tier exists to run are exactly the pods that would):
+`kubectl delete pvc` blocks indefinitely under its own storage-protection
+finalizer while a pod references the claim, so this is caught up front
+with a "stop agents first" message rather than left to hang the whole
+teardown. Every delete also carries a bounded `--timeout`, so a delete
+that hangs for any other reason is treated as a failure rather than left
+to block indefinitely. The same found/SKIPPED classification and
+abort-before-any-delete rule applies to the PVC and PV; an unmarked
 namespace is only skipped, not an abort, matching the create-side rule
 that using an existing namespace is allowed. If the cluster itself is
 confirmed gone (a positive NOT_FOUND), its objects are assumed to have
 gone with it and nothing is checked; any other failure to reach the
-cluster aborts the teardown before any delete. A failure in this step is
-reported and fails the run's exit code, but doesn't block the unrelated
-base-resource deletions that follow.
+cluster aborts the teardown before any delete.
+
+A failure deleting any Kubernetes object stops the whole teardown right
+there: Cloud Run, the VM, and every other base resource are left
+untouched, and the run reports the failure and exits non-zero, since the
+Kubernetes objects are deleted first specifically so a failure here can
+still protect everything downstream. Running `--delete` interactively
+(no `--config`) has no way to know whether a hybrid tier was ever
+configured for the hub, since `gke_target.name` only exists in a config
+file; that case prints a note naming the default namespace/PVC/PV names
+and pointing at `--config` as the way to have them checked.
 
 The NFS export itself has no separate teardown step: it's a directory and
 an `/etc/exports.d/` entry on the hub VM's own boot disk, so it's deleted

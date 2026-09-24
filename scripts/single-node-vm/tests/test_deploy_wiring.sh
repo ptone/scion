@@ -135,6 +135,44 @@ run_deploy_create() {
   rm -f "$config_file" "$log_file"
 }
 
+# run_deploy_create_to_settings_yaml CONFIG_JSON — like run_deploy_create,
+# but opts the stub `gcloud` into actually succeeding on `compute ssh`/
+# `compute scp` (GCLOUD_STUB_SSH_SUCCEEDS=true) and polls for a LATER
+# sentinel: the settings.yaml dev-mode write in Phase 3, which is the
+# earliest point past VM creation where deploy.sh has already made the
+# hybrid-tier's NFS squash-identity and export SSH calls (if the tier is
+# on) and computed HYBRID_SHARED_DIR_STORAGE_YAML, but before Phase 3b's
+# image build/push work (which this stub does not simulate at all).
+# Every "compute ssh"/"compute scp" call the stub actually receives is
+# already in $GCLOUD_STUB_LOG (gcloud_log), one call per line including
+# its full --command= text, so assertions on the rendered NFS/export
+# scripts and the settings.yaml heredoc read that log directly rather
+# than needing a separate one.
+run_deploy_create_to_settings_yaml() {
+  local config_json="$1" config_file
+  config_file="$(mktemp)"
+  printf '%s' "$config_json" > "$config_file"
+  local sentinel="${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
+  rm -f "$sentinel"
+  local log_file
+  log_file="$(mktemp)"
+  GCLOUD_STUB_SSH_SUCCEEDS=true bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
+    < /dev/null > "$log_file" 2>&1 &
+  local pid=$!
+  local waited_ms=0
+  while [[ ! -f "$sentinel" && "$waited_ms" -lt 15000 ]]; do
+    sleep 0.1
+    waited_ms=$((waited_ms + 100))
+  done
+  sleep 0.2
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null
+  DEPLOY_RC=$?
+  DEPLOY_LOG="$(cat "$log_file")"
+  DEPLOY_REACHED_SETTINGS_YAML="$([[ -f "$sentinel" ]] && echo true || echo false)"
+  rm -f "$config_file" "$log_file"
+}
+
 # line_number PATTERN LOG — the 1-based line number of the first log line
 # containing PATTERN, or empty if none matches.
 line_number() {
@@ -490,6 +528,23 @@ test_deploy_create_tier_on_source_build_refused() {
   assert_contains "$log" "cannot pull images" "the message should explain why"
 }
 
+test_deploy_create_tier_on_loopback_registry_refused_with_correct_message() {
+  fresh_gcloud_state
+  local config_file
+  config_file="$(mktemp)"
+  printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "localhost:5000/scion")" > "$config_file"
+  local log rc
+  log="$(timeout 10 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
+  rc=$?
+  rm -f "$config_file"
+  assert_true "$([[ "$rc" -ne 0 && "$rc" -ne 124 ]] && echo true || echo false)" \
+    "tier-on with a loopback registry must be refused fast, not hang until the create-mode timeout"
+  assert_eq "0" "$(gcloud_log | grep -c 'compute instances create' || true)" "nothing should be created"
+  assert_contains "$log" "names this VM itself" "the message must explain the loopback problem, not claim source is 'build'"
+  assert_not_contains "$log" "source is 'build'" \
+    "the loopback-registry branch must not use the source=build error message (container_images.source is 'registry' here)"
+}
+
 test_deploy_create_tier_off_source_build_unaffected() {
   fresh_gcloud_state
   run_deploy_create "$(base_config_json "$HUB")"
@@ -625,7 +680,7 @@ test_deploy_delete_interactive_unmarked_exits_nonzero_before_any_delete() {
 }
 
 # =====================================================================
-# Kubernetes objects (R4 teardown wiring): tier-off inertness, the
+# Kubernetes objects (marker-scoped teardown wiring): tier-off inertness, the
 # cluster-gone/cluster-error distinction, and the abort-before-any-
 # delete rule for an unmarked PV/PVC. Create-mode wiring for these
 # objects is exercised only at the function level
@@ -694,4 +749,65 @@ test_deploy_delete_k8s_unmarked_pv_aborts_before_any_delete() {
   assert_eq "1" "$DEPLOY_RC" "an unmarked PV must abort the whole teardown"
   assert_eq "0" "$(gcloud_log | grep -c ' delete' || true)" "no delete call of any kind should happen before the abort"
   assert_eq "0" "$(kubectl_log | grep -c 'delete' || true)" "no kubectl delete call should happen before the abort either"
+}
+
+# =====================================================================
+# Past VM create, into Phase 3: extends coverage past the point every
+# other create-mode wiring test above intentionally stops (the VM-exists
+# sentinel), using GCLOUD_STUB_SSH_SUCCEEDS so the stub actually answers
+# `compute ssh`/`compute scp` instead of failing immediately. Stops at
+# the settings.yaml dev-mode write -- the earliest point where the
+# hybrid tier's NFS squash-identity/export SSH calls (if the tier is on)
+# and the HYBRID_SHARED_DIR_STORAGE_YAML computation have both already
+# happened, but before Phase 3b's image build/push work, which this
+# stub does not simulate.
+# =====================================================================
+
+test_deploy_create_tier_off_reaches_settings_yaml_with_no_hybrid_ssh_calls() {
+  fresh_gcloud_state
+  run_deploy_create_to_settings_yaml "$(base_config_json "$HUB")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-off create must reach the settings.yaml write"
+  local log
+  log="$(gcloud_log)"
+  assert_eq "0" "$(echo "$log" | grep -c 'useradd -r -M -N -g scion' || true)" \
+    "tier off must never run the NFS squash-identity script"
+  assert_eq "0" "$(echo "$log" | grep -c 'mkfs.ext4' || true)" \
+    "tier off must never run the NFS export script"
+  assert_not_contains "$log" "shared_dir_storage" \
+    "the tier-off settings.yaml write must not carry the shared_dir_storage block"
+  assert_eq "0" "$(kubectl_log | grep -c . || true)" "tier off must make zero kubectl calls"
+}
+
+test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_mig "mig-a" "template-a"
+  seed_template "template-a" "gke-mycluster-abc123-node"
+  run_deploy_create_to_settings_yaml \
+    "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the settings.yaml write"
+  local log
+  log="$(gcloud_log)"
+
+  assert_contains "$log" "useradd -r -M -N -g scion -s /usr/sbin/nologin scion-nfs" \
+    "the squash-identity script must actually be sent over SSH when the tier is on"
+
+  # The default node-subnet CIDR the gcloud stub serves when a test
+  # doesn't override it via seed_subnet -- see tests/lib/harness.sh.
+  assert_contains "$log" "10.128.0.0/20" \
+    "the export line's CIDR must be the discovered node subnet, wired through correctly from hybrid_discover"
+  assert_contains "$log" "anonuid=997,anongid=1001" \
+    "the export line's anonuid/anongid must be exactly what the squash script returned, wired through unchanged"
+
+  assert_contains "$log" "shared_dir_storage:" \
+    "the tier-on settings.yaml write must carry the shared_dir_storage block"
+  assert_contains "$log" 'mount_root: "/srv"' \
+    "mount_root must be the export root's parent, not the full export root (the pre-fix bug)"
+  assert_contains "$log" 'id: "scion-shared"' \
+    "the share id must be the export root's base name"
+  assert_contains "$log" 'pv_name: "scion-hub-demohub-shared"' \
+    "pv_name must carry the resolved PVC name"
+
+  assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/namespace/scion-hub-${HUB}.json" ]] && echo true || echo false)" \
+    "hybrid_k8s_preflight must have created the namespace in Phase 2, well before this Phase 3 stopping point"
 }

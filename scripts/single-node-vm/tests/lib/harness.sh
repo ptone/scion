@@ -89,7 +89,7 @@ print(json.dumps({
 }
 
 # seed_k8s_pv_unmarked NAME — a pre-existing PV with the target name and
-# no marker label at all, for the R3-refusal tests.
+# no marker label at all, for the marker-refusal tests.
 seed_k8s_pv_unmarked() {
   printf '{"kind": "PersistentVolume", "metadata": {"name": "%s", "labels": {}}, "spec": {}}' "$1" \
     > "${KUBECTL_STUB_STATE_DIR}/pv/$1.json"
@@ -111,7 +111,7 @@ print(json.dumps({
 }
 
 # seed_k8s_pvc_unmarked NAME NAMESPACE — a pre-existing PVC with the
-# target name/namespace and no marker label, for the R3-refusal tests.
+# target name/namespace and no marker label, for the marker-refusal tests.
 seed_k8s_pvc_unmarked() {
   local name="$1" ns="$2"
   printf '{"kind": "PersistentVolumeClaim", "metadata": {"name": "%s", "namespace": "%s", "labels": {}}, "spec": {}}' \
@@ -155,6 +155,24 @@ set_k8s_get_permission_masked() {
 # NAME` call fails instead of succeeding.
 set_k8s_delete_will_fail() {
   touch "${KUBECTL_STUB_STATE_DIR}/$1/$2.json.delete-fail"
+}
+
+# seed_k8s_pod_using_pvc NAMESPACE POD_NAME PVC_NAME — a pod in NAMESPACE
+# whose spec mounts PVC_NAME, for the teardown pod preflight ("stop
+# agents first") to find.
+seed_k8s_pod_using_pvc() {
+  local namespace="$1" pod="$2" pvc="$3"
+  mkdir -p "${KUBECTL_STUB_STATE_DIR}/pods"
+  printf '{"items": [{"metadata": {"name": "%s"}, "spec": {"volumes": [{"name": "v", "persistentVolumeClaim": {"claimName": "%s"}}]}}]}' \
+    "$pod" "$pvc" > "${KUBECTL_STUB_STATE_DIR}/pods/${namespace}.json"
+}
+
+# set_k8s_pods_get_error NAMESPACE — the next `kubectl get pods -n
+# NAMESPACE` call fails, for the "could not check, unknown is never
+# treated as gone" path.
+set_k8s_pods_get_error() {
+  mkdir -p "${KUBECTL_STUB_STATE_DIR}/pods"
+  touch "${KUBECTL_STUB_STATE_DIR}/pods/$1.json.get-error"
 }
 
 # set_cluster_describe_error NAME — the next `container clusters
@@ -247,22 +265,24 @@ seed_run_service_exists() {
 }
 
 # set_run_service_describe_error NAME — the next `run services describe`
-# call for this service fails with a non-not-found error (a permissions
-# problem, for example), so the fail-safe "assume it exists, don't
-# label" branch can be tested directly.
+# call for this service fails (a permissions problem, for example). On
+# its own this tells hybrid_cloud_run_label_args nothing -- it no longer
+# trusts describe's error text at all -- so pair this with either
+# seed_run_service_exists (the follow-up `list` still finds it: no
+# label) or set_run_service_list_error (list also fails: no label,
+# fail-safe) to exercise the two ways a describe failure can resolve.
 set_run_service_describe_error() {
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
   touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.describe-error"
 }
 
-# set_run_service_describe_permission_masked NAME — like
-# set_run_service_describe_error, but with a realistic permission-denied
-# message that also happens to contain the words "not found". Must NOT
-# be treated as "gone".
-set_run_service_describe_permission_masked() {
+# set_run_service_list_error — the next `run services list` call fails
+# outright, simulating "truly cannot tell whether it exists". The
+# positive-absence check must fail safe (no label) here, never read a
+# failed list as confirmation of absence.
+set_run_service_list_error() {
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
-  printf 'gcloud-stub: PERMISSION_DENIED: Service %s not found or permission denied' "$1" \
-    > "${GCLOUD_STUB_STATE_DIR}/run-services/$1.describe-error"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/list-error"
 }
 
 # set_firewall_delete_will_fail NAME — the next `firewall-rules delete`
@@ -411,6 +431,19 @@ assert_true() {
   else
     FAIL_COUNT=$((FAIL_COUNT + 1))
     echo "FAIL [${CURRENT_TEST}]: ${msg} (expected true, got '${cond}')"
+  fi
+}
+
+# assert_false COND MSG — COND must be "" or "false" (the two shapes
+# `$([[ x ]] && echo true)` and `$([[ x ]] && echo true || echo false)`
+# both produce when x is false).
+assert_false() {
+  local cond="$1" msg="${2:-}"
+  if [[ -z "$cond" || "$cond" == "false" ]]; then
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    echo "FAIL [${CURRENT_TEST}]: ${msg} (expected false/empty, got '${cond}')"
   fi
 }
 
