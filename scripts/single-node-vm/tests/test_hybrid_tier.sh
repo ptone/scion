@@ -331,7 +331,7 @@ test_discover_node_subnet_accepts_slash_8_boundary() {
 test_nfs_export_line_renders_expected_options() {
   local line
   line="$(hybrid_nfs_export_line "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123")"
-  assert_eq "/srv/scion-shared 10.128.0.0/20(rw,sync,no_subtree_check,all_squash,anonuid=6001,anongid=6000,sec=sys,fsid=abc123)" \
+  assert_eq "/srv/scion-shared 10.128.0.0/20(rw,sync,no_subtree_check,all_squash,anonuid=6001,anongid=6000,sec=sys,mp,fsid=abc123)" \
     "$line" "the export line must render every required option in the expected shape"
 }
 
@@ -346,6 +346,13 @@ test_nfs_export_line_anonuid_and_anongid_are_distinct_values() {
   line="$(hybrid_nfs_export_line "/srv/scion-shared" "10.128.0.0/20" "6001" "1000" "abc123")"
   assert_contains "$line" "anonuid=6001" "anonuid must be the squash uid, not the scion gid"
   assert_contains "$line" "anongid=1000" "anongid must be the scion group's gid -- there is no separate squash group"
+}
+
+test_nfs_export_line_has_mp_option() {
+  local line
+  line="$(hybrid_nfs_export_line "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123")"
+  assert_contains "$line" ",mp," \
+    "the mp option is the export-side fail-closed guarantee: knfsd itself refuses to serve the path unless it's a mountpoint"
 }
 
 test_nfs_fsid_deterministic_for_same_hub() {
@@ -490,6 +497,8 @@ test_nfs_export_script_mounts_before_exporting() {
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
   assert_contains "$script" "x-systemd.before=nfs-server.service" \
     "the fstab entry must order the mount before the NFS server unit starts"
+  assert_contains "$script" "x-systemd.required-by=nfs-server.service" \
+    "before= alone only orders the units; required-by= is what makes nfs-server actually depend on the mount, so it won't start if the mount fails"
   assert_contains "$script" "if ! mountpoint -q /srv/scion-shared; then" "must check whether the export root is already mounted"
   assert_contains "$script" "sudo mount /srv/scion-shared" "must mount the export filesystem"
 }
