@@ -29,9 +29,9 @@
 #
 # Every function here is a plain shell function operating on explicit
 # arguments and a small set of documented globals (HYBRID_ENABLED,
-# GKE_PROJECT, GKE_LOCATION, GKE_NAME, GKE_NODE_TAG, HYBRID_ALLOW_NAME,
-# HYBRID_DENY_NAME, HYBRID_TEARDOWN_*), so the test harness under tests/ can
-# source this file on its own -- with its own stub
+# GKE_PROJECT, GKE_LOCATION, GKE_NAME, GKE_NODE_TAG, GKE_NODE_SUBNET_CIDR,
+# HYBRID_ALLOW_NAME, HYBRID_DENY_NAME, HYBRID_TEARDOWN_*), so the test
+# harness under tests/ can source this file on its own -- with its own stub
 # `config_get`/`info`/`warn`/`err` and a stub `gcloud` on PATH -- without
 # ever loading or running deploy.sh itself.
 #
@@ -127,19 +127,63 @@ _hybrid_cluster_ref() {
   echo "${GKE_NAME} (project: ${GKE_PROJECT}, location: ${GKE_LOCATION})"
 }
 
+# _hybrid_region_from_location LOCATION
+#
+# A GKE cluster's location is either regional (e.g. us-central1, already
+# a region) or zonal (e.g. us-central1-a, a region plus a single-letter
+# zone suffix). Subnetworks are regional resources, so a zonal location
+# needs that suffix stripped before it can be passed to
+# `gcloud compute networks subnets describe --region`.
+_hybrid_region_from_location() {
+  local location="$1"
+  if [[ "$location" =~ ^(.+)-[a-z]$ ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "$location"
+  fi
+}
+
+# _hybrid_validate_node_subnet_cidr CIDR
+#
+# Validates CIDR as a syntactically valid IPv4 network in canonical form
+# (no host bits set), and refuses anything broader than /8: 0.0.0.0/0
+# would list every routable address as a trusted NFS client, and nothing
+# a single GKE node subnet legitimately needs is ever wider than /8.
+# Prints nothing and returns non-zero on any problem; the caller supplies
+# the actionable error message.
+_hybrid_validate_node_subnet_cidr() {
+  local cidr="$1"
+  "$PYTHON" -c "
+import ipaddress, sys
+try:
+    net = ipaddress.ip_network(sys.argv[1], strict=True)
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if (net.version == 4 and net.prefixlen >= 8) else 1)
+" "$cidr"
+}
+
 # hybrid_discover HUB_NETWORK
 #
 # Verifies the configured GKE cluster exists and is on the hub's own
-# network, then discovers its node network tag. Every gcloud call here is
-# read-only (describe); nothing is created. Sets GKE_NODE_TAG. Exits
+# network, then discovers its node network tag and its node subnet's
+# primary IP range. Every gcloud call here is read-only (describe);
+# nothing is created. Sets GKE_NODE_TAG and GKE_NODE_SUBNET_CIDR. Exits
 # non-zero with an actionable message, naming the cluster and (where
 # relevant) what was found, if the cluster can't be described, is on a
-# different network than the hub VM, or no single node tag can be
-# discovered -- always before any resource is created. Every failure
-# message includes gcloud's own stderr rather than assuming "not found":
-# a permission or API-disabled error looks nothing like a missing
+# different network than the hub VM, its node subnet can't be described
+# or has an invalid or dangerously broad IP range, or no single node tag
+# can be discovered -- always before any resource is created. Every
+# failure message includes gcloud's own stderr rather than assuming "not
+# found": a permission or API-disabled error looks nothing like a missing
 # cluster, and reporting it as one would send an operator chasing the
 # wrong fix.
+#
+# The node subnet -- not the pod CIDR or any secondary range -- is what
+# the NFS export's client list is built from: nodes, not pods, originate
+# the NFS mount traffic that reaches the VM. The firewall allow rule's
+# source is unrelated to this and continues to use the node network tag
+# discovered above, not an IP range.
 #
 # Node-tag discovery starts from the cluster, not from guessing at
 # instance names: it reads the cluster's node pools' managed instance
@@ -190,6 +234,49 @@ print(d.get('network') or '')
     err "GKE cluster ${cluster_ref} is on network '${network}', but this hub uses network '${hub_network}'. Attaching a cluster on a different network is not supported."
     exit 1
   fi
+
+  # The NFS export's client list is the cluster's node subnet, never the
+  # pod CIDR or any secondary range: nodes are what actually originate
+  # NFS traffic, and the node subnet is the narrowest range that's still
+  # guaranteed to cover every node regardless of how pod/service ranges
+  # are laid out.
+  local subnetwork
+  subnetwork="$(echo "$describe_json" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('subnetwork') or '')
+")"
+  if [[ -z "$subnetwork" ]]; then
+    err "Could not determine the node subnetwork for GKE cluster ${cluster_ref} from its description."
+    exit 1
+  fi
+
+  local subnet_region
+  subnet_region="$(_hybrid_region_from_location "$GKE_LOCATION")"
+
+  local subnet_err subnet_json
+  subnet_err="$(mktemp)"
+  if ! subnet_json="$(gcloud compute networks subnets describe "$subnetwork" \
+      --region="$subnet_region" --project="${GKE_PROJECT}" --format=json 2>"${subnet_err}")"; then
+    err "Could not describe node subnetwork '${subnetwork}' (region: ${subnet_region}) for GKE cluster ${cluster_ref}:"
+    err "  $(cat "${subnet_err}")"
+    rm -f "${subnet_err}"
+    exit 1
+  fi
+  rm -f "${subnet_err}"
+
+  local node_cidr
+  node_cidr="$(echo "$subnet_json" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('ipCidrRange') or '')
+")"
+  if [[ -z "$node_cidr" ]] || ! _hybrid_validate_node_subnet_cidr "$node_cidr"; then
+    err "GKE cluster ${cluster_ref}'s node subnetwork '${subnetwork}' has an invalid or dangerously broad primary IP range ('${node_cidr:-empty}'). Refusing to build an NFS export client list from it."
+    exit 1
+  fi
+  # shellcheck disable=SC2034 # consumed by the NFS export function
+  GKE_NODE_SUBNET_CIDR="$node_cidr"
 
   local mig_urls
   mig_urls="$(echo "$describe_json" | "$PYTHON" -c "
