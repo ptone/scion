@@ -1439,7 +1439,10 @@ rewritten.
 - `make check-custom` — same pre-existing hits as every prior round, zero
   in touched files.
 - `go test -count=50 -shuffle=on -timeout=25m ./cmd/sciontool/commands/...`
-  — see the report to sb-em for this run's seed and result.
+  (seed `-test.shuffle 1790263857851578351`): 622.1s. Only
+  `TestStatusCommand` (50/50) and `TestStatusCommandUnknownType` (49/50)
+  failed — the same pre-existing, order-dependent bug as every prior
+  round; zero other failures.
 
 ### Functions/files touched (this follow-up)
 
