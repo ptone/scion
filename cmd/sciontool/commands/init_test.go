@@ -917,6 +917,26 @@ func TestConfigureGitCommand_SkipsCredentialOverrideForNonRootDifferentTarget(t 
 	}
 }
 
+// TestConfigureGitCommand_PropagatesTrustBundleEnv proves the git-clone leg
+// of sb-dev-mitm's egress_trust_bundle env-propagation trace: "in-process
+// init (git clone: GIT_SSL_CAINFO)". configureGitCommand
+// (init.go, ~line 2507) builds cmd.Env as append(os.Environ(),
+// "GIT_TERMINAL_PROMPT=0") — a full copy of the process environment, not an
+// allowlisted subset — so GIT_SSL_CAINFO (and every other CA-bundle var
+// buildActorTemplate sets on the container) reaches the actual `git`
+// subprocess whenever it is present in the parent's env, with no code
+// change needed here to carry it through.
+func TestConfigureGitCommand_PropagatesTrustBundleEnv(t *testing.T) {
+	t.Setenv("GIT_SSL_CAINFO", "/run/ate/trust-bundle.pem")
+
+	cmd := exec.CommandContext(context.Background(), "git", "status")
+	configureGitCommand(cmd, os.Getuid(), os.Getgid())
+
+	if !slices.Contains(cmd.Env, "GIT_SSL_CAINFO=/run/ate/trust-bundle.pem") {
+		t.Errorf("cmd.Env = %v, want it to contain GIT_SSL_CAINFO=/run/ate/trust-bundle.pem", cmd.Env)
+	}
+}
+
 func TestEnsureWorkspaceOwnership_SkipsChownWhenNonRoot(t *testing.T) {
 	chownCalled := false
 	chown := func(string, int, int) error {
