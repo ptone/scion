@@ -733,28 +733,30 @@ error).
 ### Req 1 (current behaviour, supersedes (B) above)
 
 `exitOnNonZeroInit`/`os.Exit` on the init path was reverted (a later,
-binding design decision, folded into `2ce540c04`): **Substrate does not
-observe a PID 1 exit as a failure signal at all** — the actor stays
-`ACTOR_STATE_RUNNING` and **holds its worker** either way — so exiting
-substrate-serve's own control server on a non-zero `RunInit` only loses the
-control server (and exec-based diagnosis) for no compensating benefit.
+binding design decision, folded into `2ce540c04`): **Substrate (pinned at
+`d277088`) does not observe a PID-1 exit** as a failure signal at all — the
+actor stays `ACTOR_STATE_RUNNING` and **holds its worker** either way — so
+exiting substrate-serve's own control server on a non-zero `RunInit` only
+loses the control server (and exec-based diagnosis) for no compensating
+benefit.
 
-The current behaviour: substrate-serve's `InitRunner` wrapper just returns
-`RunInit`'s exit code, with no `os.Exit` (`substrate_serve.go`);
-`handleBootstrap` logs the code and flips a new `s.initFailed` flag
-(`pkg/sciontool/substrate/server.go`); `/healthz` reports a distinct
-`StateInitFailed` (`"init-failed"`) over a normal **HTTP 200**, so a caller
-that knows to check it can tell the difference from a genuinely running
-harness (see `pkg/sciontool/substrate/types.go`'s own doc comments for the
-exact contract). `reportInitFailure`'s direct Hub report — called from
-inside `RunInit` itself, not by any caller of it — remains the primary,
-immediate failure signal; **the hub only shows this agent as errored if
-that direct report succeeds** (it is not implied by the actor's own state,
-which stays running); `/healthz`'s `init-failed` is a secondary, polled
-signal for a caller that already knows to look for it, not something the
-broker currently consumes. This correction, the rootfs fixup (below), and
-the "moved from `TestMain`'s own doc comment" incident narrative in the
-next section are all the same follow-up round.
+The current behaviour: **substrate-serve stays up after a non-zero init**;
+substrate-serve's `InitRunner` wrapper just returns `RunInit`'s exit code,
+with no `os.Exit` (`substrate_serve.go`); `handleBootstrap` logs the code
+and flips a new `s.initFailed` flag (`pkg/sciontool/substrate/server.go`);
+**`/healthz` reports init-failed (HTTP 200)** — a distinct `StateInitFailed`
+(`"init-failed"`) over a normal HTTP 200 response, so a caller that knows to
+check it can tell the difference from a genuinely running harness (see
+`pkg/sciontool/substrate/types.go`'s own doc comments for the exact
+contract). `reportInitFailure`'s direct Hub report — called from inside
+`RunInit` itself, not by any caller of it — remains the primary, immediate
+failure signal; **the hub shows this agent as errored only if that direct
+report succeeds** (it is not implied by the actor's own state, which stays
+running); `/healthz`'s `init-failed` is a secondary, polled signal for a
+caller that already knows to look for it, not something the broker
+currently consumes. This correction, the rootfs fixup (below), and the
+"moved from `TestMain`'s own doc comment" incident narrative in the next
+section are all the same follow-up round.
 
 ### Incidents 2-4 (moved out of `TestMain`'s own doc comment, round-15 Nit 7)
 
@@ -796,7 +798,7 @@ handler that `Wait4(-1, ...)`s any reapable child — including one a later
 call a package var (`startReaper`, defaulting to `supervisor.StartReaper`)
 that `TestMain` stubs to a no-op for the whole test binary (layer 4).
 
-**Incident 4:** see Follow-up 4's own write-up above (layer 5,
+**Incident 4:** see Follow-up 4's own write-up below (layer 5,
 `log.SetLogPath`) — every `RunInit`-driving test in this package was
 appending real lines to this container's own real `/home/scion/agent.log`
 via `pkg/sciontool/log`'s lazy same-condition `Init()` default.
@@ -1058,6 +1060,15 @@ call the two default functions directly (bypassing the var entirely, as if
 TestMain's override were never installed) and assert the new sentinel
 error.
 
+**M6 proof: code review plus a unit test that kills gate removal; no live
+sandbox.** `TestDefaultScionUserLookup_RefusesUnderTest` is that test: it
+calls `defaultScionUserLookup` directly (the exact shape of the M6
+mutation — TestMain's override removed) and kills it by asserting
+`errRealUserLookupDisabledUnderTest`. This container has no throwaway uid,
+user namespace or other sandbox to run the M6 mutation class in live (see
+the correction below), so this test plus the code review that traced the
+call path is the accepted proof for this mutation, not a live re-run.
+
 **M6 re-verified — correction (substrate-lead/sb-em, on this same round):**
 the run below is *not* a sandboxed run, and calling it one in an earlier
 version of this entry was wrong. `HOME=$(mktemp -d)` plus clearing
@@ -1097,7 +1108,7 @@ override was restored via `git checkout --` immediately afterward
 | M3 | capability loop hardcoded to SETUID/SETGID only | Real | `TestCheckPrivilegeDropFeasible_EveryRequiredCapabilityIsChecked` | Failed as expected (CHOWN subtest) | unchanged |
 | M4 | `s.initFailed = true` flip removed | Real | `TestHealthz_NonZeroInitFlipsToInitFailedButServerKeepsServing` | Failed as expected | unchanged |
 | M5 | `reportInitFailure` removed from staged-secrets decode failure | Real | `TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` | Failed as expected | unchanged |
-| M6 | TestMain `scionUserLookup`/`lookupUserByID` stub removed | **Real (the incident itself)**, then **real again, but now backstopped by the `testing.Testing()` gate** (not a sandbox — see the correction above; this container has no throwaway uid/namespace to sandbox this mutation class with) | (none, originally) → `TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` + `TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap` (post-gate) | Live incident reproduced (real) → both PASS, new gate holds | **changed** (real run) → unchanged (real re-run, gate now in place) |
+| M6 | TestMain `scionUserLookup`/`lookupUserByID` stub removed | **Real (the incident itself)** originally. **M6 proof: code review plus a unit test that kills gate removal; no live sandbox** — the real-env re-run described below is a demonstration that the new gate holds, not the verification method itself; this container has no throwaway uid/namespace to sandbox this mutation class with | (none, originally) → `TestDefaultScionUserLookup_RefusesUnderTest` (the accepted proof) | Live incident reproduced (real) → gate-removal killed by the unit test; the real-env re-run of the original two guarding tests also passed post-gate | **changed** (real run) → unchanged (real re-run, gate now in place) |
 | M7 | `startupRootfsFixup("/")` call removed | Real | `TestRunSubstrateServe_CallsRootfsFixupBeforeListening` | Failed as expected | unchanged |
 | M8 | traversability/home-ownership block removed | Real | 5 traversability tests | Failed as expected | unchanged |
 | M9 | `ownerUID != 0` idempotency guard removed | Real | `TestFixupRootfsForScion_ChownsRootOwnedHomeEntriesThenIsIdempotent` | Failed as expected | unchanged |
@@ -1126,3 +1137,151 @@ take ~13-19s each, so 50 of them (~650-950s) can exceed Go's default
 per-binary 10-minute test timeout on their own, with no hang involved. An
 explicit `-timeout=25m` was the actual fix for that second failure, not a
 code change.
+
+## Follow-up 6: portable chown detection, both rootfs-fixup call sites gated, and the pinned Req 1/M6 wording
+
+Three fixes to the previous round's own delta, none of them behavioural:
+
+**Darwin build.** The home-chown parity tests (Req 1 above) used a
+ctime-based detector (`chownDetectorCtime`/`assertChowned`) that read
+`syscall.Stat_t.Ctim`, a linux-only field name (darwin's is `Ctimespec`),
+so `GOOS=darwin go vet ./cmd/sciontool/commands/` failed to compile the test
+binary. The detector was also tick-dependent: a bare self-chown right after
+`mkdir` left ctime unchanged in the large majority of trials at this
+container's clock resolution, and the two `sed` execs inside
+`directSetUIDAt` only happened to straddle a tick reliably enough to pass.
+Fixed by making the chown itself injectable: `directSetUIDAtChown` is now a
+package var defaulting to `os.Chown`, and the two tests that need to know
+whether the home chown ran record the calls directly instead of inferring
+it from a filesystem timestamp. Production behaviour is unchanged — the
+default value is `os.Chown` itself. The round-15 Req 4 parity probe
+(`reviews/round-15-req4-probe.md`, unaffected by this change since
+`directSetUIDAt`'s signature didn't move) reruns 5/5 identical at this
+round's head.
+
+**The `/bootstrap` fixup was not gated on the skip env.**
+`SCION_SUBSTRATE_TEST_SKIP_ROOTFS_FIXUP` only gated call site 1
+(`runSubstrateServe`'s startup call). Call site 2
+(`substrateServeRootfsFixup`, which `handleBootstrap` runs as the
+`/bootstrap` fallback) still ran `fixupRootfsForScionUser("/")` against a
+real, unscrubbed `/` and real `scion` home whenever the SIGTERM integration
+test's real subprocess POSTed `/bootstrap` — exactly the condition the env
+var's own comment claimed was fully covered. Fixed by checking the same env
+(renamed `skipRootfsFixupEnv`, since it no longer only gates "startup") at
+both call sites, via a new injectable `bootstrapRootfsFixup` var for call
+site 2 (the same pattern `startupRootfsFixup` already used for call site
+1). Both false comments (`substrate_serve.go`, `substrate_serve_test.go`)
+are corrected.
+
+A binding condition on this fix, relayed mid-round: the skip env must skip
+*only* the fixup, never the privilege-drop precondition
+(`checkPrivilegeDropFeasible`). This already held by construction —
+`checkPrivilegeDropFeasible` is wired into the `substrate.Server` as a
+separate `PrivilegeDropChecker`, independent of the `RootfsFixup` the skip
+env gates, and never reads the env itself — but a test now pins it
+explicitly:
+`TestCheckPrivilegeDropFeasible_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs`
+sets the skip env, gives the checker a `$HOME` still owned by root (the
+condition the fixup exists to correct), and asserts the checker still
+rejects. The knob can only make bootstrap fail closed sooner, never bypass
+the check.
+
+**The project log was missing pinned wording from the Req 1 entry and the
+M6 proof bar.** The "Req 1 (current behaviour)" section above now states,
+verbatim: **"Substrate (pinned at `d277088`) does not observe a PID-1
+exit"**, and **"substrate-serve stays up after a non-zero init;
+`/healthz` reports init-failed (HTTP 200)"** — both were previously only
+implied. The Follow-up 5 section now also states the M6 proof bar
+verbatim: **"code review plus a unit test that kills gate removal; no live
+sandbox"** (`TestDefaultScionUserLookup_RefusesUnderTest` is that test),
+and the M6 mutation-table row no longer presents the real-env re-run as the
+verification method — the unit test is.
+
+### Nits resolved
+
+- Added `TestDefaultPrivilegeDropPreconditionDeps_LookupUserGoesThroughScionUserLookup`,
+  pinning that the checker's user lookup goes through the same
+  `testing.Testing()`-gated `scionUserLookup` var as every other lookup in
+  this file — nothing else in the suite catches a regression to a direct
+  `user.Lookup` call.
+- Trimmed several comments down to the invariant they were restating,
+  without the narrative history: `defaultPrivilegeDropPreconditionDeps`'s
+  `lookupUser` field, `directSetUIDAt`'s four inline comments,
+  `homeOwnedAndWritable`'s doc comment (also fixed an ungrammatical
+  trailing sentence there), and two test doc comments
+  (`TestCheckPrivilegeDropFeasible_HomeWritableButNotTraversable_Fails`,
+  the "Mutation check" comment in `TestAdjustScionUser_ScionUserNotFound`).
+- Fixed a forward reference in the log's own "Incidents 2-4" section:
+  "see Follow-up 4's own write-up above" pointed the wrong way — Follow-up
+  4 is below it, not above.
+- This section itself is the missing log entry for the previous round's
+  code changes (the Req 4 reorder, the Nit fixes, and the skip env), which
+  the previous round's own last paragraph gestured at but never added.
+
+### Mutation kill-checks (real env, `agent-info.json` hash before/after)
+
+Hash `d06f10cd3412…` unchanged before and after both mutations below (0
+changes), each applied as a scoped source edit, run, and reverted (`diff`
+confirmed byte-identical afterward):
+
+| Mutation | Guarding test | Result |
+|---|---|---|
+| `directSetUIDAt`'s home chown gated on `hasEntry` (skipping it in the passwd-missing/disabled-account cases) | `TestDirectSetUIDAt_NoEntryToRewrite_ReturnsError`, `TestDirectSetUIDAt_PasswdEntryDisabledAccount_HomeStillChownedButReportsError` | Both failed as expected |
+| `substrateServeRootfsFixup`'s skip-env check removed | `TestSubstrateServeRootfsFixup_SkipEnv` | Failed as expected |
+
+Not run, per the standing rule: TestMain stub/redirect removal, and the
+`testing.Testing()` gate removal.
+
+### Gates (`SCION_*` and `CLAUDE_CODE_ENABLE_TELEMETRY` unset)
+
+- `go build ./...` — pass.
+- `GOOS=darwin go vet ./cmd/sciontool/commands/` — pass (was failing at
+  this round's start; see above).
+- `GOOS=darwin go build ./...` — pass.
+- `go vet ./...` — pass, no output.
+- `go test -count=1 ./cmd/sciontool/... ./pkg/sciontool/... ./pkg/runtime/... ./pkg/substratecaps/...` — all pass.
+- `go test -race -count=1 ./cmd/sciontool/commands/...` — pass.
+- `go test -count=50 -shuffle=on -timeout=25m ./cmd/sciontool/commands/...`
+  (seed `-test.shuffle 1790262582344610826`): 629.2s. Only
+  `TestStatusCommand` (49/50) and `TestStatusCommandUnknownType` (49/50)
+  failed — the same pre-existing, order-dependent bug documented in
+  Follow-up 4/5 (`status.go:57-58` reusing the package-level `rootCmd`);
+  zero other failures. The exact 49/50-vs-49/50 split differs slightly
+  from the previous round's 50/50-vs-49/50 (shuffle order dependent, per
+  the same root cause), not a new defect.
+- `golangci-lint run --new-from-rev=c3b6e821d ./...` — 0 issues.
+- `make check-custom` — same pre-existing hits in
+  `pkg/agent/shared_dir_storage.go`, `pkg/runtime/shared_dir_storage_test.go`,
+  `pkg/agent/run_shared_dir_storage_test.go`; zero in touched files.
+- Round-15 Req 4 parity probe rerun at this round's head: 5/5 identical.
+- Hygiene greps over every touched file: 0 hits (one role-name reference
+  was caught and fixed mid-round, see the commit history).
+
+### Functions/files touched (this follow-up)
+
+- `cmd/sciontool/commands/init.go`: new `directSetUIDAtChown` var;
+  `directSetUIDAt` reads it instead of calling `os.Chown` directly;
+  trimmed comments (no behaviour change).
+- `cmd/sciontool/commands/init_privilege_drop_test.go`: removed
+  `chownDetectorCtime`/`assertChowned`; added
+  `recordDirectSetUIDAtChowns`/`assertHomeChowned`; new
+  `TestDefaultPrivilegeDropPreconditionDeps_LookupUserGoesThroughScionUserLookup`;
+  trimmed two comments.
+- `cmd/sciontool/commands/substrate_rootfs.go`: doc-comment grammar fix
+  only.
+- `cmd/sciontool/commands/substrate_serve.go`: `skipStartupRootfsFixupEnv`
+  renamed `skipRootfsFixupEnv`; new `rootfsFixupSkipped` helper; new
+  `bootstrapRootfsFixup` var; `substrateServeRootfsFixup` now gated;
+  corrected comments.
+- `cmd/sciontool/commands/substrate_serve_test.go`: renamed test, new
+  `TestRunSubstrateServe_RootfsFixupEnvUnset_CallSite1Runs`,
+  `TestSubstrateServeRootfsFixup_SkipEnv`,
+  `TestSubstrateServeRootfsFixup_EnvUnset_Runs`,
+  `TestCheckPrivilegeDropFeasible_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs`;
+  corrected comments.
+- This file: the Req 1 entry, the M6 proof-bar wording and table row, the
+  forward-reference fix, and this section.
+
+No changes to `pkg/sciontool/substrate` (the `Server`/`handleBootstrap`
+wiring itself is untouched — only the cmd-layer functions it calls), no
+`go.mod`/`go.sum` changes.
