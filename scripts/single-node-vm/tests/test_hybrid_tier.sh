@@ -15,6 +15,7 @@ DENY_NAME="scion-hub-${HUB}-nfs-deny"
 HUB_ALLOW_NAME="scion-hub-${HUB}-hub-allow"
 TARGET_TAG="scion-hub-${HUB}-nfs"
 MARKER="scion-deployment=${HUB}"
+INSTANCE_NAME_TEST="scion-hub-${HUB}"
 
 # --- tier-off: absent config means zero hybrid gcloud calls ---------------
 test_tier_off_no_gcloud_calls() {
@@ -2212,4 +2213,220 @@ test_registry_loopback_rejects_legitimate_registry() {
 test_registry_loopback_rejects_lookalike_host() {
   assert_true "$(_hybrid_registry_is_loopback '1270.0.0.1/scion' && echo false || echo true)" \
     "a host that merely starts with the digits 127 but isn't in 127.0.0.0/8 must not be refused"
+}
+
+# =====================================================================
+# Pod CIDR discovery: cross-checked against two fields in the same
+# cluster describe JSON, used only by the hub-allow firewall rule.
+# =====================================================================
+
+test_discover_pod_cidr_from_cluster_fixture() {
+  fresh_gcloud_state
+  GKE_NAME="podcidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "podcidrcluster" "$NETWORK" "mig-x"
+  seed_mig "mig-x" "template-x"
+  seed_template "template-x" "gke-podcidrcluster-x-node"
+  seed_pod_cidr "podcidrcluster" "10.60.0.0/14"
+  hybrid_discover "$NETWORK"
+  assert_eq "10.60.0.0/14" "$GKE_POD_CIDR" "must read the actual pod CIDR, not a hardcoded default"
+}
+
+test_discover_pod_cidr_mismatch_refused() {
+  fresh_gcloud_state
+  GKE_NAME="mismatchcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "mismatchcluster" "$NETWORK" "mig-x"
+  seed_mig "mig-x" "template-x"
+  seed_template "template-x" "gke-mismatchcluster-x-node"
+  seed_pod_cidr_mismatch "mismatchcluster" "10.60.0.0/14" "10.61.0.0/14"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "disagreeing pod CIDR fields must refuse before any create"
+  assert_contains "$RUN_OUTPUT" "two different pod CIDRs" "error should explain why"
+}
+
+test_discover_pod_cidr_missing_refused() {
+  fresh_gcloud_state
+  GKE_NAME="nopodcidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "nopodcidrcluster" "$NETWORK" "mig-x"
+  seed_mig "mig-x" "template-x"
+  seed_template "template-x" "gke-nopodcidrcluster-x-node"
+  seed_pod_cidr_missing "nopodcidrcluster"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a missing pod CIDR must refuse before any create"
+  assert_contains "$RUN_OUTPUT" "Could not determine the pod CIDR" "error should explain why"
+}
+
+test_discover_pod_cidr_refuses_broader_than_slash_8() {
+  fresh_gcloud_state
+  GKE_NAME="widepodcidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "widepodcidrcluster" "$NETWORK" "mig-x"
+  seed_mig "mig-x" "template-x"
+  seed_template "template-x" "gke-widepodcidrcluster-x-node"
+  seed_pod_cidr "widepodcidrcluster" "10.0.0.0/7"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a pod CIDR broader than /8 must be refused"
+  assert_contains "$RUN_OUTPUT" "invalid or dangerously broad" "error should explain why"
+}
+
+# =====================================================================
+# Static internal IP reservation: one reservation shared by the
+# PV's NFS server field and the hub URL, marked the same way as every
+# other hybrid resource.
+# =====================================================================
+
+test_internal_ip_new_vm_reserves_fresh_when_absent() {
+  fresh_gcloud_state
+  hybrid_ensure_internal_ip_new_vm "$HUB" "$PROJECT" "us-central1" "default"
+  assert_eq "10.128.0.9" "$HYBRID_INTERNAL_IP" "must read back the reserved address"
+  assert_contains "$(gcloud_log)" "compute addresses create scion-hub-${HUB}-internal-ip" \
+    "must reserve a fresh address when absent"
+}
+
+test_internal_ip_new_vm_reuses_existing_marked_reservation() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.42" "$MARKER"
+  hybrid_ensure_internal_ip_new_vm "$HUB" "$PROJECT" "us-central1" "default"
+  assert_eq "10.128.0.42" "$HYBRID_INTERNAL_IP" "a marked existing reservation must be reused as-is"
+  assert_eq "0" "$(gcloud_log | grep -c 'addresses create' || true)" \
+    "an already-marked, existing reservation must not be recreated"
+}
+
+test_internal_ip_new_vm_refuses_unmarked_reservation() {
+  fresh_gcloud_state
+  seed_address_unmarked "scion-hub-${HUB}-internal-ip" "10.128.0.42"
+  run_expect_fail hybrid_ensure_internal_ip_new_vm "$HUB" "$PROJECT" "us-central1" "default"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unmarked same-name reservation must refuse the run"
+  assert_contains "$RUN_OUTPUT" "without this deployment's marker" "error should explain why"
+}
+
+test_internal_ip_new_vm_list_error_fails_closed() {
+  fresh_gcloud_state
+  set_address_list_will_fail "scion-hub-${HUB}-internal-ip"
+  run_expect_fail hybrid_ensure_internal_ip_new_vm "$HUB" "$PROJECT" "us-central1" "default"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unknown list result must fail closed, not be treated as absent"
+}
+
+test_internal_ip_existing_vm_promotes_current_ip_when_absent() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
+  hybrid_ensure_internal_ip_existing_vm "$HUB" "$PROJECT" "us-central1" "default" \
+    "10.128.0.5" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_eq "10.128.0.5" "$HYBRID_INTERNAL_IP" "must promote the VM's current IP"
+  assert_contains "$(gcloud_log)" "addresses create scion-hub-${HUB}-internal-ip" "must promote via addresses create"
+  assert_contains "$(gcloud_log)" "--addresses=10.128.0.5" "must promote the exact current IP, not a fresh one"
+}
+
+test_internal_ip_existing_vm_reuses_matching_marked_reservation() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
+  hybrid_ensure_internal_ip_existing_vm "$HUB" "$PROJECT" "us-central1" "default" \
+    "10.128.0.5" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_eq "10.128.0.5" "$HYBRID_INTERNAL_IP" "a matching marked reservation must be reused"
+  assert_eq "0" "$(gcloud_log | grep -c 'addresses create' || true)" "must not be promoted/recreated when already matching"
+}
+
+test_internal_ip_existing_vm_drift_fails_with_remediation() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.99" "$MARKER"
+  run_expect_fail hybrid_ensure_internal_ip_existing_vm "$HUB" "$PROJECT" "us-central1" "default" \
+    "10.128.0.5" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a mismatched marked reservation must fail the run"
+  assert_contains "$RUN_OUTPUT" "no longer matches the VM's current internal IP" "error should explain the drift"
+  assert_contains "$RUN_OUTPUT" "addresses delete" "error should include remediation"
+}
+
+test_internal_ip_existing_vm_refuses_unmarked_reservation() {
+  fresh_gcloud_state
+  seed_address_unmarked "scion-hub-${HUB}-internal-ip" "10.128.0.5"
+  run_expect_fail hybrid_ensure_internal_ip_existing_vm "$HUB" "$PROJECT" "us-central1" "default" \
+    "10.128.0.5" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unmarked same-name reservation must refuse the run"
+  assert_contains "$RUN_OUTPUT" "without this deployment's marker" "error should explain why"
+}
+
+test_internal_ip_teardown_check_marked_ready_for_delete() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
+  hybrid_internal_ip_teardown_check "$HUB" "$PROJECT" "us-central1"
+  assert_eq "true" "$HYBRID_INTERNAL_IP_TEARDOWN_READY" "a marked reservation must be ready for delete"
+  assert_eq "false" "$HYBRID_INTERNAL_IP_TEARDOWN_FAILED" "a marked reservation must not fail the preflight"
+}
+
+test_internal_ip_teardown_check_unmarked_aborts() {
+  fresh_gcloud_state
+  seed_address_unmarked "scion-hub-${HUB}-internal-ip" "10.128.0.5"
+  hybrid_internal_ip_teardown_check "$HUB" "$PROJECT" "us-central1"
+  assert_eq "false" "$HYBRID_INTERNAL_IP_TEARDOWN_READY" "an unmarked reservation must not be queued for delete"
+  assert_eq "true" "$HYBRID_INTERNAL_IP_TEARDOWN_FAILED" "an unmarked reservation must abort the whole teardown"
+}
+
+test_internal_ip_teardown_check_absent_is_inert() {
+  fresh_gcloud_state
+  hybrid_internal_ip_teardown_check "$HUB" "$PROJECT" "us-central1"
+  assert_eq "false" "$HYBRID_INTERNAL_IP_TEARDOWN_READY" "nothing to delete when the reservation was never created"
+  assert_eq "false" "$HYBRID_INTERNAL_IP_TEARDOWN_FAILED" "an absent reservation must not fail the preflight"
+}
+
+test_internal_ip_teardown_delete_when_vm_gone() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
+  hybrid_internal_ip_teardown_check "$HUB" "$PROJECT" "us-central1"
+  hybrid_internal_ip_teardown_delete "$PROJECT" "us-central1" "true"
+  assert_eq "true" "$HYBRID_INTERNAL_IP_DELETED" "must delete once the VM is confirmed gone"
+  assert_eq "false" "$HYBRID_INTERNAL_IP_DELETE_FAILED" "a successful delete must not be reported as failed"
+}
+
+test_internal_ip_teardown_delete_skipped_when_vm_not_gone() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
+  hybrid_internal_ip_teardown_check "$HUB" "$PROJECT" "us-central1"
+  hybrid_internal_ip_teardown_delete "$PROJECT" "us-central1" "false"
+  assert_eq "false" "$HYBRID_INTERNAL_IP_DELETED" "must not delete while the VM's deletion isn't confirmed"
+  assert_eq "true" "$HYBRID_INTERNAL_IP_DELETE_FAILED" "must be reported as kept/failed, not silently skipped"
+  assert_eq "0" "$(gcloud_log | grep -c 'addresses delete' || true)" "no delete call may even be attempted"
+}
+
+test_internal_ip_teardown_delete_noop_when_nothing_queued() {
+  fresh_gcloud_state
+  hybrid_internal_ip_teardown_check "$HUB" "$PROJECT" "us-central1"
+  hybrid_internal_ip_teardown_delete "$PROJECT" "us-central1" "true"
+  assert_eq "false" "$HYBRID_INTERNAL_IP_DELETED" "nothing was queued, so nothing should be reported deleted"
+  assert_eq "false" "$HYBRID_INTERNAL_IP_DELETE_FAILED" "nothing queued must not be reported as failed either"
+}
+
+# =====================================================================
+# Hub URL guard: the post-create verification half.
+# =====================================================================
+
+test_hub_url_guard_verify_passes_when_everything_is_in_place() {
+  fresh_gcloud_state
+  HYBRID_INTERNAL_IP="10.128.0.5"
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+    "" "10.52.0.0/14" "$TARGET_TAG" "900"
+  hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+}
+
+test_hub_url_guard_verify_fails_on_empty_internal_ip() {
+  fresh_gcloud_state
+  HYBRID_INTERNAL_IP=""
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an empty internal IP must fail the guard"
+  assert_contains "$RUN_OUTPUT" "no valid internal IP is resolved" "error should explain why"
+}
+
+test_hub_url_guard_verify_fails_when_reservation_missing() {
+  fresh_gcloud_state
+  HYBRID_INTERNAL_IP="10.128.0.5"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a missing reservation must fail the guard"
+  assert_contains "$RUN_OUTPUT" "could not be confirmed after create" "error should name the reservation"
+}
+
+test_hub_url_guard_verify_fails_when_hub_allow_rule_missing() {
+  fresh_gcloud_state
+  HYBRID_INTERNAL_IP="10.128.0.5"
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a missing hub-allow rule must fail the guard"
+  assert_contains "$RUN_OUTPUT" "$HUB_ALLOW_NAME" "error should name the missing rule"
 }
