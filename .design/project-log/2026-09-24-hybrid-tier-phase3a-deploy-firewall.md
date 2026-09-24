@@ -28,13 +28,15 @@ fails with an actionable message before anything else runs.
 ## Discovery
 
 Before creating anything, `deploy.sh` confirms the cluster exists and is on the same VPC
-network as the hub VM (`default`, today), then discovers the cluster's node network tag with a
-read-only `gcloud compute instances list` call. GKE names every node instance from the cluster
-name with a mode-specific prefix — `gke-<cluster>-...` for a Standard node pool, `gk3-<cluster>-
-...` for Autopilot — so matching either prefix and reading the tags already present on one of
-those instances works uniformly for both cluster modes without any Kubernetes API access. A
-cluster that can't be found, a network mismatch, or an undiscoverable tag all fail before any
-resource is created.
+network as the hub VM (`default`, today), then discovers the cluster's node network tag with
+read-only `gcloud` calls bound to the cluster itself, not to guessing at instance names: it
+reads the cluster's node pools' managed instance groups, then the network tags on each group's
+instance template — present even when a pool currently has zero running instances, such as an
+idle Autopilot pool. Among those tags it selects the one matching the pattern GKE itself uses
+for a node's firewall-purpose tag, `gke-<suffix>-node`, which is the same pattern for both a
+Standard and an Autopilot cluster. Zero or more than one distinct match refuses to guess and
+fails, naming the cluster and listing every tag it found. A cluster that can't be found or a
+network mismatch also fail, before any resource is created.
 
 ## Firewall rules and VM tag
 
@@ -55,11 +57,13 @@ service account keep today's unmarked adopt-by-name behavior unchanged. Re-runni
 against a hub that predates the hybrid tier works: the existing base resources are adopted as
 always, and the two firewall rules (plus the VM tag) are created fresh, with markers.
 
-A pre-existing, already-marked rule is reused without re-verifying the rest of its spec
-(priority, tags, ports) — only ownership is checked. Re-verifying the full spec on every run
-would either silently correct a deliberate hand edit or break an otherwise-idempotent re-run
-over a rule an operator had tuned by hand; "carries this deployment's marker" is what this
-slice treats as proof of ownership.
+A pre-existing, already-marked rule is also checked against the tier's full expected spec
+(direction, action, ports, priority, source, target tag, network) before being reused. Any
+mismatch fails the run, lists exactly which fields differ, and prints the commands to fix it —
+always a delete (so the next `deploy.sh` run recreates the rule correctly), plus a direct
+`update` command when the drift is limited to fields that command can change in place. Nothing
+is ever auto-corrected: a hand-edited rule under this deployment's marker is exactly what an
+operator should see reported back, since the rule's meaning comes from those fields.
 
 ## Teardown (`--delete`)
 
@@ -82,16 +86,18 @@ test ever contacts GCP. Coverage includes: rule names, the marker on every creat
 (including that the marker check is an exact match, not a substring, so a prefix-colliding hub
 name can't be mistaken for a match), refusal on an existing unmarked rule, the target tag on
 every created rule, the allow/deny priorities/ports/source-tag/deny-all shape, discovery for
-both a Standard and an Autopilot node-naming fixture, the network-mismatch refusal, the
-pre-existing non-hybrid-hub re-run case, teardown's marked/SKIPPED/fail-the-run classification,
-and the tier-off case (config absent, zero hybrid-related `gcloud` calls).
+both a Standard and an Autopilot node-pool/instance-group/instance-template fixture shape
+(including a pair of prefix-colliding cluster names, a multi-tag template, a zero-instance
+pool, and the zero- and multiple-candidate refusals), the network-mismatch refusal, the
+pre-existing non-hybrid-hub re-run case, an idempotent create-then-reuse round trip, each
+spec-drift scenario together with its remediation output, teardown's
+marked/SKIPPED/fail-the-run classification, and the tier-off case (config absent, zero
+hybrid-related `gcloud` calls).
 
 No CI workflow currently runs anything under `scripts/single-node-vm/`; the repository's
 blanket `shellcheck` job lints any `*.sh` file with no path filter, so the new scripts are
-covered by that but not by any dedicated test-execution job. `shellcheck` itself was not
-available in the environment this slice was developed in, so its output could not be checked
-directly here; the new scripts were syntax-checked (`bash -n`) and exercised through the test
-runner instead.
+covered by that but not by any dedicated test-execution job. Every new or changed script here
+(including `tests/lib/gcloud`, which has no `.sh` extension) is shellcheck-clean.
 
 ## Docs
 
