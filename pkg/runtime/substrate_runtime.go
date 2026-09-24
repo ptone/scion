@@ -600,31 +600,35 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	defer substrateAgentStateMu.Unlock()
 
 	// Ambiguity guard: labelFilter identifies a caller looking for one
-	// specific agent slug ("scion.name") without narrowing to a project
-	// (no scion.project/scion.grove or scion.project_id/scion.grove_id
-	// key), which is exactly the shape AgentManager.Delete/Stop and
-	// LookupContainerID's own runtime queries use (pkg/agent/manager.go,
-	// pkg/runtimebroker/server.go) — neither ever adds a project key to
-	// the filter it passes down here, even when the broker-level caller
-	// resolved one. If two or more record-having actors share that slug
-	// (only possible across different projects — see the per-project
-	// uniqueness this runtime otherwise relies on), an unscoped query has
-	// no way to pick the right one, and picking one arbitrarily (e.g.
-	// ListActors order) risks acting on the wrong project's agent. Rather
-	// than guess, every actor sharing that slug is excluded from an
-	// unscoped-by-slug result: the caller sees no match (a no-op) instead
-	// of a wrong-actor match. A project-scoped query for the same slug is
-	// unaffected. Record-less actors do reach this loop (the tally below
-	// ranges over every actor ListActors returned) but are skipped by the
-	// rec == nil check, so they never contribute a count; they also can't
-	// collide with a record-having actor's tally in the first place, since
-	// a record-less actor reports its own project-prefixed actor name as
-	// "scion.name" (see this function's doc comment), never a bare slug.
+	// specific agent slug ("scion.name") without narrowing to a project (no
+	// project-name or project-ID label key, canonical or deprecated-alias —
+	// see projectcompat.IsProjectNameLabelKey/IsProjectIDLabelKey), which is
+	// exactly the shape AgentManager.Delete/Stop and LookupContainerID's own
+	// runtime queries use (pkg/agent/manager.go, pkg/runtimebroker/server.go)
+	// — neither ever adds a project key to the filter it passes down here,
+	// even when the broker-level caller resolved one. If two or more
+	// record-having actors share that slug (only possible across different
+	// projects — see the per-project uniqueness this runtime otherwise
+	// relies on), an unscoped query has no way to pick the right one, and
+	// picking one arbitrarily (e.g. ListActors order) risks acting on the
+	// wrong project's agent. Rather than guess, every actor sharing that
+	// slug is excluded from an unscoped-by-slug result: the caller sees no
+	// match (a no-op) instead of a wrong-actor match. A project-scoped
+	// query for the same slug is unaffected. Record-less actors do reach
+	// this loop (the tally below ranges over every actor ListActors
+	// returned) but are skipped by the rec == nil check, so they never
+	// contribute a count; they also can't collide with a record-having
+	// actor's tally in the first place, since a record-less actor reports
+	// its own project-prefixed actor name as "scion.name" (see this
+	// function's doc comment), never a bare slug.
 	requestedName, hasNameFilter := labelFilter["scion.name"]
-	hasProjectScope := labelFilter[projectcompat.LabelProject] != "" ||
-		labelFilter[projectcompat.LabelGrove] != "" ||
-		labelFilter[projectcompat.LabelProjectID] != "" ||
-		labelFilter[projectcompat.LabelGroveID] != ""
+	hasProjectScope := false
+	for k, v := range labelFilter {
+		if v != "" && (projectcompat.IsProjectNameLabelKey(k) || projectcompat.IsProjectIDLabelKey(k)) {
+			hasProjectScope = true
+			break
+		}
+	}
 
 	slugCounts := make(map[string]int)
 	if hasNameFilter && !hasProjectScope {
@@ -719,10 +723,10 @@ func substrateLabelsMatch(labels map[string]string, project, projectID string, f
 	for k, v := range filter {
 		actual := labels[k]
 		if actual == "" {
-			switch k {
-			case projectcompat.LabelProject, projectcompat.LabelGrove:
+			switch {
+			case projectcompat.IsProjectNameLabelKey(k):
 				actual = project
-			case projectcompat.LabelProjectID, projectcompat.LabelGroveID:
+			case projectcompat.IsProjectIDLabelKey(k):
 				actual = projectID
 			}
 		}
