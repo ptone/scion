@@ -363,9 +363,13 @@ top, freshly, with their markers.
 that `--delete` always checks for (and, if marked, removes) the two hybrid
 firewall rules by name, whether or not the current config has the tier
 enabled — teardown has no other way to know whether the tier was ever
-turned on for this hub. This adds two read-only calls to every `--delete`
-run and, rarely, can make it refuse to proceed (see below); it does not
-change what gets deleted for a hub that never had the tier on.
+turned on for this hub. This adds one read-only `firewall-rules list` call
+to every `--delete` run and, rarely, can make it refuse to proceed (see
+below); it does not change what gets deleted for a hub that never had the
+tier on. A VM delete failure with no hybrid rules present also still
+warns and continues, exactly as it always has; only with hybrid rules
+present does a VM delete failure or an unconfirmed VM state fail the run
+(see below).
 
 Before deleting anything, `--delete` looks up the two hybrid firewall
 rules and prints a classification line for each one found:
@@ -378,13 +382,22 @@ this deployment owns. The same applies if the check itself can't complete
 (a permissions error, for example): an unknown ownership state is treated
 as a failure, never as "nothing to protect."
 
-Marked rules are deleted only once the hub VM is confirmed gone (deleted
-successfully, or already absent) — never while the VM might still exist,
-so the deny rule stays in effect for as long as the VM could still be
-reachable. If the VM fails to delete, both hybrid rules are kept and the
-run reports the failure. Deletion order is the reverse of creation: the
-allow rule first, then the deny rule. The GKE cluster itself is never
-deleted by this script, under any circumstance.
+Marked rules are deleted only once the hub VM is confirmed gone: deleted
+successfully, or positively confirmed absent project-wide, not merely
+inferred from a delete or describe call that happened to fail (which
+could just as easily mean a wrong zone or a transient error) — never
+while the VM might still exist or its fate is unknown, so the deny rule
+stays in effect for as long as the VM could still be reachable. If the VM
+fails to delete, or its absence can't be confirmed, both hybrid rules are
+kept and the run reports the failure. Deletion order is the reverse of
+creation: the allow rule first, then the deny rule, and deletion stops at
+the first rule that isn't confirmed gone, so the deny rule is never
+deleted after the allow rule's own delete failed. If a marked rule has
+drifted from its expected spec in a way only a delete can fix, and that
+rule is the deny rule, the printed remediation deletes the allow rule
+first, then the deny rule, then re-runs deploy.sh — never advice that
+would leave the allow rule in place with no deny. The GKE cluster itself
+is never deleted by this script, under any circumstance.
 
 ### Testing this locally
 
