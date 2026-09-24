@@ -42,7 +42,7 @@ PYTHON="${GCLOUD_STUB_PYTHON:-python3}"
 
 mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
   "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates" \
-  "${GCLOUD_STUB_STATE_DIR}/instances"
+  "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets"
 
 printf '%s\n' "$*" >> "$GCLOUD_STUB_LOG"
 
@@ -101,6 +101,25 @@ case "${1:-} ${2:-} ${3:-} ${4:-}" in
     fi
     echo "gcloud-stub: managed instance group ${key} not found" >&2
     exit 1
+    ;;
+  "compute networks subnets describe")
+    require_project "$@"
+    require_flag region "$@"
+    key="$(last_segment "${5:-}")"
+    f="${GCLOUD_STUB_STATE_DIR}/subnets/${key}.json"
+    if [[ -f "${f}.describe-fail" ]]; then
+      echo "gcloud-stub: simulated describe failure for subnet ${key}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      exit 0
+    fi
+    # No explicit fixture: every cluster fixture (seed_cluster) implicitly
+    # names its subnet "default-subnet", so tests that don't care about
+    # the actual CIDR value don't need to seed one explicitly.
+    echo '{"ipCidrRange": "10.128.0.0/20"}'
+    exit 0
     ;;
   "compute routers nats describe")
     exit 1

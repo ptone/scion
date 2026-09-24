@@ -77,6 +77,7 @@ test_discover_standard_shape() {
 
   hybrid_discover "$NETWORK"
   assert_eq "gke-democluster-abc12345-node" "$GKE_NODE_TAG" "should discover the Standard node tag via its instance template"
+  assert_eq "10.128.0.0/20" "$GKE_NODE_SUBNET_CIDR" "should discover the node subnet's primary CIDR for a Standard cluster"
 }
 
 test_discover_autopilot_shape() {
@@ -90,6 +91,7 @@ test_discover_autopilot_shape() {
   hybrid_discover "$NETWORK"
   assert_eq "gke-aplcluster-abcdef-node" "$GKE_NODE_TAG" \
     "should discover the Autopilot node tag via its instance template even though node instances are gk3-prefixed"
+  assert_eq "10.128.0.0/20" "$GKE_NODE_SUBNET_CIDR" "should discover the node subnet's primary CIDR for an Autopilot cluster too"
 }
 
 # A cluster whose managed instance group currently has zero running
@@ -196,6 +198,75 @@ test_discover_cluster_not_found_refused() {
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unfound cluster must fail the run"
   assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" "nothing should be created after a failed discovery"
+}
+
+# --- Node subnet discovery (the NFS export's client CIDR) -----------------
+
+test_discover_node_subnet_cidr_from_explicit_fixture() {
+  fresh_gcloud_state
+  GKE_NAME="subnetcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "subnetcluster" "$NETWORK" "mig-x"
+  seed_mig "mig-x" "template-x"
+  seed_template "template-x" "gke-subnetcluster-x-node"
+  seed_subnet "default-subnet" "10.4.0.0/22"
+  hybrid_discover "$NETWORK"
+  assert_eq "10.4.0.0/22" "$GKE_NODE_SUBNET_CIDR" "should discover the subnet's actual primary CIDR, not a hardcoded default"
+}
+
+test_discover_node_subnet_region_from_zonal_location() {
+  fresh_gcloud_state
+  GKE_NAME="zonalcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1-a"
+  seed_cluster "zonalcluster" "$NETWORK" "mig-x"
+  seed_mig "mig-x" "template-x"
+  seed_template "template-x" "gke-zonalcluster-x-node"
+  hybrid_discover "$NETWORK"
+  assert_eq "1" "$(gcloud_log | grep -c 'networks subnets describe default-subnet --region=us-central1 ' || true)" \
+    "a zonal location (us-central1-a) must resolve to its region (us-central1) for the subnet lookup, not be passed through as-is"
+}
+
+test_discover_node_subnet_describe_failure_refused() {
+  fresh_gcloud_state
+  GKE_NAME="subnetfailcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "subnetfailcluster" "$NETWORK" "mig-x"
+  seed_mig "mig-x" "template-x"
+  seed_template "template-x" "gke-subnetfailcluster-x-node"
+  set_subnet_describe_will_fail "default-subnet"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unreadable node subnet must fail discovery"
+  assert_contains "$RUN_OUTPUT" "default-subnet" "error should name the subnet"
+}
+
+test_discover_node_subnet_refuses_zero_slash_zero() {
+  fresh_gcloud_state
+  GKE_NAME="wideopencluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "wideopencluster" "$NETWORK" "mig-x"
+  seed_mig "mig-x" "template-x"
+  seed_template "template-x" "gke-wideopencluster-x-node"
+  seed_subnet "default-subnet" "0.0.0.0/0"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "0.0.0.0/0 must never be accepted as an NFS export client range"
+}
+
+test_discover_node_subnet_refuses_broader_than_slash_8() {
+  fresh_gcloud_state
+  GKE_NAME="toobroadcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "toobroadcluster" "$NETWORK" "mig-x"
+  seed_mig "mig-x" "template-x"
+  seed_template "template-x" "gke-toobroadcluster-x-node"
+  seed_subnet "default-subnet" "10.0.0.0/7"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "anything broader than /8 must be refused"
+}
+
+test_discover_node_subnet_accepts_slash_8_boundary() {
+  fresh_gcloud_state
+  GKE_NAME="boundarycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "boundarycluster" "$NETWORK" "mig-x"
+  seed_mig "mig-x" "template-x"
+  seed_template "template-x" "gke-boundarycluster-x-node"
+  seed_subnet "default-subnet" "10.0.0.0/8"
+  hybrid_discover "$NETWORK"
+  assert_eq "10.0.0.0/8" "$GKE_NODE_SUBNET_CIDR" "/8 itself is the narrowest allowed refusal boundary, so it must be accepted"
 }
 
 # =====================================================================

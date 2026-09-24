@@ -57,7 +57,7 @@ fresh_gcloud_state() {
   GCLOUD_STUB_LOG="$(mktemp)"
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
     "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates" \
-    "${GCLOUD_STUB_STATE_DIR}/instances"
+    "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets"
   export GCLOUD_STUB_STATE_DIR GCLOUD_STUB_LOG
 }
 
@@ -139,7 +139,11 @@ seed_cluster() {
 import json, sys
 network = sys.argv[1]
 migs = sys.argv[2:]
-body = {'network': network, 'nodePools': [{'instanceGroupUrls': migs}] if migs else []}
+body = {
+    'network': network,
+    'subnetwork': 'default-subnet',
+    'nodePools': [{'instanceGroupUrls': migs}] if migs else [],
+}
 print(json.dumps(body))
 " "$network" "$@" > "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json"
 }
@@ -148,6 +152,22 @@ print(json.dumps(body))
 # (nodePools entirely empty), for the "no managed instance groups" case.
 seed_cluster_no_pools() {
   seed_cluster "$1" "$2"
+}
+
+# seed_subnet NAME CIDR — overrides the stub's default node-subnet
+# fixture ("default-subnet" / 10.128.0.0/20, seeded implicitly so
+# existing cluster fixtures don't all need updating) with an explicit
+# name and primary IP range, for tests that care about the actual CIDR
+# value.
+seed_subnet() {
+  local name="$1" cidr="$2"
+  printf '{"ipCidrRange": "%s"}' "$cidr" > "${GCLOUD_STUB_STATE_DIR}/subnets/${name}.json"
+}
+
+# set_subnet_describe_will_fail NAME — the next `networks subnets
+# describe` call for this subnet fails instead of returning a range.
+set_subnet_describe_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/subnets/$1.json.describe-fail"
 }
 
 # seed_mig KEY TEMPLATE_REF — KEY is the last path segment of whatever MIG
