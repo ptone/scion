@@ -335,15 +335,23 @@ Enabling the tier does two things, both additive:
    - `scion-hub-<hub_name>-nfs-deny` — denies tcp:2049 from everywhere
      else (`0.0.0.0/0`), priority 950.
 
+   The deny rule is created first, then the allow rule, so an interrupted
+   run can never leave the allow rule in place without its paired deny.
+
    If a firewall rule with one of these names already exists but doesn't
    carry the exact marker, the script refuses to touch it and fails rather
    than adopting a rule it doesn't recognize as its own. If it carries the
    marker, the script additionally verifies its full security-relevant
-   spec (direction, action, ports, priority, source, target tag, network)
-   against what this tier expects, and fails — listing exactly what
-   differs, plus the commands to fix it — rather than silently correcting
-   a rule that has drifted from that spec (for example, after the cluster
-   was recreated with a new node tag). Nothing is ever auto-corrected.
+   spec (direction, action, every allow/deny entry, source tags, source
+   ranges, source/target service accounts, destination ranges, disabled,
+   target tags, priority, network) against what this tier expects, and
+   fails — listing exactly what differs, plus the commands to fix it —
+   rather than silently correcting a rule that has drifted from that spec
+   (for example, after the cluster was recreated with a new node tag).
+   The fix-it commands include an in-place `update` only when running it
+   would converge to exactly the expected rule; otherwise only a delete
+   command is offered (deploy.sh recreates the rule correctly on the next
+   run). Nothing is ever auto-corrected.
 
 Re-running the deploy script against an existing hub that predates the
 hybrid tier works the same way as any other re-run: the base VM, Cloud Run
@@ -353,15 +361,32 @@ top, freshly, with their markers.
 
 ### Teardown (`--delete`)
 
-**Base-resource adoption and teardown are unchanged by this tier.** The
-`--delete` flow adds one thing: before deleting anything, it looks up the
-two hybrid firewall rules by name. Rules carrying this hub's exact marker
-are deleted along with everything else; a name match without the marker is
-listed as **SKIPPED** and fails the whole teardown run before any resource
-is deleted, since a naming collision on those two names means the hub name
-can no longer be trusted to identify only resources this deployment owns.
-The GKE cluster itself is never deleted by this script, under any
-circumstance.
+**Base-resource adoption and teardown are unchanged by this tier**, except
+that `--delete` always checks for (and, if marked, removes) the two hybrid
+firewall rules by name, whether or not the current config has the tier
+enabled — teardown has no other way to know whether the tier was ever
+turned on for this hub. This adds two read-only calls to every `--delete`
+run and, rarely, can make it refuse to proceed (see below); it does not
+change what gets deleted for a hub that never had the tier on.
+
+Before deleting anything, `--delete` looks up the two hybrid firewall
+rules and prints a classification line for each one found:
+`  found (marked): <name>` for a rule carrying this hub's exact marker, or
+`  SKIPPED (unmarked): <name>` for a name match that doesn't. Any SKIPPED
+line fails the whole teardown run before any resource is deleted (not
+just the two hybrid rules), since a naming collision on those two names
+means the hub name can no longer be trusted to identify only resources
+this deployment owns. The same applies if the check itself can't complete
+(a permissions error, for example): an unknown ownership state is treated
+as a failure, never as "nothing to protect."
+
+Marked rules are deleted only once the hub VM is confirmed gone (deleted
+successfully, or already absent) — never while the VM might still exist,
+so the deny rule stays in effect for as long as the VM could still be
+reachable. If the VM fails to delete, both hybrid rules are kept and the
+run reports the failure. Deletion order is the reverse of creation: the
+allow rule first, then the deny rule. The GKE cluster itself is never
+deleted by this script, under any circumstance.
 
 ### Testing this locally
 
