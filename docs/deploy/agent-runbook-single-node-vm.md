@@ -97,7 +97,10 @@ does not exist. Ask them to verify the project ID and their permissions.
 `deploy.sh` enables every API it needs itself (Phase 2) — this preflight
 check exists only to fail fast on permissions before gathering deployment
 details from the user, not because the operator needs to enable anything
-manually.
+manually. `deploy.sh` itself lists what's already enabled first and only
+calls `services enable` for whatever's actually missing (never an
+unconditional call on every run); if the hybrid tier is on, it also
+requires `container.googleapis.com`.
 
 Check each API. If any is missing, run the consolidated enable command below
 (`gcloud services enable` is idempotent and accepts multiple services, so
@@ -216,7 +219,7 @@ the user does not have a preference. Validate each answer before moving on.
 | 8 | Update policy | `auto` | Must be `auto`, `notify`, or `disabled`. Explain: **auto** = install updates automatically (recommended). **notify** = check for updates, show banner in admin UI. **disabled** = no automatic checking. | `update_policy` |
 | 9 | Release channel | `nightly` | Must be `stable`, `preview`, or `nightly`. Defaults to nightly — only ask if the user wants to override. **stable** = GA releases. **preview** = pre-releases (rc, alpha, beta). **nightly** = nightly builds. | `release_channel` |
 | 10 | Chat plugins | none (empty list) | Each must be one of: `telegram`, `discord`, `slack`, `teams`. Multiple allowed. | `chat_plugins` |
-| 11 | Attach a GKE cluster (hybrid tier)? | No | Only ask if the user mentions running agents on Kubernetes. If yes: cluster name, location (zone or region), and project (default: same as `project_id`; a different project is not supported yet). The cluster must already exist and be on the same VPC network as the hub VM (`default`, today) — this script never creates or deletes a cluster. | `gke_target.name`, `gke_target.location`, `gke_target.project` |
+| 11 | Attach a GKE cluster (hybrid tier)? | No | Only ask if the user mentions running agents on Kubernetes. If yes: cluster name, location (zone or region), and project (default: same as `project_id`; a different project is not supported yet); the Kubernetes namespace (default `scion-hub-<hub_name>`) and PersistentVolumeClaim name (default `scion-hub-<hub_name>-shared`) for the shared tree. The cluster must already exist and be on the same VPC network as the hub VM (`default`, today) — this script never creates or deletes a cluster. **Also requires `container_images.source: registry`** (Question 6) — GKE nodes cannot pull from the VM's local Docker store that `source: build` uses, and the node service account needs `roles/artifactregistry.reader` (or equivalent read access) on that registry. | `gke_target.name`, `gke_target.location`, `gke_target.project`, `gke_target.namespace`, `gke_target.pvc_name` |
 
 ---
 
@@ -307,7 +310,19 @@ deletes the cluster itself — it is always a manual prerequisite the user
 sets up beforehand, in the same GCP project as the hub and on the hub VM's
 network (`default`, today).
 
-Enabling the tier does four things, all additive:
+**Prerequisites**, all checked or enforced by `deploy.sh` itself before
+anything is created:
+- An existing GKE cluster (Standard or Autopilot) in the hub's own GCP
+  project, on the hub VM's network.
+- `container_images.source: registry` with a registry path the cluster's
+  node service account can read (`roles/artifactregistry.reader` or
+  equivalent) — GKE nodes cannot pull from the VM's local Docker image
+  store that `source: build` uses, so `build` is refused outright when the
+  tier is on.
+- The base required APIs, plus `container.googleapis.com`; see
+  [2.3 Required APIs](#23-required-apis).
+
+Enabling the tier does five things, all additive:
 
 1. **Discovery.** Before creating anything, the script confirms the cluster
    exists, checks that its network matches the hub VM's, and discovers the
@@ -373,21 +388,45 @@ Enabling the tier does four things, all additive:
    the remediation. An existing, unmarked namespace is used as-is and
    never adopted or deleted.
 
+5. **settings.yaml.** Both writes (the initial dev-mode one and the later
+   proxy-mode update) add a `server.shared_dir_storage` block (backend
+   `nfs`, pointing at the VM's export and the PV the Kubernetes objects
+   above create) using the schema already defined for it in the runtime's
+   own settings package. The `gke` runtime and profile settings are not
+   written yet — see Known limits below.
+
 Re-running the deploy script against an existing hub that predates the
 hybrid tier works the same way as any other re-run: the base VM, Cloud Run
 proxy, router, NAT and service account are adopted exactly as they are
-today, and the hybrid firewall rules, NFS export, and Kubernetes objects
-(and the VM tag) are added on top, freshly, with their markers.
+today (**base adoption and teardown are unchanged by this tier, always**),
+and the hybrid firewall rules, NFS export, Kubernetes objects, and
+`shared_dir_storage` settings (and the VM tag) are added on top, freshly,
+with their markers.
 
-Every base resource this script creates fresh -- whether or not the
-hybrid tier is on -- is additionally marked `scion-deployment=<hub_name>`
-(a label on the VM and, on first create only, the Cloud Run proxy; a
-description on the service account and Cloud Router, appended to the IAP
-SSH rule's own description). This marker is purely informational: it is
-never checked and never affects adoption or teardown of those resources.
-Required API enablement is also unconditional on the tier: only APIs not
-already enabled on the project are ever passed to `services enable`
-(plus `container.googleapis.com` when the tier is on).
+**Two changes apply regardless of whether the tier is on**, deliberately:
+- **Base resource markers.** Every base resource this script creates fresh
+  is marked `scion-deployment=<hub_name>` (a label on the VM and, on first
+  create only, the Cloud Run proxy; a description on the service account
+  and Cloud Router, appended to the IAP SSH rule's own existing
+  description). This marker is purely informational: it is never checked
+  and never affects adoption or teardown of those resources, tier or no
+  tier.
+- **API enablement.** Only APIs not already enabled on the project are
+  ever passed to `services enable` (see
+  [2.3 Required APIs](#23-required-apis)); this was previously
+  unconditional on every run.
+
+**Known limits.** See `docs/deploy/hybrid-tier.md`'s own Known limits
+section for `ptone/scion#1799` (image pinning: use `--image <digest>` at
+agent start, not a profile's `harness_overrides`, since a template's own
+image default wins over it for both Docker and GKE agents),
+`ptone/scion#1800`, and `ptone/scion#1801`. For hardening an NFS tree that
+was exported before a dedicated squash identity was in place, see that
+same page's manual fix-up recipe under "E2 hardening: dedicated squash
+identity + default ACL" — this deploy.sh tier option is what that page's
+own Known limits section refers to as the still-pending infrastructure
+piece; it's no longer pending once this tier is used for a new
+deployment.
 
 ### Teardown (`--delete`)
 
@@ -443,6 +482,10 @@ gone with it and nothing is checked; any other failure to reach the
 cluster aborts the teardown before any delete. A failure in this step is
 reported and fails the run's exit code, but doesn't block the unrelated
 base-resource deletions that follow.
+
+The NFS export itself has no separate teardown step: it's a directory and
+an `/etc/exports.d/` entry on the hub VM's own boot disk, so it's deleted
+along with the VM.
 
 ### Testing this locally
 
@@ -779,11 +822,21 @@ bash scripts/single-node-vm/deploy.sh --delete
 | Cloud Router | `scion-hub-HUB_NAME-router` |
 | Service account | `scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com` |
 | IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` |
+| *If the hybrid tier is on:* NFS allow/deny firewall rules | `scion-hub-HUB_NAME-nfs-allow`, `scion-hub-HUB_NAME-nfs-deny` |
+| *If the hybrid tier is on:* PersistentVolumeClaim, PersistentVolume | `gke_target.pvc_name` (default `scion-hub-HUB_NAME-shared`), `scion-hub-HUB_NAME-shared` |
+| *If the hybrid tier is on and this deployment created it:* Kubernetes namespace | `gke_target.namespace` (default `scion-hub-HUB_NAME`) |
 
 ### What is intentionally NOT deleted
 
 - **IAP tunnel role** (`roles/iap.tunnelResourceAccessor`) on the deployer
   account. This role may be used for SSH access to other VMs in the project.
+- **The GKE cluster itself**, under any circumstance — it's always an
+  existing, attach-only prerequisite.
+- **The Kubernetes namespace, if it existed before this deployment and
+  never carried this deployment's marker** — it's used as-is on create and
+  left alone on teardown, the same rule both ways.
+- **The NFS export's own data**, since it has no separate teardown: it's
+  deleted along with the VM's boot disk, not by an explicit step.
 
 To remove it manually:
 
