@@ -6,10 +6,13 @@
 # a fresh-per-test gcloud stub state dir on PATH, and small assertion
 # helpers. No test here ever contacts GCP; the only `gcloud` on PATH is
 # tests/lib/gcloud.
+#
+# This file has no shebang -- it is always `source`d, never executed --
+# so shellcheck needs an explicit shell directive to know its dialect.
+# shellcheck shell=bash
 
 HARNESS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HARNESS_TESTS_DIR="$(dirname "$HARNESS_LIB_DIR")"
-HARNESS_FIXTURES_DIR="${HARNESS_TESTS_DIR}/fixtures"
+PYTHON="${PYTHON:-python3}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -42,6 +45,7 @@ config_prompt() {
   err "config_prompt called unexpectedly with: $2"
   exit 1
 }
+# shellcheck disable=SC2034 # read by hybrid_read_config in hybrid-tier.sh
 CONFIG_FILE="/dev/null/hybrid-tier-tests-placeholder"
 
 # --- gcloud stub setup ---------------------------------------------------
@@ -51,23 +55,70 @@ fresh_gcloud_state() {
   CONFIG=()
   GCLOUD_STUB_STATE_DIR="$(mktemp -d)"
   GCLOUD_STUB_LOG="$(mktemp)"
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
+    "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates"
   export GCLOUD_STUB_STATE_DIR GCLOUD_STUB_LOG
 }
 
-# seed_firewall_rule NAME DESCRIPTION — simulates a pre-existing rule.
-seed_firewall_rule() {
-  mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules"
-  printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/firewall-rules/$1"
+# seed_firewall_rule_desc_only NAME DESCRIPTION — simulates a pre-existing
+# rule that carries an arbitrary (possibly non-marker) description, with no
+# other fields set. Only useful for the "unmarked, refuse to adopt" tests,
+# where _hybrid_ensure_firewall_rule fails on the marker check before ever
+# looking at the rest of the spec.
+seed_firewall_rule_desc_only() {
+  "$PYTHON" "${HARNESS_LIB_DIR}/firewall-rule-json.py" \
+    "$2" "default" "INGRESS" "ALLOW" "tcp" "2049" "" "" "" "900" \
+    > "${GCLOUD_STUB_STATE_DIR}/firewall-rules/$1.json"
 }
 
-# seed_cluster_network NETWORK — the fixture cluster's reported network.
-seed_cluster_network() {
-  printf '%s' "$1" > "${GCLOUD_STUB_STATE_DIR}/cluster-network"
+# seed_firewall_rule_json NAME DESC NETWORK DIRECTION ACTION PROTO PORTS \
+#   SOURCE_TAGS SOURCE_RANGES TARGET_TAGS PRIORITY
+#
+# Simulates a pre-existing rule with a fully specified spec, for the
+# marker-plus-spec-verification tests (matching reuse, and drift).
+seed_firewall_rule_json() {
+  local name="$1"
+  shift
+  "$PYTHON" "${HARNESS_LIB_DIR}/firewall-rule-json.py" "$@" \
+    > "${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
 }
 
-# seed_instances FIXTURE_FILE — Standard or Autopilot node-instance fixture.
-seed_instances() {
-  cp "${HARNESS_FIXTURES_DIR}/$1" "${GCLOUD_STUB_STATE_DIR}/instances.tsv"
+# seed_cluster NAME NETWORK MIG... — the fixture cluster's reported
+# network and the instanceGroupUrls of its (single) node pool. With no
+# MIG arguments, the cluster has zero node pools.
+seed_cluster() {
+  local name="$1" network="$2"
+  shift 2
+  "$PYTHON" -c "
+import json, sys
+network = sys.argv[1]
+migs = sys.argv[2:]
+body = {'network': network, 'nodePools': [{'instanceGroupUrls': migs}] if migs else []}
+print(json.dumps(body))
+" "$network" "$@" > "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json"
+}
+
+# seed_cluster_no_pools NAME NETWORK — a cluster with zero node pools
+# (nodePools entirely empty), for the "no managed instance groups" case.
+seed_cluster_no_pools() {
+  seed_cluster "$1" "$2"
+}
+
+# seed_mig KEY TEMPLATE_REF — KEY is the last path segment of whatever MIG
+# URL a test seeds into a cluster's instanceGroupUrls; TEMPLATE_REF is
+# whatever hybrid-tier.sh should then pass on to `instance-templates
+# describe` (a bare name or another fixture URL, looked up by its own last
+# path segment in turn).
+seed_mig() {
+  printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/migs/$1.txt"
+}
+
+# seed_template KEY TAGS_CSV — TAGS_CSV is a comma-separated tag list;
+# stored the way `--format=value(properties.tags.items)` actually renders
+# a repeated field: semicolon-joined.
+seed_template() {
+  local key="$1" tags_csv="$2"
+  printf '%s' "${tags_csv//,/;}" > "${GCLOUD_STUB_STATE_DIR}/templates/${key}.txt"
 }
 
 gcloud_log() {
@@ -100,7 +151,10 @@ assert_contains() {
     FAIL_COUNT=$((FAIL_COUNT + 1))
     echo "FAIL [${CURRENT_TEST}]: ${msg} (expected to find '${needle}')"
     echo "  --- haystack ---"
-    echo "$haystack" | sed 's/^/  /'
+    local line
+    while IFS= read -r line; do
+      echo "  ${line}"
+    done <<< "$haystack"
   fi
 }
 
@@ -127,12 +181,15 @@ assert_true() {
 # run_expect_fail CMD... — runs a command that is expected to call `exit`
 # with a non-zero status (hybrid-tier.sh's fatal-error functions call exit
 # directly, not return). Runs in a subshell so the test process survives.
-# Sets RUN_EXIT_CODE and RUN_OUTPUT.
+# Sets RUN_EXIT_CODE and RUN_OUTPUT, both read back by the caller in
+# test_hybrid_tier.sh.
 run_expect_fail() {
   local out
   set +e
   out="$("$@" 2>&1)"
+  # shellcheck disable=SC2034 # read by callers in test_hybrid_tier.sh
   RUN_EXIT_CODE=$?
   set -e
+  # shellcheck disable=SC2034 # read by callers in test_hybrid_tier.sh
   RUN_OUTPUT="$out"
 }

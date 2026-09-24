@@ -313,14 +313,18 @@ Enabling the tier does two things, both additive:
 
 1. **Discovery.** Before creating anything, the script confirms the cluster
    exists, checks that its network matches the hub VM's, and discovers the
-   cluster's node network tag with a read-only `gcloud` call. This works
-   the same way for a Standard cluster (nodes named `gke-<cluster>-...`)
-   and an Autopilot cluster (nodes named `gk3-<cluster>-...`): it lists
-   Compute Engine instances whose name matches either prefix for the
-   configured cluster name and reads the tags already present on one of
-   them. If the cluster can't be found, its network doesn't match, or no
-   node tag can be discovered, the script fails with an actionable message
-   before creating anything.
+   cluster's node network tag with read-only `gcloud` calls, bound to the
+   cluster itself rather than to guessing at instance names: it reads the
+   cluster's node pools' managed instance groups, then the network tags on
+   each group's instance template (this also works for a pool that
+   currently has zero running instances, such as an idle Autopilot pool).
+   Among those tags, it looks for the one GKE itself assigns for firewall
+   purposes, matching the pattern `gke-<suffix>-node` — the same pattern
+   for both a Standard and an Autopilot cluster. If zero or more than one
+   distinct tag matches that pattern, the script refuses to guess and
+   fails, listing whatever candidates it found. If the cluster can't be
+   found or its network doesn't match, it also fails, before creating
+   anything.
 2. **Firewall rules and VM tag.** Two firewall rules are created, both
    scoped to this hub by an exact `scion-deployment=<hub_name>` marker in
    their description and a `scion-hub-<hub_name>-nfs` target tag, which the
@@ -333,7 +337,13 @@ Enabling the tier does two things, both additive:
 
    If a firewall rule with one of these names already exists but doesn't
    carry the exact marker, the script refuses to touch it and fails rather
-   than adopting a rule it doesn't recognize as its own.
+   than adopting a rule it doesn't recognize as its own. If it carries the
+   marker, the script additionally verifies its full security-relevant
+   spec (direction, action, ports, priority, source, target tag, network)
+   against what this tier expects, and fails — listing exactly what
+   differs, plus the commands to fix it — rather than silently correcting
+   a rule that has drifted from that spec (for example, after the cluster
+   was recreated with a new node tag). Nothing is ever auto-corrected.
 
 Re-running the deploy script against an existing hub that predates the
 hybrid tier works the same way as any other re-run: the base VM, Cloud Run

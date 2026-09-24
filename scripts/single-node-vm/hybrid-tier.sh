@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# This file has no shebang -- it is always `source`d, never executed --
+# so shellcheck needs an explicit shell directive to know its dialect.
+# shellcheck shell=bash
+
 # scripts/single-node-vm/hybrid-tier.sh — hybrid-tier (attach-only GKE
 # target) additions for deploy.sh: config parsing, cluster discovery, and
 # the two NFS firewall rules the hub VM needs to serve shared dirs to GKE
@@ -19,15 +23,15 @@
 #
 # This file is meant to be `source`d by deploy.sh, never executed directly.
 # It depends on the caller already having defined `config_get`,
-# `config_prompt`, `info`, `warn` and `err` (deploy.sh defines all of these
-# before sourcing this file), and on `set -euo pipefail` already being in
-# effect.
+# `config_prompt`, `info`, `warn`, `err` and `PYTHON` (deploy.sh defines all
+# of these before sourcing this file), and on `set -euo pipefail` already
+# being in effect.
 #
 # Every function here is a plain shell function operating on explicit
 # arguments and a small set of documented globals (HYBRID_ENABLED,
 # GKE_PROJECT, GKE_LOCATION, GKE_NAME, GKE_NODE_TAG, HYBRID_ALLOW_NAME,
-# HYBRID_DENY_NAME, HYBRID_TEARDOWN_*), so the test harness under
-# tests/hybrid-tier/ can source this file on its own -- with its own stub
+# HYBRID_DENY_NAME, HYBRID_TEARDOWN_*), so the test harness under tests/ can
+# source this file on its own -- with its own stub
 # `config_get`/`info`/`warn`/`err` and a stub `gcloud` on PATH -- without
 # ever loading or running deploy.sh itself.
 #
@@ -83,93 +87,282 @@ hybrid_read_config() {
     err "gke_target.project ('${GKE_PROJECT}') must match this hub's project ('${project_id}'). Attaching a cluster in a different project is not supported yet."
     exit 1
   fi
+  # shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
   HYBRID_ENABLED=true
+}
+
+# _hybrid_cluster_ref — a "name (project: P, location: L)" string for
+# actionable messages, built from the globals hybrid_read_config sets.
+_hybrid_cluster_ref() {
+  echo "${GKE_NAME} (project: ${GKE_PROJECT}, location: ${GKE_LOCATION})"
 }
 
 # hybrid_discover HUB_NETWORK
 #
 # Verifies the configured GKE cluster exists and is on the hub's own
 # network, then discovers its node network tag. Every gcloud call here is
-# read-only (describe/list); nothing is created. Sets GKE_NODE_TAG. Exits
-# non-zero with an actionable message if the cluster isn't found, is on a
-# different network than the hub VM, or no node tag can be discovered --
+# read-only (describe); nothing is created. Sets GKE_NODE_TAG. Exits
+# non-zero with an actionable message, naming the cluster and (where
+# relevant) what was found, if the cluster isn't found, is on a different
+# network than the hub VM, or no single node tag can be discovered --
 # always before any resource is created.
 #
-# Node-tag discovery: GKE names every node instance from the cluster name,
-# with a prefix that differs by mode -- "gke-<cluster>-..." for a Standard
-# node pool, "gk3-<cluster>-..." for Autopilot -- so the search below
-# matches either prefix and works uniformly for both without calling the
-# Kubernetes API at all. It reads the network tags already present on one
-# of the cluster's own Compute Engine node instances via `gcloud compute`,
-# the same property the firewall rule below matches traffic on.
+# Node-tag discovery starts from the cluster, not from guessing at
+# instance names: it reads the cluster's node pools' managed instance
+# groups (instanceGroupUrls) and, for each, the network tags on that
+# group's instance template -- the tag a template carries applies to every
+# instance in the group, including when the group currently has zero
+# instances (an Autopilot pool scaled to zero, for example), so this works
+# without listing live instances at all. Among those tags, the one GKE
+# itself assigns for firewall purposes matches ^gke-.+-node$ (the same
+# pattern for both Standard and Autopilot node pools -- Autopilot's own
+# node instances are additionally named with a gk3- prefix, but the
+# firewall-purpose network tag GKE assigns them still follows the
+# gke-...-node pattern). If zero or more than one distinct tag matches
+# that pattern across all node pools, this refuses to guess and fails
+# instead, listing whatever candidates it found.
 hybrid_discover() {
   local hub_network="$1"
-  local network node_tags
+  local cluster_ref
+  cluster_ref="$(_hybrid_cluster_ref)"
 
-  network="$(gcloud container clusters describe "${GKE_NAME}" \
+  local describe_json
+  describe_json="$(gcloud container clusters describe "${GKE_NAME}" \
     --project="${GKE_PROJECT}" --location="${GKE_LOCATION}" \
-    --format="value(network)" 2>/dev/null)" || true
+    --format=json 2>/dev/null)" || true
+  if [[ -z "$describe_json" ]]; then
+    err "GKE cluster ${cluster_ref} was not found."
+    exit 1
+  fi
+
+  local network
+  network="$(echo "$describe_json" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+print(d.get('network') or '')
+")"
   if [[ -z "$network" ]]; then
-    err "GKE cluster '${GKE_NAME}' was not found in project '${GKE_PROJECT}', location '${GKE_LOCATION}'."
+    err "Could not determine the network for GKE cluster ${cluster_ref} from its description."
     exit 1
   fi
   if [[ "$network" != "$hub_network" ]]; then
-    err "GKE cluster '${GKE_NAME}' is on network '${network}', but this hub uses network '${hub_network}'. Attaching a cluster on a different network is not supported."
+    err "GKE cluster ${cluster_ref} is on network '${network}', but this hub uses network '${hub_network}'. Attaching a cluster on a different network is not supported."
     exit 1
   fi
 
-  node_tags="$(gcloud compute instances list \
-    --project="${GKE_PROJECT}" \
-    --filter="name~^(gke|gk3)-${GKE_NAME}-" \
-    --limit=1 \
-    --format="value(tags.items)" 2>/dev/null)" || true
-  GKE_NODE_TAG="$(echo "$node_tags" | tr ';' '\n' | sed '/^$/d' | head -1)"
-  if [[ -z "$GKE_NODE_TAG" ]]; then
-    err "Could not discover a node network tag for GKE cluster '${GKE_NAME}'. Ensure the cluster has at least one running node."
+  local mig_urls
+  mig_urls="$(echo "$describe_json" | "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+urls = []
+for np in d.get('nodePools') or []:
+    urls.extend(np.get('instanceGroupUrls') or [])
+print('\n'.join(urls))
+")"
+  if [[ -z "$mig_urls" ]]; then
+    err "GKE cluster ${cluster_ref} has no managed instance groups (its node pools may be empty). Could not discover a node network tag."
     exit 1
   fi
+
+  local mig_count=0
+  local -a all_tags_seen=()
+  local -a candidates=()
+  local mig_url template_ref tags_line tag
+
+  while IFS= read -r mig_url; do
+    [[ -z "$mig_url" ]] && continue
+    mig_count=$((mig_count + 1))
+    template_ref="$(gcloud compute instance-groups managed describe "$mig_url" \
+      --format="value(instanceTemplate)" 2>/dev/null)" || true
+    [[ -z "$template_ref" ]] && continue
+    tags_line="$(gcloud compute instance-templates describe "$template_ref" \
+      --format="value(properties.tags.items)" 2>/dev/null)" || true
+    [[ -z "$tags_line" ]] && continue
+    while IFS= read -r tag; do
+      [[ -z "$tag" ]] && continue
+      all_tags_seen+=("$tag")
+      if [[ "$tag" =~ ^gke-.+-node$ ]]; then
+        candidates+=("$tag")
+      fi
+    done < <(echo "$tags_line" | tr ';' '\n')
+  done <<< "$mig_urls"
+
+  local unique_candidates=""
+  if [[ ${#candidates[@]} -gt 0 ]]; then
+    unique_candidates="$(printf '%s\n' "${candidates[@]}" | sort -u)"
+  fi
+  local candidate_count=0
+  [[ -n "$unique_candidates" ]] && candidate_count="$(echo "$unique_candidates" | grep -c .)"
+
+  if [[ "$candidate_count" -eq 0 ]]; then
+    local seen_desc="none"
+    [[ ${#all_tags_seen[@]} -gt 0 ]] && seen_desc="$(printf '%s\n' "${all_tags_seen[@]}" | sort -u | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')"
+    err "Could not discover a GKE node network tag for cluster ${cluster_ref}: no instance template tag matched the expected pattern (gke-<suffix>-node) across ${mig_count} managed instance group(s) checked. Tags seen: ${seen_desc}."
+    exit 1
+  fi
+  if [[ "$candidate_count" -gt 1 ]]; then
+    local candidates_desc
+    candidates_desc="$(echo "$unique_candidates" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')"
+    err "Found more than one candidate GKE node network tag for cluster ${cluster_ref}, refusing to guess. Candidates: ${candidates_desc}."
+    exit 1
+  fi
+
+  GKE_NODE_TAG="$unique_candidates"
 }
 
-# _hybrid_ensure_firewall_rule NAME PROJECT_ID MARKER [gcloud create args...]
+# _hybrid_firewall_rule_fields JSON
+#
+# Given the JSON body of `gcloud compute firewall-rules describe
+# --format=json`, echoes a single tab-separated line:
+#   network<TAB>direction<TAB>action<TAB>port_spec<TAB>source<TAB>target_tags<TAB>priority
+# normalized the same way this file's expected values are expressed
+# (network as its short name, port_spec as "proto:port,port", source as
+# whichever of sourceTags/sourceRanges is set, target_tags comma-joined),
+# so the caller can compare tab-field-by-tab-field against what it expects.
+_hybrid_firewall_rule_fields() {
+  "$PYTHON" -c "
+import json, sys
+d = json.load(sys.stdin)
+network = (d.get('network') or '').rstrip('/').rsplit('/', 1)[-1]
+direction = d.get('direction') or ''
+if d.get('allowed'):
+    action = 'ALLOW'
+    rule = d['allowed'][0]
+elif d.get('denied'):
+    action = 'DENY'
+    rule = d['denied'][0]
+else:
+    action = ''
+    rule = {}
+proto = rule.get('IPProtocol', '')
+ports = ','.join(rule.get('ports') or [])
+port_spec = (proto + ':' + ports) if ports else proto
+source = ','.join(d.get('sourceTags') or []) or ','.join(d.get('sourceRanges') or [])
+target_tags = ','.join(d.get('targetTags') or [])
+priority = str(d['priority']) if d.get('priority') is not None else ''
+print('\t'.join([network, direction, action, port_spec, source, target_tags, priority]))
+"
+}
+
+# _hybrid_check_rule_drift NAME PROJECT_ID JSON NETWORK DIRECTION ACTION \
+#   PORT_SPEC SOURCE_TYPE SOURCE_VALUE TARGET_TAG PRIORITY
+#
+# Compares an already-marked, pre-existing rule's security-relevant fields
+# (direction, action, ports, priority, source, target tags, network)
+# against what this tier expects. On a match, returns 0 silently. On any
+# mismatch, prints every differing field plus a remediation command --
+# always the delete command (deploy.sh recreates the rule correctly on the
+# next run), and additionally a direct `update` command when the drift is
+# limited to fields `update` can change in place (source/target-tags/
+# priority; not direction, action or network) -- then returns 1. Never
+# corrects anything itself.
+_hybrid_check_rule_drift() {
+  local name="$1" project_id="$2" json="$3" exp_network="$4" exp_direction="$5" \
+    exp_action="$6" exp_port="$7" source_type="$8" exp_source="$9" exp_target_tag="${10}" \
+    exp_priority="${11}"
+
+  local fields act_network act_direction act_action act_port act_source act_target_tag act_priority
+  fields="$(echo "$json" | _hybrid_firewall_rule_fields)"
+  IFS=$'\t' read -r act_network act_direction act_action act_port act_source act_target_tag act_priority <<< "$fields"
+
+  local -a mismatches=()
+  [[ "$act_network" != "$exp_network" ]] && mismatches+=("network: expected '${exp_network}', found '${act_network}'")
+  [[ "$act_direction" != "$exp_direction" ]] && mismatches+=("direction: expected '${exp_direction}', found '${act_direction}'")
+  [[ "$act_action" != "$exp_action" ]] && mismatches+=("action: expected '${exp_action}', found '${act_action}'")
+  [[ "$act_port" != "$exp_port" ]] && mismatches+=("ports: expected '${exp_port}', found '${act_port}'")
+  [[ "$act_source" != "$exp_source" ]] && mismatches+=("source: expected '${exp_source}', found '${act_source}'")
+  [[ "$act_target_tag" != "$exp_target_tag" ]] && mismatches+=("target tags: expected '${exp_target_tag}', found '${act_target_tag}'")
+  [[ "$act_priority" != "$exp_priority" ]] && mismatches+=("priority: expected '${exp_priority}', found '${act_priority}'")
+
+  if [[ ${#mismatches[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  err "Firewall rule '${name}' carries this deployment's marker but its spec has drifted from what this tier expects:"
+  local m
+  for m in "${mismatches[@]}"; do
+    err "  ${m}"
+  done
+  err "Refusing to auto-correct a marked rule. To restore the expected spec, delete it and let the next deploy.sh run recreate it:"
+  err "  gcloud compute firewall-rules delete ${name} --project=${project_id} --quiet"
+
+  local network_ok=true direction_ok=true action_ok=true port_ok=true
+  [[ "$act_network" != "$exp_network" ]] && network_ok=false
+  [[ "$act_direction" != "$exp_direction" ]] && direction_ok=false
+  [[ "$act_action" != "$exp_action" ]] && action_ok=false
+  [[ "$act_port" != "$exp_port" ]] && port_ok=false
+  if [[ "$network_ok" == "true" && "$direction_ok" == "true" && "$action_ok" == "true" && "$port_ok" == "true" ]]; then
+    local source_flag
+    if [[ "$source_type" == "tag" ]]; then
+      source_flag="--source-tags=${exp_source}"
+    else
+      source_flag="--source-ranges=${exp_source}"
+    fi
+    err "Or update it in place:"
+    err "  gcloud compute firewall-rules update ${name} --project=${project_id} --priority=${exp_priority} ${source_flag} --target-tags=${exp_target_tag}"
+  fi
+
+  return 1
+}
+
+# _hybrid_ensure_firewall_rule NAME PROJECT_ID MARKER NETWORK DIRECTION \
+#   ACTION PORT_SPEC SOURCE_TYPE SOURCE_VALUE TARGET_TAG PRIORITY
 #
 # Shared by hybrid_ensure_firewall_rules below. If a rule named NAME
-# already exists: reuses it as-is when its description is exactly MARKER,
-# or fails when it is not -- deploy.sh never adopts a same-named rule it
-# does not already own. Otherwise creates it with the given args plus
-# --description=MARKER.
-#
-# Reuse checks ownership only, not the rest of the rule's spec (priority,
-# tags, ports): re-verifying the full spec on every run would either
-# silently correct drift (masking a deliberate hand edit) or fail an
-# otherwise-idempotent re-run over a hand-tuned rule. "Carries this
-# deployment's marker" is what Phase 3a treats as proof of ownership; spec
-# drift detection is not part of this scope.
+# already exists: fails outright if its description isn't exactly MARKER
+# (deploy.sh never adopts a same-named rule it does not already own);
+# otherwise verifies its full security-relevant spec against the expected
+# values via _hybrid_check_rule_drift, and fails (never auto-corrects) on
+# any mismatch. Only a rule that both carries the marker and matches the
+# expected spec is left alone. Otherwise creates it fresh, with the marker
+# and expected spec.
 _hybrid_ensure_firewall_rule() {
-  local name="$1" project_id="$2" marker="$3"
-  shift 3
-  local existing_desc
-  if existing_desc="$(gcloud compute firewall-rules describe "${name}" \
-      --project="${project_id}" --format="value(description)" 2>/dev/null)"; then
-    if [[ "$existing_desc" == "$marker" ]]; then
-      echo "  Firewall rule already exists (owned by this deployment): ${name}"
-      return 0
+  local name="$1" project_id="$2" marker="$3" network="$4" direction="$5" action="$6" \
+    port_spec="$7" source_type="$8" source_value="$9" target_tag="${10}" priority="${11}"
+
+  local json
+  if json="$(gcloud compute firewall-rules describe "${name}" \
+      --project="${project_id}" --format=json 2>/dev/null)"; then
+    local existing_desc
+    existing_desc="$(echo "$json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
+    if [[ "$existing_desc" != "$marker" ]]; then
+      err "Firewall rule '${name}' already exists but does not carry this deployment's marker ('${marker}'). Refusing to modify it."
+      exit 1
     fi
-    err "Firewall rule '${name}' already exists but does not carry this deployment's marker ('${marker}'). Refusing to modify it."
-    exit 1
+    if ! _hybrid_check_rule_drift "$name" "$project_id" "$json" "$network" "$direction" \
+        "$action" "$port_spec" "$source_type" "$source_value" "$target_tag" "$priority"; then
+      exit 1
+    fi
+    echo "  Firewall rule already exists and matches the expected spec: ${name}"
+    return 0
   fi
+
+  local source_flag
+  if [[ "$source_type" == "tag" ]]; then
+    source_flag="--source-tags=${source_value}"
+  else
+    source_flag="--source-ranges=${source_value}"
+  fi
+
   gcloud compute firewall-rules create "${name}" \
     --project="${project_id}" \
     --description="${marker}" \
-    "$@" \
+    --network="${network}" \
+    --direction="${direction}" \
+    --action="${action}" \
+    --rules="${port_spec}" \
+    "${source_flag}" \
+    --target-tags="${target_tag}" \
+    --priority="${priority}" \
     --quiet
   echo "  Created firewall rule: ${name}"
 }
 
 # hybrid_ensure_firewall_rules HUB_NAME PROJECT_ID NETWORK
 #
-# Creates (or verifies ownership of) the two firewall rules this tier
-# needs, both targeting scion-hub-<hub>-nfs and carrying the exact
-# description token scion-deployment=<hub>:
+# Creates (or verifies the marker and full spec of) the two firewall rules
+# this tier needs, both targeting scion-hub-<hub>-nfs and carrying the
+# exact description token scion-deployment=<hub>:
 #   scion-hub-<hub>-nfs-allow  INGRESS ALLOW tcp:2049 from the discovered
 #                              node tag (GKE_NODE_TAG; set by
 #                              hybrid_discover), priority 900.
@@ -187,12 +380,10 @@ hybrid_ensure_firewall_rules() {
   HYBRID_DENY_NAME="scion-hub-${hub_name}-nfs-deny"
 
   _hybrid_ensure_firewall_rule "${HYBRID_ALLOW_NAME}" "${project_id}" "${marker}" \
-    --network="${network}" --direction=INGRESS --action=ALLOW --rules=tcp:2049 \
-    --source-tags="${GKE_NODE_TAG}" --target-tags="${target_tag}" --priority=900
+    "${network}" "INGRESS" "ALLOW" "tcp:2049" "tag" "${GKE_NODE_TAG}" "${target_tag}" "900"
 
   _hybrid_ensure_firewall_rule "${HYBRID_DENY_NAME}" "${project_id}" "${marker}" \
-    --network="${network}" --direction=INGRESS --action=DENY --rules=tcp:2049 \
-    --source-ranges=0.0.0.0/0 --target-tags="${target_tag}" --priority=950
+    "${network}" "INGRESS" "DENY" "tcp:2049" "range" "0.0.0.0/0" "${target_tag}" "950"
 }
 
 # hybrid_vm_tag HUB_NAME
@@ -242,14 +433,16 @@ hybrid_teardown_check() {
   HYBRID_TEARDOWN_DELETE=()
   HYBRID_TEARDOWN_SKIP=()
 
-  local name desc
+  local name json desc
   for name in "scion-hub-${hub_name}-nfs-allow" "scion-hub-${hub_name}-nfs-deny"; do
-    if desc="$(gcloud compute firewall-rules describe "${name}" \
-        --project="${project_id}" --format="value(description)" 2>/dev/null)"; then
+    if json="$(gcloud compute firewall-rules describe "${name}" \
+        --project="${project_id}" --format=json 2>/dev/null)"; then
+      desc="$(echo "$json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
       if [[ "$desc" == "$marker" ]]; then
         HYBRID_TEARDOWN_DELETE+=("${name}")
       else
         HYBRID_TEARDOWN_SKIP+=("${name}")
+        # shellcheck disable=SC2034 # read by deploy.sh after this call returns
         HYBRID_TEARDOWN_FAILED=true
       fi
     fi
