@@ -79,6 +79,13 @@ set_firewall_list_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/firewall-rules-list-should-fail"
 }
 
+# set_instances_list_will_fail — every `instances list` call fails
+# (simulating a transient API error), so the VM-gone check can't tell
+# whether the VM is still there.
+set_instances_list_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/instances-list-should-fail"
+}
+
 # set_firewall_delete_will_fail NAME — the next `firewall-rules delete`
 # call for this rule fails instead of succeeding (the rule's JSON stays
 # present in stub state, matching a real failed delete rather than one

@@ -719,19 +719,24 @@ test_discover_anchor_rejects_substring_match() {
   assert_contains "$RUN_OUTPUT" "x-gke-foo-node-y" "error should list the rejected tag as seen, not as a candidate"
 }
 
-# One managed instance group whose template can't be read must not sink
-# discovery when another group in the same cluster has a valid tag.
-test_discover_partial_mig_read_failure_still_succeeds() {
+# One managed instance group whose template can't be read must refuse
+# discovery even when another group in the same cluster has a valid tag,
+# since the unreadable group could be hiding a second, different tag.
+test_discover_partial_mig_read_failure_refused() {
   fresh_gcloud_state
   GKE_NAME="partialcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "partialcluster" "$NETWORK" "mig-unreadable" "mig-good"
   # mig-unreadable is deliberately never seeded via seed_mig, so the
-  # stub's `instance-groups managed describe` fails for it.
+  # stub's `instance-groups managed describe` fails for it. Even though
+  # the readable sibling yields a single, unambiguous candidate, a
+  # partial view could be hiding a second, different tag on the group
+  # that couldn't be read, so this must still fail rather than guess.
   seed_mig "mig-good" "template-good"
   seed_template "template-good" "gke-partialcluster-good-node"
-  hybrid_discover "$NETWORK"
-  assert_eq "gke-partialcluster-good-node" "$GKE_NODE_TAG" \
-    "a readable sibling instance group should still yield the tag"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "an unreadable instance group must fail discovery even if a sibling group yields a candidate"
+  assert_contains "$RUN_OUTPUT" "1 of 2" "error should count the unreadable instance group"
 }
 
 # When every managed instance group is unreadable, the failure message

@@ -154,8 +154,11 @@ _hybrid_cluster_ref() {
 # firewall-purpose network tag GKE assigns them still follows the
 # gke-...-node pattern). If zero or more than one distinct tag matches
 # that pattern across all node pools, this refuses to guess and fails
-# instead, listing whatever candidates it found, and how many instance
-# groups' templates it could not even read.
+# instead, listing whatever candidates it found. If any instance group or
+# its template can't even be read, this also fails outright, even if the
+# readable ones already yield exactly one candidate: a group this call
+# couldn't see could carry a second, different tag, and "guessed right by
+# luck" is not a property this check can claim.
 hybrid_discover() {
   local hub_network="$1"
   local cluster_ref
@@ -204,6 +207,7 @@ print('\n'.join(urls))
 
   local mig_count=0
   local unreadable_count=0
+  local first_unreadable_err=""
   local -a all_tags_seen=()
   local -a candidates=()
   local mig_url template_ref tags_line tag mig_call_err
@@ -216,6 +220,7 @@ print('\n'.join(urls))
     if ! template_ref="$(gcloud compute instance-groups managed describe "$mig_url" \
         --format="value(instanceTemplate)" 2>"${mig_call_err}")"; then
       unreadable_count=$((unreadable_count + 1))
+      [[ -z "$first_unreadable_err" ]] && first_unreadable_err="$(head -1 "${mig_call_err}")"
       rm -f "${mig_call_err}"
       continue
     fi
@@ -226,6 +231,7 @@ print('\n'.join(urls))
     if ! tags_line="$(gcloud compute instance-templates describe "$template_ref" \
         --format="value(properties.tags.items)" 2>"${mig_call_err}")"; then
       unreadable_count=$((unreadable_count + 1))
+      [[ -z "$first_unreadable_err" ]] && first_unreadable_err="$(head -1 "${mig_call_err}")"
       rm -f "${mig_call_err}"
       continue
     fi
@@ -241,9 +247,14 @@ print('\n'.join(urls))
     done < <(echo "$tags_line" | tr ';' '\n')
   done <<< "$mig_urls"
 
-  local unreadable_note=""
+  # A partial view could hide a second, distinct tag on the instance
+  # group(s) that couldn't be read, so any unreadable group fails
+  # discovery outright rather than proceeding on the readable subset --
+  # even when the readable ones already yield exactly one candidate.
   if [[ "$unreadable_count" -gt 0 ]]; then
-    unreadable_note=" (${unreadable_count} of ${mig_count} managed instance group(s) could not be read -- check permissions)"
+    err "Could not discover a GKE node network tag for cluster ${cluster_ref}: ${unreadable_count} of ${mig_count} managed instance group(s) could not be read, which could hide a second, distinct tag. Refusing to guess from a partial view."
+    err "  First error: ${first_unreadable_err}"
+    exit 1
   fi
 
   local unique_candidates=""
@@ -256,13 +267,13 @@ print('\n'.join(urls))
   if [[ "$candidate_count" -eq 0 ]]; then
     local seen_desc="none"
     [[ ${#all_tags_seen[@]} -gt 0 ]] && seen_desc="$(printf '%s\n' "${all_tags_seen[@]}" | sort -u | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')"
-    err "Could not discover a GKE node network tag for cluster ${cluster_ref}: no instance template tag matched the expected pattern (gke-<suffix>-node) across ${mig_count} managed instance group(s) checked${unreadable_note}. Tags seen: ${seen_desc}."
+    err "Could not discover a GKE node network tag for cluster ${cluster_ref}: no instance template tag matched the expected pattern (gke-<suffix>-node) across ${mig_count} managed instance group(s) checked. Tags seen: ${seen_desc}."
     exit 1
   fi
   if [[ "$candidate_count" -gt 1 ]]; then
     local candidates_desc
     candidates_desc="$(echo "$unique_candidates" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')"
-    err "Found more than one candidate GKE node network tag for cluster ${cluster_ref}, refusing to guess. Candidates: ${candidates_desc}${unreadable_note}."
+    err "Found more than one candidate GKE node network tag for cluster ${cluster_ref}, refusing to guess. Candidates: ${candidates_desc}."
     exit 1
   fi
 
@@ -272,29 +283,29 @@ print('\n'.join(urls))
 # _hybrid_firewall_rule_fields
 #
 # Reads the JSON body of `gcloud compute firewall-rules describe
-# --format=json` from stdin and echoes a single line, fields joined by
-# ASCII unit separator (0x1f, not tab: bash's `read` collapses runs of
-# IFS *whitespace* -- which includes tab -- silently merging adjacent
-# empty fields and shifting every field after them, which is exactly
-# wrong for a format where "this field is empty" is a meaningful,
-# distinct result, not a fencepost to skip), with every security-relevant
-# field, normalized for exact comparison:
-#   network  direction  action  rules  source_tags  source_ranges
-#   source_sas  target_tags  target_sas  dest_ranges  disabled  priority
-# - network: its short name (last path segment of the self-link URL).
-# - action: ALLOW, DENY, or MALFORMED if both allowed[] and denied[] are
-#   present (GCP itself never returns that shape; treating it as a
-#   guaranteed mismatch is simpler and safer than picking one).
-# - rules: every allowed/denied entry (not just the first), each
-#   rendered "proto:port,port" (ports sorted) or bare "proto" with no
-#   ports, the whole set sorted and joined with ';' -- so a second entry,
-#   in either order, changes this field.
-# - source_tags / source_ranges: compared as separate fields (GCP ORs
-#   them when both are set, so which "extra" one is empty matters).
-# - source_sas / target_sas / dest_ranges: comma-joined, sorted; this
-#   tier's own rules never set any of them, so a non-empty value here is
-#   always a drift.
-# - disabled: "true" or "false".
+# --format=json` from stdin and echoes every field able to widen,
+# narrow or disable the rule, normalized for exact comparison and joined
+# by ASCII unit separator (0x1f, not tab -- see below):
+#   network  direction  action  allowed/denied (all entries)  sourceTags
+#   sourceRanges  sourceServiceAccounts  targetTags
+#   targetServiceAccounts  destinationRanges  disabled  priority
+# Output-only metadata (id, name, kind, selfLink, creationTimestamp,
+# description, logConfig) is ignored -- it can't change what the rule
+# does. network is reduced to its short name (the self-link's last path
+# segment). action is ALLOW, DENY, or MALFORMED if both allowed[] and
+# denied[] are present (GCP never returns that shape; treating it as a
+# guaranteed mismatch is simpler than picking one). Every allowed/denied
+# entry is included, each rendered "proto:port,port" (ports sorted) or
+# bare "proto", the whole set sorted and joined with ';', so a second
+# entry changes the field regardless of order. sourceTags and
+# sourceRanges are compared as separate fields, since GCP ORs them when
+# both are set. The remaining list fields are comma-joined and sorted.
+#
+# 0x1f, not tab, because bash's `read` collapses runs of IFS
+# *whitespace* -- which includes tab -- silently merging adjacent empty
+# fields and shifting every field after them, which is wrong here: "this
+# field is empty" is a meaningful, distinct result, not a fencepost to
+# skip.
 _hybrid_firewall_rule_fields() {
   "$PYTHON" -c "
 import json, sys
@@ -340,27 +351,29 @@ print(sep.join([network, direction, action, rules_sig, source_tags,
 # _hybrid_check_rule_drift NAME PROJECT_ID JSON NETWORK DIRECTION ACTION \
 #   RULES SOURCE_TYPE SOURCE_VALUE TARGET_TAG PRIORITY
 #
-# Compares an already-marked, pre-existing rule's full security-relevant
-# spec (every field _hybrid_firewall_rule_fields reports) against what
-# this tier expects for it. SOURCE_TYPE is "tag" or "range"; the *other*
-# source field is expected empty, since a rule this tier creates only
-# ever sets one of them, and GCP ORs the two when both are present.
-# source/target service accounts and destination ranges are always
-# expected empty, and disabled is always expected false.
+# Compares an already-marked, pre-existing rule against every field able
+# to widen, narrow or disable it: direction, action, disabled, priority,
+# network, allowed/denied (all entries), sourceTags, sourceRanges,
+# sourceServiceAccounts, targetServiceAccounts, targetTags,
+# destinationRanges. Output-only metadata is ignored. SOURCE_TYPE is
+# "tag" or "range"; the *other* source field is expected empty, since a
+# rule this tier creates only ever sets one of them, and GCP ORs the two
+# when both are present. Service accounts and destination ranges are
+# always expected empty, and disabled is always expected false.
 #
 # On a full match, returns 0 silently. On any mismatch, prints every
-# differing field plus a remediation command -- always the delete
-# command (deploy.sh recreates the rule correctly on the next run), and
-# additionally a direct `update` command, but only when applying it would
-# converge to *exactly* the expected rule: that requires network,
-# direction, action, rules, the non-selected source field, both service
-# account fields, destination ranges and disabled to already match, so
-# the only drift left is something `update` can set directly (the
-# selected source field, target tags, priority). If a field would need to
-# be *cleared* (for example a stray sourceRanges on an allow rule) or
-# `update` simply cannot change it (direction, action, network, rules,
-# service accounts, disabled), only the delete remediation is offered.
-# Never corrects anything itself.
+# differing field, then the delete remediation, then an `update`
+# remediation too, but only when `update` can converge to *exactly* the
+# expected rule -- every other field already matches, and the only drift
+# left is something it can set directly (the expected source type,
+# target tags, priority). If a field would need to be cleared, or
+# `update` can't touch it (direction, action, network, rule entries,
+# service accounts, disabled), only delete is offered. For the deny
+# rule, the delete remediation is the two-rule, order-preserving sequence
+# (delete allow, delete deny, re-run deploy.sh) rather than a bare
+# delete, since deleting the deny alone would leave tcp:2049 reachable
+# through the allow rule with nothing to deny it. Never corrects
+# anything itself.
 _hybrid_check_rule_drift() {
   local name="$1" project_id="$2" json="$3" exp_network="$4" exp_direction="$5" \
     exp_action="$6" exp_rules="$7" source_type="$8" exp_source_value="$9" \
@@ -382,53 +395,50 @@ _hybrid_check_rule_drift() {
     act_disabled act_priority <<< "$fields"
 
   local -a mismatches=()
-  local network_ok=true direction_ok=true action_ok=true rules_ok=true
-  local other_source_ok=true source_sas_ok=true target_sas_ok=true
-  local dest_ranges_ok=true disabled_ok=true
+  local update_converges=true
 
   if [[ "$act_network" != "$exp_network" ]]; then
     mismatches+=("network: expected '${exp_network}', found '${act_network}'")
-    network_ok=false
+    update_converges=false
   fi
   if [[ "$act_direction" != "$exp_direction" ]]; then
     mismatches+=("direction: expected '${exp_direction}', found '${act_direction}'")
-    direction_ok=false
+    update_converges=false
   fi
   if [[ "$act_action" != "$exp_action" ]]; then
     mismatches+=("action: expected '${exp_action}', found '${act_action}'")
-    action_ok=false
+    update_converges=false
   fi
   if [[ "$act_rules" != "$exp_rules" ]]; then
     mismatches+=("ports: expected '${exp_rules}', found '${act_rules}'")
-    rules_ok=false
+    update_converges=false
   fi
-
   if [[ "$act_source_tags" != "$exp_source_tags" ]]; then
     mismatches+=("source tags: expected '${exp_source_tags:-(empty)}', found '${act_source_tags:-(empty)}'")
-    [[ "$source_type" != "tag" ]] && other_source_ok=false
+    [[ "$source_type" != "tag" ]] && update_converges=false
   fi
   if [[ "$act_source_ranges" != "$exp_source_ranges" ]]; then
     mismatches+=("source ranges: expected '${exp_source_ranges:-(empty)}', found '${act_source_ranges:-(empty)}'")
-    [[ "$source_type" != "range" ]] && other_source_ok=false
+    [[ "$source_type" != "range" ]] && update_converges=false
   fi
   if [[ "$act_source_sas" != "" ]]; then
     mismatches+=("source service accounts: expected '(empty)', found '${act_source_sas}'")
-    source_sas_ok=false
+    update_converges=false
   fi
   if [[ "$act_target_tags" != "$exp_target_tag" ]]; then
     mismatches+=("target tags: expected '${exp_target_tag}', found '${act_target_tags}'")
   fi
   if [[ "$act_target_sas" != "" ]]; then
     mismatches+=("target service accounts: expected '(empty)', found '${act_target_sas}'")
-    target_sas_ok=false
+    update_converges=false
   fi
   if [[ "$act_dest_ranges" != "" ]]; then
     mismatches+=("destination ranges: expected '(empty)', found '${act_dest_ranges}'")
-    dest_ranges_ok=false
+    update_converges=false
   fi
   if [[ "$act_disabled" != "false" ]]; then
     mismatches+=("disabled: expected 'false', found '${act_disabled}'")
-    disabled_ok=false
+    update_converges=false
   fi
   if [[ "$act_priority" != "$exp_priority" ]]; then
     mismatches+=("priority: expected '${exp_priority}', found '${act_priority}'")
@@ -443,16 +453,17 @@ _hybrid_check_rule_drift() {
   for m in "${mismatches[@]}"; do
     err "  ${m}"
   done
-  err "Refusing to auto-correct a marked rule. To restore the expected spec, delete it and let the next deploy.sh run recreate it:"
-  err "  gcloud compute firewall-rules delete ${name} --project=${project_id} --quiet"
+  err "Refusing to auto-correct a marked rule. To restore the expected spec:"
+  if [[ "$name" == *-nfs-deny ]]; then
+    local allow_name="${name%-nfs-deny}-nfs-allow"
+    err "  Delete both rules, in this order, then re-run deploy.sh (deleting only the deny rule would leave tcp:2049 reachable through the allow rule with nothing to deny it):"
+    err "    gcloud compute firewall-rules delete ${allow_name} --project=${project_id} --quiet"
+    err "    gcloud compute firewall-rules delete ${name} --project=${project_id} --quiet"
+  else
+    err "  gcloud compute firewall-rules delete ${name} --project=${project_id} --quiet"
+  fi
 
-  if [[ "$network_ok" == "true" && "$direction_ok" == "true" && "$action_ok" == "true" \
-      && "$rules_ok" == "true" && "$other_source_ok" == "true" && "$source_sas_ok" == "true" \
-      && "$target_sas_ok" == "true" && "$dest_ranges_ok" == "true" && "$disabled_ok" == "true" ]]; then
-    # Every field `update` cannot touch already matches, and the only
-    # possible drift left is in fields it can set directly (the expected
-    # source type, target tags, priority) -- applying it converges to
-    # exactly the expected rule, never leaving a stray field behind.
+  if [[ "$update_converges" == "true" ]]; then
     local source_flag
     if [[ "$source_type" == "tag" ]]; then
       source_flag="--source-tags=${exp_source_value}"
@@ -576,27 +587,15 @@ hybrid_apply_vm_tag() {
 # hybrid_teardown_check HUB_NAME PROJECT_ID
 #
 # Looks up the two NFS firewall rules with a single `firewall-rules list`
-# call (rather than two `describe` calls) and classifies each:
-#   found, description exactly scion-deployment=<hub>  -> queued for
-#     deletion in HYBRID_TEARDOWN_DELETE, allow before deny.
-#   found, any other description (including empty)      -> recorded in
-#     HYBRID_TEARDOWN_SKIP, and HYBRID_TEARDOWN_FAILED is set to "true".
-#   not found                                            -> ignored.
-# If the list call itself fails -- permissions, a transient API error,
-# anything -- this sets HYBRID_TEARDOWN_FAILED and returns without
-# populating either array, rather than treating the failure as "no rules
-# exist". An unknown ownership state must never look identical to
-# "nothing to protect": the former needs the run to stop, and only the
-# latter is safe to proceed past. Never deletes anything itself.
-#
-# The caller MUST check HYBRID_TEARDOWN_FAILED and, if "true", refuse the
-# ENTIRE teardown -- base resources included -- before calling
-# hybrid_teardown_delete or deleting anything else (hybrid_teardown_
-# preflight below does this). An unmarked name collision means this
-# HUB_NAME can no longer be trusted to identify only resources this
-# deployment owns, so nothing proceeds safely from that point, not just
-# the two hybrid-owned rules; a failed list call means ownership can't be
-# determined at all, which is exactly as unsafe.
+# call and classifies each: marked -> HYBRID_TEARDOWN_DELETE (allow
+# before deny); found but unmarked -> HYBRID_TEARDOWN_SKIP, and
+# HYBRID_TEARDOWN_FAILED=true; not found -> ignored. A failed list call
+# also sets HYBRID_TEARDOWN_FAILED, without populating either array --
+# "unknown" must never look like "nothing to protect". $PYTHON is needed,
+# and preflighted with a clear error, only when something was actually
+# found to classify. Never deletes anything itself; the caller must
+# treat HYBRID_TEARDOWN_FAILED=true as reason to abort the entire
+# teardown (hybrid_teardown_preflight below does this).
 hybrid_teardown_check() {
   local hub_name="$1" project_id="$2"
   local marker="scion-deployment=${hub_name}"
@@ -619,6 +618,20 @@ hybrid_teardown_check() {
     return 0
   fi
   rm -f "${list_err}"
+
+  # Nothing to classify, so nothing needs $PYTHON either -- this keeps
+  # the common tier-off/no-hybrid-rules case working even without a
+  # Python interpreter on PATH, since it never has anything to parse.
+  if [[ "$list_json" == "[]" ]]; then
+    return 0
+  fi
+
+  if ! command -v "$PYTHON" &>/dev/null; then
+    err "Python interpreter '${PYTHON}' is required to check hybrid-tier firewall rule ownership during teardown, but was not found."
+    # shellcheck disable=SC2034 # read by callers after this call returns
+    HYBRID_TEARDOWN_FAILED=true
+    return 0
+  fi
 
   local name desc
   for name in "$name_allow" "$name_deny"; do
@@ -677,28 +690,50 @@ hybrid_teardown_preflight() {
   return 1
 }
 
+# _hybrid_firewall_rule_absent NAME PROJECT_ID
+#
+# Positively confirms a rule doesn't exist via a `list` call, the same
+# fail-closed pattern as the ownership check: returns 0 only when the
+# list call succeeds AND comes back empty. Any other outcome (the rule is
+# listed, or the list call itself fails) returns 1 -- "unknown" is never
+# treated as "gone".
+_hybrid_firewall_rule_absent() {
+  local name="$1" project_id="$2"
+  local list_json
+  if ! list_json="$(gcloud compute firewall-rules list --project="${project_id}" \
+      --filter="name=(${name})" --format=json 2>/dev/null)"; then
+    return 1
+  fi
+  [[ "$list_json" == "[]" ]]
+}
+
 # hybrid_teardown_delete PROJECT_ID
 #
-# Deletes exactly the rules hybrid_teardown_check queued in
-# HYBRID_TEARDOWN_DELETE (allow before deny, the reverse of create
-# order). Call only after confirming HYBRID_TEARDOWN_FAILED=false, and
-# only once the hub VM is confirmed gone (the caller's responsibility --
-# see docs/deploy/agent-runbook-single-node-vm.md). Sets
-# HYBRID_TEARDOWN_DELETED to the rules actually gone afterward, and
-# HYBRID_TEARDOWN_DELETE_FAILED to any that could not be confirmed
-# deleted. The caller must treat a non-empty HYBRID_TEARDOWN_DELETE_FAILED
-# as a failed teardown, and must only report HYBRID_TEARDOWN_DELETED as
-# deleted -- never a rule whose delete call failed. A delete that fails
-# is re-checked with a describe: if the rule is gone anyway (already
-# deleted, e.g. by a concurrent run), that counts as success; any other
-# outcome is a real, reported failure. Never deletes the cluster; this
-# tier never creates or deletes a cluster in the first place.
+# Deletes the rules hybrid_teardown_check queued in HYBRID_TEARDOWN_DELETE,
+# allow before deny. Call only after confirming HYBRID_TEARDOWN_FAILED=
+# false, and only once the hub VM is confirmed gone (the caller's
+# responsibility -- see docs/deploy/agent-runbook-single-node-vm.md).
+# Stops at the first delete that isn't confirmed gone -- via `delete`
+# succeeding, or, on a `delete` failure, a positive not-found from
+# `_hybrid_firewall_rule_absent` -- and leaves every rule from that point
+# on untouched, so the deny is never deleted after the allow delete
+# failed or came back uncertain. Sets HYBRID_TEARDOWN_DELETED to the
+# rules actually gone afterward and HYBRID_TEARDOWN_DELETE_FAILED to the
+# first rule that wasn't (and, transitively, every rule still queued
+# behind it). The caller must treat a non-empty
+# HYBRID_TEARDOWN_DELETE_FAILED as a failed teardown, and must only
+# report HYBRID_TEARDOWN_DELETED as deleted. Never deletes the cluster;
+# this tier never creates or deletes a cluster in the first place.
 hybrid_teardown_delete() {
   local project_id="$1"
   HYBRID_TEARDOWN_DELETED=()
   HYBRID_TEARDOWN_DELETE_FAILED=()
-  local name delete_err
+  local name delete_err stopped=false
   for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
+    if [[ "$stopped" == "true" ]]; then
+      HYBRID_TEARDOWN_DELETE_FAILED+=("${name}")
+      continue
+    fi
     delete_err="$(mktemp)"
     if gcloud compute firewall-rules delete "${name}" \
         --project="${project_id}" --quiet 2>"${delete_err}"; then
@@ -707,14 +742,14 @@ hybrid_teardown_delete() {
       rm -f "${delete_err}"
       continue
     fi
-    if gcloud compute firewall-rules describe "${name}" \
-        --project="${project_id}" &>/dev/null; then
+    if _hybrid_firewall_rule_absent "${name}" "${project_id}"; then
+      warn "Firewall rule ${name} was already gone before this teardown deleted it."
+      HYBRID_TEARDOWN_DELETED+=("${name}")
+    else
       err "Failed to delete firewall rule ${name}:"
       err "  $(cat "${delete_err}")"
       HYBRID_TEARDOWN_DELETE_FAILED+=("${name}")
-    else
-      warn "Firewall rule ${name} was already gone before this teardown deleted it."
-      HYBRID_TEARDOWN_DELETED+=("${name}")
+      stopped=true
     fi
     rm -f "${delete_err}"
   done

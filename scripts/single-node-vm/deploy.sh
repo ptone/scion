@@ -246,6 +246,10 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   if [[ -z "$HUB_NAME" ]]; then
     config_prompt HUB_NAME "Hub name [my-hub]: " "my-hub"
   fi
+  if [[ ! "$HUB_NAME" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    err "Hub name '${HUB_NAME}' is invalid. It must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens."
+    exit 1
+  fi
 
   REGION="$(config_get 'region' '')"
   if [[ -z "$REGION" ]]; then
@@ -326,25 +330,39 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   fi
 
   # The hybrid NFS firewall rules are only safe to delete once this VM is
-  # confirmed gone -- keeping the deny rule alive as long as the VM might
-  # still exist matters more than deleting it promptly. Track that here
-  # rather than assuming the delete call's own success/failure tells the
-  # whole story: a "not found" from `delete` (already gone) is exactly as
-  # safe to proceed past as a successful delete, but a real failure with
-  # the VM still present is not.
+  # confirmed gone. With the tier off (no hybrid rules queued), a VM
+  # delete failure warns and continues exactly as it always has --
+  # nothing downstream depends on the VM's fate. With the tier on, "gone"
+  # must be a positive, project-wide answer rather than inferred from a
+  # `describe` in a possibly-wrong zone (ZONE above falls back to a guess
+  # when its own discovery call fails): a non-zero exit from the check
+  # itself means unknown, and unknown is never treated as gone.
   info "Deleting GCE VM..."
   VM_GONE=false
   if gcloud compute instances delete "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
     echo "  Deleted: ${INSTANCE_NAME}"
     VM_GONE=true
-  elif gcloud compute instances describe "${INSTANCE_NAME}" \
-      --zone="${ZONE}" --project="${PROJECT_ID}" &>/dev/null; then
-    err "Failed to delete GCE VM ${INSTANCE_NAME}; it still exists."
-    TEARDOWN_HAD_FAILURE=true
-  else
+  elif [[ ${#HYBRID_TEARDOWN_DELETE[@]} -eq 0 ]]; then
     warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
     VM_GONE=true
+  else
+    VM_LIST_ERR_FILE="$(mktemp)"
+    if VM_LIST_OUTPUT="$(gcloud compute instances list --project="${PROJECT_ID}" \
+        --filter="name=${INSTANCE_NAME}" --format="value(name)" 2>"${VM_LIST_ERR_FILE}")"; then
+      if [[ -z "$VM_LIST_OUTPUT" ]]; then
+        warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
+        VM_GONE=true
+      else
+        err "Failed to delete GCE VM ${INSTANCE_NAME}; it still exists."
+        TEARDOWN_HAD_FAILURE=true
+      fi
+    else
+      err "Failed to delete GCE VM ${INSTANCE_NAME}, and could not confirm whether it still exists:"
+      err "  $(cat "${VM_LIST_ERR_FILE}")"
+      TEARDOWN_HAD_FAILURE=true
+    fi
+    rm -f "${VM_LIST_ERR_FILE}"
   fi
 
   info "Deleting Cloud NAT..."
