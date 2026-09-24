@@ -45,6 +45,16 @@ TIER_DIR="$(dirname "$SCRIPT_DIR")"
 export PATH="${SCRIPT_DIR}/lib:${PATH}"
 export TIER_DIR
 
+# A sentinel, deliberately-bogus KUBECONFIG, exported globally so every
+# test in this suite -- not just ones that explicitly set it -- proves it
+# never reads or writes the ambient/operator KUBECONFIG. Every kubectl
+# call in hybrid-tier.sh must set KUBECONFIG="$HYBRID_KUBECONFIG"
+# explicitly; if any code path ever fell back to an ambient value, this
+# path pointing at nothing would fail loudly instead of silently working
+# against whatever the operator running these tests happens to have
+# configured.
+export KUBECONFIG="/nonexistent/should-never-be-read-or-written-kubeconfig"
+
 # shellcheck source=scripts/single-node-vm/tests/lib/harness.sh
 source "${SCRIPT_DIR}/lib/harness.sh"
 # shellcheck source=scripts/single-node-vm/hybrid-tier.sh

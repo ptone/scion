@@ -313,6 +313,18 @@ print(json.dumps(out))
     require_project "$@"
     require_flag zone "$@"
     name="${4:-}"
+    format="$(get_flag format "$@")" || format=""
+    if [[ "$format" == "get(networkInterfaces[0].networkIP)" ]]; then
+      # Read back once, right after the VM is confirmed up -- must
+      # succeed with a real-looking internal IP for the hybrid tier's
+      # settings.yaml/PV rendering and the base health-check URL, both
+      # of which depend on it, to have anything meaningful to render.
+      if [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}" ]]; then
+        echo "${GCLOUD_STUB_VM_IP:-10.128.0.5}"
+        exit 0
+      fi
+      exit 1
+    fi
     # Same sentinel purpose as the "instances create" case below: this is
     # always the call deploy.sh makes right before branching into either
     # "create a new VM" or "tag the existing one", so it marks the point
@@ -394,8 +406,27 @@ print(json.dumps(out))
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists" ]]; then
       exit 0
     fi
-    echo "gcloud-stub: NOT_FOUND: Requested entity was not found." >&2
+    # Real gcloud's own Cloud Run 404 text -- "Cannot find service [X]" --
+    # carries none of the NOT_FOUND/404 tokens gcloud's other APIs use, so
+    # this deliberately does NOT look like the other services' not-found
+    # fixtures below: hybrid_cloud_run_label_args must never rely on
+    # text-matching this, only on the positive-absence `list` call.
+    echo "gcloud-stub: ERROR: (gcloud.run.services.describe) Cannot find service [${name}]" >&2
     exit 1
+    ;;
+  "run services list")
+    require_project "$@"
+    require_flag region "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/list-error" ]]; then
+      echo "gcloud-stub: simulated error listing run services" >&2
+      exit 1
+    fi
+    filter="$(get_flag filter "$@")" || filter=""
+    name="${filter#metadata.name=}"
+    if [[ -n "$name" && -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists" ]]; then
+      echo "$name"
+    fi
+    exit 0
     ;;
   "container clusters describe")
     require_project "$@"
@@ -414,8 +445,55 @@ print(json.dumps(out))
       cat "$f"
       exit 0
     fi
-    echo "gcloud-stub: NOT_FOUND: Cluster ${name} not found" >&2
+    echo "gcloud-stub: ERROR: (gcloud.container.clusters.describe) ResponseError: code=404, message=Not found: projects/${GCLOUD_STUB_PROJECT:-demo-project}/locations/x/clusters/${name}." >&2
     exit 1
+    ;;
+  "compute ssh "*)
+    # Only opts into actually succeeding when a test explicitly asks for
+    # it (GCLOUD_STUB_SSH_SUCCEEDS=true): every pre-existing create-mode
+    # wiring test relies on `compute ssh` failing immediately so it can
+    # stop deploy.sh shortly after the VM-exists sentinel without waiting
+    # out the real SSH-readiness retry loop. Canned answers only cover
+    # the handful of commands whose stdout deploy.sh's own local
+    # variables actually depend on; everything else (binary/plugin
+    # install, hub.env write, etc.) just succeeds silently, since the
+    # stub never really executes any of it remotely.
+    if [[ "${GCLOUD_STUB_SSH_SUCCEEDS:-false}" != "true" ]]; then
+      echo "gcloud-stub: compute ssh not simulated (set GCLOUD_STUB_SSH_SUCCEEDS=true to enable)" >&2
+      exit 1
+    fi
+    require_project "$@"
+    require_flag zone "$@"
+    cmd="$(get_flag command "$@")" || cmd=""
+    case "$cmd" in
+      "echo ssh-ok")
+        echo ssh-ok
+        ;;
+      "uname -m")
+        echo "${GCLOUD_STUB_SSH_ARCH:-x86_64}"
+        ;;
+      *"useradd -r -M -N -g scion"*)
+        # The rendered NFS squash-identity script: its own docstring says
+        # it prints exactly "SQUASH_UID:SCION_GID" on success.
+        echo "${GCLOUD_STUB_SSH_SQUASH_IDS:-997:1001}"
+        ;;
+      *"test -f /home/scion/.scion/hub.env"*)
+        echo "no"
+        ;;
+      *"schema_version"*)
+        # The settings.yaml dev-mode write: this is the point create-mode
+        # wiring tests that opt into GCLOUD_STUB_SSH_SUCCEEDS stop at.
+        touch "${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
+        ;;
+    esac
+    exit 0
+    ;;
+  "compute scp "*)
+    if [[ "${GCLOUD_STUB_SSH_SUCCEEDS:-false}" != "true" ]]; then
+      echo "gcloud-stub: compute scp not simulated (set GCLOUD_STUB_SSH_SUCCEEDS=true to enable)" >&2
+      exit 1
+    fi
+    exit 0
     ;;
   "compute instance-templates describe")
     key="$(last_segment "${4:-}")"

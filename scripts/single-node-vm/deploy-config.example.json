@@ -18,6 +18,7 @@
     "location": "",
     "project": "",
     "namespace": "",
-    "pvc_name": ""
+    "pvc_name": "",
+    "shared_dir_image_size_gb": 20
   }
 }

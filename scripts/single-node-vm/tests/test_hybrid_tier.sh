@@ -419,14 +419,14 @@ test_nfs_squash_identity_script_asserts_uid_mismatch() {
 
 test_nfs_export_script_has_set_euo_pipefail() {
   local script
-  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub")"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
   assert_eq "set -euo pipefail" "$(echo "$script" | head -1)" \
     "the remote script must fail closed on any unexpected error"
 }
 
 test_nfs_export_script_root_owner_and_mode() {
   local script
-  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub")"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
   assert_contains "$script" "sudo mkdir -p /srv/scion-shared" "must create the export root"
   assert_contains "$script" "sudo chown scion:scion /srv/scion-shared" "the export root must be owned scion:scion"
   assert_contains "$script" "sudo chmod 2755 /srv/scion-shared" \
@@ -435,7 +435,7 @@ test_nfs_export_script_root_owner_and_mode() {
 
 test_nfs_export_script_writes_exports_file_using_the_render_function() {
   local script expected_line
-  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub")"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
   expected_line="$(hybrid_nfs_export_line "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123")"
   assert_contains "$script" "echo '${expected_line}' | sudo tee /etc/exports.d/scion-hub-demohub.exports" \
     "the exports file must be this hub's own file, containing exactly hybrid_nfs_export_line's output"
@@ -443,17 +443,135 @@ test_nfs_export_script_writes_exports_file_using_the_render_function() {
 
 test_nfs_export_script_exportfs_and_enable_service() {
   local script
-  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub")"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
   assert_contains "$script" "sudo exportfs -ra" "must re-export after writing the file"
-  assert_contains "$script" "sudo systemctl enable --now nfs-kernel-server" "must enable and start the service"
+  assert_contains "$script" "sudo systemctl enable --now nfs-server" \
+    "must enable and start the service under its canonical unit name, not the Debian package name"
 }
 
 test_nfs_export_script_installs_server_package_if_needed() {
   local script
-  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub")"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
   assert_contains "$script" "if ! dpkg -s nfs-kernel-server >/dev/null 2>&1; then" \
     "the install must be guarded, not run unconditionally on every re-run"
   assert_contains "$script" "apt-get install -y nfs-kernel-server" "must actually install the package"
+}
+
+test_nfs_export_script_creates_exports_d_directory() {
+  local script
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
+  assert_contains "$script" "sudo install -d -m 0755 /etc/exports.d" \
+    "/etc/exports.d does not exist on a stock jammy install; it must be created before the exports file is written into it"
+}
+
+test_nfs_export_script_v4_only_hardening() {
+  local script
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
+  assert_contains "$script" "/etc/nfs.conf.d/scion-hub.conf" "must write an NFS server config drop-in"
+  assert_contains "$script" "vers2=n" "NFSv2 must be disabled"
+  assert_contains "$script" "vers3=n" "NFSv3 must be disabled"
+  assert_contains "$script" "udp=n" "UDP must be disabled"
+  assert_contains "$script" "sudo systemctl mask --now rpcbind.service rpcbind.socket" \
+    "rpcbind is unneeded once v2/v3 are off and must be masked"
+}
+
+test_nfs_export_script_image_created_once_never_remkfs() {
+  local script
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
+  assert_contains "$script" "if [ ! -e ${HYBRID_NFS_IMAGE_PATH} ]; then" \
+    "the image must only be created (and mkfs'd) the first time -- an existing image is never re-created"
+  assert_contains "$script" "sudo truncate -s 20G ${HYBRID_NFS_IMAGE_PATH}" "must size the image from the IMAGE_SIZE_GB argument"
+  assert_contains "$script" "sudo mkfs.ext4 -F -q ${HYBRID_NFS_IMAGE_PATH}" "must format the image ext4"
+}
+
+test_nfs_export_script_mounts_before_exporting() {
+  local script
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
+  assert_contains "$script" "x-systemd.before=nfs-server.service" \
+    "the fstab entry must order the mount before the NFS server unit starts"
+  assert_contains "$script" "if ! mountpoint -q /srv/scion-shared; then" "must check whether the export root is already mounted"
+  assert_contains "$script" "sudo mount /srv/scion-shared" "must mount the export filesystem"
+}
+
+test_nfs_export_script_fails_closed_when_not_mounted() {
+  local script mount_check_line exit_line
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
+  # There must be a SECOND mountpoint check (the fail-closed guard, after
+  # the mount attempt) whose failure branch exits non-zero before the
+  # export root is ever chowned/chmoded or the exports file written.
+  assert_eq "2" "$(echo "$script" | grep -c 'mountpoint -q /srv/scion-shared')" \
+    "there must be both a before-mount check and a fail-closed check after attempting to mount"
+  mount_check_line="$(echo "$script" | grep -n 'mountpoint -q /srv/scion-shared' | tail -1 | cut -d: -f1)"
+  exit_line="$(echo "$script" | grep -n 'exit 1$' | head -1 | cut -d: -f1)"
+  assert_true "$([[ -n "$exit_line" && "$exit_line" -gt "$mount_check_line" ]] && echo true || echo false)" \
+    "the fail-closed exit must come after the second mountpoint check"
+  local chown_line
+  chown_line="$(echo "$script" | grep -n 'sudo chown scion:scion /srv/scion-shared' | head -1 | cut -d: -f1)"
+  assert_true "$([[ "$exit_line" -lt "$chown_line" ]] && echo true || echo false)" \
+    "the fail-closed exit must come before anything is chowned/exported"
+}
+
+# Executes the rendered export script end to end against fake system
+# binaries, proving the create-once and fail-closed behaviors actually
+# hold at runtime, not just in the rendered text -- text alone can't
+# distinguish "creates once" from "always creates" without running it
+# twice, and can't distinguish a fail-closed guard that actually stops
+# the script from one that's dead code after an early `set -e` exit
+# elsewhere. Every command the script invokes that could otherwise touch
+# a REAL absolute path on the machine running the tests (mkdir, install,
+# mkfs.ext4, truncate, mount, mountpoint, systemctl, dpkg, apt-get,
+# exportfs, chown, chmod, tee, and sudo itself) is faked and put first on
+# PATH; only `grep`'s own read of /etc/fstab is left real, since that's
+# read-only and safe everywhere this suite runs.
+_setup_export_script_fakebins() {
+  local dir="$1" mounted="$2"
+  mkdir -p "$dir"
+  printf '#!/bin/bash\necho "$*" >> "%s/mkfs.log"\n' "$dir" > "$dir/mkfs.ext4"
+  # Real truncate's last argument is the target file; touch it so a
+  # second run's "does the image already exist" check sees it.
+  # shellcheck disable=SC2016 # writing a literal fake-binary script body, not expanding now
+  printf '#!/bin/bash\necho "$*" >> "%s/truncate.log"\ntouch "${@: -1}"\n' "$dir" > "$dir/truncate"
+  printf '#!/bin/bash\n[ "%s" = "true" ] && exit 0 || exit 1\n' "$mounted" > "$dir/mountpoint"
+  printf '#!/bin/bash\nexit 0\n' > "$dir/mount"
+  printf '#!/bin/bash\nexit 0\n' > "$dir/mkdir"
+  printf '#!/bin/bash\nexit 0\n' > "$dir/install"
+  printf '#!/bin/bash\nexit 0\n' > "$dir/dpkg"
+  printf '#!/bin/bash\nexit 0\n' > "$dir/apt-get"
+  printf '#!/bin/bash\nexit 0\n' > "$dir/systemctl"
+  printf '#!/bin/bash\nexit 0\n' > "$dir/exportfs"
+  printf '#!/bin/bash\nexit 0\n' > "$dir/chown"
+  printf '#!/bin/bash\nexit 0\n' > "$dir/chmod"
+  printf '#!/bin/bash\n"$@"\n' > "$dir/sudo"
+  printf '#!/bin/bash\ncat >> "%s/tee.log"\n' "$dir" > "$dir/tee"
+  chmod +x "$dir"/mkfs.ext4 "$dir"/truncate "$dir"/mountpoint "$dir"/mount "$dir"/mkdir "$dir"/install \
+    "$dir"/dpkg "$dir"/apt-get "$dir"/systemctl "$dir"/exportfs "$dir"/chown "$dir"/chmod "$dir"/sudo "$dir"/tee
+}
+
+test_probe_export_script_executed_fails_closed_when_never_mounts() {
+  local d out rc script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "false"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" "must exit non-zero when the export root never becomes a mountpoint"
+  assert_contains "$out" "is not a mountpoint" "must explain why it refused"
+  assert_false "$([[ -f "${d}/tee.log" ]] && grep -q "scion-hub-demohub.exports" "${d}/tee.log" 2>/dev/null && echo true)" \
+    "must never write the exports file when the export root isn't actually mounted"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_creates_image_only_once() {
+  local d script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
+  assert_eq "1" "$(wc -l < "${d}/mkfs.log" 2>/dev/null || echo 0)" "the first run must format the image exactly once"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
+  assert_eq "1" "$(wc -l < "${d}/mkfs.log" 2>/dev/null || echo 0)" "a second run must never re-format an image that already exists"
+  rm -rf "$d"
 }
 
 # =====================================================================
@@ -466,12 +584,27 @@ test_settings_shared_dir_storage_yaml_fields() {
   local yaml
   yaml="$(hybrid_settings_shared_dir_storage_yaml "10.128.0.5" "/srv/scion-shared" "scion-hub-demohub-shared")"
   assert_contains "$yaml" "backend: nfs" "backend must be nfs"
-  assert_contains "$yaml" 'mount_root: "/srv/scion-shared"' "mount_root must be the export root"
+  # mount_root/id must split so mount_root/id resolves back to the export
+  # root -- the Docker broker computes its local mount path as
+  # filepath.Join(mount_root, shares[0].id) -- not mount_root alone
+  # equal to the export root, which was the pre-fix bug (an extra path
+  # segment, so Docker and GKE ended up with two different trees).
+  assert_contains "$yaml" 'mount_root: "/srv"' "mount_root must be the export root's parent directory"
+  assert_contains "$yaml" 'id: "scion-shared"' "the share id must be the export root's base name"
   assert_contains "$yaml" 'subpath_root: "projects"' "subpath_root must be the fixed projects subdirectory"
   assert_contains "$yaml" 'server: "10.128.0.5"' "the share's server must be the VM's internal IP"
-  assert_contains "$yaml" 'export: "/srv/scion-shared"' "the share's export path must be the export root"
-  assert_contains "$yaml" 'pv_name: "scion-hub-demohub-shared"' "the share's pv_name must be the PV this hub's pods bind to"
-  assert_contains "$yaml" 'id: "shared"' "the share must have a stable id"
+  assert_contains "$yaml" 'export: "/srv/scion-shared"' "the share's export path must be the full export root"
+  assert_contains "$yaml" 'pv_name: "scion-hub-demohub-shared"' \
+    "the share's pv_name field must carry the PVC name (that's what the Go side consumes as the claimName), not the PV's own name"
+}
+
+test_settings_shared_dir_storage_yaml_mount_root_and_id_rejoin_to_export_root() {
+  local yaml mount_root share_id
+  yaml="$(hybrid_settings_shared_dir_storage_yaml "10.128.0.5" "/srv/scion-shared" "scion-hub-demohub-shared")"
+  mount_root="$(echo "$yaml" | "$PYTHON" -c "import sys; print(sys.stdin.read().split('mount_root: \"')[1].split('\"')[0])")"
+  share_id="$(echo "$yaml" | "$PYTHON" -c "import sys; print(sys.stdin.read().split('id: \"')[1].split('\"')[0])")"
+  assert_eq "/srv/scion-shared" "${mount_root}/${share_id}" \
+    "mount_root joined with id must equal the export root, matching the PV's nfs.path and the Docker broker's own local mount path"
 }
 
 test_settings_shared_dir_storage_yaml_indented_under_server() {
@@ -531,22 +664,36 @@ test_cloud_run_label_args_existing_service_no_label() {
   assert_eq "" "$args" "an already-existing service is a redeploy and must not be (re-)labeled"
 }
 
-test_cloud_run_label_args_describe_error_fails_safe_no_label() {
+test_cloud_run_label_args_describe_error_but_list_confirms_exists_no_label() {
   fresh_gcloud_state
   set_run_service_describe_error "demohub-iap-proxy"
+  seed_run_service_exists "demohub-iap-proxy"
   local args
   args="$(hybrid_cloud_run_label_args "demohub-iap-proxy" "$PROJECT" "us-central1" "demohub")"
   assert_eq "" "$args" \
-    "a describe error that isn't NOT_FOUND must fail safe toward assuming the service exists (no label), not toward labeling it"
+    "describe can fail (a permissions problem, for example) while list still positively confirms the service exists -- no label"
 }
 
-test_cloud_run_label_args_permission_masked_not_found_fails_safe() {
+test_cloud_run_label_args_describe_error_and_list_error_fails_safe_no_label() {
   fresh_gcloud_state
-  set_run_service_describe_permission_masked "demohub-iap-proxy"
+  set_run_service_describe_error "demohub-iap-proxy"
+  set_run_service_list_error
   local args
   args="$(hybrid_cloud_run_label_args "demohub-iap-proxy" "$PROJECT" "us-central1" "demohub")"
   assert_eq "" "$args" \
-    "a permission-denied message that also happens to say 'not found' must never be read as NOT_FOUND"
+    "when neither describe nor the positive-absence list call succeeds, existence is truly unknown and must fail safe toward no label"
+}
+
+test_cloud_run_label_args_real_cannot_find_service_text_still_yields_label() {
+  fresh_gcloud_state
+  # Real gcloud's Cloud Run 404 text ("Cannot find service [X]") carries
+  # none of the NOT_FOUND/404 tokens the old text-matching implementation
+  # looked for -- this proves the label still gets added via the `list`
+  # call regardless of what describe's error text says.
+  local args
+  args="$(hybrid_cloud_run_label_args "demohub-iap-proxy" "$PROJECT" "us-central1" "demohub")"
+  assert_eq "--labels=scion-deployment=demohub" "$args" \
+    "the stub's describe error is real gcloud's own 'Cannot find service' text, which must still resolve to a label via list"
 }
 
 # =====================================================================
@@ -594,6 +741,80 @@ test_kubectl_not_found_matches_NotFound_reason() {
 test_kubectl_not_found_rejects_permission_masked_message() {
   assert_true "$(_hybrid_kubectl_not_found 'Error from server: pv "x" not found or permission denied' && echo false || echo true)" \
     "a permission-denied message that also happens to say 'not found' must never be read as NotFound"
+}
+
+# Realistic fixtures against real gcloud/kubectl error corpora (not
+# invented text), proving the permission/forbidden exclusion is doing
+# real work (a genuine not-found TOKEN alongside permission wording must
+# still read as "not gone"), and that a bare 404-shaped substring
+# embedded in an unrelated name, URL, or timeout message is never
+# mistaken for gcloud's own absence signal.
+test_gcloud_not_found_rejects_404_with_permission_text() {
+  assert_true "$(_hybrid_gcloud_not_found 'ResponseError: code=404, message=Not found or permission denied' && echo false || echo true)" \
+    "a 404 whose text also mentions permission must not read as gone"
+}
+test_gcloud_not_found_rejects_cluster_named_with_404_in_url() {
+  assert_true "$(_hybrid_gcloud_not_found "ERROR: gcloud crashed (ConnectionError): HTTPSConnectionPool(host='container.googleapis.com', port=443): Max retries exceeded with url: /v1/projects/p1/locations/us-central1/clusters/hub-404?alt=json" && echo false || echo true)" \
+    "a cluster literally named with '404' in the URL must not read as gone"
+}
+test_gcloud_not_found_rejects_project_id_with_404_in_url() {
+  assert_true "$(_hybrid_gcloud_not_found "ERROR: gcloud crashed (ConnectionError): HTTPSConnectionPool(host='container.googleapis.com', port=443): Max retries exceeded with url: /v1/projects/team-404-prod/locations/us-central1/clusters/c1?alt=json" && echo false || echo true)" \
+    "a project id containing '404' must not read as gone"
+}
+test_gcloud_not_found_rejects_proxy_status_line_with_404_in_request_id() {
+  assert_true "$(_hybrid_gcloud_not_found 'ERROR: HTTPError 502: Bad gateway from proxy 10.0.0.1 (request 404-7a1)' && echo false || echo true)" \
+    "an unrelated 502 whose request id happens to contain '404' must not read as gone"
+}
+test_gcloud_not_found_rejects_timeout_seconds_404() {
+  assert_true "$(_hybrid_gcloud_not_found 'ERROR: Timeout after 404 seconds' && echo false || echo true)" \
+    "a timeout duration that happens to be 404 seconds must not read as gone"
+}
+test_gcloud_not_found_rejects_service_unavailable() {
+  assert_true "$(_hybrid_gcloud_not_found 'ResponseError: code=503, message=The service is currently unavailable.' && echo false || echo true)" \
+    "a 503 must not read as gone"
+}
+test_gcloud_not_found_rejects_quota_exceeded() {
+  assert_true "$(_hybrid_gcloud_not_found 'ResponseError: code=429, message=Quota exceeded for quota metric' && echo false || echo true)" \
+    "a 429 must not read as gone"
+}
+test_gcloud_not_found_rejects_missing_required_flag() {
+  assert_true "$(_hybrid_gcloud_not_found 'One of [--location, --region, --zone] must be supplied.' && echo false || echo true)" \
+    "a usage error must not read as gone"
+}
+test_gcloud_not_found_rejects_did_you_mean_suggestion() {
+  assert_true "$(_hybrid_gcloud_not_found "ERROR: (gcloud.container.clusters.describe) NOT_FOUND: Did you mean 'my-cluster'?" && echo false || echo true)" \
+    "a suggestion response means gcloud found something close, not that the requested name is confirmed absent"
+}
+
+test_kubectl_not_found_matches_real_pvc_and_namespace_fixtures() {
+  assert_true "$(_hybrid_kubectl_not_found 'Error from server (NotFound): persistentvolumeclaims "scion-hub-h-shared" not found' && echo true || echo false)" \
+    "a real PVC not-found message must be recognized"
+  assert_true "$(_hybrid_kubectl_not_found 'Error from server (NotFound): namespaces "scion-hub-h" not found' && echo true || echo false)" \
+    "a real namespace not-found message must be recognized"
+}
+test_kubectl_not_found_rejects_forbidden_with_notfound_token() {
+  assert_true "$(_hybrid_kubectl_not_found 'Error from server (Forbidden): persistentvolumeclaims "x" is forbidden: User "u" cannot get resource "persistentvolumeclaims" in API group "" in the namespace "ns"' && echo false || echo true)" \
+    "a Forbidden response must never read as absent"
+}
+test_kubectl_not_found_rejects_connection_timeout() {
+  assert_true "$(_hybrid_kubectl_not_found 'Unable to connect to the server: dial tcp 10.1.2.3:443: i/o timeout' && echo false || echo true)" \
+    "a connectivity failure must not read as absent"
+}
+test_kubectl_not_found_rejects_unrecognized_resource_type() {
+  assert_true "$(_hybrid_kubectl_not_found "error: the server doesn't have a resource type \"pvc\"" && echo false || echo true)" \
+    "an unrecognized resource type error must not read as absent"
+}
+test_kubectl_not_found_rejects_missing_auth_plugin() {
+  assert_true "$(_hybrid_kubectl_not_found 'Unable to connect to the server: getting credentials: exec: executable gke-gcloud-auth-plugin not found' && echo false || echo true)" \
+    "a missing-auth-plugin error (which itself says 'not found') must not read as the object being absent"
+}
+test_kubectl_not_found_rejects_unauthorized() {
+  assert_true "$(_hybrid_kubectl_not_found 'error: You must be logged in to the server (Unauthorized)' && echo false || echo true)" \
+    "an unauthorized error must not read as absent"
+}
+test_kubectl_not_found_rejects_generic_server_could_not_find_resource() {
+  assert_true "$(_hybrid_kubectl_not_found 'Error from server (NotFound): the server could not find the requested resource' && echo false || echo true)" \
+    "the API server's own generic 'could not find the requested resource' (an endpoint/version skew, not the object being checked) must not read as absent"
 }
 
 # =====================================================================
@@ -678,6 +899,21 @@ test_k8s_setup_kubeconfig_missing_kubectl_fails() {
   assert_contains "$RUN_OUTPUT" "kubectl is required" "error should say why"
 }
 
+test_k8s_setup_kubeconfig_missing_auth_plugin_fails() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  local d
+  d="$(mktemp -d)"
+  ln -s "$(command -v kubectl)" "${d}/kubectl"
+  local old_path="$PATH"
+  PATH="${d}"
+  run_expect_fail hybrid_k8s_setup_kubeconfig
+  PATH="$old_path"
+  rm -rf "$d"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "missing gke-gcloud-auth-plugin must fail the run even when kubectl itself is present"
+  assert_contains "$RUN_OUTPUT" "gke-gcloud-auth-plugin is required" "error should say why"
+}
+
 test_k8s_setup_kubeconfig_get_credentials_failure() {
   fresh_gcloud_state
   GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
@@ -685,6 +921,106 @@ test_k8s_setup_kubeconfig_get_credentials_failure() {
   run_expect_fail hybrid_k8s_setup_kubeconfig
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a get-credentials failure must fail the run"
   assert_contains "$RUN_OUTPUT" "Could not get credentials" "error should explain what failed"
+}
+
+# Proves every kubectl call uses HYBRID_KUBECONFIG specifically, never an
+# ambient value -- even when the caller's own shell has KUBECONFIG set to
+# something else (run.sh exports exactly such a sentinel, bogus value
+# globally; this test additionally overrides it to a second, distinct
+# bogus value of its own, to prove the property doesn't depend on which
+# ambient value happens to be set). Runs the full create-mode surface
+# (preflight, ensure, teardown check, teardown delete) through one
+# KUBECONFIG override, not just setup_kubeconfig alone.
+test_probe_every_kubectl_call_used_task_private_kubeconfig() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  local saved="${KUBECONFIG-__unset__}"
+  export KUBECONFIG="/nonexistent/a-different-ambient-kubeconfig-for-this-test"
+  hybrid_k8s_preflight "$K8S_HUB"
+  local preflight_kubeconfig="$HYBRID_KUBECONFIG"
+  hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP" >/dev/null 2>&1
+  hybrid_k8s_teardown_check "$K8S_HUB" >/dev/null 2>&1
+  hybrid_k8s_teardown_delete >/dev/null 2>&1
+  local total good
+  total="$(kubectl_log | grep -c . || true)"
+  good="$(kubectl_log | grep -c "^KUBECONFIG=${preflight_kubeconfig} " || true)"
+  assert_true "$([[ "$total" -gt 0 ]] && echo true || echo false)" "probe must have exercised kubectl"
+  assert_eq "$total" "$good" "every kubectl call must use HYBRID_KUBECONFIG, not the ambient KUBECONFIG"
+  assert_eq "false" "$([[ -e /nonexistent/a-different-ambient-kubeconfig-for-this-test ]] && echo true || echo false)" \
+    "get-credentials must never write the ambient KUBECONFIG"
+  rm -f "$preflight_kubeconfig" "$HYBRID_KUBECONFIG"
+  if [[ "$saved" == "__unset__" ]]; then unset KUBECONFIG; else export KUBECONFIG="$saved"; fi
+}
+
+# =====================================================================
+# hybrid_k8s_preflight: everything about the Kubernetes objects that
+# doesn't depend on the VM's IP, meant to run right after
+# hybrid_discover, before the VM/NFS/firewall rules exist.
+# =====================================================================
+
+test_k8s_preflight_refuses_unmarked_pv_without_creating_namespace() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_k8s_pv_unmarked "$K8S_PV"
+  run_expect_fail hybrid_k8s_preflight "$K8S_HUB"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unmarked PV must refuse the run"
+  assert_contains "$RUN_OUTPUT" "without this deployment's marker" "error should explain why"
+  assert_false "$([[ -f "${KUBECTL_STUB_STATE_DIR}/namespace/${K8S_NS}.json" ]] && echo true)" \
+    "the namespace must never be created after a PV refusal -- namespace creation only happens once the PV/PVC checks pass"
+  # hybrid_k8s_preflight ran inside run_expect_fail's own subshell, so the
+  # HYBRID_KUBECONFIG it set never reaches this shell to clean up here --
+  # the same pre-existing limitation test_k8s_setup_kubeconfig_get_
+  # credentials_failure above also lives with.
+}
+
+test_k8s_preflight_refuses_unmarked_pvc() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_k8s_pvc_unmarked "$K8S_PVC" "$K8S_NS"
+  run_expect_fail hybrid_k8s_preflight "$K8S_HUB"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unmarked PVC must refuse the run"
+  assert_contains "$RUN_OUTPUT" "without this deployment's marker" "error should explain why"
+}
+
+test_k8s_preflight_pv_non_ip_drift_fails() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/other-path" "$K8S_NS" "$K8S_PVC"
+  run_expect_fail hybrid_k8s_preflight "$K8S_HUB"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a drifted (non-IP) PV field must fail before anything else is created"
+  assert_contains "$RUN_OUTPUT" "path:" "error should name the drifted field"
+}
+
+test_k8s_preflight_does_not_check_pv_server_ip() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  # An IP that will NOT match the eventual VM IP -- preflight must not
+  # care, since it runs before the VM (and its IP) exist at all.
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "10.99.99.99" "/srv/scion-shared" "$K8S_NS" "$K8S_PVC"
+  hybrid_k8s_preflight "$K8S_HUB"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_preflight_creates_namespace_when_absent_and_pv_pvc_checks_pass() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_preflight "$K8S_HUB"
+  assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/namespace/${K8S_NS}.json" ]] && echo true || echo false)" \
+    "the namespace must be created when absent and nothing else refused first"
+  assert_false "$([[ -f "${KUBECTL_STUB_STATE_DIR}/pv/${K8S_PV}.json" ]] && echo true)" \
+    "the PV must NOT be created here -- creation stays in hybrid_k8s_ensure_objects, once the VM's IP is known"
+  assert_false "$([[ -f "${KUBECTL_STUB_STATE_DIR}/pvc/${K8S_NS}__${K8S_PVC}.json" ]] && echo true)" \
+    "the PVC must NOT be created here either"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_preflight_unmarked_namespace_used_as_is() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_k8s_namespace_unmarked "$K8S_NS"
+  hybrid_k8s_preflight "$K8S_HUB"
+  assert_eq "0" "$(kubectl_log | grep -c 'create -f' || true)" "an existing, unmarked namespace must not be re-created (labeled)"
+  rm -f "$HYBRID_KUBECONFIG"
 }
 
 test_k8s_ensure_creates_all_three_when_absent() {
@@ -726,8 +1062,8 @@ test_k8s_ensure_unmarked_namespace_used_not_labeled_not_refused() {
   hybrid_k8s_setup_kubeconfig
   seed_k8s_namespace_unmarked "$K8S_NS"
   hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
-  assert_eq "2" "$(kubectl_log | grep -c 'apply -f' || true)" \
-    "only the PV and PVC should be applied -- the unmarked-but-usable namespace must not be re-applied (labeled)"
+  assert_eq "2" "$(kubectl_log | grep -c 'create -f' || true)" \
+    "only the PV and PVC should be created -- the unmarked-but-usable namespace must not be re-created (labeled)"
   rm -f "$HYBRID_KUBECONFIG"
 }
 
@@ -847,6 +1183,65 @@ test_k8s_teardown_check_get_error_aborts() {
   set_k8s_get_error namespace "$K8S_NS"
   hybrid_k8s_teardown_check "$K8S_HUB"
   assert_eq "true" "$HYBRID_K8S_TEARDOWN_FAILED" "an unknown check result must abort, not be treated as absent"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_check_refuses_when_pod_references_pvc() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pvc "$K8S_PVC" "$K8S_NS" "$K8S_HUB" "$K8S_PV"
+  seed_k8s_pod_using_pvc "$K8S_NS" "some-agent-pod" "$K8S_PVC"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  assert_eq "true" "$HYBRID_K8S_TEARDOWN_FAILED" "a pod still mounting the PVC must refuse teardown before any delete"
+  local k found=false
+  for k in ${HYBRID_K8S_TEARDOWN_DELETE[@]+"${HYBRID_K8S_TEARDOWN_DELETE[@]}"}; do
+    [[ "$k" == "pvc" ]] && found=true
+  done
+  assert_eq "false" "$found" "the PVC must not be queued for deletion while a pod still mounts it"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_check_pods_get_error_aborts() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pvc "$K8S_PVC" "$K8S_NS" "$K8S_HUB" "$K8S_PV"
+  set_k8s_pods_get_error "$K8S_NS"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  assert_eq "true" "$HYBRID_K8S_TEARDOWN_FAILED" "an unknown pod-reference check must abort, not be treated as safe to delete"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_check_no_referencing_pods_proceeds() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pvc "$K8S_PVC" "$K8S_NS" "$K8S_HUB" "$K8S_PV"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  assert_eq "false" "$HYBRID_K8S_TEARDOWN_FAILED" "no referencing pods must not fail the preflight"
+  local k found=false
+  for k in ${HYBRID_K8S_TEARDOWN_DELETE[@]+"${HYBRID_K8S_TEARDOWN_DELETE[@]}"}; do
+    [[ "$k" == "pvc" ]] && found=true
+  done
+  assert_eq "true" "$found" "the PVC must still be queued when nothing references it"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_delete_bounds_every_delete_with_a_timeout() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pvc "$K8S_PVC" "$K8S_NS" "$K8S_HUB" "$K8S_PV"
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "$K8S_NS" "$K8S_PVC"
+  seed_k8s_namespace "$K8S_NS" "$K8S_HUB"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  hybrid_k8s_teardown_delete
+  local deletes
+  deletes="$(kubectl_log | grep -c ' delete ' || true)"
+  local timed_out
+  timed_out="$(kubectl_log | grep ' delete ' | grep -c -- '--timeout=' || true)"
+  assert_eq "$deletes" "$timed_out" "every kubectl delete call must carry an explicit --timeout"
   rm -f "$HYBRID_KUBECONFIG"
 }
 
@@ -1747,4 +2142,52 @@ test_discover_no_node_pools_message_pinned() {
   seed_cluster "emptycluster2" "$NETWORK"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_contains "$RUN_OUTPUT" "no managed instance groups" "the no-node-pools message text should be pinned"
+}
+
+# =====================================================================
+# _hybrid_registry_is_loopback: every spelling of "this VM itself" that
+# a container_images.registry value could take, tested one clause at a
+# time so a single collapsed/overbroad pattern can't hide behind another
+# passing case.
+# =====================================================================
+
+test_registry_loopback_bare_localhost() {
+  assert_true "$(_hybrid_registry_is_loopback 'localhost/scion' && echo true || echo false)" \
+    "a bare localhost/... registry must be refused"
+}
+test_registry_loopback_localhost_with_port() {
+  assert_true "$(_hybrid_registry_is_loopback 'localhost:5000/scion' && echo true || echo false)" \
+    "localhost with an explicit port must be refused"
+}
+test_registry_loopback_127_bare() {
+  assert_true "$(_hybrid_registry_is_loopback '127.0.0.1/scion' && echo true || echo false)" \
+    "a bare 127.0.0.1 registry must be refused"
+}
+test_registry_loopback_127_with_port() {
+  assert_true "$(_hybrid_registry_is_loopback '127.0.0.1:5000/scion' && echo true || echo false)" \
+    "127.0.0.1 with a port must be refused"
+}
+test_registry_loopback_127_other_host() {
+  assert_true "$(_hybrid_registry_is_loopback '127.5.5.5/scion' && echo true || echo false)" \
+    "the whole 127.0.0.0/8 range must be refused, not just 127.0.0.1"
+}
+test_registry_loopback_ipv6_bare() {
+  assert_true "$(_hybrid_registry_is_loopback '[::1]/scion' && echo true || echo false)" \
+    "a bare IPv6 loopback literal must be refused"
+}
+test_registry_loopback_ipv6_with_port() {
+  assert_true "$(_hybrid_registry_is_loopback '[::1]:5000/scion' && echo true || echo false)" \
+    "an IPv6 loopback literal with a port must be refused"
+}
+test_registry_loopback_zero_address() {
+  assert_true "$(_hybrid_registry_is_loopback '0.0.0.0:5000/scion' && echo true || echo false)" \
+    "0.0.0.0 (binds-everywhere, reaches the node itself) must be refused"
+}
+test_registry_loopback_rejects_legitimate_registry() {
+  assert_true "$(_hybrid_registry_is_loopback 'us-docker.pkg.dev/demo-project/scion' && echo false || echo true)" \
+    "a real Artifact Registry path must never be refused"
+}
+test_registry_loopback_rejects_lookalike_host() {
+  assert_true "$(_hybrid_registry_is_loopback '1270.0.0.1/scion' && echo false || echo true)" \
+    "a host that merely starts with the digits 127 but isn't in 127.0.0.0/8 must not be refused"
 }

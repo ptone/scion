@@ -333,10 +333,23 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   # used throughout this tier's other checks.
   HYBRID_K8S_TEARDOWN_READY=false
   K8S_GKE_NAME="$(config_get 'gke_target.name' '')"
+  if [[ -z "$K8S_GKE_NAME" && -z "$CONFIG_FILE" ]]; then
+    echo ""
+    warn "No --config given, so this teardown cannot tell whether a hybrid tier was ever configured for hub '${HUB_NAME}'. If it was, its Kubernetes objects (default names: namespace $(hybrid_k8s_default_namespace "$HUB_NAME"), PVC $(hybrid_k8s_default_pvc_name "$HUB_NAME"), PV $(hybrid_k8s_pv_name "$HUB_NAME") -- or whatever gke_target.namespace/pvc_name were customized to) will NOT be checked or deleted by this run. Re-run with --config pointing at the same config file used to deploy, to have them checked."
+  fi
   if [[ -n "$K8S_GKE_NAME" ]]; then
-    GKE_NAME="$K8S_GKE_NAME"
     GKE_LOCATION="$(config_get 'gke_target.location' '')"
-    GKE_PROJECT="$(config_get 'gke_target.project' "$PROJECT_ID")"
+    GKE_PROJECT_RAW="$(config_get 'gke_target.project' '')"
+    GKE_NAMESPACE_RAW="$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$HUB_NAME")")"
+    GKE_PVC_NAME_RAW="$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$HUB_NAME")")"
+    GKE_NAME="$K8S_GKE_NAME"
+    GKE_PROJECT="${GKE_PROJECT_RAW:-$PROJECT_ID}"
+    # Same field-syntax and project-match validation the create path
+    # applies via hybrid_read_config -- a malformed or foreign-project
+    # gke_target must be refused here too, not just on create.
+    _hybrid_validate_target_fields "$GKE_NAME" "$GKE_LOCATION" "$GKE_PROJECT" "$GKE_NAMESPACE_RAW" "$GKE_PVC_NAME_RAW" "$PROJECT_ID"
+    GKE_NAMESPACE="$GKE_NAMESPACE_RAW"
+    GKE_PVC_NAME="$GKE_PVC_NAME_RAW"
     echo ""
     echo "Checking hybrid-tier Kubernetes object ownership:"
     CLUSTER_DESCRIBE_ERR="$(mktemp)"
@@ -360,11 +373,23 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     rm -f "${CLUSTER_DESCRIBE_ERR}"
   fi
 
+  # _hybrid_k8s_display KIND — "kind/name" for the kind hybrid_k8s_
+  # teardown_check queued, using the names it resolved (HYBRID_K8S_PVC_
+  # NAME/HYBRID_K8S_PV_NAME/HYBRID_K8S_NAMESPACE), for both the
+  # will-delete list below and the final summary.
+  _hybrid_k8s_display() {
+    case "$1" in
+      pvc) echo "persistentvolumeclaim/${HYBRID_K8S_PVC_NAME}" ;;
+      pv) echo "persistentvolume/${HYBRID_K8S_PV_NAME}" ;;
+      namespace) echo "namespace/${HYBRID_K8S_NAMESPACE}" ;;
+    esac
+  }
+
   echo ""
   echo "The following resources will be deleted:"
   if [[ "$HYBRID_K8S_TEARDOWN_READY" == "true" ]]; then
     for k8s_kind in ${HYBRID_K8S_TEARDOWN_DELETE[@]+"${HYBRID_K8S_TEARDOWN_DELETE[@]}"}; do
-      echo "  Kubernetes object: ${k8s_kind} (hybrid tier)"
+      echo "  Kubernetes object: $(_hybrid_k8s_display "$k8s_kind") (hybrid tier)"
     done
   fi
   echo "  Cloud Run service: ${PROXY_SERVICE} (region: ${REGION})"
@@ -387,128 +412,192 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     fi
   fi
 
+  # Stop at the first failure: a hybrid-tier Kubernetes object delete
+  # failure keeps Cloud Run, the VM, and every resource below untouched
+  # (K8S_TEARDOWN_OK gates all of them) rather than only skipping the
+  # rest of the k8s sub-chain -- the k8s objects are deleted first,
+  # before anything else, precisely so a failure here can still protect
+  # everything that hasn't been touched yet. This still reaches the
+  # summary below, which reports every resource kept, not just the ones
+  # actually deleted.
+  K8S_TEARDOWN_OK=true
+  PROXY_SERVICE_DELETED=false
+  VM_DELETED=false
+  VM_GONE=false
+  NAT_DELETED=false
+  ROUTER_DELETED=false
+  SA_DELETED=false
+  FW_RULE_DELETED=false
+  HYBRID_TEARDOWN_DELETED=()
+
   if [[ "$HYBRID_K8S_TEARDOWN_READY" == "true" ]]; then
     info "Deleting hybrid-tier Kubernetes objects..."
     hybrid_k8s_teardown_delete
     if [[ ${#HYBRID_K8S_TEARDOWN_DELETE_FAILED[@]} -gt 0 ]]; then
       TEARDOWN_HAD_FAILURE=true
+      K8S_TEARDOWN_OK=false
+      err "Stopping teardown here: a hybrid-tier Kubernetes object failed to delete. Cloud Run, the VM, and every other resource below are being kept untouched; re-run teardown once the failure above is resolved."
     fi
   fi
 
-  info "Deleting Cloud Run IAP proxy service..."
-  if gcloud run services delete "${PROXY_SERVICE}" \
-      --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${PROXY_SERVICE}"
-  else
-    warn "Cloud Run service ${PROXY_SERVICE} not found or already deleted."
-  fi
+  if [[ "$K8S_TEARDOWN_OK" == "true" ]]; then
+    info "Deleting Cloud Run IAP proxy service..."
+    if gcloud run services delete "${PROXY_SERVICE}" \
+        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+      echo "  Deleted: ${PROXY_SERVICE}"
+      PROXY_SERVICE_DELETED=true
+    else
+      warn "Cloud Run service ${PROXY_SERVICE} not found or already deleted."
+    fi
 
-  # The hybrid NFS firewall rules are only safe to delete once this VM is
-  # confirmed gone. With the tier off (no hybrid rules queued), a VM
-  # delete failure warns and continues exactly as it always has --
-  # nothing downstream depends on the VM's fate. With the tier on, "gone"
-  # must be a positive, project-wide answer rather than inferred from a
-  # `describe` in a possibly-wrong zone (ZONE above falls back to a guess
-  # when its own discovery call fails): a non-zero exit from the check
-  # itself means unknown, and unknown is never treated as gone.
-  info "Deleting GCE VM..."
-  VM_GONE=false
-  if gcloud compute instances delete "${INSTANCE_NAME}" \
-      --zone="${ZONE}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${INSTANCE_NAME}"
-    VM_GONE=true
-  elif [[ ${#HYBRID_TEARDOWN_DELETE[@]} -eq 0 ]]; then
-    warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
-    VM_GONE=true
-  else
-    VM_LIST_ERR_FILE="$(mktemp)"
-    # This list has no --zones, so it's a project-wide AggregatedList. The
-    # SDK's default compute/allow_partial_error=true downgrades an
-    # UNREACHABLE zone to a stderr warning and exit 0 with that zone's
-    # instances silently missing from the output -- which would read as
-    # "gone" even when the VM's own delete just failed because that same
-    # zone is down. Setting this to false makes a partial result raise
-    # instead, landing in the "could not confirm" branch below rather than
-    # being misread as "gone".
-    if VM_LIST_OUTPUT="$(CLOUDSDK_COMPUTE_ALLOW_PARTIAL_ERROR=false gcloud compute instances list --project="${PROJECT_ID}" \
-        --filter="name=${INSTANCE_NAME}" --format="value(name)" 2>"${VM_LIST_ERR_FILE}")"; then
-      if [[ -z "$VM_LIST_OUTPUT" ]]; then
-        warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
-        VM_GONE=true
+    # The hybrid NFS firewall rules are only safe to delete once this VM
+    # is confirmed gone. With the tier off (no hybrid rules queued), a VM
+    # delete failure warns and continues exactly as it always has --
+    # nothing downstream depends on the VM's fate. With the tier on,
+    # "gone" must be a positive, project-wide answer rather than inferred
+    # from a `describe` in a possibly-wrong zone (ZONE above falls back
+    # to a guess when its own discovery call fails): a non-zero exit from
+    # the check itself means unknown, and unknown is never treated as
+    # gone.
+    info "Deleting GCE VM..."
+    if gcloud compute instances delete "${INSTANCE_NAME}" \
+        --zone="${ZONE}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+      echo "  Deleted: ${INSTANCE_NAME}"
+      VM_GONE=true
+      VM_DELETED=true
+    elif [[ ${#HYBRID_TEARDOWN_DELETE[@]} -eq 0 ]]; then
+      warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
+      VM_GONE=true
+    else
+      VM_LIST_ERR_FILE="$(mktemp)"
+      # This list has no --zones, so it's a project-wide AggregatedList.
+      # The SDK's default compute/allow_partial_error=true downgrades an
+      # UNREACHABLE zone to a stderr warning and exit 0 with that zone's
+      # instances silently missing from the output -- which would read as
+      # "gone" even when the VM's own delete just failed because that
+      # same zone is down. Setting this to false makes a partial result
+      # raise instead, landing in the "could not confirm" branch below
+      # rather than being misread as "gone".
+      if VM_LIST_OUTPUT="$(CLOUDSDK_COMPUTE_ALLOW_PARTIAL_ERROR=false gcloud compute instances list --project="${PROJECT_ID}" \
+          --filter="name=${INSTANCE_NAME}" --format="value(name)" 2>"${VM_LIST_ERR_FILE}")"; then
+        if [[ -z "$VM_LIST_OUTPUT" ]]; then
+          warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
+          VM_GONE=true
+        else
+          err "Failed to delete GCE VM ${INSTANCE_NAME}; it still exists."
+          TEARDOWN_HAD_FAILURE=true
+        fi
       else
-        err "Failed to delete GCE VM ${INSTANCE_NAME}; it still exists."
+        err "Failed to delete GCE VM ${INSTANCE_NAME}, and could not confirm whether it still exists:"
+        err "  $(cat "${VM_LIST_ERR_FILE}")"
         TEARDOWN_HAD_FAILURE=true
       fi
-    else
-      err "Failed to delete GCE VM ${INSTANCE_NAME}, and could not confirm whether it still exists:"
-      err "  $(cat "${VM_LIST_ERR_FILE}")"
-      TEARDOWN_HAD_FAILURE=true
+      rm -f "${VM_LIST_ERR_FILE}"
     fi
-    rm -f "${VM_LIST_ERR_FILE}"
-  fi
 
-  info "Deleting Cloud NAT..."
-  if gcloud compute routers nats delete "${NAT_NAME}" \
-      --router="${ROUTER_NAME}" \
-      --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${NAT_NAME}"
-  else
-    warn "Cloud NAT ${NAT_NAME} not found or already deleted."
-  fi
+    info "Deleting Cloud NAT..."
+    if gcloud compute routers nats delete "${NAT_NAME}" \
+        --router="${ROUTER_NAME}" \
+        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+      echo "  Deleted: ${NAT_NAME}"
+      NAT_DELETED=true
+    else
+      warn "Cloud NAT ${NAT_NAME} not found or already deleted."
+    fi
 
-  info "Deleting Cloud Router..."
-  if gcloud compute routers delete "${ROUTER_NAME}" \
-      --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${ROUTER_NAME}"
-  else
-    warn "Cloud Router ${ROUTER_NAME} not found or already deleted."
-  fi
+    info "Deleting Cloud Router..."
+    if gcloud compute routers delete "${ROUTER_NAME}" \
+        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+      echo "  Deleted: ${ROUTER_NAME}"
+      ROUTER_DELETED=true
+    else
+      warn "Cloud Router ${ROUTER_NAME} not found or already deleted."
+    fi
 
-  info "Deleting service account..."
-  if gcloud iam service-accounts delete "${SA_EMAIL}" \
-      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${SA_EMAIL}"
-  else
-    warn "Service account ${SA_EMAIL} not found or already deleted."
-  fi
+    info "Deleting service account..."
+    if gcloud iam service-accounts delete "${SA_EMAIL}" \
+        --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+      echo "  Deleted: ${SA_EMAIL}"
+      SA_DELETED=true
+    else
+      warn "Service account ${SA_EMAIL} not found or already deleted."
+    fi
 
-  # Note: We intentionally do NOT revoke roles/iap.tunnelResourceAccessor from
-  # the deployer. This role is bound to the operator (not a service account) and
-  # may be used for IAP SSH access to other VMs in the project. Revoking it here
-  # would silently break access to those other resources.
-  info "Skipping IAP tunnel role cleanup (operator may use it for other VMs)."
+    # Note: We intentionally do NOT revoke roles/iap.tunnelResourceAccessor from
+    # the deployer. This role is bound to the operator (not a service account) and
+    # may be used for IAP SSH access to other VMs in the project. Revoking it here
+    # would silently break access to those other resources.
+    info "Skipping IAP tunnel role cleanup (operator may use it for other VMs)."
 
-  info "Deleting IAP SSH firewall rule..."
-  if gcloud compute firewall-rules delete "${FW_RULE_NAME}" \
-      --project="${PROJECT_ID}" --quiet 2>/dev/null; then
-    echo "  Deleted: ${FW_RULE_NAME}"
-  else
-    warn "Firewall rule ${FW_RULE_NAME} not found or already deleted."
-  fi
+    info "Deleting IAP SSH firewall rule..."
+    if gcloud compute firewall-rules delete "${FW_RULE_NAME}" \
+        --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+      echo "  Deleted: ${FW_RULE_NAME}"
+      FW_RULE_DELETED=true
+    else
+      warn "Firewall rule ${FW_RULE_NAME} not found or already deleted."
+    fi
 
-  HYBRID_TEARDOWN_DELETED=()
-  if [[ ${#HYBRID_TEARDOWN_DELETE[@]} -gt 0 ]]; then
-    if [[ "$VM_GONE" == "true" ]]; then
-      info "Deleting hybrid-tier firewall rules..."
-      hybrid_teardown_delete "$PROJECT_ID"
-      if [[ ${#HYBRID_TEARDOWN_DELETE_FAILED[@]} -gt 0 ]]; then
+    if [[ ${#HYBRID_TEARDOWN_DELETE[@]} -gt 0 ]]; then
+      if [[ "$VM_GONE" == "true" ]]; then
+        info "Deleting hybrid-tier firewall rules..."
+        hybrid_teardown_delete "$PROJECT_ID"
+        if [[ ${#HYBRID_TEARDOWN_DELETE_FAILED[@]} -gt 0 ]]; then
+          TEARDOWN_HAD_FAILURE=true
+        fi
+      else
+        err "Keeping the hybrid-tier NFS firewall rules because GCE VM ${INSTANCE_NAME} still exists; tcp:2049 access stays restricted. Re-run teardown after the VM is deleted."
         TEARDOWN_HAD_FAILURE=true
       fi
-    else
-      err "Keeping the hybrid-tier NFS firewall rules because GCE VM ${INSTANCE_NAME} still exists; tcp:2049 access stays restricted. Re-run teardown after the VM is deleted."
-      TEARDOWN_HAD_FAILURE=true
     fi
+  else
+    TEARDOWN_HAD_FAILURE=true
   fi
 
   echo ""
   echo -e "${BOLD}=== Teardown Complete ===${RESET}"
   echo ""
-  echo "  Deleted Cloud Run service: ${PROXY_SERVICE}"
-  echo "  Deleted GCE VM:            ${INSTANCE_NAME}"
-  echo "  Deleted Cloud NAT:         ${NAT_NAME}"
-  echo "  Deleted Cloud Router:      ${ROUTER_NAME}"
-  echo "  Deleted service account:   ${SA_EMAIL}"
-  echo "  Deleted firewall rule:     ${FW_RULE_NAME}"
+  if [[ "$HYBRID_K8S_TEARDOWN_READY" == "true" ]]; then
+    for k8s_kind in ${HYBRID_K8S_TEARDOWN_DELETED[@]+"${HYBRID_K8S_TEARDOWN_DELETED[@]}"}; do
+      echo "  Deleted Kubernetes object:  $(_hybrid_k8s_display "$k8s_kind")"
+    done
+    for k8s_kind in ${HYBRID_K8S_TEARDOWN_DELETE_FAILED[@]+"${HYBRID_K8S_TEARDOWN_DELETE_FAILED[@]}"}; do
+      echo "  Kept Kubernetes object:     $(_hybrid_k8s_display "$k8s_kind") (delete failed or not attempted)"
+    done
+  fi
+  if [[ -n "$K8S_GKE_NAME" ]]; then
+    echo "  Kubernetes cluster:         ${K8S_GKE_NAME} -- never deleted (this tier never creates or deletes the cluster itself)"
+  fi
+  if [[ "$PROXY_SERVICE_DELETED" == "true" ]]; then
+    echo "  Deleted Cloud Run service:  ${PROXY_SERVICE}"
+  else
+    echo "  Kept Cloud Run service:     ${PROXY_SERVICE}"
+  fi
+  if [[ "$VM_DELETED" == "true" ]]; then
+    echo "  Deleted GCE VM:             ${INSTANCE_NAME}"
+  else
+    echo "  Kept GCE VM:                ${INSTANCE_NAME}"
+  fi
+  if [[ "$NAT_DELETED" == "true" ]]; then
+    echo "  Deleted Cloud NAT:          ${NAT_NAME}"
+  else
+    echo "  Kept Cloud NAT:             ${NAT_NAME}"
+  fi
+  if [[ "$ROUTER_DELETED" == "true" ]]; then
+    echo "  Deleted Cloud Router:       ${ROUTER_NAME}"
+  else
+    echo "  Kept Cloud Router:          ${ROUTER_NAME}"
+  fi
+  if [[ "$SA_DELETED" == "true" ]]; then
+    echo "  Deleted service account:    ${SA_EMAIL}"
+  else
+    echo "  Kept service account:       ${SA_EMAIL}"
+  fi
+  if [[ "$FW_RULE_DELETED" == "true" ]]; then
+    echo "  Deleted firewall rule:      ${FW_RULE_NAME}"
+  else
+    echo "  Kept firewall rule:         ${FW_RULE_NAME}"
+  fi
   for name in ${HYBRID_TEARDOWN_DELETED[@]+"${HYBRID_TEARDOWN_DELETED[@]}"}; do
     echo "  Deleted firewall rule:     ${name}"
   done
@@ -759,12 +848,20 @@ if [[ "$HYBRID_ENABLED" == "true" ]]; then
   echo "  Hybrid tier: enabled (GKE cluster: ${GKE_NAME}, location: ${GKE_LOCATION})"
   # GKE nodes pull the agent image from the registry named in
   # settings.yaml's image_registry field; they have no access to the VM's
-  # own localhost image store, which is exactly where container_images.
-  # source=build puts it. Refused here, before any create, rather than
-  # left to fail confusingly once a pod actually tries to pull it.
-  if [[ "$IMAGE_SOURCE" == "build" || "$IMAGE_REGISTRY" == localhost/* ]]; then
-    err "The hybrid tier is on, but container_images.source is 'build' (registry: ${IMAGE_REGISTRY}). GKE nodes cannot pull images from the VM's local Docker store."
+  # own local image store, which is exactly where container_images.
+  # source=build puts it -- and every loopback spelling of a registry
+  # host (localhost, 127.0.0.0/8, ::1, 0.0.0.0, with or without a port)
+  # names that same VM from a GKE node's point of view too. Refused
+  # here, before any create, rather than left to fail confusingly once a
+  # pod actually tries to pull it.
+  if [[ "$IMAGE_SOURCE" == "build" ]]; then
+    err "The hybrid tier is on, but container_images.source is 'build'. GKE nodes cannot pull images from the VM's local Docker store."
     err "Set container_images.source to 'registry' and container_images.registry to a registry the cluster's node service account can read (for example an Artifact Registry repository with artifactregistry.reader granted to that service account)."
+    exit 1
+  fi
+  if _hybrid_registry_is_loopback "$IMAGE_REGISTRY"; then
+    err "The hybrid tier is on, but container_images.registry ('${IMAGE_REGISTRY}') names this VM itself (a loopback address). GKE nodes cannot reach it there."
+    err "Set container_images.registry to a registry the cluster's node service account can read (for example an Artifact Registry repository with artifactregistry.reader granted to that service account)."
     exit 1
   fi
 fi
@@ -899,8 +996,10 @@ REQUIRED_APIS=(
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
   REQUIRED_APIS+=(container.googleapis.com)
 fi
+API_LIST_ERR_FILE="$(mktemp)"
 if ENABLED_APIS="$(gcloud services list --enabled --project="${PROJECT_ID}" \
-    --format="value(config.name)" 2>/dev/null)"; then
+    --format="value(config.name)" 2>"${API_LIST_ERR_FILE}")"; then
+  rm -f "${API_LIST_ERR_FILE}"
   MISSING_APIS=()
   for api in "${REQUIRED_APIS[@]}"; do
     if ! grep -qx "$api" <<< "$ENABLED_APIS"; then
@@ -912,8 +1011,11 @@ if ENABLED_APIS="$(gcloud services list --enabled --project="${PROJECT_ID}" \
   fi
 elif [[ "$HYBRID_ENABLED" == "true" ]]; then
   err "Could not list enabled APIs for project ${PROJECT_ID}, so it's unknown whether container.googleapis.com (needed for the hybrid tier) is already enabled. Refusing to guess: enabling it unconditionally would fail on a runner without serviceusage.services.enable if it's already on, and skipping it would fail later if it's not."
+  err "  $(cat "${API_LIST_ERR_FILE}")"
+  rm -f "${API_LIST_ERR_FILE}"
   exit 1
 else
+  rm -f "${API_LIST_ERR_FILE}"
   # Tier off: unchanged from before this check existed, so this path
   # keeps working everywhere it always has, including on a runner that
   # can't list services but can still call enable on an already-enabled
@@ -934,6 +1036,16 @@ if [[ "$HYBRID_ENABLED" == "true" ]]; then
   info "Discovering GKE cluster network and node tag..."
   hybrid_discover "default"
   echo "  Node network tag: ${GKE_NODE_TAG}"
+
+  # Everything about the hybrid tier's Kubernetes objects that doesn't
+  # depend on the VM's own IP address -- including the marker-refusal
+  # check that used to only fire in Phase 4, after the VM, NFS export
+  # and firewall rules already existed -- runs here, alongside discovery
+  # and before any of those are created. See hybrid_k8s_preflight's own
+  # comment for exactly what it does and doesn't cover; the remaining,
+  # IP-dependent part of this check happens later, in Phase 4.
+  info "Checking hybrid-tier Kubernetes object ownership..."
+  hybrid_k8s_preflight "$HUB_NAME"
 fi
 
 # --- Cross-org IAP warning (best-effort; never blocks the deploy) ---
@@ -1226,8 +1338,13 @@ echo "  VM internal IP: ${VM_IP}"
 # before this existed.
 HYBRID_SHARED_DIR_STORAGE_YAML=""
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  # The third argument is a PersistentVolumeClaim name, not the
+  # PersistentVolume's own name: the Go side consumes shares[0].pv_name
+  # as the pod spec's claimName (see pkg/runtime/k8s_runtime.go), so
+  # GKE_PVC_NAME (the resolved PVC name, which may differ from the PV's
+  # name) is what belongs here.
   HYBRID_SHARED_DIR_STORAGE_YAML="$(hybrid_settings_shared_dir_storage_yaml \
-    "$VM_IP" "$HYBRID_NFS_EXPORT_ROOT" "$(hybrid_k8s_pv_name "$HUB_NAME")")"
+    "$VM_IP" "$HYBRID_NFS_EXPORT_ROOT" "$GKE_PVC_NAME")"
 fi
 
 # --- Hybrid tier: NFS squash identity, server, and export ---
@@ -1240,12 +1357,32 @@ fi
 # subnet CIDR ever changes.
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
   info "Creating the NFS squash identity (if needed)..."
-  SQUASH_IDS=$(gcloud compute ssh "${INSTANCE_NAME}" \
-    --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="$(hybrid_nfs_squash_identity_script "$HYBRID_NFS_SQUASH_USER")" \
-    2>/dev/null)
+  SQUASH_SSH_ERR="$(mktemp)"
+  if ! SQUASH_IDS=$(gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="$(hybrid_nfs_squash_identity_script "$HYBRID_NFS_SQUASH_USER")" \
+      2>"${SQUASH_SSH_ERR}"); then
+    err "Could not create or validate the NFS squash identity on ${INSTANCE_NAME}:"
+    err "  $(cat "${SQUASH_SSH_ERR}")"
+    rm -f "${SQUASH_SSH_ERR}"
+    exit 1
+  fi
+  rm -f "${SQUASH_SSH_ERR}"
+  # The remote script only ever prints this one line on success (see its
+  # own comment), but validate it here too rather than trust stdout
+  # blindly: a uid/gid pair is about to be embedded directly into the
+  # NFS export line's anonuid=/anongid=, and squashing to uid 0 would
+  # defeat the entire point of a dedicated, unprivileged squash identity.
+  if [[ ! "$SQUASH_IDS" =~ ^[0-9]+:[0-9]+$ ]]; then
+    err "Unexpected output from the NFS squash identity script on ${INSTANCE_NAME}: '${SQUASH_IDS}' (expected UID:GID)."
+    exit 1
+  fi
   SQUASH_UID="${SQUASH_IDS%%:*}"
   SQUASH_GID="${SQUASH_IDS##*:}"
+  if [[ "$SQUASH_UID" -eq 0 ]]; then
+    err "The NFS squash uid resolved to 0 on ${INSTANCE_NAME}; refusing to export with root as the anonymous uid."
+    exit 1
+  fi
   echo "  Squash uid: ${SQUASH_UID} (scion group gid: ${SQUASH_GID})"
 
   info "Installing the NFS server and export (if needed)..."
@@ -1253,7 +1390,8 @@ if [[ "$HYBRID_ENABLED" == "true" ]]; then
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --command="$(hybrid_nfs_export_script "$HYBRID_NFS_EXPORT_ROOT" "$GKE_NODE_SUBNET_CIDR" \
-      "$SQUASH_UID" "$SQUASH_GID" "$NFS_FSID" "$HUB_NAME")"
+      "$SQUASH_UID" "$SQUASH_GID" "$NFS_FSID" "$HUB_NAME" \
+      "$HYBRID_NFS_IMAGE_PATH" "$HYBRID_SHARED_DIR_IMAGE_SIZE_GB")"
 fi
 
 # ===================================================================
@@ -1613,13 +1751,15 @@ fi
 section "Phase 4: IAP Proxy"
 
 # --- Hybrid tier: Kubernetes objects (PV, namespace, PVC) ---
-# Unlike the firewall rules and NFS export, the PV's identity includes
-# the VM's own internal IP (read back in Phase 3, above, once the VM is
-# confirmed up) -- so this runs here rather than earlier in Phase 2
-# alongside the firewall checks.
+# The non-IP-dependent parts of this check (kubectl/plugin presence,
+# credentials, marker refusal, namespace creation) already ran in Phase
+# 2 via hybrid_k8s_preflight, right after discovery -- HYBRID_KUBECONFIG
+# is already set from that call, so it's not re-fetched here. What's
+# left is the part that genuinely can't run any earlier: the PV's
+# identity includes the VM's own internal IP (read back in Phase 3,
+# above, once the VM is confirmed up).
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
   info "Ensuring hybrid-tier Kubernetes objects (if needed)..."
-  hybrid_k8s_setup_kubeconfig
   hybrid_k8s_ensure_objects "$HUB_NAME" "$VM_IP"
 fi
 

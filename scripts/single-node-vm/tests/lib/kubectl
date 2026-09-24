@@ -24,7 +24,7 @@ set -euo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${GCLOUD_STUB_PYTHON:-python3}"
 
-mkdir -p "${KUBECTL_STUB_STATE_DIR}/pv" "${KUBECTL_STUB_STATE_DIR}/pvc" "${KUBECTL_STUB_STATE_DIR}/namespace"
+mkdir -p "${KUBECTL_STUB_STATE_DIR}/pv" "${KUBECTL_STUB_STATE_DIR}/pvc" "${KUBECTL_STUB_STATE_DIR}/namespace" "${KUBECTL_STUB_STATE_DIR}/pods"
 
 printf 'KUBECONFIG=%s %s\n' "$KUBECONFIG" "$*" >> "$KUBECTL_STUB_LOG"
 
@@ -136,7 +136,22 @@ case "${1:-} ${2:-}" in
     echo "Error from server (NotFound): persistentvolumeclaims \"${name}\" not found" >&2
     exit 1
     ;;
-  "apply -f")
+  "get pods")
+    ns="$(get_flag n "$@")" || ns="default"
+    f="${KUBECTL_STUB_STATE_DIR}/pods/${ns}.json"
+    if [[ -f "${f}.get-error" ]]; then
+      err_msg="$(cat "${f}.get-error")"
+      echo "${err_msg:-Error from server: simulated PERMISSION_DENIED error listing pods in ${ns}}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      cat "$f"
+    else
+      echo '{"items": []}'
+    fi
+    exit 0
+    ;;
+  "apply -f"|"create -f")
     manifest="$(cat)"
     obj_json="$("$PYTHON" "${LIB_DIR}/k8s-manifest-to-json.py" <<<"$manifest")"
     kind="$("$PYTHON" -c "import json,sys; print(json.loads(sys.argv[1])['kind'])" "$obj_json")"
