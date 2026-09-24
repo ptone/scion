@@ -146,6 +146,29 @@ case "${1:-} ${2:-}" in
     require_project "$@"
     exit 0
     ;;
+  "services list")
+    require_project "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/services-list-should-fail" ]]; then
+      echo "gcloud-stub: simulated services list failure" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/enabled-apis.txt" ]]; then
+      cat "${GCLOUD_STUB_STATE_DIR}/enabled-apis.txt"
+    else
+      # Default: every API this script could ever require is already
+      # enabled, so a test that doesn't care about the API check sees no
+      # `services enable` call at all.
+      cat <<'APIS'
+compute.googleapis.com
+run.googleapis.com
+iap.googleapis.com
+cloudbuild.googleapis.com
+artifactregistry.googleapis.com
+container.googleapis.com
+APIS
+    fi
+    exit 0
+    ;;
   "auth list")
     echo "stub-deployer@example.com"
     exit 0

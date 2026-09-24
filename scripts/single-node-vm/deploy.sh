@@ -800,15 +800,43 @@ echo "  Authenticated as: ${ACCOUNT}"
 section "Phase 2: GCP Resources"
 
 # --- Enable APIs ---
+# Enables only whatever's actually missing, not the whole list every run:
+# some validation runners don't hold serviceusage.services.enable and
+# would fail on an `enable` call for an API that's already on. The
+# hybrid tier additionally needs container.googleapis.com.
 info "Enabling required APIs..."
-gcloud services enable \
-  compute.googleapis.com \
-  run.googleapis.com \
-  iap.googleapis.com \
-  cloudbuild.googleapis.com \
-  artifactregistry.googleapis.com \
-  aiplatform.googleapis.com \
-  --project="${PROJECT_ID}" --quiet
+REQUIRED_APIS=(
+  compute.googleapis.com
+  run.googleapis.com
+  iap.googleapis.com
+  cloudbuild.googleapis.com
+  artifactregistry.googleapis.com
+  aiplatform.googleapis.com
+)
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  REQUIRED_APIS+=(container.googleapis.com)
+fi
+if ENABLED_APIS="$(gcloud services list --enabled --project="${PROJECT_ID}" \
+    --format="value(config.name)" 2>/dev/null)"; then
+  MISSING_APIS=()
+  for api in "${REQUIRED_APIS[@]}"; do
+    if ! grep -qx "$api" <<< "$ENABLED_APIS"; then
+      MISSING_APIS+=("$api")
+    fi
+  done
+  if [[ ${#MISSING_APIS[@]} -gt 0 ]]; then
+    gcloud services enable "${MISSING_APIS[@]}" --project="${PROJECT_ID}" --quiet
+  fi
+elif [[ "$HYBRID_ENABLED" == "true" ]]; then
+  err "Could not list enabled APIs for project ${PROJECT_ID}, so it's unknown whether container.googleapis.com (needed for the hybrid tier) is already enabled. Refusing to guess: enabling it unconditionally would fail on a runner without serviceusage.services.enable if it's already on, and skipping it would fail later if it's not."
+  exit 1
+else
+  # Tier off: unchanged from before this check existed, so this path
+  # keeps working everywhere it always has, including on a runner that
+  # can't list services but can still call enable on an already-enabled
+  # API (a harmless no-op in that direction).
+  gcloud services enable "${REQUIRED_APIS[@]}" --project="${PROJECT_ID}" --quiet
+fi
 
 # --- Hybrid tier: discovery ---
 # Read-only (describe calls only; nothing is created). This runs before
