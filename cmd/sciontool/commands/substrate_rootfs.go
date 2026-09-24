@@ -167,9 +167,9 @@ func canSearchDir(info fs.FileInfo, uid, gid uint32) bool {
 // failing closed on, not a case to accept. Both write and execute are
 // required (0o300): a directory can be "writable" (create/delete entries
 // within it) yet still untraversable without its own execute bit, and
-// checking write alone would pass a $HOME the scion user can't actually
-// reach past canSearchDir's own parent-directory checks already covering
-// (which only check the parents of $HOME, not $HOME itself).
+// checking write alone would pass a $HOME the scion user still can't
+// reach, since canSearchDir's own checks only cover $HOME's parents, not
+// $HOME itself.
 func homeOwnedAndWritable(info fs.FileInfo, uid uint32) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uid {
