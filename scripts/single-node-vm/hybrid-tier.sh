@@ -417,6 +417,97 @@ hybrid_nfs_export_line() {
   echo "${export_root} ${cidr}(rw,sync,no_subtree_check,all_squash,anonuid=${anonuid},anongid=${anongid},sec=sys,fsid=${fsid})"
 }
 
+# hybrid_nfs_squash_identity_script SQUASH_USER
+#
+# Renders the remote script that idempotently creates the dedicated NFS
+# squash identity (a system account, no home, no login shell, primary
+# group "scion") if it doesn't already exist, then asserts its uid
+# differs from the "scion" (broker) user's own uid -- squashing every
+# NFS client to the broker's own identity would let any pod that can
+# reach the export act as the broker on the shared tree -- and, only on
+# success, prints "SQUASH_UID:SCION_GID" for the caller to capture. Pure
+# string rendering -- no gcloud or SSH calls -- so it's directly
+# unit-testable; the caller (deploy.sh) is responsible for actually
+# running the result over SSH.
+hybrid_nfs_squash_identity_script() {
+  local squash_user="$1"
+  cat <<SCRIPT
+set -euo pipefail
+id ${squash_user} >/dev/null 2>&1 || sudo useradd -r -M -N -g scion -s /usr/sbin/nologin ${squash_user}
+SQUASH_UID=\$(id -u ${squash_user})
+SCION_UID=\$(id -u scion)
+SCION_GID=\$(getent group scion | cut -d: -f3)
+if [ "\$SQUASH_UID" = "\$SCION_UID" ]; then
+  echo 'The NFS squash uid must not equal the scion (broker) uid.' >&2
+  exit 1
+fi
+echo "\${SQUASH_UID}:\${SCION_GID}"
+SCRIPT
+}
+
+# hybrid_nfs_export_script EXPORT_ROOT CIDR ANONUID ANONGID FSID HUB_NAME
+#
+# Renders the remote script that idempotently creates the export root
+# (owned scion:scion, mode 2755 so the squash uid can't write it),
+# installs nfs-kernel-server if it isn't already, writes this hub's own
+# file under /etc/exports.d/ (using hybrid_nfs_export_line for the
+# rendered line, so the two stay in sync), re-exports, and enables and
+# starts the service. Always rewrites the file and re-exports, which is
+# how the export picks up a changed CIDR on re-run with no separate
+# drift detection needed. Pure string rendering -- no gcloud or SSH
+# calls -- so it's directly unit-testable; the caller is responsible for
+# actually running the result over SSH, after the squash identity script
+# above has already run.
+hybrid_nfs_export_script() {
+  local export_root="$1" cidr="$2" anonuid="$3" anongid="$4" fsid="$5" hub_name="$6"
+  local export_line
+  export_line="$(hybrid_nfs_export_line "$export_root" "$cidr" "$anonuid" "$anongid" "$fsid")"
+  cat <<SCRIPT
+set -euo pipefail
+sudo mkdir -p ${export_root}
+sudo chown scion:scion ${export_root}
+sudo chmod 2755 ${export_root}
+if ! dpkg -s nfs-kernel-server >/dev/null 2>&1; then
+  sudo apt-get update -y
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nfs-kernel-server
+fi
+echo '${export_line}' | sudo tee /etc/exports.d/scion-hub-${hub_name}.exports > /dev/null
+sudo exportfs -ra
+sudo systemctl enable --now nfs-kernel-server
+echo 'NFS export configured.'
+SCRIPT
+}
+
+# hybrid_cloud_run_label_args SERVICE_NAME PROJECT_ID REGION HUB_NAME
+#
+# Echoes the --labels=... argument to pass to `gcloud run deploy`, or
+# nothing, based on whether the service already exists: the base-marker
+# convention is additive and create-only, so the label is only added
+# when this is the first create. `gcloud run services describe` failing
+# is ambiguous between "doesn't exist yet" (NOT_FOUND) and some other
+# problem (a permissions error, for example) -- its exit code alone
+# doesn't distinguish them, so this checks the error text. Anything
+# other than a clear NOT_FOUND fails safe toward "assume it exists" (no
+# label), on the reasoning that a missing marker is corrected by
+# nothing, while a wrong marker on an existing, unrelated service is not
+# easily undone.
+hybrid_cloud_run_label_args() {
+  local service_name="$1" project_id="$2" region="$3" hub_name="$4"
+  local describe_err
+  describe_err="$(mktemp)"
+  if gcloud run services describe "$service_name" \
+      --project="$project_id" --region="$region" >/dev/null 2>"${describe_err}"; then
+    rm -f "${describe_err}"
+    return 0
+  fi
+  local not_found=false
+  grep -qi 'not_found\|not found' "${describe_err}" && not_found=true
+  rm -f "${describe_err}"
+  if [[ "$not_found" == "true" ]]; then
+    echo "--labels=scion-deployment=${hub_name}"
+  fi
+}
+
 # _hybrid_firewall_rule_fields
 #
 # Reads the JSON body of `gcloud compute firewall-rules describe

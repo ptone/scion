@@ -1133,41 +1133,18 @@ if [[ "$HYBRID_ENABLED" == "true" ]]; then
   info "Creating the NFS squash identity (if needed)..."
   SQUASH_IDS=$(gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="
-      set -e
-      id ${HYBRID_NFS_SQUASH_USER} >/dev/null 2>&1 || sudo useradd -r -M -N -g scion -s /usr/sbin/nologin ${HYBRID_NFS_SQUASH_USER}
-      SQUASH_UID=\$(id -u ${HYBRID_NFS_SQUASH_USER})
-      SCION_UID=\$(id -u scion)
-      SCION_GID=\$(getent group scion | cut -d: -f3)
-      if [ \"\$SQUASH_UID\" = \"\$SCION_UID\" ]; then
-        echo 'The NFS squash uid must not equal the scion (broker) uid.' >&2
-        exit 1
-      fi
-      echo \"\${SQUASH_UID}:\${SCION_GID}\"
-    " 2>/dev/null)
+    --command="$(hybrid_nfs_squash_identity_script "$HYBRID_NFS_SQUASH_USER")" \
+    2>/dev/null)
   SQUASH_UID="${SQUASH_IDS%%:*}"
   SQUASH_GID="${SQUASH_IDS##*:}"
   echo "  Squash uid: ${SQUASH_UID} (scion group gid: ${SQUASH_GID})"
 
   info "Installing the NFS server and export (if needed)..."
   NFS_FSID="$(hybrid_nfs_fsid "$HUB_NAME")"
-  NFS_EXPORT_LINE="$(hybrid_nfs_export_line "$HYBRID_NFS_EXPORT_ROOT" "$GKE_NODE_SUBNET_CIDR" "$SQUASH_UID" "$SQUASH_GID" "$NFS_FSID")"
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
-    --command="
-      set -e
-      sudo mkdir -p ${HYBRID_NFS_EXPORT_ROOT}
-      sudo chown scion:scion ${HYBRID_NFS_EXPORT_ROOT}
-      sudo chmod 2755 ${HYBRID_NFS_EXPORT_ROOT}
-      if ! dpkg -s nfs-kernel-server >/dev/null 2>&1; then
-        sudo apt-get update -y
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nfs-kernel-server
-      fi
-      echo '${NFS_EXPORT_LINE}' | sudo tee /etc/exports.d/scion-hub-${HUB_NAME}.exports > /dev/null
-      sudo exportfs -ra
-      sudo systemctl enable --now nfs-kernel-server
-      echo 'NFS export configured.'
-    "
+    --command="$(hybrid_nfs_export_script "$HYBRID_NFS_EXPORT_ROOT" "$GKE_NODE_SUBNET_CIDR" \
+      "$SQUASH_UID" "$SQUASH_GID" "$NFS_FSID" "$HUB_NAME")"
 fi
 
 # ===================================================================
@@ -1594,10 +1571,8 @@ echo "  Target URL: http://${VM_IP}:8080"
 echo "  Image: ${PROXY_IMAGE}"
 
 PROXY_SERVICE_LABEL_ARGS=()
-if ! gcloud run services describe "${PROXY_SERVICE}" \
-    --project="${PROJECT_ID}" --region="${REGION}" &>/dev/null; then
-  PROXY_SERVICE_LABEL_ARGS=(--labels="scion-deployment=${HUB_NAME}")
-fi
+PROXY_LABEL_ARG="$(hybrid_cloud_run_label_args "${PROXY_SERVICE}" "${PROJECT_ID}" "${REGION}" "${HUB_NAME}")"
+[[ -n "$PROXY_LABEL_ARG" ]] && PROXY_SERVICE_LABEL_ARGS=("$PROXY_LABEL_ARG")
 
 gcloud run deploy "${PROXY_SERVICE}" \
   --project="${PROJECT_ID}" \

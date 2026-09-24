@@ -317,6 +317,118 @@ test_nfs_fsid_is_a_well_formed_uuid() {
 }
 
 # =====================================================================
+# NFS squash identity and export remote scripts, and the Cloud Run
+# label decision: the parts of the tier-gated remote step that would
+# otherwise be unreachable from the wiring tests (they run after the
+# point the create-mode sentinel stops). Rendering them as pure
+# functions (identity/export scripts) or gcloud-stub-testable functions
+# (the Cloud Run decision) closes that gap.
+# =====================================================================
+
+test_nfs_squash_identity_script_has_set_euo_pipefail() {
+  local script
+  script="$(hybrid_nfs_squash_identity_script "scion-nfs")"
+  assert_eq "set -euo pipefail" "$(echo "$script" | head -1)" \
+    "the remote script must fail closed on any unexpected error, not silently continue"
+}
+
+test_nfs_squash_identity_script_useradd_guarded_by_exists() {
+  local script
+  script="$(hybrid_nfs_squash_identity_script "scion-nfs")"
+  assert_contains "$script" "id scion-nfs >/dev/null 2>&1 ||" \
+    "useradd must only run when the identity doesn't already exist"
+  assert_contains "$script" "useradd -r -M -N -g scion -s /usr/sbin/nologin scion-nfs" \
+    "useradd must create a system account, no home, no user-private group, primary group scion, no login shell"
+}
+
+test_nfs_squash_identity_script_reads_ids() {
+  local script
+  script="$(hybrid_nfs_squash_identity_script "scion-nfs")"
+  # shellcheck disable=SC2016 # asserting the literal remote-script text, not expanding locally
+  assert_contains "$script" 'SQUASH_UID=$(id -u scion-nfs)' "must read the squash uid back numerically"
+  # shellcheck disable=SC2016 # asserting the literal remote-script text, not expanding locally
+  assert_contains "$script" 'SCION_UID=$(id -u scion)' "must read the broker's own uid for the comparison"
+  # shellcheck disable=SC2016 # asserting the literal remote-script text, not expanding locally
+  assert_contains "$script" 'SCION_GID=$(getent group scion | cut -d: -f3)' \
+    "must read the scion group's gid for anongid, not assume it matches the user's own gid"
+}
+
+test_nfs_squash_identity_script_asserts_uid_mismatch() {
+  local script
+  script="$(hybrid_nfs_squash_identity_script "scion-nfs")"
+  # shellcheck disable=SC2016 # asserting the literal remote-script text, not expanding locally
+  assert_contains "$script" 'if [ "$SQUASH_UID" = "$SCION_UID" ]; then' \
+    "the mismatch check must run unconditionally, not just log a warning"
+  assert_contains "$script" "The NFS squash uid must not equal the scion (broker) uid." \
+    "the failure message must explain why"
+  assert_contains "$script" $'  exit 1\nfi' "an equal uid must exit non-zero, not just warn and continue"
+}
+
+test_nfs_export_script_has_set_euo_pipefail() {
+  local script
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub")"
+  assert_eq "set -euo pipefail" "$(echo "$script" | head -1)" \
+    "the remote script must fail closed on any unexpected error"
+}
+
+test_nfs_export_script_root_owner_and_mode() {
+  local script
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub")"
+  assert_contains "$script" "sudo mkdir -p /srv/scion-shared" "must create the export root"
+  assert_contains "$script" "sudo chown scion:scion /srv/scion-shared" "the export root must be owned scion:scion"
+  assert_contains "$script" "sudo chmod 2755 /srv/scion-shared" \
+    "mode 2755 is what keeps the squash uid from writing the export root"
+}
+
+test_nfs_export_script_writes_exports_file_using_the_render_function() {
+  local script expected_line
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub")"
+  expected_line="$(hybrid_nfs_export_line "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123")"
+  assert_contains "$script" "echo '${expected_line}' | sudo tee /etc/exports.d/scion-hub-demohub.exports" \
+    "the exports file must be this hub's own file, containing exactly hybrid_nfs_export_line's output"
+}
+
+test_nfs_export_script_exportfs_and_enable_service() {
+  local script
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub")"
+  assert_contains "$script" "sudo exportfs -ra" "must re-export after writing the file"
+  assert_contains "$script" "sudo systemctl enable --now nfs-kernel-server" "must enable and start the service"
+}
+
+test_nfs_export_script_installs_server_package_if_needed() {
+  local script
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub")"
+  assert_contains "$script" "if ! dpkg -s nfs-kernel-server >/dev/null 2>&1; then" \
+    "the install must be guarded, not run unconditionally on every re-run"
+  assert_contains "$script" "apt-get install -y nfs-kernel-server" "must actually install the package"
+}
+
+test_cloud_run_label_args_new_service_gets_label() {
+  fresh_gcloud_state
+  local args
+  args="$(hybrid_cloud_run_label_args "demohub-iap-proxy" "$PROJECT" "us-central1" "demohub")"
+  assert_eq "--labels=scion-deployment=demohub" "$args" \
+    "a not-yet-existing service (NOT_FOUND) is the first-create case and must get the marker"
+}
+
+test_cloud_run_label_args_existing_service_no_label() {
+  fresh_gcloud_state
+  seed_run_service_exists "demohub-iap-proxy"
+  local args
+  args="$(hybrid_cloud_run_label_args "demohub-iap-proxy" "$PROJECT" "us-central1" "demohub")"
+  assert_eq "" "$args" "an already-existing service is a redeploy and must not be (re-)labeled"
+}
+
+test_cloud_run_label_args_describe_error_fails_safe_no_label() {
+  fresh_gcloud_state
+  set_run_service_describe_error "demohub-iap-proxy"
+  local args
+  args="$(hybrid_cloud_run_label_args "demohub-iap-proxy" "$PROJECT" "us-central1" "demohub")"
+  assert_eq "" "$args" \
+    "a describe error that isn't NOT_FOUND must fail safe toward assuming the service exists (no label), not toward labeling it"
+}
+
+# =====================================================================
 # Firewall rules: names, marker, target tag, shape, reuse, and
 # spec-drift verification on reuse.
 # =====================================================================
