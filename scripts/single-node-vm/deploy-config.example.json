@@ -16,6 +16,8 @@
   "gke_target": {
     "name": "",
     "location": "",
-    "project": ""
+    "project": "",
+    "namespace": "",
+    "pvc_name": ""
   }
 }

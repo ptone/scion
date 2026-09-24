@@ -79,6 +79,15 @@
 #   gke_target.project           Project the cluster lives in. Defaults to
 #                                 project_id. A cluster in a different
 #                                 project is not supported yet.
+#   gke_target.namespace         Kubernetes namespace for the shared-tree
+#                                 PersistentVolumeClaim. Defaults to
+#                                 scion-hub-<hub_name>. An existing
+#                                 namespace without this deployment's
+#                                 marker is used as-is, never adopted or
+#                                 relabeled, and never deleted on teardown.
+#   gke_target.pvc_name           Name of the PersistentVolumeClaim in that
+#                                 namespace. Defaults to
+#                                 scion-hub-<hub_name>-shared.
 
 set -euo pipefail
 
