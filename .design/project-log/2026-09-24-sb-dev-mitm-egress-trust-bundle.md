@@ -82,17 +82,24 @@ request fails.
      present, so it cannot mask `NODE_EXTRA_CA_CERTS` etc. either. The
      actual `syscall.Credential` UID/GID switch is a plain `execve`-time
      credential change, not a login shell (`su`), so nothing resets the
-     environment. `sciontool init`'s child command for substrate is `tmux
-     new-session -A -s main ...`
-     (`cmd/sciontool/commands/init.go:82`), exec'd directly by `Supervisor.Run`
-     with this env — tmux's server, started fresh on this exec, captures
-     that as its own process environment and every pane spawned from it
-     (including the harness) inherits it via tmux's normal environment
-     seeding. No `update-environment`/`set-environment` config exists in
-     this codebase, and none is needed: that tmux option only matters for a
-     *second* client re-attaching to an *already-running* server, which
-     doesn't happen on a fresh actor start (a config change also forces a
-     new template/golden snapshot per point 3 above, so there's no
+     environment. **Correction (round-18 review, FYI-3):** the Substrate
+     harness child's actual launch command is `buildSubstrateStartCmd` →
+     `tmuxAgentWindowCmd` + `buildTmuxStartCmd`
+     (`pkg/runtime/substrate_runtime.go:973-979`,
+     `pkg/runtime/common.go:140-178`): `tmux new-session -d -s scion -n
+     agent /bin/sh -c '<harness>; echo $? > …'` — not `tmux new-session -A
+     -s main` (`cmd/sciontool/commands/init.go:82` is that command's own
+     `--help` text, not what substrate-serve actually execs). The
+     conclusion is unchanged either way: exec'd directly by
+     `Supervisor.Run` with this env, tmux's server (started fresh on this
+     exec) captures that as its own process environment and every pane
+     spawned from it (including the harness) inherits it via tmux's normal
+     environment seeding. No `update-environment`/`set-environment` config
+     exists in this codebase, and none is needed: that tmux option only
+     matters for a *second* client re-attaching to an *already-running*
+     server, which doesn't happen on a fresh actor start (a config change
+     also forces a new template/golden snapshot per point 3 above, so
+     there's no
      stale-server case to worry about here either). Test:
      `TestSupervisor_HarnessChildInheritsCABundleEnv`
      (`pkg/sciontool/supervisor/trust_bundle_env_test.go`).
@@ -215,5 +222,164 @@ changes — the test suite touches no real agent state).
 - `d4074c70` feat(runtime): project the sdsmint trust bundle into the actor template
 - `a6f3d4e5` test(sciontool): prove the CA-bundle env reaches the git clone and harness child
 - `4bfbe085` docs(substrate): document egress_trust_bundle and the SSL_CERT_DIR note
+
+All pushed to `origin/scion/substrate-integration`.
+
+## Round 18 (sb-dev-mitm-r18): the su - exec fix, plus R-2/R-3/N-1
+
+Base: `76c0609fb`. Full review at
+`reviews/round-18-sb-rev-18.md` (sb-rev-18, REQUEST CHANGES: 0 Critical /
+3 Required / 1 Optional / 5 FYI).
+
+### Task 1 (R-1, DECIDED by substrate-lead): `su -w` conditional on the CA vars
+
+The round-18 review reproduced trace item 5 from the original report: every
+`sciontool substrate-serve exec` call (the broker exec endpoint, `scion
+look`, `/scion/v1/exec` directly) runs through `execAsUserCmd`
+(`pkg/sciontool/substrate/execuser.go`), which used `su - "$1" -c "$2"`
+whenever the exec-as-user differs from the caller — true for every
+Substrate exec, since substrate-serve is always root and `ExecUser()` is
+`"scion"`. `su -` is a login shell; it discards the whole inherited
+environment, so any exec-invoked command doing TLS lost the gateway CA
+under sdsmint even though the harness itself trusted it fine.
+
+**Fix, in the Substrate copy only:** `execAsUserCmd` now passes `su -w
+<list> - "$1" -c "$2"` when at least one CA-bundle var is set (non-empty)
+in the pre-su environment, and the exact pre-fix `su - "$1" -c "$2"`
+otherwise — byte-identical script and argv on every plain install, since
+none of the vars is ever set there. `<list>` names only the vars that ARE
+set, in a fixed order.
+
+**Design choice: build `<list>` in Go, not in the sh wrapper.** The brief
+left this open ("pick whichever keeps the plain-path script/argv
+byte-identical and is easiest to test, and justify the choice"). Go wins on
+both counts here: `execAsUserCmd` already returns a fully-resolved argv
+(no shell-side string processing exists to reuse), and building the list
+in Go makes every case (plain, all-5, subset, empty-string-counts-as-unset)
+a pure function of a `[]string` input — no process spawn, no PATH shim,
+no real `su`/`sh` needed for the required tests. The one required test
+that's specific to a sh-built list ("(f), if the list is built in sh") is
+therefore not required here, but a confidence test that actually runs the
+generated script through `/bin/sh` with a PATH-shimmed `su` recorder is
+included anyway (`TestExecAsUserCmd_RealShellInvokesSuWithExpectedArgv`)
+since it's cheap and closes the "does a real shell parse this the way the
+Go string implies" gap.
+
+**Shared source of truth:** the candidate names are
+`pkg/substrateenv.TrustBundleVarNames` — a new, dependency-free package
+(same shape and rationale as the existing `pkg/substratecaps`) that both
+`pkg/runtime`'s `buildActorTemplate` and `pkg/sciontool/substrate`'s
+`execAsUserCmd` import directly. `buildActorTemplate` was refactored to
+build its `Env` slice by iterating this shared slice (mapping every name to
+the bundle file, except `SSL_CERT_DIR` which gets the bundle's mount
+directory) instead of a hand-written literal, so the two lists cannot
+silently drift apart. Two tests tie them together from each side:
+`TestExecAsUserCmd_CandidateNamesMatchTemplateEnvNames`
+(`pkg/sciontool/substrate`) and
+`TestBuildActorTemplate_EnvNamesMatchSharedTrustBundleVarNames`
+(`pkg/runtime`).
+
+`pkg/runtime.ExecAsUserCmd` (every other runtime's copy) is untouched, per
+the brief: `-w` is util-linux-specific and this whole mechanism only exists
+to counter Substrate's own env-propagation shape.
+
+Also added: a comment in `execuser.go` documenting the intentional
+divergence from `pkg/runtime.ExecAsUserCmd` (R-1's second ask), and a
+README note (next to `egress_trust_bundle`) that the image needs util-linux
+≥ 2.35 for `su -w`, which scion's images (Debian trixie) already satisfy.
+
+#### Tests (pkg/sciontool/substrate/execuser_test.go)
+
+- (a) `TestExecAsUserCmd_PlainEnvIsByteIdentical` — pins the exact pre-fix
+  script/argv literal.
+- (b) `TestExecAsUserCmd_AllCAVarsSet` — all 5 set → `-w` with exactly
+  those 5, in order.
+- (c) `TestExecAsUserCmd_SubsetOfCAVarsSet` — 2 of 5 set → `-w` with
+  exactly those 2, in the fixed order (not env order).
+- (d) `TestExecAsUserCmd_EmptyValueCountsAsUnset` — `SSL_CERT_FILE=` (empty
+  value) is treated as unset.
+- (e) `TestExecAsUserCmd_CandidateNamesMatchTemplateEnvNames` (this
+  package) + `TestBuildActorTemplate_EnvNamesMatchSharedTrustBundleVarNames`
+  (`pkg/runtime`) — the tie test, from both sides.
+- (f) not required (list built in Go, not sh) but included anyway:
+  `TestExecAsUserCmd_RealShellInvokesSuWithExpectedArgv`.
+
+#### Mutation table (Task 1)
+
+Each applied by hand in the real environment, confirmed to fail, then
+reverted (`git diff` clean afterward). `agent-info.json` sha256:
+`fd40d02d1d2487a7e6d829345fe9406ee705b1a35dd57ea4125163797ba003ea` before
+Task 1's mutation runs and after every revert — 0 changes.
+
+| Mutation | Result |
+|---|---|
+| Removed the `if list != ""` condition, so `-w <list> -` is always passed | KILLED by (a): plain-env literal no longer matched (`su -w  - ...` with an empty list) |
+| Dropped `CURL_CA_BUNDLE` from `substrateenv.TrustBundleVarNames` | KILLED by (b): all-5 case only produced 4 names. (e)'s exec-side test still passed, since both sides read the same mutated slice — exactly why the brief allows "(b) or (e)" |
+| Removed the `set[name] != ""` presence check in `trustBundleWhitelist`, so every candidate name is always appended | KILLED by (c): subset case (2 set) produced all 5 names instead of 2 |
+
+### Task 2: round-18 findings
+
+| Finding | Resolution | Commit |
+|---|---|---|
+| R-1 (exec path drops CA vars) | Fixed — see Task 1 above. Divergence comment added to `execuser.go`. | `d40717ac` |
+| R-2 (process references in shipped code) | Fixed — reworded every listed location (`init_test.go:921`, `substrate_egress_test.go:197-199`, `substrate_template.go:234`, `substrate_trust_bundle_test.go:31,40,192`, `trust_bundle_env_test.go:16`) to describe behaviour instead of naming an agent/brief/review. Pinned literal `scion-52ec9dfe17f8` kept. Re-ran the hygiene grep on every changed non-log file (Task 1's new files included) — the only hits left are false positives (hex capability bitmasks, a decimal IP literal, and the two legitimately-pinned template-name literals); see the grep output below. | `d40717ac`, `1d8c5e67` |
+| R-3 (false "exclusive anchor" claim for curl/git/Node) | Fixed — reworded `deploy/substrate/README.md`'s `egress_trust_bundle` section and the `buildActorTemplate` code comment to the substrate-lead's exact binding wording: SSL_CERT_DIR is exclusive for Go and Python `ssl`, additive-or-ignored for curl/git/Node; states what it buys (a hub status success is positive proof for Go; a bypassed gateway fails closed) and the cost (status reports fail TLS if the hub is ever reached without the gateway re-originating). Added the curl/git compiled-in-CApath explanation and the `curl -sv` issuer check / `--capath /nonexistent --cacert ...` proof method. `SSL_CERT_DIR` itself stays set — not relitigated. | `d40717ac`, `1d8c5e67` |
+| N-1 (Optional: table-driven name tests) | Done — `TestSubstrateTemplateName_UnchangedWhenEgressTrustBundleUnset` / `_ChangesWhenEgressTrustBundleSet` are now table-driven over the original fixture plus a worker-selector + nil-resources fixture (`substrateTemplateNameFixtures`). New literal `scion-3b33f56da495` computed and pinned for the second fixture. | `d40717ac` |
+| FYI-1 (cleanenv) | No action — already how gates were run. |
+| FYI-2 (sciontool's Go client trusts only the gateway CA; a bypass fails closed) | No action — this is exactly the tradeoff R-3's reworded text now states explicitly. |
+| FYI-3 (project log's tmux command was wrong) | Fixed — corrected the original entry above: the real launch is `buildSubstrateStartCmd` → `tmuxAgentWindowCmd`/`buildTmuxStartCmd` → `tmux new-session -d -s scion -n agent /bin/sh -c …` (`pkg/runtime/substrate_runtime.go:973-979`, `pkg/runtime/common.go:140-178`), not `tmux new-session -A -s main` (`init.go:82`, that command's own `--help` text). Conclusion unchanged. | (log-only, this entry) |
+| FYI-4 (`proto.Equal` nil vs empty repeated field) | No action — equivalent mutant, as the review notes. |
+| FYI-5 (rotation reaches only resumed/new actors) | No action — already documented in `docs/egress-trust-bundle.md` upstream. |
+
+#### Hygiene grep (re-run on every changed non-log file, including Task 1's new files)
+
+```
+grep -rniE 'round [0-9]|this round|sb-rev|sb-dev|sb-em|substrate-lead|finding #|the review|reviewer|the brief|addendum|another agent|[0-9a-f]{9}' \
+  cmd/sciontool/commands/init_test.go deploy/substrate/README.md \
+  pkg/config/substrate_egress_test.go pkg/runtime/substrate_template.go \
+  pkg/runtime/substrate_trust_bundle_test.go pkg/sciontool/substrate/execuser.go \
+  pkg/sciontool/substrate/execuser_test.go pkg/sciontool/supervisor/trust_bundle_env_test.go \
+  pkg/substrateenv/substrateenv.go
+
+cmd/sciontool/commands/init_test.go:582:	// /proc/self/uid_map typically shows "0 0 4294967295" or similar.
+cmd/sciontool/commands/init_test.go:1048:			input: "Name:\tinit\nCapEff:\t000001ffffffffff\n",
+cmd/sciontool/commands/init_test.go:1054:			input: "Name:\tinit\nCapInh:\t0000000000000000\nCapEff:\t00000000000000ff\n",
+cmd/sciontool/commands/init_test.go:1060:			input: "Name:\tinit\nCapEff:\t000000000000007f\n",
+cmd/sciontool/commands/init_test.go:1065:			input: "Name:\tinit\nCapEff:\t0000000000000000\n",
+cmd/sciontool/commands/init_test.go:1070:			input: "Name:\tinit\nCapInh:\t0000000000000000\n",
+cmd/sciontool/commands/init_test.go:1086:			input: "CapEff:\t0000000000000080\n",
+pkg/config/substrate_egress_test.go:274:		{"decimal IP alias", "2130706433"},
+pkg/config/substrate_egress_test.go:559:		{"IP/CIDR: decimal IP alias", "2130706433", reasonIPCIDR},
+pkg/runtime/substrate_trust_bundle_test.go:229:			wantUnset: "scion-52ec9dfe17f8",
+pkg/runtime/substrate_trust_bundle_test.go:245:			wantUnset: "scion-3b33f56da495",
+```
+
+Every remaining hit is a false positive against the pattern (hex capability
+bitmasks, a decimal IP literal, or the two pinned template-name literals
+the review explicitly said to keep) — no genuine process/agent reference
+left.
+
+### Gates (round 18)
+
+`cleanenv` applied first (unset `SCION_*`, `CLAUDE_CODE_ENABLE_TELEMETRY`).
+
+| Gate | Result |
+|---|---|
+| `go build ./...` | clean |
+| `GOOS=darwin go vet ./cmd/sciontool/commands/ ./pkg/sciontool/...` | clean |
+| `go vet ./...` | clean |
+| `go test -count=1 ./pkg/runtime/... ./pkg/config/... ./pkg/sciontool/... ./cmd/sciontool/...` | all `ok` |
+| `go test -count=1 -race ./pkg/sciontool/substrate/...` | clean, no races |
+| `make lint` | clean |
+| `golangci-lint run --new-from-rev=c3b6e821d ./...` | `0 issues` |
+
+No deviation from the known pre-existing failure list (same as the
+original brief's list).
+
+### Commits (round 18)
+
+- `d40717ac` fix(sciontool): keep the CA-bundle env across the su - exec path (R-1)
+- `1d8c5e67` fix: reword process references and correct the SSL_CERT_DIR claim (R-2, R-3)
+- `472823de` docs(substrate): note the util-linux >= 2.35 requirement for su -w
 
 All pushed to `origin/scion/substrate-integration`.
