@@ -157,6 +157,56 @@ rebinding, or a service like nip.io/sslip.io that does this by design.
 Closing that gap requires a post-resolution check by the egress proxy
 itself, which Phase 1 does not add.
 
+### `egress_trust_bundle`: only needed under sdsmint
+
+Substrate's plain `atenet-egress` only enforces `egress_allow` for TLS
+*passthrough* on ADDRESS rules — every rule `egress_allow` emits is a
+HostnameRule, which is enforced for HTTPS only under the **sdsmint** egress
+gateway (`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`).
+Under sdsmint the gateway terminates every TLS connection and re-originates
+it with a per-SNI leaf certificate chained to its own CA — not the origin's
+— so an actor validating only the public roots rejects it and every HTTPS
+request fails.
+
+Set `runtimes.<name>.substrate.egress_trust_bundle: egress-mitm.ate.dev` —
+the only trust bundle name the vendored Substrate version (d277088b)
+resolves — **if and only if the cluster runs sdsmint and the actor makes any
+HTTPS/TLS request.** When set, `buildActorTemplate`
+(`pkg/runtime/substrate_template.go`) adds a `system-info` volume that
+projects the gateway's CA to `/run/ate/trust-bundle.pem`, and points
+`NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`, `SSL_CERT_FILE`, and
+`CURL_CA_BUNDLE` at that file, plus `SSL_CERT_DIR=/run/ate`. See
+`docs/egress-trust-bundle.md` in agent-substrate/substrate for the full
+guide, including every runtime's own env var.
+
+**`SSL_CERT_DIR=/run/ate` is deliberate**, not an oversight: under sdsmint
+every TLS origin the actor can reach — the hub included — is fronted by the
+gateway, so the base image's public roots in `/etc/ssl/certs` are dead
+weight. Pointing `SSL_CERT_DIR` at the projection too, instead of leaving it
+at its default, makes the gateway CA the actor's *only* trust anchor, so a
+successful HTTPS fetch (a `200`, not a TLS error) is positive proof the
+projected bundle did the validating — not a public root happening to also
+work. **Node ignores `SSL_CERT_DIR` entirely** (it has no OpenSSL-backed
+default-directory concept), so `NODE_EXTRA_CA_CERTS` — which is *additive*
+to Node's own bundled roots, not a replacement — is still required for it
+separately; nothing about setting `SSL_CERT_DIR` narrows what a Node
+process trusts.
+
+**Setting this on a plain (non-sdsmint) install breaks every actor.**
+Nothing backs the `egress-mitm.ate.dev` `ClusterTrustBundle` on a plain
+install, so the actor fails to start entirely rather than merely losing
+HTTPS: atelet logs `while populating system-info volume "system-info":
+system-info projection "trust-bundle.pem": trust bundle
+"egress-mitm.ate.dev": ClusterTrustBundle
+"egress-mitm.ate.dev:mitm:primary-bundle" not found` on the node that was
+going to host the actor, and the same text surfaces to the caller via
+`CreateActor`/`Run`, wrapped by the resume step and gRPC.
+
+Leaving `egress_trust_bundle` empty (the default) is byte-identical to
+today: no `system-info` volume, no `/run/ate` mount, no Env — and it also
+leaves `substrateTemplateName`'s content-address unchanged, so a plain
+install's existing golden templates keep being reused rather than rebuilt.
+
 ### `server.broker.broker_id` in the ConfigMap
 
 `HUB_BROKER_ID` fills `server.broker.broker_id`
