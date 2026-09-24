@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# scripts/single-node-vm/tests/lib/gcloud — a fake `gcloud` for the
+# hybrid-tier test harness, put first on PATH by tests/run.sh. Never
+# contacts GCP.
+#
+# Every invocation is appended to $GCLOUD_STUB_LOG, one call per line
+# (space-joined argv), so tests can assert on exactly what hybrid-tier.sh
+# asked gcloud to do. Responses are served from plain files under
+# $GCLOUD_STUB_STATE_DIR, which each test populates as its fixture and can
+# inspect afterwards to see what would have been created or deleted.
+#
+# Only the subcommands hybrid-tier.sh actually issues are implemented.
+
+set -euo pipefail
+
+: "${GCLOUD_STUB_LOG:?GCLOUD_STUB_LOG must be set}"
+: "${GCLOUD_STUB_STATE_DIR:?GCLOUD_STUB_STATE_DIR must be set}"
+
+mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules"
+
+printf '%s\n' "$*" >> "$GCLOUD_STUB_LOG"
+
+# get_flag KEY "$@" — echoes the value of --KEY=VALUE among the remaining
+# args, or fails (no output) if absent.
+get_flag() {
+  local key="$1"
+  shift
+  local a
+  for a in "$@"; do
+    case "$a" in
+      "--${key}="*) printf '%s' "${a#--"${key}"=}"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+case "$1 $2 $3" in
+  "compute firewall-rules describe")
+    name="$4"
+    f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}"
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      exit 0
+    fi
+    exit 1
+    ;;
+  "compute firewall-rules create")
+    name="$4"
+    desc="$(get_flag description "$@")" || desc=""
+    printf '%s' "$desc" > "${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}"
+    exit 0
+    ;;
+  "compute firewall-rules delete")
+    name="$4"
+    f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}"
+    if [[ -f "$f" ]]; then
+      rm -f "$f"
+      exit 0
+    fi
+    exit 1
+    ;;
+  "compute instances list")
+    filter="$(get_flag filter "$@")" || filter=""
+    # filter is of the form: name~^(gke|gk3)-<cluster>-
+    cluster="${filter#*)-}"
+    cluster="${cluster%-}"
+    fixture="${GCLOUD_STUB_STATE_DIR}/instances.tsv"
+    if [[ -f "$fixture" ]]; then
+      awk -F'\t' -v c="$cluster" '$1 ~ "^(gke|gk3)-" c "-" {print $2; exit}' "$fixture"
+    fi
+    exit 0
+    ;;
+  "compute instances add-tags")
+    exit 0
+    ;;
+  "container clusters describe")
+    f="${GCLOUD_STUB_STATE_DIR}/cluster-network"
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      exit 0
+    fi
+    exit 1
+    ;;
+  *)
+    echo "gcloud-stub: unhandled invocation: $*" >&2
+    exit 1
+    ;;
+esac
