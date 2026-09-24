@@ -18,6 +18,11 @@ import (
 
 var substrateServeAddr string
 
+// skipStartupRootfsFixupEnv, when set to any non-empty value, skips call
+// site 1's rootfs fixup in runSubstrateServe. See its own call site for
+// why this exists — a real actor never has a reason to set it.
+const skipStartupRootfsFixupEnv = "SCION_SUBSTRATE_TEST_SKIP_ROOTFS_FIXUP"
+
 // substrateServeCmd is the template entrypoint for the `substrate` runtime
 // (phase1-spec.md §2.1). It is compiled into the same sciontool binary as
 // every other subcommand, so no image-build change is needed beyond what
@@ -141,7 +146,23 @@ func runSubstrateServe(addr string) int {
 	// would copy up the entire home (including harness installs) on every
 	// actor start and hurt warm start. See fixupRootfsForScion's doc
 	// comment for what it actually fixes and why.
-	startupRootfsFixup("/")
+	//
+	// skipStartupRootfsFixupEnv is checked here, not left implicit: this is
+	// the one call site that runs against a real, unscrubbed "/" and real
+	// "scion" home whenever this binary is actually exec'd rather than
+	// driven in-process by a test (e.g.
+	// TestSubstrateServeCommand_Integration_SIGTERMNotForwarded's real
+	// subprocess) — no test-binary TestMain sandboxing reaches a real
+	// exec'd child's own process. There is no legitimate reason for a real
+	// actor to ever set this: it exists purely so that one integration
+	// test's subprocess, run by whoever happens to have real CAP_CHOWN on
+	// their own machine, can never Lchown anything under their own real
+	// home. Not read through the injectable startupRootfsFixup var: this
+	// check is about whether to call it at all, which a test replacing
+	// that var already controls directly.
+	if os.Getenv(skipStartupRootfsFixupEnv) == "" {
+		startupRootfsFixup("/")
+	}
 
 	srv := newSubstrateServeServer(RunInit)
 
@@ -160,14 +181,10 @@ func runSubstrateServe(addr string) int {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM)
 	// signal.Stop followed by close lets the goroutine below exit via its
-	// range loop instead of leaking forever: without this, every call to
-	// runSubstrateServe (including one that returns immediately because
-	// ListenAndServe failed) leaks one goroutine parked on sigChan for the
-	// life of the process. Harmless in production (there's only ever one
-	// call, and the process runs forever anyway), but a test that calls
-	// runSubstrateServe more than a handful of times — e.g. under
-	// -count=50 -shuffle=on — accumulates thousands of them and the test
-	// binary eventually times out.
+	// range loop on any return path, instead of leaking a goroutine parked
+	// on sigChan for the life of the process on every call. See the
+	// project log for why this matters even though production only ever
+	// calls this once.
 	defer func() {
 		signal.Stop(sigChan)
 		close(sigChan)

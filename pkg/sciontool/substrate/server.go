@@ -318,8 +318,9 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 			// distinct, HTTP-reachable state instead, so a caller that
 			// knows to check it can tell the difference from a genuinely
 			// running harness. The primary failure signal is the direct
-			// Hub report the init runner's own caller (reportInitFailure,
-			// cmd/sciontool/commands) already makes before returning.
+			// Hub report reportInitFailure (cmd/sciontool/commands) already
+			// makes from inside RunInit itself, before RunInit (and so
+			// runInit here) returns.
 			if exitCode != 0 {
 				s.mu.Lock()
 				s.initFailed = true

@@ -11,6 +11,42 @@ import (
 	"testing"
 )
 
+// TestCanSearchDir_OwnerFirst pins the kernel's own permission-check order
+// that canSearchDir's doc comment claims: once a directory's owning uid
+// matches the target uid, only the owner bit decides traversability —
+// never falling through to the group or other bits, no matter how
+// permissive they are. Every other canSearchDir-exercising test in this
+// package uses directories the target uid doesn't own, so a mutation
+// replacing the owner branch with the "other" bit check would survive
+// them all; this is the one that pins the owner-first rule directly.
+func TestCanSearchDir_OwnerFirst(t *testing.T) {
+	const uid, gid = 1000, 1000
+	cases := []struct {
+		name string
+		mode fs.FileMode
+		want bool
+	}{
+		// Owner has no bits at all, but group (which also matches gid) and
+		// other both have full rwx. The owner branch must still win.
+		{"owner empty, group+other rwx (0o070)", fs.ModeDir | 0o070, false},
+		{"owner empty, group+other rwx (0o077)", fs.ModeDir | 0o077, false},
+		// Owner has read+write but not execute; other has execute. The
+		// owner branch must still win (no execute bit there means false),
+		// not fall through to other's execute bit.
+		{"owner rw only, other x (0o601)", fs.ModeDir | 0o601, false},
+		// Control: owner does have the execute bit.
+		{"owner has x (0o100)", fs.ModeDir | 0o100, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			info := fakeFileInfo{mode: c.mode, uid: uid, gid: gid}
+			if got := canSearchDir(info, uid, gid); got != c.want {
+				t.Errorf("canSearchDir(mode=%v, owned by the target uid/gid) = %v, want %v", c.mode, got, c.want)
+			}
+		})
+	}
+}
+
 // TestFixupRootfsForScion_WidensRestrictiveRoot proves condition (i) from
 // fixupRootfsForScion's doc comment: a rootfs whose '/' comes up too
 // restrictive to traverse (e.g. 0700, from bundle_linux.go's MkdirAll) gets
@@ -125,14 +161,16 @@ func TestFixupRootfsForScion_ChownsRootOwnedHomeEntriesThenIsIdempotent(t *testi
 }
 
 // TestFixupRootfsForScion_NoopWhenAlreadyCorrect proves the doc comment's
-// "idempotent and quiet: when neither condition needs fixing, this makes no
-// changes" claim end to end, using the real (non-faked) fileOwnerUID and
-// lchownFn: a t.TempDir()'s entries are owned by the test's own uid, not
-// root, so nothing here should be touched at all. Combined with
+// "idempotent: when neither condition needs fixing, this makes no changes"
+// claim end to end, using the real (non-faked) fileOwnerUID and lchownFn: a
+// t.TempDir()'s entries are owned by the test's own uid, not root, so
+// nothing here should be touched at all. Combined with
 // TestFixupRootfsForScion_ChownsRootOwnedHomeEntriesThenIsIdempotent above
-// (which proves "logs nothing" by inspection: fixupRootfsForScion's only
-// log.Info call is gated on rootChanged || homeChanged > 0, and that test
-// already proves both are false/0 on a no-op pass), this covers the case
+// (which proves the info-on-change log line stays silent by inspection:
+// fixupRootfsForScion's only log.Info call is gated on
+// rootChanged || homeChanged > 0, and that test already proves both are
+// false/0 on a no-op pass — the unconditional log.Debug line logs on every
+// call, on purpose, and isn't part of this claim), this covers the case
 // where they start out false/0 rather than becoming so after a first fix.
 func TestFixupRootfsForScion_NoopWhenAlreadyCorrect(t *testing.T) {
 	root := t.TempDir()

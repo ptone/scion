@@ -194,8 +194,20 @@ type privilegeDropPreconditionDeps struct {
 // the real process: /proc/self/status, the real "scion" user, the real
 // environment, and the real filesystem.
 var defaultPrivilegeDropPreconditionDeps = privilegeDropPreconditionDeps{
-	hasCapBit:  hasCapBit,
-	lookupUser: user.Lookup,
+	hasCapBit: hasCapBit,
+	// lookupUser goes through the scionUserLookup var (a closure, not
+	// scionUserLookup's current value directly — this struct literal is
+	// evaluated once at package-init time, before TestMain can override
+	// the var, so binding the value directly here would freeze in
+	// whatever scionUserLookup held at that moment and never see the
+	// override) rather than calling user.Lookup itself, so the checker
+	// falls under the same two defenses every other "scion" lookup in
+	// this file does: TestMain's stub, and defaultScionUserLookup's own
+	// testing.Testing() gate. Before this, checkPrivilegeDropFeasible was
+	// the one remaining path in this package that read-only resolved the
+	// real "scion" account even under go test whenever real capabilities
+	// happened to be present.
+	lookupUser: func(username string) (*user.User, error) { return scionUserLookup(username) },
 	getenv:     os.Getenv,
 	statPath:   os.Stat,
 }
@@ -657,7 +669,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			if dir == "" {
 				continue
 			}
-			if _, err := chownTreeRootOwned(dir, targetUID, targetGID); err != nil {
+			if _, _, err := chownTreeRootOwned(dir, targetUID, targetGID); err != nil {
 				log.Error("Failed to chown %s after pre-start hooks: %v", dir, err)
 			}
 		}
@@ -1643,11 +1655,8 @@ func watchLimitsTriggerFile(ctx context.Context, ch chan<- struct{}) {
 }
 
 // errRealUserLookupDisabledUnderTest is defaultScionUserLookup/
-// defaultLookupUserByID's second, independent defense against a real
-// account lookup from a test — see their own doc comment for the incident
-// (a test wrote this container's own real agent-info.json after its
-// TestMain override of scionUserLookup/lookupUserByID was removed) this
-// exists to catch even when that first defense is gone.
+// defaultLookupUserByID's own error — see their doc comment for why this
+// second, independent defense exists.
 var errRealUserLookupDisabledUnderTest = errors.New("scionUserLookup/lookupUserByID: real user lookups are disabled under go test; a test that needs a resolved user must override the var itself (scoped with t.Cleanup)")
 
 // defaultScionUserLookup is scionUserLookup's real, production value — but
@@ -1972,14 +1981,25 @@ func directSetUID(username, newUID, newGID string) error {
 // test can exercise the "no entry to rewrite" detection against a temp file
 // instead of the real /etc/group and /etc/passwd.
 func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir string) error {
+	// Recorded up front, but only acted on at the very end (see the return
+	// below): the historical (pre-substrate) behaviour ran the group sed,
+	// the passwd sed and the home chown unconditionally regardless of
+	// whether username actually had a passwd entry, and this must still
+	// do exactly that for every runtime that isn't substrate — a
+	// non-substrate caller absorbs this error (adjustScionUser, with
+	// requirePrivilegeDrop false) and falls through to the same (uid, gid)
+	// it always returned, so the side effects (home now owned by the
+	// realigned uid/gid) must land the same way they always did, not be
+	// skipped because this function also needs to tell substrate's
+	// requirePrivilegeDrop=true caller that nothing was actually rewritten.
+	hasEntry := passwdEntryExists(passwdPath, username)
+
 	// Update /etc/group: replace the GID (3rd field) for the matching
 	// group. Best-effort and unconditional, with no pre-check — matching
 	// the historical behaviour exactly: sed's substitute command exits 0
 	// whether or not it matched anything, and a scion user whose primary
 	// group isn't literally named "scion" (e.g. useradd -g users scion) is
 	// a legitimate, harmless case for this line to silently match nothing.
-	// Only the passwd entry below is what actually determines whether the
-	// uid/gid rewrite took effect, so only it is pre-checked.
 	groupSed := exec.Command("sed", "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:/\1%s:/`, username, newGID),
 		groupPath)
@@ -1987,14 +2007,12 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 		return fmt.Errorf("sed %s: %w (output: %s)", groupPath, err, string(out))
 	}
 
-	// sed -i's substitute command exits 0 regardless of whether it matched
-	// anything, so confirm the passwd entry exists first — otherwise a
-	// missing "scion" user would slip through with no error at all.
-	if !passwdEntryExists(passwdPath, username) {
-		return fmt.Errorf("%s: %w", passwdPath, errPasswdEntryNotRewritten)
-	}
-	// Update /etc/passwd: replace both UID (3rd field) and GID (4th field)
-	// Format: username:x:UID:GID:...
+	// Update /etc/passwd: replace both UID (3rd field) and GID (4th field).
+	// Format: username:x:UID:GID:... — also unconditional and best-effort,
+	// for the same reason as the group sed above: sed -i's substitute
+	// command exits 0 whether or not anything matched, so this is a
+	// harmless no-op when hasEntry is false, exactly like the historical
+	// (pre-substrate) behaviour.
 	passwdSed := exec.Command("sed", "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:[0-9]+:/\1%s:%s:/`, username, newUID, newGID),
 		passwdPath)
@@ -2002,10 +2020,11 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 		return fmt.Errorf("sed %s: %w (output: %s)", passwdPath, err, string(out))
 	}
 
-	// Chown the home directory and its immediate contents (skeleton files).
-	// We avoid a deep recursive walk since that's the expensive part of
-	// usermod on fuse-overlayfs. The home dir should only have dotfiles
-	// from /etc/skel at this point.
+	// Chown the home directory and its immediate contents (skeleton files),
+	// unconditionally — including when hasEntry is false, matching
+	// the historical behaviour. We avoid a deep recursive walk since that's the expensive
+	// part of usermod on fuse-overlayfs. The home dir should only have
+	// dotfiles from /etc/skel at this point.
 	uid := mustAtoi(newUID)
 	gid := mustAtoi(newGID)
 	if err := os.Chown(homeDir, uid, gid); err != nil {
@@ -2021,6 +2040,15 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 		}
 	}
 
+	// Only now, after every side effect above has run exactly as it always
+	// did, report that nothing was actually there to rewrite — substrate's
+	// requirePrivilegeDrop=true caller still fails closed on this (see
+	// errPasswdEntryNotRewritten's own doc comment); every other caller
+	// absorbs it and returns the same (uid, gid) it always did, with the
+	// home chown already applied above rather than skipped.
+	if !hasEntry {
+		return fmt.Errorf("%s: %w", passwdPath, errPasswdEntryNotRewritten)
+	}
 	return nil
 }
 
@@ -2377,15 +2405,17 @@ var (
 // skipped for efficiency. It is called both after pre-start hooks, to fix
 // up files created by provisioners running as root (which would otherwise
 // be undeletable by the non-root broker), and — for substrate specifically
-// — by fixupRootfsForScion. Returns the number of entries actually
+// — by fixupRootfsForScion. Returns the number of entries the walk visited
+// in total (so a no-op call's own cost is still measurable — see
+// fixupRootfsForScion's unconditional log.Debug) and the number actually
 // rechowned.
-func chownTreeRootOwned(root string, uid, gid int) (int, error) {
-	changed := 0
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+func chownTreeRootOwned(root string, uid, gid int) (walked, changed int, err error) {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Skip permission errors on walk (e.g., lost+found).
 			return nil
 		}
+		walked++
 		info, err := d.Info()
 		if err != nil {
 			return nil
@@ -2401,7 +2431,7 @@ func chownTreeRootOwned(root string, uid, gid int) (int, error) {
 		changed++
 		return nil
 	})
-	return changed, err
+	return walked, changed, err
 }
 
 func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, chown func(string, int, int) error) {

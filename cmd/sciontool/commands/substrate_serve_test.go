@@ -129,7 +129,13 @@ func TestSubstrateServeCommand_Integration_SIGTERMNotForwarded(t *testing.T) {
 	// HOME redirection in this package for the incident this defends
 	// against — a subprocess isn't automatically covered by that, since it
 	// gets a fresh environment from cmd.Env, not the test binary's own).
-	cmd.Env = append(filterHubEnv(os.Environ()), "HOME="+t.TempDir())
+	// skipStartupRootfsFixupEnv: this subprocess
+	// runs the real runSubstrateServe against this machine's real "/" and
+	// real "scion" home — nothing about this test binary's own TestMain
+	// sandboxing reaches a real exec'd child. Whoever runs this
+	// integration test locally with real CAP_CHOWN would otherwise have
+	// entries under their own real home Lchowned by the startup fixup.
+	cmd.Env = append(filterHubEnv(os.Environ()), "HOME="+t.TempDir(), skipStartupRootfsFixupEnv+"=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -241,17 +247,11 @@ func TestRunSubstrateServe_CallsRootfsFixupBeforeListening(t *testing.T) {
 	}
 }
 
-// TestRunSubstrateServe_DoesNotLeakSignalGoroutine is a regression test for
-// a real goroutine leak this file's own shuffle-mutation proof run
-// discovered: runSubstrateServe's SIGTERM-handling goroutine never exited
-// on return (ListenAndServe failing and returning immediately, exactly
-// like TestRunSubstrateServe_CallsRootfsFixupBeforeListening above,
-// leaked one every time). Harmless in production — there's only ever one
-// real call, and the process runs forever anyway — but calling
-// runSubstrateServe repeatedly in a test (as that test now does, and as
-// -count=50 -shuffle=on does 50x over) leaked one goroutine per call, and
-// the accumulated thousands eventually made the whole test binary time
-// out. See runSubstrateServe's own signal.Stop/close defer for the fix.
+// TestRunSubstrateServe_DoesNotLeakSignalGoroutine is a regression test:
+// runSubstrateServe's SIGTERM-handling goroutine must exit on every return
+// path, not leak one per call — see runSubstrateServe's own signal.Stop/
+// close defer, and the project log for why this matters even though
+// production only ever calls this once.
 func TestRunSubstrateServe_DoesNotLeakSignalGoroutine(t *testing.T) {
 	orig := startupRootfsFixup
 	t.Cleanup(func() { startupRootfsFixup = orig })
@@ -289,6 +289,32 @@ func TestRunSubstrateServe_DoesNotLeakSignalGoroutine(t *testing.T) {
 	}
 	if after > before+5 {
 		t.Errorf("goroutine count grew from %d to %d over %d runSubstrateServe calls that each failed to listen — want it to stay flat (no per-call leak)", before, after, iterations)
+	}
+}
+
+// TestRunSubstrateServe_SkipStartupRootfsFixupEnv proves
+// skipStartupRootfsFixupEnv actually skips the
+// call when set — the escape hatch
+// TestSubstrateServeCommand_Integration_SIGTERMNotForwarded's subprocess
+// relies on to never touch a real machine's real home.
+func TestRunSubstrateServe_SkipStartupRootfsFixupEnv(t *testing.T) {
+	t.Setenv(skipStartupRootfsFixupEnv, "1")
+	orig := startupRootfsFixup
+	t.Cleanup(func() { startupRootfsFixup = orig })
+	var called bool
+	startupRootfsFixup = func(string) { called = true }
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a port to force a listen failure: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	if code := runSubstrateServe(l.Addr().String()); code != 1 {
+		t.Fatalf("runSubstrateServe() = %d, want 1 (the address is already in use)", code)
+	}
+	if called {
+		t.Error("startupRootfsFixup was called despite the skip env var being set")
 	}
 }
 

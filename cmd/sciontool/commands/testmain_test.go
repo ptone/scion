@@ -22,93 +22,33 @@ var errScionUserLookupDisabledInTests = errors.New("scionUserLookup/lookupUserBy
 
 // TestMain makes this package's tests hermetic against the *real* machine
 // they happen to run on, for the whole test binary — not just the tests
-// that remember to sandbox themselves.
-//
-// Incident 1: a test that drove the real
-// RunInit wrote agent-info.json with phase "error" to this container's own,
-// real /home/scion — because this dev/test environment's actual system user
-// is named "scion", so setupHostUser's rootless shortcut and
-// resolveAgentHome's fallback both resolved a genuine user.Lookup("scion")
-// to the real account, regardless of what $HOME a single test had set with
-// t.Setenv. Some component outside this test process (the real agent
-// supervision for this container) reads that file and forwarded the
-// contamination to the real Hub, which then rejected this agent's own
-// inbound messages for about 35 minutes. A per-test t.Setenv cannot fix
-// this: the hazard is a real syscall-backed lookup, not an environment
-// variable.
-//
-// Incident 2: TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap
-// drove the real newSubstrateServeServer() wiring (real RunInit; at the
-// time, also a real os.Exit — since reverted, see StateInitFailed's doc
-// comment in pkg/sciontool/substrate) and set SCION_HOST_UID/GID but never
-// set HOME. Under the mutation that removes WithPrivilegeDropChecker
-// (exactly the regression this test exists to catch), bootstrap wrongly
-// returns 200, the real RunInit goroutine runs for real,
-// requirePrivilegeDropOrFail fails, and reportInitFailure resolves
-// agentHome via resolveAgentHome's os.Getenv("HOME") fallback — the real,
-// ambient $HOME of whoever's machine runs this test, not a temp directory,
-// because neither the test nor TestMain (at the time) redirected it. This
-// happened on a *different* agent's container (an independent reviewer's),
-// not just this one: it wrote that container's real agent-info.json.
-// "No test can touch the real account or hub even on a regression" did not
-// hold merely by clearing env vars and disabling user lookups; a
-// still-real $HOME is enough on its own to reach a real file.
-//
-// Incident 3: under -shuffle=on, TestDirectSetUIDAt_RewritesExistingEntry
-// (and any other exec.Command-based test) started failing with
-// "waitid: no child processes" once shuffled after the RunInit tests.
-// RunInit calls supervisor.StartReaper, which installs a process-wide
-// SIGCHLD handler that Wait4(-1, ...)s any reapable child — including one
-// a later exec.Command in this same test binary is still waiting on
-// itself, racing os/exec's own wait() and failing it with ECHILD. See
-// startReaper's own doc comment.
-//
-// Incident 4: every RunInit-driving test in this package was appending
-// real lines to this container's own real /home/scion/agent.log the whole
-// time. pkg/sciontool/log's write() lazily calls Init() on first use if no
-// path has been set, and Init() defaults to "/home/scion/agent.log"
-// whenever that directory exists — true on any machine where "scion" is a
-// real account, exactly the condition behind incidents 1-2. This is a
-// diagnostic log, not something a heartbeat relays to the Hub, so the
-// blast radius is smaller than incidents 1-2, but it is still a real file
-// on a real, possibly shared machine that tests were writing into by
-// accident.
+// that remember to sandbox themselves. See the project log
+// (.design/project-log/2026-09-23-substrate-phase1-delete-and-profile-fixes.md,
+// "Follow-up 3" and "Incidents 2-4") for the incidents that motivated each
+// layer below.
 //
 // Layers, all required:
 //
 //  1. Every SCION_HUB*/token/agent-identity env var, plus SCION_HOST_UID/GID
-//     and SCION_KEEPID_UID, is cleared for the entire process before any
-//     test runs. hub.NewClient() already refuses a non-localhost hub under
-//     `go test` (see its own doc comment), but that guard depends on
-//     testing.Testing() and a hubURL read from the environment; clearing
-//     the env here removes the *input* to that decision entirely, for
-//     every test in this package, not just ones that remember to call
-//     scrubHubEnv.
-//  2. scionUserLookup and lookupUserByID (the two package vars every
-//     "scion"/by-UID lookup in this file goes through — see their own doc
-//     comments) default to "not found" for the whole test binary. A test
-//     that needs a *resolved* fake user (e.g. adjustScionUser's tests)
-//     overrides the var itself, scoped with t.Cleanup so it reverts to this
-//     safe default afterward — it never falls through to a real syscall.
+//     and SCION_KEEPID_UID, is cleared for the entire process: removes the
+//     *input* hub.NewClient()'s own testing.Testing() guard depends on, for
+//     every test here, not just ones that remember to call scrubHubEnv.
+//  2. scionUserLookup and lookupUserByID default to "not found" for the
+//     whole test binary: no lookup here can resolve a real account, even
+//     when a test overrides the var back to a fake one (scoped with
+//     t.Cleanup). defaultScionUserLookup/defaultLookupUserByID's own
+//     testing.Testing() gate (init.go) is this layer's independent
+//     backstop, not a replacement for it.
 //  3. HOME, the XDG base-directory variables, and SCION_WORKSPACE_PATH are
-//     all redirected to one per-binary temp directory before any test
-//     runs, and removed afterward. These are every remaining input this
-//     package's code uses to derive a real filesystem path when nothing
-//     more specific (targetUID, an explicit agentHome parameter) is
-//     available — resolveAgentHome's os.Getenv("HOME") fallback,
-//     hooks.NewLifecycleManager's default hooks dir, gitCloneWorkspace's
-//     SCION_WORKSPACE_PATH default ("/workspace" — a real, precious path in
-//     any dev container this runs in). A test's own t.Setenv("HOME", ...)
-//     is necessary but not sufficient on its own (incident 2): it protects
-//     only that one test, not a regression that reaches this fallback from
-//     a code path the test author didn't anticipate.
-//  4. startReaper is stubbed to a no-op for the whole test binary
-//     (incident 3), so a test driving RunInit never installs the
-//     process-wide zombie reaper that steals other tests' exec.Command
-//     children.
+//     redirected to one per-binary temp directory: every remaining input
+//     this package's code uses to derive a real filesystem path when
+//     nothing more specific is available.
+//  4. startReaper is stubbed to a no-op for the whole test binary: a test
+//     driving RunInit must never install the process-wide zombie reaper
+//     that steals another test's exec.Command child.
 //  5. log.SetLogPath redirects pkg/sciontool/log's own file target to the
-//     same per-binary temp directory (incident 4), before any log call in
-//     this binary can lazily Init() itself against the real path.
+//     same per-binary temp directory, before any log call in this binary
+//     can lazily Init() itself against the real path.
 func TestMain(m *testing.M) {
 	envVarsToClear := append(append([]string{}, hubEnvVars...),
 		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID")

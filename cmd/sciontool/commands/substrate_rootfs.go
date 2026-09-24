@@ -36,9 +36,13 @@ import (
 // $HOME — purely so a test can point them at a t.TempDir() standing in for
 // the real rootfs and home directory.
 //
-// Idempotent and quiet: when neither condition needs fixing, this makes no
-// changes and logs nothing. It logs exactly one info line, with what
-// changed and how long it took, when something actually did.
+// Idempotent: when neither condition needs fixing, this makes no changes.
+// It always logs one debug line with the home walk's duration and entry
+// count — including on a no-op call, since the /bootstrap call site hits
+// this on every actor start and is by design a no-op once startup has
+// already fixed things up, so that cost would otherwise never be
+// measurable at all — and logs one additional info line, with what
+// changed, only when something actually did.
 func fixupRootfsForScion(root, home string, uid, gid int) {
 	start := time.Now()
 
@@ -57,10 +61,18 @@ func fixupRootfsForScion(root, home string, uid, gid int) {
 		}
 	}
 
-	homeChanged, err := chownTreeRootOwned(home, uid, gid)
+	homeWalked, homeChanged, err := chownTreeRootOwned(home, uid, gid)
 	if err != nil {
 		log.Error("fixupRootfsForScion: failed to walk %s: %v", home, err)
 	}
+
+	// Unconditional, unlike the info line below: the /bootstrap call site
+	// (RootfsFixup) hits this on every actor start and is a no-op by
+	// design once the startup call has already fixed everything up, so
+	// without this line that call's own cost — a full stat walk of $HOME —
+	// would never be measurable at all.
+	log.Debug("fixupRootfsForScion: walked %s in %s (%d entries, %d rechowned)",
+		home, time.Since(start), homeWalked, homeChanged)
 
 	if rootChanged || homeChanged > 0 {
 		log.Info("fixupRootfsForScion: fixed up rootfs in %s (root chmod to 0755: %v, home entries rechowned: %d)",
@@ -148,15 +160,20 @@ func canSearchDir(info fs.FileInfo, uid, gid uint32) bool {
 }
 
 // homeOwnedAndWritable reports whether $HOME (info) is owned by uid and
-// writable by its owner. Substrate always starts the actor with a single
-// scion user and no legitimate secondary group write case, so this only
-// ever checks the owner bit — a $HOME merely group- or other-writable
-// would be a misconfiguration worth failing closed on, not a case to
-// accept.
+// both writable and traversable (searchable) by its owner. Substrate
+// always starts the actor with a single scion user and no legitimate
+// secondary group write case, so this only ever checks the owner bits — a
+// $HOME merely group- or other-writable would be a misconfiguration worth
+// failing closed on, not a case to accept. Both write and execute are
+// required (0o300): a directory can be "writable" (create/delete entries
+// within it) yet still untraversable without its own execute bit, and
+// checking write alone would pass a $HOME the scion user can't actually
+// reach past canSearchDir's own parent-directory checks already covering
+// (which only check the parents of $HOME, not $HOME itself).
 func homeOwnedAndWritable(info fs.FileInfo, uid uint32) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uid {
 		return false
 	}
-	return info.Mode()&0o200 != 0
+	return info.Mode()&0o300 == 0o300
 }

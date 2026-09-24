@@ -40,12 +40,20 @@ const (
 	// distinct state here is what lets a caller that already knows to
 	// probe it (e.g. a future broker-side liveness check) distinguish this
 	// from a genuinely running harness — see the cmd layer's
-	// exitCodePrivilegeDropRequired and reportInitFailure for the direct
-	// Hub report, which is the primary failure signal today.
+	// exitCodePrivilegeDropRequired and reportInitFailure (called from
+	// inside RunInit itself) for the direct Hub report, which is the
+	// primary failure signal today. Reported over HTTP as a normal 200 OK
+	// with body {"state":"init-failed"} — healthz's status code always
+	// means "the control server itself is up and answering," never
+	// "everything behind it succeeded"; the state field is where a caller
+	// distinguishes success from this.
 	StateInitFailed State = "init-failed"
 )
 
-// HealthzResponse is the body of GET /scion/v1/healthz.
+// HealthzResponse is the body of GET /scion/v1/healthz, always returned
+// with HTTP 200 — the status code reflects the control server's own
+// liveness, not the state it reports. See each State constant's own doc
+// comment for what State a caller can expect and what it means.
 type HealthzResponse struct {
 	State State `json:"state"`
 }

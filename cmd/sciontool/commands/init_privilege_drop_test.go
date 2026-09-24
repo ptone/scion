@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -301,6 +302,20 @@ func TestCheckPrivilegeDropFeasible_HomeNotWritable_Fails(t *testing.T) {
 	}
 }
 
+// TestCheckPrivilegeDropFeasible_HomeWritableButNotTraversable_Fails is
+// a $HOME with the owner write bit but not the owner
+// execute bit (0600 — the scion user could create/delete entries in
+// principle, but can't even cd into the directory to do so) must still
+// fail. homeOwnedAndWritable's earlier 0o200-only check would have passed
+// this.
+func TestCheckPrivilegeDropFeasible_HomeWritableButNotTraversable_Fails(t *testing.T) {
+	d := fakePrivilegeDropDeps(t)
+	d.statPath = statPathOverride("/home/scion", fakeFileInfo{mode: fs.ModeDir | 0o600, uid: 1000, gid: 1000})
+	if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
+		t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition (home writable but not traversable)", err)
+	}
+}
+
 func TestCheckPrivilegeDropFeasible_TraversableAndOwned_Passes(t *testing.T) {
 	// The happy path: every default from fakePrivilegeDropDeps already
 	// satisfies traversability and home ownership/writability, so this is
@@ -527,18 +542,34 @@ func TestAdjustScionUser_ScionUserNotFound(t *testing.T) {
 	withScionUserLookup(t, func(string) (*user.User, error) {
 		return nil, errors.New("user: unknown user scion")
 	})
-	withRunDirectSetUID(t, func(string, string, string) error { return nil })
 	// Force the direct-edit branch (skip a real usermod/groupmod exec call).
 	t.Setenv("SCION_ALT_USERMOD", "1")
 
 	t.Run("RequirePrivilegeDrop=true fails closed", func(t *testing.T) {
+		var calls int
+		withRunDirectSetUID(t, func(string, string, string) error {
+			calls++
+			return nil
+		})
 		uid, gid, rootless := adjustScionUser(1000, 1000, "1000", "1000", true)
 		if uid != 0 || gid != 0 || rootless != false {
 			t.Errorf("adjustScionUser(..., true) = (%d,%d,%v), want (0,0,false)", uid, gid, rootless)
 		}
+		// Mutation check: disabling the not-found early
+		// return (adjustScionUser's requirePrivilegeDrop branch right after
+		// the failed lookup) still passes every other assertion here,
+		// because the post-adjust verify step backstops the return value —
+		// but it means runDirectSetUID gets called with a username that was
+		// never resolved to a real user at all. This assertion is the one
+		// that actually pins "never even try the rewrite," not just "the
+		// return value happens to come out right."
+		if calls != 0 {
+			t.Errorf("runDirectSetUID was called %d time(s) after a failed scion user lookup with requirePrivilegeDrop=true, want 0 — the early return must skip the rewrite attempt entirely, not just fail closed on its result", calls)
+		}
 	})
 
 	t.Run("RequirePrivilegeDrop=false is unchanged", func(t *testing.T) {
+		withRunDirectSetUID(t, func(string, string, string) error { return nil })
 		uid, gid, rootless := adjustScionUser(1000, 1000, "1000", "1000", false)
 		if uid != 1000 || gid != 1000 || rootless != false {
 			t.Errorf("adjustScionUser(..., false) = (%d,%d,%v), want (1000,1000,false) — non-substrate runtimes must stay byte-identical", uid, gid, rootless)
@@ -633,6 +664,14 @@ func TestAdjustScionUser_PostAdjustVerifyMismatch(t *testing.T) {
 // directSetUID's "no entry to rewrite" detection.
 // -----------------------------------------------------------------------
 
+// TestDirectSetUIDAt_NoEntryToRewrite_ReturnsError proves a parity
+// requirement: the historical (pre-substrate) directSetUID, run against a
+// passwd file with no entry for username, still chowned the home
+// directory — the sed simply matched nothing and exited 0. That side
+// effect must happen exactly the same way now, with the pre-check only
+// changing what directSetUIDAt *reports*, not what it *does*: home gets
+// chowned either way, and only substrate's requirePrivilegeDrop=true
+// caller treats the report as fatal (adjustScionUser, tested separately).
 func TestDirectSetUIDAt_NoEntryToRewrite_ReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	groupPath := filepath.Join(dir, "group")
@@ -643,16 +682,103 @@ func TestDirectSetUIDAt_NoEntryToRewrite_ReturnsError(t *testing.T) {
 	if err := os.WriteFile(passwdPath, []byte("other:x:2000:2000:Other User:/home/other:/bin/sh\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	homeDir := filepath.Join(dir, "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before := chownDetectorCtime(t, homeDir)
 
-	err := directSetUIDAt("scion", "1000", "1000", groupPath, passwdPath, filepath.Join(dir, "home"))
+	// newUID/newGID are the test process's own uid/gid, not "1000": os.Chown
+	// to a *different* uid/gid requires CAP_CHOWN, which this test process
+	// doesn't have, but a self-chown (even though it changes nothing about
+	// the file) still requires the syscall to actually run, and always
+	// bumps ctime when it does — see chownDetectorCtime.
+	self := strconv.Itoa(os.Getuid())
+	selfGID := strconv.Itoa(os.Getgid())
+	err := directSetUIDAt("scion", self, selfGID, groupPath, passwdPath, homeDir)
 	if !errors.Is(err, errPasswdEntryNotRewritten) {
 		t.Fatalf("directSetUIDAt() = %v, want an error wrapping errPasswdEntryNotRewritten", err)
 	}
 
-	// Confirm nothing was rewritten as a side effect of detecting this.
+	// Confirm nothing was rewritten in the passwd/group files as a side
+	// effect of detecting this (the sed's substitute matched nothing, as
+	// intended).
 	groupContent, _ := os.ReadFile(groupPath)
 	if !strings.Contains(string(groupContent), "other:x:2000:") {
 		t.Errorf("group file was modified despite no matching entry: %q", groupContent)
+	}
+
+	// But the home chown must still have happened — see the doc comment
+	// above.
+	assertChowned(t, homeDir, before)
+}
+
+// TestDirectSetUIDAt_PasswdEntryDisabledAccount_HomeStillChownedButReportsError
+// covers a "scion:*:" entry: it exists, but is disabled (no leading "x" —
+// see passwdEntryExists's own doc comment on why it anchors on
+// "username:x:" and not just "username:"), so it still doesn't match the
+// sed pattern either (which also anchors on ":x:"). This is the case
+// passwdEntryExists's tightened prefix check made newly reachable, and
+// pins that check against loosening back to a bare "username:" prefix.
+// Home must still be chowned, exactly like the missing-entry case above.
+func TestDirectSetUIDAt_PasswdEntryDisabledAccount_HomeStillChownedButReportsError(t *testing.T) {
+	dir := t.TempDir()
+	groupPath := filepath.Join(dir, "group")
+	passwdPath := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(groupPath, []byte("scion:x:2000:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(passwdPath, []byte("scion:*:2000:2000:Scion (disabled):/home/scion:/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	homeDir := filepath.Join(dir, "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before := chownDetectorCtime(t, homeDir)
+
+	self := strconv.Itoa(os.Getuid())
+	selfGID := strconv.Itoa(os.Getgid())
+	err := directSetUIDAt("scion", self, selfGID, groupPath, passwdPath, homeDir)
+	if !errors.Is(err, errPasswdEntryNotRewritten) {
+		t.Fatalf("directSetUIDAt() = %v, want an error wrapping errPasswdEntryNotRewritten (a \"scion:*:\" line is not a rewritable entry)", err)
+	}
+
+	passwdContent, _ := os.ReadFile(passwdPath)
+	if !strings.Contains(string(passwdContent), "scion:*:2000:2000:") {
+		t.Errorf("passwd file was modified despite no \":x:\" entry to match: %q", passwdContent)
+	}
+
+	assertChowned(t, homeDir, before)
+}
+
+// chownDetectorCtime returns path's current ctime, for use with
+// assertChowned. A directSetUIDAt caller in these tests always passes its
+// own uid/gid as the chown target (real CAP_CHOWN isn't available), which
+// changes nothing about the file's actual ownership — but chown(2) still
+// bumps ctime on any call that actually executes, whether or not the
+// values differ from the file's current owner, so this detects whether the
+// chown call happened at all without needing a mock or real privilege.
+func chownDetectorCtime(t *testing.T, path string) syscall.Timespec {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("could not read %s's ctime", path)
+	}
+	return stat.Ctim
+}
+
+// assertChowned fails the test unless path's ctime has advanced past
+// before — see chownDetectorCtime.
+func assertChowned(t *testing.T, path string, before syscall.Timespec) {
+	t.Helper()
+	after := chownDetectorCtime(t, path)
+	if after.Sec < before.Sec || (after.Sec == before.Sec && after.Nsec <= before.Nsec) {
+		t.Errorf("%s's ctime did not advance (before=%v, after=%v) — the home chown must run even when there's no passwd entry to rewrite", path, before, after)
 	}
 }
 
