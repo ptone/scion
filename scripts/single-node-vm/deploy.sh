@@ -751,7 +751,7 @@ else
 fi
 
 # --- Hybrid tier (optional GKE attach target) ---
-hybrid_read_config "$PROJECT_ID"
+hybrid_read_config "$PROJECT_ID" "$HUB_NAME"
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
   echo "  Hybrid tier: enabled (GKE cluster: ${GKE_NAME}, location: ${GKE_LOCATION})"
 fi

@@ -95,29 +95,36 @@ _hybrid_kubectl_not_found() {
   echo "$text" | grep -qE '\(NotFound\)'
 }
 
-# hybrid_read_config PROJECT_ID
+# hybrid_read_config PROJECT_ID HUB_NAME
 #
-# Reads gke_target.{name,location,project} via the caller's config_get. In
-# interactive mode (no CONFIG_FILE), offers to enable the tier and prompts
-# for the three fields via config_prompt when the operator opts in; in
-# config-file mode, an absent or empty gke_target.name means the tier is
-# off, full stop, with no prompt.
+# Reads gke_target.{name,location,project,namespace,pvc_name} via the
+# caller's config_get. In interactive mode (no CONFIG_FILE), offers to
+# enable the tier and prompts for all five fields via config_prompt when
+# the operator opts in, showing each derived default (empty input
+# accepts it); in config-file mode, an absent or empty gke_target.name
+# means the tier is off, full stop, with no prompt.
 #
 # Sets HYBRID_ENABLED to "true" or "false". When "true", also sets
-# GKE_PROJECT, GKE_LOCATION and GKE_NAME. Exits non-zero with an actionable
-# message if: gke_target.name is set but gke_target.location is missing;
-# any of gke_target.name/location/project fails GCP's own naming pattern;
-# gke_target.project is set and differs from PROJECT_ID (only a cluster in
-# the hub's own project is supported); or $PYTHON isn't available (the
-# rest of the tier depends on it for every gcloud JSON response it reads).
+# GKE_PROJECT, GKE_LOCATION, GKE_NAME, GKE_NAMESPACE and GKE_PVC_NAME.
+# Exits non-zero with an actionable message if: gke_target.name is set
+# but gke_target.location is missing; any of gke_target.name/location/
+# project fails GCP's own naming pattern; gke_target.project is set and
+# differs from PROJECT_ID (only a cluster in the hub's own project is
+# supported); or $PYTHON isn't available (the rest of the tier depends
+# on it for every gcloud JSON response it reads).
 hybrid_read_config() {
-  local project_id="$1"
-  local cfg_name cfg_location cfg_project
+  local project_id="$1" hub_name="$2"
+  local cfg_name cfg_location cfg_project cfg_namespace cfg_pvc_name
   local hybrid_choice
+  local default_namespace default_pvc_name
+  default_namespace="$(hybrid_k8s_default_namespace "$hub_name")"
+  default_pvc_name="$(hybrid_k8s_default_pvc_name "$hub_name")"
 
   cfg_name="$(config_get 'gke_target.name' '')"
   cfg_location="$(config_get 'gke_target.location' '')"
   cfg_project="$(config_get 'gke_target.project' '')"
+  cfg_namespace="$(config_get 'gke_target.namespace' "$default_namespace")"
+  cfg_pvc_name="$(config_get 'gke_target.pvc_name' "$default_pvc_name")"
 
   if [[ -z "$cfg_name" && -z "${CONFIG_FILE:-}" ]]; then
     echo ""
@@ -126,6 +133,8 @@ hybrid_read_config() {
       config_prompt cfg_name "GKE cluster name: " ""
       config_prompt cfg_location "GKE cluster location (zone or region): " ""
       config_prompt cfg_project "GKE cluster project [${project_id}]: " "${project_id}"
+      config_prompt cfg_namespace "Kubernetes namespace for the shared tree [${default_namespace}]: " "${default_namespace}"
+      config_prompt cfg_pvc_name "PersistentVolumeClaim name [${default_pvc_name}]: " "${default_pvc_name}"
     fi
   fi
 
@@ -151,6 +160,14 @@ hybrid_read_config() {
     err "gke_target.project '${cfg_project}' is not a valid GCP project ID."
     exit 1
   fi
+  if ! [[ "$cfg_namespace" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+    err "gke_target.namespace '${cfg_namespace}' is not a valid Kubernetes namespace name (lowercase alphanumeric and hyphens, must start and end with an alphanumeric, max 63 characters)."
+    exit 1
+  fi
+  if ! [[ "$cfg_pvc_name" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+    err "gke_target.pvc_name '${cfg_pvc_name}' is not a valid Kubernetes object name (lowercase alphanumeric and hyphens, must start and end with an alphanumeric, max 63 characters)."
+    exit 1
+  fi
 
   GKE_NAME="$cfg_name"
   GKE_LOCATION="$cfg_location"
@@ -167,6 +184,10 @@ hybrid_read_config() {
 
   # shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
   HYBRID_ENABLED=true
+  # shellcheck disable=SC2034 # read by hybrid_k8s_ensure_objects/_teardown_check as an override
+  GKE_NAMESPACE="$cfg_namespace"
+  # shellcheck disable=SC2034 # read by hybrid_k8s_ensure_objects/_teardown_check as an override
+  GKE_PVC_NAME="$cfg_pvc_name"
 }
 
 # _hybrid_cluster_ref — a "name (project: P, location: L)" string for
@@ -1211,8 +1232,12 @@ _hybrid_k8s_get() {
 hybrid_k8s_ensure_objects() {
   local hub_name="$1" vm_ip="$2"
   local namespace pvc_name pv_name
-  namespace="$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")"
-  pvc_name="$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$hub_name")")"
+  # GKE_NAMESPACE/GKE_PVC_NAME, if set, come from hybrid_read_config
+  # (which may have prompted for them interactively); falling back to
+  # config_get directly covers callers that skip it, such as --delete,
+  # which must never prompt.
+  namespace="${GKE_NAMESPACE:-$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")}"
+  pvc_name="${GKE_PVC_NAME:-$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$hub_name")")}"
   pv_name="$(hybrid_k8s_pv_name "$hub_name")"
 
   if _hybrid_k8s_get namespace "$namespace"; then
@@ -1301,8 +1326,8 @@ hybrid_k8s_ensure_objects() {
 # HYBRID_KUBECONFIG to already be set.
 hybrid_k8s_teardown_check() {
   local hub_name="$1"
-  HYBRID_K8S_NAMESPACE="$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")"
-  HYBRID_K8S_PVC_NAME="$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$hub_name")")"
+  HYBRID_K8S_NAMESPACE="${GKE_NAMESPACE:-$(config_get 'gke_target.namespace' "$(hybrid_k8s_default_namespace "$hub_name")")}"
+  HYBRID_K8S_PVC_NAME="${GKE_PVC_NAME:-$(config_get 'gke_target.pvc_name' "$(hybrid_k8s_default_pvc_name "$hub_name")")}"
   HYBRID_K8S_PV_NAME="$(hybrid_k8s_pv_name "$hub_name")"
   HYBRID_K8S_TEARDOWN_DELETE=()
   HYBRID_K8S_TEARDOWN_FAILED=false
