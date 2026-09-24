@@ -340,6 +340,9 @@ print(json.dumps(out))
     exit 0
     ;;
   "compute routers describe")
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/router-exists" ]]; then
+      exit 0
+    fi
     exit 1
     ;;
   "compute routers create")
@@ -350,6 +353,9 @@ print(json.dumps(out))
     exit 0
     ;;
   "iam service-accounts describe")
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-account-exists" ]]; then
+      exit 0
+    fi
     exit 1
     ;;
   "iam service-accounts create")

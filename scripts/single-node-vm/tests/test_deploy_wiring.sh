@@ -324,6 +324,65 @@ test_deploy_create_discovery_before_first_create() {
 }
 
 # =====================================================================
+# Base markers on create: additive, create-only, never checked or
+# adopted on. This is the first deliberate tier-off behavior change (the
+# second is the API check, above): markers apply on every fresh deploy
+# regardless of whether the hybrid tier is on, and never on redeploys of
+# an existing resource. Base teardown is unaffected either way.
+# =====================================================================
+
+test_deploy_create_base_markers_present_on_fresh_create() {
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB")"
+  local log
+  log="$(gcloud_log)"
+  local instance_line sa_line router_line fw_line
+  instance_line="$(echo "$log" | grep 'compute instances create' | head -1)"
+  sa_line="$(echo "$log" | grep 'service-accounts create' | head -1)"
+  router_line="$(echo "$log" | grep 'compute routers create' | head -1)"
+  fw_line="$(echo "$log" | grep 'firewall-rules create.*allow-iap-ssh' | head -1)"
+  assert_contains "$instance_line" "--labels=scion-deployment=${HUB}" "the VM must carry the marker label on create"
+  assert_contains "$sa_line" "--description=scion-deployment=${HUB}" "the service account must carry the marker description on create"
+  assert_contains "$router_line" "--description=scion-deployment=${HUB}" "the router must carry the marker description on create"
+  assert_contains "$fw_line" "scion-deployment=${HUB}" \
+    "the IAP SSH firewall rule's description must include the marker token alongside its existing text"
+  assert_contains "$fw_line" "Allow SSH via IAP tunneling" \
+    "the IAP SSH firewall rule's existing description text must be preserved, not replaced by the marker"
+}
+
+test_deploy_create_base_markers_absent_when_tier_off_no_tags() {
+  # Same fixture as test_deploy_create_tier_off_no_tags_no_container_calls,
+  # but checking the marker is present regardless -- this is the
+  # deliberate tier-off exception, not something gated on the tier.
+  fresh_gcloud_state
+  run_deploy_create "$(base_config_json "$HUB")"
+  assert_eq "1" "$(gcloud_log | grep -c -- "--labels=scion-deployment=${HUB}" || true)" \
+    "the base marker must be present even with the hybrid tier off"
+}
+
+# Markers must never appear on an adopt/existing-resource path: this
+# reuses the existing-VM fixture (no hybrid tier involved) to prove the
+# instance marker is create-only.
+test_deploy_create_base_markers_absent_on_existing_vm() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  run_deploy_create "$(base_config_json "$HUB")"
+  assert_eq "0" "$(gcloud_log | grep -c 'compute instances create' || true)" \
+    "an existing VM must not be recreated (and so never gets the create-only marker call)"
+}
+
+test_deploy_create_base_markers_absent_on_existing_router_and_sa() {
+  fresh_gcloud_state
+  set_router_exists
+  set_service_account_exists
+  run_deploy_create "$(base_config_json "$HUB")"
+  assert_eq "0" "$(gcloud_log | grep -c 'compute routers create' || true)" \
+    "an existing router must not be recreated (and so never gets the create-only marker call)"
+  assert_eq "0" "$(gcloud_log | grep -c 'service-accounts create' || true)" \
+    "an existing service account must not be recreated (and so never gets the create-only marker call)"
+}
+
+# =====================================================================
 # API check: enable only what's missing, never the whole list when
 # nothing needs it, and add container.googleapis.com when the tier is
 # on. This is the second deliberate tier-off behavior change (the first
