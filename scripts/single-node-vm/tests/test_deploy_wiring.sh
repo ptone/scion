@@ -588,3 +588,66 @@ test_deploy_delete_interactive_unmarked_exits_nonzero_before_any_delete() {
   assert_eq "0" "$(gcloud_log | grep -c ' delete' || true)" \
     "no delete call of any kind should be logged before the abort"
 }
+
+# =====================================================================
+# Kubernetes objects (R4 teardown wiring): tier-off inertness, the
+# cluster-gone/cluster-error distinction, and the abort-before-any-
+# delete rule for an unmarked PV/PVC. Create-mode wiring for these
+# objects is exercised only at the function level
+# (test_k8s_ensure_* in test_hybrid_tier.sh): hybrid_k8s_ensure_objects
+# runs in Phase 4, well past the point create-mode wiring tests
+# intentionally stop (the VM-exists sentinel), and further downstream
+# than even the NFS/squash step -- deep into image-build territory the
+# stub doesn't simulate at all.
+# =====================================================================
+
+K8S_NS_D="scion-hub-${HUB}"
+K8S_PVC_D="scion-hub-${HUB}-shared"
+K8S_PV_D="scion-hub-${HUB}-shared"
+
+test_deploy_delete_k8s_tier_off_zero_kubectl_calls() {
+  fresh_gcloud_state
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "0" "$DEPLOY_RC" "tier-off teardown must succeed as before"
+  assert_eq "0" "$(kubectl_log | grep -c . || true)" "tier-off teardown must make zero kubectl calls"
+}
+
+test_deploy_delete_k8s_cluster_not_found_continues() {
+  fresh_gcloud_state
+  run_deploy_delete "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  assert_eq "0" "$DEPLOY_RC" "a genuinely-gone cluster must not fail the teardown"
+  assert_eq "0" "$(kubectl_log | grep -c . || true)" \
+    "a NOT_FOUND cluster means its k8s objects went with it -- no kubectl call should even be attempted"
+  assert_contains "$DEPLOY_LOG" "went with it" "should explain why nothing was checked"
+}
+
+test_deploy_delete_k8s_cluster_describe_error_aborts_before_any_delete() {
+  fresh_gcloud_state
+  set_cluster_describe_error "mycluster"
+  run_deploy_delete "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  assert_eq "1" "$DEPLOY_RC" "an unconfirmable cluster state must fail the teardown"
+  assert_eq "0" "$(gcloud_log | grep -c ' delete' || true)" "no delete call of any kind should happen before the abort"
+}
+
+test_deploy_delete_k8s_all_marked_deletes_all_three() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_k8s_pvc "$K8S_PVC_D" "$K8S_NS_D" "$HUB" "$K8S_PV_D"
+  seed_k8s_pv "$K8S_PV_D" "$HUB" "10.128.0.5" "/srv/scion-shared" "$K8S_NS_D" "$K8S_PVC_D"
+  seed_k8s_namespace "$K8S_NS_D" "$HUB"
+  run_deploy_delete "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  assert_eq "0" "$DEPLOY_RC" "an all-marked k8s teardown must succeed"
+  assert_eq "1" "$(kubectl_log | grep -c 'delete pvc' || true)" "the PVC must be deleted"
+  assert_eq "1" "$(kubectl_log | grep -c 'delete pv ' || true)" "the PV must be deleted"
+  assert_eq "1" "$(kubectl_log | grep -c 'delete namespace' || true)" "the namespace must be deleted"
+}
+
+test_deploy_delete_k8s_unmarked_pv_aborts_before_any_delete() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_k8s_pv_unmarked "$K8S_PV_D"
+  run_deploy_delete "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  assert_eq "1" "$DEPLOY_RC" "an unmarked PV must abort the whole teardown"
+  assert_eq "0" "$(gcloud_log | grep -c ' delete' || true)" "no delete call of any kind should happen before the abort"
+  assert_eq "0" "$(kubectl_log | grep -c 'delete' || true)" "no kubectl delete call should happen before the abort either"
+}
