@@ -459,6 +459,39 @@ func TestBootstrap_PrivilegeDropCheckerSeesReqEnv(t *testing.T) {
 	}
 }
 
+// TestBootstrap_RootfsFixupRunsBeforePrivilegeDropChecker proves call site 2
+// (see RootfsFixup's doc comment): handleBootstrap must run it before the
+// privilege-drop precondition, which depends on the rootfs it corrects
+// (traversability, home ownership). This is also the "call site 2 gets
+// removed" mutation check — deleting the s.rootfsFixup() call in
+// handleBootstrap leaves "rootfsFixup" out of order (recorded here, not
+// present at all), failing this test.
+func TestBootstrap_RootfsFixupRunsBeforePrivilegeDropChecker(t *testing.T) {
+	var order []string
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithRootfsFixup(func() { order = append(order, "rootfsFixup") }),
+		WithPrivilegeDropChecker(func() error {
+			order = append(order, "privilegeDropChecker")
+			return nil
+		}),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd:     "true",
+		ControlToken: "tok",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	want := []string{"rootfsFixup", "privilegeDropChecker"}
+	if len(order) != len(want) || order[0] != want[0] || order[1] != want[1] {
+		t.Errorf("call order = %v, want %v", order, want)
+	}
+}
+
 // TestBootstrap_PrivilegeDropPreconditionFails_RejectsWithoutStartingInit
 // proves the serve side of PrivilegeDropChecker's contract: when it rejects
 // the bootstrap, the response must be non-2xx

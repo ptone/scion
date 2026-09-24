@@ -202,6 +202,44 @@ func TestSubstrateServeCommand_Integration_SIGTERMNotForwarded(t *testing.T) {
 	}
 }
 
+// TestRunSubstrateServe_CallsRootfsFixupBeforeListening proves call site 1
+// (see fixupRootfsForScion's doc comment): runSubstrateServe must run the
+// rootfs fixup before the control server can ever answer /healthz, so a
+// restored actor's golden snapshot always reflects the corrected rootfs.
+// runSubstrateServe is otherwise a strictly sequential function — the fixup
+// call and the listen attempt can't race each other — so it's enough to
+// force the listen attempt to fail immediately (by holding the port open
+// ourselves first) and confirm the fixup ran anyway, rather than standing up
+// a real, reachable server on a free port. This is also the "the startup
+// call gets removed" mutation check: deleting the startupRootfsFixup("/")
+// call in runSubstrateServe fails this test.
+func TestRunSubstrateServe_CallsRootfsFixupBeforeListening(t *testing.T) {
+	orig := startupRootfsFixup
+	t.Cleanup(func() { startupRootfsFixup = orig })
+	var called bool
+	var gotRoot string
+	startupRootfsFixup = func(root string) {
+		called = true
+		gotRoot = root
+	}
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a port to force a listen failure: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	if code := runSubstrateServe(l.Addr().String()); code != 1 {
+		t.Fatalf("runSubstrateServe() = %d, want 1 (the address is already in use, so ListenAndServe must fail)", code)
+	}
+	if !called {
+		t.Error("runSubstrateServe returned without ever calling startupRootfsFixup")
+	}
+	if gotRoot != "/" {
+		t.Errorf("startupRootfsFixup called with root = %q, want \"/\"", gotRoot)
+	}
+}
+
 func findFreePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")

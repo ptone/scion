@@ -77,6 +77,20 @@ func substrateServePrivilegeDropChecker() error {
 	return checkPrivilegeDropFeasible(defaultPrivilegeDropPreconditionDeps)
 }
 
+// substrateServeRootfsFixup is the substrate.RootfsFixup substrate-serve
+// wires into its Server as call site 2 (the /bootstrap fallback — see
+// fixupRootfsForScion's doc comment for call site 1, substrate-serve's own
+// startup, which is the primary one).
+func substrateServeRootfsFixup() {
+	fixupRootfsForScionUser("/")
+}
+
+// startupRootfsFixup is call site 1's own call, as a package var — the same
+// reason as startReaper: a test driving runSubstrateServe needs to observe
+// (and assert the ordering of) this call without it resolving the real
+// "scion" user or touching a real rootfs.
+var startupRootfsFixup = fixupRootfsForScionUser
+
 // newSubstrateServeServer builds the *substrate.Server substrate-serve
 // mounts, wiring both the init runner and the privilege-drop precondition
 // (see PrivilegeDropChecker's doc comment). Extracted so a test can drive
@@ -103,6 +117,7 @@ func substrateServePrivilegeDropChecker() error {
 func newSubstrateServeServer(runInit func(argv []string, opts InitRunOptions) int) *substrate.Server {
 	return substrate.NewServer(
 		substrate.WithPrivilegeDropChecker(substrateServePrivilegeDropChecker),
+		substrate.WithRootfsFixup(substrateServeRootfsFixup),
 		substrate.WithInitRunner(func(argv []string, forwardTermSignal bool) int {
 			return runInit(argv, substrateServeInitOptions(forwardTermSignal))
 		}),
@@ -118,6 +133,15 @@ func runSubstrateServe(addr string) int {
 	// startReaper's own doc comment (init.go) for why this is a package var
 	// rather than calling supervisor.StartReaper directly.
 	startReaper()
+
+	// Call site 1 (primary): fix up the rootfs before /healthz can ever
+	// report ready. This runs during the golden boot, so the corrected
+	// rootfs is captured in the snapshot and a restored actor never redoes
+	// the copy-up of the whole home tree — doing this only in /bootstrap
+	// would copy up the entire home (including harness installs) on every
+	// actor start and hurt warm start. See fixupRootfsForScion's doc
+	// comment for what it actually fixes and why.
+	startupRootfsFixup("/")
 
 	srv := newSubstrateServeServer(RunInit)
 

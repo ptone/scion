@@ -91,6 +91,19 @@ type InitRunner func(argv []string, forwardTermSignal bool) int
 // runtime other than substrate-serve) skips the check entirely.
 type PrivilegeDropChecker func() error
 
+// RootfsFixup is PrivilegeDropChecker's fallback companion: handleBootstrap
+// calls it, right before the precondition, as a defensive second call site
+// for the same rootfs fixup substrate-serve's own startup already runs
+// (see the cmd layer's fixupRootfsForScion for what it fixes and why). It
+// should normally be a no-op here, since the golden snapshot already has
+// the corrected rootfs baked in from startup; this only matters if a
+// pre-snapshot actor somehow reaches /bootstrap without having gone
+// through that startup path.
+//
+// Optional, for the same reason as PrivilegeDropChecker: a Server built
+// without one (most existing tests) skips it entirely.
+type RootfsFixup func()
+
 // Server implements the `sciontool substrate-serve` control server
 // (phase1-spec.md §2.1): healthz, one-shot bootstrap, and authenticated
 // exec. /pty, /rehydrate and /tunnel/open are out of scope for Phase 1.
@@ -98,6 +111,7 @@ type Server struct {
 	nonceVerifier      NonceVerifier
 	runInit            InitRunner
 	privilegeDropCheck PrivilegeDropChecker
+	rootfsFixup        RootfsFixup
 
 	// chownUID/chownGID own bootstrap-written files and directories,
 	// matching the "scion" user's ownership. -1 means "don't chown"
@@ -132,6 +146,12 @@ func WithInitRunner(r InitRunner) Option {
 // PrivilegeDropChecker's doc comment.
 func WithPrivilegeDropChecker(c PrivilegeDropChecker) Option {
 	return func(s *Server) { s.privilegeDropCheck = c }
+}
+
+// WithRootfsFixup sets the fallback rootfs fixup handleBootstrap runs right
+// before the privilege-drop precondition. See RootfsFixup's doc comment.
+func WithRootfsFixup(f RootfsFixup) Option {
+	return func(s *Server) { s.rootfsFixup = f }
 }
 
 // WithChownOwner overrides the uid/gid used to chown bootstrap-written
@@ -258,6 +278,14 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		if err := os.Setenv(k, v); err != nil {
 			log.Error("bootstrap: failed to set env var %s: %v", k, err)
 		}
+	}
+
+	// Call site 2 (fallback): re-run the rootfs fixup right before the
+	// privilege-drop precondition, which depends on it (traversability and
+	// home ownership). See RootfsFixup's doc comment for why this is
+	// normally a no-op.
+	if s.rootfsFixup != nil {
+		s.rootfsFixup()
 	}
 
 	// Synchronous privilege-drop precondition (see PrivilegeDropChecker's

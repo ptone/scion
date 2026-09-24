@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -97,19 +99,43 @@ func TestParseCapBit(t *testing.T) {
 	}
 }
 
+// fakeFileInfo is a minimal fs.FileInfo whose Sys() returns a
+// *syscall.Stat_t, so canSearchDir/homeOwnedAndWritable's type assertion
+// succeeds against a value that was never really stat'd.
+type fakeFileInfo struct {
+	mode     fs.FileMode
+	uid, gid uint32
+}
+
+func (f fakeFileInfo) Name() string       { return "" }
+func (f fakeFileInfo) Size() int64        { return 0 }
+func (f fakeFileInfo) Mode() fs.FileMode  { return f.mode }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return f.mode.IsDir() }
+func (f fakeFileInfo) Sys() any           { return &syscall.Stat_t{Uid: f.uid, Gid: f.gid} }
+
+// fakeStatAllTraversableAndOwned is checkPrivilegeDropFeasible's statPath
+// default for tests: every path is a directory, mode 0755, owned by
+// uid:gid 1000:1000 — traversable by everyone, owned and writable by the
+// target uid used throughout these tests.
+func fakeStatAllTraversableAndOwned(string) (fs.FileInfo, error) {
+	return fakeFileInfo{mode: fs.ModeDir | 0o755, uid: 1000, gid: 1000}, nil
+}
+
 // fakePrivilegeDropDeps builds privilegeDropPreconditionDeps with every
 // dependency controllable, defaulting to a fully-feasible environment (every
-// capability present) so each test case only needs to override the one
-// thing it's testing.
+// capability present, every path traversable and correctly owned) so each
+// test case only needs to override the one thing it's testing.
 func fakePrivilegeDropDeps(t *testing.T) privilegeDropPreconditionDeps {
 	t.Helper()
 	env := map[string]string{"SCION_HOST_UID": "1000", "SCION_HOST_GID": "1000"}
 	return privilegeDropPreconditionDeps{
 		hasCapBit: func(uint) bool { return true },
 		lookupUser: func(string) (*user.User, error) {
-			return &user.User{Username: "scion", Uid: "1000", Gid: "1000"}, nil
+			return &user.User{Username: "scion", Uid: "1000", Gid: "1000", HomeDir: "/home/scion"}, nil
 		},
-		getenv: func(k string) string { return env[k] },
+		getenv:   func(k string) string { return env[k] },
+		statPath: fakeStatAllTraversableAndOwned,
 	}
 }
 
@@ -180,6 +206,91 @@ func TestCheckPrivilegeDropFeasible_HostUIDGIDUnparseable_Fails(t *testing.T) {
 	}
 	if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
 		t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition", err)
+	}
+}
+
+// -----------------------------------------------------------------------
+// checkPrivilegeDropFeasible's rootfs traversability checks.
+// -----------------------------------------------------------------------
+
+// statPathOverride builds a statPath fake that returns override for the
+// given path and fakeStatAllTraversableAndOwned's default for everything
+// else.
+func statPathOverride(path string, override fakeFileInfo) func(string) (fs.FileInfo, error) {
+	return func(p string) (fs.FileInfo, error) {
+		if p == path {
+			return override, nil
+		}
+		return fakeStatAllTraversableAndOwned(p)
+	}
+}
+
+func TestCheckPrivilegeDropFeasible_RootNotTraversable_Fails(t *testing.T) {
+	d := fakePrivilegeDropDeps(t)
+	// '/' owned by root (uid 0), mode 0700: the target uid (1000) is
+	// neither owner nor group, and other has no x bit.
+	d.statPath = statPathOverride("/", fakeFileInfo{mode: fs.ModeDir | 0o700, uid: 0, gid: 0})
+	if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
+		t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition (root not traversable)", err)
+	}
+}
+
+func TestCheckPrivilegeDropFeasible_HomeParentNotTraversable_Fails(t *testing.T) {
+	d := fakePrivilegeDropDeps(t)
+	// /home (a parent of /home/scion, the fake user's HomeDir) not
+	// traversable by the target uid/gid.
+	d.statPath = statPathOverride("/home", fakeFileInfo{mode: fs.ModeDir | 0o700, uid: 0, gid: 0})
+	if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
+		t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition (home parent not traversable)", err)
+	}
+}
+
+func TestCheckPrivilegeDropFeasible_WorkspaceParentNotTraversable_Fails(t *testing.T) {
+	d := fakePrivilegeDropDeps(t)
+	d.getenv = func(k string) string {
+		switch k {
+		case "SCION_HOST_UID", "SCION_HOST_GID":
+			return "1000"
+		case "SCION_WORKSPACE_PATH":
+			return "/srv/workspace"
+		}
+		return ""
+	}
+	// /srv (a parent of the configured workspace path) not traversable.
+	d.statPath = statPathOverride("/srv", fakeFileInfo{mode: fs.ModeDir | 0o700, uid: 0, gid: 0})
+	if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
+		t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition (workspace parent not traversable)", err)
+	}
+}
+
+func TestCheckPrivilegeDropFeasible_HomeNotOwnedByTarget_Fails(t *testing.T) {
+	d := fakePrivilegeDropDeps(t)
+	// $HOME (/home/scion) owned by root, not the target uid.
+	d.statPath = statPathOverride("/home/scion", fakeFileInfo{mode: fs.ModeDir | 0o755, uid: 0, gid: 0})
+	if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
+		t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition (home not owned by target)", err)
+	}
+}
+
+func TestCheckPrivilegeDropFeasible_HomeNotWritable_Fails(t *testing.T) {
+	d := fakePrivilegeDropDeps(t)
+	// $HOME owned by the target uid, but with no write bit for anyone
+	// (0555 — readable/traversable, never writable).
+	d.statPath = statPathOverride("/home/scion", fakeFileInfo{mode: fs.ModeDir | 0o555, uid: 1000, gid: 1000})
+	if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
+		t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition (home not writable)", err)
+	}
+}
+
+func TestCheckPrivilegeDropFeasible_TraversableAndOwned_Passes(t *testing.T) {
+	// The happy path: every default from fakePrivilegeDropDeps already
+	// satisfies traversability and home ownership/writability, so this is
+	// the same as TestCheckPrivilegeDropFeasible_AllPresent_Passes,
+	// restated here to anchor it explicitly against the traversability
+	// requirement rather than only the capability/user/env one.
+	d := fakePrivilegeDropDeps(t)
+	if err := checkPrivilegeDropFeasible(d); err != nil {
+		t.Errorf("checkPrivilegeDropFeasible() = %v, want nil", err)
 	}
 }
 

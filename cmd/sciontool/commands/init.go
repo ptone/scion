@@ -180,15 +180,23 @@ type privilegeDropPreconditionDeps struct {
 	hasCapBit  func(bit uint) bool
 	lookupUser func(string) (*user.User, error)
 	getenv     func(string) string
+
+	// statPath reads a path's mode, owning uid and owning gid, without
+	// following through to any deeper access check (see canSearchDir/
+	// homeOwnedAndWritable). Injectable so the traversability checks below
+	// can be driven against a fake rootfs in tests instead of the real '/'
+	// and $HOME.
+	statPath func(string) (fs.FileInfo, error)
 }
 
 // defaultPrivilegeDropPreconditionDeps wires checkPrivilegeDropFeasible to
-// the real process: /proc/self/status, the real "scion" user, and the real
-// environment.
+// the real process: /proc/self/status, the real "scion" user, the real
+// environment, and the real filesystem.
 var defaultPrivilegeDropPreconditionDeps = privilegeDropPreconditionDeps{
 	hasCapBit:  hasCapBit,
 	lookupUser: user.Lookup,
 	getenv:     os.Getenv,
+	statPath:   os.Stat,
 }
 
 // errPrivilegeDropPrecondition is checkPrivilegeDropFeasible's only error:
@@ -206,9 +214,10 @@ var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not m
 // error and the actor deleted, the same way any other bootstrap failure
 // does — rather than a harness that silently never starts inside an actor
 // the broker still believes is running. It must be cheap and side-effect-
-// free — no sed, no usermod — so it deliberately does not reimplement
-// setupHostUser's realignment; it only re-checks the conditions that can
-// each independently make that realignment silently produce nothing:
+// free — no sed, no usermod, no chmod/chown — so it deliberately does not
+// reimplement setupHostUser's realignment or fixupRootfsForScion's own
+// fixup; it only re-checks the conditions that can each independently make
+// either of those silently produce nothing usable:
 //   - every capability in substratecaps.Required effective — not just
 //     SETUID/SETGID: a template built without one of them (e.g. CHOWN)
 //     must fail here, synchronously, rather than pass this check and die
@@ -218,7 +227,17 @@ var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not m
 //   - the "scion" user resolvable at all;
 //   - SCION_HOST_UID/GID present and parseable (buildBootstrapEnv sets these
 //     into req.Env, applied to the process environment by handleBootstrap
-//     just before this runs — see substrate_bootstrap.go).
+//     just before this runs — see substrate_bootstrap.go);
+//   - the scion user can actually reach and use its own home directory:
+//     '/', every parent of $HOME and every parent of the workspace path
+//     traversable by it, and $HOME itself owned by it and writable by it.
+//     fixupRootfsForScion (called at substrate-serve startup, and again
+//     here as a fallback via RootfsFixup) is what's supposed to guarantee
+//     this; this check is what catches it not having (an actor that never
+//     went through that startup path, or a rootfs oddity fixupRootfsForScion
+//     doesn't yet cover). Traversability is computed from each directory's
+//     mode/uid/gid, never by actually attempting to switch to the scion
+//     user — see canSearchDir.
 //
 // This does not guarantee setupHostUser's usermod/sed realignment will
 // succeed (e.g. a corrupted /etc/passwd could still fail it) — that residual
@@ -230,7 +249,8 @@ func checkPrivilegeDropFeasible(d privilegeDropPreconditionDeps) error {
 			return errPrivilegeDropPrecondition
 		}
 	}
-	if _, err := d.lookupUser("scion"); err != nil {
+	scionUser, err := d.lookupUser("scion")
+	if err != nil {
 		return errPrivilegeDropPrecondition
 	}
 	hostUID, hostGID := d.getenv("SCION_HOST_UID"), d.getenv("SCION_HOST_GID")
@@ -243,6 +263,32 @@ func checkPrivilegeDropFeasible(d privilegeDropPreconditionDeps) error {
 	if _, err := strconv.Atoi(hostGID); err != nil {
 		return errPrivilegeDropPrecondition
 	}
+
+	uid64, uidErr := strconv.ParseUint(scionUser.Uid, 10, 32)
+	gid64, gidErr := strconv.ParseUint(scionUser.Gid, 10, 32)
+	if uidErr != nil || gidErr != nil {
+		return errPrivilegeDropPrecondition
+	}
+	uid, gid := uint32(uid64), uint32(gid64)
+
+	workspacePath := d.getenv("SCION_WORKSPACE_PATH")
+	if workspacePath == "" {
+		workspacePath = "/workspace"
+	}
+
+	dirsToTraverse := mergeDirLists([]string{"/"}, parentDirs(scionUser.HomeDir), parentDirs(workspacePath))
+	for _, dir := range dirsToTraverse {
+		info, err := d.statPath(dir)
+		if err != nil || !canSearchDir(info, uid, gid) {
+			return errPrivilegeDropPrecondition
+		}
+	}
+
+	homeInfo, err := d.statPath(scionUser.HomeDir)
+	if err != nil || !homeOwnedAndWritable(homeInfo, uid) {
+		return errPrivilegeDropPrecondition
+	}
+
 	return nil
 }
 
@@ -610,7 +656,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			if dir == "" {
 				continue
 			}
-			if err := chownTreeRootOwned(dir, targetUID, targetGID); err != nil {
+			if _, err := chownTreeRootOwned(dir, targetUID, targetGID); err != nil {
 				log.Error("Failed to chown %s after pre-start hooks: %v", dir, err)
 			}
 		}
@@ -2271,13 +2317,32 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 	return nil
 }
 
+// lchownFn is chownTreeRootOwned's os.Lchown call site as a package var, and
+// fileOwnerUID is its "read this entry's owning uid" call site, so tests can
+// drive chownTreeRootOwned's decision logic (which entries count as
+// root-owned, and what happens when they're chowned) without needing the
+// test process to actually own root-owned files or hold CAP_CHOWN itself.
+var (
+	lchownFn = os.Lchown
+	fileOwnerUID = func(info fs.FileInfo) (uid uint32, ok bool) {
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return 0, false
+		}
+		return stat.Uid, true
+	}
+)
+
 // chownTreeRootOwned recursively chowns files owned by root (UID 0) to
 // the specified uid:gid. Files already owned by the target user are
-// skipped for efficiency. This is called after pre-start hooks to fix up
-// files created by provisioners running as root, which would otherwise be
-// undeletable by the non-root broker.
-func chownTreeRootOwned(root string, uid, gid int) error {
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+// skipped for efficiency. It is called both after pre-start hooks, to fix
+// up files created by provisioners running as root (which would otherwise
+// be undeletable by the non-root broker), and — for substrate specifically
+// — by fixupRootfsForScion. Returns the number of entries actually
+// rechowned.
+func chownTreeRootOwned(root string, uid, gid int) (int, error) {
+	changed := 0
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Skip permission errors on walk (e.g., lost+found).
 			return nil
@@ -2286,17 +2351,18 @@ func chownTreeRootOwned(root string, uid, gid int) error {
 		if err != nil {
 			return nil
 		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
+		ownerUID, ok := fileOwnerUID(info)
+		if !ok || ownerUID != 0 {
 			return nil
 		}
-		if stat.Uid == 0 {
-			if chErr := os.Lchown(path, uid, gid); chErr != nil {
-				log.Error("chownTreeRootOwned: failed to chown %s: %v", path, chErr)
-			}
+		if chErr := lchownFn(path, uid, gid); chErr != nil {
+			log.Error("chownTreeRootOwned: failed to chown %s: %v", path, chErr)
+			return nil
 		}
+		changed++
 		return nil
 	})
+	return changed, err
 }
 
 func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, chown func(string, int, int) error) {
