@@ -164,6 +164,24 @@ resource "kubernetes_job_v1" "nfs_init" {
   timeouts {
     create = "5m"
   }
+
+  # Autopilot's warden webhook injects fields into the pod template at
+  # create time (a seccomp profile, dropped container capabilities,
+  # allow_privilege_escalation, an arch toleration, and resource requests)
+  # that aren't in this config. Since the pod template is immutable, every
+  # subsequent plan sees those injected values as drift and wants to replace
+  # the whole Job — failing A2's "second plan, no changes". Ignore exactly
+  # the paths Autopilot injects; nothing broader, and none of these values
+  # are declared in config on purpose (design §3.4, updated after vm-deploy's
+  # first real plan).
+  lifecycle {
+    ignore_changes = [
+      spec[0].template[0].spec[0].security_context,
+      spec[0].template[0].spec[0].container[0].security_context,
+      spec[0].template[0].spec[0].container[0].resources,
+      spec[0].template[0].spec[0].toleration,
+    ]
+  }
 }
 
 # storage_class_name = "" does not bind on GKE: the cluster's default-class
