@@ -348,7 +348,15 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     VM_GONE=true
   else
     VM_LIST_ERR_FILE="$(mktemp)"
-    if VM_LIST_OUTPUT="$(gcloud compute instances list --project="${PROJECT_ID}" \
+    # This list has no --zones, so it's a project-wide AggregatedList. The
+    # SDK's default compute/allow_partial_error=true downgrades an
+    # UNREACHABLE zone to a stderr warning and exit 0 with that zone's
+    # instances silently missing from the output -- which would read as
+    # "gone" even when the VM's own delete just failed because that same
+    # zone is down. Setting this to false makes a partial result raise
+    # instead, landing in the "could not confirm" branch below rather than
+    # being misread as "gone".
+    if VM_LIST_OUTPUT="$(CLOUDSDK_COMPUTE_ALLOW_PARTIAL_ERROR=false gcloud compute instances list --project="${PROJECT_ID}" \
         --filter="name=${INSTANCE_NAME}" --format="value(name)" 2>"${VM_LIST_ERR_FILE}")"; then
       if [[ -z "$VM_LIST_OUTPUT" ]]; then
         warn "GCE VM ${INSTANCE_NAME} not found or already deleted."

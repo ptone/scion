@@ -289,8 +289,9 @@ print('\n'.join(urls))
 #   network  direction  action  allowed/denied (all entries)  sourceTags
 #   sourceRanges  sourceServiceAccounts  targetTags
 #   targetServiceAccounts  destinationRanges  disabled  priority
-# Output-only metadata (id, name, kind, selfLink, creationTimestamp,
-# description, logConfig) is ignored -- it can't change what the rule
+# Every other field is ignored, including non-scoping settable fields
+# (description, logConfig) and output-only metadata (id, name, kind,
+# selfLink, creationTimestamp) -- none of them can change what the rule
 # does. network is reduced to its short name (the self-link's last path
 # segment). action is ALLOW, DENY, or MALFORMED if both allowed[] and
 # denied[] are present (GCP never returns that shape; treating it as a
@@ -355,7 +356,9 @@ print(sep.join([network, direction, action, rules_sig, source_tags,
 # to widen, narrow or disable it: direction, action, disabled, priority,
 # network, allowed/denied (all entries), sourceTags, sourceRanges,
 # sourceServiceAccounts, targetServiceAccounts, targetTags,
-# destinationRanges. Output-only metadata is ignored. SOURCE_TYPE is
+# destinationRanges. Every other field is ignored, including
+# non-scoping settable fields (description, logConfig) and output-only
+# metadata (id, name, kind, selfLink, creationTimestamp). SOURCE_TYPE is
 # "tag" or "range"; the *other* source field is expected empty, since a
 # rule this tier creates only ever sets one of them, and GCP ORs the two
 # when both are present. Service accounts and destination ranges are
@@ -461,6 +464,7 @@ _hybrid_check_rule_drift() {
     err "    gcloud compute firewall-rules delete ${name} --project=${project_id} --quiet"
   else
     err "  gcloud compute firewall-rules delete ${name} --project=${project_id} --quiet"
+    err "  Then re-run deploy.sh to recreate it with the expected spec."
   fi
 
   if [[ "$update_converges" == "true" ]]; then
@@ -731,6 +735,7 @@ hybrid_teardown_delete() {
   local name delete_err stopped=false
   for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
     if [[ "$stopped" == "true" ]]; then
+      err "Not attempted (kept so tcp:2049 stays denied): ${name}"
       HYBRID_TEARDOWN_DELETE_FAILED+=("${name}")
       continue
     fi

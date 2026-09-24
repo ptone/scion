@@ -413,7 +413,7 @@ test_teardown_check_unmarked_fails_and_skips() {
   assert_eq "true" "$HYBRID_TEARDOWN_FAILED" "an unmarked name match must fail the teardown run"
   assert_eq "1" "${#HYBRID_TEARDOWN_DELETE[@]}" "the marked rule is still queued"
   assert_eq "1" "${#HYBRID_TEARDOWN_SKIP[@]}" "the unmarked rule is listed as SKIPPED"
-  assert_eq "$DENY_NAME" "${HYBRID_TEARDOWN_SKIP[0]}" "the deny rule is the one skipped"
+  assert_eq "$DENY_NAME" "${HYBRID_TEARDOWN_SKIP[0]:-}" "the deny rule is the one skipped"
 }
 
 test_teardown_delete_only_deletes_queued() {
@@ -585,6 +585,7 @@ test_drift_field_direction() {
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "direction drift must fail"
   assert_contains "$RUN_OUTPUT" "direction:" "should name the direction field"
   assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_contains "$RUN_OUTPUT" "re-run deploy.sh" "an allow-rule delete remediation must also say to re-run deploy.sh, not just delete"
   assert_not_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "update cannot change direction"
 }
 
@@ -775,6 +776,8 @@ test_discover_partial_mig_read_failure_refused() {
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "an unreadable instance group must fail discovery even if a sibling group yields a candidate"
   assert_contains "$RUN_OUTPUT" "1 of 2" "error should count the unreadable instance group"
+  assert_contains "$RUN_OUTPUT" "First error: gcloud-stub: managed instance group mig-unreadable not found" \
+    "the first gcloud stderr line must be surfaced"
 }
 
 # When every managed instance group is unreadable, the failure message
@@ -789,6 +792,8 @@ test_discover_all_migs_unreadable_mentions_it() {
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "all-unreadable must still fail discovery"
   assert_contains "$RUN_OUTPUT" "could not be read" "the message should say instance groups could not be read"
   assert_contains "$RUN_OUTPUT" "2 of 2" "the message should count how many were unreadable"
+  assert_contains "$RUN_OUTPUT" "First error: gcloud-stub: managed instance group mig-dead-1 not found" \
+    "the first gcloud stderr line must be surfaced"
 }
 
 # drift_seed_deny / drift_check_deny — same pattern as the allow-side
@@ -883,7 +888,16 @@ test_teardown_delete_stops_after_allow_failure_deny_survives() {
   seed_firewall_rule_desc_only "$DENY_NAME" "$MARKER"
   set_firewall_delete_will_fail "$ALLOW_NAME"
   hybrid_teardown_check "$HUB" "$PROJECT"
-  hybrid_teardown_delete "$PROJECT"
+  # Captured without a subshell (not run_expect_fail): hybrid_teardown_delete
+  # sets HYBRID_TEARDOWN_DELETED/_FAILED as globals, and a command
+  # substitution's subshell would discard those mutations before this
+  # function could assert on them.
+  local stderr_file
+  stderr_file="$(mktemp)"
+  hybrid_teardown_delete "$PROJECT" 2>"${stderr_file}"
+  local stderr_output
+  stderr_output="$(cat "${stderr_file}")"
+  rm -f "${stderr_file}"
   assert_true "$([[ -f "${GCLOUD_STUB_STATE_DIR}/firewall-rules/${DENY_NAME}.json" ]] && echo true || echo false)" \
     "the deny rule must never be deleted after the allow delete failed"
   local n is_deny_deleted=false
@@ -891,6 +905,10 @@ test_teardown_delete_stops_after_allow_failure_deny_survives() {
     [[ "$n" == "$DENY_NAME" ]] && is_deny_deleted=true
   done
   assert_eq "false" "$is_deny_deleted" "the deny rule must not be reported as deleted"
+  assert_eq "2" "${#HYBRID_TEARDOWN_DELETE_FAILED[@]}" \
+    "the deny rule queued behind the failed allow must be recorded as not deleted too"
+  assert_contains "$stderr_output" "Not attempted (kept" \
+    "the operator must be told the deny rule was never attempted, not just that the allow failed"
 }
 
 test_teardown_delete_confirms_already_gone_via_list() {
@@ -1025,6 +1043,8 @@ test_discover_unreadable_template_counted() {
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unreadable template must fail discovery"
   assert_contains "$RUN_OUTPUT" "1 of 1" "error should count the unreadable instance group"
+  assert_contains "$RUN_OUTPUT" "First error: gcloud-stub: instance template template-unreadable not found" \
+    "the first gcloud stderr line must be surfaced"
 }
 
 test_discover_no_node_pools_message_pinned() {

@@ -78,6 +78,27 @@ run_deploy_delete() {
   rm -f "$config_file"
 }
 
+# run_deploy_delete_interactive PYTHON_OVERRIDE STDIN_TEXT — runs
+# `deploy.sh --delete` with no --config at all, piping STDIN_TEXT to
+# answer its interactive prompts (hub name, region, the confirmation).
+# Unlike run_deploy_delete, deploy.sh never touches $PYTHON on this path
+# before the teardown ownership check: --config is what triggers the
+# unconditional Python preflight (deploy.sh:208) and config_get's own use
+# of $PYTHON, and neither runs here. PYTHON_OVERRIDE, if non-empty, is
+# exported for deploy.sh's own process only, to simulate a missing
+# interpreter; it does not affect the stub, which reads
+# GCLOUD_STUB_PYTHON instead (see tests/lib/gcloud) for exactly this
+# reason. Same no-stray-set-e discipline as run_deploy_delete above.
+run_deploy_delete_interactive() {
+  local python_override="$1" stdin_text="$2"
+  if [[ -n "$python_override" ]]; then
+    DEPLOY_LOG="$(PYTHON="$python_override" bash "$DEPLOY_SH" --delete <<<"$stdin_text" 2>&1)"
+  else
+    DEPLOY_LOG="$(bash "$DEPLOY_SH" --delete <<<"$stdin_text" 2>&1)"
+  fi
+  DEPLOY_RC=$?
+}
+
 # run_deploy_create CONFIG_JSON — runs `deploy.sh` (create mode) in the
 # background and stops it shortly after the VM-exists sentinel appears
 # (see the file header), falling back to a 10s wait if it never does (the
@@ -156,6 +177,24 @@ test_deploy_delete_hybrid_list_before_any_delete() {
   delete_line="$(line_number ' delete' "$log")"
   assert_true "$([[ -n "$list_line" && -n "$delete_line" && "$list_line" -lt "$delete_line" ]] && echo true || echo false)" \
     "the hybrid ownership list call must precede the first delete call"
+}
+
+# Re-running teardown after the VM is already gone (no instance seeded,
+# so `instances delete` fails as not-found and the project-wide list must
+# positively confirm "gone") must actually delete both hybrid rules and
+# succeed -- this is the exact recovery path deploy.sh's own "Keeping the
+# hybrid-tier NFS firewall rules... Re-run teardown after the VM is
+# deleted" message tells the operator to use.
+test_deploy_delete_vm_already_gone_rules_deleted() {
+  fresh_gcloud_state
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-allow" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "ALLOW" "tcp" "2049" "gke-x-node" "" "scion-hub-${HUB}-nfs" "900"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-deny" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "DENY" "tcp" "2049" "" "0.0.0.0/0" "scion-hub-${HUB}-nfs" "950"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "0" "$DEPLOY_RC" "re-running teardown after the VM is already gone must succeed"
+  assert_eq "2" "$(gcloud_log | grep -c "firewall-rules delete scion-hub-${HUB}-nfs-" || true)" \
+    "both hybrid rules must be deleted once the VM is positively confirmed gone"
 }
 
 test_deploy_delete_hybrid_rules_deleted_after_vm() {
@@ -306,6 +345,27 @@ test_deploy_delete_vm_uncertain_after_transient_list_error_keeps_rules() {
   assert_contains "$DEPLOY_LOG" "could not confirm" "should explain that the VM's state is unknown, not assumed gone"
 }
 
+# A zone being UNREACHABLE during the VM-gone check must not read as "the
+# VM is gone": real gcloud downgrades that to a warning and exit 0 with
+# the VM silently missing from the list, unless
+# CLOUDSDK_COMPUTE_ALLOW_PARTIAL_ERROR=false is set on the call, which the
+# stub enforces (see set_instances_list_zone_unreachable).
+test_deploy_delete_vm_zone_unreachable_partial_list_keeps_rules() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  set_instance_delete_will_fail "$INSTANCE_NAME"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-allow" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "ALLOW" "tcp" "2049" "gke-x-node" "" "scion-hub-${HUB}-nfs" "900"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-deny" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "DENY" "tcp" "2049" "" "0.0.0.0/0" "scion-hub-${HUB}-nfs" "950"
+  set_instances_list_zone_unreachable
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "1" "$DEPLOY_RC" \
+    "a partial AggregatedList result from an unreachable zone must not be read as the VM being gone"
+  assert_eq "0" "$(gcloud_log | grep -c "firewall-rules delete scion-hub-${HUB}-nfs-" || true)" \
+    "the hybrid rules must not be deleted when a zone is unreachable and the VM's fate can't be confirmed"
+}
+
 test_deploy_delete_tier_off_vm_failure_warns_and_continues() {
   fresh_gcloud_state
   seed_instance "$INSTANCE_NAME" "us-central1-b"
@@ -357,11 +417,17 @@ test_deploy_delete_hybrid_rule_delete_failure_exits_nonzero_excluded_from_summar
 }
 
 # The "no python needed when nothing matched" case is pinned at the
-# function level instead of here: test_teardown_check_no_python_needed_
-# when_nothing_matches in test_hybrid_tier.sh. deploy.sh itself requires
-# $PYTHON unconditionally to parse --config (deploy.sh:209, pre-existing
-# and unrelated to the hybrid tier), so a full subprocess run with
-# PYTHON=/nonexistent can never reach the teardown ownership check at
-# all -- it fails at config parsing first, every time, tier or no tier.
-# run_deploy_delete's PYTHON_OVERRIDE parameter exists for this case, but
-# there is no exit-0 scenario for it to demonstrate at this layer.
+# function level (test_teardown_check_no_python_needed_when_nothing_
+# matches in test_hybrid_tier.sh) and, here, at the deploy.sh level too,
+# via the interactive (no --config) path: without --config, deploy.sh
+# never touches $PYTHON before the teardown ownership check runs, so a
+# missing interpreter is not fatal as long as there is nothing for the
+# check to actually parse.
+test_deploy_delete_interactive_no_python_no_rules_exits_zero() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  run_deploy_delete_interactive "/nonexistent/python3" "$(printf '%s\n' "$HUB" "us-central1" "y")"
+  assert_eq "0" "$DEPLOY_RC" \
+    "an interactive --delete with no config and no hybrid rules must not need python at all"
+  assert_contains "$DEPLOY_LOG" "Deleted: ${INSTANCE_NAME}" "the base VM delete must still complete"
+}
