@@ -5,16 +5,26 @@
 #
 # Every invocation is appended to $GCLOUD_STUB_LOG, one call per line
 # (space-joined argv), so tests can assert on exactly what hybrid-tier.sh
-# asked gcloud to do. Responses are served from plain files under
-# $GCLOUD_STUB_STATE_DIR, which each test populates as its fixture and can
-# inspect afterwards to see what would have been created or deleted.
+# or deploy.sh asked gcloud to do. Responses are served from plain files
+# under $GCLOUD_STUB_STATE_DIR, which each test populates as its fixture
+# and can inspect afterwards to see what would have been created or
+# deleted.
 #
-# Only the subcommands hybrid-tier.sh actually issues are implemented.
+# Covers both the hybrid-tier functions (firewall rules, clusters,
+# instance groups/templates) and the base deploy.sh resources needed to
+# run deploy.sh itself end to end against this stub (service account,
+# router, NAT, the base VM, Cloud Run delete, auth/project plumbing).
 # Firewall rules and clusters are stored as JSON (mirroring the real
 # --format=json shape hybrid-tier.sh parses); instance-group/template
-# lookups are stored as plain-text fixtures keyed by the last path segment
-# of whatever URL or name hybrid-tier.sh passed in, since Compute Engine
-# resource names are unique per project regardless of the full self-link.
+# lookups are stored as plain-text fixtures keyed by the last path
+# segment of whatever URL or name was passed in.
+#
+# --project is required on every call that takes it in the real gcloud
+# CLI; this stub asserts it is present (and non-empty) on every create
+# and on the cluster describe, and fails loudly (not just "not found")
+# if it's missing -- a missing --project on a mutating call is exactly
+# the kind of bug this suite exists to catch before it reaches a script
+# that only gets tested by hand.
 
 set -euo pipefail
 
@@ -25,7 +35,8 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${PYTHON:-python3}"
 
 mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
-  "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates"
+  "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates" \
+  "${GCLOUD_STUB_STATE_DIR}/instances"
 
 printf '%s\n' "$*" >> "$GCLOUD_STUB_LOG"
 
@@ -43,6 +54,19 @@ get_flag() {
   return 1
 }
 
+# require_project "$@" — fails loudly if --project=... is missing or empty.
+require_project() {
+  local p
+  p="$(get_flag project "$@")" || {
+    echo "gcloud-stub: missing --project on: $*" >&2
+    exit 1
+  }
+  if [[ -z "$p" ]]; then
+    echo "gcloud-stub: empty --project on: $*" >&2
+    exit 1
+  fi
+}
+
 # last_segment URL_OR_NAME — the basename, used as the fixture lookup key
 # for instance groups and instance templates regardless of whether
 # hybrid-tier.sh passed a bare name or a full self-link URL.
@@ -50,12 +74,13 @@ last_segment() {
   printf '%s' "${1##*/}"
 }
 
-# "instance-groups managed describe" is a four-word subcommand (unlike
-# every other case below, which is three words plus a resource name at
-# $4), so it needs its own match on $1..$4 before the general dispatch.
-case "$1 $2 $3 $4" in
+# "instance-groups managed describe" and "routers nats <verb>" are
+# four-word subcommands (unlike every other case below, which is three
+# words plus a resource name at $4, or two words plus a name/project at
+# $3), so they need their own match on $1..$4 before the general dispatch.
+case "${1:-} ${2:-} ${3:-} ${4:-}" in
   "compute instance-groups managed describe")
-    key="$(last_segment "$5")"
+    key="$(last_segment "${5:-}")"
     f="${GCLOUD_STUB_STATE_DIR}/migs/${key}.txt"
     if [[ -f "$f" ]]; then
       cat "$f"
@@ -63,11 +88,40 @@ case "$1 $2 $3 $4" in
     fi
     exit 1
     ;;
+  "compute routers nats describe")
+    exit 1
+    ;;
+  "compute routers nats create")
+    require_project "$@"
+    exit 0
+    ;;
+  "compute routers nats delete")
+    exit 0
+    ;;
 esac
 
-case "$1 $2 $3" in
+case "${1:-} ${2:-}" in
+  "projects add-iam-policy-binding")
+    exit 0
+    ;;
+  "projects get-ancestors")
+    # Empty output = "could not read ancestry" in deploy.sh, which just
+    # skips the cross-org IAP check. Not the scenario under test here.
+    exit 0
+    ;;
+  "services enable")
+    require_project "$@"
+    exit 0
+    ;;
+  "auth list")
+    echo "stub-deployer@example.com"
+    exit 0
+    ;;
+esac
+
+case "${1:-} ${2:-} ${3:-}" in
   "compute firewall-rules describe")
-    name="$4"
+    name="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
     if [[ -f "$f" ]]; then
       cat "$f"
@@ -76,7 +130,8 @@ case "$1 $2 $3" in
     exit 1
     ;;
   "compute firewall-rules create")
-    name="$4"
+    require_project "$@"
+    name="${4:-}"
     desc="$(get_flag description "$@")" || desc=""
     network="$(get_flag network "$@")" || network=""
     direction="$(get_flag direction "$@")" || direction=""
@@ -101,19 +156,116 @@ case "$1 $2 $3" in
     exit 0
     ;;
   "compute firewall-rules delete")
-    name="$4"
+    name="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
+    if [[ -f "${f}.delete-fail" ]]; then
+      echo "gcloud-stub: simulated delete failure for ${name}" >&2
+      exit 1
+    fi
     if [[ -f "$f" ]]; then
       rm -f "$f"
       exit 0
     fi
+    echo "gcloud-stub: firewall rule ${name} not found" >&2
     exit 1
     ;;
+  "compute firewall-rules list")
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/firewall-rules-list-should-fail" ]]; then
+      echo "gcloud-stub: simulated list failure (permission denied)" >&2
+      exit 1
+    fi
+    filter="$(get_flag filter "$@")" || filter=""
+    inner="${filter#name=(}"
+    inner="${inner%)}"
+    "$PYTHON" -c "
+import json, os, sys
+names = sys.argv[1].split()
+state_dir = sys.argv[2]
+out = []
+for n in names:
+    p = os.path.join(state_dir, 'firewall-rules', n + '.json')
+    if os.path.isfile(p):
+        with open(p) as f:
+            d = json.load(f)
+        d['name'] = n
+        out.append(d)
+print(json.dumps(out))
+" "$inner" "${GCLOUD_STUB_STATE_DIR}"
+    exit 0
+    ;;
   "compute instances add-tags")
+    require_project "$@"
+    exit 0
+    ;;
+  "compute instances list")
+    filter="$(get_flag filter "$@")" || filter=""
+    name="${filter#name=}"
+    f="${GCLOUD_STUB_STATE_DIR}/instances/${name}"
+    if [[ -f "$f" ]]; then
+      cat "$f"
+    fi
+    exit 0
+    ;;
+  "compute instances describe")
+    name="${4:-}"
+    [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}" ]] && exit 0
+    exit 1
+    ;;
+  "compute instances delete")
+    require_project "$@"
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/instances/${name}"
+    if [[ -f "${f}.delete-fail" ]]; then
+      echo "gcloud-stub: simulated delete failure for ${name}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      rm -f "$f"
+      exit 0
+    fi
+    echo "gcloud-stub: instance ${name} not found" >&2
+    exit 1
+    ;;
+  "compute instances create")
+    require_project "$@"
+    name="${4:-}"
+    echo "us-central1-b" > "${GCLOUD_STUB_STATE_DIR}/instances/${name}"
+    exit 0
+    ;;
+  "compute zones list")
+    echo "us-central1-b"
+    exit 0
+    ;;
+  "compute routers describe")
+    exit 1
+    ;;
+  "compute routers create")
+    require_project "$@"
+    exit 0
+    ;;
+  "compute routers delete")
+    exit 0
+    ;;
+  "iam service-accounts describe")
+    exit 1
+    ;;
+  "iam service-accounts create")
+    require_project "$@"
+    exit 0
+    ;;
+  "iam service-accounts delete")
+    exit 0
+    ;;
+  "run services delete")
     exit 0
     ;;
   "container clusters describe")
-    name="$4"
+    require_project "$@"
+    get_flag location "$@" >/dev/null || {
+      echo "gcloud-stub: missing --location on: $*" >&2
+      exit 1
+    }
+    name="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json"
     if [[ -f "$f" ]]; then
       cat "$f"
@@ -122,7 +274,7 @@ case "$1 $2 $3" in
     exit 1
     ;;
   "compute instance-templates describe")
-    key="$(last_segment "$4")"
+    key="$(last_segment "${4:-}")"
     f="${GCLOUD_STUB_STATE_DIR}/templates/${key}.txt"
     if [[ -f "$f" ]]; then
       cat "$f"

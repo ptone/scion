@@ -279,20 +279,21 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
   # Hybrid tier: classify the two NFS firewall rules (if either exists) by
-  # marker ownership before printing or deleting anything. An unmarked name
-  # match means HUB_NAME can no longer be trusted to identify only
-  # resources this deployment owns, so the whole teardown aborts below --
-  # not just the two hybrid rules -- rather than proceeding to delete other
-  # resources under a name that turned out to be ambiguous.
-  hybrid_teardown_check "$HUB_NAME" "$PROJECT_ID"
-  if [[ "$HYBRID_TEARDOWN_FAILED" == "true" ]]; then
-    err "Refusing to tear down: the following firewall rule(s) match this hub's naming but do not carry this deployment's marker, so ownership can't be confirmed:"
-    for name in "${HYBRID_TEARDOWN_SKIP[@]}"; do
-      err "  ${name}"
-    done
-    err "Resolve the naming collision manually, then re-run teardown."
+  # marker ownership before printing or deleting anything. This runs even
+  # when the hybrid tier is off in the current config: teardown has no
+  # other way to know whether the tier was ever turned on for this hub,
+  # so it always checks for (and, if marked, later removes) these two
+  # rule names. An unmarked name match, or a failure to even list the
+  # rules, means HUB_NAME can no longer be trusted to identify only
+  # resources this deployment owns, so the whole teardown aborts here --
+  # not just the two hybrid rules -- rather than proceeding to delete
+  # other resources under a name that turned out to be ambiguous.
+  echo ""
+  echo "Checking hybrid-tier firewall rule ownership:"
+  if ! hybrid_teardown_preflight "$HUB_NAME" "$PROJECT_ID"; then
     exit 1
   fi
+  TEARDOWN_HAD_FAILURE=false
 
   echo ""
   echo "The following resources will be deleted:"
@@ -302,11 +303,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
-  if [[ ${#HYBRID_TEARDOWN_DELETE[@]} -gt 0 ]]; then
-    for name in "${HYBRID_TEARDOWN_DELETE[@]}"; do
-      echo "  Firewall rule:     ${name} (hybrid tier)"
-    done
-  fi
+  for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
+    echo "  Firewall rule:     ${name} (hybrid tier)"
+  done
   echo ""
   if [[ -n "$CONFIG_FILE" && ! -t 0 ]]; then
     info "Non-interactive mode: proceeding with teardown."
@@ -326,12 +325,26 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     warn "Cloud Run service ${PROXY_SERVICE} not found or already deleted."
   fi
 
+  # The hybrid NFS firewall rules are only safe to delete once this VM is
+  # confirmed gone -- keeping the deny rule alive as long as the VM might
+  # still exist matters more than deleting it promptly. Track that here
+  # rather than assuming the delete call's own success/failure tells the
+  # whole story: a "not found" from `delete` (already gone) is exactly as
+  # safe to proceed past as a successful delete, but a real failure with
+  # the VM still present is not.
   info "Deleting GCE VM..."
+  VM_GONE=false
   if gcloud compute instances delete "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
     echo "  Deleted: ${INSTANCE_NAME}"
+    VM_GONE=true
+  elif gcloud compute instances describe "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" &>/dev/null; then
+    err "Failed to delete GCE VM ${INSTANCE_NAME}; it still exists."
+    TEARDOWN_HAD_FAILURE=true
   else
     warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
+    VM_GONE=true
   fi
 
   info "Deleting Cloud NAT..."
@@ -373,9 +386,18 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     warn "Firewall rule ${FW_RULE_NAME} not found or already deleted."
   fi
 
+  HYBRID_TEARDOWN_DELETED=()
   if [[ ${#HYBRID_TEARDOWN_DELETE[@]} -gt 0 ]]; then
-    info "Deleting hybrid-tier firewall rules..."
-    hybrid_teardown_delete "$PROJECT_ID"
+    if [[ "$VM_GONE" == "true" ]]; then
+      info "Deleting hybrid-tier firewall rules..."
+      hybrid_teardown_delete "$PROJECT_ID"
+      if [[ ${#HYBRID_TEARDOWN_DELETE_FAILED[@]} -gt 0 ]]; then
+        TEARDOWN_HAD_FAILURE=true
+      fi
+    else
+      err "Keeping the hybrid-tier NFS firewall rules because GCE VM ${INSTANCE_NAME} still exists; tcp:2049 access stays restricted. Re-run teardown after the VM is deleted."
+      TEARDOWN_HAD_FAILURE=true
+    fi
   fi
 
   echo ""
@@ -387,9 +409,13 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Deleted Cloud Router:      ${ROUTER_NAME}"
   echo "  Deleted service account:   ${SA_EMAIL}"
   echo "  Deleted firewall rule:     ${FW_RULE_NAME}"
-  for name in "${HYBRID_TEARDOWN_DELETE[@]}"; do
+  for name in ${HYBRID_TEARDOWN_DELETED[@]+"${HYBRID_TEARDOWN_DELETED[@]}"}; do
     echo "  Deleted firewall rule:     ${name}"
   done
+  if [[ "$TEARDOWN_HAD_FAILURE" == "true" ]]; then
+    err "Teardown completed with at least one failure reported above."
+    exit 1
+  fi
   exit 0
 fi
 
@@ -758,6 +784,21 @@ gcloud services enable \
   aiplatform.googleapis.com \
   --project="${PROJECT_ID}" --quiet
 
+# --- Hybrid tier: discovery ---
+# Read-only (describe calls only; nothing is created). This runs before
+# every create in the rest of Phase 2 -- the service account, IAM
+# bindings, Cloud Router, Cloud NAT and the IAP SSH firewall rule -- so a
+# bad cluster name, a network mismatch, or an undiscoverable node tag
+# never leaves any of those half-created behind. The two hybrid firewall
+# rules themselves are created later, immediately before the VM (see
+# below): discovery only needs to run before creation starts, not
+# immediately before the specific rules that depend on its result.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Discovering GKE cluster network and node tag..."
+  hybrid_discover "default"
+  echo "  Node network tag: ${GKE_NODE_TAG}"
+fi
+
 # --- Cross-org IAP warning (best-effort; never blocks the deploy) ---
 # IAP's default (Google-managed) OAuth client only covers same-organization
 # use. A custom OAuth client is required when: the deployer is outside the
@@ -927,14 +968,11 @@ else
   echo "  Created firewall rule: ${FW_RULE_NAME}"
 fi
 
-# --- Hybrid tier: discovery + NFS firewall rules ---
-# Read-only discovery, then the two rules, both before the VM is created so
-# a discovery or ownership failure never leaves a half-created deployment.
+# --- Hybrid tier: NFS firewall rules ---
+# Discovery already ran above, right after the APIs were enabled and
+# before any of Phase 2's creates -- see the comment there. Only the
+# rule-creation step is here, immediately before the VM.
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
-  info "Discovering GKE cluster network and node tag..."
-  hybrid_discover "default"
-  echo "  Node network tag: ${GKE_NODE_TAG}"
-
   info "Creating hybrid-tier NFS firewall rules (if needed)..."
   hybrid_ensure_firewall_rules "$HUB_NAME" "$PROJECT_ID" "default"
 fi
@@ -965,7 +1003,7 @@ else
     --image-family=ubuntu-2204-lts \
     --image-project=ubuntu-os-cloud \
     --metadata-from-file=user-data="${SCRIPT_DIR}/cloud-init.yaml" \
-    "${VM_TAGS_ARGS[@]}" \
+    ${VM_TAGS_ARGS[@]+"${VM_TAGS_ARGS[@]}"} \
     --quiet
   echo "  Created VM: ${INSTANCE_NAME} (zone: ${ZONE})"
 fi

@@ -56,8 +56,35 @@ fresh_gcloud_state() {
   GCLOUD_STUB_STATE_DIR="$(mktemp -d)"
   GCLOUD_STUB_LOG="$(mktemp)"
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
-    "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates"
+    "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates" \
+    "${GCLOUD_STUB_STATE_DIR}/instances"
   export GCLOUD_STUB_STATE_DIR GCLOUD_STUB_LOG
+}
+
+# seed_instance NAME ZONE — simulates a pre-existing GCE VM.
+seed_instance() {
+  printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/instances/$1"
+}
+
+# set_instance_delete_will_fail NAME — the next `instances delete` call
+# for this instance fails instead of succeeding (the instance stays
+# "present" in the stub's state, matching a real failed delete).
+set_instance_delete_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/instances/$1.delete-fail"
+}
+
+# set_firewall_list_will_fail — the next `firewall-rules list` call (used
+# by hybrid_teardown_check) fails instead of returning a rule list.
+set_firewall_list_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/firewall-rules-list-should-fail"
+}
+
+# set_firewall_delete_will_fail NAME — the next `firewall-rules delete`
+# call for this rule fails instead of succeeding (the rule's JSON stays
+# present in stub state, matching a real failed delete rather than one
+# that succeeded or found nothing).
+set_firewall_delete_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/firewall-rules/$1.json.delete-fail"
 }
 
 # seed_firewall_rule_desc_only NAME DESCRIPTION — simulates a pre-existing
@@ -72,10 +99,13 @@ seed_firewall_rule_desc_only() {
 }
 
 # seed_firewall_rule_json NAME DESC NETWORK DIRECTION ACTION PROTO PORTS \
-#   SOURCE_TAGS SOURCE_RANGES TARGET_TAGS PRIORITY
+#   SOURCE_TAGS SOURCE_RANGES TARGET_TAGS PRIORITY \
+#   [SOURCE_SAS [TARGET_SAS [DEST_RANGES [DISABLED [EXTRA_PROTO [EXTRA_PORTS]]]]]]
 #
 # Simulates a pre-existing rule with a fully specified spec, for the
-# marker-plus-spec-verification tests (matching reuse, and drift).
+# marker-plus-spec-verification tests (matching reuse, and drift). The
+# trailing fields are optional and default to empty/false; see
+# firewall-rule-json.py for what each one builds.
 seed_firewall_rule_json() {
   local name="$1"
   shift
@@ -180,16 +210,22 @@ assert_true() {
 
 # run_expect_fail CMD... — runs a command that is expected to call `exit`
 # with a non-zero status (hybrid-tier.sh's fatal-error functions call exit
-# directly, not return). Runs in a subshell so the test process survives.
-# Sets RUN_EXIT_CODE and RUN_OUTPUT, both read back by the caller in
-# test_hybrid_tier.sh.
+# directly, not return). The command substitution below already runs it
+# in a subshell, so its `exit` can never end the calling test (each test
+# additionally runs in its own subshell at the run.sh level, so this is
+# defense in depth, not the only thing preventing that). Restores
+# errexit to whatever it was before the call, rather than unconditionally
+# turning it on, so this never changes the caller's shell options as a
+# side effect. Sets RUN_EXIT_CODE and RUN_OUTPUT, both read back by the
+# caller in test_hybrid_tier.sh.
 run_expect_fail() {
-  local out
+  local out had_errexit=false
+  case "$-" in *e*) had_errexit=true ;; esac
   set +e
   out="$("$@" 2>&1)"
   # shellcheck disable=SC2034 # read by callers in test_hybrid_tier.sh
   RUN_EXIT_CODE=$?
-  set -e
+  [[ "$had_errexit" == "true" ]] && set -e
   # shellcheck disable=SC2034 # read by callers in test_hybrid_tier.sh
   RUN_OUTPUT="$out"
 }
