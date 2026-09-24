@@ -530,7 +530,7 @@ if err := requirePrivilegeDropOrFail(targetUID, opts.RequirePrivilegeDrop); err 
 }
 ```
 
-`requirePrivilegeDropOrFail(targetUID, requirePrivilegeDrop)` is a small, standalone, directly-testable function of `setupHostUser`'s own result — not a reimplementation of its branching — returning a fixed, secret-free sentinel error whenever `requirePrivilegeDrop` is set and `targetUID` is still `0`. Substrate always starts the actor as UID 0, so — unlike other runtimes, where staying at UID 0 can legitimately mean "already unprivileged" (rootless Podman/keep-id) — a substrate agent reaching `targetUID == 0` after `setupHostUser` can only mean the drop never happened. `RunInit` returns before the supervisor (and therefore the harness) is ever started. This exits the actor's PID 1 (`substrate-serve`) non-zero from the bootstrap goroutine; the actor becomes visibly unhealthy to Substrate's own control plane, which is how the broker's existing `Run()` failure handling (already deletes the actor on a failed/timed-out bootstrap, no secrets in the error) picks it up — no new broker-side error path was needed for this.
+**Correction (round 13 review):** the paragraph originally here overstated what this change actually did. `requirePrivilegeDropOrFail(targetUID, requirePrivilegeDrop)` is a small, standalone, directly-testable function of `setupHostUser`'s own result — not a reimplementation of its branching — returning a fixed, secret-free sentinel error whenever `requirePrivilegeDrop` is set and `targetUID` is still `0`. Substrate always starts the actor as UID 0, so — unlike other runtimes, where staying at UID 0 can legitimately mean "already unprivileged" (rootless Podman/keep-id) — a substrate agent reaching `targetUID == 0` after `setupHostUser` can only mean the drop never happened. `RunInit` does return before the supervisor (and therefore the harness) is ever started — that half was true. But at this point in the branch's history, `RunInit` only `return 1`s: it does not call `os.Exit`, so substrate-serve's PID 1 does **not** exit; `server.go`'s bootstrap goroutine only logs the non-zero exit code; `/bootstrap` had already answered 200 before `RunInit` even ran; and `Run()` had already returned success once `postBootstrap` got that 200. Nothing reported the failure to the broker or the Hub. The actor was left running, empty, reporting healthy — the exact "silent failure" this change was meant to replace. See the next entry in this log for the actual fix (a synchronous `/bootstrap` precondition, plus this check kept as defence in depth with real failure reporting and a PID-1 exit).
 
 One known, accepted limitation: `setupHostUser`'s `SCION_KEEPID_UID` (rootless Podman keep-id) branch also returns `targetUID=0` on its own *success* path, since it drops privileges via a direct `syscall.Setuid`/`Setgid` call internally rather than deferring to the supervisor's `Credential`. `requirePrivilegeDropOrFail` cannot distinguish that from a real failure by return value alone, so it would fail closed there too. This is not reachable for substrate today — that env var is Podman-specific and substrate's bootstrap never sets it — and failing closed on it would be overly conservative rather than wrong (the actual drop likely already succeeded), so it was left as a documented edge case rather than engineered around.
 
@@ -570,3 +570,83 @@ Per the explicit instruction to start with exactly `SETUID`/`SETGID` and add any
 - `pkg/runtime/substrate_runtime_test.go`, `cmd/sciontool/commands/init_test.go`: new tests described above.
 
 No changes to `pkg/sciontool/supervisor` (its own privilege-drop and rootless-fallback logic is unchanged — only its inputs, from `RunInit`, changed for substrate specifically), `execAsUserCmd`/`ExecAsUserCmd`, or any other runtime's `RunConfig`/env-building path. No `go.mod`/`go.sum` changes.
+
+## Follow-up 2: the fail-closed gate actually fails the agent; no scion user means no start
+
+A follow-up review found two gaps in the previous entry's fail-closed work, and a binding acceptance bar was set for the first one before this follow-up started (see "Acceptance bar" below).
+
+### Gap 1: the gate stopped the harness but never failed the agent
+
+As corrected above, `requirePrivilegeDropOrFail` returning 1 from `RunInit` did not fail `Run()`, did not delete the actor, and did not report anything — the actor was left running, empty, with `/bootstrap` already having answered 200. The security property held (the harness never started as root); the failure was silent.
+
+**Acceptance bar (binding, set before this fix):** when the privilege drop cannot happen, end to end: `Run()` must return an error, the actor must be deleted the same way a bootstrap failure already deletes it, and the hub must show the agent as errored, not running. A PID-1 exit alone cannot satisfy this, because `/bootstrap` has already answered 200 by the time `RunInit` — and therefore `requirePrivilegeDropOrFail` — ever runs.
+
+**Fix.** A new synchronous precondition, `PrivilegeDropChecker` (`pkg/sciontool/substrate/server.go`), runs inside `handleBootstrap` — after `req.Env` is applied to the process environment (so `SCION_HOST_UID`/`GID` are visible) but before the handler commits to a 200 response or starts the in-process init. Its concrete implementation, `checkPrivilegeDropFeasible` (`cmd/sciontool/commands/init.go`), lives in the cmd layer for the same reason `InitRunner` does (this package must never import `cmd/sciontool/commands`), and re-checks — cheaply, without performing any of it — the three things that can make the real realignment silently produce nothing: `CAP_SETUID`/`CAP_SETGID` effective, the `scion` user resolvable, and `SCION_HOST_UID`/`GID` present and parseable.
+
+When it fails, `handleBootstrap` responds with a fixed, secret-free message and a non-2xx status, and never starts the init runner. This is not new plumbing: `postBootstrap` (`pkg/runtime/substrate_bootstrap.go`) already treats any non-2xx as an error, and `Run` (`pkg/runtime/substrate_runtime.go`) already runs `cleanup()` — `DeleteActorEgressPolicy` + `DeleteActor(AnyState: true)` — on any `postBootstrap` error before returning it. Wiring the check into `handleBootstrap` reuses that existing failure path exactly, so the acceptance bar reduces to a property the broker already had for every other bootstrap failure.
+
+`requirePrivilegeDropOrFail` inside `RunInit` stays as defence in depth for the case where the precondition is somehow bypassed or wrong. It now does two things it didn't before:
+
+- reports the failure through `statusHandler`/the Hub, the same way the git-clone failure path does (extracted into `reportPrivilegeDropFailure`, using an `agentHome` resolved by a new `resolveAgentHome` shared with `RunInit`'s normal path);
+- returns a dedicated sentinel, `exitCodePrivilegeDropRequired`, that `substrate-serve`'s `InitRunner` wrapper (not `RunInit` itself, which must never call `os.Exit`) checks for specifically — not "any non-zero code" — before calling `os.Exit`, so PID 1 dies without changing behaviour for any other `RunInit` failure that also returns before the harness launches (git clone, staged secrets, pre-start hooks, ...), all of which are expected to leave the control server up for diagnosis.
+
+Also extracted for testability: `substrateServeInitOptions` (the `InitRunOptions` substrate-serve passes to `RunInit`, so a test can assert `RequirePrivilegeDrop: true` is actually wired there) and `newSubstrateServeServer` (the exact `*substrate.Server` construction `runSubstrateServe` uses, so a test can prove the precondition is actually wired without starting an HTTP listener).
+
+### Gap 2: an image with no `scion` user ran the harness as a raw UID with no passwd entry
+
+With `CAP_SETUID`/`CAP_SETGID` present but no `scion` user in the image, `setupHostUser` still returned `(1000, 1000, false)` as if the drop had succeeded: the initial `user.Lookup("scion")` failure only logged; `directSetUID`'s `sed -i` substitute exits 0 whether or not it matched anything, so a missing user produced no error either; and the post-adjustment verify also only logged. `requirePrivilegeDropOrFail` then passed, and the supervisor dropped the harness to a numeric UID with no passwd entry and an inconsistent `HOME`.
+
+**Fix, gated on `RequirePrivilegeDrop` so every other runtime's `setupHostUser` return value is byte-identical to before this change** (`setupHostUser` and the extracted `adjustScionUser` both take the flag as a parameter now):
+
+- a `scion` user that can't be resolved at all now returns `(0, 0, false)` under the flag, instead of logging and pushing through the adjustment attempt anyway;
+- `directSetUID` (split into path-parameterized `directSetUIDAt` for testability) now pre-checks that a `username:` line actually exists in the target file before running `sed`, and returns a new `errPasswdEntryNotRewritten` if not — a real, previously-impossible-to-detect failure mode, not a reimplementation of `sed`'s own logic. Whether this new error changes the caller's outcome is itself gated: under `RequirePrivilegeDrop` it fails closed; without it, the historical (bug-for-bug) "log and report success anyway" behaviour is preserved exactly, since changing it would be a behaviour change for runtimes other than substrate;
+- a post-adjustment verify that doesn't show `Uid == hostUID && Gid == hostGID` (checked via a new `verifiedUserMatches` helper) now also fails closed under the flag, instead of only logging.
+
+Every one of these fail-closed outcomes flows through the same `requirePrivilegeDropOrFail` → `reportPrivilegeDropFailure` → `exitCodePrivilegeDropRequired` path as gap 1's fix, and — because the synchronous `/bootstrap` precondition already checks "the scion user resolvable" as one of its three conditions — is expected to be caught there first in practice, the same defence-in-depth relationship as gap 1.
+
+`scionUserLookup` and `runDirectSetUID` are now package vars (not direct calls) purely so `adjustScionUser`'s branches are unit-testable without a real `scion` user or real system files — the same reasoning `requirePrivilegeDropOrFail` already used for `setupHostUser`.
+
+### Nits taken in the same pass
+
+- `buildActorTemplate` now does `Add: slices.Clone(substrateContainerCapabilitiesAdd)` instead of assigning the package-level slice directly into the template proto, so a caller that ever mutated `tmpl...Capabilities.Add` in place can't corrupt the shared value future templates hash against.
+- The WHY comment on the container's `SecurityContext` (and the `substrateContainerCapabilitiesAdd` var doc) now names the supervisor's own `syscall.Credential` drop (`pkg/sciontool/supervisor/supervisor.go`'s `Run`, ~lines 113-150 — `exec.Cmd` performs `setgroups`/`setgid`/`setuid` under the hood for a `Credential`-bearing child) as a primary consumer of `SETUID`/`SETGID`, alongside `su`/`execAsUserCmd` — both need both capabilities to leave root, and the comment previously named only the latter.
+- A stray process-artifact reference ("ADDENDUM") in a doc comment (`cmd/sciontool/commands/init.go`) was reworded to state the requirement itself.
+- Two references to this project's own defect-numbering scheme, left over from an earlier round and outside that round's own diff, are now reworded to describe what the code actually does instead of naming a finding: the port-forward/autoexpose skip comment in `init.go`, and a regression test's doc comment in `pkg/agent/substrate_delete_test.go`.
+
+### Tests
+
+- `pkg/sciontool/substrate/server_test.go`: `TestBootstrap_PrivilegeDropPreconditionFails_RejectsWithoutStartingInit` and `TestBootstrap_PrivilegeDropPreconditionPasses_StartsInit` drive the real `Handler()` with a fake `PrivilegeDropChecker`, proving the non-2xx-without-starting-init contract and its positive control.
+- `pkg/runtime/substrate_runtime_test.go`: the existing `TestSubstrateRun_CleanupOnFailure/"bootstrap fails"` case (a generic non-2xx bootstrap response) is now annotated as this change's broker-side proof — the broker cannot distinguish a precondition rejection from any other bootstrap failure, and `postBootstrap`/`Run`'s handling of both is identical; the assertion that `DeleteActor` and `DeleteActorEgressPolicy` were both called, common to every case in that table, is exactly the acceptance bar's "actor is deleted" half.
+- `cmd/sciontool/commands/init_privilege_drop_test.go` (new file): `TestCheckPrivilegeDropFeasible_*` (all five branches, fully dependency-injected — no reliance on the test machine's real capabilities/users); `TestHasCapSetGID_ParsesEffectiveCapabilities`; `TestSubstrateServeInitOptions_RequiresPrivilegeDrop`; `TestExitOnPrivilegeDropSentinel_SentinelExits` / `_OtherCodesDoNotExit` (proving this is "exactly this sentinel," not "any non-zero code"); `TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap` (drives the real `newSubstrateServeServer()` wiring, deterministically, via unset `SCION_HOST_UID`/`GID`); `TestReportPrivilegeDropFailure_WritesPhaseErrorAndMessage`; `TestRunInit_PrivilegeDropFailure_ReturnsSentinel` (drives the real `RunInit`); `TestAdjustScionUser_*` (all three R2 fail-closed cases, each with a `RequirePrivilegeDrop: false` control proving the non-substrate return value is unchanged); `TestDirectSetUIDAt_NoEntryToRewrite_ReturnsError` / `_RewritesExistingEntry` (against temp files, never real system files).
+- Mutation checks performed by hand (edit, run the targeted test, confirm failure, revert, confirm the full suite is green again — see the message to sb-em for the exact commands and output):
+  - `substrateServeInitOptions`'s `RequirePrivilegeDrop: true` flipped to `false` → `TestSubstrateServeInitOptions_RequiresPrivilegeDrop` fails.
+  - `newSubstrateServeServer`'s `WithPrivilegeDropChecker(...)` call removed → `TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap` fails.
+- `pkg/agent/substrate_delete_test.go`'s existing `TestSubstrateAgentManagerDelete_RecordExists*` tests are unaffected (comment-only change).
+
+### Live negative-test recipe
+
+Delivered separately, in the scratchpad, not in this repo: `infra/live-negative-test-recipe.md` and `infra/negative-test-patch.diff` (a one-line, never-committed throwaway patch to `substrateContainerCapabilitiesAdd` that empties the capability grant — content-addressed, so it can never collide with or reuse a real golden template). No production knob was added anywhere for this; the only way to make the drop infeasible for a live test is to actually not grant the capability.
+
+### Gate results (this follow-up, `SCION_*` and `CLAUDE_CODE_ENABLE_TELEMETRY` unset)
+
+- `go build ./...` — pass.
+- `go vet` on `pkg/runtime/...`, `pkg/runtimebroker/...`, `pkg/agent/...`, `pkg/config/...`, `pkg/sciontool/...`, `cmd/sciontool/...` — pass, no output.
+- `go test -count=1` on `pkg/runtime/...`, `pkg/runtimebroker/...`, `pkg/agent/...`, `pkg/config/...`, `pkg/sciontool/...`, `cmd/sciontool/...` — all pass. (`pkg/runtime`'s pre-existing, unrelated `TestGetRuntime*` container-auto-detection failures and `pkg/agent`/`pkg/config`/`pkg/runtimebroker`'s pre-existing, unrelated settings/env-gathering failures were confirmed identical on the unmodified base commit before relying on "pre-existing" — see the message to sb-em.)
+- `go test -race -count=1` on `cmd/sciontool/commands/...` and `pkg/sciontool/substrate/...` — pass.
+- `golangci-lint run --new-from-rev=c3b6e821d ./...` — 0 issues.
+- `make check-custom` — same pre-existing, unrelated NFS shared-dir-storage hits as before, in files this change does not touch; zero hits in any file this change touches.
+- Hygiene greps (`round [0-9]|this round|sb-rev|sb-dev|sb-em|substrate-lead|finding #|the review|D2 report` and `\b(C1|R1|R2|N[1-3]|E[1-5]|D1|D2)\b`) over every file this change touches — zero hits.
+
+### Functions/files touched (this follow-up)
+
+- `pkg/sciontool/substrate/server.go`: new `PrivilegeDropChecker` type, `WithPrivilegeDropChecker` option, `privilegeDropCheck` field, the precondition call in `handleBootstrap`.
+- `pkg/sciontool/substrate/server_test.go`: the two new tests above.
+- `cmd/sciontool/commands/init.go`: `exitCodePrivilegeDropRequired`, `privilegeDropPreconditionDeps`, `defaultPrivilegeDropPreconditionDeps`, `errPrivilegeDropPrecondition`, `checkPrivilegeDropFeasible`, `hasCapSetGID`/`parseCapSetGID` (and a shared `parseCapBit` `parseCapSetUID` now also uses), `resolveAgentHome` (extracted), `reportPrivilegeDropFailure` (extracted), `adjustScionUser` (extracted from `setupHostUser`), `verifiedUserMatches`, `scionUserLookup`/`runDirectSetUID` (new package vars), `directSetUIDAt` (path-parameterized), `errPasswdEntryNotRewritten`, `passwdFileHasEntry`; `setupHostUser`'s signature now takes `requirePrivilegeDrop bool`.
+- `cmd/sciontool/commands/init_privilege_drop_test.go` (new file): all tests described above.
+- `cmd/sciontool/commands/substrate_serve.go`: `substrateServeInitOptions`, `exitOnPrivilegeDropSentinel`, `substrateServePrivilegeDropChecker`, `newSubstrateServeServer` (all extracted from `runSubstrateServe`'s body).
+- `cmd/sciontool/commands/substrate_serve_test.go`: the existing SIGTERM integration test now skips (with a stated reason) when the environment lacks `CAP_SETUID`/`CAP_SETGID`, and its bootstrap body now sets `SCION_HOST_UID`/`GID` — both needed so this integration test's unrelated subject (SIGTERM handling) isn't newly blocked by the precondition it was never exercising.
+- `pkg/runtime/substrate_template.go`: `slices.Clone` nit, WHY comment update (both above).
+- `pkg/runtime/substrate_runtime_test.go`: comment-only, annotating the existing broker-side proof.
+- `pkg/agent/substrate_delete_test.go`, `cmd/sciontool/commands/init.go` (the port-forward/autoexpose comment): comment-only nit cleanup.
+
+No changes to the delete paths, to any capability beyond what was already granted, or to any other runtime's behaviour.
