@@ -2257,7 +2257,9 @@ test_discover_pod_cidr_missing_refused() {
 
 test_discover_pod_cidr_refuses_broader_than_slash_8() {
   fresh_gcloud_state
-  GKE_NAME="widepodcidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  GKE_NAME="widepodcidrcluster"; GKE_PROJECT="$PROJECT"
+  # shellcheck disable=SC2034 # read by hybrid_discover (hybrid-tier.sh)
+  GKE_LOCATION="us-central1"
   seed_cluster "widepodcidrcluster" "$NETWORK" "mig-x"
   seed_mig "mig-x" "template-x"
   seed_template "template-x" "gke-widepodcidrcluster-x-node"
