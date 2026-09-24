@@ -16,9 +16,17 @@
 # scripts/single-node-vm/tests/run.sh — runs the hybrid-tier test suite.
 #
 # This never contacts GCP: it puts tests/lib (containing a stub `gcloud`)
-# at the front of PATH, sources hybrid-tier.sh directly (not deploy.sh, so
-# no VM/Cloud Run/IAP flow runs at all), and calls each test_* function
-# found in test_hybrid_tier.sh.
+# at the front of PATH, sources hybrid-tier.sh directly, and calls each
+# test_* function found in test_hybrid_tier.sh (function-level tests) and
+# test_deploy_wiring.sh (tests that run deploy.sh itself as a real
+# subprocess against the same stub, to cover the wiring between the two
+# files that function-level tests can't reach).
+#
+# Requires bash >= 4 (uses `mapfile` and associative arrays). This is a
+# dev-only test runner, not a deployment artifact: deploy.sh and
+# hybrid-tier.sh themselves target bash 3.2+ (macOS's shipped /bin/bash),
+# but this runner does not need to, and is not the vehicle for verifying
+# that support -- see the bash-3.2 note in hybrid-tier.sh's header.
 #
 # Usage:
 #   ./run.sh
@@ -35,6 +43,7 @@ TIER_DIR="$(dirname "$SCRIPT_DIR")"
 # The stub `gcloud` must resolve before any real one on the operator's
 # machine.
 export PATH="${SCRIPT_DIR}/lib:${PATH}"
+export TIER_DIR
 
 # shellcheck source=scripts/single-node-vm/tests/lib/harness.sh
 source "${SCRIPT_DIR}/lib/harness.sh"
@@ -42,16 +51,48 @@ source "${SCRIPT_DIR}/lib/harness.sh"
 source "${TIER_DIR}/hybrid-tier.sh"
 # shellcheck source=scripts/single-node-vm/tests/test_hybrid_tier.sh
 source "${SCRIPT_DIR}/test_hybrid_tier.sh"
+# shellcheck source=scripts/single-node-vm/tests/test_deploy_wiring.sh
+source "${SCRIPT_DIR}/test_deploy_wiring.sh"
 
 mapfile -t TEST_NAMES < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
 
+TOTAL_PASS=0
+TOTAL_FAIL=0
+
+# Each test runs in its own subshell: a test_* function that unexpectedly
+# hits hybrid-tier.sh's own `exit` (a bug, since only run_expect_fail
+# cases are supposed to do that) then only ends that one subshell, not
+# the whole run.sh process, so the remaining tests still get a chance to
+# run and the suite still reports a final pass/fail count instead of
+# dying silently partway through.
 for CURRENT_TEST in "${TEST_NAMES[@]}"; do
-  "$CURRENT_TEST"
+  RESULT_FILE="$(mktemp)"
+  (
+    PASS_COUNT=0
+    FAIL_COUNT=0
+    "$CURRENT_TEST"
+    {
+      echo "PASS_COUNT=${PASS_COUNT}"
+      echo "FAIL_COUNT=${FAIL_COUNT}"
+    } > "$RESULT_FILE"
+  )
+  SUBSHELL_RC=$?
+  if [[ -s "$RESULT_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$RESULT_FILE"
+  else
+    echo "CRASH [${CURRENT_TEST}]: test subshell exited with status ${SUBSHELL_RC} before reporting any result"
+    PASS_COUNT=0
+    FAIL_COUNT=1
+  fi
+  TOTAL_PASS=$((TOTAL_PASS + PASS_COUNT))
+  TOTAL_FAIL=$((TOTAL_FAIL + FAIL_COUNT))
+  rm -f "$RESULT_FILE"
 done
 
 echo ""
-echo "hybrid-tier tests: ${PASS_COUNT} passed, ${FAIL_COUNT} failed (of $((PASS_COUNT + FAIL_COUNT)) assertions across ${#TEST_NAMES[@]} tests)."
+echo "hybrid-tier tests: ${TOTAL_PASS} passed, ${TOTAL_FAIL} failed (of $((TOTAL_PASS + TOTAL_FAIL)) assertions across ${#TEST_NAMES[@]} tests)."
 
-if [[ "$FAIL_COUNT" -gt 0 ]]; then
+if [[ "$TOTAL_FAIL" -gt 0 ]]; then
   exit 1
 fi

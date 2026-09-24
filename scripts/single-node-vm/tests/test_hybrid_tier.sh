@@ -41,7 +41,12 @@ test_config_missing_location_refused() {
   CONFIG["gke_target.name"]="mycluster"
   run_expect_fail hybrid_read_config "$PROJECT"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "missing gke_target.location must fail the run"
-  assert_contains "$RUN_OUTPUT" "location" "error should mention the missing field"
+  # Specifically the "is required" check, not merely that the later regex
+  # validation also happens to reject an empty string with a message that
+  # happens to also contain the word "location" (which would still pass a
+  # bare substring check without actually pinning this specific check).
+  assert_contains "$RUN_OUTPUT" "is required when gke_target.name is set" \
+    "error should be the missing-field message, not some other check that also mentions location"
 }
 
 # --- config: same-project cluster enables the tier --------------------------
@@ -416,4 +421,329 @@ test_teardown_delete_only_deletes_queued() {
   hybrid_teardown_delete "$PROJECT"
   assert_true "$([[ -f "${GCLOUD_STUB_STATE_DIR}/firewall-rules/${ALLOW_NAME}.json" ]] && echo false || echo true)" \
     "the marked rule should actually be deleted from stub state"
+}
+
+# --- Create order: deny before allow, so an allow rule can never exist
+# without its paired deny. -------------------------------------------------
+test_firewall_rules_created_deny_before_allow() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  local log allow_line_num deny_line_num
+  log="$(gcloud_log)"
+  allow_line_num="$(echo "$log" | grep -n "firewall-rules create ${ALLOW_NAME} " | head -1 | cut -d: -f1)"
+  deny_line_num="$(echo "$log" | grep -n "firewall-rules create ${DENY_NAME} " | head -1 | cut -d: -f1)"
+  assert_true "$([[ -n "$deny_line_num" && -n "$allow_line_num" && "$deny_line_num" -lt "$allow_line_num" ]] && echo true || echo false)" \
+    "the deny rule must be created before the allow rule"
+}
+
+# --- Teardown delete order: allow before deny (the reverse of create). ---
+test_teardown_delete_order_allow_before_deny() {
+  fresh_gcloud_state
+  seed_firewall_rule_desc_only "$ALLOW_NAME" "$MARKER"
+  seed_firewall_rule_desc_only "$DENY_NAME" "$MARKER"
+  hybrid_teardown_check "$HUB" "$PROJECT"
+  hybrid_teardown_delete "$PROJECT"
+  local log allow_line_num deny_line_num
+  log="$(gcloud_log)"
+  allow_line_num="$(echo "$log" | grep -n "firewall-rules delete ${ALLOW_NAME}" | head -1 | cut -d: -f1)"
+  deny_line_num="$(echo "$log" | grep -n "firewall-rules delete ${DENY_NAME}" | head -1 | cut -d: -f1)"
+  assert_true "$([[ -n "$allow_line_num" && -n "$deny_line_num" && "$allow_line_num" -lt "$deny_line_num" ]] && echo true || echo false)" \
+    "the allow rule must be deleted before the deny rule"
+}
+
+# --- Teardown exact-marker matching: a prefix-colliding hub name, or a
+# marker with trailing text, must both be treated as unmarked. -----------
+test_teardown_marker_prefix_collision_is_skipped() {
+  fresh_gcloud_state
+  seed_firewall_rule_desc_only "$ALLOW_NAME" "scion-deployment=${HUB}2"
+  hybrid_teardown_check "$HUB" "$PROJECT"
+  assert_eq "true" "$HYBRID_TEARDOWN_FAILED" "a prefix-colliding marker must not be treated as a match"
+  assert_eq "1" "${#HYBRID_TEARDOWN_SKIP[@]}" "the rule should be SKIPPED, not queued for deletion"
+  assert_eq "0" "${#HYBRID_TEARDOWN_DELETE[@]}" "nothing should be queued for deletion"
+}
+
+test_teardown_marker_with_trailing_text_is_skipped() {
+  fresh_gcloud_state
+  seed_firewall_rule_desc_only "$ALLOW_NAME" "${MARKER} extra"
+  hybrid_teardown_check "$HUB" "$PROJECT"
+  assert_eq "true" "$HYBRID_TEARDOWN_FAILED" "a marker with trailing text must not be treated as a match"
+  assert_eq "1" "${#HYBRID_TEARDOWN_SKIP[@]}" "the rule should be SKIPPED, not queued for deletion"
+  assert_eq "0" "${#HYBRID_TEARDOWN_DELETE[@]}" "nothing should be queued for deletion"
+}
+
+# --- An unmarked rule with an otherwise fully matching spec must still be
+# refused at the marker check -- proving the run actually stops there,
+# not that some later check happens to also reject it. --------------------
+test_firewall_rule_unmarked_but_fully_matching_spec_refused() {
+  fresh_gcloud_state
+  seed_firewall_rule_json "$ALLOW_NAME" "some-unrelated-description" "$NETWORK" "INGRESS" "ALLOW" "tcp" "2049" \
+    "$DRIFT_NODE_TAG" "" "$TARGET_TAG" "900"
+  run_expect_fail _hybrid_ensure_firewall_rule "$ALLOW_NAME" "$PROJECT" "$MARKER" \
+    "default" "INGRESS" "ALLOW" "tcp:2049" "tag" "$DRIFT_NODE_TAG" "$TARGET_TAG" "900"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "an unmarked rule must be refused even when its spec fully matches"
+  assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" \
+    "nothing should be created when an unmarked rule blocks the run"
+}
+
+# =====================================================================
+# hybrid_teardown_preflight: the extracted, directly testable teardown
+# safety check (classification printing + abort decision).
+# =====================================================================
+
+test_teardown_preflight_none_found_succeeds_silently() {
+  fresh_gcloud_state
+  local out
+  out="$(hybrid_teardown_preflight "$HUB" "$PROJECT")"
+  local rc=$?
+  assert_eq "0" "$rc" "no rules present should not abort"
+  assert_eq "" "$out" "nothing found means nothing to print"
+}
+
+test_teardown_preflight_marked_prints_found_and_succeeds() {
+  fresh_gcloud_state
+  seed_firewall_rule_desc_only "$ALLOW_NAME" "$MARKER"
+  seed_firewall_rule_desc_only "$DENY_NAME" "$MARKER"
+  local out
+  out="$(hybrid_teardown_preflight "$HUB" "$PROJECT")"
+  local rc=$?
+  assert_eq "0" "$rc" "an all-marked pair should not abort"
+  assert_contains "$out" "found (marked): ${ALLOW_NAME}" "should print the documented found-marked line"
+  assert_contains "$out" "found (marked): ${DENY_NAME}" "should print the documented found-marked line"
+}
+
+test_teardown_preflight_unmarked_prints_skipped_and_aborts() {
+  fresh_gcloud_state
+  seed_firewall_rule_desc_only "$ALLOW_NAME" "$MARKER"
+  seed_firewall_rule_desc_only "$DENY_NAME" "unrelated-rule-not-ours"
+  run_expect_fail hybrid_teardown_preflight "$HUB" "$PROJECT"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unmarked match must abort"
+  assert_contains "$RUN_OUTPUT" "found (marked): ${ALLOW_NAME}" "should still print the marked rule as found"
+  assert_contains "$RUN_OUTPUT" "SKIPPED (unmarked): ${DENY_NAME}" "should print the documented SKIPPED line"
+  assert_contains "$RUN_OUTPUT" "Refusing to tear down" "should explain the abort"
+}
+
+test_teardown_preflight_list_failure_aborts_with_no_classification() {
+  fresh_gcloud_state
+  set_firewall_list_will_fail
+  run_expect_fail hybrid_teardown_preflight "$HUB" "$PROJECT"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a failed list call must abort"
+  assert_not_contains "$RUN_OUTPUT" "found (marked)" "a list failure is not the same as finding nothing"
+  assert_not_contains "$RUN_OUTPUT" "SKIPPED (unmarked)" "a list failure is not an unmarked-match abort"
+  assert_contains "$RUN_OUTPUT" "aborting teardown rather than assuming none exist" "should explain that the failure itself is the reason"
+}
+
+# --- hybrid_teardown_delete: a real delete failure (rule still present
+# afterward) must be reported as a failure, never as "deleted". ----------
+test_teardown_delete_failure_is_reported_not_deleted() {
+  fresh_gcloud_state
+  seed_firewall_rule_desc_only "$ALLOW_NAME" "$MARKER"
+  set_firewall_delete_will_fail "$ALLOW_NAME"
+  hybrid_teardown_check "$HUB" "$PROJECT"
+  hybrid_teardown_delete "$PROJECT"
+  assert_eq "1" "${#HYBRID_TEARDOWN_DELETE_FAILED[@]}" "the failed delete should be recorded as failed"
+  assert_eq "0" "${#HYBRID_TEARDOWN_DELETED[@]}" "the failed delete must not be recorded as deleted"
+  assert_true "$([[ -f "${GCLOUD_STUB_STATE_DIR}/firewall-rules/${ALLOW_NAME}.json" ]] && echo true || echo false)" \
+    "the rule should still be present in stub state after a failed delete"
+}
+
+# =====================================================================
+# Single-field drift battery: from a fully matching allow-rule
+# seed, change exactly one field, and check the drift message names that
+# field, always offers the delete remediation, and offers the update
+# remediation only for fields `update` can converge in place (the
+# expected-type source value, target tags, priority) -- never for
+# direction, action, ports/rule-shape, the other source type, service
+# accounts, disabled, or network.
+# =====================================================================
+
+DRIFT_NODE_TAG="gke-x-node"
+
+# drift_seed_allow [EXTRA seed_firewall_rule_json ARGS...] — seeds
+# $ALLOW_NAME with every field at its expected value, then overridden by
+# any extra positional args the caller appends (seed_firewall_rule_json's
+# own argument order: DESC NETWORK DIRECTION ACTION PROTO PORTS
+# SOURCE_TAGS SOURCE_RANGES TARGET_TAGS PRIORITY [SOURCE_SAS [TARGET_SAS
+# [DEST_RANGES [DISABLED [EXTRA_PROTO [EXTRA_PORTS]]]]]]).
+drift_seed_allow() {
+  seed_firewall_rule_json "$ALLOW_NAME" "$@"
+}
+
+drift_check_allow() {
+  run_expect_fail _hybrid_ensure_firewall_rule "$ALLOW_NAME" "$PROJECT" "$MARKER" \
+    "default" "INGRESS" "ALLOW" "tcp:2049" "tag" "$DRIFT_NODE_TAG" "$TARGET_TAG" "900"
+}
+
+test_drift_field_direction() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "default" "EGRESS" "ALLOW" "tcp" "2049" "$DRIFT_NODE_TAG" "" "$TARGET_TAG" "900"
+  drift_check_allow
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "direction drift must fail"
+  assert_contains "$RUN_OUTPUT" "direction:" "should name the direction field"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_not_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "update cannot change direction"
+}
+
+test_drift_field_action() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "default" "INGRESS" "DENY" "tcp" "2049" "$DRIFT_NODE_TAG" "" "$TARGET_TAG" "900"
+  drift_check_allow
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "action drift must fail"
+  assert_contains "$RUN_OUTPUT" "action:" "should name the action field"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_not_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "update cannot change action"
+}
+
+test_drift_field_ports() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "default" "INGRESS" "ALLOW" "tcp" "22" "$DRIFT_NODE_TAG" "" "$TARGET_TAG" "900"
+  drift_check_allow
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "ports drift must fail"
+  assert_contains "$RUN_OUTPUT" "ports:" "should name the ports field"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_not_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "update cannot change ports"
+}
+
+test_drift_field_extra_rule_entry() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "default" "INGRESS" "ALLOW" "tcp" "2049" "$DRIFT_NODE_TAG" "" "$TARGET_TAG" "900" \
+    "" "" "" "false" "all" ""
+  drift_check_allow
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an extra allowed entry must fail"
+  assert_contains "$RUN_OUTPUT" "ports:" "an extra rule entry changes the ports/rules signature"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_not_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "update cannot remove a rule entry"
+}
+
+test_drift_field_source_tag_value() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "default" "INGRESS" "ALLOW" "tcp" "2049" "some-other-tag" "" "$TARGET_TAG" "900"
+  drift_check_allow
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "source-tag drift must fail"
+  assert_contains "$RUN_OUTPUT" "source tags:" "should name the source tags field"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "a same-type source drift converges via update"
+  assert_contains "$RUN_OUTPUT" "--source-tags=${DRIFT_NODE_TAG}" "the update remediation should restore the expected source tag"
+}
+
+test_drift_field_stray_source_ranges() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "default" "INGRESS" "ALLOW" "tcp" "2049" "$DRIFT_NODE_TAG" "0.0.0.0/0" "$TARGET_TAG" "900"
+  drift_check_allow
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a stray sourceRanges must fail"
+  assert_contains "$RUN_OUTPUT" "source ranges:" "should name the source ranges field"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_not_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" \
+    "update cannot clear a stray sourceRanges, so only delete may be offered"
+}
+
+test_drift_field_source_service_account() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "default" "INGRESS" "ALLOW" "tcp" "2049" "$DRIFT_NODE_TAG" "" "$TARGET_TAG" "900" \
+    "sa@example.iam.gserviceaccount.com"
+  drift_check_allow
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a source service account must fail"
+  assert_contains "$RUN_OUTPUT" "source service accounts:" "should name the source service accounts field"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_not_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "update cannot clear a service account"
+}
+
+test_drift_field_disabled() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "default" "INGRESS" "ALLOW" "tcp" "2049" "$DRIFT_NODE_TAG" "" "$TARGET_TAG" "900" \
+    "" "" "" "true"
+  drift_check_allow
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a disabled rule must fail"
+  assert_contains "$RUN_OUTPUT" "disabled:" "should name the disabled field"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_not_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "update is never offered for a disabled rule"
+}
+
+test_drift_field_priority() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "default" "INGRESS" "ALLOW" "tcp" "2049" "$DRIFT_NODE_TAG" "" "$TARGET_TAG" "800"
+  drift_check_allow
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "priority drift must fail"
+  assert_contains "$RUN_OUTPUT" "priority:" "should name the priority field"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "priority-only drift converges via update"
+  assert_contains "$RUN_OUTPUT" "--priority=900" "the update remediation should restore the expected priority"
+}
+
+test_drift_field_target_tags() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "default" "INGRESS" "ALLOW" "tcp" "2049" "$DRIFT_NODE_TAG" "" "some-other-target" "900"
+  drift_check_allow
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "target-tag drift must fail"
+  assert_contains "$RUN_OUTPUT" "target tags:" "should name the target tags field"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "target-tag-only drift converges via update"
+  assert_contains "$RUN_OUTPUT" "--target-tags=${TARGET_TAG}" "the update remediation should restore the expected target tag"
+}
+
+test_drift_field_network() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "othernet" "INGRESS" "ALLOW" "tcp" "2049" "$DRIFT_NODE_TAG" "" "$TARGET_TAG" "900"
+  drift_check_allow
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "network drift must fail"
+  assert_contains "$RUN_OUTPUT" "network:" "should name the network field"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "delete remediation must be present"
+  assert_not_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "update cannot change network"
+}
+
+test_drift_field_matching_reuse_passes() {
+  fresh_gcloud_state
+  drift_seed_allow "$MARKER" "default" "INGRESS" "ALLOW" "tcp" "2049" "$DRIFT_NODE_TAG" "" "$TARGET_TAG" "900"
+  drift_check_allow
+  assert_eq "0" "$RUN_EXIT_CODE" "a fully matching rule must be reused without error"
+  assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" "a fully matching rule must not be recreated"
+}
+
+# =====================================================================
+# Discovery: regex anchoring and partial-read resilience
+# =====================================================================
+
+# The tag pattern is fully anchored: a tag that merely *contains*
+# "gke-...-node" as a substring, rather than matching it exactly, must
+# never be picked.
+test_discover_anchor_rejects_substring_match() {
+  fresh_gcloud_state
+  GKE_NAME="anchortest"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "anchortest" "$NETWORK" "mig-anchor"
+  seed_mig "mig-anchor" "template-anchor"
+  seed_template "template-anchor" "x-gke-foo-node-y"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a tag that only contains the pattern as a substring must not be accepted"
+  assert_contains "$RUN_OUTPUT" "x-gke-foo-node-y" "error should list the rejected tag as seen, not as a candidate"
+}
+
+# One managed instance group whose template can't be read must not sink
+# discovery when another group in the same cluster has a valid tag.
+test_discover_partial_mig_read_failure_still_succeeds() {
+  fresh_gcloud_state
+  GKE_NAME="partialcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "partialcluster" "$NETWORK" "mig-unreadable" "mig-good"
+  # mig-unreadable is deliberately never seeded via seed_mig, so the
+  # stub's `instance-groups managed describe` fails for it.
+  seed_mig "mig-good" "template-good"
+  seed_template "template-good" "gke-partialcluster-good-node"
+  hybrid_discover "$NETWORK"
+  assert_eq "gke-partialcluster-good-node" "$GKE_NODE_TAG" \
+    "a readable sibling instance group should still yield the tag"
+}
+
+# When every managed instance group is unreadable, the failure message
+# must say so rather than implying the tags simply didn't match.
+test_discover_all_migs_unreadable_mentions_it() {
+  fresh_gcloud_state
+  GKE_NAME="deadcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "deadcluster" "$NETWORK" "mig-dead-1" "mig-dead-2"
+  # Neither MIG is seeded, so both `instance-groups managed describe`
+  # calls fail.
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "all-unreadable must still fail discovery"
+  assert_contains "$RUN_OUTPUT" "could not be read" "the message should say instance groups could not be read"
+  assert_contains "$RUN_OUTPUT" "2 of 2" "the message should count how many were unreadable"
 }
