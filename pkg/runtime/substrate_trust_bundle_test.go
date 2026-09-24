@@ -249,8 +249,8 @@ func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
 
 // TestSubstrateTemplateName_UnchangedWhenEgressTrustBundleUnset pins the
 // literal name substrateTemplateName produces, with EgressTrustBundle
-// unset, across a table of fixture configs (round-18 review N-1: a worker
-// selector and nil resources, on top of the original single fixture).
+// unset, across a table of fixture configs (the original fixture plus one
+// with a worker selector and nil resources).
 func TestSubstrateTemplateName_UnchangedWhenEgressTrustBundleUnset(t *testing.T) {
 	for _, tc := range substrateTemplateNameFixtures() {
 		t.Run(tc.name, func(t *testing.T) {

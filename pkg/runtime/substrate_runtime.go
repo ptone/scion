@@ -14,8 +14,8 @@
 
 // SubstrateRuntime implements runtime.Runtime for Agent Substrate
 // (github.com/agent-substrate/substrate), a Kubernetes-hosted actor runtime.
-// See /scion-volumes/scratchpad/projects/substrate-integration/{findings.md,
-// phase1-spec.md} for the design this Phase 1 slice implements.
+// See deploy/substrate/README.md for the design this Phase 1 slice
+// implements.
 package runtime
 
 import (

@@ -231,7 +231,7 @@ install's existing golden templates keep being reused rather than rebuilt.
 This carries the CA-bundle vars across the `su -` login shell that
 `sciontool substrate-serve exec` (the broker exec endpoint, `scion look`,
 and `/scion/v1/exec` directly) would otherwise reset. scion's images
-satisfy this already (Debian trixie ships util-linux 2.38). Plain installs
+satisfy this already (≥ 2.35; Debian trixie ships util-linux 2.41). Plain installs
 are unaffected either way: `-w` is only ever added when a CA-bundle var is
 actually set, which never happens without `egress_trust_bundle` configured.
 

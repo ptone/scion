@@ -103,11 +103,16 @@ func TestExecAsUserCmd_EmptyValueCountsAsUnset(t *testing.T) {
 	}
 }
 
-// TestExecAsUserCmd_CandidateNamesMatchTemplateEnvNames is test (e): the tie
-// between execAsUserCmd's -w candidate list and buildActorTemplate's Env
-// names. Both derive from substrateenv.TrustBundleVarNames directly; this
-// confirms trustBundleWhitelist actually walks that shared slice, in order,
-// rather than some independent, potentially-drifted copy of the names.
+// TestExecAsUserCmd_CandidateNamesMatchTemplateEnvNames confirms
+// trustBundleWhitelist walks substrateenv.TrustBundleVarNames itself, in
+// that slice's own order, rather than some independent, hard-coded copy of
+// the names or a different (e.g. map-derived) order. It is not what
+// protects against a name being dropped from the shared slice — with a
+// name missing, both this test and its counterpart on the template side
+// would agree on the shorter list and still pass. That drift protection
+// comes from TestExecAsUserCmd_AllCAVarsSet's and
+// TestBuildActorTemplate_EgressTrustBundleSet's hand-written literals,
+// which name all 5 vars explicitly.
 func TestExecAsUserCmd_CandidateNamesMatchTemplateEnvNames(t *testing.T) {
 	env := make([]string, 0, len(substrateenv.TrustBundleVarNames))
 	for _, name := range substrateenv.TrustBundleVarNames {

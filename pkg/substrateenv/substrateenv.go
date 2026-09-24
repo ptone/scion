@@ -23,8 +23,8 @@
 //     directory) on the actor's container Env;
 //   - pkg/sciontool/substrate's execAsUserCmd passes exactly the subset of
 //     these names that are actually set to `su -w`, so exec-invoked
-//     commands (round-18 review finding R-1) don't lose the bundle to
-//     `su -`'s login-shell environment reset.
+//     commands don't lose the bundle to `su -`'s login-shell environment
+//     reset.
 //
 // A name added to one list but not the other is exactly the defect class
 // this package exists to prevent: an exec-invoked TLS client would keep
