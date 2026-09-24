@@ -434,3 +434,59 @@ for v in $(env|grep -o '^SCION_[A-Za-z0-9_]*'); do unset $v; done; unset CLAUDE_
 **`TestSubstrateBroker_NoMatchGate_FiresForNamedSubstrateProfile` now goes through the real on-disk path**, since it's cheap and the underlying bug is now understood: it writes an actual `settings.json` per subtest (matching `TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig`'s shape) and calls `config.LoadEffectiveSettings` for real, rather than constructing a `*VersionedSettings` value in memory. It passes under a clean environment and fails with the documented decode error when `SCION_AUTO_EXPOSE_PORTS=true` is set — directly confirming the root cause.
 
 The one remaining failure (`pkg/runtime/cloudrun`'s pre-existing data race) is unrelated to this branch and not addressed here.
+
+---
+
+## Follow-up: the substrate no-match delete gate returns 204, not 404 (live 502 over the control channel)
+
+Live testing over the hub's control channel showed a delete-after-stop on a substrate agent returning a **502**. Root cause: the substrate no-match gate (previous follow-up) returns 404, but `ControlChannelBrokerClient.doRequest` (`pkg/hub/controlchannel_client.go`) turns *every* tunneled response with a status of 400 or above into an error, regardless of which code it is — so `DeleteAgent`'s own "allow 404 for idempotent delete" check, a few lines further down in the same file, is unreachable dead code on this transport: `doRequest` already returned an error before that check ever runs. (The plain HTTP transport, `broker_http_transport.go`, does exempt 404 — this is control-channel-specific.) The hub-side fix for the underlying `doRequest` blind spot is out of scope here (tracked as `ptone/scion#1846`); this follow-up changes only the broker's own status code for this one gate.
+
+**Change:** the substrate no-match gate in `deleteAgent` now returns **204 No Content** instead of 404. It still does not call `mgr.Delete`, still runs before the project-blind hub-managed-project fallback and the soft-delete `agent-info.json` marking, and is still gated to `rt.Name() == "substrate" && projectID != "" && !matched`. Nothing else about the gate's conditions or placement changed. An info-level log line now records the no-op (agent slug and project ID only, no secrets) so it's still visible in broker logs even though the response is now indistinguishable, at the HTTP layer, from an actual delete.
+
+**Only this one gate changes — verified, not assumed.** The ambiguity/multi-match path (two record-having actors sharing a slug across projects — `SubstrateRuntime.List`'s tally-based exclusion) is untouched. Traced and confirmed by direct test: that path was already returning 204 before this follow-up too, via a different mechanism — `matchesAgent`'s own project-ID check already finds the correct project's entry (so the no-match gate doesn't fire; `matched` is `true`), but `AgentManager.Delete`'s *internal* unscoped `Runtime.List` call then hits `SubstrateRuntime.List`'s ambiguity guard, which excludes all same-slug entries — no error, `mgr.Delete` returns `(false, nil)`, and `deleteAgent` reaches its normal 204 success path. This is unaffected by this follow-up; the two code paths (the no-match gate and the ambiguity guard) are structurally independent, and only the former changed.
+
+### Before/after: what `deleteAgent` returns, by substrate path
+
+| Path | Before | After | Changed? |
+|---|---|---|---|
+| Matched, unique slug (ordinary delete) | 204 | 204 | No |
+| No match in the requested project (this follow-up's target) | 404 | 204 | **Yes** |
+| Record-less actor (any project) | 404 (via the no-match gate above — a record-less actor never sets `matched`) | 204 | **Yes** (same gate, different actor shape) |
+| Ambiguous: 2+ record-having actors share the slug across projects | 204 (via the ambiguity guard inside `Runtime.List`, `mgr.Delete` silently no-ops) | 204 | No |
+| Non-substrate runtime, any of the above | Unchanged (the gate is substrate-only; falls through to `mgr.Delete` exactly as before) | Unchanged | No |
+
+### Deferred nits also cleared this follow-up
+
+- Renamed `TestSubstrateBroker_ScopedDeleteMatchesOwnProject_D1HappyPath` to `TestSubstrateBroker_ScopedDeleteMatchesOwnProject`, and removed "the review's exact repro" from its doc comment.
+- Trimmed the named-profile test's comment: dropped the changelog-style paragraph describing an earlier, in-memory version of the test, and the reference to a numbered report; it now just states what the test does and why.
+- Reworded a comment in the hub-managed-project-scan test that contained the legacy `groves` literal, so `make check-custom`'s grove-literal check has zero hits in any file this branch touches.
+- Replaced direct `projectcompat.LabelGrove`/`LabelGroveID` references in `SubstrateRuntime.List`'s ambiguity guard and `substrateLabelsMatch` with two new small helpers, `projectcompat.IsProjectNameLabelKey`/`IsProjectIDLabelKey` (in the already-allowlisted `pkg/projectcompat`) — these were also flagged by the grove-literal check (`pkg/runtime/substrate_runtime.go` isn't allowlisted either), predating this follow-up. Same behavior, no legacy-label identifiers spelled out outside `pkg/projectcompat` anymore.
+
+### Tests
+
+- The existing no-match/record-less repro tests now assert 204 instead of 404, with the same zero-`DeleteActor`-calls and unchanged-file/agent-info assertions as before.
+- New: an info-level log line is asserted directly — `slog.SetDefault` is redirected to a buffer before the test server is constructed (`s.agentLifecycleLog` captures `slog.Default()` once, at construction), and the buffer is parsed as JSON lines afterward, checking for an INFO record with the agent slug and project ID. This mirrors an existing capture pattern already used elsewhere in this codebase for slog-based assertions.
+- The non-substrate parity test is unchanged (still asserts 204, which was never gated on the substrate check to begin with).
+- Optional hub-side test, done: a fake tunnel already existed in `pkg/hub/controlchannel_client_test.go` for exactly this client, so no new test infrastructure was needed. Added `statusCode` as a configurable field on the existing mock tunnel and a new test asserting `ControlChannelBrokerClient.DeleteAgent` returns `nil` for a tunneled 204 response — confirming a 204 needs no special-casing at all: `doRequest` only treats a status of 400 or above as an error, so 204 was always an ordinary success path on this transport, unlike 404.
+
+### Gate results (this follow-up, `SCION_*` and `CLAUDE_CODE_ENABLE_TELEMETRY` unset)
+
+- `go build ./...` — pass.
+- `go vet` on `pkg/runtime/...`, `pkg/runtimebroker/...`, `pkg/agent/...`, `pkg/config/...`, `pkg/projectcompat/...`, `pkg/hub/...` — pass, no output.
+- `gofmt -l` on every changed file — clean.
+- `go test -count=1` on `pkg/runtime/...`, `pkg/runtimebroker/...`, `pkg/agent/...`, `pkg/config/...` — all pass.
+- `go test -race -count=1` on `pkg/runtime`, `pkg/runtimebroker`, `pkg/agent` — pass, except the same pre-existing, confirmed-unrelated `pkg/runtime/cloudrun` data race noted in the previous follow-up.
+- `go test -count=50` on every changed test (`pkg/runtimebroker`, `pkg/hub`, `pkg/projectcompat`, `pkg/runtime`) — pass, no flakes.
+- `golangci-lint run --new-from-rev=c3b6e821d --concurrency=1 ./...` — 0 issues.
+- `make check-custom` — fails overall on pre-existing, unrelated legacy-literal hits in NFS shared-dir-storage files this branch has never touched; zero hits in any file this branch touches (confirmed by diffing the check's output against the branch's own changed-file list).
+- Hygiene greps (`round [0-9]|this round|sb-rev|sb-dev|sb-em|substrate-lead|finding #` and `\b(C1|R1|R2|N[1-3]|E[1-5]|D1|D2)\b`) over every changed file — no hits, other than the same two pre-existing `N1-7` references in `handlers.go` noted previously (confirmed via `git blame` to predate this branch).
+
+### Functions touched (this follow-up)
+
+- `pkg/runtimebroker/handlers.go`: `deleteAgent`'s substrate-only no-match gate — status code, added the info log line, and updated the comment.
+- `pkg/runtime/substrate_runtime.go`: `SubstrateRuntime.List`'s ambiguity-guard project-scope check and `substrateLabelsMatch`, rewritten to use the new `projectcompat` helpers instead of naming the legacy label constants directly; comment wording only otherwise.
+- `pkg/projectcompat/labels.go`: two new helpers, `IsProjectNameLabelKey` and `IsProjectIDLabelKey`.
+- `pkg/runtimebroker/substrate_cross_project_test.go`: updated status-code assertions, a rename, comment trims, and two new tests (info-log assertion; the log-capture helper).
+- `pkg/hub/controlchannel_client_test.go`: added a configurable status code to the existing mock tunnel and one new test for the 204 case.
+
+No changes to `pkg/agent/manager.go`, `AgentManager.Delete`/`.Stop`, the ambiguity guard's own logic (only its label-key lookup was refactored, not its behavior), or any other runtime. No `go.mod`/`go.sum` changes.
