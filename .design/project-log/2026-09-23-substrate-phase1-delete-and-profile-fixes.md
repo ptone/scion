@@ -934,3 +934,105 @@ file. `go test -count=10 -shuffle=on -v ./cmd/sciontool/commands/...`: only
 the pre-existing, unrelated `TestStatusCommand`/`TestStatusCommandUnknownType`
 failures; every other test passed on every shuffled iteration, with no
 goroutine-count growth (see the leak fix above).
+
+## Follow-up 5: substrate-lead's amended proof bar, a second defense for M6, and the full `-count=50` run
+
+The harness that was running this follow-up died mid-session when the M6
+incident's token revocation took down its own credentials (05:11,
+`could not refresh access token`) — a real instance of exactly the failure
+mode Follow-up 4 documents. On resume, `git status`/`git diff` showed the
+goroutine-leak fix and the Follow-up 4 project-log entry uncommitted but
+passing; both were committed and pushed immediately (`5d702339f`,
+`1cdaf9747`) before anything else.
+
+### Amended proof bar (substrate-lead's decision)
+
+- Defense-**removal** mutations (M6-type: deleting a TestMain stub or
+  redirect) run **only** in a sandbox from now on — `$HOME` redirected to a
+  throwaway directory and every `SCION_*` env var cleared — never against
+  the real environment again, no matter how the earlier "hash before/after,
+  0 changes required" framing read. M6 itself already violated this
+  (necessarily, since the incident is what taught this lesson) and is not
+  re-run against the real environment again.
+- Behaviour mutations (M1-M5, M7-M9 — a check or guard misbehaving, not a
+  test-hermeticity layer disappearing) still run with the real environment
+  and a hash check; 0 changes required. M1-M5 were already done in Follow-up
+  4. **M7-M9 were also already done in Follow-up 4**, immediately after
+  reverting the M6 mutation and before this round's brief arrived — the
+  table below carries them forward rather than re-running them, since
+  re-running an already-real-env-verified behaviour mutation a second time
+  adds no new evidence.
+
+### Second, independent defense for M6 (approved; separate commit `3b18f8db9`)
+
+`scionUserLookup`/`lookupUserByID`'s real, production values
+(`defaultScionUserLookup`/`defaultLookupUserByID`, `init.go`) now refuse to
+run under `go test` (`testing.Testing()`) — the same pattern
+`pkg/sciontool/hub`'s `NewClient` already uses for its own non-localhost-hub
+guard — returning `errRealUserLookupDisabledUnderTest` instead of falling
+through to a real `user.Lookup`/`user.LookupId`. TestMain's override of the
+`scionUserLookup`/`lookupUserByID` vars remains the primary, first-line
+defense; this is what still catches a test-driven lookup if that override
+is ever accidentally removed (M6, again), since a var's default reverting
+to its production function no longer means a real lookup happens under
+test.
+
+`TestDefaultScionUserLookup_RefusesUnderTest`/
+`TestDefaultLookupUserByID_RefusesUnderTest` (`init_privilege_drop_test.go`)
+call the two default functions directly (bypassing the var entirely, as if
+TestMain's override were never installed) and assert the new sentinel
+error.
+
+**M6 re-verified, in a sandbox this time:** removed TestMain's
+`scionUserLookup`/`lookupUserByID` override again (the exact M6 mutation),
+then ran `TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` and
+`TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap`
+with every `SCION_*` env var cleared and `$HOME` redirected to a fresh
+`mktemp -d` throwaway directory (not the real environment — per the amended
+bar above). Both passed. The real `/home/scion/agent-info.json` hash was
+identical before and after
+(`bafb90eaceaee72f3104be6f6e962da2c31719d69f7982c2036c912f4e6b9f4c` both
+times) — expected and unsurprising now, since the new gate means nothing
+in this path can resolve a real account while `testing.Testing()` is true,
+regardless of `$HOME` or env. The TestMain override was restored via `git
+checkout --` immediately afterward (confirmed byte-identical to the
+committed file).
+
+### The full mutation table
+
+| # | Mutation | Environment | Guarding test | Result | `agent-info.json` hash before → after |
+|---|---|---|---|---|---|
+| M1 | `RequirePrivilegeDrop: false` | Real | `TestSubstrateServeInitOptions_RequiresPrivilegeDrop` | Failed as expected | unchanged |
+| M2 | `WithPrivilegeDropChecker(...)` removed | Real | `TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap` | Failed as expected (200 instead of non-2xx; no `os.Exit`) | unchanged |
+| M3 | capability loop hardcoded to SETUID/SETGID only | Real | `TestCheckPrivilegeDropFeasible_EveryRequiredCapabilityIsChecked` | Failed as expected (CHOWN subtest) | unchanged |
+| M4 | `s.initFailed = true` flip removed | Real | `TestHealthz_NonZeroInitFlipsToInitFailedButServerKeepsServing` | Failed as expected | unchanged |
+| M5 | `reportInitFailure` removed from staged-secrets decode failure | Real | `TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` | Failed as expected | unchanged |
+| M6 | TestMain `scionUserLookup`/`lookupUserByID` stub removed | **Real (the incident itself)**, then **sandbox (re-verified against the new gate)** | (none, originally) → `TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` + `TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap` (post-gate) | Live incident reproduced (real) → both PASS, new gate holds (sandbox) | **changed** (real run) → unchanged (sandbox re-run) |
+| M7 | `startupRootfsFixup("/")` call removed | Real | `TestRunSubstrateServe_CallsRootfsFixupBeforeListening` | Failed as expected | unchanged |
+| M8 | traversability/home-ownership block removed | Real | 5 traversability tests | Failed as expected | unchanged |
+| M9 | `ownerUID != 0` idempotency guard removed | Real | `TestFixupRootfsForScion_ChownsRootOwnedHomeEntriesThenIsIdempotent` | Failed as expected | unchanged |
+
+### Gates (final)
+
+`go build ./...`, `go vet ./cmd/sciontool/commands/... ./pkg/sciontool/substrate/...`
+clean; `go test -race -count=1` on both packages `ok`; `golangci-lint run
+--new-from-rev=2ce540c04 ./...` 0 issues; `make check-custom` same
+pre-existing unrelated hits, zero in touched files; hygiene greps zero
+hits across every touched source file (the project log itself
+necessarily names the historical incidents/commits it documents, which
+isn't what the grep is for).
+
+`go test -count=50 -shuffle=on -timeout=25m -v ./cmd/sciontool/commands/...`
+(seed `-test.shuffle 1790254356964811518`): completed in 621.8s. Only
+`TestStatusCommand` (50/50 iterations) and `TestStatusCommandUnknownType`
+(49/50) failed — the pre-existing, unrelated bug from Follow-up 4, confirmed
+there via `git stash -u` against the clean `2ce540c04`. Every other test in
+the package, including every test this branch has added, passed on every
+shuffled iteration. Note: the very first attempt at this run (before the
+goroutine-leak fix) genuinely hung; the second attempt (after the fix, at
+the default `-timeout` of 10m) failed with `panic: test timed out after
+10m0s` for an unrelated reason — 50 sequential iterations of this package
+take ~13-19s each, so 50 of them (~650-950s) can exceed Go's default
+per-binary 10-minute test timeout on their own, with no hang involved. An
+explicit `-timeout=25m` was the actual fix for that second failure, not a
+code change.
