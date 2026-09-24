@@ -18,10 +18,23 @@ import (
 
 var substrateServeAddr string
 
-// skipStartupRootfsFixupEnv, when set to any non-empty value, skips call
-// site 1's rootfs fixup in runSubstrateServe. See its own call site for
-// why this exists — a real actor never has a reason to set it.
-const skipStartupRootfsFixupEnv = "SCION_SUBSTRATE_TEST_SKIP_ROOTFS_FIXUP"
+// skipRootfsFixupEnv, when set to any non-empty value, skips the rootfs
+// fixup at both of its call sites (runSubstrateServe's startup call and
+// substrateServeRootfsFixup's /bootstrap fallback) — never the
+// privilege-drop precondition (substrateServePrivilegeDropChecker /
+// checkPrivilegeDropFeasible), which is wired into the Server independently
+// of this env var and always re-checks the same traversability/ownership
+// conditions the fixup would have corrected. Skipping the fixup can
+// therefore only make bootstrap fail closed sooner, never bypass the check.
+// A real actor never has a reason to set it — see each call site for why it
+// exists.
+const skipRootfsFixupEnv = "SCION_SUBSTRATE_TEST_SKIP_ROOTFS_FIXUP"
+
+// rootfsFixupSkipped reports whether skipRootfsFixupEnv is set, for both
+// rootfs fixup call sites to check.
+func rootfsFixupSkipped() bool {
+	return os.Getenv(skipRootfsFixupEnv) != ""
+}
 
 // substrateServeCmd is the template entrypoint for the `substrate` runtime
 // (phase1-spec.md §2.1). It is compiled into the same sciontool binary as
@@ -85,9 +98,14 @@ func substrateServePrivilegeDropChecker() error {
 // substrateServeRootfsFixup is the substrate.RootfsFixup substrate-serve
 // wires into its Server as call site 2 (the /bootstrap fallback — see
 // fixupRootfsForScion's doc comment for call site 1, substrate-serve's own
-// startup, which is the primary one).
+// startup, which is the primary one). Gated on skipRootfsFixupEnv the same
+// way call site 1 is; see that const's doc comment for why this never
+// weakens the separately-wired privilege-drop precondition.
 func substrateServeRootfsFixup() {
-	fixupRootfsForScionUser("/")
+	if rootfsFixupSkipped() {
+		return
+	}
+	bootstrapRootfsFixup("/")
 }
 
 // startupRootfsFixup is call site 1's own call, as a package var — the same
@@ -95,6 +113,12 @@ func substrateServeRootfsFixup() {
 // (and assert the ordering of) this call without it resolving the real
 // "scion" user or touching a real rootfs.
 var startupRootfsFixup = fixupRootfsForScionUser
+
+// bootstrapRootfsFixup is call site 2's own call, as a package var for the
+// same reason as startupRootfsFixup: a test driving substrateServeRootfsFixup
+// needs to observe whether it ran without resolving the real "scion" user or
+// touching a real rootfs.
+var bootstrapRootfsFixup = fixupRootfsForScionUser
 
 // newSubstrateServeServer builds the *substrate.Server substrate-serve
 // mounts, wiring both the init runner and the privilege-drop precondition
@@ -147,20 +171,18 @@ func runSubstrateServe(addr string) int {
 	// actor start and hurt warm start. See fixupRootfsForScion's doc
 	// comment for what it actually fixes and why.
 	//
-	// skipStartupRootfsFixupEnv is checked here, not left implicit: this is
-	// the one call site that runs against a real, unscrubbed "/" and real
-	// "scion" home whenever this binary is actually exec'd rather than
-	// driven in-process by a test (e.g.
-	// TestSubstrateServeCommand_Integration_SIGTERMNotForwarded's real
-	// subprocess) — no test-binary TestMain sandboxing reaches a real
+	// rootfsFixupSkipped is checked here, not left implicit: this call site
+	// runs against a real, unscrubbed "/" and real "scion" home whenever
+	// this binary is actually exec'd rather than driven in-process by a
+	// test (e.g. TestSubstrateServeCommand_Integration_SIGTERMNotForwarded's
+	// real subprocess) — no test-binary TestMain sandboxing reaches a real
 	// exec'd child's own process. There is no legitimate reason for a real
-	// actor to ever set this: it exists purely so that one integration
-	// test's subprocess, run by whoever happens to have real CAP_CHOWN on
-	// their own machine, can never Lchown anything under their own real
-	// home. Not read through the injectable startupRootfsFixup var: this
-	// check is about whether to call it at all, which a test replacing
-	// that var already controls directly.
-	if os.Getenv(skipStartupRootfsFixupEnv) == "" {
+	// actor to ever set skipRootfsFixupEnv: see its own doc comment for why
+	// this is safe to skip (the precondition below is unaffected). Not read
+	// through the injectable startupRootfsFixup var: this check is about
+	// whether to call it at all, which a test replacing that var already
+	// controls directly.
+	if !rootfsFixupSkipped() {
 		startupRootfsFixup("/")
 	}
 

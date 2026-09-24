@@ -7,7 +7,9 @@ package commands
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -129,13 +131,17 @@ func TestSubstrateServeCommand_Integration_SIGTERMNotForwarded(t *testing.T) {
 	// HOME redirection in this package for the incident this defends
 	// against — a subprocess isn't automatically covered by that, since it
 	// gets a fresh environment from cmd.Env, not the test binary's own).
-	// skipStartupRootfsFixupEnv: this subprocess
-	// runs the real runSubstrateServe against this machine's real "/" and
-	// real "scion" home — nothing about this test binary's own TestMain
-	// sandboxing reaches a real exec'd child. Whoever runs this
+	// skipRootfsFixupEnv: this subprocess runs the real runSubstrateServe
+	// (and answers the real /bootstrap below) against this machine's real
+	// "/" and real "scion" home — nothing about this test binary's own
+	// TestMain sandboxing reaches a real exec'd child. Whoever runs this
 	// integration test locally with real CAP_CHOWN would otherwise have
-	// entries under their own real home Lchowned by the startup fixup.
-	cmd.Env = append(filterHubEnv(os.Environ()), "HOME="+t.TempDir(), skipStartupRootfsFixupEnv+"=1")
+	// entries under their own real home Lchowned by either fixup call site.
+	// This never weakens checkPrivilegeDropFeasible (see skipRootfsFixupEnv's
+	// own doc comment): the bootstrap below still only succeeds because this
+	// runner's own "scion" home already satisfies that check without the
+	// fixup's help.
+	cmd.Env = append(filterHubEnv(os.Environ()), "HOME="+t.TempDir(), skipRootfsFixupEnv+"=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -292,13 +298,12 @@ func TestRunSubstrateServe_DoesNotLeakSignalGoroutine(t *testing.T) {
 	}
 }
 
-// TestRunSubstrateServe_SkipStartupRootfsFixupEnv proves
-// skipStartupRootfsFixupEnv actually skips the
-// call when set — the escape hatch
+// TestRunSubstrateServe_SkipRootfsFixupEnv proves skipRootfsFixupEnv
+// actually skips call site 1 when set — the escape hatch
 // TestSubstrateServeCommand_Integration_SIGTERMNotForwarded's subprocess
 // relies on to never touch a real machine's real home.
-func TestRunSubstrateServe_SkipStartupRootfsFixupEnv(t *testing.T) {
-	t.Setenv(skipStartupRootfsFixupEnv, "1")
+func TestRunSubstrateServe_SkipRootfsFixupEnv(t *testing.T) {
+	t.Setenv(skipRootfsFixupEnv, "1")
 	orig := startupRootfsFixup
 	t.Cleanup(func() { startupRootfsFixup = orig })
 	var called bool
@@ -315,6 +320,88 @@ func TestRunSubstrateServe_SkipStartupRootfsFixupEnv(t *testing.T) {
 	}
 	if called {
 		t.Error("startupRootfsFixup was called despite the skip env var being set")
+	}
+}
+
+// TestRunSubstrateServe_RootfsFixupEnvUnset_CallSite1Runs is
+// TestRunSubstrateServe_SkipRootfsFixupEnv's mirror: with the env unset
+// (the production default), call site 1 must still run.
+func TestRunSubstrateServe_RootfsFixupEnvUnset_CallSite1Runs(t *testing.T) {
+	orig := startupRootfsFixup
+	t.Cleanup(func() { startupRootfsFixup = orig })
+	var called bool
+	startupRootfsFixup = func(string) { called = true }
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a port to force a listen failure: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	if code := runSubstrateServe(l.Addr().String()); code != 1 {
+		t.Fatalf("runSubstrateServe() = %d, want 1 (the address is already in use)", code)
+	}
+	if !called {
+		t.Error("startupRootfsFixup was not called with the skip env unset")
+	}
+}
+
+// TestSubstrateServeRootfsFixup_SkipEnv proves skipRootfsFixupEnv also gates
+// call site 2 (the /bootstrap fallback) — this is Required 2's fix: before
+// it, only call site 1 was gated, and TestSubstrateServeCommand_Integration_
+// SIGTERMNotForwarded's real subprocess (which POSTs /bootstrap) still ran
+// this call site against a real "/" and real "scion" home.
+func TestSubstrateServeRootfsFixup_SkipEnv(t *testing.T) {
+	t.Setenv(skipRootfsFixupEnv, "1")
+	orig := bootstrapRootfsFixup
+	t.Cleanup(func() { bootstrapRootfsFixup = orig })
+	var called bool
+	bootstrapRootfsFixup = func(string) { called = true }
+
+	substrateServeRootfsFixup()
+
+	if called {
+		t.Error("bootstrapRootfsFixup was called despite the skip env var being set")
+	}
+}
+
+// TestSubstrateServeRootfsFixup_EnvUnset_Runs is
+// TestSubstrateServeRootfsFixup_SkipEnv's mirror: with the env unset, call
+// site 2 must still run — the production default.
+func TestSubstrateServeRootfsFixup_EnvUnset_Runs(t *testing.T) {
+	orig := bootstrapRootfsFixup
+	t.Cleanup(func() { bootstrapRootfsFixup = orig })
+	var called bool
+	var gotRoot string
+	bootstrapRootfsFixup = func(root string) { called = true; gotRoot = root }
+
+	substrateServeRootfsFixup()
+
+	if !called {
+		t.Error("bootstrapRootfsFixup was not called with the skip env unset")
+	}
+	if gotRoot != "/" {
+		t.Errorf("bootstrapRootfsFixup called with root = %q, want \"/\"", gotRoot)
+	}
+}
+
+// TestCheckPrivilegeDropFeasible_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs
+// is the binding condition on Required 2 (substrate-lead): skipRootfsFixupEnv
+// must skip ONLY the fixup, never the privilege-drop precondition. With the
+// env set and a rootfs that still needs the fixup (here: $HOME not owned by
+// the target uid, exactly what fixupRootfsForScion would have corrected),
+// checkPrivilegeDropFeasible — substrate-serve's synchronous /bootstrap
+// precondition, wired independently of skipRootfsFixupEnv — must still
+// reject. This proves the knob can only make bootstrap fail closed sooner,
+// never bypass the check.
+func TestCheckPrivilegeDropFeasible_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs(t *testing.T) {
+	t.Setenv(skipRootfsFixupEnv, "1")
+	d := fakePrivilegeDropDeps(t)
+	// $HOME owned by root, not the target uid — the condition the fixup
+	// exists to correct.
+	d.statPath = statPathOverride("/home/scion", fakeFileInfo{mode: fs.ModeDir | 0o755, uid: 0, gid: 0})
+	if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
+		t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition — skipRootfsFixupEnv must never weaken this check", err)
 	}
 }
 
