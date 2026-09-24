@@ -7,7 +7,6 @@ package commands
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -386,23 +385,61 @@ func TestSubstrateServeRootfsFixup_EnvUnset_Runs(t *testing.T) {
 	}
 }
 
-// TestCheckPrivilegeDropFeasible_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs
-// pins the binding invariant on skipRootfsFixupEnv: it must skip ONLY the
-// fixup, never the privilege-drop precondition. With the env set and a
-// rootfs that still needs the fixup (here: $HOME not owned by the target
-// uid, exactly what fixupRootfsForScion would have corrected),
-// checkPrivilegeDropFeasible — substrate-serve's synchronous /bootstrap
-// precondition, wired independently of skipRootfsFixupEnv — must still
-// reject. This proves the knob can only make bootstrap fail closed sooner,
-// never bypass the check.
-func TestCheckPrivilegeDropFeasible_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs(t *testing.T) {
+// TestSubstrateServeBootstrap_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs
+// pins the binding invariant on skipRootfsFixupEnv at the wiring level, not
+// by calling checkPrivilegeDropFeasible directly: it must skip ONLY the
+// /bootstrap rootfs fixup (call site 2, bootstrapRootfsFixup), never the
+// privilege-drop precondition substrate-serve wires into the Server. It
+// drives POST /scion/v1/bootstrap through newSubstrateServeServer, the same
+// wiring runSubstrateServe uses, with a rootfs that still needs the fixup
+// (here: $HOME reported root-owned, exactly what fixupRootfsForScion would
+// have corrected). This proves the knob can only make bootstrap fail closed
+// sooner, never bypass the check — a regression that made the env also
+// short-circuit substrateServePrivilegeDropChecker (or
+// checkPrivilegeDropFeasible itself) would make this test see the bootstrap
+// accepted and the init runner started, and fail.
+func TestSubstrateServeBootstrap_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs(t *testing.T) {
 	t.Setenv(skipRootfsFixupEnv, "1")
+
+	origDeps := defaultPrivilegeDropPreconditionDeps
+	t.Cleanup(func() { defaultPrivilegeDropPreconditionDeps = origDeps })
 	d := fakePrivilegeDropDeps(t)
 	// $HOME owned by root, not the target uid — the condition the fixup
 	// exists to correct.
 	d.statPath = statPathOverride("/home/scion", fakeFileInfo{mode: fs.ModeDir | 0o755, uid: 0, gid: 0})
-	if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
-		t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition — skipRootfsFixupEnv must never weaken this check", err)
+	defaultPrivilegeDropPreconditionDeps = d
+
+	origFixup := bootstrapRootfsFixup
+	t.Cleanup(func() { bootstrapRootfsFixup = origFixup })
+	var fixupCalled bool
+	bootstrapRootfsFixup = func(string) { fixupCalled = true }
+
+	var initCalled bool
+	stubRunInit := func(argv []string, opts InitRunOptions) int {
+		initCalled = true
+		return 0
+	}
+
+	srv := newSubstrateServeServer(stubRunInit)
+	rec := doSubstrateServeJSON(t, srv, "POST", "/scion/v1/bootstrap", "any-token", map[string]any{
+		"env":           map[string]string{},
+		"files":         []any{},
+		"start_cmd":     "true",
+		"control_token": "tok",
+	})
+
+	if rec.Code == 200 || rec.Code < 400 {
+		t.Errorf("status = %d, want a non-2xx rejection — skipRootfsFixupEnv must never weaken the privilege-drop precondition", rec.Code)
+	}
+	// The init runner is started asynchronously by handleBootstrap on
+	// success (see its own doc comment); give any wrongly-started goroutine
+	// a moment to flip the flag before asserting it never did.
+	time.Sleep(20 * time.Millisecond)
+	if initCalled {
+		t.Error("the init runner was invoked despite the privilege-drop precondition failing; the harness must never start")
+	}
+	if fixupCalled {
+		t.Error("bootstrapRootfsFixup was called despite the skip env var being set")
 	}
 }
 

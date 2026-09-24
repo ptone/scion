@@ -1460,3 +1460,50 @@ No changes to `pkg/runtime/substrate_template.go`,
 `cmd/sciontool/commands/init.go`'s `log.Chown`/`stagedsecrets.Write` call
 sites, or either rootfs-fixup call site — the capability list is the only
 production code that changed. No `go.mod`/`go.sum` changes.
+
+## Follow-up 8: the skip-env/checker binding condition now has a wiring-level test
+
+Round-17's Required 1 found that
+`TestCheckPrivilegeDropFeasible_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs`
+called `checkPrivilegeDropFeasible` directly, so `t.Setenv(skipRootfsFixupEnv,
+"1")` had no effect on the function under test — it never reads that env.
+An env short-circuit inserted at the top of
+`substrateServePrivilegeDropChecker` survived the whole suite.
+
+Replaced that test with
+`TestSubstrateServeBootstrap_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs`
+(`cmd/sciontool/commands/substrate_serve_test.go`), which drives the actual
+wiring: sets the skip env, overrides `defaultPrivilegeDropPreconditionDeps`
+with `fakePrivilegeDropDeps` (statPath reporting `/home/scion` as
+root-owned) and `bootstrapRootfsFixup` with a recorder, builds
+`newSubstrateServeServer(stubRunInit)`, and POSTs `/scion/v1/bootstrap`
+through `doSubstrateServeJSON`. Asserts the bootstrap is rejected
+(non-2xx), the stubbed init runner is never invoked, and
+`bootstrapRootfsFixup` is never called. Corrected the test's own doc
+comment to describe what it now proves, rather than restating the
+(unfulfilled) claim from before.
+
+Mutation proof: both an env short-circuit at the top of
+`substrateServePrivilegeDropChecker` and the same short-circuit placed
+inside `checkPrivilegeDropFeasible` itself make the new test fail (200
+returned, stub init runner invoked); both are reverted, confirmed by an
+empty `git diff` on the touched production files. `agent-info.json`'s
+sha256 is unchanged before/after the test run.
+
+Test-only change — no production code touched
+(`git diff --stat` against the prior head, excluding test and doc files,
+is empty).
+
+### Gates (`SCION_*` and `CLAUDE_CODE_ENABLE_TELEMETRY` unset)
+
+- `go build ./...` — pass.
+- `GOOS=darwin go vet ./cmd/sciontool/commands/` — pass, no output.
+- `go test -count=1 ./cmd/sciontool/...` — pass.
+- `go test -race -count=1 ./cmd/sciontool/commands/...` — pass.
+- `golangci-lint run --new-from-rev=c3b6e821d ./...` — 0 issues.
+- `make check-custom` — same pre-existing `compat-literals` hits as every
+  prior round (`pkg/runtime/shared_dir_storage_test.go`,
+  `pkg/agent/shared_dir_storage.go`,
+  `pkg/agent/run_shared_dir_storage_test.go`), confirmed identical on the
+  unmodified prior head; zero hits in any file this change touches.
+- `-count=50` shuffle run skipped per this round's brief.
