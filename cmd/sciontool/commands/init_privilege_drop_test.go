@@ -149,6 +149,25 @@ func fakeHasCapBitMissing(missing ...uint) func(uint) bool {
 	return func(bit uint) bool { return !missingSet[bit] }
 }
 
+// TestDefaultScionUserLookup_RefusesUnderTest and
+// TestDefaultLookupUserByID_RefusesUnderTest prove the second, independent
+// defense in defaultScionUserLookup/defaultLookupUserByID's own doc
+// comment: called directly (as if TestMain's own override of the
+// scionUserLookup/lookupUserByID vars had been accidentally removed —
+// exactly the incident these exist to catch a second time), neither may
+// ever resolve a real account while running under `go test`.
+func TestDefaultScionUserLookup_RefusesUnderTest(t *testing.T) {
+	if _, err := defaultScionUserLookup("scion"); !errors.Is(err, errRealUserLookupDisabledUnderTest) {
+		t.Errorf("defaultScionUserLookup(%q) error = %v, want errRealUserLookupDisabledUnderTest", "scion", err)
+	}
+}
+
+func TestDefaultLookupUserByID_RefusesUnderTest(t *testing.T) {
+	if _, err := defaultLookupUserByID("0"); !errors.Is(err, errRealUserLookupDisabledUnderTest) {
+		t.Errorf("defaultLookupUserByID(%q) error = %v, want errRealUserLookupDisabledUnderTest", "0", err)
+	}
+}
+
 func TestCheckPrivilegeDropFeasible_AllPresent_Passes(t *testing.T) {
 	if err := checkPrivilegeDropFeasible(fakePrivilegeDropDeps(t)); err != nil {
 		t.Errorf("checkPrivilegeDropFeasible() = %v, want nil", err)

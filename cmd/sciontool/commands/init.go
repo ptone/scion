@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -1641,6 +1642,39 @@ func watchLimitsTriggerFile(ctx context.Context, ch chan<- struct{}) {
 	}
 }
 
+// errRealUserLookupDisabledUnderTest is defaultScionUserLookup/
+// defaultLookupUserByID's second, independent defense against a real
+// account lookup from a test — see their own doc comment for the incident
+// (a test wrote this container's own real agent-info.json after its
+// TestMain override of scionUserLookup/lookupUserByID was removed) this
+// exists to catch even when that first defense is gone.
+var errRealUserLookupDisabledUnderTest = errors.New("scionUserLookup/lookupUserByID: real user lookups are disabled under go test; a test that needs a resolved user must override the var itself (scoped with t.Cleanup)")
+
+// defaultScionUserLookup is scionUserLookup's real, production value — but
+// even this refuses to run under `go test` (testing.Testing()), the same
+// pattern pkg/sciontool/hub's NewClient uses for its own non-localhost-hub
+// guard. TestMain overriding the scionUserLookup var to a stub is the
+// intended, primary defense (see scionUserLookup's own doc comment); this
+// is what still catches a test-driven lookup if that override is ever
+// accidentally removed, since nothing about a var default silently
+// reverting to this function requires a test to have opted back into real
+// lookups.
+func defaultScionUserLookup(username string) (*user.User, error) {
+	if testing.Testing() {
+		return nil, errRealUserLookupDisabledUnderTest
+	}
+	return user.Lookup(username)
+}
+
+// defaultLookupUserByID is lookupUserByID's real, production value. Same
+// two-layer reasoning as defaultScionUserLookup.
+func defaultLookupUserByID(uid string) (*user.User, error) {
+	if testing.Testing() {
+		return nil, errRealUserLookupDisabledUnderTest
+	}
+	return user.LookupId(uid)
+}
+
 // scionUserLookup resolves the "scion" system user. It is a package var
 // (rather than calling user.Lookup directly) both so adjustScionUser's
 // requirePrivilegeDrop-gated fail-closed checks can be exercised in a unit
@@ -1656,12 +1690,17 @@ func watchLimitsTriggerFile(ctx context.Context, ch chan<- struct{}) {
 // reading the Hub token file) at the real, live path — silently changing
 // this agent's own reported status. Every "scion" lookup in this file goes
 // through this var for that reason, not just the ones adjustScionUser uses.
-var scionUserLookup = user.Lookup
+//
+// Its default value, defaultScionUserLookup, is itself gated on
+// testing.Testing() — a second, independent defense for when TestMain's own
+// override of this var is the thing that's missing (see that function's
+// doc comment).
+var scionUserLookup = defaultScionUserLookup
 
 // lookupUserByID resolves a user by numeric UID. Same reasoning as
 // scionUserLookup: resolveAgentHome's targetUID != 0 branch must be
 // overridable so a test can never resolve a real account's home directory.
-var lookupUserByID = user.LookupId
+var lookupUserByID = defaultLookupUserByID
 
 // runDirectSetUID is directSetUID's call site as a package var, for the same
 // reason as scionUserLookup: adjustScionUser's control flow around a failed
