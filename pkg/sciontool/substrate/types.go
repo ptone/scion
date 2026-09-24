@@ -33,6 +33,16 @@ const (
 	StateAwaitingBootstrap State = "awaiting-bootstrap"
 	// StateRunning is entered after a successful one-shot bootstrap.
 	StateRunning State = "running"
+	// StateInitFailed is entered when the in-process init (InitRunner)
+	// exits non-zero. The control server stays up and HTTP-reachable —
+	// Substrate does not observe a PID 1 exit as a failure signal (the
+	// actor stays ACTOR_STATE_RUNNING regardless), so healthz reporting a
+	// distinct state here is what lets a caller that already knows to
+	// probe it (e.g. a future broker-side liveness check) distinguish this
+	// from a genuinely running harness — see the cmd layer's
+	// exitCodePrivilegeDropRequired and reportInitFailure for the direct
+	// Hub report, which is the primary failure signal today.
+	StateInitFailed State = "init-failed"
 )
 
 // HealthzResponse is the body of GET /scion/v1/healthz.

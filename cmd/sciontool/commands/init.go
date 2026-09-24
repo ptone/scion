@@ -148,18 +148,22 @@ func requirePrivilegeDropOrFail(targetUID int, requirePrivilegeDrop bool) error 
 // exitCodePrivilegeDropRequired is the exit code RunInit returns when
 // requirePrivilegeDropOrFail trips — never returned for any other reason.
 // It stays a distinct value (rather than a plain 1) purely so an operator
-// reading substrate-serve's own exit code can tell which failure this was;
-// substrate-serve's InitRunner (substrate_serve.go) itself now reacts to
-// any non-zero RunInit exit code the same way (see exitOnNonZeroInit), not
-// just this one. The synchronous bootstrap precondition
-// (pkg/sciontool/substrate.PrivilegeDropChecker) is expected to catch a
-// missing privilege drop before /bootstrap ever responds 200 — which is
-// what actually makes Run() itself return an error and the broker delete
-// the actor, since a PID 1 exit happens after the 200 has already gone
-// out — so reaching this at all is already defence in depth. Either way,
-// RunInit reports PhaseError to the Hub and to the local agent-info state
-// (below) before returning it, the same way the git-clone failure path
-// does.
+// reading substrate-serve's own logged exit code can tell which failure
+// this was. It does not, on its own, cause substrate-serve's process to
+// exit or otherwise change process-level behaviour — see StateInitFailed's
+// doc comment (pkg/sciontool/substrate) for why: Substrate does not treat
+// an actor's PID 1 exiting as a failure signal at all, so exiting here
+// would only lose the control server for no compensating benefit. The
+// synchronous bootstrap precondition (pkg/sciontool/substrate.
+// PrivilegeDropChecker) is expected to catch a missing privilege drop
+// before /bootstrap ever responds 200, which is what actually makes Run()
+// itself return an error and the broker delete the actor — reaching this
+// sentinel at all is already defence in depth for when that precondition
+// somehow doesn't. Either way, RunInit reports PhaseError to the Hub and
+// to the local agent-info state (below) before returning it, the same way
+// the git-clone failure path does — see reportInitFailure's doc comment
+// for why that direct Hub report, not a broker heartbeat fallback, is the
+// only thing that makes this failure visible on substrate.
 const exitCodePrivilegeDropRequired = 17
 
 // privilegeDropPreconditionDeps groups checkPrivilegeDropFeasible's external
@@ -209,8 +213,8 @@ var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not m
 //     SETUID/SETGID: a template built without one of them (e.g. CHOWN)
 //     must fail here, synchronously, rather than pass this check and die
 //     deep inside RunInit once the harness is already supposed to be
-//     starting (proven live at 017adc1b5 — see substratecaps.Required's
-//     CHOWN entry for the exact log lines);
+//     starting (observed live — see substratecaps.Required's CHOWN entry
+//     for the exact log lines);
 //   - the "scion" user resolvable at all;
 //   - SCION_HOST_UID/GID present and parseable (buildBootstrapEnv sets these
 //     into req.Env, applied to the process environment by handleBootstrap
@@ -286,12 +290,19 @@ func resolveAgentHome(targetUID int, rootless bool) string {
 
 // reportInitFailure reports a RunInit failure the same way the git-clone
 // failure path pioneered: local agent-info state to PhaseError with a
-// message, plus a best-effort direct Hub report (the broker heartbeat is
-// the fallback if that call fails or the Hub isn't configured). cause's
-// message ends up in the response substrate-serve's control server may
-// expose and in the Hub-visible message, so callers must only pass fixed,
-// secret-free errors (as errPrivilegeDropRequired and every caller below
-// do) — never one built from raw command output or file contents.
+// message, plus a best-effort direct Hub report. For runtimes whose broker
+// reads the container's agent-info.json as part of its own status
+// heartbeat (e.g. Docker), that local write is a second, independent path
+// to the same result if the direct Hub call fails or the Hub isn't
+// configured. Substrate has no such fallback: its broker does not read
+// agent-info.json out of the actor, so on substrate the direct Hub call
+// above is the only failure signal that reaches the Hub at all — see
+// StateInitFailed's doc comment (pkg/sciontool/substrate) for the other
+// half of what substrate-serve does about this. cause's message ends up in
+// the response substrate-serve's control server may expose and in the
+// Hub-visible message, so callers must only pass fixed, secret-free errors
+// (as errPrivilegeDropRequired and every caller below do) — never one
+// built from raw command output or file contents.
 //
 // Shared by every RunInit failure path that needs to report before
 // returning, rather than each constructing its own StatusHandler: this is
@@ -329,7 +340,7 @@ func reportInitFailure(agentHome string, cause error) {
 func RunInit(args []string, opts InitRunOptions) int {
 	// Start the reaper goroutine for zombie process cleanup.
 	// This is critical when running as PID 1 in a container.
-	supervisor.StartReaper()
+	startReaper()
 
 	// Extract the child command (everything after --)
 	childArgs := extractChildCommand(args)
@@ -1611,6 +1622,17 @@ var lookupUserByID = user.LookupId
 // rewrite is unit-tested without ever touching real system files.
 var runDirectSetUID = directSetUID
 
+// startReaper is supervisor.StartReaper's call site as a package var.
+// StartReaper installs a process-wide SIGCHLD handler that Wait4(-1, ...)s
+// any reapable child — including one a later exec.Command in the *same*
+// test binary is still waiting on itself, which races os/exec's own
+// wait() and fails it with ECHILD. RunInit (and substrate-serve's own
+// startup) call this unconditionally because a real PID 1 needs it, but a
+// test driving RunInit directly does not, and starting it there corrupts
+// every other test in the same binary that shells out — stubbed to a
+// no-op by TestMain for exactly that reason.
+var startReaper = supervisor.StartReaper
+
 // setupHostUser realigns the container's "scion" user to SCION_HOST_UID/GID
 // so the harness (and, for substrate, execAsUserCmd) can drop privileges
 // from root to it. requirePrivilegeDrop is RunInit's own
@@ -1743,7 +1765,8 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 // it (every runtime except substrate-serve), this function's return value
 // is byte-identical to before this change: the same silent "report success
 // anyway" fallback other runtimes have relied on stays exactly as it was,
-// per the brief's rule not to change other runtimes' behaviour.
+// since those runtimes depend on that historical fallback and must not be
+// changed here.
 func adjustScionUser(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop bool) (int, int, bool) {
 	// Skip if UID/GID already match (1001 is the default)
 	currentInfo, lookupErr := scionUserLookup("scion")
@@ -1864,13 +1887,14 @@ func directSetUID(username, newUID, newGID string) error {
 // test can exercise the "no entry to rewrite" detection against a temp file
 // instead of the real /etc/group and /etc/passwd.
 func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir string) error {
-	// sed -i's substitute command exits 0 regardless of whether it matched
-	// anything, so confirm the entry exists first — otherwise a missing
-	// "scion" user would slip through both edits below with no error at all.
-	if !passwdFileHasEntry(groupPath, username) {
-		return fmt.Errorf("%s: %w", groupPath, errPasswdEntryNotRewritten)
-	}
-	// Update /etc/group: replace the GID (3rd field) for the matching group
+	// Update /etc/group: replace the GID (3rd field) for the matching
+	// group. Best-effort and unconditional, with no pre-check — matching
+	// the historical behaviour exactly: sed's substitute command exits 0
+	// whether or not it matched anything, and a scion user whose primary
+	// group isn't literally named "scion" (e.g. useradd -g users scion) is
+	// a legitimate, harmless case for this line to silently match nothing.
+	// Only the passwd entry below is what actually determines whether the
+	// uid/gid rewrite took effect, so only it is pre-checked.
 	groupSed := exec.Command("sed", "-i", "-E",
 		fmt.Sprintf(`s/^(%s:x:)[0-9]+:/\1%s:/`, username, newGID),
 		groupPath)
@@ -1878,7 +1902,10 @@ func directSetUIDAt(username, newUID, newGID, groupPath, passwdPath, homeDir str
 		return fmt.Errorf("sed %s: %w (output: %s)", groupPath, err, string(out))
 	}
 
-	if !passwdFileHasEntry(passwdPath, username) {
+	// sed -i's substitute command exits 0 regardless of whether it matched
+	// anything, so confirm the passwd entry exists first — otherwise a
+	// missing "scion" user would slip through with no error at all.
+	if !passwdEntryExists(passwdPath, username) {
 		return fmt.Errorf("%s: %w", passwdPath, errPasswdEntryNotRewritten)
 	}
 	// Update /etc/passwd: replace both UID (3rd field) and GID (4th field)
@@ -1917,16 +1944,21 @@ func mustAtoi(s string) int {
 	return n
 }
 
-// passwdFileHasEntry reports whether path (a /etc/passwd- or /etc/group-
-// formatted file) has a line for username, i.e. one starting with
-// "username:". Returns false (not an error) if the file can't be read,
-// since that's just as much "nothing to rewrite" as the entry being absent.
-func passwdFileHasEntry(path, username string) bool {
+// passwdEntryExists reports whether path (an /etc/passwd-formatted file)
+// has a line for username, matching the exact "username:x:" prefix the
+// passwd sed substitution above anchors on — not just "username:", which a
+// "scion:*:" or "scion:!:" line (a locked/disabled account, still a valid
+// passwd entry) would also match while the sed itself matches nothing.
+// Returns false (not an error) if the file can't be read, since that's
+// just as much "nothing to rewrite" as the entry being absent. A TOCTOU
+// window between this read and the sed -i below is negligible: only root
+// in the actor writes these files, and only before the harness starts.
+func passwdEntryExists(path, username string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
-	prefix := username + ":"
+	prefix := username + ":x:"
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.HasPrefix(line, prefix) {
 			return true
@@ -2652,28 +2684,10 @@ func parseCapSetUID(statusContent string) bool {
 	return parseCapBit(statusContent, 7) // CAP_SETUID = bit 7
 }
 
-// hasCapSetGID is CAP_SETGID's counterpart to hasCapSetUID. su (and the
-// supervisor's own syscall.Credential drop — see substrate_template.go's WHY
-// comment) needs both SETUID and SETGID to leave root; checking only
-// CAP_SETUID would miss an actor granted the wrong single capability.
-func hasCapSetGID() bool {
-	data, err := os.ReadFile("/proc/self/status")
-	if err != nil {
-		return false
-	}
-	return parseCapSetGID(string(data))
-}
-
-// parseCapSetGID parses the content of /proc/self/status and returns true
-// if CAP_SETGID (bit 6) is present in the effective capability set.
-func parseCapSetGID(statusContent string) bool {
-	return parseCapBit(statusContent, 6) // CAP_SETGID = bit 6
-}
-
-// hasCapBit is hasCapSetUID/hasCapSetGID's generalization to an arbitrary
-// capability bit (see substratecaps.Capability.EffBit), used by
-// checkPrivilegeDropFeasible to verify substratecaps.Required in full —
-// not just SETUID/SETGID — without a hardcoded function per capability.
+// hasCapBit is hasCapSetUID's generalization to an arbitrary capability bit
+// (see substratecaps.Capability.EffBit), used by checkPrivilegeDropFeasible
+// to verify substratecaps.Required in full — every required capability,
+// not just SETUID — without a hardcoded function per capability.
 func hasCapBit(bit uint) bool {
 	data, err := os.ReadFile("/proc/self/status")
 	if err != nil {
@@ -2684,8 +2698,8 @@ func hasCapBit(bit uint) bool {
 
 // parseCapBit parses /proc/self/status content and returns whether the given
 // bit is set in the effective capability set (CapEff). Shared by
-// parseCapSetUID and parseCapSetGID (and hasCapBit) so they can never drift
-// in how they read the file.
+// parseCapSetUID and hasCapBit so they can never drift in how they read the
+// file.
 func parseCapBit(statusContent string, bit uint) bool {
 	for _, line := range strings.Split(statusContent, "\n") {
 		if strings.HasPrefix(line, "CapEff:") {

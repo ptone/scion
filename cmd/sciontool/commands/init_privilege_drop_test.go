@@ -46,37 +46,52 @@ func doSubstrateServeJSON(t *testing.T, srv interface{ Handler() http.Handler },
 // checkPrivilegeDropFeasible: the synchronous /bootstrap precondition.
 // -----------------------------------------------------------------------
 
-func TestHasCapSetGID_ParsesEffectiveCapabilities(t *testing.T) {
+// TestParseCapBit covers parseCapBit generically (the function hasCapBit
+// uses to check any capability in substratecaps.Required, not just
+// SETUID) — bit 6 (CAP_SETGID) and bit 0 (CAP_CHOWN) alongside a few edge
+// cases, complementing TestParseCapSetUID's bit-7-specific coverage.
+func TestParseCapBit(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
+		bit   uint
 		want  bool
 	}{
 		{
-			name:  "CAP_SETGID present among limited caps",
+			name:  "bit 6 (SETGID) present among limited caps",
 			input: "Name:\tinit\nCapEff:\t00000000000000ff\n",
+			bit:   6,
 			want:  true,
 		},
 		{
-			name:  "CAP_SETGID absent (only SETUID bit set)",
+			name:  "bit 6 (SETGID) absent (only SETUID bit set)",
 			input: "Name:\tinit\nCapEff:\t0000000000000080\n",
+			bit:   6,
 			want:  false,
 		},
 		{
-			name:  "only CAP_SETGID bit set",
+			name:  "only bit 6 set",
 			input: "CapEff:\t0000000000000040\n",
+			bit:   6,
+			want:  true,
+		},
+		{
+			name:  "bit 0 (CHOWN) set",
+			input: "CapEff:\t0000000000000001\n",
+			bit:   0,
 			want:  true,
 		},
 		{
 			name:  "no capabilities",
 			input: "CapEff:\t0000000000000000\n",
+			bit:   6,
 			want:  false,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := parseCapSetGID(tc.input); got != tc.want {
-				t.Errorf("parseCapSetGID(%q) = %v, want %v", tc.input, got, tc.want)
+			if got := parseCapBit(tc.input, tc.bit); got != tc.want {
+				t.Errorf("parseCapBit(%q, %d) = %v, want %v", tc.input, tc.bit, got, tc.want)
 			}
 		})
 	}
@@ -90,9 +105,11 @@ func fakePrivilegeDropDeps(t *testing.T) privilegeDropPreconditionDeps {
 	t.Helper()
 	env := map[string]string{"SCION_HOST_UID": "1000", "SCION_HOST_GID": "1000"}
 	return privilegeDropPreconditionDeps{
-		hasCapBit:  func(uint) bool { return true },
-		lookupUser: func(string) (*user.User, error) { return &user.User{Username: "scion", Uid: "1000", Gid: "1000"}, nil },
-		getenv:     func(k string) string { return env[k] },
+		hasCapBit: func(uint) bool { return true },
+		lookupUser: func(string) (*user.User, error) {
+			return &user.User{Username: "scion", Uid: "1000", Gid: "1000"}, nil
+		},
+		getenv: func(k string) string { return env[k] },
 	}
 }
 
@@ -190,60 +207,29 @@ func TestSubstrateServeInitOptions_RequiresPrivilegeDrop(t *testing.T) {
 	}
 }
 
-// TestExitOnNonZeroInit_NonZeroExits covers every non-zero code this can
-// plausibly see: the privilege-drop sentinel, a plain 1 (most RunInit
-// failure paths), and a couple of harness-style codes (137 = 128+SIGKILL,
-// a common "container was killed" convention) — all of them must exit.
-func TestExitOnNonZeroInit_NonZeroExits(t *testing.T) {
-	for _, code := range []int{1, 2, 17, exitCodePrivilegeDropRequired, 137} {
-		var gotCode int
-		var called bool
-		exitOnNonZeroInit(code, func(c int) {
-			called = true
-			gotCode = c
-		})
-		if !called {
-			t.Errorf("exit was not called for code %d", code)
-		}
-		if gotCode != code {
-			t.Errorf("exit called with %d, want %d", gotCode, code)
-		}
-	}
-}
-
-// TestExitOnNonZeroInit_ZeroDoesNotExit is the one deliberate exception —
-// see exitOnNonZeroInit's doc comment for why 0 alone is left alone.
-func TestExitOnNonZeroInit_ZeroDoesNotExit(t *testing.T) {
-	exitOnNonZeroInit(0, func(int) {
-		t.Error("exit was called for code 0, want no call")
-	})
-}
-
 // TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap
 // drives the exact server construction runSubstrateServe uses (real
-// PrivilegeDropChecker; a stubbed init runner and exit func — see
-// newSubstrateServeServer's doc comment for why those two are never the
-// real RunInit/os.Exit in a test) and proves the wiring itself: with
-// SCION_HOST_UID/GID absent from the process environment, the deterministic
-// branch of checkPrivilegeDropFeasible, the bootstrap must be rejected
-// without ever invoking the init runner. If WithPrivilegeDropChecker were
-// ever dropped from newSubstrateServeServer, this test would instead see
-// 200 and its own assertions would fail — cleanly, as a normal test
-// failure, not by driving a real RunInit and a real os.Exit — this is the
-// "disabling the precondition must fail a test" mutation check.
+// PrivilegeDropChecker; a stubbed init runner — see newSubstrateServeServer's
+// doc comment for why it's never the real RunInit in a test) and proves the
+// wiring itself: with SCION_HOST_UID/GID absent from the process
+// environment, the deterministic branch of checkPrivilegeDropFeasible, the
+// bootstrap must be rejected without ever invoking the init runner. If
+// WithPrivilegeDropChecker were ever dropped from newSubstrateServeServer,
+// this test would instead see 200 and its own assertions would fail —
+// cleanly, as a normal test failure, not by driving a real RunInit — this
+// is the "disabling the precondition must fail a test" mutation check.
 func TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv("SCION_HOST_GID", "")
 	scrubHubEnv(t)
 
-	var initCalled, exitCalled bool
+	var initCalled bool
 	stubRunInit := func(argv []string, opts InitRunOptions) int {
 		initCalled = true
 		return 0
 	}
-	stubExit := func(int) { exitCalled = true }
 
-	srv := newSubstrateServeServer(stubRunInit, stubExit)
+	srv := newSubstrateServeServer(stubRunInit)
 	rec := doSubstrateServeJSON(t, srv, "POST", "/scion/v1/bootstrap", "any-token", map[string]any{
 		"env":           map[string]string{},
 		"files":         []any{},
@@ -254,17 +240,15 @@ func TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap(t *te
 	if rec.Code == 200 || rec.Code < 400 {
 		t.Errorf("status = %d, want a non-2xx rejection (SCION_HOST_UID/GID are unset)", rec.Code)
 	}
-	// Give any wrongly-started goroutine a moment to flip the flags before
-	// asserting they never did (the real init runner call happens
+	// Give any wrongly-started goroutine a moment to flip the flag before
+	// asserting it never did (the real init runner call happens
 	// asynchronously — see handleBootstrap).
 	time.Sleep(20 * time.Millisecond)
 	if initCalled {
 		t.Error("the init runner was invoked despite the privilege-drop precondition failing; the harness must never start")
 	}
-	if exitCalled {
-		t.Error("exit was invoked despite the precondition failing before init ever ran")
-	}
 }
+
 
 // -----------------------------------------------------------------------
 // RunInit's defence-in-depth failure reporting (real integration —
@@ -329,11 +313,12 @@ func TestRunInit_PrivilegeDropFailure_ReturnsSentinel(t *testing.T) {
 
 // TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure drives the real
 // RunInit through a *different* pre-launch failure path than the
-// privilege-drop gate (round-13 follow-up item B: "ANY non-zero in-process
-// init exit... must not be limited to the privilege-drop sentinel") to
-// prove reportInitFailure was actually wired at this call site, not just
-// the privilege-drop one. SCION_STAGED_SECRETS holding undecodable data
-// makes stagedsecrets.Decode fail before anything else in RunInit runs.
+// privilege-drop gate, to prove reportInitFailure was actually wired at
+// this call site too, not just the privilege-drop one — every RunInit
+// failure path that returns before the harness launches must report, not
+// just the one this package's tests happen to exercise most. SCION_STAGED_SECRETS
+// holding undecodable data makes stagedsecrets.Decode fail before anything
+// else in RunInit runs.
 func TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure(t *testing.T) {
 	scrubHubEnv(t)
 	t.Setenv("SCION_HOST_UID", "")
@@ -406,8 +391,8 @@ func TestAdjustScionUser_AlreadyCorrect_ShortCircuitsRegardlessOfFlag(t *testing
 // TestAdjustScionUser_ScionUserNotFound covers the first fail-closed case: under
 // RequirePrivilegeDrop, a missing scion user must fail closed; every other
 // runtime (RequirePrivilegeDrop: false) must see the exact same
-// (uid, gid, false) it always has, since the brief's rule is not to change
-// other runtimes' behaviour.
+// (uid, gid, false) it always has, since those runtimes depend on the
+// historical fallback and must not be changed here.
 func TestAdjustScionUser_ScionUserNotFound(t *testing.T) {
 	withScionUserLookup(t, func(string) (*user.User, error) {
 		return nil, errors.New("user: unknown user scion")
@@ -573,6 +558,51 @@ func TestDirectSetUIDAt_RewritesExistingEntry(t *testing.T) {
 	}
 	if !strings.Contains(string(passwdContent), "scion:x:1000:1000:") {
 		t.Errorf("passwd file = %q, want it rewritten to UID/GID 1000", passwdContent)
+	}
+}
+
+// TestDirectSetUIDAt_PasswdEntryNoMatchingGroupLine_GroupIsBestEffort proves
+// a passwd entry that exists but whose primary group isn't literally named
+// "scion" (e.g. `useradd -g users scion`) is a legitimate, real-world case
+// — the group sed matching nothing must not fail the whole operation, and
+// the passwd rewrite (the one that actually matters) must still succeed.
+// This is the historical non-substrate behaviour, preserved exactly: only a
+// real command failure or a missing *passwd* entry is an error.
+func TestDirectSetUIDAt_PasswdEntryNoMatchingGroupLine_GroupIsBestEffort(t *testing.T) {
+	dir := t.TempDir()
+	groupPath := filepath.Join(dir, "group")
+	passwdPath := filepath.Join(dir, "passwd")
+	// No "scion:" line in the group file at all — a user whose primary
+	// group has a different name.
+	if err := os.WriteFile(groupPath, []byte("users:x:100:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(passwdPath, []byte("scion:x:2000:100:Scion:/home/scion:/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	homeDir := filepath.Join(dir, "home")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := directSetUIDAt("scion", "1000", "1000", groupPath, passwdPath, homeDir); err != nil {
+		t.Fatalf("directSetUIDAt() = %v, want nil — a group sed matching nothing must not be an error", err)
+	}
+
+	groupContent, err := os.ReadFile(groupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(groupContent), "users:x:100:") {
+		t.Errorf("group file = %q, want unchanged (no scion group entry to rewrite)", groupContent)
+	}
+
+	passwdContent, err := os.ReadFile(passwdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(passwdContent), "scion:x:1000:1000:") {
+		t.Errorf("passwd file = %q, want it rewritten to UID/GID 1000 despite the group not matching", passwdContent)
 	}
 }
 

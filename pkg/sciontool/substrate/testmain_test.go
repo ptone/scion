@@ -19,24 +19,26 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 )
 
 // TestMain clears every Hub- and privilege-drop-related environment
-// variable, and redirects HOME/XDG_*/SCION_WORKSPACE_PATH to one per-binary
-// temp directory, before any test in this package runs — see
-// cmd/sciontool/commands's TestMain (testmain_test.go) for the two
-// incidents this defends against. This package doesn't import
-// pkg/sciontool/hub or resolve a fixed real home directory itself (every
-// test here drives WithInitRunner/WithPrivilegeDropChecker with local
-// fakes, never the real RunInit — see cmd/sciontool/commands's
+// variable, and redirects HOME/XDG_*/SCION_WORKSPACE_PATH/the Hub token
+// home to one per-binary temp directory, before any test in this package
+// runs — see cmd/sciontool/commands's TestMain (testmain_test.go) for the
+// two incidents this defends against. This package's own production code
+// doesn't import pkg/sciontool/hub or resolve a fixed real home directory
+// itself (every test here drives WithInitRunner/WithPrivilegeDropChecker
+// with local fakes, never the real RunInit — see cmd/sciontool/commands's
 // newSubstrateServeServer for where the real ones are wired instead), so
 // the blast radius here is smaller. But handleBootstrap does read
 // SCION_HOST_UID/GID out of the real process environment (set there by a
 // test's own req.Env, via os.Setenv, exactly like a real bootstrap
 // request), so a test that forgets to reset them could otherwise leak a
-// previous test's values into a later one; and the HOME/XDG/workspace
-// redirection is cheap insurance against any future test in this package
-// that does end up resolving a real path.
+// previous test's values into a later one; and the HOME/XDG/workspace/hub
+// token home redirection is cheap insurance against any future test in
+// this package that does end up resolving a real path.
 func TestMain(m *testing.M) {
 	for _, v := range []string{
 		"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_AUTH_TOKEN",
@@ -57,8 +59,10 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("XDG_CACHE_HOME", filepath.Join(tmpHome, ".cache"))
 	_ = os.Setenv("XDG_STATE_HOME", filepath.Join(tmpHome, ".local", "state"))
 	_ = os.Setenv("SCION_WORKSPACE_PATH", filepath.Join(tmpHome, "workspace"))
+	restoreTokenHome := hub.SetTokenHome(tmpHome)
 
 	code := m.Run()
+	restoreTokenHome()
 	_ = os.RemoveAll(tmpHome)
 	os.Exit(code)
 }

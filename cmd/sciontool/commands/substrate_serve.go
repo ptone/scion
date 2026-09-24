@@ -14,7 +14,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
 var substrateServeAddr string
@@ -71,39 +70,6 @@ func substrateServeInitOptions(forwardTermSignal bool) InitRunOptions {
 	return InitRunOptions{ForwardTermSignal: forwardTermSignal, RequirePrivilegeDrop: true}
 }
 
-// exitOnNonZeroInit is substrate-serve's InitRunner-wrapping fail-loud
-// mechanism: any non-zero RunInit exit code calls exit(code) so PID 1
-// itself dies, rather than leaving substrate-serve's control server up
-// reporting "running" over an actor that has nothing left happening
-// inside it. This was originally scoped to only the privilege-drop
-// sentinel (exitCodePrivilegeDropRequired); it was widened after a live
-// git-clone failure ("in-process init exited with code 1") left an actor
-// showing "running" the same way, proving the gap wasn't unique to the
-// privilege-drop path.
-//
-// Exit code 0 is the one case deliberately left alone: it is RunInit's
-// literal definition of nothing having gone wrong, whether that's the
-// supervised harness process exiting cleanly on its own or (today, since
-// nothing else ever asks it to stop — substrate-serve does not forward
-// SIGTERM to the harness, see runSubstrateServe) any other 0 exit RunInit
-// produces. Every RunInit failure that returns a specific non-zero
-// path — before the harness ever launches (staged secrets, git clone,
-// harness manifest, the privilege-drop gate, ...) or after it launched and
-// then crashed or hit its limits — already calls reportInitFailure (or,
-// for limits/crash classification, RunInit's own end-of-run reporting)
-// before returning, so this never needs to guess at a message: it only
-// adds the PID 1 exit, which is the one signal Substrate's own process
-// supervision observes regardless of whether any of those Hub calls
-// actually got through.
-//
-// exit is a parameter so a test can drive this without an actual os.Exit
-// call terminating the test binary.
-func exitOnNonZeroInit(exitCode int, exit func(int)) {
-	if exitCode != 0 {
-		exit(exitCode)
-	}
-}
-
 // substrateServePrivilegeDropChecker is the substrate.PrivilegeDropChecker
 // substrate-serve wires into its Server (see checkPrivilegeDropFeasible's
 // doc comment for what it actually checks).
@@ -118,23 +84,27 @@ func substrateServePrivilegeDropChecker() error {
 // disabled precondition regressing back to Phase 1's silent behaviour —
 // without starting an HTTP listener.
 //
-// runInit and exit are parameters, not the real RunInit/os.Exit called
-// directly, precisely so a test exercising this wiring can never reach the
-// real RunInit or the real process exit. A test that stubs both and then
-// removes WithPrivilegeDropChecker (the regression this wiring exists to
-// catch) must see its stub called and fail on that assertion — not have
-// the real RunInit write this machine's real agent-info.json and the real
-// os.Exit kill the test binary out from under it, which is exactly what
-// happened before this was parameterized: bootstrap wrongly returning 200
-// under that mutation drove the real RunInit for real, in-process,
-// including its own os.Exit on failure.
-func newSubstrateServeServer(runInit func(argv []string, opts InitRunOptions) int, exit func(int)) *substrate.Server {
+// runInit is a parameter, not the real RunInit called directly, precisely
+// so a test exercising this wiring can never reach the real RunInit. A
+// test that stubs it and then removes WithPrivilegeDropChecker (the
+// regression this wiring exists to catch) must see its stub called and
+// fail on that assertion — not have the real RunInit write this machine's
+// real agent-info.json, which is exactly what happened before this was
+// parameterized: bootstrap wrongly returning 200 under that mutation drove
+// the real RunInit for real, in-process.
+//
+// The init runner's own exit code is deliberately not acted on here beyond
+// what WithInitRunner's caller (handleBootstrap) already does (log it,
+// flip healthz to StateInitFailed) — substrate-serve does not exit the
+// process on a non-zero init. See StateInitFailed's doc comment for why:
+// Substrate does not observe a PID 1 exit as a failure signal at all, so
+// exiting would only lose the control server (and exec-based diagnosis)
+// for no compensating benefit.
+func newSubstrateServeServer(runInit func(argv []string, opts InitRunOptions) int) *substrate.Server {
 	return substrate.NewServer(
 		substrate.WithPrivilegeDropChecker(substrateServePrivilegeDropChecker),
 		substrate.WithInitRunner(func(argv []string, forwardTermSignal bool) int {
-			exitCode := runInit(argv, substrateServeInitOptions(forwardTermSignal))
-			exitOnNonZeroInit(exitCode, exit)
-			return exitCode
+			return runInit(argv, substrateServeInitOptions(forwardTermSignal))
 		}),
 	)
 }
@@ -142,12 +112,14 @@ func newSubstrateServeServer(runInit func(argv []string, opts InitRunOptions) in
 func runSubstrateServe(addr string) int {
 	// substrate-serve is PID 1 inside the actor: reap reparented zombies the
 	// same way `sciontool init` does. RunInit (invoked after bootstrap)
-	// starts its own reaper too; a second StartReaper call is harmless
+	// starts its own reaper too; a second startReaper call is harmless
 	// (each independently drains SIGCHLD via WNOHANG) and this one covers
-	// the awaiting-bootstrap window before RunInit ever runs.
-	supervisor.StartReaper()
+	// the awaiting-bootstrap window before RunInit ever runs. See
+	// startReaper's own doc comment (init.go) for why this is a package var
+	// rather than calling supervisor.StartReaper directly.
+	startReaper()
 
-	srv := newSubstrateServeServer(RunInit, os.Exit)
+	srv := newSubstrateServeServer(RunInit)
 
 	httpServer := &http.Server{
 		Addr:    addr,

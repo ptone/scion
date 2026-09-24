@@ -11,6 +11,8 @@ import (
 	"os/user"
 	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 )
 
 // errScionUserLookupDisabledInTests is what scionUserLookup/lookupUserByID
@@ -21,7 +23,7 @@ var errScionUserLookupDisabledInTests = errors.New("scionUserLookup/lookupUserBy
 // they happen to run on, for the whole test binary — not just the tests
 // that remember to sandbox themselves.
 //
-// Incident 1 (round-13 hermeticity follow-up): a test that drove the real
+// Incident 1: a test that drove the real
 // RunInit wrote agent-info.json with phase "error" to this container's own,
 // real /home/scion — because this dev/test environment's actual system user
 // is named "scion", so setupHostUser's rootless shortcut and
@@ -35,21 +37,30 @@ var errScionUserLookupDisabledInTests = errors.New("scionUserLookup/lookupUserBy
 // variable.
 //
 // Incident 2: TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap
-// drove the real newSubstrateServeServer() wiring (real RunInit, real
-// os.Exit) and set SCION_HOST_UID/GID but never set HOME. Under the mutation
-// that removes WithPrivilegeDropChecker (exactly the regression this test
-// exists to catch), bootstrap wrongly returns 200, the real RunInit
-// goroutine runs for real, requirePrivilegeDropOrFail fails, and
-// reportInitFailure resolves agentHome via resolveAgentHome's
-// os.Getenv("HOME") fallback — the real, ambient $HOME of whoever's machine
-// runs this test, not a temp directory, because neither the test nor
-// TestMain (at the time) redirected it. This happened on a *different*
-// agent's container (the round-14 reviewer's), not just this one: it wrote
-// that container's real agent-info.json and then called the real
-// exitOnNonZeroInit, which calls the real os.Exit and kills the test binary
-// itself. "No test can touch the real account or hub even on a regression"
-// did not hold merely by clearing env vars and disabling user lookups; a
+// drove the real newSubstrateServeServer() wiring (real RunInit; at the
+// time, also a real os.Exit — since reverted, see StateInitFailed's doc
+// comment in pkg/sciontool/substrate) and set SCION_HOST_UID/GID but never
+// set HOME. Under the mutation that removes WithPrivilegeDropChecker
+// (exactly the regression this test exists to catch), bootstrap wrongly
+// returns 200, the real RunInit goroutine runs for real,
+// requirePrivilegeDropOrFail fails, and reportInitFailure resolves
+// agentHome via resolveAgentHome's os.Getenv("HOME") fallback — the real,
+// ambient $HOME of whoever's machine runs this test, not a temp directory,
+// because neither the test nor TestMain (at the time) redirected it. This
+// happened on a *different* agent's container (an independent reviewer's),
+// not just this one: it wrote that container's real agent-info.json.
+// "No test can touch the real account or hub even on a regression" did not
+// hold merely by clearing env vars and disabling user lookups; a
 // still-real $HOME is enough on its own to reach a real file.
+//
+// Incident 3: under -shuffle=on, TestDirectSetUIDAt_RewritesExistingEntry
+// (and any other exec.Command-based test) started failing with
+// "waitid: no child processes" once shuffled after the RunInit tests.
+// RunInit calls supervisor.StartReaper, which installs a process-wide
+// SIGCHLD handler that Wait4(-1, ...)s any reapable child — including one
+// a later exec.Command in this same test binary is still waiting on
+// itself, racing os/exec's own wait() and failing it with ECHILD. See
+// startReaper's own doc comment.
 //
 // Layers, all required:
 //
@@ -79,6 +90,10 @@ var errScionUserLookupDisabledInTests = errors.New("scionUserLookup/lookupUserBy
 //     is necessary but not sufficient on its own (incident 2): it protects
 //     only that one test, not a regression that reaches this fallback from
 //     a code path the test author didn't anticipate.
+//  4. startReaper is stubbed to a no-op for the whole test binary
+//     (incident 3), so a test driving RunInit never installs the
+//     process-wide zombie reaper that steals other tests' exec.Command
+//     children.
 func TestMain(m *testing.M) {
 	envVarsToClear := append(append([]string{}, hubEnvVars...),
 		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID")
@@ -92,6 +107,7 @@ func TestMain(m *testing.M) {
 	lookupUserByID = func(string) (*user.User, error) {
 		return nil, errScionUserLookupDisabledInTests
 	}
+	startReaper = func() {}
 
 	tmpHome, err := os.MkdirTemp("", "sciontool-test-home-*")
 	if err != nil {
@@ -105,7 +121,17 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("XDG_STATE_HOME", filepath.Join(tmpHome, ".local", "state"))
 	_ = os.Setenv("SCION_WORKSPACE_PATH", filepath.Join(tmpHome, "workspace"))
 
+	// hub.ReadTokenFile resolves its own home directory independently of
+	// $HOME: resolveTokenHome (pkg/sciontool/hub) prefers a real
+	// user.Lookup("scion") result over $HOME, so on a machine where
+	// "scion" is a real account, redirecting $HOME above does not stop it
+	// from reading — or, if a test ever called WriteTokenFile, writing —
+	// the real ~/.scion/scion-token. SetTokenHome overrides that resolver
+	// directly.
+	restoreTokenHome := hub.SetTokenHome(tmpHome)
+
 	code := m.Run()
+	restoreTokenHome()
 	_ = os.RemoveAll(tmpHome)
 	os.Exit(code)
 }

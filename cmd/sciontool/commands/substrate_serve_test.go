@@ -12,11 +12,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 )
 
 func TestSubstrateServeCommand_Help(t *testing.T) {
@@ -69,15 +72,43 @@ func TestSubstrateServeCommand_Integration_SIGTERMNotForwarded(t *testing.T) {
 
 	// substrate-serve's synchronous /bootstrap precondition
 	// (checkPrivilegeDropFeasible) deliberately refuses to bootstrap
-	// without CAP_SETUID/CAP_SETGID, which this integration test's
-	// unprivileged subprocess never has (unlike a real Substrate actor,
-	// which is granted exactly those two capabilities — see
+	// without every capability in substratecaps.Required (SETUID, SETGID,
+	// CHOWN — not just "those two", now that CHOWN was added), which this
+	// integration test's unprivileged subprocess never has (unlike a real
+	// Substrate actor, which is granted exactly that set — see
 	// substrate_template.go). This test is about SIGTERM handling, not the
 	// privilege drop, so skip rather than fail when the environment can't
 	// satisfy a precondition this test was never exercising on purpose.
-	if !hasCapSetUID() || !hasCapSetGID() {
-		t.Skip("skipping: this environment lacks CAP_SETUID/CAP_SETGID, so the bootstrap privilege-drop precondition would reject the request before this test's real subject (SIGTERM handling) is ever reached")
+	for _, c := range substratecaps.Required {
+		if !hasCapBit(c.EffBit) {
+			t.Skipf("skipping: this environment lacks CAP_%s, so the bootstrap privilege-drop precondition would reject the request before this test's real subject (SIGTERM handling) is ever reached", c.Name)
+		}
 	}
+
+	// The runner running as root (rather than as an unprivileged CI/dev
+	// account) means we can't safely pick a SCION_HOST_UID/GID that's
+	// guaranteed to already match the real "scion" account without either
+	// performing a real /etc/passwd edit (exactly what this test must not
+	// do — see the HOST_UID comment below) or assuming this is a throwaway
+	// container, which isn't something this test can verify.
+	if os.Getuid() == 0 {
+		t.Skip("skipping: this integration test only runs as a non-root user")
+	}
+	// SCION_HOST_UID/GID are set to the runner's own actual "scion" account
+	// (looked up here, not hardcoded and not just this process's own
+	// os.Getuid()): the subprocess resolves "scion" from the same real
+	// /etc/passwd this test process runs under, so using that account's own
+	// recorded uid/gid guarantees setupHostUser takes the "already correct"
+	// shortcut — no usermod/sed edit against the runner's real
+	// /etc/passwd/group is ever attempted, regardless of what uid this test
+	// process itself happens to be running as. If there's no local "scion"
+	// account at all, skip: any other value would force a real edit
+	// attempt, which is exactly what this test must not do.
+	scionUser, err := user.Lookup("scion")
+	if err != nil {
+		t.Skipf("skipping: no local \"scion\" account to borrow a safe SCION_HOST_UID/GID from: %v", err)
+	}
+	hostUID, hostGID := scionUser.Uid, scionUser.Gid
 
 	binPath := filepath.Join(t.TempDir(), "sciontool-test")
 	buildCmd := exec.Command("go", "build", "-buildvcs=false", "-o", binPath, "../")
@@ -120,9 +151,11 @@ func TestSubstrateServeCommand_Integration_SIGTERMNotForwarded(t *testing.T) {
 	const marker = "60013"
 	bootstrapBody, err := json.Marshal(map[string]any{
 		// SCION_HOST_UID/GID: satisfies checkPrivilegeDropFeasible's
-		// precondition alongside the CAP_SETUID/CAP_SETGID skip above — a
-		// real Substrate bootstrap always sets these (buildBootstrapEnv).
-		"env":           map[string]string{"SCION_HOST_UID": "1000", "SCION_HOST_GID": "1000"},
+		// precondition alongside the capability skip above — a real
+		// Substrate bootstrap always sets these (buildBootstrapEnv). Set to
+		// the runner's own uid/gid (see above) so setupHostUser takes the
+		// "already correct" shortcut with no real /etc/passwd edit.
+		"env":           map[string]string{"SCION_HOST_UID": hostUID, "SCION_HOST_GID": hostGID},
 		"files":         []any{},
 		"start_cmd":     "sleep " + marker,
 		"control_token": controlToken,

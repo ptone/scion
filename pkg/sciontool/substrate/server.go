@@ -107,6 +107,7 @@ type Server struct {
 
 	mu           sync.Mutex
 	bootstrapped bool
+	initFailed   bool
 	controlToken string
 }
 
@@ -182,16 +183,25 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state := StateAwaitingBootstrap
-	if s.isBootstrapped() {
+	bootstrapped, initFailed := s.bootstrapState()
+	if initFailed {
+		state = StateInitFailed
+	} else if bootstrapped {
 		state = StateRunning
 	}
 	writeJSON(w, http.StatusOK, HealthzResponse{State: state})
 }
 
 func (s *Server) isBootstrapped() bool {
+	bootstrapped, _ := s.bootstrapState()
+	return bootstrapped
+}
+
+// bootstrapState reads bootstrapped and initFailed together under one lock.
+func (s *Server) bootstrapState() (bootstrapped, initFailed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.bootstrapped
+	return s.bootstrapped, s.initFailed
 }
 
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +282,21 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 			// cmd/substrate_serve.go and InitRunOptions.ForwardTermSignal).
 			exitCode := s.runInit(childArgs, false)
 			log.Info("substrate-serve: in-process init exited with code %d", exitCode)
+			// The control server deliberately stays up regardless of
+			// exitCode — Substrate does not observe PID 1 exiting as a
+			// failure signal (the actor stays running and keeps its
+			// worker either way), so there is nothing to gain and exec-
+			// based diagnosis to lose by exiting here. Flip healthz to a
+			// distinct, HTTP-reachable state instead, so a caller that
+			// knows to check it can tell the difference from a genuinely
+			// running harness. The primary failure signal is the direct
+			// Hub report the init runner's own caller (reportInitFailure,
+			// cmd/sciontool/commands) already makes before returning.
+			if exitCode != 0 {
+				s.mu.Lock()
+				s.initFailed = true
+				s.mu.Unlock()
+			}
 		}()
 	} else {
 		log.Error("bootstrap: no InitRunner configured; child process was not started")

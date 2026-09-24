@@ -28,8 +28,8 @@
 // A capability present in one list but not the other is exactly the
 // defect class this package exists to prevent: a template missing a
 // capability the checker doesn't know to ask for would pass the
-// precondition and then fail deep inside RunInit instead (proven live at
-// 017adc1b5 — see Required's CHOWN entry). This package has no
+// precondition and then fail deep inside RunInit instead (observed live —
+// see Required's CHOWN entry). This package has no
 // dependencies beyond the standard library, so both pkg/runtime (broker-
 // side, heavy k8s/grpc dependencies) and cmd/sciontool/commands (the
 // agent-side sciontool binary, which must stay light and must never
@@ -73,7 +73,7 @@ var Required = []Capability{
 	{
 		Name:   "CHOWN",
 		EffBit: 0,
-		Why:    `Proven live at 017adc1b5: "Failed to chown log file: chown /home/scion/agent.log: operation not permitted" and "Failed to chown workspace to UID=1000 GID=1000: chown /workspace: operation not permitted", followed by "Git clone failed: git init failed" and init exiting 1. RunInit unconditionally chowns the log file (log.Chown) and the workspace/home tree (chownTreeRootOwned/ensureWorkspaceOwnership) from root to the scion user once a drop is expected, and chown(2) to an arbitrary uid/gid needs CAP_CHOWN once a process's capability set is restricted — the same "still UID 0 isn't still all-powerful" property that made SETUID/SETGID necessary for su in the first place.`,
+		Why:    `Observed live: "Failed to chown log file: chown /home/scion/agent.log: operation not permitted" and "Failed to chown workspace to UID=1000 GID=1000: chown /workspace: operation not permitted", followed by "Git clone failed: git init failed" and init exiting 1. RunInit unconditionally chowns the log file (log.Chown) and the workspace/home tree (chownTreeRootOwned/ensureWorkspaceOwnership) from root to the scion user once a drop is expected, and chown(2) to an arbitrary uid/gid needs CAP_CHOWN once a process's capability set is restricted — the same "still UID 0 isn't still all-powerful" property that made SETUID/SETGID necessary for su in the first place.`,
 	},
 }
 

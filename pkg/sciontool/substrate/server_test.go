@@ -74,6 +74,88 @@ func TestHealthz_InitiallyAwaitingBootstrap(t *testing.T) {
 	}
 }
 
+// TestHealthz_NonZeroInitFlipsToInitFailedButServerKeepsServing proves that
+// substrate-serve does not exit the process on a non-zero init (there is no
+// os.Exit anywhere in this package to begin with — that decision lives in
+// the cmd layer's InitRunner wrapper, which does not act on the exit code
+// at all), so the control server keeps serving, and healthz flips to the
+// distinct StateInitFailed rather than staying "running" — see
+// StateInitFailed's doc comment for why that matters given Substrate
+// doesn't observe a PID 1 exit as a failure signal either way.
+func TestHealthz_NonZeroInitFlipsToInitFailedButServerKeepsServing(t *testing.T) {
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int {
+			return 1
+		}),
+	)
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd:     "true",
+		ControlToken: "tok",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	// The server must still be serving (this test is still running — a real
+	// os.Exit anywhere in this path would have killed the test binary
+	// itself, not just failed an assertion), and healthz must reflect the
+	// failed init rather than reporting "running". The init runner's exit
+	// code is only applied to s.initFailed *after* it returns (see
+	// handleBootstrap's goroutine), so poll rather than checking once
+	// immediately.
+	deadline := time.Now().Add(2 * time.Second)
+	var got HealthzResponse
+	for {
+		healthz := doJSON(t, srv.Handler(), http.MethodGet, "/scion/v1/healthz", "", nil)
+		if healthz.Code != http.StatusOK {
+			t.Fatalf("healthz status = %d, want 200", healthz.Code)
+		}
+		got = decodeJSON[HealthzResponse](t, healthz)
+		if got.State == StateInitFailed || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got.State != StateInitFailed {
+		t.Errorf("healthz state = %q, want %q", got.State, StateInitFailed)
+	}
+}
+
+// TestHealthz_ZeroExitStaysRunning is the control for the test above: a
+// clean (0) init exit must not flip healthz away from StateRunning.
+func TestHealthz_ZeroExitStaysRunning(t *testing.T) {
+	initDone := make(chan struct{})
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int {
+			defer close(initDone)
+			return 0
+		}),
+	)
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd:     "true",
+		ControlToken: "tok",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case <-initDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("init runner was never invoked")
+	}
+
+	healthz := doJSON(t, srv.Handler(), http.MethodGet, "/scion/v1/healthz", "", nil)
+	got := decodeJSON[HealthzResponse](t, healthz)
+	if got.State != StateRunning {
+		t.Errorf("healthz state = %q, want %q", got.State, StateRunning)
+	}
+}
+
 func TestBootstrap_BadNonceRejected(t *testing.T) {
 	srv := NewServer(
 		WithChownOwner(-1, -1),
@@ -337,6 +419,43 @@ func TestBootstrap_RejectsRelativePath(t *testing.T) {
 	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", req)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 for an invalid bootstrap file path", rec.Code)
+	}
+}
+
+// TestBootstrap_PrivilegeDropCheckerSeesReqEnv proves the ordering
+// handleBootstrap's own comment claims but nothing previously exercised:
+// PrivilegeDropChecker must run *after* req.Env has been applied to the
+// process environment, not before — checkPrivilegeDropFeasible's real
+// SCION_HOST_UID/GID checks depend on this. A mutation that moved the
+// checker call earlier (before the req.Env loop) would still "fail safe"
+// against every other test here (nothing would be configured yet, so a
+// real checker would just reject), which is why that mutation survived
+// without this test: it makes the ordering itself the assertion, not a
+// side effect of some other check happening to fail either way.
+func TestBootstrap_PrivilegeDropCheckerSeesReqEnv(t *testing.T) {
+	const testVar = "SCION_SUBSTRATE_CHECKER_ORDERING_TEST_VAR"
+	t.Setenv(testVar, "")
+
+	var sawValue string
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithPrivilegeDropChecker(func() error {
+			sawValue = os.Getenv(testVar)
+			return nil
+		}),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		Env:          map[string]string{testVar: "from-req-env"},
+		StartCmd:     "true",
+		ControlToken: "tok",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if sawValue != "from-req-env" {
+		t.Errorf("PrivilegeDropChecker saw %s=%q, want %q — it must run after req.Env is applied to the process environment", testVar, sawValue, "from-req-env")
 	}
 }
 
