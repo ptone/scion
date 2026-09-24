@@ -909,6 +909,10 @@ test_teardown_delete_stops_after_allow_failure_deny_survives() {
     "the deny rule queued behind the failed allow must be recorded as not deleted too"
   assert_contains "$stderr_output" "Not attempted (kept" \
     "the operator must be told the deny rule was never attempted, not just that the allow failed"
+  assert_contains "$stderr_output" "Not attempted (kept so tcp:2049 stays denied): ${DENY_NAME}" \
+    "the not-attempted line must name the specific queued rule"
+  assert_eq "$DENY_NAME" "${HYBRID_TEARDOWN_DELETE_FAILED[1]:-}" \
+    "the deny rule (not just some rule) must be the one recorded as queued-behind"
 }
 
 test_teardown_delete_confirms_already_gone_via_list() {

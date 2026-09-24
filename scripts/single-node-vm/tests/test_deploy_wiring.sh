@@ -364,6 +364,8 @@ test_deploy_delete_vm_zone_unreachable_partial_list_keeps_rules() {
     "a partial AggregatedList result from an unreachable zone must not be read as the VM being gone"
   assert_eq "0" "$(gcloud_log | grep -c "firewall-rules delete scion-hub-${HUB}-nfs-" || true)" \
     "the hybrid rules must not be deleted when a zone is unreachable and the VM's fate can't be confirmed"
+  assert_contains "$DEPLOY_LOG" "could not confirm" \
+    "should explain that the VM's state is unknown, not assumed gone, for the unreachable-zone case too"
 }
 
 test_deploy_delete_tier_off_vm_failure_warns_and_continues() {
@@ -430,4 +432,20 @@ test_deploy_delete_interactive_no_python_no_rules_exits_zero() {
   assert_eq "0" "$DEPLOY_RC" \
     "an interactive --delete with no config and no hybrid rules must not need python at all"
   assert_contains "$DEPLOY_LOG" "Deleted: ${INSTANCE_NAME}" "the base VM delete must still complete"
+  assert_eq "1" "$(gcloud_log | grep -c "compute firewall-rules list" || true)" \
+    "the teardown ownership check must actually run on the interactive path too, not be skipped"
+}
+
+# An unmarked same-name rule must still abort the teardown before any
+# delete on the interactive (no --config) path, exactly as it does with
+# --config -- the ownership check runs the same way regardless of how the
+# run is driven.
+test_deploy_delete_interactive_unmarked_exits_nonzero_before_any_delete() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  seed_firewall_rule_desc_only "scion-hub-${HUB}-nfs-allow" "unrelated-rule-not-ours"
+  run_deploy_delete_interactive "" "$(printf '%s\n' "$HUB" "us-central1" "y")"
+  assert_eq "1" "$DEPLOY_RC" "an unmarked hybrid rule name match must fail the interactive teardown too"
+  assert_eq "0" "$(gcloud_log | grep -c ' delete' || true)" \
+    "no delete call of any kind should be logged before the abort"
 }
