@@ -307,7 +307,7 @@ deletes the cluster itself — it is always a manual prerequisite the user
 sets up beforehand, in the same GCP project as the hub and on the hub VM's
 network (`default`, today).
 
-Enabling the tier does two things, both additive:
+Enabling the tier does four things, all additive:
 
 1. **Discovery.** Before creating anything, the script confirms the cluster
    exists, checks that its network matches the hub VM's, and discovers the
@@ -351,11 +351,43 @@ Enabling the tier does two things, both additive:
    command is offered (deploy.sh recreates the rule correctly on the next
    run). Nothing is ever auto-corrected.
 
+3. **NFS server and export.** Discovery also reads the cluster's node
+   subnet's primary IP range (never the pod CIDR), refusing anything
+   `0.0.0.0/0` or broader than `/8`. Once the VM exists, a dedicated
+   `scion-nfs` system account (no login shell, no home, primary group
+   `scion`) is created for NFS's `all_squash` identity, distinct from the
+   `scion` broker account -- the deploy asserts they have different uids
+   and refuses to continue otherwise. `nfs-kernel-server` is installed and
+   a per-hub file under `/etc/exports.d/` exports `/srv/scion-shared` to
+   just the node subnet, squashing every client to that dedicated
+   identity. There's no separate teardown for the export: it's deleted
+   along with the VM.
+4. **Kubernetes objects.** A cluster-scoped PersistentVolume
+   (`scion-hub-<hub_name>-shared`), a namespace (default
+   `scion-hub-<hub_name>`), and a PersistentVolumeClaim in that namespace
+   (default `scion-hub-<hub_name>-shared`, bound to the PV) are created
+   once the VM's IP is known, all labeled `scion-deployment=<hub_name>`.
+   An existing PV or PVC with the target name but no marker refuses the
+   run; a marked one whose identity has drifted (the NFS server IP after a
+   VM recreate, for example) also refuses, with the fields that differ and
+   the remediation. An existing, unmarked namespace is used as-is and
+   never adopted or deleted.
+
 Re-running the deploy script against an existing hub that predates the
 hybrid tier works the same way as any other re-run: the base VM, Cloud Run
 proxy, router, NAT and service account are adopted exactly as they are
-today, and the two hybrid firewall rules (and the VM tag) are added on
-top, freshly, with their markers.
+today, and the hybrid firewall rules, NFS export, and Kubernetes objects
+(and the VM tag) are added on top, freshly, with their markers.
+
+Every base resource this script creates fresh -- whether or not the
+hybrid tier is on -- is additionally marked `scion-deployment=<hub_name>`
+(a label on the VM and, on first create only, the Cloud Run proxy; a
+description on the service account and Cloud Router, appended to the IAP
+SSH rule's own description). This marker is purely informational: it is
+never checked and never affects adoption or teardown of those resources.
+Required API enablement is also unconditional on the tier: only APIs not
+already enabled on the project are ever passed to `services enable`
+(plus `container.googleapis.com` when the tier is on).
 
 ### Teardown (`--delete`)
 
@@ -398,6 +430,19 @@ rule is the deny rule, the printed remediation deletes the allow rule
 first, then the deny rule, then re-runs deploy.sh — never advice that
 would leave the allow rule in place with no deny. The GKE cluster itself
 is never deleted by this script, under any circumstance.
+
+If `gke_target.name` is set, `--delete` also tears down the Kubernetes
+objects, before any base resource: the PVC, then the PV, then the
+namespace (only if it carries this deployment's marker -- an unmarked,
+reused namespace is never deleted). The same found/SKIPPED classification
+and abort-before-any-delete rule applies to the PVC and PV; an unmarked
+namespace is only skipped, not an abort, matching the create-side rule
+that using an existing namespace is allowed. If the cluster itself is
+confirmed gone (a positive NOT_FOUND), its objects are assumed to have
+gone with it and nothing is checked; any other failure to reach the
+cluster aborts the teardown before any delete. A failure in this step is
+reported and fails the run's exit code, but doesn't block the unrelated
+base-resource deletions that follow.
 
 ### Testing this locally
 
