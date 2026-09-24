@@ -176,6 +176,20 @@ APIS
 esac
 
 case "${1:-} ${2:-} ${3:-}" in
+  "container clusters get-credentials")
+    require_project "$@"
+    get_flag location "$@" >/dev/null || {
+      echo "gcloud-stub: missing --location on: $*" >&2
+      exit 1
+    }
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/get-credentials-should-fail" ]]; then
+      echo "gcloud-stub: simulated get-credentials failure" >&2
+      exit 1
+    fi
+    : "${KUBECONFIG:?KUBECONFIG must be set when calling get-credentials}"
+    echo "fake-kubeconfig-for-${4:-}" > "$KUBECONFIG"
+    exit 0
+    ;;
   "config get-value project")
     # Only the interactive path (no --config) asks for this: PROJECT_ID
     # otherwise comes straight from the config file.
@@ -373,7 +387,7 @@ print(json.dumps(out))
     require_flag region "$@"
     name="${4:-}"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.describe-error" ]]; then
-      echo "gcloud-stub: PERMISSION_DENIED: simulated non-not-found describe error" >&2
+      echo "gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED describe error unrelated to existence" >&2
       exit 1
     fi
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists" ]]; then
@@ -390,10 +404,15 @@ print(json.dumps(out))
     }
     name="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json"
+    if [[ -f "${f}.describe-error" ]]; then
+      echo "gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED cluster describe error unrelated to existence" >&2
+      exit 1
+    fi
     if [[ -f "$f" ]]; then
       cat "$f"
       exit 0
     fi
+    echo "gcloud-stub: NOT_FOUND: Cluster ${name} not found" >&2
     exit 1
     ;;
   "compute instance-templates describe")

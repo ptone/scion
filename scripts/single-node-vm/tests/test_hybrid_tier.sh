@@ -429,6 +429,285 @@ test_cloud_run_label_args_describe_error_fails_safe_no_label() {
 }
 
 # =====================================================================
+# Kubernetes objects: naming, kubeconfig setup, manifest rendering,
+# create/refuse/drift, and teardown. No test here contacts a real
+# cluster; the stub kubectl records every invocation and serves
+# fixtures the same way the stub gcloud does.
+# =====================================================================
+
+K8S_HUB="demohub"
+K8S_NS="scion-hub-${K8S_HUB}"
+K8S_PVC="scion-hub-${K8S_HUB}-shared"
+K8S_PV="scion-hub-${K8S_HUB}-shared"
+K8S_VM_IP="10.128.0.5"
+
+test_k8s_pv_name() {
+  assert_eq "scion-hub-demohub-shared" "$(hybrid_k8s_pv_name "demohub")" "PV name must be scion-hub-<hub>-shared"
+}
+test_k8s_default_namespace() {
+  assert_eq "scion-hub-demohub" "$(hybrid_k8s_default_namespace "demohub")" "default namespace must be scion-hub-<hub>"
+}
+test_k8s_default_pvc_name() {
+  assert_eq "scion-hub-demohub-shared" "$(hybrid_k8s_default_pvc_name "demohub")" "default PVC name must be scion-hub-<hub>-shared"
+}
+
+test_k8s_pv_manifest_fields() {
+  local yaml
+  yaml="$(hybrid_k8s_pv_manifest "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "$K8S_NS" "$K8S_PVC")"
+  assert_contains "$yaml" "name: ${K8S_PV}" "must name the PV"
+  assert_contains "$yaml" "scion-deployment: ${K8S_HUB}" "must carry the marker label"
+  assert_contains "$yaml" "server: ${K8S_VM_IP}" "must point the NFS server at the VM's IP"
+  assert_contains "$yaml" "path: /srv/scion-shared" "must point at the export root"
+  assert_contains "$yaml" "persistentVolumeReclaimPolicy: Retain" "reclaim policy must be Retain"
+  assert_contains "$yaml" 'storageClassName: ""' "must never be dynamically provisioned"
+  assert_contains "$yaml" "- ReadWriteMany" "access mode must be RWX"
+  assert_contains "$yaml" "- nfsvers=4.1" "mount options must pin the NFS version"
+  assert_contains "$yaml" "- hard" "mount options must use hard, not soft"
+  assert_contains "$yaml" "namespace: ${K8S_NS}" "claimRef must pin the namespace"
+  assert_contains "$yaml" "name: ${K8S_PVC}" "claimRef must pin the PVC name"
+}
+
+test_k8s_namespace_manifest_fields() {
+  local yaml
+  yaml="$(hybrid_k8s_namespace_manifest "$K8S_NS" "$K8S_HUB")"
+  assert_contains "$yaml" "kind: Namespace" "must be a Namespace object"
+  assert_contains "$yaml" "name: ${K8S_NS}" "must name the namespace"
+  assert_contains "$yaml" "scion-deployment: ${K8S_HUB}" "must carry the marker label"
+}
+
+test_k8s_pvc_manifest_fields() {
+  local yaml
+  yaml="$(hybrid_k8s_pvc_manifest "$K8S_PVC" "$K8S_NS" "$K8S_HUB" "$K8S_PV")"
+  assert_contains "$yaml" "name: ${K8S_PVC}" "must name the PVC"
+  assert_contains "$yaml" "namespace: ${K8S_NS}" "must be in the target namespace"
+  assert_contains "$yaml" "scion-deployment: ${K8S_HUB}" "must carry the marker label"
+  assert_contains "$yaml" "volumeName: ${K8S_PV}" "must bind to the expected PV"
+  assert_contains "$yaml" 'storageClassName: ""' "must never be dynamically provisioned"
+  assert_contains "$yaml" "- ReadWriteMany" "access mode must be RWX"
+}
+
+test_k8s_setup_kubeconfig_uses_distinct_temp_files() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  local first="$HYBRID_KUBECONFIG"
+  hybrid_k8s_setup_kubeconfig
+  local second="$HYBRID_KUBECONFIG"
+  assert_true "$([[ "$first" != "$second" ]] && echo true || echo false)" "each setup call must use its own fresh temp file"
+  assert_not_contains "$first" ".kube" "must never point at the operator's default kubeconfig location"
+  rm -f "$first" "$second"
+}
+
+test_k8s_setup_kubeconfig_missing_kubectl_fails() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  local old_path="$PATH"
+  # shellcheck disable=SC2123 # deliberately hiding kubectl for this one test
+  PATH="/nonexistent-bin-dir-for-this-test"
+  run_expect_fail hybrid_k8s_setup_kubeconfig
+  PATH="$old_path"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "missing kubectl must fail the run"
+  assert_contains "$RUN_OUTPUT" "kubectl is required" "error should say why"
+}
+
+test_k8s_setup_kubeconfig_get_credentials_failure() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  set_get_credentials_will_fail
+  run_expect_fail hybrid_k8s_setup_kubeconfig
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a get-credentials failure must fail the run"
+  assert_contains "$RUN_OUTPUT" "Could not get credentials" "error should explain what failed"
+}
+
+test_k8s_ensure_creates_all_three_when_absent() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/namespace/${K8S_NS}.json" ]] && echo true || echo false)" "namespace must be created"
+  assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/pv/${K8S_PV}.json" ]] && echo true || echo false)" "PV must be created"
+  assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/pvc/${K8S_NS}__${K8S_PVC}.json" ]] && echo true || echo false)" "PVC must be created"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_refuses_unmarked_pv() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pv_unmarked "$K8S_PV"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unmarked PV must refuse the run"
+  assert_contains "$RUN_OUTPUT" "without this deployment's marker" "error should explain why"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_refuses_unmarked_pvc() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pvc_unmarked "$K8S_PVC" "$K8S_NS"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unmarked PVC must refuse the run"
+  assert_contains "$RUN_OUTPUT" "without this deployment's marker" "error should explain why"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_unmarked_namespace_used_not_labeled_not_refused() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_namespace_unmarked "$K8S_NS"
+  hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_eq "2" "$(kubectl_log | grep -c 'apply -f' || true)" \
+    "only the PV and PVC should be applied -- the unmarked-but-usable namespace must not be re-applied (labeled)"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_pv_drift_ip_change_fails_with_remediation() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "10.128.0.99" "/srv/scion-shared" "$K8S_NS" "$K8S_PVC"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a PV whose server IP no longer matches must fail the run"
+  assert_contains "$RUN_OUTPUT" "server:" "error should name the drifted field"
+  assert_contains "$RUN_OUTPUT" "kubectl delete pvc" "remediation must include deleting the PVC first"
+  assert_contains "$RUN_OUTPUT" "kubectl delete pv" "remediation must include deleting the PV"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_pvc_drift_wrong_volume_fails() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "$K8S_NS" "$K8S_PVC"
+  seed_k8s_pvc "$K8S_PVC" "$K8S_NS" "$K8S_HUB" "some-other-pv"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a PVC bound to the wrong PV must fail the run"
+  assert_contains "$RUN_OUTPUT" "some-other-pv" "error should name the actual, wrong binding"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_matching_marked_objects_are_reused_without_recreating() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_namespace "$K8S_NS" "$K8S_HUB"
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "$K8S_NS" "$K8S_PVC"
+  seed_k8s_pvc "$K8S_PVC" "$K8S_NS" "$K8S_HUB" "$K8S_PV"
+  hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_eq "0" "$(kubectl_log | grep -c 'apply -f' || true)" \
+    "matching, marked objects must be reused, not recreated"
+}
+
+test_k8s_ensure_get_error_on_pv_fails_closed() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  set_k8s_get_error pv "$K8S_PV"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unknown PV state must fail closed, not be treated as absent"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_check_all_marked_queues_all_three_in_order() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pvc "$K8S_PVC" "$K8S_NS" "$K8S_HUB" "$K8S_PV"
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "$K8S_NS" "$K8S_PVC"
+  seed_k8s_namespace "$K8S_NS" "$K8S_HUB"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  assert_eq "false" "$HYBRID_K8S_TEARDOWN_FAILED" "all-marked must not fail the preflight"
+  assert_eq "3" "${#HYBRID_K8S_TEARDOWN_DELETE[@]}" "all three objects must be queued"
+  assert_eq "pvc" "${HYBRID_K8S_TEARDOWN_DELETE[0]:-}" "PVC must be first in deletion order"
+  assert_eq "pv" "${HYBRID_K8S_TEARDOWN_DELETE[1]:-}" "PV must be second"
+  assert_eq "namespace" "${HYBRID_K8S_TEARDOWN_DELETE[2]:-}" "namespace must be last"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_check_unmarked_pvc_aborts() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pvc_unmarked "$K8S_PVC" "$K8S_NS"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  assert_eq "true" "$HYBRID_K8S_TEARDOWN_FAILED" "an unmarked PVC must abort the whole teardown"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_check_unmarked_pv_aborts() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pv_unmarked "$K8S_PV"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  assert_eq "true" "$HYBRID_K8S_TEARDOWN_FAILED" "an unmarked PV must abort the whole teardown"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_check_unmarked_namespace_skipped_not_aborted() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_namespace_unmarked "$K8S_NS"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  assert_eq "false" "$HYBRID_K8S_TEARDOWN_FAILED" "an unmarked namespace must not abort -- using an existing one is allowed"
+  local k found=false
+  for k in ${HYBRID_K8S_TEARDOWN_DELETE[@]+"${HYBRID_K8S_TEARDOWN_DELETE[@]}"}; do
+    [[ "$k" == "namespace" ]] && found=true
+  done
+  assert_eq "false" "$found" "an unmarked namespace must never be queued for deletion"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_check_get_error_aborts() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  set_k8s_get_error namespace "$K8S_NS"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  assert_eq "true" "$HYBRID_K8S_TEARDOWN_FAILED" "an unknown check result must abort, not be treated as absent"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_delete_stops_at_first_failure() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pvc "$K8S_PVC" "$K8S_NS" "$K8S_HUB" "$K8S_PV"
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "$K8S_NS" "$K8S_PVC"
+  seed_k8s_namespace "$K8S_NS" "$K8S_HUB"
+  set_k8s_delete_will_fail pvc "${K8S_NS}__${K8S_PVC}"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  hybrid_k8s_teardown_delete
+  assert_eq "3" "${#HYBRID_K8S_TEARDOWN_DELETE_FAILED[@]}" \
+    "the failed PVC plus the PV and namespace queued behind it must all be recorded as not deleted"
+  assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/pv/${K8S_PV}.json" ]] && echo true || echo false)" \
+    "the PV must never be deleted after the PVC delete failed"
+  assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/namespace/${K8S_NS}.json" ]] && echo true || echo false)" \
+    "the namespace must never be deleted after the PVC delete failed"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_delete_all_succeed() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pvc "$K8S_PVC" "$K8S_NS" "$K8S_HUB" "$K8S_PV"
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "$K8S_NS" "$K8S_PVC"
+  seed_k8s_namespace "$K8S_NS" "$K8S_HUB"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  hybrid_k8s_teardown_delete
+  assert_eq "0" "${#HYBRID_K8S_TEARDOWN_DELETE_FAILED[@]}" "nothing should be recorded as failed"
+  assert_eq "3" "${#HYBRID_K8S_TEARDOWN_DELETED[@]}" "all three objects must be deleted"
+  assert_true "$([[ ! -f "${KUBECTL_STUB_STATE_DIR}/pvc/${K8S_NS}__${K8S_PVC}.json" ]] && echo true || echo false)" "PVC must be gone"
+  assert_true "$([[ ! -f "${KUBECTL_STUB_STATE_DIR}/pv/${K8S_PV}.json" ]] && echo true || echo false)" "PV must be gone"
+  assert_true "$([[ ! -f "${KUBECTL_STUB_STATE_DIR}/namespace/${K8S_NS}.json" ]] && echo true || echo false)" "namespace must be gone"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+# =====================================================================
 # Firewall rules: names, marker, target tag, shape, reuse, and
 # spec-drift verification on reuse.
 # =====================================================================

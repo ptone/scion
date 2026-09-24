@@ -59,6 +59,106 @@ fresh_gcloud_state() {
     "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates" \
     "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets" "${GCLOUD_STUB_STATE_DIR}/run-services"
   export GCLOUD_STUB_STATE_DIR GCLOUD_STUB_LOG
+  KUBECTL_STUB_STATE_DIR="$(mktemp -d)"
+  KUBECTL_STUB_LOG="$(mktemp)"
+  mkdir -p "${KUBECTL_STUB_STATE_DIR}/pv" "${KUBECTL_STUB_STATE_DIR}/pvc" "${KUBECTL_STUB_STATE_DIR}/namespace"
+  export KUBECTL_STUB_STATE_DIR KUBECTL_STUB_LOG
+}
+
+kubectl_log() {
+  [[ -f "$KUBECTL_STUB_LOG" ]] && cat "$KUBECTL_STUB_LOG"
+}
+
+# seed_k8s_pv NAME HUB_NAME SERVER PATH NAMESPACE PVC_NAME [RECLAIM] —
+# simulates a pre-existing, marked PV with the given identity fields.
+seed_k8s_pv() {
+  local name="$1" hub="$2" server="$3" path="$4" ns="$5" pvc="$6" reclaim="${7:-Retain}"
+  "$PYTHON" -c "
+import json, sys
+name, hub, server, path, ns, pvc, reclaim = sys.argv[1:8]
+print(json.dumps({
+    'kind': 'PersistentVolume',
+    'metadata': {'name': name, 'labels': {'scion-deployment': hub}},
+    'spec': {
+        'nfs': {'server': server, 'path': path},
+        'claimRef': {'namespace': ns, 'name': pvc},
+        'persistentVolumeReclaimPolicy': reclaim,
+    },
+}))
+" "$name" "$hub" "$server" "$path" "$ns" "$pvc" "$reclaim" > "${KUBECTL_STUB_STATE_DIR}/pv/${name}.json"
+}
+
+# seed_k8s_pv_unmarked NAME — a pre-existing PV with the target name and
+# no marker label at all, for the R3-refusal tests.
+seed_k8s_pv_unmarked() {
+  printf '{"kind": "PersistentVolume", "metadata": {"name": "%s", "labels": {}}, "spec": {}}' "$1" \
+    > "${KUBECTL_STUB_STATE_DIR}/pv/$1.json"
+}
+
+# seed_k8s_pvc NAME NAMESPACE HUB_NAME VOLUME_NAME — a pre-existing,
+# marked PVC bound to VOLUME_NAME.
+seed_k8s_pvc() {
+  local name="$1" ns="$2" hub="$3" volume_name="$4"
+  "$PYTHON" -c "
+import json, sys
+name, ns, hub, volume_name = sys.argv[1:5]
+print(json.dumps({
+    'kind': 'PersistentVolumeClaim',
+    'metadata': {'name': name, 'namespace': ns, 'labels': {'scion-deployment': hub}},
+    'spec': {'volumeName': volume_name},
+}))
+" "$name" "$ns" "$hub" "$volume_name" > "${KUBECTL_STUB_STATE_DIR}/pvc/${ns}__${name}.json"
+}
+
+# seed_k8s_pvc_unmarked NAME NAMESPACE — a pre-existing PVC with the
+# target name/namespace and no marker label, for the R3-refusal tests.
+seed_k8s_pvc_unmarked() {
+  local name="$1" ns="$2"
+  printf '{"kind": "PersistentVolumeClaim", "metadata": {"name": "%s", "namespace": "%s", "labels": {}}, "spec": {}}' \
+    "$name" "$ns" > "${KUBECTL_STUB_STATE_DIR}/pvc/${ns}__${name}.json"
+}
+
+# seed_k8s_namespace NAME HUB_NAME — a pre-existing, marked namespace.
+seed_k8s_namespace() {
+  local name="$1" hub="$2"
+  printf '{"kind": "Namespace", "metadata": {"name": "%s", "labels": {"scion-deployment": "%s"}}, "spec": {}}' \
+    "$name" "$hub" > "${KUBECTL_STUB_STATE_DIR}/namespace/${name}.json"
+}
+
+# seed_k8s_namespace_unmarked NAME — a pre-existing namespace with no
+# marker label, for the "used but not adopted" case.
+seed_k8s_namespace_unmarked() {
+  printf '{"kind": "Namespace", "metadata": {"name": "%s", "labels": {}}, "spec": {}}' "$1" \
+    > "${KUBECTL_STUB_STATE_DIR}/namespace/$1.json"
+}
+
+# set_k8s_get_error KIND NAME — the next `kubectl get KIND NAME` call
+# fails with an error that isn't a "not found" (a permissions or
+# connectivity problem, say), so "unknown, not gone/absent" handling can
+# be tested directly. KIND is pv, pvc, or namespace; for pvc, NAME must
+# be "namespace__pvcname" to match the stub's own key.
+set_k8s_get_error() {
+  touch "${KUBECTL_STUB_STATE_DIR}/$1/$2.json.get-error"
+}
+
+# set_k8s_delete_will_fail KIND NAME — the next `kubectl delete KIND
+# NAME` call fails instead of succeeding.
+set_k8s_delete_will_fail() {
+  touch "${KUBECTL_STUB_STATE_DIR}/$1/$2.json.delete-fail"
+}
+
+# set_cluster_describe_error NAME — the next `container clusters
+# describe` call for this cluster fails with an error that isn't
+# NOT_FOUND (distinct from the cluster simply never having been seeded,
+# which the stub already reports as NOT_FOUND).
+set_cluster_describe_error() {
+  touch "${GCLOUD_STUB_STATE_DIR}/clusters/$1.json.describe-error"
+}
+
+# set_get_credentials_will_fail — the next `container clusters
+# get-credentials` call fails.
+set_get_credentials_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/get-credentials-should-fail"
 }
 
 # seed_instance NAME ZONE — simulates a pre-existing GCE VM.
