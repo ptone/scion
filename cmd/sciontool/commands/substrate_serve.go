@@ -159,6 +159,19 @@ func runSubstrateServe(addr string) int {
 	// in Phase 2; Phase 1 only guarantees survival of the signal itself.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM)
+	// signal.Stop followed by close lets the goroutine below exit via its
+	// range loop instead of leaking forever: without this, every call to
+	// runSubstrateServe (including one that returns immediately because
+	// ListenAndServe failed) leaks one goroutine parked on sigChan for the
+	// life of the process. Harmless in production (there's only ever one
+	// call, and the process runs forever anyway), but a test that calls
+	// runSubstrateServe more than a handful of times — e.g. under
+	// -count=50 -shuffle=on — accumulates thousands of them and the test
+	// binary eventually times out.
+	defer func() {
+		signal.Stop(sigChan)
+		close(sigChan)
+	}()
 	go func() {
 		for sig := range sigChan {
 			log.Info("substrate-serve: received %s; not forwarding to harness (Phase 1 limitation, full eviction handling is Phase 2)", sig)

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -237,6 +238,57 @@ func TestRunSubstrateServe_CallsRootfsFixupBeforeListening(t *testing.T) {
 	}
 	if gotRoot != "/" {
 		t.Errorf("startupRootfsFixup called with root = %q, want \"/\"", gotRoot)
+	}
+}
+
+// TestRunSubstrateServe_DoesNotLeakSignalGoroutine is a regression test for
+// a real goroutine leak this file's own shuffle-mutation proof run
+// discovered: runSubstrateServe's SIGTERM-handling goroutine never exited
+// on return (ListenAndServe failing and returning immediately, exactly
+// like TestRunSubstrateServe_CallsRootfsFixupBeforeListening above,
+// leaked one every time). Harmless in production — there's only ever one
+// real call, and the process runs forever anyway — but calling
+// runSubstrateServe repeatedly in a test (as that test now does, and as
+// -count=50 -shuffle=on does 50x over) leaked one goroutine per call, and
+// the accumulated thousands eventually made the whole test binary time
+// out. See runSubstrateServe's own signal.Stop/close defer for the fix.
+func TestRunSubstrateServe_DoesNotLeakSignalGoroutine(t *testing.T) {
+	orig := startupRootfsFixup
+	t.Cleanup(func() { startupRootfsFixup = orig })
+	startupRootfsFixup = func(string) {}
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a port to force a listen failure: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	runtime.GC()
+	before := runtime.NumGoroutine()
+
+	const iterations = 20
+	for i := 0; i < iterations; i++ {
+		if code := runSubstrateServe(l.Addr().String()); code != 1 {
+			t.Fatalf("run %d: runSubstrateServe() = %d, want 1 (the address is already in use)", i, code)
+		}
+	}
+
+	// Generous, not required: signal.Stop/close happens synchronously in
+	// runSubstrateServe's own defer before it returns, so there should be
+	// nothing left to settle — this just protects against flakiness from
+	// the Go runtime's own goroutine bookkeeping.
+	deadline := time.Now().Add(2 * time.Second)
+	var after int
+	for {
+		runtime.GC()
+		after = runtime.NumGoroutine()
+		if after <= before+5 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if after > before+5 {
+		t.Errorf("goroutine count grew from %d to %d over %d runSubstrateServe calls that each failed to listen — want it to stay flat (no per-call leak)", before, after, iterations)
 	}
 }
 
