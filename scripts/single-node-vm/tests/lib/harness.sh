@@ -109,6 +109,16 @@ set_services_list_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/services-list-should-fail"
 }
 
+# set_router_exists / set_service_account_exists — simulate a
+# pre-existing base router or service account, so its create-only marker
+# can be asserted absent on the adopt path.
+set_router_exists() {
+  touch "${GCLOUD_STUB_STATE_DIR}/router-exists"
+}
+set_service_account_exists() {
+  touch "${GCLOUD_STUB_STATE_DIR}/service-account-exists"
+}
+
 # set_firewall_delete_will_fail NAME — the next `firewall-rules delete`
 # call for this rule fails instead of succeeding (the rule's JSON stays
 # present in stub state, matching a real failed delete rather than one

@@ -925,6 +925,7 @@ if gcloud iam service-accounts describe "${SA_EMAIL}" \
 else
   gcloud iam service-accounts create "${SA_NAME}" \
     --display-name="Scion Hub VM (${HUB_NAME})" \
+    --description="scion-deployment=${HUB_NAME}" \
     --project="${PROJECT_ID}"
   echo "  Created service account: ${SA_EMAIL}"
 fi
@@ -982,6 +983,7 @@ else
     --region="${REGION}" \
     --project="${PROJECT_ID}" \
     --network=default \
+    --description="scion-deployment=${HUB_NAME}" \
     --quiet
   echo "  Created Cloud Router: ${ROUTER_NAME}"
 fi
@@ -1017,7 +1019,7 @@ else
     --action=ALLOW \
     --rules=tcp:22 \
     --source-ranges=35.235.240.0/20 \
-    --description="Allow SSH via IAP tunneling for Scion Hub" \
+    --description="Allow SSH via IAP tunneling for Scion Hub | scion-deployment=${HUB_NAME}" \
     --quiet
   echo "  Created firewall rule: ${FW_RULE_NAME}"
 fi
@@ -1057,6 +1059,7 @@ else
     --image-family=ubuntu-2204-lts \
     --image-project=ubuntu-os-cloud \
     --metadata-from-file=user-data="${SCRIPT_DIR}/cloud-init.yaml" \
+    --labels="scion-deployment=${HUB_NAME}" \
     ${VM_TAGS_ARGS[@]+"${VM_TAGS_ARGS[@]}"} \
     --quiet
   echo "  Created VM: ${INSTANCE_NAME} (zone: ${ZONE})"
@@ -1588,9 +1591,20 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 echo "  Proxy image pushed: ${PROXY_IMAGE}"
 
 # --- Deploy Cloud Run IAP proxy ---
+# `gcloud run deploy` is itself idempotent (creates if absent, redeploys
+# in place if present), so a marker label is only added when this
+# describe finds nothing: labeling every redeploy would be harmless too,
+# but the base-resource marker convention here is additive and
+# create-only, matching every other base resource above.
 info "Deploying Cloud Run IAP proxy: ${PROXY_SERVICE}..."
 echo "  Target URL: http://${VM_IP}:8080"
 echo "  Image: ${PROXY_IMAGE}"
+
+PROXY_SERVICE_LABEL_ARGS=()
+if ! gcloud run services describe "${PROXY_SERVICE}" \
+    --project="${PROJECT_ID}" --region="${REGION}" &>/dev/null; then
+  PROXY_SERVICE_LABEL_ARGS=(--labels="scion-deployment=${HUB_NAME}")
+fi
 
 gcloud run deploy "${PROXY_SERVICE}" \
   --project="${PROJECT_ID}" \
@@ -1602,6 +1616,7 @@ gcloud run deploy "${PROXY_SERVICE}" \
   --vpc-egress=all-traffic \
   --allow-unauthenticated \
   --port=8080 \
+  ${PROXY_SERVICE_LABEL_ARGS[@]+"${PROXY_SERVICE_LABEL_ARGS[@]}"} \
   --quiet
 
 # --- Get Cloud Run service URL ---
