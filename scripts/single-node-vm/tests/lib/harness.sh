@@ -141,6 +141,16 @@ set_k8s_get_error() {
   touch "${KUBECTL_STUB_STATE_DIR}/$1/$2.json.get-error"
 }
 
+# set_k8s_get_permission_masked KIND NAME — like set_k8s_get_error, but
+# with a realistic permission-denied message that also happens to
+# contain the words "not found" (some APIs word it that way deliberately
+# to avoid confirming a resource's existence to an unauthorized caller).
+# Must NOT be treated as "gone".
+set_k8s_get_permission_masked() {
+  printf 'Error from server: %s "%s" not found or permission denied' "$1" "$2" \
+    > "${KUBECTL_STUB_STATE_DIR}/$1/$2.json.get-error"
+}
+
 # set_k8s_delete_will_fail KIND NAME — the next `kubectl delete KIND
 # NAME` call fails instead of succeeding.
 set_k8s_delete_will_fail() {
@@ -153,6 +163,15 @@ set_k8s_delete_will_fail() {
 # which the stub already reports as NOT_FOUND).
 set_cluster_describe_error() {
   touch "${GCLOUD_STUB_STATE_DIR}/clusters/$1.json.describe-error"
+}
+
+# set_cluster_describe_permission_masked NAME — like
+# set_cluster_describe_error, but with a realistic permission-denied
+# message that also happens to contain the words "not found". Must NOT
+# be treated as "gone".
+set_cluster_describe_permission_masked() {
+  printf 'gcloud-stub: PERMISSION_DENIED: Cluster %s not found or permission denied' "$1" \
+    > "${GCLOUD_STUB_STATE_DIR}/clusters/$1.json.describe-error"
 }
 
 # set_get_credentials_will_fail — the next `container clusters
@@ -234,6 +253,16 @@ seed_run_service_exists() {
 set_run_service_describe_error() {
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
   touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.describe-error"
+}
+
+# set_run_service_describe_permission_masked NAME — like
+# set_run_service_describe_error, but with a realistic permission-denied
+# message that also happens to contain the words "not found". Must NOT
+# be treated as "gone".
+set_run_service_describe_permission_masked() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  printf 'gcloud-stub: PERMISSION_DENIED: Service %s not found or permission denied' "$1" \
+    > "${GCLOUD_STUB_STATE_DIR}/run-services/$1.describe-error"
 }
 
 # set_firewall_delete_will_fail NAME — the next `firewall-rules delete`

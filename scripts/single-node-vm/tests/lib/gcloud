@@ -387,7 +387,8 @@ print(json.dumps(out))
     require_flag region "$@"
     name="${4:-}"
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.describe-error" ]]; then
-      echo "gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED describe error unrelated to existence" >&2
+      err_msg="$(cat "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.describe-error")"
+      echo "${err_msg:-gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED describe error unrelated to existence}" >&2
       exit 1
     fi
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists" ]]; then
@@ -405,7 +406,8 @@ print(json.dumps(out))
     name="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json"
     if [[ -f "${f}.describe-error" ]]; then
-      echo "gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED cluster describe error unrelated to existence" >&2
+      err_msg="$(cat "${f}.describe-error")"
+      echo "${err_msg:-gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED cluster describe error unrelated to existence}" >&2
       exit 1
     fi
     if [[ -f "$f" ]]; then

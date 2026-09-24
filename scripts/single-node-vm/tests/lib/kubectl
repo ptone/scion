@@ -49,7 +49,8 @@ case "${1:-} ${2:-}" in
     name="${3:-}"
     f="${KUBECTL_STUB_STATE_DIR}/pv/${name}.json"
     if [[ -f "${f}.get-error" ]]; then
-      echo "Error from server: simulated PERMISSION_DENIED error getting persistentvolume ${name}" >&2
+      err_msg="$(cat "${f}.get-error")"
+      echo "${err_msg:-Error from server: simulated PERMISSION_DENIED error getting persistentvolume ${name}}" >&2
       exit 1
     fi
     if [[ -f "$f" ]]; then
@@ -63,7 +64,8 @@ case "${1:-} ${2:-}" in
     name="${3:-}"
     f="${KUBECTL_STUB_STATE_DIR}/namespace/${name}.json"
     if [[ -f "${f}.get-error" ]]; then
-      echo "Error from server: simulated PERMISSION_DENIED error getting namespace ${name}" >&2
+      err_msg="$(cat "${f}.get-error")"
+      echo "${err_msg:-Error from server: simulated PERMISSION_DENIED error getting namespace ${name}}" >&2
       exit 1
     fi
     if [[ -f "$f" ]]; then
@@ -79,7 +81,8 @@ case "${1:-} ${2:-}" in
     key="${ns}__${name}"
     f="${KUBECTL_STUB_STATE_DIR}/pvc/${key}.json"
     if [[ -f "${f}.get-error" ]]; then
-      echo "Error from server: simulated PERMISSION_DENIED error getting persistentvolumeclaim ${name}" >&2
+      err_msg="$(cat "${f}.get-error")"
+      echo "${err_msg:-Error from server: simulated PERMISSION_DENIED error getting persistentvolumeclaim ${name}}" >&2
       exit 1
     fi
     if [[ -f "$f" ]]; then

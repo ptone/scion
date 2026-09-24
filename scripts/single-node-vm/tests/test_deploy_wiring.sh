@@ -629,6 +629,15 @@ test_deploy_delete_k8s_cluster_describe_error_aborts_before_any_delete() {
   assert_eq "0" "$(gcloud_log | grep -c ' delete' || true)" "no delete call of any kind should happen before the abort"
 }
 
+test_deploy_delete_k8s_cluster_permission_masked_not_read_as_gone() {
+  fresh_gcloud_state
+  set_cluster_describe_permission_masked "mycluster"
+  run_deploy_delete "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  assert_eq "1" "$DEPLOY_RC" \
+    "a permission-denied cluster-describe error that also says 'not found' must not be read as the cluster being gone"
+  assert_eq "0" "$(gcloud_log | grep -c ' delete' || true)" "no delete call of any kind should happen before the abort"
+}
+
 test_deploy_delete_k8s_all_marked_deletes_all_three() {
   fresh_gcloud_state
   seed_cluster "mycluster" "default" "mig-a"
