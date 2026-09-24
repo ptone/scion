@@ -712,6 +712,10 @@ then "Git clone failed: git init failed").
 
 ### (B): any non-zero in-process init exit fails loud, not only the sentinel
 
+> **SUPERSEDED — see "Req 1 (current behaviour)" below.** This section
+> describes this branch's history at the time it was written, not its
+> current state. Kept verbatim for the record.
+
 `exitOnPrivilegeDropSentinel` → `exitOnNonZeroInit`: substrate-serve's
 `InitRunner` wrapper now calls `os.Exit` for any non-zero `RunInit` exit
 code, not just the privilege-drop sentinel — proven necessary by the same
@@ -725,6 +729,77 @@ exceeded classification (`classifyExit`) is untouched. `reportInitFailure`
 (staged secrets decode/write, harness manifest parse, invalid harness env
 overlay/telemetry marker, immediate child-start failure, a supervisor-level
 error).
+
+### Req 1 (current behaviour, supersedes (B) above)
+
+`exitOnNonZeroInit`/`os.Exit` on the init path was reverted (a later,
+binding design decision, folded into `2ce540c04`): **Substrate does not
+observe a PID 1 exit as a failure signal at all** — the actor stays
+`ACTOR_STATE_RUNNING` and **holds its worker** either way — so exiting
+substrate-serve's own control server on a non-zero `RunInit` only loses the
+control server (and exec-based diagnosis) for no compensating benefit.
+
+The current behaviour: substrate-serve's `InitRunner` wrapper just returns
+`RunInit`'s exit code, with no `os.Exit` (`substrate_serve.go`);
+`handleBootstrap` logs the code and flips a new `s.initFailed` flag
+(`pkg/sciontool/substrate/server.go`); `/healthz` reports a distinct
+`StateInitFailed` (`"init-failed"`) over a normal **HTTP 200**, so a caller
+that knows to check it can tell the difference from a genuinely running
+harness (see `pkg/sciontool/substrate/types.go`'s own doc comments for the
+exact contract). `reportInitFailure`'s direct Hub report — called from
+inside `RunInit` itself, not by any caller of it — remains the primary,
+immediate failure signal; **the hub only shows this agent as errored if
+that direct report succeeds** (it is not implied by the actor's own state,
+which stays running); `/healthz`'s `init-failed` is a secondary, polled
+signal for a caller that already knows to look for it, not something the
+broker currently consumes. This correction, the rootfs fixup (below), and
+the "moved from `TestMain`'s own doc comment" incident narrative in the
+next section are all the same follow-up round.
+
+### Incidents 2-4 (moved out of `TestMain`'s own doc comment, round-15 Nit 7)
+
+`cmd/sciontool/commands/testmain_test.go`'s doc comment had grown, across
+several rounds, into a ~90-line incident narrative alongside its actual
+"five layers, all required" reference documentation, and one line named a
+specific other agent's container. Trimmed to the layers plus a one-line
+reason each; the narrative moves here.
+
+**Incident 2:**
+`TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap`
+drove the real `newSubstrateServeServer()` wiring (real `RunInit`; at the
+time, also a real `os.Exit` — see the (B) correction above) and set
+`SCION_HOST_UID`/`GID` but never set `HOME`. Under the mutation that
+removes `WithPrivilegeDropChecker` (exactly the regression this test exists
+to catch), bootstrap wrongly returned 200, the real `RunInit` goroutine ran
+for real, `requirePrivilegeDropOrFail` failed, and `reportInitFailure`
+resolved `agentHome` via `resolveAgentHome`'s `os.Getenv("HOME")` fallback
+— the real, ambient `$HOME` of whoever's machine ran this test, not a temp
+directory, because neither the test nor `TestMain` (at the time) redirected
+it. This happened on a *different* agent's own container, not just this
+branch's: it wrote that container's real `agent-info.json`. "No test can
+touch the real account or hub even on a regression" did not hold merely by
+clearing env vars and disabling user lookups (Incident 1's fix); a
+still-real `$HOME` was enough on its own to reach a real file. Fixed by
+redirecting `HOME`/the XDG base-directory variables/`SCION_WORKSPACE_PATH`
+to one per-binary temp directory in both packages' `TestMain`s (layer 3),
+and by parameterizing `newSubstrateServeServer` to take `runInit` (and, at
+the time, `exit`) as injected values so a server-wiring test can never
+reach the real ones.
+
+**Incident 3:** under `-shuffle=on`, `TestDirectSetUIDAt_RewritesExistingEntry`
+(and any other `exec.Command`-based test) started failing with "waitid: no
+child processes" once shuffled after the `RunInit` tests. `RunInit` called
+`supervisor.StartReaper` directly, which installs a process-wide `SIGCHLD`
+handler that `Wait4(-1, ...)`s any reapable child — including one a later
+`exec.Command` in the same test binary was still waiting on itself, racing
+`os/exec`'s own `wait()` and failing it with `ECHILD`. Fixed by making the
+call a package var (`startReaper`, defaulting to `supervisor.StartReaper`)
+that `TestMain` stubs to a no-op for the whole test binary (layer 4).
+
+**Incident 4:** see Follow-up 4's own write-up above (layer 5,
+`log.SetLogPath`) — every `RunInit`-driving test in this package was
+appending real lines to this container's own real `/home/scion/agent.log`
+via `pkg/sciontool/log`'s lazy same-condition `Init()` default.
 
 ### Gates (`SCION_*` and `CLAUDE_CODE_ENABLE_TELEMETRY` unset)
 
@@ -983,20 +1058,35 @@ call the two default functions directly (bypassing the var entirely, as if
 TestMain's override were never installed) and assert the new sentinel
 error.
 
-**M6 re-verified, in a sandbox this time:** removed TestMain's
-`scionUserLookup`/`lookupUserByID` override again (the exact M6 mutation),
-then ran `TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` and
+**M6 re-verified — correction (substrate-lead/sb-em, on this same round):**
+the run below is *not* a sandboxed run, and calling it one in an earlier
+version of this entry was wrong. `HOME=$(mktemp -d)` plus clearing
+`SCION_*` env vars does not isolate this mutation at all: the real lookup
+resolves `/home/scion` through `/etc/passwd` (a real system account,
+`uid 1002`), entirely independent of `$HOME` or any environment variable —
+that *is* the incident. The only thing that made re-running this mutation
+safe was that the new `testing.Testing()` gate (this round's own fix,
+above) already existed and refused the lookup regardless of environment.
+The normative sandbox for this mutation class is a throwaway uid, a user
+namespace, or a separate disposable container — none of which this
+container has (`unshare` gives `EPERM` here; see the round-15 review's own
+"Not run" note on this same mutation class) — so it genuinely was not run
+in a sandbox, and must not be described as one.
+
+What was actually done: removed TestMain's `scionUserLookup`/
+`lookupUserByID` override again (the exact M6 mutation), then ran
+`TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` and
 `TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap`
-with every `SCION_*` env var cleared and `$HOME` redirected to a fresh
-`mktemp -d` throwaway directory (not the real environment — per the amended
-bar above). Both passed. The real `/home/scion/agent-info.json` hash was
-identical before and after
+with every `SCION_*` env var cleared and `$HOME` redirected to a throwaway
+`mktemp -d` directory, relying on the new `testing.Testing()` gate — not on
+that env/HOME redirection — to keep it safe. Both tests passed. The real
+`/home/scion/agent-info.json` hash was identical before and after
 (`bafb90eaceaee72f3104be6f6e962da2c31719d69f7982c2036c912f4e6b9f4c` both
-times) — expected and unsurprising now, since the new gate means nothing
-in this path can resolve a real account while `testing.Testing()` is true,
-regardless of `$HOME` or env. The TestMain override was restored via `git
-checkout --` immediately afterward (confirmed byte-identical to the
-committed file).
+times), exactly as expected once the gate is what's actually doing the
+work: nothing in this path can resolve a real account while
+`testing.Testing()` is true, regardless of `$HOME` or env. The TestMain
+override was restored via `git checkout --` immediately afterward
+(confirmed byte-identical to the committed file).
 
 ### The full mutation table
 
@@ -1007,7 +1097,7 @@ committed file).
 | M3 | capability loop hardcoded to SETUID/SETGID only | Real | `TestCheckPrivilegeDropFeasible_EveryRequiredCapabilityIsChecked` | Failed as expected (CHOWN subtest) | unchanged |
 | M4 | `s.initFailed = true` flip removed | Real | `TestHealthz_NonZeroInitFlipsToInitFailedButServerKeepsServing` | Failed as expected | unchanged |
 | M5 | `reportInitFailure` removed from staged-secrets decode failure | Real | `TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` | Failed as expected | unchanged |
-| M6 | TestMain `scionUserLookup`/`lookupUserByID` stub removed | **Real (the incident itself)**, then **sandbox (re-verified against the new gate)** | (none, originally) → `TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` + `TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap` (post-gate) | Live incident reproduced (real) → both PASS, new gate holds (sandbox) | **changed** (real run) → unchanged (sandbox re-run) |
+| M6 | TestMain `scionUserLookup`/`lookupUserByID` stub removed | **Real (the incident itself)**, then **real again, but now backstopped by the `testing.Testing()` gate** (not a sandbox — see the correction above; this container has no throwaway uid/namespace to sandbox this mutation class with) | (none, originally) → `TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure` + `TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap` (post-gate) | Live incident reproduced (real) → both PASS, new gate holds | **changed** (real run) → unchanged (real re-run, gate now in place) |
 | M7 | `startupRootfsFixup("/")` call removed | Real | `TestRunSubstrateServe_CallsRootfsFixupBeforeListening` | Failed as expected | unchanged |
 | M8 | traversability/home-ownership block removed | Real | 5 traversability tests | Failed as expected | unchanged |
 | M9 | `ownerUID != 0` idempotency guard removed | Real | `TestFixupRootfsForScion_ChownsRootOwnedHomeEntriesThenIsIdempotent` | Failed as expected | unchanged |
