@@ -100,6 +100,18 @@ func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, reso
 		strings.Join(substrateContainerCapabilitiesAdd, ","),
 		substrateServeEntrypointVersion,
 	)
+	// EgressTrustBundle is appended as its own hash-input segment ONLY when
+	// set, rather than always written as a 10th "%s" field (which would be
+	// "" on every existing plain install and still change the hash from
+	// what it was before this field existed). This is deliberate: an unset
+	// EgressTrustBundle must keep producing the exact template name it
+	// always has, so existing templates and golden snapshots on plain
+	// installs are reused unchanged; setting it must produce a new name,
+	// since buildActorTemplate's output genuinely differs (a system-info
+	// volume, a mount, and five Env vars that were not there before).
+	if sc.EgressTrustBundle != "" {
+		_, _ = fmt.Fprintf(h, "|%s", sc.EgressTrustBundle)
+	}
 	sum := hex.EncodeToString(h.Sum(nil))
 	return "scion-" + sum[:12]
 }
@@ -149,10 +161,31 @@ func substrateSandboxClass(name string) ateapipb.SandboxClass {
 	}
 }
 
+// substrateTrustBundleMountPath is the fixed, non-secret mount path for the
+// projected trust-bundle system-info volume. Kept as a constant, not derived
+// from sc, because the bundle's consumers (buildActorTemplate's own Env
+// values below, and every doc/support reference) all need the same literal
+// path — see docs/egress-trust-bundle.md (agent-substrate/substrate
+// d277088b) and demos/egress/egress-mitm-template.yaml.tmpl, which this
+// mirrors exactly.
+const substrateTrustBundleMountPath = "/run/ate"
+
+// substrateTrustBundleFileName is the projected file's name within the
+// system-info volume (SystemInfoDataSource.TrustBundle.Path is relative to
+// the volume root), so its absolute path is
+// substrateTrustBundleMountPath + "/" + substrateTrustBundleFileName.
+const substrateTrustBundleFileName = "trust-bundle.pem"
+
+// substrateTrustBundleFile is the bundle's full absolute path once mounted,
+// used for every CA-related env var below.
+const substrateTrustBundleFile = substrateTrustBundleMountPath + "/" + substrateTrustBundleFileName
+
 // buildActorTemplate constructs the ActorTemplate for CreateActorTemplate
-// (phase1-spec.md §2.2 step 3). Env is always empty — per-agent config is
-// never baked into the template (findings.md §4.2); it is pushed after the
-// actor starts, via POST /scion/v1/bootstrap.
+// (phase1-spec.md §2.2 step 3). Env carries no secrets and no per-agent
+// config, ever (findings.md §4.2; that is pushed after the actor starts, via
+// POST /scion/v1/bootstrap) — the only Env this function ever sets is the
+// fixed set of CA-bundle paths below, and only when
+// sc.EgressTrustBundle is non-empty.
 func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) *ateapipb.ActorTemplate {
 	if resources == nil {
 		resources = config.BuiltinDefaultResources()
@@ -166,6 +199,58 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 		limits = append(limits, &ateapipb.Limits{Name: "memory", Quantity: resources.Limits.Memory})
 	}
 
+	// env, volumes, and volumeMounts for the projected egress-gateway trust
+	// bundle — added only when sc.EgressTrustBundle is set (opt-in, default
+	// off). Off must stay byte-identical to before this field existed: no
+	// system-info volume, no /run/ate mount, Env nil.
+	var trustBundleEnv []*ateapipb.EnvVar
+	var trustBundleVolumes []*ateapipb.Volume
+	var trustBundleMounts []*ateapipb.VolumeMount
+	if sc.EgressTrustBundle != "" {
+		trustBundleVolumes = []*ateapipb.Volume{
+			{
+				Name: "system-info",
+				SystemInfo: &ateapipb.SystemInfoVolumeSource{
+					DataSources: []*ateapipb.SystemInfoDataSource{
+						{
+							TrustBundle: &ateapipb.TrustBundleDataSource{
+								Name: sc.EgressTrustBundle,
+								Path: substrateTrustBundleFileName,
+							},
+						},
+					},
+				},
+			},
+		}
+		trustBundleMounts = []*ateapipb.VolumeMount{
+			{Name: "system-info", MountPath: substrateTrustBundleMountPath},
+		}
+		// NODE_EXTRA_CA_CERTS, GIT_SSL_CAINFO, SSL_CERT_FILE, CURL_CA_BUNDLE,
+		// and SSL_CERT_DIR are all fixed, non-secret paths into the
+		// projected bundle — never per-agent config or a secret, so setting
+		// them here does not weaken the "Env carries no secrets" invariant
+		// above.
+		//
+		// SSL_CERT_DIR=/run/ate is deliberate (substrate-lead decision):
+		// under sdsmint, every TLS origin the actor can reach — the hub
+		// included — is fronted by the gateway, so the base image's public
+		// roots in /etc/ssl/certs are dead weight; pointing SSL_CERT_DIR at
+		// the projection too, instead of leaving it at its default, makes
+		// the gateway CA the actor's ONLY anchor, so an HTTP 200 is positive
+		// proof the projected bundle did the validating rather than a
+		// public root happening to also work (docs/egress-trust-bundle.md).
+		// Node ignores SSL_CERT_DIR entirely — see the README note this
+		// links to — so NODE_EXTRA_CA_CERTS (additive to Node's bundled
+		// roots, not a replacement) is still required for it separately.
+		trustBundleEnv = []*ateapipb.EnvVar{
+			{Name: "NODE_EXTRA_CA_CERTS", Value: substrateTrustBundleFile},
+			{Name: "GIT_SSL_CAINFO", Value: substrateTrustBundleFile},
+			{Name: "SSL_CERT_FILE", Value: substrateTrustBundleFile},
+			{Name: "CURL_CA_BUNDLE", Value: substrateTrustBundleFile},
+			{Name: "SSL_CERT_DIR", Value: substrateTrustBundleMountPath},
+		}
+	}
+
 	tmpl := &ateapipb.ActorTemplate{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: templateName},
 		Containers: []*ateapipb.Container{
@@ -173,10 +258,10 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				Name:    "scion-agent",
 				Image:   imageDigest,
 				Command: []string{"sciontool", "substrate-serve"},
-				Env:     nil, // no secrets, ever (findings.md §4.2)
-				VolumeMounts: []*ateapipb.VolumeMount{
+				Env:     trustBundleEnv, // no secrets, ever (findings.md §4.2); only fixed CA-bundle paths when egress_trust_bundle is set
+				VolumeMounts: append([]*ateapipb.VolumeMount{
 					{Name: "workspace", MountPath: "/workspace"},
-				},
+				}, trustBundleMounts...),
 				// Substrate always starts the actor process as UID 0 / GID 0
 				// (ContainerSpec has no user field — agent-substrate/substrate
 				// internal/ocispec/ocispec.go) with a minimal default
@@ -213,9 +298,9 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				Resources: &ateapipb.Resources{Limits: limits},
 			},
 		},
-		Volumes: []*ateapipb.Volume{
+		Volumes: append([]*ateapipb.Volume{
 			{Name: "workspace", DurableDir: &ateapipb.DurableDirVolumeSource{}},
-		},
+		}, trustBundleVolumes...),
 		SnapshotsConfig: &ateapipb.SnapshotsConfig{
 			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
 			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
