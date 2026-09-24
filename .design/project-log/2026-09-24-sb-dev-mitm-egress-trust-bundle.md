@@ -383,3 +383,115 @@ original brief's list).
 - `472823de` docs(substrate): note the util-linux >= 2.35 requirement for su -w
 
 All pushed to `origin/scion/substrate-integration`.
+
+## Round 19 (sb-dev-mitm-r19): comment/doc-only fixes
+
+Base: `477efc1c`. Review: `reviews/round-19-sb-rev-19.md` (sb-rev-19,
+REQUEST CHANGES: 0 Critical / 1 Required / 2 Nit-Optional / 3 FYI). The
+round-18 `su -w` fix itself was independently reproduced and confirmed
+correct (byte-identical plain path, empirical `su -w` with root, all 7
+mutations killed, template proto unchanged for both cases); the only
+blocker was two new process references the round-18 fix itself
+introduced.
+
+**R19-1 (Required).** The round-18 fix added two references the round-18
+R-2 cleanup was supposed to eliminate:
+- `pkg/substrateenv/substrateenv.go:26`: "commands (round-18 review finding
+  R-1) don't lose the bundle to" → reworded to drop the parenthetical
+  entirely.
+- `pkg/runtime/substrate_trust_bundle_test.go:252`: "(round-18 review N-1:
+  a worker selector and nil resources, …)" → reworded to "(the original
+  fixture plus one with a worker selector and nil resources)".
+
+The brief's own hygiene grep (`round [0-9]`) missed both because of the
+hyphen in "round-18" — flagged by the reviewer as a pattern gap, and fixed
+per an addendum below.
+
+**Mid-task addendum from substrate-lead (binding, relayed by sb-em):**
+before this round's own hygiene grep was finalized, sb-em forwarded a
+widened, case-insensitive pattern to use instead of the brief's:
+```
+round[- _]?[0-9]|\bR-?[0-9]+\b|N-?[0-9]|sb-(dev|rev|em)|substrate-lead|finding|review(er)?|scratchpad|scion-volumes
+```
+run over `git diff --name-only cf8a1487f..HEAD` (excluding only
+`.design/project-log/`), with judgment scoped to lines **added** since
+`cf8a1487f` (pre-existing lines in touched files are not in scope). The
+addendum named one known true hit outside that added-lines scope to fix
+anyway: `pkg/runtime/substrate_runtime.go:17-18`, a pre-existing (since
+before `cf8a1487f`) package-doc reference to
+`/scion-volumes/scratchpad/projects/substrate-integration/{findings.md,
+phase1-spec.md}` — an agent-only scratchpad path, unreachable from a real
+repo checkout. Fixed to point at `deploy/substrate/README.md` instead (no
+`.design/kubernetes/substrate-runtime.md` exists on this branch, so the
+brief's fallback wasn't needed).
+
+Running the widened pattern against lines added since `cf8a1487f` (see
+"Full grep output" below) found exactly the two R19-1 hits above and two
+coincidental-substring false positives in the pinned template-name
+literals (`scion-52ec9dfe17f8` / `scion-3b33f56da495`, each containing an
+`n-<digit>` substring purely by hex-digest coincidence — `...ion-52ec...`
+and `...ion-3b33...`). It also matched two occurrences of `(findings.md
+§4.2)` in `pkg/runtime/substrate_template.go` (lines 186 and 270 in the
+current file) — verified byte-for-byte identical to the same parenthetical
+already present at `cf8a1487f` (`git show cf8a1487f:... | grep`), carried
+through only because I edited the surrounding sentence for unrelated
+reasons. `findings.md`/`phase1-spec.md` citations in this exact style are
+already pervasive throughout `pkg/runtime` (100+ pre-existing occurrences
+across `substrate_runtime.go`, `substrate_bootstrap.go`, `substrate_egress.go`,
+none of them touched by this branch), so these two are judged pre-existing
+content under the addendum's own "some hits will be pre-existing lines in
+files you touched" carve-out, not new introductions — left as-is, out of
+scope for a two-line comment fix.
+
+**N19-1 (Nit).** `deploy/substrate/README.md`'s util-linux version claim
+was wrong: it said "Debian trixie ships util-linux 2.38", but 2.38 is
+bookworm's version; trixie ships 2.41. Fixed to state both the `>= 2.35`
+requirement and the corrected `2.41` figure.
+
+**N19-2 (Optional).** `TestExecAsUserCmd_CandidateNamesMatchTemplateEnvNames`'s
+doc comment implied it was drift protection against a name being dropped
+from the shared slice — it isn't (both sides would agree on the same
+shorter list and the test would still pass, as mutation M3 in round-18's
+own table showed). Reworded to say what it actually guards — that
+`trustBundleWhitelist` walks `substrateenv.TrustBundleVarNames` itself, in
+that slice's own order, not an independent or hard-coded copy — and to
+name the tests that do provide drift protection:
+`TestExecAsUserCmd_AllCAVarsSet` and `TestBuildActorTemplate_EgressTrustBundleSet`.
+
+All changes are comment/doc-only: `git diff 477efc1c..HEAD -- .
+':!*.md' ':!*_test.go'` shows only comment-line changes in
+`pkg/runtime/substrate_runtime.go` and `pkg/substrateenv/substrateenv.go`.
+
+### Full grep output (added lines since cf8a1487f, after fixes)
+
+```
+git diff cf8a1487f -- . ':!.design/project-log/' | grep '^+' | grep -v '^+++' | \
+  grep -nEi "round[- _]?[0-9]|\bR-?[0-9]+\b|N-?[0-9]|sb-(dev|rev|em)|substrate-lead|finding|review(er)?|scratchpad|scion-volumes"
+
+239:+// config, ever (findings.md §4.2; that is pushed after the actor starts, via
+303:+				Env:     trustBundleEnv, // no secrets, ever (findings.md §4.2); only fixed CA-bundle paths when egress_trust_bundle is set
+536:+			wantUnset: "scion-52ec9dfe17f8",
+552:+			wantUnset: "scion-3b33f56da495",
+```
+
+All 4 are legitimate false positives / pre-existing content, justified
+above: the two `findings.md §4.2` citations are verbatim pre-existing text
+from `cf8a1487f`, and the two `scion-...` lines are pinned content-hash
+literals whose hex digits coincidentally contain an `n-<digit>` substring.
+
+### Gates (round 19)
+
+`cleanenv` applied first.
+
+| Gate | Result |
+|---|---|
+| `go build ./...` | clean |
+| `go vet ./pkg/substrateenv/... ./pkg/sciontool/substrate/... ./pkg/runtime/...` | clean |
+| `go test -count=1 ./pkg/substrateenv/... ./pkg/sciontool/substrate/... ./pkg/runtime/...` | all `ok` |
+| `golangci-lint run --new-from-rev=c3b6e821d ./...` | `0 issues` |
+
+### Commits (round 19)
+
+- `f037e5d9` fix: reword process references and doc nits (round-19: R19-1, N19-1, N19-2)
+
+Pushed to `origin/scion/substrate-integration`.
