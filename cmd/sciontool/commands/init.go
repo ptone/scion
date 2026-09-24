@@ -7,6 +7,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -101,6 +102,46 @@ type InitRunOptions struct {
 	// installed a SIGTERM handler in that mode, the two handlers would race
 	// on the same process signal and the harness could be killed anyway.
 	ForwardTermSignal bool
+
+	// RequirePrivilegeDrop fails RunInit closed — refusing to start the
+	// harness — when setupHostUser could not actually drop from root to
+	// the scion user (e.g. the container's capability set lacks
+	// CAP_SETUID/CAP_SETGID). Substrate always starts the actor process as
+	// UID 0 (agent-substrate/substrate's ContainerSpec has no user field),
+	// so unlike a container runtime where staying at UID 0 can legitimately
+	// mean "already unprivileged" (rootless Podman/keep-id — see
+	// setupHostUser), on substrate it can only mean the drop never
+	// happened, and scion never runs the harness or exec as root.
+	//
+	// This is set only by `sciontool substrate-serve`'s InitRunner
+	// (cmd/sciontool/commands/substrate_serve.go), never by an environment
+	// variable a workload could set itself, and it does not change
+	// setupHostUser's own rootless fallback for any other runtime — that
+	// fallback (rootless Podman relies on it) is unchanged; this only adds
+	// a check of its result.
+	RequirePrivilegeDrop bool
+}
+
+// errPrivilegeDropRequired is returned when RequirePrivilegeDrop is set and
+// setupHostUser did not actually drop privileges. It is deliberately
+// generic and secret-free: setupHostUser's own log lines (CAP_SETUID
+// absent, SCION_HOST_UID/GID not set, etc.) carry the specific reason.
+var errPrivilegeDropRequired = errors.New("privilege drop to the scion user did not happen; refusing to start the harness as root")
+
+// requirePrivilegeDropOrFail implements RequirePrivilegeDrop's fail-closed
+// check (ADDENDUM: substrate must never run the harness as root). It is a
+// plain function of setupHostUser's own result, not a reimplementation of
+// its logic: on substrate, targetUID stays 0 (root) if and only if
+// setupHostUser could not complete a real privilege drop (see
+// RequirePrivilegeDrop's doc comment for why substrate has no legitimate
+// "correctly still UID 0" outcome, unlike other runtimes' rootless mode).
+// Kept separate from setupHostUser so it's testable without depending on
+// the real CAP_SETUID/os.Getuid() environment a unit test runs in.
+func requirePrivilegeDropOrFail(targetUID int, requirePrivilegeDrop bool) error {
+	if requirePrivilegeDrop && targetUID == 0 {
+		return errPrivilegeDropRequired
+	}
+	return nil
 }
 
 func init() {
@@ -158,6 +199,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Set up scion user UID/GID to match host user
 	targetUID, targetGID, rootless := setupHostUser()
 	log.Info("setupHostUser result: targetUID=%d, targetGID=%d, rootless=%v (now euid=%d, egid=%d)", targetUID, targetGID, rootless, os.Geteuid(), os.Getegid())
+
+	// Fail closed rather than start the harness as root (see
+	// InitRunOptions.RequirePrivilegeDrop's doc comment). No secrets in this
+	// error: setupHostUser's own preceding log lines carry the specific
+	// reason (missing capability, unmapped UID, etc.).
+	if err := requirePrivilegeDropOrFail(targetUID, opts.RequirePrivilegeDrop); err != nil {
+		log.Error("%v", err)
+		return 1
+	}
 
 	// Chown the log file so the scion user can write to it even if it was created by root
 	if targetUID != 0 {

@@ -64,7 +64,13 @@ func runSubstrateServe(addr string) int {
 
 	srv := substrate.NewServer(
 		substrate.WithInitRunner(func(argv []string, forwardTermSignal bool) int {
-			return RunInit(argv, InitRunOptions{ForwardTermSignal: forwardTermSignal})
+			// RequirePrivilegeDrop: true — substrate always starts the actor
+			// as UID 0, so a failed/skipped privilege drop can only mean
+			// "still root," never a legitimate rootless outcome (see
+			// InitRunOptions.RequirePrivilegeDrop). This is a flag passed
+			// here at the substrate-serve entry path, not an env var a
+			// workload could set itself.
+			return RunInit(argv, InitRunOptions{ForwardTermSignal: forwardTermSignal, RequirePrivilegeDrop: true})
 		}),
 	)
 

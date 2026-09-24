@@ -7,6 +7,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1074,5 +1075,42 @@ func TestParseCapSetUID(t *testing.T) {
 				t.Errorf("parseCapSetUID() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRequirePrivilegeDropOrFail_SubstrateFailsClosed is the fail-closed
+// case: substrate-serve sets RequirePrivilegeDrop, and setupHostUser did
+// not actually drop privileges (targetUID stayed 0 — the only way that
+// happens on substrate, which always starts the actor as UID 0). RunInit
+// must refuse to start the harness rather than run it as root.
+func TestRequirePrivilegeDropOrFail_SubstrateFailsClosed(t *testing.T) {
+	err := requirePrivilegeDropOrFail(0, true)
+	if err == nil {
+		t.Fatal("requirePrivilegeDropOrFail(0, true) = nil, want an error — substrate must never start the harness as root")
+	}
+	if !errors.Is(err, errPrivilegeDropRequired) {
+		t.Errorf("requirePrivilegeDropOrFail(0, true) = %v, want errPrivilegeDropRequired", err)
+	}
+}
+
+// TestRequirePrivilegeDropOrFail_SubstrateSucceedsWhenDropped confirms the
+// gate does not fire when the drop actually happened (targetUID != 0) —
+// the ordinary, successful case once the actor's capability set and
+// SCION_HOST_UID/GID are both in place.
+func TestRequirePrivilegeDropOrFail_SubstrateSucceedsWhenDropped(t *testing.T) {
+	if err := requirePrivilegeDropOrFail(1000, true); err != nil {
+		t.Errorf("requirePrivilegeDropOrFail(1000, true) = %v, want nil", err)
+	}
+}
+
+// TestRequirePrivilegeDropOrFail_NonSubstrateRootlessUnchanged is the
+// non-substrate control: RequirePrivilegeDrop is false (every runtime
+// except substrate-serve — the plain `sciontool init` CLI entrypoint never
+// sets it), so the generic rootless fallback (e.g. rootless Podman,
+// targetUID legitimately staying 0) is completely unaffected by this
+// gate, exactly as before this change.
+func TestRequirePrivilegeDropOrFail_NonSubstrateRootlessUnchanged(t *testing.T) {
+	if err := requirePrivilegeDropOrFail(0, false); err != nil {
+		t.Errorf("requirePrivilegeDropOrFail(0, false) = %v, want nil (non-substrate rootless fallback must be unaffected)", err)
 	}
 }
