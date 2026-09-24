@@ -225,6 +225,16 @@ HYBRID_ENABLED=false
 # shellcheck source=scripts/single-node-vm/hybrid-tier.sh
 source "${SCRIPT_DIR}/hybrid-tier.sh"
 
+# One EXIT trap, registered once, covers every task-private temp file
+# this script creates later (SSH_STDERR_FILE, HYBRID_KUBECONFIG): both
+# start empty, and `rm -f ""` is a harmless no-op, so setting the trap
+# here before either file exists is safe. `trap` replaces rather than
+# stacks, so a second, later `trap ... EXIT` call would silently drop
+# this one -- there must only ever be this single registration.
+SSH_STDERR_FILE=""
+HYBRID_KUBECONFIG=""
+trap 'rm -f "$SSH_STDERR_FILE" "$HYBRID_KUBECONFIG"' EXIT
+
 # ---------------------------------------------------------------------------
 # Teardown flow (--delete)
 # ---------------------------------------------------------------------------
@@ -299,8 +309,52 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   fi
   TEARDOWN_HAD_FAILURE=false
 
+  # Hybrid tier (Kubernetes objects): gke_target.name is read directly,
+  # never via the interactive hybrid_read_config, since a --delete run
+  # must never prompt to enable the tier. Absent gke_target.name means
+  # the tier was never configured for this hub's teardown, so none of
+  # the k8s objects are ever touched -- as inert as the tier-off create
+  # path. A cluster that's genuinely gone (a positive NOT_FOUND) means
+  # its k8s objects went with it, so this prints that and continues;
+  # any other describe failure -- unknown, not confirmed gone -- aborts
+  # before any delete, the same "uncertainty counts as not gone" rule
+  # used throughout this tier's other checks.
+  HYBRID_K8S_TEARDOWN_READY=false
+  K8S_GKE_NAME="$(config_get 'gke_target.name' '')"
+  if [[ -n "$K8S_GKE_NAME" ]]; then
+    GKE_NAME="$K8S_GKE_NAME"
+    GKE_LOCATION="$(config_get 'gke_target.location' '')"
+    GKE_PROJECT="$(config_get 'gke_target.project' "$PROJECT_ID")"
+    echo ""
+    echo "Checking hybrid-tier Kubernetes object ownership:"
+    CLUSTER_DESCRIBE_ERR="$(mktemp)"
+    if gcloud container clusters describe "$GKE_NAME" --location="$GKE_LOCATION" \
+        --project="$GKE_PROJECT" --quiet >/dev/null 2>"${CLUSTER_DESCRIBE_ERR}"; then
+      hybrid_k8s_setup_kubeconfig
+      hybrid_k8s_teardown_check "$HUB_NAME"
+      if [[ "$HYBRID_K8S_TEARDOWN_FAILED" == "true" ]]; then
+        rm -f "${CLUSTER_DESCRIBE_ERR}"
+        exit 1
+      fi
+      HYBRID_K8S_TEARDOWN_READY=true
+    elif grep -qi 'not_found\|not found' "${CLUSTER_DESCRIBE_ERR}"; then
+      echo "  GKE cluster ${GKE_NAME} not found; its Kubernetes objects went with it."
+    else
+      err "Could not confirm whether GKE cluster ${GKE_NAME} still exists:"
+      err "  $(cat "${CLUSTER_DESCRIBE_ERR}")"
+      rm -f "${CLUSTER_DESCRIBE_ERR}"
+      exit 1
+    fi
+    rm -f "${CLUSTER_DESCRIBE_ERR}"
+  fi
+
   echo ""
   echo "The following resources will be deleted:"
+  if [[ "$HYBRID_K8S_TEARDOWN_READY" == "true" ]]; then
+    for k8s_kind in ${HYBRID_K8S_TEARDOWN_DELETE[@]+"${HYBRID_K8S_TEARDOWN_DELETE[@]}"}; do
+      echo "  Kubernetes object: ${k8s_kind} (hybrid tier)"
+    done
+  fi
   echo "  Cloud Run service: ${PROXY_SERVICE} (region: ${REGION})"
   echo "  GCE VM:            ${INSTANCE_NAME} (zone: ${ZONE})"
   echo "  Cloud NAT:         ${NAT_NAME} (router: ${ROUTER_NAME})"
@@ -318,6 +372,14 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     if [[ "$(echo "$CONFIRM" | tr '[:upper:]' '[:lower:]')" != "y" ]]; then
       echo "Aborted."
       exit 0
+    fi
+  fi
+
+  if [[ "$HYBRID_K8S_TEARDOWN_READY" == "true" ]]; then
+    info "Deleting hybrid-tier Kubernetes objects..."
+    hybrid_k8s_teardown_delete
+    if [[ ${#HYBRID_K8S_TEARDOWN_DELETE_FAILED[@]} -gt 0 ]]; then
+      TEARDOWN_HAD_FAILURE=true
     fi
   fi
 
@@ -1069,7 +1131,6 @@ fi
 info "Waiting for SSH access to VM..."
 SSH_READY=false
 SSH_STDERR_FILE="$(mktemp)"
-trap 'rm -f "$SSH_STDERR_FILE"' EXIT
 for attempt in $(seq 1 "$SSH_MAX_ATTEMPTS"); do
   if gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
@@ -1519,6 +1580,17 @@ if [[ -z "$VM_IP" ]]; then
   exit 1
 fi
 echo "  VM internal IP: ${VM_IP}"
+
+# --- Hybrid tier: Kubernetes objects (PV, namespace, PVC) ---
+# Unlike the firewall rules and NFS export, the PV's identity includes
+# the VM's own internal IP, which isn't known until the VM exists -- so
+# this runs here, once VM_IP is read, rather than earlier in Phase 2
+# alongside the firewall checks.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Ensuring hybrid-tier Kubernetes objects (if needed)..."
+  hybrid_k8s_setup_kubeconfig
+  hybrid_k8s_ensure_objects "$HUB_NAME" "$VM_IP"
+fi
 
 # --- Build and deploy Cloud Run IAP proxy ---
 # We build the proxy image on the VM and deploy with --image instead of
