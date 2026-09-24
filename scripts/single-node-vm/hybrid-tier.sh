@@ -47,6 +47,23 @@
 # on 4.4+; the `+` form is the portable way to say "zero or more
 # elements" on every bash version this script might run under.
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+# The dedicated NFS squash identity: a system account with no login shell
+# and no home, whose primary group is the existing "scion" group (the
+# broker's own group -- see docs/deploy/agent-runbook-single-node-vm.md).
+# Deliberately distinct from the "scion" user itself: squashing every NFS
+# client to the broker's own uid would mean any pod that can reach the
+# export can act as the broker on the shared tree, which is exactly the
+# upper-dir-symlink-plant vector the dedicated identity exists to close.
+# shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
+readonly HYBRID_NFS_SQUASH_USER="scion-nfs"
+# The NFS export root: a plain directory on the VM's boot disk (per the
+# design's boot-disk provisioning choice), not a separate mounted volume.
+# shellcheck disable=SC2034 # read by deploy.sh after sourcing this file
+readonly HYBRID_NFS_EXPORT_ROOT="/srv/scion-shared"
+
 # hybrid_read_config PROJECT_ID
 #
 # Reads gke_target.{name,location,project} via the caller's config_get. In
@@ -365,6 +382,39 @@ print('\n'.join(urls))
   fi
 
   GKE_NODE_TAG="$unique_candidates"
+}
+
+# hybrid_nfs_fsid HUB_NAME
+#
+# A stable, deterministic NFS export fsid for this hub: a UUID5 derived
+# from the hub name, so it's the same across every re-run without needing
+# a separate value generated once and recorded somewhere. nfs-utils
+# accepts a UUID for `fsid=` (the documented way to keep file handles
+# stable and avoid ESTALE) just as readily as a small integer, and a UUID
+# needs no coordination between hubs the way hand-assigned integers would.
+hybrid_nfs_fsid() {
+  local hub_name="$1"
+  "$PYTHON" -c "
+import uuid, sys
+print(uuid.uuid5(uuid.NAMESPACE_DNS, 'scion-hub-' + sys.argv[1] + '.nfs-export'))
+" "$hub_name"
+}
+
+# hybrid_nfs_export_line EXPORT_ROOT CIDR ANONUID ANONGID FSID
+#
+# Renders one `/etc/exports.d` line for the hybrid tier's NFS export:
+# `sync` (required so both Docker and GKE writers see consistent state),
+# `no_subtree_check`, `all_squash` to the given anonuid/anongid, `sec=sys`
+# (this tier's authorization is by source IP -- see the docs, not by NFS
+# auth), and the given fsid. There is no separate squash group: anongid is
+# the "scion" group's own gid, since the Phase 2 leaf ACL grants that
+# group access, and a different anongid would make GKE's writes invisible
+# to it. Pure string rendering -- no gcloud or SSH calls -- so it's
+# directly unit-testable; the caller is responsible for actually reading
+# the anonuid/anongid off the VM and writing the result to a file.
+hybrid_nfs_export_line() {
+  local export_root="$1" cidr="$2" anonuid="$3" anongid="$4" fsid="$5"
+  echo "${export_root} ${cidr}(rw,sync,no_subtree_check,all_squash,anonuid=${anonuid},anongid=${anongid},sec=sys,fsid=${fsid})"
 }
 
 # _hybrid_firewall_rule_fields
