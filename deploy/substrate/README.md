@@ -23,7 +23,7 @@ expose those unauthenticated surfaces beyond the cluster boundary.
 
 Substrate requires a digest-pinned agent image (`.design/kubernetes/substrate-runtime.md`
 §3). Without one, `scion start` on a `substrate` profile fails closed
-(`pkg/runtime/substrate_runtime.go:317`):
+(`pkg/runtime/substrate_runtime.go:316`):
 
 ```
 substrate: image "<image>" is not pinned by digest (@sha256:...); set a digest image in the agent's template or pass --image (tag resolution is a Phase 2 feature)

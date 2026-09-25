@@ -110,7 +110,7 @@ Substrate's Postgres and out of golden snapshots, and lets every agent on the
 same image/resources/sandbox share one template.
 
 - **Image must be digest-pinned** (`@sha256:...`). `Run` fails closed
-  otherwise (`pkg/runtime/substrate_runtime.go:317`):
+  otherwise (`pkg/runtime/substrate_runtime.go:316`):
 
   > `substrate: image %q is not pinned by digest (@sha256:...); set a
   > digest image in the agent's template or pass --image (tag resolution
