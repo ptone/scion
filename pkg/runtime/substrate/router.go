@@ -22,7 +22,7 @@ import (
 )
 
 // TargetActorHeader is the header Substrate's inbound atenet-router uses to
-// address a specific actor (findings.md §1, phase1-spec.md §2.2).
+// address a specific actor (substrate-runtime.md §1).
 const TargetActorHeader = "ate-target-actor"
 
 // RouterClient sends HTTP requests to an actor's in-actor control server

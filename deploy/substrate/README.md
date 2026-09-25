@@ -3,7 +3,7 @@
 Deploys the scion runtime broker as an in-cluster workload on the Substrate
 GKE cluster, connected to the `scion-integration` hub, with the
 `substrate` runtime profile it needs to run agents as Substrate actors.
-This is Phase 1 scaffolding (substrate-integration `phase1-spec.md` §2.4):
+This is Phase 1 scaffolding (`.design/kubernetes/substrate-runtime.md` §1):
 a minimal manifest for testing the end-to-end slice, not the polished Helm
 chart (that's Phase 2).
 
@@ -14,10 +14,10 @@ before `kubectl apply`.
 ## Why an in-cluster broker
 
 Substrate has no authorization on its control API or inbound router — see
-`findings.md` §6. The broker needs both `api.ate-system.svc` (ateapi) and
-`atenet-router` reachability, and D1 requires it run in-cluster rather than
-reach in over a LoadBalancer/Ingress that would expose those unauthenticated
-surfaces beyond the cluster boundary.
+`.design/kubernetes/substrate-runtime.md` §1. The broker needs both
+`api.ate-system.svc` (ateapi) and `atenet-router` reachability, and must run
+in-cluster rather than reach in over a LoadBalancer/Ingress that would
+expose those unauthenticated surfaces beyond the cluster boundary.
 
 ## Operational prerequisites
 
@@ -691,8 +691,8 @@ kubectl run netpol-probe --rm -it --restart=Never \
   NetworkPolicy for why a hand-written duplicate would weaken, not
   strengthen, this).
 - **No Helm chart, no template GC, no doctor integration.** This is
-  Phase 1's minimal fixture (`phase1-spec.md` §2.4 explicitly scopes it this
-  way); the polished chart is Phase 2.
+  Phase 1's minimal fixture (`.design/kubernetes/substrate-runtime.md` §1
+  scopes it this way); the polished chart is Phase 2.
 - **No in-cluster credential rotation.** See "Secret creation" step 3.
 - **Bootstrap files — including the composed agent home — cross the
   broker→router hop in plaintext.** The router endpoint in this fixture is

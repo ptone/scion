@@ -43,7 +43,7 @@ import (
 )
 
 // Phase 1 bounds not exposed as settings (only TemplateReadyTimeout is
-// configurable — phase1-spec.md §2.3).
+// configurable — substrate-runtime.md §2).
 const (
 	defaultActorRunningTimeout = 5 * time.Minute
 	actorRunningPollInterval   = 2 * time.Second
@@ -53,10 +53,10 @@ const (
 )
 
 // substrateAgentRecord holds the fields List needs that ListActors cannot
-// return (Substrate actors carry no labels — findings.md §3), synthesised
+// return (Substrate actors carry no labels — substrate-runtime.md §4), synthesised
 // from the broker's own record of what it passed to Run. Phase 1 accepts
 // that a broker restart loses this for actors it did not create in this
-// process lifetime (phase1-spec.md §2.2 List row); Phase 2 adds the
+// process lifetime (substrate-runtime.md §4); Phase 2 adds the
 // ConfigMap-backed store.
 type substrateAgentRecord struct {
 	Labels        map[string]string
@@ -107,11 +107,11 @@ type SubstrateRuntime struct {
 var (
 	substrateAgentStateMu sync.Mutex
 	// substrateControlTokens maps "<atespace>/<actor>" to the control_token
-	// minted at bootstrap (phase1-spec.md §2.2 step 8: "keep it in memory
+	// minted at bootstrap (substrate-runtime.md §5.3: "keep it in memory
 	// keyed by <atespace>/<actor>").
 	substrateControlTokens = make(map[string]string)
 	// substrateAgentRecords maps actor UID to the label/metadata record
-	// synthesised at Run (phase1-spec.md §2.2 List row: "keyed by actor
+	// synthesised at Run (substrate-runtime.md §4: "keyed by actor
 	// uid").
 	substrateAgentRecords = make(map[string]*substrateAgentRecord)
 )
@@ -125,7 +125,7 @@ var (
 // instance regardless of config.
 //
 // This exists because the broker treats substrate as an auxiliary runtime,
-// not its default one (findings.md/phase1-spec.md never made it the
+// not its default one (substrate-runtime.md §2 never makes it the
 // default): pkg/runtimebroker resolves a fresh Runtime from settings via
 // GetRuntime on every `start` whose profile isn't the default, and would
 // otherwise call NewSubstrateRuntime again each time. Without memoization,
@@ -159,7 +159,7 @@ func substrateRuntimeCacheKey(cfg config.V1SubstrateConfig) (string, error) {
 // NewSubstrateRuntime returns the process-wide SubstrateRuntime for sc,
 // building one on first use and reusing it on every subsequent call with an
 // equal config (see substrateRuntimesMu). There is no auto-detect path for
-// substrate (phase1-spec.md §2.3): callers only reach this constructor when
+// substrate (substrate-runtime.md §2): callers only reach this constructor when
 // a profile explicitly selects it.
 func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error) {
 	if sc == nil {
@@ -290,7 +290,7 @@ func (r *SubstrateRuntime) Name() string { return "substrate" }
 // runtime.
 func (r *SubstrateRuntime) ExecUser() string { return "scion" }
 
-// Run implements the 9 steps of phase1-spec.md §2.2. Any failure after
+// Run implements the 9 steps of substrate-runtime.md §4. Any failure after
 // CreateActor triggers best-effort cleanup (delete the actor and its
 // egress policy) before returning.
 func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
@@ -479,7 +479,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 
 // bootstrapNonce is the single call site for the bootstrap request's bearer
 // value (brief instruction: "structure the code so the nonce source is one
-// function"). phase1-spec.md §5 leaves open a choice between MintActorJWT
+// function"). substrate-runtime.md §5.2 leaves open a choice between MintActorJWT
 // (verifiable actor identity via a systemInfo volume) and a fallback
 // (first-bootstrap-wins, secured by a NetworkPolicy restricting router
 // ingress to the broker namespace), pending further investigation into
@@ -496,7 +496,7 @@ func (r *SubstrateRuntime) bootstrapNonce(ctx context.Context, atespace, actorNa
 	return generateControlToken()
 }
 
-// Delete implements phase1-spec.md §2.2 Delete row: DeleteActorEgressPolicy
+// Delete implements substrate-runtime.md §9: DeleteActorEgressPolicy
 // (ignoring NotFound), then DeleteActor(any_state=true), then drop the
 // in-memory control token (and label record, best effort).
 func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
@@ -535,11 +535,11 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
 // Stop is the same as Delete in Phase 1: nothing here suspends to a DATA
 // snapshot yet, and faking a "stopped" state that just left the actor
 // running (or claiming a durable stop that instead discarded the actor's
-// state) would both be dishonest about what happened. See findings.md §4.6
-// and phase1-spec.md §2.2 Stop row.
+// state) would both be dishonest about what happened. See substrate-runtime.md §4
+// and substrate-runtime.md §4's Stop row.
 //
 // TODO(Phase 2): SuspendActor with DATA scope instead, once resume-from-
-// suspend and the $HOME durableDir layout (findings.md Q5) land, so Stop
+// suspend and the $HOME durableDir layout (substrate-runtime.md §11) land, so Stop
 // keeps the workspace and frees the worker rather than deleting the actor.
 func (r *SubstrateRuntime) Stop(ctx context.Context, id string) error {
 	return r.Delete(ctx, id)
@@ -548,12 +548,12 @@ func (r *SubstrateRuntime) Stop(ctx context.Context, id string) error {
 // substrateAtespacePrefix is the naming convention substrateAtespaceName
 // produces. List uses it to skip actors outside any scion-managed
 // atespace: ListActors with an empty atespace (List has no project context
-// to scope it to — the spec's literal "ListActors(atespace)" can't be
-// applied here) lists across the whole cluster, which may host other
+// to scope it to, unlike the atespace-scoped call substrate-runtime.md §4
+// describes) lists across the whole cluster, which may host other
 // tenants sharing the same Substrate install.
 const substrateAtespacePrefix = "scion-"
 
-// List implements phase1-spec.md §2.2 List row.
+// List implements substrate-runtime.md §4.
 //
 // AgentInfo.ProjectPath is populated from the record's ProjectPath (set at
 // Run time from cfg.Annotations, falling back to cfg.Labels — see Run),
@@ -756,7 +756,7 @@ func substrateLabelsMatch(labels map[string]string, project, projectID string, f
 }
 
 // substratePhase maps ateapipb.ActorState onto scion's AgentInfo.Phase
-// vocabulary (findings.md §4.6).
+// vocabulary (substrate-runtime.md §4).
 func substratePhase(s ateapipb.ActorState) string {
 	switch s {
 	case ateapipb.ActorState_ACTOR_STATE_RESUMING:
@@ -778,11 +778,11 @@ func substratePhase(s ateapipb.ActorState) string {
 	}
 }
 
-// GetLogs implements phase1-spec.md §2.2 GetLogs row: GetActor →
+// GetLogs implements substrate-runtime.md §4: GetActor →
 // status.worker_assignment → client-go PodLogs (tail 2000 lines).
 //
-// API-shape note (validation question 8): the spec described this as
-// "GetActor → status.worker → GetWorker → pod name/namespace", but
+// API-shape note: an earlier design assumed an extra GetWorker call was
+// needed to resolve "GetActor → status.worker → pod name/namespace", but
 // ActorStatus.worker_assignment already carries worker_pod and
 // worker_namespace directly (a deliberate denormalization — see the proto
 // comment on WorkerAssignment: "readers on a hot path do not have to fetch
@@ -821,7 +821,7 @@ func (r *SubstrateRuntime) GetLogs(ctx context.Context, id string) (string, erro
 	return string(data), nil
 }
 
-// Exec implements phase1-spec.md §2.2 Exec row: POST /scion/v1/exec via the
+// Exec implements substrate-runtime.md §4: POST /scion/v1/exec via the
 // router, using the control_token minted at bootstrap.
 func (r *SubstrateRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
 	atespace, actorName, err := splitSubstrateID(id)
@@ -843,7 +843,7 @@ func (r *SubstrateRuntime) Exec(ctx context.Context, id string, cmd []string) (s
 	return res.Stdout, nil
 }
 
-// Attach is not supported in Phase 1 (findings.md §3, phase1-spec.md §2.2).
+// Attach is not supported in Phase 1 (substrate-runtime.md §4).
 // The broker's PTY switch (pty_handlers.go) returns a clean error before
 // reaching this method; it exists to satisfy the Runtime interface and as
 // a defensive fallback.
@@ -885,7 +885,7 @@ func (r *SubstrateRuntime) RemoveImage(ctx context.Context, image string) error 
 func (r *SubstrateRuntime) PullImage(ctx context.Context, image string) error { return nil }
 
 // ensureAtespace creates atespace, treating AlreadyExists as success
-// (phase1-spec.md §2.2 step 1).
+// (substrate-runtime.md §4).
 func (r *SubstrateRuntime) ensureAtespace(ctx context.Context, atespace string) error {
 	_, err := r.client.CreateAtespace(ctx, &ateapipb.CreateAtespaceRequest{
 		Atespace: &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: atespace}},
@@ -931,13 +931,13 @@ func (r *SubstrateRuntime) redact(cfg RunConfig, err error) error {
 }
 
 // isDigestPinned reports whether image is pinned by digest
-// ([registry/]repository[:tag]@sha256:...), per phase1-spec.md §2.2 step 2.
+// ([registry/]repository[:tag]@sha256:...), per substrate-runtime.md §3.
 func isDigestPinned(image string) bool {
 	return strings.Contains(image, "@sha256:")
 }
 
 // substrateAtespaceName computes "scion-<first 12 chars of projectID>"
-// (phase1-spec.md §2.2 step 1), sanitised to a valid Kubernetes short name
+// (substrate-runtime.md §4), sanitised to a valid Kubernetes short name
 // (ResourceMetadata.atespace's k8s-short-name format: lowercase alphanumeric
 // and '-', starting and ending with an alphanumeric character). A UUID
 // project ID is already valid as-is; this defends against any other project
@@ -974,7 +974,7 @@ func sanitizeK8sShortNameFragment(s string) string {
 }
 
 // splitSubstrateID splits a runtime ID of the form "<atespace>/<actor>",
-// the format Run returns (phase1-spec.md §2.2 step 9).
+// the format Run returns (substrate-runtime.md §4).
 func splitSubstrateID(id string) (atespace, actorName string, err error) {
 	atespace, actorName, ok := strings.Cut(id, "/")
 	if !ok || atespace == "" || actorName == "" {

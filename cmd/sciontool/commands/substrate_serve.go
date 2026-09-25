@@ -37,7 +37,7 @@ func rootfsFixupSkipped() bool {
 }
 
 // substrateServeCmd is the template entrypoint for the `substrate` runtime
-// (phase1-spec.md §2.1). It is compiled into the same sciontool binary as
+// (substrate-runtime.md §5.1). It is compiled into the same sciontool binary as
 // every other subcommand, so no image-build change is needed beyond what
 // already builds `./cmd/sciontool/`.
 var substrateServeCmd = &cobra.Command{
@@ -59,7 +59,7 @@ listens on the port the inbound router targets by default (:80) and serves:
 Known Phase 1 limitation: substrate-serve logs SIGTERM but does not forward
 it to the harness and does not exit. Full eviction handling — suspending the
 actor within the worker's 30-minute grace period instead of just surviving
-the signal — is Phase 2 (see .design docs: findings.md D3).`,
+the signal — is Phase 2 (see .design docs: substrate-runtime.md §11).`,
 	Run: func(cmd *cobra.Command, args []string) {
 		os.Exit(runSubstrateServe(substrateServeAddr))
 	},
@@ -193,7 +193,7 @@ func runSubstrateServe(addr string) int {
 		Handler: srv.Handler(),
 	}
 
-	// Phase 1 (findings.md D3): log SIGTERM and keep running. Do not forward
+	// Phase 1 (substrate-runtime.md §5.6): log SIGTERM and keep running. Do not forward
 	// it to the harness and do not exit — an evicting worker sends SIGTERM
 	// with a 30-minute grace period before SIGKILL, and killing the harness
 	// immediately would turn a recoverable eviction into a lost agent. The

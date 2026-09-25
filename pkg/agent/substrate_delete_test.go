@@ -240,7 +240,7 @@ func TestSubstrateAgentManagerDelete_RecordExists(t *testing.T) {
 
 // TestSubstrateAgentManagerDelete_NoRecord is the documented, deliberate
 // no-op case: an actor with no in-memory agent record at all, simulating a
-// broker restart (phase1-spec.md §2.2's List row explicitly accepts losing
+// broker restart (substrate-runtime.md §4's List row explicitly accepts losing
 // records across a restart). The actor here is injected directly into the
 // fake client, never through this SubstrateRuntime's own Run, so there is
 // genuinely no substrateAgentRecords entry for it.

@@ -42,7 +42,7 @@ import (
 
 // DefaultTokenAudience is used when DialerConfig.TokenAudience is empty,
 // matching the audience ateapi's own TokenRequest-based auth expects
-// (phase1-spec.md §2.2).
+// (substrate-runtime.md §1).
 const DefaultTokenAudience = "api.ate-system.svc"
 
 // tokenExpirySeconds is the lifetime requested for each minted token.

@@ -47,7 +47,7 @@ func TestSubstrateServeCommand_AddrFlagDefault(t *testing.T) {
 	if flag == nil {
 		t.Fatal("addr flag not found")
 	}
-	// phase1-spec.md §2.1: the router targets :80 by default.
+	// substrate-runtime.md §5.1: the router targets :80 by default.
 	if flag.DefValue != ":80" {
 		t.Errorf("expected default addr :80, got %s", flag.DefValue)
 	}
@@ -55,7 +55,7 @@ func TestSubstrateServeCommand_AddrFlagDefault(t *testing.T) {
 
 // TestSubstrateServeCommand_Integration_SIGTERMNotForwarded is a real
 // subprocess integration test (mirrors TestInitCommand_Integration's
-// pattern) proving the Phase 1 requirement from phase1-spec.md §2.1:
+// pattern) proving the Phase 1 requirement from substrate-runtime.md §5.6:
 // substrate-serve logs SIGTERM but does not forward it to the harness and
 // does not exit. It builds the sciontool binary, boots `substrate-serve`,
 // bootstraps a long-lived child, sends the running process a real SIGTERM,

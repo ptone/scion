@@ -77,7 +77,7 @@ const (
 // The concrete implementation (cmd/sciontool/commands.RunInit) lives in the
 // cmd layer; Server takes it as a function value so this package never
 // imports cmd/sciontool/commands. This is the "reuse, don't fork" seam for
-// the init logic required by phase1-spec.md §2.1.
+// the init logic required by substrate-runtime.md §5.1.
 type InitRunner func(argv []string, forwardTermSignal bool) int
 
 // PrivilegeDropChecker is InitRunner's synchronous companion: when the
@@ -120,7 +120,7 @@ type PrivilegeDropChecker func() error
 type RootfsFixup func()
 
 // Server implements the `sciontool substrate-serve` control server
-// (phase1-spec.md §2.1): healthz, one-shot bootstrap, and authenticated
+// (substrate-runtime.md §5.1): healthz, one-shot bootstrap, and authenticated
 // exec. /pty, /rehydrate and /tunnel/open are out of scope for Phase 1.
 type Server struct {
 	nonceVerifier      NonceVerifier
@@ -144,7 +144,7 @@ type Server struct {
 type Option func(*Server)
 
 // WithNonceVerifier overrides the bootstrap nonce verifier. Default is
-// FirstBootstrapWinsVerifier (phase1-spec.md §5 fallback).
+// FirstBootstrapWinsVerifier (substrate-runtime.md §5.2 fallback).
 func WithNonceVerifier(v NonceVerifier) Option {
 	return func(s *Server) { s.nonceVerifier = v }
 }

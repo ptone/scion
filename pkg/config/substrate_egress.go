@@ -107,7 +107,7 @@ var egressAllowSpecialUseTLDs = map[string]string{
 // reach the router, other in-cluster services, or "everything" through its
 // EgressPolicy. See ValidateEgressAllow for the exact rules.
 //
-// Threat model: the Phase 1 bootstrap nonce fallback (phase1-spec.md §5)
+// Threat model: the Phase 1 bootstrap nonce fallback (substrate-runtime.md §5.2)
 // trusts whichever caller reaches the control server's /bootstrap endpoint
 // first. The NetworkPolicy restricting router ingress to the broker
 // namespace is the primary defense against an unauthorized bootstrap; this

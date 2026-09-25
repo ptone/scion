@@ -17,7 +17,7 @@ package substrate
 import "crypto/subtle"
 
 // NonceVerifier authenticates the bearer token presented to
-// POST /scion/v1/bootstrap. phase1-spec.md §5 leaves the nonce source
+// POST /scion/v1/bootstrap. substrate-runtime.md §5.2 leaves the nonce source
 // undecided between two options:
 //
 //   - the actor's identity, minted by the broker via ateapi's MintActorJWT
@@ -35,7 +35,7 @@ type NonceVerifier interface {
 	VerifyNonce(token string) bool
 }
 
-// FirstBootstrapWinsVerifier implements the phase1-spec.md §5 fallback: it
+// FirstBootstrapWinsVerifier implements the substrate-runtime.md §5.2 fallback: it
 // accepts any bearer token, including an empty one. The server's own
 // single-shot bootstrap enforcement (accept only the first call) is the
 // only thing standing between an in-cluster caller and bootstrap, so this
@@ -49,7 +49,7 @@ func (FirstBootstrapWinsVerifier) VerifyNonce(string) bool { return true }
 
 // StaticNonceVerifier compares the presented bearer token against a fixed
 // expected value in constant time. It stands in for the MintActorJWT-derived
-// nonce (phase1-spec.md §5, option A) — once that mechanism is wired up, its
+// nonce (substrate-runtime.md §5.2) — once that mechanism is wired up, its
 // caller resolves the actor's expected nonce and constructs this verifier
 // (or a JWT-verifying one) instead of FirstBootstrapWinsVerifier.
 type StaticNonceVerifier struct {

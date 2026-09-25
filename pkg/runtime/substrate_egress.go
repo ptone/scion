@@ -24,9 +24,9 @@ import (
 )
 
 // hardcodedModelEgressHosts are the harness model API hosts Phase 1
-// hardcodes (phase1-spec.md §2.2 step 5): Anthropic, plus Google auth and
+// hardcodes (substrate-runtime.md §7): Anthropic, plus Google auth and
 // Vertex. "*.googleapis.com" also happens to cover the telemetry default
-// (cloudtrace.googleapis.com, findings.md §2), but substrateEgressHostnames
+// (cloudtrace.googleapis.com, substrate-runtime.md §7), but substrateEgressHostnames
 // adds the actual configured telemetry endpoint as its own rule too — see
 // the telemetry section below.
 var hardcodedModelEgressHosts = []string{
@@ -36,7 +36,7 @@ var hardcodedModelEgressHosts = []string{
 }
 
 // substrateEgressHostnames collects the hostname patterns for the actor's
-// EgressPolicy (phase1-spec.md §2.2 step 5): the hub endpoint host, the git
+// EgressPolicy (substrate-runtime.md §7): the hub endpoint host, the git
 // clone host, the hardcoded harness model hosts, and egress_allow from
 // settings. Duplicates are removed; empty/unresolvable hosts are skipped
 // rather than failing Run — a missing hub or git host here means the
@@ -69,9 +69,9 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		add(h)
 	}
 
-	// Telemetry endpoint host (phase1-spec.md §2.2 step 5: "the telemetry
+	// Telemetry endpoint host (substrate-runtime.md §7: "the telemetry
 	// endpoint"). *.googleapis.com below happens to cover the Cloud Trace
-	// default (findings.md §2), but that's a coincidence of the default,
+	// default (substrate-runtime.md §7), but that's a coincidence of the default,
 	// not a rule: a self-hosted OTLP collector or the hub's own endpoint
 	// needs its own rule, so check every env var scion's telemetry stack
 	// actually uses rather than relying on the wildcard. Checked
@@ -148,7 +148,7 @@ func hostFromURL(raw string) string {
 
 // buildEgressPolicy builds the CreateActorEgressPolicyRequest for actor
 // atespace/actorName, with a single EgressRule matching any of hostnames
-// (phase1-spec.md §2.2 step 5). "default" is the only permitted egress
+// (substrate-runtime.md §7). "default" is the only permitted egress
 // policy resource name per the EgressPolicy proto comment.
 func buildEgressPolicy(atespace, actorName string, hostnames []string) *ateapipb.CreateActorEgressPolicyRequest {
 	return &ateapipb.CreateActorEgressPolicyRequest{

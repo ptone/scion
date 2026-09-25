@@ -34,7 +34,7 @@ import (
 )
 
 // substrateServeEntrypointVersion is folded into the template's
-// content-address (phase1-spec.md §2.2 step 3) so a change to the
+// content-address (substrate-runtime.md §3) so a change to the
 // `sciontool substrate-serve` protocol forces a new template rather than
 // silently reusing a golden snapshot built against the old one.
 const substrateServeEntrypointVersion = "substrate-serve/v1"
@@ -63,7 +63,7 @@ const defaultTemplateReadyTimeout = 10 * time.Minute
 const templateReadyPollInterval = 5 * time.Second
 
 // substrateTemplateName computes the content-addressed ActorTemplate name
-// (phase1-spec.md §2.2 step 3). Same inputs always produce the same name,
+// (substrate-runtime.md §3). Same inputs always produce the same name,
 // so concurrent Runs for the same effective template converge on one
 // CreateActorTemplate instead of racing to create distinct ones.
 //
@@ -74,10 +74,10 @@ const templateReadyPollInterval = 5 * time.Second
 // the nil pointer as "" while buildActorTemplate substitutes a real default
 // would let a change to that default silently reuse the old golden
 // template), the hardcoded snapshot scope, the container's added
-// capabilities, and the entrypoint version. This is a deliberate deviation
-// from the spec's literal hash-input list (image digest + sandbox class +
-// resources + scope + entrypoint version only): those other fields are
-// template content too, and changing them in settings — or in this
+// capabilities, and the entrypoint version. This is a deliberate expansion
+// of substrate-runtime.md §3's hash-input list (image digest + sandbox
+// class + resources + scope + entrypoint version only): those other fields
+// are template content too, and changing them in settings — or in this
 // runtime's own code, for the capability set — must not silently reuse a
 // stale golden template.
 func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) string {
@@ -182,8 +182,8 @@ const substrateTrustBundleFileName = "trust-bundle.pem"
 const substrateTrustBundleFile = substrateTrustBundleMountPath + "/" + substrateTrustBundleFileName
 
 // buildActorTemplate constructs the ActorTemplate for CreateActorTemplate
-// (phase1-spec.md §2.2 step 3). Env carries no secrets and no per-agent
-// config, ever (findings.md §4.2; that is pushed after the actor starts, via
+// (substrate-runtime.md §3). Env carries no secrets and no per-agent
+// config, ever (substrate-runtime.md §3; that is pushed after the actor starts, via
 // POST /scion/v1/bootstrap) — the only Env this function ever sets is the
 // fixed set of CA-bundle paths below, and only when
 // sc.EgressTrustBundle is non-empty.
@@ -267,7 +267,7 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				Name:    "scion-agent",
 				Image:   imageDigest,
 				Command: []string{"sciontool", "substrate-serve"},
-				Env:     trustBundleEnv, // no secrets, ever (findings.md §4.2); only fixed CA-bundle paths when egress_trust_bundle is set
+				Env:     trustBundleEnv, // no secrets, ever (substrate-runtime.md §3); only fixed CA-bundle paths when egress_trust_bundle is set
 				VolumeMounts: append([]*ateapipb.VolumeMount{
 					{Name: "workspace", MountPath: "/workspace"},
 				}, trustBundleMounts...),
@@ -343,7 +343,7 @@ func templateReadyTimeout(sc config.V1SubstrateConfig) time.Duration {
 
 // ensureActorTemplate gets the ActorTemplate named templateName in atespace,
 // creating it if missing, then waits for its golden snapshot to become
-// ready (phase1-spec.md §2.2 step 3: "creating a template boots a golden
+// ready (substrate-runtime.md §3: "creating a template boots a golden
 // actor, so wait for the template to be ready"). clock lets tests replace
 // time.Sleep with an instant no-op.
 func ensureActorTemplate(ctx context.Context, client ateapipb.ControlClient, atespace, templateName string, tmpl *ateapipb.ActorTemplate, timeout time.Duration, sleep func(time.Duration)) error {

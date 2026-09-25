@@ -1019,7 +1019,7 @@ type V1CloudRunSandboxConfig struct {
 }
 
 // V1SubstrateConfig holds Substrate runtime settings (substrate-integration
-// findings.md / phase1-spec.md §2.3). Substrate is a Kubernetes-hosted actor
+// substrate-runtime.md §2). Substrate is a Kubernetes-hosted actor
 // runtime; scion agents run as Substrate "actors". Selection is explicit
 // only — there is no auto-detect branch in factory.go.
 type V1SubstrateConfig struct {
@@ -1082,7 +1082,7 @@ type V1SubstrateConfig struct {
 	// a single Run call, so one check per call is enough). Substrate's
 	// egress default-deny plus the actor's EgressPolicy is what keeps an
 	// actor off the atenet-router and other in-cluster services
-	// (findings.md §6 threat model); an entry that reaches either of those
+	// (substrate-runtime.md §7); an entry that reaches either of those
 	// would defeat it.
 	EgressAllow []string `json:"egress_allow,omitempty" yaml:"egress_allow,omitempty" koanf:"egress_allow"`
 	// EgressTrustBundle names a Substrate trust bundle to project into every

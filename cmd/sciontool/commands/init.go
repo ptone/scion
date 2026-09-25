@@ -99,8 +99,8 @@ type InitRunOptions struct {
 	// It must be false when RunInit is invoked in-process by
 	// `sciontool substrate-serve` (pkg/sciontool/substrate). substrate-serve
 	// is itself PID 1 there and owns SIGTERM handling: Phase 1 requires it
-	// to log SIGTERM without forwarding it (see phase1-spec.md §2.1 and
-	// findings.md D3 — full eviction handling is Phase 2). If RunInit also
+	// to log SIGTERM without forwarding it (see substrate-runtime.md §5.6 —
+	// full eviction handling is Phase 2). If RunInit also
 	// installed a SIGTERM handler in that mode, the two handlers would race
 	// on the same process signal and the harness could be killed anyway.
 	ForwardTermSignal bool
@@ -975,9 +975,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 			// WebSocket egress (the hub port-forward tunnel) is blocked there,
 			// so starting it would just spin retrying against 403s. Autoexpose
 			// depends on the same tunnel. Skip both when running under the
-			// substrate runtime (phase1-spec.md §3). This is a Phase 1
-			// limitation, not a permanent one — see §4.3b for the on-demand
-			// tunnel design that will eventually re-enable this.
+			// substrate runtime (substrate-runtime.md §7). This is a Phase 1
+			// limitation, not a permanent one — an on-demand tunnel design
+			// would eventually re-enable this (substrate-runtime.md §11).
 			if os.Getenv("SCION_RUNTIME") == "substrate" {
 				log.Info("SCION_RUNTIME=substrate: skipping port-forward tunnel manager and auto-expose (WebSocket egress is not available on Substrate)")
 			} else {

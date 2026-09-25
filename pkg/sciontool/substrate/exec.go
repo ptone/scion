@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	// maxOutputBytes caps stdout and stderr independently, per phase1-spec.md
+	// maxOutputBytes caps stdout and stderr independently, per substrate-runtime.md
 	// §2.1 ("Output is capped at 4 MiB per stream (truncate and flag)").
 	maxOutputBytes = 4 * 1024 * 1024
 

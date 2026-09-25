@@ -245,7 +245,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		return rt
 	case "substrate":
 		// No auto-detect branch: substrate is only ever selected explicitly
-		// by profile (phase1-spec.md §2.3), so this case is unreachable via
+		// by profile (substrate-runtime.md §2), so this case is unreachable via
 		// the "local"/"auto" detection above.
 		rt, err := NewSubstrateRuntime(rtConfig.Substrate)
 		if err != nil {

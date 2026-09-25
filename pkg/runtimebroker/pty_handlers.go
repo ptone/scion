@@ -731,8 +731,8 @@ func (s *LocalPTYSession) Run() error {
 	} else if isK8s {
 		return s.runK8sExec()
 	} else if isSubstrate {
-		// Substrate has no exec/attach/TTY primitive in Phase 1 (findings.md
-		// §3, phase1-spec.md §2.2); return a clean error instead of falling
+		// Substrate has no exec/attach/TTY primitive in Phase 1 (substrate-runtime.md
+		// §4); return a clean error instead of falling
 		// through to docker exec, which would fail confusingly.
 		return fmt.Errorf("attach not yet supported on substrate")
 	} else {
@@ -1176,8 +1176,8 @@ func (h *StreamPTYHandler) Run() error {
 	} else if isK8s {
 		return h.runK8sExec()
 	} else if isSubstrate {
-		// Substrate has no exec/attach/TTY primitive in Phase 1 (findings.md
-		// §3, phase1-spec.md §2.2); return a clean error instead of falling
+		// Substrate has no exec/attach/TTY primitive in Phase 1 (substrate-runtime.md
+		// §4); return a clean error instead of falling
 		// through to docker exec, which would fail confusingly.
 		return fmt.Errorf("attach not yet supported on substrate")
 	} else {

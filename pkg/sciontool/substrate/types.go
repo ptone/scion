@@ -14,7 +14,7 @@
 
 // Package substrate implements the Phase 1 `sciontool substrate-serve`
 // control server: the in-actor HTTP server that the Substrate runtime
-// broker bootstraps a scion agent through (phase1-spec.md §2.1). It is the
+// broker bootstraps a scion agent through (substrate-runtime.md §5.1). It is the
 // template entrypoint for the `substrate` runtime; the broker/runtime side
 // of the integration lives in pkg/runtime.
 //

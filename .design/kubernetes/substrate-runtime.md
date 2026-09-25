@@ -118,16 +118,22 @@ same image/resources/sandbox share one template.
   Tag→digest resolution is a Phase 2 feature. See `deploy/substrate/README.md`
   for the default-install interaction with harness-config images.
 - **Template name** = `scion-` + the first 12 hex characters of
-  `sha256(image digest, sandbox class, resources, snapshot scope,
-  worker_selector, egress_trust_bundle, substrate-serve entrypoint version)`.
-  Same inputs always produce the same name, so concurrent `Run`s for the same
-  effective template converge on one `CreateActorTemplate` instead of racing
-  to create distinct ones. The entrypoint version is folded in so a change to
-  the `substrate-serve` wire protocol forces a new template rather than
-  reusing golden state built against an older one. Setting `egress_trust_bundle`
-  changes the hash (a new `system-info` volume and Env are added — see §7.1);
-  leaving it empty keeps existing golden templates on a plain install
-  byte-identical and reused.
+  `sha256(image digest, sandbox class, sandbox config name, worker_selector,
+  snapshot storage, effective resources, snapshot scope, the container's
+  added capabilities, substrate-serve entrypoint version)`, plus
+  `egress_trust_bundle` appended only when it is non-empty. Same inputs
+  always produce the same name, so concurrent `Run`s for the same effective
+  template converge on one `CreateActorTemplate` instead of racing to create
+  distinct ones. The entrypoint version is folded in so a change to the
+  `substrate-serve` wire protocol forces a new template rather than reusing
+  golden state built against an older one; resources are resolved against
+  `config.BuiltinDefaultResources` before hashing (a nil `*ResourceSpec`
+  would otherwise hash as empty and silently reuse a stale golden template
+  if the default ever changes). `egress_trust_bundle` is appended as its own
+  segment, not a fixed field, precisely so that leaving it empty keeps
+  existing golden templates on a plain install byte-identical and reused;
+  setting it changes the hash, since `buildActorTemplate`'s output genuinely
+  differs (a new `system-info` volume and Env — see §7.1).
 - **Contents:** one container running the pinned image, command
   `["sciontool", "substrate-serve"]`, `Env` carrying no secrets and no
   per-agent config ever (only the fixed CA-bundle paths when
@@ -552,13 +558,13 @@ that already existed for the actor-delete path.
   (§9).
 - Non-home image paths remain root-owned after the rootfs fixup (§8), which
   only re-chowns under the resolved home directory.
-- **The profile image pin loses to the harness-config/template `image` on a
-  default install.** The substrate profile's own digest pin applies only
-  when neither the template nor the harness-config sets `image`; the shipped
-  `claude` harness-config seed sets `scion-claude:latest`, so a default
-  install's `substrate` create fails closed with the `not pinned by digest`
-  error (§3) unless the operator pins the harness-config image — see
-  `deploy/substrate/README.md`.
+- **A default install's `substrate` create can fail closed with the
+  `not pinned by digest` error (§3) against the shipped `claude`
+  harness-config's `scion-claude:latest` image.** TODO-image-trace: the
+  exact mechanism that selects the image a `substrate` create actually uses
+  (profile pin vs. harness-config vs. template) is under active
+  investigation and not yet settled here — see `deploy/substrate/README.md`
+  for the current operator-facing guidance.
 - **The egress hostname-rule model requires the sdsmint MITM gateway**
   (§7.1); the plain gateway enforces only address rules for TLS.
 - **The dialer's trust material is pinned for the broker process's
@@ -575,9 +581,8 @@ that already existed for the actor-delete path.
 
 ## 11. Phase 2+ recommendations
 
-- Resolve the image-precedence gap (previous section) generically, e.g. by
-  giving the substrate profile's own pin precedence over harness-config/template
-  `image`, or by resolving tags to digests.
+- Resolve the default-install image gap (previous section) once
+  TODO-image-trace lands, and/or by resolving tags to digests.
 - Identity-derived bootstrap nonce (`MintActorJWT`), replacing the Phase 1
   fallback (§5.2).
 - Seal the bootstrap payload end-to-end, or move the router endpoint to its
@@ -590,6 +595,10 @@ that already existed for the actor-delete path.
   credentials on suspend).
 - Eviction handling beyond "don't forward SIGTERM" (§5.6): watch for
   `WORKER_STATE_DRAINING`, and have the broker suspend proactively.
+- An on-demand hub port-forward tunnel and `sciontool` autoexpose, so
+  Substrate agents regain that path once it no longer depends on
+  always-on WebSocket egress (§1, §7) — a scion-wide refactor, not
+  substrate-specific, that this runtime would opt into once it lands.
 - Template GC, and a durable (ConfigMap-backed) label store surviving
   broker restarts (§4's `List` row, §10).
 - Confirm actor deletion (poll until `DELETING` clears, or report a stuck

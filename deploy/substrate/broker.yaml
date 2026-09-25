@@ -13,7 +13,7 @@
 # limitations under the License.
 #
 # Phase 1 in-cluster broker manifest for the `substrate` runtime
-# (substrate-integration phase1-spec.md §2.4). This is a plain manifest, not
+# (.design/kubernetes/substrate-runtime.md §1). This is a plain manifest, not
 # a Helm chart — see deploy/substrate/README.md for placeholders, the
 # out-of-band Secret the operator must create, apply order, and verification
 # commands. Every dollar-brace placeholder below is meant to be resolved with
@@ -107,7 +107,7 @@ roleRef:
   name: scion-substrate-broker-ctb-reader
   apiGroup: rbac.authorization.k8s.io
 ---
-# GetLogs (phase1-spec.md §2.2) reads the current worker pod's logs via
+# GetLogs (.design/kubernetes/substrate-runtime.md §4) reads the current worker pod's logs via
 # client-go PodLogs. This is a namespaced Role in the *worker* namespace,
 # bound to the broker's ServiceAccount from the *broker* namespace — the two
 # may be the same cluster but are almost certainly different namespaces.
@@ -324,7 +324,8 @@ spec:
             secretName: scion-substrate-broker-hub-credentials
             defaultMode: 0400
 ---
-# Router ingress restriction (phase1-spec.md §5 fallback requirement): the
+# Router ingress restriction (.design/kubernetes/substrate-runtime.md §5.2
+# fallback requirement): the
 # bootstrap nonce fallback ("first bootstrap wins") is only acceptable with
 # this in place, restricting the router to broker-namespace callers.
 #

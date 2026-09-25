@@ -14,7 +14,7 @@ in substrate's full `go.mod`, which requires **Go 1.27.0** (scion targets
 1.26.1) and forces major-version upgrades of `k8s.io/api`,
 `k8s.io/apimachinery`, `k8s.io/client-go`, and a dozen other shared
 transitive deps scion already pins — a build-tooling-wide change out of
-scope for the substrate runtime slice (phase1-spec.md §2.2, "if that module
+scope for the substrate runtime slice (substrate-runtime.md §1, "if that module
 pulls in unreasonable transitive dependencies, copy the generated
 `ateapipb` package under `third_party/`").
 

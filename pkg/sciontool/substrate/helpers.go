@@ -187,5 +187,5 @@ func pathPrefixes(dir string) []string {
 // include content_b64 or decoded bytes, so this currently just documents
 // that invariant rather than performing scrubbing. Kept as a named seam so
 // future error paths added here are reviewed against the same "no secrets
-// in logs or errors" requirement (phase1-spec.md §2.1).
+// in logs or errors" requirement (substrate-runtime.md §6).
 func redactErr(err error) error { return err }

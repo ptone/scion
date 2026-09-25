@@ -77,7 +77,7 @@ func TestShellQuote_EscapesSingleQuotes(t *testing.T) {
 }
 
 // TestRunExec_OutputCapsAndFlags is an end-to-end test (real subprocess) of
-// the 4 MiB per-stream cap required by phase1-spec.md §2.1. It generates
+// the 4 MiB per-stream cap required by substrate-runtime.md §5.1. It generates
 // more than maxOutputBytes on stdout and confirms the response is capped at
 // exactly maxOutputBytes with truncated=true, and does the same for stderr
 // independently.

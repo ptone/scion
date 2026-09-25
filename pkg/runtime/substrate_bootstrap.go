@@ -36,7 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
-// Substrate control server routes (phase1-spec.md §2.1), reachable through
+// Substrate control server routes (substrate-runtime.md §5.1), reachable through
 // the router with the ate-target-actor header.
 const (
 	substrateHealthzPath   = "/scion/v1/healthz"
@@ -64,15 +64,15 @@ const (
 )
 
 // healthzAwaitingBootstrap and healthzRunning are the two states substrate-serve's
-// GET /scion/v1/healthz reports (phase1-spec.md §2.1).
+// GET /scion/v1/healthz reports (substrate-runtime.md §5.1).
 const (
 	healthzAwaitingBootstrap = "awaiting-bootstrap"
 	healthzRunning           = "running"
 )
 
 // bootstrapFile is one entry of the bootstrap payload's "files" array.
-// mode is a plain decimal file mode (e.g. 384 == 0600), matching the spec
-// example — not octal text — so it round-trips through JSON as a number.
+// mode is a plain decimal file mode (e.g. 384 == 0600, substrate-runtime.md
+// §5.3) — not octal text — so it round-trips through JSON as a number.
 type bootstrapFile struct {
 	Path       string `json:"path"`
 	Mode       int    `json:"mode"`
@@ -87,7 +87,7 @@ type bootstrapFile struct {
 	decodedSize int64
 }
 
-// bootstrapRequest is the POST /scion/v1/bootstrap body (phase1-spec.md §2.1).
+// bootstrapRequest is the POST /scion/v1/bootstrap body (substrate-runtime.md §5.3).
 type bootstrapRequest struct {
 	Env          map[string]string `json:"env"`
 	Files        []bootstrapFile   `json:"files"`
@@ -108,9 +108,9 @@ type execRequest struct {
 }
 
 // execResponse is the POST /scion/v1/exec body. Truncated flags that stdout
-// or stderr hit the 4 MiB per-stream cap (phase1-spec.md §2.1); the field
+// or stderr hit the 4 MiB per-stream cap (substrate-runtime.md §5.1); the field
 // name is provisional pending confirmation of the exact wire-format
-// contract (brief §Scope 5).
+// contract.
 type execResponse struct {
 	Stdout    string `json:"stdout"`
 	Stderr    string `json:"stderr"`
@@ -121,12 +121,12 @@ type execResponse struct {
 // defaultFileMode is applied to every bootstrap file. Neither
 // api.FileMapping nor api.ResolvedSecret carries a mode, so a single
 // conservative, owner-only mode is used for all of them — matching the
-// phase1-spec.md §2.1 example (384 decimal == 0600 octal).
+// substrate-runtime.md §5.3 example (384 decimal == 0600 octal).
 const defaultFileMode = 0o600
 
 // buildBootstrapEnv assembles the full agent env for the bootstrap payload.
 //
-// phase1-spec.md §2.2 step 8 states the formula as cfg.Env +
+// substrate-runtime.md §5.3 states the formula as cfg.Env +
 // ResolvedAuth.EnvVars + env-type ResolvedSecrets. This also folds in
 // cfg.Harness.GetEnv()/GetTelemetryEnv(), which every other runtime
 // includes (see buildCommonRunArgs, KubernetesRuntime.buildPod) and which
@@ -170,7 +170,7 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 
 	// SCION_RUNTIME=substrate lets sciontool disable autoexpose/port-forward
 	// (blocked by Substrate's default-deny, no-WebSocket-egress posture —
-	// findings.md §1, §10) so it does not spin retrying a tunnel that can
+	// substrate-runtime.md §7) so it does not spin retrying a tunnel that can
 	// never connect.
 	env["SCION_RUNTIME"] = "substrate"
 
@@ -541,7 +541,7 @@ func buildBootstrapFiles(cfg RunConfig) ([]bootstrapFile, error) {
 }
 
 // generateControlToken returns a random 32-byte hex string, used both as
-// the bearer for POST /scion/v1/exec (phase1-spec.md §2.1) and, in the
+// the bearer for POST /scion/v1/exec (substrate-runtime.md §5.1) and, in the
 // Phase 1 fallback nonce (see substrateBootstrapNonce), as the bootstrap
 // bearer itself.
 func generateControlToken() (string, error) {
@@ -605,7 +605,7 @@ func getHealthz(ctx context.Context, router *substrate.RouterClient, atespace, a
 // answers 409: someone bootstrapped this actor before the broker's own
 // request landed.
 //
-// Under the Phase 1 fallback nonce (phase1-spec.md §5: any bearer accepted,
+// Under the Phase 1 fallback nonce (substrate-runtime.md §5.2: any bearer accepted,
 // correctness resting on "first bootstrap wins" plus a NetworkPolicy
 // restricting router ingress to the broker namespace), the broker is
 // supposed to be the only caller that can ever reach this endpoint before
@@ -696,7 +696,7 @@ func (e *bootstrapPathRejectedError) Error() string {
 }
 
 // postBootstrap sends the bootstrap payload through the router, authorized
-// with nonce (phase1-spec.md §2.1). Any non-2xx status is an error; 409
+// with nonce (substrate-runtime.md §5.3). Any non-2xx status is an error; 409
 // specifically becomes errBootstrapHijacked (see its doc comment) rather
 // than being treated as an idempotent no-op, and 422 becomes
 // bootstrapPathRejectedError (see its doc comment) rather than falling into
@@ -737,7 +737,7 @@ func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace
 }
 
 // doExec sends argv through the router to the actor's control server,
-// authorized with the actor's control_token (phase1-spec.md §2.2 Exec row).
+// authorized with the actor's control_token (substrate-runtime.md §4).
 func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actorName, controlToken string, argv []string, user string, timeout time.Duration) (execResponse, error) {
 	var out execResponse
 
