@@ -328,7 +328,13 @@ print(json.dumps(out))
       # settings.yaml/PV rendering and the base health-check URL, both
       # of which depend on it, to have anything meaningful to render.
       if [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}" ]]; then
-        echo "${GCLOUD_STUB_VM_IP:-10.128.0.5}"
+        if [[ -n "${GCLOUD_STUB_VM_IP:-}" ]]; then
+          echo "${GCLOUD_STUB_VM_IP}"
+        elif [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}.ip" ]]; then
+          cat "${GCLOUD_STUB_STATE_DIR}/instances/${name}.ip"
+        else
+          echo "10.128.0.5"
+        fi
         exit 0
       fi
       exit 1
@@ -348,7 +354,11 @@ print(json.dumps(out))
     name="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/instances/${name}"
     if [[ -f "${f}.delete-fail" ]]; then
-      echo "gcloud-stub: simulated delete failure for ${name}" >&2
+      if [[ -f "${f}.delete-fail-text" ]]; then
+        cat "${f}.delete-fail-text" >&2
+      else
+        echo "gcloud-stub: simulated delete failure for ${name}" >&2
+      fi
       exit 1
     fi
     if [[ -f "$f" ]]; then
@@ -362,6 +372,15 @@ print(json.dumps(out))
     require_project "$@"
     name="${4:-}"
     echo "us-central1-b" > "${GCLOUD_STUB_STATE_DIR}/instances/${name}"
+    # Record the actually-requested private IP, if any, so a later
+    # `describe --format=get(networkInterfaces[0].networkIP)` reflects
+    # what this VM was really created with -- otherwise the hub URL
+    # guard's real-VM-describe check would always see the generic
+    # default IP instead of the reserved one on the new-VM path.
+    priv_ip="$(get_flag private-network-ip "$@")" || priv_ip=""
+    if [[ -n "$priv_ip" ]]; then
+      printf '%s' "$priv_ip" > "${GCLOUD_STUB_STATE_DIR}/instances/${name}.ip"
+    fi
     # A sentinel the create-mode wiring tests poll for, so they can stop
     # deploy.sh right after VM creation instead of waiting out its SSH
     # retry loop (which this stub's unhandled `compute ssh` case makes

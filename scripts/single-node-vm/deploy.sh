@@ -455,6 +455,12 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   # for example, no hybrid firewall rules were ever created for this hub
   # but the internal IP reservation still was.
   HYBRID_TEARDOWN_DELETE_FAILED=()
+  # Set whenever hybrid_teardown_delete is never even attempted for a
+  # queued rule (a k8s failure or an unconfirmed VM stop everything
+  # before it's reached), so the summary can tell "never attempted,
+  # here's why" apart from "attempted and failed" the same way the
+  # internal-IP reservation already does.
+  HYBRID_RULES_DELETE_SKIP_REASON=""
 
   if [[ "$HYBRID_K8S_TEARDOWN_READY" == "true" ]]; then
     info "Deleting hybrid-tier Kubernetes objects..."
@@ -497,15 +503,26 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     # guess when its own discovery call fails): a non-zero exit from the
     # check itself means unknown, and unknown is never treated as gone.
     info "Deleting GCE VM..."
+    VM_DELETE_ERR="$(mktemp)"
     if gcloud compute instances delete "${INSTANCE_NAME}" \
-        --zone="${ZONE}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+        --zone="${ZONE}" --project="${PROJECT_ID}" --quiet 2>"${VM_DELETE_ERR}"; then
       echo "  Deleted: ${INSTANCE_NAME}"
       VM_GONE=true
       VM_DELETED=true
     elif [[ ${#HYBRID_TEARDOWN_DELETE[@]} -eq 0 && "${HYBRID_INTERNAL_IP_TEARDOWN_READY:-false}" != "true" ]]; then
-      warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
-      VM_GONE=true
-      VM_NOT_FOUND=true
+      # Tier off: unchanged in spirit from before this classification
+      # existed (warn and continue, never fail the run over this) -- but
+      # now actually reads the delete's own error text, as every other
+      # base resource already does, instead of assuming "not found" from
+      # any failure. A permission or API error must be reported as kept,
+      # not as a false "not found" that could hide a still-existing VM.
+      if _hybrid_gcloud_not_found "$(cat "${VM_DELETE_ERR}")"; then
+        warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
+        VM_GONE=true
+        VM_NOT_FOUND=true
+      else
+        warn "GCE VM ${INSTANCE_NAME} could not be confirmed deleted: $(cat "${VM_DELETE_ERR}")"
+      fi
     else
       VM_LIST_ERR_FILE="$(mktemp)"
       # This list has no --zones, so it's a project-wide AggregatedList.
@@ -533,6 +550,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
       fi
       rm -f "${VM_LIST_ERR_FILE}"
     fi
+    rm -f "${VM_DELETE_ERR}"
 
     info "Deleting Cloud NAT..."
     NAT_DELETE_ERR="$(mktemp)"
@@ -606,6 +624,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
         fi
       else
         err "Keeping the hybrid-tier firewall rules and internal IP reservation because GCE VM ${INSTANCE_NAME} still exists; tcp:2049/8080 access and the reserved address stay in place. Re-run teardown after the VM is deleted."
+        HYBRID_RULES_DELETE_SKIP_REASON="VM not confirmed gone"
         TEARDOWN_HAD_FAILURE=true
       fi
     fi
@@ -626,6 +645,12 @@ if [[ "$DELETE_MODE" == "true" ]]; then
       fi
     fi
   else
+    # A hybrid-tier Kubernetes object failed to delete: nothing below
+    # this point ever ran, so any queued firewall rules and the internal
+    # IP reservation were never even attempted, not just kept after a
+    # failed attempt.
+    HYBRID_RULES_DELETE_SKIP_REASON="a hybrid-tier Kubernetes object failed to delete"
+    HYBRID_INTERNAL_IP_DELETE_SKIP_REASON="a hybrid-tier Kubernetes object failed to delete"
     TEARDOWN_HAD_FAILURE=true
   fi
 
@@ -685,8 +710,26 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   else
     echo "  Kept firewall rule:         ${FW_RULE_NAME}"
   fi
-  for name in ${HYBRID_TEARDOWN_DELETED[@]+"${HYBRID_TEARDOWN_DELETED[@]}"}; do
-    echo "  Deleted firewall rule:     ${name}"
+  for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
+    HYBRID_RULE_WAS_DELETED=false
+    for hd in ${HYBRID_TEARDOWN_DELETED[@]+"${HYBRID_TEARDOWN_DELETED[@]}"}; do
+      [[ "$hd" == "$name" ]] && HYBRID_RULE_WAS_DELETED=true
+    done
+    if [[ "$HYBRID_RULE_WAS_DELETED" == "true" ]]; then
+      echo "  Deleted firewall rule:      ${name}"
+      continue
+    fi
+    HYBRID_RULE_DELETE_FAILED=false
+    for hf in ${HYBRID_TEARDOWN_DELETE_FAILED[@]+"${HYBRID_TEARDOWN_DELETE_FAILED[@]}"}; do
+      [[ "$hf" == "$name" ]] && HYBRID_RULE_DELETE_FAILED=true
+    done
+    if [[ "$HYBRID_RULE_DELETE_FAILED" == "true" ]]; then
+      echo "  Kept firewall rule:         ${name} (delete failed, or not attempted after an earlier rule's delete failed)"
+    elif [[ -n "${HYBRID_RULES_DELETE_SKIP_REASON:-}" ]]; then
+      echo "  SKIPPED firewall rule:      ${name} (${HYBRID_RULES_DELETE_SKIP_REASON})"
+    else
+      echo "  Kept firewall rule:         ${name}"
+    fi
   done
   if [[ -n "${HYBRID_INTERNAL_IP_TEARDOWN_NAME:-}" ]]; then
     if [[ "${HYBRID_INTERNAL_IP_DELETED:-false}" == "true" ]]; then
@@ -1375,7 +1418,7 @@ fi
 # VPC; there is no other shape this tier supports. See hybrid_hub_url_
 # guard_verify's own comment for what this does and doesn't cover.
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
-  hybrid_hub_url_guard_verify "$HUB_NAME" "$PROJECT_ID" "$REGION"
+  hybrid_hub_url_guard_verify "$HUB_NAME" "$PROJECT_ID" "$REGION" "$INSTANCE_NAME" "$ZONE"
 fi
 
 # --- Wait for SSH readiness (avoids race on initial boot) ---

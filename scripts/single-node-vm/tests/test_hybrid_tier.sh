@@ -669,10 +669,10 @@ test_nfs_export_script_mounts_before_exporting() {
 test_nfs_export_script_stale_fstab_line_fails_instead_of_silently_trusting_it() {
   local script
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
-  assert_contains "$script" "grep -qF \"${HYBRID_NFS_IMAGE_PATH} \" /etc/fstab" \
-    "must first check whether any line already mentions the image path"
-  assert_contains "$script" "does not match the expected options; refusing to continue" \
-    "a pre-existing line for this image with different options must fail with a message, never be silently trusted or silently replaced"
+  assert_contains "$script" "grep -qxF \"${HYBRID_NFS_IMAGE_PATH} /srv/scion-shared ext4 loop,nofail" \
+    "must check for an exact, whole-line match of the expected fstab entry"
+  assert_contains "$script" "does not match the expected entry; refusing to continue" \
+    "a pre-existing line for the export root that doesn't match must fail with a message, never be silently trusted or silently replaced"
   assert_contains "$script" "Expected: ${HYBRID_NFS_IMAGE_PATH} /srv/scion-shared ext4 loop,nofail" \
     "the failure message must show the operator the exact line it expected"
 }
@@ -715,15 +715,16 @@ test_nfs_export_script_fstab_line_nofail_and_no_fsck() {
 test_nfs_export_script_fails_closed_when_not_mounted() {
   local script mount_check_line exit_line
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
-  # There must be a SECOND mountpoint check (the fail-closed guard, after
-  # the mount attempt) whose failure branch exits non-zero before the
+  # There must be THREE mountpoint checks: the pre-fallocate refusal
+  # check (K4), the before-mount check, and the fail-closed guard after
+  # the mount attempt -- whose failure branch exits non-zero before the
   # export root is ever chowned/chmoded or the exports file written.
-  assert_eq "2" "$(echo "$script" | grep -c 'mountpoint -q /srv/scion-shared')" \
-    "there must be both a before-mount check and a fail-closed check after attempting to mount"
+  assert_eq "3" "$(echo "$script" | grep -c 'mountpoint -q /srv/scion-shared')" \
+    "there must be the pre-fallocate refusal check, a before-mount check, and a fail-closed check after attempting to mount"
   mount_check_line="$(echo "$script" | grep -n 'mountpoint -q /srv/scion-shared' | tail -1 | cut -d: -f1)"
-  exit_line="$(echo "$script" | grep -n 'exit 1$' | head -1 | cut -d: -f1)"
+  exit_line="$(echo "$script" | grep -n 'is not a mountpoint after attempting to mount' | head -1 | cut -d: -f1)"
   assert_true "$([[ -n "$exit_line" && "$exit_line" -gt "$mount_check_line" ]] && echo true || echo false)" \
-    "the fail-closed exit must come after the second mountpoint check"
+    "the fail-closed exit must come after the last (post-mount) mountpoint check"
   local chown_line
   chown_line="$(echo "$script" | grep -n 'sudo chown scion:scion /srv/scion-shared' | head -1 | cut -d: -f1)"
   assert_true "$([[ "$exit_line" -lt "$chown_line" ]] && echo true || echo false)" \
@@ -740,8 +741,15 @@ test_nfs_export_script_fails_closed_when_not_mounted() {
 # a REAL absolute path on the machine running the tests (mkdir, install,
 # mkfs.ext4, fallocate, mount, mountpoint, systemctl, dpkg, apt-get,
 # exportfs, chown, chmod, tee, findmnt, losetup, and sudo itself) is
-# faked and put first on PATH; only `grep`'s own read of /etc/fstab is
-# left real, since that's read-only and safe everywhere this suite runs.
+# faked and put first on PATH. `grep` and `awk` are real (the script's
+# own FSTAB_PATH parameter, not a PATH trick, is what points its fstab
+# reads at a per-test fixture file instead of the real /etc/fstab --
+# see hybrid_nfs_export_script's own fstab_path parameter). `cat`
+# delegates to the real binary except for a read of the literal path
+# /etc/nfs.conf.d/scion-hub.conf, which is redirected to a per-test
+# fixture file (dir/.nfs-conf-existing, absent by default) so a test can
+# exercise the conditional-restart logic without touching the real
+# machine's file.
 # MOUNTED selects the `mountpoint`/`mount` fakes' behavior, tracked via
 # a marker file (dir/.mounted) rather than a fixed answer, so the two
 # checks the rendered script makes (before attempting to mount, and the
@@ -811,6 +819,9 @@ _setup_export_script_fakebins() {
     '  echo "Failed to get unit file state for ${u}: No such file or directory" >&2' \
     '  exit 1' \
     'fi' \
+    'if [ "$1" = "is-active" ]; then' \
+    "  [ -f \"${dir}/.nfs-server-active\" ] && exit 0 || exit 3" \
+    'fi' \
     'exit 0' \
     > "$dir/systemctl"
   printf '#!/bin/bash\necho "$*" >> "%s/exportfs.log"\nexit 0\n' "$dir" > "$dir/exportfs"
@@ -820,9 +831,43 @@ _setup_export_script_fakebins() {
   printf '#!/bin/bash\ncat >> "%s/tee.log"\n' "$dir" > "$dir/tee"
   printf '#!/bin/bash\necho "/dev/loop0"\n' > "$dir/findmnt"
   printf '#!/bin/bash\necho "%s"\n' "$back" > "$dir/losetup"
+  # Delegates to the real `cat` for everything except a read of
+  # /etc/nfs.conf.d/scion-hub.conf, redirected to a per-test fixture
+  # (absent by default, so every existing test -- which never seeds
+  # one -- sees "no prior config", matching this fake's own default of
+  # "restart always needed", the same as before this fake existed).
+  # shellcheck disable=SC2016 # writing a literal fake-binary script body, not expanding now
+  printf '%s\n' \
+    '#!/bin/bash' \
+    'if [ "$#" -eq 1 ] && [ "$1" = "/etc/nfs.conf.d/scion-hub.conf" ]; then' \
+    "  if [ -f \"${dir}/.nfs-conf-existing\" ]; then" \
+    "    exec /bin/cat \"${dir}/.nfs-conf-existing\"" \
+    '  else' \
+    '    exit 1' \
+    '  fi' \
+    'fi' \
+    'exec /bin/cat "$@"' \
+    > "$dir/cat"
   chmod +x "$dir"/mkfs.ext4 "$dir"/fallocate "$dir"/mountpoint "$dir"/mount "$dir"/mkdir "$dir"/install \
     "$dir"/dpkg "$dir"/apt-get "$dir"/systemctl "$dir"/exportfs "$dir"/chown "$dir"/chmod "$dir"/sudo "$dir"/tee \
-    "$dir"/findmnt "$dir"/losetup
+    "$dir"/findmnt "$dir"/losetup "$dir"/cat
+}
+
+# set_export_script_nfs_conf_existing DIR CONTENT — seeds the fake `cat`
+# (set up by _setup_export_script_fakebins above) to answer CONTENT for
+# a read of /etc/nfs.conf.d/scion-hub.conf, simulating a prior run
+# having already written it.
+set_export_script_nfs_conf_existing() {
+  local dir="$1" content="$2"
+  printf '%s' "$content" > "${dir}/.nfs-conf-existing"
+}
+
+# set_export_script_nfs_server_active DIR — the fake systemctl (set up
+# by _setup_export_script_fakebins above) answers `is-active nfs-server`
+# as active. Without this, it answers inactive, matching a fresh
+# install where the server was never started by this script.
+set_export_script_nfs_server_active() {
+  touch "${1}/.nfs-server-active"
 }
 
 test_probe_export_script_executed_fails_closed_when_never_mounts() {
@@ -838,6 +883,124 @@ test_probe_export_script_executed_fails_closed_when_never_mounts() {
     "must never write the exports file when the export root isn't actually mounted"
   assert_false "$([[ -f "${d}/exportfs.log" ]] && echo true)" \
     "must never call exportfs at all when the export root isn't actually mounted"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_refuses_existing_mount_from_other_source_before_fallocate() {
+  local d out rc script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  # mounted=true (so the pre-check's own `mountpoint -q` succeeds) with a
+  # MOUNT_BACK_OVERRIDE pointing away from image_path, simulating a
+  # manually provisioned layout already mounted at the export root from
+  # a different image entirely.
+  _setup_export_script_fakebins "$d" "true" "$image_path" "/var/lib/scion-nfs/export.img"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" \
+    "must refuse when the export root is already mounted from a different source"
+  assert_contains "$out" "not from the image this script manages" "error should explain why"
+  assert_false "$([[ -f "${d}/fallocate.log" ]] && echo true)" \
+    "must never allocate a second image on top of an existing, unrecognized layout"
+  assert_false "$([[ -f "${d}/mkfs.log" ]] && echo true)" \
+    "must never format anything before this refusal"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_refuses_fstab_line_for_export_root_with_different_device() {
+  local d out rc script image_path fake_fstab
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  fake_fstab="${d}/fstab"
+  _setup_export_script_fakebins "$d" "false" "$image_path"
+  printf '%s\n' "/var/lib/scion-nfs/export.img /srv/scion-shared ext4 loop,nofail 0 0" > "$fake_fstab"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20" "$fake_fstab")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" \
+    "must refuse when fstab already has a different device mounted at the export root"
+  assert_contains "$out" "does not match the expected entry" "error should explain why"
+  assert_false "$([[ -f "${d}/fallocate.log" ]] && echo true)" \
+    "must never allocate an image before this refusal"
+  assert_false "$([[ -f "${d}/mkfs.log" ]] && echo true)" \
+    "must never format anything before this refusal"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_refuses_stale_fstab_line_exact_match() {
+  local d out rc script image_path fake_fstab
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  fake_fstab="${d}/fstab"
+  _setup_export_script_fakebins "$d" "false" "$image_path"
+  # Same device and mountpoint, but missing nofail -- a substring match
+  # (the pre-fix grep -qF) would have accepted this as "already correct"
+  # since the expected line contains this one as a prefix; grep -qxF
+  # must not.
+  printf '%s\n' "${image_path} /srv/scion-shared ext4 loop 0 0" > "$fake_fstab"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20" "$fake_fstab")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" \
+    "a same-device fstab line with different options must fail exact-line matching, not be accepted as a prefix match"
+  assert_contains "$out" "does not match the expected entry" "error should explain why"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_ignores_commented_out_fstab_line() {
+  local d rc script image_path fake_fstab
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  fake_fstab="${d}/fstab"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  printf '%s\n' "# ${image_path} /srv/scion-shared ext4 loop,nofail,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 0" > "$fake_fstab"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20" "$fake_fstab")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1; rc=$?
+  assert_eq "0" "$rc" "a commented-out copy of the line must never be read as the real thing"
+  assert_true "$([[ -f "${d}/tee.log" ]] && grep -qF "${image_path} /srv/scion-shared ext4 loop,nofail" "${d}/tee.log" 2>/dev/null && echo true || echo false)" \
+    "the real fstab line must still be appended when only a commented copy exists"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_restarts_nfs_server_on_first_run() {
+  local d script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
+  assert_true "$([[ -f "${d}/systemctl.log" ]] && grep -qF "restart nfs-server" "${d}/systemctl.log" 2>/dev/null && echo true || echo false)" \
+    "the first run, with no prior config on disk, must restart to actually pick up v4.1/TCP-only"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_skips_restart_when_config_unchanged_and_already_active() {
+  local d script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  set_export_script_nfs_conf_existing "$d" "$(printf '[nfsd]\nvers2=n\nvers3=n\nvers4.0=n\nudp=n')"
+  set_export_script_nfs_server_active "$d"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
+  assert_false "$([[ -f "${d}/systemctl.log" ]] && grep -qF "restart nfs-server" "${d}/systemctl.log" 2>/dev/null && echo true)" \
+    "an unchanged config with an already-active server must not restart -- avoids an NFSv4 grace-period stall on every redeploy"
+  assert_true "$([[ -f "${d}/systemctl.log" ]] && grep -qF "enable nfs-server" "${d}/systemctl.log" 2>/dev/null && echo true || echo false)" \
+    "enable must still run even when restart is skipped"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_restarts_when_config_unchanged_but_not_confirmed_active() {
+  local d script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  set_export_script_nfs_conf_existing "$d" "$(printf '[nfsd]\nvers2=n\nvers3=n\nvers4.0=n\nudp=n')"
+  # Deliberately not calling set_export_script_nfs_server_active: an
+  # inconclusive "is it active" answer must fail closed toward
+  # restarting, not toward skipping it.
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
+  assert_true "$([[ -f "${d}/systemctl.log" ]] && grep -qF "restart nfs-server" "${d}/systemctl.log" 2>/dev/null && echo true || echo false)" \
+    "an unconfirmed-active server must still restart even with unchanged config -- fail closed toward restarting"
   rm -rf "$d"
 }
 
@@ -884,11 +1047,34 @@ test_probe_export_script_executed_refuses_wrong_mount_source() {
   local d out rc script image_path
   d="$(mktemp -d)"
   image_path="${d}/export.img"
+  # A pre-existing, already-mounted-elsewhere export root is now caught
+  # by the pre-fallocate refusal (K4), earlier than the post-mount
+  # fail-closed check this test originally targeted -- both checks use
+  # the same findmnt/losetup fakes, so this still exercises "mounted
+  # from the wrong source", just via the earlier of the two guards.
   _setup_export_script_fakebins "$d" "true" "$image_path" "/some/other/image.img"
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
   out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
   assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" \
     "must exit non-zero when the export root is mounted from something other than this image's loop device"
+  assert_contains "$out" "not from the image this script manages" "must explain why it refused"
+  assert_false "$([[ -f "${d}/tee.log" ]] && grep -q "scion-hub-demohub.exports" "${d}/tee.log" 2>/dev/null && echo true)" \
+    "must never write the exports file against the wrong mount"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_refuses_wrong_mount_source_after_fresh_mount() {
+  local d out rc script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  # Not mounted at start (so the K4 pre-check doesn't fire), but the
+  # `mount` fake's backing file doesn't match once it does mount --
+  # exercises the separate, post-mount fail-closed check specifically.
+  _setup_export_script_fakebins "$d" "becomes" "$image_path" "/some/other/image.img"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" \
+    "must exit non-zero when a freshly attempted mount comes up from the wrong source"
   assert_contains "$out" "not from the loop device backing" "must explain why it refused"
   assert_false "$([[ -f "${d}/tee.log" ]] && grep -q "scion-hub-demohub.exports" "${d}/tee.log" 2>/dev/null && echo true)" \
     "must never write the exports file against the wrong mount"
@@ -3086,6 +3272,16 @@ test_internal_ip_teardown_check_absent_is_inert() {
   assert_eq "false" "$HYBRID_INTERNAL_IP_TEARDOWN_FAILED" "an absent reservation must not fail the preflight"
 }
 
+test_internal_ip_teardown_check_list_failure_is_failure_not_absent() {
+  fresh_gcloud_state
+  set_address_list_will_fail "scion-hub-${HUB}-internal-ip"
+  hybrid_internal_ip_teardown_check "$HUB" "$PROJECT" "us-central1"
+  assert_eq "false" "$HYBRID_INTERNAL_IP_TEARDOWN_READY" \
+    "an unconfirmable list result must never be queued for delete, the same as a genuinely absent one, but for a different reason"
+  assert_eq "true" "$HYBRID_INTERNAL_IP_TEARDOWN_FAILED" \
+    "a failed list call must abort the whole teardown -- unknown must never be read as absent"
+}
+
 test_internal_ip_teardown_delete_when_vm_gone() {
   fresh_gcloud_state
   seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
@@ -3121,10 +3317,11 @@ test_hub_url_guard_verify_passes_when_everything_is_in_place() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
   GKE_POD_CIDR="10.52.0.0/14"
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
   seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
   seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
     "" "10.52.0.0/14" "$TARGET_TAG" "900"
-  assert_true "$(hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" && echo true || echo false)" \
+  assert_true "$(hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b" && echo true || echo false)" \
     "the guard must pass when the reservation is marked/matches the VM IP and the rule's source matches the pod CIDR"
 }
 
@@ -3132,10 +3329,11 @@ test_hub_url_guard_verify_fails_when_reservation_unmarked() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
   GKE_POD_CIDR="10.52.0.0/14"
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
   seed_address_unmarked "scion-hub-${HUB}-internal-ip" "10.128.0.5"
   seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
     "" "10.52.0.0/14" "$TARGET_TAG" "900"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "a reservation that no longer carries this deployment's marker must fail the guard"
   assert_contains "$RUN_OUTPUT" "no longer carries this deployment's marker" "error should explain why"
@@ -3145,23 +3343,41 @@ test_hub_url_guard_verify_fails_when_reservation_address_mismatches_vm_ip() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
   GKE_POD_CIDR="10.52.0.0/14"
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
   seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.99" "$MARKER"
   seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
     "" "10.52.0.0/14" "$TARGET_TAG" "900"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "a reservation whose address doesn't match the VM's resolved internal IP must fail the guard"
   assert_contains "$RUN_OUTPUT" "reach the wrong address" "error should explain why"
+}
+
+test_hub_url_guard_verify_fails_when_vm_actual_ip_diverges_even_if_hybrid_internal_ip_still_matches() {
+  fresh_gcloud_state
+  HYBRID_INTERNAL_IP="10.128.0.5"
+  GKE_POD_CIDR="10.52.0.0/14"
+  export GCLOUD_STUB_VM_IP="10.128.0.77"
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+    "" "10.52.0.0/14" "$TARGET_TAG" "900"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "the guard must catch the VM's real internal IP having diverged from the reservation, even when \$HYBRID_INTERNAL_IP (read earlier, from the reservation itself on the new-VM path) still equals it -- comparing against \$HYBRID_INTERNAL_IP alone could never catch this"
+  assert_contains "$RUN_OUTPUT" "reach the wrong address" "error should explain why"
+  unset GCLOUD_STUB_VM_IP
 }
 
 test_hub_url_guard_verify_fails_on_hub_allow_source_range_drift() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
   GKE_POD_CIDR="10.52.0.0/14"
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
   seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
   seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
     "" "0.0.0.0/0" "$TARGET_TAG" "900"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "a hub-allow rule whose source range no longer matches the discovered pod CIDR must fail the guard"
   assert_contains "$RUN_OUTPUT" "not the discovered pod CIDR" "error should explain why"
@@ -3170,7 +3386,7 @@ test_hub_url_guard_verify_fails_on_hub_allow_source_range_drift() {
 test_hub_url_guard_verify_fails_on_empty_internal_ip() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP=""
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an empty internal IP must fail the guard"
   assert_contains "$RUN_OUTPUT" "no valid internal IP is resolved" "error should explain why"
 }
@@ -3178,7 +3394,8 @@ test_hub_url_guard_verify_fails_on_empty_internal_ip() {
 test_hub_url_guard_verify_fails_when_reservation_missing() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a missing reservation must fail the guard"
   assert_contains "$RUN_OUTPUT" "could not be confirmed after create" "error should name the reservation"
 }
@@ -3186,8 +3403,9 @@ test_hub_url_guard_verify_fails_when_reservation_missing() {
 test_hub_url_guard_verify_fails_when_hub_allow_rule_missing() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
   seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a missing hub-allow rule must fail the guard"
   assert_contains "$RUN_OUTPUT" "$HUB_ALLOW_NAME" "error should name the missing rule"
 }

@@ -231,6 +231,14 @@ set_instance_delete_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/instances/$1.delete-fail"
 }
 
+# set_instance_delete_error_text NAME TEXT — used with
+# set_instance_delete_will_fail above: replaces the stub's generic
+# failure message with TEXT, so a test can distinguish a confirmed
+# not-found error from an ambiguous one (permission, API outage, etc.).
+set_instance_delete_error_text() {
+  printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/instances/$1.delete-fail-text"
+}
+
 # set_firewall_list_will_fail — the next `firewall-rules list` call (used
 # by hybrid_teardown_check) fails instead of returning a rule list.
 set_firewall_list_will_fail() {

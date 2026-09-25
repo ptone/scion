@@ -410,6 +410,16 @@ test_deploy_delete_internal_ip_unmarked_aborts_before_any_delete() {
     "no delete call of any kind should be logged before the abort"
 }
 
+test_deploy_delete_internal_ip_list_failure_aborts_before_any_delete() {
+  fresh_gcloud_state
+  set_address_list_will_fail "scion-hub-${HUB}-internal-ip"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "1" "$DEPLOY_RC" \
+    "an unconfirmable internal-IP reservation state must fail the teardown run, not be treated as absent"
+  assert_eq "0" "$(gcloud_log | grep -c ' delete' || true)" \
+    "no delete call of any kind should be logged before the abort"
+}
+
 test_deploy_delete_internal_ip_deleted_when_vm_already_gone() {
   fresh_gcloud_state
   seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.42" "scion-deployment=${HUB}"
@@ -791,6 +801,26 @@ test_deploy_delete_tier_off_vm_failure_warns_and_continues() {
   run_deploy_delete "$(base_config_json "$HUB")"
   assert_eq "0" "$DEPLOY_RC" \
     "with no hybrid rules queued, a VM delete failure must warn and continue exactly as before this tier existed"
+  # The stub's generic "simulated delete failure" text carries none of
+  # _hybrid_gcloud_not_found's required tokens, so this must be classified
+  # as an unconfirmed failure (Kept), not misreported as a positive
+  # not-found -- the fake VM is still "present" in the stub's own state.
+  assert_contains "$DEPLOY_LOG" "  Kept GCE VM:                ${INSTANCE_NAME}" \
+    "a VM delete failure that isn't a confirmed not-found must be reported as Kept, not Not found"
+  assert_not_contains "$DEPLOY_LOG" "Not found GCE VM" \
+    "must never claim the VM is gone from an ambiguous delete error alone"
+}
+
+test_deploy_delete_tier_off_vm_not_found_error_reports_not_found() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  set_instance_delete_will_fail "$INSTANCE_NAME"
+  set_instance_delete_error_text "$INSTANCE_NAME" \
+    "ERROR: (gcloud.compute.instances.delete) Could not fetch resource: - The resource 'projects/x/zones/us-central1-b/instances/${INSTANCE_NAME}' was not found (code=404)"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "0" "$DEPLOY_RC" "a confirmed not-found VM delete error must still warn and continue"
+  assert_contains "$DEPLOY_LOG" "Not found GCE VM:           ${INSTANCE_NAME}" \
+    "a delete error that is a positive not-found must still be reported as Not found"
 }
 
 # =====================================================================
@@ -971,6 +1001,63 @@ test_deploy_delete_k8s_delete_failure_stops_all_downstream_deletes() {
     "Cloud Run must not be deleted when a hybrid-tier Kubernetes object failed to delete"
   assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules delete' || true)" \
     "no firewall rule may be deleted when a hybrid-tier Kubernetes object failed to delete"
+}
+
+test_deploy_delete_k8s_failure_reports_hybrid_resources_skipped_not_kept() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_k8s_pvc "$K8S_PVC_D" "$K8S_NS_D" "$HUB" "$K8S_PV_D"
+  seed_k8s_pv "$K8S_PV_D" "$HUB" "10.128.0.5" "/srv/scion-shared" "$K8S_NS_D" "$K8S_PVC_D"
+  seed_k8s_namespace "$K8S_NS_D" "$HUB"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-allow" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "ALLOW" "tcp" "2049" "gke-x-node" "" "scion-hub-${HUB}-nfs" "900"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-deny" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "DENY" "tcp" "2049" "" "0.0.0.0/0" "scion-hub-${HUB}-nfs" "950"
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.42" "scion-deployment=${HUB}"
+  set_k8s_delete_will_fail "pvc" "${K8S_NS_D}__${K8S_PVC_D}"
+  run_deploy_delete "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  assert_eq "1" "$DEPLOY_RC" "a kubectl delete failure must fail the whole teardown"
+  assert_contains "$DEPLOY_LOG" "SKIPPED firewall rule:      scion-hub-${HUB}-nfs-allow (a hybrid-tier Kubernetes object failed to delete)" \
+    "a hybrid firewall rule never attempted because k8s failed first must be reported SKIPPED, not Kept"
+  assert_contains "$DEPLOY_LOG" "SKIPPED firewall rule:      scion-hub-${HUB}-nfs-deny (a hybrid-tier Kubernetes object failed to delete)" \
+    "the deny rule must be reported the same way"
+  assert_contains "$DEPLOY_LOG" "SKIPPED internal IP:       scion-hub-${HUB}-internal-ip (a hybrid-tier Kubernetes object failed to delete)" \
+    "the internal IP reservation must be reported SKIPPED, not Kept (delete failed: unknown error), when it was never attempted"
+  assert_not_contains "$DEPLOY_LOG" "Kept internal IP" \
+    "must never claim a delete was attempted and failed when it was never attempted at all"
+}
+
+test_deploy_delete_vm_not_gone_reports_hybrid_rules_skipped() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  set_instance_delete_will_fail "$INSTANCE_NAME"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-allow" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "ALLOW" "tcp" "2049" "gke-x-node" "" "scion-hub-${HUB}-nfs" "900"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-deny" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "DENY" "tcp" "2049" "" "0.0.0.0/0" "scion-hub-${HUB}-nfs" "950"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "1" "$DEPLOY_RC" "a VM delete failure must fail the whole teardown"
+  assert_contains "$DEPLOY_LOG" "SKIPPED firewall rule:      scion-hub-${HUB}-nfs-allow (VM not confirmed gone)" \
+    "a hybrid rule never attempted because the VM isn't confirmed gone must be reported SKIPPED, not Kept"
+  assert_contains "$DEPLOY_LOG" "SKIPPED firewall rule:      scion-hub-${HUB}-nfs-deny (VM not confirmed gone)" \
+    "the deny rule must be reported the same way"
+}
+
+test_deploy_delete_hybrid_rule_delete_failure_reports_downstream_rule_kept() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-allow" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "ALLOW" "tcp" "2049" "gke-x-node" "" "scion-hub-${HUB}-nfs" "900"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-deny" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "DENY" "tcp" "2049" "" "0.0.0.0/0" "scion-hub-${HUB}-nfs" "950"
+  set_firewall_delete_will_fail "scion-hub-${HUB}-nfs-allow"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "1" "$DEPLOY_RC" "a hybrid firewall rule delete failure must fail the whole teardown"
+  assert_contains "$DEPLOY_LOG" "Kept firewall rule:         scion-hub-${HUB}-nfs-allow (delete failed, or not attempted after an earlier rule's delete failed)" \
+    "the rule whose delete actually failed must be reported Kept"
+  assert_contains "$DEPLOY_LOG" "Kept firewall rule:         scion-hub-${HUB}-nfs-deny (delete failed, or not attempted after an earlier rule's delete failed)" \
+    "the deny rule, never attempted because the allow rule ahead of it failed, must also be reported Kept, not silently dropped from the summary"
 }
 
 test_deploy_delete_k8s_deletes_precede_vm_delete() {

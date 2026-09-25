@@ -733,13 +733,21 @@ SCRIPT
 #      are off), verifying the mask actually took rather than assuming
 #      it did, writes this hub's own file under /etc/exports.d/ (using
 #      hybrid_nfs_export_line for the rendered line, so the two stay in
-#      sync), re-exports, and enables and restarts the server under its
-#      canonical unit name (nfs-server; nfs-kernel-server is only the
-#      Debian/Ubuntu package name) -- a restart, not just enable --now,
-#      because apt's postinst already started the server with the
-#      stock config before this script's own /etc/nfs.conf.d write, so
-#      enable --now alone would be a no-op against an already-running
-#      unit and leave v2/v3/UDP live until the next reboot.
+#      sync), re-exports, and enables the server under its canonical
+#      unit name (nfs-server; nfs-kernel-server is only the Debian/
+#      Ubuntu package name). A restart -- not just enable --now, which
+#      would be a no-op against an already-running unit -- only happens
+#      when it's actually needed: either this is the first time
+#      /etc/nfs.conf.d/scion-hub.conf has this exact content (apt's
+#      postinst already started the server with the stock v2/v3/UDP-
+#      enabled config before this script's write, so the very first
+#      run must restart to pick up v4.1/TCP-only), or nfs-server isn't
+#      confirmed already active. Every later re-run with unchanged
+#      content and a confirmed-active server leaves it running
+#      untouched, avoiding an NFSv4 grace-period stall (during which
+#      GKE clients can't reclaim or open new state) on every redeploy.
+#      Fails closed toward restarting: an inconclusive "is it active"
+#      check is treated the same as "not active".
 # Always rewrites the exports file and re-exports, which is how the
 # export picks up a changed CIDR on re-run with no separate drift
 # detection needed. Pure string rendering -- no gcloud or SSH calls --
@@ -748,7 +756,7 @@ SCRIPT
 # has already run.
 hybrid_nfs_export_script() {
   local export_root="$1" cidr="$2" anonuid="$3" anongid="$4" fsid="$5" hub_name="$6" \
-    image_path="$7" image_size_gb="$8"
+    image_path="$7" image_size_gb="$8" fstab_path="${9:-/etc/fstab}"
   local export_line image_dir
   export_line="$(hybrid_nfs_export_line "$export_root" "$cidr" "$anonuid" "$anongid" "$fsid")"
   image_dir="$(dirname "$image_path")"
@@ -756,17 +764,36 @@ hybrid_nfs_export_script() {
   cat <<SCRIPT
 set -euo pipefail
 sudo mkdir -p ${image_dir}
+# Refuse before touching anything -- no fallocate, no mkfs, no fstab
+# write -- if EXPORT_ROOT is already in use by a layout this script
+# doesn't manage: a pre-existing mount from a different source (for
+# example a manually provisioned image at another path), or an existing
+# fstab line for EXPORT_ROOT that isn't exactly this one. Checking this
+# first means a manually created layout is refused outright instead of
+# silently getting a second image allocated and a second fstab line
+# appended alongside it, only to fail later at the mount-source check.
+if mountpoint -q ${export_root}; then
+  existing_src="\$(findmnt -n -o SOURCE --mountpoint ${export_root} 2>/dev/null || true)"
+  existing_back="\$(losetup -n -O BACK-FILE "\$existing_src" 2>/dev/null || true)"
+  if [ "\$existing_back" != "${image_path}" ]; then
+    echo "${export_root} is already mounted (source: \${existing_src:-<unknown>}, backing file: \${existing_back:-<none>}), not from the image this script manages (${image_path}); refusing to continue on top of an existing layout it doesn't recognize." >&2
+    exit 1
+  fi
+fi
+if grep -qxF "${fstab_line}" ${fstab_path} 2>/dev/null; then
+  : # fstab already has exactly the expected line; nothing to add.
+elif awk -v mp="${export_root}" '\$2 == mp { found=1 } END { exit !found }' ${fstab_path} 2>/dev/null; then
+  echo "${fstab_path} already has a line for ${export_root} that does not match the expected entry; refusing to continue. Expected: ${fstab_line}" >&2
+  exit 1
+else
+  echo "${fstab_line}" | sudo tee -a ${fstab_path} > /dev/null
+  sudo systemctl daemon-reload
+fi
 if [ ! -e ${image_path} ]; then
   sudo fallocate -l ${image_size_gb}G ${image_path} || { sudo rm -f ${image_path}; echo "could not reserve ${image_size_gb}G for ${image_path} (insufficient disk space?); refusing to continue" >&2; exit 1; }
   sudo mkfs.ext4 -F -q ${image_path}
 fi
 sudo mkdir -p ${export_root}
-if grep -qF "${image_path} " /etc/fstab; then
-  grep -qF "${fstab_line}" /etc/fstab || { echo "/etc/fstab already has a line for ${image_path} that does not match the expected options; refusing to continue. Expected: ${fstab_line}" >&2; exit 1; }
-else
-  echo "${fstab_line}" | sudo tee -a /etc/fstab > /dev/null
-  sudo systemctl daemon-reload
-fi
 if ! mountpoint -q ${export_root}; then
   sudo mount ${export_root}
 fi
@@ -794,19 +821,28 @@ if ! dpkg -s nfs-kernel-server >/dev/null 2>&1; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nfs-kernel-server
 fi
 sudo install -d -m 0755 /etc/nfs.conf.d
-cat <<'NFSCONF' | sudo tee /etc/nfs.conf.d/scion-hub.conf > /dev/null
+NFS_CONF_CONTENT="\$(cat <<'NFSCONF'
 [nfsd]
 vers2=n
 vers3=n
 vers4.0=n
 udp=n
 NFSCONF
+)"
+NFS_CONF_EXISTING="\$(cat /etc/nfs.conf.d/scion-hub.conf 2>/dev/null || true)"
+NFS_CONF_NEEDS_RESTART=true
+if [ "\$NFS_CONF_EXISTING" = "\$NFS_CONF_CONTENT" ]; then
+  NFS_CONF_NEEDS_RESTART=false
+fi
+echo "\$NFS_CONF_CONTENT" | sudo tee /etc/nfs.conf.d/scion-hub.conf > /dev/null
 sudo systemctl mask --now rpcbind.service rpcbind.socket
 [ "\$(systemctl is-enabled rpcbind.socket 2>/dev/null || true)" = masked ] || { echo "rpcbind.socket did not mask; refusing to continue" >&2; exit 1; }
 echo '${export_line}' | sudo tee /etc/exports.d/scion-hub-${hub_name}.exports > /dev/null
 sudo exportfs -ra
 sudo systemctl enable nfs-server
-sudo systemctl restart nfs-server
+if [ "\$NFS_CONF_NEEDS_RESTART" = "true" ] || ! systemctl is-active --quiet nfs-server; then
+  sudo systemctl restart nfs-server
+fi
 echo 'NFS export configured.'
 SCRIPT
 }
@@ -1624,7 +1660,7 @@ hybrid_internal_ip_teardown_delete() {
   rm -f "${delete_err}"
 }
 
-# hybrid_hub_url_guard_verify HUB_NAME PROJECT_ID REGION
+# hybrid_hub_url_guard_verify HUB_NAME PROJECT_ID REGION INSTANCE_NAME ZONE
 #
 # The hub URL guard's post-create half: GKE agent pods reach the hub at
 # http://<internal-ip>:8080 over the VPC, and that is the ONLY shape
@@ -1634,20 +1670,31 @@ hybrid_internal_ip_teardown_delete() {
 # pod CIDR reach tcp:8080) must actually be confirmed in place once
 # everything above has run. Confirming "in place" means more than the
 # resource merely existing: the reservation must still carry this
-# deployment's marker and its address must equal the VM's resolved
-# internal IP (not some other, unrelated reservation that happens to
-# share the expected name), and the firewall rule's source range must
-# equal the discovered pod CIDR (not a wider range that would either
-# under- or over-admit pods). The guard's other half -- refusing before
-# any create if the pod CIDR can't be discovered, or if the internal-IP
-# reservation itself can't be resolved -- already happens by
-# construction: hybrid_discover and hybrid_ensure_internal_ip_*
-# above both exit non-zero on their own failures, before this ever
-# runs. Fails loudly, naming exactly which piece is missing or wrong.
+# deployment's marker and its address must equal the VM's OWN, freshly
+# re-described networkInterfaces[0].networkIP -- not $HYBRID_INTERNAL_IP,
+# which on the new-VM path was itself read from this same reservation
+# earlier and so can't catch the reservation and the VM ever having
+# actually diverged -- and the firewall rule's source range must equal
+# the discovered pod CIDR (not a wider range that would either under- or
+# over-admit pods). The guard's other half -- refusing before any create
+# if the pod CIDR can't be discovered, or if the internal-IP reservation
+# itself can't be resolved -- already happens by construction:
+# hybrid_discover and hybrid_ensure_internal_ip_* above both exit
+# non-zero on their own failures, before this ever runs. Fails loudly,
+# naming exactly which piece is missing or wrong.
 hybrid_hub_url_guard_verify() {
-  local hub_name="$1" project_id="$2" region="$3"
+  local hub_name="$1" project_id="$2" region="$3" instance_name="$4" zone="$5"
   if [[ -z "${HYBRID_INTERNAL_IP:-}" ]] || ! [[ "$HYBRID_INTERNAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     err "Hub URL guard: no valid internal IP is resolved for hub ${hub_name} (got '${HYBRID_INTERNAL_IP:-}'). GKE agent pods would have no way to reach the hub."
+    exit 1
+  fi
+
+  local vm_ip
+  vm_ip="$(gcloud compute instances describe "$instance_name" \
+    --zone="$zone" --project="$project_id" \
+    --format="get(networkInterfaces[0].networkIP)" 2>/dev/null)"
+  if [[ -z "$vm_ip" ]]; then
+    err "Hub URL guard: could not re-describe VM ${instance_name} to confirm its actual internal IP."
     exit 1
   fi
 
@@ -1664,8 +1711,8 @@ hybrid_hub_url_guard_verify() {
     err "Hub URL guard: internal IP reservation ${ip_name} no longer carries this deployment's marker (found: '${addr_marker}')."
     exit 1
   fi
-  if [[ "$addr_value" != "$HYBRID_INTERNAL_IP" ]]; then
-    err "Hub URL guard: internal IP reservation ${ip_name} is ${addr_value}, but the VM's resolved internal IP is ${HYBRID_INTERNAL_IP}. GKE agent pods would reach the wrong address."
+  if [[ "$addr_value" != "$vm_ip" ]]; then
+    err "Hub URL guard: internal IP reservation ${ip_name} is ${addr_value}, but VM ${instance_name}'s actual internal IP is ${vm_ip}. GKE agent pods would reach the wrong address."
     exit 1
   fi
 
