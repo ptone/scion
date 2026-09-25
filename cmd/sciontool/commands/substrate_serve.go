@@ -155,8 +155,10 @@ var defaultSubstrateHarnessCwdDeps = substrateHarnessCwdDeps{
 //     absolute) if it and every ancestor directory are searchable by the
 //     scion uid/gid.
 //  2. The scion user's own home directory (lookupUser("scion").HomeDir —
-//     the same value supervisor.Run sets as the child's HOME), under the
-//     same check. This package never reads substrate-serve's own $HOME.
+//     normally equal to the HOME supervisor.Run sets, though supervisor
+//     derives that value independently as "/home/"+Username rather than
+//     from this same lookup), under the same check. This package never
+//     reads substrate-serve's own $HOME.
 //  3. Neither usable: an error naming every candidate tried (quoted path
 //     and reason) and the uid they were checked for — nothing else. This
 //     never returns "/" and never leaves cmd.Dir to inherit this process's
@@ -220,9 +222,9 @@ func resolveSubstrateHarnessCwd(d substrateHarnessCwdDeps) (string, error) {
 // uid. candidate is filepath.Clean'd first, so a non-canonical spelling
 // (e.g. "/.", "//", or "/tmp/..") can't slip past the "never '/'" guard —
 // parentDirs already cleans its own output, so an uncleaned candidate could
-// previously reach that guard already reduced to "/" and pass it. The
-// cleaned value is what dirsSearchable is walked against; candidate itself
-// is never "/" after cleaning.
+// reach that guard already reduced to "/" and pass it. The cleaned value is
+// what dirsSearchable is walked against; candidate itself is never "/"
+// after cleaning.
 //
 // candidate must also be absolute. resolveSubstrateHarnessCwd's own switch
 // already rejects a non-absolute SCION_WORKSPACE_PATH before ever calling
@@ -234,7 +236,7 @@ func resolveSubstrateHarnessCwd(d substrateHarnessCwdDeps) (string, error) {
 // substrate-serve's OWN process cwd at chdir time (typically "/" for a
 // container's PID 1 before any WORKDIR is applied), so this is a second
 // "never '/'" vector, distinct from a literal "/" or a symlink resolving to
-// it, and closed here at the same choke point (sb-dev-cwd-r4 self-audit).
+// it, and closed here at the same choke point.
 //
 // stat(dir) follows the final symlink in dir, but says nothing about a
 // symlink's target's own ancestors — a candidate that is itself a symlink
@@ -264,7 +266,7 @@ func dirUsableForScion(d substrateHarnessCwdDeps, candidate string, uid, gid uin
 
 	real, err := d.evalSymlinks(candidate)
 	if err != nil {
-		return false, fmt.Sprintf("cannot resolve symlinks: %v", err)
+		return false, fmt.Sprintf("cannot resolve symlinks: %q", err.Error())
 	}
 	// A candidate that is itself fine lexically (never "/", per the guard
 	// above) can still be a symlink chain that resolves to "/" — e.g.
@@ -273,8 +275,7 @@ func dirUsableForScion(d substrateHarnessCwdDeps, candidate string, uid, gid uin
 	// without this check dirsSearchable below would happily approve it, and
 	// the caller would return the logical candidate while its EFFECTIVE cwd
 	// (what chdir/PWD would actually resolve through) is "/" — exactly the
-	// "never /" constraint this whole resolver exists to uphold (sb-dev-cwd
-	// end amendment; sb-dev-cwd-r4, R2).
+	// "never /" constraint this whole resolver exists to uphold.
 	if real == "/" {
 		return false, "resolves to /"
 	}
@@ -365,6 +366,38 @@ var startupRootfsFixup = fixupRootfsForScionUser
 // touching a real rootfs.
 var bootstrapRootfsFixup = fixupRootfsForScionUser
 
+// substrateServeInitRunner builds the substrate.InitRunner that resolves the
+// harness working directory and then delegates to runInit. Extracted from
+// newSubstrateServeServer so a test can drive it directly — including the
+// no-usable-cwd path, which must return exitCodeNoUsableHarnessCwd rather
+// than delegate to runInit at all — without standing up a Server.
+//
+// The init runner's own exit code is deliberately not acted on here beyond
+// what WithInitRunner's caller (handleBootstrap) already does (log it,
+// flip healthz to StateInitFailed) — substrate-serve does not exit the
+// process on a non-zero init. See StateInitFailed's doc comment for why:
+// Substrate does not observe a PID 1 exit as a failure signal at all, so
+// exiting would only lose the control server (and exec-based diagnosis)
+// for no compensating benefit.
+func substrateServeInitRunner(runInit func(argv []string, opts InitRunOptions) int) substrate.InitRunner {
+	return func(argv []string, forwardTermSignal bool) int {
+		opts, err := substrateServeInitOptions(forwardTermSignal)
+		if err != nil {
+			// Fail the harness start (see resolveSubstrateHarnessCwd's
+			// doc comment): never invoke runInit with no usable
+			// WorkingDir. Logged in full (paths + uid only, no
+			// secrets); the exit code alone flips healthz to
+			// StateInitFailed the same way any other init failure does,
+			// and substrateServeReportCwdFailure gives the Hub the same
+			// direct report RunInit's own failure paths would.
+			log.Error("substrate-serve: %v", err)
+			substrateServeReportCwdFailure(defaultSubstrateHarnessCwdDeps, err)
+			return exitCodeNoUsableHarnessCwd
+		}
+		return runInit(argv, opts)
+	}
+}
+
 // newSubstrateServeServer builds the *substrate.Server substrate-serve
 // mounts, wiring both the init runner and the privilege-drop precondition
 // (see PrivilegeDropChecker's doc comment). Extracted so a test can drive
@@ -380,34 +413,11 @@ var bootstrapRootfsFixup = fixupRootfsForScionUser
 // real agent-info.json, which is exactly what happened before this was
 // parameterized: bootstrap wrongly returning 200 under that mutation drove
 // the real RunInit for real, in-process.
-//
-// The init runner's own exit code is deliberately not acted on here beyond
-// what WithInitRunner's caller (handleBootstrap) already does (log it,
-// flip healthz to StateInitFailed) — substrate-serve does not exit the
-// process on a non-zero init. See StateInitFailed's doc comment for why:
-// Substrate does not observe a PID 1 exit as a failure signal at all, so
-// exiting would only lose the control server (and exec-based diagnosis)
-// for no compensating benefit.
 func newSubstrateServeServer(runInit func(argv []string, opts InitRunOptions) int) *substrate.Server {
 	return substrate.NewServer(
 		substrate.WithPrivilegeDropChecker(substrateServePrivilegeDropChecker),
 		substrate.WithRootfsFixup(substrateServeRootfsFixup),
-		substrate.WithInitRunner(func(argv []string, forwardTermSignal bool) int {
-			opts, err := substrateServeInitOptions(forwardTermSignal)
-			if err != nil {
-				// Fail the harness start (see resolveSubstrateHarnessCwd's
-				// doc comment): never invoke runInit with no usable
-				// WorkingDir. Logged in full (paths + uid only, no
-				// secrets); the exit code alone flips healthz to
-				// StateInitFailed the same way any other init failure does,
-				// and substrateServeReportCwdFailure gives the Hub the same
-				// direct report RunInit's own failure paths would.
-				log.Error("substrate-serve: %v", err)
-				substrateServeReportCwdFailure(defaultSubstrateHarnessCwdDeps, err)
-				return exitCodeNoUsableHarnessCwd
-			}
-			return runInit(argv, opts)
-		}),
+		substrate.WithInitRunner(substrateServeInitRunner(runInit)),
 	)
 }
 

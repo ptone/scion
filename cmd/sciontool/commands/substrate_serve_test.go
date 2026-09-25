@@ -447,10 +447,12 @@ func TestSubstrateServeBootstrap_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs
 
 // -----------------------------------------------------------------------
 // resolveSubstrateHarnessCwd / InitRunOptions.WorkingDir wiring
-// (sb-dev-cwd: the harness process tree must not start at cmd.Dir="/".
-// sb-dev-cwd-r2: the fallback must resolve the SCION uid's home, not
-// substrate-serve's own root $HOME, and every candidate must be verified
-// searchable by the scion uid/gid, not just stat-able by root.)
+//
+// Invariants covered: the harness process tree must never start at
+// cmd.Dir="/". The fallback must resolve the scion uid's own home, not
+// substrate-serve's own root $HOME, and every candidate — workspace and
+// fallback alike — must be verified searchable by the scion uid/gid, not
+// just stat-able by root.
 // -----------------------------------------------------------------------
 
 // fakeScionUserForHarnessCwd is resolveSubstrateHarnessCwd tests' shared
@@ -476,7 +478,7 @@ func fakeSubstrateHarnessCwdDeps(env map[string]string, leafDirs map[string]fs.F
 		// or "/tmp/.." must reach this fake exactly as the real filesystem
 		// would see it, or a test relying on production's own
 		// filepath.Clean would pass vacuously whether or not that Clean
-		// call is actually there (sb-dev-cwd-r4, R1).
+		// call is actually there.
 		stat: func(p string) (os.FileInfo, error) {
 			clean := filepath.Clean(p)
 			switch clean {
@@ -538,14 +540,13 @@ func TestResolveSubstrateHarnessCwd_DefaultsWorkspacePath(t *testing.T) {
 }
 
 // TestResolveSubstrateHarnessCwd_IgnoresAmbientHOMEWhenUnset and
-// TestResolveSubstrateHarnessCwd_IgnoresAmbientHOMEWhenRoot are R1's
-// regression tests: substrate-serve's own $HOME (root's — e.g. "/root", the
+// TestResolveSubstrateHarnessCwd_IgnoresAmbientHOMEWhenRoot guard the
+// invariant that substrate-serve's own $HOME (root's — e.g. "/root", the
 // usual container-runtime default for uid 0 — or unset) must never be
 // consulted at all. The fallback is always the scion user's real home from
 // lookupUser("scion"), independent of $HOME. "/root" is deliberately also
-// stat-able here (and would satisfy the old, buggy code's checks) so a
-// regression that reads $HOME again would make this test observe "/root"
-// instead of "/home/scion" and fail.
+// stat-able here so a regression that reads $HOME again would make this
+// test observe "/root" instead of "/home/scion" and fail.
 func TestResolveSubstrateHarnessCwd_IgnoresAmbientHOMEWhenUnset(t *testing.T) {
 	d := fakeSubstrateHarnessCwdDeps(
 		map[string]string{}, // HOME unset; SCION_WORKSPACE_PATH unset -> default, deliberately absent below
@@ -575,11 +576,11 @@ func TestResolveSubstrateHarnessCwd_IgnoresAmbientHOMEWhenRoot(t *testing.T) {
 }
 
 // TestResolveSubstrateHarnessCwd_FallsBackWhenWorkspaceNotSearchableByScionUID
-// is R1's core bug: a workspace directory that stats fine (as root, the uid
-// resolveSubstrateHarnessCwd itself runs as) but is not searchable by the
-// scion uid/gid — here, owned by root, mode 0700 — must NOT be chosen,
-// because supervisor.Run's chdir happens AFTER the credential drop to the
-// scion uid.
+// guards the core invariant: a workspace directory that stats fine (as
+// root, the uid resolveSubstrateHarnessCwd itself runs as) but is not
+// searchable by the scion uid/gid — here, owned by root, mode 0700 — must
+// NOT be chosen, because supervisor.Run's chdir happens AFTER the
+// credential drop to the scion uid.
 func TestResolveSubstrateHarnessCwd_FallsBackWhenWorkspaceNotSearchableByScionUID(t *testing.T) {
 	rootOnly := fakeFileInfo{mode: fs.ModeDir | 0o700, uid: 0, gid: 0}
 	d := fakeSubstrateHarnessCwdDeps(
@@ -613,8 +614,8 @@ func TestResolveSubstrateHarnessCwd_FallsBackWhenWorkspaceIsAFile(t *testing.T) 
 	}
 }
 
-// TestResolveSubstrateHarnessCwd_RejectsNonAbsoluteWorkspacePath is the
-// "also take" item: a relative SCION_WORKSPACE_PATH is stat'd (and would
+// TestResolveSubstrateHarnessCwd_RejectsNonAbsoluteWorkspacePath guards the
+// invariant that a relative SCION_WORKSPACE_PATH is stat'd (and would
 // resolve) relative to substrate-serve's own cwd, which won't match a trust
 // entry — so it must be rejected and treated the same as "unusable",
 // falling through to the scion home.
@@ -655,13 +656,13 @@ func TestResolveSubstrateHarnessCwd_NeverFallsBackToRoot(t *testing.T) {
 	}
 }
 
-// TestResolveSubstrateHarnessCwd_CanonicalisesNonCanonicalRootSpellings is
-// the canonicalisation Optional from round 2: dirUsableForScion's "never
-// '/'" guard used to be a plain string comparison, and parentDirs already
-// cleans its own output, so a candidate that is merely a non-canonical
-// spelling of "/" reached the guard already reduced to "/" and slipped
-// through it. Every spelling below is lexically "/" and must still be
-// refused, whether it arrives via SCION_WORKSPACE_PATH...
+// TestResolveSubstrateHarnessCwd_CanonicalisesNonCanonicalRootSpellings
+// guards dirUsableForScion's "never '/'" check against a plain string
+// comparison against "/": parentDirs already cleans its own output, so a
+// candidate that is merely a non-canonical spelling of "/" would reach the
+// guard already reduced to "/" and slip through it if the guard itself
+// didn't clean candidate first. Every spelling below is lexically "/" and
+// must still be refused, whether it arrives via SCION_WORKSPACE_PATH...
 func TestResolveSubstrateHarnessCwd_CanonicalisesNonCanonicalRootSpellings(t *testing.T) {
 	for _, spelling := range []string{"/.", "//", "/tmp/.."} {
 		t.Run(spelling, func(t *testing.T) {
@@ -722,7 +723,7 @@ func TestResolveSubstrateHarnessCwd_ReturnsCanonicalPath(t *testing.T) {
 }
 
 // TestResolveSubstrateHarnessCwd_FallsBackWhenSymlinkTargetParentUnsearchable
-// is the symlink-target Optional from round 2: a candidate that is itself a
+// guards the symlink-target invariant: a candidate that is itself a
 // symlink can pass the lexical ancestor walk — stat follows the final
 // symlink, and a root process's plain stat succeeds regardless of the
 // target's own ancestor permissions — while its resolved target sits behind
@@ -759,9 +760,9 @@ func TestResolveSubstrateHarnessCwd_FallsBackWhenSymlinkTargetParentUnsearchable
 	}
 }
 
-// TestResolveSubstrateHarnessCwd_SymlinkResolvingToRoot_Rejected is O1's
-// sibling in the fake-deps suite (sb-dev-cwd-r4, R2): a candidate whose
-// EvalSymlinks target is exactly "/" must be rejected outright, even though
+// TestResolveSubstrateHarnessCwd_SymlinkResolvingToRoot_Rejected is the
+// fake-deps counterpart guarding: a candidate whose EvalSymlinks target is
+// exactly "/" must be rejected outright, even though
 // "/" is always searchable and would otherwise pass the resolved-chain walk
 // trivially (no ancestors to check). See
 // TestResolveSubstrateHarnessCwd_EffectiveCwd_SymlinkedWorkspaceResolvingToRoot_FallsBack
@@ -786,10 +787,10 @@ func TestResolveSubstrateHarnessCwd_SymlinkResolvingToRoot_Rejected(t *testing.T
 	}
 }
 
-// TestResolveSubstrateHarnessCwd_EvalSymlinksError_MakesCandidateUnusable is
-// O1: dirUsableForScion's EvalSymlinks error path (a broken link, a cycle,
-// ...) must reject the candidate with that error as the reason, never treat
-// an error as if it were success. evalSymlinks deliberately returns the
+// TestResolveSubstrateHarnessCwd_EvalSymlinksError_MakesCandidateUnusable
+// guards dirUsableForScion's EvalSymlinks error path (a broken link, a
+// cycle, ...): it must reject the candidate with that error as the reason,
+// never treat an error as if it were success. evalSymlinks deliberately returns the
 // candidate ITSELF alongside the error (not "" or some other path): that
 // makes "real != candidate" false regardless of the error, so a mutant that
 // stops checking err (e.g. `real, _ := d.evalSymlinks(candidate)`) sees
@@ -816,16 +817,16 @@ func TestResolveSubstrateHarnessCwd_EvalSymlinksError_MakesCandidateUnusable(t *
 	}
 }
 
-// TestResolveSubstrateHarnessCwd_RejectsNonAbsoluteHomeDir is the sb-dev-cwd-r4
-// self-audit's own finding: unlike SCION_WORKSPACE_PATH (rejected by
+// TestResolveSubstrateHarnessCwd_RejectsNonAbsoluteHomeDir guards the
+// invariant that, unlike SCION_WORKSPACE_PATH (rejected by
 // resolveSubstrateHarnessCwd's own switch before it ever reaches
-// dirUsableForScion), scionUser.HomeDir was never checked for being
+// dirUsableForScion), scionUser.HomeDir must also be checked for being
 // absolute. filepath.Clean("") == "." — so an /etc/passwd entry with an
-// empty (or otherwise relative) home directory used to resolve to a
-// relative candidate that the literal `candidate == "/"` guard doesn't
-// catch. "." and the candidate itself are deliberately both stat-able and
-// searchable here (leafDirs), so only the new IsAbs guard — not a
-// dirsSearchable rejection — is what makes this fail.
+// empty (or otherwise relative) home directory would resolve to a relative
+// candidate that the literal `candidate == "/"` guard doesn't catch. "."
+// and the candidate itself are deliberately both stat-able and searchable
+// here (leafDirs), so only the IsAbs guard — not a dirsSearchable
+// rejection — is what makes this fail.
 func TestResolveSubstrateHarnessCwd_RejectsNonAbsoluteHomeDir(t *testing.T) {
 	d := fakeSubstrateHarnessCwdDeps(
 		map[string]string{"SCION_WORKSPACE_PATH": "/nope"},
@@ -861,11 +862,10 @@ func TestResolveSubstrateHarnessCwd_ScionUserLookupFails_ReturnsError(t *testing
 }
 
 // TestResolveSubstrateHarnessCwd_BothUnusable_ReturnsErrorNamingPathsAndUID
-// is the substrate-lead amendment's explicit requirement: when neither the
-// workspace nor the scion home resolve, the error must name every candidate
-// tried (quoted path, plus reason) and the uid it was checked for, and
-// nothing else — never falling back to an unset cmd.Dir (which would
-// inherit "/").
+// guards the requirement that, when neither the workspace nor the scion
+// home resolve, the error must name every candidate tried (quoted path,
+// plus reason) and the uid it was checked for, and nothing else — never
+// falling back to an unset cmd.Dir (which would inherit "/").
 func TestResolveSubstrateHarnessCwd_BothUnusable_ReturnsErrorNamingPathsAndUID(t *testing.T) {
 	rootOnly := fakeFileInfo{mode: fs.ModeDir | 0o700, uid: 0, gid: 0}
 	d := fakeSubstrateHarnessCwdDeps(
@@ -1110,7 +1110,7 @@ func TestResolveSubstrateHarnessCwd_EffectiveCwd_SymlinkedWorkspaceReallyEnterab
 }
 
 // TestResolveSubstrateHarnessCwd_EffectiveCwd_SymlinkedWorkspaceResolvingToRoot_FallsBack
-// is R2's real-FS regression test (sb-dev-cwd-r4): a real os.Symlink("/",
+// is the real-FS regression test: a real os.Symlink("/",
 // link) as SCION_WORKSPACE_PATH must never be chosen, even though a real
 // chdir into it would actually succeed — it lands in the real "/", which is
 // exactly what the "never /" constraint forbids regardless of whether the
@@ -1179,25 +1179,17 @@ func TestResolveSubstrateHarnessCwd_EffectiveCwd_WorkspaceAndHomeBothResolveToRo
 
 // TestResolveSubstrateHarnessCwd_EffectiveCwd_RelativeHomeDir_NeverUsed is
 // the real-filesystem version of
-// TestResolveSubstrateHarnessCwd_RejectsNonAbsoluteHomeDir (sb-dev-cwd-r4
-// self-audit): an empty scionUser.HomeDir cleans to "." (filepath.Clean's
-// own documented behaviour for ""), which a real chdir resolves against
-// THIS PROCESS's own cwd — standing in here for substrate-serve's real cwd,
-// typically "/" for a container's PID 1. The test relocates this process's
-// cwd to a throwaway directory (restored via t.Cleanup) precisely so that,
-// if the guard regressed, the returned "." would be a real, enterable
-// directory — proving the rejection is about the candidate being relative
-// at all, not about that directory happening to be unusable.
+// TestResolveSubstrateHarnessCwd_RejectsNonAbsoluteHomeDir: an empty
+// scionUser.HomeDir cleans to "." (filepath.Clean's own documented
+// behaviour for ""), which a real chdir resolves against THIS PROCESS's own
+// cwd — standing in here for substrate-serve's real cwd, typically "/" for
+// a container's PID 1. The test relocates this process's cwd to a
+// throwaway directory precisely so that, if the guard regressed, the
+// returned "." would be a real, enterable directory — proving the
+// rejection is about the candidate being relative at all, not about that
+// directory happening to be unusable.
 func TestResolveSubstrateHarnessCwd_EffectiveCwd_RelativeHomeDir_NeverUsed(t *testing.T) {
-	origCwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cwdStandIn := t.TempDir()
-	if err := os.Chdir(cwdStandIn); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origCwd) })
+	t.Chdir(t.TempDir())
 
 	d := substrateHarnessCwdDeps{
 		getenv: func(k string) string {
@@ -1278,12 +1270,12 @@ func TestSubstrateServeInitOptions_FallsBackToHomeFromRealEnv(t *testing.T) {
 //     resolveSubstrateHarnessCwd's doc comment for why that single
 //     mechanism covers both the plain child and the tmux session).
 //
-// sb-dev-cwd-r2 (R2): the InitRunner runs in handleBootstrap's own goroutine
-// (server.go), so the previous version of this test — an unsynchronised
-// package-level var written there and polled from the test goroutine — was
-// a real data race (`go test -race` failed) and, via handleBootstrap's
-// os.Setenv("SCION_WORKSPACE_PATH", ...), leaked that env var into every
-// later test in the package. Fixed by handing the result over a buffered
+// The InitRunner runs in handleBootstrap's own goroutine (server.go), so a
+// version of this test that used an unsynchronised package-level var
+// written there and polled from the test goroutine would be a real data
+// race (`go test -race` would fail) and, via handleBootstrap's
+// os.Setenv("SCION_WORKSPACE_PATH", ...), would leak that env var into
+// every later test in the package. Guarded by handing the result over a buffered
 // channel (select with a timeout, no shared mutable state) and by
 // t.Setenv-ing the var to "" first so its Cleanup restores whatever this
 // process's real ambient value was.
@@ -1392,7 +1384,7 @@ func TestSubstrateServeBootstrap_NoUsableHarnessCwd_ReportsInitFailureToLocalSta
 
 	// handleBootstrap runs the init runner in its own goroutine. Poll
 	// /healthz for StateInitFailed rather than for agent-info.json's mere
-	// existence on disk (sb-dev-cwd-r3): the init-runner goroutine sets
+	// existence on disk: the init-runner goroutine sets
 	// s.initFailed under s.mu only AFTER newSubstrateServeServer's wrapper
 	// (substrateServeInitOptions's error path) returns, and that wrapper
 	// calls substrateServeReportCwdFailure — which does the agent-info.json
@@ -1436,6 +1428,37 @@ func TestSubstrateServeBootstrap_NoUsableHarnessCwd_ReportsInitFailureToLocalSta
 	}
 	if info.Phase != string(state.PhaseError) {
 		t.Errorf("agent-info.json phase = %q, want %q", info.Phase, state.PhaseError)
+	}
+}
+
+// TestSubstrateServeInitRunner_NoUsableHarnessCwd_ReturnsExitCode18 drives
+// substrateServeInitRunner directly (no HTTP layer) and asserts its exact
+// return value: the substrate.InitRunner contract only carries an int back
+// to the caller, so a mutant that returns any other non-zero code (e.g. 1)
+// would still make the harness fail to start while losing the distinct,
+// operator-facing discriminator this exit code exists to provide.
+func TestSubstrateServeInitRunner_NoUsableHarnessCwd_ReturnsExitCode18(t *testing.T) {
+	scrubHubEnv(t)
+	agentHome := t.TempDir()
+	workspace := t.TempDir()
+	withScionUserLookup(t, func(string) (*user.User, error) {
+		return &user.User{Uid: "1", Gid: "1", HomeDir: agentHome}, nil
+	})
+	t.Setenv("SCION_WORKSPACE_PATH", workspace)
+
+	var initCalled bool
+	stubRunInit := func(argv []string, opts InitRunOptions) int {
+		initCalled = true
+		return 0
+	}
+
+	got := substrateServeInitRunner(stubRunInit)([]string{"sh", "-c", "true"}, false)
+
+	if got != exitCodeNoUsableHarnessCwd {
+		t.Errorf("substrateServeInitRunner(...)(...) = %d, want %d (exitCodeNoUsableHarnessCwd)", got, exitCodeNoUsableHarnessCwd)
+	}
+	if initCalled {
+		t.Error("runInit was invoked despite no usable harness cwd; the harness must never start")
 	}
 }
 
