@@ -103,12 +103,22 @@ run_deploy_delete_interactive() {
 }
 
 # run_deploy_create CONFIG_JSON — runs `deploy.sh` (create mode) in the
-# background and stops it shortly after the VM-exists sentinel appears
-# (see the file header), falling back to a 10s wait if it never does (the
-# safety margin used before the sentinel existed). Sets DEPLOY_RC
-# (typically 143, from the TERM this sends once it's done reading the
-# log -- these tests never assert on it) and DEPLOY_LOG. Same
-# no-stray-set-e discipline as run_deploy_delete above.
+# background and stops it once the VM-exists sentinel appears (see the
+# file header) AND the log has gone quiet, rather than a single fixed
+# grace period after the sentinel's first appearance: Part B added more
+# gcloud calls (the internal-IP ensure functions, `add-tags`) between the
+# sentinel's original firing point and the point these tests actually
+# assert on, and a fixed 0.2s grace was measured to be too short for
+# those under load. The wait for the sentinel itself uses a 30s budget --
+# "large" on purpose, since the review that flagged this measured normal
+# runs taking up to 9.1s under moderate load, some 90% of the previous
+# 10s budget -- and fails the whole call loudly (returns 1, with the
+# partial log annotated) if the sentinel is never reached at all, rather
+# than silently letting the caller assert against a partial log as if
+# nothing were wrong. Sets DEPLOY_RC (typically 143, from the TERM this
+# sends once it's done reading the log -- these tests never assert on it)
+# and DEPLOY_LOG. Same no-stray-set-e discipline as run_deploy_delete
+# above.
 run_deploy_create() {
   local config_json="$1" config_file
   config_file="$(mktemp)"
@@ -120,19 +130,46 @@ run_deploy_create() {
   bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null > "$log_file" 2>&1 &
   local pid=$!
   local waited_ms=0
-  while [[ ! -f "$sentinel" && "$waited_ms" -lt 10000 ]]; do
+  while [[ ! -f "$sentinel" && "$waited_ms" -lt 30000 ]]; do
     sleep 0.1
     waited_ms=$((waited_ms + 100))
   done
-  # A brief grace period past the sentinel for the triggering call's own
-  # log line, and (on the existing-VM branch) the add-tags call right
-  # after it, to actually be written before the log is read.
-  sleep 0.2
+  if [[ ! -f "$sentinel" ]]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null
+    DEPLOY_RC=1
+    DEPLOY_LOG="$(cat "$log_file")
+FATAL: run_deploy_create: sentinel '${sentinel}' was never reached within 30000ms -- deploy.sh may be stuck, or this test's expectations no longer match its actual call sequence"
+    rm -f "$config_file" "$log_file"
+    return 1
+  fi
+  _wait_for_deploy_log_quiescence "$log_file"
   kill -TERM "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null
   DEPLOY_RC=$?
   DEPLOY_LOG="$(cat "$log_file")"
   rm -f "$config_file" "$log_file"
+}
+
+# _wait_for_deploy_log_quiescence LOG_FILE — polls LOG_FILE's line count
+# until it stops growing for 3 consecutive polls (300ms), instead of a
+# single fixed sleep after the sentinel first appears. deploy.sh's own
+# stdout/stderr grows with every call it completes, so "stopped growing"
+# is a direct signal that whatever ran right after the sentinel (the
+# triggering call's own log line, add-tags, the internal-IP calls) has
+# actually been written, not a guess at how long that should take.
+_wait_for_deploy_log_quiescence() {
+  local log_file="$1" last_lines=-1 cur_lines quiet_polls=0
+  while [[ "$quiet_polls" -lt 3 ]]; do
+    cur_lines="$(wc -l < "$log_file" 2>/dev/null || echo 0)"
+    if [[ "$cur_lines" == "$last_lines" ]]; then
+      quiet_polls=$((quiet_polls + 1))
+    else
+      quiet_polls=0
+      last_lines="$cur_lines"
+    fi
+    sleep 0.1
+  done
 }
 
 # run_deploy_create_to_settings_yaml CONFIG_JSON — like run_deploy_create,
@@ -160,11 +197,13 @@ run_deploy_create_to_settings_yaml() {
     < /dev/null > "$log_file" 2>&1 &
   local pid=$!
   local waited_ms=0
-  while [[ ! -f "$sentinel" && "$waited_ms" -lt 15000 ]]; do
+  while [[ ! -f "$sentinel" && "$waited_ms" -lt 30000 ]]; do
     sleep 0.1
     waited_ms=$((waited_ms + 100))
   done
-  sleep 0.2
+  if [[ -f "$sentinel" ]]; then
+    _wait_for_deploy_log_quiescence "$log_file"
+  fi
   kill -TERM "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null
   DEPLOY_RC=$?

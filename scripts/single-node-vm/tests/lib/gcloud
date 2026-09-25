@@ -276,6 +276,13 @@ print(json.dumps(out))
   "compute instances add-tags")
     require_project "$@"
     require_flag zone "$@"
+    # Re-touches the same sentinel as "instances create" below: on the
+    # existing-VM branch, this (and the hybrid-tier internal-IP calls
+    # that follow it) is real work a create-mode wiring test needs to
+    # have actually happened before it stops deploy.sh, not just the
+    # earlier "does the VM exist" describe call the sentinel used to fire
+    # on alone.
+    touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
     exit 0
     ;;
   "compute instances list")
@@ -399,6 +406,14 @@ print(json.dumps(out))
     else
       echo "[]"
     fi
+    # Re-touches the same VM-creation sentinel: this list call is always
+    # the first (and sometimes only, on a reuse) step of the hybrid-tier
+    # internal-IP ensure functions, which run either just before
+    # "instances create" or just after "instances add-tags" -- both
+    # already-touched points -- so a create-mode wiring test waiting on
+    # that sentinel needs this call's own completion covered too, not
+    # just whichever of those two happens to run first.
+    touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
     exit 0
     ;;
   "compute addresses describe")
@@ -437,6 +452,7 @@ print(json.dumps({
     'subnetwork': 'https://www.googleapis.com/compute/v1/projects/' + project + '/regions/' + region + '/subnetworks/' + subnet,
 }))
 " "$addr" "$desc" "$project" "$region" "$subnet" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+    touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
     exit 0
     ;;
   "compute addresses delete")

@@ -45,6 +45,23 @@ TIER_DIR="$(dirname "$SCRIPT_DIR")"
 export PATH="${SCRIPT_DIR}/lib:${PATH}"
 export TIER_DIR
 
+# Every mktemp/mktemp -d call anywhere in this run -- fresh_gcloud_state's
+# own four per-test entries (the biggest source: roughly one set per test,
+# ~750 entries for this suite's size, across every prior test that ran in
+# the same process), each test's own RESULT_FILE below, and any ad hoc
+# mktemp inside an individual test -- lands under TMPDIR. Pointing TMPDIR
+# at a fresh, run-scoped directory instead of the caller's ambient one (or
+# /tmp) means the whole run's footprint is bounded to this one directory
+# and is removed in one shot on exit, including on a crash (the trap fires
+# on any exit path), rather than accumulating in the caller's real
+# temporary directory across every run the caller ever makes -- which is
+# what actually happened before this fix: unrelated mktemp entries from
+# many past runs pooled in one shared directory, undetected, until disk
+# pressure crashed the host running them.
+RUN_TMPDIR="$(mktemp -d)"
+export TMPDIR="$RUN_TMPDIR"
+trap 'rm -rf "$RUN_TMPDIR"' EXIT
+
 # A sentinel, deliberately-bogus KUBECONFIG, exported globally so every
 # test in this suite -- not just ones that explicitly set it -- proves it
 # never reads or writes the ambient/operator KUBECONFIG. Every kubectl
@@ -78,6 +95,23 @@ TOTAL_FAIL=0
 for CURRENT_TEST in "${TEST_NAMES[@]}"; do
   RESULT_FILE="$(mktemp)"
   (
+    # Cleans up this one test's own fresh_gcloud_state entries, plus
+    # HYBRID_KUBECONFIG (set by hybrid_k8s_setup_kubeconfig -- production
+    # code, not test-only -- whenever a test exercises anything on the
+    # Kubernetes side), the moment this subshell exits, on any path --
+    # normal return, a test's own early `exit` (the CRASH case above), or
+    # a signal. This is deliberately systematic rather than relying on
+    # each test remembering its own `rm -f "$HYBRID_KUBECONFIG"": several
+    # tests didn't, and their leftover kubeconfig files then sat in
+    # $TMPDIR for the rest of the run, invisible to every later test's own
+    # (correct) cleanup, since a fresh per-test subshell never inherits a
+    # variable set by an earlier one -- only the file on disk survives.
+    # Without a trap here, each test's mktemp entries only get removed in
+    # bulk when the whole run's RUN_TMPDIR is torn down at the very end,
+    # so anyone inspecting TMPDIR mid-run (or a run that never reaches its
+    # own exit, killed from outside) would still see the full
+    # accumulation.
+    trap 'rm -rf "${GCLOUD_STUB_STATE_DIR:-}" "${KUBECTL_STUB_STATE_DIR:-}"; rm -f "${GCLOUD_STUB_LOG:-}" "${KUBECTL_STUB_LOG:-}" "${HYBRID_KUBECONFIG:-}"' EXIT
     PASS_COUNT=0
     FAIL_COUNT=0
     "$CURRENT_TEST"
@@ -102,6 +136,21 @@ done
 
 echo ""
 echo "hybrid-tier tests: ${TOTAL_PASS} passed, ${TOTAL_FAIL} failed (of $((TOTAL_PASS + TOTAL_FAIL)) assertions across ${#TEST_NAMES[@]} tests)."
+
+# Self-check: every test's own EXIT trap above should have already
+# removed its fresh_gcloud_state entries, and every RESULT_FILE is
+# removed right after it's read, so nothing should be left in TMPDIR at
+# all at this point -- not just "cleaned up eventually" by RUN_TMPDIR's
+# own EXIT trap once this process ends. A leftover entry here means some
+# test (or a helper it calls) made a temp file/dir this harness doesn't
+# know to clean up per-test, which is exactly the kind of gap that let
+# the original leak go undetected.
+LEFTOVER_TMP_COUNT="$(find "$TMPDIR" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "$LEFTOVER_TMP_COUNT" -ne 0 ]]; then
+  echo "WARNING: ${LEFTOVER_TMP_COUNT} entries remain in \$TMPDIR (${TMPDIR}) after every test's own cleanup ran -- something is leaking outside the per-test EXIT trap above:"
+  find "$TMPDIR" -mindepth 1 2>/dev/null | sed 's/^/  /'
+  TOTAL_FAIL=$((TOTAL_FAIL + 1))
+fi
 
 if [[ "$TOTAL_FAIL" -gt 0 ]]; then
   exit 1

@@ -52,6 +52,18 @@ CONFIG_FILE="/dev/null/hybrid-tier-tests-placeholder"
 # fresh_gcloud_state resets CONFIG, the invocation log, and the stub's
 # on-disk fixture state dir for the next test.
 fresh_gcloud_state() {
+  # Each call makes 4 new mktemp entries (two dirs, two files). Every
+  # test in the suite calls this at least once, so leaving the previous
+  # call's entries in place -- as this used to do -- accumulates roughly
+  # one set per test for the life of the whole run: ~750 entries in
+  # $TMPDIR for a run of this suite's size. Removing the previous call's
+  # entries before making new ones keeps the suite's own footprint
+  # bounded to "the current test's state" at any point in time, not
+  # "every test's state so far". This still leaves the very last test's
+  # entries in place when the run ends, which run.sh's own per-run
+  # TMPDIR + EXIT trap is what actually cleans up.
+  rm -rf "${GCLOUD_STUB_STATE_DIR:-}" "${KUBECTL_STUB_STATE_DIR:-}"
+  rm -f "${GCLOUD_STUB_LOG:-}" "${KUBECTL_STUB_LOG:-}"
   CONFIG=()
   GCLOUD_STUB_STATE_DIR="$(mktemp -d)"
   GCLOUD_STUB_LOG="$(mktemp)"
@@ -554,13 +566,27 @@ assert_false() {
 # side effect. Sets RUN_EXIT_CODE and RUN_OUTPUT, both read back by the
 # caller in test_hybrid_tier.sh.
 run_expect_fail() {
-  local out had_errexit=false
+  local out had_errexit=false before_tmp after_tmp
   case "$-" in *e*) had_errexit=true ;; esac
   set +e
+  before_tmp="$(find "${TMPDIR:-/tmp}" -mindepth 1 2>/dev/null | sort)"
   out="$("$@" 2>&1)"
   # shellcheck disable=SC2034 # read by callers in test_hybrid_tier.sh
   RUN_EXIT_CODE=$?
   [[ "$had_errexit" == "true" ]] && set -e
   # shellcheck disable=SC2034 # read by callers in test_hybrid_tier.sh
   RUN_OUTPUT="$out"
+  # "$@" above runs inside a command-substitution subshell, so a mktemp
+  # file/dir it creates (HYBRID_KUBECONFIG, set by
+  # hybrid_k8s_setup_kubeconfig, is the recurring one) is invisible here
+  # once the subshell exits: there is no variable left to rm -f, only the
+  # file on disk. Diffing TMPDIR before/after and removing whatever
+  # appeared catches this generically, for any function this wraps, not
+  # just the ones a test author remembered to audit.
+  after_tmp="$(find "${TMPDIR:-/tmp}" -mindepth 1 2>/dev/null | sort)"
+  if [[ "$after_tmp" != "$before_tmp" ]]; then
+    comm -13 <(printf '%s\n' "$before_tmp") <(printf '%s\n' "$after_tmp") | while IFS= read -r _new_tmp_entry; do
+      [[ -n "$_new_tmp_entry" ]] && rm -rf "$_new_tmp_entry"
+    done
+  fi
 }
