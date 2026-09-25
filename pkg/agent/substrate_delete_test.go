@@ -495,10 +495,13 @@ func TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed(t *tes
 			mgr := NewManager(rt)
 			defer mgr.Close()
 
-			// Unscoped: exactly the shape AgentManager.Delete's own internal
-			// Runtime.List call uses regardless of what projectPath the
-			// broker-level caller resolved (see deleteAgent, which passes
-			// this same value through) — an empty projectPath here.
+			// Unscoped: exercises AgentManager.Delete's own internal
+			// Runtime.List call directly, with an empty projectPath.
+			// deleteAgent no longer goes through this path — it resolves the
+			// target itself (project ID included in the List filter) and
+			// calls AgentManager.DeleteTarget, which performs no re-list —
+			// so this covers Delete's own slug-resolution fallback for
+			// other, non-broker-resolved callers.
 			if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err != nil {
 				t.Fatalf(`Delete("dev") error = %v`, err)
 			}
