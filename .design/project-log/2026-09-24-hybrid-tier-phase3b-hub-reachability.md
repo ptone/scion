@@ -10,7 +10,7 @@ a static internal IP reservation for the hub VM so that address is stable across
 Also verifies (and did not need to change) that the hub's auth layer accepts an agent token over a
 plain, non-localhost URL. Delivering a `gke`-profile-scoped hub endpoint that actually points GKE
 agents at the reserved address is a separate, hub-side code change and is out of scope here — see
-Known limits below and the "not implemented" section at the end of this entry.
+Known limits below.
 
 ## Pod CIDR discovery
 
@@ -25,18 +25,25 @@ dangerously broad range to the firewall rule below.
 
 A third rule, `scion-hub-<hub>-hub-allow` (`INGRESS ALLOW tcp:8080` from the discovered pod CIDR,
 priority 900), joins the existing NFS allow/deny pair under the same target tag and marker
-convention. It has no paired deny: port 8080 is already reachable VPC-internally as part of this
-tier's existing base posture (the single-node VM's own IAP proxy setup), so this rule only narrows
-how pods specifically reach it rather than opening anything new. `hybrid_teardown_check` was
-extended to classify and report on this third rule the same way as the NFS pair; the underlying
-preflight/delete functions needed no changes, since they already iterate generically over whatever
-names are classified.
+convention, with no paired deny. This is what lets GKE agent pods reach the hub directly, and it
+opens tcp:8080 to every pod in the cluster (all namespaces), not only Scion agents; requests are
+still authenticated by the hub itself (an agent token, or the IAP assertion for browser users),
+and a small set of endpoints (health checks, login/token flows, OIDC discovery, public settings)
+answer without credentials, same as for any other caller. Pod-to-hub traffic on this path is plain
+HTTP inside the VPC, so agent tokens travel as bearer credentials over it -- anything able to
+observe VPC or node traffic can capture them, so this cluster's workloads need to stay trusted.
+Only the cluster's default pod range is admitted; a node pool with a separate pod CIDR isn't
+covered and fails closed (blocked, not open). `hybrid_teardown_check` was extended to classify and
+report on this third rule the same way as the NFS pair; the underlying preflight/delete functions
+needed no changes, since they already iterate generically over whatever names are classified.
 
 ## Static internal IP reservation
 
 `scion-hub-<hub>-internal-ip` reserves the hub VM's internal address so it survives a VM recreate,
-marked the same way as the other base resources (an exact `scion-deployment=<hub>` description).
-On a fresh VM, a free address is reserved (or an existing marked one reused) and the VM is created
+marked with an exact `scion-deployment=<hub>` description -- the same token format the firewall
+rules, router, and service account use for their own markers, but unlike those base resources,
+this marker is enforced: an address with this name that lacks it is refused on create and blocks
+teardown. On a fresh VM, a free address is reserved (or an existing marked one reused) and the VM is created
 with `--private-network-ip` pinned to it. On an existing VM, its current internal IP is promoted
 into a reservation of the same name (`addresses create --addresses=<current-ip>`), and the VM is
 re-described afterward to confirm the IP didn't change. A same-name reservation that's unmarked, or
@@ -70,19 +77,10 @@ IAP or proxy/localhost-specific logic runs, so a GKE agent dialing the hub direc
 the same way it would through the proxy. No code change was needed or made; this was a read-only
 trace to confirm the internal-IP approach doesn't need a new auth path.
 
-## Known limits: the reservation and rule are provisioned but not yet consumed
+## Known limits: interim, pending a hub-side change
 
-Nothing in this tier today points the `gke` runtime's agents at the reserved internal IP. The hub
-endpoint GKE agent pods receive is still whatever the hub process resolves for every runtime alike
-(the same value used for admin invite links and the OIDC issuer default). Three ways to deliver a
-`gke`-profile-scoped override were traced and rejected, each written up with file:line evidence:
-pointing the general-purpose `server.hub.public_url` at the internal IP breaks admin invite links,
-chat-bridge links, IAP-audience derivation, and (if configured) OIDC/`cloudrun_invoker` audiences;
-the one genuinely profile-scoped settings key
-(`profiles.<name>.harness_overrides.<harness>.env`) is unconditionally overwritten by the hub
-dispatcher and the runtime broker before it can ever apply; and no third, hub-wide dispatch
-endpoint distinct from `public_url` exists at all — every code path that could set it converges on
-the identical field. Delivering this requires a hub code change and is not part of this tier.
+Nothing yet points the `gke` runtime's agents at the reserved internal IP; a hub-side change is
+required before this tier ships. This is provisioning ahead of that change, not a finished feature.
 
 `docs/deploy/agent-runbook-single-node-vm.md` and `docs/deploy/hybrid-tier.md` document the
 discovery step, the three firewall rules, the reservation, the widened teardown table and

@@ -361,11 +361,23 @@ Enabling the tier does five things, all additive:
    - `scion-hub-<hub_name>-nfs-deny` — denies tcp:2049 from everywhere
      else (`0.0.0.0/0`), priority 950.
    - `scion-hub-<hub_name>-hub-allow` — allows tcp:8080 from the cluster's
-     discovered pod CIDR, priority 900. Unlike the NFS pair, this rule has
-     no paired deny: port 8080 is already reachable VPC-internally as part
-     of this tier's existing base posture (the single-node VM's own IAP
-     proxy setup), so this rule only narrows how pods specifically reach
-     it, it does not newly expose anything.
+     discovered pod CIDR, priority 900, no paired deny. This is what lets
+     GKE agent pods reach the hub directly, and it opens tcp:8080 to
+     every pod in the cluster (all namespaces), not only Scion agents.
+     Requests are still authenticated by the hub itself (an agent token,
+     or the IAP assertion for browser users); a small set of endpoints
+     (health checks, login/token flows, OIDC discovery, public settings)
+     answer without credentials, the same as they do for any other
+     caller. Pod-to-hub traffic on this path is **plain HTTP inside the
+     VPC** — agent tokens are sent as bearer credentials over it, so
+     anything able to observe VPC or node traffic (for example a
+     privileged or hostNetwork pod on a cluster node) can capture them.
+     Keep this cluster's workloads trusted, or restrict who can schedule
+     privileged pods on it. Only the cluster's default pod range
+     (`clusterIpv4Cidr`) is ever admitted; a node pool with an additional,
+     separate pod CIDR is not covered by this rule and its pods cannot
+     reach the hub -- this fails closed (nothing outside the discovered
+     range is let in), not open.
 
    The deny rule is created first, then the allow rule, so an interrupted
    run can never leave the allow rule in place without its paired deny.
@@ -386,10 +398,13 @@ Enabling the tier does five things, all additive:
    the next run). Nothing is ever auto-corrected.
 
    The hub VM's internal IP is also reserved as a static address,
-   `scion-hub-<hub_name>-internal-ip`, marked the same way as the other
-   base resources — an exact `scion-deployment=<hub_name>` description,
-   the same marker mechanism the firewall rules, router, and service
-   account already use. On a fresh VM, a free address is reserved first
+   `scion-hub-<hub_name>-internal-ip`, marked with an exact
+   `scion-deployment=<hub_name>` description — the same token format the
+   firewall rules, router, and service account use for their own
+   markers, but unlike those base resources, this marker is enforced: an
+   address with this name that lacks it is refused on create and blocks
+   teardown, the same as an unmarked firewall rule. On a fresh VM, a free
+   address is reserved first
    and the VM is created with `--private-network-ip` pinned to it; on an
    existing VM, its current internal IP is promoted into a reservation of
    the same name (`gcloud compute addresses create ... --addresses
