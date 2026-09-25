@@ -124,6 +124,30 @@ ever reached the actor.
   limit was hit — in practice this almost always surfaced as an ambiguous
   JSON-decode 400. It now uses `http.MaxBytesReader`, which fails the read
   closed at the limit with a distinguishable error, reported as `413`.
+- **A rejected path is now `422`, with a stable code (C-1 decision, round
+  22).** The every-component symlink guard applies to every bootstrap
+  `Path`, not just ones under home, so a target under a *system* symlink
+  (e.g. `/var/run -> /run` on Debian-based images, or a merged-`/usr`
+  layout) is rejected the same way a symlinked path under home is.
+  Previously every rejection — a symlink in the path, an empty/relative
+  path, a non-directory path component — surfaced as the same generic,
+  content-free `500` every other write failure produces. `writeBootstrapFile`
+  now returns a `*bootstrapPathError` for these three cases specifically,
+  and `handleBootstrap` answers `422` with that error's own text: a stable
+  code (`bootstrap_path_symlink` for a symlink anywhere in the path,
+  `bootstrap_path_invalid` for everything else) plus the rejected file's own
+  path — never an internal ancestor, never content. Other write failures
+  are unchanged and stay a generic `500`. The broker's `postBootstrap`
+  parses a `422` body back into a matching `bootstrapPathRejectedError`, and
+  `Run` logs the code and path explicitly (both are configuration, safe to
+  log) before returning the error to its caller. No new wire fields: the
+  `422` body is still the same unstructured string every other `/bootstrap`
+  error has always used, just in a stable, parseable
+  `"<code>: bootstrap file <quoted path> rejected: <detail>"` shape for this
+  one class of error. See phase1-spec.md Addendum B (C-1) and
+  `deploy/substrate/README.md`'s "No symlink traversal" note for the
+  operator-facing statement and workaround (use the resolved path, e.g.
+  `/run/secrets/...` instead of `/var/run/secrets/...`).
 
 ## Measured transport limits
 
@@ -162,16 +186,19 @@ no existing import relationship in either direction.
   *directory* (as opposed to a symlinked regular file) pointing outside
   HomeDir is skipped and never descended into, empty-HomeDir no-op (both
   `HomeDir == ""` and an existing-but-empty HomeDir), missing-HomeDir error,
-  precedence/dedup (home vs. auth vs. secret, later wins), the total cap at
-  cap and at cap+1, the cap summed across all three sources (individually
-  under cap, combined over it), the cap computed *after* dedup (an
-  oversized home file shadowed by a small auth override at the same path
-  must not count), `homeBootstrapFiles` itself returning the cap error
-  during the walk for a single oversized file, an error-hygiene test with a
-  sentinel secret embedded in a home file, and a dedup-position test that
-  asserts the actual order of a non-alphabetical path set (rather than
-  sorting before comparing) to prove the "first occurrence keeps its
-  position" contract the test's name and comment describe.
+  precedence/dedup (home vs. auth vs. secret, later wins), a home file and an
+  auth `ContainerPath` that only differ by a doubled separator (e.g. `x` vs.
+  `/home/scion//x`) collapse to one entry via the pre-dedup `filepath.Clean`,
+  the total cap at cap and at cap+1, the cap summed across all three sources
+  (individually under cap, combined over it), the cap is computed after
+  dedup (a home file shadowed by an auth override does not count, provided
+  home's own total stays under the cap; see the early exit), `homeBootstrapFiles`
+  itself returning the cap error during the walk for a single oversized
+  file, an error-hygiene test with a sentinel secret embedded in a home
+  file, and a dedup-position test that asserts the actual order of a
+  non-alphabetical path set (rather than sorting before comparing) to prove
+  the "first occurrence keeps its position" contract the test's name and
+  comment describe.
 - `pkg/sciontool/substrate/server_test.go`: the original symlinked-parent
   case is rejected both at the `writeBootstrapFile` level and end-to-end
   through `handleBootstrap` (surfaces as the existing generic 500, no
@@ -185,8 +212,24 @@ no existing import relationship in either direction.
   normally; a `..`-bearing path Cleans to its lexical location and never
   touches the component the `..` walked back through; a symlink at the
   *leaf* file path is atomically replaced rather than written through, with
-  its old target left untouched; and the oversized-body case expects `413`
-  via `http.MaxBytesReader`.
+  its old target left untouched (pinned: the test now requires the replace
+  outcome and fails the test if the write is rejected instead, matching what
+  the code comments and this log document); and the oversized-body case
+  expects `413` via `http.MaxBytesReader`. Both symlink- and invalid-path
+  rejections are now also proven end-to-end as `422` with their stable code
+  and the rejected path in the body, and without content (C-1, round 22).
+  Every test that builds a bootstrap path from a temp directory now roots it
+  at `realTempDir(t)` (`filepath.EvalSymlinks(t.TempDir())`) instead of the
+  raw `t.TempDir()`, because the every-component guard Lstats ancestors
+  above the test's own fixtures too, and a symlinked `TMPDIR` (the macOS
+  default, and reproducible on Linux) would otherwise trip it for reasons
+  unrelated to what each test is checking (round 22, RQ-1).
+- `pkg/runtime/substrate_runtime_test.go`: a `422` bootstrap rejection
+  surfaces `Run`'s returned error with the stable code and the rejected
+  path, and never the (sentinel) file content the run's own config carries;
+  a dedicated `parseBootstrapPathError` test round-trips a path containing
+  characters `strconv.Quote` must escape, and confirms a generic (non-
+  path-error) body reports `ok=false` rather than a wrong split.
 - All existing parity tests for other runtimes (docker, k8s, cloudrun,
   cloudrun-sandbox) are unaffected — this change only touches the substrate
   runtime's own file-assembly and serve-side path handling.
@@ -197,7 +240,14 @@ no existing import relationship in either direction.
   (copy-in/one-way/additive-over-image-home semantics, the walk's symlink/
   non-regular-file skip rule, the cap and its measured sources) plus a new
   "Known Phase 1 limitations" bullet extending the existing plaintext
-  broker→router transport note to cover home files.
+  broker→router transport note to cover home files. A new "No symlink
+  traversal in a target's path" note (C-1, round 22) states the `422
+  bootstrap_path_symlink` restriction, names the workaround (the resolved
+  path, e.g. `/run/secrets/...`), and documents `bootstrap_path_invalid` as
+  the other stable code.
 - `phase1-spec.md` (scratchpad, not in the repo): §2.1's `files` example and
-  §2.2 step 8 amended in place; new "Addendum B: home delivery" section
-  recording the finding, decision, and the measured limits.
+  §2.2 step 8 amended in place; "Addendum B: home delivery" section
+  recording the finding, decision, and the measured limits, extended with a
+  C-1 sub-decision (round 22) recording the every-component guard's
+  consequence for targets under a system symlink, the `422` status and its
+  two stable codes, and the workaround.

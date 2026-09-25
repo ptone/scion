@@ -451,6 +451,22 @@ cloudrun-sandbox, which bind-mount or relocate `HomeDir` directly:**
   those is "a file to ship," and reading one could block or behave
   unpredictably.
 
+**No symlink traversal in a target's path.** File-secret and auth targets
+must not traverse a symlink anywhere in their path, including system
+symlinks such as `/var/run -> /run` or a merged-`/usr` image — such a target
+fails bootstrap with HTTP `422` and the stable code `bootstrap_path_symlink`.
+This is `substrate-serve`'s `mkdirAllTracked` guard (`pkg/sciontool/substrate/
+helpers.go`): every existing path component is checked, not just the ones
+under `/home`, so a target under a symlinked system path is rejected exactly
+like a symlinked path under home. **Workaround:** use the resolved form of
+the target instead of the symlinked one, e.g. `/run/secrets/...` rather than
+`/var/run/secrets/...`. A separate stable code, `bootstrap_path_invalid`,
+covers every other path-shape rejection (an empty or non-absolute path, or a
+path component that exists but is not a directory). Both codes are returned
+in the `422` response body alongside the rejected file's own path — never
+its content — and the broker's `Run` error and log line for a rejected
+bootstrap surface both.
+
 **Size cap.** The total decoded size across every file (home + auth +
 secrets combined, after dedup) is capped by
 `maxBootstrapFilesTotalBytes` = 16 MiB (`pkg/runtime/substrate_bootstrap.go`).
