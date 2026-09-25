@@ -594,6 +594,17 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     fi
     rm -f "${SA_DELETE_ERR}"
 
+    # The transport SA is checked and deleted unconditionally, the same
+    # as the firewall-rule and internal-IP ownership checks above: the
+    # current config may have the tier off while it was on for a
+    # previous deploy of this same hub, and this is the only way
+    # teardown can find out. Never touches an unmarked same-name SA.
+    info "Deleting agent transport service account (if present)..."
+    hybrid_teardown_transport_sa "${HUB_NAME}" "${PROJECT_ID}" "${PROXY_SERVICE}" "${REGION}"
+    if [[ "$HYBRID_TRANSPORT_SA_DELETE_FAILED" == "true" ]]; then
+      TEARDOWN_HAD_FAILURE=true
+    fi
+
     # Note: We intentionally do NOT revoke roles/iap.tunnelResourceAccessor from
     # the deployer. This role is bound to the operator (not a service account) and
     # may be used for IAP SSH access to other VMs in the project. Revoking it here
@@ -1264,6 +1275,39 @@ else
   echo "  Created service account: ${SA_EMAIL}"
 fi
 
+# --- Hybrid tier: agent transport auth setup ---
+# GKE agent pods reach the hub through its public IAP URL, authenticating
+# the transport hop with a Google OIDC ID token minted by impersonating a
+# dedicated service account -- gated on the hybrid tier, not on IAP being
+# on in general, because only GKE-dispatched agents ever leave the hub VM
+# to reach it; a Docker-dispatched agent on the VM itself never traverses
+# IAP. Runs here, right after the hub's own runtime SA exists (needed for
+# the grant below), and after the cross-organization IAP check above:
+# both the client-ID discovery and that check depend on IAP already
+# being configured for this project. The Cloud Run resource-level grant
+# (hybrid_grant_transport_sa_iap_access) happens later, in Phase 4,
+# since the Cloud Run service and its own IAP enablement don't exist
+# yet at this point.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Setting up agent transport auth..."
+  hybrid_discover_iap_client_id "${PROJECT_ID}"
+  hybrid_ensure_transport_sa "${HUB_NAME}" "${PROJECT_ID}"
+  hybrid_grant_transport_token_creator "${HYBRID_TRANSPORT_SA_EMAIL}" "${SA_EMAIL}" "${PROJECT_ID}"
+  # Rendered once, here, and spliced into both settings.yaml writes below
+  # (dev mode in Phase 3, proxy mode in Phase 5), the same pattern
+  # HYBRID_SHARED_DIR_STORAGE_YAML uses. IAM changes (the grants above,
+  # and the Cloud Run accessor grant in Phase 4) can take on the order of
+  # a minute to propagate; the first agent dispatched immediately after
+  # this deploy finishes may see a transient 403 minting or using its
+  # transport token. deploy.sh has nothing that blocks on this
+  # propagation itself -- it never mints or uses a transport token -- so
+  # it's documented here and in the runbook rather than covered with a
+  # blind sleep.
+  HYBRID_AUTH_TRANSPORT_YAML="$(hybrid_settings_auth_transport_yaml "${HYBRID_IAP_CLIENT_ID}" "${HYBRID_TRANSPORT_SA_EMAIL}")"
+else
+  HYBRID_AUTH_TRANSPORT_YAML=""
+fi
+
 # Bind minimal IAM roles (idempotent)
 # artifactregistry.writer lets the VM build and push the Cloud Run IAP proxy
 # image directly to Artifact Registry (see Phase 4).
@@ -1412,12 +1456,12 @@ else
   echo "  Created VM: ${INSTANCE_NAME} (zone: ${ZONE})"
 fi
 
-# --- Hub URL guard (post-create half) ---
-# GKE agent pods reach the hub at http://<internal-ip>:8080 over the
-# VPC; there is no other shape this tier supports. See hybrid_hub_url_
-# guard_verify's own comment for what this does and doesn't cover.
+# --- Internal IP guard (post-create half) ---
+# The shared NFS PV's server field needs the reserved internal IP to
+# actually match the VM. See hybrid_internal_ip_guard_verify's own
+# comment for what this does and doesn't cover.
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
-  hybrid_hub_url_guard_verify "$HUB_NAME" "$PROJECT_ID" "$REGION" "$INSTANCE_NAME" "$ZONE"
+  hybrid_internal_ip_guard_verify "$HUB_NAME" "$PROJECT_ID" "$REGION" "$INSTANCE_NAME" "$ZONE"
 fi
 
 # --- Wait for SSH readiness (avoids race on initial boot) ---
@@ -1702,7 +1746,7 @@ ${ADMIN_EMAIL:+    admin_emails:
     backend: local
   auth:
     mode: dev
-${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
+${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}}${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
 }  listen_port: 8080
 SETTINGSEOF
   "
@@ -2074,6 +2118,15 @@ else
   fi
 fi
 
+# --- Hybrid tier: grant agent transport SA IAP access ---
+# The Cloud Run service and its own IAP enablement now exist, so the
+# resource-level grant deferred from the transport-setup step in Phase 2
+# happens here, alongside the operator's own grant above.
+if [[ "$HYBRID_ENABLED" == "true" ]]; then
+  info "Granting agent transport service account IAP access..."
+  hybrid_grant_transport_sa_iap_access "${HYBRID_TRANSPORT_SA_EMAIL}" "${PROXY_SERVICE}" "${REGION}" "${PROJECT_ID}"
+fi
+
 # --- Wait for IAP enforcement ---
 info "Waiting for IAP enforcement to activate..."
 echo "  IAP takes 30-60 seconds to begin enforcing after being enabled."
@@ -2133,7 +2186,7 @@ ${ADMIN_EMAIL:+    admin_emails:
       provider: iap
       iap:
         audience: \"${IAP_AUDIENCE}\"
-${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
+${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}}${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
 }  listen_port: 8080
 SETTINGSEOF
   "
