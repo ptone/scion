@@ -690,29 +690,42 @@ every runtime — not a substrate-specific mechanism:
   collapses any `LookupContainerID` error (not just a genuine miss) into
   the same `""` a not-found produces**, so a transient listing failure could
   otherwise reach the idempotent 202 for a still-existing, still-recorded
-  agent. On a broker with at least one `RecordlessActorProber` runtime
-  registered, `stopAgent` re-runs just the primary, project-scoped list call
-  itself (`agentLookupListErr`, `pkg/runtimebroker/handlers.go`) before
-  falling back to the record-less-actor check, and returns an explicit 5xx
-  if that call errors — never treating "the check itself failed" as "safe to
-  no-op". Every runtime without that capability is unaffected: the
-  type assertion fails and stop's control flow is byte-identical to before
-  this existed.
+  agent. Re-deriving that outcome from a second, independent list call is
+  not safe: a transient failure on the first call can resolve by the time
+  the second one runs, silently masking exactly the failure this exists to
+  catch. Instead, on a broker with at least one `RecordlessActorProber`
+  runtime registered, `stopAgent` resolves the target through a single,
+  error-preserving lookup (`projectScopedTargetErr`,
+  `pkg/runtimebroker/handlers.go`) and decides directly from that one call's
+  own error — an ambiguous match and an auxiliary runtime's list error are
+  also treated as "could not determine", never as not-found — returning an
+  explicit 5xx rather than falling back to the idempotent 202. Every runtime
+  without that capability is unaffected: `hasRecordlessProber` is false and
+  `stopAgent` keeps calling `projectScopedTarget` exactly as before,
+  unchanged.
 - **A record-less actor already in `ACTOR_STATE_DELETING` is excluded from
   the count above.** Stop is Delete in Phase 1 (§4's `Stop` row): it drops
   this process's own in-memory record immediately, but Delete is
   fire-and-forget (above), so the actor can stay listed, in `DELETING`, for a
   while afterward. Without this exclusion, an ordinary same-project
   stop-then-delete sequence — no restart at all — would falsely report
-  "broker restarted" for as long as that actor stayed listed. This is safe
-  unconditionally: the `ActorState` enum
-  (`third_party/ateapipb/ateapi.proto`) has no state after `DELETING` for an
-  actor to revert to (a deleted actor simply stops being listed), and
-  `ActorStatus.state` is required on every listed actor, so a record-less
-  `DELETING` actor can only ever disappear next, never re-enter a live
-  state. An actor already in `DELETING` also already had its egress policy
-  removed first (Delete's own ordering, above), so there is nothing left for
-  the count to protect.
+  "broker restarted" for as long as that actor stayed listed. Excluding it
+  is safe with respect to the egress leak this whole mechanism exists to
+  prevent: the `ActorState` enum (`third_party/ateapipb/ateapi.proto`) has
+  no state after `DELETING` for an actor to revert to (a deleted actor
+  simply stops being listed), and `ActorStatus.state` is required on every
+  listed actor, so a record-less `DELETING` actor can only ever disappear
+  next, never re-enter a live state. An actor already in `DELETING` also
+  already had its egress policy removed first (Delete's own ordering,
+  above), so there is nothing left for the count to protect.
+  **It is the one documented exception to the invariant stated above**: a
+  pre-restart actor that was already `DELETING` when the broker restarted
+  (e.g. a pre-restart `Stop` that never finished) is excluded too, so a
+  delete of its slug returns the ordinary idempotent `404` and the hub drops
+  its record while the actor may still be sitting in the cluster, stuck.
+  This is an accepted trade-off, not an oversight — see
+  `deploy/substrate/README.md`, consequence (d), including the operator
+  commands to find and clear one.
 - **The broker's local-file deletion fallback (`findAgentInHubManagedProjects`,
   called from `findAgentProjectDir`) is itself project-scoped**: it only
   accepts a hub-managed project directory whose own recorded project ID
@@ -753,7 +766,15 @@ every runtime — not a substrate-specific mechanism:
   caller is no longer told it is gone when it isn't. A record-less actor
   already in `ACTOR_STATE_DELETING` is the one exception: it is never
   counted, so an ordinary same-project stop-then-delete sequence with no
-  restart involved stays the ordinary idempotent 404/202 (§9).
+  restart involved stays the ordinary idempotent 404/202 (§9). The same
+  exclusion also means a *pre-restart* actor stuck in `DELETING` (e.g. a
+  pre-restart `Stop` that never finished) is not counted either — its
+  delete returns the ordinary idempotent 404 and the hub drops its record
+  while the actor may still exist, stuck in the cluster (§9,
+  `deploy/substrate/README.md` consequence (d)). A process-local record of
+  this process's own delete requests could not distinguish this case from a
+  genuinely pre-restart actor either, since the reason the deletion never
+  finished is below scion.
 - Exec and Message against a record-less actor fail with an explicit
   "no control token cached" error — permanent for that specific actor, since
   bootstrap is one-shot (§5) and there is no way to re-mint or recover a
