@@ -232,6 +232,29 @@ func SetSubstrateRuntimeBuilderForTest(builder func(config.V1SubstrateConfig) (*
 	}
 }
 
+// WipeSubstrateAgentStateForTest clears the process-wide
+// substrateControlTokens and substrateAgentRecords maps, for tests in other
+// packages (e.g. pkg/runtimebroker) that need to simulate a runtime process
+// restart against a *SubstrateRuntime built over a fake ateapi client. This
+// is test-only support, exported (rather than kept package-private like
+// this package's own equivalent used by substrate_restart_test.go) solely
+// because pkg/runtimebroker cannot reach an unexported symbol here; nothing
+// in production ever calls it — the real analog of "wipe" is simply a new
+// broker process starting with empty maps. Call the returned func (e.g. via
+// t.Cleanup) to restore the previous contents.
+func WipeSubstrateAgentStateForTest() (restore func()) {
+	substrateAgentStateMu.Lock()
+	prevTokens, prevRecords := substrateControlTokens, substrateAgentRecords
+	substrateControlTokens = make(map[string]string)
+	substrateAgentRecords = make(map[string]*substrateAgentRecord)
+	substrateAgentStateMu.Unlock()
+	return func() {
+		substrateAgentStateMu.Lock()
+		substrateControlTokens, substrateAgentRecords = prevTokens, prevRecords
+		substrateAgentStateMu.Unlock()
+	}
+}
+
 // newSubstrateRuntimeFromConfig builds a fresh SubstrateRuntime by dialing
 // ateapi and building an in-cluster Kubernetes client. This is
 // substrateRuntimeBuilder's production implementation.
@@ -748,7 +771,11 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 // given projectID, it returns the atespace that project maps to and the
 // names of every actor in it that this runtime process has no in-memory
 // record for (substrateAgentRecords, keyed by actor UID — lost across a
-// process restart for any actor a previous process created).
+// process restart for any actor a previous process created) AND that is not
+// already in ACTOR_STATE_DELETING (see the loop below for why: a record-less
+// actor already being deleted needs no further protection, and excluding it
+// is what keeps ordinary same-project stop-then-delete sequences — no
+// restart involved — from being misreported as "broker restarted").
 //
 // Positive rule for what counts as a project atespace's actor: Run (above)
 // is the only call site in this runtime that creates an Actor in a
@@ -769,13 +796,20 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 
 	var actors []*ateapipb.Actor
 	pageToken := ""
-	for {
+	for page := 0; ; page++ {
+		if page >= maxRecordlessActorListPages {
+			return atespace, nil, fmt.Errorf("substrate: list actors in atespace %s: exceeded %d pages", atespace, maxRecordlessActorListPages)
+		}
 		resp, err := r.client.ListActors(ctx, &ateapipb.ListActorsRequest{Atespace: atespace, PageToken: pageToken})
 		if err != nil {
 			return atespace, nil, fmt.Errorf("substrate: list actors in atespace %s: %w", atespace, err)
 		}
 		actors = append(actors, resp.GetActors()...)
-		pageToken = resp.GetNextPageToken()
+		next := resp.GetNextPageToken()
+		if next != "" && next == pageToken {
+			return atespace, nil, fmt.Errorf("substrate: list actors in atespace %s: server returned a repeated page token", atespace)
+		}
+		pageToken = next
 		if pageToken == "" {
 			break
 		}
@@ -791,10 +825,46 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 		if substrateAgentRecords[actor.GetMetadata().GetUid()] != nil {
 			continue
 		}
+		if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_DELETING {
+			// A record-less actor already in ACTOR_STATE_DELETING is not
+			// something this fix needs to protect: Delete (above) removes
+			// the egress policy before DeleteActor, so a delete already in
+			// flight has no leak left to prevent, restart or not. Excluding
+			// it here is also what keeps ordinary, no-restart operation
+			// working: Stop is Delete in Phase 1 (this runtime's Stop doc
+			// comment), which drops the in-memory record immediately but
+			// leaves the actor listed in DELETING for some time afterward
+			// (the fire-and-forget note above) — without this exclusion, an
+			// absent-slug delete/stop in the same project during that window
+			// would falsely report "broker restarted" even though nothing
+			// restarted.
+			//
+			// This is safe to do unconditionally, not just "usually", for
+			// two reasons checked against the proto rather than assumed:
+			// the ActorState enum (third_party/ateapipb/ateapi.proto:520-532)
+			// has no state after DELETING for an actor to revert to — a
+			// deleted actor simply stops being listed, there is no
+			// ACTOR_STATE_DELETED for it to sit in — and ActorStatus.state is
+			// `+k8s:required` (proto:538), so a listed actor's state is
+			// never zero-valued/unknown here. So a record-less DELETING
+			// actor can only ever disappear next, never re-enter a live
+			// state, which is also consistent with every DELETING incident
+			// on this cluster (some stuck for hours): none recovered to a
+			// live state; they either finished deleting or stayed stuck.
+			continue
+		}
 		actorNames = append(actorNames, actor.GetMetadata().GetName())
 	}
 	return atespace, actorNames, nil
 }
+
+// maxRecordlessActorListPages bounds RecordlessActors' ListActors paging
+// loop: a misbehaving server that never returns an empty next_page_token
+// would otherwise spin until ctx expires. A page holds an unspecified but
+// presumably large number of actors server-side, so this is generous
+// headroom for any real atespace (one project's worth of agents) while
+// still bounding the call count.
+const maxRecordlessActorListPages = 10000
 
 // substrateLabelsMatch mirrors the label-filter pattern used by the other
 // runtimes (e.g. CloudRunSandboxRuntime.List): an entry with no explicit

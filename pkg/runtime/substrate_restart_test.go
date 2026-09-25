@@ -198,6 +198,43 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
+// TestSubstrateRestart_RecordlessActors_ExcludesDeletingState covers the
+// chosen fix for a same-project, no-restart false positive (M1): a
+// record-less actor already in ACTOR_STATE_DELETING must never be counted
+// (Stop is Delete in Phase 1, and Delete's fire-and-forget DeleteActor call
+// can leave the actor listed, in DELETING, for a while after the in-memory
+// record is already gone — see Delete's and RecordlessActors' doc comments),
+// while a record-less actor in any other state still is.
+func TestSubstrateRestart_RecordlessActors_ExcludesDeletingState(t *testing.T) {
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	const projectID = "550e8400-e29b-41d4-a716-446655440000"
+	const wantAtespace = "scion-550e8400-e29"
+	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		return &ateapipb.ListActorsResponse{
+			Actors: []*ateapipb.Actor{
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: wantAtespace, Name: "deleting-agent", Uid: "uid-deleting"},
+					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_DELETING}},
+				{Metadata: &ateapipb.ResourceMetadata{Atespace: wantAtespace, Name: "crashed-agent", Uid: "uid-crashed"},
+					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_CRASHED}},
+			},
+		}, nil
+	}
+
+	atespace, names, err := rt.RecordlessActors(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("RecordlessActors() error = %v", err)
+	}
+	if atespace != wantAtespace {
+		t.Errorf("RecordlessActors() atespace = %q, want %q", atespace, wantAtespace)
+	}
+	if len(names) != 1 || names[0] != "crashed-agent" {
+		t.Errorf("RecordlessActors() = %v, want exactly [%q] — a DELETING record-less actor must never be counted, but any other state must", names, "crashed-agent")
+	}
+}
+
 // TestSubstrateRestart_NewAgentAfterWipe_FullyManageable covers the design's
 // "a post-restart NEW agent is fully manageable" case: an agent started by
 // this same process AFTER the in-memory state was wiped (i.e. after the

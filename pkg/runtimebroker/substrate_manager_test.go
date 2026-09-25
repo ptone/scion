@@ -98,6 +98,13 @@ type fakeSubstrateControlClient struct {
 	// surface as an explicit error rather than being treated as "found
 	// none" (ptone/scion#1808).
 	listActorsErr error
+
+	// listActorsErrFor, when non-nil, is consulted per request and may fail
+	// only some ListActors calls — e.g. only the atespace-scoped call the
+	// record-less-actor probe makes, or only the unscoped call List makes —
+	// so a test can reach one code path while the other still succeeds
+	// (ptone/scion#1808).
+	listActorsErrFor func(*ateapipb.ListActorsRequest) error
 }
 
 func newFakeSubstrateControlClient(recorder *substrateEgressRecorder) *fakeSubstrateControlClient {
@@ -164,6 +171,11 @@ func (f *fakeSubstrateControlClient) ListActors(ctx context.Context, in *ateapip
 	defer f.mu.Unlock()
 	if f.listActorsErr != nil {
 		return nil, f.listActorsErr
+	}
+	if f.listActorsErrFor != nil {
+		if err := f.listActorsErrFor(in); err != nil {
+			return nil, err
+		}
 	}
 	if f.forceListOrder != nil {
 		return &ateapipb.ListActorsResponse{Actors: f.forceListOrder}, nil
