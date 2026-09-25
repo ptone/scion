@@ -87,6 +87,44 @@ discovery step, the three firewall rules, the reservation, the widened teardown 
 ownership-check wording, and this limitation, in the same style as the existing NFS/Kubernetes
 sections.
 
+## Hardening pass
+
+A follow-up pass tightened several areas beyond the initial slice:
+
+- **NFS server posture**: the `nfs.conf.d` drop-in now also disables NFSv4.0; `nfs-server` is
+  restarted (not just enabled) after writing it, since a package install can already have started
+  the service with stock config; the rpcbind mask is verified rather than assumed.
+- **Loop filesystem**: image reservation uses `fallocate` (fails clearly, and removes the partial
+  file, on insufficient disk) instead of a sparse `truncate`; a stale `/etc/fstab` line for the
+  image with different options is refused rather than silently trusted; the mount is verified to
+  actually be backed by the image's loop device, not just present at the export path; a
+  `scion-hub.service` drop-in adds `RequiresMountsFor` on the export root. The `nofail` rationale in
+  both the code comment and commit history now states plainly that `x-systemd.required-by=` alone
+  already keeps a failed mount from blocking boot (verified against `systemd.mount(5)`); `nofail` is
+  kept only as a defensive redundancy.
+- **Teardown clarity**: the internal IP reservation appears in the pre-delete confirmation list; the
+  summary distinguishes "SKIPPED" (delete never attempted, with why) from "Kept" (delete attempted
+  and failed); every base resource's "not found" case is now reported separately from "Kept" rather
+  than collapsed into it.
+- **Static IP / guard hardening**: the reused reservation's address type and subnet are checked
+  against expectations on both the new-VM and existing-VM paths; a reservation create that succeeds
+  but can't be read back is an explicit, named error instead of a silent `set -e` exit; the
+  existing-VM promote path validates the current IP looks like IPv4 before using it; the hub URL
+  guard now also checks the reservation's marker, that its address matches the VM's resolved
+  internal IP, and that the hub-allow rule's source range matches the discovered pod CIDR (not just
+  that both resources exist).
+- **Test harness**: the suite's own `TMPDIR` usage is now bounded to a single run-scoped directory,
+  removed in one shot on exit, with a self-check that it's empty afterward; the create-mode wiring
+  tests wait on a sentinel with a large timeout and fail loudly if it's never reached, instead of a
+  fixed short grace period; substantial new coverage closes several gaps in the existing test
+  suite, including: the NFS squash-identity script executed (not just its rendered text inspected); a
+  host-bits-set CIDR rejection; each PV drift field (reclaim policy, `claimRef.name`,
+  `claimRef.namespace`, path) checked individually in both the pre-VM and post-VM object checks; an
+  unknown (not just absent) check result treated as a hard failure at every namespace/PV/PVC lookup
+  site, including in teardown; a realistic kubectl permission-denied message that also matches the
+  literal not-found shape; the Cloud Run proxy's marker label actually reaching the `run deploy`
+  call; and every field of the hub-allow firewall rule's drift check (not just its source range).
+
 ## Test harness
 
 `tests/lib/harness.sh` gained `seed_pod_cidr`/`seed_pod_cidr_mismatch`/`seed_pod_cidr_missing`,
