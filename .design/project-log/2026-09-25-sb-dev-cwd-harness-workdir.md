@@ -324,3 +324,66 @@ exit-18 path and asserts `agent-info.json` gets written with
 `./pkg/sciontool/supervisor/` both pass clean this round (no leftover
 telemetry env in this sandbox). `go test` for `./pkg/runtime/...` and
 `./pkg/sciontool/...` both pass clean.
+
+## Round 4 (sb-dev-cwd-r4): symlink-to-root, non-absolute home, and a test-effectiveness gap
+
+Round 3's review found the canonicalisation tests didn't actually exercise
+the `filepath.Clean` fix (the fake `stat` matched paths verbatim, so `/.`,
+`//`, and `/tmp/..` looked identically "missing" whether or not `Clean` ran),
+and that a candidate whose symlink chain resolves to exactly `/` was still
+accepted, since `/` is always searchable and so sails through the
+resolved-chain walk unguarded.
+
+1. **Fake `stat` now cleans its argument** (`fakeSubstrateHarnessCwdDeps`,
+   `cmd/sciontool/commands/substrate_serve_test.go`), matching `os.Stat`'s
+   own lexical resolution of `.`/`..`. Verified by temporarily removing
+   both `filepath.Clean` calls in production: only the two canonicalisation
+   tests and `_ReturnsCanonicalPath` fail; the fix was then restored and the
+   suite re-confirmed green.
+2. **A resolved target of exactly `/` is now rejected** in
+   `dirUsableForScion` (`substrate_serve.go`), right after `EvalSymlinks`,
+   with reason `"resolves to /"`. New fake-deps and real-filesystem
+   (`os.Symlink("/", link)`) tests cover both the single-candidate fallback
+   and the both-candidates-resolve-to-`/` error case. Confirmed by removing
+   the guard: all three new tests fail (one accepts the root-resolving
+   symlink outright, two produce no error).
+3. **The `EvalSymlinks` error path is now covered**: a fake-deps test
+   returns the candidate itself alongside a non-nil error, so a mutant that
+   stops checking the error (sees `real == candidate`, skips the resolved
+   walk, accepts the candidate) is caught — confirmed by applying that
+   exact mutation and watching the test fail.
+4. **Self-audit finding, fixed**: `scionUser.HomeDir` was never checked for
+   being absolute the way `SCION_WORKSPACE_PATH` explicitly is.
+   `filepath.Clean("")` is `.`, not `/`, so an empty (or otherwise relative)
+   home directory reached the lexical `candidate == "/"` guard as a
+   relative path that guard doesn't match, and would return a relative
+   `WorkingDir` — one a real chdir resolves against substrate-serve's own
+   process cwd, typically `/` for a container's PID 1. Closed with a
+   `!filepath.IsAbs(candidate)` guard in `dirUsableForScion`, ahead of the
+   literal-`/` check, with a fake-deps test and a real-filesystem test that
+   relocates the test process's own cwd to prove the rejection is about the
+   candidate being relative, not about the directory being unusable.
+   Confirmed by removing the guard: both new tests fail, returning the
+   relative candidate with a nil error.
+5. **Remaining residual, not fixed**: an intermediate symlink hop (a
+   candidate symlinked to `/p/q`, where `q` is itself a symlink to `/r/s`)
+   means `/p`'s own permissions are checked by neither the lexical chain
+   (ancestors of the candidate) nor the resolved chain (ancestors of the
+   fully-resolved `/r/s`) — the kernel traverses `/p` but this resolver
+   never looks at it. This can only cause a false accept that fails at
+   actual chdir time (`EACCES`), never a landing in `/`, since the fully
+   resolved target is what's checked against `/` and its own ancestors. Not
+   fixed, matching the round-3 review's own conclusion on this same point.
+6. **The no-usable-cwd wiring test now polls `/healthz`** for
+   `StateInitFailed` instead of polling for `agent-info.json`'s mere
+   existence: the init-runner goroutine sets `initFailed` under the
+   server's mutex only after the InitRunner wrapper (which does the
+   `agent-info.json` write) returns, so observing that state gives a real
+   happens-before edge and proves the goroutine ran to completion — the
+   file's existence alone gave neither. `go test -race -count=30` on this
+   test (and its siblings) is clean.
+
+**Gates**: `gofmt`, `go vet`, `go build -buildvcs=false ./...` clean (env
+scrubbed). `go test -race` for `./cmd/sciontool/commands/` and
+`./pkg/sciontool/supervisor/`, and `go test` for `./pkg/runtime/...` and
+`./pkg/sciontool/...`, all pass.
