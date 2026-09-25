@@ -1889,6 +1889,107 @@ test_drift_hub_allow_widened_source_fails_with_remediation() {
   assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${HUB_ALLOW_NAME}" "drift output should include a runnable delete remediation"
 }
 
+# The six tests below each drift exactly one more field of the hub-allow
+# rule (everything else matching), isolating that the shared drift check
+# -- already well covered through the NFS allow/deny rule fixtures above
+# -- is actually reached for hub-allow too, not skipped for it.
+
+test_drift_hub_allow_wrong_ports_fails() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_firewall_rule_json "$ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "2049" \
+    "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
+  seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
+    "" "0.0.0.0/0" "$TARGET_TAG" "950"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "9090" \
+    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "900"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a hub-allow rule with the wrong port must fail the run, not be adopted as-is"
+  assert_contains "$RUN_OUTPUT" "ports:" "drift output should name the drifted field"
+}
+
+test_drift_hub_allow_wrong_priority_fails() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_firewall_rule_json "$ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "2049" \
+    "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
+  seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
+    "" "0.0.0.0/0" "$TARGET_TAG" "950"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "800"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a hub-allow rule with the wrong priority must fail the run, not be adopted as-is"
+  assert_contains "$RUN_OUTPUT" "priority:" "drift output should name the drifted field"
+}
+
+test_drift_hub_allow_wrong_target_tags_fails() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_firewall_rule_json "$ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "2049" \
+    "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
+  seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
+    "" "0.0.0.0/0" "$TARGET_TAG" "950"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+    "" "${GKE_POD_CIDR}" "some-other-tag" "900"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a hub-allow rule with the wrong target tag must fail the run, not be adopted as-is"
+  assert_contains "$RUN_OUTPUT" "target tags:" "drift output should name the drifted field"
+}
+
+test_drift_hub_allow_wrong_direction_fails() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_firewall_rule_json "$ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "2049" \
+    "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
+  seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
+    "" "0.0.0.0/0" "$TARGET_TAG" "950"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "EGRESS" "ALLOW" "tcp" "8080" \
+    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "900"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a hub-allow rule with the wrong direction must fail the run, not be adopted as-is"
+  assert_contains "$RUN_OUTPUT" "direction:" "drift output should name the drifted field"
+}
+
+test_drift_hub_allow_wrong_action_fails() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_firewall_rule_json "$ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "2049" \
+    "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
+  seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
+    "" "0.0.0.0/0" "$TARGET_TAG" "950"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
+    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "900"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a hub-allow rule with the wrong action must fail the run, not be adopted as-is"
+  assert_contains "$RUN_OUTPUT" "action:" "drift output should name the drifted field"
+}
+
+test_drift_hub_allow_disabled_fails() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_firewall_rule_json "$ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "2049" \
+    "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
+  seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
+    "" "0.0.0.0/0" "$TARGET_TAG" "950"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "900" "" "" "" "true"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a disabled hub-allow rule must fail the run, not be adopted as-is"
+  assert_contains "$RUN_OUTPUT" "disabled:" "drift output should name the drifted field"
+}
+
 test_drift_action_change_offers_delete_but_not_update() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
