@@ -1143,6 +1143,10 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 	// containers that lack a project label (pre-existing agents or solo/CLI
 	// mode). A container labeled for a different project must not match a
 	// project-scoped request, or same-slug agents across projects would collide.
+	// The unscoped name fallback here should also be project-scoped for
+	// substrate; if that changes, fix it together with
+	// projectScopedTargetErr's matching fallback in handlers.go, so the two
+	// copies don't drift apart.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)

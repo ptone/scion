@@ -1740,7 +1740,10 @@ func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID strin
 
 	// Backward compatibility: retry without project filter, but only accept
 	// containers that lack a project label — see projectScopedTarget's own
-	// doc comment for why.
+	// doc comment for why. The unscoped name fallback here should also be
+	// project-scoped for substrate; if that changes, fix it together with
+	// LookupContainerID's matching fallback in server.go, so the two copies
+	// don't drift apart.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
