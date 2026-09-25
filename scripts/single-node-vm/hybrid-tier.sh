@@ -711,13 +711,19 @@ SCRIPT
 #      which this one-time check can't;
 #   4. sets ownership/mode on the now-mounted export root (scion:scion,
 #      mode 2755 so the squash uid can't write it), installs
-#      nfs-kernel-server if it isn't already, disables NFSv2/v3 and UDP
-#      via /etc/nfs.conf.d (this tier is NFSv4/TCP-only) and masks
-#      rpcbind (unneeded once v2/v3 are off), writes this hub's own file
-#      under /etc/exports.d/ (using hybrid_nfs_export_line for the
-#      rendered line, so the two stay in sync), re-exports, and enables
-#      and starts the server under its canonical unit name (nfs-server;
-#      nfs-kernel-server is only the Debian/Ubuntu package name).
+#      nfs-kernel-server if it isn't already, disables NFSv2/v3/4.0 and
+#      UDP via /etc/nfs.conf.d (this tier is NFSv4.1/TCP-only, matching
+#      the PV's own nfsvers=4.1) and masks rpcbind (unneeded once v2/v3
+#      are off), verifying the mask actually took rather than assuming
+#      it did, writes this hub's own file under /etc/exports.d/ (using
+#      hybrid_nfs_export_line for the rendered line, so the two stay in
+#      sync), re-exports, and enables and restarts the server under its
+#      canonical unit name (nfs-server; nfs-kernel-server is only the
+#      Debian/Ubuntu package name) -- a restart, not just enable --now,
+#      because apt's postinst already started the server with the
+#      stock config before this script's own /etc/nfs.conf.d write, so
+#      enable --now alone would be a no-op against an already-running
+#      unit and leave v2/v3/UDP live until the next reboot.
 # Always rewrites the exports file and re-exports, which is how the
 # export picks up a changed CIDR on re-run with no separate drift
 # detection needed. Pure string rendering -- no gcloud or SSH calls --
@@ -761,12 +767,15 @@ cat <<'NFSCONF' | sudo tee /etc/nfs.conf.d/scion-hub.conf > /dev/null
 [nfsd]
 vers2=n
 vers3=n
+vers4.0=n
 udp=n
 NFSCONF
-sudo systemctl mask --now rpcbind.service rpcbind.socket || true
+sudo systemctl mask --now rpcbind.service rpcbind.socket
+systemctl is-enabled rpcbind.socket 2>/dev/null | grep -q masked || { echo "rpcbind.socket did not mask; refusing to continue" >&2; exit 1; }
 echo '${export_line}' | sudo tee /etc/exports.d/scion-hub-${hub_name}.exports > /dev/null
 sudo exportfs -ra
-sudo systemctl enable --now nfs-server
+sudo systemctl enable nfs-server
+sudo systemctl restart nfs-server
 echo 'NFS export configured.'
 SCRIPT
 }

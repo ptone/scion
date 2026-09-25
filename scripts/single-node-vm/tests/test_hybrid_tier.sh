@@ -454,8 +454,10 @@ test_nfs_export_script_exportfs_and_enable_service() {
   local script
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
   assert_contains "$script" "sudo exportfs -ra" "must re-export after writing the file"
-  assert_contains "$script" "sudo systemctl enable --now nfs-server" \
-    "must enable and start the service under its canonical unit name, not the Debian package name"
+  assert_contains "$script" "sudo systemctl enable nfs-server" \
+    "must enable the service under its canonical unit name, not the Debian package name"
+  assert_contains "$script" "sudo systemctl restart nfs-server" \
+    "must restart (not just enable --now), since apt's postinst already started the server with the stock config before this script's own /etc/nfs.conf.d write; enable --now alone is a no-op on an already-running unit"
 }
 
 test_nfs_export_script_installs_server_package_if_needed() {
@@ -479,9 +481,14 @@ test_nfs_export_script_v4_only_hardening() {
   assert_contains "$script" "/etc/nfs.conf.d/scion-hub.conf" "must write an NFS server config drop-in"
   assert_contains "$script" "vers2=n" "NFSv2 must be disabled"
   assert_contains "$script" "vers3=n" "NFSv3 must be disabled"
+  assert_contains "$script" "vers4.0=n" "NFSv4.0 must be disabled -- the PV pins nfsvers=4.1"
   assert_contains "$script" "udp=n" "UDP must be disabled"
   assert_contains "$script" "sudo systemctl mask --now rpcbind.service rpcbind.socket" \
     "rpcbind is unneeded once v2/v3 are off and must be masked"
+  assert_contains "$script" 'systemctl is-enabled rpcbind.socket 2>/dev/null | grep -q masked' \
+    "the mask must be verified, not assumed with a swallowed || true"
+  assert_not_contains "$script" 'mask --now rpcbind.service rpcbind.socket || true' \
+    "the mask's own exit status must not be discarded"
 }
 
 test_nfs_export_script_image_created_once_never_remkfs() {
