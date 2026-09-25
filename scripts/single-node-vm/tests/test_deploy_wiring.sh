@@ -19,7 +19,7 @@
 #
 # create-mode tests only need the log through the end of deploy.sh's
 # Phase 2 (VM create/tag plus, when the tier is on, the hybrid-tier
-# internal-IP calls and the hub URL guard) -- not a full simulated
+# internal-IP calls and their guard) -- not a full simulated
 # deploy, which would need to get past an SSH-readiness retry loop with
 # real sleeps between attempts. So run_deploy_create runs deploy.sh in
 # the background and polls for the `phase2-complete` sentinel the stub's
@@ -183,7 +183,7 @@ _stop_deploy_bg() {
 # (touched by the stub's `compute ssh` handler on its first invocation --
 # see tests/lib/gcloud): by that point deploy.sh's entire Phase 2 has run
 # to completion, including VM create/tag, the hybrid-tier internal-IP
-# calls and the hub URL guard, in every tier/VM-state combination, since
+# calls and their guard, in every tier/VM-state combination, since
 # deploy.sh runs strictly sequentially. The wait uses a 30s budget --
 # large enough to absorb realistic per-call latency on a loaded host --
 # and fails the whole call loudly (returns 1, with the partial log
@@ -477,7 +477,7 @@ test_deploy_delete_hub_deny_deleted_before_nfs_deny() {
   seed_firewall_rule_json "scion-hub-${HUB}-nfs-deny" "scion-deployment=${HUB}" \
     "default" "INGRESS" "DENY" "tcp" "2049" "" "0.0.0.0/0" "scion-hub-${HUB}-nfs" "950"
   seed_firewall_rule_json "scion-hub-${HUB}-hub-deny" "scion-deployment=${HUB}" \
-    "default" "INGRESS" "DENY" "tcp" "8080" "" "10.52.0.0/14" "scion-hub-${HUB}-nfs" "950"
+    "default" "INGRESS" "DENY" "all" "" "" "10.52.0.0/14" "scion-hub-${HUB}-nfs" "950"
   run_deploy_delete "$(base_config_json "$HUB")"
   local log hub_deny_line deny_line
   log="$(gcloud_log)"
@@ -1507,4 +1507,274 @@ test_deploy_create_tier_on_existing_vm_promotes_current_ip() {
     "an existing VM's current IP must be promoted to a static reservation"
   assert_contains "$log" "--addresses=10.128.0.5" \
     "must promote the VM's actual current IP (the stub's instances-describe default), not a fresh/different one"
+}
+
+# =====================================================================
+# Settings writes parsed as YAML, and the agent transport wiring.
+# =====================================================================
+# The settings tests above compare substrings or bytes. These parse the
+# captured settings.yaml writes with the koanf YAML parser the hub uses
+# to load its settings (tests/lib/settings-yaml-to-json.go, run through
+# the repository's own Go module), so a splice that produces invalid or
+# mis-nested YAML fails here even when every expected substring is
+# present.
+
+# _settings_heredoc_nth LOG N — the body of the Nth (1-based)
+# settings.yaml heredoc in LOG.
+_settings_heredoc_nth() {
+  echo "$1" | awk -v want="$2" "/<< 'SETTINGSEOF'/{flag=1; n++; buf=\"\"; next} /^SETTINGSEOF\$/{flag=0; if (n == want) printf \"%s\", buf} flag{buf=buf \$0 ORS}"
+}
+
+# _settings_yaml_json YAML — prints YAML parsed by the hub's settings
+# parser, as JSON. Non-zero, with the parser's error on stderr, if YAML
+# does not parse.
+_settings_yaml_json() {
+  local go_bin repo_root
+  go_bin="$(command -v go || true)"
+  if [[ -z "$go_bin" && -x /usr/local/go/bin/go ]]; then
+    go_bin=/usr/local/go/bin/go
+  fi
+  if [[ -z "$go_bin" ]]; then
+    echo "settings YAML parse: no Go toolchain found (needed to run tests/lib/settings-yaml-to-json.go)" >&2
+    return 2
+  fi
+  repo_root="$(cd "${TIER_DIR}/../.." && pwd)"
+  printf '%s' "$1" | (cd "$repo_root" && "$go_bin" run -buildvcs=false \
+    scripts/single-node-vm/tests/lib/settings-yaml-to-json.go)
+}
+
+# _json_get JSON PATH — the value at dotted PATH (list indexes as
+# numbers, e.g. server.hub.admin_emails.0), or "<missing>".
+_json_get() {
+  printf '%s' "$1" | "$PYTHON" -c '
+import json, sys
+node = json.load(sys.stdin)
+for part in sys.argv[1].split("."):
+    if isinstance(node, list) and part.isdigit() and int(part) < len(node):
+        node = node[int(part)]
+    elif isinstance(node, dict) and part in node:
+        node = node[part]
+    else:
+        print("<missing>")
+        sys.exit(0)
+print(node if isinstance(node, str) else json.dumps(node))
+' "$2"
+}
+
+TRANSPORT_TEST_CLIENT_ID="999999999-Verbatim_Client-ID.apps.googleusercontent.com"
+
+test_deploy_create_tier_on_settings_writes_parse_as_yaml() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default"
+  set_iap_client_id "$TRANSPORT_TEST_CLIENT_ID"
+  run_deploy_create_to_proxy_settings_yaml \
+    "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the Phase-5 proxy-mode settings.yaml write"
+  local log transport_sa n yaml json mode
+  log="$(gcloud_log)"
+  transport_sa="$(hybrid_transport_sa_name "$HUB")@demo-project.iam.gserviceaccount.com"
+  assert_eq "2" "$(echo "$log" | grep -c "<< 'SETTINGSEOF'" || true)" \
+    "a create through Phase 5 must write settings.yaml twice (dev mode, then proxy mode)"
+  for n in 1 2; do
+    if [[ "$n" == 1 ]]; then mode="dev"; else mode="proxy"; fi
+    yaml="$(_settings_heredoc_nth "$log" "$n")"
+    json="$(_settings_yaml_json "$yaml")"
+    assert_eq "0" "$?" "the ${mode}-mode settings.yaml write must parse as YAML"
+    assert_eq "$mode" "$(_json_get "$json" server.auth.mode)" "${mode}-mode write: server.auth.mode"
+    assert_eq "iap" "$(_json_get "$json" server.auth.transport.mode)" "${mode}-mode write: server.auth.transport.mode"
+    assert_eq "$TRANSPORT_TEST_CLIENT_ID" "$(_json_get "$json" server.auth.transport.oidc_audience)" \
+      "${mode}-mode write: server.auth.transport.oidc_audience must be the discovered client ID, verbatim"
+    assert_eq "$transport_sa" "$(_json_get "$json" server.auth.transport.platform_auth_sa)" \
+      "${mode}-mode write: server.auth.transport.platform_auth_sa must be the transport SA"
+    assert_eq "invite_only" "$(_json_get "$json" server.auth.user_access_mode)" \
+      "${mode}-mode write: server.auth.user_access_mode defaults to invite_only with the tier on"
+    assert_eq "<missing>" "$(_json_get "$json" server.auth.authorized_domains)" \
+      "${mode}-mode write: no authorized_domains unless the config sets them"
+    assert_eq "admin@example.com" "$(_json_get "$json" server.hub.admin_emails.0)" \
+      "${mode}-mode write: the admin stays in admin_emails"
+    assert_eq "nfs" "$(_json_get "$json" server.shared_dir_storage.backend)" \
+      "${mode}-mode write: server.shared_dir_storage.backend"
+    assert_eq "10.128.0.9" "$(_json_get "$json" server.shared_dir_storage.nfs.shares.0.server)" \
+      "${mode}-mode write: the shared_dir_storage share server is the reserved internal IP"
+    assert_eq "8080" "$(_json_get "$json" server.listen_port)" \
+      "${mode}-mode write: server.listen_port stays a server-level key after the splices"
+  done
+}
+
+test_deploy_create_tier_off_settings_writes_parse_as_yaml() {
+  fresh_gcloud_state
+  run_deploy_create_to_proxy_settings_yaml \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-off create must reach the Phase-5 proxy-mode settings.yaml write"
+  local log n yaml json mode
+  log="$(gcloud_log)"
+  for n in 1 2; do
+    if [[ "$n" == 1 ]]; then mode="dev"; else mode="proxy"; fi
+    yaml="$(_settings_heredoc_nth "$log" "$n")"
+    json="$(_settings_yaml_json "$yaml")"
+    assert_eq "0" "$?" "the tier-off ${mode}-mode settings.yaml write must parse as YAML"
+    assert_eq "$mode" "$(_json_get "$json" server.auth.mode)" "tier-off ${mode}-mode write: server.auth.mode"
+    assert_eq "<missing>" "$(_json_get "$json" server.auth.transport)" \
+      "tier-off ${mode}-mode write: no transport block"
+    assert_eq "<missing>" "$(_json_get "$json" server.auth.user_access_mode)" \
+      "tier-off ${mode}-mode write: no user_access_mode"
+    assert_eq "<missing>" "$(_json_get "$json" server.shared_dir_storage)" \
+      "tier-off ${mode}-mode write: no shared_dir_storage block"
+    assert_eq "8080" "$(_json_get "$json" server.listen_port)" "tier-off ${mode}-mode write: server.listen_port"
+  done
+}
+
+test_deploy_create_tier_on_grants_transport_sa_roles() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default"
+  set_iap_client_id "$TRANSPORT_TEST_CLIENT_ID"
+  run_deploy_create_to_proxy_settings_yaml \
+    "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the Phase-5 proxy-mode settings.yaml write"
+  local log transport_sa token_line iap_line
+  log="$(gcloud_log)"
+  transport_sa="$(hybrid_transport_sa_name "$HUB")@demo-project.iam.gserviceaccount.com"
+  token_line="$(echo "$log" | grep "^iam service-accounts add-iam-policy-binding ${transport_sa} " || true)"
+  assert_eq "1" "$(printf '%s' "$token_line" | grep -c . || true)" \
+    "deploy.sh must grant exactly one role binding on the transport SA"
+  assert_contains "$token_line" "--role=roles/iam.serviceAccountOpenIdTokenCreator" \
+    "the transport SA binding must use the ID-token-only role"
+  assert_contains "$token_line" "--member=serviceAccount:scion-hub-${HUB}@demo-project.iam.gserviceaccount.com" \
+    "the transport SA binding's member must be the hub VM's runtime SA"
+  iap_line="$(echo "$log" | grep '^iap web add-iam-policy-binding ' | grep -F -- "--member=serviceAccount:${transport_sa}" || true)"
+  assert_eq "1" "$(printf '%s' "$iap_line" | grep -c . || true)" \
+    "Phase 4 must grant the transport SA IAP access exactly once"
+  assert_contains "$iap_line" "--role=roles/iap.httpsResourceAccessor" \
+    "the transport SA's IAP grant must use the accessor role"
+  assert_contains "$iap_line" "--service=scion-hub-${HUB}-iap-proxy" \
+    "the transport SA's IAP grant must be on the hub's own Cloud Run service"
+  assert_contains "$log" "iap settings get --project=demo-project --resource-type=iap_web" \
+    "the client ID must be read from the project-level IAP settings"
+}
+
+test_deploy_create_tier_off_no_transport_calls() {
+  fresh_gcloud_state
+  run_deploy_create_to_proxy_settings_yaml \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-off create must reach the Phase-5 proxy-mode settings.yaml write"
+  local log
+  log="$(gcloud_log)"
+  assert_eq "0" "$(echo "$log" | grep -c '^iap settings get' || true)" "tier off must not read IAP settings"
+  assert_eq "0" "$(echo "$log" | grep -c 'scion-tp-' || true)" "tier off must not create or grant a transport SA"
+}
+
+# _run_deploy_create_expect_refusal CONFIG_JSON — runs a create that is
+# expected to stop at validation, with a timeout so a missed refusal
+# fails fast. Sets DEPLOY_RC and DEPLOY_LOG.
+_run_deploy_create_expect_refusal() {
+  local config_file
+  config_file="$(mktemp)"
+  printf '%s' "$1" > "$config_file"
+  DEPLOY_LOG="$(timeout 60 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
+  DEPLOY_RC=$?
+  rm -f "$config_file"
+}
+
+test_deploy_create_tier_on_service_account_admin_email_refused() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default"
+  _run_deploy_create_expect_refusal \
+    "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion" \
+      | sed 's/admin@example.com/robot@demo-project.iam.gserviceaccount.com/')"
+  assert_true "$([[ "$DEPLOY_RC" -ne 0 && "$DEPLOY_RC" -ne 124 ]] && echo true || echo false)" \
+    "tier on with a service-account admin_email must be refused before any create"
+  assert_contains "$DEPLOY_LOG" "is a service account" "the message should say what is wrong with admin_email"
+  assert_eq "0" "$(gcloud_log | grep -c ' create ' || true)" "nothing should be created"
+}
+
+test_deploy_create_tier_on_open_user_access_mode_refused() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default"
+  _run_deploy_create_expect_refusal \
+    "$(base_config_json "$HUB" "$(hybrid_config_fragment), \"user_access_mode\": \"open\"" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_true "$([[ "$DEPLOY_RC" -ne 0 && "$DEPLOY_RC" -ne 124 ]] && echo true || echo false)" \
+    "tier on with user_access_mode open must be refused before any create"
+  assert_contains "$DEPLOY_LOG" "user_access_mode 'open' is not supported" "the message should name the mode"
+  assert_eq "0" "$(gcloud_log | grep -c ' create ' || true)" "nothing should be created"
+}
+
+test_deploy_create_tier_on_domain_restricted_written_to_settings() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default"
+  run_deploy_create_to_proxy_settings_yaml \
+    "$(base_config_json "$HUB" "$(hybrid_config_fragment), \"user_access_mode\": \"domain_restricted\", \"authorized_domains\": [\"Example.com\"]" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the Phase-5 proxy-mode settings.yaml write"
+  local log json
+  log="$(gcloud_log)"
+  json="$(_settings_yaml_json "$(_settings_heredoc_nth "$log" 2)")"
+  assert_eq "0" "$?" "the proxy-mode settings.yaml write must parse as YAML"
+  assert_eq "domain_restricted" "$(_json_get "$json" server.auth.user_access_mode)" \
+    "a configured domain_restricted mode reaches settings.yaml"
+  assert_eq '["example.com"]' "$(_json_get "$json" server.auth.authorized_domains)" \
+    "the configured domains reach settings.yaml, lowercased"
+  assert_eq "iap" "$(_json_get "$json" server.auth.transport.mode)" "the transport block is still written alongside"
+  assert_contains "$DEPLOY_LOG" "User access:  domain_restricted" "the resolved mode is shown in the pre-deploy summary"
+}
+
+test_deploy_create_tier_off_ignores_user_access_config() {
+  fresh_gcloud_state
+  run_deploy_create_to_proxy_settings_yaml \
+    "$(base_config_json "$HUB" ", \"user_access_mode\": \"open\"" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-off create with user access keys must still run"
+  assert_contains "$DEPLOY_LOG" "applied only when the hybrid tier is on; ignoring them" \
+    "tier off must say the user access keys are not applied"
+  assert_not_contains "$(gcloud_log)" "user_access_mode" "tier off must not write user_access_mode"
+}
+
+# =====================================================================
+# Teardown of the agent transport service account, as deploy.sh
+# reports it.
+# =====================================================================
+
+test_deploy_delete_transport_sa_deleted_and_reported() {
+  fresh_gcloud_state
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@demo-project.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "0" "$DEPLOY_RC" "a clean teardown with a marked transport SA must exit 0"
+  assert_contains "$(gcloud_log)" "iam service-accounts delete ${email} " "the marked transport SA must be deleted"
+  assert_contains "$DEPLOY_LOG" "Deleted transport SA:       ${email}" "the summary must list the deleted transport SA"
+  assert_contains "$DEPLOY_LOG" "No transport SA IAP access left on: scion-hub-${HUB}-iap-proxy" \
+    "the summary must say no IAP access is left once the Cloud Run service is gone"
+}
+
+test_deploy_delete_transport_sa_absent_reported_not_found() {
+  fresh_gcloud_state
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "0" "$DEPLOY_RC" "an absent transport SA must not fail teardown"
+  assert_contains "$DEPLOY_LOG" "Not found transport SA:     $(hybrid_transport_sa_name "$HUB")@demo-project.iam.gserviceaccount.com" \
+    "the summary must list the transport SA as not found"
+}
+
+test_deploy_delete_transport_sa_delete_failure_exits_nonzero() {
+  fresh_gcloud_state
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@demo-project.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  set_service_account_delete_will_fail "$email"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_true "$([[ "$DEPLOY_RC" -ne 0 ]] && echo true || echo false)" \
+    "a failed transport SA delete must make teardown exit non-zero"
+  assert_contains "$DEPLOY_LOG" "Kept transport SA:          ${email} (delete failed)" \
+    "the summary must list the transport SA as kept, with the reason"
+}
+
+test_deploy_delete_transport_sa_describe_error_exits_nonzero() {
+  fresh_gcloud_state
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@demo-project.iam.gserviceaccount.com"
+  set_service_account_describe_error "$email"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_true "$([[ "$DEPLOY_RC" -ne 0 ]] && echo true || echo false)" \
+    "a transport SA whose state cannot be read must make teardown exit non-zero"
+  assert_contains "$DEPLOY_LOG" "Kept transport SA:          ${email} (state unknown: describe failed)" \
+    "the summary must list the transport SA as kept because its state is unknown"
+  assert_eq "0" "$(gcloud_log | grep -c "iam service-accounts delete ${email}" || true)" \
+    "nothing must be deleted when the transport SA's state is unknown"
 }

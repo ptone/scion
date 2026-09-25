@@ -2398,7 +2398,7 @@ test_hub_deny_rule_created_with_name_marker_tag_and_shape() {
   assert_contains "$hub_deny_line" "--network=${NETWORK}" "hub-deny rule is on the hub's network"
   assert_contains "$hub_deny_line" "--direction=INGRESS" "hub-deny rule is ingress"
   assert_contains "$hub_deny_line" "--action=DENY" "hub-deny rule action"
-  assert_contains "$hub_deny_line" "--rules=tcp:8080" "hub-deny rule port"
+  assert_contains "$hub_deny_line" "--rules=all " "hub-deny rule denies all protocols and ports"
   assert_contains "$hub_deny_line" "--source-ranges=${GKE_POD_CIDR}" "hub-deny rule sources from the discovered pod CIDR"
   assert_contains "$hub_deny_line" "--priority=950" "hub-deny rule uses the nfs-deny priority scheme"
 }
@@ -2433,6 +2433,48 @@ test_hub_deny_overlap_check_refuses_on_subnet_describe_failure() {
   assert_contains "$RUN_OUTPUT" "Could not describe subnet" "error should explain the describe failure"
   assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" \
     "nothing must be created when the overlap check itself can't complete"
+}
+
+# CIDR blocks either nest or are disjoint, so "overlap" has two shapes:
+# the subnet containing the pod CIDR (above) and the pod CIDR containing
+# the subnet (here). Both must refuse.
+test_hub_deny_overlap_check_refuses_subnet_inside_pod_cidr() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_subnet "$NETWORK" "10.53.16.0/20"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a Cloud Run egress range inside the pod CIDR must refuse too"
+  assert_contains "$RUN_OUTPUT" "overlaps" "error should explain the overlap"
+  assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" \
+    "nothing must be created before the overlap check passes"
+}
+
+test_hub_deny_overlap_check_refuses_empty_subnet_range() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_subnet "$NETWORK" ""
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a subnet with no primary range must refuse, not be read as no overlap"
+  assert_contains "$RUN_OUTPUT" "has no primary IP range" "error should explain the missing range"
+  assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" \
+    "nothing must be created when the range is unknown"
+}
+
+test_hub_deny_overlap_check_refuses_unparsable_subnet_range() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_subnet "$NETWORK" "not-a-cidr"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a range the comparison cannot parse must refuse, not be read as no overlap"
+  assert_contains "$RUN_OUTPUT" "Could not compare subnet" "error should explain the failed comparison"
+  assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" \
+    "nothing must be created when the comparison fails"
 }
 
 test_hub_deny_overlap_check_passes_on_disjoint_range() {
@@ -2470,7 +2512,7 @@ test_firewall_rule_reused_when_marked_and_matching() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "all" "" \
     "" "$GKE_POD_CIDR" "$TARGET_TAG" "950"
   hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" \
@@ -2571,7 +2613,7 @@ test_drift_hub_deny_narrowed_source_fails_with_remediation() {
   # Drifted: the hub-deny rule's source narrowed away from the whole
   # discovered pod CIDR, which would let some pods reach the hub the
   # rule is supposed to block.
-  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "all" "" \
     "" "10.52.0.0/16" "$TARGET_TAG" "950"
   run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
@@ -2595,12 +2637,15 @@ test_drift_hub_deny_wrong_ports_fails() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "9090" \
+  # A hub-deny that covers only tcp:8080 is narrower than the expected
+  # all-protocol deny, and must be caught as drift, not adopted.
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
     "" "${GKE_POD_CIDR}" "$TARGET_TAG" "950"
   run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
-    "a hub-deny rule with the wrong port must fail the run, not be adopted as-is"
+    "a hub-deny rule limited to one port must fail the run, not be adopted as-is"
   assert_contains "$RUN_OUTPUT" "ports:" "drift output should name the drifted field"
+  assert_contains "$RUN_OUTPUT" "expected 'all', found 'tcp:8080'" "drift output should show both protocol specs"
 }
 
 test_drift_hub_deny_wrong_priority_fails() {
@@ -2611,7 +2656,7 @@ test_drift_hub_deny_wrong_priority_fails() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "all" "" \
     "" "${GKE_POD_CIDR}" "$TARGET_TAG" "800"
   run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
@@ -2627,7 +2672,7 @@ test_drift_hub_deny_wrong_target_tags_fails() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "all" "" \
     "" "${GKE_POD_CIDR}" "some-other-tag" "950"
   run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
@@ -2643,7 +2688,7 @@ test_drift_hub_deny_wrong_direction_fails() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "EGRESS" "DENY" "tcp" "8080" \
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "EGRESS" "DENY" "all" "" \
     "" "${GKE_POD_CIDR}" "$TARGET_TAG" "950"
   run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
@@ -2677,7 +2722,7 @@ test_drift_hub_deny_disabled_fails() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "all" "" \
     "" "${GKE_POD_CIDR}" "$TARGET_TAG" "950" "" "" "" "true"
   run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
@@ -3924,24 +3969,23 @@ test_internal_ip_guard_verify_fails_when_reservation_missing() {
 }
 
 # =====================================================================
-# Confidentiality/regression sweep: no hub-allow artifact remains.
+# No artifact of a pod-to-hub allow rule remains.
 # =====================================================================
 
 test_no_hub_allow_artifact_remains_in_scripts_or_docs() {
-  # Scoped to production code and the current-state reference docs, not
-  # this test file itself (this check's own name and description
-  # necessarily spell out the string it searches for) and not
-  # .design/project-log/ (a dated, append-only development journal --
-  # pre-DA-1 entries accurately describe what that phase's code did at
-  # the time; the DA-1 entry itself describes the current design).
+  # Scans every text file under scripts/single-node-vm (including the
+  # extensionless stubs in tests/lib), docs/ and .design/project-log/,
+  # for any spelling of the name (hub-allow, hub_allow, "hub allow", in
+  # any case) and the removed guard function's name. The one exclusion is
+  # this file, where this test's own name and patterns spell the string
+  # out.
   local hits repo_root
   repo_root="$(cd "${TIER_DIR}/../.." && pwd)"
-  hits="$(grep -rIn 'hub-allow\|hub_allow\|HUB_ALLOW\|hybrid_hub_url_guard' \
-    "${TIER_DIR}" "${repo_root}/docs" \
-    --include='*.sh' --include='*.md' --include='*.json' \
+  hits="$(grep -rIniE 'hub[-_ ]allow|hybrid_hub_url_guard' \
+    "${TIER_DIR}" "${repo_root}/docs" "${repo_root}/.design/project-log" \
     --exclude='test_hybrid_tier.sh' \
     2>/dev/null || true)"
-  assert_eq "" "$hits" "no hub-allow naming, variable, or function-name artifact should remain anywhere under scripts/single-node-vm or docs"
+  assert_eq "" "$hits" "no hub-allow naming, variable, or function-name artifact should remain under scripts/single-node-vm, docs or .design/project-log"
 }
 
 # =====================================================================
@@ -3976,29 +4020,71 @@ test_discover_iap_client_id_refused_on_api_error() {
   assert_contains "$RUN_OUTPUT" "Could not read project" "error should explain the read failure"
 }
 
-test_transport_sa_name_deterministic_and_within_length() {
-  local short long
-  short="$(hybrid_transport_sa_name "demohub")"
-  assert_eq "scion-hub-demohub-transport" "$short" "a short hub name needs no truncation"
-  long="$(hybrid_transport_sa_name "a-very-long-hub-name-well-past-the-limit")"
-  assert_true "$([[ ${#long} -le 30 ]] && echo true || echo false)" "a long hub name must still fit in 30 chars"
-  assert_true "$([[ "$long" == *-transport ]] && echo true || echo false)" "truncation must still end in -transport"
-  assert_eq "$long" "$(hybrid_transport_sa_name "a-very-long-hub-name-well-past-the-limit")" \
-    "truncation must be deterministic for the same hub name"
+test_transport_sa_name_shape_and_length() {
+  local name hub
+  for hub in x demohub team-alpha-prod a-very-long-hub-nm xxxxxxxxxxx-yyyyyyyy; do
+    name="$(hybrid_transport_sa_name "$hub")"
+    assert_true "$([[ ${#name} -ge 6 && ${#name} -le 30 ]] && echo true || echo false)" \
+      "transport SA id for '${hub}' must be 6-30 chars (got '${name}', ${#name})"
+    assert_true "$([[ "$name" =~ ^[a-z]([-a-z0-9]*[a-z0-9])$ ]] && echo true || echo false)" \
+      "transport SA id for '${hub}' must use the service-account id charset (got '${name}')"
+    assert_true "$([[ "$name" == scion-tp-* ]] && echo true || echo false)" \
+      "transport SA id for '${hub}' must use the scion-tp- prefix (got '${name}')"
+    assert_true "$([[ "$name" != *--* ]] && echo true || echo false)" \
+      "transport SA id for '${hub}' must not contain a doubled hyphen (got '${name}')"
+  done
+  assert_eq "scion-tp-demohub-bcaae3f2" "$(hybrid_transport_sa_name "demohub")" \
+    "a short hub name keeps its full name plus the 8-hex hash of the full name"
+}
+
+test_transport_sa_name_stable_across_runs() {
+  local first second
+  first="$(hybrid_transport_sa_name "team-alpha-prod")"
+  # shellcheck disable=SC2016 # expanded by the child shell, not here
+  second="$(bash -c 'source "$1"; hybrid_transport_sa_name "team-alpha-prod"' _ "${TIER_DIR}/hybrid-tier.sh")"
+  assert_eq "$first" "$second" "the transport SA id must be the same in a separate process for the same hub name"
+}
+
+test_transport_sa_name_distinct_for_shared_long_prefix() {
+  local a b c
+  a="$(hybrid_transport_sa_name "team-alpha-prod")"
+  b="$(hybrid_transport_sa_name "team-alpha-dev")"
+  c="$(hybrid_transport_sa_name "team-alpha-p")"
+  assert_true "$([[ "$a" != "$b" && "$a" != "$c" && "$b" != "$c" ]] && echo true || echo false)" \
+    "hubs sharing a long name prefix must get distinct transport SA ids (got '${a}', '${b}', '${c}')"
+}
+
+# deploy.sh names the hub's base SA "scion-hub-<hub>", cut to 30 chars;
+# a transport SA id must never equal any hub's base SA id, including a
+# hub literally named "<other hub>-transport".
+test_transport_sa_name_never_equals_a_base_sa_name() {
+  local hub base t
+  for hub in x x-transport demohub demohub-transport a-very-long-hub-nm; do
+    t="$(hybrid_transport_sa_name "$hub")"
+    for base in "scion-hub-x" "scion-hub-x-transport" "scion-hub-demohub" "scion-hub-demohub-transport" "scion-hub-a-very-long-hub-nm"; do
+      assert_true "$([[ "$t" != "${base:0:30}" ]] && echo true || echo false)" \
+        "transport SA id '${t}' (hub '${hub}') must not equal base SA id '${base:0:30}'"
+    done
+  done
+  assert_true "$([[ "$(hybrid_transport_sa_name x)" != "$(hybrid_transport_sa_name x-transport)" ]] && echo true || echo false)" \
+    "hubs x and x-transport must get distinct transport SA ids"
 }
 
 test_ensure_transport_sa_creates_when_absent() {
   fresh_gcloud_state
+  local sa_id
+  sa_id="$(hybrid_transport_sa_name "$HUB")"
   hybrid_ensure_transport_sa "$HUB" "$PROJECT"
-  assert_eq "scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com" "$HYBRID_TRANSPORT_SA_EMAIL" \
+  assert_eq "${sa_id}@${PROJECT}.iam.gserviceaccount.com" "$HYBRID_TRANSPORT_SA_EMAIL" \
     "the transport SA email must be derived from the hub name and project"
-  assert_contains "$(gcloud_log)" "iam service-accounts create scion-hub-${HUB}-transport" \
+  assert_contains "$(gcloud_log)" "iam service-accounts create ${sa_id} " \
     "the transport SA must actually be created"
 }
 
 test_ensure_transport_sa_reuses_when_marked() {
   fresh_gcloud_state
-  local email="scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com"
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
   seed_service_account "$email" "$MARKER"
   hybrid_ensure_transport_sa "$HUB" "$PROJECT"
   assert_eq "0" "$(gcloud_log | grep -c 'iam service-accounts create' || true)" \
@@ -4007,12 +4093,26 @@ test_ensure_transport_sa_reuses_when_marked() {
 
 test_ensure_transport_sa_refused_when_unmarked() {
   fresh_gcloud_state
-  local email="scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com"
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
   seed_service_account "$email" "some-other-marker"
   run_expect_fail hybrid_ensure_transport_sa "$HUB" "$PROJECT"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "an unmarked same-name transport SA must be refused, not adopted"
   assert_contains "$RUN_OUTPUT" "without this deployment's marker" "error should explain the refusal"
+}
+
+test_ensure_transport_sa_refused_on_describe_error() {
+  fresh_gcloud_state
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
+  set_service_account_describe_error "$email"
+  run_expect_fail hybrid_ensure_transport_sa "$HUB" "$PROJECT"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a describe error other than not-found must fail the run, not be read as absent"
+  assert_contains "$RUN_OUTPUT" "Could not confirm whether transport service account" "error should explain the uncertainty"
+  assert_eq "0" "$(gcloud_log | grep -c 'iam service-accounts create' || true)" \
+    "nothing must be created when the SA's existence is unknown"
 }
 
 test_grant_transport_token_creator_uses_openid_token_creator_role_and_correct_member() {
@@ -4063,38 +4163,267 @@ test_settings_auth_transport_yaml_renders_expected_fields() {
 
 test_teardown_transport_sa_deletes_when_marked() {
   fresh_gcloud_state
-  local email="scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com"
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
   seed_service_account "$email" "$MARKER"
-  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "false"
   assert_eq "true" "$HYBRID_TRANSPORT_SA_DELETED" "a marked transport SA must be deleted"
   assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "a successful delete must not be reported as failed"
+  assert_eq "$email" "$HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL" "the checked SA email must be recorded for the summary"
   assert_contains "$(gcloud_log)" "iam service-accounts delete ${email}" "the transport SA must actually be deleted"
+}
+
+test_teardown_transport_sa_removes_iap_binding_before_delete() {
+  fresh_gcloud_state
+  local email log binding_line binding_at delete_at
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "false"
+  log="$(gcloud_log)"
+  binding_line="$(echo "$log" | grep 'iap web remove-iam-policy-binding' || true)"
+  assert_contains "$binding_line" "--service=${INSTANCE_NAME_TEST}-iap-proxy" "the binding removal must target the hub's own Cloud Run service"
+  assert_contains "$binding_line" "--member=serviceAccount:${email}" "the binding removal must name the transport SA"
+  assert_contains "$binding_line" "--role=roles/iap.httpsResourceAccessor" "the binding removal must name the accessor role"
+  assert_eq "removed" "$HYBRID_TRANSPORT_SA_BINDING_STATE" "a successful removal must be recorded"
+  binding_at="$(line_number "iap web remove-iam-policy-binding" "$log")"
+  delete_at="$(line_number "iam service-accounts delete" "$log")"
+  assert_true "$([[ -n "$binding_at" && -n "$delete_at" && "$binding_at" -lt "$delete_at" ]] && echo true || echo false)" \
+    "the binding must be removed before the SA is deleted"
+}
+
+test_teardown_transport_sa_skips_binding_when_service_gone() {
+  fresh_gcloud_state
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "true"
+  assert_eq "0" "$(gcloud_log | grep -c 'iap web remove-iam-policy-binding' || true)" \
+    "with the Cloud Run service confirmed gone, its IAM policy (and this binding) went with it"
+  assert_eq "absent" "$HYBRID_TRANSPORT_SA_BINDING_STATE" "the binding must be recorded as absent"
+  assert_eq "true" "$HYBRID_TRANSPORT_SA_DELETED" "the SA must still be deleted"
+}
+
+test_teardown_transport_sa_binding_already_absent_is_fine() {
+  fresh_gcloud_state
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  set_iap_web_remove_binding_error "ERROR: Policy binding with the specified principal, role, and condition not found!"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "false"
+  assert_eq "absent" "$HYBRID_TRANSPORT_SA_BINDING_STATE" "an already-absent binding counts as removed"
+  assert_eq "true" "$HYBRID_TRANSPORT_SA_DELETED" "the SA must still be deleted"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "an already-absent binding is not a failure"
+}
+
+test_teardown_transport_sa_binding_failure_keeps_sa() {
+  fresh_gcloud_state
+  local email out
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  set_iap_web_remove_binding_error ""
+  out="$(hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "false" 2>&1)"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "false" >/dev/null 2>&1
+  assert_eq "failed" "$HYBRID_TRANSPORT_SA_BINDING_STATE" "a binding removal failure must be recorded"
+  assert_eq "true" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "a binding removal failure must be reported as a failure"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETED" "the SA must not be reported deleted"
+  assert_eq "0" "$(gcloud_log | grep -c 'iam service-accounts delete' || true)" \
+    "the SA must be kept so a re-run can retry the binding removal and the delete together"
+  assert_contains "$out" "PERMISSION_DENIED" "the removal error must be printed"
 }
 
 test_teardown_transport_sa_never_touches_unmarked() {
   fresh_gcloud_state
-  local email="scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com"
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
   seed_service_account "$email" "some-other-marker"
-  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "false" 2>/dev/null
   assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETED" "an unmarked transport SA must not be reported as deleted"
   assert_eq "true" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "an unmarked transport SA must be reported as a failure to resolve"
   assert_eq "0" "$(gcloud_log | grep -c 'iam service-accounts delete' || true)" \
     "an unmarked transport SA must never actually be deleted"
+  assert_eq "0" "$(gcloud_log | grep -c 'iap web remove-iam-policy-binding' || true)" \
+    "an unmarked transport SA's bindings must never be touched either"
 }
 
-test_teardown_transport_sa_absent_is_a_no_op() {
+test_teardown_transport_sa_not_found_is_a_no_op() {
   fresh_gcloud_state
-  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "false"
   assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETED" "nothing to delete, so nothing should be reported deleted"
-  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "an absent SA must not be reported as a failure either"
+  assert_eq "true" "$HYBRID_TRANSPORT_SA_NOT_FOUND" "a positive not-found must be recorded as not found"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "a positive not-found must not be reported as a failure"
+  assert_eq "0" "$(gcloud_log | grep -c 'iam service-accounts delete' || true)" "nothing must be deleted"
+}
+
+test_teardown_transport_sa_describe_permission_denied_is_a_failure() {
+  fresh_gcloud_state
+  local email out
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
+  set_service_account_describe_error "$email"
+  out="$(hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "false" 2>&1)"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "false" >/dev/null 2>&1
+  assert_eq "true" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "a describe error other than not-found leaves the state unknown: a failure"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_NOT_FOUND" "a permission error must never read as not found"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETED" "nothing was deleted"
+  assert_contains "$HYBRID_TRANSPORT_SA_KEPT_REASON" "state unknown" "the kept reason must say why"
+  assert_contains "$out" "PERMISSION_DENIED" "the describe error must be printed"
 }
 
 test_teardown_transport_sa_delete_failure_reported() {
   fresh_gcloud_state
-  local email="scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com"
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
   seed_service_account "$email" "$MARKER"
   set_service_account_delete_will_fail "$email"
-  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "false" 2>/dev/null
   assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETED" "a failed delete must not be reported as deleted"
   assert_eq "true" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "a failed delete must be reported as failed"
+  assert_eq "delete failed" "$HYBRID_TRANSPORT_SA_KEPT_REASON" "the kept reason must say the delete failed"
+}
+
+# =====================================================================
+# Restricted user access (hybrid_resolve_user_access): the mode and
+# domains the tier writes into settings.yaml, and what it refuses.
+# =====================================================================
+
+# _user_access_config JSON — points CONFIG_FILE at a config file holding
+# JSON, inside the per-test stub state dir so the per-test cleanup
+# removes it.
+_user_access_config() {
+  CONFIG_FILE="${GCLOUD_STUB_STATE_DIR}/user-access-config.json"
+  printf '%s' "$1" > "$CONFIG_FILE"
+}
+
+# _expect_user_access_refused ADMIN_EMAIL EXPECTED_SUBSTRING DESCRIPTION
+_expect_user_access_refused() {
+  run_expect_fail hybrid_resolve_user_access "$1"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "$3 must be refused"
+  assert_contains "$RUN_OUTPUT" "$2" "$3: the error should say why"
+}
+
+test_user_access_defaults_to_invite_only() {
+  fresh_gcloud_state
+  _user_access_config '{"hub_name": "demohub"}'
+  hybrid_resolve_user_access "admin@example.com"
+  assert_eq "invite_only" "$HYBRID_USER_ACCESS_MODE" "with no user_access_mode configured, the tier writes invite_only"
+  assert_eq '    user_access_mode: "invite_only"' "$HYBRID_USER_ACCESS_YAML" \
+    "the default block is the mode alone, nested under auth:"
+}
+
+test_user_access_defaults_to_invite_only_without_config_file() {
+  fresh_gcloud_state
+  CONFIG_FILE=""
+  hybrid_resolve_user_access "admin@example.com"
+  assert_eq "invite_only" "$HYBRID_USER_ACCESS_MODE" "with no config file at all, the tier writes invite_only"
+}
+
+test_user_access_domain_restricted_with_domains() {
+  fresh_gcloud_state
+  _user_access_config '{"user_access_mode": "domain_restricted", "authorized_domains": ["Example.com", "*.corp.example.org"]}'
+  hybrid_resolve_user_access "admin@example.com"
+  assert_eq "domain_restricted" "$HYBRID_USER_ACCESS_MODE" "a configured domain_restricted mode is respected"
+  assert_eq "$(printf '    user_access_mode: "domain_restricted"\n    authorized_domains:\n      - "example.com"\n      - "*.corp.example.org"')" \
+    "$HYBRID_USER_ACCESS_YAML" "the configured domains are written, lowercased, in order"
+}
+
+test_user_access_invite_only_with_domains() {
+  fresh_gcloud_state
+  _user_access_config '{"authorized_domains": ["example.com"]}'
+  hybrid_resolve_user_access "admin@example.com"
+  assert_eq "invite_only" "$HYBRID_USER_ACCESS_MODE" "domains alone keep the invite_only default"
+  assert_contains "$HYBRID_USER_ACCESS_YAML" '      - "example.com"' "configured domains are written with invite_only too"
+}
+
+test_user_access_refuses_open_mode() {
+  fresh_gcloud_state
+  _user_access_config '{"user_access_mode": "open"}'
+  _expect_user_access_refused "admin@example.com" "user_access_mode 'open' is not supported" "user_access_mode open"
+}
+
+test_user_access_refuses_empty_mode() {
+  fresh_gcloud_state
+  _user_access_config '{"user_access_mode": ""}'
+  _expect_user_access_refused "admin@example.com" "user_access_mode '' is not supported" "an empty user_access_mode"
+}
+
+test_user_access_refuses_unknown_mode() {
+  fresh_gcloud_state
+  _user_access_config '{"user_access_mode": "everyone"}'
+  _expect_user_access_refused "admin@example.com" "use invite_only (the default when unset) or domain_restricted" \
+    "an unknown user_access_mode"
+}
+
+test_user_access_refuses_non_string_mode() {
+  fresh_gcloud_state
+  _user_access_config '{"user_access_mode": 5}'
+  _expect_user_access_refused "admin@example.com" "user_access_mode must be a string" "a non-string user_access_mode"
+}
+
+test_user_access_refuses_domain_restricted_without_domains() {
+  fresh_gcloud_state
+  _user_access_config '{"user_access_mode": "domain_restricted"}'
+  _expect_user_access_refused "admin@example.com" "needs at least one authorized_domains entry" \
+    "domain_restricted with no authorized_domains"
+  _user_access_config '{"user_access_mode": "domain_restricted", "authorized_domains": []}'
+  _expect_user_access_refused "admin@example.com" "needs at least one authorized_domains entry" \
+    "domain_restricted with an empty authorized_domains list"
+}
+
+test_user_access_refuses_service_account_domains() {
+  fresh_gcloud_state
+  local domain
+  for domain in "gserviceaccount.com" "developer.gserviceaccount.com" "demo-project.iam.gserviceaccount.com" \
+      "*.gserviceaccount.com" "*.iam.gserviceaccount.com" "*.com" "Demo-Project.IAM.GServiceAccount.com"; do
+    _user_access_config "{\"user_access_mode\": \"domain_restricted\", \"authorized_domains\": [\"example.com\", \"${domain}\"]}"
+    _expect_user_access_refused "admin@example.com" "matches service account email addresses" \
+      "authorized_domains entry '${domain}'"
+  done
+}
+
+test_user_access_allows_ordinary_wildcard_domain() {
+  fresh_gcloud_state
+  _user_access_config '{"user_access_mode": "domain_restricted", "authorized_domains": ["*.example.com"]}'
+  hybrid_resolve_user_access "admin@example.com"
+  assert_eq "domain_restricted" "$HYBRID_USER_ACCESS_MODE" "an ordinary *.domain wildcard is accepted"
+}
+
+test_user_access_refuses_malformed_domains() {
+  fresh_gcloud_state
+  local domain
+  for domain in "user@example.com" "example" "*" "*.com." "exa mple.com" "-example.com"; do
+    _user_access_config "{\"authorized_domains\": [\"${domain}\"]}"
+    _expect_user_access_refused "admin@example.com" "is not a domain name" "authorized_domains entry '${domain}'"
+  done
+}
+
+test_user_access_refuses_non_list_domains() {
+  fresh_gcloud_state
+  _user_access_config '{"authorized_domains": "example.com"}'
+  _expect_user_access_refused "admin@example.com" "authorized_domains must be a list" "a string authorized_domains"
+}
+
+test_user_access_refuses_empty_admin_email() {
+  fresh_gcloud_state
+  _user_access_config '{}'
+  _expect_user_access_refused "" "needs admin_email set" "an empty admin_email with the tier on"
+}
+
+test_user_access_refuses_service_account_admin_email() {
+  fresh_gcloud_state
+  _user_access_config '{}'
+  local email
+  for email in "robot@demo-project.iam.gserviceaccount.com" \
+      "$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com" \
+      "Robot@Demo-Project.IAM.GServiceAccount.COM" "123456789-compute@developer.gserviceaccount.com"; do
+    _expect_user_access_refused "$email" "is a service account" "admin_email '${email}'"
+  done
+}
+
+test_user_access_config_present_detects_either_key() {
+  fresh_gcloud_state
+  _user_access_config '{"hub_name": "demohub"}'
+  assert_false "$(hybrid_user_access_config_present && echo true || echo false)" "no user access keys: not present"
+  _user_access_config '{"user_access_mode": "invite_only"}'
+  assert_true "$(hybrid_user_access_config_present && echo true || echo false)" "user_access_mode set: present"
+  _user_access_config '{"authorized_domains": []}'
+  assert_true "$(hybrid_user_access_config_present && echo true || echo false)" "an empty authorized_domains list: present"
 }

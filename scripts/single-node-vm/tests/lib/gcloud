@@ -560,12 +560,19 @@ print(json.dumps({
     ;;
   "iam service-accounts describe")
     # $4 is a full email for this call (unlike create's bare account id
-    # below). A name-scoped fixture, keyed by that email, is checked
-    # first; the old, non-name-scoped service-account-exists flag is
-    # kept for backward compatibility with callers (the hub's own base
-    # SA) that only ever check existence, never a description.
+    # below). A name-scoped describe-error fixture is checked first (an
+    # error unrelated to existence, e.g. PERMISSION_DENIED), then a
+    # name-scoped JSON fixture keyed by that email; the non-name-scoped
+    # service-account-exists flag serves callers (the hub's own base SA)
+    # that only ever check existence, never a description. Anything else
+    # is a realistic NOT_FOUND.
     sa_email="${4:-}"
     f="${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
+    if [[ -f "${f}.describe-error" ]]; then
+      err_msg="$(cat "${f}.describe-error")"
+      echo "${err_msg:-gcloud-stub: ERROR: (gcloud.iam.service-accounts.describe) PERMISSION_DENIED: Permission iam.serviceAccounts.get denied on resource}" >&2
+      exit 1
+    fi
     if [[ -f "$f" ]]; then
       cat "$f"
       exit 0
@@ -574,6 +581,7 @@ print(json.dumps({
       echo '{}'
       exit 0
     fi
+    echo "gcloud-stub: ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account" >&2
     exit 1
     ;;
   "iam service-accounts create")
@@ -621,6 +629,12 @@ json.dump({'email': email, 'description': desc}, open(path, 'w'))
     ;;
   "iap settings get")
     require_project "$@"
+    # The real CLI needs a resource type to know which settings to read;
+    # the project-wide OAuth client lives on iap_web.
+    if [[ "$(get_flag resource-type "$@" || true)" != "iap_web" ]]; then
+      echo "gcloud-stub: ERROR: iap settings get requires --resource-type=iap_web for project-level settings" >&2
+      exit 1
+    fi
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/iap-settings-get-should-fail" ]]; then
       echo "gcloud-stub: simulated IAP settings read failure" >&2
       exit 1
@@ -648,6 +662,11 @@ json.dump({'email': email, 'description': desc}, open(path, 'w'))
     exit 0
     ;;
   "iap web remove-iam-policy-binding")
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/iap-web-remove-binding-error" ]]; then
+      err_msg="$(cat "${GCLOUD_STUB_STATE_DIR}/iap-web-remove-binding-error")"
+      echo "${err_msg:-gcloud-stub: ERROR: (gcloud.iap.web.remove-iam-policy-binding) PERMISSION_DENIED: simulated binding removal failure}" >&2
+      exit 1
+    fi
     exit 0
     ;;
   "run services delete")
@@ -714,8 +733,8 @@ json.dump({'email': email, 'description': desc}, open(path, 'w'))
   "compute ssh "*)
     # The first `compute ssh` call of deploy.sh's own SSH-readiness retry
     # loop always happens here, on its first attempt, before that loop's
-    # own backoff sleep -- deploy.sh's entire Phase 2 (VM create/tag, the
-    # hybrid-tier internal-IP calls, and the hub URL guard) has run to
+    # own backoff sleep -- deploy.sh's entire Phase 2 (VM create/tag and
+    # the hybrid-tier internal-IP calls and their guard) has run to
     # completion by the time this is reached, in every tier/VM-state
     # combination, since deploy.sh is a single sequential script. This is
     # the sentinel run_deploy_create's default (see test_deploy_wiring.sh)

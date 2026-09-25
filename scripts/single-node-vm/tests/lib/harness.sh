@@ -313,6 +313,21 @@ set_service_account_delete_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/service-accounts/$1.json.delete-fail"
 }
 
+# set_service_account_describe_error EMAIL [MESSAGE] — `describe` for
+# exactly this service account fails with MESSAGE, or by default a
+# realistic PERMISSION_DENIED error that says nothing about existence.
+set_service_account_describe_error() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/service-accounts"
+  printf '%s' "${2:-}" > "${GCLOUD_STUB_STATE_DIR}/service-accounts/$1.json.describe-error"
+}
+
+# set_iap_web_remove_binding_error MESSAGE — `iap web
+# remove-iam-policy-binding` fails with MESSAGE on stderr, or by default
+# a realistic PERMISSION_DENIED error.
+set_iap_web_remove_binding_error() {
+  printf '%s' "${1:-}" > "${GCLOUD_STUB_STATE_DIR}/iap-web-remove-binding-error"
+}
+
 # set_service_account_grant_will_fail EMAIL — the next
 # `add-iam-policy-binding` on exactly this service account fails.
 set_service_account_grant_will_fail() {
