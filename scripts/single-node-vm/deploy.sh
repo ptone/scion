@@ -1066,6 +1066,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
+default_harness_config: antigravity
 image_registry: \"${IMAGE_REGISTRY}\"
 # Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
 # in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
@@ -1576,6 +1577,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
+default_harness_config: antigravity
 image_registry: \"${IMAGE_REGISTRY}\"
 # Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
 # in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
