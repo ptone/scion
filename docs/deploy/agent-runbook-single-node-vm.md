@@ -370,9 +370,10 @@ Enabling the tier does five things, all additive:
      Requests are still authenticated by the hub itself (an agent token,
      or the IAP assertion for browser users); a small set of endpoints
      (health checks, login/token flows, OIDC discovery, public settings,
-     static UI assets, and endpoints gated by their own secret such as a
-     broker join token, a webhook signature, or a signed URL) answer
-     without credentials, the same as they do for any other caller.
+     static UI assets, the GitHub App webhook endpoint, and endpoints
+     gated by their own secret such as a broker join token or a signed
+     URL) answer without credentials, the same as they do for any other
+     caller.
      Pod-to-hub traffic on this path is **plain HTTP inside the
      VPC** — agent tokens are sent as bearer credentials over it, so
      anything able to observe VPC or node traffic (for example a

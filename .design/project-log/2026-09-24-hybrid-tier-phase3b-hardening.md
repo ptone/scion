@@ -121,11 +121,3 @@ actual gcloud/kubectl error corpora, not invented text) replace or supplement th
 substring-based ones. `tests/run.sh` now exports a sentinel, deliberately-bogus `KUBECONFIG`
 globally, so every test -- not just ones that explicitly set it -- proves it never falls back to
 an ambient value.
-
-## Wording cleanup
-
-A few code comments, test comments, and this project log's k8s-objects entry described the
-marker-refusal and marker-scoped teardown behavior using internal shorthand rather than plain
-language; reworded them to describe what the code actually does. A handful of commit messages
-carried the same shorthand or narrative phrasing; those were reworded in place (identical trees,
-verified) rather than left standing.
