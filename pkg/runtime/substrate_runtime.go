@@ -854,12 +854,13 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 			// This exclusion is safe to apply unconditionally, not just
 			// "usually", with respect to the egress leak it exists to avoid
 			// counting: two reasons checked against the proto rather than
-			// assumed. The ActorState enum
-			// (third_party/ateapipb/ateapi.proto:520-532) has no state after
-			// DELETING for an actor to revert to — a deleted actor simply
-			// stops being listed, there is no ACTOR_STATE_DELETED for it to
-			// sit in — and ActorStatus.state is `+k8s:required` (proto:537),
-			// so a listed actor's state is never zero-valued/unknown here.
+			// assumed. There is no transition out of DELETING back to a live
+			// state: RevertActor only accepts CRASHED/RUNNING/PAUSED actors
+			// (third_party/ateapipb/ateapi.proto:46-47), and a deleted actor
+			// simply stops being listed (there is no ACTOR_STATE_DELETED
+			// for it to sit in). And ActorStatus.state is `+k8s:required`
+			// (proto:537), so a listed actor's state is never
+			// zero-valued/unknown here.
 			// So a record-less DELETING actor can only ever disappear next,
 			// never re-enter a live state, which is also consistent with
 			// every DELETING incident on this cluster (some stuck for

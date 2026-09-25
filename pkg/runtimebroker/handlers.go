@@ -1844,9 +1844,20 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, filter map[string]stri
 // registered prober. Errors are typed exactly as LookupContainerID's are
 // (ErrAgentListUnavailable for a listing failure, an unwrapped
 // uniqueAgentEntry error for an ambiguous match, ErrAgentNotFound for a
-// matched record with no container ID) so callers can use the same
-// errors.Is(err, ErrAgentNotFound) test either function's error satisfies
+// matched record with no container ID — the one exception is the unwrapped
+// "agent manager not available" error returned when s.manager is nil) so
+// callers can use the same errors.Is(err, ErrAgentNotFound) test either
+// function's error satisfies
 // (ptone/scion#1808).
+//
+// The rule is: 5xx when the lookup cannot determine the target, i.e. any
+// list error before a match is found. The two resolution stages run in
+// order, and an error in the earlier one is decisive: if the project-scoped
+// stage finds no match and its auxiliary scan returns an error, this
+// returns that error (5xx, fail-closed) without running the unscoped
+// fallback stage (scion.name + agentsWithoutProjectLabel), even though that
+// fallback stage might have matched. That errs toward an explicit failure,
+// never toward a false not-found or a wrong target.
 func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID string) (string, error) {
 	if s.manager == nil {
 		return "", fmt.Errorf("agent manager not available")
