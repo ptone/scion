@@ -975,7 +975,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			// WebSocket egress (the hub port-forward tunnel) is blocked there,
 			// so starting it would just spin retrying against 403s. Autoexpose
 			// depends on the same tunnel. Skip both when running under the
-			// substrate runtime (substrate-runtime.md §7). This is a Phase 1
+			// substrate runtime (substrate-runtime.md §1). This is a Phase 1
 			// limitation, not a permanent one — an on-demand tunnel design
 			// would eventually re-enable this (substrate-runtime.md §11).
 			if os.Getenv("SCION_RUNTIME") == "substrate" {

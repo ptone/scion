@@ -73,8 +73,11 @@ type BootstrapRequest struct {
 	Env map[string]string `json:"env"`
 	// Files are written to disk before the child process starts.
 	Files []BootstrapFile `json:"files"`
-	// StartCmd is the same command string the k8s runtime places in
-	// SCION_START_CMD (a tmux invocation that starts the harness).
+	// StartCmd is a tmux invocation that starts the harness, built by the
+	// shared buildTmuxStartCmd helper in its tmuxPollSession form (see
+	// substrate-runtime.md §5.3): substrate-serve's child has no TTY, unlike
+	// the k8s runtime's SCION_START_CMD, which uses the tmuxAttachSession
+	// form from the same helper.
 	StartCmd string `json:"start_cmd"`
 	// ControlToken is the bearer token required on all later
 	// /scion/v1/exec calls.

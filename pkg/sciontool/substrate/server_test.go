@@ -635,8 +635,8 @@ func TestWriteBootstrapFile_DotDotCleansToLocationUnderHomeAndNowhereElse(t *tes
 // directory entry currently sits at path — including a symlink — rather
 // than following it, so this must succeed by atomically replacing the link
 // with a regular file, and the symlink's old target must be left untouched.
-// This pins "replaced" as the one documented outcome (server.go:404-412's
-// comment and substrate-runtime.md §5.5 both claim it): a future change
+// This pins "replaced" as the one documented outcome (writeBootstrapFile's
+// leaf-symlink comment and substrate-runtime.md §5.5 both claim it): a future change
 // that instead rejects the leaf case must update those docs, which means it
 // must also update this test.
 func TestWriteBootstrapFile_LeafSymlinkIsReplacedNotWrittenThrough(t *testing.T) {

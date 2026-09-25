@@ -17,18 +17,17 @@ package substrate
 import "crypto/subtle"
 
 // NonceVerifier authenticates the bearer token presented to
-// POST /scion/v1/bootstrap. substrate-runtime.md §5.2 leaves the nonce source
-// undecided between two options:
+// POST /scion/v1/bootstrap. substrate-runtime.md §5.2 documents two options:
 //
 //   - the actor's identity, minted by the broker via ateapi's MintActorJWT
 //     (if a verifiable identity is available through the systemInfo volume);
-//   - a fallback where the server accepts only the first bootstrap request
-//     and correctness instead relies on a NetworkPolicy restricting router
-//     ingress to the broker namespace.
+//   - the fallback used in Phase 1, where the server accepts only the first
+//     bootstrap request and correctness instead relies on a NetworkPolicy
+//     restricting router ingress to the broker namespace.
 //
 // This interface lets either plug in without changing the HTTP handler.
-// Until the decision lands, Server defaults to FirstBootstrapWinsVerifier
-// (the documented fallback).
+// Server currently defaults to FirstBootstrapWinsVerifier (the Phase 1
+// fallback).
 type NonceVerifier interface {
 	// VerifyNonce reports whether token is accepted as the bootstrap nonce.
 	// It is called once, before the single-shot bootstrap check.

@@ -47,7 +47,7 @@ func TestSubstrateServeCommand_AddrFlagDefault(t *testing.T) {
 	if flag == nil {
 		t.Fatal("addr flag not found")
 	}
-	// substrate-runtime.md §5.1: the router targets :80 by default.
+	// substrate-runtime.md §5: the router targets :80 by default.
 	if flag.DefValue != ":80" {
 		t.Errorf("expected default addr :80, got %s", flag.DefValue)
 	}

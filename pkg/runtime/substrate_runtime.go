@@ -111,8 +111,7 @@ var (
 	// memory, keyed by `<atespace>/<actor>`").
 	substrateControlTokens = make(map[string]string)
 	// substrateAgentRecords maps actor UID to the label/metadata record
-	// synthesised at Run (substrate-runtime.md §4: "keyed by actor
-	// uid").
+	// synthesised at Run (substrate-runtime.md §4: keyed by actor UID).
 	substrateAgentRecords = make(map[string]*substrateAgentRecord)
 )
 
@@ -479,11 +478,11 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 
 // bootstrapNonce is the single call site for the bootstrap request's bearer
 // value, so the broker has one place to change how it is derived.
-// substrate-runtime.md §5.2 leaves open a choice between MintActorJWT
-// (verifiable actor identity via a systemInfo volume) and a fallback
-// (first-bootstrap-wins, secured by a NetworkPolicy restricting router
-// ingress to the broker namespace), pending further investigation into
-// whether MintActorJWT is actually usable here.
+// substrate-runtime.md §5.2 documents two options: MintActorJWT (verifiable
+// actor identity via a systemInfo volume) and the fallback this function
+// implements (first-bootstrap-wins, secured by a NetworkPolicy restricting
+// router ingress to the broker namespace). §5.2 records this fallback as
+// the one used in Phase 1, not an open question.
 //
 // This is the fallback. It could not confirm MintActorJWT's alternative is
 // even possible from ateapi.proto alone: a systemInfo TrustBundleDataSource
@@ -491,8 +490,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 // and whether one of those allowlisted names carries what's needed to
 // verify a substrate-issued actor JWT is opaque outside atelet's
 // implementation. Do not switch this to MintActorJWT without confirming
-// that decision — substrate-runtime.md §5.2 records the choice and the
-// open question it leaves.
+// that it is actually usable here.
 func (r *SubstrateRuntime) bootstrapNonce(ctx context.Context, atespace, actorName, actorUID string) (string, error) {
 	return generateControlToken()
 }
@@ -757,7 +755,7 @@ func substrateLabelsMatch(labels map[string]string, project, projectID string, f
 }
 
 // substratePhase maps ateapipb.ActorState onto scion's AgentInfo.Phase
-// vocabulary (substrate-runtime.md §4).
+// vocabulary.
 func substratePhase(s ateapipb.ActorState) string {
 	switch s {
 	case ateapipb.ActorState_ACTOR_STATE_RESUMING:

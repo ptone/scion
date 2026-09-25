@@ -170,7 +170,7 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 
 	// SCION_RUNTIME=substrate lets sciontool disable autoexpose/port-forward
 	// (blocked by Substrate's default-deny, no-WebSocket-egress posture —
-	// substrate-runtime.md §7) so it does not spin retrying a tunnel that can
+	// substrate-runtime.md §1) so it does not spin retrying a tunnel that can
 	// never connect.
 	env["SCION_RUNTIME"] = "substrate"
 
@@ -542,8 +542,8 @@ func buildBootstrapFiles(cfg RunConfig) ([]bootstrapFile, error) {
 
 // generateControlToken returns a random 32-byte hex string, used both as
 // the bearer for POST /scion/v1/exec (substrate-runtime.md §5.1) and, in the
-// Phase 1 fallback nonce (see substrateBootstrapNonce), as the bootstrap
-// bearer itself.
+// Phase 1 fallback nonce (see (*SubstrateRuntime).bootstrapNonce), as the
+// bootstrap bearer itself.
 func generateControlToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {

@@ -37,7 +37,7 @@ func rootfsFixupSkipped() bool {
 }
 
 // substrateServeCmd is the template entrypoint for the `substrate` runtime
-// (substrate-runtime.md §5.1). It is compiled into the same sciontool binary as
+// (substrate-runtime.md §5). It is compiled into the same sciontool binary as
 // every other subcommand, so no image-build change is needed beyond what
 // already builds `./cmd/sciontool/`.
 var substrateServeCmd = &cobra.Command{
