@@ -5,7 +5,7 @@ Branch `scion/hybrid-tier-p3`, same fork PR as the earlier Phase 3a and 3b slice
 ## Overview
 
 Provisions pod CIDR discovery, a third firewall rule (hub-deny) that blocks the cluster's pod
-range from reaching the hub VM's tcp:8080 directly, and a static internal IP reservation for the
+range from reaching the hub VM directly, on any protocol, and a static internal IP reservation for the
 hub VM so the shared NFS PV's server field stays stable across VM recreates. Agents reach the hub
 through its existing public IAP URL; there is no private-IP hub endpoint.
 
@@ -20,12 +20,15 @@ dangerously broad range to the firewall rule below.
 
 ## Hub-deny firewall rule
 
-A third rule, `scion-hub-<hub>-hub-deny` (`INGRESS DENY tcp:8080` from the discovered pod CIDR,
+A third rule, `scion-hub-<hub>-hub-deny` (`INGRESS DENY` on all protocols from the discovered pod CIDR,
 priority 950 — the same scheme as `nfs-deny`, so it beats a network's own default-allow-internal
 rule), joins the existing NFS allow/deny pair under the same target tag and marker convention.
-Nothing in the cluster's pod range can reach the hub VM's tcp:8080 directly; only the cluster's
-default pod range is covered, and a node pool with a separate pod CIDR isn't in scope (fails
-closed, not open). `hybrid_teardown_check` classifies and reports on this third rule the same way
+NFS mounts are unaffected: the kubelet mounts from the node's primary address, which `nfs-allow`
+admits at priority 900, before either deny rule. Only the cluster's default pod range is covered.
+Pods on a node pool with its own pod range, or on an additional pod range, are not covered, and
+neither is pod traffic that leaves with the node's address (host-network pods, or source-NATed
+traffic); the runbook says so and gives the remedy (an equivalent deny rule for each additional
+pod range). `hybrid_teardown_check` classifies and reports on this third rule the same way
 as the NFS pair; the underlying preflight/delete functions needed no changes, since they already
 iterate generically over whatever names are classified.
 

@@ -11,7 +11,7 @@ GKE cluster's node subnet so the export's client list is scoped correctly. It al
 small, deliberately tier-independent fixes: an API-enablement check that only enables what's
 actually missing, and ownership markers on every base resource this script creates fresh.
 Out of scope for this slice: the PV/PVC and namespace objects, the settings.yaml write blocks,
-the hub URL guard, and the docs pass -- all follow in later slices on this same branch.
+the hub reachability pieces, and the docs pass -- all follow in later slices on this same branch.
 
 ## Node subnet discovery
 

@@ -6,9 +6,9 @@ Branch `scion/hybrid-tier-p3`, same fork PR as the earlier Phase 3a and 3b slice
 
 GKE agent pods reach the hub through its existing public IAP URL — the same URL browser users
 use — authenticating with a Google OIDC ID token the hub mints by impersonating a dedicated
-transport service account. There is no private-IP hub endpoint: hub-deny (`INGRESS DENY tcp:8080`
-from the discovered pod CIDR, priority 950, the same scheme as `nfs-deny`) makes explicit that
-nothing in the cluster's pod range can reach the hub VM directly. The static internal IP
+transport service account. There is no private-IP hub endpoint: hub-deny (`INGRESS DENY` on all
+protocols from the discovered pod CIDR, priority 950, the same scheme as `nfs-deny`) makes
+explicit that the cluster's default pod range has no direct path to the hub VM. The static internal IP
 reservation exists solely for the shared NFS PV's server field.
 
 ## Cloud Run egress / hub-deny overlap
@@ -22,8 +22,8 @@ tier is in use. A describe failure fails the same way; an unknown range is never
 
 ## Agent transport auth
 
-A dedicated `scion-hub-<hub>-transport` service account is created or adopted (marked in its
-description — service accounts have no labels — the same convention as every other hybrid-tier
+A dedicated transport service account, `scion-tp-<first 12 characters of the hub name>-<8-hex
+checksum of the full hub name>`, is created or adopted (marked in its description — service accounts have no labels — the same convention as every other hybrid-tier
 resource; a same-name SA without the marker is refused, never adopted). Setup:
 
 1. The project's IAP OAuth client ID is read (`gcloud iap settings get --resource-type=iap_web`)
@@ -47,23 +47,26 @@ uses a transport token, so nothing in it blocks on that propagation; the very fi
 right after a deploy may see a transient authentication failure that a retry resolves, and this is
 documented in the runbook rather than covered with a blind sleep.
 
-Teardown removes the transport SA's Cloud Run IAP binding (best-effort, since deleting the Cloud
-Run service already does this when that delete succeeds) and then the SA itself, marked only,
-never touching an unmarked same-name SA — the same discipline as every other hybrid-tier resource.
+Teardown removes the transport SA's Cloud Run IAP binding (skipped when the Cloud Run service
+has already been deleted, which removes it) and then the SA itself, marked only, never touching an
+unmarked same-name SA — the same discipline as every other hybrid-tier resource. Only a positive
+not-found counts as absent; an unreadable state, a failed binding removal or a failed delete keeps
+the SA, is listed in the teardown summary, and makes teardown exit non-zero.
 
 ## Docs
 
-`docs/deploy/agent-runbook-single-node-vm.md` and `docs/deploy/hybrid-tier.md` describe hub-deny
-and the Cloud-Run-egress overlap check under the firewall-rule bullet, a dedicated step for agent
-transport auth, and the resource table lists hub-deny and the transport service account.
+`docs/deploy/agent-runbook-single-node-vm.md` describes hub-deny and the Cloud-Run-egress overlap
+check under the firewall-rule bullet and has a dedicated step for agent transport auth; its
+resource table lists hub-deny and the transport service account. `docs/deploy/hybrid-tier.md`
+notes that GKE agents reach the hub through its IAP URL and points to the runbook.
 
 ## Tests
 
 Function-level coverage in `test_hybrid_tier.sh`: hub-deny's creation shape and every field of its
 drift check; the overlap check (an overlapping range, a subnet-describe failure, and a disjoint
-range); a repository-wide check that no resource, variable, or function named for the private-IP
-path this tier doesn't have exists anywhere under `scripts/single-node-vm` or `docs`; and the
-transport-auth functions (client-ID discovery, the transport SA's name truncation and
+range); a check that no resource, variable, or function named for the private-IP path this tier
+doesn't have exists under `scripts/single-node-vm`, `docs` or `.design/project-log`; and the
+transport-auth functions (client-ID discovery, the transport SA's name and
 create/adopt/refuse-unmarked behavior, the token-creator grant's role and member, the Cloud Run
 accessor grant's resource type/service/role/member, the rendered `settings.yaml` block, and
 teardown's marked/unmarked/absent/failure cases). `test_deploy_wiring.sh` covers the firewall

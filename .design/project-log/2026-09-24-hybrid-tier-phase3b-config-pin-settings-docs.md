@@ -9,7 +9,7 @@ later slice of this same PR.
 Rounds out the hybrid tier's configuration surface and settings.yaml integration, closes the
 image-pin question raised for this tier, hardens the not-found detection introduced in the
 previous slice against a realistic ambiguous-error shape, and does a full documentation pass for
-everything except the hub URL guard.
+everything except the hub reachability pieces (pod CIDR, hub-deny rule, static internal IP).
 
 ## Wizard prompts
 
@@ -72,10 +72,10 @@ cover all three call sites.
 
 ## Documentation
 
-A full pass over the runbook's hybrid-tier section (except the hub URL guard, documented in a
+A full pass over the runbook's hybrid-tier section (except the hub reachability pieces, documented in a
 later slice): prerequisites up front (existing cluster in-project and on-network, a registry
 image source with node-SA read access, the required APIs); the settings.yaml write as the tier's
-fifth additive piece; an explicit statement that base adoption and teardown are unchanged by this
+one of the tier's additive pieces; an explicit statement that base adoption and teardown are unchanged by this
 tier, always; the two changes that apply regardless of the tier (base resource markers, the
 enable-only-what's-missing API check) called out together; the export's lack of a separate
 teardown; the hybrid-tier resources and their conditional-on-marker deletion added to the
