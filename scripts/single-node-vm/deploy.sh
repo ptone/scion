@@ -91,6 +91,19 @@
 #   gke_target.pvc_name           Name of the PersistentVolumeClaim in that
 #                                 namespace. Defaults to
 #                                 scion-hub-<hub_name>-shared.
+#   user_access_mode             Hybrid tier only. The tier configures
+#                                 restricted user access: invite_only
+#                                 (the default when unset) or
+#                                 domain_restricted. "open" and an empty
+#                                 value are refused. admin_email must be
+#                                 set to a user account; it can always
+#                                 sign in and invites other users.
+#   authorized_domains           Hybrid tier only. Optional list of email
+#                                 domains ("example.com" or
+#                                 "*.example.com"); required for
+#                                 domain_restricted. Service account
+#                                 domains (gserviceaccount.com) are
+#                                 refused.
 
 set -euo pipefail
 
@@ -600,7 +613,11 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     # previous deploy of this same hub, and this is the only way
     # teardown can find out. Never touches an unmarked same-name SA.
     info "Deleting agent transport service account (if present)..."
-    hybrid_teardown_transport_sa "${HUB_NAME}" "${PROJECT_ID}" "${PROXY_SERVICE}" "${REGION}"
+    PROXY_SERVICE_GONE=false
+    if [[ "$PROXY_SERVICE_DELETED" == "true" || "${PROXY_SERVICE_NOT_FOUND:-false}" == "true" ]]; then
+      PROXY_SERVICE_GONE=true
+    fi
+    hybrid_teardown_transport_sa "${HUB_NAME}" "${PROJECT_ID}" "${PROXY_SERVICE}" "${REGION}" "${PROXY_SERVICE_GONE}"
     if [[ "$HYBRID_TRANSPORT_SA_DELETE_FAILED" == "true" ]]; then
       TEARDOWN_HAD_FAILURE=true
     fi
@@ -633,7 +650,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
           TEARDOWN_HAD_FAILURE=true
         fi
       else
-        err "Keeping the hybrid-tier firewall rules and internal IP reservation because GCE VM ${INSTANCE_NAME} still exists; tcp:2049/8080 access and the reserved address stay in place. Re-run teardown after the VM is deleted."
+        err "Keeping the hybrid-tier firewall rules and internal IP reservation because GCE VM ${INSTANCE_NAME} still exists; the pod-range deny and NFS access rules and the reserved address stay in place. Re-run teardown after the VM is deleted."
         HYBRID_RULES_DELETE_SKIP_REASON="VM not confirmed gone"
         TEARDOWN_HAD_FAILURE=true
       fi
@@ -712,6 +729,20 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     echo "  Not found service account:  ${SA_EMAIL}"
   else
     echo "  Kept service account:       ${SA_EMAIL}"
+  fi
+  if [[ -n "${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL:-}" ]]; then
+    if [[ "${HYBRID_TRANSPORT_SA_DELETED:-false}" == "true" ]]; then
+      echo "  Deleted transport SA:       ${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL}"
+    elif [[ "${HYBRID_TRANSPORT_SA_NOT_FOUND:-false}" == "true" ]]; then
+      echo "  Not found transport SA:     ${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL}"
+    else
+      echo "  Kept transport SA:          ${HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL} (${HYBRID_TRANSPORT_SA_KEPT_REASON:-not attempted})"
+    fi
+    case "${HYBRID_TRANSPORT_SA_BINDING_STATE:-not-attempted}" in
+      removed) echo "  Removed transport SA IAP access on: ${PROXY_SERVICE}" ;;
+      absent)  echo "  No transport SA IAP access left on: ${PROXY_SERVICE}" ;;
+      failed)  echo "  Kept transport SA IAP access on:    ${PROXY_SERVICE} (removal failed)" ;;
+    esac
   fi
   if [[ "$FW_RULE_DELETED" == "true" ]]; then
     echo "  Deleted firewall rule:      ${FW_RULE_NAME}"
@@ -1012,6 +1043,18 @@ if [[ "$HYBRID_ENABLED" == "true" ]]; then
     err "The hybrid tier is on, but container_images.registry ('${IMAGE_REGISTRY}') names this VM itself (a loopback address). GKE nodes cannot reach it there."
     err "Set container_images.registry to a registry the cluster's node service account can read (for example an Artifact Registry repository with artifactregistry.reader granted to that service account)."
     exit 1
+  fi
+  # The hybrid tier configures restricted user access (invite-only by
+  # default): validated here, before any create, and spliced into both
+  # settings.yaml writes below as HYBRID_USER_ACCESS_YAML.
+  hybrid_resolve_user_access "$ADMIN_EMAIL"
+  echo "  User access:  ${HYBRID_USER_ACCESS_MODE}"
+else
+  # Empty when the tier is off, so both settings.yaml writes render
+  # exactly as they do without the tier.
+  HYBRID_USER_ACCESS_YAML=""
+  if hybrid_user_access_config_present; then
+    warn "user_access_mode / authorized_domains in the config file are applied only when the hybrid tier is on; ignoring them."
   fi
 fi
 
@@ -1746,7 +1789,9 @@ ${ADMIN_EMAIL:+    admin_emails:
     backend: local
   auth:
     mode: dev
-${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}}${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
+${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
+}${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
+}${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
 }  listen_port: 8080
 SETTINGSEOF
   "
@@ -2186,7 +2231,9 @@ ${ADMIN_EMAIL:+    admin_emails:
       provider: iap
       iap:
         audience: \"${IAP_AUDIENCE}\"
-${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}}${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
+${HYBRID_AUTH_TRANSPORT_YAML:+${HYBRID_AUTH_TRANSPORT_YAML}
+}${HYBRID_USER_ACCESS_YAML:+${HYBRID_USER_ACCESS_YAML}
+}${HYBRID_SHARED_DIR_STORAGE_YAML:+${HYBRID_SHARED_DIR_STORAGE_YAML}
 }  listen_port: 8080
 SETTINGSEOF
   "

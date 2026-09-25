@@ -356,8 +356,9 @@ sys.exit(0 if (net.version == 4 and net.prefixlen >= 8) else 1)
 # the NFS mount traffic that reaches the VM. The NFS firewall allow
 # rule's source is unrelated to this and continues to use the node
 # network tag discovered above, not an IP range. The pod CIDR is used
-# only by the separate hub-deny firewall rule (tcp:8080), which blocks
-# that same pod range from reaching the hub directly over the VPC.
+# only by the separate hub-deny firewall rule (all protocols), which
+# blocks that same pod range from reaching the hub VM directly over the
+# VPC.
 #
 # Node-tag discovery reads the node tag GKE assigns, from the cluster's
 # own GKE-managed firewall rules, the same source for Standard and
@@ -446,11 +447,11 @@ print(d.get('ipCidrRange') or '')
   # shellcheck disable=SC2034 # consumed by the NFS export function
   GKE_NODE_SUBNET_CIDR="$node_cidr"
 
-  # The pod CIDR is what the hub-deny firewall rule (tcp:8080, blocking
-  # pods from reaching the hub directly over the VPC) sources from --
-  # unlike the NFS export, which sources from the node subnet, because
-  # kubelet (not the pod) originates NFS mount traffic, but a pod's own
-  # HTTP request would genuinely come from its pod IP. Read from two
+  # The pod CIDR is what the hub-deny firewall rule (all protocols,
+  # blocking pods from reaching the hub VM directly over the VPC) sources
+  # from -- unlike the NFS export, which sources from the node subnet,
+  # because kubelet (not the pod) originates NFS mount traffic, but a
+  # pod's own request would genuinely come from its pod IP. Read from two
   # places in the same describe JSON and require them to agree:
   # `clusterIpv4Cidr` is the cluster-wide value,
   # `ipAllocationPolicy.clusterIpv4CidrBlock` is the allocation-policy's
@@ -1217,7 +1218,7 @@ _hybrid_ensure_firewall_rule() {
 # --network=default --subnet=default), so its own traffic to the hub's
 # tcp:8080 sources from that subnet's primary IP range -- never from a
 # pod-range address. If that range ever overlapped the discovered pod
-# CIDR, hub-deny (source = pod CIDR, tcp:8080) would also deny the
+# CIDR, hub-deny (source = pod CIDR, all protocols) would also deny the
 # proxy's own traffic, breaking every deploy, hybrid tier or not. Reads
 # the subnet's primary range fresh and refuses to continue -- before
 # hub-deny or anything else in this function is created -- on any
@@ -1269,17 +1270,23 @@ print('true' if a.overlaps(b) else 'false')
 #                              hybrid_discover), priority 900.
 #   scion-hub-<hub>-nfs-deny   INGRESS DENY  tcp:2049 from 0.0.0.0/0,
 #                              priority 950.
-#   scion-hub-<hub>-hub-deny   INGRESS DENY  tcp:8080 from the discovered
-#                              pod CIDR (GKE_POD_CIDR; set by
-#                              hybrid_discover), priority 950 -- the same
-#                              scheme as nfs-deny, so it beats a network's
-#                              own default-allow-internal rule. GKE agent
-#                              pods reach the hub through its public IAP
-#                              URL, not a private VPC path, so nothing
-#                              inside the cluster's pod range should ever
-#                              reach tcp:8080 on the hub VM directly; this
-#                              rule makes that explicit rather than
-#                              relying on the absence of an allow rule.
+#   scion-hub-<hub>-hub-deny   INGRESS DENY  all protocols and ports from
+#                              the discovered pod CIDR (GKE_POD_CIDR; set
+#                              by hybrid_discover), priority 950 -- the
+#                              same scheme as nfs-deny, so it beats a
+#                              network's own default-allow-internal rule.
+#                              GKE agent pods reach the hub through its
+#                              public IAP URL, not a private VPC path, so
+#                              nothing inside the cluster's pod range
+#                              needs to reach the hub VM directly on any
+#                              port. NFS is unaffected: the PV mount is
+#                              made by the kubelet from the node's own
+#                              primary address, which nfs-allow (priority
+#                              900) admits by source tag, not from a pod
+#                              address. Only the cluster's default pod
+#                              range is covered; a node pool with its own
+#                              pod range, or an additional pod range added
+#                              to the cluster, is not (see the runbook).
 # _hybrid_check_cloud_run_egress_overlap runs first, before any of the
 # three rules are created, and refuses outright if the pod CIDR could
 # overlap the Cloud Run IAP proxy's own egress range. The two NFS rules
@@ -1306,7 +1313,7 @@ hybrid_ensure_firewall_rules() {
     "${network}" "INGRESS" "DENY" "tcp:2049" "range" "0.0.0.0/0" "${target_tag}" "950"
 
   _hybrid_ensure_firewall_rule "${HYBRID_HUB_DENY_NAME}" "${project_id}" "${marker}" \
-    "${network}" "INGRESS" "DENY" "tcp:8080" "range" "${GKE_POD_CIDR}" "${target_tag}" "950"
+    "${network}" "INGRESS" "DENY" "all" "range" "${GKE_POD_CIDR}" "${target_tag}" "950"
 
   _hybrid_ensure_firewall_rule "${HYBRID_ALLOW_NAME}" "${project_id}" "${marker}" \
     "${network}" "INGRESS" "ALLOW" "tcp:2049" "tag" "${GKE_NODE_TAG}" "${target_tag}" "900"
@@ -1833,20 +1840,32 @@ hybrid_internal_ip_guard_verify() {
 
 # hybrid_transport_sa_name HUB_NAME
 #
-# GCP service-account IDs must be 6-30 chars. Truncates HUB_NAME itself
-# (not the whole string) so the result always ends in "-transport" --
-# deterministic for a given HUB_NAME, and this fixed suffix is what
-# keeps it from ever colliding with deploy.sh's own SA_NAME truncation
-# of "scion-hub-<hub>" (which has no such suffix).
+# The transport SA's account id: "scion-tp-<hub prefix>-<hash>", where
+# <hash> is 8 hex digits of the CRC-32 (POSIX `cksum`) of the FULL hub
+# name and <hub prefix> is at most the first 12 characters of the hub
+# name, with any trailing hyphen dropped. GCP service-account ids must be
+# 6-30 characters of [a-z0-9-], starting with a letter and ending in a
+# letter or digit; the longest possible result is 9 + 12 + 1 + 8 = 30.
+#   - The prefix is readable only; the hash is what tells hubs apart, so
+#     two hub names that share their first 12 characters still get
+#     different ids (a hash collision between two specific hub names is
+#     possible in principle but vanishingly unlikely, and would surface
+#     as the ownership-marker refusal below, never as silent sharing).
+#   - "scion-tp-" can never equal deploy.sh's own base SA id, which
+#     always starts with "scion-hub-", whatever either hub is named.
+#   - Deterministic for a given hub name, so a redeploy or teardown
+#     always finds the same account.
+# Uses `cksum` rather than Python so teardown can compute the name
+# without an interpreter.
 hybrid_transport_sa_name() {
-  local hub_name="$1" name
-  name="scion-hub-${hub_name}-transport"
-  if [[ ${#name} -gt 30 ]]; then
-    # len("scion-hub-") == 10, len("-transport") == 10; 30 - 10 - 10 == 10
-    # characters left for the hub-name portion.
-    name="scion-hub-${hub_name:0:10}-transport"
-  fi
-  echo "$name"
+  local hub_name="$1" crc hash prefix
+  crc="$(printf '%s' "$hub_name" | cksum | awk '{print $1}')"
+  hash="$(printf '%08x' "$crc")"
+  prefix="${hub_name:0:12}"
+  while [[ "$prefix" == *- ]]; do
+    prefix="${prefix%-}"
+  done
+  echo "scion-tp-${prefix}-${hash}"
 }
 
 # hybrid_discover_iap_client_id PROJECT_ID
@@ -1893,12 +1912,14 @@ print(((d.get('accessSettings') or {}).get('oauthSettings') or {}).get('clientId
 # that lacks the marker. Sets HYBRID_TRANSPORT_SA_EMAIL.
 hybrid_ensure_transport_sa() {
   local hub_name="$1" project_id="$2"
-  local sa_name sa_email marker desc_json existing_desc
+  local sa_name sa_email marker desc_json existing_desc describe_err
   sa_name="$(hybrid_transport_sa_name "$hub_name")"
   sa_email="${sa_name}@${project_id}.iam.gserviceaccount.com"
   marker="scion-deployment=${hub_name}"
 
-  if desc_json="$(gcloud iam service-accounts describe "$sa_email" --project="$project_id" --format=json 2>/dev/null)"; then
+  describe_err="$(mktemp)"
+  if desc_json="$(gcloud iam service-accounts describe "$sa_email" --project="$project_id" --format=json 2>"${describe_err}")"; then
+    rm -f "${describe_err}"
     existing_desc="$(echo "$desc_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
     if [[ "$existing_desc" != "$marker" ]]; then
       err "Service account ${sa_email} already exists without this deployment's marker. Refusing to adopt it for agent transport auth."
@@ -1906,6 +1927,13 @@ hybrid_ensure_transport_sa() {
     fi
     echo "  Reusing existing transport service account: ${sa_email}"
   else
+    if ! _hybrid_gcloud_not_found "$(cat "${describe_err}")"; then
+      err "Could not confirm whether transport service account ${sa_email} already exists:"
+      err "  $(cat "${describe_err}")"
+      rm -f "${describe_err}"
+      exit 1
+    fi
+    rm -f "${describe_err}"
     if ! gcloud iam service-accounts create "$sa_name" \
         --project="$project_id" \
         --display-name="Scion hub ${hub_name} agent transport" \
@@ -1981,45 +2009,268 @@ hybrid_settings_auth_transport_yaml() {
 YAML
 }
 
-# hybrid_teardown_transport_sa HUB_NAME PROJECT_ID SERVICE REGION
+# =====================================================================
+# Restricted user access. With the tier on, the settings.yaml writes
+# carry a non-open server.auth.user_access_mode (invite_only unless the
+# config file chooses domain_restricted), plus any configured
+# server.auth.authorized_domains. The hub's admin_emails entry
+# (ADMIN_EMAIL) is always allowed to sign in, whatever the mode, and
+# invites other users from the web UI's admin Users page or with
+# `scion hub invite`.
+# =====================================================================
+
+# _hybrid_read_user_access_config — reads the optional top-level
+# `user_access_mode` (string) and `authorized_domains` (list of strings)
+# config keys, telling "absent" apart from "present but empty" (which
+# config_get cannot). Sets HYBRID_CFG_USER_ACCESS_MODE_SET (true/false),
+# HYBRID_CFG_USER_ACCESS_MODE, HYBRID_CFG_AUTHORIZED_DOMAINS_SET
+# (true/false) and the array HYBRID_CFG_AUTHORIZED_DOMAINS. Exits on a
+# value of the wrong type. With no config file, both are absent.
+_hybrid_read_user_access_config() {
+  local parsed line
+  HYBRID_CFG_USER_ACCESS_MODE_SET=false
+  HYBRID_CFG_USER_ACCESS_MODE=""
+  HYBRID_CFG_AUTHORIZED_DOMAINS_SET=false
+  HYBRID_CFG_AUTHORIZED_DOMAINS=()
+  if [[ -z "${CONFIG_FILE:-}" || ! -f "${CONFIG_FILE:-}" ]]; then
+    return 0
+  fi
+  if ! parsed="$("$PYTHON" -c "
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+if not isinstance(d, dict):
+    d = {}
+def bad(msg):
+    sys.stderr.write(msg + '\n')
+    sys.exit(2)
+def clean(v, key):
+    if not isinstance(v, str):
+        bad(key + ' must be a string')
+    if '\n' in v or '\r' in v or '\t' in v:
+        bad(key + ' must not contain tabs or line breaks')
+    return v
+if 'user_access_mode' in d:
+    print('M\t' + clean(d['user_access_mode'], 'user_access_mode'))
+if 'authorized_domains' in d:
+    v = d['authorized_domains']
+    if not isinstance(v, list):
+        bad('authorized_domains must be a list of domain names')
+    print('L\t')
+    for item in v:
+        print('D\t' + clean(item, 'authorized_domains entries'))
+" "$CONFIG_FILE" 2>&1)"; then
+    err "Invalid user access settings in config file ${CONFIG_FILE}: ${parsed}"
+    exit 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      "M	"*)
+        HYBRID_CFG_USER_ACCESS_MODE_SET=true
+        HYBRID_CFG_USER_ACCESS_MODE="${line#M	}"
+        ;;
+      "L	"*)
+        HYBRID_CFG_AUTHORIZED_DOMAINS_SET=true
+        ;;
+      "D	"*)
+        HYBRID_CFG_AUTHORIZED_DOMAINS+=("${line#D	}")
+        ;;
+    esac
+  done <<< "$parsed"
+}
+
+# hybrid_user_access_config_present — true if the config file sets
+# either user access key. deploy.sh uses this to warn, with the tier
+# off, that they are not applied.
+hybrid_user_access_config_present() {
+  _hybrid_read_user_access_config
+  [[ "$HYBRID_CFG_USER_ACCESS_MODE_SET" == "true" || "$HYBRID_CFG_AUTHORIZED_DOMAINS_SET" == "true" ]]
+}
+
+# _hybrid_is_service_account_domain DOMAIN — true if DOMAIN (lowercase)
+# names, or as a "*.suffix" wildcard would match, a Google service
+# account email domain (anything ending in gserviceaccount.com). The
+# hub matches "*.suffix" entries by plain suffix, so "*.com" counts too.
+_hybrid_is_service_account_domain() {
+  local domain="$1" suffix
+  if [[ "$domain" == *gserviceaccount.com ]]; then
+    return 0
+  fi
+  if [[ "$domain" == "*."* ]]; then
+    suffix="${domain#\*}"
+    if [[ "sa.gserviceaccount.com" == *"$suffix" ]]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# hybrid_resolve_user_access ADMIN_EMAIL
 #
-# Removes the transport SA's Cloud Run IAP accessor binding (best-effort:
-# deleting the Cloud Run service itself, done earlier in teardown,
-# already removes this when that delete succeeds, but a kept Cloud Run
-# service would otherwise be left with a dangling member reference), then
-# the SA itself -- marked only, refusing to touch an unmarked same-name
-# SA, exactly like every other hybrid-tier resource. Sets
-# HYBRID_TRANSPORT_SA_DELETED and HYBRID_TRANSPORT_SA_DELETE_FAILED. A
-# failure here does not skip anything else in the caller's teardown
+# Validates the user access settings the tier writes, before anything is
+# created. Refuses:
+#   - an empty ADMIN_EMAIL (nobody could sign in to invite anyone);
+#   - an ADMIN_EMAIL that is a service account (ends in
+#     gserviceaccount.com);
+#   - a configured user_access_mode other than invite_only or
+#     domain_restricted (including "open" and the empty string);
+#   - domain_restricted with no authorized_domains;
+#   - an authorized_domains entry that is not a domain name or
+#     "*.domain" wildcard, or that names or covers a service account
+#     domain.
+# Sets HYBRID_USER_ACCESS_MODE, the array HYBRID_AUTHORIZED_DOMAINS
+# (lowercased) and HYBRID_USER_ACCESS_YAML, the block spliced into both
+# settings.yaml writes.
+hybrid_resolve_user_access() {
+  local admin_email="$1" admin_lower mode domain lower
+  local label_re='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
+  local domain_re="^${label_re}(\\.${label_re})+\$"
+  local wildcard_re="^\\*\\.${label_re}(\\.${label_re})*\$"
+  _hybrid_read_user_access_config
+
+  if [[ -z "$admin_email" ]]; then
+    err "The hybrid tier configures restricted user access (invite-only by default), which needs admin_email set to the account that signs in first and invites other users."
+    exit 1
+  fi
+  admin_lower="$(printf '%s' "$admin_email" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$admin_lower" == *gserviceaccount.com ]]; then
+    err "admin_email '${admin_email}' is a service account. With the hybrid tier on, admin_email must be a user account that can sign in to the web UI."
+    exit 1
+  fi
+
+  mode="invite_only"
+  if [[ "$HYBRID_CFG_USER_ACCESS_MODE_SET" == "true" ]]; then
+    mode="$HYBRID_CFG_USER_ACCESS_MODE"
+    case "$mode" in
+      invite_only|domain_restricted) ;;
+      *)
+        err "user_access_mode '${mode}' is not supported with the hybrid tier, which configures restricted user access: use invite_only (the default when unset) or domain_restricted."
+        exit 1
+        ;;
+    esac
+  fi
+
+  HYBRID_AUTHORIZED_DOMAINS=()
+  for domain in ${HYBRID_CFG_AUTHORIZED_DOMAINS[@]+"${HYBRID_CFG_AUTHORIZED_DOMAINS[@]}"}; do
+    lower="$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')"
+    if ! [[ "$lower" =~ $domain_re || "$lower" =~ $wildcard_re ]]; then
+      err "authorized_domains entry '${domain}' is not a domain name (example.com) or a wildcard (*.example.com)."
+      exit 1
+    fi
+    if _hybrid_is_service_account_domain "$lower"; then
+      err "authorized_domains entry '${domain}' is not allowed with the hybrid tier: it matches service account email addresses (gserviceaccount.com)."
+      exit 1
+    fi
+    HYBRID_AUTHORIZED_DOMAINS+=("$lower")
+  done
+
+  if [[ "$mode" == "domain_restricted" && ${#HYBRID_AUTHORIZED_DOMAINS[@]} -eq 0 ]]; then
+    err "user_access_mode domain_restricted needs at least one authorized_domains entry."
+    exit 1
+  fi
+
+  HYBRID_USER_ACCESS_MODE="$mode"
+  HYBRID_USER_ACCESS_YAML="$(hybrid_settings_user_access_yaml "$mode" ${HYBRID_AUTHORIZED_DOMAINS[@]+"${HYBRID_AUTHORIZED_DOMAINS[@]}"})"
+}
+
+# hybrid_settings_user_access_yaml MODE [DOMAIN...]
+#
+# Renders user_access_mode (and authorized_domains, when any are given)
+# indented to nest under the settings.yaml `auth:` mapping. Pure string
+# rendering, directly unit-testable.
+hybrid_settings_user_access_yaml() {
+  local mode="$1" domain
+  shift
+  printf '    user_access_mode: "%s"\n' "$mode"
+  if [[ $# -gt 0 ]]; then
+    printf '    authorized_domains:\n'
+    for domain in "$@"; do
+      printf '      - "%s"\n' "$domain"
+    done
+  fi
+}
+
+# hybrid_teardown_transport_sa HUB_NAME PROJECT_ID SERVICE REGION SERVICE_GONE
+#
+# Removes the transport SA and its Cloud Run IAP accessor binding --
+# marked only, refusing to touch an unmarked same-name SA, exactly like
+# every other hybrid-tier resource. Only a positive not-found from
+# `describe` reads as "nothing to do"; any other describe error leaves the
+# SA's state unknown, which is recorded as a failure, never as gone.
+#
+# The IAP binding lives on the Cloud Run service's IAM policy, so when
+# SERVICE_GONE is "true" (the caller confirmed the service deleted or not
+# found) it went with the service and there is nothing to remove.
+# Otherwise it is removed before the SA; a binding that is already absent
+# counts as removed, but any other removal failure keeps the SA too, so a
+# re-run can retry both.
+#
+# Sets, for the caller's summary and exit status:
+#   HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL   the SA email checked
+#   HYBRID_TRANSPORT_SA_DELETED          true once the SA is deleted
+#   HYBRID_TRANSPORT_SA_NOT_FOUND        true if there was no SA to delete
+#   HYBRID_TRANSPORT_SA_DELETE_FAILED    true if the SA was kept on error,
+#                                        was unmarked, or its state is
+#                                        unknown
+#   HYBRID_TRANSPORT_SA_KEPT_REASON      why, when DELETE_FAILED is true
+#   HYBRID_TRANSPORT_SA_BINDING_STATE    removed | absent | failed |
+#                                        not-attempted
+# A failure here does not skip anything else in the caller's teardown
 # sequence; the caller decides how to treat it.
 hybrid_teardown_transport_sa() {
-  local hub_name="$1" project_id="$2" service="$3" region="$4"
-  local sa_name sa_email marker desc_json existing_desc delete_err
+  local hub_name="$1" project_id="$2" service="$3" region="$4" service_gone="${5:-false}"
+  local sa_name sa_email marker desc_json existing_desc describe_err delete_err binding_err
   sa_name="$(hybrid_transport_sa_name "$hub_name")"
   sa_email="${sa_name}@${project_id}.iam.gserviceaccount.com"
   marker="scion-deployment=${hub_name}"
+  HYBRID_TRANSPORT_SA_TEARDOWN_EMAIL="$sa_email"
   HYBRID_TRANSPORT_SA_DELETED=false
+  HYBRID_TRANSPORT_SA_NOT_FOUND=false
   HYBRID_TRANSPORT_SA_DELETE_FAILED=false
+  HYBRID_TRANSPORT_SA_KEPT_REASON=""
+  HYBRID_TRANSPORT_SA_BINDING_STATE="not-attempted"
 
-  if ! desc_json="$(gcloud iam service-accounts describe "$sa_email" --project="$project_id" --format=json 2>/dev/null)"; then
-    # Not found (or unreadable) is treated as nothing to do here, the
-    # same as every other base-resource "not found or already deleted"
-    # case in this teardown flow.
+  describe_err="$(mktemp)"
+  if ! desc_json="$(gcloud iam service-accounts describe "$sa_email" --project="$project_id" --format=json 2>"${describe_err}")"; then
+    if _hybrid_gcloud_not_found "$(cat "${describe_err}")"; then
+      echo "  Transport service account ${sa_email} not found; nothing to delete."
+      HYBRID_TRANSPORT_SA_NOT_FOUND=true
+    else
+      err "Could not confirm whether transport service account ${sa_email} exists; keeping it:"
+      err "  $(cat "${describe_err}")"
+      HYBRID_TRANSPORT_SA_DELETE_FAILED=true
+      HYBRID_TRANSPORT_SA_KEPT_REASON="state unknown: describe failed"
+    fi
+    rm -f "${describe_err}"
     return 0
   fi
+  rm -f "${describe_err}"
   existing_desc="$(echo "$desc_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
   if [[ "$existing_desc" != "$marker" ]]; then
     warn "Transport service account ${sa_email} does not carry this deployment's marker; leaving it untouched."
     HYBRID_TRANSPORT_SA_DELETE_FAILED=true
+    HYBRID_TRANSPORT_SA_KEPT_REASON="no ownership marker"
     return 0
   fi
 
-  gcloud iap web remove-iam-policy-binding \
-    --resource-type=cloud-run --service="$service" \
-    --region="$region" --project="$project_id" \
-    --member="serviceAccount:${sa_email}" \
-    --role=roles/iap.httpsResourceAccessor \
-    --quiet >/dev/null 2>&1 || true
+  if [[ "$service_gone" == "true" ]]; then
+    HYBRID_TRANSPORT_SA_BINDING_STATE="absent"
+  else
+    binding_err="$(mktemp)"
+    if gcloud iap web remove-iam-policy-binding         --resource-type=cloud-run --service="$service"         --region="$region" --project="$project_id"         --member="serviceAccount:${sa_email}"         --role=roles/iap.httpsResourceAccessor         --quiet >/dev/null 2>"${binding_err}"; then
+      HYBRID_TRANSPORT_SA_BINDING_STATE="removed"
+    elif _hybrid_gcloud_not_found "$(cat "${binding_err}")"         || grep -qi 'policy binding with the specified .* not found' "${binding_err}"; then
+      HYBRID_TRANSPORT_SA_BINDING_STATE="absent"
+    else
+      err "Could not remove transport service account ${sa_email}'s IAP access on Cloud Run service ${service}; keeping the service account so a re-run can retry both:"
+      err "  $(cat "${binding_err}")"
+      HYBRID_TRANSPORT_SA_BINDING_STATE="failed"
+      HYBRID_TRANSPORT_SA_DELETE_FAILED=true
+      HYBRID_TRANSPORT_SA_KEPT_REASON="IAP access binding removal failed"
+      rm -f "${binding_err}"
+      return 0
+    fi
+    rm -f "${binding_err}"
+  fi
 
   delete_err="$(mktemp)"
   if gcloud iam service-accounts delete "$sa_email" \
@@ -2028,11 +2279,12 @@ hybrid_teardown_transport_sa() {
     HYBRID_TRANSPORT_SA_DELETED=true
   elif _hybrid_gcloud_not_found "$(cat "${delete_err}")"; then
     echo "  Transport service account ${sa_email} not found or already deleted."
-    HYBRID_TRANSPORT_SA_DELETED=true
+    HYBRID_TRANSPORT_SA_NOT_FOUND=true
   else
     err "Failed to delete transport service account ${sa_email}:"
     err "  $(cat "${delete_err}")"
     HYBRID_TRANSPORT_SA_DELETE_FAILED=true
+    HYBRID_TRANSPORT_SA_KEPT_REASON="delete failed"
   fi
   rm -f "${delete_err}"
 }
