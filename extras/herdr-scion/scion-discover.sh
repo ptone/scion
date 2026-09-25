@@ -20,11 +20,15 @@ source "${SCRIPT_DIR}/scion-common.sh"
 
 log() { echo "[scion-discover] $*" >&2; }
 
-# Collect identifiers of running scion agents (one per line).
-# Uses .slug // .name because slug is omitempty in local/podman mode.
+# Collect running scion agents as TSV rows: name, project, projectPath (one
+# row per agent). Uses .slug // .name because slug is omitempty in
+# local/podman mode. project falls back to "global" (scion's own fallback
+# project name) so every row has a usable, comparable project value.
+# projectPath may be empty (Hub mode, or an older scion without the field).
 running_agents() {
   scion list -a -r --format json 2>/dev/null \
-    | jq -r '.[] | select(.phase == "running") | .slug // .name' 2>/dev/null
+    | jq -r '.[] | select(.phase == "running")
+              | [(.slug // .name), (.project // "global"), (.projectPath // "")] | @tsv' 2>/dev/null
 }
 
 # Collect agent identifiers from existing herdr panes that belong to this plugin.
@@ -76,8 +80,14 @@ main() {
 
   local created=0
 
-  while IFS= read -r identifier; do
-    [[ -z "$identifier" ]] && continue
+  while IFS=$'\t' read -r name project project_path; do
+    [[ -z "$name" ]] && continue
+
+    # Identifier is project/name, not just name: scion agent names are only
+    # unique within a project, and discovery runs across all projects (-a).
+    # Also what the pane's label is built from, so cross-project name
+    # collisions don't get treated as the same pane.
+    local identifier="${project}/${name}"
 
     # Skip if a pane already exists for this agent.
     if echo "$existing" | grep -qxF "$identifier"; then
@@ -89,7 +99,7 @@ main() {
 
     local split_json pane_id
     if ! split_json="$("$HERDR_BIN" pane split --direction right \
-      --env "SCION_AGENT=${identifier}")"; then
+      --env "SCION_AGENT=${name}" --env "SCION_PROJECT=${project}")"; then
       log "Failed to split a pane for $identifier — skipping."
       continue
     fi
@@ -101,7 +111,17 @@ main() {
     fi
 
     "$HERDR_BIN" pane rename "$pane_id" "scion:${identifier}"
-    "$HERDR_BIN" pane run "$pane_id" "bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${identifier}'"
+
+    # scion resolves its target project from -g or CWD, then falls back to
+    # "global" — the wrapper needs the project (and, when known, its
+    # filesystem path) to attach the right agent rather than hitting
+    # "agent '<name>' not found in project 'global'".
+    local run_cmd
+    run_cmd="bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${name}' --project '${project}'"
+    if [[ -n "$project_path" ]]; then
+      run_cmd+=" --project-path '${project_path}'"
+    fi
+    "$HERDR_BIN" pane run "$pane_id" "$run_cmd"
 
     created=$((created + 1))
   done <<< "$agents"

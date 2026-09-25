@@ -23,13 +23,36 @@ source "${SCRIPT_DIR}/scion-common.sh"
 log() { echo "[scion-dashboard] $*" >&2; }
 
 # Build a layout pane node for a single agent.
+#   $1 — name, $2 — project, $3 — projectPath (may be empty)
+# scion resolves its target project from -g or CWD, then falls back to
+# "global" — the wrapper needs --project (and, when known, --project-path)
+# to attach the right agent rather than hitting "agent '<name>' not found
+# in project 'global'".
 pane_node() {
-  local slug="$1"
-  jq -n --arg slug "$slug" --arg script "${SCRIPT_DIR}/scion-attach-wrapper.sh" '{
+  local name="$1" project="$2" project_path="$3"
+  local identifier="${project}/${name}"
+
+  local -a cmd=(bash "${SCRIPT_DIR}/scion-attach-wrapper.sh" "$name" --project "$project")
+  if [[ -n "$project_path" ]]; then
+    cmd+=(--project-path "$project_path")
+  fi
+
+  local cmd_json
+  cmd_json="$(printf '%s\n' "${cmd[@]}" | jq -R . | jq -s .)"
+
+  # Note: the --arg name can't be "label" — jq's parser treats a variable
+  # reference $label as its `label $out | ...` control-flow keyword, not a
+  # bound --arg, and fails with "unexpected label, expecting IDENT" even
+  # though the *object key* `label:` on its own is fine.
+  jq -n \
+    --arg pane_label "scion:${identifier}" \
+    --arg name "$name" \
+    --arg project "$project" \
+    --argjson cmd "$cmd_json" '{
     type: "pane",
-    label: ("scion:" + $slug),
-    command: ["bash", $script, $slug],
-    env: { SCION_AGENT: $slug }
+    label: $pane_label,
+    command: $cmd,
+    env: { SCION_AGENT: $name, SCION_PROJECT: $project }
   }'
 }
 
@@ -105,7 +128,8 @@ main() {
 
   local agents
   agents="$(scion list -a -r --format json 2>/dev/null \
-    | jq -r '.[] | select(.phase == "running") | .slug // .name' 2>/dev/null)"
+    | jq -r '.[] | select(.phase == "running")
+              | [(.slug // .name), (.project // "global"), (.projectPath // "")] | @tsv' 2>/dev/null)"
 
   if [[ -z "$agents" ]]; then
     echo "No running Scion agents found." >&2
@@ -114,10 +138,10 @@ main() {
 
   # Build pane nodes array.
   local pane_nodes="[]"
-  while IFS= read -r slug; do
-    [[ -z "$slug" ]] && continue
+  while IFS=$'\t' read -r name project project_path; do
+    [[ -z "$name" ]] && continue
     local node
-    node="$(pane_node "$slug")"
+    node="$(pane_node "$name" "$project" "$project_path")"
     pane_nodes="$(echo "$pane_nodes" | jq --argjson n "$node" '. + [$n]')"
   done <<< "$agents"
 

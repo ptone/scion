@@ -21,15 +21,29 @@ source "${SCRIPT_DIR}/scion-common.sh"
 
 log() { echo "[scion-pick] $*" >&2; }
 
-# Build a display line for each agent: "identifier  template  activity"
-# Uses .slug // .name because slug is omitempty in local/podman mode.
+# Build a display row for each agent: display, template, activity, project,
+# name, projectPath. Only the first three columns are shown (see
+# --with-nth below); the rest travel through unseen so the caller can
+# recover the agent's actual project after a selection. display is
+# "project/name" — scion agent names are only unique within a project, and
+# this lists across all projects (-a), so the display (and later, the pane
+# label) needs the project to disambiguate. Uses .slug // .name because
+# slug is omitempty in local/podman mode; project falls back to "global".
 agent_display_lines() {
   scion list -a -r --format json 2>/dev/null \
     | jq -r '.[] | select(.phase == "running")
-              | "\(.slug // .name)\t\(.template // "-")\t\(.activity // "idle")"' 2>/dev/null
+              | [((.project // "global") + "/" + (.slug // .name)),
+                 (.template // "-"),
+                 (.activity // "idle"),
+                 (.project // "global"),
+                 (.slug // .name),
+                 (.projectPath // "")] | @tsv' 2>/dev/null
 }
 
-# Pick using fzf if available, otherwise a basic numbered menu on stderr/stdin.
+# Pick using fzf if available, otherwise a basic numbered menu on
+# stderr/stdin. Returns the full selected row (all 6 tab-separated fields),
+# not just the display column — fzf's --with-nth only changes what's shown
+# and matched against, not what's printed on selection.
 pick_agent() {
   local lines="$1"
 
@@ -38,26 +52,28 @@ pick_agent() {
       | fzf --prompt="Select Scion agent> " \
             --delimiter=$'\t' \
             --with-nth=1,2,3 \
-            --header="AGENT  TEMPLATE  ACTIVITY" \
-      | cut -f1
+            --header="AGENT  TEMPLATE  ACTIVITY"
     return
   fi
 
-  # Fallback: numbered menu.
-  local -a slugs=()
+  # Fallback: numbered menu. Keep each full row so project/name/projectPath
+  # survive a numeric pick too.
+  local -a rows=()
   local i=1
   echo "" >&2
   echo "Running Scion agents:" >&2
-  while IFS=$'\t' read -r slug tmpl activity; do
-    printf "  %d) %-24s  %-16s  %s\n" "$i" "$slug" "$tmpl" "$activity" >&2
-    slugs+=("$slug")
+  while IFS= read -r line; do
+    local display tmpl activity
+    IFS=$'\t' read -r display tmpl activity _ _ _ <<< "$line"
+    printf "  %d) %-32s  %-16s  %s\n" "$i" "$display" "$tmpl" "$activity" >&2
+    rows+=("$line")
     i=$((i + 1))
   done <<< "$lines"
 
   echo "" >&2
-  read -rp "Select agent [1-${#slugs[@]}]: " choice
-  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#slugs[@]} )); then
-    echo "${slugs[$((choice - 1))]}"
+  read -rp "Select agent [1-${#rows[@]}]: " choice
+  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#rows[@]} )); then
+    echo "${rows[$((choice - 1))]}"
   fi
 }
 
@@ -89,19 +105,23 @@ main() {
     exit 0
   fi
 
-  local selected
-  selected="$(pick_agent "$lines")"
+  local selected_row
+  selected_row="$(pick_agent "$lines")"
 
-  if [[ -z "$selected" ]]; then
+  if [[ -z "$selected_row" ]]; then
     echo "No agent selected." >&2
     exit 0
   fi
 
+  local display template activity project name project_path
+  IFS=$'\t' read -r display template activity project name project_path <<< "$selected_row"
+  local identifier="${project}/${name}"
+
   # Check if a pane already exists for this agent (tracked via pane .label).
-  if pane_exists_for_agent "$selected"; then
-    log "Pane already exists for $selected — focusing it."
+  if pane_exists_for_agent "$identifier"; then
+    log "Pane already exists for $identifier — focusing it."
     local pane_id
-    pane_id="$(pane_id_for_agent "$selected")"
+    pane_id="$(pane_id_for_agent "$identifier")"
     if [[ -n "$pane_id" ]]; then
       # Agent commands accept a pane_id directly (herdr resolves it to the
       # agent currently hosted in that pane).
@@ -110,13 +130,13 @@ main() {
     exit 0
   fi
 
-  log "Creating pane for agent: $selected"
+  log "Creating pane for agent: $identifier"
 
   # Split off the pane that opened us (passed via SCION_TARGET_PANE by
   # scion-open-pane.sh), so the new agent pane lands next to the user's
   # pane rather than off this overlay. Falls back to herdr's default target
   # (calling pane, then focused pane) if unset.
-  local -a split_args=(--direction right --env "SCION_AGENT=${selected}")
+  local -a split_args=(--direction right --env "SCION_AGENT=${name}" --env "SCION_PROJECT=${project}")
   if [[ -n "${SCION_TARGET_PANE:-}" ]]; then
     split_args=(--pane "$SCION_TARGET_PANE" "${split_args[@]}")
   fi
@@ -125,12 +145,22 @@ main() {
   split_json="$("$HERDR_BIN" pane split "${split_args[@]}")"
   pane_id="$(echo "$split_json" | jq -r '.result.pane.pane_id // empty')"
   if [[ -z "$pane_id" ]]; then
-    log "herdr pane split returned no pane_id for $selected: $split_json"
+    log "herdr pane split returned no pane_id for $identifier: $split_json"
     exit 1
   fi
 
-  "$HERDR_BIN" pane rename "$pane_id" "scion:${selected}"
-  "$HERDR_BIN" pane run "$pane_id" "bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${selected}'"
+  "$HERDR_BIN" pane rename "$pane_id" "scion:${identifier}"
+
+  # scion resolves its target project from -g or CWD, then falls back to
+  # "global" — the wrapper needs the project (and, when known, its
+  # filesystem path) to attach the right agent rather than hitting
+  # "agent '<name>' not found in project 'global'".
+  local run_cmd
+  run_cmd="bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${name}' --project '${project}'"
+  if [[ -n "$project_path" ]]; then
+    run_cmd+=" --project-path '${project_path}'"
+  fi
+  "$HERDR_BIN" pane run "$pane_id" "$run_cmd"
 }
 
 main "$@"
