@@ -692,7 +692,16 @@ SCRIPT
 #      ordering) -- before= alone only orders the units; on a failed
 #      mount it would let nfs-server start anyway and export whatever's
 #      really at EXPORT_ROOT (the boot disk's root filesystem), exactly
-#      the exposure this dedicated filesystem exists to close. Then
+#      the exposure this dedicated filesystem exists to close. Also
+#      carries nofail, so a failed mount here fails closed for NFS
+#      specifically (via required-by= above) without also taking the
+#      whole VM down to emergency.target -- per systemd.mount(5), nofail's
+#      documented effect is scoped only to this mount's relationship with
+#      local-fs.target/remote-fs.target and has no bearing on the
+#      separate, unit-specific required-by=nfs-server.service dependency.
+#      The fsck pass is 0: systemd-fstab-generator only ever schedules
+#      fsck for device paths, so a nonzero pass on this loop-mounted
+#      regular file is a no-op that just logs a boot-time warning. Then
 #      mounts it if it isn't already;
 #   3. fails closed -- before writing or activating anything below --
 #      if EXPORT_ROOT is not actually a mountpoint after that: this is
@@ -730,7 +739,7 @@ if [ ! -e ${image_path} ]; then
 fi
 sudo mkdir -p ${export_root}
 if ! grep -qF "${image_path} " /etc/fstab; then
-  echo "${image_path} ${export_root} ext4 loop,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 2" | sudo tee -a /etc/fstab > /dev/null
+  echo "${image_path} ${export_root} ext4 loop,nofail,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 0" | sudo tee -a /etc/fstab > /dev/null
   sudo systemctl daemon-reload
 fi
 if ! mountpoint -q ${export_root}; then

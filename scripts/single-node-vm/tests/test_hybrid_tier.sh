@@ -504,6 +504,16 @@ test_nfs_export_script_mounts_before_exporting() {
   assert_contains "$script" "sudo mount /srv/scion-shared" "must mount the export filesystem"
 }
 
+test_nfs_export_script_fstab_line_nofail_and_no_fsck() {
+  local script fstab_line
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
+  fstab_line="$(echo "$script" | grep "${HYBRID_NFS_IMAGE_PATH} /srv/scion-shared ext4")"
+  assert_contains "$fstab_line" "loop,nofail,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service" \
+    "nofail must be present alongside the loop and before=/required-by= options -- it protects boot from a scratchpad-mount failure without touching the separate required-by=nfs-server.service dependency"
+  assert_contains "$fstab_line" " 0 0" \
+    "the fsck pass must be 0 -- systemd-fstab-generator never schedules fsck for a loop-mounted regular file, so a nonzero pass is a no-op boot-time warning"
+}
+
 test_nfs_export_script_fails_closed_when_not_mounted() {
   local script mount_check_line exit_line
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
