@@ -501,7 +501,6 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 	p.sink("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {
 		p.sink("project."+agent.ProjectID+".agent.status", evt)
-		p.sink("grove."+agent.ProjectID+".agent.status", evt)
 	}
 }
 
@@ -532,7 +531,6 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 	p.sink("agent."+agent.ID+".created", evt)
 	if agent.ProjectID != "" {
 		p.sink("project."+agent.ProjectID+".agent.created", evt)
-		p.sink("grove."+agent.ProjectID+".agent.created", evt)
 	}
 }
 
@@ -547,7 +545,6 @@ func (p *eventBuilder) PublishAgentDeleted(_ context.Context, agentID, projectID
 	p.sink("agent."+agentID+".deleted", evt)
 	if projectID != "" {
 		p.sink("project."+projectID+".agent.deleted", evt)
-		p.sink("grove."+projectID+".agent.deleted", evt)
 	}
 }
 
@@ -562,7 +559,6 @@ func (p *eventBuilder) PublishAgentPorts(_ context.Context, agent *store.Agent) 
 	p.sink("agent."+agent.ID+".ports", evt)
 	if agent.ProjectID != "" {
 		p.sink("project."+agent.ProjectID+".agent.ports", evt)
-		p.sink("grove."+agent.ProjectID+".agent.ports", evt)
 	}
 }
 
@@ -575,7 +571,6 @@ func (p *eventBuilder) PublishProjectCreated(_ context.Context, project *store.P
 		Slug:      project.Slug,
 	}
 	p.sink("project."+project.ID+".created", evt)
-	p.sink("grove."+project.ID+".created", evt)
 }
 
 // PublishProjectUpdated publishes a project updated event.
@@ -586,7 +581,6 @@ func (p *eventBuilder) PublishProjectUpdated(_ context.Context, project *store.P
 		Name:      project.Name,
 	}
 	p.sink("project."+project.ID+".updated", evt)
-	p.sink("grove."+project.ID+".updated", evt)
 }
 
 // PublishProjectDeleted publishes a project deleted event.
@@ -596,7 +590,6 @@ func (p *eventBuilder) PublishProjectDeleted(_ context.Context, projectID string
 		GroveID:   projectID,
 	}
 	p.sink("project."+projectID+".deleted", evt)
-	p.sink("grove."+projectID+".deleted", evt)
 }
 
 // PublishBrokerConnected publishes broker connection events, one per project the broker serves.
@@ -610,7 +603,6 @@ func (p *eventBuilder) PublishBrokerConnected(_ context.Context, brokerID, broke
 			Status:     "online",
 		}
 		p.sink("project."+pid+".broker.status", evt)
-		p.sink("grove."+pid+".broker.status", evt)
 	}
 }
 
@@ -624,7 +616,6 @@ func (p *eventBuilder) PublishBrokerDisconnected(_ context.Context, brokerID str
 			Status:    "offline",
 		}
 		p.sink("project."+pid+".broker.status", evt)
-		p.sink("grove."+pid+".broker.status", evt)
 	}
 }
 
@@ -651,7 +642,6 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 	p.sink("notification.created", evt)
 	if notif.ProjectID != "" {
 		p.sink("project."+notif.ProjectID+".notification", evt)
-		p.sink("grove."+notif.ProjectID+".notification", evt)
 	}
 }
 
@@ -767,7 +757,6 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 	}
 	if recipientIsUser && msg.ProjectID != "" {
 		p.sink("project."+msg.ProjectID+".user.message", evt)
-		p.sink("grove."+msg.ProjectID+".user.message", evt)
 	}
 	if msg.AgentID != "" {
 		p.sink("agent."+msg.AgentID+".message", evt)

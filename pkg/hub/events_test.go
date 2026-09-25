@@ -617,6 +617,48 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 	}
 }
 
+// TestChannelEventPublisher_NoLegacyGroveSubjects is a regression test for
+// the SSE cross-project leak: legacy grove.<projectId>.* subjects were a
+// duplicate of the authorized project.<projectId>.* subjects, but SSE subject
+// authorization only ever checked "project", "user" and "agent" prefixes, so
+// any authenticated session could subscribe to grove.> and read every
+// project's events. The fix removes the duplicate grove.* publish calls
+// entirely (default-deny authorization is covered separately in
+// pkg/hub/sse_authz_test.go). This test subscribes to the wildcard grove.>
+// pattern and asserts nothing is ever delivered there, for every event type
+// that used to be dual-published.
+func TestChannelEventPublisher_NoLegacyGroveSubjects(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	groveCh, unsub := pub.Subscribe("grove.>")
+	defer unsub()
+
+	ctx := context.Background()
+	pub.PublishAgentStatus(ctx, &store.Agent{ID: "a1", ProjectID: "g1", Phase: "running"})
+	pub.PublishAgentCreated(ctx, &store.Agent{ID: "a1", ProjectID: "g1"})
+	pub.PublishAgentDeleted(ctx, "a1", "g1")
+	pub.PublishAgentPorts(ctx, &store.Agent{ID: "a1", ProjectID: "g1"})
+	pub.PublishProjectCreated(ctx, &store.Project{ID: "g1", Name: "Project"})
+	pub.PublishProjectUpdated(ctx, &store.Project{ID: "g1", Name: "Project"})
+	pub.PublishProjectDeleted(ctx, "g1")
+	pub.PublishBrokerConnected(ctx, "b1", "broker-one", []string{"g1"})
+	pub.PublishBrokerDisconnected(ctx, "b1", []string{"g1"})
+	pub.PublishNotification(ctx, &store.Notification{ID: "n1", ProjectID: "g1", Status: "COMPLETED"})
+	pub.PublishUserMessage(ctx, &store.Message{
+		ID: "m1", ProjectID: "g1", Sender: "agent:a1", SenderID: "a1",
+		Recipient: "user:alice", RecipientID: "u1", Msg: "secret", Type: "assistant-reply",
+		CreatedAt: time.Now().UTC(),
+	}, nil)
+
+	select {
+	case evt := <-groveCh:
+		t.Fatalf("legacy grove.* subject must not be published, got %q", evt.Subject)
+	default:
+		// Expected: nothing was published on grove.>.
+	}
+}
+
 func TestNoopEventPublisher(t *testing.T) {
 	var pub noopEventPublisher
 	ctx := context.Background()
