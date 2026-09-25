@@ -1451,6 +1451,330 @@ hybrid_teardown_delete() {
 }
 
 # =====================================================================
+# Static internal IP: one reserved address, shared by the PV's NFS
+# server field and the hub URL GKE agents reach the hub at, so neither
+# depends on the VM's ephemeral IP surviving a recreate. Marked the same
+# way as the other hybrid resources: an exact description token,
+# scion-deployment=<hub>.
+# =====================================================================
+
+# hybrid_internal_ip_name HUB_NAME
+hybrid_internal_ip_name() {
+  echo "scion-hub-$1-internal-ip"
+}
+
+# _hybrid_internal_ip_get NAME PROJECT_ID REGION
+#
+# Sets HYBRID_INTERNAL_IP_STATUS (found/absent/unknown),
+# HYBRID_INTERNAL_IP_ADDR, HYBRID_INTERNAL_IP_DESC,
+# HYBRID_INTERNAL_IP_ADDRESS_TYPE, HYBRID_INTERNAL_IP_SUBNET (the bare
+# subnet name, not the full subnetwork URL), and, on unknown,
+# HYBRID_INTERNAL_IP_ERR. Returns 0 only when found. Uses a `list` call
+# rather than `describe` + error-text matching -- the same positive-
+# absence pattern the firewall rules' own ownership checks use
+# (_hybrid_firewall_rule_absent): a list that succeeds AND comes back
+# empty is the only thing that counts as "absent"; a list failure is
+# "unknown", never treated as absent. Same not-found-vs-unknown
+# distinction as every other ownership check in this file.
+_hybrid_internal_ip_get() {
+  local name="$1" project_id="$2" region="$3"
+  local err_file list_json
+  err_file="$(mktemp)"
+  HYBRID_INTERNAL_IP_ADDR=""
+  HYBRID_INTERNAL_IP_DESC=""
+  HYBRID_INTERNAL_IP_ADDRESS_TYPE=""
+  HYBRID_INTERNAL_IP_SUBNET=""
+  HYBRID_INTERNAL_IP_ERR=""
+  if ! list_json="$(gcloud compute addresses list --project="$project_id" \
+      --filter="name=(${name}) region:${region}" --format=json 2>"${err_file}")"; then
+    HYBRID_INTERNAL_IP_STATUS="unknown"
+    HYBRID_INTERNAL_IP_ERR="$(cat "${err_file}")"
+    rm -f "${err_file}"
+    return 1
+  fi
+  rm -f "${err_file}"
+  if [[ "$list_json" == "[]" ]]; then
+    HYBRID_INTERNAL_IP_STATUS="absent"
+    return 1
+  fi
+  HYBRID_INTERNAL_IP_STATUS="found"
+  HYBRID_INTERNAL_IP_ADDR="$(echo "$list_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('address') or '')")"
+  HYBRID_INTERNAL_IP_DESC="$(echo "$list_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('description') or '')")"
+  HYBRID_INTERNAL_IP_ADDRESS_TYPE="$(echo "$list_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('addressType') or '')")"
+  local subnetwork_url
+  subnetwork_url="$(echo "$list_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('subnetwork') or '')")"
+  HYBRID_INTERNAL_IP_SUBNET="${subnetwork_url##*/}"
+  return 0
+}
+
+# hybrid_ensure_internal_ip_new_vm HUB_NAME PROJECT_ID REGION SUBNET
+#
+# Called before creating a brand-new VM. Reuses a marked existing
+# reservation (a rerun after a previous, partially-completed create), or
+# reserves a fresh one otherwise; refuses a same-name reservation that
+# lacks the marker. Sets HYBRID_INTERNAL_IP to the address to pass as
+# the new VM's --private-network-ip.
+hybrid_ensure_internal_ip_new_vm() {
+  local hub_name="$1" project_id="$2" region="$3" subnet="$4"
+  local name marker
+  name="$(hybrid_internal_ip_name "$hub_name")"
+  marker="scion-deployment=${hub_name}"
+
+  if _hybrid_internal_ip_get "$name" "$project_id" "$region"; then
+    if [[ "$HYBRID_INTERNAL_IP_DESC" != "$marker" ]]; then
+      err "Internal IP reservation ${name} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_ADDRESS_TYPE" != "INTERNAL" ]]; then
+      err "Internal IP reservation ${name} is marked, but its address type is '${HYBRID_INTERNAL_IP_ADDRESS_TYPE}', not INTERNAL. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_SUBNET" != "$subnet" ]]; then
+      err "Internal IP reservation ${name} is marked, but its subnet is '${HYBRID_INTERNAL_IP_SUBNET}', not the expected '${subnet}'. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
+    HYBRID_INTERNAL_IP="$HYBRID_INTERNAL_IP_ADDR"
+    echo "  Reusing existing internal IP reservation: ${name} (${HYBRID_INTERNAL_IP})"
+    return 0
+  elif [[ "$HYBRID_INTERNAL_IP_STATUS" == "unknown" ]]; then
+    err "Could not check internal IP reservation ${name}: ${HYBRID_INTERNAL_IP_ERR}"
+    exit 1
+  fi
+
+  if ! gcloud compute addresses create "$name" \
+      --project="$project_id" --region="$region" --subnet="$subnet" \
+      --description="$marker" --quiet; then
+    err "Could not reserve a new internal IP address named ${name}."
+    exit 1
+  fi
+  if ! _hybrid_internal_ip_get "$name" "$project_id" "$region"; then
+    err "Reserved internal IP ${name}, but could not read it back (status: ${HYBRID_INTERNAL_IP_STATUS}${HYBRID_INTERNAL_IP_ERR:+: ${HYBRID_INTERNAL_IP_ERR}})."
+    exit 1
+  fi
+  HYBRID_INTERNAL_IP="$HYBRID_INTERNAL_IP_ADDR"
+  echo "  Reserved internal IP: ${name} (${HYBRID_INTERNAL_IP})"
+}
+
+# hybrid_ensure_internal_ip_existing_vm HUB_NAME PROJECT_ID REGION SUBNET \
+#   CURRENT_IP INSTANCE_NAME ZONE
+#
+# Called when the VM already exists. Promotes CURRENT_IP to a static
+# reservation if one doesn't exist yet, then re-describes the VM to
+# confirm its IP didn't change out from under the promotion (fails
+# otherwise -- an unchanged IP is the whole point of promoting it).
+# Verifies a marked existing reservation's address still matches
+# CURRENT_IP (a changed VM IP after some other recreate is drift: fails
+# with remediation, never auto-corrected). Refuses a same-name
+# reservation that lacks the marker. Sets HYBRID_INTERNAL_IP.
+hybrid_ensure_internal_ip_existing_vm() {
+  local hub_name="$1" project_id="$2" region="$3" subnet="$4" current_ip="$5" \
+    instance_name="$6" zone="$7"
+  local name marker
+  name="$(hybrid_internal_ip_name "$hub_name")"
+  marker="scion-deployment=${hub_name}"
+
+  if _hybrid_internal_ip_get "$name" "$project_id" "$region"; then
+    if [[ "$HYBRID_INTERNAL_IP_DESC" != "$marker" ]]; then
+      err "Internal IP reservation ${name} already exists without this deployment's marker. Refusing to adopt it."
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_ADDR" != "$current_ip" ]]; then
+      err "Internal IP reservation ${name} carries this deployment's marker but its address (${HYBRID_INTERNAL_IP_ADDR}) no longer matches the VM's current internal IP (${current_ip})."
+      err "Refusing to auto-correct. Delete the reservation, then re-run deploy.sh to promote the VM's current IP:"
+      err "  gcloud compute addresses delete ${name} --region=${region} --project=${project_id} --quiet"
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_ADDRESS_TYPE" != "INTERNAL" ]]; then
+      err "Internal IP reservation ${name} is marked, but its address type is '${HYBRID_INTERNAL_IP_ADDRESS_TYPE}', not INTERNAL. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_SUBNET" != "$subnet" ]]; then
+      err "Internal IP reservation ${name} is marked, but its subnet is '${HYBRID_INTERNAL_IP_SUBNET}', not the expected '${subnet}'. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
+    HYBRID_INTERNAL_IP="$HYBRID_INTERNAL_IP_ADDR"
+    return 0
+  elif [[ "$HYBRID_INTERNAL_IP_STATUS" == "unknown" ]]; then
+    err "Could not check internal IP reservation ${name}: ${HYBRID_INTERNAL_IP_ERR}"
+    exit 1
+  fi
+
+  if ! [[ "$current_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    err "The VM's current internal IP ('${current_ip}') doesn't look like an IPv4 address; refusing to promote it to a static reservation. A blank or malformed value here would make 'gcloud compute addresses create --addresses=' reserve an unrelated, auto-assigned address instead."
+    exit 1
+  fi
+
+  info "Promoting the VM's current internal IP to a static reservation..."
+  if ! gcloud compute addresses create "$name" \
+      --project="$project_id" --region="$region" --subnet="$subnet" \
+      --addresses="$current_ip" --description="$marker" --quiet; then
+    err "Could not promote the VM's current internal IP (${current_ip}) to a static reservation named ${name}."
+    exit 1
+  fi
+  local recheck_ip
+  recheck_ip="$(gcloud compute instances describe "$instance_name" \
+    --zone="$zone" --project="$project_id" \
+    --format="get(networkInterfaces[0].networkIP)")"
+  if [[ "$recheck_ip" != "$current_ip" ]]; then
+    err "The VM's internal IP changed from ${current_ip} to ${recheck_ip} while promoting the reservation; refusing to continue with a mismatched address."
+    exit 1
+  fi
+  HYBRID_INTERNAL_IP="$current_ip"
+  echo "  Promoted internal IP reservation: ${name} (${HYBRID_INTERNAL_IP})"
+}
+
+# hybrid_internal_ip_teardown_check HUB_NAME PROJECT_ID REGION
+#
+# Classifies the internal IP reservation exactly like the firewall
+# rules: found+marked -> ready to delete; found+unmarked -> SKIPPED,
+# aborts the whole teardown before any delete; not found -> ignored; an
+# unknown check result also aborts. Sets HYBRID_INTERNAL_IP_TEARDOWN_NAME
+# and HYBRID_INTERNAL_IP_TEARDOWN_READY.
+hybrid_internal_ip_teardown_check() {
+  local hub_name="$1" project_id="$2" region="$3"
+  local name marker
+  name="$(hybrid_internal_ip_name "$hub_name")"
+  marker="scion-deployment=${hub_name}"
+  HYBRID_INTERNAL_IP_TEARDOWN_NAME="$name"
+  HYBRID_INTERNAL_IP_TEARDOWN_READY=false
+  HYBRID_INTERNAL_IP_TEARDOWN_FAILED=false
+
+  if _hybrid_internal_ip_get "$name" "$project_id" "$region"; then
+    if [[ "$HYBRID_INTERNAL_IP_DESC" == "$marker" ]]; then
+      echo "  found (marked): ${name}"
+      HYBRID_INTERNAL_IP_TEARDOWN_READY=true
+    else
+      echo "  SKIPPED (unmarked): ${name}"
+      HYBRID_INTERNAL_IP_TEARDOWN_FAILED=true
+    fi
+  elif [[ "$HYBRID_INTERNAL_IP_STATUS" == "unknown" ]]; then
+    err "Could not check internal IP reservation ${name}: ${HYBRID_INTERNAL_IP_ERR}"
+    HYBRID_INTERNAL_IP_TEARDOWN_FAILED=true
+  fi
+}
+
+# hybrid_internal_ip_teardown_delete PROJECT_ID REGION VM_GONE
+#
+# Deletes the reservation hybrid_internal_ip_teardown_check found ready,
+# but only once VM_GONE is "true" (the address is still attached to the
+# VM's NIC until it's deleted, so deleting it earlier would fail anyway,
+# and a not-yet-confirmed VM is exactly the "don't delete NFS/hub-allow
+# firewall rules yet either" case). When VM_GONE isn't "true", SKIPS the
+# reservation with a reason rather than attempting the delete -- this is
+# reported distinctly from an attempted-and-failed delete (SKIPPED vs.
+# Kept), so the two are never conflated in the final summary. Sets
+# HYBRID_INTERNAL_IP_DELETED, HYBRID_INTERNAL_IP_DELETE_FAILED,
+# HYBRID_INTERNAL_IP_DELETE_SKIP_REASON (set only for the SKIPPED case)
+# and HYBRID_INTERNAL_IP_DELETE_ERR (set only for an actual delete
+# failure).
+hybrid_internal_ip_teardown_delete() {
+  local project_id="$1" region="$2" vm_gone="$3"
+  HYBRID_INTERNAL_IP_DELETED=false
+  HYBRID_INTERNAL_IP_DELETE_FAILED=false
+  HYBRID_INTERNAL_IP_DELETE_SKIP_REASON=""
+  HYBRID_INTERNAL_IP_DELETE_ERR=""
+  if [[ "$HYBRID_INTERNAL_IP_TEARDOWN_READY" != "true" ]]; then
+    return 0
+  fi
+  if [[ "$vm_gone" != "true" ]]; then
+    warn "Keeping internal IP reservation ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}: the VM's deletion isn't confirmed yet."
+    HYBRID_INTERNAL_IP_DELETE_FAILED=true
+    HYBRID_INTERNAL_IP_DELETE_SKIP_REASON="VM not confirmed gone"
+    return 0
+  fi
+  local delete_err
+  delete_err="$(mktemp)"
+  if gcloud compute addresses delete "$HYBRID_INTERNAL_IP_TEARDOWN_NAME" \
+      --region="$region" --project="$project_id" --quiet 2>"${delete_err}"; then
+    echo "  Deleted: ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}"
+    HYBRID_INTERNAL_IP_DELETED=true
+  else
+    HYBRID_INTERNAL_IP_DELETE_ERR="$(cat "${delete_err}")"
+    err "Failed to delete internal IP reservation ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}:"
+    err "  ${HYBRID_INTERNAL_IP_DELETE_ERR}"
+    HYBRID_INTERNAL_IP_DELETE_FAILED=true
+  fi
+  rm -f "${delete_err}"
+}
+
+# hybrid_hub_url_guard_verify HUB_NAME PROJECT_ID REGION INSTANCE_NAME ZONE
+#
+# The hub URL guard's post-create half: GKE agent pods reach the hub at
+# http://<internal-ip>:8080 over the VPC, and that is the ONLY shape
+# this tier supports -- there is no fallback to a public URL or an
+# IAP-only refusal, so both pieces that make it work (the static
+# internal IP reservation, and the hub-allow firewall rule letting the
+# pod CIDR reach tcp:8080) must actually be confirmed in place once
+# everything above has run. Confirming "in place" means more than the
+# resource merely existing: the reservation must still carry this
+# deployment's marker and its address must equal the VM's OWN, freshly
+# re-described networkInterfaces[0].networkIP -- not $HYBRID_INTERNAL_IP,
+# which on the new-VM path was itself read from this same reservation
+# earlier and so can't catch the reservation and the VM ever having
+# actually diverged -- and the firewall rule's source range must equal
+# the discovered pod CIDR (not a wider range that would either under- or
+# over-admit pods). The guard's other half -- refusing before any create
+# if the pod CIDR can't be discovered, or if the internal-IP reservation
+# itself can't be resolved -- already happens by construction:
+# hybrid_discover and hybrid_ensure_internal_ip_* above both exit
+# non-zero on their own failures, before this ever runs. Fails loudly,
+# naming exactly which piece is missing or wrong.
+hybrid_hub_url_guard_verify() {
+  local hub_name="$1" project_id="$2" region="$3" instance_name="$4" zone="$5"
+  if [[ -z "${HYBRID_INTERNAL_IP:-}" ]] || ! [[ "$HYBRID_INTERNAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    err "Hub URL guard: no valid internal IP is resolved for hub ${hub_name} (got '${HYBRID_INTERNAL_IP:-}'). GKE agent pods would have no way to reach the hub."
+    exit 1
+  fi
+
+  local vm_ip
+  vm_ip="$(gcloud compute instances describe "$instance_name" \
+    --zone="$zone" --project="$project_id" \
+    --format="get(networkInterfaces[0].networkIP)" 2>/dev/null)"
+  if [[ -z "$vm_ip" ]]; then
+    err "Hub URL guard: could not re-describe VM ${instance_name} to confirm its actual internal IP."
+    exit 1
+  fi
+  if [[ "$HYBRID_INTERNAL_IP" != "$vm_ip" ]]; then
+    err "Hub URL guard: the resolved internal IP (${HYBRID_INTERNAL_IP}) does not match VM ${instance_name}'s actual internal IP (${vm_ip}). GKE agent pods would reach the wrong address."
+    exit 1
+  fi
+
+  local ip_name marker addr_json addr_marker addr_value
+  ip_name="$(hybrid_internal_ip_name "$hub_name")"
+  marker="scion-deployment=${hub_name}"
+  if ! addr_json="$(gcloud compute addresses describe "$ip_name" --region="$region" --project="$project_id" --format=json 2>/dev/null)"; then
+    err "Hub URL guard: internal IP reservation ${ip_name} could not be confirmed after create."
+    exit 1
+  fi
+  addr_marker="$(echo "$addr_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
+  addr_value="$(echo "$addr_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('address') or '')")"
+  if [[ "$addr_marker" != "$marker" ]]; then
+    err "Hub URL guard: internal IP reservation ${ip_name} no longer carries this deployment's marker (found: '${addr_marker}')."
+    exit 1
+  fi
+  if [[ -z "$addr_value" ]] || ! [[ "$addr_value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    err "Hub URL guard: internal IP reservation ${ip_name}'s address ('${addr_value}') is not a valid IPv4 address."
+    exit 1
+  fi
+  if [[ "$addr_value" != "$vm_ip" ]]; then
+    err "Hub URL guard: internal IP reservation ${ip_name} is ${addr_value}, but VM ${instance_name}'s actual internal IP is ${vm_ip}. GKE agent pods would reach the wrong address."
+    exit 1
+  fi
+
+  local hub_allow_name rule_json rule_ranges
+  hub_allow_name="scion-hub-${hub_name}-hub-allow"
+  if ! rule_json="$(gcloud compute firewall-rules describe "$hub_allow_name" --project="$project_id" --format=json 2>/dev/null)"; then
+    err "Hub URL guard: firewall rule ${hub_allow_name} could not be confirmed after create. GKE agent pods would have no way to reach the hub at ${HYBRID_INTERNAL_IP}:8080."
+    exit 1
+  fi
+  rule_ranges="$(echo "$rule_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(','.join(d.get('sourceRanges') or []))")"
+  if [[ "$rule_ranges" != "${GKE_POD_CIDR:-}" ]]; then
+    err "Hub URL guard: firewall rule ${hub_allow_name}'s source range is '${rule_ranges}', not the discovered pod CIDR '${GKE_POD_CIDR:-}'. GKE agent pods outside that range would be denied, or the rule may be wider than intended."
+    exit 1
+  fi
+}
+
+# =====================================================================
 # Kubernetes objects: the PV/namespace/PVC the hybrid tier's shared
 # tree is mounted through, and their teardown. Every kubectl call below
 # requires HYBRID_KUBECONFIG to already be set by
