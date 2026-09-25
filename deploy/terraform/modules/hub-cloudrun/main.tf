@@ -105,30 +105,32 @@ resource "google_secret_manager_secret" "settings" {
 resource "google_secret_manager_secret_version" "settings" {
   secret = google_secret_manager_secret.settings.id
   secret_data = templatefile("${path.module}/templates/settings.yaml.tftpl", {
-    project_id          = var.project_id
-    region              = var.region
-    hub_name            = local.hub_id
-    public_url          = local.public_url
-    iap_audience        = local.iap_audience
-    admin_emails        = var.admin_emails
-    db_user             = var.db_user
-    db_password         = data.google_secret_manager_secret_version.db_password.secret_data
-    db_name             = var.db_name
-    sql_connection_name = var.sql_connection_name
-    bucket              = google_storage_bucket.artifacts.name
-    iap_oauth_client_id = var.iap_oauth_client_id
-    transport_sa_email  = var.transport_sa_email
-    nfs_mount_root      = var.nfs_mount_root
-    nfs_server          = var.nfs_server
-    nfs_export          = var.nfs_export
-    pv_name             = var.pv_name
-    namespace           = var.namespace
-    nfs_uid             = var.nfs_uid
-    nfs_gid             = var.nfs_gid
-    nfs_subpath_root    = var.nfs_subpath_root
-    image_registry      = var.image_registry
-    broker_id           = local.broker_id
-    broker_name         = "${local.hub_id}-broker"
+    project_id           = var.project_id
+    region               = var.region
+    hub_name             = local.hub_id
+    public_url           = local.public_url
+    iap_audience         = local.iap_audience
+    admin_emails         = var.admin_emails
+    db_user              = var.db_user
+    db_password          = data.google_secret_manager_secret_version.db_password.secret_data
+    db_name              = var.db_name
+    sql_connection_name  = var.sql_connection_name
+    bucket               = google_storage_bucket.artifacts.name
+    iap_oauth_client_id  = var.iap_oauth_client_id
+    transport_sa_email   = var.transport_sa_email
+    nfs_mount_root       = var.nfs_mount_root
+    nfs_server           = var.nfs_server
+    nfs_export           = var.nfs_export
+    pv_name              = var.pv_name
+    namespace            = var.namespace
+    nfs_uid              = var.nfs_uid
+    nfs_gid              = var.nfs_gid
+    nfs_subpath_root     = var.nfs_subpath_root
+    image_registry       = var.image_registry
+    broker_id            = local.broker_id
+    broker_name          = "${local.hub_id}-broker"
+    hub_write_timeout    = var.hub_write_timeout
+    broker_write_timeout = var.broker_write_timeout
   })
 
   # F-107: secret_data changing always forces a replace (Secret Manager

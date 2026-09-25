@@ -19,6 +19,12 @@ server:
     public_url: ${public_url}
     hub_id: ${hub_name}
     admin_emails: ${jsonencode(admin_emails)}
+    # F-110: default 60s (pkg/config/hub_config.go:672) is too short for a
+    # slow agent create (cold Autopilot node/image pull) — the create
+    # succeeds, but the hub's own response gets silently discarded once
+    # WriteTimeout fires, and Cloud Run reports 503 for a request that
+    # actually worked.
+    write_timeout: ${hub_write_timeout}
   database:
     driver: postgres
     url: postgres://${db_user}:${urlencode(db_password)}@/${db_name}?host=/cloudsql/${sql_connection_name}
@@ -57,6 +63,11 @@ server:
     # the human-readable form instead, for the UI.
     broker_id: ${broker_id}
     broker_name: ${broker_name}
+    # F-110: default 120s (pkg/config/hub_config.go:685) is close enough to
+    # observed slow-create durations (113.66s) that the co-located broker's
+    # own response write could independently fail here even after
+    # server.hub.write_timeout above is raised.
+    write_timeout: ${broker_write_timeout}
     auto_provide: true
   workspace_storage:
     backend: nfs

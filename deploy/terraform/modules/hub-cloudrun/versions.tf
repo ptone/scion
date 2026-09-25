@@ -1,5 +1,11 @@
 terraform {
-  required_version = ">= 1.6"
+  # >= 1.9, not >= 1.6 (F-110): hub_write_timeout/broker_write_timeout's
+  # cross-variable validation against var.timeout needs 1.9's relaxed
+  # validation-block restrictions — the same reason configurations/hub's
+  # root already requires >= 1.9 for its hub_name/state_prefix validation.
+  # The calling root already satisfies this; this just makes the module's
+  # own floor consistent with what it actually needs standalone.
+  required_version = ">= 1.9"
 
   required_providers {
     google = {

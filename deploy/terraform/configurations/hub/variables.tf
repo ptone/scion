@@ -121,6 +121,18 @@ variable "timeout" {
   default     = "3600s"
 }
 
+variable "hub_write_timeout" {
+  description = "F-110 (design §9): hub http.Server WriteTimeout, rendered into settings.yaml (server.hub.write_timeout). See hub-cloudrun's own variable for the full rationale and its validation (format + bounded by var.timeout) — this is a plain pass-through."
+  type        = string
+  default     = "300s"
+}
+
+variable "broker_write_timeout" {
+  description = "F-110 (design §9): co-located broker http.Server WriteTimeout, rendered into settings.yaml (server.broker.write_timeout). See hub-cloudrun's own variable for the full rationale and its validation (format + bounded by var.timeout) — this is a plain pass-through."
+  type        = string
+  default     = "300s"
+}
+
 variable "nfs_uid" {
   type    = number
   default = 1000

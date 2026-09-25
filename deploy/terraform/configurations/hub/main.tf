@@ -160,6 +160,10 @@ module "hub_cloudrun" {
   memory        = var.memory
   timeout       = var.timeout
 
+  # F-110 (design §9): hub-cloudrun validates both against var.timeout itself.
+  hub_write_timeout    = var.hub_write_timeout
+  broker_write_timeout = var.broker_write_timeout
+
   # Single-sourced with agent-runtime-k8s above (design §3.4) — passing the
   # same three values to both, rather than letting hub-cloudrun default them
   # independently, is what stops the NFS tree being chowned one way while
