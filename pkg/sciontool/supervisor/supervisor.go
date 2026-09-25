@@ -58,6 +58,14 @@ type Config struct {
 	// change mergeEnvOverlay's precedence rule — it is correct for its own
 	// case. See the override reasoning in the P2d PR description.
 	SecretOverrides map[string]string
+	// WorkingDir sets the child process's working directory (exec.Cmd.Dir).
+	// Empty (the zero value) leaves cmd.Dir unset, so the child inherits
+	// this process's own current working directory — exactly today's
+	// behaviour for every caller that does not set this field. Supervisor
+	// never inspects the environment or filesystem to decide this itself;
+	// the caller resolves it (see commands.InitRunOptions.WorkingDir, set
+	// only by substrate-serve's InitRunner wiring).
+	WorkingDir string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -104,6 +112,14 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	s.cmd.Stdin = os.Stdin
 	s.cmd.Stdout = os.Stdout
 	s.cmd.Stderr = os.Stderr
+
+	// Leave cmd.Dir unset (today's behaviour: the child inherits this
+	// process's own cwd) unless the caller explicitly resolved one. See
+	// Config.WorkingDir's doc comment.
+	if s.config.WorkingDir != "" {
+		s.cmd.Dir = s.config.WorkingDir
+		log.Debug("Child working directory: %s", s.config.WorkingDir)
+	}
 
 	// Start in a new process group so we can signal the whole group
 	s.cmd.SysProcAttr = &syscall.SysProcAttr{

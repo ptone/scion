@@ -443,6 +443,233 @@ func TestSubstrateServeBootstrap_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs
 	}
 }
 
+// -----------------------------------------------------------------------
+// resolveSubstrateHarnessCwd / InitRunOptions.WorkingDir wiring
+// (sb-dev-cwd: the harness process tree must not start at cmd.Dir="/").
+// -----------------------------------------------------------------------
+
+// fakeSubstrateHarnessCwdDeps builds substrateHarnessCwdDeps from plain maps,
+// so tests never depend on this machine's real SCION_WORKSPACE_PATH, $HOME,
+// or filesystem — the same reasoning as fakePrivilegeDropDeps.
+func fakeSubstrateHarnessCwdDeps(env map[string]string, dirs map[string]bool) substrateHarnessCwdDeps {
+	return substrateHarnessCwdDeps{
+		getenv: func(k string) string { return env[k] },
+		stat: func(p string) (os.FileInfo, error) {
+			if dirs[p] {
+				return fakeFileInfo{mode: fs.ModeDir | 0o755}, nil
+			}
+			return nil, fmt.Errorf("stat %s: no such file or directory", p)
+		},
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_UsesWorkspaceWhenValid is the normal case:
+// SCION_WORKSPACE_PATH exists and is a directory, matching the image's
+// WORKDIR the way Docker/Podman/Kubernetes already get for free.
+func TestResolveSubstrateHarnessCwd_UsesWorkspaceWhenValid(t *testing.T) {
+	d := fakeSubstrateHarnessCwdDeps(
+		map[string]string{"SCION_WORKSPACE_PATH": "/workspace", "HOME": "/root"},
+		map[string]bool{"/workspace": true, "/root": true},
+	)
+	if got := resolveSubstrateHarnessCwd(d); got != "/workspace" {
+		t.Errorf("resolveSubstrateHarnessCwd() = %q, want %q", got, "/workspace")
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_DefaultsWorkspacePath proves the default
+// "/workspace" is used when SCION_WORKSPACE_PATH is unset, mirroring
+// RunInit's own default (see checkPrivilegeDropFeasible's workspacePath
+// handling).
+func TestResolveSubstrateHarnessCwd_DefaultsWorkspacePath(t *testing.T) {
+	d := fakeSubstrateHarnessCwdDeps(
+		map[string]string{"HOME": "/root"},
+		map[string]bool{"/workspace": true, "/root": true},
+	)
+	if got := resolveSubstrateHarnessCwd(d); got != "/workspace" {
+		t.Errorf("resolveSubstrateHarnessCwd() = %q, want default %q", got, "/workspace")
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_FallsBackToHomeWhenWorkspaceMissing is the
+// brief amendment's required fallback: when the workspace directory doesn't
+// exist, fall back to $HOME rather than leaving the process at its inherited
+// (potentially "/") cwd.
+func TestResolveSubstrateHarnessCwd_FallsBackToHomeWhenWorkspaceMissing(t *testing.T) {
+	d := fakeSubstrateHarnessCwdDeps(
+		map[string]string{"SCION_WORKSPACE_PATH": "/workspace", "HOME": "/home/scion"},
+		map[string]bool{"/home/scion": true}, // /workspace deliberately absent
+	)
+	if got := resolveSubstrateHarnessCwd(d); got != "/home/scion" {
+		t.Errorf("resolveSubstrateHarnessCwd() = %q, want fallback %q", got, "/home/scion")
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_FallsBackToHomeWhenWorkspaceIsAFile covers
+// "not a directory" (as opposed to merely missing) from the same fallback
+// rule.
+func TestResolveSubstrateHarnessCwd_FallsBackToHomeWhenWorkspaceIsAFile(t *testing.T) {
+	d := substrateHarnessCwdDeps{
+		getenv: func(k string) string {
+			return map[string]string{"SCION_WORKSPACE_PATH": "/workspace", "HOME": "/home/scion"}[k]
+		},
+		stat: func(p string) (os.FileInfo, error) {
+			switch p {
+			case "/workspace":
+				return fakeFileInfo{mode: 0o644}, nil // regular file, not a dir
+			case "/home/scion":
+				return fakeFileInfo{mode: fs.ModeDir | 0o755}, nil
+			}
+			return nil, fmt.Errorf("stat %s: no such file or directory", p)
+		},
+	}
+	if got := resolveSubstrateHarnessCwd(d); got != "/home/scion" {
+		t.Errorf("resolveSubstrateHarnessCwd() = %q, want fallback %q", got, "/home/scion")
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_NeverFallsBackToRoot is the amendment's
+// explicit guard: even when $HOME itself is "/", resolveSubstrateHarnessCwd
+// must never return "/" — the exact bug this whole fix exists to avoid, and
+// "/" must never be added to any trust list.
+func TestResolveSubstrateHarnessCwd_NeverFallsBackToRoot(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		dirs map[string]bool
+	}{
+		{
+			name: "HOME is /",
+			env:  map[string]string{"SCION_WORKSPACE_PATH": "/nope", "HOME": "/"},
+			dirs: map[string]bool{"/": true},
+		},
+		{
+			name: "HOME unset",
+			env:  map[string]string{"SCION_WORKSPACE_PATH": "/nope"},
+			dirs: map[string]bool{},
+		},
+		{
+			name: "HOME also missing on disk",
+			env:  map[string]string{"SCION_WORKSPACE_PATH": "/nope", "HOME": "/also-nope"},
+			dirs: map[string]bool{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := fakeSubstrateHarnessCwdDeps(tc.env, tc.dirs)
+			if got := resolveSubstrateHarnessCwd(d); got == "/" {
+				t.Errorf("resolveSubstrateHarnessCwd() = %q, must never fall back to \"/\"", got)
+			}
+		})
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_NoUsableDirLeavesUnset proves the final
+// fallback rung: when neither the workspace nor $HOME resolve to a usable
+// directory, the function returns "" (today's behaviour: cmd.Dir stays
+// unset) rather than guessing at some other path.
+func TestResolveSubstrateHarnessCwd_NoUsableDirLeavesUnset(t *testing.T) {
+	d := fakeSubstrateHarnessCwdDeps(
+		map[string]string{"SCION_WORKSPACE_PATH": "/nope", "HOME": "/also-nope"},
+		map[string]bool{},
+	)
+	if got := resolveSubstrateHarnessCwd(d); got != "" {
+		t.Errorf("resolveSubstrateHarnessCwd() = %q, want \"\" (unset, no usable fallback)", got)
+	}
+}
+
+// TestSubstrateServeInitOptions_SetsWorkingDirFromRealEnv drives
+// substrateServeInitOptions end to end against the real
+// defaultSubstrateHarnessCwdDeps (real os.Getenv/os.Stat), proving the
+// wiring — not just resolveSubstrateHarnessCwd in isolation — actually
+// threads SCION_WORKSPACE_PATH into InitRunOptions.WorkingDir.
+func TestSubstrateServeInitOptions_SetsWorkingDirFromRealEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SCION_WORKSPACE_PATH", dir)
+
+	opts := substrateServeInitOptions(false)
+	if opts.WorkingDir != dir {
+		t.Errorf("substrateServeInitOptions(false).WorkingDir = %q, want %q", opts.WorkingDir, dir)
+	}
+}
+
+// TestSubstrateServeInitOptions_FallsBackToHomeFromRealEnv is
+// TestSubstrateServeInitOptions_SetsWorkingDirFromRealEnv's fallback
+// counterpart against the real deps.
+func TestSubstrateServeInitOptions_FallsBackToHomeFromRealEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SCION_WORKSPACE_PATH", filepath.Join(t.TempDir(), "does-not-exist"))
+	t.Setenv("HOME", home)
+
+	opts := substrateServeInitOptions(false)
+	if opts.WorkingDir != home {
+		t.Errorf("substrateServeInitOptions(false).WorkingDir = %q, want fallback %q", opts.WorkingDir, home)
+	}
+}
+
+// TestSubstrateServeBootstrap_ThreadsWorkingDirToInitRunner drives a real
+// bootstrap request through newSubstrateServeServer (the same wiring
+// runSubstrateServe uses), the way
+// TestSubstrateServeBootstrap_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs
+// already does, and proves two things at once:
+//
+//  1. the InitRunOptions the InitRunner receives carries WorkingDir resolved
+//     from the bootstrap request's own env (req.Env is applied via
+//     os.Setenv before the init runner is invoked — see handleBootstrap);
+//  2. argv (childArgs) is exactly ["sh", "-c", req.StartCmd] — unchanged
+//     from before this fix — proving the fix never parses or rewrites the
+//     tmux invocation string that pkg/runtime builds; it only adds a cwd via
+//     InitRunOptions, which is what makes cmd.Dir apply uniformly to that
+//     whole `sh -c "tmux new-session ..."` process (see
+//     resolveSubstrateHarnessCwd's doc comment for why that single
+//     mechanism covers both the plain child and the tmux session).
+func TestSubstrateServeBootstrap_ThreadsWorkingDirToInitRunner(t *testing.T) {
+	origDeps := defaultPrivilegeDropPreconditionDeps
+	t.Cleanup(func() { defaultPrivilegeDropPreconditionDeps = origDeps })
+	defaultPrivilegeDropPreconditionDeps = fakePrivilegeDropDeps(t)
+
+	workspace := t.TempDir()
+
+	var (
+		gotArgv []string
+		gotOpts InitRunOptions
+	)
+	stubRunInit := func(argv []string, opts InitRunOptions) int {
+		gotArgv = argv
+		gotOpts = opts
+		return 0
+	}
+
+	srv := newSubstrateServeServer(stubRunInit)
+	const startCmd = "tmux new-session -d -s scion -n agent /bin/sh -c 'echo hi'"
+	rec := doSubstrateServeJSON(t, srv, "POST", "/scion/v1/bootstrap", "any-token", map[string]any{
+		"env":           map[string]string{"SCION_WORKSPACE_PATH": workspace},
+		"files":         []any{},
+		"start_cmd":     startCmd,
+		"control_token": "tok",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The init runner is started asynchronously by handleBootstrap on
+	// success — give it a moment to run.
+	deadline := time.Now().Add(2 * time.Second)
+	for gotOpts.WorkingDir == "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	wantArgv := []string{"sh", "-c", startCmd}
+	if len(gotArgv) != len(wantArgv) || gotArgv[0] != wantArgv[0] || gotArgv[1] != wantArgv[1] || gotArgv[2] != wantArgv[2] {
+		t.Errorf("init runner argv = %v, want %v (the tmux invocation string must stay untouched)", gotArgv, wantArgv)
+	}
+	if gotOpts.WorkingDir != workspace {
+		t.Errorf("init runner InitRunOptions.WorkingDir = %q, want %q (resolved from the bootstrap request's own SCION_WORKSPACE_PATH)", gotOpts.WorkingDir, workspace)
+	}
+	if !gotOpts.RequirePrivilegeDrop {
+		t.Error("init runner InitRunOptions.RequirePrivilegeDrop = false, want true (unaffected by this change)")
+	}
+}
+
 func findFreePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")

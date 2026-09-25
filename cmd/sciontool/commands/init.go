@@ -122,6 +122,27 @@ type InitRunOptions struct {
 	// fallback (rootless Podman relies on it) is unchanged; this only adds
 	// a check of its result.
 	RequirePrivilegeDrop bool
+
+	// WorkingDir sets the harness child's working directory (threaded into
+	// supervisor.Config.WorkingDir, which sets exec.Cmd.Dir — see that
+	// field's doc comment). Empty (the zero value) leaves cmd.Dir unset, so
+	// the child inherits this process's own current working directory —
+	// RunInit's historical behaviour, unconditionally, for `sciontool init`
+	// and every runtime other than substrate.
+	//
+	// Set only by `sciontool substrate-serve`'s InitRunner wiring
+	// (cmd/sciontool/commands/substrate_serve.go's substrateServeInitOptions),
+	// never by an environment variable a workload could set itself and never
+	// derived here from SCION_RUNTIME or any other sniffing: RunInit stays a
+	// plain function of this field, exactly like RequirePrivilegeDrop above.
+	// Substrate is the one runtime that needs it because its ateapi
+	// Container spec has no workingDir field and ateom does not apply the
+	// image's WorkingDir, so — unlike Docker/Podman/Kubernetes, which all
+	// get the correct cwd from the image's WORKDIR for free — this
+	// process's own cwd is not already correct by the time RunInit runs
+	// (see substrateServeInitOptions's doc comment for how the value is
+	// resolved, including the $HOME fallback).
+	WorkingDir string
 }
 
 // errPrivilegeDropRequired is returned when RequirePrivilegeDrop is set and
@@ -859,6 +880,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		EnvOverlay:            harnessEnvOverlay,
 		NativeTelemetryPolicy: nativeTelemetryPolicy,
 		SecretOverrides:       secretOverrides,
+		WorkingDir:            opts.WorkingDir,
 	}
 	sup := supervisor.New(config)
 

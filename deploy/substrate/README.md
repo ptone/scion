@@ -235,6 +235,13 @@ satisfy this already (≥ 2.35; Debian trixie ships util-linux 2.41). Plain inst
 are unaffected either way: `-w` is only ever added when a CA-bundle var is
 actually set, which never happens without `egress_trust_bundle` configured.
 
+Note: the harness child and its tmux session start with cwd resolved to
+`SCION_WORKSPACE_PATH` (default `/workspace`, falling back to `$HOME` if
+that path isn't a directory — see `resolveSubstrateHarnessCwd`,
+`cmd/sciontool/commands/substrate_serve.go`); a later exec via `su -` (as
+above) still resets cwd to `$HOME` on login, exactly as `docker exec ...
+su -` does on every other runtime, so this is expected and unchanged.
+
 ### `server.broker.broker_id` in the ConfigMap
 
 `HUB_BROKER_ID` fills `server.broker.broker_id`

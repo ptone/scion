@@ -6,6 +6,8 @@ package supervisor
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -38,6 +40,69 @@ func TestSupervisor_RunFailingCommand(t *testing.T) {
 	}
 	if exitCode != 1 {
 		t.Errorf("expected exit code 1, got %d", exitCode)
+	}
+}
+
+// TestSupervisor_RunWithWorkingDir proves Config.WorkingDir sets the child's
+// cmd.Dir: the substrate-cwd fix (see commands.InitRunOptions.WorkingDir)
+// only reaches the actual OS process if this field is honoured here. Using
+// a relative-path file creation ("touch marker") rather than reading
+// os.Stdout is deliberate: Run hardcodes s.cmd.Stdout = os.Stdout, so the
+// only externally observable proof of the child's cwd is where a
+// relative-path side effect lands.
+func TestSupervisor_RunWithWorkingDir(t *testing.T) {
+	dir := t.TempDir()
+	config := DefaultConfig()
+	config.WorkingDir = dir
+	sup := New(config)
+
+	ctx := context.Background()
+	exitCode, err := sup.Run(ctx, []string{"sh", "-c", "touch marker"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, "marker")); statErr != nil {
+		t.Errorf("marker file not found in WorkingDir %s: %v (child did not start with the configured cwd)", dir, statErr)
+	}
+}
+
+// TestSupervisor_RunWithoutWorkingDir_LeavesCmdDirUnset proves the
+// non-substrate path is unchanged: when Config.WorkingDir is left at its
+// zero value (every caller today except substrate-serve), the child must
+// NOT be forced into any particular directory — it inherits this process's
+// own cwd, exactly as before this change. A relative-path side effect
+// (rather than asserting exec.Cmd.Dir directly, which is only observable
+// during Run) proves the child actually ran with the supervisor process's
+// own cwd rather than some directory this change might have introduced.
+func TestSupervisor_RunWithoutWorkingDir_LeavesCmdDirUnset(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd(): %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("os.Chdir(%s): %v", dir, err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	config := DefaultConfig() // WorkingDir left unset (zero value)
+	sup := New(config)
+
+	ctx := context.Background()
+	exitCode, err := sup.Run(ctx, []string{"sh", "-c", "touch marker"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, "marker")); statErr != nil {
+		t.Errorf("marker file not found in this process's own cwd %s: %v (WorkingDir==\"\" must inherit the supervisor's cwd, not change it)", dir, statErr)
 	}
 }
 

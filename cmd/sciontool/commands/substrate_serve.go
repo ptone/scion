@@ -85,7 +85,102 @@ func substrateServeInitOptions(forwardTermSignal bool) InitRunOptions {
 	// InitRunOptions.RequirePrivilegeDrop). This is a flag passed here at
 	// the substrate-serve entry path, not an env var a workload could set
 	// itself.
-	return InitRunOptions{ForwardTermSignal: forwardTermSignal, RequirePrivilegeDrop: true}
+	return InitRunOptions{
+		ForwardTermSignal:    forwardTermSignal,
+		RequirePrivilegeDrop: true,
+		// WorkingDir: resolved here, substrate-only, and handed to RunInit
+		// as a plain field — see resolveSubstrateHarnessCwd's doc comment
+		// for the bug this fixes and why this is where it's fixed.
+		WorkingDir: resolveSubstrateHarnessCwd(defaultSubstrateHarnessCwdDeps),
+	}
+}
+
+// substrateHarnessCwdDeps groups resolveSubstrateHarnessCwd's external
+// dependencies so tests can substitute them — the same reasoning as
+// privilegeDropPreconditionDeps: no test should depend on this machine's
+// real SCION_WORKSPACE_PATH, $HOME, or filesystem.
+type substrateHarnessCwdDeps struct {
+	getenv func(string) string
+	stat   func(string) (os.FileInfo, error)
+}
+
+// defaultSubstrateHarnessCwdDeps wires resolveSubstrateHarnessCwd to the
+// real process environment and filesystem.
+var defaultSubstrateHarnessCwdDeps = substrateHarnessCwdDeps{
+	getenv: os.Getenv,
+	stat:   os.Stat,
+}
+
+// resolveSubstrateHarnessCwd resolves the working directory the substrate
+// harness child should start in, mirroring the image's WORKDIR the way
+// Docker/Podman/Kubernetes already do natively (see
+// InitRunOptions.WorkingDir's doc comment). Under Substrate the ateapi
+// Container spec has no workingDir field at all and ateom does not apply the
+// image's WorkingDir, so without this fix the harness process tree
+// (claude, its sh, tmux) starts at cmd.Dir="" — this process's own cwd,
+// observed live as "/" — and claude shows the folder-trust dialog for "/"
+// instead of the delivered ~/.claude.json's trusted /workspace, so the
+// agent never makes a model call.
+//
+// Resolution order, matching the brief amendment exactly:
+//  1. SCION_WORKSPACE_PATH (default "/workspace") if it exists and is a
+//     directory — the normal case, matching every other runtime's image
+//     WORKDIR.
+//  2. $HOME, if SCION_WORKSPACE_PATH isn't usable and $HOME is itself a
+//     directory other than "/".
+//  3. "" (today's behaviour: cmd.Dir stays unset, so the child inherits
+//     this process's own cwd) if neither resolves. This never returns "/",
+//     regardless of what SCION_WORKSPACE_PATH or $HOME contain — falling
+//     back to "/" is exactly the bug this function exists to avoid, and
+//     "/" is never added to any trust list.
+//
+// A single log line is emitted each time the primary path isn't usable, so
+// a fallback is visible in the actor's log; it only ever names a path via
+// %q, never any file content or other secret.
+//
+// This same resolved directory is expected to cover BOTH the plain harness
+// child and the tmux session it runs under, without this package ever
+// parsing or rewriting req.StartCmd (an opaque string built client-side in
+// pkg/runtime — see BootstrapRequest.StartCmd's doc comment: "the same
+// command string the k8s runtime places in SCION_START_CMD, a tmux
+// invocation"). handleBootstrap always execs it as `sh -c req.StartCmd`
+// (pkg/sciontool/substrate/server.go); this resolved directory becomes that
+// sh process's cmd.Dir via InitRunOptions.WorkingDir ->
+// supervisor.Config.WorkingDir. tmux's own `new-session`, invoked from
+// within that shell without an explicit -c flag, defaults its initial
+// pane's directory to its invoking client's cwd — i.e. exactly this
+// directory — so the "agent" window (the harness) and the "shell" window
+// `new-window` creates alongside it both land here too, and `scion attach`
+// (which attaches to the existing "agent"/"shell" panes rather than
+// starting a new one) sees the same result. This is deliberately not done
+// by rewriting req.StartCmd to inject a literal `tmux new-session -c <dir>`
+// flag: that string's construction (pkg/runtime/common.go,
+// pkg/runtime/substrate_runtime.go) is shared with, and parity-tested
+// against, every other runtime (see TestBuildCommonRunArgs_NoWorkspaceCwdFlag
+// / TestKubernetesRuntime_BuildPod_NoWorkspaceCwdFlag in pkg/runtime), and
+// duplicating tmux's own cwd-construction logic here would only add a
+// second, driftable place that could disagree with it. A later exec via
+// `su -` (e.g. an operator's own `scion exec`) still lands in $HOME, the
+// same way `docker exec ... su -` does on every other runtime — that is
+// unchanged and left alone (see deploy/substrate/README.md).
+func resolveSubstrateHarnessCwd(d substrateHarnessCwdDeps) string {
+	workspace := d.getenv("SCION_WORKSPACE_PATH")
+	if workspace == "" {
+		workspace = "/workspace"
+	}
+	if info, err := d.stat(workspace); err == nil && info.IsDir() {
+		return workspace
+	}
+	log.Info("substrate-serve: workspace path %q is not a directory; falling back to the home directory for the harness cwd", workspace)
+
+	home := d.getenv("HOME")
+	if home != "" && home != "/" {
+		if info, err := d.stat(home); err == nil && info.IsDir() {
+			return home
+		}
+	}
+	log.Info("substrate-serve: home directory fallback is not a usable directory either; leaving the harness working directory unset rather than falling back to \"/\"")
+	return ""
 }
 
 // substrateServePrivilegeDropChecker is the substrate.PrivilegeDropChecker
