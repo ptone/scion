@@ -175,7 +175,7 @@ same image/resources/sandbox share one template.
 
 **`Run(cfg)` steps:**
 
-1. Compute `atespace = "scion-" + first 12 chars of sha256(cfg.ProjectID)`
+1. Compute `atespace = "scion-" + first 12 chars of cfg.ProjectID`
    (sanitised to a valid Kubernetes short name) and `actor = cfg.Name`
    (already DNS-safe). `CreateAtespace` if missing, treating `AlreadyExists`
    as success.
@@ -210,8 +210,10 @@ into the same `sciontool` binary as every other subcommand.
 
 ### 5.1 Endpoints
 
-- `GET /scion/v1/healthz` — no auth. Returns `{"state": "awaiting-bootstrap"}`
-  or `{"state": "running"}` only, never data.
+- `GET /scion/v1/healthz` — no auth. Always HTTP 200; the body's `state` field
+  is one of `awaiting-bootstrap`, `running`, or `init-failed` (entered when
+  the in-process init exits non-zero after a successful bootstrap; the
+  control server stays up regardless — see §10). Never returns data.
 - `POST /scion/v1/bootstrap` — accepted once per process lifetime, only in
   `awaiting-bootstrap`. Auth: the nonce (§5.2). Effect: write the files
   (§5.4), set the env, and run the **existing** `sciontool init` path
@@ -266,9 +268,19 @@ CIDRs, catch-alls and internal-shaped hostnames outright.
 }
 ```
 
-- `env` = `cfg.Env` + `ResolvedAuth.EnvVars` + env-type `ResolvedSecrets`,
-  plus `SCION_RUNTIME=substrate` (which is what lets `sciontool` disable
-  autoexpose and the port-forward tunnel — §1, §7).
+- `env` = `cfg.Harness.GetEnv()`/`GetTelemetryEnv()` (when a harness is set;
+  every other runtime includes these, and the harness needs the model, task
+  and telemetry env they carry to start at all — `buildBootstrapEnv` folds
+  them in deliberately rather than narrowing to the literal formula below,
+  which would ship a harness that cannot run) + `cfg.Env` +
+  `ResolvedAuth.EnvVars` + env-type `ResolvedSecrets`, plus
+  `SCION_RUNTIME=substrate` (which is what lets `sciontool` disable
+  autoexpose and the port-forward tunnel — §1, §7) and
+  `SCION_HOST_UID`/`SCION_HOST_GID`, both fixed at `1000` (the actor image's
+  built-in `scion` user), so `sciontool init`'s privilege-drop path has a
+  target UID/GID to drop to — Substrate's workspace is never bind-mounted
+  from the broker's own filesystem, so there is no host identity to mirror
+  the way Docker/Podman or the NFS backend do.
 - `mode` is decimal (384 decimal == 0600 octal) — the only mode used for
   every file, since neither `api.FileMapping` nor `api.ResolvedSecret`
   carries one.
