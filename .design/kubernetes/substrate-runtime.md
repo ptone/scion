@@ -653,6 +653,30 @@ every runtime — not a substrate-specific mechanism:
   requiring an operator to re-identify it by other means. The durable fix
   is persisting agent records so they survive a broker restart (§11), not
   reconstructing identity from the actor name.
+- **A delete or stop that would otherwise report idempotent success fails
+  closed instead when the target project's atespace holds a record-less
+  actor.** Because a record-less actor can never be resolved by slug (above),
+  a project-scoped delete/stop for an absent slug ordinarily looks
+  indistinguishable from "genuinely nothing here" — but on a broker that has
+  just restarted, "genuinely nothing here" and "the actor you meant has no
+  record" are not the same thing, and reporting the former as success would
+  let the hub treat the operation as complete while the actor, its egress
+  policy, and its worker are still live (ptone/scion#1808). `SubstrateRuntime`
+  exposes a narrow, type-asserted `RecordlessActorProber` capability
+  (`pkg/runtimebroker`, never added to the generic `Runtime` interface) that
+  lists the record-less actors in a project's own atespace independent of
+  slug matching. `resolveDeleteTarget` and the stop path consult it exactly
+  once, only at the point they would otherwise answer not-found/idempotent,
+  and only when the requesting caller supplied a project ID: at least one
+  record-less actor there turns the answer into `HTTP 409
+  substrate_agent_identity_unknown` (naming the atespace and the count)
+  instead; none present leaves the ordinary idempotent 404/202 unchanged; the
+  probe itself erroring is an explicit failure, never treated as either
+  outcome. See `deploy/substrate/README.md`, "After a broker restart", for
+  the operator-facing behavior and cleanup steps, including the two
+  fail-closed consequences this accepts (a same-prefix atespace collision
+  across two projects, and every absent-slug delete in an affected project
+  returning 409 until its record-less actors are cleaned up).
 - **The broker's local-file deletion fallback (`findAgentInHubManagedProjects`,
   called from `findAgentProjectDir`) is itself project-scoped**: it only
   accepts a hub-managed project directory whose own recorded project ID
@@ -682,12 +706,20 @@ every runtime — not a substrate-specific mechanism:
 - A record-less actor (no in-memory record — e.g. after a broker restart)
   remains unreachable by slug even within its own project, by design (§9);
   an operator must re-identify it by other means until its record is
-  restored.
-- Stop-then-delete can leak local broker-side files.
+  restored. A project-scoped delete/stop targeting it (or any absent slug in
+  the same atespace) now fails closed with `409
+  substrate_agent_identity_unknown` instead of silently reporting the usual
+  idempotent success (§9) — the actor is not touched either way, but the
+  caller is no longer told it is gone when it isn't.
+- Exec and Message against a record-less actor fail with an explicit
+  "no control token cached" error — permanent for that specific actor, since
+  bootstrap is one-shot (§5) and there is no way to re-mint or recover a
+  token an earlier process already used.
 - The broker's in-memory `substrateAgentRecords`/`substrateControlTokens`
   are lost on a broker restart for actors it did not create in the current
   process lifetime (§4's `List` row); a Phase 2 ConfigMap-backed store
   replaces this.
+- Stop-then-delete can leak local broker-side files.
 - A forced delete can still leak an actor that doesn't confirm `DELETING`
   (§9).
 - Non-home image paths remain root-owned after the rootfs fixup (§8), which
@@ -737,8 +769,20 @@ every runtime — not a substrate-specific mechanism:
   Substrate agents regain that path once it no longer depends on
   always-on WebSocket egress (§1) — a scion-wide refactor, not
   substrate-specific, that this runtime would opt into once it lands.
-- Template GC, and a durable (ConfigMap-backed) label store surviving
-  broker restarts (§4's `List` row, §10).
+- Template GC, and a durable, ConfigMap-backed `substrateAgentRecords` store
+  — keyed by actor UID or `<atespace>/<actor>`, reloaded at broker startup —
+  surviving broker restarts (§4's `List` row, §9, §10). This is what would
+  let `List`, and therefore delete/stop, resolve a pre-restart actor by slug
+  again instead of requiring the operator cleanup in
+  `deploy/substrate/README.md`.
+- Control-token persistence: mint the token into a Kubernetes `Secret` at
+  the same point it is cached in memory today (`Run`, §4 step 8), keyed the
+  same way, and reload it at broker startup. This cannot help an actor
+  bootstrapped before the persistence code ships — `sciontool
+  substrate-serve`'s bootstrap endpoint is one-shot (§5), so a broker that
+  never held that actor's token in the first place cannot retroactively
+  acquire it — but it closes the gap for every actor started after this
+  lands.
 - Confirm actor deletion (poll until `DELETING` clears, or report a stuck
   state) instead of the current fire-and-forget `Delete` (§9).
 - Doctor integration for the substrate profile (API reachability, auth,

@@ -218,6 +218,27 @@ data:
     profiles:
       substrate:
         runtime: substrate-prod
+      # The embedded default settings (pkg/config/embeds/default_settings.yaml)
+      # always define profiles.local and profiles.remote, resolving to the
+      # docker and Kubernetes runtimes respectively; a project or global
+      # settings layer only overwrites the exact leaf keys it sets, so it
+      # never removes them. discoverAuxiliaryRuntimes (pkg/runtimebroker)
+      # then registers every profile whose resolved runtime type differs
+      # from this broker's default ("substrate"), which is what pulls in a
+      # docker and a Kubernetes auxiliary runtime this deployment never
+      # uses: this container has no docker binary and this broker's RBAC
+      # does not allow listing Kubernetes pods, so both auxiliary runtimes'
+      # List calls fail on every request that reaches resolveDeleteTarget,
+      # and see ptone/scion#1808 for what that failure masks. Repointing
+      # both profile names at this same substrate-prod runtime is enough:
+      # their resolved type then equals the default's, so
+      # discoverAuxiliaryRuntimes registers nothing extra and neither
+      # failure mode exists on this broker. See README.md, "After a broker
+      # restart", for the rest of that issue.
+      local:
+        runtime: substrate-prod
+      remote:
+        runtime: substrate-prod
 ---
 # Broker credentials (BrokerID + HMAC SecretKey) come from a Secret created
 # out-of-band — see README "Secret creation". This is a reference only, not

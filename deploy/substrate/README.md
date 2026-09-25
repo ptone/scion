@@ -856,6 +856,96 @@ kubectl run netpol-probe --rm -it --restart=Never \
   restarting the broker Deployment** (a rolling restart is sufficient) to
   pick it up.
 
+## After a broker restart
+
+The broker keeps two things only in memory, process-wide, never persisted
+(`pkg/runtime/substrate_runtime.go`): the per-agent record `List` needs to
+report a project-scoped agent's slug and project labels, and the
+`control_token` minted at bootstrap for `Exec`/`Message`. A broker restart —
+a pod reschedule, a rolling update, an OOM kill, anything that starts a new
+process — drops both for every actor a *previous* process created. The
+actors themselves, their egress policies, and their workers are untouched on
+the cluster; only this broker's memory of them is gone (ptone/scion#1808).
+
+**Behaviour after a restart:**
+- **Delete/stop of a pre-restart agent by its project-scoped slug returns
+  HTTP 409 `substrate_agent_identity_unknown`**, not the usual 404 (delete)
+  or 202 (stop). The response names the atespace and how many record-less
+  actors it holds. This is intentional: a 404 is treated as an idempotent
+  completed delete by the hub, and a 202 as a completed stop — either would
+  let the actor, its egress policy, and its worker leak with no further
+  signal. An explicit conflict, requiring an operator, is the safe failure
+  here.
+- **Exec and Message** on a pre-restart agent fail with an explicit error
+  naming the missing control token. This is permanent for that specific
+  actor: `sciontool substrate-serve`'s bootstrap endpoint is one-shot
+  (`.design/kubernetes/substrate-runtime.md` §5), so there is no way for a
+  new broker process to re-mint or recover the token an old process already
+  used.
+- **New agents are unaffected.** Any agent this broker process itself
+  starts (i.e. anything created after the restart) has a fresh in-memory
+  record and control token, and its delete/stop/exec/message all work
+  normally.
+
+**Operator cleanup for a record-less actor** (the 409 response's atespace
+and actor name are exactly what you need):
+
+```sh
+# 1. Delete the actor's egress policy. There is no dedicated CLI for this;
+#    call the ateapi Control service's DeleteActorEgressPolicy RPC directly
+#    (e.g. via grpcurl against api.${ATE_SYSTEM_NAMESPACE}.svc:443), or
+#    whatever operator tooling your cluster already wraps it with.
+
+# 2. Delete the actor itself, any_state so a non-RUNNING actor isn't
+#    rejected:
+kubectl ate delete actor -a <atespace> <actor> --any-state
+
+# 3. Force-delete the hub's own agent record so it doesn't keep dispatching
+#    to an actor that no longer exists. `scion delete --force` does not
+#    exist (checked, cmd/delete.go has no --force flag) — call the hub API
+#    directly:
+curl -X DELETE "https://<hub-endpoint>/api/v1/agents/<agent-id>?force=true" \
+  -H "Authorization: Bearer <token>"
+```
+
+Step 3's `force=true` is what makes this safe to run against a 409: the hub
+handler (`pkg/hub/handlers_agents_core.go`) only skips the normal
+broker-dispatch failure path — the one that would otherwise surface this
+same 409 back to the operator and refuse to touch the hub record — when
+`force` is set.
+
+**Fail-closed consequences worth knowing about, not fixed here:**
+- (a) `substrateAtespaceName` truncates a project ID to its first 12
+  (sanitized) characters. Two projects can theoretically share that prefix
+  and therefore the same atespace name. If they do, a record-less actor
+  belonging to project X can turn project Y's genuinely-absent-slug delete
+  into this same 409 — an operator-visible error, never a wrong-project
+  action, but a confusing one to debug without knowing this.
+- (b) Once at least one record-less actor exists in a project's atespace,
+  *every* delete of an absent slug in that project returns 409 instead of
+  the usual idempotent 404, until every record-less actor in that atespace
+  has been cleaned up (above) or the broker is restarted again against a
+  cluster where they no longer exist.
+
+Both are accepted trade-offs of failing closed rather than risking a false
+success; see `.design/kubernetes/substrate-runtime.md` §10 for the durable
+fix Phase 2 tracks.
+
+**`profiles.local`/`profiles.remote` are repointed at the substrate runtime
+in this ConfigMap on purpose** (`broker.yaml`) — not an oversight. The
+embedded default settings always define these two profiles against the
+docker and Kubernetes runtimes; a project or global settings layer only
+overwrites the exact keys it sets, so it can't remove them. Left alone, this
+broker would discover both as auxiliary runtimes on every request and their
+`List` calls would fail here (no docker binary, no pod-list RBAC),
+independently masking the exact "not found" vs "can't tell" ambiguity this
+section's fix addresses. Repointing both at this broker's own `substrate-prod`
+runtime removes that layer of noise regardless of this fix. Neither profile
+name is expected to be requested by name against this broker in practice
+(see `broker.yaml`'s comment on the ConfigMap for the reasoning); if that
+assumption is wrong for your deployment, treat this as a one-line thing to
+revisit.
+
 ## Files
 
 - `broker.yaml` — Namespace, ServiceAccount, RBAC (TokenRequest-on-self,
