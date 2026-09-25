@@ -105,20 +105,22 @@ run_deploy_delete_interactive() {
 # run_deploy_create CONFIG_JSON — runs `deploy.sh` (create mode) in the
 # background and stops it once the VM-exists sentinel appears (see the
 # file header) AND the log has gone quiet, rather than a single fixed
-# grace period after the sentinel's first appearance: Part B added more
-# gcloud calls (the internal-IP ensure functions, `add-tags`) between the
-# sentinel's original firing point and the point these tests actually
-# assert on, and a fixed 0.2s grace was measured to be too short for
-# those under load. The wait for the sentinel itself uses a 30s budget --
-# "large" on purpose, since the review that flagged this measured normal
-# runs taking up to 9.1s under moderate load, some 90% of the previous
-# 10s budget -- and fails the whole call loudly (returns 1, with the
-# partial log annotated) if the sentinel is never reached at all, rather
-# than silently letting the caller assert against a partial log as if
-# nothing were wrong. Sets DEPLOY_RC (typically 143, from the TERM this
-# sends once it's done reading the log -- these tests never assert on it)
-# and DEPLOY_LOG. Same no-stray-set-e discipline as run_deploy_delete
-# above.
+# grace period after the sentinel's first appearance: several gcloud
+# calls (the internal-IP ensure functions, `add-tags`) can run between
+# the sentinel's own firing point and the point a given test actually
+# asserts on, and a fixed short grace period is not reliably long enough
+# for those under load. The wait for the sentinel itself uses a 30s
+# budget -- large enough to absorb realistic per-call latency on a loaded
+# host -- and fails the whole call loudly (returns 1, with the partial
+# log annotated) if the sentinel is never reached at all, rather than
+# silently letting the caller assert against a partial log as if nothing
+# were wrong. A test that needs to know one specific, later call has
+# completed (not just that deploy.sh reached this general branch point)
+# should use run_deploy_create_wait_for below instead, which waits on a
+# call-specific sentinel with no quiescence guessing on top. Sets
+# DEPLOY_RC (typically 143, from the TERM this sends once it's done
+# reading the log -- these tests never assert on it) and DEPLOY_LOG.
+# Same no-stray-set-e discipline as run_deploy_delete above.
 run_deploy_create() {
   local config_json="$1" config_file
   config_file="$(mktemp)"
@@ -144,6 +146,48 @@ FATAL: run_deploy_create: sentinel '${sentinel}' was never reached within 30000m
     return 1
   fi
   _wait_for_deploy_log_quiescence "$log_file"
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null
+  DEPLOY_RC=$?
+  DEPLOY_LOG="$(cat "$log_file")"
+  rm -f "$config_file" "$log_file"
+}
+
+# run_deploy_create_wait_for CONFIG_JSON SENTINEL_FILENAME — like
+# run_deploy_create, but for the handful of tests that need to know one
+# specific, later gcloud call has actually completed (not just that
+# deploy.sh has reached the general create-or-tag branch point the
+# default sentinel above fires at): waits only on SENTINEL_FILENAME
+# (relative to $GCLOUD_STUB_STATE_DIR), with the same 30s fail-loud
+# budget, and does NOT layer the quiescence poll on top -- the whole
+# point of a call-specific sentinel is that nothing after it needs
+# guessing at. Existing tests that use the default, earlier-firing
+# sentinel plus quiescence are unaffected; this is an alternate entry
+# point, not a replacement.
+run_deploy_create_wait_for() {
+  local config_json="$1" sentinel_filename="$2" config_file
+  config_file="$(mktemp)"
+  printf '%s' "$config_json" > "$config_file"
+  local sentinel="${GCLOUD_STUB_STATE_DIR}/${sentinel_filename}"
+  rm -f "$sentinel"
+  local log_file
+  log_file="$(mktemp)"
+  bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null > "$log_file" 2>&1 &
+  local pid=$!
+  local waited_ms=0
+  while [[ ! -f "$sentinel" && "$waited_ms" -lt 30000 ]]; do
+    sleep 0.1
+    waited_ms=$((waited_ms + 100))
+  done
+  if [[ ! -f "$sentinel" ]]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null
+    DEPLOY_RC=1
+    DEPLOY_LOG="$(cat "$log_file")
+FATAL: run_deploy_create_wait_for: sentinel '${sentinel}' was never reached within 30000ms -- deploy.sh may be stuck, or this test's expectations no longer match its actual call sequence"
+    rm -f "$config_file" "$log_file"
+    return 1
+  fi
   kill -TERM "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null
   DEPLOY_RC=$?
@@ -500,7 +544,8 @@ test_deploy_create_tier_on_tags_new_vm() {
   seed_cluster "mycluster" "default" "mig-a"
   seed_mig "mig-a" "template-a"
   seed_template "template-a" "gke-mycluster-abc123-node"
-  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  run_deploy_create_wait_for "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" \
+    "instances-create-completed"
   local log create_line
   log="$(gcloud_log)"
   create_line="$(echo "$log" | grep 'compute instances create' | head -1)"
@@ -690,7 +735,7 @@ test_deploy_create_api_check_list_failure_tier_on_fails_actionably() {
   config_file="$(mktemp)"
   printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" > "$config_file"
   local log rc
-  log="$(timeout 10 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
+  log="$(timeout 60 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
   rc=$?
   rm -f "$config_file"
   assert_true "$([[ "$rc" -ne 0 && "$rc" -ne 124 ]] && echo true || echo false)" \
@@ -716,7 +761,7 @@ test_deploy_create_tier_on_source_build_refused() {
   config_file="$(mktemp)"
   printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)")" > "$config_file"
   local log rc
-  log="$(timeout 10 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
+  log="$(timeout 60 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
   rc=$?
   rm -f "$config_file"
   assert_true "$([[ "$rc" -ne 0 && "$rc" -ne 124 ]] && echo true || echo false)" \
@@ -731,7 +776,7 @@ test_deploy_create_tier_on_loopback_registry_refused_with_correct_message() {
   config_file="$(mktemp)"
   printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "localhost:5000/scion")" > "$config_file"
   local log rc
-  log="$(timeout 10 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
+  log="$(timeout 60 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
   rc=$?
   rm -f "$config_file"
   assert_true "$([[ "$rc" -ne 0 && "$rc" -ne 124 ]] && echo true || echo false)" \
@@ -1193,7 +1238,7 @@ test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
   assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/namespace/scion-hub-${HUB}.json" ]] && echo true || echo false)" \
     "hybrid_k8s_preflight must have created the namespace in Phase 2, well before this Phase 3 stopping point"
 
-  # Part B: the reserved internal IP -- not the VM's ephemeral describe
+  # The reserved internal IP -- not the VM's ephemeral describe
   # IP -- must be what the VM is actually created with, and the same
   # value the settings.yaml write and the PV would use, so GKE agents,
   # the Docker broker, and the reserved address all agree on one number.
@@ -1242,7 +1287,8 @@ test_deploy_create_tier_on_existing_vm_promotes_current_ip() {
   seed_cluster "mycluster" "default" "mig-a"
   seed_mig "mig-a" "template-a"
   seed_template "template-a" "gke-mycluster-abc123-node"
-  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  run_deploy_create_wait_for "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" \
+    "addresses-create-completed"
   local log
   log="$(gcloud_log)"
   assert_contains "$log" "addresses create scion-hub-${HUB}-internal-ip" \

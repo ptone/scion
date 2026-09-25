@@ -386,6 +386,12 @@ print(json.dumps(out))
     # retry loop (which this stub's unhandled `compute ssh` case makes
     # fail immediately, but deploy.sh still sleeps between attempts).
     touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
+    # A second, dedicated sentinel touched only here (not at any of the
+    # other, earlier points the generic one above also fires at), for a
+    # test that specifically needs to know this exact call has already
+    # completed -- not just that deploy.sh has reached the general
+    # create-or-tag branch point.
+    touch "${GCLOUD_STUB_STATE_DIR}/instances-create-completed"
     exit 0
     ;;
   "compute zones list")
@@ -455,11 +461,16 @@ print(json.dumps(out))
   "compute addresses create")
     require_project "$@"
     require_flag region "$@"
+    # Real gcloud creates an EXTERNAL address when --subnet is omitted,
+    # not one on any particular internal subnet -- silently defaulting
+    # it here (as this stub used to) would hide a caller that dropped
+    # the flag by accident.
+    require_flag subnet "$@"
     region="$(get_flag region "$@")" || region="us-central1"
     name="${4:-}"
     addr="$(get_flag addresses "$@")" || addr="10.128.0.9"
     desc="$(get_flag description "$@")" || desc=""
-    subnet="$(get_flag subnet "$@")" || subnet="default"
+    subnet="$(get_flag subnet "$@")"
     project="$(get_flag project "$@")" || project="demo-project"
     "$PYTHON" -c "
 import json, sys
@@ -472,6 +483,7 @@ print(json.dumps({
 }))
 " "$addr" "$desc" "$project" "$region" "$subnet" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
     touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
+    touch "${GCLOUD_STUB_STATE_DIR}/addresses-create-completed"
     exit 0
     ;;
   "compute addresses delete")

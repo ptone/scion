@@ -54,10 +54,10 @@ export TIER_DIR
 # /tmp) means the whole run's footprint is bounded to this one directory
 # and is removed in one shot on exit, including on a crash (the trap fires
 # on any exit path), rather than accumulating in the caller's real
-# temporary directory across every run the caller ever makes -- which is
-# what actually happened before this fix: unrelated mktemp entries from
-# many past runs pooled in one shared directory, undetected, until disk
-# pressure crashed the host running them.
+# temporary directory across every run the caller ever makes: an
+# unbounded, undetected accumulation of mktemp entries from many runs in
+# one shared directory can eventually exhaust disk space on the host
+# running them.
 RUN_TMPDIR="$(mktemp -d)"
 export TMPDIR="$RUN_TMPDIR"
 trap 'rm -rf "$RUN_TMPDIR"' EXIT
