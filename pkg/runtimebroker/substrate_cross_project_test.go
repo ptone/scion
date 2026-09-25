@@ -272,14 +272,17 @@ func TestSubstrateBroker_RecordlessActorNoOpEvenInItsOwnProject(t *testing.T) {
 // returned both actors — Delete then removed whichever ListActors happened
 // to return first, regardless of which project deleteAgent was scoped to.
 //
-// With ProjectPath populated correctly, AgentManager.Delete's internal
-// List call is still unscoped by project — see manager.go — so
-// SubstrateRuntime.List's ambiguity guard still can't tell the two apart
-// at that specific call site and excludes both: deleteAgent scoped to
-// either project becomes a no-op (zero DeleteActor calls, both actors left
-// running), not a wrong-actor delete. This is the accepted, reported
-// trade-off — see the project log for the full list of broker operations
-// this affects.
+// With ProjectPath populated correctly, AgentManager.Delete's internal List
+// call is still unscoped by project — see manager.go — so
+// SubstrateRuntime.List's ambiguity guard still can't tell the two apart at
+// that specific call site and excludes both. Previously deleteAgent still
+// called mgr.Delete anyway, which no-opped (zero DeleteActor calls) and then
+// reported the same 204 as a genuine successful delete — a false success:
+// the caller could not tell "deleted" from "silently refused" apart. Now
+// deleteAgent detects the ambiguity itself, before ever calling mgr.Delete,
+// and reports it explicitly as a 409 with a stable, machine-readable code
+// (ErrCodeSubstrateAmbiguousSlug) — still fail-closed (zero DeleteActor
+// calls, both actors survive), but no longer indistinguishable from success.
 func TestSubstrateBroker_SameSlugDifferentProjects_DeleteFailsClosed(t *testing.T) {
 	const (
 		atespaceA = "scion-aaaaaaaaaaaa"
@@ -313,6 +316,17 @@ func TestSubstrateBroker_SameSlugDifferentProjects_DeleteFailsClosed(t *testing.
 			w := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
 			srv.deleteAgent(w, req, "dev", projBID)
+
+			if w.Code != http.StatusConflict {
+				t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (409 Conflict, ambiguous slug across two projects)`, w.Code, http.StatusConflict)
+			}
+			var errResp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &errResp); err != nil {
+				t.Fatalf("response body is not valid JSON: %v; body=%s", err, w.Body.String())
+			}
+			if errResp.Error.Code != ErrCodeSubstrateAmbiguousSlug {
+				t.Errorf("error code = %q, want %q; body=%s", errResp.Error.Code, ErrCodeSubstrateAmbiguousSlug, w.Body.String())
+			}
 
 			fc.mu.Lock()
 			defer fc.mu.Unlock()

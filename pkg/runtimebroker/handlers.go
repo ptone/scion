@@ -64,6 +64,38 @@ func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 	return matchesAgentProject(a, projectID)
 }
 
+// substrateSlugProjectCount returns the number of distinct projects, among
+// agents, that contain an entry whose identity matches id (matchesAgent with
+// no project scope: name, container ID, or slug). It exists only for the
+// substrate-only ambiguity check in deleteAgent/stopAgent: AgentManager's own
+// internal Delete/Stop List call is unscoped by project (pkg/agent/manager.go),
+// and SubstrateRuntime.List's ambiguity guard (pkg/runtime/substrate_runtime.go)
+// responds to that shape by excluding every actor sharing the slug across
+// more than one project rather than risk picking the wrong one — which
+// otherwise surfaces to the caller as a silent no-op reported as success.
+// This reproduces that same "more than one project" tally from the broker's
+// own already-fetched, unfiltered agent list (fetched with "scion.agent":
+// "true" only, so it is never itself subject to the guard, which only
+// engages for a "scion.name"-filtered, project-unscoped query) so the
+// ambiguity can be reported instead of silently swallowed.
+func substrateSlugProjectCount(agents []api.AgentInfo, id string) int {
+	projects := make(map[string]struct{})
+	for _, a := range agents {
+		if !matchesAgent(a, id, "") {
+			continue
+		}
+		key := projectcompat.ProjectIDFromLabels(a.Labels)
+		if key == "" {
+			key = a.ProjectID
+		}
+		if key == "" {
+			key = a.Project
+		}
+		projects[key] = struct{}{}
+	}
+	return len(projects)
+}
+
 func matchesAgentProject(a api.AgentInfo, projectID string) bool {
 	// Check runtime labels first (canonical project_id, then legacy grove_id),
 	// then ProjectID field.
@@ -1317,6 +1349,29 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		return
 	}
 
+	// Substrate-only: the requested slug DID match an entry in this
+	// project, but that same slug may also belong to an agent in a
+	// DIFFERENT project. AgentManager.Delete's own internal Runtime.List
+	// call below is unscoped by project (pkg/agent/manager.go) and hits
+	// SubstrateRuntime.List's ambiguity guard, which excludes every actor
+	// sharing the slug rather than risk picking the wrong one — so
+	// mgr.Delete would silently no-op (zero DeleteActor calls) and this
+	// handler would still report a successful 204, even though project A's
+	// agent is still running. Detected here from the same unfiltered
+	// "scion.agent":"true" listing already fetched above (never itself
+	// subject to the guard, since it carries no "scion.name" filter), so
+	// this never touches manager.go or the runtime's own List/Delete call
+	// paths: fail closed with an explicit, machine-readable 409 instead of
+	// calling mgr.Delete at all.
+	if rt.Name() == "substrate" && matched {
+		if n := substrateSlugProjectCount(agents, id); n > 1 {
+			s.agentLifecycleLog.Info("Substrate delete: ambiguous agent slug across projects, refusing",
+				"agent_id", id, "project_id", projectID, "project_count", n)
+			AmbiguousAgentSlug(w, id, n)
+			return
+		}
+	}
+
 	// If no project path was found (container missing or no annotation), check
 	// hub-managed project directories for the agent's files. Without this,
 	// agents in hub-managed projects (~/.scion.projects/<slug>/) are silently
@@ -1672,7 +1727,42 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		attribute.String("scion.project.id", projectID),
 	)
 
-	mgr := s.resolveManagerForAgent(ctx, id, projectID)
+	mgr, rt := s.resolveAgentRuntimeTarget(ctx, id, projectID)
+
+	// Substrate-only: detect a same-slug agent ambiguous across projects
+	// before ever calling projectScopedTarget below. projectScopedTarget's
+	// own LookupContainerID call (pkg/runtimebroker/server.go) is unscoped
+	// by project and hits SubstrateRuntime.List's ambiguity guard, which
+	// excludes every actor sharing the slug — indistinguishable, to
+	// LookupContainerID, from the agent genuinely being absent from this
+	// project. Left unhandled, that resolves to the target == "" branch
+	// below: a silent, successful-looking 202 "Stop operation accepted"
+	// with no actor touched, project A's agent left running — the Stop-side
+	// counterpart of the Delete false success. Fail closed instead: 409
+	// with a stable, machine-readable code, no Stop call at all. Uses the
+	// same unfiltered "scion.agent":"true" listing pattern as deleteAgent's
+	// equivalent check (never itself subject to the guard, since it carries
+	// no "scion.name" filter), so this never touches manager.go or the
+	// runtime's own List/Stop/Delete call paths.
+	if rt.Name() == "substrate" {
+		if agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"}); err == nil {
+			matched := false
+			for _, a := range agents {
+				if matchesAgent(a, id, projectID) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				if n := substrateSlugProjectCount(agents, id); n > 1 {
+					s.agentLifecycleLog.Info("Substrate stop: ambiguous agent slug across projects, refusing",
+						"agent_id", id, "project_id", projectID, "project_count", n)
+					AmbiguousAgentSlug(w, id, n)
+					return
+				}
+			}
+		}
+	}
 
 	// Resolve the project-scoped container so that same-slug agents in
 	// different projects on this broker don't collide. An empty target means

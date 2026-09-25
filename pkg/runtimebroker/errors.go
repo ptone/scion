@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -46,6 +47,15 @@ const (
 	ErrCodeRuntimeError     = "runtime_error"
 	ErrCodeHubUnreachable   = "hub_unreachable"
 	ErrCodeTemplateError    = "template_error"
+
+	// ErrCodeSubstrateAmbiguousSlug names a Delete/Stop request whose agent
+	// slug resolves to agents in more than one project on a substrate
+	// runtime. An unscoped-by-slug lookup can't tell which project's actor
+	// was meant (see SubstrateRuntime.List's ambiguity guard in
+	// pkg/runtime/substrate_runtime.go), so the operation is refused rather
+	// than silently acting on neither actor while reporting success. Stable
+	// across releases: callers may match on this string.
+	ErrCodeSubstrateAmbiguousSlug = "substrate_ambiguous_agent_slug"
 )
 
 // writeError writes a JSON error response.
@@ -134,4 +144,19 @@ func TemplateError(w http.ResponseWriter, message string) {
 // Unprocessable writes a 422 Unprocessable Entity response.
 func Unprocessable(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, message, nil)
+}
+
+// AmbiguousAgentSlug writes a 409 Conflict response for a substrate Delete
+// or Stop whose agent slug is shared by agents in more than one project:
+// neither this broker nor the runtime can safely pick one, so the caller
+// must disambiguate (e.g. by removing the same-slug agent from the other
+// project first). The message names the slug and how many projects it
+// spans; it carries no secrets, tokens, or environment values.
+func AmbiguousAgentSlug(w http.ResponseWriter, slug string, projectCount int) {
+	writeError(w, http.StatusConflict, ErrCodeSubstrateAmbiguousSlug,
+		fmt.Sprintf("agent slug %q is ambiguous: it belongs to agents in %d different projects", slug, projectCount),
+		map[string]interface{}{
+			"slug":         slug,
+			"projectCount": projectCount,
+		})
 }
