@@ -697,8 +697,13 @@ every runtime — not a substrate-specific mechanism:
   runtime registered, `stopAgent` resolves the target through a single,
   error-preserving lookup (`projectScopedTargetErr`,
   `pkg/runtimebroker/handlers.go`) and decides directly from that one call's
-  own error — an ambiguous match and an auxiliary runtime's list error are
-  also treated as "could not determine", never as not-found — returning an
+  own error — an ambiguous match is also treated as "could not determine",
+  never as not-found. Auxiliary runtimes are scanned in a fixed, sorted
+  order, and a match found on any of them is authoritative: an earlier or
+  later auxiliary runtime's own list error only becomes "could not
+  determine" when no auxiliary runtime produces a match at all, so the
+  outcome no longer depends on Go's randomized map iteration order the way
+  an earlier version of this fix did. Any of these outcomes returns an
   explicit 5xx rather than falling back to the idempotent 202. Every runtime
   without that capability is unaffected: `hasRecordlessProber` is false and
   `stopAgent` keeps calling `projectScopedTarget` exactly as before,
