@@ -1026,6 +1026,53 @@ test_deploy_create_tier_off_reaches_settings_yaml_with_no_hybrid_ssh_calls() {
   assert_eq "0" "$(kubectl_log | grep -c . || true)" "tier off must make zero kubectl calls"
 }
 
+# The test above only checks that a couple of hybrid-specific strings are
+# absent; it says nothing about whether the rest of the rendered
+# settings.yaml is exactly right, or whether the ${HYBRID_SHARED_DIR_
+# STORAGE_YAML:+...} splice leaves any stray blank line or indentation
+# artifact behind when it expands to nothing. This extracts the actual
+# heredoc body deploy.sh sent over SSH (between the `<< 'SETTINGSEOF'`
+# and closing `SETTINGSEOF` lines in the real, captured --command= text,
+# not a reimplementation of deploy.sh's own splice logic) and compares it
+# byte-for-byte against the exact content a tier-off run must produce.
+test_deploy_create_tier_off_settings_yaml_byte_identical() {
+  fresh_gcloud_state
+  run_deploy_create_to_settings_yaml "$(base_config_json "$HUB")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-off create must reach the settings.yaml write"
+  local log actual expected
+  log="$(gcloud_log)"
+  actual="$(echo "$log" | awk "/<< 'SETTINGSEOF'/{flag=1; next} /^SETTINGSEOF\$/{flag=0} flag")"
+  expected="$(cat <<'EXPECTED'
+schema_version: "1"
+image_registry: "localhost/scion"
+harness_configs:
+  antigravity:
+    harness: antigravity
+    env:
+      GOOGLE_CLOUD_PROJECT: "demo-project"
+      GOOGLE_CLOUD_LOCATION: "global"
+server:
+  hub:
+    name: "demohub"
+    admin_emails:
+      - "admin@example.com"
+  maintenance:
+    deployment_tier: "binary"
+    release_channel: "nightly"
+    update_policy: "auto"
+  storage:
+    local_path: /home/scion/.scion/workspace-storage
+  secrets:
+    backend: local
+  auth:
+    mode: dev
+  listen_port: 8080
+EXPECTED
+)"
+  assert_eq "$expected" "$actual" \
+    "a tier-off settings.yaml must be byte-for-byte identical to a render with no hybrid-tier splice at all"
+}
+
 test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
   fresh_gcloud_state
   seed_cluster "mycluster" "default" "mig-a"
