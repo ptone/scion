@@ -107,7 +107,7 @@ type SubstrateRuntime struct {
 var (
 	substrateAgentStateMu sync.Mutex
 	// substrateControlTokens maps "<atespace>/<actor>" to the control_token
-	// minted at bootstrap (substrate-runtime.md §5.3: "keep it in memory
+	// minted at bootstrap (substrate-runtime.md §4 step 8: "keep it in memory
 	// keyed by <atespace>/<actor>").
 	substrateControlTokens = make(map[string]string)
 	// substrateAgentRecords maps actor UID to the label/metadata record
@@ -478,8 +478,8 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 }
 
 // bootstrapNonce is the single call site for the bootstrap request's bearer
-// value (brief instruction: "structure the code so the nonce source is one
-// function"). substrate-runtime.md §5.2 leaves open a choice between MintActorJWT
+// value, so the broker has one place to change how it is derived.
+// substrate-runtime.md §5.2 leaves open a choice between MintActorJWT
 // (verifiable actor identity via a systemInfo volume) and a fallback
 // (first-bootstrap-wins, secured by a NetworkPolicy restricting router
 // ingress to the broker namespace), pending further investigation into
@@ -491,7 +491,8 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 // and whether one of those allowlisted names carries what's needed to
 // verify a substrate-issued actor JWT is opaque outside atelet's
 // implementation. Do not switch this to MintActorJWT without confirming
-// that decision — see the project log for the open question this leaves.
+// that decision — substrate-runtime.md §5.2 records the choice and the
+// open question it leaves.
 func (r *SubstrateRuntime) bootstrapNonce(ctx context.Context, atespace, actorName, actorUID string) (string, error) {
 	return generateControlToken()
 }
@@ -535,8 +536,8 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
 // Stop is the same as Delete in Phase 1: nothing here suspends to a DATA
 // snapshot yet, and faking a "stopped" state that just left the actor
 // running (or claiming a durable stop that instead discarded the actor's
-// state) would both be dishonest about what happened. See substrate-runtime.md §4
-// and substrate-runtime.md §4's Stop row.
+// state) would both be dishonest about what happened. See
+// substrate-runtime.md §4's Stop row.
 //
 // TODO(Phase 2): SuspendActor with DATA scope instead, once resume-from-
 // suspend and the $HOME durableDir layout (substrate-runtime.md §11) land, so Stop
@@ -984,10 +985,11 @@ func splitSubstrateID(id string) (atespace, actorName string, err error) {
 }
 
 // buildSubstrateStartCmd builds the tmux start command exactly as the
-// shared helper (common.go) builds it for every other runtime — see the
-// brief's shared start-cmd helper extraction. Substrate's control server
-// execs this the same way Cloud Run/-sandbox's PID 1 does: no TTY, so it
-// polls the tmux session's liveness rather than attaching.
+// shared helper (common.go) builds it for every other runtime, through
+// that same shared helper rather than a duplicated implementation.
+// Substrate's control server execs this the same way Cloud Run/-sandbox's
+// PID 1 does: no TTY, so it polls the tmux session's liveness rather than
+// attaching.
 func buildSubstrateStartCmd(cfg RunConfig) (string, error) {
 	cmdLine, ok := harnessCmdLine(cfg)
 	if !ok {

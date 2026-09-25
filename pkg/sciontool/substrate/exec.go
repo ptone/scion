@@ -25,7 +25,8 @@ import (
 
 const (
 	// maxOutputBytes caps stdout and stderr independently, per substrate-runtime.md
-	// §2.1 ("Output is capped at 4 MiB per stream (truncate and flag)").
+	// §5.1 ("Output is capped at 4 MiB per stream (truncated, with a flag on
+	// the response)").
 	maxOutputBytes = 4 * 1024 * 1024
 
 	// defaultExecTimeout is used when the request omits timeout_s.

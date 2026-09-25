@@ -22,10 +22,10 @@ var errScionUserLookupDisabledInTests = errors.New("scionUserLookup/lookupUserBy
 
 // TestMain makes this package's tests hermetic against the *real* machine
 // they happen to run on, for the whole test binary — not just the tests
-// that remember to sandbox themselves. See the project log
-// (.design/project-log/2026-09-23-substrate-phase1-delete-and-profile-fixes.md,
-// "Follow-up 3" and "Incidents 2-4") for the incidents that motivated each
-// layer below.
+// that remember to sandbox themselves. See
+// .design/project-log/2026-09-25-substrate-phase1-substrate-serve.md
+// ("Privilege drop" and "Test hermeticity") for what motivated each layer
+// below.
 //
 // Layers, all required:
 //

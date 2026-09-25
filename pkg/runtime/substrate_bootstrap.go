@@ -131,8 +131,8 @@ const defaultFileMode = 0o600
 // cfg.Harness.GetEnv()/GetTelemetryEnv(), which every other runtime
 // includes (see buildCommonRunArgs, KubernetesRuntime.buildPod) and which
 // the harness needs to run at all (model, task and telemetry env are not
-// otherwise present in cfg.Env). This inclusion is a spec/behavior question
-// (see the project log) rather than silently narrowed to the literal
+// otherwise present in cfg.Env). This inclusion is documented in
+// substrate-runtime.md §5.3 rather than silently narrowed to the literal
 // formula, since narrowing it would ship a harness that cannot start.
 func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	env := make(map[string]string)

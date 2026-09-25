@@ -69,8 +69,8 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		add(h)
 	}
 
-	// Telemetry endpoint host (substrate-runtime.md §7: "the telemetry
-	// endpoint"). *.googleapis.com below happens to cover the Cloud Trace
+	// The configured telemetry endpoint host (substrate-runtime.md §7).
+	// *.googleapis.com below happens to cover the Cloud Trace
 	// default (substrate-runtime.md §7), but that's a coincidence of the default,
 	// not a rule: a self-hosted OTLP collector or the hub's own endpoint
 	// needs its own rule, so check every env var scion's telemetry stack

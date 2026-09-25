@@ -587,7 +587,7 @@ func TestWriteBootstrapFile_RejectsSymlinkAtFirstComponentUnderHome(t *testing.T
 // TestWriteBootstrapFile_DotDotCleansToLocationUnderHomeAndNowhereElse proves
 // a ".." segment in the bootstrap file's Path lands exactly where
 // filepath.Clean says it should, and never touches the lexical component the
-// ".." walks back through. Per design-home-delivery.md, serve accepts
+// ".." walks back through. Per substrate-runtime.md §5.5, serve accepts
 // arbitrary absolute paths (auth/secret targets can legitimately be outside
 // home), so this deliberately does not add any "reject paths outside home"
 // behavior — it only proves the lexical Clean plus the symlink walk agree
@@ -636,7 +636,7 @@ func TestWriteBootstrapFile_DotDotCleansToLocationUnderHomeAndNowhereElse(t *tes
 // than following it, so this must succeed by atomically replacing the link
 // with a regular file, and the symlink's old target must be left untouched.
 // This pins "replaced" as the one documented outcome (server.go:404-412's
-// comment, the project log, and Addendum B all claim it): a future change
+// comment and substrate-runtime.md §5.5 both claim it): a future change
 // that instead rejects the leaf case must update those docs, which means it
 // must also update this test.
 func TestWriteBootstrapFile_LeafSymlinkIsReplacedNotWrittenThrough(t *testing.T) {

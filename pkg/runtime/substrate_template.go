@@ -74,12 +74,11 @@ const templateReadyPollInterval = 5 * time.Second
 // the nil pointer as "" while buildActorTemplate substitutes a real default
 // would let a change to that default silently reuse the old golden
 // template), the hardcoded snapshot scope, the container's added
-// capabilities, and the entrypoint version. This is a deliberate expansion
-// of substrate-runtime.md §3's hash-input list (image digest + sandbox
-// class + resources + scope + entrypoint version only): those other fields
-// are template content too, and changing them in settings — or in this
-// runtime's own code, for the capability set — must not silently reuse a
-// stale golden template.
+// capabilities, and the entrypoint version — every template-content
+// input listed in substrate-runtime.md §3. All of these are template
+// content, so changing any of them in settings — or in this runtime's own
+// code, for the capability set — must not silently reuse a stale golden
+// template.
 func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) string {
 	effectiveResources := resources
 	if effectiveResources == nil {
@@ -343,9 +342,10 @@ func templateReadyTimeout(sc config.V1SubstrateConfig) time.Duration {
 
 // ensureActorTemplate gets the ActorTemplate named templateName in atespace,
 // creating it if missing, then waits for its golden snapshot to become
-// ready (substrate-runtime.md §3: "creating a template boots a golden
-// actor, so wait for the template to be ready"). clock lets tests replace
-// time.Sleep with an instant no-op.
+// ready — creating a template boots a golden actor and snapshots it
+// (substrate-runtime.md §3), so Run must not proceed to CreateActor until
+// that snapshot is ready. clock lets tests replace time.Sleep with an
+// instant no-op.
 func ensureActorTemplate(ctx context.Context, client ateapipb.ControlClient, atespace, templateName string, tmpl *ateapipb.ActorTemplate, timeout time.Duration, sleep func(time.Duration)) error {
 	existing, err := client.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: atespace, Name: templateName},
