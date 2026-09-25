@@ -481,6 +481,10 @@ print(json.dumps(out))
   "compute addresses create")
     require_project "$@"
     require_flag region "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/addresses/${4:-}.json.create-fail" ]]; then
+      echo "gcloud-stub: simulated create failure for address ${4:-}" >&2
+      exit 1
+    fi
     # Real gcloud creates an EXTERNAL address when --subnet is omitted,
     # not one on any particular internal subnet -- silently defaulting
     # it here (as this stub used to) would hide a caller that dropped

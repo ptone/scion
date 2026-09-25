@@ -361,6 +361,12 @@ set_address_delete_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/addresses/$1.json.delete-fail"
 }
 
+# set_address_create_will_fail NAME — the next `compute addresses create`
+# call for this reservation fails instead of succeeding.
+set_address_create_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/addresses/$1.json.create-fail"
+}
+
 # set_address_list_will_fail NAME — the next `compute addresses list`
 # call filtered to this name fails instead of returning a result.
 set_address_list_will_fail() {

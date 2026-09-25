@@ -498,6 +498,17 @@ test_deploy_delete_internal_ip_deleted_when_vm_already_gone() {
     "the summary must report the reservation as deleted"
 }
 
+test_deploy_delete_internal_ip_delete_failure_reflected_in_exit_code() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.42" "scion-deployment=${HUB}"
+  set_address_delete_will_fail "scion-hub-${HUB}-internal-ip"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "1" "$DEPLOY_RC" \
+    "an internal-IP delete failure, with the VM confirmed gone, must fail the whole teardown's exit code"
+  assert_contains "$DEPLOY_LOG" "Kept internal IP:          scion-hub-${HUB}-internal-ip (delete failed:" \
+    "the summary must report the reservation as Kept, with the delete-failed reason"
+}
+
 test_deploy_delete_internal_ip_kept_when_vm_not_gone() {
   fresh_gcloud_state
   seed_instance "$INSTANCE_NAME" "us-central1-b"
@@ -1166,6 +1177,48 @@ test_deploy_delete_k8s_unmarked_pv_aborts_before_any_delete() {
 # stub does not simulate.
 # =====================================================================
 
+test_deploy_create_squash_script_non_numeric_output_fails_before_any_write() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_mig "mig-a" "template-a"
+  seed_template "template-a" "gke-mycluster-abc123-node"
+  local config_file
+  config_file="$(mktemp)"
+  printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" > "$config_file"
+  local log rc
+  log="$(GCLOUD_STUB_SSH_SUCCEEDS=true GCLOUD_STUB_SSH_SQUASH_IDS="abc" \
+    timeout 60 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
+  rc=$?
+  rm -f "$config_file"
+  assert_true "$([[ "$rc" -ne 0 && "$rc" -ne 124 ]] && echo true || echo false)" \
+    "non-numeric output from the squash-identity script must fail deploy.sh, not hang or be silently accepted"
+  assert_contains "$log" "Unexpected output from the NFS squash identity script" "the message should explain why"
+  assert_not_contains "$log" "schema_version" "settings.yaml must never be written after this refusal"
+  assert_eq "0" "$(echo "$log" | grep -c 'exports.d' || true)" \
+    "the NFS export must never be written after this refusal"
+}
+
+test_deploy_create_squash_script_uid_zero_fails_before_any_write() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_mig "mig-a" "template-a"
+  seed_template "template-a" "gke-mycluster-abc123-node"
+  local config_file
+  config_file="$(mktemp)"
+  printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" > "$config_file"
+  local log rc
+  log="$(GCLOUD_STUB_SSH_SUCCEEDS=true GCLOUD_STUB_SSH_SQUASH_IDS="0:1001" \
+    timeout 60 bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null 2>&1)"
+  rc=$?
+  rm -f "$config_file"
+  assert_true "$([[ "$rc" -ne 0 && "$rc" -ne 124 ]] && echo true || echo false)" \
+    "a squash uid of 0 must fail deploy.sh, not be accepted as the anonymous NFS uid"
+  assert_contains "$log" "refusing to export with root as the anonymous uid" "the message should explain why"
+  assert_not_contains "$log" "schema_version" "settings.yaml must never be written after this refusal"
+  assert_eq "0" "$(echo "$log" | grep -c 'exports.d' || true)" \
+    "the NFS export must never be written after this refusal"
+}
+
 test_deploy_create_tier_off_reaches_settings_yaml_with_no_hybrid_ssh_calls() {
   fresh_gcloud_state
   run_deploy_create_to_settings_yaml "$(base_config_json "$HUB")"
@@ -1307,6 +1360,13 @@ test_deploy_create_tier_on_proxy_settings_yaml_has_shared_dir_storage_block() {
     "the tier-on proxy-mode settings.yaml write must carry the shared_dir_storage block -- an IAP-mode hub must not silently lose it"
   assert_contains "$proxy_heredoc" 'server: "10.128.0.9"' \
     "the proxy-mode shared_dir_storage server field must be the reserved internal IP"
+  # hybrid_k8s_ensure_objects (Phase 4, after VM_IP is final) is what
+  # actually creates the PV/PVC a tier-on deploy depends on -- nothing
+  # before this point in the flow asserts that it was ever called at all.
+  assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/pv/scion-hub-${HUB}-shared.json" ]] && echo true || echo false)" \
+    "hybrid_k8s_ensure_objects must actually create the PV when the tier is on"
+  assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/pvc/scion-hub-${HUB}__scion-hub-${HUB}-shared.json" ]] && echo true || echo false)" \
+    "hybrid_k8s_ensure_objects must actually create the PVC when the tier is on"
 }
 
 test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {

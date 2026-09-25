@@ -1571,9 +1571,12 @@ hybrid_ensure_internal_ip_existing_vm() {
   fi
 
   info "Promoting the VM's current internal IP to a static reservation..."
-  gcloud compute addresses create "$name" \
-    --project="$project_id" --region="$region" --subnet="$subnet" \
-    --addresses="$current_ip" --description="$marker" --quiet
+  if ! gcloud compute addresses create "$name" \
+      --project="$project_id" --region="$region" --subnet="$subnet" \
+      --addresses="$current_ip" --description="$marker" --quiet; then
+    err "Could not promote the VM's current internal IP (${current_ip}) to a static reservation named ${name}."
+    exit 1
+  fi
   local recheck_ip
   recheck_ip="$(gcloud compute instances describe "$instance_name" \
     --zone="$zone" --project="$project_id" \

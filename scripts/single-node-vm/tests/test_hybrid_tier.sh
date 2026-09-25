@@ -116,6 +116,39 @@ test_k8s_ensure_objects_uses_hybrid_read_config_override() {
   rm -f "$HYBRID_KUBECONFIG"
 }
 
+# Drives the REAL interactive prompt path (no config file), with a real
+# config_prompt (read -rp against stdin) standing in for the harness's
+# own stub, which errors on any call it doesn't expect -- exactly what
+# the interactive branch needs to actually exercise. Restores the
+# stub afterward so no other test's use of config_prompt is affected.
+test_read_config_interactive_prompts_for_namespace_and_pvc_name() {
+  fresh_gcloud_state
+  # shellcheck disable=SC2034 # read by hybrid_read_config's own [[ -z "${CONFIG_FILE:-}" ]] check, via this local shadow
+  local CONFIG_FILE=""
+  local saved_config_prompt
+  saved_config_prompt="$(declare -f config_prompt)"
+  # shellcheck disable=SC2317 # invoked indirectly, by hybrid_read_config below
+  config_prompt() {
+    local varname="$1" prompt="$2" default="$3" input
+    read -rp "$prompt" input
+    printf -v "$varname" '%s' "${input:-$default}"
+  }
+  hybrid_read_config "$PROJECT" "$HUB" <<'STDIN'
+y
+mycluster
+us-central1
+
+custom-ns
+custom-pvc
+STDIN
+  eval "$saved_config_prompt"
+  assert_eq "true" "$HYBRID_ENABLED" "answering 'y' to the hybrid-tier prompt must enable the tier"
+  assert_eq "custom-ns" "$GKE_NAMESPACE" \
+    "the interactive namespace prompt's answer must be used, not silently skipped or defaulted"
+  assert_eq "custom-pvc" "$GKE_PVC_NAME" \
+    "the interactive PVC-name prompt's answer must be used, not silently skipped or defaulted"
+}
+
 # =====================================================================
 # Discovery: bound to the cluster's own node pools / instance groups /
 # instance templates, never to instance-name string matching.
@@ -1001,6 +1034,23 @@ test_probe_export_script_executed_restarts_when_config_unchanged_but_not_confirm
   PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
   assert_true "$([[ -f "${d}/systemctl.log" ]] && grep -qF "restart nfs-server" "${d}/systemctl.log" 2>/dev/null && echo true || echo false)" \
     "an unconfirmed-active server must still restart even with unchanged config -- fail closed toward restarting"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_uses_the_given_non_default_size() {
+  local d script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  # Every other executed test passes "20", which is also the hard-coded
+  # value a mutant that ignores gke_target.shared_dir_image_size_gb
+  # entirely would produce -- a non-default size is the only way to
+  # actually distinguish "the given size was used" from "any size was
+  # used".
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "37")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
+  assert_contains "$(cat "${d}/fallocate.log" 2>/dev/null || true)" "-l 37G" \
+    "the image must actually be allocated at the given, non-default size"
   rm -rf "$d"
 }
 
@@ -3147,6 +3197,17 @@ test_internal_ip_existing_vm_promotes_current_ip_when_absent() {
   assert_eq "10.128.0.5" "$HYBRID_INTERNAL_IP" "must promote the VM's current IP"
   assert_contains "$(gcloud_log)" "addresses create scion-hub-${HUB}-internal-ip" "must promote via addresses create"
   assert_contains "$(gcloud_log)" "--addresses=10.128.0.5" "must promote the exact current IP, not a fresh one"
+}
+
+test_internal_ip_existing_vm_promote_create_failure_is_explicit_error() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
+  set_address_create_will_fail "scion-hub-${HUB}-internal-ip"
+  run_expect_fail hybrid_ensure_internal_ip_existing_vm "$HUB" "$PROJECT" "us-central1" "default" \
+    "10.128.0.5" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a promote addresses-create failure must fail the run explicitly, not be silently treated as success"
+  assert_contains "$RUN_OUTPUT" "Could not promote the VM's current internal IP" "error should explain why"
 }
 
 test_internal_ip_existing_vm_reuses_matching_marked_reservation() {
