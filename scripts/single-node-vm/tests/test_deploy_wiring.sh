@@ -230,14 +230,37 @@ _wait_for_deploy_log_quiescence() {
 # scripts and the settings.yaml heredoc read that log directly rather
 # than needing a separate one.
 run_deploy_create_to_settings_yaml() {
-  local config_json="$1" config_file
+  _run_deploy_create_to_settings_yaml_impl "$1" "dev"
+}
+
+# run_deploy_create_to_proxy_settings_yaml CONFIG_JSON — like
+# run_deploy_create_to_settings_yaml, but runs all the way through
+# Cloud Run deploy and IAP enablement to the Phase-5 proxy-mode
+# settings.yaml (re)write instead of stopping at the earlier dev-mode
+# one. IAP_ENFORCEMENT_WAIT_SECS is overridden to 0 so this doesn't
+# block on deploy.sh's real 60s wait for IAP enforcement to activate.
+run_deploy_create_to_proxy_settings_yaml() {
+  _run_deploy_create_to_settings_yaml_impl "$1" "proxy"
+}
+
+# _run_deploy_create_to_settings_yaml_impl CONFIG_JSON MODE ("dev" or
+# "proxy") — shared implementation. Sets DEPLOY_RC, DEPLOY_LOG, and
+# DEPLOY_REACHED_SETTINGS_YAML.
+_run_deploy_create_to_settings_yaml_impl() {
+  local config_json="$1" mode="$2" config_file
   config_file="$(mktemp)"
   printf '%s' "$config_json" > "$config_file"
-  local sentinel="${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
+  local sentinel
+  if [[ "$mode" == "proxy" ]]; then
+    sentinel="${GCLOUD_STUB_STATE_DIR}/settings-yaml-proxy-mode-written"
+  else
+    sentinel="${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
+  fi
   rm -f "$sentinel"
   local log_file
   log_file="$(mktemp)"
-  GCLOUD_STUB_SSH_SUCCEEDS=true bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
+  GCLOUD_STUB_SSH_SUCCEEDS=true IAP_ENFORCEMENT_WAIT_SECS=0 \
+    bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
     < /dev/null > "$log_file" 2>&1 &
   local pid=$!
   local waited_ms=0
@@ -1173,7 +1196,13 @@ test_deploy_create_tier_off_settings_yaml_byte_identical() {
   assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-off create must reach the settings.yaml write"
   local log actual expected
   log="$(gcloud_log)"
-  actual="$(echo "$log" | awk "/<< 'SETTINGSEOF'/{flag=1; next} /^SETTINGSEOF\$/{flag=0} flag")"
+  # Command substitution strips ALL trailing newlines, which would hide
+  # a stray trailing blank line the splice mechanism might leave behind.
+  # Appending a sentinel character and stripping only that (not "$(...)"
+  # itself) preserves any real trailing newline in both actual and
+  # expected.
+  actual="$(echo "$log" | awk "/<< 'SETTINGSEOF'/{flag=1; next} /^SETTINGSEOF\$/{flag=0} flag"; echo x)"
+  actual="${actual%x}"
   expected="$(cat <<'EXPECTED'
 schema_version: "1"
 image_registry: "localhost/scion"
@@ -1200,9 +1229,84 @@ server:
     mode: dev
   listen_port: 8080
 EXPECTED
-)"
+echo x)"
+  expected="${expected%x}"
   assert_eq "$expected" "$actual" \
     "a tier-off settings.yaml must be byte-for-byte identical to a render with no hybrid-tier splice at all"
+}
+
+# The dev-mode write above is what deploy.sh's own Phase 3 uses on every
+# create; production auth is proxy mode (IAP), written later in Phase 5
+# once the Cloud Run proxy exists -- an entirely separate heredoc in
+# deploy.sh, unpinned by the dev-mode test above.
+test_deploy_create_tier_off_proxy_settings_yaml_byte_identical() {
+  fresh_gcloud_state
+  run_deploy_create_to_proxy_settings_yaml \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-off create must reach the Phase-5 proxy-mode settings.yaml write"
+  local log actual expected
+  log="$(gcloud_log)"
+  # Two settings.yaml writes are logged by this point (Phase 3 dev-mode,
+  # then Phase 5 proxy-mode); take the LAST one.
+  actual="$(echo "$log" | awk "/<< 'SETTINGSEOF'/{flag=1; buf=\"\"; next} /^SETTINGSEOF\$/{flag=0; last=buf} flag{buf=buf \$0 ORS} END{printf \"%s\", last}"; echo x)"
+  actual="${actual%x}"
+  expected="$(cat <<'EXPECTED'
+schema_version: "1"
+image_registry: "us-docker.pkg.dev/demo-project/scion"
+harness_configs:
+  antigravity:
+    harness: antigravity
+    env:
+      GOOGLE_CLOUD_PROJECT: "demo-project"
+      GOOGLE_CLOUD_LOCATION: "global"
+server:
+  hub:
+    name: "demohub"
+    admin_emails:
+      - "admin@example.com"
+  maintenance:
+    deployment_tier: "binary"
+    release_channel: "nightly"
+    update_policy: "auto"
+  storage:
+    local_path: /home/scion/.scion/workspace-storage
+  secrets:
+    backend: local
+  auth:
+    mode: proxy
+    proxy:
+      provider: iap
+      iap:
+        audience: "/projects/123456789012/locations/us-central1/services/scion-hub-demohub-iap-proxy"
+  listen_port: 8080
+EXPECTED
+echo x)"
+  expected="${expected%x}"
+  assert_eq "$expected" "$actual" \
+    "a tier-off proxy-mode settings.yaml must be byte-for-byte identical to a render with no hybrid-tier splice at all"
+}
+
+test_deploy_create_tier_on_proxy_settings_yaml_has_shared_dir_storage_block() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_mig "mig-a" "template-a"
+  seed_template "template-a" "gke-mycluster-abc123-node"
+  run_deploy_create_to_proxy_settings_yaml \
+    "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the Phase-5 proxy-mode settings.yaml write"
+  local log proxy_heredoc
+  log="$(gcloud_log)"
+  # The log also contains Phase 3's dev-mode write, which carries its own
+  # shared_dir_storage block -- extracting only the LAST (proxy-mode)
+  # heredoc keeps this test from passing merely because the earlier,
+  # unrelated dev-mode write still has the block.
+  proxy_heredoc="$(echo "$log" | awk "/<< 'SETTINGSEOF'/{flag=1; buf=\"\"; next} /^SETTINGSEOF\$/{flag=0; last=buf} flag{buf=buf \$0 ORS} END{printf \"%s\", last}"; echo x)"
+  proxy_heredoc="${proxy_heredoc%x}"
+  assert_contains "$proxy_heredoc" "mode: proxy" "the proxy-mode write must actually carry proxy auth, not dev"
+  assert_contains "$proxy_heredoc" "shared_dir_storage:" \
+    "the tier-on proxy-mode settings.yaml write must carry the shared_dir_storage block -- an IAP-mode hub must not silently lose it"
+  assert_contains "$proxy_heredoc" 'server: "10.128.0.9"' \
+    "the proxy-mode shared_dir_storage server field must be the reserved internal IP"
 }
 
 test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {

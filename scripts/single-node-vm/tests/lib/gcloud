@@ -132,6 +132,10 @@ case "${1:-} ${2:-} ${3:-} ${4:-}" in
   "compute routers nats delete")
     exit 0
     ;;
+  "beta run services update")
+    require_project "$@"
+    exit 0
+    ;;
 esac
 
 case "${1:-} ${2:-}" in
@@ -172,6 +176,22 @@ APIS
     ;;
   "auth list")
     echo "stub-deployer@example.com"
+    exit 0
+    ;;
+  "projects describe")
+    echo "123456789012"
+    exit 0
+    ;;
+  "config get-value")
+    echo "stub-deployer@example.com"
+    exit 0
+    ;;
+  "run deploy")
+    require_project "$@"
+    require_flag region "$@"
+    name="${3:-}"
+    mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+    touch "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists"
     exit 0
     ;;
 esac
@@ -535,6 +555,10 @@ print(json.dumps({
       exit 1
     fi
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists" ]]; then
+      format="$(get_flag format "$@")" || format=""
+      if [[ "$format" == "value(status.url)" ]]; then
+        echo "https://${name}-abc123-uc.a.run.app"
+      fi
       exit 0
     fi
     # Real gcloud's own Cloud Run 404 text -- "Cannot find service [X]" --
@@ -610,6 +634,13 @@ print(json.dumps({
         ;;
       *"test -f /home/scion/.scion/hub.env"*)
         echo "no"
+        ;;
+      *"schema_version"*"mode: proxy"*)
+        # The settings.yaml Phase-5 proxy-mode (re)write: a later, distinct
+        # sentinel from the dev-mode one below, for a test that needs to
+        # reach past Cloud Run deploy/IAP enablement instead of stopping
+        # at the earlier dev-mode write.
+        touch "${GCLOUD_STUB_STATE_DIR}/settings-yaml-proxy-mode-written"
         ;;
       *"schema_version"*)
         # The settings.yaml dev-mode write: this is the point create-mode

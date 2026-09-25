@@ -130,7 +130,9 @@ readonly HEALTH_CHECK_MAX_ATTEMPTS=12
 readonly HEALTH_CHECK_RETRY_SECS=5
 readonly BUILD_POLL_MAX_ATTEMPTS=180
 readonly BUILD_POLL_INTERVAL_SECS=15
-readonly IAP_ENFORCEMENT_WAIT_SECS=60
+# Overridable via env so a test can drive this deploy without waiting
+# out the real wait for real IAP enforcement to activate.
+readonly IAP_ENFORCEMENT_WAIT_SECS="${IAP_ENFORCEMENT_WAIT_SECS:-60}"
 
 # ---------------------------------------------------------------------------
 # Parse flags
