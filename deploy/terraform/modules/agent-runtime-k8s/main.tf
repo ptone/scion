@@ -55,9 +55,20 @@ resource "kubernetes_role" "hub" {
   }
 }
 
-# GKE maps the hub SA's Google identity to an RBAC User of the same name, so
-# no project-level container.developer is needed — only this namespaced
-# binding plus container.clusterViewer (granted in hub-identity).
+# GKE maps the hub SA's Google identity to an RBAC User of the same name —
+# in principle. In practice (F-108, design §9): the hub's k8s client
+# authenticates via pkg/k8s/client.go's fallbackToGCEAuth (the kubeconfig
+# this module's caller renders names the gke-gcloud-auth-plugin exec, which
+# the hub image doesn't have), and that fallback requests only the
+# cloud-platform OAuth scope — not userinfo.email. Without userinfo.email,
+# GKE can't resolve the caller's email and instead identifies it by the SA's
+# numeric unique_id, so an email-only subject here never matches: every
+# heartbeat logged `pods is forbidden: User "115656325337183068810"`, and
+# pod create would have been denied the same way. Two subjects, both kept:
+# the unique_id one is what actually matches today; the email one is kept so
+# this binding needs no further change once the client is fixed upstream to
+# request userinfo.email (design §9 upstream follow-up, item h) — dropping
+# it now would just trade today's outage for a silent one later.
 resource "kubernetes_role_binding" "hub" {
   metadata {
     name      = "${var.hub_name}-hub"
@@ -70,10 +81,20 @@ resource "kubernetes_role_binding" "hub" {
     name      = kubernetes_role.hub.metadata[0].name
   }
 
+  # F-108: matches nothing today (GKE can't see this email without
+  # userinfo.email), but kept for when the upstream client fix lands.
   subject {
     api_group = "rbac.authorization.k8s.io"
     kind      = "User"
     name      = var.hub_sa_email
+  }
+
+  # F-108: this is the subject that actually matches while the hub's k8s
+  # client only presents the cloud-platform scope.
+  subject {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "User"
+    name      = var.hub_sa_unique_id
   }
 }
 

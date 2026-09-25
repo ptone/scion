@@ -3,6 +3,11 @@ output "hub_sa_email" {
   value       = google_service_account.hub.email
 }
 
+output "hub_sa_unique_id" {
+  description = "Hub SA's numeric unique_id (F-108, design §9). Not secret. The hub's k8s client falls back to pkg/k8s/client.go's fallbackToGCEAuth (the kubeconfig names the gke-gcloud-auth-plugin exec, which the image doesn't have), and that fallback requests only the cloud-platform scope, not userinfo.email — so GKE identifies the caller by this numeric ID instead of the SA's email. agent-runtime-k8s's RoleBinding needs a second subject on this value or every hub API call to the cluster is denied as an unrecognized User."
+  value       = google_service_account.hub.unique_id
+}
+
 output "transport_sa_email" {
   description = "Transport service account email (mints IAP OIDC tokens for agents)."
   value       = google_service_account.transport.email

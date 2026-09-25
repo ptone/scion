@@ -18,6 +18,16 @@ variable "hub_sa_email" {
   type        = string
 }
 
+variable "hub_sa_unique_id" {
+  description = "Hub SA's numeric unique_id (F-108, design §9, hub-identity output). Bound as a SECOND subject on the RoleBinding alongside hub_sa_email: the hub's k8s client falls back to pkg/k8s/client.go's fallbackToGCEAuth (the kubeconfig names the gke-gcloud-auth-plugin exec, absent from the image), which requests only the cloud-platform scope, not userinfo.email — so GKE identifies the caller by this numeric ID, not the SA's email, and the email-only subject never matches. Kept alongside the email subject (not replacing it) so the binding still matches once the client is fixed upstream to request userinfo.email (tracked as a design §9 upstream follow-up, item h)."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.hub_sa_unique_id))
+    error_message = "hub_sa_unique_id must be a non-empty numeric string (GCP service account unique_id, e.g. \"115656325337183068810\")."
+  }
+}
+
 variable "agent_sa_email" {
   description = "Agent service account email. Bound to the namespace's default KSA via Workload Identity."
   type        = string

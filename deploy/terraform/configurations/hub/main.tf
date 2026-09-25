@@ -78,10 +78,11 @@ module "hub_identity" {
 module "agent_runtime_k8s" {
   source = "../../modules/agent-runtime-k8s"
 
-  hub_name       = var.hub_name
-  project_id     = var.project_id
-  hub_sa_email   = module.hub_identity.hub_sa_email
-  agent_sa_email = module.hub_identity.agent_sa_email
+  hub_name         = var.hub_name
+  project_id       = var.project_id
+  hub_sa_email     = module.hub_identity.hub_sa_email
+  hub_sa_unique_id = module.hub_identity.hub_sa_unique_id
+  agent_sa_email   = module.hub_identity.agent_sa_email
 
   nfs = {
     server     = module.shared_lookup.shared.nfs.server
