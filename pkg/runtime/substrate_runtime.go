@@ -768,9 +768,9 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 
 // RecordlessActors implements the broker's optional record-less-actor
 // capability (see pkg/runtimebroker's RecordlessActorProber, ptone/scion#1808):
-// given projectID, it returns the atespace that project maps to and the
-// names of every actor in it that this runtime process has no in-memory
-// record for (substrateAgentRecords, keyed by actor UID — lost across a
+// given projectID, it returns the atespace that project maps to and every
+// actor in it that this runtime process has no in-memory record for
+// (substrateAgentRecords, keyed by actor UID — lost across a
 // process restart for any actor a previous process created) AND that is not
 // already in ACTOR_STATE_DELETING (see the loop below for why: a record-less
 // actor already being deleted needs no further protection, and excluding it
@@ -803,10 +803,10 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 // project's own atespace is a real per-agent actor; scoping the list to
 // that one atespace (both via the request's Atespace field and the
 // defensive equality check below) is the only exclusion this method needs.
-func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID string) (atespace string, actorNames []string, err error) {
+func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID string) (atespace string, actors []RecordlessActor, err error) {
 	atespace = substrateAtespaceName(projectID)
 
-	var actors []*ateapipb.Actor
+	var rawActors []*ateapipb.Actor
 	pageToken := ""
 	for page := 0; ; page++ {
 		if page >= maxRecordlessActorListPages {
@@ -816,7 +816,7 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 		if err != nil {
 			return atespace, nil, fmt.Errorf("substrate: list actors in atespace %s: %w", atespace, err)
 		}
-		actors = append(actors, resp.GetActors()...)
+		rawActors = append(rawActors, resp.GetActors()...)
 		next := resp.GetNextPageToken()
 		if next != "" && next == pageToken {
 			return atespace, nil, fmt.Errorf("substrate: list actors in atespace %s: server returned a repeated page token", atespace)
@@ -830,7 +830,7 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 	substrateAgentStateMu.Lock()
 	defer substrateAgentStateMu.Unlock()
 
-	for _, actor := range actors {
+	for _, actor := range rawActors {
 		if actor.GetMetadata().GetAtespace() != atespace {
 			continue
 		}
@@ -879,9 +879,22 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 			// broker restart", consequence (d).
 			continue
 		}
-		actorNames = append(actorNames, actor.GetMetadata().GetName())
+		actors = append(actors, RecordlessActor{Name: actor.GetMetadata().GetName(), UID: actor.GetMetadata().GetUid()})
 	}
-	return atespace, actorNames, nil
+	return atespace, actors, nil
+}
+
+// RecordlessActor identifies one actor RecordlessActors found with no
+// in-memory record. UID is the actor's ResourceMetadata.uid: globally unique
+// across atespaces and, in practice, across ateapi backends too (standard
+// UUID-style generation), which is what lets a caller checking more than one
+// substrate manager (recordlessActorProbe, pkg/runtimebroker) dedupe by
+// actor identity rather than by "atespace/name" — a key that collides
+// whenever two different ateapi endpoints happen to hold a same-named actor
+// in an atespace name derived the same way from the same projectID.
+type RecordlessActor struct {
+	Name string
+	UID  string
 }
 
 // maxRecordlessActorListPages bounds RecordlessActors' ListActors paging

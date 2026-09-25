@@ -916,27 +916,55 @@ from the response body:
 
 ```sh
 # 0. Identify the actor. The 409 response body only proves at least one
-#    record-less actor exists in this atespace; it does not name it. The
+#    record-less actor exists in this atespace; it does not name it, and it
+#    is never a license to act on every name the broker's log turns up. The
 #    broker logs the record-less actor NAMES at WARN on every such 409 (only
-#    in its own log, never in the HTTP response):
-kubectl -n "${BROKER_NAMESPACE}" logs deploy/scion-substrate-broker \
+#    in its own log, never in the HTTP response). Because a rolling update
+#    or `strategy: Recreate` can list more than one broker pod at once, find
+#    the SPECIFIC pod that logged the line you care about, not an arbitrary
+#    one (`kubectl logs deploy/...` picks one pod for you, which may not be
+#    the one that logged this WARN):
+kubectl -n "${BROKER_NAMESPACE}" logs --prefix -l app=scion-substrate-broker \
   | grep -i "agent identity unknown"
-#    Look for the "recordless_actors" field on that log line. For each name
-#    it lists:
-#      (i)  confirm its .metadata.createTime predates the CURRENT broker
-#           pod's .status.startTime -- an actor created after the current
-#           pod started is not a pre-restart actor, whatever this 409 says:
+#    Each matching line is prefixed "[pod/<pod-name>/scion-substrate-broker]"
+#    -- note that pod name (call it POD below) and read the
+#    "recordless_actors" field on that same line.
+#
+#    The actor THIS delete/stop is for is named "<project-slug>--<agent-slug>"
+#    (containerName, pkg/agent/run.go) -- act ONLY on that one name, and only
+#    if it appears in POD's WARN line and passes both checks below. The WARN
+#    line lists every record-less actor in the atespace, which routinely
+#    includes OTHER pre-restart agents in the same project that are still
+#    running (and, per the atespace-prefix note below, possibly another
+#    project's actors sharing the prefix). Those other names are NOT part of
+#    this procedure and must not be deleted here: each is cleaned up through
+#    its own agent's delete/stop, when that request hits this same 409.
+#
+#    For the one name that matches <project-slug>--<agent-slug>:
+#      (i)  confirm its .metadata.createTime predates the broker CONTAINER's
+#           current start in POD -- not POD's .status.startTime, which is
+#           when the POD started and does NOT move when the kubelet restarts
+#           a crashed or OOM-killed container in place
+#           (`restartPolicy: Always`, the Deployment default). An in-pod
+#           container restart is exactly the kind of "broker restart" this
+#           whole mechanism exists to catch (see "an OOM kill, anything that
+#           starts a new process" above, and consequence (d) below), so the
+#           pod's start time is the wrong boundary: use the container's own
+#           state.running.startedAt instead:
 kubectl ate get actor -a <atespace> <actor> -o yaml   # read .metadata.createTime
-kubectl -n "${BROKER_NAMESPACE}" get pods -l app=scion-substrate-broker \
-  -o jsonpath='{.items[0].status.startTime}'
+kubectl -n "${BROKER_NAMESPACE}" get pod "$POD" \
+  -o jsonpath='{.status.containerStatuses[?(@.name=="scion-substrate-broker")].state.running.startedAt}'
+#           An actor created after that timestamp is not a pre-restart
+#           actor, whatever this 409 says -- do not act on it.
 #      (ii) cross-check it against the hub's own agent list for this
 #           project (its phase/name should match what you expect).
 #    If more than one project could plausibly share this atespace (see the
-#    atespace-prefix note below), confirm ownership with each project's
-#    owner first. Only a name verified this way -- from the broker's own
-#    WARN log line, confirmed pre-restart, and matched against the hub's
-#    agent list -- may be acted on below; never guess from the requested
-#    slug alone.
+#    atespace-prefix note below), confirm ownership with that project's
+#    owner first. Only the one name verified this way -- read from POD's own
+#    WARN log line, confirmed pre-restart against POD's own container start,
+#    and matched against the hub's agent list -- may be acted on below;
+#    never guess from the requested slug alone, and never act on the other
+#    names the same WARN line lists.
 
 # 1. Only once the actor is confirmed: delete its egress policy FIRST. This
 #    order is mandatory, not a suggestion — deleting the actor before its
@@ -944,8 +972,36 @@ kubectl -n "${BROKER_NAMESPACE}" get pods -l app=scion-substrate-broker \
 #    (RecordlessActors only ever reports actors, so an orphaned policy alone
 #    is invisible to this whole mechanism). There is no dedicated CLI for
 #    this; call the ateapi Control service's DeleteActorEgressPolicy RPC
-#    directly (e.g. via grpcurl against api.${ATE_SYSTEM_NAMESPACE}.svc:443),
-#    or whatever operator tooling your cluster already wraps it with.
+#    directly. Keep TLS verification ON: never grpcurl -insecure/-plaintext
+#    against a real cluster endpoint (this cluster's own recorded manual
+#    grpcurl calls used -insecure only because they went through
+#    `kubectl port-forward` to localhost, which cannot present the service's
+#    real certificate -- that shortcut does not apply to a direct
+#    api.${ATE_SYSTEM_NAMESPACE}.svc:443 call):
+ATE_TOKEN=$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
+  --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)
+ATE_HDR=$(mktemp); trap 'rm -f "$ATE_HDR"' EXIT INT TERM
+printf 'Authorization: Bearer %s\n' "$ATE_TOKEN" > "$ATE_HDR"; chmod 600 "$ATE_HDR"
+unset ATE_TOKEN
+grpcurl -H @"$ATE_HDR" \
+  -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
+  api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/DeleteActorEgressPolicy
+#    NEEDS VERIFICATION: the CA that authenticates api.${ATE_SYSTEM_NAMESPACE}.svc's
+#    certificate is cluster-internal, not in a public trust store (the
+#    broker itself trusts it via the ca_file/cluster_trust_bundle settings in
+#    this ConfigMap, not a system default) -- run grpcurl somewhere that same
+#    trust material is available (e.g. its own -cacert, or a pod/exec
+#    context that already has it), never with -insecure/-plaintext. Not
+#    confirmed against a real cluster in this pass.
+
+#    Verify the policy is actually gone before touching the actor — an
+#    orphaned policy after step 2 is invisible to this whole mechanism, so
+#    this check matters, not just as a courtesy:
+grpcurl -H @"$ATE_HDR" \
+  -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
+  api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/GetActorEgressPolicy
+#    Expect a NotFound gRPC status. Anything else means the policy is still
+#    there; do not proceed to step 2 until it reads NotFound.
 
 # 2. Delete the actor itself, any_state so a non-RUNNING actor isn't
 #    rejected:
@@ -958,23 +1014,31 @@ kubectl ate delete actor -a <atespace> <actor> --any-state
 #    itself uses; do not create or expect any separate "~/.scion/token"
 #    file — nothing in this codebase creates one). Nothing that expands a
 #    secret may appear on the command line (shell history, `ps`,
-#    `/proc/<pid>/cmdline`), so write it to a 0600 header file first:
-HDR=$(mktemp)
-printf 'Authorization: Bearer %s\n' "$TOKEN" > "$HDR"
-chmod 600 "$HDR"
-curl -X DELETE "https://<hub-endpoint>/api/v1/agents/<agent-id>?force=true" \
-  -H @"$HDR"
-rm -f "$HDR"
+#    `/proc/<pid>/cmdline`) or be left behind if this is interrupted:
+read -rs TOKEN            # paste the hub token; not echoed, not in history
+HDR=$(mktemp); trap 'rm -f "$HDR"' EXIT INT TERM
+printf 'Authorization: Bearer %s\n' "$TOKEN" > "$HDR"; chmod 600 "$HDR"
+unset TOKEN
+curl --fail-with-body -X DELETE \
+  "https://<hub-endpoint>/api/v1/agents/<agent-id>?force=true" -H @"$HDR"
 ```
 
-Step 3's `force=true` is what makes this safe to run against a 409: the hub
-handler (`pkg/hub/handlers_agents_core.go`) only skips the normal
-broker-dispatch failure path — the one that would otherwise surface this
-same 409 back to the operator and refuse to touch the hub record — when
-`force` is set. Run force-delete only after steps 0–2 succeed: it never
-touches the broker or the actor itself, so running it early just orphans
-the actor with no further signal, the same failure this whole mechanism
-exists to prevent.
+`--fail-with-body` makes a 401/403/404 exit non-zero (with the body still
+shown) instead of silently exiting 0, so a rejected request cannot be
+mistaken for a completed step.
+
+`force=true` does not skip the broker: the hub (`pkg/hub/handlers_agents_core.go`)
+still dispatches the delete to the broker exactly as a normal delete would —
+it only changes what happens when that dispatch fails. Without `force`, a
+broker error (including this same 409) fails the hub request and leaves the
+hub record alone; with `force`, the hub logs the broker error and deletes its
+own agent record anyway, regardless of what the broker did or didn't manage
+to clean up. Run it only after steps 0–2 succeed: run it early and the actor,
+egress policy and worker are orphaned with no further signal (the broker
+error that would have surfaced this is now just a log line); run it while
+other record-less actors remain in this atespace and the broker still
+returns 409, so the project's on-broker files for this agent may also be
+left behind.
 
 **Fail-closed consequences worth knowing about, not fixed here:**
 - (a) `substrateAtespaceName` truncates a project ID to its first 12
@@ -1024,12 +1088,17 @@ exists to prevent.
   kubectl ate get actors -a <atespace>
 
   # 2. For each DELETING candidate NAME, compare its creation time against
-  #    the CURRENT broker pod's start time. Only a NAME that predates the
-  #    current pod is a candidate — a DELETING actor created after the
-  #    current pod started is still in its own, ordinary, in-flight delete:
+  #    every currently running broker pod's CONTAINER start -- not the pod's
+  #    .status.startTime, which does not move on an in-pod crash or OOM
+  #    restart (see step 0(i) above for why that distinction matters here).
+  #    List every matching pod rather than guessing .items[0] (a rolling
+  #    update or `strategy: Recreate` can list more than one at once):
   kubectl ate get actor -a <atespace> <NAME> -o yaml   # read .metadata.createTime
   kubectl -n "${BROKER_NAMESPACE}" get pods -l app=scion-substrate-broker \
-    -o jsonpath='{.items[0].status.startTime}'
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[?(@.name=="scion-substrate-broker")].state.running.startedAt}{"\n"}{end}'
+  #    Only a NAME that predates every one of those timestamps is a
+  #    candidate -- a DELETING actor created after any of them may still be
+  #    that pod's own, ordinary, in-flight delete.
 
   # 3. Only for a NAME confirmed in step 2: delete its egress policy exactly
   #    as in operator cleanup step 1 above (tolerates NotFound if it is
