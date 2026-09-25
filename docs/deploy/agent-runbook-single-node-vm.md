@@ -415,17 +415,36 @@ Enabling the tier does five things, all additive:
    `/srv/scion-shared` (the export root) is the root of its own
    dedicated, size-capped ext4 filesystem (default 20G, configurable via
    `gke_target.shared_dir_image_size_gb`), loop-mounted from a single
-   image file that itself lives on the VM's boot disk; the image is
-   created and formatted only the first time, never re-created on a later
-   run, and the export is only ever written or activated once the mount
-   is confirmed. Growing it later is a manual, documented operation (grow
-   the image file, then `resize2fs`) -- this script never shrinks it.
-   `nfs-kernel-server` is installed, NFSv2/v3 and UDP are disabled (this
-   tier is NFSv4/TCP-only) and `rpcbind` is masked, and a per-hub file
-   under `/etc/exports.d/` exports the mounted root to just the node
-   subnet, squashing every client to the dedicated identity. There's no
-   separate teardown for the export or its backing image file: both are
-   deleted along with the VM's boot disk.
+   image file that itself lives on the VM's boot disk; the image's space
+   is reserved with `fallocate` (not a sparse `truncate`), failing
+   clearly and removing the partial file if the boot disk can't hold it,
+   and formatted only the first time -- never re-created on a later run.
+   A pre-existing `/etc/fstab` line for that image with different
+   options is never silently trusted or replaced; the run fails with the
+   options it expected. The export is only ever written or activated
+   once the mount is confirmed, including a check that whatever is
+   mounted at the export root is actually the loop device backing this
+   image (via `findmnt`/`losetup`), not a stray leftover mount. A
+   `scion-hub.service` drop-in (tier-on only) adds
+   `RequiresMountsFor=/srv/scion-shared`, so the hub itself can never
+   start against an unmounted export and write shared-dir paths to the
+   boot disk's root filesystem instead. If a run is interrupted between
+   creating the image and finishing this mount setup, remove the image
+   file and re-run rather than trying to reuse a half-created one --
+   the create step's own guard refuses to reformat an image that already
+   exists, so a partial image is otherwise never retried automatically.
+   Growing the image later is a manual, documented operation (grow the
+   image file, then `resize2fs`) -- this script never shrinks it.
+   `nfs-kernel-server` is installed, NFSv2/v3/4.0 and UDP are disabled
+   (this tier is NFSv4.1/TCP-only, matching the PersistentVolume's own
+   `nfsvers=4.1`) and `rpcbind` is masked, with the mask verified rather
+   than assumed; the server is restarted (not just `enable --now`) after
+   writing this config, since the package's own install already starts
+   it with the stock config beforehand. A per-hub file under
+   `/etc/exports.d/` exports the mounted root to just the node subnet,
+   squashing every client to the dedicated identity. There's no separate
+   teardown for the export or its backing image file: both are deleted
+   along with the VM's boot disk.
 4. **Kubernetes objects.** A cluster-scoped PersistentVolume
    (`scion-hub-<hub_name>-shared`), a namespace (default
    `scion-hub-<hub_name>`), and a PersistentVolumeClaim in that namespace

@@ -496,8 +496,20 @@ test_nfs_export_script_image_created_once_never_remkfs() {
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
   assert_contains "$script" "if [ ! -e ${HYBRID_NFS_IMAGE_PATH} ]; then" \
     "the image must only be created (and mkfs'd) the first time -- an existing image is never re-created"
-  assert_contains "$script" "sudo truncate -s 20G ${HYBRID_NFS_IMAGE_PATH}" "must size the image from the IMAGE_SIZE_GB argument"
+  assert_contains "$script" "sudo fallocate -l 20G ${HYBRID_NFS_IMAGE_PATH}" "must size the image from the IMAGE_SIZE_GB argument"
   assert_contains "$script" "sudo mkfs.ext4 -F -q ${HYBRID_NFS_IMAGE_PATH}" "must format the image ext4"
+}
+
+test_nfs_export_script_fallocate_failure_removes_partial_image_and_exits() {
+  local script fallocate_line rm_line exit_line
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
+  assert_contains "$script" "sudo fallocate -l 20G ${HYBRID_NFS_IMAGE_PATH} || {" \
+    "a fallocate failure (insufficient disk) must be caught, not left to a bare set -e exit with no explanation"
+  fallocate_line="$(echo "$script" | grep -n 'sudo fallocate' | head -1 | cut -d: -f1)"
+  rm_line="$(echo "$script" | grep -n "sudo rm -f ${HYBRID_NFS_IMAGE_PATH}" | head -1 | cut -d: -f1)"
+  assert_true "$([[ -n "$rm_line" && "$rm_line" -eq "$fallocate_line" ]] && echo true || echo false)" \
+    "on failure the partial image must be removed in the same statement, so a retry's [ ! -e ] guard doesn't see a half-allocated file and skip mkfs"
+  assert_contains "$script" "insufficient disk space" "the failure message must say why, not just fail silently"
 }
 
 test_nfs_export_script_mounts_before_exporting() {
@@ -509,6 +521,42 @@ test_nfs_export_script_mounts_before_exporting() {
     "before= alone only orders the units; required-by= is what makes nfs-server actually depend on the mount, so it won't start if the mount fails"
   assert_contains "$script" "if ! mountpoint -q /srv/scion-shared; then" "must check whether the export root is already mounted"
   assert_contains "$script" "sudo mount /srv/scion-shared" "must mount the export filesystem"
+}
+
+test_nfs_export_script_stale_fstab_line_fails_instead_of_silently_trusting_it() {
+  local script
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
+  assert_contains "$script" "grep -qF \"${HYBRID_NFS_IMAGE_PATH} \" /etc/fstab" \
+    "must first check whether any line already mentions the image path"
+  assert_contains "$script" "does not match the expected options; refusing to continue" \
+    "a pre-existing line for this image with different options must fail with a message, never be silently trusted or silently replaced"
+  assert_contains "$script" "Expected: ${HYBRID_NFS_IMAGE_PATH} /srv/scion-shared ext4 loop,nofail" \
+    "the failure message must show the operator the exact line it expected"
+}
+
+test_nfs_export_script_verifies_mount_source_is_the_image_loop_device() {
+  local script
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
+  assert_contains "$script" "findmnt -n -o SOURCE --mountpoint /srv/scion-shared" \
+    "must look up what's actually mounted at the export root, not just that something is"
+  assert_contains "$script" "losetup -n -O BACK-FILE" \
+    "must resolve the mount source's backing file through losetup, since the mount source is a loop device, not the image path itself"
+  assert_contains "$script" "not from the loop device backing ${HYBRID_NFS_IMAGE_PATH}" \
+    "must refuse a stray tmpfs/bind mount masquerading as the export filesystem"
+}
+
+test_nfs_export_script_hub_service_requires_mounts_for_export_root() {
+  local script
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
+  assert_contains "$script" "/etc/systemd/system/scion-hub.service.d/10-scion-shared.conf" \
+    "a tier-on drop-in must make scion-hub.service depend on the export mount"
+  assert_contains "$script" "RequiresMountsFor=/srv/scion-shared" \
+    "the hub must never start against an unmounted export and write shared-dir paths to the boot disk's root filesystem instead"
+  local dropin_line reload_line
+  dropin_line="$(echo "$script" | grep -n '10-scion-shared.conf' | tail -1 | cut -d: -f1)"
+  reload_line="$(echo "$script" | grep -n 'sudo systemctl daemon-reload' | tail -1 | cut -d: -f1)"
+  assert_true "$([[ -n "$reload_line" && "$reload_line" -gt "$dropin_line" ]] && echo true || echo false)" \
+    "daemon-reload must run after the drop-in is written, so systemd actually picks it up"
 }
 
 test_nfs_export_script_fstab_line_nofail_and_no_fsck() {
@@ -547,45 +595,76 @@ test_nfs_export_script_fails_closed_when_not_mounted() {
 # the script from one that's dead code after an early `set -e` exit
 # elsewhere. Every command the script invokes that could otherwise touch
 # a REAL absolute path on the machine running the tests (mkdir, install,
-# mkfs.ext4, truncate, mount, mountpoint, systemctl, dpkg, apt-get,
-# exportfs, chown, chmod, tee, and sudo itself) is faked and put first on
-# PATH; only `grep`'s own read of /etc/fstab is left real, since that's
-# read-only and safe everywhere this suite runs.
+# mkfs.ext4, fallocate, mount, mountpoint, systemctl, dpkg, apt-get,
+# exportfs, chown, chmod, tee, findmnt, losetup, and sudo itself) is
+# faked and put first on PATH; only `grep`'s own read of /etc/fstab is
+# left real, since that's read-only and safe everywhere this suite runs.
+# MOUNTED selects the `mountpoint`/`mount` fakes' behavior, tracked via
+# a marker file (dir/.mounted) rather than a fixed answer, so the two
+# checks the rendered script makes (before attempting to mount, and the
+# fail-closed check after) can behave differently within one run:
+#   true    -- the marker pre-exists: mountpoint succeeds from the very
+#              first check, so `mount` must never be called at all.
+#   false   -- no marker, and `mount` never creates one: mountpoint
+#              fails both times, exercising the fail-closed exit.
+#   becomes -- no marker at start, but `mount` creates one when run: the
+#              first check fails, `mount` runs exactly once, and the
+#              fail-closed check then succeeds.
+# `findmnt`/`losetup` are wired to report IMAGE_PATH as the mount's
+# backing file, so the new mount-source verification passes for every
+# existing test that doesn't care about it -- MOUNT_BACK_OVERRIDE lets a
+# test point that verification at a *different* path, to exercise its
+# failure mode.
 _setup_export_script_fakebins() {
   local dir="$1" mounted="$2"
+  local image_path="${3:-${dir}/export.img}" mount_back_override="${4:-}"
+  local back="${mount_back_override:-$image_path}"
   mkdir -p "$dir"
+  rm -f "$dir/.mounted"
   printf '#!/bin/bash\necho "$*" >> "%s/mkfs.log"\n' "$dir" > "$dir/mkfs.ext4"
-  # Real truncate's last argument is the target file; touch it so a
+  # Real fallocate's last argument is the target file; touch it so a
   # second run's "does the image already exist" check sees it.
   # shellcheck disable=SC2016 # writing a literal fake-binary script body, not expanding now
-  printf '#!/bin/bash\necho "$*" >> "%s/truncate.log"\ntouch "${@: -1}"\n' "$dir" > "$dir/truncate"
-  printf '#!/bin/bash\n[ "%s" = "true" ] && exit 0 || exit 1\n' "$mounted" > "$dir/mountpoint"
-  printf '#!/bin/bash\nexit 0\n' > "$dir/mount"
+  printf '#!/bin/bash\necho "$*" >> "%s/fallocate.log"\ntouch "${@: -1}"\n' "$dir" > "$dir/fallocate"
+  case "$mounted" in
+    true) touch "$dir/.mounted" ;;
+  esac
+  printf '#!/bin/bash\necho "$*" >> "%s/mountpoint.log"\n[ -e "%s/.mounted" ] && exit 0 || exit 1\n' "$dir" "$dir" > "$dir/mountpoint"
+  if [ "$mounted" = "becomes" ]; then
+    printf '#!/bin/bash\necho "$*" >> "%s/mount.log"\ntouch "%s/.mounted"\nexit 0\n' "$dir" "$dir" > "$dir/mount"
+  else
+    printf '#!/bin/bash\necho "$*" >> "%s/mount.log"\nexit 0\n' "$dir" > "$dir/mount"
+  fi
   printf '#!/bin/bash\nexit 0\n' > "$dir/mkdir"
   printf '#!/bin/bash\nexit 0\n' > "$dir/install"
   printf '#!/bin/bash\nexit 0\n' > "$dir/dpkg"
   printf '#!/bin/bash\nexit 0\n' > "$dir/apt-get"
   printf '#!/bin/bash\nexit 0\n' > "$dir/systemctl"
-  printf '#!/bin/bash\nexit 0\n' > "$dir/exportfs"
+  printf '#!/bin/bash\necho "$*" >> "%s/exportfs.log"\nexit 0\n' "$dir" > "$dir/exportfs"
   printf '#!/bin/bash\nexit 0\n' > "$dir/chown"
   printf '#!/bin/bash\nexit 0\n' > "$dir/chmod"
   printf '#!/bin/bash\n"$@"\n' > "$dir/sudo"
   printf '#!/bin/bash\ncat >> "%s/tee.log"\n' "$dir" > "$dir/tee"
-  chmod +x "$dir"/mkfs.ext4 "$dir"/truncate "$dir"/mountpoint "$dir"/mount "$dir"/mkdir "$dir"/install \
-    "$dir"/dpkg "$dir"/apt-get "$dir"/systemctl "$dir"/exportfs "$dir"/chown "$dir"/chmod "$dir"/sudo "$dir"/tee
+  printf '#!/bin/bash\necho "/dev/loop0"\n' > "$dir/findmnt"
+  printf '#!/bin/bash\necho "%s"\n' "$back" > "$dir/losetup"
+  chmod +x "$dir"/mkfs.ext4 "$dir"/fallocate "$dir"/mountpoint "$dir"/mount "$dir"/mkdir "$dir"/install \
+    "$dir"/dpkg "$dir"/apt-get "$dir"/systemctl "$dir"/exportfs "$dir"/chown "$dir"/chmod "$dir"/sudo "$dir"/tee \
+    "$dir"/findmnt "$dir"/losetup
 }
 
 test_probe_export_script_executed_fails_closed_when_never_mounts() {
   local d out rc script image_path
   d="$(mktemp -d)"
   image_path="${d}/export.img"
-  _setup_export_script_fakebins "$d" "false"
+  _setup_export_script_fakebins "$d" "false" "$image_path"
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
   out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
   assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" "must exit non-zero when the export root never becomes a mountpoint"
   assert_contains "$out" "is not a mountpoint" "must explain why it refused"
   assert_false "$([[ -f "${d}/tee.log" ]] && grep -q "scion-hub-demohub.exports" "${d}/tee.log" 2>/dev/null && echo true)" \
     "must never write the exports file when the export root isn't actually mounted"
+  assert_false "$([[ -f "${d}/exportfs.log" ]] && echo true)" \
+    "must never call exportfs at all when the export root isn't actually mounted"
   rm -rf "$d"
 }
 
@@ -593,12 +672,68 @@ test_probe_export_script_executed_creates_image_only_once() {
   local d script image_path
   d="$(mktemp -d)"
   image_path="${d}/export.img"
-  _setup_export_script_fakebins "$d" "true"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
   PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
   assert_eq "1" "$(wc -l < "${d}/mkfs.log" 2>/dev/null || echo 0)" "the first run must format the image exactly once"
   PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
   assert_eq "1" "$(wc -l < "${d}/mkfs.log" 2>/dev/null || echo 0)" "a second run must never re-format an image that already exists"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_mount_called_once_when_absent_then_present() {
+  local d script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "becomes" "$image_path"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
+  assert_eq "1" "$(wc -l < "${d}/mount.log" 2>/dev/null || echo 0)" \
+    "mount must be called exactly once to bring up an absent export"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_mount_not_called_when_already_mounted() {
+  local d script image_path mount_calls
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
+  mount_calls="0"
+  [ -f "${d}/mount.log" ] && mount_calls="$(wc -l < "${d}/mount.log")"
+  assert_eq "0" "$mount_calls" \
+    "mount must never be called when the export root is already a mountpoint before the script even tries"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_refuses_wrong_mount_source() {
+  local d out rc script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path" "/some/other/image.img"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" \
+    "must exit non-zero when the export root is mounted from something other than this image's loop device"
+  assert_contains "$out" "not from the loop device backing" "must explain why it refused"
+  assert_false "$([[ -f "${d}/tee.log" ]] && grep -q "scion-hub-demohub.exports" "${d}/tee.log" 2>/dev/null && echo true)" \
+    "must never write the exports file against the wrong mount"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_fallocate_failure_never_calls_mkfs() {
+  local d out rc script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  printf '#!/bin/bash\necho "$*" >> "%s/fallocate.log"\nexit 1\n' "$d" > "$d/fallocate"
+  chmod +x "$d/fallocate"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" "must exit non-zero when fallocate can't reserve the space"
+  assert_contains "$out" "insufficient disk space" "must explain why it refused"
+  assert_false "$([[ -f "${d}/mkfs.log" ]] && echo true)" "must never format an image that fallocate couldn't create"
   rm -rf "$d"
 }
 

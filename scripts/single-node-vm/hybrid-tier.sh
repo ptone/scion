@@ -682,9 +682,12 @@ SCRIPT
 #
 # Renders the remote script that idempotently:
 #   1. creates the backing image file (IMAGE_PATH) at IMAGE_SIZE_GB
-#      gigabytes and formats it ext4, but ONLY the first time -- an
-#      existing image file is never re-created or re-mkfs'd, since doing
-#      so would destroy whatever the export already holds;
+#      gigabytes with fallocate (which actually reserves the space,
+#      unlike a sparse truncate, and fails clearly -- removing the
+#      partial file -- if the disk can't hold it) and formats it ext4,
+#      but ONLY the first time -- an existing image file is never
+#      re-created or re-mkfs'd, since doing so would destroy whatever
+#      the export already holds;
 #   2. adds an /etc/fstab entry loop-mounting that image at EXPORT_ROOT,
 #      with BOTH x-systemd.before=nfs-server.service (orders the mount
 #      before the NFS server unit) AND x-systemd.required-by=
@@ -692,23 +695,36 @@ SCRIPT
 #      ordering) -- before= alone only orders the units; on a failed
 #      mount it would let nfs-server start anyway and export whatever's
 #      really at EXPORT_ROOT (the boot disk's root filesystem), exactly
-#      the exposure this dedicated filesystem exists to close. Also
-#      carries nofail, so a failed mount here fails closed for NFS
-#      specifically (via required-by= above) without also taking the
-#      whole VM down to emergency.target -- per systemd.mount(5), nofail's
-#      documented effect is scoped only to this mount's relationship with
-#      local-fs.target/remote-fs.target and has no bearing on the
-#      separate, unit-specific required-by=nfs-server.service dependency.
-#      The fsck pass is 0: systemd-fstab-generator only ever schedules
-#      fsck for device paths, so a nonzero pass on this loop-mounted
-#      regular file is a no-op that just logs a boot-time warning. Then
-#      mounts it if it isn't already;
+#      the exposure this dedicated filesystem exists to close. Because
+#      required-by= is set, systemd-fstab-generator does not also
+#      attach this mount to local-fs.target (systemd.mount(5)), so a
+#      failed mount blocks only nfs-server, never boot; nofail is kept
+#      anyway, defensively, to keep that same "boot never blocks on
+#      this mount" property true even if required-by= is ever removed
+#      from this line. The fsck pass is 0: systemd-fstab-generator only
+#      ever schedules fsck for device paths, so a nonzero pass on this
+#      loop-mounted regular file is a no-op that just logs a boot-time
+#      warning. A pre-existing fstab line for this image with different
+#      options is never silently replaced -- the script fails with the
+#      expected line, rather than guessing which options should win.
+#      Then mounts it if it isn't already, and verifies (findmnt +
+#      losetup) that whatever ends up mounted at EXPORT_ROOT is
+#      actually the loop device backing IMAGE_PATH, not a stray tmpfs
+#      or bind mount left over from something else;
 #   3. fails closed -- before writing or activating anything below --
 #      if EXPORT_ROOT is not actually a mountpoint after that: this is
 #      the deploy-time half of the guarantee; the exports line's own
 #      `mp` option (see hybrid_nfs_export_line) is the export-side half,
 #      and additionally covers a mount that fails on a later reboot,
-#      which this one-time check can't;
+#      which this one-time check can't. A
+#      /etc/systemd/system/scion-hub.service.d/10-scion-shared.conf
+#      drop-in adds RequiresMountsFor=EXPORT_ROOT to scion-hub.service
+#      (tier-on only; the base service install is unaffected when the
+#      tier is off), so the hub itself -- which creates shared-dir
+#      paths under EXPORT_ROOT for the co-located Docker broker -- can
+#      never start against an unmounted export and write to the boot
+#      disk's root filesystem instead, the same split this whole layout
+#      exists to prevent on the NFS side;
 #   4. sets ownership/mode on the now-mounted export root (scion:scion,
 #      mode 2755 so the squash uid can't write it), installs
 #      nfs-kernel-server if it isn't already, disables NFSv2/v3/4.0 and
@@ -736,16 +752,19 @@ hybrid_nfs_export_script() {
   local export_line image_dir
   export_line="$(hybrid_nfs_export_line "$export_root" "$cidr" "$anonuid" "$anongid" "$fsid")"
   image_dir="$(dirname "$image_path")"
+  local fstab_line="${image_path} ${export_root} ext4 loop,nofail,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 0"
   cat <<SCRIPT
 set -euo pipefail
 sudo mkdir -p ${image_dir}
 if [ ! -e ${image_path} ]; then
-  sudo truncate -s ${image_size_gb}G ${image_path}
+  sudo fallocate -l ${image_size_gb}G ${image_path} || { sudo rm -f ${image_path}; echo "could not reserve ${image_size_gb}G for ${image_path} (insufficient disk space?); refusing to continue" >&2; exit 1; }
   sudo mkfs.ext4 -F -q ${image_path}
 fi
 sudo mkdir -p ${export_root}
-if ! grep -qF "${image_path} " /etc/fstab; then
-  echo "${image_path} ${export_root} ext4 loop,nofail,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 0" | sudo tee -a /etc/fstab > /dev/null
+if grep -qF "${image_path} " /etc/fstab; then
+  grep -qF "${fstab_line}" /etc/fstab || { echo "/etc/fstab already has a line for ${image_path} that does not match the expected options; refusing to continue. Expected: ${fstab_line}" >&2; exit 1; }
+else
+  echo "${fstab_line}" | sudo tee -a /etc/fstab > /dev/null
   sudo systemctl daemon-reload
 fi
 if ! mountpoint -q ${export_root}; then
@@ -755,8 +774,20 @@ if ! mountpoint -q ${export_root}; then
   echo "${export_root} is not a mountpoint after attempting to mount ${image_path}; refusing to write or activate the NFS export on the boot disk's root filesystem instead." >&2
   exit 1
 fi
+mount_src="\$(findmnt -n -o SOURCE --mountpoint ${export_root})"
+mount_back="\$(losetup -n -O BACK-FILE "\$mount_src" 2>/dev/null || true)"
+if [ "\$mount_back" != "${image_path}" ]; then
+  echo "${export_root} is mounted, but not from the loop device backing ${image_path} (found: \${mount_back:-<none>}); refusing to write or activate the NFS export against the wrong filesystem" >&2
+  exit 1
+fi
 sudo chown scion:scion ${export_root}
 sudo chmod 2755 ${export_root}
+sudo install -d -m 0755 /etc/systemd/system/scion-hub.service.d
+cat <<HUBDROPIN | sudo tee /etc/systemd/system/scion-hub.service.d/10-scion-shared.conf > /dev/null
+[Unit]
+RequiresMountsFor=${export_root}
+HUBDROPIN
+sudo systemctl daemon-reload
 sudo install -d -m 0755 /etc/exports.d
 if ! dpkg -s nfs-kernel-server >/dev/null 2>&1; then
   sudo apt-get update -y
