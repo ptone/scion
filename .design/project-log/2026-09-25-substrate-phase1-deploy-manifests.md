@@ -53,3 +53,11 @@ The `worker_selector` setting is matched against a WorkerPool custom resource's 
 `kubectl apply` succeeding for a NetworkPolicy object says nothing about whether anything on the cluster actually enforces it — a cluster without an enforcing CNI addon accepts the object and enforces none of it, silently. This matters enough to verify with real traffic, not just object presence, and the README's verification steps do exactly that (a probe from outside the expected scope must be refused; a probe from inside must connect). A related, non-obvious operational fact worth calling out here since it shaped how those verification steps are written: enabling NetworkPolicy enforcement on a cluster that already has actors running is not a same-day, apply-and-go change — it requires labeling any pre-existing nodes so the enforcement daemonset actually schedules onto them, rolling-restarting every pod that must become subject to enforcement (explicitly including the router pod itself, not just the workers — a pod created before enforcement was enabled keeps its original network setup and gets no enforcement regardless of what NetworkPolicy objects exist, and an unrestarted router pod leaves the router-ingress policy completely unenforced while `kubectl get networkpolicy` still shows it as applied), and rebuilding any golden actor-template snapshot taken before enforcement was live, since a snapshotted network-namespace state can be incompatible with the enforcement mechanism's own network plumbing.
 
 A related documentation trap worth recording: whether NetworkPolicy enforcement is active at all cannot be determined from a single, commonly-checked cluster field — that field only ever reflects one specific enforcement backend, and checking it alone gives a false "enforcement is off" reading on a cluster enforcing via the other supported backend. Both signals need to be checked together.
+
+## Log consolidation
+
+This entry, `2026-09-25-substrate-phase1-runtime-and-settings.md`, and
+`2026-09-25-substrate-phase1-substrate-serve.md` replace the branch's
+earlier, numerous per-topic substrate-integration log entries, consolidated
+by component. Only durable technical decisions, gotchas, and root causes
+were kept; process narrative was dropped.
