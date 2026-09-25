@@ -333,20 +333,24 @@ seed_firewall_rule_desc_only() {
     > "${GCLOUD_STUB_STATE_DIR}/firewall-rules/$1.json"
 }
 
-# seed_address NAME ADDRESS DESC — a pre-existing static internal address
-# reservation with the given address and description.
+# seed_address NAME ADDRESS DESC [ADDRESS_TYPE [SUBNET [REGION]]] — a
+# pre-existing static internal address reservation with the given address
+# and description. REGION defaults to us-central1, matching every existing
+# fixture; only tests that care about cross-region name collisions need to
+# pass a different one.
 seed_address() {
-  local name="$1" address="$2" desc="$3" address_type="${4:-INTERNAL}" subnet="${5:-default}"
+  local name="$1" address="$2" desc="$3" address_type="${4:-INTERNAL}" subnet="${5:-default}" region="${6:-us-central1}"
   "$PYTHON" -c "
 import json, sys
-addr, desc, address_type, subnet = sys.argv[1:5]
+addr, desc, address_type, subnet, region = sys.argv[1:6]
 print(json.dumps({
     'address': addr,
     'description': desc,
     'addressType': address_type,
-    'subnetwork': 'https://www.googleapis.com/compute/v1/projects/demo-project/regions/us-central1/subnetworks/' + subnet,
+    'subnetwork': 'https://www.googleapis.com/compute/v1/projects/demo-project/regions/' + region + '/subnetworks/' + subnet,
+    'region': region,
 }))
-" "$address" "$desc" "$address_type" "$subnet" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+" "$address" "$desc" "$address_type" "$subnet" "$region" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
 }
 
 # seed_address_unmarked NAME ADDRESS — a pre-existing reservation with no
@@ -427,16 +431,19 @@ print(json.dumps(body))
 # fixture to the same explicit value, for tests that care about the
 # actual pod CIDR hybrid_discover reads.
 seed_pod_cidr() {
-  local name="$1" cidr="$2"
+  local name="$1" cidr="$2" services_cidr="${3:-}"
   "$PYTHON" -c "
 import json, sys
 p = sys.argv[1]
 cidr = sys.argv[2]
+services_cidr = sys.argv[3]
 d = json.load(open(p))
 d['clusterIpv4Cidr'] = cidr
 d['ipAllocationPolicy'] = {'clusterIpv4CidrBlock': cidr}
+if services_cidr:
+    d['servicesIpv4Cidr'] = services_cidr
 json.dump(d, open(p, 'w'))
-" "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json" "$cidr"
+" "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json" "$cidr" "$services_cidr"
 }
 
 # seed_pod_cidr_mismatch NAME CIDR ALT_CIDR — sets clusterIpv4Cidr and

@@ -428,10 +428,10 @@ print(json.dumps(out))
     require_project "$@"
     filter="$(get_flag filter "$@")" || filter=""
     # Filter is "name=(NAME) region:REGION" -- pull NAME out of the
-    # name=(...) clause; the region clause is unused by the stub (each
-    # fixture file is already keyed by name only, names are unique).
+    # name=(...) clause and REGION out of the region: clause.
     name="${filter#*name=(}"
     name="${name%%)*}"
+    list_region="${filter#*region:}"
     f="${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
     if [[ -f "${f}.list-error" ]]; then
       err_msg="$(cat "${f}.list-error")"
@@ -446,7 +446,15 @@ print(json.dumps(out))
       echo "gcloud-stub: simulated list failure right after create for address ${name}" >&2
       exit 1
     fi
-    if [[ -f "$f" ]]; then
+    # A fixture in a different region than the filter asked for must not
+    # be returned -- the region clause is what keeps a same-named
+    # reservation left behind in another region (e.g. a hub redeployed to
+    # a new region) from being mistaken for this one.
+    if [[ -f "$f" ]] && "$PYTHON" -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d.get('region', 'us-central1') == sys.argv[2] else 1)
+" "$f" "$list_region"; then
       echo "[$(cat "$f")]"
     else
       echo "[]"
@@ -504,6 +512,7 @@ print(json.dumps({
     'description': desc,
     'addressType': 'INTERNAL',
     'subnetwork': 'https://www.googleapis.com/compute/v1/projects/' + project + '/regions/' + region + '/subnetworks/' + subnet,
+    'region': region,
 }))
 " "$addr" "$desc" "$project" "$region" "$subnet" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
     touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"

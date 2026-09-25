@@ -1426,6 +1426,21 @@ test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
     "the hub URL guard must re-describe the hub-allow rule after create"
 }
 
+test_deploy_create_tier_on_wires_configured_image_size_to_export_script() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_mig "mig-a" "template-a"
+  seed_template "template-a" "gke-mycluster-abc123-node"
+  # A non-default size: 20 is also what every other fixture happens to
+  # produce (the config default), so it can't distinguish "the configured
+  # value was used" from "a hard-coded value was used".
+  run_deploy_create_to_settings_yaml \
+    "$(base_config_json "$HUB" ", \"gke_target\": {\"name\": \"mycluster\", \"location\": \"us-central1\", \"project\": \"demo-project\", \"shared_dir_image_size_gb\": 37}" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the settings.yaml write"
+  assert_contains "$(gcloud_log)" "fallocate -l 37G" \
+    "deploy.sh must pass the configured gke_target.shared_dir_image_size_gb through to the export script, not a fixed default"
+}
+
 test_deploy_create_cloud_run_deploy_carries_marker_label_on_fresh_create() {
   fresh_gcloud_state
   run_deploy_create_to_cloud_run_deploy "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")"
