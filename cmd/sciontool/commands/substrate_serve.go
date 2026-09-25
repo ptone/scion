@@ -224,6 +224,18 @@ func resolveSubstrateHarnessCwd(d substrateHarnessCwdDeps) (string, error) {
 // cleaned value is what dirsSearchable is walked against; candidate itself
 // is never "/" after cleaning.
 //
+// candidate must also be absolute. resolveSubstrateHarnessCwd's own switch
+// already rejects a non-absolute SCION_WORKSPACE_PATH before ever calling
+// here, but scionUser.HomeDir has no such upstream check, and
+// filepath.Clean("") == "." (a stdlib quirk, not a filesystem fact) — so an
+// /etc/passwd entry with an empty or otherwise relative home directory would
+// otherwise reach here as a relative candidate that "candidate == '/'"
+// doesn't catch. A relative cmd.Dir is resolved by the kernel against
+// substrate-serve's OWN process cwd at chdir time (typically "/" for a
+// container's PID 1 before any WORKDIR is applied), so this is a second
+// "never '/'" vector, distinct from a literal "/" or a symlink resolving to
+// it, and closed here at the same choke point (sb-dev-cwd-r4 self-audit).
+//
 // stat(dir) follows the final symlink in dir, but says nothing about a
 // symlink's target's own ancestors — a candidate that is itself a symlink
 // (e.g. "/workspace" -> "/data/ws") can pass the lexical walk above while
@@ -232,10 +244,17 @@ func resolveSubstrateHarnessCwd(d substrateHarnessCwdDeps) (string, error) {
 // with EvalSymlinks and — only when that changes anything — the resolved
 // path's own ancestor chain is walked the same way. An EvalSymlinks error
 // (a broken symlink, a cycle, ...) makes the candidate unusable outright,
-// with that error as the reason. Either way, the *candidate* (never the
-// resolved path) is what the caller returns, so PWD/cmd.Dir stay logical.
+// with that error as the reason. A resolved target of exactly "/" is
+// rejected outright too, for the same "never '/'" reason as the lexical
+// guard above — "/" is always searchable, so it would otherwise sail
+// through the resolved-chain walk below. Either way, the *candidate* (never
+// the resolved path) is what the caller returns, so PWD/cmd.Dir stay
+// logical.
 func dirUsableForScion(d substrateHarnessCwdDeps, candidate string, uid, gid uint32) (ok bool, reason string) {
 	candidate = filepath.Clean(candidate)
+	if !filepath.IsAbs(candidate) {
+		return false, "not absolute"
+	}
 	if candidate == "/" {
 		return false, "refusing to use the root directory"
 	}
@@ -246,6 +265,18 @@ func dirUsableForScion(d substrateHarnessCwdDeps, candidate string, uid, gid uin
 	real, err := d.evalSymlinks(candidate)
 	if err != nil {
 		return false, fmt.Sprintf("cannot resolve symlinks: %v", err)
+	}
+	// A candidate that is itself fine lexically (never "/", per the guard
+	// above) can still be a symlink chain that resolves to "/" — e.g.
+	// SCION_WORKSPACE_PATH or the scion HomeDir pointing at a bind mount
+	// that itself symlinks to "/". "/" is always searchable by everyone, so
+	// without this check dirsSearchable below would happily approve it, and
+	// the caller would return the logical candidate while its EFFECTIVE cwd
+	// (what chdir/PWD would actually resolve through) is "/" — exactly the
+	// "never /" constraint this whole resolver exists to uphold (sb-dev-cwd
+	// end amendment; sb-dev-cwd-r4, R2).
+	if real == "/" {
+		return false, "resolves to /"
 	}
 	if real != candidate {
 		if ok, reason := dirsSearchable(d, append(parentDirs(real), real), uid, gid); !ok {

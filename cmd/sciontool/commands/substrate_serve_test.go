@@ -470,12 +470,20 @@ func fakeScionUserForHarnessCwd(string) (*user.User, error) {
 func fakeSubstrateHarnessCwdDeps(env map[string]string, leafDirs map[string]fs.FileInfo) substrateHarnessCwdDeps {
 	return substrateHarnessCwdDeps{
 		getenv: func(k string) string { return env[k] },
+		// p is cleaned before either lookup, matching os.Stat's own
+		// semantics (the kernel resolves "." and ".." lexically before ever
+		// touching the filesystem): a non-canonical spelling like "/.", "//"
+		// or "/tmp/.." must reach this fake exactly as the real filesystem
+		// would see it, or a test relying on production's own
+		// filepath.Clean would pass vacuously whether or not that Clean
+		// call is actually there (sb-dev-cwd-r4, R1).
 		stat: func(p string) (os.FileInfo, error) {
-			switch p {
+			clean := filepath.Clean(p)
+			switch clean {
 			case "/", "/home":
 				return fakeFileInfo{mode: fs.ModeDir | 0o755}, nil
 			}
-			if info, ok := leafDirs[p]; ok {
+			if info, ok := leafDirs[clean]; ok {
 				return info, nil
 			}
 			return nil, fmt.Errorf("stat %s: no such file or directory", p)
@@ -751,6 +759,90 @@ func TestResolveSubstrateHarnessCwd_FallsBackWhenSymlinkTargetParentUnsearchable
 	}
 }
 
+// TestResolveSubstrateHarnessCwd_SymlinkResolvingToRoot_Rejected is O1's
+// sibling in the fake-deps suite (sb-dev-cwd-r4, R2): a candidate whose
+// EvalSymlinks target is exactly "/" must be rejected outright, even though
+// "/" is always searchable and would otherwise pass the resolved-chain walk
+// trivially (no ancestors to check). See
+// TestResolveSubstrateHarnessCwd_EffectiveCwd_SymlinkedWorkspaceResolvingToRoot_FallsBack
+// below for the real-filesystem version of this same case.
+func TestResolveSubstrateHarnessCwd_SymlinkResolvingToRoot_Rejected(t *testing.T) {
+	d := fakeSubstrateHarnessCwdDeps(
+		map[string]string{"SCION_WORKSPACE_PATH": "/workspace"},
+		map[string]fs.FileInfo{"/workspace": usableDirInfo, "/home/scion": usableDirInfo},
+	)
+	d.evalSymlinks = func(p string) (string, error) {
+		if p == "/workspace" {
+			return "/", nil
+		}
+		return p, nil
+	}
+	got, err := resolveSubstrateHarnessCwd(d)
+	if err != nil {
+		t.Fatalf("resolveSubstrateHarnessCwd() error = %v", err)
+	}
+	if got != "/home/scion" {
+		t.Errorf("resolveSubstrateHarnessCwd() = %q, want fallback %q (a symlink target of \"/\" must be rejected)", got, "/home/scion")
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_EvalSymlinksError_MakesCandidateUnusable is
+// O1: dirUsableForScion's EvalSymlinks error path (a broken link, a cycle,
+// ...) must reject the candidate with that error as the reason, never treat
+// an error as if it were success. evalSymlinks deliberately returns the
+// candidate ITSELF alongside the error (not "" or some other path): that
+// makes "real != candidate" false regardless of the error, so a mutant that
+// stops checking err (e.g. `real, _ := d.evalSymlinks(candidate)`) sees
+// real == candidate, skips the resolved-chain walk entirely, and returns
+// "usable" — accepting the workspace instead of falling back. Only actually
+// checking err catches that.
+func TestResolveSubstrateHarnessCwd_EvalSymlinksError_MakesCandidateUnusable(t *testing.T) {
+	d := fakeSubstrateHarnessCwdDeps(
+		map[string]string{"SCION_WORKSPACE_PATH": "/workspace"},
+		map[string]fs.FileInfo{"/workspace": usableDirInfo, "/home/scion": usableDirInfo},
+	)
+	d.evalSymlinks = func(p string) (string, error) {
+		if p == "/workspace" {
+			return "/workspace", fmt.Errorf("lstat /workspace: too many levels of symbolic links")
+		}
+		return p, nil
+	}
+	got, err := resolveSubstrateHarnessCwd(d)
+	if err != nil {
+		t.Fatalf("resolveSubstrateHarnessCwd() error = %v", err)
+	}
+	if got != "/home/scion" {
+		t.Errorf("resolveSubstrateHarnessCwd() = %q, want fallback %q (an EvalSymlinks error must make the candidate unusable, not be ignored)", got, "/home/scion")
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_RejectsNonAbsoluteHomeDir is the sb-dev-cwd-r4
+// self-audit's own finding: unlike SCION_WORKSPACE_PATH (rejected by
+// resolveSubstrateHarnessCwd's own switch before it ever reaches
+// dirUsableForScion), scionUser.HomeDir was never checked for being
+// absolute. filepath.Clean("") == "." — so an /etc/passwd entry with an
+// empty (or otherwise relative) home directory used to resolve to a
+// relative candidate that the literal `candidate == "/"` guard doesn't
+// catch. "." and the candidate itself are deliberately both stat-able and
+// searchable here (leafDirs), so only the new IsAbs guard — not a
+// dirsSearchable rejection — is what makes this fail.
+func TestResolveSubstrateHarnessCwd_RejectsNonAbsoluteHomeDir(t *testing.T) {
+	d := fakeSubstrateHarnessCwdDeps(
+		map[string]string{"SCION_WORKSPACE_PATH": "/nope"},
+		map[string]fs.FileInfo{".": usableDirInfo, "relative-home": usableDirInfo},
+	)
+	d.lookupUser = func(string) (*user.User, error) {
+		return &user.User{Uid: "1000", Gid: "1000", HomeDir: "relative-home"}, nil
+	}
+	got, err := resolveSubstrateHarnessCwd(d)
+	if err == nil {
+		t.Fatalf("resolveSubstrateHarnessCwd() = %q, <nil>, want an error (a relative HomeDir must never be used)", got)
+	}
+	if got != "" {
+		t.Errorf("resolveSubstrateHarnessCwd() = %q, want %q alongside the error", got, "")
+	}
+}
+
 // TestResolveSubstrateHarnessCwd_ScionUserLookupFails_ReturnsError covers
 // the "scion" user itself being unresolvable — resolveSubstrateHarnessCwd
 // has no uid/gid to gate any candidate on, so it must fail rather than
@@ -1017,6 +1109,115 @@ func TestResolveSubstrateHarnessCwd_EffectiveCwd_SymlinkedWorkspaceReallyEnterab
 	assertRealChdirSucceeds(t, got)
 }
 
+// TestResolveSubstrateHarnessCwd_EffectiveCwd_SymlinkedWorkspaceResolvingToRoot_FallsBack
+// is R2's real-FS regression test (sb-dev-cwd-r4): a real os.Symlink("/",
+// link) as SCION_WORKSPACE_PATH must never be chosen, even though a real
+// chdir into it would actually succeed — it lands in the real "/", which is
+// exactly what the "never /" constraint forbids regardless of whether the
+// chdir syscall itself works. assertRealChdirSucceeds is deliberately NOT
+// run against workspace here (it would trivially succeed, since "/" is
+// always enterable) — the assertion that matters is that resolution never
+// picks it, and instead falls back to home.
+func TestResolveSubstrateHarnessCwd_EffectiveCwd_SymlinkedWorkspaceResolvingToRoot_FallsBack(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink("/", workspace); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+
+	d := substrateHarnessCwdDeps{
+		getenv:       func(k string) string { return map[string]string{"SCION_WORKSPACE_PATH": workspace}[k] },
+		stat:         os.Stat,
+		evalSymlinks: filepath.EvalSymlinks,
+		lookupUser: func(string) (*user.User, error) {
+			return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: home}, nil
+		},
+	}
+	got, err := resolveSubstrateHarnessCwd(d)
+	if err != nil {
+		t.Fatalf("resolveSubstrateHarnessCwd() error = %v, want fallback to home (workspace resolves to \"/\")", err)
+	}
+	if got == "/" || got == workspace {
+		t.Fatalf("resolveSubstrateHarnessCwd() = %q, must reject a symlink resolving to \"/\" and fall back to %q", got, home)
+	}
+	if got != home {
+		t.Errorf("resolveSubstrateHarnessCwd() = %q, want fallback %q", got, home)
+	}
+	assertRealChdirSucceeds(t, got)
+}
+
+// TestResolveSubstrateHarnessCwd_EffectiveCwd_WorkspaceAndHomeBothResolveToRoot_Errors
+// is the same real-FS setup with the fallback ALSO a symlink resolving to
+// "/": the harness start must fail outright rather than ever return an
+// effective cwd of "/".
+func TestResolveSubstrateHarnessCwd_EffectiveCwd_WorkspaceAndHomeBothResolveToRoot_Errors(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "root-link-ws")
+	if err := os.Symlink("/", workspace); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(t.TempDir(), "root-link-home")
+	if err := os.Symlink("/", home); err != nil {
+		t.Fatal(err)
+	}
+
+	d := substrateHarnessCwdDeps{
+		getenv:       func(k string) string { return map[string]string{"SCION_WORKSPACE_PATH": workspace}[k] },
+		stat:         os.Stat,
+		evalSymlinks: filepath.EvalSymlinks,
+		lookupUser: func(string) (*user.User, error) {
+			return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: home}, nil
+		},
+	}
+	got, err := resolveSubstrateHarnessCwd(d)
+	if err == nil {
+		t.Fatalf("resolveSubstrateHarnessCwd() = %q, <nil>, want an error (both candidates resolve to \"/\")", got)
+	}
+	if got == "/" {
+		t.Fatal(`resolveSubstrateHarnessCwd() must never return "/"`)
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_EffectiveCwd_RelativeHomeDir_NeverUsed is
+// the real-filesystem version of
+// TestResolveSubstrateHarnessCwd_RejectsNonAbsoluteHomeDir (sb-dev-cwd-r4
+// self-audit): an empty scionUser.HomeDir cleans to "." (filepath.Clean's
+// own documented behaviour for ""), which a real chdir resolves against
+// THIS PROCESS's own cwd — standing in here for substrate-serve's real cwd,
+// typically "/" for a container's PID 1. The test relocates this process's
+// cwd to a throwaway directory (restored via t.Cleanup) precisely so that,
+// if the guard regressed, the returned "." would be a real, enterable
+// directory — proving the rejection is about the candidate being relative
+// at all, not about that directory happening to be unusable.
+func TestResolveSubstrateHarnessCwd_EffectiveCwd_RelativeHomeDir_NeverUsed(t *testing.T) {
+	origCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwdStandIn := t.TempDir()
+	if err := os.Chdir(cwdStandIn); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origCwd) })
+
+	d := substrateHarnessCwdDeps{
+		getenv: func(k string) string {
+			return map[string]string{"SCION_WORKSPACE_PATH": filepath.Join(t.TempDir(), "does-not-exist")}[k]
+		},
+		stat:         os.Stat,
+		evalSymlinks: filepath.EvalSymlinks,
+		lookupUser: func(string) (*user.User, error) {
+			return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: ""}, nil
+		},
+	}
+	got, resolveErr := resolveSubstrateHarnessCwd(d)
+	if resolveErr == nil {
+		t.Fatalf("resolveSubstrateHarnessCwd() = %q, <nil>, want an error (HomeDir \"\" must never resolve to a relative candidate)", got)
+	}
+	if got != "" && !filepath.IsAbs(got) {
+		t.Fatalf("resolveSubstrateHarnessCwd() = %q, must never return a relative path", got)
+	}
+}
+
 // TestSubstrateServeInitOptions_SetsWorkingDirFromRealEnv drives
 // substrateServeInitOptions end to end against the real
 // defaultSubstrateHarnessCwdDeps (real os.Getenv/os.Stat, and a
@@ -1189,19 +1390,38 @@ func TestSubstrateServeBootstrap_NoUsableHarnessCwd_ReportsInitFailureToLocalSta
 		t.Fatalf("bootstrap status = %d, want 200 (the no-usable-cwd failure surfaces asynchronously, after acceptance — see handleBootstrap); body=%s", rec.Code, rec.Body.String())
 	}
 
-	// handleBootstrap runs the init runner in its own goroutine; poll for
-	// the report rather than assuming it has landed by the time doSubstrateServeJSON
-	// returns.
-	var raw []byte
-	var readErr error
+	// handleBootstrap runs the init runner in its own goroutine. Poll
+	// /healthz for StateInitFailed rather than for agent-info.json's mere
+	// existence on disk (sb-dev-cwd-r3): the init-runner goroutine sets
+	// s.initFailed under s.mu only AFTER newSubstrateServeServer's wrapper
+	// (substrateServeInitOptions's error path) returns, and that wrapper
+	// calls substrateServeReportCwdFailure — which does the agent-info.json
+	// write — synchronously, in program order, before it returns. So by the
+	// time this goroutine observes s.initFailed==true through s.mu, the
+	// write has already happened-before it: a real synchronization edge and
+	// proof the goroutine ran to completion, neither of which "the file
+	// exists" gives (that goroutine could still be inside SetMessage /
+	// hub.NewClient when the file first appears).
+	var lastState string
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		raw, readErr = os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
-		if readErr == nil {
-			break
+		healthz := doSubstrateServeJSON(t, srv, "GET", "/scion/v1/healthz", "", nil)
+		var body struct {
+			State string `json:"state"`
+		}
+		if err := json.Unmarshal(healthz.Body.Bytes(), &body); err == nil {
+			lastState = body.State
+			if lastState == "init-failed" {
+				break
+			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	if lastState != "init-failed" {
+		t.Fatalf("healthz state = %q, want %q (after 2s)", lastState, "init-failed")
+	}
+
+	raw, readErr := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
 	if readErr != nil {
 		t.Fatalf("expected agent-info.json to be written to the scion home after the no-usable-cwd path: %v", readErr)
 	}
