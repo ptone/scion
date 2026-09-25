@@ -9,6 +9,16 @@ locals {
   iap_audience = "/projects/${var.project_number}/locations/${var.region}/services/${var.hub_name}"
 
   nfs_mount_path = "${var.nfs_mount_root}/${var.hub_name}"
+
+  # This module's own single point of truth for the hub's identity as it
+  # flows into settings.yaml's hub_id and SCION_SERVER_HUB_HUBID below — both
+  # must resolve to the exact same value ResolveHubID() (pkg/config/
+  # hub_config.go) will see, or GCPBackend.Get computes a different
+  # scion-hub-<hash>-* secret name than the one hub-identity actually
+  # provisioned (split-brain secret lookup). The caller (configurations/hub)
+  # feeds var.hub_name from its own local.hub_id for the same reason, so this
+  # is the same value end to end, named at each layer that touches it.
+  hub_id = var.hub_name
 }
 
 # --- Bucket (artifacts, signed URLs) ---
@@ -83,7 +93,7 @@ resource "google_secret_manager_secret_version" "settings" {
   secret_data = templatefile("${path.module}/templates/settings.yaml.tftpl", {
     project_id          = var.project_id
     region              = var.region
-    hub_name            = var.hub_name
+    hub_name            = local.hub_id
     public_url          = local.public_url
     iap_audience        = local.iap_audience
     admin_emails        = var.admin_emails
@@ -141,6 +151,54 @@ resource "google_secret_manager_secret_iam_member" "hub_reads_kubeconfig" {
   project   = var.project_id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${var.hub_sa_email}"
+}
+
+# --- OIDC signing key (design §3.4, added 09-25 after tfha-h1's first boot) ---
+#
+# SCION_REQUIRE_STABLE_SIGNING_KEY=true (below) makes pkg/hub/oidckeys.go:467
+# refuse to generate the RSA OIDC signing key at boot — the agent and user
+# signing keys are derived from the session secret, but the OIDC key has no
+# derivation path, so with no key pre-provisioned no new hub could start.
+# Terraform pre-provisions it instead of the hub generating it.
+#
+# The secret ID is built directly from hub-identity's hub_scope_secret_hash
+# (not recomputed here), so it lands under the hub SA's existing conditioned
+# secretmanager.admin grant (scion-hub-<hash>-*) with no new IAM: the hub
+# finds it through GCPBackend.Get's no-DB-record path (computes the name,
+# reads accessLatestVersion), then backs it up to the store. Set() on an
+# existing secret only adds versions and never rewrites labels, so later
+# hub rotations (RotateKey) and boot re-syncs cause no Terraform drift.
+resource "tls_private_key" "oidc_signing_key" {
+  algorithm = "RSA"
+  rsa_bits  = 2048
+}
+
+resource "google_secret_manager_secret" "oidc_signing_key" {
+  project   = var.project_id
+  secret_id = "scion-hub-${var.hub_scope_secret_hash}-oidc_signing_key"
+
+  # Mirrors pkg/secret/gcpbackend.go's buildLabels for this secret's real
+  # identity, so it shows up in the console exactly as if the hub had
+  # created it itself.
+  labels = {
+    "scion-scope"    = "hub"
+    "scion-scope-id" = var.hub_name
+    "scion-type"     = "internal"
+    "scion-name"     = "oidc_signing_key"
+    "scion-target"   = "oidc_signing_key"
+    "scion-hub-name" = var.hub_name
+  }
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "oidc_signing_key" {
+  secret = google_secret_manager_secret.oidc_signing_key.id
+  # Must be PKCS#8 ("-----BEGIN PRIVATE KEY-----"): decodePEMPrivateKey
+  # rejects the PKCS#1 form (private_key_pem, "-----BEGIN RSA PRIVATE KEY-----").
+  secret_data = tls_private_key.oidc_signing_key.private_key_pem_pkcs8
 }
 
 # --- IAM propagation guard (design §3.5, from OQ-8's ~70s measurement) ---
@@ -244,6 +302,17 @@ resource "google_cloud_run_v2_service" "hub" {
         value = var.namespace
       }
       env {
+        # Pulled forward from phase 2 (design §3.4, 09-25): must equal
+        # settings.yaml's hub_id exactly, from the same local.hub_id value —
+        # two sources of truth for the same identity is exactly the class of
+        # bug this whole project keeps finding. ResolveHubID() prefers
+        # settings hub_id over this env var, so this alone doesn't drive
+        # secret naming, but it must never diverge from it. Also forces the
+        # new revision this change needs.
+        name  = "SCION_SERVER_HUB_HUBID"
+        value = local.hub_id
+      }
+      env {
         name = "SCION_SERVER_SESSION_SECRET"
         value_source {
           secret_key_ref {
@@ -341,6 +410,7 @@ resource "google_cloud_run_v2_service" "hub" {
     google_secret_manager_secret_version.settings,
     google_secret_manager_secret_version.kubeconfig,
     google_secret_manager_secret_version.session_secret,
+    google_secret_manager_secret_version.oidc_signing_key,
     google_secret_manager_secret_iam_member.hub_reads_settings,
     google_secret_manager_secret_iam_member.hub_reads_kubeconfig,
     google_secret_manager_secret_iam_member.hub_reads_session_secret,

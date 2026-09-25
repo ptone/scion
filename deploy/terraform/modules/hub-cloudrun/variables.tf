@@ -53,6 +53,11 @@ variable "hub_iam_condition_expression" {
   type        = string
 }
 
+variable "hub_scope_secret_hash" {
+  description = "hub-identity's 12-char hub-scope secret hash (scion-hub-<hash>-*), used verbatim to pre-provision the OIDC signing key secret ID so it falls under the hub SA's existing conditioned secretmanager.admin grant. Not recomputed here — hub-identity is the one source of truth, shared with its IAM condition."
+  type        = string
+}
+
 variable "network_name" {
   description = "VPC network name for Direct VPC egress (shared.network.name)."
   type        = string

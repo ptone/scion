@@ -30,3 +30,8 @@ output "hub_iam_condition_expression" {
   description = "The hub-scope secret-name prefix used in the conditioned secretmanager.admin grant, exposed only so hub-cloudrun's time_sleep can trigger a fresh wait if this expression ever changes (e.g. hub_name changes) — not meant for any other use."
   value       = local.hub_scope_secret_prefix
 }
+
+output "hub_scope_secret_hash" {
+  description = "The 12-char hex hash gcpSecretName produces for this hub's HUB-scope secrets (scion-hub-<hash>-*). hub-cloudrun uses this directly to pre-provision the OIDC signing key secret ID — must not be recomputed elsewhere, so there is exactly one source of truth shared with the IAM condition above."
+  value       = local.hub_scope_secret_hash
+}

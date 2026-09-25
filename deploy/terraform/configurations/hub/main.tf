@@ -43,6 +43,19 @@ locals {
   # shared-lookup's real resource data (not a manually reconstructed
   # string), overridable via var.image_registry for a variation.
   image_registry = coalesce(var.image_registry, module.shared_lookup.shared.artifact_registry.repo_url)
+
+  # Single source of truth for this hub's identity, fed to hub-identity (whose
+  # hub_name input drives hub_scope_secret_hash, the OIDC signing key's secret
+  # ID) and to hub-cloudrun (whose hub_name input drives settings.yaml's
+  # hub_id and the SCION_SERVER_HUB_HUBID env var). ResolveHubID() in
+  # pkg/config/hub_config.go prefers settings hub_id over the env var, so the
+  # env var alone doesn't drive secret naming — but the two must never
+  # diverge, or GCPBackend.Get computes a different scion-hub-<hash>-* secret
+  # name than the one actually provisioned here (split-brain secret lookup).
+  # Routing both module calls through this one local, instead of each
+  # referencing var.hub_name independently, is what keeps them in lockstep
+  # (tf-lead/vm-deploy, OIDC signing key task).
+  hub_id = var.hub_name
 }
 
 module "cloudsql_database" {
@@ -59,7 +72,7 @@ module "hub_identity" {
 
   project_id     = var.project_id
   project_number = module.shared_lookup.shared.project_number
-  hub_name       = var.hub_name
+  hub_name       = local.hub_id
 }
 
 module "agent_runtime_k8s" {
@@ -87,13 +100,14 @@ module "hub_cloudrun" {
   project_id                   = var.project_id
   project_number               = module.shared_lookup.shared.project_number
   region                       = var.region
-  hub_name                     = var.hub_name
+  hub_name                     = local.hub_id
   hub_image                    = var.hub_image
   image_registry               = local.image_registry
   hub_sa_email                 = module.hub_identity.hub_sa_email
   transport_sa_email           = module.hub_identity.transport_sa_email
   hub_iam_grants               = module.hub_identity.hub_iam_grants
   hub_iam_condition_expression = module.hub_identity.hub_iam_condition_expression
+  hub_scope_secret_hash        = module.hub_identity.hub_scope_secret_hash
 
   network_name = module.shared_lookup.shared.network.name
   subnet_name  = module.shared_lookup.shared.network.subnet_name
