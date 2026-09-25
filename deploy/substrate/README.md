@@ -133,9 +133,10 @@ well inside the hub's dispatch timeout.
      **a router pod that was never restarted leaves
      `atenet-router-restrict-ingress` completely unenforced**, silently,
      while `kubectl get networkpolicy` still shows the object as applied.
-     This is the one control the §5 first-bootstrap-wins fallback depends
-     on; skipping the router in this restart is the failure mode that
-     matters most here, not an edge case.
+     This is one of the two controls the §5 first-bootstrap-wins fallback
+     depends on (see "Known Phase 1 limitations" below — neither policy
+     alone is sufficient); skipping the router in this restart is the
+     failure mode that matters most here, not an edge case.
   4. **Recreate every golden `ActorTemplate` snapshot** — snapshots taken
      before enforcement was on fail `runsc restore` with **exit 128** once
      enforcement is live, because the snapshotted network namespace state
@@ -161,7 +162,7 @@ handled separately (see "Secret creation" below).
 | `HUB_ENDPOINT` | The `scion-integration` hub's URL | from your hub deployment — not a Substrate-specific value |
 | `HUB_BROKER_ID` | The broker's stable UUID from `scion runtime-broker register` (not secret — see below) | UUID printed by `register`; there is no fixed value until you actually register |
 | `HUB_CONNECTION_NAME` | The `--name` used at `register` time; also the credentials JSON filename | `scion-integration` (suggested) |
-| `CLUSTER_TRUST_BUNDLE_NAME` | The `ClusterTrustBundle` object verifying ateapi/router TLS | `servicedns.podcert.ate.dev:identity:primary-bundle` |
+| `CLUSTER_TRUST_BUNDLE_NAME` | The `ClusterTrustBundle` object verifying ateapi TLS (the router hop is plaintext in Phase 1 — see below) | `servicedns.podcert.ate.dev:identity:primary-bundle` |
 | `SANDBOX_CONFIG_NAME` | The `SandboxConfig` CRD instance actor templates use | `gvisor-default` |
 | `WORKER_SELECTOR_KEY` / `WORKER_SELECTOR_VALUE` | One label key/value pinning actors to a `WorkerPool` — matched against **the `WorkerPool` object's own `metadata.labels`**, not any Pod label (see the callout below the table) | `pool` / `scion-agents` |
 | `SNAPSHOT_STORAGE_URI` | Bucket/prefix for actor snapshots | `gs://snapshot-substrate-scion-test` |
@@ -233,8 +234,11 @@ else, including:
 - catch-alls: `all`, `*`, `0.0.0.0/0`, `::/0`, or any bare `*`-style entry;
 - a hostname whose top-level domain isn't a real, ICANN-delegated one (this
   also catches Kubernetes-internal-shaped names like `*.default.pod` or
-  `10-0-0-1.kube-system.pod`, and reserved zones like `home.arpa`, `.lan`,
+  `10-0-0-1.kube-system.pod`, and made-up/reserved zones like `.lan`,
   `.corp`, `.local`, `.internal`, `.localhost`);
+- a hostname under the special-use `arpa` or `onion` top-level domains
+  (`arpa` is itself ICANN-delegated, so it needs its own rejection rule
+  rather than the ICANN-delegation check above) — this covers `home.arpa`;
 - a hostname that is itself a public suffix rather than a name beneath one
   — including private/multi-tenant-platform suffixes such as
   `googleapis.com` or `github.io` (`storage.googleapis.com` and
@@ -285,8 +289,10 @@ re-originating the connection, status reports fail TLS.
 
 It does **not** give the same guarantee for curl, git, or Node:
 
-- **curl and git** on Debian (the base image, trixie) are both built
-  against libcurl with `--with-ca-path=/etc/ssl/certs` compiled in; libcurl
+- **curl (Debian, the base image, trixie) and git (vendored from
+  Chainguard's git image, not Debian's own — see `image-build/core-base/
+  Dockerfile`)** are both built against libcurl with
+  `--with-ca-path=/etc/ssl/certs` compiled in; libcurl
   passes that CApath to OpenSSL explicitly, so `SSL_CERT_DIR` is never
   consulted and both still trust the full public root set *in addition to*
   the gateway CA. (OpenSSL's CApath lookup also needs certificates under
@@ -322,8 +328,8 @@ install's existing golden templates keep being reused rather than rebuilt.
 **When set, the image needs util-linux ≥ 2.35** (`su`'s
 `-w`/`--whitelist-environment` flag, `pkg/sciontool/substrate/execuser.go`).
 This carries the CA-bundle vars across the `su -` login shell that
-`sciontool substrate-serve exec` (the broker exec endpoint, `scion look`,
-and `/scion/v1/exec` directly) would otherwise reset. scion's images
+the substrate-serve `/scion/v1/exec` path (the broker exec endpoint,
+`scion look`, and `/scion/v1/exec` calls directly) would otherwise reset. scion's images
 satisfy this already (≥ 2.35; Debian trixie ships util-linux 2.41). Plain installs
 are unaffected either way: `-w` is only ever added when a CA-bundle var is
 actually set, which never happens without `egress_trust_bundle` configured.
@@ -430,7 +436,8 @@ kubectl apply -f /tmp/broker.rendered.yaml   # includes the NetworkPolicy too
 
 # 4. Create the Secret (see "Secret creation" above) — do this AFTER step 3
 #    creates the namespace, before the Deployment's pod actually starts
-#    scheduling, or the pod will CrashLoopBackOff on a missing volume source
+#    scheduling. A missing (non-optional) Secret volume source leaves the
+#    pod in ContainerCreating with a FailedMount event, not CrashLoopBackOff,
 #    until the Secret exists.
 kubectl create secret generic scion-substrate-broker-hub-credentials ...
 ```
@@ -461,8 +468,10 @@ kubectl apply --dry-run=server -f /tmp/broker.rendered.yaml   # catches RBAC/CRD
 ## Broker API exposure
 
 The Deployment passes `--host=0.0.0.0` so the broker's own API (port 9800,
-used by the `readinessProbe`/`livenessProbe` below and by
-`scion runtime-broker status`) binds to all interfaces, not just loopback.
+used by the `readinessProbe`/`livenessProbe` below and, for
+`scion runtime-broker status --broker`, via the Hub API rather than a
+direct connection — plain `status` with no `--broker` flag probes the
+caller's own local broker instead) binds to all interfaces, not just loopback.
 Without it, a standalone broker in `--hosted` mode (no `--enable-hub`)
 binds to `127.0.0.1` by default — a safety net
 (`cmd/server_foreground.go:915-920`) so a *fresh* broker with no HMAC keys
@@ -475,23 +484,28 @@ by this flag, but every code path that reads it is gated on
 in this deployment.)
 
 **This is safe because the broker's own HMAC auth is unconditionally
-"strict mode."** `pkg/runtimebroker/server.go` hardcodes
-`BrokerAuthEnabled: true, BrokerAuthStrictMode: true` as the default (no
-flag or settings key turns strict mode off for this deployment) and, more
-importantly, **refuses to start at all** on a non-loopback host unless
-valid HMAC keys are already loaded (`validateBrokerAuthStartup`,
-`pkg/runtimebroker/server.go`). With `hub_endpoint` set in the ConfigMap,
-`HubEnabled` is true, so the branch that actually runs here is the
-hub-mode one at `:805-809` ("...in hub mode requires HMAC auth keys");
-the general non-loopback check at `:816-819` is the one that would apply
+"strict mode."** The live `ServerConfig` built for this deployment
+(`cmd/server_foreground.go:2536-2537`) hardcodes `BrokerAuthEnabled: true,
+BrokerAuthStrictMode: true` (no flag or settings key turns strict mode off
+here) and, more importantly, **refuses to start at all** on a non-loopback
+host unless valid HMAC keys are already loaded
+(`validateBrokerAuthStartup`, `pkg/runtimebroker/server.go`). With
+`hub_endpoint` set in the ConfigMap, `HubEnabled` is true, so the branch
+that actually runs here is the hub-mode one at `:805-807` ("...in hub mode
+requires HMAC auth keys"); the general non-loopback check at `:817-818` is
+the one that would apply
 if `HubEnabled` were false. Both refuse to start rather than fall open —
 it does not fall open to unauthenticated non-loopback listening under any
 configuration this manifest produces. Those keys come from the credentials
 Secret (see "Secret creation" above), loaded from the mounted
 `hub-credentials/<name>.json` before the broker's HTTP server starts
-listening. Practical consequence: if that Secret is missing or empty when
-the pod starts, the broker container now fails closed (crashes / restarts)
-rather than serving `:9800` unauthenticated — reinforcing, not weakening,
+listening. Practical consequence: an **empty or invalid** Secret reaches
+the broker's startup, so the container fails closed (`CrashLoopBackOff`,
+with the startup-refusal log line) rather than serving `:9800`
+unauthenticated. A Secret that is **missing entirely** never reaches that
+code at all — the non-optional Secret volume keeps the pod in
+`ContainerCreating`, and `kubectl describe pod` shows a `FailedMount`
+event, until the Secret exists. Either way this reinforces, not weakens,
 why the Secret must exist before the Deployment's pod actually starts (see
 "Apply order" step 4).
 
@@ -588,10 +602,13 @@ error naming only the cap and the total size, never a path or file content.
 ## Verification commands (once applied to a real cluster)
 
 ```sh
-# Broker pod is up and its own health endpoint is happy.
+# Broker pod is up and READY (the readinessProbe already hits /healthz;
+# the broker image has no wget/curl, so don't exec a check into it).
 kubectl -n "${BROKER_NAMESPACE}" get pods -l app=scion-substrate-broker
-kubectl -n "${BROKER_NAMESPACE}" exec deploy/scion-substrate-broker -- \
-  wget -qO- http://localhost:9800/healthz
+
+# Or hit /healthz from your own workstation:
+kubectl -n "${BROKER_NAMESPACE}" port-forward deploy/scion-substrate-broker 9800:9800 &
+curl -s localhost:9800/healthz
 
 # Broker registered and heartbeating (from a machine with hub access):
 scion runtime-broker status --broker "${HUB_BROKER_ID}"
@@ -695,7 +712,7 @@ kubectl run netpol-probe --rm -it --restart=Never \
 ## Known Phase 1 limitations
 
 - **Bootstrap auth is the §5 fallback, not the identity-derived nonce.**
-  `sciontool substrate-serve` (this branch) defaults to
+  `sciontool substrate-serve` (Phase 1) defaults to
   `FirstBootstrapWinsVerifier`: any bearer token is accepted, and only the
   single-shot "first bootstrap wins" check plus two NetworkPolicies from
   *two different owners* prevent an unauthorized bootstrap:
@@ -722,7 +739,7 @@ kubectl run netpol-probe --rm -it --restart=Never \
   worker pod's IP, not just the router, can bootstrap an actor before the
   broker does.** Because this manifest only owns one of the two policies,
   verifying the *other* one exists and works — not just assuming Substrate
-  applies it correctly — is not optional; see verification steps (c)–(e)
+  applies it correctly — is not optional; see verification steps (c)–(f)
   above.
 - **NetworkPolicy enforcement requires GKE Dataplane V2 or the Calico
   add-on to be enabled on the cluster.** A GKE cluster created without
@@ -759,8 +776,9 @@ kubectl run netpol-probe --rm -it --restart=Never \
   This is a documented Kubernetes/GKE networking property, not something
   specific to this manifest, but it's exactly the kind of thing that's easy
   to get backwards when reasoning about "does restricting ingress break our
-  own health checks?" — hence verification step (e), rather than trusting
-  the documentation alone.
+  own health checks?" None of the verification steps above test this
+  specific exemption directly (step (e) tests router-label reachability,
+  not kubelet probes) — rely on the GKE documentation for this property.
 - **Metrics/monitoring scraping is not accounted for.** The router
   NetworkPolicy only opens its client-facing ports (8080/8443/8081/8444) to
   the broker namespace; it does not add an explicit allow for Google Managed
@@ -782,8 +800,10 @@ kubectl run netpol-probe --rm -it --restart=Never \
   NetworkPolicy for why a hand-written duplicate would weaken, not
   strengthen, this).
 - **No Helm chart, no template GC, no doctor integration.** This is
-  Phase 1's minimal fixture (`.design/kubernetes/substrate-runtime.md` §1
-  scopes it this way); the polished chart is Phase 2.
+  Phase 1's minimal fixture — template GC and doctor integration are listed
+  as Phase 2 items in `.design/kubernetes/substrate-runtime.md` §11 (see
+  also §9 for current template/GC behavior); a Helm chart isn't discussed
+  in that doc at all. The polished chart is Phase 2.
 - **No in-cluster credential rotation.** See "Secret creation" step 3.
 - **Bootstrap files — including the composed agent home — cross the
   broker→router hop in plaintext.** The router endpoint in this fixture is
@@ -802,15 +822,17 @@ kubectl run netpol-probe --rm -it --restart=Never \
   for the broker process's lifetime, not re-read per agent start.**
   `pkg/runtime.NewSubstrateRuntime` memoizes one `*SubstrateRuntime` (and its
   gRPC `ClientConn`, dialed once) per distinct `V1SubstrateConfig` for the
-  life of the process — see the "process-wide memoization" comment on
-  `substrateRuntimesMu` in `pkg/runtime/substrate_runtime.go`. Rotating the
+  life of the process — see the memoization comment on `substrateRuntimesMu`
+  in `pkg/runtime/substrate_runtime.go`. Rotating the
   CA behind the same `ca_file` path, or re-keying the same
   `ClusterTrustBundle` name, does not take effect until the broker process
   restarts — the existing `ClientConn`'s TLS config was built once, at first
   dial, and is never rebuilt. This is a known Phase 1 gap, not something
-  this branch adds code to reload: a proper fix would build the dialer's
-  `tls.Config` with `GetConfigForClient` or `VerifyPeerCertificate` so it
-  re-reads the CA source per handshake, which is Phase 2 scope. Until then,
+  Phase 1 adds code to reload: a proper fix would have the dialer's
+  client-side TLS config re-read the CA source per handshake (e.g. via
+  `tls.Config.VerifyPeerCertificate`/`VerifyConnection`, or custom gRPC
+  transport credentials — `GetConfigForClient` is a server-side callback
+  and doesn't apply here), which is Phase 2 scope. Until then,
   **a CA rotation on this cluster requires
   restarting the broker Deployment** (a rolling restart is sufficient) to
   pick it up.

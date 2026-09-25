@@ -70,11 +70,12 @@ roleRef:
   name: scion-substrate-broker-tokenrequest
   apiGroup: rbac.authorization.k8s.io
 ---
-# ClusterTrustBundle is cluster-scoped, so verifying ateapi/router TLS
-# against one (pkg/runtime/substrate/dialer.go, when
-# substrate.cluster_trust_bundle is set) needs a ClusterRole, not a
-# namespaced Role. Only needed if you use cluster_trust_bundle instead of
-# ca_file — keep both anyway, since it's read-only and harmless if unused.
+# ClusterTrustBundle is cluster-scoped, so verifying ateapi TLS against one
+# (pkg/runtime/substrate/dialer.go, when substrate.cluster_trust_bundle is
+# set — the router hop is plaintext in Phase 1 and is not covered by this)
+# needs a ClusterRole, not a namespaced Role. Only needed if you use
+# cluster_trust_bundle instead of ca_file — keep both anyway, since it's
+# read-only and harmless if unused.
 #
 # certificates.k8s.io/v1beta1 vs v1: GKE 1.37+ may have promoted
 # ClusterTrustBundle to v1 — RBAC rules key on group+resource, not API
@@ -295,7 +296,7 @@ spec:
               value: /home/scion
             # SCION_HUB_ENDPOINT is a fallback the broker reads if settings.yaml
             # doesn't resolve one (cmd/root.go GetHubEndpoint); harmless to set
-            # alongside the ConfigMap's hub.endpoint.
+            # alongside the ConfigMap's server.broker.hub_endpoint.
             - name: SCION_HUB_ENDPOINT
               value: "${HUB_ENDPOINT}"
           ports:
@@ -344,9 +345,10 @@ spec:
 #     8444 (connect-tls), 4040 (status) — these are the client-facing ports
 #     this policy must keep open to the broker;
 #   - readiness/liveness probes hit port 9090 on the router container itself
-#     (kubelet-originated; most CNIs, including GKE Dataplane V2, exempt
-#     node-to-pod probe traffic from NetworkPolicy, but verify on your
-#     cluster — see README);
+#     (kubelet-originated; exempt from NetworkPolicy on GKE, by design, on
+#     both enforcement backends — Calico and Dataplane V2 — but verify on
+#     your cluster; see the README's "Kubelet health-check probes are
+#     exempt" note);
 #   - metrics scraping is a separate concern: atenet-router-monitoring.yaml
 #     is a Google Managed Prometheus PodMonitoring scraping the *envoy*
 #     container's admin port (9901) directly by pod IP, not through this
