@@ -407,14 +407,22 @@ how you operate this tier:
 
 **Creating the export as a dedicated filesystem root.** The recommended
 approach: put the export on its own filesystem (a loop-mounted image file on
-the boot disk here; a separate disk is the same recipe with the device in
-place of the image file and no `loop` option) rather than a subdirectory of
-`/`. Run once, as root:
+the boot disk here; for a separate disk, use a device path instead, skip
+`fallocate` and the `loop` option, guard the format with `blkid -p <dev>` —
+format only if it reports no filesystem, never unconditionally — and use
+`UUID=<uuid>` or `/dev/disk/by-id/...` in fstab rather than the raw device
+name, which can change across reboots) rather than a subdirectory of `/`.
+Run once, as root:
 
 ```bash
 # Create and format the backing image, but only the first time -- never
 # re-create or re-format one that already exists, since that would
 # destroy its contents on every re-run of any provisioning automation.
+# Size this for the scratchpad's expected footprint, leaving headroom on
+# / for the OS, container images, and hub.db -- this example uses 100G on
+# the default 200G boot disk; adjust to fit your workload, and remember
+# that a cutover (below) also needs / to have free space for the image on
+# top of the existing tree it's copying.
 test ! -e /var/lib/scion-shared.img || { echo "image exists; not re-creating" >&2; exit 1; }
 fallocate -l 100G /var/lib/scion-shared.img      # preallocated: also gives the size isolation from / noted above
 mkfs.ext4 -q /var/lib/scion-shared.img           # ext4: the ACL support the E2 section below relies on
@@ -426,8 +434,18 @@ mkdir -p /srv/scion-shared
 # nfs-server start anyway and export the bare directory on / -- exactly
 # the gap this layout exists to close. x-systemd.required-by= is what
 # turns "ordered before" into "required by", so nfs-server.service will
-# not start if this mount unit fails.
-echo '/var/lib/scion-shared.img /srv/scion-shared ext4 loop,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 2' >> /etc/fstab
+# not start if this mount unit fails. nofail is a separate, narrower
+# guarantee, scoped only to local-fs.target/remote-fs.target
+# (systemd.mount(5)): it downgrades just that one edge from required to
+# wanted and drops this mount's ordering before those targets, so a
+# failed mount here no longer takes the whole VM down to emergency mode.
+# It does not touch the explicit required-by=nfs-server.service
+# dependency above, which is a separate, unit-specific dependency that
+# nfs-server.service alone still enforces. The fsck pass is 0: per
+# systemd-fstab-generator(8), fsck is only ever scheduled for device
+# paths, so a nonzero pass on this loop-mounted regular file is a no-op
+# that just logs a boot-time warning.
+echo '/var/lib/scion-shared.img /srv/scion-shared ext4 loop,nofail,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 0' >> /etc/fstab
 systemctl daemon-reload
 mount /srv/scion-shared
 mountpoint -q /srv/scion-shared || { echo "mount failed; refusing to continue" >&2; exit 1; }
@@ -435,9 +453,10 @@ mountpoint -q /srv/scion-shared || { echo "mount failed; refusing to continue" >
 
 The export path is the mounted filesystem's own root, not a subdirectory
 under it. The exports(5) `mp` (mountpoint) option is the export-side half of
-the same fail-closed guarantee -- it makes knfsd itself refuse to serve the
-path unless it's currently a mountpoint, which also covers a mount that fails
-on a later reboot, not just at initial provisioning time:
+the same fail-closed guarantee -- it's enforced by nfs-utils userspace
+(`exportfs`/`rpc.mountd`), not the kernel, and makes the NFS server refuse to
+export the path unless it's currently a mountpoint, which also covers a mount
+that fails on a later reboot, not just at initial provisioning time:
 
 ```
 /srv/scion-shared <node-subnet>(rw,sync,no_subtree_check,all_squash,anonuid=<uid>,anongid=<gid>,mp)
@@ -458,20 +477,35 @@ chmod 2755 /srv/scion-shared
 **On an existing deployment.** Switching an already-running hub to this
 layout replaces the filesystem underneath the export, which the Reboot/
 stale-handle caveats below already flag as an ESTALE trigger -- treat it as a
-migration, not a live change:
+migration, not a live change. The steps below never mount the new filesystem
+over `/srv/scion-shared` until the old tree has already been moved out from
+under that path by name, so the final cleanup step can only ever remove the
+retired copy it explicitly names, never data hidden under a live mount:
 
-1. Stop the hub and any GKE agents so nothing is reading or writing the
-   export during the copy.
-2. Create and mount the new filesystem at a temporary path (the block
-   above, with a scratch mountpoint instead of `/srv/scion-shared`).
-3. Copy the existing tree across, preserving ACLs: `rsync -aAX
-   /srv/scion-shared/ /mnt/new-export/`.
-4. Apply the ownership/mode step above to the new filesystem's root.
-5. Unmount the temporary mountpoint, then mount the same filesystem at
-   `/srv/scion-shared` (update `/etc/fstab` accordingly) and
-   `exportfs -ra`.
-6. Restart the hub and GKE agents; existing NFS clients need to remount.
-7. Once you've verified the copy, remove the old data from `/`.
+1. Create and format the backing image as in the block above, but mount it
+   at a temporary path instead of `/srv/scion-shared`:
+   `mkdir -p /mnt/scion-shared-new && mount -o loop
+   /var/lib/scion-shared.img /mnt/scion-shared-new`.
+2. Copy the existing tree across, preserving ACLs and hard links, while the
+   hub and agents keep running: `rsync -aHAX /srv/scion-shared/
+   /mnt/scion-shared-new/`.
+3. Stop the hub, any GKE agents, and `systemctl stop nfs-server`, so nothing
+   is reading, writing, or serving the export during the swap.
+4. Catch anything written since step 2 with a final, quick sync:
+   `rsync -aHAX --delete /srv/scion-shared/ /mnt/scion-shared-new/`.
+5. `umount /mnt/scion-shared-new`.
+6. `/srv/scion-shared` is still an ordinary directory at this point --
+   nothing is mounted over it -- so it's safe to retire it by name:
+   `mv /srv/scion-shared /srv/scion-shared.old`.
+7. `mkdir -p /srv/scion-shared`, then add the fstab line and mount it as in
+   the block above (pointing at the real export path this time), and
+   confirm with `mountpoint -q /srv/scion-shared`.
+8. Apply the ownership/mode step above to the new filesystem's root.
+9. Add `mp` to the export line and `systemctl start nfs-server`.
+10. Restart the hub and GKE agents; existing NFS clients need to remount.
+11. Once you've verified the new export, remove the retired copy:
+    `rm -rf /srv/scion-shared.old` -- this only ever targets the `.old` path
+    from step 6, never the live, currently-mounted export.
 
 ## Reboot, stale-handle, and cross-runtime visibility caveats
 
