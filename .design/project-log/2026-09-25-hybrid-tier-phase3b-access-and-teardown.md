@@ -1,6 +1,6 @@
 # Hybrid Deployment Tier — Phase 3b: hub-deny scope, transport SA id, restricted user access
 
-Branch `scion/hybrid-tier-p3`, same fork PR as the earlier Phase 3a and 3b slices.
+Branch `scion/hybrid-tier-p3`, the same fork PR as Phase 3a and the other Phase 3b entries.
 
 ## Overview
 
@@ -34,7 +34,7 @@ same-name SA without this hub's marker.
 
 ## Transport SA create and teardown
 
-Create refuses on a describe error other than not-found, instead of treating it as absent.
+Create refuses on a describe error other than not-found; only a positive not-found reads as absent.
 Teardown takes a fifth argument, whether the Cloud Run service is gone. It removes the SA's IAP
 access binding first unless the service is gone, treats an already-absent binding as fine, and
 keeps the SA if the removal fails. Any describe error other than not-found keeps the SA as

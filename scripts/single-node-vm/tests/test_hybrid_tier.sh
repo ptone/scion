@@ -3976,7 +3976,7 @@ test_no_hub_allow_artifact_remains_in_scripts_or_docs() {
   # Scans every text file under scripts/single-node-vm (including the
   # extensionless stubs in tests/lib), docs/ and .design/project-log/,
   # for any spelling of the name (hub-allow, hub_allow, "hub allow", in
-  # any case) and the removed guard function's name. The one exclusion is
+  # any case) and the guard function's name. The one exclusion is
   # this file, where this test's own name and patterns spell the string
   # out.
   local hits repo_root
