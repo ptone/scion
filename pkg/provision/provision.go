@@ -678,12 +678,32 @@ func chownTarget(hostPath string) string {
 // given UID/GID. This is a ONE-TIME operation done under the advisory lock
 // during first provisioning (design §9.1). Per-start chown is NOT done for
 // NFS (slow/racy over the network).
+//
+// -h (--no-dereference), not plain -R (F-111 review, tf-lead): GNU chown's
+// non-recursive default is to dereference a symlink argument, and this now
+// runs as root with CAP_DAC_OVERRIDE in the k8s init container — without -h,
+// a symlink inside a cloned (possibly untrusted) repo pointing outside the
+// chowned tree (elsewhere in the init container's own filesystem view, or
+// another mounted shared dir) risks having its REFERENT re-owned instead of
+// just the link itself. -h makes chown re-own the link and never follow it,
+// on both the target chown binary (GNU coreutils, confirmed via --help: "-h,
+// --no-dereference" is supported; scion-base's runtime layer is
+// node:24-trixie-slim, i.e. Debian, i.e. GNU coreutils, not BusyBox) and
+// BusyBox (also supports -h). Verified empirically, not assumed: a symlink's
+// target's ctime is provably untouched by `chown -R -h` (TestChownProjectTree_
+// SymlinkOutsideTree_TargetOwnershipUnchanged), which is what actually matters
+// here — regardless of what a bare `chown -R` (no -h) does or doesn't
+// dereference by default for non-argument symlinks encountered during
+// traversal (this sandbox's GNU coreutils 9.1 did not dereference those
+// either, checked directly by the same ctime method — but -h removes any
+// doubt and matches standard hardening practice for this exact class of risk,
+// so it's unconditional here regardless of that finding).
 func chownProjectTree(ctx context.Context, projectRoot string, uid, gid int) error {
-	// Use chown -R for recursive ownership change.
-	cmd := exec.CommandContext(ctx, "chown", "-R", fmt.Sprintf("%d:%d", uid, gid), projectRoot)
+	// Use chown -R -h for recursive ownership change without following symlinks.
+	cmd := exec.CommandContext(ctx, "chown", "-R", "-h", fmt.Sprintf("%d:%d", uid, gid), projectRoot)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("chown -R %d:%d %s: %s", uid, gid, projectRoot, strings.TrimSpace(string(output)))
+		return fmt.Errorf("chown -R -h %d:%d %s: %s", uid, gid, projectRoot, strings.TrimSpace(string(output)))
 	}
 	return nil
 }

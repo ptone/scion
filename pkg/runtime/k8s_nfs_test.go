@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -1236,8 +1237,10 @@ func TestBuildPod_NFSBackend_InitContainer_MountsSharedDirs(t *testing.T) {
 			sharedPaths = env.Value
 		}
 	}
-	assert.Equal(t, "/scion-volumes/scratchpad,/scion-volumes/logs", sharedPaths,
-		"SCION_SHARED_DIR_PATHS must list both shared-dir mount paths")
+	// F-111 review (tf-lead nit): keyed explicitly by name=path pairs, not a
+	// bare path list — see nfsSharedDirMount and the CLI parser's comment.
+	assert.Equal(t, "scratchpad=/scion-volumes/scratchpad,logs=/scion-volumes/logs", sharedPaths,
+		"SCION_SHARED_DIR_PATHS must list both shared-dir name=mountPath pairs")
 
 	// The volume names the init container's mounts reference must actually
 	// exist in pod.Spec.Volumes (created by the later, unrelated main-loop
@@ -1245,6 +1248,61 @@ func TestBuildPod_NFSBackend_InitContainer_MountsSharedDirs(t *testing.T) {
 	// volume is a broken pod spec the API server would reject.
 	if findVolume(pod, "shared-dir-0") == nil || findVolume(pod, "shared-dir-1") == nil {
 		t.Fatal("init container mounts reference volumes that don't exist in pod.Spec.Volumes")
+	}
+}
+
+// TestBuildPod_NFSBackend_InitAndMainSharedDirMounts_MatchExactly is a
+// drift-prevention test (F-111 review, tf-lead nit): nfsSharedDirInitMounts
+// re-derives the same volume-name/mountPath/subPath computation the main
+// container's shared-dir loop makes independently, later in the same
+// buildPod call. Rather than extracting a shared helper both call sites use
+// (a larger, riskier change to the existing, already-covered main loop for a
+// nit-level concern), this test pins byte-for-byte parity between the two:
+// if either one's computation ever drifts from the other, this fails
+// immediately instead of silently producing an init container that chowns
+// the wrong path. Covers both the default target (/scion-volumes/<name>) and
+// the InWorkspace nested target (<workspace>/.scion-volumes/<name>).
+func TestBuildPod_NFSBackend_InitAndMainSharedDirMounts_MatchExactly(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-nfs-shared-drift",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace",
+		SharedDirs: []api.SharedDir{
+			{Name: "scratchpad"},
+			{Name: "logs", ReadOnly: true},
+			{Name: "nested-dir", InWorkspace: true},
+		},
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+	}
+	ic := pod.Spec.InitContainers[0]
+
+	for i := range config.SharedDirs {
+		volName := fmt.Sprintf("shared-dir-%d", i)
+		initMount := findVolumeMount(&corev1.Container{VolumeMounts: ic.VolumeMounts}, volName)
+		mainMount := findVolumeMount(&pod.Spec.Containers[0], volName)
+		if initMount == nil {
+			t.Fatalf("%s: no init-container mount found", volName)
+		}
+		if mainMount == nil {
+			t.Fatalf("%s: no main-container mount found", volName)
+		}
+		if initMount.MountPath != mainMount.MountPath {
+			t.Errorf("%s: init MountPath = %q, main MountPath = %q (drift)", volName, initMount.MountPath, mainMount.MountPath)
+		}
+		if initMount.SubPath != mainMount.SubPath {
+			t.Errorf("%s: init SubPath = %q, main SubPath = %q (drift)", volName, initMount.SubPath, mainMount.SubPath)
+		}
 	}
 }
 

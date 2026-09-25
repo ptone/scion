@@ -20,9 +20,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -385,6 +387,87 @@ func TestProvisionShared_ChownsSharedDirsIndependently(t *testing.T) {
 	// above) if chowning sharedPath had errored — success here is the
 	// positive proof that the shared-dir chown loop actually ran and
 	// reported success, not just that mkdir happened to work.
+}
+
+// TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged is the
+// F-111 review fix (tf-lead): chownProjectTree now runs `chown -R -h`, not
+// plain `-R` — as root with CAP_DAC_OVERRIDE (the k8s init container's
+// winner security context), a symlink inside a cloned/possibly-untrusted
+// tree pointing OUTSIDE it (elsewhere in the init container's filesystem
+// view, or another mounted shared dir) must never have its REFERENT
+// re-owned, only the link itself.
+//
+// This sandbox has no CAP_CHOWN (verified directly, matching the pattern in
+// cloudrun_sandbox_runtime_test.go's TestPrepareScionLayout_ChownsDirectories),
+// so this can't observe a UID actually changing on the link while staying
+// fixed on the target. It observes something at least as decisive: ctime is
+// updated by chown/lchown unconditionally, even when the new owner equals
+// the old owner (verified empirically before writing this test — a `chown -R
+// -h` to the process's own uid:gid left the outside target's ctime, down to
+// the nanosecond, byte-for-byte identical). If -h ever regressed to plain
+// -R and dereferenced the symlink, the target's ctime would change even
+// though its uid/gid numerically wouldn't (same reason this sandbox can't
+// use the uid itself as the signal) — so ctime is the correct, decisive
+// check here, not a fallback for one.
+func TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("ctime/uid check uses syscall.Stat_t (Linux only)")
+	}
+
+	// A tree we're about to chown -R -h...
+	treeRoot := t.TempDir()
+	// ...containing a symlink to a file in a completely separate directory
+	// (standing in for "elsewhere in the container's filesystem view" or
+	// "another mounted shared dir" — not a subdirectory of treeRoot at all).
+	outsideDir := t.TempDir()
+	outsideTarget := filepath.Join(outsideDir, "outside-target.txt")
+	if err := os.WriteFile(outsideTarget, []byte("do not touch"), 0644); err != nil {
+		t.Fatalf("write outside target: %v", err)
+	}
+	linkPath := filepath.Join(treeRoot, "link-to-outside")
+	if err := os.Symlink(outsideTarget, linkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	before, err := os.Lstat(outsideTarget)
+	if err != nil {
+		t.Fatalf("lstat outside target before: %v", err)
+	}
+	beforeStat := before.Sys().(*syscall.Stat_t)
+
+	if err := chownProjectTree(context.Background(), treeRoot, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("chownProjectTree: %v", err)
+	}
+
+	after, err := os.Lstat(outsideTarget)
+	if err != nil {
+		t.Fatalf("lstat outside target after: %v", err)
+	}
+	afterStat := after.Sys().(*syscall.Stat_t)
+
+	if afterStat.Uid != beforeStat.Uid || afterStat.Gid != beforeStat.Gid {
+		t.Errorf("outside target ownership changed: before uid=%d gid=%d, after uid=%d gid=%d",
+			beforeStat.Uid, beforeStat.Gid, afterStat.Uid, afterStat.Gid)
+	}
+	beforeCtime := beforeStat.Ctim
+	afterCtime := afterStat.Ctim
+	if beforeCtime != afterCtime {
+		t.Errorf("outside target ctime changed (target was touched, meaning the symlink was dereferenced): before %+v, after %+v",
+			beforeCtime, afterCtime)
+	}
+
+	// Positive control: the symlink itself (not the target) must actually
+	// have been (l)chowned — proves chown -R -h did something, not that it
+	// silently no-op'd on everything including the link.
+	linkInfo, err := os.Lstat(linkPath)
+	if err != nil {
+		t.Fatalf("lstat link: %v", err)
+	}
+	linkStat := linkInfo.Sys().(*syscall.Stat_t)
+	if int(linkStat.Uid) != os.Getuid() || int(linkStat.Gid) != os.Getgid() {
+		t.Errorf("link itself not chowned: uid=%d gid=%d, want %d:%d",
+			linkStat.Uid, linkStat.Gid, os.Getuid(), os.Getgid())
+	}
 }
 
 // --- writeSentinel ---

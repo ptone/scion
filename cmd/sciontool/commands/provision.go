@@ -98,20 +98,31 @@ func runProvision(ctx context.Context) error {
 
 	// F-111 (design §9): the k8s runtime mounts each NFS-backed shared dir
 	// into this init container at its own path (mirroring the main
-	// container's mounts) and passes those absolute paths here, comma-joined
+	// container's mounts) and passes "name=mountPath" pairs here, comma-joined
 	// — mkdir+chown must reach them the same as the workspace dir, since
 	// they're separate volume mounts the workspace's own chown doesn't reach.
+	// Keyed explicitly by the shared dir's own name (the producer side,
+	// pkg/runtime/k8s_runtime.go's nfsSharedDirMount, carries it alongside
+	// the mount for exactly this reason), not derived from the path here —
+	// two shared dirs could produce the same path basename through different
+	// target shapes (InWorkspace vs not), so reconstructing the key from the
+	// path on this side would risk a silent collision.
 	sharedDirs := make(map[string]provision.ResolvedSharedDir)
 	if raw := os.Getenv("SCION_SHARED_DIR_PATHS"); raw != "" {
-		for i, p := range strings.Split(raw, ",") {
-			if p == "" {
+		for i, pair := range strings.Split(raw, ",") {
+			if pair == "" {
 				continue
 			}
-			key := filepath.Base(p)
-			if key == "" || key == "." || key == "/" {
-				key = fmt.Sprintf("shared-dir-%d", i)
+			name, path, ok := strings.Cut(pair, "=")
+			if !ok || name == "" || path == "" {
+				log.Info("SCION_SHARED_DIR_PATHS: skipping malformed entry %q (want name=path)", pair)
+				continue
 			}
-			sharedDirs[key] = provision.ResolvedSharedDir{HostPath: p}
+			key := name
+			if _, dup := sharedDirs[key]; dup {
+				key = fmt.Sprintf("%s-%d", name, i)
+			}
+			sharedDirs[key] = provision.ResolvedSharedDir{HostPath: path}
 		}
 	}
 

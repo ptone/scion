@@ -1326,19 +1326,27 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// (sharedDirStorageNFS below) — a separate subsystem, not implicated
 		// in F-111.
 		initVolumeMounts := []corev1.VolumeMount{workspaceVolumeMount}
-		var sharedDirPaths []string
+		// F-111 review (tf-lead nit): SCION_SHARED_DIR_PATHS carries
+		// "name=mountPath" pairs, comma-joined — keyed explicitly by each
+		// shared dir's own name (nfsSharedDirMount.Name), not derived from
+		// the path via filepath.Base on the consuming side. Basenames are
+		// unique today, but two shared dirs could produce the same basename
+		// through different target shapes (one InWorkspace, one not); naming
+		// the key here instead of reconstructing it there removes that risk
+		// rather than relying on it never happening.
+		var sharedDirPairs []string
 		if sharedMounts := nfsSharedDirInitMounts(config); len(sharedMounts) > 0 {
-			initVolumeMounts = append(initVolumeMounts, sharedMounts...)
-			for _, m := range sharedMounts {
-				sharedDirPaths = append(sharedDirPaths, m.MountPath)
+			for _, sm := range sharedMounts {
+				initVolumeMounts = append(initVolumeMounts, sm.Mount)
+				sharedDirPairs = append(sharedDirPairs, sm.Name+"="+sm.Mount.MountPath)
 			}
 		}
 
 		initEnv := nfsProvisionEnv(config.GitCloneForInit)
-		if len(sharedDirPaths) > 0 {
+		if len(sharedDirPairs) > 0 {
 			initEnv = append(initEnv, corev1.EnvVar{
 				Name:  "SCION_SHARED_DIR_PATHS",
-				Value: strings.Join(sharedDirPaths, ","),
+				Value: strings.Join(sharedDirPairs, ","),
 			})
 		}
 
@@ -2531,6 +2539,19 @@ func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) string {
 	return filepath.Join(parent, "shared-dirs", sharedDirName)
 }
 
+// nfsSharedDirMount pairs a shared dir's own name (config.SharedDirs[i].Name,
+// e.g. "scratchpad") with its init-container VolumeMount — kept together so
+// callers never have to re-derive the name from the mount's k8s volume name
+// or its MountPath (F-111 review, tf-lead: keying SCION_SHARED_DIR_PATHS off
+// filepath.Base(mountPath) works today but silently collides if two shared
+// dirs ever produced the same basename via different target shapes, e.g. one
+// InWorkspace and one not; carrying the real name explicitly removes that
+// risk rather than reconstructing it from a path).
+type nfsSharedDirMount struct {
+	Name  string
+	Mount corev1.VolumeMount
+}
+
 // nfsSharedDirInitMounts returns the workspace-provision init container's
 // additional VolumeMounts for shared dirs served from the workspace NFS PVC
 // by subPath (F-111, design §9) — mirrors buildPod's own nfsSharedDirs branch
@@ -2540,7 +2561,7 @@ func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) string {
 // call. Returns nil for any other shared-dir mechanism
 // (server.shared_dir_storage's own NFS backend, or the local per-dir-PVC
 // backend) — those are separate subsystems, not implicated in F-111.
-func nfsSharedDirInitMounts(config RunConfig) []corev1.VolumeMount {
+func nfsSharedDirInitMounts(config RunConfig) []nfsSharedDirMount {
 	sharedDirStorageNFS := config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs"
 	nfsSharedDirs := !sharedDirStorageNFS && config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 	if !nfsSharedDirs || len(config.SharedDirs) == 0 {
@@ -2552,16 +2573,19 @@ func nfsSharedDirInitMounts(config RunConfig) []corev1.VolumeMount {
 		k8sContainerWorkspace = "/workspace"
 	}
 
-	mounts := make([]corev1.VolumeMount, 0, len(config.SharedDirs))
+	mounts := make([]nfsSharedDirMount, 0, len(config.SharedDirs))
 	for i, sd := range config.SharedDirs {
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
 			target = fmt.Sprintf("%s/.scion-volumes/%s", k8sContainerWorkspace, sd.Name)
 		}
-		mounts = append(mounts, corev1.VolumeMount{
-			Name:      fmt.Sprintf("shared-dir-%d", i),
-			MountPath: target,
-			SubPath:   nfsSharedDirSubPath(config.NFSSubPath, sd.Name),
+		mounts = append(mounts, nfsSharedDirMount{
+			Name: sd.Name,
+			Mount: corev1.VolumeMount{
+				Name:      fmt.Sprintf("shared-dir-%d", i),
+				MountPath: target,
+				SubPath:   nfsSharedDirSubPath(config.NFSSubPath, sd.Name),
+			},
 		})
 	}
 	return mounts
