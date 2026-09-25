@@ -96,21 +96,32 @@ main() {
     exit 0
   fi
 
-  # Check if a pane already exists for this agent (tracked via .agent field).
+  # Check if a pane already exists for this agent (tracked via pane .label).
   if pane_exists_for_agent "$selected"; then
     log "Pane already exists for $selected — focusing it."
     local pane_id
     pane_id="$(pane_id_for_agent "$selected")"
     if [[ -n "$pane_id" ]]; then
-      herdr agent focus "$pane_id" 2>/dev/null || true
+      # Agent commands accept a pane_id directly (herdr resolves it to the
+      # agent currently hosted in that pane).
+      herdr agent focus "$pane_id"
     fi
     exit 0
   fi
 
   log "Creating pane for agent: $selected"
-  herdr pane split --direction right \
-    --env "SCION_AGENT=${selected}" \
-    -- bash "${SCRIPT_DIR}/scion-attach-wrapper.sh" "$selected"
+
+  local split_json pane_id
+  split_json="$(herdr pane split --direction right \
+    --env "SCION_AGENT=${selected}")"
+  pane_id="$(echo "$split_json" | jq -r '.result.pane.pane_id // empty')"
+  if [[ -z "$pane_id" ]]; then
+    log "herdr pane split returned no pane_id for $selected: $split_json"
+    exit 1
+  fi
+
+  herdr pane rename "$pane_id" "scion:${selected}"
+  herdr pane run "$pane_id" "bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${selected}'"
 }
 
 main "$@"

@@ -11,10 +11,15 @@
 #   thinking               -> working
 #   blocked                -> blocked
 #   waiting_for_input      -> blocked
-#   completed              -> done
+#   completed              -> idle
 #   stalled                -> idle
 #   idle / null / other    -> idle
-#   (phase != running)     -> done
+#   (phase != running)     -> idle
+#
+# `herdr pane report-agent --state` only accepts idle|working|blocked|unknown
+# ("done" is not a settable state — herdr derives its own Done badge from
+# idle plus its internal "seen" tracking). Completed/stopped agents are
+# therefore reported as idle.
 #
 # Environment:
 #   SCION_BRIDGE_INTERVAL  Poll interval in seconds (default: 4)
@@ -43,9 +48,10 @@ map_state() {
   local activity="$1"
   local phase="$2"
 
-  # If the agent is no longer running, it's done regardless of activity.
+  # If the agent is no longer running, report idle — herdr shows Done once
+  # it observes the pane at rest; "done" itself is not a settable state.
   if [[ "$phase" != "running" ]]; then
-    echo "done"
+    echo "idle"
     return
   fi
 
@@ -56,11 +62,8 @@ map_state() {
     blocked|waiting_for_input)
       echo "blocked"
       ;;
-    completed)
-      echo "done"
-      ;;
     *)
-      # stalled, idle, null, empty, unknown — all map to idle
+      # completed, stalled, idle, null, empty, unknown — all map to idle
       echo "idle"
       ;;
   esac
@@ -98,15 +101,16 @@ cleanup() {
 
 poll_once() {
   # Get all herdr panes belonging to this plugin.
-  # Scion panes are identified by .agent field starting with "scion/".
+  # Scion panes are identified by their .label, set via `herdr pane rename`
+  # right after split, with the format "scion:<identifier>".
   local panes_json
-  panes_json="$(herdr pane list --json 2>/dev/null)" || return 1
+  panes_json="$(herdr pane list)" || return 1
 
   # Extract pane_id + agent identifier from scion-managed panes.
   local pane_entries
   pane_entries="$(echo "$panes_json" \
-    | jq -r '.[] | select(.agent != null and (.agent | startswith("scion/")))
-             | "\(.pane_id)\t\(.agent | ltrimstr("scion/"))"' 2>/dev/null)"
+    | jq -r '.result.panes[] | select(.label != null and (.label | startswith("scion:")))
+             | "\(.pane_id)\t\(.label | ltrimstr("scion:"))"' 2>/dev/null)"
 
   [[ -z "$pane_entries" ]] && return 0
 
@@ -126,19 +130,20 @@ poll_once() {
     local activity phase herdr_state
 
     if [[ -z "$agent_info" ]]; then
-      # Agent no longer in scion list at all — treat as done.
-      herdr_state="done"
+      # Agent no longer in scion list at all — report idle (see note above:
+      # "done" is not a settable report-agent state).
+      herdr_state="idle"
     else
       activity="$(echo "$agent_info" | jq -r '.activity // "idle"' 2>/dev/null)"
       phase="$(echo "$agent_info" | jq -r '.phase // "unknown"' 2>/dev/null)"
       herdr_state="$(map_state "$activity" "$phase")"
     fi
 
-    # Report to herdr.
+    # Report to herdr (state only — identity/tracking is via pane .label).
     herdr pane report-agent "$pane_id" \
       --source "scion:integration" \
       --agent "scion/${identifier}" \
-      --state "$herdr_state" 2>/dev/null || true
+      --state "$herdr_state"
 
   done <<< "$pane_entries"
 }
