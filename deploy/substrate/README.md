@@ -722,6 +722,14 @@ kubectl run netpol-probe --rm -it --restart=Never \
 
 ## Known Phase 1 limitations
 
+- **`scion stop` destroys the agent on substrate.** Phase 1 has no suspend
+  primitive, so `Stop` is `Delete` (`.design/kubernetes/substrate-runtime.md`
+  §4's `Stop` row): the actor, its workspace, and its worker slot are all
+  gone, not paused. A later `scion start` provisions a brand-new actor from
+  the template, not a resumed one — any uncommitted work in the stopped
+  actor's workspace is lost. Push before stopping. Suspend/resume (keeping
+  the workspace and freeing the worker without discarding either) is a
+  Phase 2 item (§11).
 - **Bootstrap auth is the §5 fallback, not the identity-derived nonce.**
   `sciontool substrate-serve` (Phase 1) defaults to
   `FirstBootstrapWinsVerifier`: any bearer token is accepted, and only the
