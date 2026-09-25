@@ -76,7 +76,7 @@ fresh_gcloud_state() {
   GCLOUD_STUB_STATE_DIR="$(mktemp -d)"
   GCLOUD_STUB_LOG="$(mktemp)"
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
-    "${GCLOUD_STUB_STATE_DIR}/migs" "${GCLOUD_STUB_STATE_DIR}/templates" \
+    "${GCLOUD_STUB_STATE_DIR}/gke-node-firewall-rules" \
     "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets" "${GCLOUD_STUB_STATE_DIR}/run-services" \
     "${GCLOUD_STUB_STATE_DIR}/addresses"
   export GCLOUD_STUB_STATE_DIR GCLOUD_STUB_LOG
@@ -401,20 +401,76 @@ seed_firewall_rule_json() {
     > "${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
 }
 
-# seed_cluster NAME NETWORK MIG... — the fixture cluster's reported
-# network and the instanceGroupUrls of its (single) node pool. With no
-# MIG arguments, the cluster has zero node pools.
+# _seed_default_gke_node_tag_rules NAME NETWORK POD_CIDR — (re)writes the
+# GKE-managed-style -all/-vms firewall rule pair node-tag discovery reads,
+# keyed to this cluster's own name so multiple clusters on one network
+# don't collide, and to whatever pod CIDR it currently has. Called from
+# seed_cluster (first write) and seed_pod_cidr (to keep the two in sync
+# when a test changes the CIDR after the fact). Tests that want a
+# specific failure shape instead call seed_gke_node_tag_rules directly,
+# or clear_gke_node_tag_rules to remove this default entirely.
+_seed_default_gke_node_tag_rules() {
+  local name="$1" network="$2" pod_cidr="$3"
+  seed_gke_node_tag_rules "$name" "$network" "$pod_cidr" "gke-${name}-x-node"
+}
+
+# seed_gke_node_tag_rules NAME NETWORK POD_CIDR TAG [VMS_TAG] [PREFIX] —
+# writes a matching -all/-vms rule pair (both named gke-<name>-<PREFIX>-*,
+# both INGRESS, -all sourced from POD_CIDR) with the given target tag.
+# PREFIX defaults to "x" (matching _seed_default_gke_node_tag_rules and
+# every test that doesn't care about the exact rule name); pass the real
+# per-cluster hash-shaped suffix to mirror an actual GKE-managed rule
+# name exactly. VMS_TAG defaults to TAG (the two rules agreeing, the
+# normal case); pass a different value to build the "-all and -vms
+# disagree" fixture. Direction defaults to INGRESS; pass a 7th argument
+# to override it, for the "candidate not INGRESS" fixture.
+seed_gke_node_tag_rules() {
+  local name="$1" network="$2" pod_cidr="$3" tag="$4" vms_tag="${5:-$4}" prefix="${6:-x}" direction="${7:-INGRESS}"
+  "$PYTHON" -c "
+import json, sys
+name, network, pod_cidr, tag, vms_tag, prefix, direction = sys.argv[1:8]
+# TAG may be a comma-separated list, to build the 'more than one target
+# tag on the -all rule' fixture; an empty string means zero target tags.
+rules = {
+    'gke-%s-%s-all' % (name, prefix): {
+        'name': 'gke-%s-%s-all' % (name, prefix), 'network': network, 'direction': direction,
+        'sourceRanges': [pod_cidr], 'targetTags': tag.split(',') if tag else [],
+    },
+    'gke-%s-%s-vms' % (name, prefix): {
+        'name': 'gke-%s-%s-vms' % (name, prefix), 'network': network, 'direction': 'INGRESS',
+        'sourceRanges': ['10.128.0.0/9'], 'targetTags': [vms_tag],
+    },
+}
+for rule_name, body in rules.items():
+    with open(sys.argv[8] + '/' + rule_name + '.json', 'w') as f:
+        json.dump(body, f)
+" "$name" "$network" "$pod_cidr" "$tag" "$vms_tag" "$prefix" "$direction" "${GCLOUD_STUB_STATE_DIR}/gke-node-firewall-rules"
+}
+
+# clear_gke_node_tag_rules NAME — removes the auto-seeded (or explicitly
+# seeded) -all/-vms pair for this cluster name, for tests that want
+# discovery to find nothing at all.
+clear_gke_node_tag_rules() {
+  rm -f "${GCLOUD_STUB_STATE_DIR}/gke-node-firewall-rules/gke-$1-"*"-all.json" \
+    "${GCLOUD_STUB_STATE_DIR}/gke-node-firewall-rules/gke-$1-"*"-vms.json"
+}
+
+# seed_cluster NAME NETWORK [ignored...] — the fixture cluster's reported
+# network. Any arguments after NETWORK are accepted and ignored (call
+# sites from before node-tag discovery moved to firewall rules used to
+# pass MIG names here; harmless to still pass, nothing reads them).
+# Also writes this cluster's default node-tag firewall rule pair (see
+# _seed_default_gke_node_tag_rules) so discovery succeeds out of the box;
+# tests that care about a specific tag or failure shape override it with
+# seed_gke_node_tag_rules or clear_gke_node_tag_rules.
 seed_cluster() {
   local name="$1" network="$2"
-  shift 2
   "$PYTHON" -c "
 import json, sys
 network = sys.argv[1]
-migs = sys.argv[2:]
 body = {
     'network': network,
     'subnetwork': 'default-subnet',
-    'nodePools': [{'instanceGroupUrls': migs}] if migs else [],
     # A default pod CIDR, agreeing between both fields hybrid_discover
     # cross-checks, so existing fixtures that don't care about the
     # actual pod CIDR value don't all need updating -- same rationale as
@@ -423,13 +479,17 @@ body = {
     'ipAllocationPolicy': {'clusterIpv4CidrBlock': '10.52.0.0/14'},
 }
 print(json.dumps(body))
-" "$network" "$@" > "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json"
+" "$network" > "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json"
+  _seed_default_gke_node_tag_rules "$name" "$network" "10.52.0.0/14"
 }
 
 # seed_pod_cidr NAME CIDR — overrides both clusterIpv4Cidr and
 # ipAllocationPolicy.clusterIpv4CidrBlock on an already-seeded cluster
 # fixture to the same explicit value, for tests that care about the
-# actual pod CIDR hybrid_discover reads.
+# actual pod CIDR hybrid_discover reads. Also re-points the cluster's
+# default node-tag firewall rule pair's source range at the new CIDR, so
+# a test that changes the pod CIDR and still expects discovery to
+# succeed doesn't have to know about the firewall-rule fixture at all.
 seed_pod_cidr() {
   local name="$1" cidr="$2" services_cidr="${3:-}"
   "$PYTHON" -c "
@@ -444,6 +504,12 @@ if services_cidr:
     d['servicesIpv4Cidr'] = services_cidr
 json.dump(d, open(p, 'w'))
 " "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json" "$cidr" "$services_cidr"
+  local network
+  network="$("$PYTHON" -c "import json,sys; print(json.load(open(sys.argv[1])).get('network') or '')" \
+    "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json")"
+  if [[ -f "${GCLOUD_STUB_STATE_DIR}/gke-node-firewall-rules/gke-${name}-x-all.json" ]]; then
+    _seed_default_gke_node_tag_rules "$name" "$network" "$cidr"
+  fi
 }
 
 # seed_pod_cidr_mismatch NAME CIDR ALT_CIDR — sets clusterIpv4Cidr and
@@ -475,12 +541,6 @@ json.dump(d, open(p, 'w'))
 " "${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json"
 }
 
-# seed_cluster_no_pools NAME NETWORK — a cluster with zero node pools
-# (nodePools entirely empty), for the "no managed instance groups" case.
-seed_cluster_no_pools() {
-  seed_cluster "$1" "$2"
-}
-
 # seed_subnet NAME CIDR — overrides the stub's default node-subnet
 # fixture ("default-subnet" / 10.128.0.0/20, seeded implicitly so
 # existing cluster fixtures don't all need updating) with an explicit
@@ -495,23 +555,6 @@ seed_subnet() {
 # describe` call for this subnet fails instead of returning a range.
 set_subnet_describe_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/subnets/$1.json.describe-fail"
-}
-
-# seed_mig KEY TEMPLATE_REF — KEY is the last path segment of whatever MIG
-# URL a test seeds into a cluster's instanceGroupUrls; TEMPLATE_REF is
-# whatever hybrid-tier.sh should then pass on to `instance-templates
-# describe` (a bare name or another fixture URL, looked up by its own last
-# path segment in turn).
-seed_mig() {
-  printf '%s' "$2" > "${GCLOUD_STUB_STATE_DIR}/migs/$1.txt"
-}
-
-# seed_template KEY TAGS_CSV — TAGS_CSV is a comma-separated tag list;
-# stored the way `--format=value(properties.tags.items)` actually renders
-# a repeated field: semicolon-joined.
-seed_template() {
-  local key="$1" tags_csv="$2"
-  printf '%s' "${tags_csv//,/;}" > "${GCLOUD_STUB_STATE_DIR}/templates/${key}.txt"
 }
 
 gcloud_log() {

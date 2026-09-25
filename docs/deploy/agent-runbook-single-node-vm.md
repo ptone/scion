@@ -333,20 +333,23 @@ anything is created:
 Enabling the tier does five things, all additive:
 
 1. **Discovery.** Before creating anything, the script confirms the cluster
-   exists, checks that its network matches the hub VM's, and discovers the
-   cluster's node network tag with read-only `gcloud` calls, bound to the
-   cluster itself rather than to guessing at instance names: it reads the
-   cluster's node pools' managed instance groups, then the network tags on
-   each group's instance template (this also works for a pool that
-   currently has zero running instances, such as an idle Autopilot pool).
-   Among those tags, it looks for the one GKE itself assigns for firewall
-   purposes, matching the pattern `gke-<suffix>-node` — the same pattern
-   for both a Standard and an Autopilot cluster. If zero or more than one
-   distinct tag matches that pattern, the script refuses to guess and
-   fails, listing whatever candidates it found. If the cluster can't be
-   found or its network doesn't match, it also fails, before creating
-   anything. The same cluster description is also used to read the
-   cluster's pod CIDR (`clusterIpv4Cidr`, cross-checked against
+   exists, checks that its network matches the hub VM's, and discovers
+   the node tag GKE assigns, read from the cluster's GKE-managed firewall
+   rules — the same source and the same check for both a Standard and an
+   Autopilot cluster. It lists the firewall rules on the cluster's
+   network and looks for the one rule matching `gke-<suffix>-all`, with
+   direction INGRESS, whose source ranges include the cluster's own pod
+   CIDR (pod CIDRs are unique within a VPC, which is what ties the rule
+   to this cluster). That rule must carry exactly one target tag,
+   matching `gke-<suffix>-node`, and the matching `gke-<suffix>-vms` rule
+   must exist with the same single target tag. If no rule matches, more
+   than one does, the tag shape doesn't match, or the two rules disagree,
+   the script refuses to guess and fails, listing whatever it found and
+   naming this as something to fix on the cluster's own firewall rules,
+   not in `deploy.sh`. If the cluster can't be found or its network
+   doesn't match, it also fails, before creating anything. The same
+   cluster description is also used to read the cluster's pod CIDR
+   (`clusterIpv4Cidr`, cross-checked against
    `ipAllocationPolicy.clusterIpv4CidrBlock` — the script fails if the two
    disagree or if the range is missing, broader than `/8`, or not valid
    IPv4), which is what scopes the hub-allow firewall rule below to pod

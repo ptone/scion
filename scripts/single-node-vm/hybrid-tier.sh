@@ -359,24 +359,18 @@ sys.exit(0 if (net.version == 4 and net.prefixlen >= 8) else 1)
 # only by the separate hub-allow firewall rule (tcp:8080), whose traffic
 # genuinely does originate from pod IPs.
 #
-# Node-tag discovery starts from the cluster, not from guessing at
-# instance names: it reads the cluster's node pools' managed instance
-# groups (instanceGroupUrls) and, for each, the network tags on that
-# group's instance template -- the tag a template carries applies to every
-# instance in the group, including when the group currently has zero
-# instances (an Autopilot pool scaled to zero, for example), so this works
-# without listing live instances at all. Among those tags, the one GKE
-# itself assigns for firewall purposes matches ^gke-.+-node$ (the same
-# pattern for both Standard and Autopilot node pools -- Autopilot's own
-# node instances are additionally named with a gk3- prefix, but the
-# firewall-purpose network tag GKE assigns them still follows the
-# gke-...-node pattern). If zero or more than one distinct tag matches
-# that pattern across all node pools, this refuses to guess and fails
-# instead, listing whatever candidates it found. If any instance group or
-# its template can't even be read, this also fails outright, even if the
-# readable ones already yield exactly one candidate: a group this call
-# couldn't see could carry a second, different tag, and "guessed right by
-# luck" is not a property this check can claim.
+# Node-tag discovery reads the node tag GKE assigns, from the cluster's
+# own GKE-managed firewall rules, the same source for Standard and
+# Autopilot clusters alike: it lists the firewall rules on the cluster's
+# network, and looks among them for the one rule matching ^gke-.+-all$,
+# direction INGRESS, whose source ranges include this cluster's own pod
+# CIDR -- pod CIDRs are unique within a VPC, so this ties the rule to
+# this specific cluster. That rule must carry exactly one target tag,
+# matching ^gke-.+-node$, and the matching <same-prefix>-vms rule must
+# exist and carry the same single target tag. Anything else -- no
+# matching rule, more than one, the wrong shape of tags, or the -vms
+# rule missing or disagreeing -- refuses to guess and fails instead,
+# listing whatever it found.
 hybrid_discover() {
   local hub_network="$1"
   local cluster_ref
@@ -488,93 +482,97 @@ print((d.get('ipAllocationPolicy') or {}).get('clusterIpv4CidrBlock') or '')
   # shellcheck disable=SC2034 # consumed by the hub-allow firewall rule
   GKE_POD_CIDR="$pod_cidr"
 
-  local mig_urls
-  mig_urls="$(echo "$describe_json" | "$PYTHON" -c "
-import json, sys
-d = json.load(sys.stdin)
-urls = []
-for np in d.get('nodePools') or []:
-    urls.extend(np.get('instanceGroupUrls') or [])
-print('\n'.join(urls))
-")"
-  if [[ -z "$mig_urls" ]]; then
-    err "GKE cluster ${cluster_ref} has no managed instance groups (its node pools may be empty). Could not discover a node network tag."
+  # The node tag is read from GKE's own auto-created firewall rules,
+  # rather than from nodePools[].instanceGroupUrls -> instance group ->
+  # instance template -> tags: on Autopilot clusters, the node instance
+  # groups, templates and instances are not visible as Compute resources
+  # in the project at all (a 404 on every instance-group describe call,
+  # even for a cluster with running nodes), so that path can never work
+  # there. The firewall rules GKE creates for every cluster, of either
+  # type, are always present and visible, and the cluster's pod CIDR
+  # (unique within a VPC) ties the right pair of rules to this cluster
+  # without needing to reconstruct GKE's own truncated-name/hash scheme.
+  local fw_list_json fw_list_err
+  fw_list_err="$(mktemp)"
+  if ! fw_list_json="$(gcloud compute firewall-rules list --project="${GKE_PROJECT}" \
+      --filter="network:*/${network}" --format=json 2>"${fw_list_err}")"; then
+    err "Could not list firewall rules on network '${network}' to discover the GKE node tag for cluster ${cluster_ref}:"
+    err "  $(cat "${fw_list_err}")"
+    rm -f "${fw_list_err}"
+    exit 1
+  fi
+  rm -f "${fw_list_err}"
+
+  local disc_result disc_status disc_detail
+  disc_result="$(echo "$fw_list_json" | "$PYTHON" -c "
+import json, sys, re
+
+rules = json.load(sys.stdin)
+pod_cidr = sys.argv[1]
+all_re = re.compile(r'^gke-.+-all\$')
+node_re = re.compile(r'^gke-.+-node\$')
+
+
+def describe(r):
+    ranges = ','.join(r.get('sourceRanges') or []) or 'none'
+    return '%s (direction=%s, sourceRanges=%s)' % (r.get('name') or '', r.get('direction') or '', ranges)
+
+
+name_matches = [r for r in rules if all_re.match(r.get('name') or '')]
+if not name_matches:
+    print('NONE::no firewall rule matching ^gke-.+-all\$ was found on this network')
+    sys.exit(0)
+
+candidates = [r for r in name_matches
+              if (r.get('direction') or '') == 'INGRESS'
+              and pod_cidr in (r.get('sourceRanges') or [])]
+if not candidates:
+    found = '; '.join(describe(r) for r in name_matches)
+    print('NONE::found %d rule(s) named like a GKE-managed rule, but none had direction INGRESS with source range %s: %s'
+          % (len(name_matches), pod_cidr, found))
+    sys.exit(0)
+
+if len(candidates) > 1:
+    found = ', '.join(sorted((r.get('name') or '') for r in candidates))
+    print('AMBIGUOUS::%d candidate rules matched: %s' % (len(candidates), found))
+    sys.exit(0)
+
+rule = candidates[0]
+tags = rule.get('targetTags') or []
+if len(tags) != 1:
+    print('BADTAGS::%s has %d target tag(s): %s' % (rule.get('name') or '', len(tags), ', '.join(tags) or 'none'))
+    sys.exit(0)
+
+tag = tags[0]
+if not node_re.match(tag):
+    print(\"BADTAGSHAPE::%s's target tag '%s' does not match ^gke-.+-node\$\" % (rule.get('name') or '', tag))
+    sys.exit(0)
+
+prefix = (rule.get('name') or '')[:-len('-all')]
+vms_name = prefix + '-vms'
+vms_rule = next((r for r in rules if (r.get('name') or '') == vms_name), None)
+if vms_rule is None:
+    print('NOVMS::%s was not found' % vms_name)
+    sys.exit(0)
+
+vms_tags = vms_rule.get('targetTags') or []
+if vms_tags != [tag]:
+    print(\"VMSMISMATCH::%s's target tag(s) (%s) do not match %s's (%s)\"
+          % (vms_name, ', '.join(vms_tags) or 'none', rule.get('name') or '', tag))
+    sys.exit(0)
+
+print('OK::%s' % tag)
+" "$pod_cidr")"
+
+  disc_status="${disc_result%%::*}"
+  disc_detail="${disc_result#*::}"
+
+  if [[ "$disc_status" != "OK" ]]; then
+    err "Could not discover a GKE node network tag for cluster ${cluster_ref}: its GKE-managed firewall rules are missing or ambiguous (${disc_detail}). This is fixed on the cluster's own firewall rules, not in this script."
     exit 1
   fi
 
-  local mig_count=0
-  local unreadable_count=0
-  local first_unreadable_err=""
-  local -a all_tags_seen=()
-  local -a candidates=()
-  local mig_url template_ref tags_line tag mig_call_err
-
-  while IFS= read -r mig_url; do
-    [[ -z "$mig_url" ]] && continue
-    mig_count=$((mig_count + 1))
-
-    mig_call_err="$(mktemp)"
-    if ! template_ref="$(gcloud compute instance-groups managed describe "$mig_url" \
-        --format="value(instanceTemplate)" 2>"${mig_call_err}")"; then
-      unreadable_count=$((unreadable_count + 1))
-      [[ -z "$first_unreadable_err" ]] && first_unreadable_err="$(head -1 "${mig_call_err}")"
-      rm -f "${mig_call_err}"
-      continue
-    fi
-    rm -f "${mig_call_err}"
-    [[ -z "$template_ref" ]] && continue
-
-    mig_call_err="$(mktemp)"
-    if ! tags_line="$(gcloud compute instance-templates describe "$template_ref" \
-        --format="value(properties.tags.items)" 2>"${mig_call_err}")"; then
-      unreadable_count=$((unreadable_count + 1))
-      [[ -z "$first_unreadable_err" ]] && first_unreadable_err="$(head -1 "${mig_call_err}")"
-      rm -f "${mig_call_err}"
-      continue
-    fi
-    rm -f "${mig_call_err}"
-    [[ -z "$tags_line" ]] && continue
-
-    while IFS= read -r tag; do
-      [[ -z "$tag" ]] && continue
-      all_tags_seen+=("$tag")
-      if [[ "$tag" =~ ^gke-.+-node$ ]]; then
-        candidates+=("$tag")
-      fi
-    done < <(echo "$tags_line" | tr ';' '\n')
-  done <<< "$mig_urls"
-
-  # A partial view could hide a second, distinct tag on the instance
-  # group(s) that couldn't be read, so any unreadable group fails
-  # discovery outright rather than proceeding on the readable subset --
-  # even when the readable ones already yield exactly one candidate.
-  if [[ "$unreadable_count" -gt 0 ]]; then
-    err "Could not discover a GKE node network tag for cluster ${cluster_ref}: ${unreadable_count} of ${mig_count} managed instance group(s) could not be read, which could hide a second, distinct tag. Refusing to guess from a partial view."
-    err "  First error: ${first_unreadable_err}"
-    exit 1
-  fi
-
-  local unique_candidates=""
-  if [[ ${#candidates[@]} -gt 0 ]]; then
-    unique_candidates="$(printf '%s\n' "${candidates[@]}" | sort -u)"
-  fi
-  local candidate_count=0
-  [[ -n "$unique_candidates" ]] && candidate_count="$(echo "$unique_candidates" | grep -c .)"
-
-  if [[ "$candidate_count" -eq 0 ]]; then
-    local seen_desc="none"
-    [[ ${#all_tags_seen[@]} -gt 0 ]] && seen_desc="$(printf '%s\n' "${all_tags_seen[@]}" | sort -u | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')"
-    err "Could not discover a GKE node network tag for cluster ${cluster_ref}: no instance template tag matched the expected pattern (gke-<suffix>-node) across ${mig_count} managed instance group(s) checked. Tags seen: ${seen_desc}."
-    exit 1
-  fi
-  if [[ "$candidate_count" -gt 1 ]]; then
-    local candidates_desc
-    candidates_desc="$(echo "$unique_candidates" | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')"
-    err "Found more than one candidate GKE node network tag for cluster ${cluster_ref}, refusing to guess. Candidates: ${candidates_desc}."
-    exit 1
-  fi
-
-  GKE_NODE_TAG="$unique_candidates"
+  GKE_NODE_TAG="$disc_detail"
 }
 
 # hybrid_nfs_fsid HUB_NAME

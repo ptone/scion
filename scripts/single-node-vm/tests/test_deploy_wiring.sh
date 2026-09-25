@@ -576,8 +576,6 @@ test_deploy_create_tier_off_no_tags_no_container_calls() {
 test_deploy_create_tier_on_tags_new_vm() {
   fresh_gcloud_state
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   run_deploy_create_wait_for "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" \
     "instances-create-completed"
   local log create_line
@@ -595,8 +593,6 @@ test_deploy_create_tier_on_existing_vm_gets_add_tags() {
   fresh_gcloud_state
   seed_instance "$INSTANCE_NAME" "us-central1-b"
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local log
   log="$(gcloud_log)"
@@ -613,8 +609,6 @@ test_deploy_create_tier_on_existing_vm_gets_add_tags() {
 test_deploy_create_discovery_before_first_create() {
   fresh_gcloud_state
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local log discover_line first_create_line
   log="$(gcloud_log)"
@@ -627,8 +621,6 @@ test_deploy_create_discovery_before_first_create() {
 test_deploy_create_removes_temp_kubeconfig_on_exit() {
   fresh_gcloud_state
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local kubeconfig_path
   kubeconfig_path="$(kubectl_log | head -1 | sed -n 's/^KUBECONFIG=\([^ ]*\) .*/\1/p')"
@@ -735,8 +727,6 @@ test_deploy_create_api_check_tier_on_adds_container() {
   seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
     cloudbuild.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local enable_line
   enable_line="$(gcloud_log | grep 'services enable' | head -1)"
@@ -1000,8 +990,6 @@ K8S_PV_D="scion-hub-${HUB}-shared"
 test_deploy_create_k8s_preflight_unmarked_pv_aborts_before_any_create() {
   fresh_gcloud_state
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   seed_k8s_pv_unmarked "$K8S_PV_D"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   assert_true "$([[ "$DEPLOY_RC" -ne 0 ]] && echo true || echo false)" \
@@ -1180,8 +1168,6 @@ test_deploy_delete_k8s_unmarked_pv_aborts_before_any_delete() {
 test_deploy_create_squash_script_non_numeric_output_fails_before_any_write() {
   fresh_gcloud_state
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   local config_file
   config_file="$(mktemp)"
   printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" > "$config_file"
@@ -1201,8 +1187,6 @@ test_deploy_create_squash_script_non_numeric_output_fails_before_any_write() {
 test_deploy_create_squash_script_uid_zero_fails_before_any_write() {
   fresh_gcloud_state
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   local config_file
   config_file="$(mktemp)"
   printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" > "$config_file"
@@ -1342,8 +1326,6 @@ echo x)"
 test_deploy_create_tier_on_proxy_settings_yaml_has_shared_dir_storage_block() {
   fresh_gcloud_state
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   run_deploy_create_to_proxy_settings_yaml \
     "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the Phase-5 proxy-mode settings.yaml write"
@@ -1372,8 +1354,6 @@ test_deploy_create_tier_on_proxy_settings_yaml_has_shared_dir_storage_block() {
 test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
   fresh_gcloud_state
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   run_deploy_create_to_settings_yaml \
     "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the settings.yaml write"
@@ -1429,8 +1409,6 @@ test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
 test_deploy_create_tier_on_wires_configured_image_size_to_export_script() {
   fresh_gcloud_state
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   # A non-default size: 20 is also what every other fixture happens to
   # produce (the config default), so it can't distinguish "the configured
   # value was used" from "a hard-coded value was used".
@@ -1464,8 +1442,6 @@ test_deploy_create_tier_on_existing_vm_promotes_current_ip() {
   fresh_gcloud_state
   seed_instance "$INSTANCE_NAME" "us-central1-b"
   seed_cluster "mycluster" "default" "mig-a"
-  seed_mig "mig-a" "template-a"
-  seed_template "template-a" "gke-mycluster-abc123-node"
   run_deploy_create_wait_for "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" \
     "addresses-create-completed"
   local log

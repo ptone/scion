@@ -150,128 +150,147 @@ STDIN
 }
 
 # =====================================================================
-# Discovery: bound to the cluster's own node pools / instance groups /
-# instance templates, never to instance-name string matching.
+# Discovery: the node tag is read from the cluster's own GKE-managed
+# firewall rules, the same mechanism for Standard and Autopilot.
 # =====================================================================
 
 test_discover_standard_shape() {
   fresh_gcloud_state
-  GKE_NAME="democluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "democluster" "$NETWORK" \
-    "https://www.googleapis.com/compute/v1/projects/${PROJECT}/zones/us-central1-a/instanceGroupManagers/gke-democluster-default-pool-abc12345-grp"
-  seed_mig "gke-democluster-default-pool-abc12345-grp" \
-    "https://www.googleapis.com/compute/v1/projects/${PROJECT}/global/instanceTemplates/gke-democluster-default-pool-abc12345"
-  seed_template "gke-democluster-default-pool-abc12345" "gke-democluster-abc12345-node,http-server"
+  GKE_NAME="scion-agents"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "scion-agents" "$NETWORK"
+  seed_pod_cidr "scion-agents" "10.1.128.0/17"
+  clear_gke_node_tag_rules "scion-agents"
+  seed_gke_node_tag_rules "scion-agents" "$NETWORK" "10.1.128.0/17" \
+    "gke-scion-agents-bd6d1459-node" "gke-scion-agents-bd6d1459-node" "bd6d1459"
 
   hybrid_discover "$NETWORK"
-  assert_eq "gke-democluster-abc12345-node" "$GKE_NODE_TAG" "should discover the Standard node tag via its instance template"
-  assert_eq "10.128.0.0/20" "$GKE_NODE_SUBNET_CIDR" "should discover the node subnet's primary CIDR for a Standard cluster"
+  assert_eq "gke-scion-agents-bd6d1459-node" "$GKE_NODE_TAG" \
+    "should discover the node tag via the cluster's GKE-managed firewall rules"
+  assert_eq "10.128.0.0/20" "$GKE_NODE_SUBNET_CIDR" "should discover the node subnet's primary CIDR"
 }
 
+# Autopilot node instance groups, templates and instances are not visible
+# as Compute resources in the project (a 404 on every instance-group
+# describe, even for a cluster with running nodes) -- discovery must
+# never depend on reading them, for either cluster type.
 test_discover_autopilot_shape() {
   fresh_gcloud_state
   GKE_NAME="aplcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "aplcluster" "$NETWORK" \
-    "https://www.googleapis.com/compute/v1/projects/${PROJECT}/zones/us-central1-a/instanceGroupManagers/gk3-aplcluster-nap-abcdef-grp"
-  seed_mig "gk3-aplcluster-nap-abcdef-grp" "gk3-aplcluster-nap-abcdef-template"
-  seed_template "gk3-aplcluster-nap-abcdef-template" "gke-aplcluster-abcdef-node"
+  seed_cluster "aplcluster" "$NETWORK"
 
   hybrid_discover "$NETWORK"
-  assert_eq "gke-aplcluster-abcdef-node" "$GKE_NODE_TAG" \
-    "should discover the Autopilot node tag via its instance template even though node instances are gk3-prefixed"
-  assert_eq "10.128.0.0/20" "$GKE_NODE_SUBNET_CIDR" "should discover the node subnet's primary CIDR for an Autopilot cluster too"
+  assert_eq "gke-aplcluster-x-node" "$GKE_NODE_TAG" \
+    "should discover the Autopilot node tag via firewall rules, the same path as a Standard cluster"
+  assert_not_contains "$(gcloud_log)" "instance-groups managed describe" \
+    "discovery must never call instance-groups managed describe -- it 404s on Autopilot even when nodes are running"
 }
 
-# A cluster whose managed instance group currently has zero running
-# instances (e.g. an Autopilot pool scaled to zero) still has a template
-# with tags, so discovery must not depend on any live instance existing.
-test_discover_works_with_zero_instances() {
-  fresh_gcloud_state
-  GKE_NAME="idlecluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "idlecluster" "$NETWORK" "mig-idle"
-  seed_mig "mig-idle" "template-idle"
-  seed_template "template-idle" "gke-idlecluster-zz9999-node"
-  hybrid_discover "$NETWORK"
-  assert_eq "gke-idlecluster-zz9999-node" "$GKE_NODE_TAG" \
-    "discovery reads the template, not live instances, so zero current replicas is fine"
-}
-
-# Two clusters whose names prefix-collide ("demo" / "demo-cluster") must
-# never cross-contaminate: discovery is bound to the exact cluster's own
-# describe response and its own instance groups, never to instance-name
-# string matching.
-test_discover_prefix_collision_does_not_cross_contaminate() {
-  fresh_gcloud_state
-  seed_cluster "demo" "$NETWORK" "mig-demo"
-  seed_mig "mig-demo" "template-demo"
-  seed_template "template-demo" "gke-demo-aaa111-node"
-
-  seed_cluster "demo-cluster" "$NETWORK" "mig-democluster"
-  seed_mig "mig-democluster" "template-democluster"
-  seed_template "template-democluster" "gke-demo-cluster-bbb222-node"
-
-  GKE_NAME="demo"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  hybrid_discover "$NETWORK"
-  assert_eq "gke-demo-aaa111-node" "$GKE_NODE_TAG" \
-    "the prefix-colliding cluster's tag must never be picked for a different cluster"
-}
-
-# A template listing a user-added tag before the real GKE node tag must
-# not change which one is picked -- filtering is by pattern, not position.
-test_discover_multi_tag_template_user_tag_first() {
-  fresh_gcloud_state
-  GKE_NAME="multitest"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "multitest" "$NETWORK" "mig-multi"
-  seed_mig "mig-multi" "template-multi"
-  seed_template "template-multi" "custom-user-tag,gke-multitest-xyz-node"
-  hybrid_discover "$NETWORK"
-  assert_eq "gke-multitest-xyz-node" "$GKE_NODE_TAG" \
-    "the real node tag must be picked regardless of tag order in the template"
-}
-
-test_discover_zero_candidates_refused_with_evidence() {
+test_discover_no_all_rule_refused_with_evidence() {
   fresh_gcloud_state
   GKE_NAME="notagcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "notagcluster" "$NETWORK" "mig-notag"
-  seed_mig "mig-notag" "template-notag"
-  seed_template "template-notag" "custom-tag,another-tag"
+  seed_cluster "notagcluster" "$NETWORK"
+  clear_gke_node_tag_rules "notagcluster"
   run_expect_fail hybrid_discover "$NETWORK"
-  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "no matching tag must fail the run"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "no -all rule must fail the run"
   assert_contains "$RUN_OUTPUT" "notagcluster" "error should name the cluster"
-  assert_contains "$RUN_OUTPUT" "custom-tag" "error should list a tag that was found"
-  assert_contains "$RUN_OUTPUT" "another-tag" "error should list the other tag that was found"
+  assert_contains "$RUN_OUTPUT" "missing or ambiguous" "error should say the cluster's firewall rules are missing or ambiguous"
+  assert_contains "$RUN_OUTPUT" "cluster's own firewall rules" "error should say this is fixed on the cluster, not in this script"
+}
+
+test_discover_pod_cidr_matches_no_rule_refused_with_evidence() {
+  fresh_gcloud_state
+  GKE_NAME="nomatchcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "nomatchcluster" "$NETWORK"
+  seed_pod_cidr "nomatchcluster" "10.1.128.0/17"
+  # The -all rule exists, but its source range doesn't cover this
+  # cluster's pod CIDR -- distinct from no -all rule existing at all.
+  seed_gke_node_tag_rules "nomatchcluster" "$NETWORK" "10.60.0.0/17" "gke-nomatchcluster-x-node"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an -all rule whose source range doesn't cover the pod CIDR must fail the run"
+  assert_contains "$RUN_OUTPUT" "gke-nomatchcluster-x-all" "error should list the rule that was found"
+  assert_contains "$RUN_OUTPUT" "10.60.0.0/17" "error should list the source range that was found"
+}
+
+test_discover_candidate_not_ingress_refused_with_evidence() {
+  fresh_gcloud_state
+  GKE_NAME="egresscluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "egresscluster" "$NETWORK"
+  seed_pod_cidr "egresscluster" "10.1.128.0/17"
+  seed_gke_node_tag_rules "egresscluster" "$NETWORK" "10.1.128.0/17" "gke-egresscluster-x-node" \
+    "gke-egresscluster-x-node" "x" "EGRESS"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a matching rule whose direction isn't INGRESS must fail the run"
+  assert_contains "$RUN_OUTPUT" "gke-egresscluster-x-all" "error should list the rule that was found"
+  assert_contains "$RUN_OUTPUT" "direction=EGRESS" "error should list the direction that was found"
 }
 
 test_discover_ambiguous_candidates_refused_with_evidence() {
   fresh_gcloud_state
   GKE_NAME="ambigcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "ambigcluster" "$NETWORK" "mig-a" "mig-b"
-  seed_mig "mig-a" "template-a"
-  seed_mig "mig-b" "template-b"
-  seed_template "template-a" "gke-ambigcluster-aaa-node"
-  seed_template "template-b" "gke-ambigcluster-bbb-node"
+  seed_cluster "ambigcluster" "$NETWORK"
+  seed_pod_cidr "ambigcluster" "10.1.128.0/17"
+  clear_gke_node_tag_rules "ambigcluster"
+  seed_gke_node_tag_rules "ambigcluster" "$NETWORK" "10.1.128.0/17" "gke-ambigcluster-aaa-node" \
+    "gke-ambigcluster-aaa-node" "aaa"
+  seed_gke_node_tag_rules "ambigcluster" "$NETWORK" "10.1.128.0/17" "gke-ambigcluster-bbb-node" \
+    "gke-ambigcluster-bbb-node" "bbb"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "more than one candidate must fail the run, never guess"
   assert_contains "$RUN_OUTPUT" "ambigcluster" "error should name the cluster"
-  assert_contains "$RUN_OUTPUT" "gke-ambigcluster-aaa-node" "error should list the first candidate"
-  assert_contains "$RUN_OUTPUT" "gke-ambigcluster-bbb-node" "error should list the second candidate"
+  assert_contains "$RUN_OUTPUT" "gke-ambigcluster-aaa-all" "error should list the first candidate rule"
+  assert_contains "$RUN_OUTPUT" "gke-ambigcluster-bbb-all" "error should list the second candidate rule"
 }
 
-test_discover_no_node_pools_refused() {
+test_discover_all_rule_two_node_tags_refused_with_evidence() {
   fresh_gcloud_state
-  GKE_NAME="emptycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "emptycluster" "$NETWORK"
+  GKE_NAME="twotagcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "twotagcluster" "$NETWORK"
+  seed_pod_cidr "twotagcluster" "10.1.128.0/17"
+  # VMS_TAG is pinned to exactly the first of the -all rule's two tags:
+  # if the exactly-one-tag check were bypassed, tags[0] is what the rest
+  # of the function would go on to use, and it must agree with -vms here
+  # so a bypassed check shows up as an unexpected SUCCESS, not a second,
+  # different failure (the -all/-vms disagreement check) that would make
+  # this test pass for the wrong reason either way.
+  seed_gke_node_tag_rules "twotagcluster" "$NETWORK" "10.1.128.0/17" \
+    "gke-twotagcluster-x-node,gke-twotagcluster-y-node" "gke-twotagcluster-x-node"
   run_expect_fail hybrid_discover "$NETWORK"
-  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a cluster with no node pools must fail discovery"
-  assert_contains "$RUN_OUTPUT" "emptycluster" "error should name the cluster"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an -all rule with more than one target tag must fail the run"
+  assert_contains "$RUN_OUTPUT" "gke-twotagcluster-x-all has 2 target tag(s)" "error should name the rule and say how many tags it has"
+  assert_contains "$RUN_OUTPUT" "gke-twotagcluster-x-node" "error should list the first tag found"
+  assert_contains "$RUN_OUTPUT" "gke-twotagcluster-y-node" "error should list the second tag found"
+}
+
+test_discover_all_vms_tags_disagree_refused_with_evidence() {
+  fresh_gcloud_state
+  GKE_NAME="disagreecluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "disagreecluster" "$NETWORK"
+  seed_pod_cidr "disagreecluster" "10.1.128.0/17"
+  seed_gke_node_tag_rules "disagreecluster" "$NETWORK" "10.1.128.0/17" \
+    "gke-disagreecluster-x-node" "gke-disagreecluster-y-node"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "the -all and -vms rules' target tags disagreeing must fail the run"
+  assert_contains "$RUN_OUTPUT" "gke-disagreecluster-x-vms" "error should name the -vms rule"
+  assert_contains "$RUN_OUTPUT" "gke-disagreecluster-x-node" "error should list the -all rule's tag"
+  assert_contains "$RUN_OUTPUT" "gke-disagreecluster-y-node" "error should list the -vms rule's disagreeing tag"
+}
+
+test_discover_missing_vms_rule_refused_with_evidence() {
+  fresh_gcloud_state
+  GKE_NAME="novmscluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "novmscluster" "$NETWORK"
+  seed_pod_cidr "novmscluster" "10.1.128.0/17"
+  seed_gke_node_tag_rules "novmscluster" "$NETWORK" "10.1.128.0/17" "gke-novmscluster-x-node"
+  rm -f "${GCLOUD_STUB_STATE_DIR}/gke-node-firewall-rules/gke-novmscluster-x-vms.json"
+  run_expect_fail hybrid_discover "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a missing -vms rule must fail the run"
+  assert_contains "$RUN_OUTPUT" "gke-novmscluster-x-vms" "error should name the missing rule"
 }
 
 test_discover_network_mismatch_refused() {
   fresh_gcloud_state
   GKE_NAME="netmismatch"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "netmismatch" "other-vpc" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-netmismatch-x-node"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "network mismatch must fail the run"
   assert_contains "$RUN_OUTPUT" "other-vpc" "error should name the cluster's actual network"
@@ -294,8 +313,6 @@ test_discover_node_subnet_cidr_from_explicit_fixture() {
   fresh_gcloud_state
   GKE_NAME="subnetcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "subnetcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-subnetcluster-x-node"
   seed_subnet "default-subnet" "10.4.0.0/22"
   hybrid_discover "$NETWORK"
   assert_eq "10.4.0.0/22" "$GKE_NODE_SUBNET_CIDR" "should discover the subnet's actual primary CIDR, not a hardcoded default"
@@ -305,8 +322,6 @@ test_discover_node_subnet_region_from_zonal_location() {
   fresh_gcloud_state
   GKE_NAME="zonalcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1-a"
   seed_cluster "zonalcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-zonalcluster-x-node"
   hybrid_discover "$NETWORK"
   assert_eq "1" "$(gcloud_log | grep -c 'networks subnets describe default-subnet --region=us-central1 ' || true)" \
     "a zonal location (us-central1-a) must resolve to its region (us-central1) for the subnet lookup, not be passed through as-is"
@@ -316,8 +331,6 @@ test_discover_node_subnet_describe_failure_refused() {
   fresh_gcloud_state
   GKE_NAME="subnetfailcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "subnetfailcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-subnetfailcluster-x-node"
   set_subnet_describe_will_fail "default-subnet"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unreadable node subnet must fail discovery"
@@ -328,8 +341,6 @@ test_discover_node_subnet_refuses_zero_slash_zero() {
   fresh_gcloud_state
   GKE_NAME="wideopencluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "wideopencluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-wideopencluster-x-node"
   seed_subnet "default-subnet" "0.0.0.0/0"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "0.0.0.0/0 must never be accepted as an NFS export client range"
@@ -355,8 +366,6 @@ test_discover_node_subnet_refuses_broader_than_slash_8() {
   fresh_gcloud_state
   GKE_NAME="toobroadcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "toobroadcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-toobroadcluster-x-node"
   seed_subnet "default-subnet" "10.0.0.0/7"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "anything broader than /8 must be refused"
@@ -366,8 +375,6 @@ test_discover_node_subnet_accepts_slash_8_boundary() {
   fresh_gcloud_state
   GKE_NAME="boundarycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "boundarycluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-boundarycluster-x-node"
   seed_subnet "default-subnet" "10.0.0.0/8"
   hybrid_discover "$NETWORK"
   assert_eq "10.0.0.0/8" "$GKE_NODE_SUBNET_CIDR" "/8 itself is the narrowest allowed refusal boundary, so it must be accepted"
@@ -2717,41 +2724,19 @@ test_drift_field_matching_reuse_passes() {
 }
 
 # =====================================================================
-# Discovery: regex anchoring and partial-read resilience
+# Discovery: regex anchoring
 # =====================================================================
 
-# The tag pattern is fully anchored: a tag that merely *contains*
+# The node-tag pattern is fully anchored: a tag that merely *contains*
 # "gke-...-node" as a substring, rather than matching it exactly, must
-# never be picked.
-# Each of the three tests below seeds a template with exactly one
-# anchor-violating tag and nothing else. Isolating them like this matters:
-# a combined fixture with all three tags together still fails discovery
-# if the anchoring is dropped entirely (it just fails via the
-# "more than one candidate" path instead of "no candidate", since all
-# three would then match as substrings), so a bare "did it fail"
-# assertion can't actually tell a correctly anchored regex apart from a
-# fully unanchored one. Isolated, a dropped anchor makes that one tag the
-# sole candidate, so discovery *succeeds* instead of failing -- a
-# difference these tests can and do assert on directly.
-
-test_discover_anchor_rejects_tag_violating_both_anchors() {
-  fresh_gcloud_state
-  GKE_NAME="anchortest1"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "anchortest1" "$NETWORK" "mig-anchor"
-  seed_mig "mig-anchor" "template-anchor"
-  seed_template "template-anchor" "x-gke-foo-node-y"
-  run_expect_fail hybrid_discover "$NETWORK"
-  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
-    "a tag matching the pattern only as a substring (violating both anchors) must not be accepted"
-  assert_contains "$RUN_OUTPUT" "x-gke-foo-node-y" "error should list the tag as seen, not silently ignore it"
-}
+# never be accepted as the target tag.
 
 test_discover_anchor_rejects_tag_missing_end_anchor() {
   fresh_gcloud_state
-  GKE_NAME="anchortest2"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "anchortest2" "$NETWORK" "mig-anchor"
-  seed_mig "mig-anchor" "template-anchor"
-  seed_template "template-anchor" "gke-foo-node-y"
+  GKE_NAME="anchortest1"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "anchortest1" "$NETWORK"
+  seed_pod_cidr "anchortest1" "10.1.128.0/17"
+  seed_gke_node_tag_rules "anchortest1" "$NETWORK" "10.1.128.0/17" "gke-foo-node-y"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "a tag whose start matches but doesn't end in -node must not be accepted"
@@ -2760,52 +2745,48 @@ test_discover_anchor_rejects_tag_missing_end_anchor() {
 
 test_discover_anchor_rejects_tag_missing_start_anchor() {
   fresh_gcloud_state
-  GKE_NAME="anchortest3"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "anchortest3" "$NETWORK" "mig-anchor"
-  seed_mig "mig-anchor" "template-anchor"
-  seed_template "template-anchor" "x-gke-foo-node"
+  GKE_NAME="anchortest2"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "anchortest2" "$NETWORK"
+  seed_pod_cidr "anchortest2" "10.1.128.0/17"
+  seed_gke_node_tag_rules "anchortest2" "$NETWORK" "10.1.128.0/17" "x-gke-foo-node"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "a tag that ends in -node but doesn't start with gke- must not be accepted"
   assert_contains "$RUN_OUTPUT" "x-gke-foo-node" "error should list the tag as seen, not silently ignore it"
 }
 
-# One managed instance group whose template can't be read must refuse
-# discovery even when another group in the same cluster has a valid tag,
-# since the unreadable group could be hiding a second, different tag.
-test_discover_partial_mig_read_failure_refused() {
+# The -all rule NAME pattern is also fully anchored: a rule name that
+# merely starts with "gke-...-all" as a prefix, with trailing characters
+# after it, must not be accepted as a candidate.
+test_discover_anchor_rejects_rule_name_missing_end_anchor() {
   fresh_gcloud_state
-  GKE_NAME="partialcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "partialcluster" "$NETWORK" "mig-unreadable" "mig-good"
-  # mig-unreadable is deliberately never seeded via seed_mig, so the
-  # stub's `instance-groups managed describe` fails for it. Even though
-  # the readable sibling yields a single, unambiguous candidate, a
-  # partial view could be hiding a second, different tag on the group
-  # that couldn't be read, so this must still fail rather than guess.
-  seed_mig "mig-good" "template-good"
-  seed_template "template-good" "gke-partialcluster-good-node"
+  GKE_NAME="anchortest3"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_cluster "anchortest3" "$NETWORK"
+  seed_pod_cidr "anchortest3" "10.1.128.0/17"
+  clear_gke_node_tag_rules "anchortest3"
+  # A -vms rule at the name an unanchored match would (wrongly) derive
+  # by stripping the literal last 4 characters of "gke-anchortest3-allish"
+  # ("gke-anchortest3-al-vms") is seeded too, agreeing on the tag: if the
+  # end anchor were dropped, every other check would also pass and
+  # discovery would succeed outright, giving a clean signal rather than a
+  # different failure (a wrong-named missing -vms rule) that would make
+  # this test pass either way.
+  "$PYTHON" -c "
+import json, sys
+d, tag = sys.argv[1], sys.argv[2]
+json.dump({
+    'name': 'gke-anchortest3-allish', 'network': sys.argv[3], 'direction': 'INGRESS',
+    'sourceRanges': ['10.1.128.0/17'], 'targetTags': [tag],
+}, open(d + '/gke-anchortest3-allish.json', 'w'))
+json.dump({
+    'name': 'gke-anchortest3-al-vms', 'network': sys.argv[3], 'direction': 'INGRESS',
+    'sourceRanges': ['10.128.0.0/9'], 'targetTags': [tag],
+}, open(d + '/gke-anchortest3-al-vms.json', 'w'))
+" "${GCLOUD_STUB_STATE_DIR}/gke-node-firewall-rules" "gke-anchortest3-x-node" "$NETWORK"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
-    "an unreadable instance group must fail discovery even if a sibling group yields a candidate"
-  assert_contains "$RUN_OUTPUT" "1 of 2" "error should count the unreadable instance group"
-  assert_contains "$RUN_OUTPUT" "First error: gcloud-stub: managed instance group mig-unreadable not found" \
-    "the first gcloud stderr line must be surfaced"
-}
-
-# When every managed instance group is unreadable, the failure message
-# must say so rather than implying the tags simply didn't match.
-test_discover_all_migs_unreadable_mentions_it() {
-  fresh_gcloud_state
-  GKE_NAME="deadcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "deadcluster" "$NETWORK" "mig-dead-1" "mig-dead-2"
-  # Neither MIG is seeded, so both `instance-groups managed describe`
-  # calls fail.
-  run_expect_fail hybrid_discover "$NETWORK"
-  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "all-unreadable must still fail discovery"
-  assert_contains "$RUN_OUTPUT" "could not be read" "the message should say instance groups could not be read"
-  assert_contains "$RUN_OUTPUT" "2 of 2" "the message should count how many were unreadable"
-  assert_contains "$RUN_OUTPUT" "First error: gcloud-stub: managed instance group mig-dead-1 not found" \
-    "the first gcloud stderr line must be surfaced"
+    "a rule name that starts with gke-...-all but doesn't end there must not be accepted"
+  assert_contains "$RUN_OUTPUT" "missing or ambiguous" "error should say the cluster's firewall rules are missing or ambiguous"
 }
 
 # drift_seed_deny / drift_check_deny — same pattern as the allow-side
@@ -3065,35 +3046,6 @@ test_config_python_preflight_refused() {
 }
 
 # =====================================================================
-# Discovery: unreadable template counted the same as an unreadable MIG
-# and the no-node-pools message pinned.
-# =====================================================================
-
-test_discover_unreadable_template_counted() {
-  fresh_gcloud_state
-  GKE_NAME="templatefailcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "templatefailcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-unreadable"
-  # template-unreadable is deliberately never seeded via seed_template, so
-  # the stub's `instance-templates describe` fails for it.
-  run_expect_fail hybrid_discover "$NETWORK"
-  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unreadable template must fail discovery"
-  assert_contains "$RUN_OUTPUT" "1 of 1" "error should count the unreadable instance group"
-  assert_contains "$RUN_OUTPUT" "First error: gcloud-stub: instance template template-unreadable not found" \
-    "the first gcloud stderr line must be surfaced"
-}
-
-test_discover_no_node_pools_message_pinned() {
-  fresh_gcloud_state
-  GKE_NAME="emptycluster2"; GKE_PROJECT="$PROJECT"
-  # shellcheck disable=SC2034 # read by hybrid_discover (hybrid-tier.sh)
-  GKE_LOCATION="us-central1"
-  seed_cluster "emptycluster2" "$NETWORK"
-  run_expect_fail hybrid_discover "$NETWORK"
-  assert_contains "$RUN_OUTPUT" "no managed instance groups" "the no-node-pools message text should be pinned"
-}
-
-# =====================================================================
 # _hybrid_registry_is_loopback: every spelling of "this VM itself" that
 # a container_images.registry value could take, tested one clause at a
 # time so a single collapsed/overbroad pattern can't hide behind another
@@ -3150,8 +3102,6 @@ test_discover_pod_cidr_from_cluster_fixture() {
   fresh_gcloud_state
   GKE_NAME="podcidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "podcidrcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-podcidrcluster-x-node"
   seed_pod_cidr "podcidrcluster" "10.60.0.0/14"
   hybrid_discover "$NETWORK"
   assert_eq "10.60.0.0/14" "$GKE_POD_CIDR" "must read the actual pod CIDR, not a hardcoded default"
@@ -3161,8 +3111,6 @@ test_discover_pod_cidr_mismatch_refused() {
   fresh_gcloud_state
   GKE_NAME="mismatchcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "mismatchcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-mismatchcluster-x-node"
   seed_pod_cidr_mismatch "mismatchcluster" "10.60.0.0/14" "10.61.0.0/14"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "disagreeing pod CIDR fields must refuse before any create"
@@ -3173,8 +3121,6 @@ test_discover_pod_cidr_ignores_services_cidr() {
   fresh_gcloud_state
   GKE_NAME="svccidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "svccidrcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-svccidrcluster-x-node"
   # A real cluster describe also carries servicesIpv4Cidr (the Service
   # range, not the pod range) alongside clusterIpv4Cidr -- make sure it's
   # never read as if it were the pod CIDR.
@@ -3187,8 +3133,6 @@ test_discover_pod_cidr_alt_field_missing_refused() {
   fresh_gcloud_state
   GKE_NAME="halfpodcidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "halfpodcidrcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-halfpodcidrcluster-x-node"
   # clusterIpv4Cidr present, ipAllocationPolicy.clusterIpv4CidrBlock missing --
   # cross-checking requires both, not just the one that happens to be there.
   seed_pod_cidr_mismatch "halfpodcidrcluster" "10.60.0.0/14" ""
@@ -3201,8 +3145,6 @@ test_discover_pod_cidr_missing_refused() {
   fresh_gcloud_state
   GKE_NAME="nopodcidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
   seed_cluster "nopodcidrcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-nopodcidrcluster-x-node"
   seed_pod_cidr_missing "nopodcidrcluster"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a missing pod CIDR must refuse before any create"
@@ -3215,8 +3157,6 @@ test_discover_pod_cidr_refuses_broader_than_slash_8() {
   # shellcheck disable=SC2034 # read by hybrid_discover (hybrid-tier.sh)
   GKE_LOCATION="us-central1"
   seed_cluster "widepodcidrcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-widepodcidrcluster-x-node"
   seed_pod_cidr "widepodcidrcluster" "10.0.0.0/7"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a pod CIDR broader than /8 must be refused"
@@ -3229,8 +3169,6 @@ test_discover_pod_cidr_refuses_ipv6() {
   # shellcheck disable=SC2034 # read by hybrid_discover (hybrid-tier.sh)
   GKE_LOCATION="us-central1"
   seed_cluster "ipv6podcidrcluster" "$NETWORK" "mig-x"
-  seed_mig "mig-x" "template-x"
-  seed_template "template-x" "gke-ipv6podcidrcluster-x-node"
   # A dual-stack or IPv6-only cluster's pod CIDR: everything downstream
   # of this (firewall ranges, address reservations) is IPv4-only, so an
   # IPv6 pod CIDR must be refused, not silently accepted.
