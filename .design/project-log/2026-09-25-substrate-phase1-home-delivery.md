@@ -251,3 +251,75 @@ no existing import relationship in either direction.
   C-1 sub-decision (round 22) recording the every-component guard's
   consequence for targets under a system symlink, the `422` status and its
   two stable codes, and the workaround.
+
+## Round 23 review fixes
+
+The prior round's `422` body was a declared wire contract (a comment on
+`bootstrapPathError` says so) but nothing pinned its exact bytes, and the
+broker's own parser had a latent split bug on a path containing its own
+delimiter text. Fixed, test-only on the wire-format side plus two small
+production hardenings:
+
+- **Golden, byte-exact body assertions.** Both of `pkg/sciontool/substrate/
+  server_test.go`'s `422` tests (the symlink case and the relative-path
+  case) now compare the response body against an exact `want` string built
+  from `codeBootstrap*`, `strconv.Quote` on the path, and the fixed
+  `" rejected: "` / `errInvalidBootstrapPath.Error()` pieces, including the
+  trailing `"\n"` `http.Error`'s own `Fprintln` appends — a `Contains` check
+  alone would stay green even if the format changed shape entirely (e.g.
+  dropping the quotes, or renaming the delimiter). `pkg/runtime/
+  substrate_runtime_test.go`'s `TestSubstrateRun_BootstrapPathRejectedSurfacesCodeAndPathNoContent`
+  fixture is now built the same byte-exact way (mirrored literal, since the
+  two packages have no import relationship to share a helper across —
+  same reasoning as the size-cap constants above) and cross-references the
+  serve-side golden test by name in a comment; a format change on either
+  side now has to update both, or one of the two test suites fails.
+- **Broker parser fix.** `parseBootstrapPathError` used to find the
+  `" rejected: "` delimiter with a plain `strings.Index` over the whole
+  remainder, which can match *inside* the quoted path itself (e.g. a
+  directory literally named `not rejected: yet`) and hand `strconv.Unquote`
+  a truncated, unparsable fragment — silently falling back to an empty
+  code/path. It now uses `strconv.QuotedPrefix` to find exactly where the
+  quoted path ends first, then checks that what follows starts with the
+  delimiter. A test with such a path is added alongside the existing
+  round-22 `TestParseBootstrapPathError` round-trip case.
+- **Log/error quoting.** `handleBootstrap`'s `422` log line named the
+  rejected path twice — once raw, once (already quoted) inside the error
+  text it also logged — so an embedded newline in the path could split the
+  log line into two, forging a second entry. It now logs the error alone
+  (`%v`, not `%s` of the raw path), which already names the path exactly
+  once, quoted. Symmetrically, the broker's `bootstrapPathRejectedError.Error()`
+  now uses `%q` instead of `%s` for the path, for the same reason (the
+  parser hands it an already-unquoted string, so a control byte would
+  otherwise reach the returned error's text raw) and so an empty path
+  reads as `""` rather than a confusing double space. The broker's
+  structured `slog` log line for the same event needed no code change —
+  `slog`'s own key/value attribute encoding already quotes a value that
+  needs it.
+- **Fallback path tested.** A `422` with a body `parseBootstrapPathError`
+  can't parse (no code, not this contract's shape) previously exercised
+  only the parser in isolation. `TestSubstrateRun_CleanupOnFailure` gained a
+  case posting a bare `"garbage"` body through the full `Run` path,
+  asserting the resulting error still reads `"...(422): garbage"` (the
+  fallback branch, never a panic or a silent success) and that cleanup
+  still runs. A second, dedicated test captures the broker's log output
+  (same pattern as `common_test.go`'s
+  `TestRunSimpleCommand_NoSecretsInDebugLog`) to prove that when the body
+  *does* parse, the log line actually carries the code and path — the prior
+  round asserted this only via the returned error's text, never against the
+  log line itself.
+- **Citation cleanup.** Four `phase1-spec.md` citations added in the prior
+  round (in `bootstrapPathError`'s doc comment, `bootstrapPathRejectedError`'s
+  doc comment, `Run`'s `errors.As` block, and `handleBootstrap`'s `422`
+  branch) pointed at a file that isn't in this repo. Replaced each with a
+  pointer to `deploy/substrate/README.md`'s "No symlink traversal in a
+  target's path" note, which already documents the same thing. This is a
+  narrow, scoped cleanup of only the newly-added citations from this range;
+  it is not the broader pre-existing-citation consolidation, which is a
+  separate, already-tracked item.
+
+None of the above changes the `422` body's actual wire shape (still
+`"<code>: bootstrap file <quoted path> rejected: <detail>"`), so
+`deploy/substrate/README.md` and `phase1-spec.md`'s Addendum B needed no
+content changes — only the citation redirects above, which point at
+README, not restate it.

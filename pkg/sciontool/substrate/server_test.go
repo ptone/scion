@@ -24,11 +24,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
 // realTempDir returns t.TempDir() with any symlinks in its path resolved.
@@ -801,11 +804,18 @@ func TestBootstrap_SymlinkedFileRejectionSurfacesAs422WithStableCode(t *testing.
 		t.Fatalf("status = %d, want 422", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, codeBootstrapPathSymlink) {
-		t.Errorf("response body = %q, want it to contain the stable code %q", body, codeBootstrapPathSymlink)
-	}
-	if !strings.Contains(body, targetPath) {
-		t.Errorf("response body = %q, want it to contain the rejected path %q", body, targetPath)
+	// Golden, byte-exact body: this is a wire contract with
+	// pkg/runtime.parseBootstrapPathError (substrate_bootstrap.go), which
+	// splits on the literal "bootstrap file "/" rejected: " substrings and
+	// strconv.Unquote's the path in between. pkg/runtime's
+	// TestSubstrateRun_BootstrapPathRejectedSurfacesCodeAndPathNoContent
+	// feeds a byte-identical fixture back through that parser and
+	// cross-references this test by name — a format change here must update
+	// both. The trailing "\n" is http.Error's own Fprintln, not this
+	// package's format.
+	want := codeBootstrapPathSymlink + ": bootstrap file " + strconv.Quote(targetPath) + " rejected: path traverses a symlink\n"
+	if body != want {
+		t.Errorf("response body = %q, want exact golden body %q", body, want)
 	}
 	if strings.Contains(body, "sentinel-secret-content") {
 		t.Errorf("response body leaked file content: %q", body)
@@ -857,11 +867,55 @@ func TestBootstrap_RejectsRelativePath(t *testing.T) {
 		t.Fatalf("status = %d, want 422 for an invalid bootstrap file path", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, codeBootstrapPathInvalid) {
-		t.Errorf("response body = %q, want it to contain the stable code %q", body, codeBootstrapPathInvalid)
+	// Golden, byte-exact body — see the matching comment in
+	// TestBootstrap_SymlinkedFileRejectionSurfacesAs422WithStableCode above
+	// for why this must stay byte-identical to what
+	// pkg/runtime.parseBootstrapPathError expects, and which broker test
+	// mirrors it.
+	want := codeBootstrapPathInvalid + ": bootstrap file " + strconv.Quote("relative/path.txt") + " rejected: " + errInvalidBootstrapPath.Error() + "\n"
+	if body != want {
+		t.Errorf("response body = %q, want exact golden body %q", body, want)
 	}
-	if !strings.Contains(body, "relative/path.txt") {
-		t.Errorf("response body = %q, want it to contain the rejected path %q", body, "relative/path.txt")
+}
+
+// TestBootstrap_RejectedPathLogLineIsSingleLineEvenWithEmbeddedNewline proves
+// that handleBootstrap's log line for a rejected bootstrap path logs the
+// error's own text exactly once (via redactErr(err), which is
+// pathErr.Error() — always quoted via strconv.Quote), never the raw
+// pathErr.path a second time. Before the fix, the raw path was logged
+// unquoted alongside the quoted one, so a newline embedded in the path could
+// split the log line into two, forging a second entry.
+func TestBootstrap_RejectedPathLogLineIsSingleLineEvenWithEmbeddedNewline(t *testing.T) {
+	tmpLog := filepath.Join(t.TempDir(), "agent.log")
+	log.SetLogPath(tmpLog)
+	log.SetQuiet(true)
+	t.Cleanup(func() { log.SetQuiet(false) })
+
+	const forgedPath = "relative/path\nFAKE LOG LINE INJECTED\nmore.txt"
+	srv := NewServer(WithChownOwner(-1, -1))
+	req := BootstrapRequest{
+		Files:        []BootstrapFile{{Path: forgedPath, ContentB64: base64.StdEncoding.EncodeToString([]byte("x"))}},
+		StartCmd:     "true",
+		ControlToken: "tok",
+	}
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+
+	data, err := os.ReadFile(tmpLog)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Errorf("log file had %d lines, want exactly 1 (the embedded newline split it):\n%s", len(lines), data)
+	}
+	if !strings.Contains(lines[0], codeBootstrapPathInvalid) {
+		t.Errorf("log line = %q, want it to contain the stable code %q", lines[0], codeBootstrapPathInvalid)
+	}
+	if strings.Contains(string(data), "FAKE LOG LINE INJECTED\n") {
+		t.Errorf("log file contains a forged line from the embedded newline: %q", data)
 	}
 }
 

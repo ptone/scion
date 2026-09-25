@@ -294,11 +294,19 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 				// path) is the caller's fault, not a server error: answer
 				// 422 with the error's stable Code and its own Path, so the
 				// broker can surface both without depending on this generic
-				// message's exact text (phase1-spec.md Addendum B).
+				// message's exact text (see deploy/substrate/README.md's "No
+				// symlink traversal in a target's path" note).
 				// Path is configuration, not secret — file content is what
 				// must never appear here, and pathErr.Error() never
 				// includes it.
-				log.Error("bootstrap: rejected file %s: %s", pathErr.path, redactErr(err))
+				//
+				// Log redactErr(err) alone, not pathErr.path separately:
+				// err.Error() (== pathErr.Error()) already names the path,
+				// quoted via strconv.Quote, so it is always a single line —
+				// logging pathErr.path a second time here would repeat it
+				// unquoted, letting an embedded newline split the log line
+				// (or forge a second one).
+				log.Error("bootstrap: rejected file: %v", redactErr(err))
 				http.Error(w, pathErr.Error(), http.StatusUnprocessableEntity)
 				return
 			}

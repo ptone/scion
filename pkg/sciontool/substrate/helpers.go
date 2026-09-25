@@ -50,7 +50,8 @@ const (
 // failure gets. Path is always the bootstrap file's own Path exactly as the
 // caller sent it — never an internal ancestor mkdirAllTracked found the
 // problem at, and never file content, which is secret-grade and must never
-// reach a response or a log line (phase1-spec.md §2.1).
+// reach a response or a log line (see deploy/substrate/README.md's "No
+// symlink traversal in a target's path" note).
 type bootstrapPathError struct {
 	code   string
 	path   string

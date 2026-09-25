@@ -643,16 +643,27 @@ func parseBootstrapPathError(body string) (code, path, detail string, ok bool) {
 	}
 	code = body[:i]
 	rest := body[i+len(bootstrapPathErrorMiddle):]
-	j := strings.Index(rest, bootstrapPathErrorTail)
-	if j < 0 {
-		return "", "", "", false
-	}
-	quotedPath := rest[:j]
-	detail = rest[j+len(bootstrapPathErrorTail):]
-	p, err := strconv.Unquote(quotedPath)
+
+	// The path is a Go-quoted string (strconv.Quote on the server side), so
+	// find exactly where it ends with strconv.QuotedPrefix rather than
+	// strings.Index-ing for bootstrapPathErrorTail directly in rest: the
+	// quoted path itself can legitimately contain the literal substring
+	// " rejected: " (e.g. a directory named "not rejected: yet"), which would
+	// make a naive Index find a tail *inside* the quotes and hand
+	// strconv.Unquote a truncated, unparsable fragment.
+	q, err := strconv.QuotedPrefix(rest)
 	if err != nil {
 		return "", "", "", false
 	}
+	afterQuote := rest[len(q):]
+	if !strings.HasPrefix(afterQuote, bootstrapPathErrorTail) {
+		return "", "", "", false
+	}
+	p, err := strconv.Unquote(q)
+	if err != nil {
+		return "", "", "", false
+	}
+	detail = afterQuote[len(bootstrapPathErrorTail):]
 	return code, p, detail, true
 }
 
@@ -660,10 +671,11 @@ func parseBootstrapPathError(body string) (code, path, detail string, ok bool) {
 // server answers 422 for a bootstrap file whose Path failed validation (see
 // pkg/sciontool/substrate's bootstrapPathError — this is the client-side
 // mirror of that wire contract). Code and Path are configuration, never
-// secret (phase1-spec.md Addendum B), and are safe to log and return as-is.
-// If the body doesn't parse (parseBootstrapPathError's ok is false), Code
-// and Path stay empty and Detail carries the raw body, so nothing is
-// silently dropped either way.
+// secret (see deploy/substrate/README.md's "No symlink traversal in a
+// target's path" note), and are safe to log and return as-is. If the body
+// doesn't parse (parseBootstrapPathError's ok is false), Code and Path stay
+// empty and Detail carries the raw body, so nothing is silently dropped
+// either way.
 type bootstrapPathRejectedError struct {
 	code   string
 	path   string
@@ -674,7 +686,12 @@ func (e *bootstrapPathRejectedError) Error() string {
 	if e.code == "" && e.path == "" {
 		return fmt.Sprintf("substrate: bootstrap rejected a file path (422): %s", e.detail)
 	}
-	return fmt.Sprintf("substrate: bootstrap rejected file %s (%s): %s", e.path, e.code, e.detail)
+	// %q, not %s, for e.path: parseBootstrapPathError unquotes the path out
+	// of the 422 body, so a newline or other control byte in a configured
+	// target would otherwise land raw in this error's text. Quoting also
+	// makes an empty path visible as "" instead of turning "file  (...)"
+	// into a confusing double space.
+	return fmt.Sprintf("substrate: bootstrap rejected file %q (%s): %s", e.path, e.code, e.detail)
 }
 
 // postBootstrap sends the bootstrap payload through the router, authorized

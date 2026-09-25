@@ -430,7 +430,14 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 			// and the path explicitly here, rather than relying on a caller
 			// to notice them inside the generic returned-error text below.
 			// Both are configuration, never file content, so they're safe
-			// in a log line (phase1-spec.md Addendum B).
+			// in a log line (see deploy/substrate/README.md's "No symlink
+			// traversal in a target's path" note). This is a structured
+			// slog call (key/value attrs, not a format string), so a
+			// newline or control byte in pathErr.path is already quoted by
+			// slog's own attribute encoding — no separate %q is needed here
+			// the way it is for bootstrapPathRejectedError.Error()'s plain
+			// fmt.Sprintf (substrate_bootstrap.go), which has no such
+			// built-in quoting.
 			runtimeLog.Error("substrate: bootstrap rejected a file path",
 				"atespace", atespace, "actor", actorName, "code", pathErr.code, "path", pathErr.path)
 		}

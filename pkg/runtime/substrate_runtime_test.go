@@ -15,8 +15,10 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -607,6 +609,19 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 			wantErr:    "bootstrapped by another caller",
 			wantAbsent: bootstrapHijackSentinel,
 		},
+		{
+			// A 422 whose body doesn't match the wire contract (no stable
+			// code, unparseable by parseBootstrapPathError) must still fail
+			// with a sane, bounded, content-free error — never silently
+			// succeed or panic — via bootstrapPathRejectedError's fallback
+			// branch (code == "" && path == "").
+			name: "bootstrap 422 with unparseable body falls back to the raw body",
+			inject: func(fc *fakeControlClient, fa *fakeActorServer) {
+				fa.bootstrapStatus = http.StatusUnprocessableEntity
+				fa.bootstrapBody = "garbage"
+			},
+			wantErr: "(422): garbage",
+		},
 	}
 
 	for _, tc := range cases {
@@ -665,7 +680,13 @@ func TestSubstrateRun_BootstrapPathRejectedSurfacesCodeAndPathNoContent(t *testi
 	defer closeServer()
 
 	fa.bootstrapStatus = http.StatusUnprocessableEntity
-	fa.bootstrapBody = `bootstrap_path_symlink: bootstrap file "` + rejectedPath + `" rejected: path traverses a symlink`
+	// Golden, byte-exact fixture: mirrors pkg/sciontool/substrate's
+	// TestBootstrap_SymlinkedFileRejectionSurfacesAs422WithStableCode body
+	// exactly, including strconv.Quote on the path and the trailing "\n"
+	// http.Error's Fprintln appends — this is the wire contract
+	// parseBootstrapPathError depends on. A format change on either side
+	// must update both tests.
+	fa.bootstrapBody = "bootstrap_path_symlink: bootstrap file " + strconv.Quote(rejectedPath) + " rejected: path traverses a symlink\n"
 
 	cfg := testSubstrateRunConfig()
 	cfg.ResolvedSecrets = []api.ResolvedSecret{
@@ -689,6 +710,50 @@ func TestSubstrateRun_BootstrapPathRejectedSurfacesCodeAndPathNoContent(t *testi
 	calls := rec.list()
 	if !containsCall(calls, "DeleteActor") {
 		t.Errorf("Run() failure did not clean up with DeleteActor; calls = %v", calls)
+	}
+}
+
+// TestSubstrateRun_BootstrapPathRejectedLogsCodeAndPath proves the other half
+// of the fallback-and-logging contract: when the 422 body DOES parse, Run's
+// explicit runtimeLog.Error call (substrate_runtime.go, right before
+// cleanup()) carries the parsed code and path as attributes — this was
+// previously exercised only indirectly (via the returned error), never
+// asserted against the log line itself.
+func TestSubstrateRun_BootstrapPathRejectedLogsCodeAndPath(t *testing.T) {
+	const rejectedPath = "/home/scion/.config/nested/secret.json"
+
+	rec := &callRecorder{}
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	fa.bootstrapStatus = http.StatusUnprocessableEntity
+	fa.bootstrapBody = "bootstrap_path_symlink: bootstrap file " + strconv.Quote(rejectedPath) + " rejected: path traverses a symlink\n"
+
+	// runtimeLog is slog.Default() with a "subsystem" attr (see common.go),
+	// which by default bridges to the stdlib "log" package — the same
+	// capture pattern common_test.go's TestRunSimpleCommand_NoSecretsInDebugLog
+	// uses.
+	var buf bytes.Buffer
+	origWriter := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(origWriter)
+		log.SetFlags(origFlags)
+	})
+
+	_, err := rt.Run(context.Background(), testSubstrateRunConfig())
+	if err == nil {
+		t.Fatal("Run() expected an error, got nil")
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "bootstrap_path_symlink") {
+		t.Errorf("log output missing the code %q; log:\n%s", "bootstrap_path_symlink", logOutput)
+	}
+	if !strings.Contains(logOutput, rejectedPath) {
+		t.Errorf("log output missing the path %q; log:\n%s", rejectedPath, logOutput)
 	}
 }
 
@@ -717,6 +782,26 @@ func TestParseBootstrapPathError(t *testing.T) {
 
 	if _, _, _, ok := parseBootstrapPathError("failed to write bootstrap files"); ok {
 		t.Error("parseBootstrapPathError on a generic 500 body: ok = true, want false")
+	}
+
+	// A path that itself contains the literal tail delimiter
+	// (" rejected: ") must not make the parser split inside the quoted path.
+	// Before the fix, strings.Index found this occurrence first, handed
+	// strconv.Unquote a truncated fragment, and ok came back false.
+	tailInPath := `/home/scion/not rejected: yet/file`
+	bodyWithTailInPath := `bootstrap_path_invalid: bootstrap file ` + strconv.Quote(tailInPath) + ` rejected: a path component exists and is not a directory`
+	code2, path2, detail2, ok2 := parseBootstrapPathError(bodyWithTailInPath)
+	if !ok2 {
+		t.Fatalf("parseBootstrapPathError(%q): ok = false, want true (path contains %q)", bodyWithTailInPath, bootstrapPathErrorTail)
+	}
+	if path2 != tailInPath {
+		t.Errorf("path = %q, want %q", path2, tailInPath)
+	}
+	if code2 != "bootstrap_path_invalid" {
+		t.Errorf("code = %q, want %q", code2, "bootstrap_path_invalid")
+	}
+	if detail2 != "a path component exists and is not a directory" {
+		t.Errorf("detail = %q, want %q", detail2, "a path component exists and is not a directory")
 	}
 }
 
