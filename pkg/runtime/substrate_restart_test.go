@@ -198,9 +198,9 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
-// TestSubstrateRestart_RecordlessActors_ExcludesDeletingState covers the
-// chosen fix for a same-project, no-restart false positive (M1): a
-// record-less actor already in ACTOR_STATE_DELETING must never be counted
+// TestSubstrateRestart_RecordlessActors_ExcludesDeletingState pins a
+// same-project, no-restart false positive: a record-less actor already in
+// ACTOR_STATE_DELETING must never be counted
 // (Stop is Delete in Phase 1, and Delete's fire-and-forget DeleteActor call
 // can leave the actor listed, in DELETING, for a while after the in-memory
 // record is already gone — see Delete's and RecordlessActors' doc comments),
