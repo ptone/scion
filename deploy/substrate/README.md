@@ -867,11 +867,15 @@ process — drops both for every actor a *previous* process created. The
 actors themselves, their egress policies, and their workers are untouched on
 the cluster; only this broker's memory of them is gone (ptone/scion#1808).
 
-**The invariant: no delete or stop reports success while the actor exists in
-any state other than `ACTOR_STATE_DELETING`.** (The `DELETING` exception is
-consequence (d) below — it has nothing to do with a restart by itself, but
-it can combine with one.) Three exit paths matter, and all three are
-covered, not just the main one:
+**The invariant: no delete or stop reports success while the actor exists,**
+with two exceptions: an actor already in `ACTOR_STATE_DELETING`, including
+the pre-restart case in consequence (d) below (the `DELETING` exclusion has
+nothing to do with a restart by itself, but can combine with one); and a
+pre-restart actor under a second substrate profile on a different ateapi
+endpoint, which is not probed until that profile's first `Run` (see "The
+record-less-actor probe only reaches..." below; not applicable to this
+deployment, which has one substrate profile).
+Three exit paths matter, and all three are covered, not just the main one:
 - **Delete/stop of a pre-restart agent by its project-scoped slug returns
   HTTP 409 `substrate_agent_identity_unknown`** — whether the slug resolves
   to nothing at all, or resolves to a file-only target because this
@@ -924,7 +928,7 @@ from the response body:
 #    the SPECIFIC pod that logged the line you care about, not an arbitrary
 #    one (`kubectl logs deploy/...` picks one pod for you, which may not be
 #    the one that logged this WARN):
-kubectl -n "${BROKER_NAMESPACE}" logs --prefix -l app=scion-substrate-broker \
+kubectl -n "${BROKER_NAMESPACE}" logs --prefix --tail=-1 -l app=scion-substrate-broker \
   | grep -i "agent identity unknown"
 #    Each matching line is prefixed "[pod/<pod-name>/scion-substrate-broker]"
 #    -- note that pod name (call it POD below) and read the
@@ -973,33 +977,38 @@ kubectl -n "${BROKER_NAMESPACE}" get pod "$POD" \
 #    is invisible to this whole mechanism). There is no dedicated CLI for
 #    this; call the ateapi Control service's DeleteActorEgressPolicy RPC
 #    directly. Keep TLS verification ON: never grpcurl -insecure/-plaintext
-#    against a real cluster endpoint (this cluster's own recorded manual
-#    grpcurl calls used -insecure only because they went through
-#    `kubectl port-forward` to localhost, which cannot present the service's
-#    real certificate -- that shortcut does not apply to a direct
-#    api.${ATE_SYSTEM_NAMESPACE}.svc:443 call):
-ATE_TOKEN=$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
-  --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)
-ATE_HDR=$(mktemp); trap 'rm -f "$ATE_HDR"' EXIT INT TERM
-printf 'Authorization: Bearer %s\n' "$ATE_TOKEN" > "$ATE_HDR"; chmod 600 "$ATE_HDR"
-unset ATE_TOKEN
-grpcurl -H @"$ATE_HDR" \
+#    against a real cluster endpoint.
+#
+#    Per deployment, fill in: <atespace> and <actor> (from step 0); the
+#    CA bundle passed to -cacert, which is the CA that signs the
+#    api.${ATE_SYSTEM_NAMESPACE}.svc certificate (cluster-internal, not in a
+#    public trust store; with this ConfigMap it is the ClusterTrustBundle
+#    named by substrate.cluster_trust_bundle, or the file named by
+#    substrate.ca_file if you use that instead); and a host to run grpcurl
+#    from that can resolve and reach api.${ATE_SYSTEM_NAMESPACE}.svc:443
+#    directly (inside the cluster network).
+#
+#    The token is held in an exported environment variable, never written to
+#    a file and never put on grpcurl's command line: with -expand-headers,
+#    grpcurl itself replaces ${ATE_TOKEN} in the header with the value of
+#    that environment variable, and the single quotes stop the shell from
+#    expanding it first, so argv only ever contains the literal text
+#    '${ATE_TOKEN}'.
+kubectl get clustertrustbundle "${CLUSTER_TRUST_BUNDLE_NAME}" \
+  -o jsonpath='{.spec.trustBundle}' > ate-ca.pem
+export ATE_TOKEN="$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
+  --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
+grpcurl -cacert ate-ca.pem -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
   -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
   api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/DeleteActorEgressPolicy
-#    NEEDS VERIFICATION: the CA that authenticates api.${ATE_SYSTEM_NAMESPACE}.svc's
-#    certificate is cluster-internal, not in a public trust store (the
-#    broker itself trusts it via the ca_file/cluster_trust_bundle settings in
-#    this ConfigMap, not a system default) -- run grpcurl somewhere that same
-#    trust material is available (e.g. its own -cacert, or a pod/exec
-#    context that already has it), never with -insecure/-plaintext. Not
-#    confirmed against a real cluster in this pass.
 
 #    Verify the policy is actually gone before touching the actor — an
 #    orphaned policy after step 2 is invisible to this whole mechanism, so
 #    this check matters, not just as a courtesy:
-grpcurl -H @"$ATE_HDR" \
+grpcurl -cacert ate-ca.pem -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
   -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
   api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/GetActorEgressPolicy
+unset ATE_TOKEN
 #    Expect a NotFound gRPC status. Anything else means the policy is still
 #    there; do not proceed to step 2 until it reads NotFound.
 
@@ -1071,8 +1080,8 @@ left behind.
   stop-then-delete race into a false 409). The consequence: a delete of its
   slug returns the ordinary idempotent 404, and the hub drops its agent
   record, while the actor itself may still be sitting in the cluster,
-  stuck in `DELETING`. This is the one exception to the invariant stated
-  above. A process-local record of which actors this broker process itself
+  stuck in `DELETING`. This is one of the two exceptions to the invariant
+  stated above. A process-local record of which actors this broker process itself
   asked to delete could not distinguish this case either: why the deletion
   never finished is below scion, in ateapi or the cluster it manages, not
   anything this process could have tracked about its own requests.

@@ -1703,9 +1703,12 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, filter map[string]stri
 // registered runtime implements RecordlessActorProber (currently just
 // substrate). Where projectScopedTarget/LookupContainerID collapse every
 // non-success outcome into "" — a transient list failure looks exactly like
-// a genuine not-found — this keeps them apart: a returned error always wraps
-// errLookupListFailed and means "the check itself could not run", while a
-// nil error with target=="" means the check ran and genuinely found nothing.
+// a genuine not-found — this keeps them apart: a returned error means "the
+// check itself could not run", while a nil error with target=="" means the
+// check ran and genuinely found nothing. Every lookup error wraps
+// errLookupListFailed; the one exception is the unwrapped error returned
+// when s.manager is nil, which still becomes a 5xx, because stopAgent
+// answers any non-nil error from here with RuntimeError (HTTP 500).
 // This is a full, independent re-implementation of LookupContainerID's
 // resolution steps rather than a wrapper around it, specifically so that
 // LookupContainerID/projectScopedTarget stay untouched — and therefore
@@ -1717,6 +1720,15 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, filter map[string]stri
 // produces a match: see auxListAgentsSorted for why a match is authoritative
 // over an error seen elsewhere, and why the scan runs in a fixed order
 // (ptone/scion#1808).
+//
+// The rule is: 5xx when the lookup cannot determine the target, i.e. any
+// list error before a match is found. The two resolution stages run in
+// order, and an error in the earlier one is decisive: if the project-scoped
+// stage finds no match and its auxiliary scan returns an error, this
+// returns that error (5xx, fail-closed) without running the unscoped
+// fallback stage (scion.name + agentsWithoutProjectLabel), even though that
+// fallback stage might have matched. That errs toward an explicit failure,
+// never toward a false not-found or a wrong target.
 func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID string) (string, error) {
 	if s.manager == nil {
 		return "", fmt.Errorf("agent manager not available")

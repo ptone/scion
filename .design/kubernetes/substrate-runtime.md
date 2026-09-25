@@ -702,8 +702,14 @@ every runtime — not a substrate-specific mechanism:
   order, and a match found on any of them is authoritative: an earlier or
   later auxiliary runtime's own list error only becomes "could not
   determine" when no auxiliary runtime produces a match at all, so the
-  outcome no longer depends on Go's randomized map iteration order the way
-  an earlier version of this fix did. Any of these outcomes returns an
+  outcome never depends on Go's randomized map iteration order. The rule is
+  5xx when the lookup cannot determine the target: any list error before a
+  match is found. The lookup runs a project-scoped stage and then an
+  unscoped fallback stage (`scion.name` plus entries with no project label),
+  and an error in the project-scoped stage is decisive: if that stage finds
+  no match and its auxiliary scan errors, the lookup returns 5xx
+  (fail-closed) without running the fallback stage, even though the
+  fallback stage might have matched. Any of these outcomes returns an
   explicit 5xx rather than falling back to the idempotent 202. Every runtime
   without that capability is unaffected: `hasRecordlessProber` is false and
   `stopAgent` keeps calling `projectScopedTarget` exactly as before,
@@ -716,14 +722,17 @@ every runtime — not a substrate-specific mechanism:
   stop-then-delete sequence — no restart at all — would falsely report
   "broker restarted" for as long as that actor stayed listed. Excluding it
   is safe with respect to the egress leak this whole mechanism exists to
-  prevent: the `ActorState` enum (`third_party/ateapipb/ateapi.proto`) has
-  no state after `DELETING` for an actor to revert to (a deleted actor
-  simply stops being listed), and `ActorStatus.state` is required on every
+  prevent: there is no transition out of `DELETING` back to a live state;
+  `RevertActor` only accepts CRASHED/RUNNING/PAUSED actors
+  (`third_party/ateapipb/ateapi.proto:46-47`), and a deleted actor simply
+  stops being listed. `ActorStatus.state` is also required on every
   listed actor, so a record-less `DELETING` actor can only ever disappear
   next, never re-enter a live state. An actor already in `DELETING` also
   already had its egress policy removed first (Delete's own ordering,
   above), so there is nothing left for the count to protect.
-  **It is the one documented exception to the invariant stated above**: a
+  **It is one of two documented exceptions to the invariant stated above**
+  (the other is a second substrate profile on a different ateapi endpoint,
+  not probed until its first `Run`; see `deploy/substrate/README.md`): a
   pre-restart actor that was already `DELETING` when the broker restarted
   (e.g. a pre-restart `Stop` that never finished) is excluded too, so a
   delete of its slug returns the ordinary idempotent `404` and the hub drops
