@@ -2677,6 +2677,11 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 	if s.config.ForceRuntime != "" {
 		if s.config.ForceRuntime == s.runtime.Name() {
+			// ForceRuntime == "substrate" returns s.manager here,
+			// bypassing the per-profile substrate config resolution below
+			// entirely — a second substrate profile's config (e.g. its own
+			// egress_allow) is not reachable under ForceRuntime. See
+			// ptone/scion#1818.
 			return s.manager
 		}
 		s.auxiliaryRuntimesMu.RLock()
@@ -2703,7 +2708,15 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 		return s.manager
 	}
 
-	if runtimeType == s.runtime.Name() {
+	// Every substrate profile shares the type string "substrate" —
+	// including the default one — so unlike every other runtime type, a
+	// type-string match here does not mean "same config": a second
+	// substrate profile can carry its own V1SubstrateConfig (e.g. its own
+	// egress_allow) and needs its own manager, not the default's (see
+	// ptone/scion#1818 for this type-vs-instance short-circuit in
+	// general). Substrate never takes the shortcut below; every other
+	// type's behavior here is unchanged.
+	if runtimeType == s.runtime.Name() && runtimeType != "substrate" {
 		return s.manager
 	}
 
