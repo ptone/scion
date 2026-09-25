@@ -33,11 +33,15 @@ import (
 // Note for anyone running the wider -tags integration suite alongside these
 // tests: pkg/store/entadapter has one unrelated, pre-existing failure,
 // TestUpsertConversationByExternalRef_FieldClassification/B_immutable (a
-// nanosecond-vs-microsecond timestamp precision comparison). Verified by
-// running it in isolation both with and without this file's migration fix —
-// identical failure either way — so it is not something the fresh-Postgres
-// migration fix surfaces or interacts with; it is simply the first time
-// anyone ran that assertion against real Postgres instead of SQLite.
+// nanosecond-vs-microsecond timestamp precision comparison). Verified
+// directly, isolating just that one test: with the pre-fix
+// normalizeBrokerLabels, it fails during setup at the migration step
+// (SQLSTATE 25P02, the same production error this file's tests cover) and
+// never reaches the CreatedAt assertion at all; with the fix applied, setup
+// succeeds and the test proceeds to fail on the precision comparison
+// instead. So this fix is what makes that assertion reachable in the first
+// place — it doesn't cause the failure, but it isn't invisible to it
+// either. Pre-existing and out of scope for this fix regardless.
 func TestMain(m *testing.M) {
 	MainSetup()
 	code := m.Run()
