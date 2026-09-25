@@ -35,17 +35,6 @@ locals {
   broker_id = uuidv5("dns", "${local.hub_id}.broker.${var.project_id}.scion")
 }
 
-# F-107: plan-time assertion that local.broker_id is actually a UUID --
-# uuidv5 always produces one today, but this catches a future edit to the
-# expression above (e.g. someone swapping in a plain string) before it ever
-# reaches a real apply and repeats the "no runtime brokers available" outage.
-check "broker_id_is_uuid" {
-  assert {
-    condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", local.broker_id))
-    error_message = "local.broker_id must be a canonical UUID (F-107): the Postgres store's runtime_brokers.id column rejects anything else, and settings.yaml's broker_id is rendered directly from this value."
-  }
-}
-
 # --- Bucket (artifacts, signed URLs) ---
 
 resource "google_storage_bucket" "artifacts" {
@@ -145,15 +134,24 @@ resource "google_secret_manager_secret_version" "settings" {
   # F-107: secret_data changing always forces a replace (Secret Manager
   # versions are add-only in the real API; there is no in-place update of an
   # existing version's data). Without create_before_destroy, Terraform's
-  # default destroy-then-create order would delete this version — and the
-  # data it holds, including the DB password embedded in the rendered
-  # settings.yaml — before the replacement exists, and the running revision
-  # (still mounting the old version by number, see the volume item below)
-  # would lose its settings out from under it. create_before_destroy makes
-  # the new version exist first; the Cloud Run service below is updated to
-  # point at it (a new revision), and only then is the old version destroyed.
+  # default destroy-then-create order would delete this version before the
+  # replacement exists, and the running revision (still mounting the old
+  # version by number, see the volume item below) would lose it out from
+  # under it. create_before_destroy makes the new version exist first; the
+  # Cloud Run service below is updated to point at it (a new revision), and
+  # only then is the old version destroyed.
   lifecycle {
     create_before_destroy = true
+
+    # F-107: a lifecycle precondition, not a top-level check block — check
+    # blocks only warn, they don't fail plan/apply, so they don't actually
+    # stop the "invalid UUID" regression this exists to catch. A
+    # precondition on the resource that renders broker_id into settings.yaml
+    # does fail the plan.
+    precondition {
+      condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", local.broker_id))
+      error_message = "local.broker_id must be a canonical UUID (F-107): the Postgres store's runtime_brokers.id column rejects anything else, and settings.yaml's broker_id is rendered directly from this value."
+    }
   }
 }
 
