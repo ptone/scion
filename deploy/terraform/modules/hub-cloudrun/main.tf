@@ -182,11 +182,11 @@ resource "google_secret_manager_secret" "oidc_signing_key" {
   # created it itself.
   labels = {
     "scion-scope"    = "hub"
-    "scion-scope-id" = var.hub_name
+    "scion-scope-id" = local.hub_id
     "scion-type"     = "internal"
     "scion-name"     = "oidc_signing_key"
     "scion-target"   = "oidc_signing_key"
-    "scion-hub-name" = var.hub_name
+    "scion-hub-name" = local.hub_id
   }
 
   replication {
@@ -322,10 +322,6 @@ resource "google_cloud_run_v2_service" "hub" {
         }
       }
 
-      volume_mounts {
-        name       = "cloudsql"
-        mount_path = "/cloudsql"
-      }
       # mount_path is the parent directory; the secret's item path below
       # supplies the filename, so the resulting file lands at exactly
       # /run/secrets/settings.yaml — the literal file entrypoint.sh checks
@@ -344,6 +340,17 @@ resource "google_cloud_run_v2_service" "hub" {
         name       = "nfs"
         mount_path = local.nfs_mount_path
       }
+      # cloudsql is declared LAST in both this list and volumes{} below, on
+      # purpose (F-104, vm-deploy): the Cloud Run v2 API always returns the
+      # cloud_sql_instance volume/mount last regardless of request order, and
+      # the provider diffs volumes/volume_mounts positionally, not by name —
+      # declaring it anywhere else here is a permanent one-item drift on
+      # every plan. Not an ignore_changes candidate: this makes the
+      # configuration match reality instead of hiding the mismatch.
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
+      }
 
       startup_probe {
         http_get {
@@ -361,12 +368,6 @@ resource "google_cloud_run_v2_service" "hub" {
       }
     }
 
-    volumes {
-      name = "cloudsql"
-      cloud_sql_instance {
-        instances = [var.sql_connection_name]
-      }
-    }
     volumes {
       name = "settings"
       secret {
@@ -392,6 +393,13 @@ resource "google_cloud_run_v2_service" "hub" {
       nfs {
         server = var.nfs_server
         path   = var.nfs_export
+      }
+    }
+    # Declared last — see the matching volume_mounts comment above (F-104).
+    volumes {
+      name = "cloudsql"
+      cloud_sql_instance {
+        instances = [var.sql_connection_name]
       }
     }
   }
