@@ -36,29 +36,88 @@ ever reached the actor.
   per-entry as an unexported, non-wire `decodedSize` field on `bootstrapFile`
   rather than re-decoding base64). The error on overflow names only the cap
   and the total size.
+- `homeBootstrapFiles` also keeps a running total of Stat-reported file sizes
+  during the walk itself, and returns the same cap-shaped error as soon as
+  that total exceeds `maxBootstrapFilesTotalBytes` — before reading the file
+  that tipped it over into memory. This is a conservative early exit against
+  a stray oversized file in a template home; `buildBootstrapFiles`'s
+  post-dedup check is still the authoritative one, since a home file that
+  ends up overridden by a same-path auth/secret file is never counted there.
+- Every bootstrap file's `Path` (home, auth, and file-type secret) is now
+  `filepath.Clean`-ed before dedup. Home's already effectively was
+  (`filepath.Join` cleans internally); auth `ContainerPath` and secret
+  `Target` values that are already absolute previously went through
+  `expandTildeTarget` unchanged, so two differently-spelled but equivalent
+  paths (e.g. a doubled separator) could have produced two wire entries for
+  what should be one path.
+- The skipped-entries log line is now capped at the first 20 relative paths
+  plus the total count, so a home with an unusually large number of skipped
+  non-regular entries can't produce an unbounded log line.
 
 ### Serve side (`pkg/sciontool/substrate/`)
 
-- **Symlink safety fix.** `mkdirAllTracked` previously found the deepest
+- **Symlink safety fix.** `mkdirAllTracked` originally found the deepest
   existing path ancestor via `os.Stat` (follows symlinks) and then delegated
   the rest to `os.MkdirAll` (also `os.Stat`-based). An image shipping a
   pre-existing symlink at an intermediate component — e.g.
   `/home/scion/.config -> /etc` — would have been silently written through:
   `Stat` reports the link's target as an ordinary existing directory, and
   `MkdirAll` creates the remaining path components on the other side of it.
-  **This was a real, exploitable gap, confirmed by test** (see
+  This was a real, exploitable gap, confirmed by test (see
   `TestWriteBootstrapFile_RejectsWriteThroughPreExistingSymlinkDir`): before
   the fix, a bootstrap file targeting a path under a symlinked directory
   landed outside the actor's intended home.
-  Fixed by rewriting `mkdirAllTracked` to walk with `os.Lstat` (never
-  follows) and create only the missing suffix with plain `os.Mkdir` calls,
-  returning a new `errSymlinkComponent` sentinel if any existing component is
-  a symlink. `writeBootstrapFile` wraps that into an error naming only the
-  bootstrap file's own `Path` (never the resolved symlink target or file
-  content) before it reaches the request-scoped log line. The final
-  `os.Rename` in `writeFileAtomicMode` was already safe against the leaf
-  component itself being a symlink (`rename(2)` replaces the directory entry
-  rather than following it), so only the parent-directory walk needed fixing.
+
+  A first fix walked *upward* from `dir` with `os.Lstat` (never follows) to
+  find the deepest already-existing ancestor, then created only the missing
+  suffix with plain `os.Mkdir`. That closed the case where the symlinked
+  component's target was itself missing the remaining subpath, but not the
+  case where it wasn't: `Lstat` only declines to follow its own final
+  argument, so an upward walk that stops at the first existing ancestor never
+  Lstats anything *above* that point. If a symlinked component further up the
+  path already had the remaining subpath pre-created on its far side (e.g.
+  `.config -> /etc` and `/etc/sub` already exists), the upward walk landed on
+  that real directory and the symlink was never noticed — the write still
+  went through it.
+
+  The guarantee `mkdirAllTracked` actually provides now: every existing
+  component of `filepath.Clean(dir)` is Lstat'd, top-down from the first
+  component to `dir` itself (not just the deepest one that happens to
+  exist). The first symlink found anywhere in that walk is rejected
+  (`errSymlinkComponent`); a non-dir component is an error; the first
+  component that doesn't exist marks the start of the missing suffix, which
+  is created top-down with plain `os.Mkdir` calls (never `os.MkdirAll`,
+  which is `os.Stat`-based and would reopen the same hole one level down).
+  Every directory `os.Mkdir` creates is therefore known-real by
+  construction. `writeBootstrapFile` wraps the sentinel into an error naming
+  only the bootstrap file's own `Path` (never the resolved ancestor or any
+  content) before it reaches the request-scoped log line.
+
+  This check is a plain existence check followed by a separate create, not
+  an atomic operation — it is only safe because nothing writes concurrently
+  during bootstrap: `substrate-serve` is the sole writer, the harness has
+  not started yet, and the image is static up to this point. It is not a
+  general TOCTOU-safe guarantee and the code comments say so explicitly.
+
+  The final path component (the file itself) is handled separately: it is
+  never Lstat'd here, because `writeFileAtomicMode`'s `os.Rename(tmp, path)`
+  replaces whatever directory entry currently sits at `path` — including a
+  pre-existing symlink — rather than following it. A symlink at the leaf is
+  therefore safe by construction (atomically replaced, its old target left
+  untouched), which is now also covered by a dedicated test.
+
+  Separately, `writeBootstrapFile` now `filepath.Clean`s the bootstrap
+  file's `Path` once and uses only that cleaned form for both the
+  `mkdirAllTracked` walk and the final write target. Previously the parent
+  directory came from `filepath.Dir(f.Path)` (which cleans internally) but
+  the final `os.Rename` still used the raw, uncleaned `f.Path`. A `..`
+  segment in that raw path is resolved by the kernel at syscall time against
+  whatever is physically on disk, which does not necessarily agree with the
+  lexically-cleaned directory the symlink walk just validated — if an
+  earlier path component is itself a symlink, `..` after it walks back from
+  the link's target, not from the intended directory. Cleaning once up front
+  removes any `..` lexically before it reaches a syscall, so the two no
+  longer name potentially different locations.
 - **Transport limit switched to `http.MaxBytesReader`.** The bootstrap
   handler previously used `io.LimitReader(r.Body, maxBootstrapBodyBytes+1)`,
   which silently truncates an over-limit body rather than signaling the
@@ -98,16 +157,36 @@ no existing import relationship in either direction.
 
 ## Tests
 
-- `pkg/runtime/substrate_bootstrap_home_test.go` (new): walk (nested path +
-  mode preserved), skip-and-count (symlink, fifo, unix socket), empty-HomeDir
-  no-op, missing-HomeDir error, precedence/dedup (home vs. auth vs. secret,
-  later wins), cap at cap and at cap+1, and an error-hygiene test with a
-  sentinel secret embedded in a home file.
-- `pkg/sciontool/substrate/server_test.go` (extended): the symlinked
-  intermediate directory is rejected both at the `writeBootstrapFile` level
-  and end-to-end through `handleBootstrap` (surfaces as the existing generic
-  500, no content leaked, single-shot slot behaves normally), and the
-  oversized-body case now expects `413` via `http.MaxBytesReader`.
+- `pkg/runtime/substrate_bootstrap_home_test.go`: walk (nested path + mode
+  preserved), skip-and-count (symlink, fifo, unix socket), a symlinked
+  *directory* (as opposed to a symlinked regular file) pointing outside
+  HomeDir is skipped and never descended into, empty-HomeDir no-op (both
+  `HomeDir == ""` and an existing-but-empty HomeDir), missing-HomeDir error,
+  precedence/dedup (home vs. auth vs. secret, later wins), the total cap at
+  cap and at cap+1, the cap summed across all three sources (individually
+  under cap, combined over it), the cap computed *after* dedup (an
+  oversized home file shadowed by a small auth override at the same path
+  must not count), `homeBootstrapFiles` itself returning the cap error
+  during the walk for a single oversized file, an error-hygiene test with a
+  sentinel secret embedded in a home file, and a dedup-position test that
+  asserts the actual order of a non-alphabetical path set (rather than
+  sorting before comparing) to prove the "first occurrence keeps its
+  position" contract the test's name and comment describe.
+- `pkg/sciontool/substrate/server_test.go`: the original symlinked-parent
+  case is rejected both at the `writeBootstrapFile` level and end-to-end
+  through `handleBootstrap` (surfaces as the existing generic 500, no
+  content leaked, single-shot slot behaves normally); a symlinked
+  *ancestor* whose target already has the remaining subpath pre-created is
+  also rejected, with nothing created on the far side (this is the case the
+  first version of the fix missed); the same is proven for a symlink at the
+  first component directly under home, and for an outside-home absolute
+  target (auth/secret-style, to prove the guard isn't home-specific), with
+  a matching positive test that a clean outside-home target writes
+  normally; a `..`-bearing path Cleans to its lexical location and never
+  touches the component the `..` walked back through; a symlink at the
+  *leaf* file path is atomically replaced rather than written through, with
+  its old target left untouched; and the oversized-body case expects `413`
+  via `http.MaxBytesReader`.
 - All existing parity tests for other runtimes (docker, k8s, cloudrun,
   cloudrun-sandbox) are unaffected — this change only touches the substrate
   runtime's own file-assembly and serve-side path handling.
