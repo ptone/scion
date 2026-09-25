@@ -28,7 +28,7 @@ make ci
 
 The watcher must run as root (or with `CAP_SYS_ADMIN`) on the host machine, not inside a container.
 
-### Watch a grove
+### Watch a project
 
 The simplest way to use the watcher is with `--grove`, which automatically discovers all agent worktree directories by inspecting Docker containers with the matching `scion.grove` label:
 
