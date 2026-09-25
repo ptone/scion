@@ -302,6 +302,22 @@ test_discover_node_subnet_refuses_zero_slash_zero() {
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "0.0.0.0/0 must never be accepted as an NFS export client range"
 }
 
+test_validate_node_subnet_cidr_refuses_host_bits_set() {
+  # ipaddress.ip_network(..., strict=True) is what actually rejects this;
+  # a host address masquerading as a network (10.0.0.1/8 instead of
+  # 10.0.0.0/8) must never be silently normalized and accepted -- the
+  # export client list must be exactly the network the operator/GKE
+  # reported, not whatever it happens to round down to.
+  run_expect_fail _hybrid_validate_node_subnet_cidr "10.0.0.1/8"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a CIDR with host bits set must be refused, not silently accepted as strict"
+}
+
+test_validate_node_subnet_cidr_accepts_clean_network() {
+  assert_true "$(_hybrid_validate_node_subnet_cidr "10.0.0.0/8" && echo true || echo false)" \
+    "a syntactically clean /8 network must be accepted"
+}
+
 test_discover_node_subnet_refuses_broader_than_slash_8() {
   fresh_gcloud_state
   GKE_NAME="toobroadcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
@@ -424,6 +440,132 @@ test_nfs_squash_identity_script_asserts_uid_mismatch() {
   assert_contains "$script" "The NFS squash uid must not equal the scion (broker) uid." \
     "the failure message must explain why"
   assert_contains "$script" $'  exit 1\nfi' "an equal uid must exit non-zero, not just warn and continue"
+}
+
+# Executes the rendered squash-identity script end to end against fake
+# id/getent/useradd/awk/sudo binaries, proving the validation logic
+# actually holds at runtime -- rendered-text assertions alone can't prove
+# a fresh useradd call, or a pre-existing account with a bad property,
+# actually produces the exit code and stdout the caller depends on.
+# SYS_UID_MAX is faked too (via awk, which the script uses only to read
+# it from /etc/login.defs), since the real file's contents in whatever
+# environment runs this suite are not something a test should depend on.
+_setup_squash_script_fakebins() {
+  local dir="$1" squash_uid="$2" squash_group="${3:-scion}" squash_shell="${4:-/usr/sbin/nologin}" \
+    scion_uid="${5:-1000}" scion_gid="${6:-1001}" sys_uid_max="${7:-999}" account_exists="${8:-false}"
+  mkdir -p "$dir"
+  cat > "$dir/id" <<IDEOF
+#!/bin/bash
+echo "\$*" >> "${dir}/id.log"
+case "\$1" in
+  -u) [ "\$2" = "scion" ] && echo "$scion_uid" || echo "$squash_uid"; exit 0 ;;
+  -gn) echo "$squash_group"; exit 0 ;;
+  *) [ "$account_exists" = "true" ] && exit 0 || exit 1 ;;
+esac
+IDEOF
+  cat > "$dir/getent" <<GETENTEOF
+#!/bin/bash
+if [ "\$1" = "passwd" ]; then
+  echo "\$2:x:$squash_uid:$scion_gid::/nonexistent:$squash_shell"
+elif [ "\$1" = "group" ]; then
+  echo "\$2:x:$scion_gid:"
+fi
+GETENTEOF
+  cat > "$dir/useradd" <<'USERADDEOF'
+#!/bin/bash
+echo "$*" >> "$(dirname "$0")/useradd.log"
+exit 0
+USERADDEOF
+  cat > "$dir/awk" <<AWKEOF
+#!/bin/bash
+echo "$sys_uid_max"
+AWKEOF
+  cat > "$dir/sudo" <<'SUDOEOF'
+#!/bin/bash
+"$@"
+SUDOEOF
+  chmod +x "$dir"/id "$dir"/getent "$dir"/useradd "$dir"/awk "$dir"/sudo
+}
+
+test_probe_squash_script_executed_fresh_account_succeeds() {
+  local d script out rc
+  d="$(mktemp -d)"
+  _setup_squash_script_fakebins "$d" "900" "scion" "/usr/sbin/nologin" "1000" "1001" "999" "false"
+  script="$(hybrid_nfs_squash_identity_script "scion-nfs")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_eq "0" "$rc" "a fresh, valid identity must succeed"
+  assert_eq "900:1001" "$out" "must print SQUASH_UID:SCION_GID"
+  assert_eq "1" "$(wc -l < "${d}/useradd.log" 2>/dev/null || echo 0)" \
+    "useradd must actually run when the account doesn't exist yet"
+  rm -rf "$d"
+}
+
+test_probe_squash_script_executed_preexisting_account_not_recreated() {
+  local d script out rc
+  d="$(mktemp -d)"
+  _setup_squash_script_fakebins "$d" "900" "scion" "/usr/sbin/nologin" "1000" "1001" "999" "true"
+  script="$(hybrid_nfs_squash_identity_script "scion-nfs")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_eq "0" "$rc" "a valid pre-existing identity must succeed"
+  assert_eq "900:1001" "$out" "must print SQUASH_UID:SCION_GID"
+  assert_false "$([[ -f "${d}/useradd.log" ]] && echo true)" \
+    "useradd must never run when the account already exists"
+  rm -rf "$d"
+}
+
+test_probe_squash_script_executed_refuses_uid_zero() {
+  local d script out rc
+  d="$(mktemp -d)"
+  _setup_squash_script_fakebins "$d" "0" "scion" "/usr/sbin/nologin" "1000" "1001" "999" "true"
+  script="$(hybrid_nfs_squash_identity_script "scion-nfs")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" "uid 0 must be refused"
+  assert_contains "$out" "must not be uid 0" "error should explain why"
+  rm -rf "$d"
+}
+
+test_probe_squash_script_executed_refuses_uid_above_sys_uid_max() {
+  local d script out rc
+  d="$(mktemp -d)"
+  _setup_squash_script_fakebins "$d" "1500" "scion" "/usr/sbin/nologin" "1000" "1001" "999" "true"
+  script="$(hybrid_nfs_squash_identity_script "scion-nfs")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" "a uid above SYS_UID_MAX must be refused"
+  assert_contains "$out" "must be a system uid" "error should explain why"
+  rm -rf "$d"
+}
+
+test_probe_squash_script_executed_refuses_wrong_group() {
+  local d script out rc
+  d="$(mktemp -d)"
+  _setup_squash_script_fakebins "$d" "900" "nogroup" "/usr/sbin/nologin" "1000" "1001" "999" "true"
+  script="$(hybrid_nfs_squash_identity_script "scion-nfs")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" "a non-scion primary group must be refused"
+  assert_contains "$out" "primary group must be scion" "error should explain why"
+  rm -rf "$d"
+}
+
+test_probe_squash_script_executed_refuses_wrong_shell() {
+  local d script out rc
+  d="$(mktemp -d)"
+  _setup_squash_script_fakebins "$d" "900" "scion" "/bin/bash" "1000" "1001" "999" "true"
+  script="$(hybrid_nfs_squash_identity_script "scion-nfs")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" "a non-nologin shell must be refused"
+  assert_contains "$out" "login shell must be" "error should explain why"
+  rm -rf "$d"
+}
+
+test_probe_squash_script_executed_refuses_uid_equal_to_scion_uid() {
+  local d script out rc
+  d="$(mktemp -d)"
+  _setup_squash_script_fakebins "$d" "900" "scion" "/usr/sbin/nologin" "900" "1001" "999" "true"
+  script="$(hybrid_nfs_squash_identity_script "scion-nfs")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" "a squash uid equal to the broker's own uid must be refused"
+  assert_contains "$out" "must not equal the scion (broker) uid" "error should explain why"
+  rm -rf "$d"
 }
 
 test_nfs_export_script_has_set_euo_pipefail() {

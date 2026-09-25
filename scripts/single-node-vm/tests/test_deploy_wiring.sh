@@ -492,6 +492,20 @@ test_deploy_create_discovery_before_first_create() {
     "cluster discovery must happen before the first create call of any kind"
 }
 
+test_deploy_create_removes_temp_kubeconfig_on_exit() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_mig "mig-a" "template-a"
+  seed_template "template-a" "gke-mycluster-abc123-node"
+  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  local kubeconfig_path
+  kubeconfig_path="$(kubectl_log | head -1 | sed -n 's/^KUBECONFIG=\([^ ]*\) .*/\1/p')"
+  assert_true "$([[ -n "$kubeconfig_path" ]] && echo true || echo false)" \
+    "the k8s preflight must have actually used a task-private KUBECONFIG, or this test can't check it was cleaned up"
+  assert_false "$([[ -n "$kubeconfig_path" && -f "$kubeconfig_path" ]] && echo true)" \
+    "the temporary kubeconfig deploy.sh's own EXIT trap creates must be removed once deploy.sh exits, not left behind in \$TMPDIR"
+}
+
 # =====================================================================
 # Base markers on create: additive, create-only, never checked or
 # adopted on. This is the first deliberate tier-off behavior change (the
