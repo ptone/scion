@@ -624,7 +624,7 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 // any authenticated session could subscribe to grove.> and read every
 // project's events. The fix removes the duplicate grove.* publish calls
 // entirely (default-deny authorization is covered separately in
-// pkg/hub/sse_authz_test.go). This test subscribes to the wildcard grove.>
+// pkg/hub/sse_default_deny_test.go). This test subscribes to the wildcard grove.>
 // pattern and asserts nothing is ever delivered there, for every event type
 // that used to be dual-published.
 func TestChannelEventPublisher_NoLegacyGroveSubjects(t *testing.T) {

@@ -16,12 +16,14 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // --- Regression tests for the SSE subject authorization default-deny fix ---
@@ -120,6 +122,87 @@ func TestSSEHandler_LegacyAndUnknownSubjectsDenied(t *testing.T) {
 			w := httptest.NewRecorder()
 			ws.handleSSE(w, sseAgentRequest(ctx, userID, "user", sub))
 			assert.Equal(t, http.StatusForbidden, w.Code, "subject %q must be denied", sub)
+		})
+	}
+}
+
+// TestSSEHandler_MixedUnknownAndAllowedSubjectDenied is a regression test for
+// review round 1 nit 2: expandSSEWildcards used to silently drop an unknown
+// category with a wildcard in resource-ID position (e.g. grove.>) instead of
+// letting authorizeSSESubjects deny it. That made a mixed request of one
+// unknown subject plus one allowed subject quietly narrow to just the
+// allowed subject (200) instead of failing the whole request closed. A
+// concrete unknown subject (no wildcard) was denied with a 403 in the same
+// situation, which was an inconsistent signal to the client. Both forms must
+// now deny the whole request and name the offending subject.
+func TestSSEHandler_MixedUnknownAndAllowedSubjectDenied(t *testing.T) {
+	const userID = "user-1"
+	ownProject := tid("mixed-own-project")
+
+	s := &mockAuthzStore{
+		projects: []store.Project{{ID: ownProject, OwnerID: userID}},
+		projectMemberships: map[string]*store.ProjectMembership{
+			ownProject + ":" + userID: {ProjectID: ownProject, UserID: userID, Role: store.ProjectRoleOwner},
+		},
+	}
+
+	for _, tc := range []struct {
+		name    string
+		unknown string
+	}{
+		{"wildcard unknown subject", "grove.>"},
+		{"concrete unknown subject", "grove." + ownProject + ".created"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pub := NewChannelEventPublisher()
+			defer pub.Close()
+			ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, nil)}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			w := httptest.NewRecorder()
+			ws.handleSSE(w, sseAgentRequest(ctx, userID, "user", tc.unknown, "project."+ownProject+".>"))
+			assert.Equal(t, http.StatusForbidden, w.Code,
+				"an unknown subject alongside an allowed one must deny the whole request")
+
+			var body struct {
+				Denied []string `json:"denied_subjects"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			assert.Equal(t, []string{tc.unknown}, body.Denied,
+				"only the unknown subject should be named as denied; the allowed one is not silently dropped")
+		})
+	}
+}
+
+// TestAuthorizeSSESubjects_AdminWildcardAllowedForAdmin covers the flip side
+// of the admin-role gate: a wildcard admin.> subject is neither a resource
+// check nor a wildcard drop for the admin category, so an actual admin
+// session must be allowed to subscribe to it (and a non-admin denied), the
+// same as the concrete admin.<event> case already covered above.
+func TestAuthorizeSSESubjects_AdminWildcardAllowedForAdmin(t *testing.T) {
+	const userID = "user-1"
+
+	for _, tc := range []struct {
+		role   string
+		denied bool
+	}{
+		{role: "admin", denied: false},
+		{role: "user", denied: true},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			s := &mockAuthzStore{}
+			pub := NewChannelEventPublisher()
+			defer pub.Close()
+			ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, nil)}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			w := httptest.NewRecorder()
+			ws.handleSSE(w, sseAgentRequest(ctx, userID, tc.role, "admin.>"))
+			if tc.denied {
+				assert.Equal(t, http.StatusForbidden, w.Code, "admin.> must be denied for a non-admin session")
+			} else {
+				assert.Equal(t, http.StatusOK, w.Code, "admin.> must be allowed for an admin session")
+			}
 		})
 	}
 }

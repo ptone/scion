@@ -1355,9 +1355,17 @@ func validateSSESubjects(subjects []string) string {
 // resource-scoped subjects. For example, "project.>" (meaning "all my
 // projects") is expanded to "project.<uuid>.>" for each project the caller
 // has ActionRead access to. Subjects that don't contain wildcards in a
-// resource-ID position pass through unchanged. Subjects whose category
-// passes through authorization without resource checks (notification, broker)
-// also pass through unchanged.
+// resource-ID position pass through unchanged. "notification" and "broker"
+// wildcards pass through unchanged too, since authorizeSSESubjects does not
+// apply a per-resource check to those two categories. Every other category —
+// including "admin" and "system", and any namespace this function does not
+// recognize — also passes through unchanged rather than being dropped here:
+// authorizeSSESubjects is the single place that decides whether a category is
+// allowed, and its default case denies anything not explicitly allow-listed.
+// Dropping unknown categories at this stage instead would make a mixed
+// request (e.g. an unknown subject alongside an allowed one) silently narrow
+// to the allowed subset instead of failing the whole request closed with a
+// deny reason.
 //
 // This expansion must run before authorizeSSESubjects so the authorization
 // check sees concrete resource IDs, and before Subscribe so the event
@@ -1411,10 +1419,11 @@ func (ws *WebServer) expandSSEWildcards(r *http.Request, subjects []string) []st
 			expanded = append(expanded, sub)
 
 		default:
-			// Unknown category (or "admin"/"system", neither of which has
-			// a legitimate wildcard subscription today) with a wildcard in
-			// ID position. authorizeSSESubjects denies unknown categories
-			// by default, so drop rather than pass through.
+			// "admin", "system", and any unrecognized category: keep the
+			// subject as-is. authorizeSSESubjects — not this function — is
+			// what denies it, so it shows up as a denied_subjects entry
+			// rather than silently vanishing from the subscription.
+			expanded = append(expanded, sub)
 		}
 	}
 
@@ -1567,10 +1576,11 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 	)
 
 	// Collect unique resource IDs from subjects. Wildcard tokens (> or *)
-	// in resource-ID positions are rejected for resource-checked categories
-	// (project, user, agent) — expandSSEWildcards should have replaced them
-	// with concrete IDs. If one slips through, it is denied. Passthrough
-	// categories (notification, broker, etc.) are unaffected.
+	// in resource-ID positions are rejected for the three categories that
+	// carry a per-resource check (project, user, agent) — expandSSEWildcards
+	// should have replaced them with concrete IDs. If one slips through, it
+	// is denied. broker, notification, system and admin have no resource ID
+	// to collect here; the final switch below decides them directly.
 	projectIDs := map[string]bool{}
 	userIDs := map[string]bool{}
 	agentIDs := map[string]bool{}
@@ -1601,9 +1611,10 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 					agentIDs[tokens[1]] = true
 				}
 			}
-			// Other categories (notification, broker, etc.) pass through —
-			// wildcards in their resource-ID position are fine because
-			// these categories have no per-resource authorization checks.
+			// broker, notification, system and admin pass through this loop
+			// untouched — none of them has a per-resource authorization
+			// check here, so there is no ID to collect. The final switch
+			// below applies whatever check each of those does need.
 		}
 	}
 
@@ -1679,8 +1690,8 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 			// already known to over-share across projects (see the
 			// PublishChatNotification doc comment above) — narrowing it to
 			// user.<subscriberId>.notification is left for a follow-up.
-			// TODO: scope notification.created per-user and drop this
-			// pass-through.
+			// TODO(ptone/scion#1934): scope notification.created per-user
+			// and drop this pass-through.
 		case "system":
 			// Only a concrete image-build job ID is allowed; no wildcards.
 			if len(tokens) < 3 || tokens[1] != "images" || isNATSWildcard(tokens[2]) {
