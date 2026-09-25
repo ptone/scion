@@ -126,15 +126,11 @@ func TestSSEHandler_LegacyAndUnknownSubjectsDenied(t *testing.T) {
 	}
 }
 
-// TestSSEHandler_MixedUnknownAndAllowedSubjectDenied is a regression test for
-// review round 1 nit 2: expandSSEWildcards used to silently drop an unknown
-// category with a wildcard in resource-ID position (e.g. grove.>) instead of
-// letting authorizeSSESubjects deny it. That made a mixed request of one
-// unknown subject plus one allowed subject quietly narrow to just the
-// allowed subject (200) instead of failing the whole request closed. A
-// concrete unknown subject (no wildcard) was denied with a 403 in the same
-// situation, which was an inconsistent signal to the client. Both forms must
-// now deny the whole request and name the offending subject.
+// TestSSEHandler_MixedUnknownAndAllowedSubjectDenied pins down the invariant:
+// an unknown subject alongside an allowed one must deny the whole request
+// (403) and name only the unknown subject; it must not be silently dropped
+// from the subscription. This holds for both a wildcard unknown subject
+// (e.g. grove.>) and a concrete one.
 func TestSSEHandler_MixedUnknownAndAllowedSubjectDenied(t *testing.T) {
 	const userID = "user-1"
 	ownProject := tid("mixed-own-project")
@@ -174,12 +170,11 @@ func TestSSEHandler_MixedUnknownAndAllowedSubjectDenied(t *testing.T) {
 	}
 }
 
-// TestAuthorizeSSESubjects_AdminWildcardAllowedForAdmin covers the flip side
-// of the admin-role gate: a wildcard admin.> subject is neither a resource
-// check nor a wildcard drop for the admin category, so an actual admin
-// session must be allowed to subscribe to it (and a non-admin denied), the
-// same as the concrete admin.<event> case already covered above.
-func TestAuthorizeSSESubjects_AdminWildcardAllowedForAdmin(t *testing.T) {
+// TestSSEHandler_AdminWildcardRequiresAdminRole covers the flip side of the
+// admin-role gate: admin.> is not expanded (admin has no resource ID), so it
+// reaches the admin-role gate unchanged: allowed for an admin session, denied
+// for everyone else.
+func TestSSEHandler_AdminWildcardRequiresAdminRole(t *testing.T) {
 	const userID = "user-1"
 
 	for _, tc := range []struct {
