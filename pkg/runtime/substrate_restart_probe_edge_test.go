@@ -53,7 +53,8 @@ func TestSubstrateRestart_RecordlessActors_CountsActorsOnLaterPages(t *testing.T
 		}
 	}
 
-	_, names, err := rt.RecordlessActors(context.Background(), probeEdgeProjectID)
+	_, actors, err := rt.RecordlessActors(context.Background(), probeEdgeProjectID)
+	names := recordlessNames(actors)
 	if err != nil {
 		t.Fatalf("RecordlessActors() error = %v", err)
 	}
@@ -77,7 +78,8 @@ func TestSubstrateRestart_RecordlessActors_RepeatedPageTokenIsExplicitError(t *t
 		return &ateapipb.ListActorsResponse{NextPageToken: "same"}, nil
 	}
 
-	_, names, err := rt.RecordlessActors(context.Background(), probeEdgeProjectID)
+	_, actors, err := rt.RecordlessActors(context.Background(), probeEdgeProjectID)
+	names := recordlessNames(actors)
 	if err == nil || !strings.Contains(err.Error(), "repeated page token") {
 		t.Fatalf("RecordlessActors() err = %v, want a repeated-page-token error", err)
 	}
@@ -111,7 +113,8 @@ func TestSubstrateRestart_RecordlessActors_EndlessPagingHitsPageCap(t *testing.T
 		return &ateapipb.ListActorsResponse{NextPageToken: fmt.Sprintf("p%d", calls)}, nil
 	}
 
-	_, names, err := rt.RecordlessActors(context.Background(), probeEdgeProjectID)
+	_, actors, err := rt.RecordlessActors(context.Background(), probeEdgeProjectID)
+	names := recordlessNames(actors)
 	if err == nil || !strings.Contains(err.Error(), "exceeded") {
 		t.Fatalf("RecordlessActors() err = %v, want a page-cap error", err)
 	}
@@ -144,7 +147,8 @@ func TestSubstrateRestart_RecordlessActors_CountsUnspecifiedState(t *testing.T) 
 				}, nil
 			}
 
-			_, names, err := rt.RecordlessActors(context.Background(), probeEdgeProjectID)
+			_, actors, err := rt.RecordlessActors(context.Background(), probeEdgeProjectID)
+			names := recordlessNames(actors)
 			if err != nil {
 				t.Fatalf("RecordlessActors() error = %v", err)
 			}

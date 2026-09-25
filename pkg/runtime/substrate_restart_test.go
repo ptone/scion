@@ -40,6 +40,19 @@ func wipeSubstrateAgentStateForRestart(t *testing.T) {
 	substrateAgentStateMu.Unlock()
 }
 
+// recordlessNames extracts just the names from RecordlessActors' result, for
+// tests that only care about which actors were reported, not their UIDs.
+func recordlessNames(actors []RecordlessActor) []string {
+	if actors == nil {
+		return nil
+	}
+	names := make([]string, len(actors))
+	for i, a := range actors {
+		names[i] = a.Name
+	}
+	return names
+}
+
 // restartTestRunConfig returns a RunConfig for projectID/agentName, digest-
 // pinned and NoAuth-free like testSubstrateRunConfig, but parameterized so a
 // test can run more than one agent (optionally in the same atespace, i.e.
@@ -94,7 +107,8 @@ func TestSubstrateRestart_RecordlessActors_ReportsOnlyUnrecorded(t *testing.T) {
 		}, nil
 	}
 
-	atespace, names, err := rt.RecordlessActors(context.Background(), projectID)
+	atespace, actors, err := rt.RecordlessActors(context.Background(), projectID)
+	names := recordlessNames(actors)
 	if err != nil {
 		t.Fatalf("RecordlessActors() error = %v", err)
 	}
@@ -120,7 +134,8 @@ func TestSubstrateRestart_RecordlessActors_NoneWhenAllRecorded(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	_, names, err := rt.RecordlessActors(context.Background(), projectID)
+	_, actors, err := rt.RecordlessActors(context.Background(), projectID)
+	names := recordlessNames(actors)
 	if err != nil {
 		t.Fatalf("RecordlessActors() error = %v", err)
 	}
@@ -154,7 +169,8 @@ func TestSubstrateRestart_RecordlessActors_ExcludesGoldenAtespace(t *testing.T) 
 		}, nil
 	}
 
-	atespace, names, err := rt.RecordlessActors(context.Background(), projectID)
+	atespace, actors, err := rt.RecordlessActors(context.Background(), projectID)
+	names := recordlessNames(actors)
 	if err != nil {
 		t.Fatalf("RecordlessActors() error = %v", err)
 	}
@@ -180,7 +196,8 @@ func TestSubstrateRestart_RecordlessActors_ProbeErrorIsExplicit(t *testing.T) {
 		return nil, errString(wantErr)
 	}
 
-	_, names, err := rt.RecordlessActors(context.Background(), "550e8400-e29b-41d4-a716-446655440000")
+	_, actors, err := rt.RecordlessActors(context.Background(), "550e8400-e29b-41d4-a716-446655440000")
+	names := recordlessNames(actors)
 	if err == nil {
 		t.Fatal("RecordlessActors() error = nil, want an explicit error when the underlying list fails")
 	}
@@ -223,7 +240,8 @@ func TestSubstrateRestart_RecordlessActors_ExcludesDeletingState(t *testing.T) {
 		}, nil
 	}
 
-	atespace, names, err := rt.RecordlessActors(context.Background(), projectID)
+	atespace, actors, err := rt.RecordlessActors(context.Background(), projectID)
+	names := recordlessNames(actors)
 	if err != nil {
 		t.Fatalf("RecordlessActors() error = %v", err)
 	}

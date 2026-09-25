@@ -1656,6 +1656,48 @@ func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) 
 // broker with no RecordlessActorProber registered.
 var errLookupListFailed = errors.New("could not determine whether the agent exists")
 
+// auxListAgentsSorted queries every currently registered auxiliary runtime
+// with filter, in sorted name order (the same order allManagers() uses), and
+// returns the first non-empty match after filterAgents narrows it. A match
+// is authoritative: once one auxiliary runtime's List call succeeds and
+// filterAgents leaves at least one entry, the remaining auxiliary runtimes
+// are not consulted at all, regardless of whether an earlier or later one in
+// the sorted order would have failed to list. Only when no auxiliary runtime
+// produces a match does a List error along the way turn into
+// errLookupListFailed — an error from a runtime that was never going to
+// match anyway must not block a genuine match found elsewhere, and the fixed
+// iteration order keeps that decision the same from one call to the next
+// instead of depending on Go's randomized map order (ptone/scion#1808).
+func (s *Server) auxListAgentsSorted(ctx context.Context, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, error) {
+	s.auxiliaryRuntimesMu.RLock()
+	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
+	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
+	for name, aux := range s.auxiliaryRuntimes {
+		auxNames = append(auxNames, name)
+		auxRuntimes[name] = aux
+	}
+	s.auxiliaryRuntimesMu.RUnlock()
+	sort.Strings(auxNames)
+
+	var listErr error
+	for _, rtName := range auxNames {
+		auxAgents, auxErr := auxRuntimes[rtName].Manager.List(ctx, filter)
+		if auxErr != nil {
+			if listErr == nil {
+				listErr = fmt.Errorf("auxiliary runtime %q: %w", rtName, auxErr)
+			}
+			continue
+		}
+		if matched := filterAgents(auxAgents); len(matched) > 0 {
+			return matched, nil
+		}
+	}
+	if listErr != nil {
+		return nil, fmt.Errorf("%w: %v", errLookupListFailed, listErr)
+	}
+	return nil, nil
+}
+
 // projectScopedTargetErr is projectScopedTarget's error-preserving twin,
 // used only by stopAgent when hasRecordlessProber reports at least one
 // registered runtime implements RecordlessActorProber (currently just
@@ -1670,10 +1712,11 @@ var errLookupListFailed = errors.New("could not determine whether the agent exis
 // provably byte-identical — for every broker without a registered prober.
 // The one deliberate behavioural difference from LookupContainerID (besides
 // preserving the error at all) is that here an auxiliary runtime's list
-// error is also "could not determine", never silently skipped in favor of
-// the next auxiliary runtime, because a skipped error is indistinguishable
-// from "that runtime just doesn't have it" and a false not-found is exactly
-// what this function exists to prevent (ptone/scion#1808).
+// error is also "could not determine" rather than silently skipped in favor
+// of the next auxiliary runtime — but only when no auxiliary runtime
+// produces a match: see auxListAgentsSorted for why a match is authoritative
+// over an error seen elsewhere, and why the scan runs in a fixed order
+// (ptone/scion#1808).
 func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID string) (string, error) {
 	if s.manager == nil {
 		return "", fmt.Errorf("agent manager not available")
@@ -1688,24 +1731,11 @@ func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID strin
 	agents = agentsForProject(agents, projectID)
 
 	if len(agents) == 0 {
-		s.auxiliaryRuntimesMu.RLock()
-		auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-		for k, v := range s.auxiliaryRuntimes {
-			auxRuntimes[k] = v
+		auxAgents, auxErr := s.auxListAgentsSorted(ctx, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
+		if auxErr != nil {
+			return "", auxErr
 		}
-		s.auxiliaryRuntimesMu.RUnlock()
-
-		for rtName, aux := range auxRuntimes {
-			auxAgents, auxErr := aux.Manager.List(ctx, filter)
-			if auxErr != nil {
-				return "", fmt.Errorf("%w: auxiliary runtime %q: %v", errLookupListFailed, rtName, auxErr)
-			}
-			auxAgents = agentsForProject(auxAgents, projectID)
-			if len(auxAgents) > 0 {
-				agents = auxAgents
-				break
-			}
-		}
+		agents = auxAgents
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
@@ -1719,24 +1749,11 @@ func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID strin
 		}
 		agents = agentsWithoutProjectLabel(agents)
 		if len(agents) == 0 {
-			s.auxiliaryRuntimesMu.RLock()
-			auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-			for k, v := range s.auxiliaryRuntimes {
-				auxRuntimes[k] = v
+			auxAgents, auxErr := s.auxListAgentsSorted(ctx, fallbackFilter, agentsWithoutProjectLabel)
+			if auxErr != nil {
+				return "", auxErr
 			}
-			s.auxiliaryRuntimesMu.RUnlock()
-
-			for rtName, aux := range auxRuntimes {
-				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
-				if auxErr != nil {
-					return "", fmt.Errorf("%w: auxiliary runtime %q: %v", errLookupListFailed, rtName, auxErr)
-				}
-				auxAgents = agentsWithoutProjectLabel(auxAgents)
-				if len(auxAgents) > 0 {
-					agents = auxAgents
-					break
-				}
-			}
+			agents = auxAgents
 		}
 	}
 
@@ -1855,7 +1872,15 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// future change to projectScopedTarget's contract, with this
 		// comment corrected to say so rather than the previous, inaccurate
 		// claim that it does live, load-bearing work today.
-		if projectID != "" {
+		//
+		// hasRecordlessProber() is also checked here, not just at the target
+		// resolution branch above: without it, a broker with no registered
+		// prober still pays for allManagers() (lock + sort) and
+		// recordlessActorProbe's manager loop on every unresolved stop, for
+		// a type-assertion that can never succeed. The two branches of this
+		// handler are then symmetric — a non-prober broker skips both the
+		// error-preserving lookup and this probe, not just one of them.
+		if projectID != "" && s.hasRecordlessProber() {
 			managers := s.allManagers()
 			atespace, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
 			if perr != nil {
@@ -3161,7 +3186,7 @@ func (e *agentIdentityUnknownError) Unwrap() error {
 // not-found into an explicit, distinguishable error instead of the normal
 // idempotent 404/202 (ptone/scion#1808).
 type RecordlessActorProber interface {
-	RecordlessActors(ctx context.Context, projectID string) (atespace string, actorNames []string, err error)
+	RecordlessActors(ctx context.Context, projectID string) (atespace string, actors []scionrt.RecordlessActor, err error)
 }
 
 // recordlessActorProbe checks every manager in managers that exposes a
@@ -3171,16 +3196,27 @@ type RecordlessActorProber interface {
 // how a runtime listing failure elsewhere on this path is never treated as
 // not-found either.
 //
-// Results are deduped by atespace/name across every manager the probe
-// checks: today's deployed topology registers substrate as the single
-// default runtime, so this never matters in practice, but a substrate
-// runtime also cached as an auxiliary manager (resolveManagerForOpts,
-// e.g. a second profile resolving to the same ateapi endpoint) would
-// otherwise report the same actor twice and double the count in the 409
-// message. A restarted broker also doesn't probe a second substrate
-// profile pointed at a *different* ateapi endpoint until that profile's
-// first Run re-registers it as an auxiliary runtime — see
-// deploy/substrate/README.md.
+// Results are deduped by actor UID across every manager the probe checks,
+// not by "atespace/name": today's deployed topology registers substrate as
+// the single default runtime, so this never matters in practice, but two
+// substrate managers can both report an actor with the same atespace and
+// name for two different reasons that need different treatment —
+//   - the SAME actor, reached twice (resolveManagerForOpts caching a second
+//     manager for a profile that resolves to the same ateapi endpoint as the
+//     default) — this must be deduped, or the 409 message double-counts it;
+//   - two DIFFERENT actors that merely collide on atespace+name because
+//     substrateAtespaceName is derived only from projectID, so it is the
+//     same string regardless of which ateapi endpoint a profile points
+//     at (see the second-profile note in deploy/substrate/README.md) — this
+//     must NOT be deduped, or the operator is told about, and given the name
+//     of, only one of two actors that both need cleaning up.
+//
+// UID (ResourceMetadata.uid) tells these apart where atespace+name cannot: a
+// real duplicate report of the same actor carries the same UID both times,
+// while two distinct actors — even sharing an atespace/name string — do not.
+// A restarted broker also doesn't probe a second substrate profile pointed
+// at a *different* ateapi endpoint until that profile's first Run
+// re-registers it as an auxiliary runtime — see deploy/substrate/README.md.
 func recordlessActorProbe(ctx context.Context, managers []agent.Manager, projectID string) (atespace string, actorNames []string, err error) {
 	seen := make(map[string]bool)
 	for _, mgr := range managers {
@@ -3196,14 +3232,20 @@ func recordlessActorProbe(ctx context.Context, managers []agent.Manager, project
 		if perr != nil {
 			return "", nil, perr
 		}
-		for _, name := range found {
-			key := as + "/" + name
+		for _, a := range found {
+			key := a.UID
+			if key == "" {
+				// Defensive only: a real actor always carries a UID (proto
+				// ResourceMetadata), so this falls back to the collision-
+				// prone atespace/name key rather than dropping the entry.
+				key = as + "/" + a.Name
+			}
 			if seen[key] {
 				continue
 			}
 			seen[key] = true
 			atespace = as
-			actorNames = append(actorNames, name)
+			actorNames = append(actorNames, a.Name)
 		}
 	}
 	return atespace, actorNames, nil

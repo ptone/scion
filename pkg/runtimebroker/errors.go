@@ -51,11 +51,20 @@ const (
 	// be verified as safe because a runtime process restart dropped the
 	// in-memory record needed to tell "not found" apart from "exists, but
 	// unidentifiable" (ptone/scion#1808). Stable within this broker's own
-	// HTTP API. The hub re-codes this broker's 409 as its own generic
-	// "conflict" error before it reaches the CLI (pkg/hub's agent delete
-	// handler), so today a hub or CLI caller sees this code's message text,
-	// not the code itself — this constant lets broker-level callers and
-	// tests branch on it, not (yet) the hub or the CLI.
+	// HTTP API, but what a hub or CLI caller sees differs by which endpoint
+	// triggered it:
+	//   - delete: the hub re-codes this broker's 409 as its own generic
+	//     "conflict" error (pkg/hub/handlers_agents_core.go, the
+	//     errors.As(err, &se) && se.StatusCode == http.StatusConflict check
+	//     around its DispatchAgentDelete call), so a caller sees this code's
+	//     message text, not the code itself;
+	//   - stop: the hub's stop dispatch (pkg/hub/handlers_agent_lifecycle.go,
+	//     the AgentActionStop case) has no equivalent check — every
+	//     DispatchAgentStop error, this one included, becomes a generic 502
+	//     "runtime_error" before the CLI sees it, so this 409 is not even
+	//     distinguishable as a conflict there today.
+	// Either way this constant lets broker-level callers and tests branch on
+	// it, not (yet) the hub or the CLI.
 	ErrCodeSubstrateAgentIdentityUnknown = "substrate_agent_identity_unknown"
 )
 
