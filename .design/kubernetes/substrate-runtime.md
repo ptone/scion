@@ -91,8 +91,10 @@ select). A settings
 profile is free to name its `substrate` runtime entry anything (e.g.
 `substrate-prod`, `substrate-nip`); `SubstrateRuntime.Name()` always reports
 the literal `"substrate"` regardless, because that is the value the broker's
-substrate-only code paths (e.g. the delete gate in
-`pkg/runtimebroker/handlers.go`) key off.
+substrate-only code paths (e.g. the PTY-attach handling in
+`pkg/runtimebroker/pty_handlers.go`) key off. Delete and stop resolution
+(§9) does not key off `Name()` at all — it is project-ID-scoped uniformly,
+on every runtime.
 
 `NewSubstrateRuntime` memoizes one `*SubstrateRuntime` (and its dialed gRPC
 `ClientConn`) per distinct `V1SubstrateConfig` for the life of the broker
@@ -454,12 +456,15 @@ other runtime's call site leaves unset (so their behavior is unchanged):
   candidate is accepted only if it, and every one of its ancestors
   (including through a symlink target), stats as searchable by the target
   uid/gid — never merely by what root itself can traverse. If neither
-  candidate is usable, resolution fails hard: the control server does not
-  start the harness, reports the failure through the same path other init
-  failures use, and exits with a distinct code so `/healthz` reflects
-  `init-failed` rather than reporting healthy with nothing running (§5.1).
-  This replaces a silent fallback to an unset `cmd.Dir`, which would have
-  landed the harness back in substrate-serve's own root-owned cwd.
+  candidate is usable, the harness is never started: the in-process init
+  runner returns `exitCodeNoUsableHarnessCwd` (18), which is logged and
+  reported to the Hub through the same init-failure path other init
+  failures use, and `/healthz` reflects `init-failed`. The control server
+  itself stays up — Substrate does not treat a PID 1 exit as a failure
+  signal (§5.1, §10) — so the actor keeps running and holding its worker
+  until it is stopped. This replaces a silent fallback to an unset
+  `cmd.Dir`, which would have landed the harness back in substrate-serve's
+  own root-owned cwd.
 - **Never `/`.** A literal `/`, or any candidate that reduces to `/` after
   cleaning or symlink resolution, is rejected outright regardless of its
   permissions.
@@ -611,9 +616,27 @@ actually leaves `DELETING`. A stuck actor is invisible to the hub and
 silently holds a worker (§10). Confirming deletion (poll until the actor
 leaves `DELETING`, or report a stuck state) is a Phase 2 item (§11).
 
-**Same-slug, cross-project safety.** Three separate guards close different
-ways a slug-based lookup could act on the wrong actor:
+**Same-slug, cross-project safety.** `resolveDeleteTarget` and
+`projectScopedTarget` (`pkg/runtimebroker/handlers.go`) resolve delete and
+stop, respectively, to a single project-matched entry before acting, on
+every runtime — not a substrate-specific mechanism:
 
+- **`resolveDeleteTarget`** collects candidates via `Runtime.List` with the
+  requested project ID included in the filter itself (across the default
+  and every auxiliary runtime), so a project-scoped `List` call returns
+  only that project's entries in the first place — `List`'s own
+  same-slug ambiguity guard (§4) never has a reason to engage here, since
+  the filter already carries a project-scoping key. The resolved entry's
+  `ContainerID` (for substrate, the globally-unique `<atespace>/<actor>`
+  pair) is what `Manager.DeleteTarget` acts on directly, so the
+  runtime-level delete never lists by bare slug again either. No match in
+  the requested project — after also checking a legacy no-project-identity
+  fallback and the project's own file-only directory — is
+  `errDeleteTargetNotFound`, answered as `404`, never a project-blind
+  guess. `projectScopedTarget` gives `stopAgent` the same property via
+  `LookupContainerID` (which uses the same project-scoped filter,
+  `scopedNameFilter`), resolving to a container ID before calling
+  `Manager.Stop`.
 - **Record-less actors are never resolvable by slug or project filter, at
   all** — not even by a request scoped to their own project. `List` (§4)
   reports a record-less actor under its raw, project-prefixed actor name,
@@ -630,25 +653,13 @@ ways a slug-based lookup could act on the wrong actor:
   requiring an operator to re-identify it by other means. The durable fix
   is persisting agent records so they survive a broker restart (§11), not
   reconstructing identity from the actor name.
-- **Two or more record-having actors sharing a slug** (only possible
-  across different projects) are *also* excluded from an unscoped-by-slug
-  `List` result, rather than one being picked arbitrarily. `Delete`'s and
-  `Stop`'s own call sites (`pkg/agent/manager.go:99,131`) filter
-  `Runtime.List` by `"scion.name"` alone, with no project-scoping key,
-  regardless of what project the outer broker-level caller resolved — so
-  this guard has to live in `List` itself, not in its callers. (The
-  `"scion.name"`-only filters in `pkg/runtimebroker/server.go` belong to
-  `LookupContainerID`/`LookupAgent`, not `Delete`/`Stop`.) A project-scoped
-  query for the same slug is unaffected.
-- **The broker's local-file deletion fallback is guarded separately, by a
-  different gate.** `findAgentInHubManagedProjects` (called from
-  `pkg/runtimebroker/handlers.go`) takes only the bare agent name, and
-  `List` never touches it. What actually keeps a project-scoped substrate
-  delete away from resolving the wrong project's files is the substrate-only
-  delete gate in that same file: a project-scoped substrate delete with no
-  matching agent in that project returns `204` before either the
-  hub-managed-projects scan or `AgentManager.Delete`'s unscoped `List` runs.
-  An unscoped delete is not covered by that gate.
+- **The broker's local-file deletion fallback (`findAgentInHubManagedProjects`,
+  called from `findAgentProjectDir`) is itself project-scoped**: it only
+  accepts a hub-managed project directory whose own recorded project ID
+  equals the requested one, so a same-named agent's files in a different
+  project are never returned as the delete target. For a matched
+  record-having entry this fallback is unreachable anyway, since the
+  matched entry's own trusted project path is used directly.
 
 ## 10. Known limitations (Phase 1)
 
@@ -668,7 +679,10 @@ ways a slug-based lookup could act on the wrong actor:
   leaves a `RUNNING` actor holding a worker; `healthz` reports
   `init-failed`, but the hub only shows an error if the direct status report
   succeeds.
-- Same-slug cross-project handling is fail-closed, not resolved (§9).
+- A record-less actor (no in-memory record — e.g. after a broker restart)
+  remains unreachable by slug even within its own project, by design (§9);
+  an operator must re-identify it by other means until its record is
+  restored.
 - Stop-then-delete can leak local broker-side files.
 - The broker's in-memory `substrateAgentRecords`/`substrateControlTokens`
   are lost on a broker restart for actors it did not create in the current

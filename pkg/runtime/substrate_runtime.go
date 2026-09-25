@@ -560,19 +560,24 @@ const substrateAtespacePrefix = "scion-"
 // caller resolves against the correct project even when two record-having
 // actors elsewhere share the same agent slug.
 //
-// Because AgentManager.Delete/Stop and LookupContainerID's own runtime
-// queries (pkg/agent/manager.go, pkg/runtimebroker/server.go) filter by
-// "scion.name" alone — they never add a project key here even when a
-// broker-level caller resolved one — an unscoped-by-slug query cannot rely
-// on ProjectPath to disambiguate two record-having actors that share a
-// slug across different projects. For that specific shape (a "scion.name"
-// filter present, no project-scoping key in labelFilter, and more than one
-// record-having actor sharing the requested slug), every such actor is
-// excluded from the result: the caller sees no match rather than an
-// arbitrary (and potentially wrong-project) one. This means an unscoped
-// same-slug Delete/Stop/LookupContainerID becomes a no-op — never a
-// wrong-actor action — in that scenario; a query that does carry a project
-// key is unaffected.
+// Any List call filtered by "scion.name" without a project-scoping key (no
+// project-name or project-ID label, canonical or deprecated-alias) reaches
+// this guard: for example AgentManager.Delete/Stop's own re-list
+// (pkg/agent/manager.go — the local CLI path via cmd/delete.go) and the
+// unlabelled backward-compatibility fallbacks in LookupContainerID and
+// LookupAgent (pkg/runtimebroker/server.go). LookupContainerID/LookupAgent's
+// primary query (scopedNameFilter) does add a project key and is
+// unaffected. The broker delete path resolves through
+// resolveDeleteTarget/AgentManager.DeleteTarget, which filters by
+// "scion.agent" and project ID rather than "scion.name" and hands the
+// already-resolved entry to DeleteTarget, so it never reaches this unscoped
+// shape. For that specific shape (a "scion.name" filter present, no
+// project-scoping key in labelFilter, and more than one record-having
+// actor sharing the requested slug), every such actor is excluded from the
+// result: the caller sees no match rather than an arbitrary (and
+// potentially wrong-project) one. This means an unscoped same-slug Delete,
+// Stop, or lookup fallback becomes a no-op — never a wrong-actor action —
+// in that scenario; a query that does carry a project key is unaffected.
 //
 // Known limitation, by design: a record-less actor (this runtime instance
 // has no in-memory agent record for it — e.g. right after a broker
@@ -620,10 +625,16 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	// specific agent slug ("scion.name") without narrowing to a project (no
 	// project-name or project-ID label key, canonical or deprecated-alias —
 	// see projectcompat.IsProjectNameLabelKey/IsProjectIDLabelKey), which is
-	// exactly the shape AgentManager.Delete/Stop and LookupContainerID's own
-	// runtime queries use (pkg/agent/manager.go, pkg/runtimebroker/server.go)
-	// — neither ever adds a project key to the filter it passes down here,
-	// even when the broker-level caller resolved one. If two or more
+	// the shape any List by "scion.name" without a project-scope key
+	// reaches: for example AgentManager.Delete/Stop's own re-list
+	// (pkg/agent/manager.go — the local CLI path via cmd/delete.go) and the
+	// unlabelled fallbacks in LookupContainerID and LookupAgent
+	// (pkg/runtimebroker/server.go). LookupContainerID/LookupAgent's
+	// primary, project-scoped query (scopedNameFilter) is unaffected. The
+	// broker delete path resolves through
+	// resolveDeleteTarget/AgentManager.DeleteTarget, which filters by
+	// project ID rather than by slug and never re-lists by "scion.name", so
+	// it does not reach this guard. If two or more
 	// record-having actors share that slug (only possible across different
 	// projects — see the per-project uniqueness this runtime otherwise
 	// relies on), an unscoped query has no way to pick the right one, and
