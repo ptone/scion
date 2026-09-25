@@ -423,6 +423,59 @@ doesn't have. Track as a Phase 2 hardening item once that's confirmed
 rather than guessing at a policy that could break the probes it's supposed
 to still allow.
 
+## Bootstrap files: home delivery
+
+`buildBootstrapFiles` (`pkg/runtime/substrate_bootstrap.go`) assembles the
+`POST /scion/v1/bootstrap` payload's `files` array from three sources, in
+this precedence order: the broker-composed agent home (`RunConfig.HomeDir`
+— harness-config `home/`, the template home, and skills), then
+`ResolvedAuth.Files`, then file-type `ResolvedSecrets`. When more than one
+source targets the same in-container path, the later source wins (auth and
+secret files override a same-path home file), and exactly one entry per
+path reaches the wire — the dedup happens in the broker, not on
+`substrate-serve`.
+
+**This delivery model is deliberately narrower than Docker/Podman or
+cloudrun-sandbox, which bind-mount or relocate `HomeDir` directly:**
+
+- **Copy-in, one-way.** Files are read once, at bootstrap time, and written
+  into the actor's filesystem. Nothing the actor writes afterwards is ever
+  synced back to the broker's `HomeDir` — there is no persistent mount or
+  ongoing sync.
+- **Additive over the image's home, not a replacement for it.** The actor
+  image's own `/home/scion` is not cleared or shadowed first; bootstrap
+  only adds or overwrites the specific paths it ships.
+- **Only regular files are shipped.** The walk
+  (`homeBootstrapFiles`, `filepath.WalkDir`) never follows a symlink, and
+  skips — counting but never reading — fifos, sockets and devices. None of
+  those is "a file to ship," and reading one could block or behave
+  unpredictably.
+
+**Size cap.** The total decoded size across every file (home + auth +
+secrets combined, after dedup) is capped by
+`maxBootstrapFilesTotalBytes` = 16 MiB (`pkg/runtime/substrate_bootstrap.go`).
+That number is sized with headroom under the limits actually measured on
+this path, not an assumed one:
+
+- The router's ingress listener for this route has no request-body cap of
+  its own: no buffer filter or `max_request_bytes` appears anywhere in its
+  filter chain, and `per_connection_buffer_limit_bytes` is unset on both the
+  listener and the upstream cluster — the 1 MiB default there is a
+  flow-control watermark, not a cap. The body streams through uninspected,
+  under a 300s route timeout.
+- `sciontool substrate-serve`'s own `POST /scion/v1/bootstrap` handler is
+  therefore the binding limit: it bounds the raw request body to
+  `maxBootstrapBodyBytes` = 64 MiB (`pkg/sciontool/substrate/server.go`) via
+  `http.MaxBytesReader`, which fails the read closed (a bounded error, not
+  unbounded buffering) once the body exceeds it.
+
+16 MiB decoded is ~21.3 MiB once base64-encoded (the 4/3 expansion), leaving
+roughly 3x headroom under the 64 MiB serve-side limit even before the
+surrounding JSON envelope (`env`, `start_cmd`, `control_token`, per-file
+path/mode/quoting) is added — negligible next to file content for any
+realistic env or `start_cmd` size. Exceeding the cap fails the run with an
+error naming only the cap and the total size, never a path or file content.
+
 ## Verification commands (once applied to a real cluster)
 
 ```sh
@@ -625,6 +678,19 @@ kubectl run netpol-probe --rm -it --restart=Never \
   Phase 1's minimal fixture (`phase1-spec.md` §2.4 explicitly scopes it this
   way); the polished chart is Phase 2.
 - **No in-cluster credential rotation.** See "Secret creation" step 3.
+- **Bootstrap files — including the composed agent home — cross the
+  broker→router hop in plaintext.** The router endpoint in this fixture is
+  `http://atenet-router.<namespace>.svc:80`, and the router client has no CA
+  configured. The composed home (see "Bootstrap files: home delivery" above)
+  can carry a `settings.json` with env values, and is treated as
+  secret-grade for hygiene (never logged or put in an error) — but the wire
+  exposure is the same plaintext hop auth and secret files already ride, not
+  a narrower one. Out of scope to fix in Phase 1 for the same reasons the
+  existing plaintext-hop risk is: this is a dedicated test cluster, router
+  ingress is restricted to the broker namespace (see the NetworkPolicy
+  discussion above), and the single-shot bootstrap check applies. A shared
+  cluster needs the router's TLS listener with a CTB CA, or an end-to-end
+  sealed payload, before this ships beyond a dedicated test cluster.
 - **The dialer's trust material (`ca_file`/`cluster_trust_bundle`) is pinned
   for the broker process's lifetime, not re-read per agent start.**
   `pkg/runtime.NewSubstrateRuntime` memoizes one `*SubstrateRuntime` (and its
