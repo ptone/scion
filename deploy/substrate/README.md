@@ -867,9 +867,11 @@ process — drops both for every actor a *previous* process created. The
 actors themselves, their egress policies, and their workers are untouched on
 the cluster; only this broker's memory of them is gone (ptone/scion#1808).
 
-**The invariant: no delete or stop reports success while the actor still
-exists.** Three exit paths matter, and all three are covered, not just the
-main one:
+**The invariant: no delete or stop reports success while the actor exists in
+any state other than `ACTOR_STATE_DELETING`.** (The `DELETING` exception is
+consequence (d) below — it has nothing to do with a restart by itself, but
+it can combine with one.) Three exit paths matter, and all three are
+covered, not just the main one:
 - **Delete/stop of a pre-restart agent by its project-scoped slug returns
   HTTP 409 `substrate_agent_identity_unknown`** — whether the slug resolves
   to nothing at all, or resolves to a file-only target because this
@@ -907,28 +909,43 @@ main one:
   turn an ordinary stop-then-delete sequence into a false "broker
   restarted" 409.
 
-**Operator cleanup for a record-less actor.** The 409 response carries only
-the atespace and a count, never an actor name or a control token — identify
-the actor from your own records first, not from the response body:
+**Operator cleanup for a record-less actor.** The 409 response body carries
+only the atespace and a count, never an actor name or a control token —
+identify the actor from the broker's own log or your own records first, not
+from the response body:
 
 ```sh
-# 0. Identify the actor. The 409 only proves at least one record-less actor
-#    exists in this atespace; it does not name it or confirm which slug you
-#    asked for is the one holding it. Compute the expected actor name
-#    yourself (<project-slug>--<agent-slug>; see pkg/agent/run.go's
-#    containerName) and cross-check it against the hub's own agent list for
-#    this project (its phase/name should match what you expect) before
-#    touching anything below. If more than one project could plausibly share
-#    this atespace (see the atespace-prefix note below), confirm ownership
-#    with each project's owner first — do not guess from the actor name
-#    alone.
-kubectl ate get actor -a <atespace> <actor> -o yaml
+# 0. Identify the actor. The 409 response body only proves at least one
+#    record-less actor exists in this atespace; it does not name it. The
+#    broker logs the record-less actor NAMES at WARN on every such 409 (only
+#    in its own log, never in the HTTP response):
+kubectl -n "${BROKER_NAMESPACE}" logs deploy/scion-substrate-broker \
+  | grep -i "agent identity unknown"
+#    Look for the "recordless_actors" field on that log line. For each name
+#    it lists:
+#      (i)  confirm its .metadata.createTime predates the CURRENT broker
+#           pod's .status.startTime -- an actor created after the current
+#           pod started is not a pre-restart actor, whatever this 409 says:
+kubectl ate get actor -a <atespace> <actor> -o yaml   # read .metadata.createTime
+kubectl -n "${BROKER_NAMESPACE}" get pods -l app=scion-substrate-broker \
+  -o jsonpath='{.items[0].status.startTime}'
+#      (ii) cross-check it against the hub's own agent list for this
+#           project (its phase/name should match what you expect).
+#    If more than one project could plausibly share this atespace (see the
+#    atespace-prefix note below), confirm ownership with each project's
+#    owner first. Only a name verified this way -- from the broker's own
+#    WARN log line, confirmed pre-restart, and matched against the hub's
+#    agent list -- may be acted on below; never guess from the requested
+#    slug alone.
 
-# 1. Only once the actor is confirmed: delete its egress policy. There is no
-#    dedicated CLI for this; call the ateapi Control service's
-#    DeleteActorEgressPolicy RPC directly (e.g. via grpcurl against
-#    api.${ATE_SYSTEM_NAMESPACE}.svc:443), or whatever operator tooling your
-#    cluster already wraps it with.
+# 1. Only once the actor is confirmed: delete its egress policy FIRST. This
+#    order is mandatory, not a suggestion — deleting the actor before its
+#    egress policy leaves the policy behind with nothing left to delete it
+#    (RecordlessActors only ever reports actors, so an orphaned policy alone
+#    is invisible to this whole mechanism). There is no dedicated CLI for
+#    this; call the ateapi Control service's DeleteActorEgressPolicy RPC
+#    directly (e.g. via grpcurl against api.${ATE_SYSTEM_NAMESPACE}.svc:443),
+#    or whatever operator tooling your cluster already wraps it with.
 
 # 2. Delete the actor itself, any_state so a non-RUNNING actor isn't
 #    rejected:
@@ -937,10 +954,17 @@ kubectl ate delete actor -a <atespace> <actor> --any-state
 # 3. Force-delete the hub's own agent record so it doesn't keep dispatching
 #    to an actor that no longer exists. `scion delete --force` does not
 #    exist (checked, cmd/delete.go has no --force flag) — call the hub API
-#    directly. Read the token from a file rather than putting it on the
-#    command line (shell history, `ps` output):
+#    directly, with the hub token you already hold (the same one `scion`
+#    itself uses; do not create or expect any separate "~/.scion/token"
+#    file — nothing in this codebase creates one). Nothing that expands a
+#    secret may appear on the command line (shell history, `ps`,
+#    `/proc/<pid>/cmdline`), so write it to a 0600 header file first:
+HDR=$(mktemp)
+printf 'Authorization: Bearer %s\n' "$TOKEN" > "$HDR"
+chmod 600 "$HDR"
 curl -X DELETE "https://<hub-endpoint>/api/v1/agents/<agent-id>?force=true" \
-  -H "Authorization: Bearer $(cat ~/.scion/token)"
+  -H @"$HDR"
+rm -f "$HDR"
 ```
 
 Step 3's `force=true` is what makes this safe to run against a 409: the hub
@@ -964,9 +988,9 @@ exists to prevent.
   ever turns a would-be success into an error, it never selects a delete
   target across atespace boundaries.
 - (b) Once at least one record-less actor exists in a project's atespace,
-  *every* delete of an absent slug in that project returns 409 instead of
-  the usual idempotent 404, until every record-less actor in that atespace
-  has been cleaned up (above).
+  *every* delete or stop of an absent slug in that project returns 409
+  instead of the usual idempotent 404/202, until every record-less actor in
+  that atespace has been cleaned up (above).
 - (c) A narrow window between `CreateActor` succeeding and this process
   recording it (spanning `waitRunning`, `healthz`, and bootstrap — tens of
   seconds) makes a new actor look record-less to any concurrent delete/stop
@@ -974,10 +998,57 @@ exists to prevent.
   itself: both get a spurious 409 rather than a wrong action, since the
   probe never selects a target. Not hardened further in Phase 1 (see
   `.design/kubernetes/substrate-runtime.md` §9).
+- (d) A pre-restart actor already in `ACTOR_STATE_DELETING` when the broker
+  restarts — for example, one this same broker began deleting (`Stop` is
+  `Delete` in Phase 1) just before whatever crash triggered the restart, and
+  whose deletion never finished — is excluded from the record-less-actor
+  count above (see "with no restart at all", above, for why: its egress
+  policy is already gone, so counting it would just turn an ordinary
+  stop-then-delete race into a false 409). The consequence: a delete of its
+  slug returns the ordinary idempotent 404, and the hub drops its agent
+  record, while the actor itself may still be sitting in the cluster,
+  stuck in `DELETING`. This is the one exception to the invariant stated
+  above. A process-local record of which actors this broker process itself
+  asked to delete could not distinguish this case either: why the deletion
+  never finished is below scion, in ateapi or the cluster it manages, not
+  anything this process could have tracked about its own requests.
 
-All three are accepted trade-offs of failing closed rather than risking a
+  Locating and clearing one (it can't be located by attempting a delete/stop
+  and reading the error — a `DELETING` actor never produces the 409 above):
+
+  ```sh
+  # 1. List the atespace's actors and note every one whose STATE column
+  #    reads ACTOR_STATE_DELETING. ListActorsRequest has no state filter, so
+  #    this is a visual/scripted filter over the full listing, not a --state
+  #    flag:
+  kubectl ate get actors -a <atespace>
+
+  # 2. For each DELETING candidate NAME, compare its creation time against
+  #    the CURRENT broker pod's start time. Only a NAME that predates the
+  #    current pod is a candidate — a DELETING actor created after the
+  #    current pod started is still in its own, ordinary, in-flight delete:
+  kubectl ate get actor -a <atespace> <NAME> -o yaml   # read .metadata.createTime
+  kubectl -n "${BROKER_NAMESPACE}" get pods -l app=scion-substrate-broker \
+    -o jsonpath='{.items[0].status.startTime}'
+
+  # 3. Only for a NAME confirmed in step 2: delete its egress policy exactly
+  #    as in operator cleanup step 1 above (tolerates NotFound if it is
+  #    already gone), then:
+  kubectl ate delete actor -a <atespace> <NAME> --any-state
+  ```
+
+All four are accepted trade-offs of failing closed rather than risking a
 false success; see `.design/kubernetes/substrate-runtime.md` §10 for the
 durable fix Phase 2 tracks.
+
+**The record-less-actor probe only reaches the substrate profiles this
+broker process has already resolved a manager for.** Immediately after a
+restart, that is just the default substrate profile — a second substrate
+profile pointed at a *different* ateapi endpoint is not probed until this
+process resolves it at least once (its first `Run`), so a pre-restart actor
+under that second profile's atespace gets the ordinary idempotent 404/202
+until then. This deployment only has one substrate profile, so it doesn't
+apply here.
 
 **`profiles.local`/`profiles.remote` are repointed at the substrate runtime
 in this ConfigMap on purpose** (`broker.yaml`) — not an oversight, and not
