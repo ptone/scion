@@ -322,14 +322,39 @@ resource "google_cloud_run_v2_service" "hub" {
   launch_stage         = "GA"
   deletion_protection  = false # this is a hub, not shared infra; hub destroy must be able to remove it
 
+  # F-109: SERVICE-level scaling (top-level, sibling of template{}), not
+  # REVISION-level. min_instance_count here is divided among only the
+  # revision(s) actually serving traffic — a retired revision at 0% traffic
+  # gets none of it. Before this, min_instance_count lived solely in
+  # template.scaling below (revision-level), which Cloud Run keeps warm
+  # regardless of traffic share: tfha-h1-00001-g5q (broken v1 settings, 0%
+  # traffic after the F-107 rollover) was still running its scheduler
+  # against the shared Postgres, because its own revision-level min kept it
+  # alive. Verified against the pinned google-beta ~> 8.4 schema: top-level
+  # scaling and min_instance_count both exist there (provider schema, not
+  # assumed).
+  scaling {
+    min_instance_count = var.min_instances
+  }
+
   template {
     service_account       = var.hub_sa_email
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2" # required for NFS volumes; provider 8.4 rejects the short "GEN2" form
     session_affinity      = true
     timeout               = var.timeout
 
+    # F-109: max stays here (per-revision ceiling; unrelated to the
+    # retired-revision problem above). min is pinned to the literal 0, not
+    # left unset: template.scaling.min_instance_count is optional but NOT
+    # computed in the provider schema (unlike max_instance_count, which is
+    # both), so Cloud Run's own "defaults to 0" only applies API-side —
+    # leaving it unset risks the same class of bug F-104 already taught us
+    # (the API echoing a value Terraform never declared, reintroducing a
+    # perpetual diff). Declaring 0 explicitly here makes config and state
+    # agree on every plan. The service-level scaling block above is what
+    # actually governs how many instances are kept warm.
     scaling {
-      min_instance_count = var.min_instances
+      min_instance_count = 0
       max_instance_count = var.max_instances
     }
 
