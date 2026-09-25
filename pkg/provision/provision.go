@@ -685,19 +685,20 @@ func chownTarget(hostPath string) string {
 // a symlink inside a cloned (possibly untrusted) repo pointing outside the
 // chowned tree (elsewhere in the init container's own filesystem view, or
 // another mounted shared dir) risks having its REFERENT re-owned instead of
-// just the link itself. -h makes chown re-own the link and never follow it,
-// on both the target chown binary (GNU coreutils, confirmed via --help: "-h,
-// --no-dereference" is supported; scion-base's runtime layer is
-// node:24-trixie-slim, i.e. Debian, i.e. GNU coreutils, not BusyBox) and
-// BusyBox (also supports -h). Verified empirically, not assumed: a symlink's
-// target's ctime is provably untouched by `chown -R -h` (TestChownProjectTree_
-// SymlinkOutsideTree_TargetOwnershipUnchanged), which is what actually matters
-// here — regardless of what a bare `chown -R` (no -h) does or doesn't
-// dereference by default for non-argument symlinks encountered during
-// traversal (this sandbox's GNU coreutils 9.1 did not dereference those
-// either, checked directly by the same ctime method — but -h removes any
-// doubt and matches standard hardening practice for this exact class of risk,
-// so it's unconditional here regardless of that finding).
+// just the link itself. -h makes chown re-own the link and never follow it.
+// Confirmed the chown binary in scion-base supports -h: its runtime layer is
+// node:24-trixie-slim (Debian, GNU coreutils, not BusyBox), and GNU chown
+// --help lists "-h, --no-dereference"; BusyBox chown also supports -h.
+//
+// TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged exercises
+// this with a same-uid chown (this sandbox has no CAP_CHOWN, so it cannot
+// chown to a different uid at all) and checks the outside target's ctime is
+// untouched. That is evidence -h behaves as documented here, not proof that
+// the real scenario (root, a different target uid, CAP_DAC_OVERRIDE) is
+// safe — it cannot exercise that scenario in this environment. Treat it as
+// a regression guard on -h's own behavior, not as a substitute for
+// verifying the real k8s init container against a live cluster.
+
 func chownProjectTree(ctx context.Context, projectRoot string, uid, gid int) error {
 	// Use chown -R -h for recursive ownership change without following symlinks.
 	cmd := exec.CommandContext(ctx, "chown", "-R", "-h", fmt.Sprintf("%d:%d", uid, gid), projectRoot)

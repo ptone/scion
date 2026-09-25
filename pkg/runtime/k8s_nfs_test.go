@@ -807,6 +807,52 @@ func TestRun_NFSLockError_FailsDispatch(t *testing.T) {
 	}
 }
 
+// TestWaitForPodReady_NamesFailedInitContainer is the F-111 review fix
+// (tf-lead): waitForPodReady used to check only the main container's
+// status, so a failed init container (most notably workspace-provision,
+// whose entire job is now a fatal chown — RequireChownSuccess, F-111) was
+// invisible here — it just sat as PodInitializing until the full 10-minute
+// timeout fired with a generic, unhelpful error. It must now name the
+// failed init container and its actual exit reason immediately.
+func TestWaitForPodReady_NamesFailedInitContainer(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	namespace := "default"
+	podName := "test-init-fail"
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "workspace-provision",
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{
+							ExitCode: 1,
+							Reason:   "Error",
+							Message:  "provision failed: ProvisionShared: chown /workspace to 1000:1000: operation not permitted",
+						},
+					},
+				},
+			},
+		},
+	}
+	if _, err := r.Client.Clientset.CoreV1().Pods(namespace).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("failed to create test pod: %v", err)
+	}
+
+	err := r.waitForPodReady(context.Background(), namespace, podName)
+	if err == nil {
+		t.Fatal("expected waitForPodReady to fail when an init container has terminated with a non-zero exit code")
+	}
+	if !strings.Contains(err.Error(), "workspace-provision") {
+		t.Errorf("error should name the failed init container, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "operation not permitted") {
+		t.Errorf("error should include the init container's failure message, got: %v", err)
+	}
+}
+
 func TestRun_NFSLockLost_CreatesWaitPod(t *testing.T) {
 	// When the lock is held by another node, the pod should have a
 	// wait-for-sentinel init container, not a cloning one.
@@ -1306,6 +1352,45 @@ func TestBuildPod_NFSBackend_InitAndMainSharedDirMounts_MatchExactly(t *testing.
 	}
 }
 
+// TestBuildPod_NFSBackend_RejectsTraversalSharedDirName is the F-111 review
+// fix (tf-lead/tf-review-nfsfix, BLOCKING), exercised end to end through
+// buildPod: a shared-dir name that would escape projects/<pid>/shared-dirs/
+// once joined must fail the whole pod build — for both the shared-dir-only
+// case (init container construction, which iterates config.SharedDirs
+// first) and the case where the escaping entry sits alongside a valid one
+// (the main-container loop, which processes them in order and must also
+// reject once it reaches the bad one, not just skip it).
+func TestBuildPod_NFSBackend_RejectsTraversalSharedDirName(t *testing.T) {
+	badNames := []string{
+		"../../../projects",
+		"../../victim/shared-dirs/scratchpad",
+		"/etc/passwd",
+		".",
+	}
+	for _, name := range badNames {
+		t.Run(name, func(t *testing.T) {
+			r := newNFSTestK8sRuntime()
+			config := RunConfig{
+				Name:                 "test-nfs-shared-traversal",
+				Image:                "test-image",
+				UnixUsername:         "scion",
+				WorkspaceBackendName: "nfs",
+				NFSPVClaimName:       "scion-workspaces",
+				NFSSubPath:           "projects/proj-123/workspace",
+				SharedDirs: []api.SharedDir{
+					{Name: "scratchpad"}, // valid, present alongside the bad one
+					{Name: name},
+				},
+			}
+
+			pod, err := r.buildPod("default", config)
+			if err == nil {
+				t.Fatalf("buildPod should have rejected shared-dir name %q, got a pod: %+v", name, pod)
+			}
+		})
+	}
+}
+
 // TestBuildPod_NFSBackend_InitContainer_NoSharedDirMounts_WhenSharedDirStorageNFS
 // confirms the scope boundary: server.shared_dir_storage's own NFS mechanism
 // (a separate subsystem from workspace_storage:nfs) is not touched by this
@@ -1373,9 +1458,39 @@ func TestNFSSharedDirSubPath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.sharedDirName, func(t *testing.T) {
-			got := nfsSharedDirSubPath(tt.workspaceSubPath, tt.sharedDirName)
+			got, err := nfsSharedDirSubPath(tt.workspaceSubPath, tt.sharedDirName)
+			if err != nil {
+				t.Fatalf("nfsSharedDirSubPath(%q, %q) unexpected error: %v", tt.workspaceSubPath, tt.sharedDirName, err)
+			}
 			if got != tt.want {
 				t.Errorf("nfsSharedDirSubPath(%q, %q) = %q, want %q", tt.workspaceSubPath, tt.sharedDirName, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNFSSharedDirSubPath_RejectsTraversalNames is the F-111 review fix
+// (tf-lead/tf-review-nfsfix, BLOCKING): filepath.Join silently collapses
+// ".." segments, so an unvalidated shared-dir name can resolve outside
+// projects/<pid>/shared-dirs/ entirely — onto another project's real
+// workspace, which the winner init container (CHOWN/FOWNER/DAC_OVERRIDE,
+// F-111) would then recursively re-own. Defense in depth alongside
+// pkg/agent/shared_dir_storage.go's own validation gate.
+func TestNFSSharedDirSubPath_RejectsTraversalNames(t *testing.T) {
+	badNames := []string{
+		"../../../projects",
+		"../../victim/shared-dirs/scratchpad",
+		"/etc/passwd",
+		".",
+	}
+	for _, name := range badNames {
+		t.Run(name, func(t *testing.T) {
+			got, err := nfsSharedDirSubPath("projects/proj-123/workspace", name)
+			if err == nil {
+				t.Fatalf("nfsSharedDirSubPath(%q) = %q, want an error", name, got)
+			}
+			if got != "" {
+				t.Errorf("nfsSharedDirSubPath(%q) returned a non-empty path %q alongside an error", name, got)
 			}
 		})
 	}

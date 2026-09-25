@@ -1047,8 +1047,16 @@ authDone:
 	// authoritative whenever the hub dispatched this agent, and correctly
 	// empty otherwise — project settings cannot choose which project's
 	// shared tree an nfs-backed agent mounts (round 2 review finding S-F4).
+	//
+	// F-111 review (BLOCKING): resolveSharedDirs needs to know whether
+	// server.workspace_storage.backend is "nfs" — a different config block
+	// from sharedDirStorageCfg (server.shared_dir_storage) — so its local/
+	// default branch can validate shared-dir names when they're about to
+	// become NFS subPaths via the k8s runtime's nfsSharedDirs path.
+	nfsWorkspaceBackend := settings != nil && settings.Server != nil &&
+		settings.Server.WorkspaceStorage != nil && settings.Server.WorkspaceStorage.Backend == "nfs"
 	sharedDirVolumes, sharedDirStorage, err := resolveSharedDirs(
-		sharedDirStorageCfg, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace)
+		sharedDirStorageCfg, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace, nfsWorkspaceBackend)
 	if err != nil {
 		return nil, err
 	}

@@ -399,16 +399,17 @@ func TestProvisionShared_ChownsSharedDirsIndependently(t *testing.T) {
 //
 // This sandbox has no CAP_CHOWN (verified directly, matching the pattern in
 // cloudrun_sandbox_runtime_test.go's TestPrepareScionLayout_ChownsDirectories),
-// so this can't observe a UID actually changing on the link while staying
-// fixed on the target. It observes something at least as decisive: ctime is
-// updated by chown/lchown unconditionally, even when the new owner equals
-// the old owner (verified empirically before writing this test — a `chown -R
-// -h` to the process's own uid:gid left the outside target's ctime, down to
-// the nanosecond, byte-for-byte identical). If -h ever regressed to plain
-// -R and dereferenced the symlink, the target's ctime would change even
-// though its uid/gid numerically wouldn't (same reason this sandbox can't
-// use the uid itself as the signal) — so ctime is the correct, decisive
-// check here, not a fallback for one.
+// so this cannot chown to a different uid at all, let alone reproduce the
+// real k8s init container (root, CAP_DAC_OVERRIDE, a target uid that
+// actually differs from the caller's). This test is a same-uid chown, and
+// checks that ctime — which chown/lchown update unconditionally, even when
+// the new owner equals the old one — is untouched on the outside target
+// (verified empirically before writing this test: a `chown -R -h` to the
+// process's own uid:gid left the outside target's ctime byte-for-byte
+// identical down to the nanosecond). That is a real regression guard on
+// -h's dereference behavior specifically, and the best this environment can
+// exercise — it is NOT proof that the real root/CAP_DAC_OVERRIDE scenario
+// is safe, only that -h itself does what it's documented to do here.
 func TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("ctime/uid check uses syscall.Stat_t (Linux only)")

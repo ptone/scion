@@ -1335,11 +1335,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// the key here instead of reconstructing it there removes that risk
 		// rather than relying on it never happening.
 		var sharedDirPairs []string
-		if sharedMounts := nfsSharedDirInitMounts(config); len(sharedMounts) > 0 {
-			for _, sm := range sharedMounts {
-				initVolumeMounts = append(initVolumeMounts, sm.Mount)
-				sharedDirPairs = append(sharedDirPairs, sm.Name+"="+sm.Mount.MountPath)
-			}
+		sharedMounts, err := nfsSharedDirInitMounts(config)
+		if err != nil {
+			return nil, fmt.Errorf("workspace-provision init container: %w", err)
+		}
+		for _, sm := range sharedMounts {
+			initVolumeMounts = append(initVolumeMounts, sm.Mount)
+			sharedDirPairs = append(sharedDirPairs, sm.Name+"="+sm.Mount.MountPath)
 		}
 
 		initEnv := nfsProvisionEnv(config.GitCloneForInit)
@@ -1537,7 +1539,13 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// NFS backend: mount from the workspace PVC with a shared-dir subPath.
 			// SubPath root mirrors the nfsBackend.Resolve layout:
 			//   <SubPathRoot>/<projectID>/shared-dirs/<name>
-			sdSubPath := nfsSharedDirSubPath(config.NFSSubPath, sd.Name)
+			// F-111 review (BLOCKING): nfsSharedDirSubPath validates sd.Name and
+			// the resulting path itself now — reject here too, independent of
+			// pkg/agent/shared_dir_storage.go's own gate.
+			sdSubPath, err := nfsSharedDirSubPath(config.NFSSubPath, sd.Name)
+			if err != nil {
+				return nil, err
+			}
 			volName := fmt.Sprintf("shared-dir-%d", i)
 
 			// The volume source is the SAME NFS PVC as the workspace — but K8s
@@ -1689,6 +1697,30 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 			pod, err := r.Client.Clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 			if err != nil {
 				return err
+			}
+
+			// F-111 review (tf-lead): init container failures (most notably
+			// workspace-provision, whose whole job is now a fatal chown —
+			// RequireChownSuccess, F-111) were invisible here: this function
+			// only ever inspected the MAIN container's status, so a failed
+			// init container just sat as "PodInitializing" until the full
+			// 10-minute timeout above fired with a generic, unhelpful error.
+			// Name the failed init container and its actual exit reason
+			// immediately instead.
+			for _, ics := range pod.Status.InitContainerStatuses {
+				if ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0 {
+					runtimeLog.Error("Init container failed", "pod", podName, "container", ics.Name,
+						"exitCode", ics.State.Terminated.ExitCode, "reason", ics.State.Terminated.Reason,
+						"message", ics.State.Terminated.Message, "phase", "init-container")
+					return fmt.Errorf("init container %q failed in pod %q: exit code %d (%s): %s",
+						ics.Name, podName, ics.State.Terminated.ExitCode, ics.State.Terminated.Reason, ics.State.Terminated.Message)
+				}
+				if ics.State.Waiting != nil && ics.State.Waiting.Reason == "CrashLoopBackOff" {
+					runtimeLog.Error("Init container crash loop", "pod", podName, "container", ics.Name,
+						"message", ics.State.Waiting.Message, "phase", "init-container")
+					return fmt.Errorf("init container %q is crash-looping in pod %q: %s — check container logs with 'scion logs'",
+						ics.Name, podName, ics.State.Waiting.Message)
+				}
 			}
 
 			// Check container statuses for more detail
@@ -2532,11 +2564,38 @@ func (r *KubernetesRuntime) GetWorkspacePath(ctx context.Context, id string) (st
 // shared dirs are siblings: "projects/<pid>/shared-dirs/<name>".
 //
 // This mirrors the nfsBackend.Resolve layout (design §5.3).
-func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) string {
+//
+// F-111 review (tf-lead/tf-review-nfsfix, BLOCKING): sharedDirName is data —
+// it can come from a cloned repo's in-repo settings.yaml — and
+// filepath.Join silently collapses ".." segments before Kubernetes' own
+// subPath escape check ever sees the resulting string. A name like
+// "../../<other-project>/workspace" would resolve to another project's real
+// workspace directory; since F-111 gave the winner init container CHOWN/
+// FOWNER/DAC_OVERRIDE, that's not just a data leak, it's a cross-project
+// ownership hijack (chown -R -h on someone else's tree). This is defense in
+// depth alongside pkg/agent/shared_dir_storage.go's own validation gate
+// (resolveSharedDirs, fails closed when workspace_storage.backend is nfs):
+// this function refuses to build a bad subPath at all, independently, in
+// case anything else ever reaches buildPod with unvalidated SharedDirs.
+//
+// Two independent checks, not one: api.ValidateSharedDirs rejects anything
+// that isn't a valid slug (lowercase alphanumeric + internal hyphens only —
+// which cannot produce a path separator or ".." by construction), and the
+// joined-path-prefix check below is a second, structurally different gate
+// that doesn't depend on the slug regex ever staying correct.
+func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) (string, error) {
+	if err := api.ValidateSharedDirs([]api.SharedDir{{Name: sharedDirName}}); err != nil {
+		return "", fmt.Errorf("shared dir name %q: %w", sharedDirName, err)
+	}
 	// workspaceSubPath is "projects/<pid>/workspace"
 	// We need "projects/<pid>/shared-dirs/<name>"
 	parent := filepath.Dir(workspaceSubPath) // "projects/<pid>"
-	return filepath.Join(parent, "shared-dirs", sharedDirName)
+	wantDir := filepath.Join(parent, "shared-dirs")
+	joined := filepath.Join(wantDir, sharedDirName)
+	if !strings.HasPrefix(joined, wantDir+string(filepath.Separator)) {
+		return "", fmt.Errorf("shared dir name %q: resolved subPath %q escapes %s", sharedDirName, joined, wantDir)
+	}
+	return joined, nil
 }
 
 // nfsSharedDirMount pairs a shared dir's own name (config.SharedDirs[i].Name,
@@ -2561,11 +2620,11 @@ type nfsSharedDirMount struct {
 // call. Returns nil for any other shared-dir mechanism
 // (server.shared_dir_storage's own NFS backend, or the local per-dir-PVC
 // backend) — those are separate subsystems, not implicated in F-111.
-func nfsSharedDirInitMounts(config RunConfig) []nfsSharedDirMount {
+func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
 	sharedDirStorageNFS := config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs"
 	nfsSharedDirs := !sharedDirStorageNFS && config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 	if !nfsSharedDirs || len(config.SharedDirs) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	k8sContainerWorkspace := config.ContainerWorkspace
@@ -2579,16 +2638,20 @@ func nfsSharedDirInitMounts(config RunConfig) []nfsSharedDirMount {
 		if sd.InWorkspace {
 			target = fmt.Sprintf("%s/.scion-volumes/%s", k8sContainerWorkspace, sd.Name)
 		}
+		subPath, err := nfsSharedDirSubPath(config.NFSSubPath, sd.Name)
+		if err != nil {
+			return nil, err
+		}
 		mounts = append(mounts, nfsSharedDirMount{
 			Name: sd.Name,
 			Mount: corev1.VolumeMount{
 				Name:      fmt.Sprintf("shared-dir-%d", i),
 				MountPath: target,
-				SubPath:   nfsSharedDirSubPath(config.NFSSubPath, sd.Name),
+				SubPath:   subPath,
 			},
 		})
 	}
-	return mounts
+	return mounts, nil
 }
 
 // nfsInitContainerInjected reports whether buildPod would add the
