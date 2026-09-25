@@ -52,17 +52,47 @@ func (stubExecQuerier) Query(_ context.Context, _ string, _, _ any) error {
 //
 // failOn matches statements (by substring) that should fail as if the
 // target table doesn't exist yet, e.g. a fresh database.
+//
+// openSavepoints tracks live savepoint names, so ROLLBACK TO / RELEASE on a
+// name that was never SAVEPOINTed fails like real Postgres (SQLSTATE
+// 3B001) instead of silently clearing the abort state. Without this, a
+// broken fix that rolled back to the wrong (or a nonexistent) savepoint
+// name would pass this mock.
 type abortableExecQuerier struct {
-	failOn  []string
-	aborted bool
+	failOn         []string
+	aborted        bool
+	openSavepoints map[string]bool
 }
 
 func (q *abortableExecQuerier) Exec(_ context.Context, stmt string, _, _ any) error {
+	if q.openSavepoints == nil {
+		q.openSavepoints = map[string]bool{}
+	}
+
 	switch {
-	case strings.HasPrefix(stmt, "ROLLBACK TO SAVEPOINT"):
+	case strings.HasPrefix(stmt, "SAVEPOINT "):
+		if q.aborted {
+			return fmt.Errorf("current transaction is aborted, commands ignored until end of transaction block (SQLSTATE 25P02)")
+		}
+		q.openSavepoints[strings.TrimPrefix(stmt, "SAVEPOINT ")] = true
+		return nil
+	case strings.HasPrefix(stmt, "ROLLBACK TO SAVEPOINT "):
+		name := strings.TrimPrefix(stmt, "ROLLBACK TO SAVEPOINT ")
+		if !q.openSavepoints[name] {
+			return fmt.Errorf("savepoint %q does not exist (SQLSTATE 3B001)", name)
+		}
 		// Rolling back to a savepoint established before the failing
 		// statement clears the abort state, exactly like real Postgres.
+		// The savepoint itself stays valid (Postgres keeps it open until
+		// RELEASE or the enclosing transaction ends).
 		q.aborted = false
+		return nil
+	case strings.HasPrefix(stmt, "RELEASE SAVEPOINT "):
+		name := strings.TrimPrefix(stmt, "RELEASE SAVEPOINT ")
+		if !q.openSavepoints[name] {
+			return fmt.Errorf("savepoint %q does not exist (SQLSTATE 3B001)", name)
+		}
+		delete(q.openSavepoints, name)
 		return nil
 	case q.aborted:
 		// Real Postgres: "current transaction is aborted, commands

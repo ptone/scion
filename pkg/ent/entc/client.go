@@ -262,19 +262,9 @@ func normalizeBrokerLabels(next entschema.Applier) entschema.Applier {
 			`UPDATE runtime_brokers SET labels = NULL WHERE labels::text = ''`,
 			`UPDATE runtime_brokers SET annotations = NULL WHERE annotations::text = ''`,
 		} {
-			// Each statement is best-effort and wrapped in its own SAVEPOINT,
-			// following skipExistingRelations above: on Postgres, ANY
-			// statement error (including 42P01 "relation does not exist" on
-			// a fresh database where runtime_brokers hasn't been created
-			// yet) aborts the surrounding transaction, and every subsequent
-			// command — including the real migration's own SAVEPOINT — is
-			// rejected until a ROLLBACK (TO SAVEPOINT). Discarding the Go
-			// error without rolling back left the transaction poisoned even
-			// though the error was "handled": the failure surfaced several
-			// statements later, as an unrelated-looking
-			// "creating savepoint" / SQLSTATE 25P02 error. Filtering on
-			// 42P01 alone would not be enough — the rollback is required
-			// regardless of which error occurred.
+			// Wrap in a SAVEPOINT so a failure (e.g. 42P01 on a fresh DB,
+			// where runtime_brokers doesn't exist yet) doesn't abort the
+			// surrounding migration transaction; see skipExistingRelations.
 			sp := fmt.Sprintf("normalize_broker_labels_%d", i)
 			if err := conn.Exec(ctx, fmt.Sprintf("SAVEPOINT %s", sp), []any{}, nil); err != nil {
 				return fmt.Errorf("creating savepoint: %w", err)
