@@ -14,6 +14,14 @@
 HARNESS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${PYTHON:-python3}"
 
+# A handful of tests deliberately replace (not prepend to) $PATH for the
+# duration of a single run_expect_fail call, to simulate a missing
+# kubectl/auth-plugin -- see test_k8s_setup_kubeconfig_missing_*_fails.
+# run_expect_fail's own TMPDIR bookkeeping (find/sort/comm, below) must
+# keep working even then, so it uses this snapshot -- taken once, here,
+# before any test can touch $PATH -- rather than the ambient $PATH.
+HARNESS_SAFE_PATH="$PATH"
+
 PASS_COUNT=0
 FAIL_COUNT=0
 
@@ -569,7 +577,7 @@ run_expect_fail() {
   local out had_errexit=false before_tmp after_tmp
   case "$-" in *e*) had_errexit=true ;; esac
   set +e
-  before_tmp="$(find "${TMPDIR:-/tmp}" -mindepth 1 2>/dev/null | sort)"
+  before_tmp="$(PATH="$HARNESS_SAFE_PATH" find "${TMPDIR:-/tmp}" -mindepth 1 2>/dev/null | PATH="$HARNESS_SAFE_PATH" sort)"
   out="$("$@" 2>&1)"
   # shellcheck disable=SC2034 # read by callers in test_hybrid_tier.sh
   RUN_EXIT_CODE=$?
@@ -583,9 +591,9 @@ run_expect_fail() {
   # file on disk. Diffing TMPDIR before/after and removing whatever
   # appeared catches this generically, for any function this wraps, not
   # just the ones a test author remembered to audit.
-  after_tmp="$(find "${TMPDIR:-/tmp}" -mindepth 1 2>/dev/null | sort)"
+  after_tmp="$(PATH="$HARNESS_SAFE_PATH" find "${TMPDIR:-/tmp}" -mindepth 1 2>/dev/null | PATH="$HARNESS_SAFE_PATH" sort)"
   if [[ "$after_tmp" != "$before_tmp" ]]; then
-    comm -13 <(printf '%s\n' "$before_tmp") <(printf '%s\n' "$after_tmp") | while IFS= read -r _new_tmp_entry; do
+    PATH="$HARNESS_SAFE_PATH" comm -13 <(printf '%s\n' "$before_tmp") <(printf '%s\n' "$after_tmp") | while IFS= read -r _new_tmp_entry; do
       [[ -n "$_new_tmp_entry" ]] && rm -rf "$_new_tmp_entry"
     done
   fi

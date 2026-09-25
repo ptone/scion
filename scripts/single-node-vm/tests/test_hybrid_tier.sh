@@ -1296,6 +1296,51 @@ test_k8s_preflight_pv_non_ip_drift_fails() {
   assert_contains "$RUN_OUTPUT" "path:" "error should name the drifted field"
 }
 
+test_k8s_preflight_pv_drift_reclaim_policy_fails() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "$K8S_NS" "$K8S_PVC" "Delete"
+  run_expect_fail hybrid_k8s_preflight "$K8S_HUB"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a drifted reclaim policy must fail preflight"
+  assert_contains "$RUN_OUTPUT" "persistentVolumeReclaimPolicy:" "error should name the drifted field"
+}
+
+test_k8s_preflight_pv_drift_claim_name_fails() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "$K8S_NS" "some-other-pvc"
+  run_expect_fail hybrid_k8s_preflight "$K8S_HUB"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a drifted claimRef.name must fail preflight"
+  assert_contains "$RUN_OUTPUT" "claimRef.name:" "error should name the drifted field"
+}
+
+test_k8s_preflight_pv_drift_claim_namespace_fails() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "some-other-namespace" "$K8S_PVC"
+  run_expect_fail hybrid_k8s_preflight "$K8S_HUB"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a drifted claimRef.namespace must fail preflight"
+  assert_contains "$RUN_OUTPUT" "claimRef.namespace:" "error should name the drifted field"
+}
+
+test_k8s_preflight_namespace_get_error_fails_closed() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  set_k8s_get_error namespace "$K8S_NS"
+  run_expect_fail hybrid_k8s_preflight "$K8S_HUB"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "an unknown namespace check must fail preflight closed, not be treated as absent (which would create over it)"
+}
+
+test_k8s_preflight_pvc_get_error_fails_closed() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  set_k8s_get_error pvc "${K8S_NS}__${K8S_PVC}"
+  run_expect_fail hybrid_k8s_preflight "$K8S_HUB"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "an unknown PVC check must fail preflight closed, not be treated as absent"
+}
+
 test_k8s_preflight_does_not_check_pv_server_ip() {
   fresh_gcloud_state
   GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
@@ -1397,6 +1442,91 @@ test_k8s_ensure_pvc_drift_wrong_volume_fails() {
   rm -f "$HYBRID_KUBECONFIG"
 }
 
+test_k8s_ensure_pv_drift_path_fails() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/other-path" "$K8S_NS" "$K8S_PVC"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a drifted export path must fail the run"
+  assert_contains "$RUN_OUTPUT" "path:" "error should name the drifted field"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_pv_drift_reclaim_policy_fails() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "$K8S_NS" "$K8S_PVC" "Delete"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a drifted reclaim policy must fail the run"
+  assert_contains "$RUN_OUTPUT" "persistentVolumeReclaimPolicy:" "error should name the drifted field"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_pv_drift_claim_name_fails() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "$K8S_NS" "some-other-pvc"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a drifted claimRef.name must fail the run"
+  assert_contains "$RUN_OUTPUT" "claimRef.name:" "error should name the drifted field"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_pv_drift_claim_namespace_fails() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  seed_k8s_pv "$K8S_PV" "$K8S_HUB" "$K8S_VM_IP" "/srv/scion-shared" "some-other-namespace" "$K8S_PVC"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a drifted claimRef.namespace must fail the run"
+  assert_contains "$RUN_OUTPUT" "claimRef.namespace:" "error should name the drifted field"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_namespace_get_error_fails_closed() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  set_k8s_get_error namespace "$K8S_NS"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "an unknown namespace check must fail closed, not be treated as absent"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_ensure_pvc_get_error_fails_closed() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  set_k8s_get_error pvc "${K8S_NS}__${K8S_PVC}"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "an unknown PVC check must fail closed, not be treated as absent (which would create a duplicate)"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_get_notfound_shaped_permission_denied_treated_as_unknown() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  # Unlike set_k8s_get_permission_masked (whose text never matches
+  # kubectl's strict NotFound shape in the first place, so the
+  # permission/forbidden exclusion in _hybrid_kubectl_not_found is never
+  # actually the deciding factor), this message DOES match that exact
+  # shape ('Error from server (NotFound): <kind> "<name>" not found')
+  # while also being permission-worded, isolating the exclusion itself:
+  # without it, this would read as a genuine "absent" match.
+  printf 'Error from server (NotFound): pv "%s" not found: permission denied (RBAC)' "$K8S_PV" \
+    > "${KUBECTL_STUB_STATE_DIR}/pv/${K8S_PV}.json.get-error"
+  run_expect_fail hybrid_k8s_ensure_objects "$K8S_HUB" "$K8S_VM_IP"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a NotFound-shaped message that also says permission/forbidden must still fail closed as unknown, not absent"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
 test_k8s_ensure_matching_marked_objects_are_reused_without_recreating() {
   fresh_gcloud_state
   GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
@@ -1488,6 +1618,16 @@ test_k8s_teardown_check_get_error_aborts() {
   set_k8s_get_error namespace "$K8S_NS"
   hybrid_k8s_teardown_check "$K8S_HUB"
   assert_eq "true" "$HYBRID_K8S_TEARDOWN_FAILED" "an unknown check result must abort, not be treated as absent"
+  rm -f "$HYBRID_KUBECONFIG"
+}
+
+test_k8s_teardown_check_pvc_get_error_aborts() {
+  fresh_gcloud_state
+  GKE_NAME="mycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
+  hybrid_k8s_setup_kubeconfig
+  set_k8s_get_error pvc "${K8S_NS}__${K8S_PVC}"
+  hybrid_k8s_teardown_check "$K8S_HUB"
+  assert_eq "true" "$HYBRID_K8S_TEARDOWN_FAILED" "an unknown PVC check must abort teardown, not be treated as absent"
   rm -f "$HYBRID_KUBECONFIG"
 }
 

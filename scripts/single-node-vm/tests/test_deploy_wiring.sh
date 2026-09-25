@@ -212,6 +212,49 @@ run_deploy_create_to_settings_yaml() {
   rm -f "$config_file" "$log_file"
 }
 
+# run_deploy_create_to_cloud_run_deploy CONFIG_JSON — extends past the
+# settings.yaml stopping point above, all the way into Phase 4's Cloud
+# Run IAP proxy deploy: `gcloud run deploy` itself is unhandled by the
+# stub (it falls through to the "unhandled invocation" catch-all, exit
+# 1), so deploy.sh's own `set -e` ends the run immediately after that
+# call is issued -- but the stub logs every invocation unconditionally
+# before dispatching on it (see tests/lib/gcloud's header), so the call,
+# including its full argv (label args and all), is already in
+# $GCLOUD_STUB_LOG by the time this returns. That makes the log itself
+# the sentinel: no separate touched file is needed, and nothing past
+# this point (Artifact Registry, image build/push, the deploy call) is
+# actually reachable any other way without a much larger stub.
+run_deploy_create_to_cloud_run_deploy() {
+  local config_json="$1" config_file
+  config_file="$(mktemp)"
+  printf '%s' "$config_json" > "$config_file"
+  local log_file
+  log_file="$(mktemp)"
+  GCLOUD_STUB_SSH_SUCCEEDS=true bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
+    < /dev/null > "$log_file" 2>&1 &
+  local pid=$!
+  local waited_ms=0
+  while ! grep -q '^run deploy ' "$GCLOUD_STUB_LOG" 2>/dev/null && [[ "$waited_ms" -lt 30000 ]]; do
+    sleep 0.1
+    waited_ms=$((waited_ms + 100))
+  done
+  if ! grep -q '^run deploy ' "$GCLOUD_STUB_LOG" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null
+    DEPLOY_RC=1
+    DEPLOY_LOG="$(cat "$log_file")
+FATAL: run_deploy_create_to_cloud_run_deploy: 'run deploy' was never logged within 30000ms"
+    rm -f "$config_file" "$log_file"
+    return 1
+  fi
+  _wait_for_deploy_log_quiescence "$log_file"
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null
+  DEPLOY_RC=$?
+  DEPLOY_LOG="$(cat "$log_file")"
+  rm -f "$config_file" "$log_file"
+}
+
 # line_number PATTERN LOG — the 1-based line number of the first log line
 # containing PATTERN, or empty if none matches.
 line_number() {
@@ -563,6 +606,8 @@ test_deploy_create_base_markers_absent_on_existing_router_and_sa() {
     "an existing router must not be recreated (and so never gets the create-only marker call)"
   assert_eq "0" "$(gcloud_log | grep -c 'service-accounts create' || true)" \
     "an existing service account must not be recreated (and so never gets the create-only marker call)"
+  assert_eq "0" "$(gcloud_log | grep -c 'service-accounts update' || true)" \
+    "adopting an existing service account must not re-describe/update it -- create-only, like every other base marker"
 }
 
 # =====================================================================
@@ -1036,6 +1081,25 @@ test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
     "the hub URL guard must re-describe the internal IP reservation after create"
   assert_contains "$log" "compute firewall-rules describe scion-hub-${HUB}-hub-allow" \
     "the hub URL guard must re-describe the hub-allow rule after create"
+}
+
+test_deploy_create_cloud_run_deploy_carries_marker_label_on_fresh_create() {
+  fresh_gcloud_state
+  run_deploy_create_to_cloud_run_deploy "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  local run_deploy_line
+  run_deploy_line="$(gcloud_log | grep '^run deploy ' | head -1)"
+  assert_contains "$run_deploy_line" "--labels=scion-deployment=${HUB}" \
+    "the Cloud Run IAP proxy must carry the marker label on its first deploy -- PROXY_SERVICE_LABEL_ARGS must actually reach the run deploy call"
+}
+
+test_deploy_create_cloud_run_deploy_no_label_when_service_already_exists() {
+  fresh_gcloud_state
+  seed_run_service_exists "${INSTANCE_NAME}-iap-proxy"
+  run_deploy_create_to_cloud_run_deploy "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  local run_deploy_line
+  run_deploy_line="$(gcloud_log | grep '^run deploy ' | head -1)"
+  assert_not_contains "$run_deploy_line" "--labels=" \
+    "redeploying an existing Cloud Run service must not add the create-only marker label"
 }
 
 test_deploy_create_tier_on_existing_vm_promotes_current_ip() {
