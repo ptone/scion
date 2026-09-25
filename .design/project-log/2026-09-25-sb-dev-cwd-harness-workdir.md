@@ -387,3 +387,57 @@ resolved-chain walk unguarded.
 scrubbed). `go test -race` for `./cmd/sciontool/commands/` and
 `./pkg/sciontool/supervisor/`, and `go test` for `./pkg/runtime/...` and
 `./pkg/sciontool/...`, all pass.
+
+## Round-5 test hardening (head `741a56e3`)
+
+A follow-up review found two test gaps and some optional cleanup, all now
+closed:
+
+- The join between `InitRunOptions.WorkingDir` and `supervisor.Config`,
+  built inline in `RunInit`, had no test: deleting the assignment left the
+  whole suite green. Extracted into a small pure `harnessSupervisorConfig`
+  helper (no mutable package-level seam) and added a unit test pinning
+  every field, including `WorkingDir` copied through when set and empty
+  when unset. Confirmed by deleting the assignment in the helper and
+  watching the new test fail, then restoring it.
+- `TestSupervisor_RunWithWorkingDir_SetsPWD` used a plain `t.TempDir()`, so
+  it passed with the PWD-setting line deleted (`sh` recomputes PWD via
+  `getcwd()` when the two already agree for a non-symlinked directory). Now
+  uses a symlinked `WorkingDir` and asserts the child's `$PWD` is the
+  logical (symlinked) path. Confirmed by deleting the PWD line and watching
+  the test fail with the physical path instead.
+- The exit code 18 (`exitCodeNoUsableHarnessCwd`) returned by
+  substrate-serve's `InitRunner` wiring on the no-usable-cwd path was never
+  asserted. Extracted the `WithInitRunner` closure into a named
+  `substrateServeInitRunner` function and added a test calling it directly,
+  asserting the exact code. Confirmed by changing the return to `1` and
+  watching the test fail.
+- Removed process/round/reviewer identifiers (agent names, "R1's"/"O1",
+  "round N", "self-audit", "end amendment", "also take") from source and
+  test comments, replacing each with the invariant being guarded, and
+  trimmed "used to"/"previously" history narration. Gate:
+  `git diff 9b5ca72bf..HEAD -- '*.go' | grep -nE '^\+.*(sb-[a-z]|\bround[
+  -]?[0-9]|\b[RO][0-9]+\b|self-audit|amendment|reviewer)'` returns nothing.
+- Reworded the HOME-equivalence comment (`substrate_serve.go`): it no
+  longer claims supervisor sets the *same* value from the *same* lookup —
+  it derives HOME independently as `"/home/"+Username`.
+- Quoted the EvalSymlinks error text (`%q`) in `dirUsableForScion`'s
+  rejection reason, consistent with the quoted-path logging convention.
+- Replaced manual `os.Chdir`/restore with `t.Chdir(t.TempDir())` in the two
+  cwd tests the review flagged, so a failing test can't leave the process
+  cwd changed or write into the source tree.
+
+**Gates**: `gofmt`, `go vet`, `go build -buildvcs=false ./...` clean.
+`golangci-lint run --new-from-rev=9b5ca72bf` on the touched packages: 0
+issues. `go test ./pkg/runtime/... ./pkg/sciontool/...` and
+`go test ./cmd/sciontool/...`: all `ok`. No non-test file under
+`pkg/runtime/` changed versus `9b5ca72bf`.
+
+`go test -race -count=3` on the full `./cmd/sciontool/commands/` and
+`./pkg/sciontool/supervisor/` packages intermittently hits two **pre-existing**
+issues unrelated to this round's diff (confirmed reproducible at the
+unmodified base commit `fcd6e0d84`): a `pkg/sciontool/log` data race
+surfacing through `TestSignalHandler_With(out)PreStopHook`
+(`signals_test.go`), and cross-iteration test pollution in `TestStatusCommand`
+under `-count>1`. Neither file is touched by this round. Filtering to just
+this round's new/changed tests, `-race -count=3` is clean every run.
