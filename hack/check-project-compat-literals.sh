@@ -87,6 +87,11 @@ allowed_paths=(
   "^pkg/config/templates_test.go$"
   "^pkg/config/v7_fixes_test.go$"
   "^pkg/hub/capability_marshal_test.go$"
+  # Regression test proving the removed grove.<projectId>.* duplicate SSE
+  # publish subjects (pkg/hub/events.go) are gone. The literal is the point
+  # of the test: it subscribes to the legacy wildcard and asserts nothing
+  # is ever delivered there.
+  "^pkg/hub/events_test.go$"
   "^pkg/hub/events_postgres_test.go$"
   "^pkg/hub/fs_safety_test.go$"
   "^pkg/hub/handlers_broker_inbound_test.go$"
@@ -101,6 +106,10 @@ allowed_paths=(
   # invisible to every /projects test.
   "^pkg/hub/project_workspace_authz_test.go$"
   "^pkg/hub/route_classification_test.go$"
+  # Regression test for SSE subject authorization default-deny: proves a
+  # non-member is denied on the legacy grove.* subjects (and other unknown
+  # namespaces), matching the removal of the grove.* publish calls above.
+  "^pkg/hub/sse_default_deny_test.go$"
   "^pkg/hub/web_test.go$"
   "^pkg/hubclient/agents_test.go$"
   "^pkg/hubclient/client_test.go$"
