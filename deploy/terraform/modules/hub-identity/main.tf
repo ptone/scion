@@ -141,5 +141,21 @@ resource "google_service_account_iam_member" "hub_mints_own_tokens" {
 # Kubernetes Secrets the hub writes, not a SecretProviderClass the agent
 # pod's own WI identity reads — so Secret Manager access is never in the
 # agent's reach at all, by construction, not just by omitted IAM. The agent
-# SA keeps only its Workload Identity binding (agent-runtime-k8s).
+# SA keeps only its Workload Identity binding (agent-runtime-k8s), plus the
+# project-level model-access role(s) below.
+#
+# Found via tfha-h1's agent-LLM-auth investigation (design §9, 2026-09-25):
+# the WI binding lets an agent authenticate AS this SA, but authentication
+# isn't authorization — with no model-access role, Vertex calls 403.
+# var.agent_sa_project_roles defaults to exactly roles/aiplatform.user, the
+# minimum needed to call Vertex, validated against owner/editor/*.admin for
+# the same reason the hub SA note above rejects a project-wide grant: this
+# runs agent- and user-supplied code.
+resource "google_project_iam_member" "agent_sa_project_roles" {
+  for_each = toset(var.agent_sa_project_roles)
+
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.agent.email}"
+}
 
