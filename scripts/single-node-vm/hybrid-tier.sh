@@ -2256,9 +2256,15 @@ hybrid_teardown_transport_sa() {
     HYBRID_TRANSPORT_SA_BINDING_STATE="absent"
   else
     binding_err="$(mktemp)"
-    if gcloud iap web remove-iam-policy-binding         --resource-type=cloud-run --service="$service"         --region="$region" --project="$project_id"         --member="serviceAccount:${sa_email}"         --role=roles/iap.httpsResourceAccessor         --quiet >/dev/null 2>"${binding_err}"; then
+    if gcloud iap web remove-iam-policy-binding \
+        --resource-type=cloud-run --service="$service" \
+        --region="$region" --project="$project_id" \
+        --member="serviceAccount:${sa_email}" \
+        --role=roles/iap.httpsResourceAccessor \
+        --quiet >/dev/null 2>"${binding_err}"; then
       HYBRID_TRANSPORT_SA_BINDING_STATE="removed"
-    elif _hybrid_gcloud_not_found "$(cat "${binding_err}")"         || grep -qi 'policy binding with the specified .* not found' "${binding_err}"; then
+    elif _hybrid_gcloud_not_found "$(cat "${binding_err}")" \
+        || grep -qi 'policy binding with the specified .* not found' "${binding_err}"; then
       HYBRID_TRANSPORT_SA_BINDING_STATE="absent"
     else
       err "Could not remove transport service account ${sa_email}'s IAP access on Cloud Run service ${service}; keeping the service account so a re-run can retry both:"
