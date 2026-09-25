@@ -268,7 +268,13 @@ func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
 	}
 }
 
-func TestBuildPod_NFSBackend_NoInitContainer_WhenNoGitClone(t *testing.T) {
+// F-111 (design §9): this test used to assert the BUG — that a non-git NFS
+// project got no init container at all, and therefore no mkdir/chown ever
+// ran for it. The gate is now nfs-backend + bound PV claim, independent of
+// git config (nfsProvisionCommand already handles gc == nil gracefully), so
+// a non-git project must still get the init container, running plain
+// `sciontool provision` with no clone env vars.
+func TestBuildPod_NFSBackend_InitContainer_Present_NonGit(t *testing.T) {
 	r := newNFSTestK8sRuntime()
 	config := RunConfig{
 		Name:                 "test-nfs-no-git",
@@ -277,7 +283,7 @@ func TestBuildPod_NFSBackend_NoInitContainer_WhenNoGitClone(t *testing.T) {
 		WorkspaceBackendName: "nfs",
 		NFSPVClaimName:       "scion-workspaces",
 		NFSSubPath:           "projects/proj-123/workspace",
-		// GitCloneForInit is nil — no init container expected
+		// GitCloneForInit is nil — non-git, shared-plain project.
 	}
 
 	pod, err := r.buildPod("default", config)
@@ -285,9 +291,99 @@ func TestBuildPod_NFSBackend_NoInitContainer_WhenNoGitClone(t *testing.T) {
 		t.Fatalf("buildPod failed: %v", err)
 	}
 
-	if len(pod.Spec.InitContainers) != 0 {
-		t.Errorf("NFS without git clone: expected no init containers, got %d", len(pod.Spec.InitContainers))
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("NFS without git clone: expected 1 init container (mkdir+chown must still run), got %d",
+			len(pod.Spec.InitContainers))
 	}
+
+	ic := pod.Spec.InitContainers[0]
+	assert.Equal(t, []string{"sciontool", "provision"}, ic.Command,
+		"non-git init container should run plain provision, no clone flags")
+	for _, env := range ic.Env {
+		if env.Name == "SCION_CLONE_URL" || env.Name == "SCION_CLONE_BRANCH" {
+			t.Errorf("non-git init container should not have clone env var %s", env.Name)
+		}
+	}
+}
+
+// TestBuildPod_NFSBackend_InitContainer_SecurityContext_Winner verifies the
+// F-111 capability/root fix: the lock-winner (or no-locker) init container —
+// the one that actually chowns — must run as root with exactly CHOWN,
+// FOWNER, DAC_OVERRIDE added on top of Drop:ALL. All three are in GKE
+// Autopilot's default allowed capability set, as is running a container as
+// root (see the comment on this security context in k8s_runtime.go for the
+// source cited).
+func TestBuildPod_NFSBackend_InitContainer_SecurityContext_Winner(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-nfs-secctx-winner",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace",
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+	}
+
+	sc := pod.Spec.InitContainers[0].SecurityContext
+	if sc == nil {
+		t.Fatal("init container has no SecurityContext")
+	}
+	if sc.RunAsUser == nil || *sc.RunAsUser != 0 {
+		t.Errorf("winner RunAsUser = %v, want 0", sc.RunAsUser)
+	}
+	if sc.RunAsGroup == nil || *sc.RunAsGroup != 0 {
+		t.Errorf("winner RunAsGroup = %v, want 0", sc.RunAsGroup)
+	}
+	if sc.RunAsNonRoot == nil || *sc.RunAsNonRoot != false {
+		t.Errorf("winner RunAsNonRoot = %v, want false (override the pod-level true)", sc.RunAsNonRoot)
+	}
+	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation != false {
+		t.Errorf("winner AllowPrivilegeEscalation = %v, want false", sc.AllowPrivilegeEscalation)
+	}
+	assert.ElementsMatch(t, []corev1.Capability{"CHOWN", "FOWNER", "DAC_OVERRIDE"}, sc.Capabilities.Add,
+		"winner must add exactly CHOWN, FOWNER, DAC_OVERRIDE")
+	assert.Equal(t, []corev1.Capability{"ALL"}, sc.Capabilities.Drop, "winner must still drop ALL first")
+}
+
+// TestBuildPod_NFSBackend_InitContainer_SecurityContext_Loser verifies the
+// wait-for-sentinel (lock-loser) init container keeps the minimal, fully-
+// dropped, non-root default — it only os.Stats a file, so it never needs
+// root or any added capability, unlike the winner above.
+func TestBuildPod_NFSBackend_InitContainer_SecurityContext_Loser(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := nfsBaseConfig("test-nfs-secctx-loser")
+	config.nfsProvisionLockLost = true
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+	}
+
+	sc := pod.Spec.InitContainers[0].SecurityContext
+	if sc == nil {
+		t.Fatal("init container has no SecurityContext")
+	}
+	if sc.RunAsUser != nil {
+		t.Errorf("loser RunAsUser = %v, want nil (inherit pod-level uid 1000)", sc.RunAsUser)
+	}
+	if sc.RunAsNonRoot != nil {
+		t.Errorf("loser RunAsNonRoot = %v, want nil (inherit pod-level true)", sc.RunAsNonRoot)
+	}
+	if len(sc.Capabilities.Add) != 0 {
+		t.Errorf("loser Capabilities.Add = %v, want none", sc.Capabilities.Add)
+	}
+	assert.Equal(t, []corev1.Capability{"ALL"}, sc.Capabilities.Drop, "loser must still drop ALL")
 }
 
 func TestBuildPod_LocalBackend_NoInitContainer_EvenWithGitClone(t *testing.T) {
@@ -330,6 +426,33 @@ func TestNFSProvisionCommand_ShallowClone(t *testing.T) {
 	for _, arg := range cmd {
 		assert.NotEqual(t, gc.URL, arg, "URL must not be in command args")
 		assert.NotEqual(t, gc.Branch, arg, "branch must not be in command args")
+	}
+}
+
+// TestNFSInitContainerInjected pins the F-111 gate: nfs backend + a bound PV
+// claim, independent of git config. This is the single source of truth
+// shared by the advisory-lock section, the init-container construction, and
+// the workspace-sync skip logic in Run() — a regression in any one of those
+// call sites would show up here first.
+func TestNFSInitContainerInjected(t *testing.T) {
+	tests := []struct {
+		name        string
+		backendName string
+		pvClaimName string
+		want        bool
+	}{
+		{name: "nfs with bound claim", backendName: "nfs", pvClaimName: "scion-workspaces", want: true},
+		{name: "nfs without a claim", backendName: "nfs", pvClaimName: "", want: false},
+		{name: "local backend", backendName: "local", pvClaimName: "scion-workspaces", want: false},
+		{name: "empty backend", backendName: "", pvClaimName: "scion-workspaces", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := RunConfig{WorkspaceBackendName: tt.backendName, NFSPVClaimName: tt.pvClaimName}
+			if got := nfsInitContainerInjected(config); got != tt.want {
+				t.Errorf("nfsInitContainerInjected() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -882,10 +1005,17 @@ func TestBuildPod_FSGroup_NFSBackend_CustomGID(t *testing.T) {
 // API calls, so we test the conditional logic via the config fields that
 // determine behavior.
 func TestSkipWorkspaceSync_NFSBackend_RunConfigGuard(t *testing.T) {
+	// F-111 (design §9): the guard used to key on WorkspaceBackendName alone,
+	// so it claimed "pre-populated by init container" even in configurations
+	// where no init container was ever injected (e.g. nfs backend selected
+	// but no PV claim bound yet). It must agree with nfsInitContainerInjected
+	// — the exact condition buildPod uses to decide whether to add the init
+	// container — not a hand-copied guess of it.
 	tests := []struct {
 		name            string
 		workspace       string
 		backendName     string
+		pvClaimName     string
 		wantWorkspaceCP bool
 	}{
 		{
@@ -901,10 +1031,18 @@ func TestSkipWorkspaceSync_NFSBackend_RunConfigGuard(t *testing.T) {
 			wantWorkspaceCP: true,
 		},
 		{
-			name:            "NFS backend skips workspace sync",
+			name:            "NFS backend with bound PV claim skips workspace sync",
 			workspace:       "/some/path",
 			backendName:     "nfs",
+			pvClaimName:     "scion-workspaces",
 			wantWorkspaceCP: false,
+		},
+		{
+			name:            "NFS backend without a bound PV claim still syncs (no init container was injected)",
+			workspace:       "/some/path",
+			backendName:     "nfs",
+			pvClaimName:     "",
+			wantWorkspaceCP: true,
 		},
 		{
 			name:            "empty workspace skips sync for any backend",
@@ -919,9 +1057,10 @@ func TestSkipWorkspaceSync_NFSBackend_RunConfigGuard(t *testing.T) {
 			config := RunConfig{
 				Workspace:            tt.workspace,
 				WorkspaceBackendName: tt.backendName,
+				NFSPVClaimName:       tt.pvClaimName,
 			}
-			// Replicate the guard condition from Run()
-			shouldSync := config.Workspace != "" && config.WorkspaceBackendName != "nfs"
+			// The real guard condition from Run(), not a hand-copied replica.
+			shouldSync := config.Workspace != "" && (config.WorkspaceBackendName != "nfs" || !nfsInitContainerInjected(config))
 			if shouldSync != tt.wantWorkspaceCP {
 				t.Errorf("workspace sync guard: got %v, want %v", shouldSync, tt.wantWorkspaceCP)
 			}
@@ -1040,6 +1179,114 @@ func TestBuildPod_SharedDirs_NFSBackend_UsesNFSSubPaths(t *testing.T) {
 	}
 	if sd0Mount.ReadOnly != false {
 		t.Error("shared-dir-0 should not be read-only")
+	}
+}
+
+// TestBuildPod_NFSBackend_InitContainer_MountsSharedDirs verifies F-111's
+// shared-dir fix (tf-lead's addendum): a shared dir mounted from the
+// workspace NFS PVC by subPath is its own, separate container-level volume
+// mount — the workspace mount alone doesn't give the init container
+// filesystem access to it, so a workspace-only chown would never reach it
+// (matching vm-deploy's live evidence: projects/<pid>/shared-dirs/scratchpad
+// was also left root:root). The init container must get the same mount(s)
+// the main container gets, plus an env var telling `sciontool provision`
+// which paths to also chown.
+func TestBuildPod_NFSBackend_InitContainer_MountsSharedDirs(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-nfs-shared-init",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace",
+		SharedDirs: []api.SharedDir{
+			{Name: "scratchpad"},
+			{Name: "logs", ReadOnly: true},
+		},
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+	}
+	ic := pod.Spec.InitContainers[0]
+
+	sd0 := findVolumeMount(&corev1.Container{VolumeMounts: ic.VolumeMounts}, "shared-dir-0")
+	sd1 := findVolumeMount(&corev1.Container{VolumeMounts: ic.VolumeMounts}, "shared-dir-1")
+	if sd0 == nil || sd1 == nil {
+		t.Fatalf("init container missing shared-dir volume mounts, got %+v", ic.VolumeMounts)
+	}
+	if sd0.MountPath != "/scion-volumes/scratchpad" {
+		t.Errorf("shared-dir-0 init mountPath = %q, want /scion-volumes/scratchpad", sd0.MountPath)
+	}
+	if sd0.SubPath != "projects/proj-123/shared-dirs/scratchpad" {
+		t.Errorf("shared-dir-0 init subPath = %q, want projects/proj-123/shared-dirs/scratchpad", sd0.SubPath)
+	}
+	if sd1.MountPath != "/scion-volumes/logs" {
+		t.Errorf("shared-dir-1 init mountPath = %q, want /scion-volumes/logs", sd1.MountPath)
+	}
+
+	var sharedPaths string
+	for _, env := range ic.Env {
+		if env.Name == "SCION_SHARED_DIR_PATHS" {
+			sharedPaths = env.Value
+		}
+	}
+	assert.Equal(t, "/scion-volumes/scratchpad,/scion-volumes/logs", sharedPaths,
+		"SCION_SHARED_DIR_PATHS must list both shared-dir mount paths")
+
+	// The volume names the init container's mounts reference must actually
+	// exist in pod.Spec.Volumes (created by the later, unrelated main-loop
+	// pass over config.SharedDirs) — a mount referencing a nonexistent
+	// volume is a broken pod spec the API server would reject.
+	if findVolume(pod, "shared-dir-0") == nil || findVolume(pod, "shared-dir-1") == nil {
+		t.Fatal("init container mounts reference volumes that don't exist in pod.Spec.Volumes")
+	}
+}
+
+// TestBuildPod_NFSBackend_InitContainer_NoSharedDirMounts_WhenSharedDirStorageNFS
+// confirms the scope boundary: server.shared_dir_storage's own NFS mechanism
+// (a separate subsystem from workspace_storage:nfs) is not touched by this
+// fix — the init container gets only the workspace mount.
+func TestBuildPod_NFSBackend_InitContainer_NoSharedDirMounts_WhenSharedDirStorageNFS(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-nfs-shared-storage-nfs",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace",
+		SharedDirs: []api.SharedDir{
+			{Name: "scratchpad"},
+		},
+		SharedDirStorage: &SharedDirRealization{
+			Backend:     "nfs",
+			PVClaimName: "scion-shared-volumes",
+			SubPaths:    map[string]string{"scratchpad": "projects/proj-123/shared-dirs/scratchpad"},
+		},
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+	}
+	ic := pod.Spec.InitContainers[0]
+	if len(ic.VolumeMounts) != 1 {
+		t.Errorf("expected only the workspace mount on the init container, got %d: %+v",
+			len(ic.VolumeMounts), ic.VolumeMounts)
+	}
+	for _, env := range ic.Env {
+		if env.Name == "SCION_SHARED_DIR_PATHS" {
+			t.Errorf("SCION_SHARED_DIR_PATHS should not be set when shared_dir_storage.backend=nfs, got %q", env.Value)
+		}
 	}
 }
 

@@ -1130,7 +1130,18 @@ authDone:
 		NFSPVClaimName:       nfsPVClaimName,
 		NFSSubPath:           nfsSubPath,
 		NFSStorageClass:      nfsStorageClass,
-		TelemetryEnabled:     telemetryEnabled,
+		// F-111 (design §9): drives the k8s runtime's NFS init container's
+		// clone-vs-plain-provision choice (nfsProvisionCommand), not whether
+		// provisioning happens at all — the init container is now gated
+		// solely on WorkspaceBackendName=="nfs" && NFSPVClaimName != ""
+		// (k8s_runtime.go's nfsInitContainerInjected), so a nil GitClone here
+		// (a non-git, shared-plain project) still gets mkdir+chown, just no
+		// clone. Mirrors the existing GitClone field above/below, which this
+		// package already sets from the same opts.GitClone for other
+		// purposes; previously nothing set GitCloneForInit at all, so the
+		// k8s init container never ran for ANY project, git or not.
+		GitCloneForInit:  opts.GitClone,
+		TelemetryEnabled: telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
 			if finalScionCfg != nil && finalScionCfg.TaskFlag != "" {

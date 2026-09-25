@@ -219,6 +219,174 @@ func TestChownTarget(t *testing.T) {
 	}
 }
 
+// --- F-111 (design §9): chown fatal-vs-tolerant, self-healing, shared dirs ---
+
+// TestProvisionShared_SelfHeals_ExistingRootOwnedDirectory is the reasoning
+// note tf-lead's addendum asked for, turned into an executable test: an
+// existing project directory with NO sentinel — exactly project be2d6fe3's
+// state, per vm-deploy's live evidence — must be repaired by the next
+// provisioning attempt with no separate manual step. os.MkdirAll on an
+// already-existing directory is a documented no-op (it does not chmod an
+// existing dir to the requested mode), so the self-healing guarantee rests
+// entirely on chownProjectTree running unconditionally whenever no sentinel
+// is found, regardless of whether the directory pre-existed. This test
+// proves exactly that: a file placed in the directory *before* calling
+// ProvisionShared is still there afterwards (MkdirAll didn't touch/recreate
+// it), and provisioning still completes and writes the sentinel (chown ran
+// on the pre-existing tree, not just a freshly-created one).
+//
+// This test cannot chown to a UID other than its own process (chown-to-
+// another-uid requires CAP_CHOWN, which this sandbox does not have — see
+// TestProvisionShared_RequireChownSuccess_FailsOnChownError below, which
+// uses exactly that restriction to force a *real* chown failure). Using
+// NFSUID/GID equal to the test process's own uid/gid still exercises the
+// real code path (MkdirAll-is-no-op-on-existing-dir, then chown -R runs
+// unconditionally) — it just can't observe an ownership *change*, only that
+// the flow completes without shortcutting via mkdir.
+func TestProvisionShared_SelfHeals_ExistingRootOwnedDirectory(t *testing.T) {
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// Simulate kubelet having already auto-created the directory (no
+	// sentinel was ever written for it — the exact be2d6fe3 state).
+	if err := os.MkdirAll(hostPath, 0755); err != nil {
+		t.Fatalf("pre-create workspace dir: %v", err)
+	}
+	marker := filepath.Join(hostPath, "pre-existing-file")
+	if err := os.WriteFile(marker, []byte("pre-existing"), 0644); err != nil {
+		t.Fatalf("write marker file: %v", err)
+	}
+
+	err := ProvisionShared(ProvisionInput{
+		Resolved:            ResolvedWorkspace{HostPath: hostPath},
+		ProjectID:           "proj-selfheal",
+		Mode:                store.SharingModeSharedPlain,
+		NFSUID:              os.Getuid(),
+		NFSGID:              os.Getgid(),
+		SentinelDir:         hostPath,
+		RequireChownSuccess: true,
+	})
+	if err != nil {
+		t.Fatalf("ProvisionShared on a pre-existing, sentinel-less directory: %v", err)
+	}
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("pre-existing file was lost: %v (MkdirAll should be a no-op on an existing dir)", err)
+	}
+	if _, err := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile)); err != nil {
+		t.Errorf("sentinel not written after successful provisioning: %v", err)
+	}
+}
+
+// TestProvisionShared_RequireChownSuccess_FailsOnChownError proves the
+// "chown failure must become fatal to the init container" requirement using
+// a *real* chown failure, not a mock: this sandbox process has no CAP_CHOWN,
+// so chowning to any UID other than its own genuinely fails with "operation
+// not permitted" (verified once, directly, before writing this test). With
+// RequireChownSuccess, ProvisionShared must return an error and must NOT
+// write the sentinel — if it did, a lock-loser pod polling for the sentinel
+// would see it and proceed believing the workspace was properly provisioned.
+func TestProvisionShared_RequireChownSuccess_FailsOnChownError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chown-to-other-uid would succeed, defeating this test's premise")
+	}
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	err := ProvisionShared(ProvisionInput{
+		Resolved:            ResolvedWorkspace{HostPath: hostPath},
+		ProjectID:           "proj-chownfail",
+		Mode:                store.SharingModeSharedPlain,
+		NFSUID:              os.Getuid() + 1, // guaranteed not our own uid
+		NFSGID:              os.Getgid(),
+		SentinelDir:         hostPath,
+		RequireChownSuccess: true,
+	})
+	if err == nil {
+		t.Fatal("expected ProvisionShared to fail when chown fails and RequireChownSuccess is true")
+	}
+	if !strings.Contains(err.Error(), "chown") {
+		t.Errorf("error should mention chown, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile)); statErr == nil {
+		t.Error("sentinel must NOT be written when a required chown fails")
+	}
+}
+
+// TestProvisionShared_ChownFailure_NonFatal_ByDefault confirms the broker's
+// own worktree-per-agent flow keeps its existing tolerant behavior — this is
+// the negative control for the test above: same forced chown failure,
+// RequireChownSuccess left at its zero value (false), and provisioning must
+// still succeed (an operator may have pre-chowned).
+func TestProvisionShared_ChownFailure_NonFatal_ByDefault(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chown-to-other-uid would succeed, defeating this test's premise")
+	}
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	err := ProvisionShared(ProvisionInput{
+		Resolved:    ResolvedWorkspace{HostPath: hostPath},
+		ProjectID:   "proj-chownfail-tolerant",
+		Mode:        store.SharingModeSharedPlain,
+		NFSUID:      os.Getuid() + 1,
+		NFSGID:      os.Getgid(),
+		SentinelDir: hostPath,
+		// RequireChownSuccess not set — defaults to false.
+	})
+	if err != nil {
+		t.Fatalf("ProvisionShared should tolerate a chown failure by default, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(hostPath, ProvisionSentinelFile)); statErr != nil {
+		t.Errorf("sentinel should still be written when chown is non-fatal: %v", statErr)
+	}
+}
+
+// TestProvisionShared_ChownsSharedDirsIndependently proves the F-111 gap
+// tf-lead's addendum flagged: a shared dir on its own, separate mount (a
+// different tree entirely from the workspace dir, standing in for a distinct
+// k8s subPath volume mount) is not reachable by chownRoot's recursion —
+// mkdir+chown must be applied to it explicitly, not assumed to be covered by
+// the workspace's own chown.
+func TestProvisionShared_ChownsSharedDirsIndependently(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	hostPath := filepath.Join(workspaceRoot, "workspace")
+
+	// A completely separate directory tree — NOT a subdirectory of hostPath
+	// or its parent, standing in for a shared dir mounted at its own subPath
+	// (e.g. /scion-volumes/scratchpad, not nested under /workspace).
+	sharedRoot := t.TempDir()
+	sharedPath := filepath.Join(sharedRoot, "scratchpad")
+
+	err := ProvisionShared(ProvisionInput{
+		Resolved: ResolvedWorkspace{
+			HostPath: hostPath,
+			SharedDirs: map[string]ResolvedSharedDir{
+				"scratchpad": {HostPath: sharedPath},
+			},
+		},
+		ProjectID:           "proj-shareddirs",
+		Mode:                store.SharingModeSharedPlain,
+		NFSUID:              os.Getuid(),
+		NFSGID:              os.Getgid(),
+		SentinelDir:         hostPath,
+		RequireChownSuccess: true,
+	})
+	if err != nil {
+		t.Fatalf("ProvisionShared: %v", err)
+	}
+
+	if _, statErr := os.Stat(sharedPath); statErr != nil {
+		t.Errorf("shared dir was not created: %v", statErr)
+	}
+	// RequireChownSuccess: true would have failed the whole call (asserted
+	// above) if chowning sharedPath had errored — success here is the
+	// positive proof that the shared-dir chown loop actually ran and
+	// reported success, not just that mkdir happened to work.
+}
+
 // --- writeSentinel ---
 
 func TestWriteSentinel_Atomic(t *testing.T) {

@@ -128,6 +128,19 @@ type ProvisionInput struct {
 	// itself is mounted (not its parent), so the sentinel must live inside the
 	// workspace mount.
 	SentinelDir string
+
+	// RequireChownSuccess makes a chown failure fatal (returns an error,
+	// before the sentinel is written) instead of the default warn-and-continue
+	// behavior (F-111, design §9). The default tolerates "an operator may
+	// have pre-chowned" for the broker's own host-side worktree-per-agent
+	// flow. The k8s init container (cmd/sciontool/commands/provision.go) sets
+	// this true: its entire purpose IS the chown, so a silent failure there
+	// reproduces the exact "workspace stuck root:root" bug this mechanism
+	// exists to fix — and does so invisibly, since without this flag the
+	// sentinel would still be written, masking the failure from every future
+	// pod that starts for this project (they'd all see the sentinel and skip
+	// provisioning, forever).
+	RequireChownSuccess bool
 }
 
 // ProvisionShared is the universal, vendor-agnostic workspace provisioning
@@ -232,13 +245,38 @@ func ProvisionShared(in ProvisionInput) error {
 
 	// Chown to stable NFS UID/GID (design §9.1). This is a ONE-TIME operation
 	// under the advisory lock — per-start chown is skipped for NFS (see N1-5).
-	//
+	// chown -R on an existing, differently-owned directory (e.g. one kubelet
+	// auto-created as root:root before this mechanism ran) re-owns it and
+	// everything already inside it — self-healing on the next start needs no
+	// separate repair step, as long as no sentinel was ever written for it
+	// (F-111, design §9).
 	chownRoot := chownTarget(in.Resolved.HostPath)
 	uid, gid := resolveUID(in), resolveGID(in)
 	if err := chownProjectTree(ctx, chownRoot, uid, gid); err != nil {
+		if in.RequireChownSuccess {
+			return fmt.Errorf("ProvisionShared: chown %s to %d:%d: %w", chownRoot, uid, gid, err)
+		}
 		slog.Warn("ProvisionShared: chown failed (non-fatal, may lack privileges)",
 			"project_id", in.ProjectID, "path", chownRoot, "uid", uid, "gid", gid, "error", err)
 		// Non-fatal: operator may have pre-chowned. Continue to write sentinel.
+	}
+
+	// Shared dirs are siblings of the workspace dir under the project root
+	// on the broker's own host-side flow, so chownRoot above (the project
+	// root there) already recurses into them — this loop is a no-op there
+	// beyond a second, redundant chown -R. In the k8s init container,
+	// chownRoot is scoped to the workspace subPath mount alone (chownTarget's
+	// "/" fallback), which does NOT reach a shared dir mounted at its own,
+	// separate subPath (F-111, design §9) — chown each one explicitly so it
+	// isn't missed there.
+	for name, sd := range in.Resolved.SharedDirs {
+		if err := chownProjectTree(ctx, sd.HostPath, uid, gid); err != nil {
+			if in.RequireChownSuccess {
+				return fmt.Errorf("ProvisionShared: chown shared-dir %q %s to %d:%d: %w", name, sd.HostPath, uid, gid, err)
+			}
+			slog.Warn("ProvisionShared: chown shared-dir failed (non-fatal, may lack privileges)",
+				"project_id", in.ProjectID, "name", name, "path", sd.HostPath, "uid", uid, "gid", gid, "error", err)
+		}
 	}
 
 	// Write sentinel atomically.
