@@ -27,7 +27,6 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -257,30 +256,30 @@ func TestSubstrateBroker_RecordlessActorNoOpEvenInItsOwnProject(t *testing.T) {
 	})
 }
 
-// TestSubstrateBroker_SameSlugDifferentProjects_DeleteFailsClosed is the
-// record-HAVING counterpart to
+// TestSubstrateBroker_SameSlugDifferentProjects_DeleteScopedToOwnProject is
+// the record-HAVING counterpart to
 // TestSubstrateBroker_RecordlessActorNotResolvableAcrossProjects: two
 // agents, both started for real through rt.Run with the realistic
 // Project/ProjectID/ProjectPath labels and annotations a hub-dispatched
 // start produces (runSubstrateAgentForProject), sharing the agent slug
 // "dev" in two different projects.
 //
-// This is the scenario a wrong-actor delete was found in: without
-// AgentInfo.ProjectPath, deleteAgent's own resolved projectPath stayed "",
-// AgentManager.Delete's deletionProjectName stayed "", and its internal
-// unscoped Runtime.List call (map[string]string{"scion.name": "dev"})
-// returned both actors — Delete then removed whichever ListActors happened
-// to return first, regardless of which project deleteAgent was scoped to.
+// This is the scenario a wrong-actor delete was found in: an unscoped
+// listing can't tell the two same-slug actors apart. resolveDeleteTarget
+// (handlers.go) closes this by including the requested project's ID in the
+// very first Runtime.List call, so SubstrateRuntime.List returns only the
+// requested project's actor in the first place — no same-slug tally, no
+// ambiguity, no guess. The resolved entry's own ContainerID (a
+// project-qualified "<atespace>/<actor>" pair, globally unique) is what
+// Manager.DeleteTarget acts on, so the runtime-level delete never needs to
+// list by bare slug again either.
 //
-// With ProjectPath populated correctly, AgentManager.Delete's internal
-// List call is still unscoped by project — see manager.go — so
-// SubstrateRuntime.List's ambiguity guard still can't tell the two apart
-// at that specific call site and excludes both: deleteAgent scoped to
-// either project becomes a no-op (zero DeleteActor calls, both actors left
-// running), not a wrong-actor delete. This is the accepted, reported
-// trade-off — see the project log for the full list of broker operations
-// this affects.
-func TestSubstrateBroker_SameSlugDifferentProjects_DeleteFailsClosed(t *testing.T) {
+// This proves both liveness and safety: a delete scoped to one project
+// calls DeleteActor exactly twice (Stop, then Delete — see below), both
+// calls naming only that project's own actor, and leaves the other
+// project's same-slug actor completely untouched — checked with the
+// request directed at each project in turn.
+func TestSubstrateBroker_SameSlugDifferentProjects_DeleteScopedToOwnProject(t *testing.T) {
 	const (
 		atespaceA = "scion-aaaaaaaaaaaa"
 		actorA    = "proja--dev"
@@ -290,77 +289,95 @@ func TestSubstrateBroker_SameSlugDifferentProjects_DeleteFailsClosed(t *testing.
 		projBID   = "bbbbbbbbbbbb"
 	)
 
-	for _, orderName := range []string{"projA first", "projB first"} {
-		t.Run(orderName, func(t *testing.T) {
+	tests := []struct {
+		name              string
+		targetProjectID   string
+		targetAtespace    string
+		targetActor       string
+		untouchedAtespace string
+		untouchedActor    string
+	}{
+		{"delete project A", projAID, atespaceA, actorA, atespaceB, actorB},
+		{"delete project B", projBID, atespaceB, actorB, atespaceA, actorA},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			srv, fc := newTestSubstrateBrokerServer(t)
 			runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
 			runSubstrateAgentForProject(t, srv.manager, "dev", "projb", projBID, testProjectScionDir(t, "projb"))
 
-			fc.mu.Lock()
-			a, aok := fc.actors[atespaceA+"/"+actorA]
-			b, bok := fc.actors[atespaceB+"/"+actorB]
-			if !aok || !bok {
-				fc.mu.Unlock()
-				t.Fatalf("test setup: actorA present=%v, actorB present=%v, want both", aok, bok)
-			}
-			if orderName == "projA first" {
-				fc.forceListOrder = []*ateapipb.Actor{a, b}
-			} else {
-				fc.forceListOrder = []*ateapipb.Actor{b, a}
-			}
-			fc.mu.Unlock()
-
 			w := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
-			srv.deleteAgent(w, req, "dev", projBID)
+			srv.deleteAgent(w, req, "dev", tt.targetProjectID)
+
+			if w.Code != http.StatusNoContent {
+				t.Fatalf("deleteAgent status = %d, want %d; body=%s", w.Code, http.StatusNoContent, w.Body.String())
+			}
 
 			fc.mu.Lock()
 			defer fc.mu.Unlock()
-			if len(fc.deleteActorCalls) != 0 {
-				t.Errorf(`deleteAgent("dev", projB) called DeleteActor %v, want zero (ambiguous slug across two projects must fail closed)`, fc.deleteActorCalls)
+			// DeleteTarget (pkg/agent/manager.go's deleteResolved) calls
+			// Runtime.Stop then Runtime.Delete unconditionally on the
+			// resolved container ID; SubstrateRuntime.Stop is Delete in
+			// Phase 1 (substrate-runtime.md §9), so a single logical delete
+			// deterministically issues exactly two DeleteActor RPCs, both
+			// for the same actor. The second one hits an already-deleted
+			// actor and gets NotFound back from the fake — tolerated by
+			// SubstrateRuntime.Delete (pkg/runtime/substrate_runtime.go)
+			// the same way a real cluster's repeat delete would be.
+			// Asserting the exact sequence (not just "at least one call")
+			// catches a regression that adds a third call or silently drops
+			// the second.
+			if len(fc.deleteActorCalls) != 2 {
+				t.Fatalf("deleteAgent(%q) called DeleteActor %d times, want exactly 2 (Stop, then Delete): %v", tt.targetProjectID, len(fc.deleteActorCalls), fc.deleteActorCalls)
 			}
-			if _, ok := fc.actors[atespaceA+"/"+actorA]; !ok {
-				t.Error("projA's actor was removed by a project-B-scoped delete — it must never be the wrong-actor target")
+			for i, call := range fc.deleteActorCalls {
+				gotActor := call.GetActor()
+				if gotActor.GetAtespace() != tt.targetAtespace || gotActor.GetName() != tt.targetActor {
+					t.Errorf("DeleteActor call %d = %s/%s, want %s/%s", i, gotActor.GetAtespace(), gotActor.GetName(), tt.targetAtespace, tt.targetActor)
+				}
 			}
-			if _, ok := fc.actors[atespaceB+"/"+actorB]; !ok {
-				t.Error("projB's actor was removed — the guard makes this a no-op, not a successful scoped delete")
+			if _, ok := fc.actors[tt.targetAtespace+"/"+tt.targetActor]; ok {
+				t.Error("the requested project's actor is still present after delete")
+			}
+			if _, ok := fc.actors[tt.untouchedAtespace+"/"+tt.untouchedActor]; !ok {
+				t.Error("the other project's same-slug actor was removed — it must never be touched by a delete scoped to a different project")
 			}
 		})
 	}
 }
 
-// TestSubstrateBroker_SameSlugDifferentProjects_LookupContainerIDFailsClosed
+// TestSubstrateBroker_SameSlugDifferentProjects_LookupContainerIDResolvesOwnProject
 // is LookupContainerID's counterpart to the delete test above:
-// LookupContainerID's own internal manager.List call
-// (map[string]string{"scion.name": slug}) is likewise unscoped by project
-// (server.go), with project filtering applied client-side afterward via
-// agentsForProject — so the ambiguity guard excludes both same-slug
-// record-having actors before that filtering ever runs. A lookup scoped to
-// either project therefore returns "not found", not the wrong project's
-// container ID and not the right one either.
-func TestSubstrateBroker_SameSlugDifferentProjects_LookupContainerIDFailsClosed(t *testing.T) {
+// scopedNameFilter (server.go) includes the project ID in the same
+// Runtime.List call as the name filter, so SubstrateRuntime.List's
+// same-slug ambiguity guard (which only applies to a name filter with no
+// project scope) never engages, and each project-scoped lookup resolves to
+// that project's own actor.
+func TestSubstrateBroker_SameSlugDifferentProjects_LookupContainerIDResolvesOwnProject(t *testing.T) {
 	const (
-		projAID = "aaaaaaaaaaaa"
-		projBID = "bbbbbbbbbbbb"
+		projAID      = "aaaaaaaaaaaa"
+		wantAContain = "scion-aaaaaaaaaaaa/proja--dev"
+		projBID      = "bbbbbbbbbbbb"
+		wantBContain = "scion-bbbbbbbbbbbb/projb--dev"
 	)
 
 	srv, _ := newTestSubstrateBrokerServer(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
 	runSubstrateAgentForProject(t, srv.manager, "dev", "projb", projBID, testProjectScionDir(t, "projb"))
 
-	if got, err := srv.LookupContainerID(context.Background(), "dev", projBID); got != "" {
-		t.Errorf(`LookupContainerID("dev", projB) = (%q, %v), want ("", err) — ambiguous slug across two projects must fail closed`, got, err)
+	if got, err := srv.LookupContainerID(context.Background(), "dev", projAID); got != wantAContain || err != nil {
+		t.Errorf(`LookupContainerID("dev", projA) = (%q, %v), want (%q, nil)`, got, err, wantAContain)
 	}
-	if got, err := srv.LookupContainerID(context.Background(), "dev", projAID); got != "" {
-		t.Errorf(`LookupContainerID("dev", projA) = (%q, %v), want ("", err) — ambiguous slug across two projects must fail closed`, got, err)
+	if got, err := srv.LookupContainerID(context.Background(), "dev", projBID); got != wantBContain || err != nil {
+		t.Errorf(`LookupContainerID("dev", projB) = (%q, %v), want (%q, nil)`, got, err, wantBContain)
 	}
 }
 
 // TestSubstrateBroker_UniqueSlugDeleteStillSucceeds is the ordinary-case
 // control: exactly one record-having agent for a given slug (the common
-// case) is unaffected by either the ProjectPath tracking or the ambiguity
-// guard. ProjectPath is populated and the guard's slug tally never exceeds
-// one, so deleteAgent resolves and removes it normally.
+// case) resolves and deletes normally through resolveDeleteTarget/
+// DeleteTarget.
 func TestSubstrateBroker_UniqueSlugDeleteStillSucceeds(t *testing.T) {
 	const (
 		atespaceA = "scion-aaaaaaaaaaaa"
@@ -388,24 +405,17 @@ func TestSubstrateBroker_UniqueSlugDeleteStillSucceeds(t *testing.T) {
 	}
 }
 
-// TestSubstrateBroker_UnscopedDeleteNoMatchInProject_FailsClosed covers the
-// gap the previous fix's own tests didn't reach: a project-B-scoped delete
-// when project B has no record-having "dev" of its own — only project A
-// does. deleteAgent's own matchesAgent loop correctly finds no entry for
-// this project (matchesAgent checks project ID, so projA's entry never
-// matches a projB request), so `projectPath` stays "". Before this fix,
-// deleteAgent fell through to mgr.Delete(id, ..., "", ...) anyway;
-// AgentManager.Delete's internal Runtime.List call is unscoped by project
-// (manager.go), so with an empty deletionProjectName its own project check
-// never engaged and it deleted whichever same-slug actor ListActors
-// happened to return — project A's, the wrong one.
-//
-// Now, for substrate specifically, deleteAgent recognizes "no matching
-// entry in the requested project" and returns 204 (an idempotent delete —
-// the agent is genuinely absent from this project) without ever calling
-// mgr.Delete, so AgentManager.Delete's unscoped List is never reached for
-// this request at all.
-func TestSubstrateBroker_UnscopedDeleteNoMatchInProject_FailsClosed(t *testing.T) {
+// TestSubstrateBroker_DeleteAbsentSlugInProject_NotFound covers a
+// project-B-scoped delete when project B has no record-having "dev" of its
+// own — only project A does. resolveDeleteTarget's project-scoped List
+// call (including project B's ID) returns nothing for project B, and the
+// legacy no-project-identity and file-only fallbacks find nothing either
+// (project A's entry carries its own project identity, so it is never a
+// candidate for a project B request). deleteAgent reports
+// errDeleteTargetNotFound as 404 without ever calling DeleteActor, and
+// project A's actor is left untouched — a project without the slug touches
+// nothing.
+func TestSubstrateBroker_DeleteAbsentSlugInProject_NotFound(t *testing.T) {
 	const (
 		atespaceA = "scion-aaaaaaaaaaaa"
 		actorA    = "proja--dev"
@@ -413,50 +423,34 @@ func TestSubstrateBroker_UnscopedDeleteNoMatchInProject_FailsClosed(t *testing.T
 		projBID   = "bbbbbbbbbbbb"
 	)
 
-	for _, orderName := range []string{"projA actor only, forward order", "projA actor only, reverse order"} {
-		t.Run(orderName, func(t *testing.T) {
-			srv, fc := newTestSubstrateBrokerServer(t)
-			runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
+	srv, fc := newTestSubstrateBrokerServer(t)
+	runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
 
-			fc.mu.Lock()
-			a, ok := fc.actors[atespaceA+"/"+actorA]
-			if !ok {
-				fc.mu.Unlock()
-				t.Fatalf("test setup: actorA not present")
-			}
-			// A single-element order is trivially "both orders", but set
-			// it explicitly so this test doesn't depend on the fake's
-			// default map-iteration behavior either.
-			fc.forceListOrder = []*ateapipb.Actor{a}
-			fc.mu.Unlock()
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
+	srv.deleteAgent(w, req, "dev", projBID)
 
-			w := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
-			srv.deleteAgent(w, req, "dev", projBID)
+	if w.Code != http.StatusNotFound {
+		t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (no matching entry in project B)`, w.Code, http.StatusNotFound)
+	}
 
-			if w.Code != http.StatusNoContent {
-				t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (idempotent: no matching entry in project B)`, w.Code, http.StatusNoContent)
-			}
-
-			fc.mu.Lock()
-			defer fc.mu.Unlock()
-			if len(fc.deleteActorCalls) != 0 {
-				t.Errorf(`deleteAgent("dev", projB) called DeleteActor %v, want zero — project B has no "dev" of its own, project A's must never be the fallback target`, fc.deleteActorCalls)
-			}
-			if _, ok := fc.actors[atespaceA+"/"+actorA]; !ok {
-				t.Error("projA's actor was removed by a project-B-scoped delete that had no matching entry in project B — it must never be the wrong-actor target")
-			}
-		})
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.deleteActorCalls) != 0 {
+		t.Errorf(`deleteAgent("dev", projB) called DeleteActor %v, want zero — project B has no "dev" of its own, project A's must never be the fallback target`, fc.deleteActorCalls)
+	}
+	if _, ok := fc.actors[atespaceA+"/"+actorA]; !ok {
+		t.Error("projA's actor was removed by a project-B-scoped delete that had no matching entry in project B — it must never be the wrong-actor target")
 	}
 }
 
-// TestSubstrateBroker_UnscopedDeleteNoMatchInProject_RecordlessOtherProject
-// is the same gap, but with project B holding a record-less actor instead
-// of nothing at all: matchesAgent never matches a record-less actor by
-// slug at all (it reports its full, project-prefixed actor name as Name —
-// see SubstrateRuntime.List's doc comment), so this must fail closed
-// exactly the same way as the no-actor-at-all case above.
-func TestSubstrateBroker_UnscopedDeleteNoMatchInProject_RecordlessOtherProject(t *testing.T) {
+// TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOtherProjectUntouched
+// is the same scenario, but with project B holding a record-less actor
+// instead of nothing at all: a record-less actor is never resolvable by
+// slug (it reports its full, project-prefixed actor name — see
+// SubstrateRuntime.List's doc comment), so this must 404 exactly the same
+// way as the no-actor-at-all case above, leaving both actors untouched.
+func TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOtherProjectUntouched(t *testing.T) {
 	const (
 		atespaceA = "scion-aaaaaaaaaaaa"
 		actorA    = "proja--dev"
@@ -477,8 +471,8 @@ func TestSubstrateBroker_UnscopedDeleteNoMatchInProject_RecordlessOtherProject(t
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
 	srv.deleteAgent(w, req, "dev", projBID)
 
-	if w.Code != http.StatusNoContent {
-		t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (idempotent: no record-having match in project B)`, w.Code, http.StatusNoContent)
+	if w.Code != http.StatusNotFound {
+		t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (no record-having match in project B)`, w.Code, http.StatusNotFound)
 	}
 
 	fc.mu.Lock()
@@ -495,10 +489,9 @@ func TestSubstrateBroker_UnscopedDeleteNoMatchInProject_RecordlessOtherProject(t
 }
 
 // TestSubstrateBroker_ScopedDeleteMatchesOwnProject is the mirror of the
-// no-match cases above: project B genuinely has its own record-having
-// "dev" — matchesAgent finds it, deleteAgent's substrate-only gate does
-// not fire (a match was found), and the delete proceeds and succeeds
-// normally, scoped to project B by its resolved ProjectPath.
+// not-found cases above: project B genuinely has its own record-having
+// "dev" — resolveDeleteTarget finds it scoped to project B's own ID, and
+// the delete proceeds and succeeds normally.
 func TestSubstrateBroker_ScopedDeleteMatchesOwnProject(t *testing.T) {
 	const (
 		atespaceB = "scion-bbbbbbbbbbbb"
@@ -526,225 +519,22 @@ func TestSubstrateBroker_ScopedDeleteMatchesOwnProject(t *testing.T) {
 	}
 }
 
-// TestDeleteAgent_NonSubstrateRuntimeUnchanged proves the new substrate-only
-// gate in deleteAgent has zero effect on any other runtime: a mock runtime
-// reports a single agent belonging to a different project than the one the
-// delete request is scoped to (matchesAgent therefore doesn't match it,
-// exactly like the substrate scenario above) — but since this runtime's
-// Name() isn't "substrate", deleteAgent must fall through to mgr.Delete
-// exactly as it always has, unchanged, even though that call's outcome
-// (deleting a differently-project-scoped agent because the generic
-// AgentManager.Delete path has no ambiguity guard of its own) is the same
-// pre-existing, out-of-scope behavior this task does not touch for any
-// runtime but substrate.
-func TestDeleteAgent_NonSubstrateRuntimeUnchanged(t *testing.T) {
-	deleteCalls := 0
-	rt := &runtime.MockRuntime{
-		NameFunc: func() string { return "mock" },
-		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
-			return []api.AgentInfo{
-				{
-					Name:        "dev",
-					ContainerID: "mock-projA-dev",
-					Project:     "proja",
-					ProjectID:   "aaaaaaaaaaaa",
-					ProjectPath: "/projects/proja",
-					Labels:      map[string]string{"scion.name": "dev", "scion.agent": "true"},
-				},
-			}, nil
-		},
-		DeleteFunc: func(ctx context.Context, id string) error {
-			deleteCalls++
-			return nil
-		},
-	}
-	mgr := agent.NewManager(rt)
-	defer mgr.Close()
-
-	cfg := DefaultServerConfig()
-	cfg.BrokerID = "test-broker-id"
-	cfg.BrokerName = "test-host"
-	cfg.ForceRuntime = ""
-	srv := New(cfg, mgr, rt)
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
-	// Scoped to a project the mock's sole entry does not belong to —
-	// matchesAgent will not match it, exactly like the substrate
-	// no-match scenario above.
-	srv.deleteAgent(w, req, "dev", "bbbbbbbbbbbb")
-
-	if w.Code != http.StatusNoContent {
-		t.Errorf("deleteAgent status = %d, want %d (non-substrate: unchanged, unmatched still falls through to mgr.Delete and reports success)", w.Code, http.StatusNoContent)
-	}
-	if deleteCalls == 0 {
-		t.Error("non-substrate runtime: Runtime.Delete was never called — deleteAgent's behavior for non-substrate runtimes must be byte-identical to before this fix")
-	}
-}
-
-// TestSubstrateBroker_NoMatchGate_FiresForNamedSubstrateProfile proves the
-// substrate-only gate isn't accidentally scoped to this file's own
-// test-only construction (runtime.NewSubstrateRuntimeForTest, always
-// literally "substrate" by definition). It builds the runtime the same way
-// GetRuntime's "substrate" case does for a real, on-disk settings.json —
-// config.LoadEffectiveSettings, then VersionedSettings.ResolveRuntime, then
-// runtime.NewSubstrateRuntime (pkg/runtime/factory.go) — for two
-// differently-named runtime entries ("substrate-prod", "substrate-nip",
-// matching TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig's
-// settings shape in substrate_manager_test.go), and confirms the resulting
-// runtime's Name() is "substrate" for both.
-//
-// Why this matters: SubstrateRuntime.Name() is a hardcoded literal
-// ("substrate") that never consults its config, so no settings-level name
-// can structurally change what it reports — but that guarantee is worth
-// pinning down with a real test through the real resolution path rather
-// than asserted from reading the one-line method alone, since it is
-// exactly what the deleteAgent gate depends on to engage at all for a
-// non-default-named substrate profile.
-func TestSubstrateBroker_NoMatchGate_FiresForNamedSubstrateProfile(t *testing.T) {
-	for _, profileName := range []string{"substrate-prod", "substrate-nip"} {
-		t.Run(profileName, func(t *testing.T) {
-			projectDir := t.TempDir()
-			scionDir := filepath.Join(projectDir, ".scion")
-			if err := os.MkdirAll(scionDir, 0755); err != nil {
-				t.Fatal(err)
-			}
-			// Distinguishes each subtest's config from the other's, so
-			// SubstrateRuntime's process-wide memoization (keyed on an
-			// encoding of the config) builds a fresh instance per subtest
-			// instead of reusing one built under the other's fake client.
-			settings := `{
-				"schema_version": "1",
-				"active_profile": "` + profileName + `",
-				"runtimes": {
-					"` + profileName + `": {
-						"type": "substrate",
-						"substrate": {
-							"api_endpoint": "api.ate-system.svc:443",
-							"router_endpoint": "http://atenet-router.ate-system.svc:80",
-							"snapshot_storage": "gs://bucket/` + profileName + `/"
-						}
-					}
-				},
-				"profiles": {
-					"` + profileName + `": {"runtime": "` + profileName + `"}
-				}
-			}`
-			if err := os.WriteFile(filepath.Join(scionDir, "settings.json"), []byte(settings), 0644); err != nil {
-				t.Fatal(err)
-			}
-
-			resolvedDir, err := config.GetResolvedProjectDir(projectDir)
-			if err != nil {
-				t.Fatalf("GetResolvedProjectDir error = %v", err)
-			}
-			vs, _, err := config.LoadEffectiveSettings(resolvedDir)
-			if err != nil {
-				t.Fatalf("LoadEffectiveSettings error = %v", err)
-			}
-			rtConfig, runtimeType, err := vs.ResolveRuntime(profileName)
-			if err != nil {
-				t.Fatalf("ResolveRuntime(%q) error = %v", profileName, err)
-			}
-			if runtimeType != "substrate" {
-				t.Fatalf(`ResolveRuntime(%q) type = %q, want "substrate" regardless of the settings runtime's own name`, profileName, runtimeType)
-			}
-
-			fc := newFakeSubstrateControlClient(&substrateEgressRecorder{})
-			actorServer := newFakeSubstrateActorServer()
-			t.Cleanup(actorServer.Close)
-			restore := runtime.SetSubstrateRuntimeBuilderForTest(func(cfg config.V1SubstrateConfig) (*runtime.SubstrateRuntime, error) {
-				return runtime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, cfg), nil
-			})
-			t.Cleanup(restore)
-
-			// The exact call GetRuntime's "substrate" case makes.
-			rt, err := runtime.NewSubstrateRuntime(rtConfig.Substrate)
-			if err != nil {
-				t.Fatalf("NewSubstrateRuntime error = %v", err)
-			}
-			if rt.Name() != "substrate" {
-				t.Fatalf(`rt.Name() = %q, want "substrate" — a differently-named settings profile (%q) must not change what the runtime reports itself as, or deleteAgent's substrate-only gate would silently never engage for it`, rt.Name(), profileName)
-			}
-
-			mgr := agent.NewManager(rt)
-			t.Cleanup(mgr.Close)
-			cfg := DefaultServerConfig()
-			cfg.BrokerID = "test-broker-id"
-			cfg.BrokerName = "test-host"
-			cfg.ForceRuntime = ""
-			srv := New(cfg, mgr, rt)
-
-			const (
-				atespaceA = "scion-aaaaaaaaaaaa"
-				actorA    = "proja--dev"
-				projAID   = "aaaaaaaaaaaa"
-				projBID   = "bbbbbbbbbbbb"
-			)
-			runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
-
-			// Confirm resolveAgentRuntimeTarget itself — not just the
-			// directly-constructed runtime above — reports "substrate" for
-			// this named-profile-resolved instance, since that's the value
-			// deleteAgent's gate actually checks.
-			_, resolvedRuntime := srv.resolveAgentRuntimeTarget(context.Background(), "dev", projBID)
-			if resolvedRuntime.Name() != "substrate" {
-				t.Fatalf(`resolveAgentRuntimeTarget(...) runtime.Name() = %q, want "substrate"`, resolvedRuntime.Name())
-			}
-
-			w := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
-			srv.deleteAgent(w, req, "dev", projBID)
-
-			if w.Code != http.StatusNoContent {
-				t.Errorf(`deleteAgent("dev", projB) status = %d, want %d — the substrate-only gate must fire for a named profile (%q) too, not just this file's directly-constructed test runtimes`, w.Code, http.StatusNoContent, profileName)
-			}
-			fc.mu.Lock()
-			defer fc.mu.Unlock()
-			if len(fc.deleteActorCalls) != 0 {
-				t.Errorf("DeleteActor called %d times, want 0", len(fc.deleteActorCalls))
-			}
-			if _, ok := fc.actors[atespaceA+"/"+actorA]; !ok {
-				t.Error("projA's actor was removed — wrong-actor delete under a named substrate profile")
-			}
-		})
-	}
-}
-
 // TestSubstrateBroker_MatchedDelete_NeverFallsBackToHubManagedProjectScan
-// covers a question raised alongside the no-match gate above: deleteAgent
-// also has a second, older fallback — findAgentInHubManagedProjects — that
-// activates when "if projectPath == "" && deleteFiles" (handlers.go). That
-// fallback takes only the bare agent name, no project identifier, and
-// returns the FIRST hub-managed project directory (findAgentInHubManagedProjects
-// walks every global project directory, current and legacy-named) that
-// happens to contain an "agents/<name>" entry — exactly the kind of
-// project-blind, order-dependent resolution the ambiguity guard above
-// exists to avoid.
+// covers deleteAgent's older, file-based fallback — findAgentProjectDir
+// (via findAgentInHubManagedProjects), reached when a matched entry has no
+// trusted project path and the request needs one (deleteFiles or
+// softDelete). That fallback is itself project-scoped: it only accepts a
+// hub-managed project directory whose own recorded project ID equals the
+// requested one, so a same-named agent in a different project is never
+// returned as the file target.
 //
-// For a MATCHED substrate entry, though, this fallback is unreachable: the
-// matching loop already set projectPath from the matched entry's own
-// AgentInfo.ProjectPath, which is non-empty for any agent that actually
-// went through AgentManager.Start (config.GetResolvedProjectDir either
-// resolves to a real, non-empty path and Start proceeds to set the
-// "scion.project_path" annotation unconditionally, or it errors and Start
-// returns before any agent record is ever created — see run.go — so a
-// matched, record-having entry can only exist with a populated
-// ProjectPath already on it). The "projectPath == """ guard on the
-// fallback therefore never opens for a matched entry, and the project-
-// blind scan never runs — this test proves that by planting a decoy
-// "other project" whose own agents/dev directory the scan WOULD return if
-// it were ever invoked, and confirming a deleteFiles=true delete of the
-// real, matched dev agent in project B never touches it.
-//
-// If this ever regresses (e.g. a future change stops setting ProjectPath
-// unconditionally), the fallback's project-blind resolution would apply to
-// substrate too and could point file deletion at a same-named agent
-// directory in a different project — the file-system analogue of the
-// wrong-actor delete this branch's other tests target. Per policy this is
-// closed for substrate specifically if ever found reachable; a non-
-// substrate instance of the same fallback is pkg/agent's generic
-// slug-matching hardening territory, not this branch's.
+// For a MATCHED substrate entry started through a normal Run, this
+// fallback is unreachable in the first place: the matched entry's own
+// ProjectPath is non-empty and trusted, so resolveDeleteTarget never needs
+// to resolve one from disk. This test proves that by planting a decoy
+// "other project" whose own agents/dev directory a project-blind scan
+// would return if it were ever invoked, and confirming a deleteFiles=true
+// delete of the real, matched dev agent in project B never touches it.
 func TestSubstrateBroker_MatchedDelete_NeverFallsBackToHubManagedProjectScan(t *testing.T) {
 	// Point config.GetGlobalDir() (via os.UserHomeDir()) at a temp HOME so
 	// the decoy hub-managed project below is the only thing
@@ -764,8 +554,8 @@ func TestSubstrateBroker_MatchedDelete_NeverFallsBackToHubManagedProjectScan(t *
 	// Confirm the decoy is actually findable by the project-blind scan —
 	// otherwise this test would pass for the wrong reason (the scan simply
 	// finding nothing, not the matched-entry guard preventing the call).
-	if got := findAgentInHubManagedProjects("dev"); got == "" {
-		t.Fatalf("test setup: findAgentInHubManagedProjects(\"dev\") = %q, want the decoy project's .scion dir to be found", got)
+	if got, err := findAgentInHubManagedProjects("dev", ""); got == "" || err != nil {
+		t.Fatalf("test setup: findAgentInHubManagedProjects(\"dev\", \"\") = (%q, %v), want the decoy project's .scion dir to be found", got, err)
 	}
 
 	const projBID = "bbbbbbbbbbbb"
@@ -785,16 +575,12 @@ func TestSubstrateBroker_MatchedDelete_NeverFallsBackToHubManagedProjectScan(t *
 }
 
 // TestSubstrateBroker_NoMatchDelete_NeverMarksWrongProjectAgentInfo covers
-// the same project-blind fallback for the NO-MATCH case: the substrate-only
-// gate is placed before both findAgentInHubManagedProjects and the
-// soft-delete agent-info.json marking, specifically so that neither one
-// ever runs off of a project-blind guess. Without that ordering, a
-// project-B-scoped delete for a "dev" that doesn't exist in project B,
-// with deleteFiles=true and softDelete=true, would resolve projectPath to
-// whichever OTHER project's agents/dev directory the scan finds first and
-// mark THAT project's agent-info.json as deleted — a real cross-project
-// data-integrity bug even though no file content is deleted (only a status
-// field is overwritten).
+// the NOT-FOUND case: resolveDeleteTarget returns errDeleteTargetNotFound
+// before deleteAgent ever reaches the soft-delete agent-info.json marking
+// step, so a project-B-scoped delete for a "dev" that doesn't exist in
+// project B can never mark some OTHER project's agent-info.json as deleted
+// — a real cross-project data-integrity bug even though no file content is
+// deleted (only a status field would have been overwritten).
 func TestSubstrateBroker_NoMatchDelete_NeverMarksWrongProjectAgentInfo(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
@@ -809,8 +595,8 @@ func TestSubstrateBroker_NoMatchDelete_NeverMarksWrongProjectAgentInfo(t *testin
 		t.Fatal(err)
 	}
 
-	if got := findAgentInHubManagedProjects("dev"); got == "" {
-		t.Fatalf("test setup: findAgentInHubManagedProjects(\"dev\") = %q, want the decoy project's .scion dir to be found", got)
+	if got, err := findAgentInHubManagedProjects("dev", ""); got == "" || err != nil {
+		t.Fatalf("test setup: findAgentInHubManagedProjects(\"dev\", \"\") = (%q, %v), want the decoy project's .scion dir to be found", got, err)
 	}
 
 	const (
@@ -826,8 +612,8 @@ func TestSubstrateBroker_NoMatchDelete_NeverMarksWrongProjectAgentInfo(t *testin
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev?deleteFiles=true&softDelete=true", nil)
 	srv.deleteAgent(w, req, "dev", projBID)
 
-	if w.Code != http.StatusNoContent {
-		t.Errorf(`deleteAgent("dev", projB, deleteFiles=true, softDelete=true) status = %d, want %d`, w.Code, http.StatusNoContent)
+	if w.Code != http.StatusNotFound {
+		t.Errorf(`deleteAgent("dev", projB, deleteFiles=true, softDelete=true) status = %d, want %d`, w.Code, http.StatusNotFound)
 	}
 	got, err := os.ReadFile(agentInfoPath)
 	if err != nil {
@@ -858,10 +644,10 @@ func captureAgentLifecycleLogs(t *testing.T) *bytes.Buffer {
 	return buf
 }
 
-// TestSubstrateBroker_NoMatchDelete_LogsAtInfo confirms the no-match gate's
-// silent no-op is still visible in broker logs: an info-level line naming
-// the agent slug and project ID, no secrets, so an operator can tell a
-// substrate delete resolved to "already gone" rather than the request
+// TestSubstrateBroker_NoMatchDelete_LogsAtInfo confirms the not-found case
+// is still visible in broker logs: an info-level line naming the agent
+// slug and project ID, no secrets, so an operator can tell a substrate
+// delete resolved to "not found in this project" rather than the request
 // simply vanishing.
 func TestSubstrateBroker_NoMatchDelete_LogsAtInfo(t *testing.T) {
 	buf := captureAgentLifecycleLogs(t)
@@ -877,8 +663,8 @@ func TestSubstrateBroker_NoMatchDelete_LogsAtInfo(t *testing.T) {
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
 	srv.deleteAgent(w, req, "dev", projBID)
 
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("deleteAgent status = %d, want %d", w.Code, http.StatusNoContent)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("deleteAgent status = %d, want %d", w.Code, http.StatusNotFound)
 	}
 
 	found := false
@@ -897,5 +683,99 @@ func TestSubstrateBroker_NoMatchDelete_LogsAtInfo(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no info-level log line with agent_id=%q project_id=%q found; log output:\n%s", "dev", projBID, buf.String())
+	}
+}
+
+// TestSubstrateBroker_SameSlugDifferentProjects_StopScopedToOwnProject is
+// Stop's counterpart to
+// TestSubstrateBroker_SameSlugDifferentProjects_DeleteScopedToOwnProject:
+// stopAgent (handlers.go) resolves the target via projectScopedTarget, which
+// calls LookupContainerID — using the same project-ID-scoped filter
+// (scopedNameFilter) as the delete path — to get the project-matched
+// entry's own container ID before calling Manager.Stop with that ID
+// directly. Manager.Stop's own internal List call is unscoped by slug, but
+// by the time it runs, agentID is already a container ID (a
+// globally-unique "<atespace>/<actor>" pair for substrate), not the bare
+// slug "dev" — slugifying it does not match any real actor's slug, so
+// Stop's internal lookup finds nothing and falls through to
+// Runtime.Stop(ctx, agentID) with that exact container ID unchanged. Since
+// SubstrateRuntime.Stop is Delete in Phase 1 (substrate-runtime.md §9,
+// §4's Stop row), this issues exactly one DeleteActor call — not two, since
+// stopAgent's own call chain invokes Runtime-level Stop only once, unlike
+// deleteAgent's Stop-then-Delete pair.
+func TestSubstrateBroker_SameSlugDifferentProjects_StopScopedToOwnProject(t *testing.T) {
+	const (
+		atespaceA = "scion-aaaaaaaaaaaa"
+		actorA    = "proja--dev"
+		projAID   = "aaaaaaaaaaaa"
+		atespaceB = "scion-bbbbbbbbbbbb"
+		actorB    = "projb--dev"
+		projBID   = "bbbbbbbbbbbb"
+	)
+	srv, fc := newTestSubstrateBrokerServer(t)
+	runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
+	runSubstrateAgentForProject(t, srv.manager, "dev", "projb", projBID, testProjectScionDir(t, "projb"))
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil)
+	srv.stopAgent(w, req, "dev", projAID)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("stopAgent status = %d, want %d; body=%s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.deleteActorCalls) != 1 {
+		t.Fatalf("stopAgent(\"dev\", projA) called DeleteActor %d times, want exactly 1: %v", len(fc.deleteActorCalls), fc.deleteActorCalls)
+	}
+	gotActor := fc.deleteActorCalls[0].GetActor()
+	if gotActor.GetAtespace() != atespaceA || gotActor.GetName() != actorA {
+		t.Errorf("DeleteActor called for %s/%s, want %s/%s", gotActor.GetAtespace(), gotActor.GetName(), atespaceA, actorA)
+	}
+	if _, ok := fc.actors[atespaceA+"/"+actorA]; ok {
+		t.Error("projA's actor is still present after a projA-scoped stop")
+	}
+	if _, ok := fc.actors[atespaceB+"/"+actorB]; !ok {
+		t.Error("projB's same-slug actor was removed — it must never be touched by a stop scoped to a different project")
+	}
+}
+
+// TestSubstrateBroker_StopAbsentSlugInProject_TouchesNothing is the stop
+// counterpart to TestSubstrateBroker_DeleteAbsentSlugInProject_NotFound: a
+// stop scoped to a project that has no "dev" of its own must not touch a
+// different project's same-slug agent. projectScopedTarget returns "" when
+// LookupContainerID can't resolve within the requested project, and
+// stopAgent treats that as an idempotent no-op without ever calling
+// Manager.Stop.
+func TestSubstrateBroker_StopAbsentSlugInProject_TouchesNothing(t *testing.T) {
+	const (
+		atespaceA = "scion-aaaaaaaaaaaa"
+		actorA    = "proja--dev"
+		projAID   = "aaaaaaaaaaaa"
+		projBID   = "bbbbbbbbbbbb"
+	)
+	srv, fc := newTestSubstrateBrokerServer(t)
+	runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil)
+	srv.stopAgent(w, req, "dev", projBID)
+
+	// stopAgent reports 202 "accepted" for both an actual stop and this
+	// not-found-in-project no-op (see handlers.go) — the hub's async stop
+	// flow does not distinguish the two at this layer, only whether the
+	// broker took a wrong-actor action, which is what this test guards.
+	if w.Code != http.StatusAccepted {
+		t.Errorf("stopAgent(\"dev\", projB) status = %d, want %d", w.Code, http.StatusAccepted)
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.deleteActorCalls) != 0 {
+		t.Errorf(`stopAgent("dev", projB) called DeleteActor %v, want zero — project B has no "dev" of its own`, fc.deleteActorCalls)
+	}
+	if _, ok := fc.actors[atespaceA+"/"+actorA]; !ok {
+		t.Error("projA's actor was removed by a project-B-scoped stop that had no matching entry in project B")
 	}
 }

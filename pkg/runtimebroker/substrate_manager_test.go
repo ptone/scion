@@ -165,11 +165,21 @@ func (f *fakeSubstrateControlClient) ListActors(ctx context.Context, in *ateapip
 	return &ateapipb.ListActorsResponse{Actors: actors}, nil
 }
 
+// DeleteActor records every call (even one that turns out to be a repeat)
+// but only the first successfully deletes: a second DeleteActor for an
+// already-deleted actor returns NotFound, exactly like a real cluster
+// would, so tests relying on this fake exercise the same
+// second-call-is-idempotent path SubstrateRuntime.Delete's own NotFound
+// tolerance (pkg/runtime/substrate_runtime.go) depends on.
 func (f *fakeSubstrateControlClient) DeleteActor(ctx context.Context, in *ateapipb.DeleteActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleteActorCalls = append(f.deleteActorCalls, in)
-	delete(f.actors, in.GetActor().GetAtespace()+"/"+in.GetActor().GetName())
+	key := in.GetActor().GetAtespace() + "/" + in.GetActor().GetName()
+	if _, ok := f.actors[key]; !ok {
+		return nil, status.Error(codes.NotFound, "not found")
+	}
+	delete(f.actors, key)
 	return &ateapipb.Actor{}, nil
 }
 
