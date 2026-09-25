@@ -28,13 +28,18 @@ running_agents() {
 }
 
 # Collect agent identifiers from existing herdr panes that belong to this plugin.
-# Panes are tracked by the .agent field set via herdr pane report-agent,
-# with the format "scion/<identifier>".
+# Panes are tracked by their .label, set via `herdr pane rename` right after
+# split, with the format "scion:<identifier>".
 existing_pane_agents() {
-  herdr pane list --json 2>/dev/null \
-    | jq -r '.[] | select(.agent != null) | .agent' 2>/dev/null \
-    | grep '^scion/' \
-    | sed 's|^scion/||' || true
+  local panes_json
+  if ! panes_json="$(herdr pane list)"; then
+    log "Warning: herdr pane list failed — assuming no existing panes."
+    return 0
+  fi
+  echo "$panes_json" \
+    | jq -r '.result.panes[] | select(.label != null) | .label' \
+    | grep '^scion:' \
+    | sed 's|^scion:||' || true
 }
 
 # ---------------------------------------------------------------------------
@@ -80,9 +85,22 @@ main() {
     fi
 
     log "Creating pane for agent: $identifier"
-    herdr pane split --direction right \
-      --env "SCION_AGENT=${identifier}" \
-      -- bash "${SCRIPT_DIR}/scion-attach-wrapper.sh" "$identifier"
+
+    local split_json pane_id
+    if ! split_json="$(herdr pane split --direction right \
+      --env "SCION_AGENT=${identifier}")"; then
+      log "Failed to split a pane for $identifier — skipping."
+      continue
+    fi
+
+    pane_id="$(echo "$split_json" | jq -r '.result.pane.pane_id // empty')"
+    if [[ -z "$pane_id" ]]; then
+      log "herdr pane split returned no pane_id for $identifier: $split_json"
+      continue
+    fi
+
+    herdr pane rename "$pane_id" "scion:${identifier}"
+    herdr pane run "$pane_id" "bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${identifier}'"
 
     created=$((created + 1))
   done <<< "$agents"

@@ -74,7 +74,7 @@ register_pane() {
     herdr pane report-agent "$HERDR_PANE_ID" \
       --source "scion:integration" \
       --agent "scion/${SLUG}" \
-      --state idle 2>/dev/null || true
+      --state idle
   fi
 }
 

@@ -54,20 +54,25 @@ All actions are available in herdr's action palette:
 
 ```bash
 # Invoke actions directly
-herdr plugin action invoke scion.herdr-integration:attach-agent
-herdr plugin action invoke scion.herdr-integration:start-agent
-herdr plugin action invoke scion.herdr-integration:refresh-agents
-herdr plugin action invoke scion.herdr-integration:dashboard
+herdr plugin action invoke attach-agent --plugin scion.herdr-integration
+herdr plugin action invoke start-agent --plugin scion.herdr-integration
+herdr plugin action invoke refresh-agents --plugin scion.herdr-integration
+herdr plugin action invoke dashboard --plugin scion.herdr-integration
 ```
 
 ## How It Works
 
 ### Pane Management
 
-Each Scion agent pane is created via `herdr pane split` with:
-- **Label**: `scion:<agent-slug>` (used for duplicate detection)
-- **Command**: `scion-attach-wrapper.sh <slug>` (handles reconnection)
-- **Environment**: `SCION_AGENT=<slug>`
+`herdr pane split` creates a bare pane — it does not accept a command to run.
+Each Scion agent pane is set up in three steps:
+1. `herdr pane split --direction right --env SCION_AGENT=<slug>` — split, and
+   read the new pane's ID from `.result.pane.pane_id`.
+2. `herdr pane rename <pane_id> "scion:<slug>"` — set the pane's label
+   immediately, before the wrapper starts. This is what duplicate detection
+   and the state bridge track panes by.
+3. `herdr pane run <pane_id> "bash scion-attach-wrapper.sh <slug>"` — type
+   the wrapper command into the pane's shell and press Enter.
 
 ### Attach Wrapper
 
@@ -79,15 +84,16 @@ The `scion-attach-wrapper.sh` script wraps `scion attach` with:
 
 ### State Bridge
 
-The `scion-state-bridge.sh` daemon polls `scion list` every 4 seconds and reports agent states to herdr:
+The `scion-state-bridge.sh` daemon polls `scion list` every 4 seconds and reports agent states to herdr via `herdr pane report-agent`, matching panes to agents by the pane's `scion:<slug>` label:
 
 | Scion Activity | Herdr State |
 |----------------|-------------|
 | `executing`, `working`, `thinking` | Working |
 | `blocked`, `waiting_for_input` | Blocked |
-| `completed` | Done |
-| `stalled`, `idle`, other | Idle |
-| Agent phase != `running` | Done |
+| `completed`, `stalled`, `idle`, other | Idle |
+| Agent phase != `running` | Idle |
+
+`herdr pane report-agent --state` only accepts `idle`, `working`, `blocked`, or `unknown` — `done` is not a settable state. Herdr derives its own Done indicator from an idle agent plus its internal "seen" tracking, so completed and stopped agents are reported as idle rather than done.
 
 The bridge enforces singleton behavior via a PID file — only one instance runs per herdr session.
 

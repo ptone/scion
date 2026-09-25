@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # scion-dashboard.sh — Create a tiled herdr layout with all running Scion agents.
 #
-# Uses `herdr api layout.apply` to build a balanced split layout where each
-# pane runs scion-attach-wrapper.sh for one agent. The layout adapts to the
-# number of agents: 1 agent = single pane, 2 = side-by-side, 3+ = grid.
+# Sends a layout.apply request straight to herdr's socket API ($HERDR_SOCKET_PATH)
+# to build a balanced split layout where each pane runs scion-attach-wrapper.sh
+# for one agent — herdr's CLI has no subcommand for layout.apply. The layout
+# adapts to the number of agents: 1 agent = single pane, 2 = side-by-side,
+# 3+ = grid.
 #
 # Requires: scion, herdr, jq on PATH.
 
@@ -130,15 +132,28 @@ main() {
   local request_id
   request_id="scion-dashboard-$(date +%s)"
 
+  # -c (compact) is required: the socket protocol frames one JSON request
+  # per line, so the request must not contain embedded newlines.
   local api_request
-  api_request="$(jq -n --arg id "$request_id" --argjson root "$layout_tree" '{
+  api_request="$(jq -nc --arg id "$request_id" --argjson root "$layout_tree" '{
     id: $id,
     method: "layout.apply",
     params: { root: $root }
   }')"
 
+  # herdr has no CLI command for layout.apply — send the request straight to
+  # its socket API (newline-terminated JSON), same mechanism herdr's own
+  # bundled integrations use.
   log "Applying layout..."
-  herdr api "$api_request" 2>/dev/null
+  local api_response
+  if ! api_response="$(herdr_socket_request "$api_request")"; then
+    log "Failed to apply layout via herdr socket API."
+    exit 1
+  fi
+  if echo "$api_response" | jq -e '.error' >/dev/null 2>&1; then
+    log "herdr layout.apply returned an error: $api_response"
+    exit 1
+  fi
 
   log "Dashboard created with $count agent pane(s)."
 
