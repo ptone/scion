@@ -8,19 +8,34 @@ platforms = ["linux", "macos"]
 [[startup]]
 command = ["bash", "scion-discover.sh"]
 
-# Action: attach to an existing running scion agent
+# Plugin panes: scion-pick-agent.sh and scion-start-agent.sh are interactive
+# (fzf / read -rp). Plugin actions run with piped stdout/stderr and no
+# controlling terminal, so they can't be actions directly — they're opened
+# as overlay panes (via the launcher actions below), which do get a real
+# terminal, and close automatically when the script exits.
+[[panes]]
+id = "pick"
+title = "Attach to Scion Agent"
+command = ["bash", "scion-pick-agent.sh"]
+
+[[panes]]
+id = "start"
+title = "Start Scion Agent"
+command = ["bash", "scion-start-agent.sh"]
+
+# Action: open the agent picker as an overlay pane
 [[actions]]
 id = "attach-agent"
 title = "Attach to Scion Agent"
 contexts = ["workspace"]
-command = ["bash", "scion-pick-agent.sh"]
+command = ["bash", "scion-open-pane.sh", "pick"]
 
-# Action: start a new scion agent from a template and attach
+# Action: open the start-agent flow as an overlay pane
 [[actions]]
 id = "start-agent"
 title = "Start Scion Agent"
 contexts = ["workspace"]
-command = ["bash", "scion-start-agent.sh"]
+command = ["bash", "scion-open-pane.sh", "start"]
 
 # Action: refresh the agent pane list (re-run discovery)
 [[actions]]

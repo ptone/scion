@@ -32,7 +32,7 @@ running_agents() {
 # split, with the format "scion:<identifier>".
 existing_pane_agents() {
   local panes_json
-  if ! panes_json="$(herdr pane list)"; then
+  if ! panes_json="$("$HERDR_BIN" pane list)"; then
     log "Warning: herdr pane list failed — assuming no existing panes."
     return 0
   fi
@@ -48,9 +48,10 @@ existing_pane_agents() {
 
 check_deps() {
   local missing=()
-  for cmd in scion herdr jq; do
+  for cmd in scion jq; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
+  command -v "$HERDR_BIN" >/dev/null 2>&1 || missing+=("$HERDR_BIN")
   if [[ ${#missing[@]} -gt 0 ]]; then
     log "Missing required commands: ${missing[*]}"
     exit 1
@@ -87,7 +88,7 @@ main() {
     log "Creating pane for agent: $identifier"
 
     local split_json pane_id
-    if ! split_json="$(herdr pane split --direction right \
+    if ! split_json="$("$HERDR_BIN" pane split --direction right \
       --env "SCION_AGENT=${identifier}")"; then
       log "Failed to split a pane for $identifier — skipping."
       continue
@@ -99,8 +100,8 @@ main() {
       continue
     fi
 
-    herdr pane rename "$pane_id" "scion:${identifier}"
-    herdr pane run "$pane_id" "bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${identifier}'"
+    "$HERDR_BIN" pane rename "$pane_id" "scion:${identifier}"
+    "$HERDR_BIN" pane run "$pane_id" "bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${identifier}'"
 
     created=$((created + 1))
   done <<< "$agents"
@@ -108,7 +109,11 @@ main() {
   log "Discovery complete. Created $created new pane(s)."
 
   # Start the state bridge in the background if it's not already running.
-  bash "${SCRIPT_DIR}/scion-state-bridge.sh" &
+  # Redirect its stdio away from ours: herdr's plugin runtime waits for this
+  # script's stdout/stderr pipes to close before marking the action/startup
+  # hook finished, and a background child that inherits them holds them open
+  # for as long as it runs (which, for the bridge, is forever).
+  bash "${SCRIPT_DIR}/scion-state-bridge.sh" </dev/null >/dev/null 2>&1 &
   disown
 }
 

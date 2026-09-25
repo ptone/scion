@@ -88,9 +88,10 @@ build_tree() {
 
 check_deps() {
   local missing=()
-  for cmd in scion herdr jq; do
+  for cmd in scion jq; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
+  command -v "$HERDR_BIN" >/dev/null 2>&1 || missing+=("$HERDR_BIN")
   if [[ ${#missing[@]} -gt 0 ]]; then
     log "Missing required commands: ${missing[*]}"
     exit 1
@@ -157,8 +158,11 @@ main() {
 
   log "Dashboard created with $count agent pane(s)."
 
-  # Start the state bridge in the background.
-  bash "${SCRIPT_DIR}/scion-state-bridge.sh" &
+  # Start the state bridge in the background. Redirect its stdio away from
+  # ours: herdr's plugin runtime waits for this script's stdout/stderr pipes
+  # to close before marking the action finished, and a background child that
+  # inherits them holds them open for as long as it runs (forever, here).
+  bash "${SCRIPT_DIR}/scion-state-bridge.sh" </dev/null >/dev/null 2>&1 &
   disown
 }
 

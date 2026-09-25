@@ -104,7 +104,7 @@ poll_once() {
   # Scion panes are identified by their .label, set via `herdr pane rename`
   # right after split, with the format "scion:<identifier>".
   local panes_json
-  panes_json="$(herdr pane list)" || return 1
+  panes_json="$("$HERDR_BIN" pane list)" || return 1
 
   # Extract pane_id + agent identifier from scion-managed panes.
   local pane_entries
@@ -140,7 +140,7 @@ poll_once() {
     fi
 
     # Report to herdr (state only — identity/tracking is via pane .label).
-    herdr pane report-agent "$pane_id" \
+    "$HERDR_BIN" pane report-agent "$pane_id" \
       --source "scion:integration" \
       --agent "scion/${identifier}" \
       --state "$herdr_state"
@@ -150,9 +150,10 @@ poll_once() {
 
 check_deps() {
   local missing=()
-  for cmd in scion herdr jq; do
+  for cmd in scion jq; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
+  command -v "$HERDR_BIN" >/dev/null 2>&1 || missing+=("$HERDR_BIN")
   if [[ ${#missing[@]} -gt 0 ]]; then
     log "Missing required commands: ${missing[*]}"
     exit 1

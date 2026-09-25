@@ -67,9 +67,10 @@ pick_agent() {
 
 check_deps() {
   local missing=()
-  for cmd in scion herdr jq; do
+  for cmd in scion jq; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
+  command -v "$HERDR_BIN" >/dev/null 2>&1 || missing+=("$HERDR_BIN")
   if [[ ${#missing[@]} -gt 0 ]]; then
     log "Missing required commands: ${missing[*]}"
     exit 1
@@ -104,24 +105,32 @@ main() {
     if [[ -n "$pane_id" ]]; then
       # Agent commands accept a pane_id directly (herdr resolves it to the
       # agent currently hosted in that pane).
-      herdr agent focus "$pane_id"
+      "$HERDR_BIN" agent focus "$pane_id"
     fi
     exit 0
   fi
 
   log "Creating pane for agent: $selected"
 
+  # Split off the pane that opened us (passed via SCION_TARGET_PANE by
+  # scion-open-pane.sh), so the new agent pane lands next to the user's
+  # pane rather than off this overlay. Falls back to herdr's default target
+  # (calling pane, then focused pane) if unset.
+  local -a split_args=(--direction right --env "SCION_AGENT=${selected}")
+  if [[ -n "${SCION_TARGET_PANE:-}" ]]; then
+    split_args=(--pane "$SCION_TARGET_PANE" "${split_args[@]}")
+  fi
+
   local split_json pane_id
-  split_json="$(herdr pane split --direction right \
-    --env "SCION_AGENT=${selected}")"
+  split_json="$("$HERDR_BIN" pane split "${split_args[@]}")"
   pane_id="$(echo "$split_json" | jq -r '.result.pane.pane_id // empty')"
   if [[ -z "$pane_id" ]]; then
     log "herdr pane split returned no pane_id for $selected: $split_json"
     exit 1
   fi
 
-  herdr pane rename "$pane_id" "scion:${selected}"
-  herdr pane run "$pane_id" "bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${selected}'"
+  "$HERDR_BIN" pane rename "$pane_id" "scion:${selected}"
+  "$HERDR_BIN" pane run "$pane_id" "bash '${SCRIPT_DIR}/scion-attach-wrapper.sh' '${selected}'"
 }
 
 main "$@"
