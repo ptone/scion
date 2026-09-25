@@ -75,7 +75,7 @@ resumed onto any free worker. scion maps one agent onto one actor.
 | `api_endpoint` | ateapi Control gRPC endpoint, e.g. `api.ate-system.svc:443`. |
 | `router_endpoint` | atenet-router inbound endpoint, e.g. `http://atenet-router.ate-system.svc:80`. |
 | `token_audience` | Audience for the in-cluster ServiceAccount TokenRequest. Defaults to `api.ate-system.svc`. |
-| `ca_file` / `cluster_trust_bundle` | Verify the ateapi/router server certificate against a PEM file or a `ClusterTrustBundle`; when both are set, `cluster_trust_bundle` wins. |
+| `ca_file` / `cluster_trust_bundle` | Verify the ateapi server certificate against a PEM file or a `ClusterTrustBundle` (the router client does not use it; `router_endpoint` is plain HTTP in Phase 1, §10); when both are set, `cluster_trust_bundle` wins. |
 | `sandbox_class` | `gvisor` (default) or `microvm`. |
 | `sandbox_config_name` | The Substrate `SandboxConfig` CRD instance actor templates reference. |
 | `worker_selector` | Copied into the ActorTemplate's `workerSelector`, matched against a `WorkerPool`'s own `metadata.labels` (not a Pod label — see `deploy/substrate/README.md`). |
@@ -86,7 +86,8 @@ resumed onto any free worker. scion maps one agent onto one actor.
 
 **Selection is explicit only.** `pkg/runtime/factory.go`'s `substrate` case
 is reachable only when a profile names it; there is no auto-detect branch
-(unlike `docker`/`k8s`, which Linux auto-detection can select). A settings
+(unlike `docker`/`podman`/`cloudrun*`, which Linux auto-detection can
+select). A settings
 profile is free to name its `substrate` runtime entry anything (e.g.
 `substrate-prod`, `substrate-nip`); `SubstrateRuntime.Name()` always reports
 the literal `"substrate"` regardless, because that is the value the broker's
@@ -95,8 +96,8 @@ substrate-only code paths (e.g. the delete gate in
 
 `NewSubstrateRuntime` memoizes one `*SubstrateRuntime` (and its dialed gRPC
 `ClientConn`) per distinct `V1SubstrateConfig` for the life of the broker
-process — see the "process-wide memoization" comment on
-`substrateRuntimesMu` (`pkg/runtime/substrate_runtime.go`). A CA rotation
+process — see the memoization comment on `substrateRuntimesMu`
+(`pkg/runtime/substrate_runtime.go`). A CA rotation
 behind the same `ca_file`/`cluster_trust_bundle` value does not take effect
 until the broker process restarts.
 
@@ -124,7 +125,7 @@ same image/resources/sandbox share one template.
   `deploy/substrate/README.md` for the operator-facing setup step this
   requires.
 - **Template name** = `scion-` + the first 12 hex characters of
-  `sha256(image digest, sandbox class, sandbox config name, worker_selector,
+  `sha256(image reference (digest-pinned), sandbox class, sandbox config name, worker_selector,
   snapshot storage, effective resources, snapshot scope, the container's
   added capabilities, substrate-serve entrypoint version)`, plus
   `egress_trust_bundle` appended only when it is non-empty. Same inputs
@@ -166,7 +167,7 @@ same image/resources/sandbox share one template.
 | `Run(cfg)` | Steps below. |
 | `Delete(id)` | See §9. |
 | `Stop(id)` | Same as `Delete`, with a `TODO(Phase 2)` marker: `SuspendActor(DATA)` plus the `$HOME` durableDir layout would keep the workspace and free the worker instead, but that lands with Phase 2's suspend/resume work (§11). Faking a "stopped" actor that is still running, or a "durable stop" that discarded the workspace, would both misreport what happened, so Phase 1 keeps `Stop` honest by making it `Delete`. |
-| `List(labelFilter)` | `ListActors(atespace)`. Substrate actors carry no labels of their own, so `AgentInfo` for a **record-having** actor (one this runtime instance has an in-memory record for, from its own `Run`, keyed by actor UID) reports the real agent slug as `Name`/`"scion.name"`. A **record-less** actor (no in-memory record — e.g. right after a broker restart) is reported under its raw, project-prefixed actor name instead, deliberately: it is never resolvable by a caller-supplied slug or project filter at all, so it can appear in an unfiltered listing without ever being actioned by the wrong caller (§9, §10). When a `"scion.name"` filter has no project-scoping key alongside it and more than one record-having actor shares that slug, `List` excludes all of them rather than guessing (§9). |
+| `List(labelFilter)` | `ListActors` across all atespaces (paginated), keeping only actors in a `scion-`-prefixed atespace (`substrateAtespacePrefix`) — `List` has no project context to scope the call. Substrate actors carry no labels of their own, so `AgentInfo` for a **record-having** actor (one this runtime instance has an in-memory record for, from its own `Run`, keyed by actor UID) reports the real agent slug as `Name`/`"scion.name"`. A **record-less** actor (no in-memory record — e.g. right after a broker restart) is reported under its raw, project-prefixed actor name instead, deliberately: it is never resolvable by a caller-supplied slug or project filter at all, so it can appear in an unfiltered listing without ever being actioned by the wrong caller (§9, §10). When a `"scion.name"` filter has no project-scoping key alongside it and more than one record-having actor shares that slug, `List` excludes all of them rather than guessing (§9). |
 | `GetLogs(id)` | `GetActor` → `status.worker_assignment` → the worker pod's name/namespace → client-go `PodLogs` (tail 2000 lines). |
 | `Exec(id, argv)` | `POST /scion/v1/exec` via the router, authorized with the `control_token` minted at bootstrap (§5.3), header `ate-target-actor: <atespace>/<actor>` (§1). Returns stdout; a non-zero exit becomes an error that includes stderr. |
 | `Attach`, `Sync`, `GetWorkspacePath` | Return errors naming Phase 2 / the hub workspace API. Substrate has no exec/attach/TTY primitive in Phase 1, so the broker's PTY switch (`pty_handlers.go`) returns a clean "attach not yet supported on substrate" error instead of falling through to docker exec, which would fail confusingly. |
@@ -209,17 +210,24 @@ into the same `sciontool` binary as every other subcommand.
 
 ### 5.1 Endpoints
 
-- `GET /scion/v1/healthz` — no auth. Always HTTP 200; the body's `state` field
+- `GET /scion/v1/healthz` — no auth. Always HTTP 200 for `GET` (`405` for any
+  other method); the body's `state` field
   is one of `awaiting-bootstrap`, `running`, or `init-failed` (entered when
   the in-process init exits non-zero after a successful bootstrap; the
   control server stays up regardless — see §10). Never returns data.
 - `POST /scion/v1/bootstrap` — accepted once per process lifetime, only in
   `awaiting-bootstrap`. Auth: the nonce (§5.2). Effect: write the files
-  (§5.4), set the env, and run the **existing** `sciontool init` path
-  in-process (the same `InitRunner` seam the cmd layer already has, reused
-  rather than forked). The server keeps serving afterwards. Responses:
-  `409` if already bootstrapped, `401` on a bad nonce, `422` for a rejected
-  file path (§5.5), `413` over the size cap (§5.4).
+  (§5.4), set the env, re-run the rootfs fixup (`fixupRootfsForScion`, a
+  normally-no-op safety net — traversability and home ownership must hold
+  before the next step), run the synchronous privilege-drop precondition
+  check, and run the **existing** `sciontool init` path in-process (the same
+  `InitRunner` seam the cmd layer already has, reused rather than forked).
+  The server keeps serving afterwards. Responses: `409` if already
+  bootstrapped, `401` on a missing/empty bearer (or, with a real verifier, a
+  wrong one), `400` for an undecodable request body, `422` for a rejected
+  file path (§5.5), `413` over the size cap (§5.4), `500` if a bootstrap file
+  fails to write or the privilege-drop precondition fails
+  (`privilegeDropPreconditionFailedMsg`).
 - `POST /scion/v1/exec` — auth: `Bearer <control_token>` from bootstrap.
   Body `{"argv":[...], "user":"scion"|"root", "timeout_s":N}`, response
   `{"stdout":"...","stderr":"...","exit_code":N}`. Output is capped at 4 MiB
@@ -240,9 +248,11 @@ Two options exist:
   against a fixed expected value in constant time, and stands in for this
   once the identity-derived path is wired up.
 - **Fallback, used in Phase 1: `FirstBootstrapWinsVerifier`.** The control
-  server accepts any bearer token, including an empty one, but the
-  single-shot "first bootstrap wins" check (§5.1, `409` on a second attempt)
-  is the actual guard. This is acceptable only together with a NetworkPolicy
+  server accepts any **non-empty** bearer token (a missing or empty
+  `Authorization: Bearer` header is rejected with `401` before the verifier
+  is consulted — `bearerToken`), but the single-shot "first bootstrap wins"
+  check (§5.1, `409` on a second attempt) is the actual guard. This is
+  acceptable only together with a NetworkPolicy
   restricting router ingress to the broker namespace
   (`deploy/substrate/README.md`) — the race window is otherwise any in-cluster
   caller able to reach the router before the broker's own bootstrap call.
@@ -273,26 +283,34 @@ CIDRs, catch-alls and internal-shaped hostnames outright.
   the harness needs the model, task and telemetry env they carry to start at
   all, + `cfg.Env` + `ResolvedAuth.EnvVars` + env-type `ResolvedSecrets`, plus
   `SCION_RUNTIME=substrate` (which is what lets `sciontool` disable
-  autoexpose and the port-forward tunnel — §1, §7) and
+  autoexpose and the port-forward tunnel — §1) and
   `SCION_HOST_UID`/`SCION_HOST_GID`, both fixed at `1000` (the actor image's
   built-in `scion` user), so `sciontool init`'s privilege-drop path has a
   target UID/GID to drop to — Substrate's workspace is never bind-mounted
   from the broker's own filesystem, so there is no host identity to mirror
   the way Docker/Podman do (the NFS backend instead uses a stable,
   node-independent identity of its own — the operator-configurable
-  `workspace_storage.nfs.uid`/`gid` settings, default `1000:1000`, carried
+  `server.workspace_storage.nfs.uid`/`gid` settings, default `1000:1000`, carried
   through as the `NFSUID`/`NFSGID` fields on `RunConfig` — rather than
   mirroring host identity).
 - `mode` is decimal (384 decimal == 0600 octal). Auth files and file-type
   secrets always get `0600`, since neither `api.FileMapping` nor
   `api.ResolvedSecret` carries a mode; home files keep their source
-  permission bits (§5.4).
+  permission bits (§5.4) — except a source with permission bits `0000`,
+  where the broker sends `mode: 0` and serve-side `writeBootstrapFile`
+  substitutes its own `defaultFileMode` (`pkg/sciontool/substrate/server.go`,
+  `0o644`) instead of writing an unreadable file. Note the two
+  same-named `defaultFileMode` constants differ: the broker's
+  (`pkg/runtime/substrate_bootstrap.go`) is `0o600`, serve's is `0o644`.
 - `files` — see §5.4 for composition and precedence, §5.5 for path safety.
-- `start_cmd` — the same tmux command string the k8s runtime's `tmuxCmd`
-  builds, through one shared helper (not duplicated a third time).
-- `control_token` — generated fresh per bootstrap, used both as the `/exec`
-  bearer (§4) and, in the Phase 1 fallback, has no bearing on the nonce
-  itself (the nonce is checked before this payload is ever parsed).
+- `start_cmd` — built by the shared `buildTmuxStartCmd` helper (not
+  duplicated a third time), in its `tmuxPollSession` form like Cloud
+  Run/-sandbox, since substrate-serve's child has no TTY; k8s and Docker use
+  the `tmuxAttachSession` form.
+- `control_token` — generated fresh per bootstrap, used as the `/exec`
+  bearer (§5.1); it is independent of the bootstrap nonce, which
+  `bootstrapNonce` generates separately and which is checked before this
+  payload is ever parsed.
 
 `postBootstrap` sends this payload through the router with the nonce as the
 bearer. Any non-2xx response is an error; `409` specifically becomes
@@ -451,13 +469,17 @@ for:
 
 `egress_allow` is **allowlist-first and validated** (`ValidateEgressAllow`,
 `pkg/config/substrate_egress.go`): only public FQDNs (optionally wildcarded
-as `*.example.com`) are accepted. Rejected outright: any IP address or CIDR;
+as `*.example.com`) are accepted. Rejected include: any IP address or CIDR;
 catch-alls (`all`, `*`, `0.0.0.0/0`, `::/0`); a hostname whose top-level
-domain isn't a real, ICANN-delegated one (also catching
-Kubernetes-internal-shaped names and reserved zones like `.local`/`.internal`);
-a hostname that is itself a public suffix rather than a name beneath one;
-hostnames ending in `.svc`, `.cluster.local`, `.internal`, `.local`, or
-`.localhost`. This does not close DNS rebinding or a service like
+domain isn't a real, ICANN-delegated one (`egressAllowSuffixOK`; also
+catching Kubernetes-internal-shaped names and reserved zones like
+`.local`/`.internal`); the special-use `arpa`/`onion` top-level domains; a
+hostname that is itself a public suffix rather than a name beneath one;
+hostnames ending in `.svc`, `.cluster.local`, `.internal`, `.local`,
+`.localhost`, or `localhost.localdomain`; a wildcard whose remainder is
+itself a public-suffix wildcard rule (e.g. `*.run.app`); single-label
+hostnames; entries over 253 characters; and entries containing `[`, `]`, or
+`%`. This does not close DNS rebinding or a service like
 nip.io/sslip.io resolving a valid public hostname to a private address —
 only a post-resolution check by the egress proxy itself could close that,
 and Phase 1 does not add one.
@@ -479,7 +501,7 @@ to `/run/ate/trust-bundle.pem`, and sets `NODE_EXTRA_CA_CERTS`,
 `GIT_SSL_CAINFO`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE` (all pointing at that
 file) and `SSL_CERT_DIR=/run/ate` — the shared variable names live in
 `pkg/substrateenv.TrustBundleVarNames`, so `buildActorTemplate` and the
-serve-side `su -w` exec path (§4, `Exec`) never drift apart. `SSL_CERT_DIR`
+serve-side `su -w` exec path (§5.1, `execAsUserCmd`) never drift apart. `SSL_CERT_DIR`
 is exclusive for Go and Python `ssl`, and only additive for curl, git and
 Node (see `deploy/substrate/README.md` for the full breakdown). Leaving
 `egress_trust_bundle` empty is byte-identical to today and keeps the
@@ -531,10 +553,12 @@ defaults, which don't hold here:
 
 ## 9. Delete semantics
 
-`Delete(id)`: `DeleteActorEgressPolicy` (ignoring `NotFound`), then
-`DeleteActor(any_state=true)`, then drop the in-memory `control_token` for
-`<atespace>/<actor>`. The ActorTemplate itself is never deleted by `Delete`
-— template GC is Phase 2 (§11).
+`Delete(id)`: `GetActor` first (best effort, to capture the actor's UID),
+then `DeleteActorEgressPolicy` (ignoring `NotFound`), then
+`DeleteActor(any_state=true)` (also tolerating `NotFound`), then drop the
+in-memory `control_token` for `<atespace>/<actor>` and, when the UID was
+captured, `substrateAgentRecords[uid]` too. The ActorTemplate itself is
+never deleted by `Delete` — template GC is Phase 2 (§11).
 
 **Delete is fire-and-forget in Phase 1.** The broker counts `DeleteActor`
 being accepted (not erroring) as success; it does not confirm the actor
@@ -542,8 +566,8 @@ actually leaves `DELETING`. A stuck actor is invisible to the hub and
 silently holds a worker (§10). Confirming deletion (poll until the actor
 leaves `DELETING`, or report a stuck state) is a Phase 2 item (§11).
 
-**Same-slug, cross-project safety.** Two independent guards close two
-different ways a slug-based lookup could act on the wrong actor:
+**Same-slug, cross-project safety.** Three separate guards close different
+ways a slug-based lookup could act on the wrong actor:
 
 - **Record-less actors are never resolvable by slug or project filter, at
   all** — not even by a request scoped to their own project. `List` (§4)
@@ -564,14 +588,22 @@ different ways a slug-based lookup could act on the wrong actor:
 - **Two or more record-having actors sharing a slug** (only possible
   across different projects) are *also* excluded from an unscoped-by-slug
   `List` result, rather than one being picked arbitrarily. `Delete`'s and
-  `Stop`'s own call sites (`pkg/agent/manager.go`,
-  `pkg/runtimebroker/server.go`) filter `Runtime.List` by `"scion.name"`
-  alone, with no project-scoping key, regardless of what project the outer
-  broker-level caller resolved — so this guard has to live in `List`
-  itself, not in its callers. A project-scoped query for the same slug is
-  unaffected. This closes the file-system analogue of the same ambiguity
-  for local-file deletion fallbacks (`findAgentInHubManagedProjects`) that
-  already existed for the actor-delete path.
+  `Stop`'s own call sites (`pkg/agent/manager.go:99,131`) filter
+  `Runtime.List` by `"scion.name"` alone, with no project-scoping key,
+  regardless of what project the outer broker-level caller resolved — so
+  this guard has to live in `List` itself, not in its callers. (The
+  `"scion.name"`-only filters in `pkg/runtimebroker/server.go` belong to
+  `LookupContainerID`/`LookupAgent`, not `Delete`/`Stop`.) A project-scoped
+  query for the same slug is unaffected.
+- **The broker's local-file deletion fallback is guarded separately, by a
+  different gate.** `findAgentInHubManagedProjects` (called from
+  `pkg/runtimebroker/handlers.go`) takes only the bare agent name, and
+  `List` never touches it. What actually keeps a project-scoped substrate
+  delete away from resolving the wrong project's files is the substrate-only
+  delete gate in that same file: a project-scoped substrate delete with no
+  matching agent in that project returns `204` before either the
+  hub-managed-projects scan or `AgentManager.Delete`'s unscoped `List` runs.
+  An unscoped delete is not covered by that gate.
 
 ## 10. Known limitations (Phase 1)
 
@@ -644,7 +676,7 @@ different ways a slug-based lookup could act on the wrong actor:
   `WORKER_STATE_DRAINING`, and have the broker suspend proactively.
 - An on-demand hub port-forward tunnel and `sciontool` autoexpose, so
   Substrate agents regain that path once it no longer depends on
-  always-on WebSocket egress (§1, §7) — a scion-wide refactor, not
+  always-on WebSocket egress (§1) — a scion-wide refactor, not
   substrate-specific, that this runtime would opt into once it lands.
 - Template GC, and a durable (ConfigMap-backed) label store surviving
   broker restarts (§4's `List` row, §10).
