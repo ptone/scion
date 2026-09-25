@@ -94,9 +94,9 @@ func TestAuthorizeSSESubjects_AdminNamespaceRequiresAdminRole(t *testing.T) {
 		"admin.* must be allowed for an admin session")
 }
 
-// TestSSEHandler_LegacyAndUnknownSubjectsDenied is the end-to-end regression
-// test called for in the fix: a non-member gets 403 for grove.>,
-// grove.<otherId>.> and an unknown prefix such as foo.>.
+// TestSSEHandler_LegacyAndUnknownSubjectsDenied is an end-to-end regression
+// test: a non-member gets 403 for grove.>, grove.<otherId>.> and an unknown
+// prefix such as foo.>.
 func TestSSEHandler_LegacyAndUnknownSubjectsDenied(t *testing.T) {
 	const userID = "user-1"
 	victimProject := tid("legacy-victim-project")
@@ -226,7 +226,9 @@ func TestSSEHandler_InventorySubjectsAllowed(t *testing.T) {
 	}
 
 	subjects := []string{
-		"project." + ownProject + ".>", // per-project feed (scope=project / space)
+		"project.>",                         // dashboard: all accessible projects, expanded then authorized
+		"project." + ownProject + ".>",      // per-project feed (scope=project / space)
+		"project." + ownProject + ".chat.>", // per-project chat feed
 		"user." + userID + ".notification",
 		"user." + userID + ".chat.>",
 		"agent." + agentID + ".>", // per-agent stream (scope=agent)
