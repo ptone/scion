@@ -17,6 +17,7 @@ package cmd
 import (
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,13 +34,39 @@ func resetFlagChanged(fs *pflag.FlagSet, names ...string) {
 	}
 }
 
+// assertNoLocalProjectFlag asserts that cmd does not register its own
+// --project flag distinct from the root's persistent --project/-g. It does
+// not assert cmd.Flags().Lookup("project") == nil, because that lookup is
+// order-dependent on a shared, package-level command: cobra's
+// mergePersistentFlags copies the root's persistent flags directly into
+// cmd's own FlagSet the first time cmd parses flags or is executed (see
+// Command.ParseFlags / Command.Execute in spf13/cobra), and that merge is
+// permanent for the process, not scoped to one test. Once any other test in
+// this package has parsed flags on cmd, Lookup("project") always finds the
+// merged-in root flag, regardless of run order. pflag's FlagSet.AddFlagSet
+// only fills in names that are not already present, so a real local
+// override (the regression this guards against) always wins over the
+// merge and is never replaced by the inherited flag — checking pointer
+// identity against the root's flag catches that regression in either
+// ordering, while a plain nil check only catches it if this test happens
+// to run before every test that triggers the merge.
+func assertNoLocalProjectFlag(t *testing.T, cmd *cobra.Command) {
+	t.Helper()
+	f := cmd.Flags().Lookup("project")
+	if f == nil {
+		return
+	}
+	assert.Same(t, rootCmd.PersistentFlags().Lookup("project"), f,
+		"%s must not register a local --project flag distinct from the root's --project/-g", cmd.Name())
+}
+
 // TestSAAddCmd_GCPProjectFlagRenamed locks in the rename: the local --project
 // flag (GCP project ID) became --gcp-project so it no longer shadows the root
 // --project/-g scion-project selector. No alias for the old name is
 // registered: an alias called "project" would recreate the shadowing.
 func TestSAAddCmd_GCPProjectFlagRenamed(t *testing.T) {
 	assert.NotNil(t, saAddCmd.Flags().Lookup("gcp-project"), "add command should register --gcp-project")
-	assert.Nil(t, saAddCmd.Flags().Lookup("project"), "add command must not register a local --project flag")
+	assertNoLocalProjectFlag(t, saAddCmd)
 }
 
 // TestSAAddCmd_RootProjectAndGCPProjectFlagsParseIndependently is the
