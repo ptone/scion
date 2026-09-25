@@ -777,6 +777,18 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 // is what keeps ordinary same-project stop-then-delete sequences — no
 // restart involved — from being misreported as "broker restarted").
 //
+// Race window: there is a narrow gap between CreateActor succeeding (Run,
+// above) and this function's own caller observing the record it writes
+// afterward — spanning waitRunning, healthz and bootstrap, so on the order
+// of tens of seconds. An actor created in that window looks record-less to
+// a concurrent call here, exactly like a genuinely pre-restart actor does.
+// This is not hardened further: the caller (resolveDeleteTarget/stopAgent)
+// only ever turns a would-be success into an explicit error on a hit, never
+// selects a delete/stop target from this list, so the failure mode is a
+// spurious 409 on an unrelated absent-slug request in the same project (or
+// on the in-flight agent itself), never a wrong action. See
+// deploy/substrate/README.md, consequence (c).
+//
 // Positive rule for what counts as a project atespace's actor: Run (above)
 // is the only call site in this runtime that creates an Actor in a
 // project's own atespace, and it creates exactly one per real agent, named
@@ -839,18 +851,32 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 			// would falsely report "broker restarted" even though nothing
 			// restarted.
 			//
-			// This is safe to do unconditionally, not just "usually", for
-			// two reasons checked against the proto rather than assumed:
-			// the ActorState enum (third_party/ateapipb/ateapi.proto:520-532)
-			// has no state after DELETING for an actor to revert to — a
-			// deleted actor simply stops being listed, there is no
-			// ACTOR_STATE_DELETED for it to sit in — and ActorStatus.state is
-			// `+k8s:required` (proto:538), so a listed actor's state is
-			// never zero-valued/unknown here. So a record-less DELETING
-			// actor can only ever disappear next, never re-enter a live
-			// state, which is also consistent with every DELETING incident
-			// on this cluster (some stuck for hours): none recovered to a
-			// live state; they either finished deleting or stayed stuck.
+			// This exclusion is safe to apply unconditionally, not just
+			// "usually", with respect to the egress leak it exists to avoid
+			// counting: two reasons checked against the proto rather than
+			// assumed. The ActorState enum
+			// (third_party/ateapipb/ateapi.proto:520-532) has no state after
+			// DELETING for an actor to revert to — a deleted actor simply
+			// stops being listed, there is no ACTOR_STATE_DELETED for it to
+			// sit in — and ActorStatus.state is `+k8s:required` (proto:537),
+			// so a listed actor's state is never zero-valued/unknown here.
+			// So a record-less DELETING actor can only ever disappear next,
+			// never re-enter a live state, which is also consistent with
+			// every DELETING incident on this cluster (some stuck for
+			// hours): none recovered to a live state; they either finished
+			// deleting or stayed stuck.
+			//
+			// It is NOT unconditionally safe with respect to the broader
+			// invariant this whole mechanism protects: an actor already
+			// DELETING when a broker restart happens is excluded here, so a
+			// delete of its slug afterward returns the ordinary idempotent
+			// 404 instead of 409, and the hub drops its record while the
+			// actor may still be sitting in the cluster, stuck. That is a
+			// deliberate, documented exception (its egress policy is
+			// already gone, so this exclusion trades a rare, already-leaked
+			// actor for not reintroducing a false 409 on ordinary
+			// stop-then-delete). See deploy/substrate/README.md, "After a
+			// broker restart", consequence (d).
 			continue
 		}
 		actorNames = append(actorNames, actor.GetMetadata().GetName())
@@ -861,10 +887,12 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 // maxRecordlessActorListPages bounds RecordlessActors' ListActors paging
 // loop: a misbehaving server that never returns an empty next_page_token
 // would otherwise spin until ctx expires. A page holds an unspecified but
-// presumably large number of actors server-side, so this is generous
-// headroom for any real atespace (one project's worth of agents) while
-// still bounding the call count.
-const maxRecordlessActorListPages = 10000
+// presumably large number of actors server-side; the atespace this scopes
+// to is one project's own agents, not a cluster-wide listing, so this is
+// generous headroom for that without leaving memory use effectively
+// unbounded. A package-level var, not a const, so a test can lower it to
+// exercise the cap without paging through this many fake responses.
+var maxRecordlessActorListPages = 100
 
 // substrateLabelsMatch mirrors the label-filter pattern used by the other
 // runtimes (e.g. CloudRunSandboxRuntime.List): an entry with no explicit

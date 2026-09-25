@@ -15,11 +15,15 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -28,14 +32,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
-// Additional broker-level coverage for ptone/scion#1808, closing gaps a
-// review round found in the first pass: a file-scan hit bypassing the
-// record-less-actor probe on delete (H1), a stop lookup error that still
-// fell through to the idempotent 202 (H2), a false 409 for a same-project
-// stop-then-delete race with no restart involved (M1), the probe's own
-// error path never actually being reached by the original probe-error test,
-// the broker-level idempotence refinement only being pinned against an
-// empty atespace, and the delete-path project-blind guard being unpinned.
+// Additional broker-level coverage for ptone/scion#1808: a file-scan hit
+// bypassing the record-less-actor probe on delete, a stop lookup error that
+// still fell through to the idempotent 202, a false 409 for a same-project
+// stop-then-delete race with no restart involved, the probe's own error
+// path, the broker-level idempotence refinement against an atespace holding
+// only recorded actors, and the delete-path project-blind guard.
 
 const (
 	gapAtespaceB = "scion-bbbbbbbbbbbb"
@@ -177,11 +179,11 @@ func TestSubstrateBroker_ProbeOnlyError_ExplicitFailure(t *testing.T) {
 }
 
 // TestSubstrateBroker_StopLookupErrorNoRecordless_ExplicitErrorNot202 covers
-// the lead-accepted defect: the slug lookup errors (the unscoped List call
-// LookupContainerID makes internally fails) while the probe would find zero
-// record-less actors. The outcome is unknown, so it must be an explicit
-// error, not the idempotent 202. The actor here is RECORDED — exactly the
-// case the record-less-actor probe alone cannot catch.
+// a persistent slug lookup failure (every unscoped List call fails) while
+// the probe would find zero record-less actors. The outcome is unknown, so
+// it must be an explicit error, not the idempotent 202. The actor here is
+// RECORDED — exactly the case the record-less-actor probe alone cannot
+// catch.
 func TestSubstrateBroker_StopLookupErrorNoRecordless_ExplicitErrorNot202(t *testing.T) {
 	srv, fc := newTestSubstrateBrokerServer(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
@@ -202,8 +204,8 @@ func TestSubstrateBroker_StopLookupErrorNoRecordless_ExplicitErrorNot202(t *test
 }
 
 // TestSubstrateBroker_DeleteFileScanHitWithRecordlessActor_NotSuccess covers
-// the other lead-flagged High: a delete with a persistent ~/.scion. The
-// agent's files survive the restart in the hub-managed project dir, so
+// a delete with a persistent ~/.scion: the agent's files survive the
+// restart in the hub-managed project dir, so
 // findAgentProjectDir hits and a file-only delete target used to be
 // returned before the probe ever ran. The actor is still in ateapi
 // (record-less), so reporting success would orphan it. Must be 409
@@ -280,16 +282,14 @@ func TestNonProberRuntime_RealAgentManager_NotFoundUnchanged(t *testing.T) {
 }
 
 // TestSubstrateBroker_StopThenDeleteWhileActorStillListedDeleting_StaysIdempotent
-// covers M1: normal operation, no restart at all. Stop (== Delete in Phase
-// 1) drops this process's own record for the actor it just deleted, but
-// Delete is fire-and-forget (substrate-runtime.md §9) — the actor can stay
-// listed, in ACTOR_STATE_DELETING, for a while afterward. A later
-// absent-slug delete of the same project must not mistake that lingering,
-// record-less, DELETING entry for a post-restart identity-unknown case: it
-// must stay the ordinary idempotent 404, not a false 409. Regression test
-// for the tech lead's chosen "stateless" fix (RecordlessActors excludes
-// ACTOR_STATE_DELETING), replacing the tombstone design the round-1 fix
-// review proposed.
+// covers normal operation, no restart at all. Stop (== Delete in Phase 1)
+// drops this process's own record for the actor it just deleted, but Delete
+// is fire-and-forget (substrate-runtime.md §9) — the actor can stay listed,
+// in ACTOR_STATE_DELETING, for a while afterward. A later absent-slug
+// delete of the same project must not mistake that lingering, record-less,
+// DELETING entry for a post-restart identity-unknown case: it must stay the
+// ordinary idempotent 404, not a false 409. Regression test for
+// RecordlessActors excluding ACTOR_STATE_DELETING.
 func TestSubstrateBroker_StopThenDeleteWhileActorStillListedDeleting_StaysIdempotent(t *testing.T) {
 	srv, fc := newTestSubstrateBrokerServer(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
@@ -323,5 +323,176 @@ func TestSubstrateBroker_StopThenDeleteWhileActorStillListedDeleting_StaysIdempo
 	srv.deleteAgent(w, httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil), "dev", gapProjBID)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("re-delete: status=%d body=%s, want 404", w.Code, w.Body.String())
+	}
+}
+
+// unscopedListFailsOnlyOnCallN fails only the Nth unscoped ListActors call
+// (1-indexed, counting only calls whose request carries no Atespace — the
+// shape LookupContainerID's own List makes) and succeeds on every other
+// call, including any later retry. This is what distinguishes a single
+// transient failure from a persistent one: onlyUnscopedListFails above
+// fails every such call, so it cannot tell a fix that re-derives the answer
+// from a second, independent call (masking the first call's transient
+// failure) apart from a fix that correctly decides from the first call's
+// own error (ptone/scion#1808).
+func unscopedListFailsOnlyOnCallN(n int, err error) func(*ateapipb.ListActorsRequest) error {
+	calls := 0
+	return func(in *ateapipb.ListActorsRequest) error {
+		if in.GetAtespace() != "" {
+			return nil
+		}
+		calls++
+		if calls == n {
+			return err
+		}
+		return nil
+	}
+}
+
+// TestSubstrateBroker_StopTransientLookupFailure_ExplicitErrorNot202 pins
+// the invariant against a SINGLE transient list failure at any position in
+// the stop path's lookup sequence, not just a persistent one (unlike
+// TestSubstrateBroker_StopLookupErrorNoRecordless_ExplicitErrorNot202
+// above, which fails every unscoped call). Whichever call fails, the
+// response must never be 202 unless Stop actually ran and removed the
+// still-recorded actor — a fix that re-derives the outcome from a second,
+// independent list call could see that second call succeed (because the
+// original failure was transient) and report a false 202 while Stop was
+// never called.
+func TestSubstrateBroker_StopTransientLookupFailure_ExplicitErrorNot202(t *testing.T) {
+	for n := 1; n <= 5; n++ {
+		t.Run(fmt.Sprintf("call_%d", n), func(t *testing.T) {
+			srv, fc := newTestSubstrateBrokerServer(t)
+			runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
+			fc.mu.Lock()
+			fc.listActorsErrFor = unscopedListFailsOnlyOnCallN(n, errors.New("simulated transient list failure"))
+			fc.mu.Unlock()
+
+			w := httptest.NewRecorder()
+			srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)
+
+			fc.mu.Lock()
+			_, stillExists := fc.actors[gapAtespaceB+"/projb--dev"]
+			deletes := len(fc.deleteActorCalls)
+			fc.mu.Unlock()
+
+			if w.Code == http.StatusAccepted {
+				// A genuine 202 is only safe if Stop (== Delete in Phase 1)
+				// actually ran and removed the actor. Anything else is a
+				// false success: 202 while the recorded actor is untouched.
+				if stillExists || deletes == 0 {
+					t.Errorf("call %d: status=202 but the actor was not actually stopped (stillExists=%v deleteActorCalls=%d) — false success", n, stillExists, deletes)
+				}
+				return
+			}
+			if !stillExists || deletes != 0 {
+				t.Errorf("call %d: status=%d but the actor was touched (stillExists=%v deleteActorCalls=%d)", n, w.Code, stillExists, deletes)
+			}
+		})
+	}
+}
+
+// TestNonProberRuntime_StopLookupError_Stays202 pins the hasRecordlessProber
+// gate itself: on a broker with no RecordlessActorProber runtime
+// registered, a stop whose lookup listing fails keeps the generic
+// idempotent 202 — the stricter, error-preserving lookup applies only when
+// a prober is registered, so other runtimes' stop behaviour is unchanged
+// (ptone/scion#1808).
+func TestNonProberRuntime_StopLookupError_Stays202(t *testing.T) {
+	listCalls := 0
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+			listCalls++
+			return nil, errors.New("simulated docker list failure")
+		},
+	}
+	mgr := agent.NewManager(rt)
+	t.Cleanup(mgr.Close)
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	w := httptest.NewRecorder()
+	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)
+	if w.Code != http.StatusAccepted {
+		t.Errorf("stop with failing lookup on a non-prober broker: status=%d body=%s, want 202 (unchanged generic behaviour)", w.Code, w.Body.String())
+	}
+	if listCalls == 0 {
+		t.Error("setup: the failing List was never called, so the lookup-error path was not exercised")
+	}
+}
+
+// TestRecordlessActorProbe_DedupesAcrossManagers pins that the same
+// prober's actors are not double-counted when the same underlying runtime
+// is reachable through more than one manager — e.g. a per-profile substrate
+// manager cached by resolveManagerForOpts alongside the default manager,
+// both pointed at the same ateapi endpoint. Today's deployed topology never
+// registers substrate twice, but nothing in recordlessActorProbe's loop
+// otherwise prevents it from happening if that ever changes.
+func TestRecordlessActorProbe_DedupesAcrossManagers(t *testing.T) {
+	srv, fc := newTestSubstrateBrokerServer(t)
+	fc.putActor(gapAtespaceB, "ghost", "uid-ghost")
+
+	dupMgr := agent.NewManager(srv.runtime)
+	t.Cleanup(dupMgr.Close)
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["substrate-dup"] = auxiliaryRuntime{Runtime: srv.runtime, Manager: dupMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	atespace, names, err := recordlessActorProbe(context.Background(), srv.allManagers(), gapProjBID)
+	if err != nil {
+		t.Fatalf("recordlessActorProbe() error = %v", err)
+	}
+	if atespace != gapAtespaceB {
+		t.Errorf("atespace = %q, want %q", atespace, gapAtespaceB)
+	}
+	if len(names) != 1 || names[0] != "ghost" {
+		t.Errorf("names = %v, want exactly one entry [ghost]: the same actor reached through two managers over the same runtime must not be double-counted", names)
+	}
+}
+
+// TestSubstrateBroker_DeleteIdentityUnknown_LogsNamesNotInBody pins that the
+// record-less actor names reach only the broker's own WARN log, never the
+// HTTP response body — the body carries just the atespace and a count
+// (SubstrateAgentIdentityUnknown), which alone can't tell an operator which
+// actor(s) matched. See deploy/substrate/README.md step 0.
+func TestSubstrateBroker_DeleteIdentityUnknown_LogsNamesNotInBody(t *testing.T) {
+	srv, fc := newTestSubstrateBrokerServer(t)
+	fc.putActor(gapAtespaceB, "projb--ghost", "uid-ghost")
+
+	var logBuf bytes.Buffer
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	w := httptest.NewRecorder()
+	srv.deleteAgent(w, httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil), "dev", gapProjBID)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d body=%s, want 409", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "projb--ghost") {
+		t.Errorf("HTTP body names the record-less actor, want only the atespace and a count: %s", w.Body.String())
+	}
+	if !strings.Contains(logBuf.String(), "projb--ghost") {
+		t.Errorf("broker log does not carry the record-less actor name: %s", logBuf.String())
+	}
+}
+
+// TestSubstrateBroker_StopIdentityUnknown_LogsNamesNotInBody is the stop-path
+// twin of the delete test above.
+func TestSubstrateBroker_StopIdentityUnknown_LogsNamesNotInBody(t *testing.T) {
+	srv, fc := newTestSubstrateBrokerServer(t)
+	fc.putActor(gapAtespaceB, "projb--ghost", "uid-ghost")
+
+	var logBuf bytes.Buffer
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	w := httptest.NewRecorder()
+	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d body=%s, want 409", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "projb--ghost") {
+		t.Errorf("HTTP body names the record-less actor, want only the atespace and a count: %s", w.Body.String())
+	}
+	if !strings.Contains(logBuf.String(), "projb--ghost") {
+		t.Errorf("broker log does not carry the record-less actor name: %s", logBuf.String())
 	}
 }

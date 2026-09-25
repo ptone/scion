@@ -50,8 +50,12 @@ const (
 	// ErrCodeSubstrateAgentIdentityUnknown marks a delete/stop that could not
 	// be verified as safe because a runtime process restart dropped the
 	// in-memory record needed to tell "not found" apart from "exists, but
-	// unidentifiable" (ptone/scion#1808). Stable so callers (hub, CLI) can
-	// branch on it instead of parsing the message.
+	// unidentifiable" (ptone/scion#1808). Stable within this broker's own
+	// HTTP API. The hub re-codes this broker's 409 as its own generic
+	// "conflict" error before it reaches the CLI (pkg/hub's agent delete
+	// handler), so today a hub or CLI caller sees this code's message text,
+	// not the code itself — this constant lets broker-level callers and
+	// tests branch on it, not (yet) the hub or the CLI.
 	ErrCodeSubstrateAgentIdentityUnknown = "substrate_agent_identity_unknown"
 )
 
