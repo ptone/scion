@@ -76,6 +76,20 @@ func ProjectPathLabels(projectPath string, includeLegacy bool) map[string]string
 	return labels
 }
 
+// IsProjectNameLabelKey reports whether key is the canonical or legacy
+// project-name label key, so a caller matching label keys generically
+// (e.g. deciding whether a label filter scopes by project at all) doesn't
+// need to name the legacy alias directly.
+func IsProjectNameLabelKey(key string) bool {
+	return key == LabelProject || key == LabelGrove
+}
+
+// IsProjectIDLabelKey reports whether key is the canonical or legacy
+// project-ID label key. See IsProjectNameLabelKey.
+func IsProjectIDLabelKey(key string) bool {
+	return key == LabelProjectID || key == LabelGroveID
+}
+
 func CanonicalFieldAliases(key string) (canonical string, legacy bool) {
 	switch key {
 	case "project", "projects", "projectId", "project_id":
