@@ -2379,7 +2379,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 // root-owned, and what happens when they're chowned) without needing the
 // test process to actually own root-owned files or hold CAP_CHOWN itself.
 var (
-	lchownFn = os.Lchown
+	lchownFn     = os.Lchown
 	fileOwnerUID = func(info fs.FileInfo) (uid uint32, ok bool) {
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {

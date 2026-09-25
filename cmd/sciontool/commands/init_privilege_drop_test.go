@@ -424,7 +424,6 @@ func TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap(t *te
 	}
 }
 
-
 // -----------------------------------------------------------------------
 // RunInit's defence-in-depth failure reporting (real integration —
 // drives the actual RunInit, not a stub).
