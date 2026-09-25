@@ -361,7 +361,15 @@ func unscopedListFailsOnlyOnCallN(n int, err error) func(*ateapipb.ListActorsReq
 // never called.
 //
 // Two call sequences are exercised, each trimmed to the calls that actually
-// exist for it rather than padded with vacuous extra Ns:
+// exist for it rather than padded with vacuous extra Ns. wantErr records,
+// per call number, whether that call's own failure MUST surface as an
+// explicit error — this is deliberately stronger than "202 implies a real
+// action happened": for the absent-slug sequence, a false "not found" and a
+// genuine one are both a 202 with nothing to act on, so a test that only
+// checked side effects could not tell a masked failure apart from the
+// correct idempotent case. The exact call this exists to catch (m18: the
+// fallback list error swallowed as "not found" instead of propagated) would
+// pass every side-effect check below and still be a false success.
 //   - a recorded agent's stop makes 3 unscoped List calls (resolving the
 //     manager, the prober-path primary lookup, and — once that lookup
 //     resolves the target — the agent manager's own Stop-time List). Calls
@@ -375,16 +383,16 @@ func unscopedListFailsOnlyOnCallN(n int, err error) func(*ateapipb.ListActorsReq
 //     3-4 (the primary and fallback lookups) must not.
 func TestSubstrateBroker_StopTransientLookupFailure_ExplicitErrorNot202(t *testing.T) {
 	cases := []struct {
-		name string
-		slug string
-		maxN int
+		name    string
+		slug    string
+		wantErr map[int]bool // call number -> must be an explicit error
 	}{
-		{"recorded agent", "dev", 3},
-		{"absent slug (reaches the fallback list call)", "gone", 4},
+		{"recorded agent", "dev", map[int]bool{1: false, 2: true, 3: false}},
+		{"absent slug (reaches the fallback list call)", "gone", map[int]bool{1: false, 2: false, 3: true, 4: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			for n := 1; n <= tc.maxN; n++ {
+			for n, wantErr := range tc.wantErr {
 				t.Run(fmt.Sprintf("call_%d", n), func(t *testing.T) {
 					srv, fc := newTestSubstrateBrokerServer(t)
 					runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
@@ -403,22 +411,28 @@ func TestSubstrateBroker_StopTransientLookupFailure_ExplicitErrorNot202(t *testi
 					deletes := len(fc.deleteActorCalls)
 					fc.mu.Unlock()
 
-					if w.Code == http.StatusAccepted {
-						if tc.slug == "dev" {
-							// A genuine 202 is only safe if Stop (== Delete in
-							// Phase 1) actually ran and removed the actor.
-							// Anything else is a false success: 202 while the
-							// recorded actor is untouched.
-							if stillExists || deletes == 0 {
-								t.Errorf("call %d: status=202 but the actor was not actually stopped (stillExists=%v deleteActorCalls=%d) — false success", n, stillExists, deletes)
-							}
-						} else if !stillExists || deletes != 0 {
-							t.Errorf("call %d: status=202 for an absent slug but the canary actor was touched (stillExists=%v deleteActorCalls=%d)", n, stillExists, deletes)
+					if wantErr {
+						if w.Code < 500 {
+							t.Errorf("call %d: status=%d, want an explicit 5xx (this call's own failure must not be swallowed as a not-found)", n, w.Code)
+						}
+						if !stillExists || deletes != 0 {
+							t.Errorf("call %d: status=%d but the actor was touched (stillExists=%v deleteActorCalls=%d)", n, w.Code, stillExists, deletes)
 						}
 						return
 					}
-					if !stillExists || deletes != 0 {
-						t.Errorf("call %d: status=%d but the actor was touched (stillExists=%v deleteActorCalls=%d)", n, w.Code, stillExists, deletes)
+					if w.Code != http.StatusAccepted {
+						t.Fatalf("call %d: status=%d, want 202 (this call's failure must not block the genuine outcome)", n, w.Code)
+					}
+					if tc.slug == "dev" {
+						// A genuine 202 is only safe if Stop (== Delete in
+						// Phase 1) actually ran and removed the actor.
+						// Anything else is a false success: 202 while the
+						// recorded actor is untouched.
+						if stillExists || deletes == 0 {
+							t.Errorf("call %d: status=202 but the actor was not actually stopped (stillExists=%v deleteActorCalls=%d) — false success", n, stillExists, deletes)
+						}
+					} else if !stillExists || deletes != 0 {
+						t.Errorf("call %d: status=202 for an absent slug but the canary actor was touched (stillExists=%v deleteActorCalls=%d)", n, stillExists, deletes)
 					}
 				})
 			}
