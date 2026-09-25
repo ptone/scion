@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -707,6 +708,38 @@ func TestSubstrateRun_BootstrapPathRejectedSurfacesCodeAndPathNoContent(t *testi
 		t.Errorf("CREDENTIAL LEAK: error = %v, want it to NOT contain the file content", err)
 	}
 
+	// Contains alone doesn't prove the body actually parsed: the fallback
+	// branch in postBootstrap (parseBootstrapPathError's ok == false) stuffs
+	// the raw body into detail, and the raw body also contains the code and
+	// path substrings too — so Contains(err, code) and Contains(err, path)
+	// hold either way. errors.As into the concrete type and checking its
+	// code/path fields is what actually pins the parse. That has to be
+	// checked against postBootstrap's own return value, not Run()'s: Run's
+	// redact (substrate_runtime.go's r.redact) deliberately flattens every
+	// returned error to a plain string (so it can strip a secret value out
+	// of the text), which erases bootstrapPathRejectedError's concrete type
+	// along the way. postBootstrap is what actually calls
+	// parseBootstrapPathError on this same fixture body, so exercising it
+	// directly against the harness's own router/fake server still proves
+	// the wire body parses, and fails (rather than stays green) if the
+	// parser regresses — see TestParseBootstrapPathError for the parser's
+	// own dedicated string-level coverage.
+	postErr := postBootstrap(context.Background(), rt.router, "scion-atespace", "test-agent", "nonce", bootstrapRequest{
+		Files:        []bootstrapFile{{Path: rejectedPath, ContentB64: "eA=="}},
+		StartCmd:     "true",
+		ControlToken: "tok",
+	})
+	var pathErr *bootstrapPathRejectedError
+	if !errors.As(postErr, &pathErr) {
+		t.Fatalf("errors.As(postBootstrap's err, *bootstrapPathRejectedError) = false, want true; err = %v", postErr)
+	}
+	if pathErr.code != "bootstrap_path_symlink" {
+		t.Errorf("pathErr.code = %q, want %q", pathErr.code, "bootstrap_path_symlink")
+	}
+	if pathErr.path != rejectedPath {
+		t.Errorf("pathErr.path = %q, want %q", pathErr.path, rejectedPath)
+	}
+
 	calls := rec.list()
 	if !containsCall(calls, "DeleteActor") {
 		t.Errorf("Run() failure did not clean up with DeleteActor; calls = %v", calls)
@@ -754,6 +787,56 @@ func TestSubstrateRun_BootstrapPathRejectedLogsCodeAndPath(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, rejectedPath) {
 		t.Errorf("log output missing the path %q; log:\n%s", rejectedPath, logOutput)
+	}
+}
+
+// TestSubstrateRun_BootstrapPathRejectedLogsQuotePathWithNewline proves the
+// claim in substrate_runtime.go's comment above the runtimeLog.Error call: a
+// newline (or other control byte) embedded in pathErr.path is quoted by
+// slog's own attribute encoding, so the structured log call needs no
+// separate %q the way bootstrapPathRejectedError.Error()'s plain
+// fmt.Sprintf does. Without that quoting, a forged newline in the path could
+// split this log line into two or forge an extra one, the same class of bug
+// server_test.go's TestBootstrap_RejectedPathLogLineIsSingleLineEvenWithEmbeddedNewline
+// covers on the serve side.
+func TestSubstrateRun_BootstrapPathRejectedLogsQuotePathWithNewline(t *testing.T) {
+	const rejectedPath = "/home/scion/.config/nested\nFAKE LOG LINE INJECTED\nsecret.json"
+
+	rec := &callRecorder{}
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	fa.bootstrapStatus = http.StatusUnprocessableEntity
+	fa.bootstrapBody = "bootstrap_path_symlink: bootstrap file " + strconv.Quote(rejectedPath) + " rejected: path traverses a symlink\n"
+
+	var buf bytes.Buffer
+	origWriter := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(origWriter)
+		log.SetFlags(origFlags)
+	})
+
+	_, err := rt.Run(context.Background(), testSubstrateRunConfig())
+	if err == nil {
+		t.Fatal("Run() expected an error, got nil")
+	}
+
+	logOutput := buf.String()
+	lines := strings.Split(strings.TrimRight(logOutput, "\n"), "\n")
+	if len(lines) != 1 {
+		t.Errorf("log output had %d lines, want exactly 1 (the embedded newline split it):\n%s", len(lines), logOutput)
+	}
+	if strings.Contains(logOutput, "FAKE LOG LINE INJECTED\n") {
+		t.Errorf("log output contains a forged line from the embedded newline: %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "bootstrap_path_symlink") {
+		t.Errorf("log output missing the code %q; log:\n%s", "bootstrap_path_symlink", logOutput)
+	}
+	if !strings.Contains(lines[0], `path="/home/scion/.config/nested\nFAKE LOG LINE INJECTED\nsecret.json"`) {
+		t.Errorf("log line = %q, want the path attribute quoted with the embedded newline escaped", lines[0])
 	}
 }
 

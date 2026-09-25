@@ -451,8 +451,9 @@ func homeBootstrapFiles(homeDir, containerHome string) ([]bootstrapFile, error) 
 // collapses duplicate Paths to one entry: the LAST occurrence's content
 // wins, but it keeps the position of the FIRST occurrence, so the result is
 // deterministic and stable regardless of how many groups collide on a path.
-// This is where phase1-spec's "one entry per path on the wire" is enforced —
-// substrate-serve is not expected to reconcile duplicates itself.
+// This is where the one-entry-per-path wire rule (deploy/substrate/README.md,
+// "Bootstrap files: home delivery") is enforced — substrate-serve is not
+// expected to reconcile duplicates itself.
 func dedupeBootstrapFilesByPath(groups ...[]bootstrapFile) []bootstrapFile {
 	index := make(map[string]int)
 	var out []bootstrapFile

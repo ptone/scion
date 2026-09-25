@@ -310,7 +310,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, pathErr.Error(), http.StatusUnprocessableEntity)
 				return
 			}
-			log.Error("bootstrap: failed to write file %s: %v", f.Path, redactErr(err))
+			log.Error("bootstrap: failed to write file %q: %v", f.Path, redactErr(err))
 			http.Error(w, "failed to write bootstrap files", http.StatusInternalServerError)
 			return
 		}

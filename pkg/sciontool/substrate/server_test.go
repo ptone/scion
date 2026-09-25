@@ -889,7 +889,17 @@ func TestBootstrap_RejectedPathLogLineIsSingleLineEvenWithEmbeddedNewline(t *tes
 	tmpLog := filepath.Join(t.TempDir(), "agent.log")
 	log.SetLogPath(tmpLog)
 	log.SetQuiet(true)
-	t.Cleanup(func() { log.SetQuiet(false) })
+	t.Cleanup(func() {
+		log.SetQuiet(false)
+		log.SetDebug(false)
+		// Restore the log path to TestMain's sandbox (testmain_test.go),
+		// not a guessed default. Once t.TempDir() above is removed,
+		// log.write's own fallback-on-OpenFile-failure path would
+		// otherwise silently rewrite the package-global log path to
+		// /tmp/agent.log and force debug mode on for every later test in
+		// this binary, defeating TestMain's log sandbox.
+		log.SetLogPath(filepath.Join(os.Getenv("HOME"), "agent.log"))
+	})
 
 	const forgedPath = "relative/path\nFAKE LOG LINE INJECTED\nmore.txt"
 	srv := NewServer(WithChownOwner(-1, -1))
@@ -913,6 +923,54 @@ func TestBootstrap_RejectedPathLogLineIsSingleLineEvenWithEmbeddedNewline(t *tes
 	}
 	if !strings.Contains(lines[0], codeBootstrapPathInvalid) {
 		t.Errorf("log line = %q, want it to contain the stable code %q", lines[0], codeBootstrapPathInvalid)
+	}
+	if strings.Contains(string(data), "FAKE LOG LINE INJECTED\n") {
+		t.Errorf("log file contains a forged line from the embedded newline: %q", data)
+	}
+}
+
+// TestBootstrap_WriteFailureLogLineIsSingleLineEvenWithEmbeddedNewline is the
+// 500-path sibling of TestBootstrap_RejectedPathLogLineIsSingleLineEvenWithEmbeddedNewline
+// above: it proves the generic write-failure log line at server.go ("bootstrap:
+// failed to write file %q: %v") also quotes f.Path, so an embedded newline in
+// the path cannot split the log line or forge a second one. Invalid base64
+// content routes writeBootstrapFile's error through this generic 500 branch
+// rather than the *bootstrapPathError 422 branch the other test covers.
+func TestBootstrap_WriteFailureLogLineIsSingleLineEvenWithEmbeddedNewline(t *testing.T) {
+	tmpLog := filepath.Join(t.TempDir(), "agent.log")
+	log.SetLogPath(tmpLog)
+	log.SetQuiet(true)
+	t.Cleanup(func() {
+		log.SetQuiet(false)
+		log.SetDebug(false)
+		// See TestBootstrap_RejectedPathLogLineIsSingleLineEvenWithEmbeddedNewline
+		// above for why this restores TestMain's sandbox path rather than a
+		// guessed default.
+		log.SetLogPath(filepath.Join(os.Getenv("HOME"), "agent.log"))
+	})
+
+	const forgedPath = "/bootstrap\nFAKE LOG LINE INJECTED\nmore.txt"
+	srv := NewServer(WithChownOwner(-1, -1))
+	req := BootstrapRequest{
+		Files:        []BootstrapFile{{Path: forgedPath, ContentB64: "not-valid-base64!!!"}},
+		StartCmd:     "true",
+		ControlToken: "tok",
+	}
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 for invalid base64 content", rec.Code)
+	}
+
+	data, err := os.ReadFile(tmpLog)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Errorf("log file had %d lines, want exactly 1 (the embedded newline split it):\n%s", len(lines), data)
+	}
+	if !strings.Contains(lines[0], strconv.Quote(forgedPath)) {
+		t.Errorf("log line = %q, want it to contain the quoted path %q", lines[0], strconv.Quote(forgedPath))
 	}
 	if strings.Contains(string(data), "FAKE LOG LINE INJECTED\n") {
 		t.Errorf("log file contains a forged line from the embedded newline: %q", data)
