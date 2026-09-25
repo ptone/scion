@@ -126,14 +126,13 @@ const defaultFileMode = 0o600
 
 // buildBootstrapEnv assembles the full agent env for the bootstrap payload.
 //
-// substrate-runtime.md §5.3 states the formula as cfg.Env +
-// ResolvedAuth.EnvVars + env-type ResolvedSecrets. This also folds in
-// cfg.Harness.GetEnv()/GetTelemetryEnv(), which every other runtime
-// includes (see buildCommonRunArgs, KubernetesRuntime.buildPod) and which
-// the harness needs to run at all (model, task and telemetry env are not
-// otherwise present in cfg.Env). This inclusion is documented in
-// substrate-runtime.md §5.3 rather than silently narrowed to the literal
-// formula, since narrowing it would ship a harness that cannot start.
+// substrate-runtime.md §5.3 documents the full env, harness terms included:
+// cfg.Harness.GetEnv() (when a harness is set) and GetTelemetryEnv() (also
+// when telemetry is enabled), which every other runtime includes (see
+// buildCommonRunArgs, KubernetesRuntime.buildPod) and which the harness
+// needs to run at all (model, task and telemetry env are not otherwise
+// present in cfg.Env), plus cfg.Env + ResolvedAuth.EnvVars + env-type
+// ResolvedSecrets.
 func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	env := make(map[string]string)
 

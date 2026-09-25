@@ -35,7 +35,7 @@ A consequence, confirmed intentional: **the CA/trust material this memoization p
 
 `Run` executes the nine steps in `.design/kubernetes/substrate-runtime.md` §4: atespace creation, the digest-pin check, template ensure/wait-ready, actor creation, egress policy creation, resume-and-wait-running, healthz poll, bootstrap. Any failure from `CreateActor` onward triggers best-effort cleanup (delete the actor and its egress policy) on a fresh, short-lived context before returning the original error.
 
-**The atespace name needs sanitizing, not just truncating.** `substrateAtespaceName` (`"scion-"` + the first 12 characters of `projectID`) initially assumed that prefix was already a valid Kubernetes short name. It now runs through the same sanitizer (`sanitizeK8sShortNameFragment`) other runtimes use — lowercase, non-alphanumeric/hyphen replaced, leading/trailing hyphens trimmed — rather than trusting the project ID's own alphabet.
+**The atespace name needs sanitizing, not just truncating.** `substrateAtespaceName` (`"scion-"` + the first 12 characters of `projectID`) initially assumed that prefix was already a valid Kubernetes short name. It now runs through a K8s short-name sanitizer (`sanitizeK8sShortNameFragment`) — lowercase, non-alphanumeric/hyphen replaced, leading/trailing hyphens trimmed — rather than trusting the project ID's own alphabet.
 
 **`CreateActor`'s `AlreadyExists` needs to look like every other runtime's "name in use" error, without a new import.** `pkg/agent` imports `pkg/runtime`, so `pkg/runtime` returning `pkg/agent`'s own `ErrContainerNameInUse` directly would cycle. Every runtime's launch-error classification instead pattern-matches the *text* of any runtime's `Run` error (looking for phrases like "container name" + "already in use"). `SubstrateRuntime`'s `AlreadyExists` error is worded to match that pattern deliberately, so the existing broker handling applies without any new coupling.
 
@@ -54,7 +54,7 @@ Substrate actors carry no labels of their own (confirmed from the proto), so `Ag
 
 ## Egress: `egress_allow` validation hardening
 
-`ValidateEgressAllow` is allowlist-first: only public FQDNs (optionally wildcarded) pass; everything else — IPs/CIDRs in any form, catch-alls, non-ICANN top-level domains, Kubernetes-internal-shaped names, a hostname that is itself a public suffix — is rejected. The validator went through several rounds of hardening against concrete bypasses found by direct, adversarial testing against the implementation, not just spec reading:
+`ValidateEgressAllow` is allowlist-first: only public FQDNs (optionally wildcarded) pass; everything else — IPs/CIDRs in any form, catch-alls, non-ICANN top-level domains, Kubernetes-internal-shaped names, a hostname that is itself a public suffix — is rejected. The validator was hardened iteratively against concrete bypasses found by direct, adversarial testing against the implementation, not just spec reading:
 
 - **Alternate spellings of the same forbidden thing evaded the checks that already existed.** A trailing-dot FQDN defeated suffix matching that assumed no trailing dot; Kubernetes short names resolvable through the in-cluster DNS search path (a bare, single-label-plus-namespace form) were never rejected because they don't look like any blocked suffix; non-canonical IP spellings (hex, decimal, IPv4-mapped, zone-ID-suffixed, port-suffixed) all fell through to the hostname-validation path, where nothing recognized them as addresses at all. Fixed with an explicit normalization pass (trim, lowercase, strip one trailing dot) before any check, explicit rejection of bracket/percent/malformed-CIDR/malformed-bare-IPv6 shapes, explicit rejection of numeric-IP-alias-shaped strings, explicit rejection of single-label hostnames, and explicit rejection of a hostname whose last label is a well-known internal namespace name or is hyphenated without the one legitimate `xn--` (IDN) prefix — no real public TLD is hyphenated any other way.
 - **A rejection can be "correct" by accident, through the wrong rule, with a message that describes the wrong reason.** A wildcard's single-label remainder was, after one fix, correctly rejected — but by a *different* check than the one that should have fired, with a misleading message. A test suite that only asserts "an error occurred" cannot catch this class of drift; the regression table was changed to assert the specific rejection *reason* (one of a fixed set of named reason constants, each tied to exactly one rule in the validator) for every row, not just that validation failed. A tautological variant of the same gap was later found in two individual tests that matched on a bare word (e.g. "arpa") that also appears, coincidentally, inside the echoed input itself — tightened to match the actual reason phrase instead.
@@ -96,9 +96,9 @@ A follow-up pass checked this log, the substrate-serve component log, and
 `.design/kubernetes/substrate-runtime.md` against the code directly and
 corrected several inaccuracies introduced during consolidation: the
 atespace name has no hash in it (it's a sanitized prefix of the project
-ID, not `sha256(projectID)`); the bootstrap write-path description here
-had drifted to describe a superseded, less-safe fix rather than the
-atomic mode-before-content write actually shipped; and the egress-hardening
+ID, not `sha256(projectID)`); the bootstrap write-path description in the
+substrate-serve log had drifted to describe a superseded, less-safe fix
+rather than the atomic mode-before-content write actually shipped; and the egress-hardening
 notes above described a dedicated blocked-CIDR list that doesn't exist —
 `ValidateEgressAllow` rejects every IP/CIDR outright, and the specific
 ranges are regression-test coverage for that single rule. The design doc
