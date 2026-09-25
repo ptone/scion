@@ -49,3 +49,7 @@ config validate` path and by save/migrate. So a real settings file using
   the empty (off) value, an unsupported value, and a bogus key in the
   substrate object — via both `config.ValidateSettings` directly and the
   `scion config validate` command path.
+- Known, intentional difference left as-is: an explicit `sandbox_class: ""`
+  is rejected by the schema's `enum: ["gvisor","microvm"]` but silently
+  accepted as gVisor by Go's `substrateSandboxClass`, kept stricter on
+  purpose to fail fast on typos rather than reconciled with Go's behavior.
