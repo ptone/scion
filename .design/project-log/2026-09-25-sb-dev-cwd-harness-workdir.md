@@ -266,3 +266,61 @@ round 1 (this sandbox has `CLAUDE_CODE_ENABLE_TELEMETRY=1` ambient).
 reproduces exactly the same pre-existing `TestGetRuntime*` auto-detection
 failures round 1 and the review both already documented (no docker/apple-
 container/gcloud binaries in this sandbox) — nothing new.
+
+## Round 3 (sb-dev-cwd-r3): four hardening items closed
+
+Round 2's review was CLEAN with four non-blocking Optionals; all four are
+fixed on this round, head `1c9b3b1d`:
+
+1. **Canonicalisation before the `/` guard.** `dirUsableForScion` now
+   `filepath.Clean`s `candidate` at the top, before comparing it to `/` and
+   before walking its ancestor chain; the cleaned value is what
+   `resolveSubstrateHarnessCwd` returns (via a new `chosen` var set by
+   `tryCandidate`). `parentDirs` already cleaned its own output, so an
+   uncleaned candidate like `/.`, `//`, or `/tmp/..` previously reached the
+   guard already reduced to `/` and slipped past it.
+2. **Symlink targets.** `substrateHarnessCwdDeps` gained an `evalSymlinks
+   func(string) (string, error)` field (wired to `filepath.EvalSymlinks` in
+   `defaultSubstrateHarnessCwdDeps`). `dirUsableForScion` resolves the
+   (cleaned) candidate with it and, when the result differs, walks the
+   resolved path's own ancestor chain too (extracted into a shared
+   `dirsSearchable` helper used for both the lexical and resolved chains).
+   An `EvalSymlinks` error makes the candidate unusable outright. The
+   *candidate*, never the resolved path, is still what gets returned, so
+   `PWD`/`cmd.Dir` stay logical.
+3. **Exit-18 Hub report.** New `substrateServeReportCwdFailure(d,
+   cause)`, called from `newSubstrateServeServer`'s `WithInitRunner` closure
+   right before returning `exitCodeNoUsableHarnessCwd`. It resolves the
+   scion user's home (falling back to `$HOME` if that lookup also fails)
+   and calls the existing `reportInitFailure`, the same helper
+   `requirePrivilegeDropOrFail`'s failure path uses in `RunInit` — so the
+   Hub learns the agent failed on this path too, not just the actor log and
+   healthz's `StateInitFailed`.
+4. **Info log.** `substrateServeInitOptions` now logs
+   `substrate-serve: harness working directory %q` once per successful
+   resolution, so a later chdir failure (which doesn't itself name the
+   directory) is diagnosable.
+
+**Tests added** (`cmd/sciontool/commands/substrate_serve_test.go`):
+`TestResolveSubstrateHarnessCwd_CanonicalisesNonCanonicalRootSpellings`
+(table: `/.`, `//`, `/tmp/..` as `SCION_WORKSPACE_PATH`),
+`_CanonicalisesHomeDirRootSpelling` (`/.` as `HomeDir`),
+`_ReturnsCanonicalPath`,
+`_FallsBackWhenSymlinkTargetParentUnsearchable` (fake `evalSymlinks`
+resolving to a target behind a root-only 0700 directory),
+`_EffectiveCwd_SymlinkedWorkspaceReallyEnterable` (real symlink, real
+`filepath.EvalSymlinks`, proves no regression on the ordinary case),
+`TestSubstrateServeReportCwdFailure_WritesPhaseErrorAndMessage` and
+`_FallsBackToHOMEWhenScionUserLookupFails` (direct, cheap unit tests of the
+new reporter against a temp `agentHome`/`$HOME`), and
+`TestSubstrateServeBootstrap_NoUsableHarnessCwd_ReportsInitFailureToLocalState`
+(drives a real bootstrap request through `newSubstrateServeServer` to the
+exit-18 path and asserts `agent-info.json` gets written with
+`PhaseError`).
+
+**Gates**: `gofmt`, `go vet`, `go build -buildvcs=false ./...` all clean
+(env scrubbed of `SCION_*`/`CLAUDE_CODE_ENABLE_TELEMETRY` first).
+`go test -race` for `./cmd/sciontool/commands/` and
+`./pkg/sciontool/supervisor/` both pass clean this round (no leftover
+telemetry env in this sandbox). `go test` for `./pkg/runtime/...` and
+`./pkg/sciontool/...` both pass clean.
