@@ -314,7 +314,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 
 	// Step 2: image must be digest-pinned. Tag resolution is Phase 2.
 	if !isDigestPinned(cfg.Image) {
-		return "", fmt.Errorf("substrate: image %q is not pinned by digest (@sha256:...); pin the harness image in the substrate profile (tag resolution is a Phase 2 feature)", cfg.Image)
+		return "", fmt.Errorf("substrate: image %q is not pinned by digest (@sha256:...); set a digest image in the agent's template or pass --image (tag resolution is a Phase 2 feature)", cfg.Image)
 	}
 
 	// Step 3: content-addressed template, created + waited-ready if new.

@@ -242,6 +242,13 @@ metadata:
     app: scion-substrate-broker
 spec:
   replicas: 1
+  # Recreate, not the apps/v1 default RollingUpdate: a rolling update briefly
+  # runs the old and new broker pods together, and both share the same
+  # broker_id (server.broker.broker_id in the ConfigMap above), which makes
+  # the hub's control channel flap while it sees a duplicate broker-ID
+  # connection.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: scion-substrate-broker

@@ -109,14 +109,20 @@ Substrate's Postgres and out of golden snapshots, and lets every agent on the
 same image/resources/sandbox share one template.
 
 - **Image must be digest-pinned** (`@sha256:...`). `Run` fails closed
-  otherwise:
+  otherwise (`pkg/runtime/substrate_runtime.go:317`):
 
-  > `substrate: image %q is not pinned by digest (@sha256:...); pin the
-  > harness image in the substrate profile (tag resolution is a Phase 2
-  > feature)`
+  > `substrate: image %q is not pinned by digest (@sha256:...); set a
+  > digest image in the agent's template or pass --image (tag resolution
+  > is a Phase 2 feature)`
 
-  Tag→digest resolution is a Phase 2 feature. See `deploy/substrate/README.md`
-  for the default-install interaction with harness-config images.
+  Tag→digest resolution is a Phase 2 feature. A substrate profile's own
+  `harness_overrides` image pin is **not** sufficient by itself on a
+  default install, because agent/template config
+  (`finalScionCfg.Image`, `pkg/agent/run.go`'s image resolution) outranks
+  it once the harness-config's own image has been copied into the agent's
+  persisted config at provisioning time (`pkg/agent/provision.go`). See
+  `deploy/substrate/README.md` for the operator-facing setup step this
+  requires.
 - **Template name** = `scion-` + the first 12 hex characters of
   `sha256(image digest, sandbox class, sandbox config name, worker_selector,
   snapshot storage, effective resources, snapshot scope, the container's
@@ -558,13 +564,15 @@ that already existed for the actor-delete path.
   (§9).
 - Non-home image paths remain root-owned after the rootfs fixup (§8), which
   only re-chowns under the resolved home directory.
-- **A default install's `substrate` create can fail closed with the
+- **A default install's `substrate` create fails closed with the
   `not pinned by digest` error (§3) against the shipped `claude`
-  harness-config's `scion-claude:latest` image.** TODO-image-trace: the
-  exact mechanism that selects the image a `substrate` create actually uses
-  (profile pin vs. harness-config vs. template) is under active
-  investigation and not yet settled here — see `deploy/substrate/README.md`
-  for the current operator-facing guidance.
+  harness-config's `scion-claude:latest` image, and a substrate profile's
+  own `harness_overrides` image pin alone does not fix it.** The
+  harness-config's image is copied into the agent's persisted config at
+  provisioning (`pkg/agent/provision.go`), and at start that agent/template
+  config image outranks the profile override (`pkg/agent/run.go`'s image
+  resolution) — see §3 and `deploy/substrate/README.md` for the required
+  setup step (a digest-pinned template `image:` or `--image`).
 - **The egress hostname-rule model requires the sdsmint MITM gateway**
   (§7.1); the plain gateway enforces only address rules for TLS.
 - **The dialer's trust material is pinned for the broker process's
@@ -581,8 +589,10 @@ that already existed for the actor-delete path.
 
 ## 11. Phase 2+ recommendations
 
-- Resolve the default-install image gap (previous section) once
-  TODO-image-trace lands, and/or by resolving tags to digests.
+- Make the default-install image gap (previous section) harder to hit by
+  default — e.g. a runtime-aware harness-config seed, or resolving tags to
+  digests generically — rather than requiring every substrate install to
+  set a digest-pinned template `image:` by hand.
 - Identity-derived bootstrap nonce (`MintActorJWT`), replacing the Phase 1
   fallback (§5.2).
 - Seal the bootstrap payload end-to-end, or move the router endpoint to its

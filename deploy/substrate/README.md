@@ -19,6 +19,99 @@ Substrate has no authorization on its control API or inbound router — see
 in-cluster rather than reach in over a LoadBalancer/Ingress that would
 expose those unauthenticated surfaces beyond the cluster boundary.
 
+## Pin the agent image by digest (REQUIRED)
+
+Substrate requires a digest-pinned agent image (`.design/kubernetes/substrate-runtime.md`
+§3). Without one, `scion start` on a `substrate` profile fails closed
+(`pkg/runtime/substrate_runtime.go:317`):
+
+```
+substrate: image "<image>" is not pinned by digest (@sha256:...); set a
+digest image in the agent's template or pass --image (tag resolution is
+a Phase 2 feature)
+```
+
+**Pinning the digest in the substrate profile's `harness_overrides` alone
+is NOT sufficient on a default install.** Why:
+
+- The shipped `claude` harness-config sets `image: scion-claude:latest`.
+- The broker copies that image into the agent's own persisted config at
+  provisioning time (`pkg/agent/provision.go`, the harness-config merge,
+  written into the agent's `scion-agent.json`).
+- At start, that agent/template config image outranks the profile's
+  `harness_overrides` pin (`pkg/agent/run.go`'s image resolution order).
+
+**Recommended:** create a substrate template that sets
+`image: <registry>/scion-claude@sha256:<digest>`, and create substrate
+agents from that template. A template image overrides the harness-config
+image, affects only agents created from that template, and survives
+`scion harness-config upgrade --force` (which reseeds the harness-config's
+own `image:` key, but doesn't touch the template).
+
+**Per-agent alternative:** pass `--image <registry>/scion-claude@sha256:<digest>`
+at `scion start` time.
+
+**Not recommended:** editing `image:` directly in the hub's `claude`
+harness-config. That config is shared by every broker and runtime on the
+hub:
+
+- removing the key breaks non-substrate profiles, unless settings also set
+  `harness_configs.claude.image`;
+- existing agents keep whatever image they already resolved and must be
+  recreated to pick up a change;
+- a non-forced `scion harness-config upgrade` only fills in missing or
+  empty keys (`mergeMissingMapValues`, `pkg/config/harness_config_upgrade.go`),
+  so a digest pin survives it, but *deleting* the `image:` key instead of
+  editing it gets the key re-added as `scion-claude:latest` on the next
+  upgrade;
+- `scion harness-config upgrade --force` reseeds `image:` from the bundled
+  default unconditionally, discarding any pin here regardless of how it was
+  set — re-apply it afterward if you go this route.
+
+**Diagnostic:** the image an agent actually resolved to is visible in its
+`scion-agent.json` (the `image` field) in the agent's directory on the
+broker.
+
+## Warm the template before first use
+
+**Creating the first agent on a given template builds its golden
+ActorTemplate snapshot, which can take on the order of a minute or more**
+(`.design/kubernetes/substrate-runtime.md` §3) — and the hub's
+control-channel dispatch timeout is hard-coded at 120s
+(`pkg/hub/server.go`). If the golden build plus actor bootstrap doesn't
+finish inside that window, the hub gives up and sends a rollback delete
+that races the still-in-progress create: the broker's create finishes
+anyway, leaving a **RUNNING, unbootstrapped actor the hub doesn't know
+about**, holding a worker indefinitely
+(`.design/kubernetes/substrate-runtime.md` §10 — this is a generic
+hub/broker dispatch-timeout gap, not substrate-specific, but a cold
+template build is the easiest way to hit it on this runtime).
+
+**Before pointing real traffic at a new template** (a new image digest,
+resource shape, sandbox class, `worker_selector`, or `egress_trust_bundle`
+— anything that changes the content-addressed template name, §3), warm it
+with a disposable agent first:
+
+```sh
+# Start a throwaway agent on the profile/template you're about to use for
+# real. The first create against a new template builds the golden snapshot
+# and can take well over a minute — this is expected here.
+scion start --profile substrate warm-template-check "echo warm"
+
+# Wait for it to actually reach `running` before treating the template as
+# warm — don't just wait for the command to return.
+scion list | grep warm-template-check
+
+# Clean up the throwaway agent. The template and its golden snapshot are
+# NOT deleted with it (template GC is a Phase 2 item) — that's the point:
+# the next real create against the same template reuses the now-ready
+# golden and takes the fast (sub-second broker dispatch) path.
+scion delete warm-template-check
+```
+
+Once the golden is `READY`, subsequent creates against that template are
+well inside the hub's dispatch timeout.
+
 ## Operational prerequisites
 
 - **Enabling NetworkPolicy enforcement (Calico or GKE Dataplane V2) on an
