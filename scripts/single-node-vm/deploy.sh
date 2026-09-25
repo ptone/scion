@@ -491,7 +491,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     fi
     rm -f "${PROXY_SERVICE_DELETE_ERR}"
 
-    # The hybrid NFS/hub-allow firewall rules and the static internal IP
+    # The hybrid firewall rules and the static internal IP
     # reservation are only safe to delete once this VM is confirmed gone
     # (the reservation is still attached to the VM's NIC until the VM
     # itself is deleted, so deleting it earlier would fail anyway). With
@@ -1358,13 +1358,13 @@ else
   echo "  Created firewall rule: ${FW_RULE_NAME}"
 fi
 
-# --- Hybrid tier: NFS firewall rules ---
+# --- Hybrid tier: firewall rules ---
 # Discovery already ran above, right after the APIs were enabled and
 # before any of Phase 2's creates -- see the comment there. Only the
 # rule-creation step is here, immediately before the VM.
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
-  info "Creating hybrid-tier NFS firewall rules (if needed)..."
-  hybrid_ensure_firewall_rules "$HUB_NAME" "$PROJECT_ID" "default"
+  info "Creating hybrid-tier firewall rules (if needed)..."
+  hybrid_ensure_firewall_rules "$HUB_NAME" "$PROJECT_ID" "default" "$REGION"
 fi
 
 # --- Create VM ---

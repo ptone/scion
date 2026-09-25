@@ -30,8 +30,9 @@
 # Every function here is a plain shell function operating on explicit
 # arguments and a small set of documented globals (HYBRID_ENABLED,
 # GKE_PROJECT, GKE_LOCATION, GKE_NAME, GKE_NODE_TAG, GKE_NODE_SUBNET_CIDR,
-# GKE_POD_CIDR, HYBRID_ALLOW_NAME, HYBRID_DENY_NAME, HYBRID_HUB_ALLOW_NAME,
-# HYBRID_INTERNAL_IP, HYBRID_TEARDOWN_*), so the test
+# GKE_POD_CIDR, HYBRID_ALLOW_NAME, HYBRID_DENY_NAME, HYBRID_HUB_DENY_NAME,
+# HYBRID_INTERNAL_IP, HYBRID_TRANSPORT_SA_EMAIL, HYBRID_IAP_CLIENT_ID,
+# HYBRID_TEARDOWN_*), so the test
 # harness under tests/ can source this file on its own -- with its own stub
 # `config_get`/`info`/`warn`/`err` and a stub `gcloud` on PATH -- without
 # ever loading or running deploy.sh itself.
@@ -355,8 +356,8 @@ sys.exit(0 if (net.version == 4 and net.prefixlen >= 8) else 1)
 # the NFS mount traffic that reaches the VM. The NFS firewall allow
 # rule's source is unrelated to this and continues to use the node
 # network tag discovered above, not an IP range. The pod CIDR is used
-# only by the separate hub-allow firewall rule (tcp:8080), whose traffic
-# genuinely does originate from pod IPs.
+# only by the separate hub-deny firewall rule (tcp:8080), which blocks
+# that same pod range from reaching the hub directly over the VPC.
 #
 # Node-tag discovery reads the node tag GKE assigns, from the cluster's
 # own GKE-managed firewall rules, the same source for Standard and
@@ -445,16 +446,17 @@ print(d.get('ipCidrRange') or '')
   # shellcheck disable=SC2034 # consumed by the NFS export function
   GKE_NODE_SUBNET_CIDR="$node_cidr"
 
-  # The pod CIDR is what the hub-allow firewall rule (tcp:8080, GKE agent
-  # pods reaching the hub directly) sources from -- unlike the NFS export,
-  # which sources from the node subnet, because kubelet (not the pod)
-  # originates NFS mount traffic, but a pod's own HTTP request to the hub
-  # genuinely comes from its pod IP. Read from two places in the same
-  # describe JSON and require them to agree: `clusterIpv4Cidr` is the
-  # cluster-wide value, `ipAllocationPolicy.clusterIpv4CidrBlock` is the
-  # allocation-policy's own record of it; a real disagreement between the
-  # two would mean this code is looking at the wrong field for this
-  # cluster's provisioning mode, which is safer to fail on than to guess.
+  # The pod CIDR is what the hub-deny firewall rule (tcp:8080, blocking
+  # pods from reaching the hub directly over the VPC) sources from --
+  # unlike the NFS export, which sources from the node subnet, because
+  # kubelet (not the pod) originates NFS mount traffic, but a pod's own
+  # HTTP request would genuinely come from its pod IP. Read from two
+  # places in the same describe JSON and require them to agree:
+  # `clusterIpv4Cidr` is the cluster-wide value,
+  # `ipAllocationPolicy.clusterIpv4CidrBlock` is the allocation-policy's
+  # own record of it; a real disagreement between the two would mean
+  # this code is looking at the wrong field for this cluster's
+  # provisioning mode, which is safer to fail on than to guess.
   local pod_cidr pod_cidr_alt
   pod_cidr="$(echo "$describe_json" | "$PYTHON" -c "
 import json, sys
@@ -475,10 +477,10 @@ print((d.get('ipAllocationPolicy') or {}).get('clusterIpv4CidrBlock') or '')
     exit 1
   fi
   if ! _hybrid_validate_node_subnet_cidr "$pod_cidr"; then
-    err "GKE cluster ${cluster_ref}'s pod CIDR '${pod_cidr}' is invalid or dangerously broad (refusing anything broader than /8). Refusing to build the hub-allow firewall rule's source range from it."
+    err "GKE cluster ${cluster_ref}'s pod CIDR '${pod_cidr}' is invalid or dangerously broad (refusing anything broader than /8). Refusing to build the hub-deny firewall rule's source range from it."
     exit 1
   fi
-  # shellcheck disable=SC2034 # consumed by the hub-allow firewall rule
+  # shellcheck disable=SC2034 # consumed by the hub-deny firewall rule
   GKE_POD_CIDR="$pod_cidr"
 
   # Autopilot does not expose node instance groups or templates as
@@ -1208,7 +1210,56 @@ _hybrid_ensure_firewall_rule() {
   echo "  Created firewall rule: ${name}"
 }
 
-# hybrid_ensure_firewall_rules HUB_NAME PROJECT_ID NETWORK
+# _hybrid_check_cloud_run_egress_overlap PROJECT_ID REGION SUBNET POD_CIDR
+#
+# The Cloud Run IAP proxy reaches the hub VM over direct VPC egress from
+# this same subnet (see deploy.sh's `gcloud run deploy`, which hardcodes
+# --network=default --subnet=default), so its own traffic to the hub's
+# tcp:8080 sources from that subnet's primary IP range -- never from a
+# pod-range address. If that range ever overlapped the discovered pod
+# CIDR, hub-deny (source = pod CIDR, tcp:8080) would also deny the
+# proxy's own traffic, breaking every deploy, hybrid tier or not. Reads
+# the subnet's primary range fresh and refuses to continue -- before
+# hub-deny or anything else in this function is created -- on any
+# overlap, or if the range can't be read at all: an unknown range is
+# never treated as "safe".
+_hybrid_check_cloud_run_egress_overlap() {
+  local project_id="$1" region="$2" subnet="$3" pod_cidr="$4"
+  local subnet_json subnet_err subnet_range
+  subnet_err="$(mktemp)"
+  if ! subnet_json="$(gcloud compute networks subnets describe "${subnet}" \
+      --region="${region}" --project="${project_id}" --format=json 2>"${subnet_err}")"; then
+    err "Could not describe subnet '${subnet}' (region: ${region}) to confirm the Cloud Run IAP proxy's egress range can't overlap the discovered pod CIDR before creating hub-deny:"
+    err "  $(cat "${subnet_err}")"
+    rm -f "${subnet_err}"
+    exit 1
+  fi
+  rm -f "${subnet_err}"
+  subnet_range="$(echo "$subnet_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('ipCidrRange') or '')")"
+  if [[ -z "$subnet_range" ]]; then
+    err "Subnet '${subnet}' has no primary IP range in its description; refusing to create hub-deny without confirming it can't overlap the Cloud Run IAP proxy's own egress range."
+    exit 1
+  fi
+  local overlaps
+  if ! overlaps="$("$PYTHON" -c "
+import ipaddress, sys
+a = ipaddress.ip_network(sys.argv[1], strict=False)
+b = ipaddress.ip_network(sys.argv[2], strict=False)
+print('true' if a.overlaps(b) else 'false')
+" "$subnet_range" "$pod_cidr" 2>&1)"; then
+    # A malformed range on either side must fail closed, the same as
+    # every other check here -- never silently treated as "no overlap".
+    err "Could not compare subnet '${subnet}'s primary range (${subnet_range}) against the discovered pod CIDR (${pod_cidr}):"
+    err "  ${overlaps}"
+    exit 1
+  fi
+  if [[ "$overlaps" == "true" ]]; then
+    err "The discovered pod CIDR (${pod_cidr}) overlaps subnet '${subnet}'s primary range (${subnet_range}), which the Cloud Run IAP proxy uses for its own egress to the hub. hub-deny would also deny the proxy's own traffic, breaking every deploy. Refusing to create it; this must be resolved on the network's own subnet or cluster configuration, not in this script."
+    exit 1
+  fi
+}
+
+# hybrid_ensure_firewall_rules HUB_NAME PROJECT_ID NETWORK REGION
 #
 # Creates (or verifies the marker and full spec of) the three firewall
 # rules this tier needs, all targeting scion-hub-<hub>-nfs and carrying
@@ -1218,39 +1269,47 @@ _hybrid_ensure_firewall_rule() {
 #                              hybrid_discover), priority 900.
 #   scion-hub-<hub>-nfs-deny   INGRESS DENY  tcp:2049 from 0.0.0.0/0,
 #                              priority 950.
-#   scion-hub-<hub>-hub-allow  INGRESS ALLOW tcp:8080 from the discovered
+#   scion-hub-<hub>-hub-deny   INGRESS DENY  tcp:8080 from the discovered
 #                              pod CIDR (GKE_POD_CIDR; set by
-#                              hybrid_discover), priority 900 -- lets GKE
-#                              agent pods reach the hub directly over the
-#                              VPC. No paired deny for hub-allow, by
-#                              design: other VPC-internal reachability to
-#                              this port comes from the network's own
-#                              pre-existing rules, not something this
-#                              tier provisions.
-# The two NFS rules are created deny first, then allow, so an interrupted
-# run can never leave an allow rule in place without its paired deny
-# (teardown deletes in the opposite order: allow first, then deny, for
-# the same reason in reverse). Sets HYBRID_ALLOW_NAME, HYBRID_DENY_NAME,
-# and HYBRID_HUB_ALLOW_NAME. Call only after hybrid_discover has set
-# GKE_NODE_TAG and GKE_POD_CIDR.
+#                              hybrid_discover), priority 950 -- the same
+#                              scheme as nfs-deny, so it beats a network's
+#                              own default-allow-internal rule. GKE agent
+#                              pods reach the hub through its public IAP
+#                              URL, not a private VPC path, so nothing
+#                              inside the cluster's pod range should ever
+#                              reach tcp:8080 on the hub VM directly; this
+#                              rule makes that explicit rather than
+#                              relying on the absence of an allow rule.
+# _hybrid_check_cloud_run_egress_overlap runs first, before any of the
+# three rules are created, and refuses outright if the pod CIDR could
+# overlap the Cloud Run IAP proxy's own egress range. The two NFS rules
+# are created deny first, then allow, so an interrupted run can never
+# leave an allow rule in place without its paired deny (teardown deletes
+# in the opposite order: allow first, then deny, for the same reason in
+# reverse); hub-deny has no paired allow to protect, so it is created
+# alongside nfs-deny, in the same position. Sets HYBRID_ALLOW_NAME,
+# HYBRID_DENY_NAME, and HYBRID_HUB_DENY_NAME. Call only after
+# hybrid_discover has set GKE_NODE_TAG and GKE_POD_CIDR.
 hybrid_ensure_firewall_rules() {
-  local hub_name="$1" project_id="$2" network="$3"
+  local hub_name="$1" project_id="$2" network="$3" region="$4"
   local marker="scion-deployment=${hub_name}"
   local target_tag
   target_tag="$(hybrid_vm_tag "${hub_name}")"
 
+  _hybrid_check_cloud_run_egress_overlap "${project_id}" "${region}" "${network}" "${GKE_POD_CIDR}"
+
   HYBRID_ALLOW_NAME="scion-hub-${hub_name}-nfs-allow"
   HYBRID_DENY_NAME="scion-hub-${hub_name}-nfs-deny"
-  HYBRID_HUB_ALLOW_NAME="scion-hub-${hub_name}-hub-allow"
+  HYBRID_HUB_DENY_NAME="scion-hub-${hub_name}-hub-deny"
 
   _hybrid_ensure_firewall_rule "${HYBRID_DENY_NAME}" "${project_id}" "${marker}" \
     "${network}" "INGRESS" "DENY" "tcp:2049" "range" "0.0.0.0/0" "${target_tag}" "950"
 
+  _hybrid_ensure_firewall_rule "${HYBRID_HUB_DENY_NAME}" "${project_id}" "${marker}" \
+    "${network}" "INGRESS" "DENY" "tcp:8080" "range" "${GKE_POD_CIDR}" "${target_tag}" "950"
+
   _hybrid_ensure_firewall_rule "${HYBRID_ALLOW_NAME}" "${project_id}" "${marker}" \
     "${network}" "INGRESS" "ALLOW" "tcp:2049" "tag" "${GKE_NODE_TAG}" "${target_tag}" "900"
-
-  _hybrid_ensure_firewall_rule "${HYBRID_HUB_ALLOW_NAME}" "${project_id}" "${marker}" \
-    "${network}" "INGRESS" "ALLOW" "tcp:8080" "range" "${GKE_POD_CIDR}" "${target_tag}" "900"
 }
 
 # hybrid_vm_tag HUB_NAME
@@ -1279,9 +1338,9 @@ hybrid_apply_vm_tag() {
 # hybrid_teardown_check HUB_NAME PROJECT_ID
 #
 # Looks up all three hybrid-tier firewall rules (the two NFS rules and
-# the hub-allow rule) with a single `firewall-rules list` call and
-# classifies each: marked -> HYBRID_TEARDOWN_DELETE (both allow rules
-# before the deny); found but unmarked -> HYBRID_TEARDOWN_SKIP, and
+# hub-deny) with a single `firewall-rules list` call and
+# classifies each: marked -> HYBRID_TEARDOWN_DELETE; found but unmarked ->
+# HYBRID_TEARDOWN_SKIP, and
 # HYBRID_TEARDOWN_FAILED=true; not found -> ignored. A failed list call
 # also sets HYBRID_TEARDOWN_FAILED, without populating either array --
 # "unknown" must never look like "nothing to protect". $PYTHON is needed,
@@ -1294,7 +1353,7 @@ hybrid_teardown_check() {
   local marker="scion-deployment=${hub_name}"
   local name_allow="scion-hub-${hub_name}-nfs-allow"
   local name_deny="scion-hub-${hub_name}-nfs-deny"
-  local name_hub_allow="scion-hub-${hub_name}-hub-allow"
+  local name_hub_deny="scion-hub-${hub_name}-hub-deny"
 
   HYBRID_TEARDOWN_FAILED=false
   HYBRID_TEARDOWN_DELETE=()
@@ -1303,7 +1362,7 @@ hybrid_teardown_check() {
   local list_json list_err
   list_err="$(mktemp)"
   if ! list_json="$(gcloud compute firewall-rules list --project="${project_id}" \
-      --filter="name=(${name_allow} ${name_deny} ${name_hub_allow})" --format=json 2>"${list_err}")"; then
+      --filter="name=(${name_allow} ${name_deny} ${name_hub_deny})" --format=json 2>"${list_err}")"; then
     err "Could not list firewall rules to check hybrid-tier ownership; aborting teardown rather than assuming none exist:"
     err "  $(cat "${list_err}")"
     rm -f "${list_err}"
@@ -1328,7 +1387,7 @@ hybrid_teardown_check() {
   fi
 
   local name desc
-  for name in "$name_allow" "$name_hub_allow" "$name_deny"; do
+  for name in "$name_allow" "$name_hub_deny" "$name_deny"; do
     desc="$(echo "$list_json" | "$PYTHON" -c "
 import json, sys
 name = sys.argv[1]
