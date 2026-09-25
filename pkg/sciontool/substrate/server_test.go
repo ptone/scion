@@ -467,6 +467,278 @@ func TestWriteBootstrapFile_RejectsWriteThroughPreExistingSymlinkDir(t *testing.
 	}
 }
 
+// TestWriteBootstrapFile_RejectsWriteThroughSymlinkWhenTargetSubpathAlreadyExists
+// covers the gap a naive "Lstat only the deepest ancestor that exists, found
+// by walking upward" search leaves open: Lstat only declines to follow its
+// own final argument, so an upward walk that stops at the first existing
+// ancestor never Lstats anything above that point. If a symlinked component
+// higher up the path already has the remaining subpath pre-created on its
+// far side, the upward walk lands on that real directory and the symlink is
+// never noticed. This must be rejected on the *current* mkdirAllTracked
+// (every existing component checked top-down), and would have been silently
+// accepted by the old upward-walk version.
+func TestWriteBootstrapFile_RejectsWriteThroughSymlinkWhenTargetSubpathAlreadyExists(t *testing.T) {
+	root := t.TempDir()
+	fakeHome := filepath.Join(root, "home", "scion")
+	outsideTarget := filepath.Join(root, "etc") // stands in for a real /etc
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The subpath the bootstrap file will target already exists on the far
+	// side of the link *before* the symlink is ever consulted.
+	if err := os.MkdirAll(filepath.Join(outsideTarget, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configLink := filepath.Join(fakeHome, ".config")
+	if err := os.Symlink(outsideTarget, configLink); err != nil {
+		t.Fatal(err)
+	}
+
+	targetPath := filepath.Join(configLink, "sub", "file")
+	srv := NewServer(WithChownOwner(-1, -1))
+	err := srv.writeBootstrapFile(BootstrapFile{
+		Path:       targetPath,
+		Mode:       0o600,
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("must-not-land-in-etc")),
+	})
+	if err == nil {
+		t.Fatal("writeBootstrapFile through a symlink whose target already has the subpath: expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), targetPath) {
+		t.Errorf("error = %v, want it to name the rejected bootstrap file path %q", err, targetPath)
+	}
+	if strings.Contains(err.Error(), "must-not-land-in-etc") {
+		t.Errorf("error leaked file content: %v", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(outsideTarget, "sub", "file")); statErr == nil {
+		t.Error("the bootstrap file was written through the symlink into outsideTarget/sub")
+	}
+	entries, err := os.ReadDir(filepath.Join(outsideTarget, "sub"))
+	if err != nil {
+		t.Fatalf("readdir outsideTarget/sub: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("outsideTarget/sub gained entries %v; nothing must be created on the far side of the link", entries)
+	}
+}
+
+// TestWriteBootstrapFile_RejectsSymlinkAtFirstComponentUnderHome is the
+// specific, most-realistic trigger for the fix above: an image where a
+// direct child of the home directory (e.g. ~/.config) is itself the
+// symlink, one component down from home, with the file only one level below
+// that.
+func TestWriteBootstrapFile_RejectsSymlinkAtFirstComponentUnderHome(t *testing.T) {
+	root := t.TempDir()
+	fakeHome := filepath.Join(root, "home", "scion")
+	outsideTarget := filepath.Join(root, "outside")
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	configLink := filepath.Join(fakeHome, ".config")
+	if err := os.Symlink(outsideTarget, configLink); err != nil {
+		t.Fatal(err)
+	}
+
+	targetPath := filepath.Join(configLink, "x")
+	srv := NewServer(WithChownOwner(-1, -1))
+	err := srv.writeBootstrapFile(BootstrapFile{
+		Path:       targetPath,
+		Mode:       0o600,
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("must-not-land-outside")),
+	})
+	if err == nil {
+		t.Fatal("writeBootstrapFile through a symlink at the first component under home: expected an error, got nil")
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideTarget, "x")); statErr == nil {
+		t.Error("the bootstrap file was written through the symlink into outsideTarget")
+	}
+}
+
+// TestWriteBootstrapFile_DotDotCleansToLocationUnderHomeAndNowhereElse proves
+// a ".." segment in the bootstrap file's Path lands exactly where
+// filepath.Clean says it should, and never touches the lexical component the
+// ".." walks back through. Per design-home-delivery.md, serve accepts
+// arbitrary absolute paths (auth/secret targets can legitimately be outside
+// home), so this deliberately does not add any "reject paths outside home"
+// behavior — it only proves the lexical Clean plus the symlink walk agree
+// with each other on where a dotdot-bearing path resolves.
+func TestWriteBootstrapFile_DotDotCleansToLocationUnderHomeAndNowhereElse(t *testing.T) {
+	root := t.TempDir()
+	fakeHome := filepath.Join(root, "home", "scion")
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Deliberately not filepath.Join, which would Clean the ".." away before
+	// the test ever exercises writeBootstrapFile's own handling of it.
+	targetPath := fakeHome + "/a/../b/file"
+	wantPath := filepath.Join(fakeHome, "b", "file")
+
+	srv := NewServer(WithChownOwner(-1, -1))
+	if err := srv.writeBootstrapFile(BootstrapFile{
+		Path:       targetPath,
+		Mode:       0o600,
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("dotdot-content")),
+	}); err != nil {
+		t.Fatalf("writeBootstrapFile with a dotdot-bearing path that Cleans under home: %v", err)
+	}
+
+	got, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", wantPath, err)
+	}
+	if string(got) != "dotdot-content" {
+		t.Errorf("content at %s = %q, want %q", wantPath, got, "dotdot-content")
+	}
+
+	// The lexical component the ".." walked back through must never have
+	// been created — the file must land only at the Cleaned location.
+	if _, statErr := os.Stat(filepath.Join(fakeHome, "a")); statErr == nil {
+		t.Error("a directory was created for the dotdot-only path component \"a\"; the write should have used the Cleaned path only")
+	}
+}
+
+// TestWriteBootstrapFile_LeafSymlinkIsReplacedNotWrittenThrough covers the
+// final path component itself being a pre-existing symlink, as distinct
+// from every test above which targets a symlinked *parent*.
+// writeFileAtomicMode's os.Rename(tmp, path) call replaces whatever
+// directory entry currently sits at path — including a symlink — rather
+// than following it, so this must succeed by atomically replacing the link
+// with a regular file, and the symlink's old target must be left untouched.
+func TestWriteBootstrapFile_LeafSymlinkIsReplacedNotWrittenThrough(t *testing.T) {
+	root := t.TempDir()
+	fakeHome := filepath.Join(root, "home", "scion")
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outsideFile := filepath.Join(root, "outside-secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	targetPath := filepath.Join(fakeHome, "leaf")
+	if err := os.Symlink(outsideFile, targetPath); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewServer(WithChownOwner(-1, -1))
+	err := srv.writeBootstrapFile(BootstrapFile{
+		Path:       targetPath,
+		Mode:       0o600,
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("new-content")),
+	})
+
+	// Either outcome is acceptable per the request: replace the link, or
+	// reject the file outright. What's never acceptable is writing through
+	// it. Assert the invariant that holds regardless of which branch this
+	// takes.
+	outsideContent, readErr := os.ReadFile(outsideFile)
+	if readErr != nil {
+		t.Fatalf("read outsideFile: %v", readErr)
+	}
+	if string(outsideContent) != "do-not-touch" {
+		t.Fatalf("outsideFile content = %q, want unchanged %q (write-through the leaf symlink)", outsideContent, "do-not-touch")
+	}
+
+	if err != nil {
+		// Rejected outright: fine, as long as the symlink and its target
+		// are untouched (already checked above).
+		return
+	}
+
+	info, statErr := os.Lstat(targetPath)
+	if statErr != nil {
+		t.Fatalf("lstat %s: %v", targetPath, statErr)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("%s is still a symlink after a successful write; want it replaced by a regular file", targetPath)
+	}
+	got, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", targetPath, err)
+	}
+	if string(got) != "new-content" {
+		t.Errorf("content at %s = %q, want %q", targetPath, got, "new-content")
+	}
+}
+
+// TestWriteBootstrapFile_RejectsSymlinkTraversalForOutsideHomeTarget proves
+// mkdirAllTracked's every-component guard is not specific to paths under any
+// notion of "home" — it applies to every bootstrap Path, including
+// auth/secret targets that legitimately live outside home (e.g.
+// /etc/app/x). The broker never emits such a payload today, but serve must
+// not rely on that.
+func TestWriteBootstrapFile_RejectsSymlinkTraversalForOutsideHomeTarget(t *testing.T) {
+	root := t.TempDir()
+	etcDir := filepath.Join(root, "etc")
+	volumeDir := filepath.Join(root, "volume")
+	if err := os.MkdirAll(etcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The remaining subpath already exists on the far side of the link.
+	if err := os.MkdirAll(filepath.Join(volumeDir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	appLink := filepath.Join(etcDir, "app")
+	if err := os.Symlink(volumeDir, appLink); err != nil {
+		t.Fatal(err)
+	}
+
+	targetPath := filepath.Join(appLink, "sub", "x")
+	srv := NewServer(WithChownOwner(-1, -1))
+	err := srv.writeBootstrapFile(BootstrapFile{
+		Path:       targetPath,
+		Mode:       0o600,
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("must-not-land-in-volume")),
+	})
+	if err == nil {
+		t.Fatal("writeBootstrapFile through a symlink for an outside-home target: expected an error, got nil")
+	}
+	if _, statErr := os.Stat(filepath.Join(volumeDir, "sub", "x")); statErr == nil {
+		t.Error("the bootstrap file was written through the symlink into volumeDir/sub")
+	}
+}
+
+// TestWriteBootstrapFile_WritesCleanOutsideHomeTargetNormally is the positive
+// counterpart to the test above: an outside-home absolute target with no
+// symlinks anywhere in its ancestry must be written normally, proving the
+// generic guard doesn't accidentally reject legitimate outside-home
+// auth/secret targets.
+func TestWriteBootstrapFile_WritesCleanOutsideHomeTargetNormally(t *testing.T) {
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "etc", "app", "x")
+
+	srv := NewServer(WithChownOwner(-1, -1))
+	if err := srv.writeBootstrapFile(BootstrapFile{
+		Path:       targetPath,
+		Mode:       0o640,
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("config-value")),
+	}); err != nil {
+		t.Fatalf("writeBootstrapFile for a clean outside-home target: %v", err)
+	}
+
+	got, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", targetPath, err)
+	}
+	if string(got) != "config-value" {
+		t.Errorf("content = %q, want %q", got, "config-value")
+	}
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatalf("stat %s: %v", targetPath, err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Errorf("mode = %v, want 0640", info.Mode().Perm())
+	}
+}
+
 // TestBootstrap_SymlinkedFileRejectionSurfacesAsGenericServerError proves the
 // end-to-end handler path: a symlink-traversal rejection reaches the client
 // as the same generic, content-free 500 every other write failure produces

@@ -330,11 +330,25 @@ const maxBootstrapFilesTotalBytes = 16 * 1024 * 1024
 // It never follows a symlink: filepath.WalkDir already doesn't descend into
 // one (each directory entry's type comes from an Lstat-equivalent, the same
 // rule pkg/hub/project_workspace_handlers.go's walkDirSearcher relies on for
-// the same reason, #1850) and this additionally treats a symlink entry, a
-// socket, a device and a fifo alike — none of them is "a file to ship" —
+// the same reason, #1850) and this additionally treats a symlink entry the
+// same as a socket, a device or a fifo — none of them is "a file to ship" —
 // skipping and counting each rather than reading through or blocking on it.
 // The only thing ever logged about a skipped entry is its path relative to
-// homeDir; contents are never inspected.
+// homeDir, capped at the first 20 plus the total count so a home with a huge
+// number of skipped entries can't blow up the log line; contents are never
+// inspected.
+//
+// It also keeps a running total of Stat-reported (pre-read) file sizes as it
+// walks and returns the same cap error buildBootstrapFiles would eventually
+// report — naming only the cap and the total, never a path or content — the
+// moment that total exceeds maxBootstrapFilesTotalBytes, before reading the
+// file that tipped it over. This is a conservative early exit, not the
+// authoritative cap check: buildBootstrapFiles still enforces the real cap
+// afterwards, over the deduped home+auth+secret total, since a home file
+// that turns out to be overridden by a same-path auth/secret file is never
+// counted there. The point here is only to stop a stray oversized file (or
+// several) in a template home from being fully buffered into memory before
+// any cap is ever consulted.
 //
 // homeDir == "" is not an error: it means the caller has no composed home to
 // ship (e.g. a runtime path that never sets RunConfig.HomeDir), and returns
@@ -361,6 +375,7 @@ func homeBootstrapFiles(homeDir, containerHome string) ([]bootstrapFile, error) 
 
 	var files []bootstrapFile
 	var skipped []string
+	var total int64
 	walkErr := filepath.WalkDir(homeDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("substrate: walk home dir at %s: %w", path, err)
@@ -380,7 +395,7 @@ func homeBootstrapFiles(homeDir, containerHome string) ([]bootstrapFile, error) 
 			return fmt.Errorf("substrate: relativize home file %s: %w", path, relErr)
 		}
 
-		if d.Type()&fs.ModeSymlink != 0 || !d.Type().IsRegular() {
+		if !d.Type().IsRegular() {
 			skipped = append(skipped, rel)
 			return nil
 		}
@@ -389,12 +404,28 @@ func homeBootstrapFiles(homeDir, containerHome string) ([]bootstrapFile, error) 
 		if infoErr != nil {
 			return fmt.Errorf("substrate: stat home file %s: %w", rel, infoErr)
 		}
+		// Check the running total against the cap using the size Stat
+		// already reported, before reading the file's content into memory.
+		// buildBootstrapFiles enforces the real cap later, over the deduped
+		// home+auth+secret total, and that check still stands; this one is
+		// a conservative early exit against a single oversized (or several
+		// large) home files so a stray multi-GB file in a template home
+		// isn't fully buffered here first. It is conservative, not exact,
+		// because it runs on home's own pre-dedup total: a home file that
+		// ends up overridden by an auth/secret file at the same path (and
+		// so never counted in the final total) could in principle trip this
+		// early check on its own, which is an acceptable, strictly-safer
+		// trade against ever buffering an unbounded amount of file content.
+		total += info.Size()
+		if total > maxBootstrapFilesTotalBytes {
+			return fmt.Errorf("substrate: bootstrap files total %d bytes exceeds cap of %d bytes", total, maxBootstrapFilesTotalBytes)
+		}
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return fmt.Errorf("substrate: read home file %s: %w", rel, readErr)
 		}
 		files = append(files, bootstrapFile{
-			Path:        filepath.Join(containerHome, rel),
+			Path:        filepath.Clean(filepath.Join(containerHome, rel)),
 			Mode:        int(info.Mode().Perm()),
 			ContentB64:  base64.StdEncoding.EncodeToString(data),
 			decodedSize: int64(len(data)),
@@ -405,7 +436,12 @@ func homeBootstrapFiles(homeDir, containerHome string) ([]bootstrapFile, error) 
 		return nil, walkErr
 	}
 	if len(skipped) > 0 {
-		runtimeLog.Info("substrate: skipped non-regular home entries during bootstrap", "count", len(skipped), "paths", skipped)
+		const maxLoggedSkipped = 20
+		logged := skipped
+		if len(logged) > maxLoggedSkipped {
+			logged = logged[:maxLoggedSkipped]
+		}
+		runtimeLog.Info("substrate: skipped non-regular home entries during bootstrap", "count", len(skipped), "paths", logged)
 	}
 	return files, nil
 }
@@ -436,9 +472,14 @@ func dedupeBootstrapFilesByPath(groups ...[]bootstrapFile) []bootstrapFile {
 // broker-composed home (RunConfig.HomeDir) first, then ResolvedAuth.Files
 // (read from SourcePath), then file-type ResolvedSecrets — auth and secret
 // entries are expected to override a same-path file the composed home
-// shipped, per the home-delivery design. Duplicate paths across the three
-// sources are deduped (see dedupeBootstrapFilesByPath) so the wire payload
-// never carries two entries for the same Path.
+// shipped, per the home-delivery design. Every entry's Path is
+// filepath.Clean-ed before dedup — home's already is (filepath.Join cleans
+// internally), but an auth ContainerPath or secret Target that is already
+// absolute is used as-is by expandTildeTarget, and two differently-spelled
+// but equivalent paths (e.g. "/home/scion/x" and "/home/scion//x") would
+// otherwise both survive dedup as distinct entries. Duplicate paths across
+// the three sources are then deduped (see dedupeBootstrapFilesByPath) so the
+// wire payload never carries two entries for the same Path.
 //
 // The total decoded size across the deduped result is capped at
 // maxBootstrapFilesTotalBytes (see its doc comment for how that number was
@@ -463,7 +504,7 @@ func buildBootstrapFiles(cfg RunConfig) ([]bootstrapFile, error) {
 				return nil, fmt.Errorf("substrate: read auth file %s: %w", f.SourcePath, err)
 			}
 			authFiles = append(authFiles, bootstrapFile{
-				Path:        expandTildeTarget(f.ContainerPath, containerHome),
+				Path:        filepath.Clean(expandTildeTarget(f.ContainerPath, containerHome)),
 				Mode:        defaultFileMode,
 				ContentB64:  base64.StdEncoding.EncodeToString(data),
 				decodedSize: int64(len(data)),
@@ -477,7 +518,7 @@ func buildBootstrapFiles(cfg RunConfig) ([]bootstrapFile, error) {
 			continue
 		}
 		secretFiles = append(secretFiles, bootstrapFile{
-			Path:        expandTildeTarget(s.Target, containerHome),
+			Path:        filepath.Clean(expandTildeTarget(s.Target, containerHome)),
 			Mode:        defaultFileMode,
 			ContentB64:  base64.StdEncoding.EncodeToString([]byte(s.Value)),
 			decodedSize: int64(len(s.Value)),

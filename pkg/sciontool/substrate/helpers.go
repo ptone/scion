@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 var (
@@ -50,56 +51,86 @@ func (e *errSymlinkComponent) Error() string {
 // os.MkdirAll's own existence check is os.Stat, which follows symlinks: if
 // an intermediate component already exists in the image as a symlink to a
 // directory (e.g. /home/scion/.config -> /etc), Stat reports it as an
-// ordinary existing directory, MkdirAll happily creates the remaining path
-// components *through* the link, and the eventual file write lands wherever
-// the link points rather than under the bootstrap file's nominal path. This
-// uses os.Lstat instead (never following) to find the deepest already-existing
-// ancestor, and creates only the missing suffix with plain os.Mkdir calls —
-// so a symlinked component is caught before anything is created or written
-// through it, and rejected wholesale rather than silently resolved.
+// ordinary existing directory and MkdirAll happily creates the remaining
+// path components *through* the link.
+//
+// It is not enough to Lstat only the deepest ancestor that turns out to
+// exist, walking upward until something is found: Lstat only declines to
+// follow its own final argument, so a naive upward walk that stops at the
+// first existing ancestor never Lstats anything *above* that point. If a
+// symlinked component higher up the path already has the remaining subpath
+// pre-created on its far side (e.g. .config -> /etc and /etc/sub already
+// exists), the upward walk lands on that real directory and never notices
+// the symlink at all. So this instead walks every existing component
+// top-down, from the first path element to dir itself, Lstat-ing each one:
+// the first symlink found anywhere is rejected, a non-dir is an error, and
+// the first component that doesn't exist marks the start of the missing
+// suffix, which is created top-down with plain os.Mkdir calls (never
+// MkdirAll, which is Stat-based and would reopen the same hole one level
+// down). Every directory os.Mkdir creates here is therefore known-real by
+// construction — it did not exist a moment before this call created it.
+//
+// This check is safe against a symlink swapped in *before* bootstrap runs
+// (a pre-built image), which is the only threat model bootstrap defends
+// against: substrate-serve is the sole writer during bootstrap, the
+// harness has not started yet, and the image is static up to this point.
+// It is a plain existence check followed by a separate create, not an
+// atomic operation, so it is not race-free against a concurrent writer that
+// could swap a path component between the Lstat and the Mkdir (a TOCTOU
+// window) — there is no such writer during bootstrap, so that window is not
+// a guarantee this function makes for callers outside that model.
 func mkdirAllTracked(dir string, perm os.FileMode) ([]string, error) {
-	dir = filepath.Clean(dir)
+	prefixes := pathPrefixes(filepath.Clean(dir))
 
-	// Walk up from dir with Lstat (never Stat) to find the deepest already-
-	// existing ancestor, collecting the missing suffix (deepest first).
-	var missing []string
-	d := dir
-	for {
-		info, err := os.Lstat(d)
+	var created []string
+	for i, p := range prefixes {
+		info, err := os.Lstat(p)
 		if err == nil {
 			if info.Mode()&os.ModeSymlink != 0 {
-				return nil, &errSymlinkComponent{path: d}
+				return nil, &errSymlinkComponent{path: p}
 			}
 			if !info.IsDir() {
-				return nil, &os.PathError{Op: "mkdir", Path: d, Err: os.ErrExist}
+				return nil, &os.PathError{Op: "mkdir", Path: p, Err: os.ErrExist}
 			}
-			break
+			continue
 		}
 		if !os.IsNotExist(err) {
 			return nil, err
 		}
-		missing = append(missing, d)
-		parent := filepath.Dir(d)
-		if parent == d {
-			// Reached the filesystem root without finding an existing
-			// ancestor.
-			break
+		// p is the first missing component: it and everything below it (all
+		// real, unchecked path — nothing above here was a symlink) must be
+		// created, top-down so each Mkdir's parent already exists.
+		for _, q := range prefixes[i:] {
+			if err := os.Mkdir(q, perm); err != nil {
+				return nil, err
+			}
+			created = append(created, q)
 		}
-		d = parent
-	}
-
-	// missing was collected bottom-up (deepest first); create top-down so
-	// each os.Mkdir's parent already exists.
-	created := make([]string, len(missing))
-	for i, p := range missing {
-		created[len(missing)-1-i] = p
-	}
-	for _, p := range created {
-		if err := os.Mkdir(p, perm); err != nil {
-			return nil, err
-		}
+		return created, nil
 	}
 	return created, nil
+}
+
+// pathPrefixes returns every path component of dir from the first one below
+// the filesystem root down to dir itself, e.g. "/a/b/c" ->
+// ["/a", "/a/b", "/a/b/c"]. dir must already be filepath.Clean-ed. The root
+// itself ("/" or a Windows volume root) is deliberately not included: it
+// always exists and cannot be a symlink, so Lstat-ing it would only cost a
+// syscall without ever changing the result.
+func pathPrefixes(dir string) []string {
+	vol := filepath.VolumeName(dir)
+	rest := strings.TrimPrefix(dir[len(vol):], string(filepath.Separator))
+	if rest == "" {
+		return nil
+	}
+	parts := strings.Split(rest, string(filepath.Separator))
+	prefixes := make([]string, 0, len(parts))
+	cur := vol + string(filepath.Separator)
+	for _, part := range parts {
+		cur = filepath.Join(cur, part)
+		prefixes = append(prefixes, cur)
+	}
+	return prefixes
 }
 
 // redactErr returns err's message unless it looks like it might carry file

@@ -19,7 +19,6 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
-	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -156,6 +155,64 @@ func TestHomeBootstrapFiles_EmptyHomeDirIsNoop(t *testing.T) {
 	}
 	if files != nil {
 		t.Errorf("homeBootstrapFiles(\"\", ...) = %+v, want nil", files)
+	}
+}
+
+// TestHomeBootstrapFiles_ExistingEmptyHomeDirIsNoop covers a HomeDir that
+// exists (unlike TestHomeBootstrapFiles_EmptyHomeDirIsNoop, which tests
+// homeDir == "") but has nothing in it — a legitimate case (e.g. a template
+// home that composed to nothing), distinct from "no home was composed" and
+// from "home is missing."
+func TestHomeBootstrapFiles_ExistingEmptyHomeDirIsNoop(t *testing.T) {
+	home := t.TempDir()
+
+	files, err := homeBootstrapFiles(home, "/home/scion")
+	if err != nil {
+		t.Fatalf("homeBootstrapFiles on an existing, empty HomeDir: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("files = %+v, want none", files)
+	}
+}
+
+// TestHomeBootstrapFiles_SymlinkedDirectoryOutsideHomeIsNotDescendedInto
+// proves the design's "nothing outside HomeDir is read" and "no descent"
+// guarantees for a symlink that points at a *directory* (as opposed to the
+// existing regular-file-symlink coverage), especially one pointing outside
+// HomeDir entirely: the walk must skip the symlink entry itself and must
+// never produce a bootstrap entry sourced from the directory it points to.
+func TestHomeBootstrapFiles_SymlinkedDirectoryOutsideHomeIsNotDescendedInto(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secretOutside := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secretOutside, []byte("outside-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A symlink inside home pointing at the outside directory.
+	linkDir := filepath.Join(home, "linkdir")
+	if err := os.Symlink(outside, linkDir); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := homeBootstrapFiles(home, "/home/scion")
+	if err != nil {
+		t.Fatalf("homeBootstrapFiles: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("files = %+v, want none (the only home entry is a symlinked directory, which must be skipped, not descended into)", files)
+	}
+	for _, f := range files {
+		if got := decodeBootstrapFileContent(t, f); got == "outside-content" {
+			t.Errorf("a file was shipped from outside HomeDir through the symlinked directory: %+v", f)
+		}
 	}
 }
 
@@ -333,6 +390,93 @@ func TestBuildBootstrapFiles_CapPlusOneFails(t *testing.T) {
 	}
 }
 
+// TestBuildBootstrapFiles_CapSumsAcrossHomeAuthAndSecret proves the cap is
+// enforced against the combined home+auth+secret total, not against any one
+// source's own total: individually, the home file and the auth file below
+// are each under the cap, but their sum is over it.
+func TestBuildBootstrapFiles_CapSumsAcrossHomeAuthAndSecret(t *testing.T) {
+	home := t.TempDir()
+	homeData := make([]byte, maxBootstrapFilesTotalBytes/2)
+	if err := os.WriteFile(filepath.Join(home, "home-file"), homeData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	authFilePath := filepath.Join(t.TempDir(), "auth-src")
+	// Individually under the cap; combined with the home file above, over it.
+	authData := make([]byte, maxBootstrapFilesTotalBytes/2+2)
+	if err := os.WriteFile(authFilePath, authData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := RunConfig{
+		UnixUsername: "scion",
+		HomeDir:      home,
+		ResolvedAuth: &api.ResolvedAuth{
+			Files: []api.FileMapping{{SourcePath: authFilePath, ContainerPath: "~/auth-file"}},
+		},
+	}
+	if _, err := buildBootstrapFiles(cfg); err == nil {
+		t.Fatal("buildBootstrapFiles: home+auth combined over the cap: expected an error, got nil")
+	}
+}
+
+// TestBuildBootstrapFiles_CapComputedAfterDedupe proves the cap is checked
+// against the deduped total, not the raw pre-dedupe sum: a home file that
+// gets overridden by a same-path auth file must not count toward the cap,
+// even though its own size alone (added to the tiny auth override) would
+// put the pre-dedupe sum over the cap.
+func TestBuildBootstrapFiles_CapComputedAfterDedupe(t *testing.T) {
+	home := t.TempDir()
+	// Comfortably under the cap by itself (so homeBootstrapFiles' own
+	// running-total early-exit never trips), but pre-dedupe sum with the
+	// auth override below would be just over the cap.
+	shadowed := make([]byte, maxBootstrapFilesTotalBytes-10)
+	if err := os.WriteFile(filepath.Join(home, "shadowed"), shadowed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	authFilePath := filepath.Join(t.TempDir(), "auth-src")
+	if err := os.WriteFile(authFilePath, []byte("tiny-override"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := RunConfig{
+		UnixUsername: "scion",
+		HomeDir:      home,
+		ResolvedAuth: &api.ResolvedAuth{
+			Files: []api.FileMapping{{SourcePath: authFilePath, ContainerPath: "~/shadowed"}},
+		},
+	}
+	files, err := buildBootstrapFiles(cfg)
+	if err != nil {
+		t.Fatalf("buildBootstrapFiles: cap must be computed after dedupe, not before: %v", err)
+	}
+	f, ok := findBootstrapFile(files, "/home/scion/shadowed")
+	if !ok || decodeBootstrapFileContent(t, f) != "tiny-override" {
+		t.Errorf("shadowed = %+v, want the auth override (%q) to have won", f, "tiny-override")
+	}
+}
+
+// TestHomeBootstrapFiles_CapErrorReturnedDuringWalk proves the running-total
+// early exit: a single home file whose size alone exceeds the cap must make
+// homeBootstrapFiles itself return the cap error, rather than reading the
+// whole file and deferring the check to buildBootstrapFiles' post-walk sum.
+func TestHomeBootstrapFiles_CapErrorReturnedDuringWalk(t *testing.T) {
+	home := t.TempDir()
+	data := make([]byte, maxBootstrapFilesTotalBytes+1)
+	if err := os.WriteFile(filepath.Join(home, "big"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := homeBootstrapFiles(home, "/home/scion")
+	if err == nil {
+		t.Fatal("homeBootstrapFiles with an over-cap file: expected an error directly from the walk, got nil")
+	}
+	if strings.Contains(err.Error(), home) {
+		t.Errorf("error leaked the home directory path: %v", err)
+	}
+}
+
 // TestBuildBootstrapFiles_ErrorHygiene_SentinelSecretInHomeFile proves that a
 // home file's own content — settings.json can carry env, which is
 // secret-grade per the design — never appears in an error string, matching
@@ -360,10 +504,19 @@ func TestBuildBootstrapFiles_ErrorHygiene_SentinelSecretInHomeFile(t *testing.T)
 	}
 }
 
+// TestDedupeBootstrapFilesByPath_LaterWinsStablePosition proves both halves
+// of dedupeBootstrapFilesByPath's contract: the later group's content wins
+// on a collision, AND the winning entry keeps the *position* of its first
+// occurrence rather than moving to wherever the later group happened to put
+// it. Paths are deliberately non-alphabetical (/b, /a, /c) so that sorting
+// before comparing — which the previous version of this test did — cannot
+// mask a broken position: a dedupe that instead re-appended overridden
+// entries at the end would produce [/a, /c, /b] here, which sorts the same
+// as the correct [/b, /a, /c] but is a different order.
 func TestDedupeBootstrapFilesByPath_LaterWinsStablePosition(t *testing.T) {
-	a := []bootstrapFile{{Path: "/x", ContentB64: "a"}, {Path: "/y", ContentB64: "y1"}}
-	b := []bootstrapFile{{Path: "/z", ContentB64: "z"}}
-	c := []bootstrapFile{{Path: "/x", ContentB64: "c"}} // overrides a's /x
+	a := []bootstrapFile{{Path: "/b", ContentB64: "b1"}, {Path: "/a", ContentB64: "a1"}}
+	b := []bootstrapFile{{Path: "/c", ContentB64: "c1"}}
+	c := []bootstrapFile{{Path: "/b", ContentB64: "b2"}} // overrides a's /b in place
 
 	got := dedupeBootstrapFilesByPath(a, b, c)
 
@@ -371,19 +524,18 @@ func TestDedupeBootstrapFilesByPath_LaterWinsStablePosition(t *testing.T) {
 	for _, f := range got {
 		paths = append(paths, f.Path)
 	}
-	sort.Strings(paths) // order isn't the point here; content-per-path is
-	want := []string{"/x", "/y", "/z"}
+	want := []string{"/b", "/a", "/c"}
 	if len(paths) != len(want) {
 		t.Fatalf("paths = %v, want %v", paths, want)
 	}
 	for i := range want {
 		if paths[i] != want[i] {
-			t.Errorf("paths = %v, want %v", paths, want)
+			t.Errorf("paths = %v, want %v (the first-occurrence position must be kept, not just the set of paths)", paths, want)
 		}
 	}
 
-	x, ok := findBootstrapFile(got, "/x")
-	if !ok || x.ContentB64 != "c" {
-		t.Errorf("/x = %+v, want content_b64 %q (later entry must win)", x, "c")
+	b0, ok := findBootstrapFile(got, "/b")
+	if !ok || b0.ContentB64 != "b2" {
+		t.Errorf("/b = %+v, want content_b64 %q (later entry must win)", b0, "b2")
 	}
 }

@@ -367,7 +367,22 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 		return errInvalidBootstrapContent
 	}
 
-	dir := filepath.Dir(f.Path)
+	// Clean f.Path once and use only the cleaned form from here on, for both
+	// the parent-directory walk and the final write target. filepath.Dir
+	// already cleans internally, so a ".." in f.Path never survives into
+	// dir — but if the raw, uncleaned f.Path were still passed to the final
+	// write below, a ".." component resolves at syscall time against
+	// whatever is actually on disk there, which the kernel does not
+	// necessarily agree lexically with: if an earlier component names a
+	// symlink, ".." after it walks back from the link's *target*, not from
+	// dir. That would let a path like /home/scion/a/../b/file resolve
+	// somewhere mkdirAllTracked never checked, even though dir looks like a
+	// plain, already-validated /home/scion/b. Cleaning first removes the
+	// ".." lexically before any syscall sees it, so the directory
+	// mkdirAllTracked walks and the path the file is ultimately written to
+	// name exactly the same components.
+	path := filepath.Clean(f.Path)
+	dir := filepath.Dir(path)
 	created, err := mkdirAllTracked(dir, 0o755)
 	if err != nil {
 		var symErr *errSymlinkComponent
@@ -386,7 +401,16 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 	if mode == 0 {
 		mode = defaultFileMode
 	}
-	if err := writeFileAtomicMode(dir, f.Path, content, mode, s.chownUID, s.chownGID); err != nil {
+	// The leaf component itself — path's final element — is never Lstat'd or
+	// otherwise checked here for being a symlink, unlike every component of
+	// dir above. That is intentional, not an oversight: writeFileAtomicMode
+	// below never opens path directly, only os.Rename(tmp, path), and
+	// rename(2) replaces whatever directory entry currently sits at path —
+	// including a symlink — rather than following it. So a pre-existing
+	// symlink at the leaf is safe by construction: it is atomically replaced
+	// by a new regular file, and whatever it used to point at is never
+	// written through and is left untouched.
+	if err := writeFileAtomicMode(dir, path, content, mode, s.chownUID, s.chownGID); err != nil {
 		return err
 	}
 
