@@ -1,7 +1,7 @@
 # Hybrid Deployment Tier — Phase 3b, slice 3, part A: wizard prompts, image pull refusal, image pin, settings.yaml, docs, not-found hardening
 
 Branch `scion/hybrid-tier-p3`, same fork PR as the earlier Phase 3a and 3b slices (`ptone/scion`,
-based on `main`). The hub URL guard and the pod CIDR/hub-allow/static internal IP work land in a
+based on `main`). The internal IP guard and the pod CIDR/hub-deny/static internal IP work land in a
 later slice of this same PR.
 
 ## Overview

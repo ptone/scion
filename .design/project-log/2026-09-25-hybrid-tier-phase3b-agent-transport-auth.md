@@ -1,16 +1,15 @@
-# Hybrid Deployment Tier — Phase 3b: agent transport auth, replacing hub-allow
+# Hybrid Deployment Tier — Phase 3b: agent transport auth
 
 Branch `scion/hybrid-tier-p3`, same fork PR as the earlier Phase 3a and 3b slices.
 
 ## Overview
 
-GKE agent pods now reach the hub through its existing public IAP URL — the same URL browser users
-use — instead of the private VPC path (`http://<VM internal IP>:8080`) the earlier hub-allow rule
-provisioned for. The private path is removed outright: hub-allow is deleted, and a new hub-deny
-rule (`INGRESS DENY tcp:8080` from the discovered pod CIDR, priority 950, the same scheme as
-nfs-deny) makes it explicit that nothing in the cluster's pod range can reach the hub VM directly.
-The static internal IP reservation is kept, since the shared NFS PV's server field still needs a
-stable address — that is now its only purpose.
+GKE agent pods reach the hub through its existing public IAP URL — the same URL browser users
+use — authenticating with a Google OIDC ID token the hub mints by impersonating a dedicated
+transport service account. There is no private-IP hub endpoint: hub-deny (`INGRESS DENY tcp:8080`
+from the discovered pod CIDR, priority 950, the same scheme as `nfs-deny`) makes explicit that
+nothing in the cluster's pod range can reach the hub VM directly. The static internal IP
+reservation exists solely for the shared NFS PV's server field.
 
 ## Cloud Run egress / hub-deny overlap
 
@@ -52,22 +51,20 @@ Teardown removes the transport SA's Cloud Run IAP binding (best-effort, since de
 Run service already does this when that delete succeeds) and then the SA itself, marked only,
 never touching an unmarked same-name SA — the same discipline as every other hybrid-tier resource.
 
-## Docs and PR body
+## Docs
 
-`docs/deploy/agent-runbook-single-node-vm.md` and `docs/deploy/hybrid-tier.md` are updated: the
-firewall-rule bullet describes hub-deny instead of hub-allow, a new step documents agent transport
-auth, the resource table lists hub-deny and the transport service account, and the interim
-known-limit about nothing pointing GKE agents at the reserved internal IP is removed (resolved by
-this change, not just superseded).
+`docs/deploy/agent-runbook-single-node-vm.md` and `docs/deploy/hybrid-tier.md` describe hub-deny
+and the Cloud-Run-egress overlap check under the firewall-rule bullet, a dedicated step for agent
+transport auth, and the resource table lists hub-deny and the transport service account.
 
 ## Tests
 
-Function-level coverage in `test_hybrid_tier.sh`: hub-deny's creation shape; the drift battery's
-hub-allow cases rewritten for hub-deny's actual spec; the overlap check (an overlapping range, a
-subnet-describe failure, and a disjoint range); a repo-wide grep confirming no hub-allow artifact
-remains in `scripts/single-node-vm` or `docs`; and the transport-auth functions (client-ID
-discovery, the transport SA's name truncation and create/adopt/refuse-unmarked behavior, the
-token-creator grant's role and member, the Cloud Run accessor grant's resource type/service/role/
-member, the rendered `settings.yaml` block, and teardown's marked/unmarked/absent/failure cases).
-`test_deploy_wiring.sh`'s hub-allow-vs-nfs-deny delete-ordering test is rewritten for hub-deny, and
-the guard wiring assertion checks only the internal-IP reservation's post-create re-describe call.
+Function-level coverage in `test_hybrid_tier.sh`: hub-deny's creation shape and every field of its
+drift check; the overlap check (an overlapping range, a subnet-describe failure, and a disjoint
+range); a repository-wide check that no resource, variable, or function named for the private-IP
+path this tier doesn't have exists anywhere under `scripts/single-node-vm` or `docs`; and the
+transport-auth functions (client-ID discovery, the transport SA's name truncation and
+create/adopt/refuse-unmarked behavior, the token-creator grant's role and member, the Cloud Run
+accessor grant's resource type/service/role/member, the rendered `settings.yaml` block, and
+teardown's marked/unmarked/absent/failure cases). `test_deploy_wiring.sh` covers the firewall
+rules' teardown delete ordering and the internal-IP guard's post-create re-describe call.

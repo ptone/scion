@@ -605,8 +605,8 @@ json.dump({'email': email, 'description': desc}, open(path, 'w'))
       rm -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
       exit 0
     fi
-    # Not otherwise seeded: same "not found" shape as the pre-existing,
-    # non-name-scoped delete path this replaces for name-scoped fixtures.
+    # Not otherwise seeded: a realistic "not found" error shape for a
+    # name-scoped fixture that was never created.
     echo "gcloud-stub: ERROR: (gcloud.iam.service-accounts.delete) NOT_FOUND: Unknown service account" >&2
     exit 1
     ;;

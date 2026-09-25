@@ -1,43 +1,33 @@
-# Hybrid Deployment Tier — Phase 3b: pod CIDR, hub-allow rule, static internal IP
+# Hybrid Deployment Tier — Phase 3b: pod CIDR, hub-deny rule, static internal IP
 
 Branch `scion/hybrid-tier-p3`, same fork PR as the earlier Phase 3a and 3b slices.
 
 ## Overview
 
-Provisions the infrastructure for GKE agent pods to reach the hub directly over the VPC at
-`http://<VM internal IP>:8080`: pod CIDR discovery, a third firewall rule scoped to that CIDR, and
-a static internal IP reservation for the hub VM so that address is stable across VM recreates.
-Also verifies (and did not need to change) that the hub's auth layer accepts an agent token over a
-plain, non-localhost URL. Delivering a `gke`-profile-scoped hub endpoint that actually points GKE
-agents at the reserved address is a separate, hub-side code change and is out of scope here — see
-Known limits below.
+Provisions pod CIDR discovery, a third firewall rule (hub-deny) that blocks the cluster's pod
+range from reaching the hub VM's tcp:8080 directly, and a static internal IP reservation for the
+hub VM so the shared NFS PV's server field stays stable across VM recreates. Agents reach the hub
+through its existing public IAP URL; there is no private-IP hub endpoint.
 
 ## Pod CIDR discovery
 
-`hybrid_discover` now also reads the cluster's pod CIDR from the same cluster-describe call
-already used for the node subnet: `clusterIpv4Cidr`, cross-checked against
+`hybrid_discover` also reads the cluster's pod CIDR from the same cluster-describe call already
+used for the node subnet: `clusterIpv4Cidr`, cross-checked against
 `ipAllocationPolicy.clusterIpv4CidrBlock`. Discovery fails if either field is missing, if the two
 disagree, or if the agreed value doesn't pass the same IPv4/`/8`-or-narrower validation already
 used for the node subnet — never guessing between two different answers, and never handing a
 dangerously broad range to the firewall rule below.
 
-## Hub-allow firewall rule
+## Hub-deny firewall rule
 
-A third rule, `scion-hub-<hub>-hub-allow` (`INGRESS ALLOW tcp:8080` from the discovered pod CIDR,
-priority 900), joins the existing NFS allow/deny pair under the same target tag and marker
-convention, with no paired deny. This is what lets GKE agent pods reach the hub directly, and it
-opens tcp:8080 to every pod in the cluster (all namespaces), not only Scion agents; requests are
-still authenticated by the hub itself (an agent token, or the IAP assertion for browser users),
-and a small set of endpoints (health checks, login/token flows, OIDC discovery, public settings,
-static UI assets, the GitHub App webhook endpoint, and endpoints gated by their own secret such as
-a broker join token or a signed URL) answer without credentials, the same as they do for any other
-caller. Pod-to-hub traffic on this path is plain
-HTTP inside the VPC, so agent tokens travel as bearer credentials over it -- anything able to
-observe VPC or node traffic can capture them, so this cluster's workloads need to stay trusted.
-Only the cluster's default pod range is admitted; a node pool with a separate pod CIDR isn't
-covered and fails closed (blocked, not open). `hybrid_teardown_check` was extended to classify and
-report on this third rule the same way as the NFS pair; the underlying preflight/delete functions
-needed no changes, since they already iterate generically over whatever names are classified.
+A third rule, `scion-hub-<hub>-hub-deny` (`INGRESS DENY tcp:8080` from the discovered pod CIDR,
+priority 950 — the same scheme as `nfs-deny`, so it beats a network's own default-allow-internal
+rule), joins the existing NFS allow/deny pair under the same target tag and marker convention.
+Nothing in the cluster's pod range can reach the hub VM's tcp:8080 directly; only the cluster's
+default pod range is covered, and a node pool with a separate pod CIDR isn't in scope (fails
+closed, not open). `hybrid_teardown_check` classifies and reports on this third rule the same way
+as the NFS pair; the underlying preflight/delete functions needed no changes, since they already
+iterate generically over whatever names are classified.
 
 ## Static internal IP reservation
 
@@ -62,32 +52,14 @@ the reason, rather than silently dropped from the summary when the VM's fate isn
 triggers the same strict, project-wide "confirmed gone" check the firewall rules already required,
 not just a bare `describe` in a possibly-wrong zone.
 
-## Hub URL guard
+## Internal IP guard
 
 The pre-create half of the guard is structural: pod-CIDR discovery and the address reservation
 already `exit 1` on their own failures before deploy.sh does anything else, so nothing downstream
-of them runs on bad inputs. `hybrid_hub_url_guard_verify`, called right after VM creation, is the
-post-create half: it re-describes the address reservation and the hub-allow rule and fails, naming
-whichever is missing, rather than letting deploy.sh proceed with settings.yaml or the rest of
-Phase 3 on an incomplete guarantee.
-
-## Auth verification (no code change)
-
-Confirmed that the hub's `UnifiedAuthMiddleware` accepts a GKE agent's own agent token before any
-IAP or proxy/localhost-specific logic runs, so a GKE agent dialing the hub directly at
-`http://<internal-ip>:8080` — bypassing the IAP-fronted Cloud Run proxy entirely — authenticates
-the same way it would through the proxy. No code change was needed or made; this was a read-only
-trace to confirm the internal-IP approach doesn't need a new auth path.
-
-## Known limits: interim, pending a hub-side change
-
-Nothing yet points the `gke` runtime's agents at the reserved internal IP; a hub-side change is
-required. This is provisioning ahead of that change, not a finished feature.
-
-`docs/deploy/agent-runbook-single-node-vm.md` and `docs/deploy/hybrid-tier.md` document the
-discovery step, the three firewall rules, the reservation, the widened teardown table and
-ownership-check wording, and this limitation, in the same style as the existing NFS/Kubernetes
-sections.
+of them runs on bad inputs. `hybrid_internal_ip_guard_verify`, called right after VM creation, is
+the post-create half: it re-describes the address reservation and fails, naming what's missing or
+mismatched, rather than letting deploy.sh proceed with settings.yaml or the rest of Phase 3 on an
+incomplete guarantee.
 
 ## Hardening pass
 
@@ -110,10 +82,9 @@ A follow-up pass tightened several areas beyond the initial slice:
 - **Static IP / guard hardening**: the reused reservation's address type and subnet are checked
   against expectations on both the new-VM and existing-VM paths; a reservation create that succeeds
   but can't be read back is an explicit, named error instead of a silent `set -e` exit; the
-  existing-VM promote path validates the current IP looks like IPv4 before using it; the hub URL
-  guard now also checks the reservation's marker, that its address matches the VM's resolved
-  internal IP, and that the hub-allow rule's source range matches the discovered pod CIDR (not just
-  that both resources exist).
+  existing-VM promote path validates the current IP looks like IPv4 before using it; the internal
+  IP guard checks the reservation's marker and that its address matches the VM's resolved internal
+  IP.
 - **Test harness**: the suite's own `TMPDIR` usage is now bounded to a single run-scoped directory,
   removed in one shot on exit, with a self-check that it's empty afterward; the create-mode wiring
   tests wait on a sentinel with a large timeout and fail loudly if it's never reached, instead of a
@@ -124,7 +95,7 @@ A follow-up pass tightened several areas beyond the initial slice:
   unknown (not just absent) check result treated as a hard failure at every namespace/PV/PVC lookup
   site, including in teardown; a realistic kubectl permission-denied message that also matches the
   literal not-found shape; the Cloud Run proxy's marker label actually reaching the `run deploy`
-  call; and every field of the hub-allow firewall rule's drift check (not just its source range).
+  call; and every field of the hub-deny firewall rule's drift check (not just its source range).
 
 ## Test harness
 
@@ -134,7 +105,7 @@ A follow-up pass tightened several areas beyond the initial slice:
 mutually-agreeing pod CIDR so existing tests didn't need to change. `tests/lib/gcloud` gained
 `compute addresses describe/create/delete/list` handlers. New coverage in `test_hybrid_tier.sh`
 spans pod CIDR discovery, all four static-IP paths (new-VM reserve/reuse/refuse/list-error,
-existing-VM promote/reuse/drift/refuse, teardown check/delete), and the hub URL guard; new
+existing-VM promote/reuse/drift/refuse, teardown check/delete), and the internal IP guard; new
 `test_deploy_wiring.sh` cases cover the actual deploy.sh-level wiring for the reservation's
 teardown delete (unmarked-aborts, deleted-when-gone, kept-when-not-gone, ordering after the VM
 delete), mirroring the existing pattern for the NFS firewall rules.

@@ -13,7 +13,7 @@ supported attach target. This source exists identically for both cluster types.
 ## Discovery
 
 From the cluster's own describe call: its network, and its pod CIDR (already read for the
-hub-allow rule). A `firewall-rules list` on that network finds the candidate rule: name matching
+hub-deny rule). A `firewall-rules list` on that network finds the candidate rule: name matching
 `gke-<suffix>-all`, direction INGRESS, source ranges including the cluster's pod CIDR (pod CIDRs
 are unique within a VPC, which is what ties the rule to this specific cluster without needing to
 reconstruct GKE's own name-truncation and hashing scheme). That rule must carry exactly one target
@@ -23,7 +23,7 @@ all refuse to guess and fail, listing what was found and naming the cluster's ow
 (not this script) as where to fix it. Nothing is created before this check passes.
 
 Unchanged: the NFS allow rule still sources from the discovered tag (kubelet mounts from the
-node's own primary IP, so a tag-based source is still correct for it); the hub-allow rule keeps
+node's own primary IP, so a tag-based source is still correct for it); the hub-deny rule keeps
 its pod-CIDR source range; the NFS export's client list stays the node subnet.
 
 ## Tests
