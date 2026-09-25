@@ -95,6 +95,10 @@ func substrateServeInitOptions(forwardTermSignal bool) (InitRunOptions, error) {
 	if err != nil {
 		return InitRunOptions{}, err
 	}
+	// One line per start, quoting only the path: a later chdir failure
+	// (e.g. a TOCTOU race) surfaces as a bare "permission denied" that
+	// doesn't name the directory, so this is what makes that diagnosable.
+	log.Info("substrate-serve: harness working directory %q", workingDir)
 	return InitRunOptions{
 		ForwardTermSignal: forwardTermSignal,
 		// RequirePrivilegeDrop: true — substrate always starts the actor as
@@ -111,16 +115,22 @@ func substrateServeInitOptions(forwardTermSignal bool) (InitRunOptions, error) {
 // privilegeDropPreconditionDeps: no test should depend on this machine's
 // real SCION_WORKSPACE_PATH, filesystem, or "scion" user.
 type substrateHarnessCwdDeps struct {
-	getenv     func(string) string
-	stat       func(string) (os.FileInfo, error)
-	lookupUser func(string) (*user.User, error)
+	getenv func(string) string
+	stat   func(string) (os.FileInfo, error)
+	// evalSymlinks resolves a candidate to its target, the same way
+	// dirUsableForScion needs to in order to check the target's own
+	// ancestors (stat alone follows the final symlink but says nothing
+	// about what's above it) — see dirUsableForScion's doc comment.
+	evalSymlinks func(string) (string, error)
+	lookupUser   func(string) (*user.User, error)
 }
 
 // defaultSubstrateHarnessCwdDeps wires resolveSubstrateHarnessCwd to the
 // real process environment, filesystem, and "scion" user.
 var defaultSubstrateHarnessCwdDeps = substrateHarnessCwdDeps{
-	getenv: os.Getenv,
-	stat:   os.Stat,
+	getenv:       os.Getenv,
+	stat:         os.Stat,
+	evalSymlinks: filepath.EvalSymlinks,
 	// Wraps the scionUserLookup var in a closure, not its current value, for
 	// the same reason as defaultPrivilegeDropPreconditionDeps.lookupUser.
 	lookupUser: func(username string) (*user.User, error) { return scionUserLookup(username) },
@@ -166,14 +176,21 @@ func resolveSubstrateHarnessCwd(d substrateHarnessCwdDeps) (string, error) {
 	}
 	uid, gid := uint32(uid64), uint32(gid64)
 
+	// chosen holds tryCandidate's own filepath.Clean of whichever candidate
+	// passed, so the canonical (but still logical — see dirUsableForScion's
+	// doc comment on symlinks) spelling is what gets returned and, later,
+	// what PWD carries — never the raw, possibly non-canonical input.
 	var tried []string
+	var chosen string
 	tryCandidate := func(path string) bool {
-		ok, reason := dirUsableForScion(d, path, uid, gid)
+		clean := filepath.Clean(path)
+		ok, reason := dirUsableForScion(d, clean, uid, gid)
 		if ok {
+			chosen = clean
 			return true
 		}
-		log.Info("substrate-serve: harness working directory candidate %q is not usable (%s)", path, reason)
-		tried = append(tried, fmt.Sprintf("%q (%s)", path, reason))
+		log.Info("substrate-serve: harness working directory candidate %q is not usable (%s)", clean, reason)
+		tried = append(tried, fmt.Sprintf("%q (%s)", clean, reason))
 		return false
 	}
 
@@ -187,11 +204,11 @@ func resolveSubstrateHarnessCwd(d substrateHarnessCwdDeps) (string, error) {
 		workspace = ""
 	}
 	if workspace != "" && tryCandidate(workspace) {
-		return workspace, nil
+		return chosen, nil
 	}
 
 	if home := scionUser.HomeDir; tryCandidate(home) {
-		return home, nil
+		return chosen, nil
 	}
 
 	return "", fmt.Errorf("substrate: no usable harness working directory for uid %d: tried %s", uid, strings.Join(tried, ", "))
@@ -200,13 +217,50 @@ func resolveSubstrateHarnessCwd(d substrateHarnessCwdDeps) (string, error) {
 // dirUsableForScion reports whether candidate and every ancestor directory
 // up to "/" exist, are directories, and are searchable (execute bit) by
 // uid/gid — the exact traversal a chdir(candidate) needs to succeed as that
-// uid. candidate itself is never "/": falling back to the root directory is
-// the bug this whole resolution exists to avoid.
+// uid. candidate is filepath.Clean'd first, so a non-canonical spelling
+// (e.g. "/.", "//", or "/tmp/..") can't slip past the "never '/'" guard —
+// parentDirs already cleans its own output, so an uncleaned candidate could
+// previously reach that guard already reduced to "/" and pass it. The
+// cleaned value is what dirsSearchable is walked against; candidate itself
+// is never "/" after cleaning.
+//
+// stat(dir) follows the final symlink in dir, but says nothing about a
+// symlink's target's own ancestors — a candidate that is itself a symlink
+// (e.g. "/workspace" -> "/data/ws") can pass the lexical walk above while
+// still being unreachable if "/data" isn't searchable, since chdir has to
+// traverse the resolved path too. So, separately, the candidate is resolved
+// with EvalSymlinks and — only when that changes anything — the resolved
+// path's own ancestor chain is walked the same way. An EvalSymlinks error
+// (a broken symlink, a cycle, ...) makes the candidate unusable outright,
+// with that error as the reason. Either way, the *candidate* (never the
+// resolved path) is what the caller returns, so PWD/cmd.Dir stay logical.
 func dirUsableForScion(d substrateHarnessCwdDeps, candidate string, uid, gid uint32) (ok bool, reason string) {
+	candidate = filepath.Clean(candidate)
 	if candidate == "/" {
 		return false, "refusing to use the root directory"
 	}
-	for _, dir := range append(parentDirs(candidate), candidate) {
+	if ok, reason := dirsSearchable(d, append(parentDirs(candidate), candidate), uid, gid); !ok {
+		return false, reason
+	}
+
+	real, err := d.evalSymlinks(candidate)
+	if err != nil {
+		return false, fmt.Sprintf("cannot resolve symlinks: %v", err)
+	}
+	if real != candidate {
+		if ok, reason := dirsSearchable(d, append(parentDirs(real), real), uid, gid); !ok {
+			return false, reason
+		}
+	}
+	return true, ""
+}
+
+// dirsSearchable reports whether every directory in dirs exists, is a
+// directory, and is searchable (execute bit) by uid/gid — the shared walk
+// dirUsableForScion runs once for candidate's own lexical ancestor chain
+// and, when it differs, again for its resolved (symlink target) chain.
+func dirsSearchable(d substrateHarnessCwdDeps, dirs []string, uid, gid uint32) (ok bool, reason string) {
+	for _, dir := range dirs {
 		info, err := d.stat(dir)
 		if err != nil {
 			return false, "missing"
@@ -219,6 +273,33 @@ func dirUsableForScion(d substrateHarnessCwdDeps, candidate string, uid, gid uin
 		}
 	}
 	return true, ""
+}
+
+// substrateServeReportCwdFailure reports the no-usable-harness-cwd (exit-18)
+// failure to the Hub the same way requirePrivilegeDropOrFail's failure does
+// in RunInit (init.go): a best-effort direct Hub call plus local agent-info
+// state, via the shared reportInitFailure helper. Without this, the Hub is
+// never told the agent failed on this path, since it returns before
+// RunInit — and hence before RunInit's own reportInitFailure calls — ever
+// runs; only the actor log and healthz's StateInitFailed would show it. See
+// reportInitFailure's doc comment for why the direct Hub call is the
+// primary signal on substrate specifically. cause is always
+// resolveSubstrateHarnessCwd's own paths+uid-only error, never one built
+// from raw input, so it's safe to surface verbatim per reportInitFailure's
+// contract.
+//
+// agentHome (where the local agent-info.json write lands) mirrors
+// resolveAgentHome's own rootless fallback: the scion user's home when it
+// can be looked up, else $HOME. Substrate always runs this path as root
+// before any privilege drop, so — unlike the harness child itself — this
+// process can typically still write there even when resolveSubstrateHarnessCwd
+// judged the same directory unusable for the dropped-privilege child.
+func substrateServeReportCwdFailure(d substrateHarnessCwdDeps, cause error) {
+	agentHome := os.Getenv("HOME")
+	if scionUser, err := d.lookupUser("scion"); err == nil {
+		agentHome = scionUser.HomeDir
+	}
+	reportInitFailure(agentHome, cause)
 }
 
 // substrateServePrivilegeDropChecker is the substrate.PrivilegeDropChecker
@@ -287,8 +368,11 @@ func newSubstrateServeServer(runInit func(argv []string, opts InitRunOptions) in
 				// doc comment): never invoke runInit with no usable
 				// WorkingDir. Logged in full (paths + uid only, no
 				// secrets); the exit code alone flips healthz to
-				// StateInitFailed the same way any other init failure does.
+				// StateInitFailed the same way any other init failure does,
+				// and substrateServeReportCwdFailure gives the Hub the same
+				// direct report RunInit's own failure paths would.
 				log.Error("substrate-serve: %v", err)
+				substrateServeReportCwdFailure(defaultSubstrateHarnessCwdDeps, err)
 				return exitCodeNoUsableHarnessCwd
 			}
 			return runInit(argv, opts)

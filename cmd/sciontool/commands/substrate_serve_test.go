@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 )
 
@@ -479,7 +480,11 @@ func fakeSubstrateHarnessCwdDeps(env map[string]string, leafDirs map[string]fs.F
 			}
 			return nil, fmt.Errorf("stat %s: no such file or directory", p)
 		},
-		lookupUser: fakeScionUserForHarnessCwd,
+		// None of these fake paths are real symlinks, so resolving one is a
+		// no-op; a test exercising the symlink-target check below wires its
+		// own evalSymlinks against a real filesystem instead.
+		evalSymlinks: func(p string) (string, error) { return p, nil },
+		lookupUser:   fakeScionUserForHarnessCwd,
 	}
 }
 
@@ -642,6 +647,110 @@ func TestResolveSubstrateHarnessCwd_NeverFallsBackToRoot(t *testing.T) {
 	}
 }
 
+// TestResolveSubstrateHarnessCwd_CanonicalisesNonCanonicalRootSpellings is
+// the canonicalisation Optional from round 2: dirUsableForScion's "never
+// '/'" guard used to be a plain string comparison, and parentDirs already
+// cleans its own output, so a candidate that is merely a non-canonical
+// spelling of "/" reached the guard already reduced to "/" and slipped
+// through it. Every spelling below is lexically "/" and must still be
+// refused, whether it arrives via SCION_WORKSPACE_PATH...
+func TestResolveSubstrateHarnessCwd_CanonicalisesNonCanonicalRootSpellings(t *testing.T) {
+	for _, spelling := range []string{"/.", "//", "/tmp/.."} {
+		t.Run(spelling, func(t *testing.T) {
+			d := fakeSubstrateHarnessCwdDeps(
+				map[string]string{"SCION_WORKSPACE_PATH": spelling},
+				map[string]fs.FileInfo{},
+			)
+			d.lookupUser = func(string) (*user.User, error) {
+				return &user.User{Uid: "1000", Gid: "1000", HomeDir: "/nope"}, nil
+			}
+			got, err := resolveSubstrateHarnessCwd(d)
+			if got == "/" {
+				t.Fatalf("resolveSubstrateHarnessCwd() = %q, must never fall back to \"/\" (non-canonical spelling %q)", got, spelling)
+			}
+			if err == nil {
+				t.Fatalf("resolveSubstrateHarnessCwd() = %q, <nil>, want an error", got)
+			}
+		})
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_CanonicalisesHomeDirRootSpelling is the
+// same guard exercised through the scion user's HomeDir (e.g. an
+// /etc/passwd entry of "/.") instead of SCION_WORKSPACE_PATH.
+func TestResolveSubstrateHarnessCwd_CanonicalisesHomeDirRootSpelling(t *testing.T) {
+	d := fakeSubstrateHarnessCwdDeps(
+		map[string]string{"SCION_WORKSPACE_PATH": "/nope"},
+		map[string]fs.FileInfo{},
+	)
+	d.lookupUser = func(string) (*user.User, error) {
+		return &user.User{Uid: "1000", Gid: "1000", HomeDir: "/."}, nil
+	}
+	got, err := resolveSubstrateHarnessCwd(d)
+	if got == "/" {
+		t.Fatalf("resolveSubstrateHarnessCwd() = %q, must never fall back to \"/\" (HomeDir \"/.\")", got)
+	}
+	if err == nil {
+		t.Fatalf("resolveSubstrateHarnessCwd() = %q, <nil>, want an error", got)
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_ReturnsCanonicalPath proves the other half
+// of the canonicalisation fix: a usable candidate that is merely spelled
+// non-canonically is returned cleaned, not verbatim, so PWD ends up
+// canonical too (see dirUsableForScion's doc comment).
+func TestResolveSubstrateHarnessCwd_ReturnsCanonicalPath(t *testing.T) {
+	d := fakeSubstrateHarnessCwdDeps(
+		map[string]string{"SCION_WORKSPACE_PATH": "/workspace/."},
+		map[string]fs.FileInfo{"/workspace": usableDirInfo},
+	)
+	got, err := resolveSubstrateHarnessCwd(d)
+	if err != nil {
+		t.Fatalf("resolveSubstrateHarnessCwd() error = %v", err)
+	}
+	if got != "/workspace" {
+		t.Errorf("resolveSubstrateHarnessCwd() = %q, want the canonical %q", got, "/workspace")
+	}
+}
+
+// TestResolveSubstrateHarnessCwd_FallsBackWhenSymlinkTargetParentUnsearchable
+// is the symlink-target Optional from round 2: a candidate that is itself a
+// symlink can pass the lexical ancestor walk — stat follows the final
+// symlink, and a root process's plain stat succeeds regardless of the
+// target's own ancestor permissions — while its resolved target sits behind
+// a directory the scion uid/gid can't actually search. supervisor.Run's
+// chdir happens after the privilege drop, so that's what has to hold, not
+// what this (root) process's own stat can reach. Modelled with a fake
+// evalSymlinks so the resolved target's parent can be independently stat'd
+// as root-owned 0700 — the same "unusable" fixture
+// FallsBackWhenWorkspaceNotSearchableByScionUID uses, just reached via the
+// resolved path instead of the lexical one.
+func TestResolveSubstrateHarnessCwd_FallsBackWhenSymlinkTargetParentUnsearchable(t *testing.T) {
+	rootOnly := fakeFileInfo{mode: fs.ModeDir | 0o700, uid: 0, gid: 0}
+	d := fakeSubstrateHarnessCwdDeps(
+		map[string]string{"SCION_WORKSPACE_PATH": "/workspace"},
+		map[string]fs.FileInfo{
+			"/workspace":  usableDirInfo, // the symlink itself: lexically fine
+			"/data/ws":    usableDirInfo, // the resolved target itself: fine
+			"/data":       rootOnly,      // the target's parent: root-only 0700
+			"/home/scion": usableDirInfo,
+		},
+	)
+	d.evalSymlinks = func(p string) (string, error) {
+		if p == "/workspace" {
+			return "/data/ws", nil
+		}
+		return p, nil
+	}
+	got, err := resolveSubstrateHarnessCwd(d)
+	if err != nil {
+		t.Fatalf("resolveSubstrateHarnessCwd() error = %v", err)
+	}
+	if got != "/home/scion" {
+		t.Errorf("resolveSubstrateHarnessCwd() = %q, want fallback %q (the symlink target's parent, /data, is root-only 0700)", got, "/home/scion")
+	}
+}
+
 // TestResolveSubstrateHarnessCwd_ScionUserLookupFails_ReturnsError covers
 // the "scion" user itself being unresolvable — resolveSubstrateHarnessCwd
 // has no uid/gid to gate any candidate on, so it must fail rather than
@@ -686,6 +795,70 @@ func TestResolveSubstrateHarnessCwd_BothUnusable_ReturnsErrorNamingPathsAndUID(t
 	}
 }
 
+// -----------------------------------------------------------------------
+// substrateServeReportCwdFailure (the exit-18 Hub report Optional).
+// -----------------------------------------------------------------------
+
+// TestSubstrateServeReportCwdFailure_WritesPhaseErrorAndMessage proves the
+// no-usable-harness-cwd path reports to local agent-info state the same way
+// reportInitFailure's other callers do (see
+// TestReportInitFailure_WritesPhaseErrorAndMessage), driven directly
+// against a fake lookupUser and a temp directory rather than through the
+// real resolveSubstrateHarnessCwd/newSubstrateServeServer wiring — that
+// wiring is covered separately by
+// TestSubstrateServeBootstrap_NoUsableHarnessCwd_ReportsInitFailureToLocalState.
+func TestSubstrateServeReportCwdFailure_WritesPhaseErrorAndMessage(t *testing.T) {
+	scrubHubEnv(t)
+	tmpHome := t.TempDir()
+	cause := fmt.Errorf("substrate: no usable harness working directory for uid 1000: tried %q (missing), %q (missing)", "/workspace", "/home/scion")
+
+	substrateServeReportCwdFailure(substrateHarnessCwdDeps{
+		lookupUser: func(string) (*user.User, error) {
+			return &user.User{HomeDir: tmpHome}, nil
+		},
+	}, cause)
+
+	raw, err := os.ReadFile(filepath.Join(tmpHome, "agent-info.json"))
+	if err != nil {
+		t.Fatalf("expected agent-info.json to be written: %v", err)
+	}
+	var info struct {
+		Phase  string `json:"phase"`
+		Detail struct {
+			Message string `json:"message"`
+		} `json:"detail"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		t.Fatalf("unmarshal agent-info.json %q: %v", raw, err)
+	}
+	if info.Phase != string(state.PhaseError) {
+		t.Errorf("agent-info.json phase = %q, want %q", info.Phase, state.PhaseError)
+	}
+	if info.Detail.Message != cause.Error() {
+		t.Errorf("agent-info.json detail.message = %q, want %q", info.Detail.Message, cause.Error())
+	}
+}
+
+// TestSubstrateServeReportCwdFailure_FallsBackToHOMEWhenScionUserLookupFails
+// covers substrateServeReportCwdFailure's own fallback: if the "scion" user
+// can't be looked up either, the local report still has to land somewhere,
+// so it falls back to $HOME — mirroring resolveAgentHome's own rootless
+// fallback (init.go) — rather than losing the report entirely.
+func TestSubstrateServeReportCwdFailure_FallsBackToHOMEWhenScionUserLookupFails(t *testing.T) {
+	scrubHubEnv(t)
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	cause := fmt.Errorf("substrate: cannot resolve the scion user for the harness working directory: user: unknown user scion")
+
+	substrateServeReportCwdFailure(substrateHarnessCwdDeps{
+		lookupUser: func(string) (*user.User, error) { return nil, fmt.Errorf("user: unknown user scion") },
+	}, cause)
+
+	if _, err := os.ReadFile(filepath.Join(tmpHome, "agent-info.json")); err != nil {
+		t.Fatalf("expected agent-info.json to be written under the $HOME fallback: %v", err)
+	}
+}
+
 // assertRealChdirSucceeds spawns a real child process with cmd.Dir=dir — the
 // same mechanism supervisor.Run uses — and fails the test if the child
 // can't actually start there. This is what makes the tests below assert the
@@ -724,8 +897,9 @@ func assertRealChdirFails(t *testing.T, dir string) {
 func TestResolveSubstrateHarnessCwd_EffectiveCwd_WorkspaceReallyEnterable(t *testing.T) {
 	workspace := t.TempDir()
 	d := substrateHarnessCwdDeps{
-		getenv: func(k string) string { return map[string]string{"SCION_WORKSPACE_PATH": workspace}[k] },
-		stat:   os.Stat,
+		getenv:       func(k string) string { return map[string]string{"SCION_WORKSPACE_PATH": workspace}[k] },
+		stat:         os.Stat,
+		evalSymlinks: filepath.EvalSymlinks,
 		lookupUser: func(string) (*user.User, error) {
 			return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: t.TempDir()}, nil
 		},
@@ -758,8 +932,9 @@ func TestResolveSubstrateHarnessCwd_EffectiveCwd_FallsBackWhenWorkspaceReallyUns
 	home := t.TempDir()
 
 	d := substrateHarnessCwdDeps{
-		getenv: func(k string) string { return map[string]string{"SCION_WORKSPACE_PATH": workspace}[k] },
-		stat:   os.Stat,
+		getenv:       func(k string) string { return map[string]string{"SCION_WORKSPACE_PATH": workspace}[k] },
+		stat:         os.Stat,
+		evalSymlinks: filepath.EvalSymlinks,
 		lookupUser: func(string) (*user.User, error) {
 			return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: home}, nil
 		},
@@ -792,8 +967,9 @@ func TestResolveSubstrateHarnessCwd_EffectiveCwd_BothReallyUnusable_Errors(t *te
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 	}
 	d := substrateHarnessCwdDeps{
-		getenv: func(k string) string { return map[string]string{"SCION_WORKSPACE_PATH": workspace}[k] },
-		stat:   os.Stat,
+		getenv:       func(k string) string { return map[string]string{"SCION_WORKSPACE_PATH": workspace}[k] },
+		stat:         os.Stat,
+		evalSymlinks: filepath.EvalSymlinks,
 		lookupUser: func(string) (*user.User, error) {
 			return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: home}, nil
 		},
@@ -807,6 +983,38 @@ func TestResolveSubstrateHarnessCwd_EffectiveCwd_BothReallyUnusable_Errors(t *te
 	}
 	assertRealChdirFails(t, workspace)
 	assertRealChdirFails(t, home)
+}
+
+// TestResolveSubstrateHarnessCwd_EffectiveCwd_SymlinkedWorkspaceReallyEnterable
+// proves the added symlink-target check (see
+// FallsBackWhenSymlinkTargetParentUnsearchable) doesn't reject an ordinary,
+// fully-accessible symlinked workspace — e.g. a bind mount surfaced as a
+// symlink, the common case this must keep working — and that the returned
+// (and real-chdir-checked) value is the logical symlink path, not its
+// resolved target.
+func TestResolveSubstrateHarnessCwd_EffectiveCwd_SymlinkedWorkspaceReallyEnterable(t *testing.T) {
+	target := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace-link")
+	if err := os.Symlink(target, workspace); err != nil {
+		t.Fatal(err)
+	}
+
+	d := substrateHarnessCwdDeps{
+		getenv:       func(k string) string { return map[string]string{"SCION_WORKSPACE_PATH": workspace}[k] },
+		stat:         os.Stat,
+		evalSymlinks: filepath.EvalSymlinks,
+		lookupUser: func(string) (*user.User, error) {
+			return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: t.TempDir()}, nil
+		},
+	}
+	got, err := resolveSubstrateHarnessCwd(d)
+	if err != nil {
+		t.Fatalf("resolveSubstrateHarnessCwd() error = %v", err)
+	}
+	if got != workspace {
+		t.Fatalf("resolveSubstrateHarnessCwd() = %q, want the logical symlink path %q, not its resolved target", got, workspace)
+	}
+	assertRealChdirSucceeds(t, got)
 }
 
 // TestSubstrateServeInitOptions_SetsWorkingDirFromRealEnv drives
@@ -931,6 +1139,83 @@ func TestSubstrateServeBootstrap_ThreadsWorkingDirToInitRunner(t *testing.T) {
 	}
 	if !got.opts.RequirePrivilegeDrop {
 		t.Error("init runner InitRunOptions.RequirePrivilegeDrop = false, want true (unaffected by this change)")
+	}
+}
+
+// TestSubstrateServeBootstrap_NoUsableHarnessCwd_ReportsInitFailureToLocalState
+// drives a real bootstrap request through newSubstrateServeServer (the same
+// wiring runSubstrateServe uses) all the way to the no-usable-harness-cwd
+// (exit-18) path, and proves substrateServeReportCwdFailure is actually
+// wired in there — not just available as a helper — the same way
+// TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure proves RunInit's
+// own staged-secrets failure path is wired to reportInitFailure.
+//
+// Both candidates are made unusable by giving the scion identity a uid/gid
+// that doesn't match this test process's own (real files/dirs are owned by
+// the real test process, so an unrelated uid/gid fails canSearchDir's
+// owner/group checks and, since t.TempDir() dirs are typically not
+// world-searchable, its "other" check too — no chmod needed). The local
+// agent-info.json write itself still succeeds because it runs as this
+// (real, owning) process, not as the simulated scion uid — exactly the
+// substrate-serve-runs-as-root-before-the-drop asymmetry
+// substrateServeReportCwdFailure's own doc comment describes.
+func TestSubstrateServeBootstrap_NoUsableHarnessCwd_ReportsInitFailureToLocalState(t *testing.T) {
+	scrubHubEnv(t)
+	origPD := defaultPrivilegeDropPreconditionDeps
+	t.Cleanup(func() { defaultPrivilegeDropPreconditionDeps = origPD })
+	defaultPrivilegeDropPreconditionDeps = fakePrivilegeDropDeps(t)
+
+	agentHome := t.TempDir()
+	workspace := t.TempDir()
+	withScionUserLookup(t, func(string) (*user.User, error) {
+		return &user.User{Uid: "1", Gid: "1", HomeDir: agentHome}, nil
+	})
+	t.Setenv("SCION_WORKSPACE_PATH", workspace)
+
+	var initCalled bool
+	stubRunInit := func(argv []string, opts InitRunOptions) int {
+		initCalled = true
+		return 0
+	}
+
+	srv := newSubstrateServeServer(stubRunInit)
+	rec := doSubstrateServeJSON(t, srv, "POST", "/scion/v1/bootstrap", "any-token", map[string]any{
+		"env":           map[string]string{},
+		"files":         []any{},
+		"start_cmd":     "true",
+		"control_token": "tok",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d, want 200 (the no-usable-cwd failure surfaces asynchronously, after acceptance — see handleBootstrap); body=%s", rec.Code, rec.Body.String())
+	}
+
+	// handleBootstrap runs the init runner in its own goroutine; poll for
+	// the report rather than assuming it has landed by the time doSubstrateServeJSON
+	// returns.
+	var raw []byte
+	var readErr error
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, readErr = os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
+		if readErr == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if readErr != nil {
+		t.Fatalf("expected agent-info.json to be written to the scion home after the no-usable-cwd path: %v", readErr)
+	}
+	if initCalled {
+		t.Error("the init runner was invoked despite no usable harness cwd; the harness must never start")
+	}
+	var info struct {
+		Phase string `json:"phase"`
+	}
+	if err := json.Unmarshal(raw, &info); err != nil {
+		t.Fatalf("unmarshal agent-info.json %q: %v", raw, err)
+	}
+	if info.Phase != string(state.PhaseError) {
+		t.Errorf("agent-info.json phase = %q, want %q", info.Phase, state.PhaseError)
 	}
 }
 
