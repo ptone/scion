@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -616,10 +617,72 @@ func getHealthz(ctx context.Context, router *substrate.RouterClient, atespace, a
 // compromise indicator (see Run's handling of this sentinel).
 var errBootstrapHijacked = errors.New("bootstrap rejected: actor was already bootstrapped by another caller")
 
+// bootstrapPathErrorMiddle and bootstrapPathErrorTail are the two fixed
+// substrings of pkg/sciontool/substrate's bootstrapPathError.Error() wire
+// text: "<code>: bootstrap file <quoted path> rejected: <detail>". They are
+// the client-side half of that wire contract — parseBootstrapPathError
+// splits on them rather than a regexp so an arbitrary path (quotes,
+// whitespace, anything strconv.Quote can round-trip) never needs escaping
+// twice.
+const (
+	bootstrapPathErrorMiddle = ": bootstrap file "
+	bootstrapPathErrorTail   = " rejected: "
+)
+
+// parseBootstrapPathError extracts the stable code, the offending path, and
+// the human-readable detail from a 422 response body shaped like
+// pkg/sciontool/substrate's bootstrapPathError.Error(). ok is false if body
+// doesn't match that shape (a server that doesn't speak this contract, or a
+// future body format this client hasn't caught up to yet) — callers must
+// still surface body as-is rather than silently dropping it.
+func parseBootstrapPathError(body string) (code, path, detail string, ok bool) {
+	body = strings.TrimSpace(body)
+	i := strings.Index(body, bootstrapPathErrorMiddle)
+	if i < 0 {
+		return "", "", "", false
+	}
+	code = body[:i]
+	rest := body[i+len(bootstrapPathErrorMiddle):]
+	j := strings.Index(rest, bootstrapPathErrorTail)
+	if j < 0 {
+		return "", "", "", false
+	}
+	quotedPath := rest[:j]
+	detail = rest[j+len(bootstrapPathErrorTail):]
+	p, err := strconv.Unquote(quotedPath)
+	if err != nil {
+		return "", "", "", false
+	}
+	return code, p, detail, true
+}
+
+// bootstrapPathRejectedError is returned by postBootstrap when the control
+// server answers 422 for a bootstrap file whose Path failed validation (see
+// pkg/sciontool/substrate's bootstrapPathError — this is the client-side
+// mirror of that wire contract). Code and Path are configuration, never
+// secret (phase1-spec.md Addendum B), and are safe to log and return as-is.
+// If the body doesn't parse (parseBootstrapPathError's ok is false), Code
+// and Path stay empty and Detail carries the raw body, so nothing is
+// silently dropped either way.
+type bootstrapPathRejectedError struct {
+	code   string
+	path   string
+	detail string
+}
+
+func (e *bootstrapPathRejectedError) Error() string {
+	if e.code == "" && e.path == "" {
+		return fmt.Sprintf("substrate: bootstrap rejected a file path (422): %s", e.detail)
+	}
+	return fmt.Sprintf("substrate: bootstrap rejected file %s (%s): %s", e.path, e.code, e.detail)
+}
+
 // postBootstrap sends the bootstrap payload through the router, authorized
 // with nonce (phase1-spec.md §2.1). Any non-2xx status is an error; 409
 // specifically becomes errBootstrapHijacked (see its doc comment) rather
-// than being treated as an idempotent no-op.
+// than being treated as an idempotent no-op, and 422 becomes
+// bootstrapPathRejectedError (see its doc comment) rather than falling into
+// the generic "other write failures" case below.
 func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace, actorName, nonce string, req bootstrapRequest) error {
 	ctx, cancel := context.WithTimeout(ctx, bootstrapRequestTimeout)
 	defer cancel()
@@ -645,6 +708,13 @@ func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace
 		return errBootstrapHijacked
 	}
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusUnprocessableEntity {
+		code, path, detail, ok := parseBootstrapPathError(string(msg))
+		if !ok {
+			detail = string(msg)
+		}
+		return &bootstrapPathRejectedError{code: code, path: path, detail: detail}
+	}
 	return fmt.Errorf("substrate: bootstrap %s/%s failed: status %d: %s", atespace, actorName, resp.StatusCode, string(msg))
 }
 

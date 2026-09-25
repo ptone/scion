@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -26,6 +27,39 @@ var (
 	errInvalidBootstrapPath    = errors.New("bootstrap file path must be a non-empty absolute path")
 	errInvalidBootstrapContent = errors.New("bootstrap file content_b64 is not valid base64")
 )
+
+// Stable, machine-readable codes carried by bootstrapPathError (see its doc
+// comment). These are wire contract: the runtime client
+// (pkg/runtime/substrate_bootstrap.go) parses them out of the HTTP 422
+// response body to decide how to report a rejected bootstrap file, so a
+// value here must never change once shipped, only gain siblings.
+const (
+	// codeBootstrapPathSymlink names the errSymlinkComponent case: some
+	// component of the file's path, at the time of the request, is a
+	// symlink.
+	codeBootstrapPathSymlink = "bootstrap_path_symlink"
+	// codeBootstrapPathInvalid names every other path-shape rejection: an
+	// empty or non-absolute Path, or a path component that exists but is
+	// not a directory (errNonDirComponent).
+	codeBootstrapPathInvalid = "bootstrap_path_invalid"
+)
+
+// bootstrapPathError is returned by writeBootstrapFile for a bootstrap file
+// whose Path fails validation, and is what makes handleBootstrap answer
+// HTTP 422 with a stable Code instead of the generic 500 every other write
+// failure gets. Path is always the bootstrap file's own Path exactly as the
+// caller sent it — never an internal ancestor mkdirAllTracked found the
+// problem at, and never file content, which is secret-grade and must never
+// reach a response or a log line (phase1-spec.md §2.1).
+type bootstrapPathError struct {
+	code   string
+	path   string
+	detail string // human-readable, content-free
+}
+
+func (e *bootstrapPathError) Error() string {
+	return fmt.Sprintf("%s: bootstrap file %s rejected: %s", e.code, strconv.Quote(e.path), e.detail)
+}
 
 // errSymlinkComponent is returned by mkdirAllTracked when a path component
 // that already exists on disk is a symlink. Bootstrap must never create or
@@ -40,6 +74,19 @@ type errSymlinkComponent struct {
 
 func (e *errSymlinkComponent) Error() string {
 	return fmt.Sprintf("path component %s is a symlink", e.path)
+}
+
+// errNonDirComponent is returned by mkdirAllTracked when a path component
+// that already exists on disk is not a directory (e.g. a plain file sits
+// where a bootstrap file's parent directory needs to be). Like
+// errSymlinkComponent, this names only the offending path; writeBootstrapFile
+// re-wraps it naming the bootstrap file's own Path.
+type errNonDirComponent struct {
+	path string
+}
+
+func (e *errNonDirComponent) Error() string {
+	return fmt.Sprintf("path component %s is not a directory", e.path)
 }
 
 // mkdirAllTracked behaves like os.MkdirAll(dir, perm), but never follows a
@@ -90,7 +137,7 @@ func mkdirAllTracked(dir string, perm os.FileMode) ([]string, error) {
 				return nil, &errSymlinkComponent{path: p}
 			}
 			if !info.IsDir() {
-				return nil, &os.PathError{Op: "mkdir", Path: p, Err: os.ErrExist}
+				return nil, &errNonDirComponent{path: p}
 			}
 			continue
 		}

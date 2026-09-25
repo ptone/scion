@@ -207,7 +207,7 @@ func TestHomeBootstrapFiles_SymlinkedDirectoryOutsideHomeIsNotDescendedInto(t *t
 		t.Fatalf("homeBootstrapFiles: %v", err)
 	}
 	if len(files) != 0 {
-		t.Fatalf("files = %+v, want none (the only home entry is a symlinked directory, which must be skipped, not descended into)", files)
+		t.Errorf("files = %+v, want none (the only home entry is a symlinked directory, which must be skipped, not descended into)", files)
 	}
 	for _, f := range files {
 		if got := decodeBootstrapFileContent(t, f); got == "outside-content" {
@@ -346,6 +346,61 @@ func TestBuildBootstrapFiles_PrecedenceHomeAuthSecret(t *testing.T) {
 	}
 	if got := decodeBootstrapFileContent(t, homeOnly); got != "home-only-content" {
 		t.Errorf("home-only content = %q, want %q", got, "home-only-content")
+	}
+}
+
+// TestBuildBootstrapFiles_CleanBeforeDedupeCollapsesDoubledSeparator proves
+// the claim that every entry's Path is filepath.Clean-ed before dedup,
+// not just home's (which is already effectively clean via filepath.Join): a
+// home file at "x" and an auth file whose ContainerPath is the differently
+// spelled but equivalent "/home/scion//x" must collapse to exactly one wire
+// entry, with the auth content winning (auth overrides home, per
+// precedence). Without the Clean at the auth/secret call sites, these would
+// survive dedup as two distinct paths and the actor would see a stray
+// "/home/scion//x" file rather than one clean override.
+func TestBuildBootstrapFiles_CleanBeforeDedupeCollapsesDoubledSeparator(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "x"), []byte("from-home"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	authFilePath := filepath.Join(t.TempDir(), "auth-src")
+	if err := os.WriteFile(authFilePath, []byte("from-auth"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := RunConfig{
+		UnixUsername: "scion",
+		HomeDir:      home,
+		ResolvedAuth: &api.ResolvedAuth{
+			Files: []api.FileMapping{
+				// Absolute and already equal to containerHome+"/x" once
+				// Cleaned, but spelled with a doubled separator so it would
+				// NOT string-equal "/home/scion/x" without Clean.
+				{SourcePath: authFilePath, ContainerPath: "/home/scion//x"},
+			},
+		},
+	}
+
+	files, err := buildBootstrapFiles(cfg)
+	if err != nil {
+		t.Fatalf("buildBootstrapFiles: %v", err)
+	}
+
+	var matches []bootstrapFile
+	for _, f := range files {
+		if f.Path == "/home/scion/x" || f.Path == "/home/scion//x" {
+			matches = append(matches, f)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("entries for x = %+v, want exactly 1 (Clean must collapse the doubled separator before dedup)", matches)
+	}
+	if matches[0].Path != "/home/scion/x" {
+		t.Errorf("path = %q, want the Cleaned form %q", matches[0].Path, "/home/scion/x")
+	}
+	if got := decodeBootstrapFileContent(t, matches[0]); got != "from-auth" {
+		t.Errorf("content = %q, want %q (the auth entry must win over home)", got, "from-auth")
 	}
 }
 

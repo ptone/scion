@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -300,6 +301,7 @@ type fakeActorServer struct {
 	mu              sync.Mutex
 	healthzState    string
 	bootstrapStatus int
+	bootstrapBody   string // written verbatim after the status line, if non-empty
 	lastBootstrap   *bootstrapRequest
 	execStatus      int
 	execResp        execResponse
@@ -325,11 +327,15 @@ func (s *fakeActorServer) handler() http.Handler {
 		s.mu.Lock()
 		s.lastBootstrap = &req
 		code := s.bootstrapStatus
+		respBody := s.bootstrapBody
 		s.mu.Unlock()
 		if code == 0 {
 			code = http.StatusOK
 		}
 		w.WriteHeader(code)
+		if respBody != "" {
+			_, _ = w.Write([]byte(respBody))
+		}
 	})
 	mux.HandleFunc(substrateExecPath, func(w http.ResponseWriter, r *http.Request) {
 		s.rec.record("exec")
@@ -639,6 +645,78 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 				t.Errorf("Run() failure did not clean up with DeleteActorEgressPolicy; calls = %v", calls)
 			}
 		})
+	}
+}
+
+// TestSubstrateRun_BootstrapPathRejectedSurfacesCodeAndPathNoContent proves
+// the broker-side contract for a rejected bootstrap path: when substrate-serve answers 422 for a
+// bootstrap file whose Path failed validation, Run's returned error names
+// both the stable code and the offending path (parsed by
+// parseBootstrapPathError out of the 422 response body), and never leaks
+// file content — even though this run's own ResolvedSecret carries a
+// sentinel, proving the client-side error-construction path itself
+// introduces no leak of its own.
+func TestSubstrateRun_BootstrapPathRejectedSurfacesCodeAndPathNoContent(t *testing.T) {
+	const contentSentinel = "FAKE-SENTINEL-secret-content-not-a-real-credential"
+	const rejectedPath = "/home/scion/.config/nested/secret.json"
+
+	rec := &callRecorder{}
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	fa.bootstrapStatus = http.StatusUnprocessableEntity
+	fa.bootstrapBody = `bootstrap_path_symlink: bootstrap file "` + rejectedPath + `" rejected: path traverses a symlink`
+
+	cfg := testSubstrateRunConfig()
+	cfg.ResolvedSecrets = []api.ResolvedSecret{
+		{Name: "S", Type: "file", Target: "~/.config/nested/secret.json", Value: contentSentinel},
+	}
+
+	_, err := rt.Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run() expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "bootstrap_path_symlink") {
+		t.Errorf("error = %v, want it to contain the stable code %q", err, "bootstrap_path_symlink")
+	}
+	if !strings.Contains(err.Error(), rejectedPath) {
+		t.Errorf("error = %v, want it to contain the rejected path %q", err, rejectedPath)
+	}
+	if strings.Contains(err.Error(), contentSentinel) {
+		t.Errorf("CREDENTIAL LEAK: error = %v, want it to NOT contain the file content", err)
+	}
+
+	calls := rec.list()
+	if !containsCall(calls, "DeleteActor") {
+		t.Errorf("Run() failure did not clean up with DeleteActor; calls = %v", calls)
+	}
+}
+
+// TestParseBootstrapPathError proves the client-side parse of
+// pkg/sciontool/substrate's bootstrapPathError wire text round-trips a path
+// containing characters strconv.Quote must escape (a space and a literal
+// quote), and that a body which doesn't match the expected shape reports
+// ok=false rather than a wrong split.
+func TestParseBootstrapPathError(t *testing.T) {
+	tricky := `/home/scion/weird "quoted" path/file`
+	body := `bootstrap_path_invalid: bootstrap file ` + strconv.Quote(tricky) + ` rejected: a path component exists and is not a directory`
+
+	code, path, detail, ok := parseBootstrapPathError(body)
+	if !ok {
+		t.Fatalf("parseBootstrapPathError(%q): ok = false, want true", body)
+	}
+	if code != "bootstrap_path_invalid" {
+		t.Errorf("code = %q, want %q", code, "bootstrap_path_invalid")
+	}
+	if path != tricky {
+		t.Errorf("path = %q, want %q", path, tricky)
+	}
+	if detail != "a path component exists and is not a directory" {
+		t.Errorf("detail = %q, want %q", detail, "a path component exists and is not a directory")
+	}
+
+	if _, _, _, ok := parseBootstrapPathError("failed to write bootstrap files"); ok {
+		t.Error("parseBootstrapPathError on a generic 500 body: ok = true, want false")
 	}
 }
 

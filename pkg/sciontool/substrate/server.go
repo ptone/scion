@@ -19,7 +19,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -289,6 +288,20 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 			// Deliberately do not include the file's content or the
 			// underlying error's arguments in the response/log beyond the
 			// path — content_b64 may carry secrets.
+			var pathErr *bootstrapPathError
+			if errors.As(err, &pathErr) {
+				// A path-shape rejection (symlink traversal, or an invalid
+				// path) is the caller's fault, not a server error: answer
+				// 422 with the error's stable Code and its own Path, so the
+				// broker can surface both without depending on this generic
+				// message's exact text (phase1-spec.md Addendum B).
+				// Path is configuration, not secret — file content is what
+				// must never appear here, and pathErr.Error() never
+				// includes it.
+				log.Error("bootstrap: rejected file %s: %s", pathErr.path, redactErr(err))
+				http.Error(w, pathErr.Error(), http.StatusUnprocessableEntity)
+				return
+			}
 			log.Error("bootstrap: failed to write file %s: %v", f.Path, redactErr(err))
 			http.Error(w, "failed to write bootstrap files", http.StatusInternalServerError)
 			return
@@ -358,9 +371,14 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 // writeBootstrapFile decodes and writes one bootstrap file, creating any
 // missing parent directories and chowning both the file and any directories
 // this call created to the scion user.
+//
+// A *bootstrapPathError return means the file's Path itself is the problem
+// (empty/relative, a non-directory component, or a symlink somewhere in its
+// ancestry) — handleBootstrap maps that to HTTP 422 with the error's stable
+// Code. Any other error is a generic write failure and stays a 500.
 func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 	if f.Path == "" || !filepath.IsAbs(f.Path) {
-		return errInvalidBootstrapPath
+		return &bootstrapPathError{code: codeBootstrapPathInvalid, path: f.Path, detail: errInvalidBootstrapPath.Error()}
 	}
 	content, err := base64.StdEncoding.DecodeString(f.ContentB64)
 	if err != nil {
@@ -392,7 +410,11 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 			// path, but there's no reason to expose more than the caller
 			// already gave us) or any content. See errSymlinkComponent's
 			// doc comment for the threat this closes.
-			return fmt.Errorf("bootstrap file %s rejected: path traverses a symlink", f.Path)
+			return &bootstrapPathError{code: codeBootstrapPathSymlink, path: f.Path, detail: "path traverses a symlink"}
+		}
+		var nonDirErr *errNonDirComponent
+		if errors.As(err, &nonDirErr) {
+			return &bootstrapPathError{code: codeBootstrapPathInvalid, path: f.Path, detail: "a path component exists and is not a directory"}
 		}
 		return err
 	}

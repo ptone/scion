@@ -423,6 +423,17 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 			cleanup()
 			return "", fmt.Errorf("substrate: actor %s was bootstrapped by another caller before this broker's request reached it; deleted as a precaution", id)
 		}
+		var pathErr *bootstrapPathRejectedError
+		if errors.As(err, &pathErr) {
+			// A bootstrap file's Path failed serve-side validation
+			// (symlink traversal, or an invalid path) — log the stable code
+			// and the path explicitly here, rather than relying on a caller
+			// to notice them inside the generic returned-error text below.
+			// Both are configuration, never file content, so they're safe
+			// in a log line (phase1-spec.md Addendum B).
+			runtimeLog.Error("substrate: bootstrap rejected a file path",
+				"atespace", atespace, "actor", actorName, "code", pathErr.code, "path", pathErr.path)
+		}
 		cleanup()
 		return "", r.redact(cfg, err)
 	}

@@ -31,6 +31,27 @@ import (
 	"time"
 )
 
+// realTempDir returns t.TempDir() with any symlinks in its path resolved.
+// t.TempDir() is not guaranteed to be symlink-free: on macOS it lives under
+// /var/folders/..., and /var is itself a symlink to /private/var, and a
+// symlinked TMPDIR reproduces the same thing on any platform (e.g.
+// TMPDIR=/tmp/link pointing at a real directory). mkdirAllTracked's
+// every-component symlink guard (see helpers.go) Lstats every existing
+// ancestor of a bootstrap path, including ones above the test's own temp
+// root, so a test that builds its bootstrap path directly on a symlinked
+// t.TempDir() would spuriously trip that guard — not because the test's
+// fixture contains a symlink, but because the *environment* does. Tests
+// that build a bootstrap path from a temp directory must root it here
+// instead, so only symlinks the fixture itself creates are under test.
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(t.TempDir()): %v", err)
+	}
+	return dir
+}
+
 func doJSON(t *testing.T, h http.Handler, method, path, bearer string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var reader *bytes.Reader
@@ -242,7 +263,7 @@ func TestBootstrap_SingleShot_SecondCallGets409(t *testing.T) {
 }
 
 func TestBootstrap_WritesFilesWithParentDirsAndEnv(t *testing.T) {
-	dir := t.TempDir()
+	dir := realTempDir(t)
 	filePath := filepath.Join(dir, "nested", "deep", "config.json")
 
 	content := []byte(`{"hello":"world"}`)
@@ -293,7 +314,7 @@ func TestBootstrap_WritesFilesWithParentDirsAndEnv(t *testing.T) {
 // only applies to a newly created file's open(2) call and has no effect on
 // a file that already exists; it only truncates and rewrites contents.
 func TestWriteBootstrapFile_EnforcesModeOnPreExistingFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := realTempDir(t)
 	filePath := filepath.Join(dir, "credential.json")
 
 	// Pre-create the file at a looser mode, as if baked into the image.
@@ -371,7 +392,7 @@ func TestWriteBootstrapFile_SetsModeAndOwnerAtomically(t *testing.T) {
 	}
 
 	t.Run("fresh file", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := realTempDir(t)
 		filePath := filepath.Join(dir, "fresh.json")
 
 		srv := NewServer(WithChownOwner(uid, gid))
@@ -387,7 +408,7 @@ func TestWriteBootstrapFile_SetsModeAndOwnerAtomically(t *testing.T) {
 	})
 
 	t.Run("pre-existing file at a different mode", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := realTempDir(t)
 		filePath := filepath.Join(dir, "existing.json")
 		if err := os.WriteFile(filePath, []byte("stale"), 0o644); err != nil {
 			t.Fatalf("failed to pre-create file: %v", err)
@@ -414,7 +435,7 @@ func TestWriteBootstrapFile_SetsModeAndOwnerAtomically(t *testing.T) {
 // os.MkdirAll happily created the remaining path components on the other
 // side of it.
 func TestWriteBootstrapFile_RejectsWriteThroughPreExistingSymlinkDir(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
 	outsideTarget := filepath.Join(root, "etc") // stands in for a real /etc
 	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
@@ -478,7 +499,7 @@ func TestWriteBootstrapFile_RejectsWriteThroughPreExistingSymlinkDir(t *testing.
 // (every existing component checked top-down), and would have been silently
 // accepted by the old upward-walk version.
 func TestWriteBootstrapFile_RejectsWriteThroughSymlinkWhenTargetSubpathAlreadyExists(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
 	outsideTarget := filepath.Join(root, "etc") // stands in for a real /etc
 	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
@@ -530,7 +551,7 @@ func TestWriteBootstrapFile_RejectsWriteThroughSymlinkWhenTargetSubpathAlreadyEx
 // symlink, one component down from home, with the file only one level below
 // that.
 func TestWriteBootstrapFile_RejectsSymlinkAtFirstComponentUnderHome(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
 	outsideTarget := filepath.Join(root, "outside")
 	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
@@ -569,7 +590,7 @@ func TestWriteBootstrapFile_RejectsSymlinkAtFirstComponentUnderHome(t *testing.T
 // behavior — it only proves the lexical Clean plus the symlink walk agree
 // with each other on where a dotdot-bearing path resolves.
 func TestWriteBootstrapFile_DotDotCleansToLocationUnderHomeAndNowhereElse(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
 	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
 		t.Fatal(err)
@@ -611,8 +632,12 @@ func TestWriteBootstrapFile_DotDotCleansToLocationUnderHomeAndNowhereElse(t *tes
 // directory entry currently sits at path — including a symlink — rather
 // than following it, so this must succeed by atomically replacing the link
 // with a regular file, and the symlink's old target must be left untouched.
+// This pins "replaced" as the one documented outcome (server.go:404-412's
+// comment, the project log, and Addendum B all claim it): a future change
+// that instead rejects the leaf case must update those docs, which means it
+// must also update this test.
 func TestWriteBootstrapFile_LeafSymlinkIsReplacedNotWrittenThrough(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
 	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
 		t.Fatal(err)
@@ -628,16 +653,14 @@ func TestWriteBootstrapFile_LeafSymlinkIsReplacedNotWrittenThrough(t *testing.T)
 	}
 
 	srv := NewServer(WithChownOwner(-1, -1))
-	err := srv.writeBootstrapFile(BootstrapFile{
+	if err := srv.writeBootstrapFile(BootstrapFile{
 		Path:       targetPath,
 		Mode:       0o600,
 		ContentB64: base64.StdEncoding.EncodeToString([]byte("new-content")),
-	})
+	}); err != nil {
+		t.Fatalf("writeBootstrapFile with a pre-existing symlink at the leaf: want the link replaced, got an error: %v", err)
+	}
 
-	// Either outcome is acceptable per the request: replace the link, or
-	// reject the file outright. What's never acceptable is writing through
-	// it. Assert the invariant that holds regardless of which branch this
-	// takes.
 	outsideContent, readErr := os.ReadFile(outsideFile)
 	if readErr != nil {
 		t.Fatalf("read outsideFile: %v", readErr)
@@ -646,18 +669,15 @@ func TestWriteBootstrapFile_LeafSymlinkIsReplacedNotWrittenThrough(t *testing.T)
 		t.Fatalf("outsideFile content = %q, want unchanged %q (write-through the leaf symlink)", outsideContent, "do-not-touch")
 	}
 
-	if err != nil {
-		// Rejected outright: fine, as long as the symlink and its target
-		// are untouched (already checked above).
-		return
-	}
-
 	info, statErr := os.Lstat(targetPath)
 	if statErr != nil {
 		t.Fatalf("lstat %s: %v", targetPath, statErr)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		t.Errorf("%s is still a symlink after a successful write; want it replaced by a regular file", targetPath)
+		t.Fatalf("%s is still a symlink after a successful write; want it replaced by a regular file", targetPath)
+	}
+	if !info.Mode().IsRegular() {
+		t.Errorf("%s mode = %v, want a regular file", targetPath, info.Mode())
 	}
 	got, err := os.ReadFile(targetPath)
 	if err != nil {
@@ -675,7 +695,7 @@ func TestWriteBootstrapFile_LeafSymlinkIsReplacedNotWrittenThrough(t *testing.T)
 // /etc/app/x). The broker never emits such a payload today, but serve must
 // not rely on that.
 func TestWriteBootstrapFile_RejectsSymlinkTraversalForOutsideHomeTarget(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	etcDir := filepath.Join(root, "etc")
 	volumeDir := filepath.Join(root, "volume")
 	if err := os.MkdirAll(etcDir, 0o755); err != nil {
@@ -711,7 +731,7 @@ func TestWriteBootstrapFile_RejectsSymlinkTraversalForOutsideHomeTarget(t *testi
 // generic guard doesn't accidentally reject legitimate outside-home
 // auth/secret targets.
 func TestWriteBootstrapFile_WritesCleanOutsideHomeTargetNormally(t *testing.T) {
-	root := t.TempDir()
+	root := realTempDir(t)
 	targetPath := filepath.Join(root, "etc", "app", "x")
 
 	srv := NewServer(WithChownOwner(-1, -1))
@@ -739,14 +759,14 @@ func TestWriteBootstrapFile_WritesCleanOutsideHomeTargetNormally(t *testing.T) {
 	}
 }
 
-// TestBootstrap_SymlinkedFileRejectionSurfacesAsGenericServerError proves the
-// end-to-end handler path: a symlink-traversal rejection reaches the client
-// as the same generic, content-free 500 every other write failure produces
-// (handleBootstrap never distinguishes it in the response body — only the
-// server log names the path), and the single-shot bootstrap slot behaves
-// like any other failed bootstrap.
-func TestBootstrap_SymlinkedFileRejectionSurfacesAsGenericServerError(t *testing.T) {
-	root := t.TempDir()
+// TestBootstrap_SymlinkedFileRejectionSurfacesAs422WithStableCode proves the
+// end-to-end handler path for the binding decision on symlinked targets: a symlink-traversal
+// rejection reaches the client as HTTP 422 with the stable
+// codeBootstrapPathSymlink code and the rejected file's own path in the
+// body, never any file content — and the single-shot bootstrap slot still
+// behaves like any other failed bootstrap.
+func TestBootstrap_SymlinkedFileRejectionSurfacesAs422WithStableCode(t *testing.T) {
+	root := realTempDir(t)
 	fakeHome := filepath.Join(root, "home", "scion")
 	outsideTarget := filepath.Join(root, "etc")
 	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
@@ -760,6 +780,7 @@ func TestBootstrap_SymlinkedFileRejectionSurfacesAsGenericServerError(t *testing
 		t.Fatal(err)
 	}
 
+	targetPath := filepath.Join(configLink, "secret.json")
 	srv := NewServer(
 		WithChownOwner(-1, -1),
 		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
@@ -767,7 +788,7 @@ func TestBootstrap_SymlinkedFileRejectionSurfacesAsGenericServerError(t *testing
 	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
 		Files: []BootstrapFile{
 			{
-				Path:       filepath.Join(configLink, "secret.json"),
+				Path:       targetPath,
 				Mode:       0o600,
 				ContentB64: base64.StdEncoding.EncodeToString([]byte("sentinel-secret-content")),
 			},
@@ -776,11 +797,18 @@ func TestBootstrap_SymlinkedFileRejectionSurfacesAsGenericServerError(t *testing
 		ControlToken: "tok",
 	})
 
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
 	}
-	if strings.Contains(rec.Body.String(), "sentinel-secret-content") {
-		t.Errorf("response body leaked file content: %q", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, codeBootstrapPathSymlink) {
+		t.Errorf("response body = %q, want it to contain the stable code %q", body, codeBootstrapPathSymlink)
+	}
+	if !strings.Contains(body, targetPath) {
+		t.Errorf("response body = %q, want it to contain the rejected path %q", body, targetPath)
+	}
+	if strings.Contains(body, "sentinel-secret-content") {
+		t.Errorf("response body leaked file content: %q", body)
 	}
 	if _, statErr := os.Stat(filepath.Join(outsideTarget, "secret.json")); statErr == nil {
 		t.Error("the bootstrap file was written through the symlink into outsideTarget")
@@ -810,6 +838,10 @@ func TestBootstrap_OversizedBodyRejectedWithoutOOM(t *testing.T) {
 	}
 }
 
+// TestBootstrap_RejectsRelativePath proves the second stable rejection code: a
+// relative bootstrap file path is a distinct rejection from a symlink
+// traversal (codeBootstrapPathInvalid, not codeBootstrapPathSymlink), also
+// answered as 422 with the offending path in the body.
 func TestBootstrap_RejectsRelativePath(t *testing.T) {
 	srv := NewServer(
 		WithChownOwner(-1, -1),
@@ -821,8 +853,51 @@ func TestBootstrap_RejectsRelativePath(t *testing.T) {
 		ControlToken: "tok",
 	}
 	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500 for an invalid bootstrap file path", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 for an invalid bootstrap file path", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, codeBootstrapPathInvalid) {
+		t.Errorf("response body = %q, want it to contain the stable code %q", body, codeBootstrapPathInvalid)
+	}
+	if !strings.Contains(body, "relative/path.txt") {
+		t.Errorf("response body = %q, want it to contain the rejected path %q", body, "relative/path.txt")
+	}
+}
+
+// TestBootstrap_RejectsNonDirComponentWith422 covers the third path-shape
+// rejection: an existing path component that is a plain file, not a
+// directory, where a bootstrap file's parent needs to be. Distinct from the
+// symlink case, but the same stable "invalid" code as the relative-path
+// case above, and also a distinct code from codeBootstrapPathSymlink.
+func TestBootstrap_RejectsNonDirComponentWith422(t *testing.T) {
+	root := realTempDir(t)
+	// "plain" is a regular file; a bootstrap file targeting a path below it
+	// needs to be created there, but it can't become a directory.
+	plain := filepath.Join(root, "plain")
+	if err := os.WriteFile(plain, []byte("i-am-a-file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	targetPath := filepath.Join(plain, "sub", "f")
+
+	srv := NewServer(WithChownOwner(-1, -1))
+	err := srv.writeBootstrapFile(BootstrapFile{
+		Path:       targetPath,
+		Mode:       0o600,
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("x")),
+	})
+	if err == nil {
+		t.Fatal("writeBootstrapFile with a non-directory path component: expected an error, got nil")
+	}
+	var pathErr *bootstrapPathError
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("err = %v (%T), want a *bootstrapPathError", err, err)
+	}
+	if pathErr.code != codeBootstrapPathInvalid {
+		t.Errorf("code = %q, want %q", pathErr.code, codeBootstrapPathInvalid)
+	}
+	if pathErr.path != targetPath {
+		t.Errorf("path = %q, want %q", pathErr.path, targetPath)
 	}
 }
 
