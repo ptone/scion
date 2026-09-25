@@ -215,21 +215,20 @@ func runSubstrateAgent(t *testing.T, mgr agent.Manager, actorName, agentSlug, pr
 	}
 }
 
-// TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig is D2's
-// regression test for the live-cluster defect where a second substrate
-// profile's egress_allow was silently ignored: resolveManagerForOpts
-// returned the runtime TYPE string ("substrate") from
-// vs.ResolveRuntime(opts.Profile), which equals the default runtime's
-// Name() for every substrate profile — including one with a completely
-// different V1SubstrateConfig — so it always returned the default's own
-// manager instead of resolving the requested profile's config.
+// TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig is a
+// regression test for the defect where a second substrate profile's
+// egress_allow was silently ignored: resolveManagerForOpts returned the
+// runtime TYPE string ("substrate") from vs.ResolveRuntime(opts.Profile),
+// which equals the default runtime's Name() for every substrate profile —
+// including one with a completely different V1SubstrateConfig — so it
+// always returned the default's own manager instead of resolving the
+// requested profile's config.
 //
-// Two substrate profiles in ONE broker process/Server, matching the live
-// settings shape from the report: "substrate" (the default, runtime
-// substrate-prod, egress_allow: []) and "substrate-nip" (runtime
-// substrate-nip, egress_allow: ["*.nip.io"]). Starting an agent under each
-// profile's manager must produce an EgressPolicy with only that profile's
-// own patterns.
+// Two substrate profiles in ONE broker process/Server: "substrate" (the
+// default, runtime substrate-prod, egress_allow: []) and "substrate-nip"
+// (runtime substrate-nip, egress_allow: ["*.nip.io"]). Starting an agent
+// under each profile's manager must produce an EgressPolicy with only that
+// profile's own patterns.
 func TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig(t *testing.T) {
 	projectDir := t.TempDir()
 	scionDir := filepath.Join(projectDir, ".scion")
