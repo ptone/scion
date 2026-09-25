@@ -121,11 +121,20 @@ poll_once() {
   while IFS=$'\t' read -r pane_id identifier; do
     [[ -z "$pane_id" || -z "$identifier" ]] && continue
 
-    # Look up this agent in the scion list output.
-    # Uses .slug // .name because slug is omitempty in local/podman mode.
+    # identifier is "project/name" — agent names are only unique within a
+    # project, and this polls across all projects (-a), so matching on name
+    # alone risks picking up a same-named agent in a different project.
+    local project name
+    project="${identifier%%/*}"
+    name="${identifier#*/}"
+
+    # Look up this agent in the scion list output, matching on project AND
+    # name. Uses .slug // .name because slug is omitempty in local/podman
+    # mode; project falls back to "global" to match how identifiers are built.
     local agent_info
     agent_info="$(echo "$agents_json" \
-      | jq -r ".[] | select((.slug // .name) == \"$identifier\")" 2>/dev/null)"
+      | jq -r --arg project "$project" --arg name "$name" \
+        '.[] | select((.project // "global") == $project and (.slug // .name) == $name)' 2>/dev/null)"
 
     local activity phase herdr_state
 

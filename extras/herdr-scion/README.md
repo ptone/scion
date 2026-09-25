@@ -69,13 +69,48 @@ herdr plugin action invoke dashboard --plugin scion.herdr-integration
 
 `herdr pane split` creates a bare pane — it does not accept a command to run.
 Each Scion agent pane is set up in three steps:
-1. `herdr pane split --direction right --env SCION_AGENT=<slug>` — split, and
+1. `herdr pane split --direction right --env SCION_AGENT=<name>` — split, and
    read the new pane's ID from `.result.pane.pane_id`.
-2. `herdr pane rename <pane_id> "scion:<slug>"` — set the pane's label
-   immediately, before the wrapper starts. This is what duplicate detection
-   and the state bridge track panes by.
-3. `herdr pane run <pane_id> "bash scion-attach-wrapper.sh <slug>"` — type
-   the wrapper command into the pane's shell and press Enter.
+2. `herdr pane rename <pane_id> "scion:<project>/<name>"` — set the pane's
+   label immediately, before the wrapper starts. This is what duplicate
+   detection and the state bridge track panes by. The label includes the
+   project because scion agent names are only unique within a project —
+   discovery and the picker list agents across every project (`-a`), so two
+   different projects can have same-named agents.
+3. `herdr pane run <pane_id> "bash scion-attach-wrapper.sh <name> --project
+   <project> [--project-path <path>] ..."` — type the wrapper command,
+   including the agent's project scope, into the pane's shell and press
+   Enter.
+
+### Project Scoping
+
+`scion attach`/`scion start` resolve their target project from `-g`
+(`--project`) or the CWD, then fall back to the `global` project. Herdr
+panes and actions don't run from the project's own directory, so without an
+explicit scope, every call would fail with `agent '<name>' not found in
+project 'global'` whenever the agent actually lives in a non-global project.
+
+To fix this, every script that discovers or creates an agent pane carries
+the agent's `project` and `projectPath` (from `scion list`'s JSON output)
+through to `scion-attach-wrapper.sh` via `--project`/`--project-path`. The
+wrapper then:
+- `cd`s into `--project-path` when given (belt-and-suspenders alongside the
+  next point — scion also resolves project from CWD).
+- Passes `-g <projectPath>` (or `-g <project>` when there's no local path —
+  Hub mode) to every `scion attach`/`scion start`/`scion list` call it
+  makes, so `is_running`/`agent_phase` checks and the actual attach/start
+  are scoped to the agent's real project, not the pane's CWD.
+
+`--project-path` is passed through exactly as `scion list` reports it — it
+isn't normalized between a project's root directory and its `.scion`
+subdirectory, which needs verifying against `-g`'s actual expectations.
+
+**Start Scion Agent** additionally has to pick a project *before* listing
+templates or starting anything: it offers the distinct `project`/
+`projectPath` pairs seen across every known agent (`scion list -a`, any
+phase), plus the invoking pane's own `workspace_cwd`/`focused_pane_cwd` if
+it looks like a scion project directory (contains `.scion`). The picker is
+skipped when there's only one known project.
 
 ### Interactive Actions (Popup Panes)
 
@@ -107,7 +142,7 @@ The `scion-attach-wrapper.sh` script wraps `scion attach` with:
 
 ### State Bridge
 
-The `scion-state-bridge.sh` daemon polls `scion list` every 4 seconds and reports agent states to herdr via `herdr pane report-agent`, matching panes to agents by the pane's `scion:<slug>` label:
+The `scion-state-bridge.sh` daemon polls `scion list` every 4 seconds and reports agent states to herdr via `herdr pane report-agent`, matching panes to agents by the pane's `scion:<project>/<name>` label — split back into project and name so agents are matched on both, not name alone (which would be ambiguous across projects):
 
 | Scion Activity | Herdr State |
 |----------------|-------------|
@@ -167,8 +202,16 @@ Terminal resize propagates through the full chain. Herdr's detach (herdr keybind
 - If the agent stopped, the pane will show the agent's final phase
 
 ### Duplicate panes
-- The plugin tracks panes by label (`scion:<slug>`); duplicates should not occur
+- The plugin tracks panes by label (`scion:<project>/<name>`); duplicates should not occur
 - If they do, close the extra pane and run refresh
+
+### "agent '<name>' not found in project 'global'"
+- The wrapper wasn't given `--project`/`--project-path`, or scion's `-g`
+  flag doesn't accept the `projectPath` value the way it was passed
+  (project root vs. `.scion` subdirectory — see Project Scoping above)
+- Check the pane's label: it should be `scion:<project>/<name>`, not just
+  `scion:<name>` — a bare name means the identifier wasn't built with a
+  project
 
 ### Keybinding conflicts
 - Herdr and the inner tmux may both use Ctrl-b as a prefix
