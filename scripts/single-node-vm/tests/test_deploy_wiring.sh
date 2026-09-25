@@ -784,6 +784,29 @@ K8S_NS_D="scion-hub-${HUB}"
 K8S_PVC_D="scion-hub-${HUB}-shared"
 K8S_PV_D="scion-hub-${HUB}-shared"
 
+# hybrid_k8s_preflight itself (unlike hybrid_k8s_ensure_objects) runs in
+# Phase 2, right after discovery and well before the VM, NFS, or firewall
+# rules exist -- so its own create-side placement, unlike the rest of the
+# k8s object lifecycle, IS reachable from a deploy-mode wiring test: an
+# unmarked PV must abort the whole run before any of those Phase 3+
+# resources are ever created.
+test_deploy_create_k8s_preflight_unmarked_pv_aborts_before_any_create() {
+  fresh_gcloud_state
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_mig "mig-a" "template-a"
+  seed_template "template-a" "gke-mycluster-abc123-node"
+  seed_k8s_pv_unmarked "$K8S_PV_D"
+  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_true "$([[ "$DEPLOY_RC" -ne 0 ]] && echo true || echo false)" \
+    "an unmarked PV must fail the whole run, not just the eventual k8s object creation"
+  assert_eq "0" "$(gcloud_log | grep -c 'compute instances create' || true)" \
+    "the VM must never be created when the k8s preflight refuses"
+  assert_eq "0" "$(gcloud_log | grep -c 'compute addresses create' || true)" \
+    "the internal IP must never be reserved when the k8s preflight refuses"
+  assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" \
+    "no hybrid firewall rule may be created when the k8s preflight refuses"
+}
+
 test_deploy_delete_k8s_tier_off_zero_kubectl_calls() {
   fresh_gcloud_state
   run_deploy_delete "$(base_config_json "$HUB")"
@@ -937,4 +960,42 @@ test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
 
   assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/namespace/scion-hub-${HUB}.json" ]] && echo true || echo false)" \
     "hybrid_k8s_preflight must have created the namespace in Phase 2, well before this Phase 3 stopping point"
+
+  # Part B: the reserved internal IP -- not the VM's ephemeral describe
+  # IP -- must be what the VM is actually created with, and the same
+  # value the settings.yaml write and the PV would use, so GKE agents,
+  # the Docker broker, and the reserved address all agree on one number.
+  # The stub's `addresses create` defaults to 10.128.0.9, distinct from
+  # `instances describe`'s own default of 10.128.0.5, so the two are
+  # never accidentally indistinguishable in this assertion.
+  local create_line
+  create_line="$(echo "$log" | grep 'compute instances create' | head -1)"
+  assert_contains "$create_line" "--private-network-ip=10.128.0.9" \
+    "the new VM must be created pinned to the reserved internal IP, not left to get an ephemeral one"
+  assert_contains "$log" 'server: "10.128.0.9"' \
+    "the settings.yaml shared_dir_storage server field must be the reserved internal IP"
+
+  # The hub URL guard's post-create half re-describes the reservation and
+  # the hub-allow rule; both calls must actually have happened by this
+  # point, proving deploy.sh calls the guard at all (nothing else in this
+  # flow describes the internal-IP address after it's created).
+  assert_contains "$log" "compute addresses describe scion-hub-${HUB}-internal-ip" \
+    "the hub URL guard must re-describe the internal IP reservation after create"
+  assert_contains "$log" "compute firewall-rules describe scion-hub-${HUB}-hub-allow" \
+    "the hub URL guard must re-describe the hub-allow rule after create"
+}
+
+test_deploy_create_tier_on_existing_vm_promotes_current_ip() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_mig "mig-a" "template-a"
+  seed_template "template-a" "gke-mycluster-abc123-node"
+  run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  local log
+  log="$(gcloud_log)"
+  assert_contains "$log" "addresses create scion-hub-${HUB}-internal-ip" \
+    "an existing VM's current IP must be promoted to a static reservation"
+  assert_contains "$log" "--addresses=10.128.0.5" \
+    "must promote the VM's actual current IP (the stub's instances-describe default), not a fresh/different one"
 }

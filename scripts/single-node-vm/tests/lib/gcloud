@@ -386,6 +386,14 @@ print(json.dumps(out))
       echo "${err_msg:-gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED listing addresses}" >&2
       exit 1
     fi
+    # Simulates list eventual-consistency: absent (empty list) reads
+    # succeed normally, but once the address actually exists (i.e. a
+    # `create` has run for it), list starts failing -- for exercising the
+    # get-immediately-after-create step's own error handling.
+    if [[ -f "${f}.list-error-after-create" && -f "$f" ]]; then
+      echo "gcloud-stub: simulated list failure right after create for address ${name}" >&2
+      exit 1
+    fi
     if [[ -f "$f" ]]; then
       echo "[$(cat "$f")]"
     else
@@ -413,14 +421,22 @@ print(json.dumps(out))
   "compute addresses create")
     require_project "$@"
     require_flag region "$@"
+    region="$(get_flag region "$@")" || region="us-central1"
     name="${4:-}"
     addr="$(get_flag addresses "$@")" || addr="10.128.0.9"
     desc="$(get_flag description "$@")" || desc=""
+    subnet="$(get_flag subnet "$@")" || subnet="default"
+    project="$(get_flag project "$@")" || project="demo-project"
     "$PYTHON" -c "
 import json, sys
-addr, desc = sys.argv[1:3]
-print(json.dumps({'address': addr, 'description': desc}))
-" "$addr" "$desc" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+addr, desc, project, region, subnet = sys.argv[1:6]
+print(json.dumps({
+    'address': addr,
+    'description': desc,
+    'addressType': 'INTERNAL',
+    'subnetwork': 'https://www.googleapis.com/compute/v1/projects/' + project + '/regions/' + region + '/subnetworks/' + subnet,
+}))
+" "$addr" "$desc" "$project" "$region" "$subnet" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
     exit 0
     ;;
   "compute addresses delete")

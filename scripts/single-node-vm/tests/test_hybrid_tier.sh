@@ -1586,6 +1586,27 @@ test_drift_lower_deny_priority_fails_with_remediation() {
   assert_contains "$RUN_OUTPUT" "--priority=950" "the update remediation should restore the expected priority"
 }
 
+test_drift_hub_allow_widened_source_fails_with_remediation() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_firewall_rule_json "$ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "2049" \
+    "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
+  seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
+    "" "0.0.0.0/0" "$TARGET_TAG" "950"
+  # Drifted: the hub-allow rule's source widened to the whole internet,
+  # rather than staying scoped to the discovered pod CIDR.
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+    "" "0.0.0.0/0" "$TARGET_TAG" "900"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a hub-allow rule widened to 0.0.0.0/0 must fail the run, not be adopted as-is"
+  assert_contains "$RUN_OUTPUT" "$HUB_ALLOW_NAME" "drift output should name the drifted rule"
+  assert_contains "$RUN_OUTPUT" "0.0.0.0/0" "drift output should show the actual (drifted) source"
+  assert_contains "$RUN_OUTPUT" "${GKE_POD_CIDR}" "drift output should show the expected source"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${HUB_ALLOW_NAME}" "drift output should include a runnable delete remediation"
+}
+
 test_drift_action_change_offers_delete_but_not_update() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
@@ -2497,6 +2518,78 @@ test_internal_ip_existing_vm_refuses_unmarked_reservation() {
   assert_contains "$RUN_OUTPUT" "without this deployment's marker" "error should explain why"
 }
 
+test_internal_ip_new_vm_refuses_reused_reservation_with_wrong_address_type() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.42" "$MARKER" "EXTERNAL" "default"
+  run_expect_fail hybrid_ensure_internal_ip_new_vm "$HUB" "$PROJECT" "us-central1" "default"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a marked reservation whose address type isn't INTERNAL must refuse the run"
+  assert_contains "$RUN_OUTPUT" "not INTERNAL" "error should explain why"
+}
+
+test_internal_ip_new_vm_refuses_reused_reservation_with_wrong_subnet() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.42" "$MARKER" "INTERNAL" "some-other-subnet"
+  run_expect_fail hybrid_ensure_internal_ip_new_vm "$HUB" "$PROJECT" "us-central1" "default"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a marked reservation on the wrong subnet must refuse the run"
+  assert_contains "$RUN_OUTPUT" "not the expected 'default'" "error should explain why"
+}
+
+test_internal_ip_new_vm_create_then_get_fails_is_explicit_error() {
+  fresh_gcloud_state
+  set_address_list_will_fail_after_create "scion-hub-${HUB}-internal-ip"
+  run_expect_fail hybrid_ensure_internal_ip_new_vm "$HUB" "$PROJECT" "us-central1" "default"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a list failure right after a successful create must be a clear, explicit failure, not a silent exit"
+  assert_contains "$RUN_OUTPUT" "could not read it back" "error should explain what happened"
+}
+
+test_internal_ip_existing_vm_refuses_reused_reservation_with_wrong_address_type() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER" "EXTERNAL" "default"
+  run_expect_fail hybrid_ensure_internal_ip_existing_vm "$HUB" "$PROJECT" "us-central1" "default" \
+    "10.128.0.5" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a marked reservation whose address type isn't INTERNAL must refuse the run"
+  assert_contains "$RUN_OUTPUT" "not INTERNAL" "error should explain why"
+}
+
+test_internal_ip_existing_vm_refuses_reused_reservation_with_wrong_subnet() {
+  fresh_gcloud_state
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER" "INTERNAL" "some-other-subnet"
+  run_expect_fail hybrid_ensure_internal_ip_existing_vm "$HUB" "$PROJECT" "us-central1" "default" \
+    "10.128.0.5" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a marked reservation on the wrong subnet must refuse the run"
+  assert_contains "$RUN_OUTPUT" "not the expected 'default'" "error should explain why"
+}
+
+test_internal_ip_existing_vm_promote_recheck_ip_changed_fails() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
+  # The stub's instances-describe recheck always answers 10.128.0.5
+  # (the default); passing a different current_ip here simulates the
+  # VM's own IP changing out from under the promotion, between the
+  # caller's earlier read and this function's own recheck.
+  run_expect_fail hybrid_ensure_internal_ip_existing_vm "$HUB" "$PROJECT" "us-central1" "default" \
+    "10.128.0.77" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a VM IP that changed between the read and the promotion recheck must fail, not silently promote the stale value"
+  assert_contains "$RUN_OUTPUT" "changed from 10.128.0.77 to 10.128.0.5" "error should show both values"
+}
+
+test_internal_ip_existing_vm_refuses_non_ipv4_current_ip_before_promoting() {
+  fresh_gcloud_state
+  run_expect_fail hybrid_ensure_internal_ip_existing_vm "$HUB" "$PROJECT" "us-central1" "default" \
+    "" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a blank or malformed current IP must be refused before it's ever passed to addresses create --addresses="
+  assert_contains "$RUN_OUTPUT" "doesn't look like an IPv4 address" "error should explain why"
+  assert_eq "0" "$(gcloud_log | grep -c 'addresses create' || true)" \
+    "must never attempt the create call with a non-IPv4 value"
+}
+
 test_internal_ip_teardown_check_marked_ready_for_delete() {
   fresh_gcloud_state
   seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
@@ -2554,10 +2647,51 @@ test_internal_ip_teardown_delete_noop_when_nothing_queued() {
 test_hub_url_guard_verify_passes_when_everything_is_in_place() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
+  GKE_POD_CIDR="10.52.0.0/14"
   seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
   seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
     "" "10.52.0.0/14" "$TARGET_TAG" "900"
-  hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  assert_true "$(hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" && echo true || echo false)" \
+    "the guard must pass when the reservation is marked/matches the VM IP and the rule's source matches the pod CIDR"
+}
+
+test_hub_url_guard_verify_fails_when_reservation_unmarked() {
+  fresh_gcloud_state
+  HYBRID_INTERNAL_IP="10.128.0.5"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_address_unmarked "scion-hub-${HUB}-internal-ip" "10.128.0.5"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+    "" "10.52.0.0/14" "$TARGET_TAG" "900"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a reservation that no longer carries this deployment's marker must fail the guard"
+  assert_contains "$RUN_OUTPUT" "no longer carries this deployment's marker" "error should explain why"
+}
+
+test_hub_url_guard_verify_fails_when_reservation_address_mismatches_vm_ip() {
+  fresh_gcloud_state
+  HYBRID_INTERNAL_IP="10.128.0.5"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.99" "$MARKER"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+    "" "10.52.0.0/14" "$TARGET_TAG" "900"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a reservation whose address doesn't match the VM's resolved internal IP must fail the guard"
+  assert_contains "$RUN_OUTPUT" "reach the wrong address" "error should explain why"
+}
+
+test_hub_url_guard_verify_fails_on_hub_allow_source_range_drift() {
+  fresh_gcloud_state
+  HYBRID_INTERNAL_IP="10.128.0.5"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
+  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+    "" "0.0.0.0/0" "$TARGET_TAG" "900"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a hub-allow rule whose source range no longer matches the discovered pod CIDR must fail the guard"
+  assert_contains "$RUN_OUTPUT" "not the discovered pod CIDR" "error should explain why"
 }
 
 test_hub_url_guard_verify_fails_on_empty_internal_ip() {

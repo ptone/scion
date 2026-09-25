@@ -308,12 +308,17 @@ seed_firewall_rule_desc_only() {
 # seed_address NAME ADDRESS DESC — a pre-existing static internal address
 # reservation with the given address and description.
 seed_address() {
-  local name="$1" address="$2" desc="$3"
+  local name="$1" address="$2" desc="$3" address_type="${4:-INTERNAL}" subnet="${5:-default}"
   "$PYTHON" -c "
 import json, sys
-addr, desc = sys.argv[1:3]
-print(json.dumps({'address': addr, 'description': desc}))
-" "$address" "$desc" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+addr, desc, address_type, subnet = sys.argv[1:5]
+print(json.dumps({
+    'address': addr,
+    'description': desc,
+    'addressType': address_type,
+    'subnetwork': 'https://www.googleapis.com/compute/v1/projects/demo-project/regions/us-central1/subnetworks/' + subnet,
+}))
+" "$address" "$desc" "$address_type" "$subnet" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
 }
 
 # seed_address_unmarked NAME ADDRESS — a pre-existing reservation with no
@@ -332,6 +337,15 @@ set_address_delete_will_fail() {
 # call filtered to this name fails instead of returning a result.
 set_address_list_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/addresses/$1.json.list-error"
+}
+
+# set_address_list_will_fail_after_create NAME — the address doesn't
+# exist yet, so the next `compute addresses list` call (checking
+# absence) still succeeds as empty; but once a `compute addresses
+# create` call for NAME has actually run, every list call after that
+# fails, simulating list eventual-consistency lag right after create.
+set_address_list_will_fail_after_create() {
+  touch "${GCLOUD_STUB_STATE_DIR}/addresses/$1.json.list-error-after-create"
 }
 
 # seed_firewall_rule_json NAME DESC NETWORK DIRECTION ACTION PROTO PORTS \

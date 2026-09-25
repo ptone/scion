@@ -1399,7 +1399,9 @@ hybrid_internal_ip_name() {
 # _hybrid_internal_ip_get NAME PROJECT_ID REGION
 #
 # Sets HYBRID_INTERNAL_IP_STATUS (found/absent/unknown),
-# HYBRID_INTERNAL_IP_ADDR, HYBRID_INTERNAL_IP_DESC, and, on unknown,
+# HYBRID_INTERNAL_IP_ADDR, HYBRID_INTERNAL_IP_DESC,
+# HYBRID_INTERNAL_IP_ADDRESS_TYPE, HYBRID_INTERNAL_IP_SUBNET (the bare
+# subnet name, not the full subnetwork URL), and, on unknown,
 # HYBRID_INTERNAL_IP_ERR. Returns 0 only when found. Uses a `list` call
 # rather than `describe` + error-text matching -- the same positive-
 # absence pattern the firewall rules' own ownership checks use
@@ -1413,6 +1415,8 @@ _hybrid_internal_ip_get() {
   err_file="$(mktemp)"
   HYBRID_INTERNAL_IP_ADDR=""
   HYBRID_INTERNAL_IP_DESC=""
+  HYBRID_INTERNAL_IP_ADDRESS_TYPE=""
+  HYBRID_INTERNAL_IP_SUBNET=""
   HYBRID_INTERNAL_IP_ERR=""
   if ! list_json="$(gcloud compute addresses list --project="$project_id" \
       --filter="name=(${name}) region:${region}" --format=json 2>"${err_file}")"; then
@@ -1429,6 +1433,10 @@ _hybrid_internal_ip_get() {
   HYBRID_INTERNAL_IP_STATUS="found"
   HYBRID_INTERNAL_IP_ADDR="$(echo "$list_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('address') or '')")"
   HYBRID_INTERNAL_IP_DESC="$(echo "$list_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('description') or '')")"
+  HYBRID_INTERNAL_IP_ADDRESS_TYPE="$(echo "$list_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('addressType') or '')")"
+  local subnetwork_url
+  subnetwork_url="$(echo "$list_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(d[0].get('subnetwork') or '')")"
+  HYBRID_INTERNAL_IP_SUBNET="${subnetwork_url##*/}"
   return 0
 }
 
@@ -1450,6 +1458,14 @@ hybrid_ensure_internal_ip_new_vm() {
       err "Internal IP reservation ${name} already exists without this deployment's marker. Refusing to adopt it."
       exit 1
     fi
+    if [[ "$HYBRID_INTERNAL_IP_ADDRESS_TYPE" != "INTERNAL" ]]; then
+      err "Internal IP reservation ${name} is marked, but its address type is '${HYBRID_INTERNAL_IP_ADDRESS_TYPE}', not INTERNAL. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_SUBNET" != "$subnet" ]]; then
+      err "Internal IP reservation ${name} is marked, but its subnet is '${HYBRID_INTERNAL_IP_SUBNET}', not the expected '${subnet}'. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
     HYBRID_INTERNAL_IP="$HYBRID_INTERNAL_IP_ADDR"
     echo "  Reusing existing internal IP reservation: ${name} (${HYBRID_INTERNAL_IP})"
     return 0
@@ -1461,7 +1477,10 @@ hybrid_ensure_internal_ip_new_vm() {
   gcloud compute addresses create "$name" \
     --project="$project_id" --region="$region" --subnet="$subnet" \
     --description="$marker" --quiet
-  _hybrid_internal_ip_get "$name" "$project_id" "$region"
+  if ! _hybrid_internal_ip_get "$name" "$project_id" "$region"; then
+    err "Reserved internal IP ${name}, but could not read it back (status: ${HYBRID_INTERNAL_IP_STATUS}${HYBRID_INTERNAL_IP_ERR:+: ${HYBRID_INTERNAL_IP_ERR}})."
+    exit 1
+  fi
   HYBRID_INTERNAL_IP="$HYBRID_INTERNAL_IP_ADDR"
   echo "  Reserved internal IP: ${name} (${HYBRID_INTERNAL_IP})"
 }
@@ -1495,10 +1514,23 @@ hybrid_ensure_internal_ip_existing_vm() {
       err "  gcloud compute addresses delete ${name} --region=${region} --project=${project_id} --quiet"
       exit 1
     fi
+    if [[ "$HYBRID_INTERNAL_IP_ADDRESS_TYPE" != "INTERNAL" ]]; then
+      err "Internal IP reservation ${name} is marked, but its address type is '${HYBRID_INTERNAL_IP_ADDRESS_TYPE}', not INTERNAL. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
+    if [[ "$HYBRID_INTERNAL_IP_SUBNET" != "$subnet" ]]; then
+      err "Internal IP reservation ${name} is marked, but its subnet is '${HYBRID_INTERNAL_IP_SUBNET}', not the expected '${subnet}'. This looks like drift from an out-of-band change; delete it (gcloud compute addresses delete ${name} --region=${region} --project=${project_id}) and re-run deploy.sh."
+      exit 1
+    fi
     HYBRID_INTERNAL_IP="$HYBRID_INTERNAL_IP_ADDR"
     return 0
   elif [[ "$HYBRID_INTERNAL_IP_STATUS" == "unknown" ]]; then
     err "Could not check internal IP reservation ${name}: ${HYBRID_INTERNAL_IP_ERR}"
+    exit 1
+  fi
+
+  if ! [[ "$current_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    err "The VM's current internal IP ('${current_ip}') doesn't look like an IPv4 address; refusing to promote it to a static reservation. A blank or malformed value here would make 'gcloud compute addresses create --addresses=' reserve an unrelated, auto-assigned address instead."
     exit 1
   fi
 
@@ -1600,27 +1632,52 @@ hybrid_internal_ip_teardown_delete() {
 # IAP-only refusal, so both pieces that make it work (the static
 # internal IP reservation, and the hub-allow firewall rule letting the
 # pod CIDR reach tcp:8080) must actually be confirmed in place once
-# everything above has run. The guard's other half -- refusing before
+# everything above has run. Confirming "in place" means more than the
+# resource merely existing: the reservation must still carry this
+# deployment's marker and its address must equal the VM's resolved
+# internal IP (not some other, unrelated reservation that happens to
+# share the expected name), and the firewall rule's source range must
+# equal the discovered pod CIDR (not a wider range that would either
+# under- or over-admit pods). The guard's other half -- refusing before
 # any create if the pod CIDR can't be discovered, or if the internal-IP
 # reservation itself can't be resolved -- already happens by
 # construction: hybrid_discover and hybrid_ensure_internal_ip_*
 # above both exit non-zero on their own failures, before this ever
-# runs. Fails loudly, naming exactly which piece is missing.
+# runs. Fails loudly, naming exactly which piece is missing or wrong.
 hybrid_hub_url_guard_verify() {
   local hub_name="$1" project_id="$2" region="$3"
   if [[ -z "${HYBRID_INTERNAL_IP:-}" ]] || ! [[ "$HYBRID_INTERNAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     err "Hub URL guard: no valid internal IP is resolved for hub ${hub_name} (got '${HYBRID_INTERNAL_IP:-}'). GKE agent pods would have no way to reach the hub."
     exit 1
   fi
-  local ip_name
+
+  local ip_name marker addr_json addr_marker addr_value
   ip_name="$(hybrid_internal_ip_name "$hub_name")"
-  if ! gcloud compute addresses describe "$ip_name" --region="$region" --project="$project_id" &>/dev/null; then
+  marker="scion-deployment=${hub_name}"
+  if ! addr_json="$(gcloud compute addresses describe "$ip_name" --region="$region" --project="$project_id" --format=json 2>/dev/null)"; then
     err "Hub URL guard: internal IP reservation ${ip_name} could not be confirmed after create."
     exit 1
   fi
-  local hub_allow_name="scion-hub-${hub_name}-hub-allow"
-  if ! gcloud compute firewall-rules describe "$hub_allow_name" --project="$project_id" &>/dev/null; then
+  addr_marker="$(echo "$addr_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
+  addr_value="$(echo "$addr_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('address') or '')")"
+  if [[ "$addr_marker" != "$marker" ]]; then
+    err "Hub URL guard: internal IP reservation ${ip_name} no longer carries this deployment's marker (found: '${addr_marker}')."
+    exit 1
+  fi
+  if [[ "$addr_value" != "$HYBRID_INTERNAL_IP" ]]; then
+    err "Hub URL guard: internal IP reservation ${ip_name} is ${addr_value}, but the VM's resolved internal IP is ${HYBRID_INTERNAL_IP}. GKE agent pods would reach the wrong address."
+    exit 1
+  fi
+
+  local hub_allow_name rule_json rule_ranges
+  hub_allow_name="scion-hub-${hub_name}-hub-allow"
+  if ! rule_json="$(gcloud compute firewall-rules describe "$hub_allow_name" --project="$project_id" --format=json 2>/dev/null)"; then
     err "Hub URL guard: firewall rule ${hub_allow_name} could not be confirmed after create. GKE agent pods would have no way to reach the hub at ${HYBRID_INTERNAL_IP}:8080."
+    exit 1
+  fi
+  rule_ranges="$(echo "$rule_json" | "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print(','.join(d.get('sourceRanges') or []))")"
+  if [[ "$rule_ranges" != "${GKE_POD_CIDR:-}" ]]; then
+    err "Hub URL guard: firewall rule ${hub_allow_name}'s source range is '${rule_ranges}', not the discovered pod CIDR '${GKE_POD_CIDR:-}'. GKE agent pods outside that range would be denied, or the rule may be wider than intended."
     exit 1
   fi
 }
