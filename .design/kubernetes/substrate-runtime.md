@@ -665,18 +665,54 @@ every runtime — not a substrate-specific mechanism:
   exposes a narrow, type-asserted `RecordlessActorProber` capability
   (`pkg/runtimebroker`, never added to the generic `Runtime` interface) that
   lists the record-less actors in a project's own atespace independent of
-  slug matching. `resolveDeleteTarget` and the stop path consult it exactly
-  once, only at the point they would otherwise answer not-found/idempotent,
-  and only when the requesting caller supplied a project ID: at least one
-  record-less actor there turns the answer into `HTTP 409
+  slug matching, excluding any actor already in `ACTOR_STATE_DELETING` (see
+  below). `resolveDeleteTarget` and the stop path consult it, only when the
+  requesting caller supplied a project ID, at every point they would
+  otherwise answer not-found/idempotent — including, on delete, **before**
+  accepting a file-only target from the local-file fallback below, not only
+  when that fallback also finds nothing: a persisted project directory (a
+  workstation broker, or any `$HOME` that survives a restart) can otherwise
+  resolve a file-only delete for an agent whose actor is still running,
+  record-less, on the cluster, deleting only the files and orphaning the
+  rest. At least one record-less actor turns the answer into `HTTP 409
   substrate_agent_identity_unknown` (naming the atespace and the count)
   instead; none present leaves the ordinary idempotent 404/202 unchanged; the
   probe itself erroring is an explicit failure, never treated as either
   outcome. See `deploy/substrate/README.md`, "After a broker restart", for
-  the operator-facing behavior and cleanup steps, including the two
-  fail-closed consequences this accepts (a same-prefix atespace collision
-  across two projects, and every absent-slug delete in an affected project
-  returning 409 until its record-less actors are cleaned up).
+  the operator-facing behavior and cleanup steps, including the fail-closed
+  consequences this accepts (a same-prefix atespace collision across two
+  projects — reachable on purpose, since project IDs are client-supplied at
+  creation, not just a theoretical accident; every absent-slug delete in an
+  affected project returning 409 until its record-less actors are cleaned
+  up; and a narrow `CreateActor`-to-record-write window that can spuriously
+  409 an unrelated request in the same project).
+- **Stop has a second failure mode delete does not: `projectScopedTarget`
+  collapses any `LookupContainerID` error (not just a genuine miss) into
+  the same `""` a not-found produces**, so a transient listing failure could
+  otherwise reach the idempotent 202 for a still-existing, still-recorded
+  agent. On a broker with at least one `RecordlessActorProber` runtime
+  registered, `stopAgent` re-runs just the primary, project-scoped list call
+  itself (`agentLookupListErr`, `pkg/runtimebroker/handlers.go`) before
+  falling back to the record-less-actor check, and returns an explicit 5xx
+  if that call errors — never treating "the check itself failed" as "safe to
+  no-op". Every runtime without that capability is unaffected: the
+  type assertion fails and stop's control flow is byte-identical to before
+  this existed.
+- **A record-less actor already in `ACTOR_STATE_DELETING` is excluded from
+  the count above.** Stop is Delete in Phase 1 (§4's `Stop` row): it drops
+  this process's own in-memory record immediately, but Delete is
+  fire-and-forget (above), so the actor can stay listed, in `DELETING`, for a
+  while afterward. Without this exclusion, an ordinary same-project
+  stop-then-delete sequence — no restart at all — would falsely report
+  "broker restarted" for as long as that actor stayed listed. This is safe
+  unconditionally: the `ActorState` enum
+  (`third_party/ateapipb/ateapi.proto`) has no state after `DELETING` for an
+  actor to revert to (a deleted actor simply stops being listed), and
+  `ActorStatus.state` is required on every listed actor, so a record-less
+  `DELETING` actor can only ever disappear next, never re-enter a live
+  state. An actor already in `DELETING` also already had its egress policy
+  removed first (Delete's own ordering, above), so there is nothing left for
+  the count to protect.
 - **The broker's local-file deletion fallback (`findAgentInHubManagedProjects`,
   called from `findAgentProjectDir`) is itself project-scoped**: it only
   accepts a hub-managed project directory whose own recorded project ID
@@ -707,10 +743,17 @@ every runtime — not a substrate-specific mechanism:
   remains unreachable by slug even within its own project, by design (§9);
   an operator must re-identify it by other means until its record is
   restored. A project-scoped delete/stop targeting it (or any absent slug in
-  the same atespace) now fails closed with `409
+  the same atespace) fails closed with `409
   substrate_agent_identity_unknown` instead of silently reporting the usual
-  idempotent success (§9) — the actor is not touched either way, but the
-  caller is no longer told it is gone when it isn't.
+  idempotent success — including a delete resolved only from a persisted
+  project directory (file-only target), and a stop whose own container
+  lookup errored rather than a genuine not-found, both of which fail
+  closed with an explicit error rather than the idempotent path they would
+  otherwise fall back to (§9) — the actor is not touched either way, but the
+  caller is no longer told it is gone when it isn't. A record-less actor
+  already in `ACTOR_STATE_DELETING` is the one exception: it is never
+  counted, so an ordinary same-project stop-then-delete sequence with no
+  restart involved stays the ordinary idempotent 404/202 (§9).
 - Exec and Message against a record-less actor fail with an explicit
   "no control token cached" error — permanent for that specific actor, since
   bootstrap is one-shot (§5) and there is no way to re-mint or recover a
