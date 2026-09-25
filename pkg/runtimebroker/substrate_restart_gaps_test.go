@@ -367,9 +367,9 @@ func unscopedListFailsOnlyOnCallN(n int, err error) func(*ateapipb.ListActorsReq
 // action happened": for the absent-slug sequence, a false "not found" and a
 // genuine one are both a 202 with nothing to act on, so a test that only
 // checked side effects could not tell a masked failure apart from the
-// correct idempotent case. The exact call this exists to catch (m18: the
-// fallback list error swallowed as "not found" instead of propagated) would
-// pass every side-effect check below and still be a false success.
+// correct idempotent case. The exact failure this exists to catch — the
+// fallback list's own error swallowed as "not found" instead of propagated —
+// would pass every side-effect check below and still be a false success.
 //   - a recorded agent's stop makes 3 unscoped List calls (resolving the
 //     manager, the prober-path primary lookup, and — once that lookup
 //     resolves the target — the agent manager's own Stop-time List). Calls
