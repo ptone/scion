@@ -469,24 +469,24 @@ test_deploy_delete_hybrid_order_allow_before_deny() {
     "the allow rule must be deleted before the deny rule (an allow must never briefly exist unpaired)"
 }
 
-test_deploy_delete_hub_allow_deleted_before_deny() {
+test_deploy_delete_hub_deny_deleted_before_nfs_deny() {
   fresh_gcloud_state
   seed_instance "$INSTANCE_NAME" "us-central1-b"
   seed_firewall_rule_json "scion-hub-${HUB}-nfs-allow" "scion-deployment=${HUB}" \
     "default" "INGRESS" "ALLOW" "tcp" "2049" "gke-x-node" "" "scion-hub-${HUB}-nfs" "900"
   seed_firewall_rule_json "scion-hub-${HUB}-nfs-deny" "scion-deployment=${HUB}" \
     "default" "INGRESS" "DENY" "tcp" "2049" "" "0.0.0.0/0" "scion-hub-${HUB}-nfs" "950"
-  seed_firewall_rule_json "scion-hub-${HUB}-hub-allow" "scion-deployment=${HUB}" \
-    "default" "INGRESS" "ALLOW" "tcp" "8080" "" "10.52.0.0/14" "scion-hub-${HUB}-nfs" "900"
+  seed_firewall_rule_json "scion-hub-${HUB}-hub-deny" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "DENY" "tcp" "8080" "" "10.52.0.0/14" "scion-hub-${HUB}-nfs" "950"
   run_deploy_delete "$(base_config_json "$HUB")"
-  local log hub_allow_line deny_line
+  local log hub_deny_line deny_line
   log="$(gcloud_log)"
-  hub_allow_line="$(line_number "firewall-rules delete scion-hub-${HUB}-hub-allow" "$log")"
+  hub_deny_line="$(line_number "firewall-rules delete scion-hub-${HUB}-hub-deny" "$log")"
   deny_line="$(line_number "firewall-rules delete scion-hub-${HUB}-nfs-deny" "$log")"
-  assert_true "$([[ -n "$hub_allow_line" && -n "$deny_line" && "$hub_allow_line" -lt "$deny_line" ]] && echo true || echo false)" \
-    "the hub-allow rule must be deleted before the deny rule, the same as the nfs-allow rule"
-  assert_eq "1" "$(gcloud_log | grep -c "firewall-rules delete scion-hub-${HUB}-hub-allow" || true)" \
-    "the hub-allow rule must actually be deleted during teardown, not just left in place"
+  assert_true "$([[ -n "$hub_deny_line" && -n "$deny_line" && "$hub_deny_line" -lt "$deny_line" ]] && echo true || echo false)" \
+    "the hub-deny rule must be deleted before the nfs-deny rule, the same as the nfs-allow rule"
+  assert_eq "1" "$(gcloud_log | grep -c "firewall-rules delete scion-hub-${HUB}-hub-deny" || true)" \
+    "the hub-deny rule must actually be deleted during teardown, not just left in place"
 }
 
 test_deploy_delete_vm_failure_keeps_hybrid_rules() {
@@ -1455,14 +1455,12 @@ test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
   assert_contains "$dev_heredoc" 'server: "10.128.0.9"' \
     "the settings.yaml shared_dir_storage server field must be the reserved internal IP"
 
-  # The hub URL guard's post-create half re-describes the reservation and
-  # the hub-allow rule; both calls must actually have happened by this
-  # point, proving deploy.sh calls the guard at all (nothing else in this
-  # flow describes the internal-IP address after it's created).
+  # The internal IP guard's post-create half re-describes the
+  # reservation; this call must actually have happened by this point,
+  # proving deploy.sh calls the guard at all (nothing else in this flow
+  # describes the internal-IP address after it's created).
   assert_contains "$log" "compute addresses describe scion-hub-${HUB}-internal-ip" \
-    "the hub URL guard must re-describe the internal IP reservation after create"
-  assert_contains "$log" "compute firewall-rules describe scion-hub-${HUB}-hub-allow" \
-    "the hub URL guard must re-describe the hub-allow rule after create"
+    "the internal IP guard must re-describe the internal IP reservation after create"
 }
 
 test_deploy_create_tier_on_wires_configured_image_size_to_export_script() {

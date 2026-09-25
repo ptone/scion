@@ -292,6 +292,56 @@ set_service_account_exists() {
   touch "${GCLOUD_STUB_STATE_DIR}/service-account-exists"
 }
 
+# seed_service_account EMAIL DESCRIPTION — a name-scoped service-account
+# fixture: the next `describe` for exactly this email returns this
+# description (for the transport SA's own marker/adopt checks, which the
+# older, non-name-scoped set_service_account_exists above can't express).
+seed_service_account() {
+  local email="$1" description="${2:-}"
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/service-accounts"
+  "$PYTHON" -c "
+import json, sys
+email, desc, path = sys.argv[1:4]
+json.dump({'email': email, 'description': desc}, open(path, 'w'))
+" "$email" "$description" "${GCLOUD_STUB_STATE_DIR}/service-accounts/${email}.json"
+}
+
+# set_service_account_delete_will_fail EMAIL — the next `delete` for
+# exactly this service account fails.
+set_service_account_delete_will_fail() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/service-accounts"
+  touch "${GCLOUD_STUB_STATE_DIR}/service-accounts/$1.json.delete-fail"
+}
+
+# set_service_account_grant_will_fail EMAIL — the next
+# `add-iam-policy-binding` on exactly this service account fails.
+set_service_account_grant_will_fail() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/service-accounts"
+  touch "${GCLOUD_STUB_STATE_DIR}/service-accounts/$1.json.grant-fail"
+}
+
+# set_iap_client_id CLIENT_ID / set_iap_client_id_empty — the next `iap
+# settings get` call returns this OAuth client id, or none at all (the
+# "IAP configured with no OAuth client" refusal case).
+set_iap_client_id() {
+  printf '%s' "$1" > "${GCLOUD_STUB_STATE_DIR}/iap-client-id.txt"
+}
+set_iap_client_id_empty() {
+  : > "${GCLOUD_STUB_STATE_DIR}/iap-client-id.txt"
+}
+
+# set_iap_settings_get_will_fail — the next `iap settings get` call
+# fails (a permissions problem, IAP not enabled, etc.).
+set_iap_settings_get_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/iap-settings-get-should-fail"
+}
+
+# set_iap_web_binding_will_fail — the next `iap web
+# add-iam-policy-binding` call fails.
+set_iap_web_binding_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/iap-web-add-binding-should-fail"
+}
+
 # seed_run_service_exists NAME — the next `run services describe` call
 # for this service succeeds (simulating a redeploy of an existing
 # service). Without this, the stub reports NOT_FOUND.

@@ -10,9 +10,10 @@
 HUB="demohub"
 PROJECT="demo-project"
 NETWORK="default"
+REGION="us-central1"
 ALLOW_NAME="scion-hub-${HUB}-nfs-allow"
 DENY_NAME="scion-hub-${HUB}-nfs-deny"
-HUB_ALLOW_NAME="scion-hub-${HUB}-hub-allow"
+HUB_DENY_NAME="scion-hub-${HUB}-hub-deny"
 TARGET_TAG="scion-hub-${HUB}-nfs"
 MARKER="scion-deployment=${HUB}"
 INSTANCE_NAME_TEST="scion-hub-${HUB}"
@@ -2353,7 +2354,7 @@ test_firewall_rules_created_with_names_marker_tag_and_shape() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
-  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
 
   assert_eq "$ALLOW_NAME" "$HYBRID_ALLOW_NAME" "allow rule name"
   assert_eq "$DENY_NAME" "$HYBRID_DENY_NAME" "deny rule name"
@@ -2384,6 +2385,66 @@ test_firewall_rules_created_with_names_marker_tag_and_shape() {
   assert_contains "$deny_line" "--priority=950" "deny rule priority"
 }
 
+test_hub_deny_rule_created_with_name_marker_tag_and_shape() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
+  assert_eq "$HUB_DENY_NAME" "$HYBRID_HUB_DENY_NAME" "hub-deny rule name"
+  local hub_deny_line
+  hub_deny_line="$(gcloud_log | grep "firewall-rules create ${HUB_DENY_NAME} ")"
+  assert_contains "$hub_deny_line" "--description=${MARKER}" "hub-deny rule carries the exact ownership marker"
+  assert_contains "$hub_deny_line" "--target-tags=${TARGET_TAG}" "hub-deny rule targets the hub's own network tag"
+  assert_contains "$hub_deny_line" "--network=${NETWORK}" "hub-deny rule is on the hub's network"
+  assert_contains "$hub_deny_line" "--direction=INGRESS" "hub-deny rule is ingress"
+  assert_contains "$hub_deny_line" "--action=DENY" "hub-deny rule action"
+  assert_contains "$hub_deny_line" "--rules=tcp:8080" "hub-deny rule port"
+  assert_contains "$hub_deny_line" "--source-ranges=${GKE_POD_CIDR}" "hub-deny rule sources from the discovered pod CIDR"
+  assert_contains "$hub_deny_line" "--priority=950" "hub-deny rule uses the nfs-deny priority scheme"
+}
+
+# =====================================================================
+# Cloud Run egress / hub-deny overlap check.
+# =====================================================================
+
+test_hub_deny_overlap_check_refuses_overlapping_range() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  # The Cloud Run proxy's egress subnet ("default") has a primary range
+  # that fully contains the discovered pod CIDR.
+  seed_subnet "$NETWORK" "10.48.0.0/12"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "an overlapping Cloud Run egress range must refuse before creating any rule"
+  assert_contains "$RUN_OUTPUT" "overlaps" "error should explain the overlap"
+  assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" \
+    "nothing must be created before the overlap check passes"
+}
+
+test_hub_deny_overlap_check_refuses_on_subnet_describe_failure() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  set_subnet_describe_will_fail "$NETWORK"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a subnet describe failure must fail closed, not be treated as no overlap"
+  assert_contains "$RUN_OUTPUT" "Could not describe subnet" "error should explain the describe failure"
+  assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" \
+    "nothing must be created when the overlap check itself can't complete"
+}
+
+test_hub_deny_overlap_check_passes_on_disjoint_range() {
+  fresh_gcloud_state
+  GKE_NODE_TAG="gke-democluster-abc12345-node"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_subnet "$NETWORK" "10.128.0.0/20"
+  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
+  assert_eq "1" "$(gcloud_log | grep -c "firewall-rules create ${HUB_DENY_NAME} " || true)" \
+    "a disjoint egress range must let hub-deny be created"
+}
+
 # A rule this tier just created must itself pass its own reuse check on
 # the very next run -- otherwise every real deploy.sh re-run would fail
 # immediately after its own first-time creation.
@@ -2391,8 +2452,8 @@ test_firewall_rules_idempotent_across_two_runs() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
-  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
-  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
+  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   local log
   log="$(gcloud_log)"
   assert_eq "1" "$(echo "$log" | grep -c "firewall-rules create ${ALLOW_NAME} ")" \
@@ -2409,9 +2470,9 @@ test_firewall_rule_reused_when_marked_and_matching() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
-    "" "$GKE_POD_CIDR" "$TARGET_TAG" "900"
-  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
+    "" "$GKE_POD_CIDR" "$TARGET_TAG" "950"
+  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules create' || true)" \
     "an already-marked, matching-spec rule triple must not be recreated"
 }
@@ -2421,21 +2482,21 @@ test_firewall_rule_refused_when_unmarked() {
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
   seed_firewall_rule_desc_only "$ALLOW_NAME" "some other unrelated rule"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unmarked name collision must fail the run"
   assert_contains "$RUN_OUTPUT" "does not carry this deployment's marker" "error should explain the refusal"
 }
 
-# Same protection as above, but for the hub-allow rule specifically: it
+# Same protection as above, but for the hub-deny rule specifically: it
 # must not get a pass just because it's the third/newest of the three
 # rules this function manages.
-test_firewall_hub_allow_rule_refused_when_unmarked() {
+test_firewall_hub_deny_rule_refused_when_unmarked() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
-  seed_firewall_rule_desc_only "$HUB_ALLOW_NAME" "some other unrelated rule"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
-  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unmarked hub-allow name collision must fail the run"
+  seed_firewall_rule_desc_only "$HUB_DENY_NAME" "some other unrelated rule"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unmarked hub-deny name collision must fail the run"
   assert_contains "$RUN_OUTPUT" "does not carry this deployment's marker" "error should explain the refusal"
 }
 
@@ -2446,7 +2507,7 @@ test_firewall_marker_check_is_exact_not_substring() {
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
   seed_firewall_rule_desc_only "$ALLOW_NAME" "scion-deployment=${HUB}2"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "a marker for a different, prefix-colliding hub must not be treated as a match"
   # Specifically the marker check, not merely "failed for some reason" (a
@@ -2471,7 +2532,7 @@ test_drift_widened_allow_source_fails_with_remediation() {
     "some-stale-tag" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a widened/changed source must fail the run"
   assert_contains "$RUN_OUTPUT" "$ALLOW_NAME" "drift output should name the drifted rule"
   assert_contains "$RUN_OUTPUT" "some-stale-tag" "drift output should show the actual (drifted) source"
@@ -2490,7 +2551,7 @@ test_drift_lower_deny_priority_fails_with_remediation() {
   # Drifted: priority lowered from 950.
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "100"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a lowered priority must fail the run"
   assert_contains "$RUN_OUTPUT" "$DENY_NAME" "drift output should name the drifted rule"
   assert_contains "$RUN_OUTPUT" "priority" "drift output should mention the drifted field"
@@ -2499,7 +2560,7 @@ test_drift_lower_deny_priority_fails_with_remediation() {
   assert_contains "$RUN_OUTPUT" "--priority=950" "the update remediation should restore the expected priority"
 }
 
-test_drift_hub_allow_widened_source_fails_with_remediation() {
+test_drift_hub_deny_narrowed_source_fails_with_remediation() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
@@ -2507,25 +2568,26 @@ test_drift_hub_allow_widened_source_fails_with_remediation() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  # Drifted: the hub-allow rule's source widened to the whole internet,
-  # rather than staying scoped to the discovered pod CIDR.
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
-    "" "0.0.0.0/0" "$TARGET_TAG" "900"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  # Drifted: the hub-deny rule's source narrowed away from the whole
+  # discovered pod CIDR, which would let some pods reach the hub the
+  # rule is supposed to block.
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
+    "" "10.52.0.0/16" "$TARGET_TAG" "950"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
-    "a hub-allow rule widened to 0.0.0.0/0 must fail the run, not be adopted as-is"
-  assert_contains "$RUN_OUTPUT" "$HUB_ALLOW_NAME" "drift output should name the drifted rule"
-  assert_contains "$RUN_OUTPUT" "0.0.0.0/0" "drift output should show the actual (drifted) source"
+    "a hub-deny rule narrowed away from the discovered pod CIDR must fail the run, not be adopted as-is"
+  assert_contains "$RUN_OUTPUT" "$HUB_DENY_NAME" "drift output should name the drifted rule"
+  assert_contains "$RUN_OUTPUT" "10.52.0.0/16" "drift output should show the actual (drifted) source"
   assert_contains "$RUN_OUTPUT" "${GKE_POD_CIDR}" "drift output should show the expected source"
-  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${HUB_ALLOW_NAME}" "drift output should include a runnable delete remediation"
+  assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${HUB_DENY_NAME}" "drift output should include a runnable delete remediation"
 }
 
-# The six tests below each drift exactly one more field of the hub-allow
+# The six tests below each drift exactly one more field of the hub-deny
 # rule (everything else matching), isolating that the shared drift check
 # -- already well covered through the NFS allow/deny rule fixtures above
-# -- is actually reached for hub-allow too, not skipped for it.
+# -- is actually reached for hub-deny too, not skipped for it.
 
-test_drift_hub_allow_wrong_ports_fails() {
+test_drift_hub_deny_wrong_ports_fails() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
@@ -2533,15 +2595,15 @@ test_drift_hub_allow_wrong_ports_fails() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "9090" \
-    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "900"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "9090" \
+    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "950"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
-    "a hub-allow rule with the wrong port must fail the run, not be adopted as-is"
+    "a hub-deny rule with the wrong port must fail the run, not be adopted as-is"
   assert_contains "$RUN_OUTPUT" "ports:" "drift output should name the drifted field"
 }
 
-test_drift_hub_allow_wrong_priority_fails() {
+test_drift_hub_deny_wrong_priority_fails() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
@@ -2549,15 +2611,15 @@ test_drift_hub_allow_wrong_priority_fails() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
     "" "${GKE_POD_CIDR}" "$TARGET_TAG" "800"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
-    "a hub-allow rule with the wrong priority must fail the run, not be adopted as-is"
+    "a hub-deny rule with the wrong priority must fail the run, not be adopted as-is"
   assert_contains "$RUN_OUTPUT" "priority:" "drift output should name the drifted field"
 }
 
-test_drift_hub_allow_wrong_target_tags_fails() {
+test_drift_hub_deny_wrong_target_tags_fails() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
@@ -2565,15 +2627,15 @@ test_drift_hub_allow_wrong_target_tags_fails() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
-    "" "${GKE_POD_CIDR}" "some-other-tag" "900"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
+    "" "${GKE_POD_CIDR}" "some-other-tag" "950"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
-    "a hub-allow rule with the wrong target tag must fail the run, not be adopted as-is"
+    "a hub-deny rule with the wrong target tag must fail the run, not be adopted as-is"
   assert_contains "$RUN_OUTPUT" "target tags:" "drift output should name the drifted field"
 }
 
-test_drift_hub_allow_wrong_direction_fails() {
+test_drift_hub_deny_wrong_direction_fails() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
@@ -2581,15 +2643,15 @@ test_drift_hub_allow_wrong_direction_fails() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "EGRESS" "ALLOW" "tcp" "8080" \
-    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "900"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "EGRESS" "DENY" "tcp" "8080" \
+    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "950"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
-    "a hub-allow rule with the wrong direction must fail the run, not be adopted as-is"
+    "a hub-deny rule with the wrong direction must fail the run, not be adopted as-is"
   assert_contains "$RUN_OUTPUT" "direction:" "drift output should name the drifted field"
 }
 
-test_drift_hub_allow_wrong_action_fails() {
+test_drift_hub_deny_wrong_action_fails() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
@@ -2597,15 +2659,17 @@ test_drift_hub_allow_wrong_action_fails() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
-    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "900"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  # Drifted: someone flipped hub-deny to ALLOW, which would open the
+  # port this rule exists to block.
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
+    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "950"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
-    "a hub-allow rule with the wrong action must fail the run, not be adopted as-is"
+    "a hub-deny rule with the wrong action must fail the run, not be adopted as-is"
   assert_contains "$RUN_OUTPUT" "action:" "drift output should name the drifted field"
 }
 
-test_drift_hub_allow_disabled_fails() {
+test_drift_hub_deny_disabled_fails() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
@@ -2613,11 +2677,11 @@ test_drift_hub_allow_disabled_fails() {
     "$GKE_NODE_TAG" "" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
-    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "900" "" "" "" "true"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  seed_firewall_rule_json "$HUB_DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "8080" \
+    "" "${GKE_POD_CIDR}" "$TARGET_TAG" "950" "" "" "" "true"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
-    "a disabled hub-allow rule must fail the run, not be adopted as-is"
+    "a disabled hub-deny rule must fail the run, not be adopted as-is"
   assert_contains "$RUN_OUTPUT" "disabled:" "drift output should name the drifted field"
 }
 
@@ -2631,7 +2695,7 @@ test_drift_action_change_offers_delete_but_not_update() {
     "" "0.0.0.0/0" "$TARGET_TAG" "900"
   seed_firewall_rule_json "$DENY_NAME" "$MARKER" "$NETWORK" "INGRESS" "DENY" "tcp" "2049" \
     "" "0.0.0.0/0" "$TARGET_TAG" "950"
-  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  run_expect_fail hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an action change must fail the run"
   assert_contains "$RUN_OUTPUT" "gcloud compute firewall-rules delete ${ALLOW_NAME}" "an action drift should still offer the delete remediation"
   assert_not_contains "$RUN_OUTPUT" "gcloud compute firewall-rules update ${ALLOW_NAME}" "an action drift must not offer an in-place update (unsupported by update)"
@@ -2659,7 +2723,7 @@ test_reenable_on_preexisting_nonhybrid_hub() {
   GKE_POD_CIDR="10.52.0.0/14"
   # No pre-existing firewall-rules state: this hub predates the hybrid tier,
   # so the two rules don't exist yet even though the VM/hub itself does.
-  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   hybrid_apply_vm_tag "scion-hub-${HUB}" "us-central1-b" "$PROJECT" "$HUB"
   assert_eq "1" "$(gcloud_log | grep -c "firewall-rules create ${ALLOW_NAME} " || true)" \
     "hybrid rules should be created fresh on an existing, previously non-hybrid hub"
@@ -2708,15 +2772,15 @@ test_teardown_check_unmarked_fails_and_skips() {
   assert_eq "$DENY_NAME" "${HYBRID_TEARDOWN_SKIP[0]:-}" "the deny rule is the one skipped"
 }
 
-test_teardown_check_unmarked_hub_allow_fails_and_skips() {
+test_teardown_check_unmarked_hub_deny_fails_and_skips() {
   fresh_gcloud_state
   seed_firewall_rule_desc_only "$ALLOW_NAME" "$MARKER"
-  seed_firewall_rule_desc_only "$HUB_ALLOW_NAME" "unrelated-rule-not-ours"
+  seed_firewall_rule_desc_only "$HUB_DENY_NAME" "unrelated-rule-not-ours"
   hybrid_teardown_check "$HUB" "$PROJECT"
-  assert_eq "true" "$HYBRID_TEARDOWN_FAILED" "an unmarked hub-allow name match must fail the teardown run too, not just the two NFS rules"
+  assert_eq "true" "$HYBRID_TEARDOWN_FAILED" "an unmarked hub-deny name match must fail the teardown run too, not just the two NFS rules"
   assert_eq "1" "${#HYBRID_TEARDOWN_DELETE[@]}" "the marked rule is still queued"
-  assert_eq "1" "${#HYBRID_TEARDOWN_SKIP[@]}" "the unmarked hub-allow rule is listed as SKIPPED"
-  assert_eq "$HUB_ALLOW_NAME" "${HYBRID_TEARDOWN_SKIP[0]:-}" "the hub-allow rule is the one skipped"
+  assert_eq "1" "${#HYBRID_TEARDOWN_SKIP[@]}" "the unmarked hub-deny rule is listed as SKIPPED"
+  assert_eq "$HUB_DENY_NAME" "${HYBRID_TEARDOWN_SKIP[0]:-}" "the hub-deny rule is the one skipped"
 }
 
 test_teardown_delete_only_deletes_queued() {
@@ -2734,7 +2798,7 @@ test_firewall_rules_created_deny_before_allow() {
   fresh_gcloud_state
   GKE_NODE_TAG="gke-democluster-abc12345-node"
   GKE_POD_CIDR="10.52.0.0/14"
-  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK"
+  hybrid_ensure_firewall_rules "$HUB" "$PROJECT" "$NETWORK" "$REGION"
   local log allow_line_num deny_line_num
   log="$(gcloud_log)"
   allow_line_num="$(echo "$log" | grep -n "firewall-rules create ${ALLOW_NAME} " | head -1 | cut -d: -f1)"
@@ -3412,7 +3476,7 @@ test_registry_loopback_rejects_lookalike_host() {
 
 # =====================================================================
 # Pod CIDR discovery: cross-checked against two fields in the same
-# cluster describe JSON, used only by the hub-allow firewall rule.
+# cluster describe JSON, used only by the hub-deny firewall rule.
 # =====================================================================
 
 test_discover_pod_cidr_from_cluster_fixture() {
@@ -3751,74 +3815,64 @@ test_internal_ip_teardown_delete_noop_when_nothing_queued() {
 }
 
 # =====================================================================
-# Hub URL guard: the post-create verification half.
+# Internal IP guard: the post-create verification half. Confirms only
+# the reservation the NFS PV needs; it has nothing to say about
+# hub-deny or any other firewall rule -- those are checked as part of
+# the firewall rules themselves (see the drift battery above).
 # =====================================================================
 
-test_hub_url_guard_verify_passes_when_everything_is_in_place() {
+test_internal_ip_guard_verify_passes_when_everything_is_in_place() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
-  GKE_POD_CIDR="10.52.0.0/14"
   seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
   seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
-    "" "10.52.0.0/14" "$TARGET_TAG" "900"
-  assert_true "$(hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b" && echo true || echo false)" \
-    "the guard must pass when the reservation is marked/matches the VM IP and the rule's source matches the pod CIDR"
+  assert_true "$(hybrid_internal_ip_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b" && echo true || echo false)" \
+    "the guard must pass when the reservation is marked and matches the VM's actual internal IP"
 }
 
-test_hub_url_guard_verify_fails_when_reservation_unmarked() {
+test_internal_ip_guard_verify_fails_when_reservation_unmarked() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
-  GKE_POD_CIDR="10.52.0.0/14"
   seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
-  seed_address_unmarked "scion-hub-${HUB}-internal-ip" "10.128.0.5"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
-    "" "10.52.0.0/14" "$TARGET_TAG" "900"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "some-other-marker"
+  run_expect_fail hybrid_internal_ip_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "a reservation that no longer carries this deployment's marker must fail the guard"
   assert_contains "$RUN_OUTPUT" "no longer carries this deployment's marker" "error should explain why"
 }
 
-test_hub_url_guard_verify_fails_when_reservation_address_mismatches_vm_ip() {
+test_internal_ip_guard_verify_fails_when_reservation_address_mismatches_vm_ip() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
-  GKE_POD_CIDR="10.52.0.0/14"
   seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
   seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.99" "$MARKER"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
-    "" "10.52.0.0/14" "$TARGET_TAG" "900"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
+  run_expect_fail hybrid_internal_ip_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "a reservation whose address doesn't match the VM's resolved internal IP must fail the guard"
-  assert_contains "$RUN_OUTPUT" "reach the wrong address" "error should explain why"
+  assert_contains "$RUN_OUTPUT" "wrong address" "error should explain why"
 }
 
-test_hub_url_guard_verify_fails_when_vm_actual_ip_diverges_even_if_hybrid_internal_ip_still_matches() {
+test_internal_ip_guard_verify_fails_when_vm_actual_ip_diverges_even_if_hybrid_internal_ip_still_matches() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
-  GKE_POD_CIDR="10.52.0.0/14"
   export GCLOUD_STUB_VM_IP="10.128.0.77"
   seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
   seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
-    "" "10.52.0.0/14" "$TARGET_TAG" "900"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
+  run_expect_fail hybrid_internal_ip_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "the guard must catch the VM's real internal IP having diverged from the reservation, even when \$HYBRID_INTERNAL_IP (read earlier, from the reservation itself on the new-VM path) still equals it -- comparing against \$HYBRID_INTERNAL_IP alone could never catch this"
-  assert_contains "$RUN_OUTPUT" "reach the wrong address" "error should explain why"
+  assert_contains "$RUN_OUTPUT" "wrong address" "error should explain why"
   unset GCLOUD_STUB_VM_IP
 }
 
-test_hub_url_guard_verify_fails_when_resolved_ip_does_not_match_vm_ip() {
+test_internal_ip_guard_verify_fails_when_resolved_ip_does_not_match_vm_ip() {
   fresh_gcloud_state
   # HYBRID_INTERNAL_IP disagrees with the VM's actual (default-stub)
   # internal IP directly -- defense in depth on top of the later
   # reservation-address check, which this scenario never even reaches.
   HYBRID_INTERNAL_IP="10.128.0.99"
-  GKE_POD_CIDR="10.52.0.0/14"
   seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
+  run_expect_fail hybrid_internal_ip_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "a resolved internal IP that doesn't match the VM's actual internal IP must fail the guard"
   assert_contains "$RUN_OUTPUT" "does not match VM" "error should explain why"
@@ -3826,55 +3880,40 @@ test_hub_url_guard_verify_fails_when_resolved_ip_does_not_match_vm_ip() {
     "must fail before ever describing the reservation"
 }
 
-test_hub_url_guard_verify_fails_when_reservation_address_is_not_valid_ipv4() {
+test_internal_ip_guard_verify_fails_when_reservation_address_is_not_valid_ipv4() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
-  GKE_POD_CIDR="10.52.0.0/14"
   seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
   seed_address "scion-hub-${HUB}-internal-ip" "not-an-ip" "$MARKER"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
+  run_expect_fail hybrid_internal_ip_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
     "a reservation address that isn't valid IPv4 must fail the guard"
   assert_contains "$RUN_OUTPUT" "not a valid IPv4 address" "error should explain why"
 }
 
-test_hub_url_guard_verify_fails_on_hub_allow_source_range_drift() {
-  fresh_gcloud_state
-  HYBRID_INTERNAL_IP="10.128.0.5"
-  GKE_POD_CIDR="10.52.0.0/14"
-  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
-  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
-  seed_firewall_rule_json "$HUB_ALLOW_NAME" "$MARKER" "$NETWORK" "INGRESS" "ALLOW" "tcp" "8080" \
-    "" "0.0.0.0/0" "$TARGET_TAG" "900"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
-  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
-    "a hub-allow rule whose source range no longer matches the discovered pod CIDR must fail the guard"
-  assert_contains "$RUN_OUTPUT" "not the discovered pod CIDR" "error should explain why"
-}
-
-test_hub_url_guard_verify_fails_on_empty_internal_ip() {
+test_internal_ip_guard_verify_fails_on_empty_internal_ip() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP=""
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
+  run_expect_fail hybrid_internal_ip_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an empty internal IP must fail the guard"
   assert_contains "$RUN_OUTPUT" "no valid internal IP is resolved" "error should explain why"
 }
 
-test_hub_url_guard_verify_fails_on_non_ipv4_internal_ip() {
+test_internal_ip_guard_verify_fails_on_non_ipv4_internal_ip() {
   fresh_gcloud_state
   # Non-empty but not IPv4-shaped -- a blank-then-fallback bug or a stray
   # hostname/IPv6 value must not slip past the emptiness check alone.
   HYBRID_INTERNAL_IP="not-an-ip"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
+  run_expect_fail hybrid_internal_ip_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a non-IPv4-shaped internal IP must fail the guard"
   assert_contains "$RUN_OUTPUT" "no valid internal IP is resolved" "error should explain why"
 }
 
-test_hub_url_guard_verify_fails_when_reservation_missing() {
+test_internal_ip_guard_verify_fails_when_reservation_missing() {
   fresh_gcloud_state
   HYBRID_INTERNAL_IP="10.128.0.5"
   seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
+  run_expect_fail hybrid_internal_ip_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a missing reservation must fail the guard"
   assert_contains "$RUN_OUTPUT" "could not be confirmed after create" "error should name the reservation"
   # Must stop right there, not fall through into the marker check with an
@@ -3884,12 +3923,178 @@ test_hub_url_guard_verify_fails_when_reservation_missing() {
   assert_not_contains "$RUN_OUTPUT" "no longer carries this deployment's marker" "must not fall through past the describe failure into the marker check"
 }
 
-test_hub_url_guard_verify_fails_when_hub_allow_rule_missing() {
+# =====================================================================
+# Confidentiality/regression sweep: no hub-allow artifact remains.
+# =====================================================================
+
+test_no_hub_allow_artifact_remains_in_scripts_or_docs() {
+  # Scoped to production code and the current-state reference docs, not
+  # this test file itself (this check's own name and description
+  # necessarily spell out the string it searches for) and not
+  # .design/project-log/ (a dated, append-only development journal --
+  # pre-DA-1 entries accurately describe what that phase's code did at
+  # the time; the DA-1 entry itself describes the current design).
+  local hits repo_root
+  repo_root="$(cd "${TIER_DIR}/../.." && pwd)"
+  hits="$(grep -rIn 'hub-allow\|hub_allow\|HUB_ALLOW\|hybrid_hub_url_guard' \
+    "${TIER_DIR}" "${repo_root}/docs" \
+    --include='*.sh' --include='*.md' --include='*.json' \
+    --exclude='test_hybrid_tier.sh' \
+    2>/dev/null || true)"
+  assert_eq "" "$hits" "no hub-allow naming, variable, or function-name artifact should remain anywhere under scripts/single-node-vm or docs"
+}
+
+# =====================================================================
+# Agent transport auth: IAP OAuth client ID discovery, the dedicated
+# transport service account, and the grants that let it mint and use ID
+# tokens.
+# =====================================================================
+
+test_discover_iap_client_id_lands_verbatim() {
   fresh_gcloud_state
-  HYBRID_INTERNAL_IP="10.128.0.5"
-  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
-  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.5" "$MARKER"
-  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
-  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a missing hub-allow rule must fail the guard"
-  assert_contains "$RUN_OUTPUT" "$HUB_ALLOW_NAME" "error should name the missing rule"
+  set_iap_client_id "999999999-realistic-client-id.apps.googleusercontent.com"
+  hybrid_discover_iap_client_id "$PROJECT"
+  assert_eq "999999999-realistic-client-id.apps.googleusercontent.com" "$HYBRID_IAP_CLIENT_ID" \
+    "the discovered client id must land verbatim, unmodified"
+}
+
+test_discover_iap_client_id_refused_when_empty() {
+  fresh_gcloud_state
+  set_iap_client_id_empty
+  run_expect_fail hybrid_discover_iap_client_id "$PROJECT"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "an IAP project with no OAuth client id configured must fail closed"
+  assert_contains "$RUN_OUTPUT" "no OAuth client ID configured" "error should explain why"
+}
+
+test_discover_iap_client_id_refused_on_api_error() {
+  fresh_gcloud_state
+  set_iap_settings_get_will_fail
+  run_expect_fail hybrid_discover_iap_client_id "$PROJECT"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "an IAP settings read failure must fail closed, not be treated as no client id"
+  assert_contains "$RUN_OUTPUT" "Could not read project" "error should explain the read failure"
+}
+
+test_transport_sa_name_deterministic_and_within_length() {
+  local short long
+  short="$(hybrid_transport_sa_name "demohub")"
+  assert_eq "scion-hub-demohub-transport" "$short" "a short hub name needs no truncation"
+  long="$(hybrid_transport_sa_name "a-very-long-hub-name-well-past-the-limit")"
+  assert_true "$([[ ${#long} -le 30 ]] && echo true || echo false)" "a long hub name must still fit in 30 chars"
+  assert_true "$([[ "$long" == *-transport ]] && echo true || echo false)" "truncation must still end in -transport"
+  assert_eq "$long" "$(hybrid_transport_sa_name "a-very-long-hub-name-well-past-the-limit")" \
+    "truncation must be deterministic for the same hub name"
+}
+
+test_ensure_transport_sa_creates_when_absent() {
+  fresh_gcloud_state
+  hybrid_ensure_transport_sa "$HUB" "$PROJECT"
+  assert_eq "scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com" "$HYBRID_TRANSPORT_SA_EMAIL" \
+    "the transport SA email must be derived from the hub name and project"
+  assert_contains "$(gcloud_log)" "iam service-accounts create scion-hub-${HUB}-transport" \
+    "the transport SA must actually be created"
+}
+
+test_ensure_transport_sa_reuses_when_marked() {
+  fresh_gcloud_state
+  local email="scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  hybrid_ensure_transport_sa "$HUB" "$PROJECT"
+  assert_eq "0" "$(gcloud_log | grep -c 'iam service-accounts create' || true)" \
+    "an already-marked, matching transport SA must not be recreated"
+}
+
+test_ensure_transport_sa_refused_when_unmarked() {
+  fresh_gcloud_state
+  local email="scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "some-other-marker"
+  run_expect_fail hybrid_ensure_transport_sa "$HUB" "$PROJECT"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "an unmarked same-name transport SA must be refused, not adopted"
+  assert_contains "$RUN_OUTPUT" "without this deployment's marker" "error should explain the refusal"
+}
+
+test_grant_transport_token_creator_uses_openid_token_creator_role_and_correct_member() {
+  fresh_gcloud_state
+  hybrid_grant_transport_token_creator "transport-sa@${PROJECT}.iam.gserviceaccount.com" \
+    "hub-sa@${PROJECT}.iam.gserviceaccount.com" "$PROJECT"
+  local line
+  line="$(gcloud_log | grep 'iam service-accounts add-iam-policy-binding')"
+  assert_contains "$line" "transport-sa@${PROJECT}.iam.gserviceaccount.com" \
+    "the grant must be on the transport SA resource itself"
+  assert_contains "$line" "--role=roles/iam.serviceAccountOpenIdTokenCreator" \
+    "the grant must use the ID-token-only role, not the broader serviceAccountTokenCreator"
+  assert_contains "$line" "--member=serviceAccount:hub-sa@${PROJECT}.iam.gserviceaccount.com" \
+    "the grant's member must be the hub's own runtime SA"
+}
+
+test_grant_transport_token_creator_fails_closed_on_grant_failure() {
+  fresh_gcloud_state
+  set_service_account_grant_will_fail "transport-sa@${PROJECT}.iam.gserviceaccount.com"
+  run_expect_fail hybrid_grant_transport_token_creator "transport-sa@${PROJECT}.iam.gserviceaccount.com" \
+    "hub-sa@${PROJECT}.iam.gserviceaccount.com" "$PROJECT"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a grant failure must fail the run, not be silently ignored"
+}
+
+test_grant_transport_sa_iap_access_uses_correct_role_and_member() {
+  fresh_gcloud_state
+  hybrid_grant_transport_sa_iap_access "transport-sa@${PROJECT}.iam.gserviceaccount.com" \
+    "$INSTANCE_NAME_TEST-iap-proxy" "us-central1" "$PROJECT"
+  local line
+  line="$(gcloud_log | grep 'iap web add-iam-policy-binding')"
+  assert_contains "$line" "--resource-type=cloud-run" "the grant must target the Cloud Run resource type"
+  assert_contains "$line" "--service=${INSTANCE_NAME_TEST}-iap-proxy" "the grant must target the hub's own Cloud Run service"
+  assert_contains "$line" "--role=roles/iap.httpsResourceAccessor" "the grant must use the same role the operator's own grant uses"
+  assert_contains "$line" "--member=serviceAccount:transport-sa@${PROJECT}.iam.gserviceaccount.com" \
+    "the grant's member must be the transport SA"
+}
+
+test_settings_auth_transport_yaml_renders_expected_fields() {
+  local yaml
+  yaml="$(hybrid_settings_auth_transport_yaml "999999999-client.apps.googleusercontent.com" "transport-sa@${PROJECT}.iam.gserviceaccount.com")"
+  assert_contains "$yaml" "mode: iap" "transport mode must be iap"
+  assert_contains "$yaml" 'oidc_audience: "999999999-client.apps.googleusercontent.com"' \
+    "oidc_audience must be the discovered client id, not a Cloud-Run-resource audience string"
+  assert_contains "$yaml" "platform_auth_sa: \"transport-sa@${PROJECT}.iam.gserviceaccount.com\"" \
+    "platform_auth_sa must be the transport SA email"
+}
+
+test_teardown_transport_sa_deletes_when_marked() {
+  fresh_gcloud_state
+  local email="scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1"
+  assert_eq "true" "$HYBRID_TRANSPORT_SA_DELETED" "a marked transport SA must be deleted"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "a successful delete must not be reported as failed"
+  assert_contains "$(gcloud_log)" "iam service-accounts delete ${email}" "the transport SA must actually be deleted"
+}
+
+test_teardown_transport_sa_never_touches_unmarked() {
+  fresh_gcloud_state
+  local email="scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "some-other-marker"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETED" "an unmarked transport SA must not be reported as deleted"
+  assert_eq "true" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "an unmarked transport SA must be reported as a failure to resolve"
+  assert_eq "0" "$(gcloud_log | grep -c 'iam service-accounts delete' || true)" \
+    "an unmarked transport SA must never actually be deleted"
+}
+
+test_teardown_transport_sa_absent_is_a_no_op() {
+  fresh_gcloud_state
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETED" "nothing to delete, so nothing should be reported deleted"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "an absent SA must not be reported as a failure either"
+}
+
+test_teardown_transport_sa_delete_failure_reported() {
+  fresh_gcloud_state
+  local email="scion-hub-${HUB}-transport@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  set_service_account_delete_will_fail "$email"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETED" "a failed delete must not be reported as deleted"
+  assert_eq "true" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "a failed delete must be reported as failed"
 }

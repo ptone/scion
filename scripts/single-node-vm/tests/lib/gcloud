@@ -559,16 +559,95 @@ print(json.dumps({
     exit 0
     ;;
   "iam service-accounts describe")
+    # $4 is a full email for this call (unlike create's bare account id
+    # below). A name-scoped fixture, keyed by that email, is checked
+    # first; the old, non-name-scoped service-account-exists flag is
+    # kept for backward compatibility with callers (the hub's own base
+    # SA) that only ever check existence, never a description.
+    sa_email="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      exit 0
+    fi
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-account-exists" ]]; then
+      echo '{}'
       exit 0
     fi
     exit 1
     ;;
   "iam service-accounts create")
     require_project "$@"
+    # $4 here is the bare account id, not the email describe/delete use --
+    # reconstruct the email the same way deploy.sh/hybrid-tier.sh do, so a
+    # later describe/delete of the same account finds this fixture.
+    sa_id="${4:-}"
+    create_project="$(get_flag project "$@")" || create_project=""
+    create_desc="$(get_flag description "$@")" || create_desc=""
+    if [[ -n "$sa_id" && -n "$create_project" ]]; then
+      mkdir -p "${GCLOUD_STUB_STATE_DIR}/service-accounts"
+      "$PYTHON" -c "
+import json, sys
+email, desc, path = sys.argv[1:4]
+json.dump({'email': email, 'description': desc}, open(path, 'w'))
+" "${sa_id}@${create_project}.iam.gserviceaccount.com" "$create_desc" \
+        "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_id}@${create_project}.iam.gserviceaccount.com.json"
+    fi
     exit 0
     ;;
   "iam service-accounts delete")
+    sa_email="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json.delete-fail" ]]; then
+      echo "gcloud-stub: simulated delete failure for service account ${sa_email}" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json" ]]; then
+      rm -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
+      exit 0
+    fi
+    # Not otherwise seeded: same "not found" shape as the pre-existing,
+    # non-name-scoped delete path this replaces for name-scoped fixtures.
+    echo "gcloud-stub: ERROR: (gcloud.iam.service-accounts.delete) NOT_FOUND: Unknown service account" >&2
+    exit 1
+    ;;
+  "iam service-accounts add-iam-policy-binding")
+    require_project "$@"
+    sa_email="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json.grant-fail" ]]; then
+      echo "gcloud-stub: simulated grant failure on service account ${sa_email}" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  "iap settings get")
+    require_project "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/iap-settings-get-should-fail" ]]; then
+      echo "gcloud-stub: simulated IAP settings read failure" >&2
+      exit 1
+    fi
+    client_id="$(cat "${GCLOUD_STUB_STATE_DIR}/iap-client-id.txt" 2>/dev/null || true)"
+    if [[ -z "$client_id" && ! -f "${GCLOUD_STUB_STATE_DIR}/iap-client-id.txt" ]]; then
+      # No fixture at all: a realistic default, so a test that doesn't
+      # care about the actual client ID doesn't need to seed one.
+      client_id="123456789-abcdefghijklmnop.apps.googleusercontent.com"
+    fi
+    if [[ -z "$client_id" ]]; then
+      # An explicitly empty fixture: IAP configured, but with no OAuth
+      # client id set -- the "must fail closed" case.
+      echo '{"accessSettings": {"oauthSettings": {}}}'
+    else
+      "$PYTHON" -c "import json,sys; print(json.dumps({'accessSettings': {'oauthSettings': {'clientId': sys.argv[1]}}}))" "$client_id"
+    fi
+    exit 0
+    ;;
+  "iap web add-iam-policy-binding")
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/iap-web-add-binding-should-fail" ]]; then
+      echo "gcloud-stub: simulated IAP web binding failure" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  "iap web remove-iam-policy-binding")
     exit 0
     ;;
   "run services delete")
