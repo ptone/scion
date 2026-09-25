@@ -323,3 +323,64 @@ None of the above changes the `422` body's actual wire shape (still
 `deploy/substrate/README.md` and `phase1-spec.md`'s Addendum B needed no
 content changes — only the citation redirects above, which point at
 README, not restate it.
+
+## Round 24 review fixes
+
+The round-24 review's one Required finding was a test-isolation leak; the
+rest were nit/optional follow-ups riding along in the same commit. No wire
+change.
+
+- **Test-isolation fix (RQ-1).** `TestBootstrap_RejectedPathLogLineIsSingleLineEvenWithEmbeddedNewline`
+  (`pkg/sciontool/substrate/server_test.go`) repoints the package-global
+  `pkg/sciontool/log` path at a file under its own `t.TempDir()` but never
+  restored it. Once that directory was removed at test end, the next
+  `log.*` call in the binary failed its `OpenFile`, and `log`'s own
+  fallback-on-failure path silently rewrote the global log path to
+  `/tmp/agent.log` and forced debug mode on for every later test — quietly
+  defeating `testmain_test.go`'s per-binary log sandbox. Fixed by restoring,
+  in `t.Cleanup`, both `log.SetDebug(false)` and `log.SetLogPath` to
+  `filepath.Join(os.Getenv("HOME"), "agent.log")` — the exact path
+  `TestMain` pins for this binary's sandbox (`HOME` is set once for the
+  whole test binary and never changed by any test in this package), not a
+  guessed default. Verified with `go test -v -count=1
+  ./pkg/sciontool/substrate/...`: no fallback WARNING, and `/tmp/agent.log`
+  is not created, under both a plain and a symlinked `TMPDIR`.
+- **Citation cleanup (N-1).** One more `phase1-spec.md` citation, added in
+  this home-delivery round itself (before the round-23 grep's scope) at
+  `dedupeBootstrapFilesByPath`'s doc comment
+  (`pkg/runtime/substrate_bootstrap.go`), missed the round-23 cleanup above.
+  Reworded to point at `deploy/substrate/README.md`'s "Bootstrap files: home
+  delivery" section instead of naming `phase1-spec.md`.
+- **500-path quoting (O).** The generic write-failure log line
+  (`pkg/sciontool/substrate/server.go`'s `handleBootstrap`, the sibling of
+  the `422` branch N-1 fixed last round) still echoed `f.Path` unquoted.
+  Changed `%s` to `%q`, matching the `422` branch's own quoting. Added
+  `TestBootstrap_WriteFailureLogLineIsSingleLineEvenWithEmbeddedNewline`,
+  which drives a path containing an embedded newline through invalid-base64
+  content (routing the failure through this 500 branch specifically, rather
+  than the `*bootstrapPathError` 422 branch the existing injection test
+  already covers) and asserts the log stays a single line.
+- **Broker golden test now pins the parse (O).** `TestSubstrateRun_BootstrapPathRejectedSurfacesCodeAndPathNoContent`
+  previously only asserted `Contains(err, code)` and `Contains(err, path)`
+  against `Run`'s returned error — both true even in
+  `parseBootstrapPathError`'s fallback (unparsed) branch, since the raw
+  body is folded into `detail` either way, so the test couldn't
+  distinguish a working parse from a broken one. `Run`'s own error can't be
+  used for a stronger check: `SubstrateRuntime.redact` deliberately
+  flattens every returned error to a plain string (to strip a secret value
+  out of the text), which erases `bootstrapPathRejectedError`'s concrete
+  type along the way. The test now also calls `postBootstrap` directly
+  against the same harness fixture and asserts `errors.As` into
+  `*bootstrapPathRejectedError`, checking `code` and `path` against the
+  expected values — pinning the parse at the point it actually happens,
+  before `redact` ever sees the error.
+- **Slog quoting test (O).** Added
+  `TestSubstrateRun_BootstrapPathRejectedLogsQuotePathWithNewline`, proving
+  the claim already stated in `substrate_runtime.go`'s comment above the
+  `runtimeLog.Error` call: a newline embedded in `pathErr.path` is quoted by
+  `slog`'s own attribute encoding, so the broker's structured log line for a
+  rejected bootstrap path stays exactly one line and the path attribute
+  renders with the newline escaped (`path="...\nFAKE LOG LINE
+  INJECTED\n..."`), not split or forged.
+
+Head at delivery: `a4a0de66`.
