@@ -551,10 +551,10 @@ test_deploy_create_removes_temp_kubeconfig_on_exit() {
 
 # =====================================================================
 # Base markers on create: additive, create-only, never checked or
-# adopted on. This is the first deliberate tier-off behavior change (the
-# second is the API check, above): markers apply on every fresh deploy
-# regardless of whether the hybrid tier is on, and never on redeploys of
-# an existing resource. Base teardown is unaffected either way.
+# adopted on. This tier-off behavior is intentional: markers apply on
+# every fresh deploy regardless of whether the hybrid tier is on, and
+# never on redeploys of an existing resource. Base teardown is
+# unaffected either way.
 # =====================================================================
 
 test_deploy_create_base_markers_present_on_fresh_create() {
@@ -613,16 +613,15 @@ test_deploy_create_base_markers_absent_on_existing_router_and_sa() {
 # =====================================================================
 # API check: enable only what's missing, never the whole list when
 # nothing needs it, and add container.googleapis.com when the tier is
-# on. This is the second deliberate tier-off behavior change (the first
-# is base markers on create, below): a validation runner without
-# serviceusage.services.enable must never see an enable call for an API
-# that's already on.
+# on. This tier-off behavior is intentional: a validation runner
+# without serviceusage.services.enable must never see an enable call
+# for an API that's already on.
 # =====================================================================
 
 test_deploy_create_api_check_all_enabled_no_enable_call() {
   fresh_gcloud_state
   seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
-    cloudbuild.googleapis.com artifactregistry.googleapis.com
+    cloudbuild.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com
   run_deploy_create "$(base_config_json "$HUB")"
   assert_eq "0" "$(gcloud_log | grep -c 'services enable' || true)" \
     "nothing missing must mean no enable call at all, not an enable call with zero APIs"
@@ -630,7 +629,8 @@ test_deploy_create_api_check_all_enabled_no_enable_call() {
 
 test_deploy_create_api_check_missing_enables_exact_set() {
   fresh_gcloud_state
-  seed_enabled_apis compute.googleapis.com iap.googleapis.com artifactregistry.googleapis.com
+  seed_enabled_apis compute.googleapis.com iap.googleapis.com artifactregistry.googleapis.com \
+    aiplatform.googleapis.com
   run_deploy_create "$(base_config_json "$HUB")"
   local enable_line
   enable_line="$(gcloud_log | grep 'services enable' | head -1)"
@@ -644,7 +644,7 @@ test_deploy_create_api_check_missing_enables_exact_set() {
 test_deploy_create_api_check_tier_on_adds_container() {
   fresh_gcloud_state
   seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
-    cloudbuild.googleapis.com artifactregistry.googleapis.com
+    cloudbuild.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com
   seed_cluster "mycluster" "default" "mig-a"
   seed_mig "mig-a" "template-a"
   seed_template "template-a" "gke-mycluster-abc123-node"
