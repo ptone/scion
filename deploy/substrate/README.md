@@ -867,15 +867,26 @@ process — drops both for every actor a *previous* process created. The
 actors themselves, their egress policies, and their workers are untouched on
 the cluster; only this broker's memory of them is gone (ptone/scion#1808).
 
-**Behaviour after a restart:**
+**The invariant: no delete or stop reports success while the actor still
+exists.** Three exit paths matter, and all three are covered, not just the
+main one:
 - **Delete/stop of a pre-restart agent by its project-scoped slug returns
-  HTTP 409 `substrate_agent_identity_unknown`**, not the usual 404 (delete)
-  or 202 (stop). The response names the atespace and how many record-less
-  actors it holds. This is intentional: a 404 is treated as an idempotent
-  completed delete by the hub, and a 202 as a completed stop — either would
+  HTTP 409 `substrate_agent_identity_unknown`** — whether the slug resolves
+  to nothing at all, or resolves to a file-only target because this
+  project's directory happens to survive the restart (a workstation broker,
+  or any `$HOME` that isn't wiped on restart the way this deployment's
+  container filesystem is). The response names the atespace and how many
+  record-less actors it holds. This is intentional: a 404 is treated as an
+  idempotent completed delete by the hub, and a 202 as a completed stop, and
+  a file-only delete actually removes the files — every one of those would
   let the actor, its egress policy, and its worker leak with no further
   signal. An explicit conflict, requiring an operator, is the safe failure
   here.
+- **If the check itself cannot run — the runtime listing needed to look for
+  record-less actors, or (on stop) the slug lookup that would otherwise
+  resolve the target, fails — delete/stop return an explicit 5xx**, never
+  the idempotent 404/202 a failed check would otherwise fall back to. An
+  unresolved outcome is never treated as a safe one.
 - **Exec and Message** on a pre-restart agent fail with an explicit error
   naming the missing control token. This is permanent for that specific
   actor: `sciontool substrate-serve`'s bootstrap endpoint is one-shot
@@ -886,15 +897,38 @@ the cluster; only this broker's memory of them is gone (ptone/scion#1808).
   starts (i.e. anything created after the restart) has a fresh in-memory
   record and control token, and its delete/stop/exec/message all work
   normally.
+- **A same-project stop or delete, with no restart at all, is not affected
+  either.** Stop is Delete in Phase 1: it drops this process's own
+  in-memory record immediately but the actor can stay listed, in
+  `ACTOR_STATE_DELETING`, for a while afterward (Delete is fire-and-forget —
+  see `.design/kubernetes/substrate-runtime.md` §9). Such an actor is never
+  counted as record-less: its egress policy is already gone (Delete deletes
+  that first), so there is nothing left to protect, and counting it would
+  turn an ordinary stop-then-delete sequence into a false "broker
+  restarted" 409.
 
-**Operator cleanup for a record-less actor** (the 409 response's atespace
-and actor name are exactly what you need):
+**Operator cleanup for a record-less actor.** The 409 response carries only
+the atespace and a count, never an actor name or a control token — identify
+the actor from your own records first, not from the response body:
 
 ```sh
-# 1. Delete the actor's egress policy. There is no dedicated CLI for this;
-#    call the ateapi Control service's DeleteActorEgressPolicy RPC directly
-#    (e.g. via grpcurl against api.${ATE_SYSTEM_NAMESPACE}.svc:443), or
-#    whatever operator tooling your cluster already wraps it with.
+# 0. Identify the actor. The 409 only proves at least one record-less actor
+#    exists in this atespace; it does not name it or confirm which slug you
+#    asked for is the one holding it. Compute the expected actor name
+#    yourself (<project-slug>--<agent-slug>; see pkg/agent/run.go's
+#    containerName) and cross-check it against the hub's own agent list for
+#    this project (its phase/name should match what you expect) before
+#    touching anything below. If more than one project could plausibly share
+#    this atespace (see the atespace-prefix note below), confirm ownership
+#    with each project's owner first — do not guess from the actor name
+#    alone.
+kubectl ate get actor -a <atespace> <actor> -o yaml
+
+# 1. Only once the actor is confirmed: delete its egress policy. There is no
+#    dedicated CLI for this; call the ateapi Control service's
+#    DeleteActorEgressPolicy RPC directly (e.g. via grpcurl against
+#    api.${ATE_SYSTEM_NAMESPACE}.svc:443), or whatever operator tooling your
+#    cluster already wraps it with.
 
 # 2. Delete the actor itself, any_state so a non-RUNNING actor isn't
 #    rejected:
@@ -903,48 +937,65 @@ kubectl ate delete actor -a <atespace> <actor> --any-state
 # 3. Force-delete the hub's own agent record so it doesn't keep dispatching
 #    to an actor that no longer exists. `scion delete --force` does not
 #    exist (checked, cmd/delete.go has no --force flag) — call the hub API
-#    directly:
+#    directly. Read the token from a file rather than putting it on the
+#    command line (shell history, `ps` output):
 curl -X DELETE "https://<hub-endpoint>/api/v1/agents/<agent-id>?force=true" \
-  -H "Authorization: Bearer <token>"
+  -H "Authorization: Bearer $(cat ~/.scion/token)"
 ```
 
 Step 3's `force=true` is what makes this safe to run against a 409: the hub
 handler (`pkg/hub/handlers_agents_core.go`) only skips the normal
 broker-dispatch failure path — the one that would otherwise surface this
 same 409 back to the operator and refuse to touch the hub record — when
-`force` is set.
+`force` is set. Run force-delete only after steps 0–2 succeed: it never
+touches the broker or the actor itself, so running it early just orphans
+the actor with no further signal, the same failure this whole mechanism
+exists to prevent.
 
 **Fail-closed consequences worth knowing about, not fixed here:**
 - (a) `substrateAtespaceName` truncates a project ID to its first 12
-  (sanitized) characters. Two projects can theoretically share that prefix
-  and therefore the same atespace name. If they do, a record-less actor
-  belonging to project X can turn project Y's genuinely-absent-slug delete
-  into this same 409 — an operator-visible error, never a wrong-project
-  action, but a confusing one to debug without knowing this.
+  (sanitized) characters. This collision is not just theoretical: project
+  IDs are client-supplied at hub project creation (`pkg/hub/handlers_projects_core.go`),
+  so anyone able to create a project who knows another project's ID prefix
+  can deliberately create one that maps to the same atespace. What that
+  allows is a count disclosure (how many record-less actors project X's
+  atespace holds) and the ability to force 409s on project X's genuinely-
+  absent-slug deletes/stops — never a wrong-project action: the probe only
+  ever turns a would-be success into an error, it never selects a delete
+  target across atespace boundaries.
 - (b) Once at least one record-less actor exists in a project's atespace,
   *every* delete of an absent slug in that project returns 409 instead of
   the usual idempotent 404, until every record-less actor in that atespace
-  has been cleaned up (above) or the broker is restarted again against a
-  cluster where they no longer exist.
+  has been cleaned up (above).
+- (c) A narrow window between `CreateActor` succeeding and this process
+  recording it (spanning `waitRunning`, `healthz`, and bootstrap — tens of
+  seconds) makes a new actor look record-less to any concurrent delete/stop
+  of an unrelated absent slug in the same project, or of the in-flight agent
+  itself: both get a spurious 409 rather than a wrong action, since the
+  probe never selects a target. Not hardened further in Phase 1 (see
+  `.design/kubernetes/substrate-runtime.md` §9).
 
-Both are accepted trade-offs of failing closed rather than risking a false
-success; see `.design/kubernetes/substrate-runtime.md` §10 for the durable
-fix Phase 2 tracks.
+All three are accepted trade-offs of failing closed rather than risking a
+false success; see `.design/kubernetes/substrate-runtime.md` §10 for the
+durable fix Phase 2 tracks.
 
 **`profiles.local`/`profiles.remote` are repointed at the substrate runtime
-in this ConfigMap on purpose** (`broker.yaml`) — not an oversight. The
-embedded default settings always define these two profiles against the
-docker and Kubernetes runtimes; a project or global settings layer only
-overwrites the exact keys it sets, so it can't remove them. Left alone, this
-broker would discover both as auxiliary runtimes on every request and their
-`List` calls would fail here (no docker binary, no pod-list RBAC),
-independently masking the exact "not found" vs "can't tell" ambiguity this
-section's fix addresses. Repointing both at this broker's own `substrate-prod`
-runtime removes that layer of noise regardless of this fix. Neither profile
-name is expected to be requested by name against this broker in practice
-(see `broker.yaml`'s comment on the ConfigMap for the reasoning); if that
-assumption is wrong for your deployment, treat this as a one-line thing to
-revisit.
+in this ConfigMap on purpose** (`broker.yaml`) — not an oversight, and not
+free of side effects. The embedded default settings always define these two
+profiles against the docker and Kubernetes runtimes; a project or global
+settings layer only overwrites the exact keys it sets, so it can't remove
+them. Left alone, this broker would discover both as auxiliary runtimes on
+every request and their `List` calls would fail here (no docker binary, no
+pod-list RBAC), independently masking the exact "not found" vs "can't tell"
+ambiguity this section's fix addresses. Repointing both at this broker's own
+`substrate-prod` runtime removes that layer of noise regardless of this fix
+— **but it also means a dispatch that names profile `local` or `remote`
+explicitly now creates a substrate agent on this broker instead of failing**
+(the embedded default `active_profile` is `local`, so this is also what an
+unqualified start against this broker resolves to). If your deployment ever
+names either profile intentionally expecting docker/Kubernetes semantics,
+treat this repoint as a one-line thing to revisit; nothing here special-cases
+that case.
 
 ## Files
 
