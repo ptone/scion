@@ -1,7 +1,6 @@
 # Hybrid Deployment Tier — Phase 3a: deploy.sh GKE attach and NFS firewall rules
 
-Branch `scion/hybrid-tier-p3`, based on the rebased `scion/hybrid-tier-p2` head. Fork PR on
-`ptone/scion`, stacked on the Phase 2 PR.
+Branch `scion/hybrid-tier-p3`, based on `main`. Fork PR on `ptone/scion`.
 
 ## Overview
 

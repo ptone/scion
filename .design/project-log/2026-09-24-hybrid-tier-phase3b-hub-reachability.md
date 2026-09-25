@@ -28,8 +28,10 @@ priority 900), joins the existing NFS allow/deny pair under the same target tag 
 convention, with no paired deny. This is what lets GKE agent pods reach the hub directly, and it
 opens tcp:8080 to every pod in the cluster (all namespaces), not only Scion agents; requests are
 still authenticated by the hub itself (an agent token, or the IAP assertion for browser users),
-and a small set of endpoints (health checks, login/token flows, OIDC discovery, public settings)
-answer without credentials, same as for any other caller. Pod-to-hub traffic on this path is plain
+and a small set of endpoints (health checks, login/token flows, OIDC discovery, public settings,
+static UI assets, and endpoints gated by their own secret such as a broker join token, a webhook
+signature, or a signed URL) answer without credentials, same as for any other caller. Pod-to-hub
+traffic on this path is plain
 HTTP inside the VPC, so agent tokens travel as bearer credentials over it -- anything able to
 observe VPC or node traffic can capture them, so this cluster's workloads need to stay trusted.
 Only the cluster's default pod range is admitted; a node pool with a separate pod CIDR isn't
@@ -41,8 +43,8 @@ needed no changes, since they already iterate generically over whatever names ar
 
 `scion-hub-<hub>-internal-ip` reserves the hub VM's internal address so it survives a VM recreate,
 marked with an exact `scion-deployment=<hub>` description -- the same token format the firewall
-rules, router, and service account use for their own markers, but unlike those base resources,
-this marker is enforced: an address with this name that lacks it is refused on create and blocks
+rules, router, and service account use for their own markers. This marker is checked on every
+adopt and every teardown: an address with this name that lacks it is refused on create and blocks
 teardown. On a fresh VM, a free address is reserved (or an existing marked one reused) and the VM is created
 with `--private-network-ip` pinned to it. On an existing VM, its current internal IP is promoted
 into a reservation of the same name (`addresses create --addresses=<current-ip>`), and the VM is
@@ -80,7 +82,7 @@ trace to confirm the internal-IP approach doesn't need a new auth path.
 ## Known limits: interim, pending a hub-side change
 
 Nothing yet points the `gke` runtime's agents at the reserved internal IP; a hub-side change is
-required before this tier ships. This is provisioning ahead of that change, not a finished feature.
+required. This is provisioning ahead of that change, not a finished feature.
 
 `docs/deploy/agent-runbook-single-node-vm.md` and `docs/deploy/hybrid-tier.md` document the
 discovery step, the three firewall rules, the reservation, the widened teardown table and

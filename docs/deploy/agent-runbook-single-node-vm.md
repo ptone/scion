@@ -366,9 +366,11 @@ Enabling the tier does five things, all additive:
      every pod in the cluster (all namespaces), not only Scion agents.
      Requests are still authenticated by the hub itself (an agent token,
      or the IAP assertion for browser users); a small set of endpoints
-     (health checks, login/token flows, OIDC discovery, public settings)
-     answer without credentials, the same as they do for any other
-     caller. Pod-to-hub traffic on this path is **plain HTTP inside the
+     (health checks, login/token flows, OIDC discovery, public settings,
+     static UI assets, and endpoints gated by their own secret such as a
+     broker join token, a webhook signature, or a signed URL) answer
+     without credentials, the same as they do for any other caller.
+     Pod-to-hub traffic on this path is **plain HTTP inside the
      VPC** — agent tokens are sent as bearer credentials over it, so
      anything able to observe VPC or node traffic (for example a
      privileged or hostNetwork pod on a cluster node) can capture them.
@@ -401,7 +403,7 @@ Enabling the tier does five things, all additive:
    `scion-hub-<hub_name>-internal-ip`, marked with an exact
    `scion-deployment=<hub_name>` description — the same token format the
    firewall rules, router, and service account use for their own
-   markers, but unlike those base resources, this marker is enforced: an
+   markers. This marker is checked on every adopt and every teardown: an
    address with this name that lacks it is refused on create and blocks
    teardown, the same as an unmarked firewall rule. On a fresh VM, a free
    address is reserved first
@@ -598,9 +600,9 @@ configured for the hub, since `gke_target.name` only exists in a config
 file; that case prints a note naming the default namespace/PVC/PV names
 and pointing at `--config` as the way to have them checked.
 
-The NFS export itself has no separate teardown step: it's a directory and
-an `/etc/exports.d/` entry on the hub VM's own boot disk, so it's deleted
-along with the VM.
+The NFS export itself has no separate teardown step: it's a dedicated image
+file, an `/etc/fstab` entry loop-mounting it, and an `/etc/exports.d/` entry,
+all on the hub VM's own boot disk, so they're deleted along with the VM.
 
 ### Testing this locally
 

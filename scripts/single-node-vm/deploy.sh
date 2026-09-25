@@ -304,16 +304,16 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   SA_NAME="scion-hub-${HUB_NAME}"
   SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
-  # Hybrid tier: classify the two NFS firewall rules (if either exists) by
+  # Hybrid tier: classify the hybrid-tier firewall rules (if any exist) by
   # marker ownership before printing or deleting anything. This runs even
   # when the hybrid tier is off in the current config: teardown has no
   # other way to know whether the tier was ever turned on for this hub,
-  # so it always checks for (and, if marked, later removes) these two
-  # rule names. An unmarked name match, or a failure to even list the
-  # rules, means HUB_NAME can no longer be trusted to identify only
-  # resources this deployment owns, so the whole teardown aborts here --
-  # not just the two hybrid rules -- rather than proceeding to delete
-  # other resources under a name that turned out to be ambiguous.
+  # so it always checks for (and, if marked, later removes) these rule
+  # names. An unmarked name match, or a failure to even list the rules,
+  # means HUB_NAME can no longer be trusted to identify only resources
+  # this deployment owns, so the whole teardown aborts here -- not just
+  # the hybrid-tier rules -- rather than proceeding to delete other
+  # resources under a name that turned out to be ambiguous.
   echo ""
   echo "Checking hybrid-tier firewall rule ownership:"
   if ! hybrid_teardown_preflight "$HUB_NAME" "$PROJECT_ID"; then

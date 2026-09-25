@@ -1,6 +1,6 @@
 # Hybrid Deployment Tier — Phase 3b, slice 1: NFS server, squash identity, node subnet, API check, base markers
 
-Branch `scion/hybrid-tier-p3`, same fork PR as Phase 3a (`ptone/scion`, stacked on the Phase 2 PR).
+Branch `scion/hybrid-tier-p3`, same fork PR as Phase 3a (`ptone/scion`, based on `main`).
 
 ## Overview
 

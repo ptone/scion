@@ -1,7 +1,7 @@
 # Hybrid Deployment Tier — Phase 3b, slice 2: Kubernetes objects (PV, namespace, PVC) and their teardown
 
 Branch `scion/hybrid-tier-p3`, same fork PR as the earlier Phase 3a and 3b slices (`ptone/scion`,
-stacked on the Phase 2 PR).
+based on `main`).
 
 ## Overview
 

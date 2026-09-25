@@ -1,8 +1,8 @@
 # Hybrid Deployment Tier — Phase 3b, slice 3, part A: wizard prompts, image pull refusal, image pin, settings.yaml, docs, not-found hardening
 
 Branch `scion/hybrid-tier-p3`, same fork PR as the earlier Phase 3a and 3b slices (`ptone/scion`,
-stacked on the Phase 2 PR). Part B (the hub URL guard and the `gke` runtime/profile settings)
-is a separate slice, pending a design decision.
+based on `main`). The hub URL guard and the pod CIDR/hub-allow/static internal IP work land in a
+later slice of this same PR.
 
 ## Overview
 
@@ -72,8 +72,8 @@ cover all three call sites.
 
 ## Documentation
 
-A full pass over the runbook's hybrid-tier section (except the hub URL guard, which waits on a
-design decision): prerequisites up front (existing cluster in-project and on-network, a registry
+A full pass over the runbook's hybrid-tier section (except the hub URL guard, documented in a
+later slice): prerequisites up front (existing cluster in-project and on-network, a registry
 image source with node-SA read access, the required APIs); the settings.yaml write as the tier's
 fifth additive piece; an explicit statement that base adoption and teardown are unchanged by this
 tier, always; the two changes that apply regardless of the tier (base resource markers, the
