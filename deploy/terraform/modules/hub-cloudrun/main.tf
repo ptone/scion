@@ -214,6 +214,28 @@ resource "google_secret_manager_secret_version" "oidc_signing_key" {
 # See the README troubleshooting note: a 403 on scion-hub-<h12>-... shortly
 # after a first apply is IAM propagation. Re-apply. Do NOT widen the
 # condition to work around it.
+# F-106 (design §9): the caller used to express this module's ordering
+# requirements (agent-runtime-k8s's nfs-init Job, cloudsql-database's DB/
+# user, hub-identity's IAM grants) as a module-level depends_on on the
+# `module "hub_cloudrun"` block itself. A module-level depends_on defers
+# EVERY resource and data source inside the module — including
+# data.google_secret_manager_secret_version.db_password above, which has no
+# actual ordering need on those modules — whenever anything in them has a
+# pending change. That made db_password's secret_data unknown at plan time,
+# which made settings' secret_data (which embeds it) unknown too, forcing a
+# spurious replace of the settings secret version on every unrelated change
+# to those three modules (vm-deploy caught this on a real apply: a plan that
+# should have been a pure IAM-member add came out 2 add / 0 change / 1
+# destroy). terraform_data.boot_prerequisites below is the replacement:
+# var.boot_prerequisites carries only real resource attributes (never a
+# module reference), so only the one resource that actually needs to
+# wait — the Cloud Run service, via its own depends_on below — is affected.
+# No data source may depend on terraform_data.boot_prerequisites, or this
+# regresses right back to the same bug for whatever data source does.
+resource "terraform_data" "boot_prerequisites" {
+  input = var.boot_prerequisites
+}
+
 resource "time_sleep" "iam_propagation" {
   create_duration = "120s"
 
@@ -413,7 +435,10 @@ resource "google_cloud_run_v2_service" "hub" {
   # *IAM* propagating — only to the secret resources' IDs, which exist as
   # soon as the (empty) secret is created, version or no version, IAM or no
   # IAM. A revision that boots before its settings/kubeconfig version exists
-  # or before the hub SA can read them fails with no retry.
+  # or before the hub SA can read them fails with no retry. B2's other half —
+  # the nfs-init Job finishing and cloudsql-database/hub-identity being
+  # ready — is terraform_data.boot_prerequisites above, not a module-level
+  # depends_on on this module's caller (F-106; see that resource's comment).
   depends_on = [
     google_secret_manager_secret_version.settings,
     google_secret_manager_secret_version.kubeconfig,
@@ -423,6 +448,7 @@ resource "google_cloud_run_v2_service" "hub" {
     google_secret_manager_secret_iam_member.hub_reads_kubeconfig,
     google_secret_manager_secret_iam_member.hub_reads_session_secret,
     time_sleep.iam_propagation,
+    terraform_data.boot_prerequisites,
   ]
 }
 

@@ -53,6 +53,11 @@ variable "hub_iam_condition_expression" {
   type        = string
 }
 
+variable "boot_prerequisites" {
+  description = "F-106 (design §9): map of real resource attributes (never bare input variables or computed strings) that the Cloud Run service must not boot before — the nfs-init Job's own identity (its Job actually finished, not just that its export path string is known), and the cloudsql-database/hub-identity resources this module doesn't otherwise reference directly. Consumed only by terraform_data.boot_prerequisites below, which google_cloud_run_v2_service.hub depends on; no data source may depend on it (see that resource's comment). Replaces a module-level depends_on that used to sit on this module's caller (configurations/hub/main.tf) — that forced Terraform to defer *every* resource and data source inside this module, including data.google_secret_manager_secret_version.db_password, whenever hub-identity/agent-runtime-k8s/cloudsql-database had any pending change, which made the settings secret_data unknown at plan time and forced a spurious replace of the settings secret version (F-106, vm-deploy caught this on a real apply)."
+  type        = map(string)
+}
+
 variable "hub_scope_secret_hash" {
   description = "hub-identity's 12-char hub-scope secret hash (scion-hub-<hash>-*), used verbatim to pre-provision the OIDC signing key secret ID so it falls under the hub SA's existing conditioned secretmanager.admin grant. Not recomputed here — hub-identity is the one source of truth, shared with its IAM condition."
   type        = string

@@ -24,10 +24,28 @@ variable "agent_sa_project_roles" {
   default     = ["roles/aiplatform.user"]
 
   validation {
+    # (?i)admin$ (case-insensitive), not \.admin$ (vm-deploy caught this):
+    # the literal-dot-then-"admin" form misses roles whose admin-ness is
+    # mid-token, not a dotted suffix — roles/securityAdmin,
+    # roles/resourcemanager.projectIamAdmin. Matching "admin" at the end of
+    # the string case-insensitively catches both those and the *.Admin/
+    # *.admin dotted forms in one pattern.
+    #
+    # The three iam.* roles are denied outright, not just admin-pattern
+    # roles: each lets the agent SA impersonate the HUB SA (serviceAccountUser
+    # signs as it, serviceAccountTokenCreator mints its tokens,
+    # workloadIdentityUser lets a pod claim its WI binding) — an
+    # authentication-scope escalation from "runs an agent" to "acts as the
+    # hub", the same class of over-grant the Agent SA comment above already
+    # rejects for Secret Manager.
     condition = alltrue([
       for r in var.agent_sa_project_roles :
-      r != "roles/owner" && r != "roles/editor" && !can(regex("\\.admin$", r))
+      r != "roles/owner" && r != "roles/editor" &&
+      !can(regex("(?i)admin$", r)) &&
+      r != "roles/iam.serviceAccountTokenCreator" &&
+      r != "roles/iam.serviceAccountUser" &&
+      r != "roles/iam.workloadIdentityUser"
     ])
-    error_message = "agent_sa_project_roles must not include roles/owner, roles/editor, or any role ending in .admin."
+    error_message = "agent_sa_project_roles must not include roles/owner, roles/editor, any role ending in \"admin\" (case-insensitive), or roles/iam.serviceAccountTokenCreator, roles/iam.serviceAccountUser, roles/iam.workloadIdentityUser (each allows impersonating the hub SA)."
   }
 }

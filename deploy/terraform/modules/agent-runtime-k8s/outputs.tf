@@ -17,3 +17,8 @@ output "nfs_export" {
   description = "Full NFS export path for this hub's subdirectory (\"<share_path>/<hub_name>\"), for hub-cloudrun's Cloud Run NFS volume."
   value       = "${var.nfs.share_path}/${var.hub_name}"
 }
+
+output "nfs_init_job_id" {
+  description = "kubernetes_job_v1.nfs_init's own uid — a real, apply-time attribute of the Job resource itself, unlike nfs_export above (a plain string computable before the Job ever runs). Feeds hub-cloudrun's boot_prerequisites (F-106, design §9) so the Cloud Run service has a genuine implicit dependency on the Job actually finishing (wait_for_completion = true above creates the per-hub NFS subdirectory) rather than on a path string that exists in config regardless of whether the mkdir/chown ran."
+  value       = kubernetes_job_v1.nfs_init.metadata[0].uid
+}

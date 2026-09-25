@@ -109,6 +109,28 @@ module "hub_cloudrun" {
   hub_iam_condition_expression = module.hub_identity.hub_iam_condition_expression
   hub_scope_secret_hash        = module.hub_identity.hub_scope_secret_hash
 
+  # F-106 (design §9): real resource attributes only, never a module
+  # reference or a computed-string output — see hub-cloudrun's
+  # boot_prerequisites variable and terraform_data.boot_prerequisites for why
+  # a module-level depends_on used to sit where this argument now is, and why
+  # it broke the settings secret on every unrelated change to these three
+  # modules (vm-deploy, real apply: an IAM-only change came out as an
+  # unrelated destroy/replace of the settings secret version). db_name/
+  # db_user and hub_iam_grants above already create real dependency edges on
+  # their own (they're resource attributes, not just variables) — bundled
+  # here too so all of B2's ordering requirements are visible in one place,
+  # not split between incidental variable wiring and this map. The one
+  # requirement that had NO other edge at all was the nfs-init Job: nfs_export
+  # (above) is a plain path string, known before the Job ever runs, so
+  # nfs_init_job_id (a real attribute of the Job resource, only known once
+  # wait_for_completion's wait is over) is what actually closes that gap.
+  boot_prerequisites = {
+    nfs_init_job   = module.agent_runtime_k8s.nfs_init_job_id
+    db_name        = module.cloudsql_database.db_name
+    db_user        = module.cloudsql_database.db_user
+    hub_iam_grants = join(",", module.hub_identity.hub_iam_grants)
+  }
+
   network_name = module.shared_lookup.shared.network.name
   subnet_name  = module.shared_lookup.shared.network.subnet_name
 
@@ -145,15 +167,18 @@ module "hub_cloudrun" {
   nfs_gid          = var.nfs_gid
   nfs_subpath_root = var.nfs_subpath_root
 
-  # Explicit ordering (tf-review B2): covers the nfs-init Job (the per-hub
-  # subdirectory must exist before the Cloud Run NFS mount attaches) and the
-  # database/user, and the hub SA's project-level IAM (hub-identity) needing
-  # to propagate before the first revision's boot attempt — none of which
-  # is otherwise guaranteed just because hub-cloudrun also consumes these
-  # modules' output attributes.
-  depends_on = [
-    module.agent_runtime_k8s,
-    module.cloudsql_database,
-    module.hub_identity,
-  ]
+  # No module-level depends_on here (F-106, design §9): it used to cover the
+  # same B2 ordering requirement (nfs-init Job, database/user, hub-identity's
+  # IAM propagating, all before the first revision boots) that
+  # boot_prerequisites above now covers — but a module-level depends_on defers
+  # every resource AND data source inside hub-cloudrun, including
+  # data.google_secret_manager_secret_version.db_password, which has no
+  # actual ordering need on these three modules. That made the settings
+  # secret's secret_data unknown at plan time, forcing a spurious replace of
+  # the settings secret version on every unrelated change to agent-runtime-k8s,
+  # cloudsql-database or hub-identity (vm-deploy, real apply: an IAM-only
+  # change came out 2 add / 0 change / 1 destroy instead of 2/0/0). Do not
+  # reintroduce a depends_on on this module block for this purpose — express
+  # any new B2-class ordering need as another real resource attribute in
+  # boot_prerequisites instead.
 }
