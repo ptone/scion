@@ -15,11 +15,13 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,6 +47,29 @@ func writeGlobalSettingsForValidate(t *testing.T, data string) {
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(globalDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(data), 0644))
+}
+
+// runConfigValidate invokes configValidateCmd.RunE and captures its stdout.
+// The command's returned error is a generic "validation failed" sentinel;
+// the per-file, per-field cause is only in the printed "ERROR: ..." lines,
+// so tests that need to pin the cause must inspect the captured output.
+func runConfigValidate(t *testing.T) (output string, err error) {
+	t.Helper()
+
+	oldStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	cmd := configValidateCmd
+	err = cmd.RunE(cmd, nil)
+
+	require.NoError(t, w.Close())
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	return buf.String(), err
 }
 
 func TestConfigValidateCmd_SubstrateEgressTrustBundleValid(t *testing.T) {
@@ -76,7 +101,26 @@ runtimes:
       bogus_field: "nope"
 `)
 
-	cmd := configValidateCmd
-	err := cmd.RunE(cmd, nil)
+	output, err := runConfigValidate(t)
 	require.Error(t, err, "an unknown key in the substrate object should fail `scion config validate`")
+	assert.Contains(t, output, "runtimes/substrate-prod/substrate",
+		"the error output should name the substrate object path that failed validation")
+}
+
+func TestConfigValidateCmd_SubstrateEgressTrustBundleInvalidValue(t *testing.T) {
+	writeGlobalSettingsForValidate(t, `
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: "api.ate-system.svc:443"
+      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      egress_trust_bundle: some-other-bundle
+`)
+
+	output, err := runConfigValidate(t)
+	require.Error(t, err, "an unsupported egress_trust_bundle value should fail `scion config validate`")
+	assert.Contains(t, output, "runtimes/substrate-prod/substrate/egress_trust_bundle",
+		"the error output should name the egress_trust_bundle field that failed validation")
 }
