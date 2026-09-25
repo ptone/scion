@@ -166,7 +166,7 @@ same image/resources/sandbox share one template.
 | `Run(cfg)` | Steps below. |
 | `Delete(id)` | See §9. |
 | `Stop(id)` | Same as `Delete`, with a `TODO(Phase 2)` marker: `SuspendActor(DATA)` plus the `$HOME` durableDir layout would keep the workspace and free the worker instead, but that lands with Phase 2's suspend/resume work (§11). Faking a "stopped" actor that is still running, or a "durable stop" that discarded the workspace, would both misreport what happened, so Phase 1 keeps `Stop` honest by making it `Delete`. |
-| `List(labelFilter)` | `ListActors(atespace)`. Substrate actors carry no labels of their own, so `AgentInfo` labels are synthesised from the broker's in-memory record of what it passed to `Run`, keyed by actor UID. A broker restart loses this record for actors it did not create in the current process lifetime (Phase 2 adds a ConfigMap-backed store); see "known limitations" (§10). Label filtering is applied after synthesis. When a `"scion.name"` filter has no project-scoping key alongside it and more than one record-having actor shares that slug, `List` excludes all of them rather than returning an arbitrary one (the same-slug cross-project hardening — see §10). |
+| `List(labelFilter)` | `ListActors(atespace)`. Substrate actors carry no labels of their own, so `AgentInfo` for a **record-having** actor (one this runtime instance has an in-memory record for, from its own `Run`, keyed by actor UID) reports the real agent slug as `Name`/`"scion.name"`. A **record-less** actor (no in-memory record — e.g. right after a broker restart) is reported under its raw, project-prefixed actor name instead, deliberately: it is never resolvable by a caller-supplied slug or project filter at all, so it can appear in an unfiltered listing without ever being actioned by the wrong caller (§9, §10). When a `"scion.name"` filter has no project-scoping key alongside it and more than one record-having actor shares that slug, `List` excludes all of them rather than guessing (§9). |
 | `GetLogs(id)` | `GetActor` → `status.worker_assignment` → the worker pod's name/namespace → client-go `PodLogs` (tail 2000 lines). |
 | `Exec(id, argv)` | `POST /scion/v1/exec` via the router, authorized with the `control_token` minted at bootstrap (§5.3), header `ate-target-actor: <atespace>/<actor>` (§1). Returns stdout; a non-zero exit becomes an error that includes stderr. |
 | `Attach`, `Sync`, `GetWorkspacePath` | Return errors naming Phase 2 / the hub workspace API. Substrate has no exec/attach/TTY primitive in Phase 1, so the broker's PTY switch (`pty_handlers.go`) returns a clean "attach not yet supported on substrate" error instead of falling through to docker exec, which would fail confusingly. |
@@ -527,14 +527,36 @@ actually leaves `DELETING`. A stuck actor is invisible to the hub and
 silently holds a worker (§10). Confirming deletion (poll until the actor
 leaves `DELETING`, or report a stuck state) is a Phase 2 item (§11).
 
-**Same-slug, cross-project safety.** Because `List` (§4) can only recover a
-best-effort project *name* for a record-less actor (not a trustworthy ID),
-`Delete`'s call sites that filter `Runtime.List` by `"scion.name"` alone,
-with no project-scoping key, must fail closed rather than guess when more
-than one record-having actor shares that slug across different projects
-(§4's `List` row). This closes the file-system analogue of the same
-ambiguity for local-file deletion fallbacks (`findAgentInHubManagedProjects`)
-that already existed for the actor-delete path.
+**Same-slug, cross-project safety.** Two independent guards close two
+different ways a slug-based lookup could act on the wrong actor:
+
+- **Record-less actors are never resolvable by slug or project filter, at
+  all** — not even by a request scoped to their own project. `List` (§4)
+  reports a record-less actor under its raw, project-prefixed actor name,
+  never its agent slug, and assigns it no project labels. An earlier
+  version of this runtime tried to recover a record-less actor's slug and
+  project by inverting its actor name and verifying the guess against its
+  atespace; that recovery could not be made safe against every
+  project-scoped caller (a lookup scoped to project B could still resolve
+  to project A's sole record-less actor sharing that slug, since nothing
+  available could verify which project a record-less actor actually
+  belonged to strongly enough for every caller). It was removed rather than
+  hardened further: a record-less actor is simply unreachable by slug,
+  making a wrong-actor action structurally impossible, at the cost of
+  requiring an operator to re-identify it by other means. The durable fix
+  is persisting agent records so they survive a broker restart (§11), not
+  reconstructing identity from the actor name.
+- **Two or more record-having actors sharing a slug** (only possible
+  across different projects) are *also* excluded from an unscoped-by-slug
+  `List` result, rather than one being picked arbitrarily. `Delete`'s and
+  `Stop`'s own call sites (`pkg/agent/manager.go`,
+  `pkg/runtimebroker/server.go`) filter `Runtime.List` by `"scion.name"`
+  alone, with no project-scoping key, regardless of what project the outer
+  broker-level caller resolved — so this guard has to live in `List`
+  itself, not in its callers. A project-scoped query for the same slug is
+  unaffected. This closes the file-system analogue of the same ambiguity
+  for local-file deletion fallbacks (`findAgentInHubManagedProjects`) that
+  already existed for the actor-delete path.
 
 ## 10. Known limitations (Phase 1)
 

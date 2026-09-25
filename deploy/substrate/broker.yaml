@@ -396,11 +396,11 @@ spec:
 # There is deliberately no second NetworkPolicy here for the worker/actor
 # side of the §5 fallback's threat model (the router policy above is only
 # half of it — see the README's "Bootstrap auth is the §5 fallback"
-# limitation). Two earlier rounds of this manifest added one
-# (`scion-worker-restrict-ingress`, all ports from ate-system) before
-# confirming that Substrate's own `atecontroller` WorkerPool controller
-# already creates a per-WorkerPool NetworkPolicy that does this — and does
-# it *more precisely*: podSelector `ate.dev/worker-pool: <pool-name>`,
+# limitation). A hand-written worker-namespace policy
+# (`scion-worker-restrict-ingress`, all ports from ate-system) is
+# deliberately not included here: Substrate's own `atecontroller` WorkerPool
+# controller already creates a per-WorkerPool NetworkPolicy that does this —
+# and does it *more precisely*: podSelector `ate.dev/worker-pool: <pool-name>`,
 # ingress only from pods labeled `app: atenet-router` *within*
 # ATE_SYSTEM_NAMESPACE (an AND of both selectors on one peer, not "anyone in
 # that namespace"), all ports
