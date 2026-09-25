@@ -19,6 +19,31 @@ locals {
   # feeds var.hub_name from its own local.hub_id for the same reason, so this
   # is the same value end to end, named at each layer that touches it.
   hub_id = var.hub_name
+
+  # F-107: settings.yaml.tftpl used to render broker_id: ${hub_name}-broker
+  # (e.g. "tfha-h1-broker"), and the Postgres store's runtime_brokers.id
+  # column requires a UUID -- the co-located broker's registration failed
+  # outright ('invalid input: invalid UUID "tfha-h1-broker"'), so no broker
+  # ever registered and every agent start 422'd with "no runtime brokers
+  # available". uuidv5 (not uuidv4/random) because it must be deterministic:
+  # resolveBrokerID's fallback path generates a random UUID and persists it
+  # to the ephemeral globalDir when none is configured, which races across
+  # max_instances = 3 replicas each picking their own -- a config-supplied,
+  # stable value is the only thing that keeps every replica agreeing on one
+  # broker identity. Namespaced on hub_id + project_id so two hubs (or the
+  # same hub_name reused in a different project) never collide.
+  broker_id = uuidv5("dns", "${local.hub_id}.broker.${var.project_id}.scion")
+}
+
+# F-107: plan-time assertion that local.broker_id is actually a UUID --
+# uuidv5 always produces one today, but this catches a future edit to the
+# expression above (e.g. someone swapping in a plain string) before it ever
+# reaches a real apply and repeats the "no runtime brokers available" outage.
+check "broker_id_is_uuid" {
+  assert {
+    condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", local.broker_id))
+    error_message = "local.broker_id must be a canonical UUID (F-107): the Postgres store's runtime_brokers.id column rejects anything else, and settings.yaml's broker_id is rendered directly from this value."
+  }
 }
 
 # --- Bucket (artifacts, signed URLs) ---
@@ -113,7 +138,23 @@ resource "google_secret_manager_secret_version" "settings" {
     nfs_gid             = var.nfs_gid
     nfs_subpath_root    = var.nfs_subpath_root
     image_registry      = var.image_registry
+    broker_id           = local.broker_id
+    broker_name         = "${local.hub_id}-broker"
   })
+
+  # F-107: secret_data changing always forces a replace (Secret Manager
+  # versions are add-only in the real API; there is no in-place update of an
+  # existing version's data). Without create_before_destroy, Terraform's
+  # default destroy-then-create order would delete this version — and the
+  # data it holds, including the DB password embedded in the rendered
+  # settings.yaml — before the replacement exists, and the running revision
+  # (still mounting the old version by number, see the volume item below)
+  # would lose its settings out from under it. create_before_destroy makes
+  # the new version exist first; the Cloud Run service below is updated to
+  # point at it (a new revision), and only then is the old version destroyed.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "google_secret_manager_secret_iam_member" "hub_reads_settings" {
@@ -144,6 +185,13 @@ resource "google_secret_manager_secret_version" "kubeconfig" {
     endpoint       = var.gke.endpoint
     ca_certificate = var.gke.ca_certificate
   })
+
+  # F-107: same reasoning as google_secret_manager_secret_version.settings
+  # above — equally trivial to apply here (same templatefile-secret-version
+  # shape), so applied for the same reason, not just for settings.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "google_secret_manager_secret_iam_member" "hub_reads_kubeconfig" {
@@ -395,8 +443,16 @@ resource "google_cloud_run_v2_service" "hub" {
       secret {
         secret = google_secret_manager_secret.settings.secret_id
         items {
-          path    = "settings.yaml"
-          version = "latest"
+          path = "settings.yaml"
+          # F-107: pinned to the specific version this apply created, not
+          # "latest" — "latest" lets a revision silently start reading a
+          # newer settings render with no new revision and no record of
+          # which settings.yaml it's actually running. Pinning here is what
+          # makes create_before_destroy above meaningful: the service
+          # updates (new revision) to point at the new version's number
+          # before the old version is destroyed, instead of both racing to
+          # resolve "latest" during the swap.
+          version = google_secret_manager_secret_version.settings.version
         }
       }
     }
@@ -406,7 +462,7 @@ resource "google_cloud_run_v2_service" "hub" {
         secret = google_secret_manager_secret.kubeconfig.secret_id
         items {
           path    = "kubeconfig.yaml"
-          version = "latest"
+          version = google_secret_manager_secret_version.kubeconfig.version
         }
       }
     }

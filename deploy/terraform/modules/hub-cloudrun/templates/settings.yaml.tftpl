@@ -50,7 +50,13 @@ server:
     enabled: true
     port: 9800
     host: 127.0.0.1
-    broker_id: ${hub_name}-broker
+    # F-107: must be a UUID, not "<hub_name>-broker" — the Postgres store's
+    # runtime_brokers.id column rejects anything else, and Terraform
+    # (hub-cloudrun's local.broker_id) is the one source of truth for it, so
+    # it never diverges across max_instances replicas. broker_name carries
+    # the human-readable form instead, for the UI.
+    broker_id: ${broker_id}
+    broker_name: ${broker_name}
     auto_provide: true
   workspace_storage:
     backend: nfs
