@@ -217,6 +217,19 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 		s.cmd.Env = removeEnvVar(s.cmd.Env, hooks.NativeTelemetryPolicyKey)
 	}
 
+	// Tell the child its logical cwd explicitly. exec.Cmd setting Dir does
+	// not itself add PWD to the environment, so without this the child
+	// would inherit this process's own PWD. sh, tmux and Node's
+	// process.cwd() all prefer PWD over getcwd() when the two agree, so
+	// this keeps a symlinked WorkingDir's logical path visible instead of
+	// its resolved physical one — the same PWD behaviour Docker/Podman/
+	// Kubernetes already get from the shell that applies the image's
+	// WORKDIR. Scoped to WorkingDir != "" so every other caller, which
+	// never sets it, is unaffected.
+	if s.config.WorkingDir != "" {
+		s.cmd.Env = setEnvVar(s.cmd.Env, "PWD", s.config.WorkingDir)
+	}
+
 	if err := s.cmd.Start(); err != nil {
 		return 1, fmt.Errorf("failed to start command: %w", err)
 	}

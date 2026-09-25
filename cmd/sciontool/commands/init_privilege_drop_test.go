@@ -369,14 +369,24 @@ func TestDefaultPrivilegeDropPreconditionDeps_LookupUserGoesThroughScionUserLook
 // editing substrate_serve.go and re-running `go test -run
 // TestSubstrateServeInitOptions_RequiresPrivilegeDrop`; reverted after).
 func TestSubstrateServeInitOptions_RequiresPrivilegeDrop(t *testing.T) {
-	opts := substrateServeInitOptions(true)
+	withScionUserLookup(t, func(username string) (*user.User, error) {
+		return &user.User{Username: username, Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: t.TempDir()}, nil
+	})
+
+	opts, err := substrateServeInitOptions(true)
+	if err != nil {
+		t.Fatalf("substrateServeInitOptions(true) error = %v", err)
+	}
 	if !opts.RequirePrivilegeDrop {
 		t.Error("substrateServeInitOptions(...).RequirePrivilegeDrop = false, want true — substrate must never start the harness as root")
 	}
 	if !opts.ForwardTermSignal {
 		t.Error("substrateServeInitOptions(true).ForwardTermSignal = false, want true (passthrough)")
 	}
-	opts2 := substrateServeInitOptions(false)
+	opts2, err := substrateServeInitOptions(false)
+	if err != nil {
+		t.Fatalf("substrateServeInitOptions(false) error = %v", err)
+	}
 	if opts2.ForwardTermSignal {
 		t.Error("substrateServeInitOptions(false).ForwardTermSignal = true, want false (passthrough)")
 	}

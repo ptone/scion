@@ -178,3 +178,91 @@ this sandbox).
 - None blocking. The `su -` exec-lands-in-$HOME behavior is unchanged by
   design (see README note) — not a gap, a deliberate non-goal per the brief
   amendment.
+
+## Round 2 (sb-dev-cwd-r2): review findings fixed
+
+`reviews/round-cwd-sb-rev-cwd.md` (sb-rev-cwd2) found the fallback broken:
+`resolveSubstrateHarnessCwd` read `d.getenv("HOME")`, which under substrate
+is substrate-serve's own (root's) `$HOME` — `/root` or unset — never the
+scion user's. Since `supervisor.Run`'s `cmd.Dir` chdir happens through
+`SysProcAttr.Credential` *after* the setuid/setgid drop
+(`syscall/exec_linux.go`: chdir follows the "User and groups" block), a
+candidate a root-only `stat` accepts can still be unusable by the dropped
+scion uid — `HOME=/root` (mode 0700) made the harness fail to start
+(EACCES); `HOME` unset silently left `cmd.Dir` at substrate-serve's own
+cwd, `/`, the exact bug the whole fix exists to avoid. A live substrate-lead
+amendment mid-task additionally required the final error (when neither
+candidate is usable) to name every candidate tried and the uid checked,
+nothing else.
+
+**Fixed**, `cmd/sciontool/commands/substrate_serve.go`:
+
+- `resolveSubstrateHarnessCwd` now returns `(string, error)`. It no longer
+  reads `$HOME` at all: the fallback is `lookupUser("scion").HomeDir` (a new
+  `substrateHarnessCwdDeps.lookupUser` field, wired to `scionUserLookup` the
+  same way `privilegeDropPreconditionDeps.lookupUser` is), the same value
+  `supervisor.Run` sets as the child's `HOME`.
+- Every candidate (workspace, then scion home) is gated by a new
+  `dirUsableForScion` helper: it walks `parentDirs(candidate) + candidate`
+  and requires each to stat as a directory searchable by the scion uid/gid
+  via the existing `canSearchDir` — never trusting a stat this (root)
+  process could make on its own. `candidate == "/"` is refused outright,
+  independent of its permissions.
+- Both candidates unusable is now a hard failure, not a silent `""`
+  (inherited cwd) fallback: `substrateServeInitOptions` propagates the
+  error, and `newSubstrateServeServer`'s `WithInitRunner` closure logs it
+  and returns a new distinct `exitCodeNoUsableHarnessCwd` (18) instead of
+  ever invoking `runInit` — flipping healthz to `StateInitFailed` the same
+  way any other init failure does. Error text (substrate-lead amendment):
+  `substrate: no usable harness working directory for uid <uid>: tried
+  "<path>" (<reason>), "<path>" (<reason>)` — quoted paths and reasons only,
+  plus the uid; nothing else.
+- "Also take" items done in the same change: a non-absolute
+  `SCION_WORKSPACE_PATH` is now rejected (`filepath.IsAbs`) and logged
+  rather than stat'd relative to substrate-serve's own cwd;
+  `supervisor.Run` now sets `PWD=<dir>` in the child env whenever
+  `WorkingDir != ""` (scoped to that case only), so a symlinked workspace's
+  logical path stays visible to sh/tmux/`process.cwd()`; the
+  `resolveSubstrateHarnessCwd` doc comment is trimmed from ~50 lines to
+  ~28.
+
+**R2 (data race + env leak)**, `cmd/sciontool/commands/substrate_serve_test.go`:
+`TestSubstrateServeBootstrap_ThreadsWorkingDirToInitRunner` wrote
+`gotArgv`/`gotOpts` from `handleBootstrap`'s own goroutine and polled them
+unsynchronized from the test goroutine (`go test -race` failure), and never
+restored `SCION_WORKSPACE_PATH` after `handleBootstrap`'s real `os.Setenv`.
+Fixed: the stub now sends an `initCall{argv, opts}` over a buffered channel,
+the test `select`s on it with a 2s timeout, and `t.Setenv("SCION_WORKSPACE_PATH",
+"")` runs before the request so `t.Cleanup` restores the prior value
+regardless of what the handler sets it to.
+
+**Tests added/changed** (`cmd/sciontool/commands/substrate_serve_test.go`,
+`cmd/sciontool/commands/init_privilege_drop_test.go`,
+`pkg/sciontool/supervisor/supervisor_test.go`): every
+`resolveSubstrateHarnessCwd` fixture now supplies a `lookupUser` fake
+instead of an ambient `$HOME` (the old `HOME=/root` fixtures were rewritten
+to `TestResolveSubstrateHarnessCwd_IgnoresAmbientHOMEWhenRoot`/`WhenUnset`,
+which assert the ambient value is never chosen even when it's independently
+stat-able); new coverage for workspace-not-searchable-by-scion-uid,
+non-absolute rejection, the never-`/` guard (now via an unusable-fallback
+error, not a returned string), the both-unusable error's exact contents
+(paths + uid), and a `scion` user lookup failure. Three new
+`..._EffectiveCwd_...` tests assert the *effective* cwd — spawning a real
+child process (`exec.Command`, `cmd.Dir` set) against real, differently-
+permissioned temp directories (mode 0 to simulate "unsearchable by anyone",
+skipped when running as root since DAC_OVERRIDE would bypass it) — not just
+the string the resolver returns, per the brief's explicit requirement. Two
+new `supervisor_test.go` tests cover the `PWD` behavior in-scope
+(`WorkingDir != ""`) and out-of-scope (`WorkingDir == ""` must not touch an
+inherited `PWD`).
+
+**Gates**: `gofmt`, `go vet`, `go build -buildvcs=false ./...` all clean.
+`go test -race -count=3 -run ThreadsWorkingDir` and `go test -race` for
+`./cmd/sciontool/commands/` and `./pkg/sciontool/supervisor/` are clean
+except the same pre-existing, environment-dependent
+`TestNativeTelemetryPolicyEffectiveChildEnv/disabled` failure documented in
+round 1 (this sandbox has `CLAUDE_CODE_ENABLE_TELEMETRY=1` ambient).
+`go test` for `./pkg/runtime/... ./pkg/sciontool/... ./cmd/sciontool/...`
+reproduces exactly the same pre-existing `TestGetRuntime*` auto-detection
+failures round 1 and the review both already documented (no docker/apple-
+container/gcloud binaries in this sandbox) — nothing new.

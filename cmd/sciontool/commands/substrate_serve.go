@@ -5,9 +5,14 @@ Copyright 2026 The Scion Authors.
 package commands
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -71,116 +76,149 @@ func init() {
 		"Address to listen on (the router targets :80 by default; overridable for tests)")
 }
 
+// exitCodeNoUsableHarnessCwd is returned by substrate-serve's InitRunner
+// wiring (never by RunInit itself) when resolveSubstrateHarnessCwd could not
+// find any directory usable by the scion uid — see its doc comment. Kept
+// distinct from a plain 1 for the same reason as
+// exitCodePrivilegeDropRequired: so an operator reading the logged exit code
+// can tell which failure this was.
+const exitCodeNoUsableHarnessCwd = 18
+
 // substrateServeInitOptions returns the InitRunOptions substrate-serve's
-// InitRunner passes to RunInit for one child invocation. Extracted so a test
-// can assert RequirePrivilegeDrop: true is actually wired here, rather than
-// only testing RunInit's own requirePrivilegeDropOrFail predicate in
-// isolation — flipping this to false would silently let the harness start
-// as root, and nothing about testing runSubstrateServe's full HTTP server
-// would otherwise catch it.
-func substrateServeInitOptions(forwardTermSignal bool) InitRunOptions {
-	// RequirePrivilegeDrop: true — substrate always starts the actor as UID
-	// 0, so a failed/skipped privilege drop can only mean "still root,"
-	// never a legitimate rootless outcome (see
-	// InitRunOptions.RequirePrivilegeDrop). This is a flag passed here at
-	// the substrate-serve entry path, not an env var a workload could set
-	// itself.
-	return InitRunOptions{
-		ForwardTermSignal:    forwardTermSignal,
-		RequirePrivilegeDrop: true,
-		// WorkingDir: resolved here, substrate-only, and handed to RunInit
-		// as a plain field — see resolveSubstrateHarnessCwd's doc comment
-		// for the bug this fixes and why this is where it's fixed.
-		WorkingDir: resolveSubstrateHarnessCwd(defaultSubstrateHarnessCwdDeps),
+// InitRunner passes to RunInit for one child invocation, or an error when
+// resolveSubstrateHarnessCwd found no directory usable by the scion uid at
+// all — the caller must fail the harness start rather than invoke RunInit
+// with an empty/unusable WorkingDir (Go chdirs after the privilege drop, so
+// an unset cmd.Dir inherits this process's own cwd, "/").
+func substrateServeInitOptions(forwardTermSignal bool) (InitRunOptions, error) {
+	workingDir, err := resolveSubstrateHarnessCwd(defaultSubstrateHarnessCwdDeps)
+	if err != nil {
+		return InitRunOptions{}, err
 	}
+	return InitRunOptions{
+		ForwardTermSignal: forwardTermSignal,
+		// RequirePrivilegeDrop: true — substrate always starts the actor as
+		// UID 0, so a failed/skipped privilege drop can only mean "still
+		// root," never a legitimate rootless outcome (see
+		// InitRunOptions.RequirePrivilegeDrop).
+		RequirePrivilegeDrop: true,
+		WorkingDir:           workingDir,
+	}, nil
 }
 
 // substrateHarnessCwdDeps groups resolveSubstrateHarnessCwd's external
 // dependencies so tests can substitute them — the same reasoning as
 // privilegeDropPreconditionDeps: no test should depend on this machine's
-// real SCION_WORKSPACE_PATH, $HOME, or filesystem.
+// real SCION_WORKSPACE_PATH, filesystem, or "scion" user.
 type substrateHarnessCwdDeps struct {
-	getenv func(string) string
-	stat   func(string) (os.FileInfo, error)
+	getenv     func(string) string
+	stat       func(string) (os.FileInfo, error)
+	lookupUser func(string) (*user.User, error)
 }
 
 // defaultSubstrateHarnessCwdDeps wires resolveSubstrateHarnessCwd to the
-// real process environment and filesystem.
+// real process environment, filesystem, and "scion" user.
 var defaultSubstrateHarnessCwdDeps = substrateHarnessCwdDeps{
 	getenv: os.Getenv,
 	stat:   os.Stat,
+	// Wraps the scionUserLookup var in a closure, not its current value, for
+	// the same reason as defaultPrivilegeDropPreconditionDeps.lookupUser.
+	lookupUser: func(username string) (*user.User, error) { return scionUserLookup(username) },
 }
 
-// resolveSubstrateHarnessCwd resolves the working directory the substrate
-// harness child should start in, mirroring the image's WORKDIR the way
-// Docker/Podman/Kubernetes already do natively (see
-// InitRunOptions.WorkingDir's doc comment). Under Substrate the ateapi
-// Container spec has no workingDir field at all and ateom does not apply the
-// image's WorkingDir, so without this fix the harness process tree
-// (claude, its sh, tmux) starts at cmd.Dir="" — this process's own cwd,
-// observed live as "/" — and claude shows the folder-trust dialog for "/"
-// instead of the delivered ~/.claude.json's trusted /workspace, so the
-// agent never makes a model call.
+// resolveSubstrateHarnessCwd picks the working directory the substrate
+// harness child (and, via tmux's own cwd inheritance, its tmux session too —
+// see the "agent"/"shell" window reasoning in the project log) should start
+// in, mirroring the image's WORKDIR that ateom does not apply under
+// Substrate (see InitRunOptions.WorkingDir).
 //
-// Resolution order, matching the brief amendment exactly:
-//  1. SCION_WORKSPACE_PATH (default "/workspace") if it exists and is a
-//     directory — the normal case, matching every other runtime's image
-//     WORKDIR.
-//  2. $HOME, if SCION_WORKSPACE_PATH isn't usable and $HOME is itself a
-//     directory other than "/".
-//  3. "" (today's behaviour: cmd.Dir stays unset, so the child inherits
-//     this process's own cwd) if neither resolves. This never returns "/",
-//     regardless of what SCION_WORKSPACE_PATH or $HOME contain — falling
-//     back to "/" is exactly the bug this function exists to avoid, and
-//     "/" is never added to any trust list.
+// supervisor.Run's chdir happens via SysProcAttr.Credential AFTER the
+// privilege drop to the scion uid/gid, not before, so a candidate that a
+// root-only stat approves can still make the child fail to start (EACCES)
+// or silently inherit substrate-serve's own cwd. Every candidate below is
+// therefore verified searchable by the scion uid/gid specifically,
+// including its full ancestor chain, via canSearchDir — never by trusting a
+// stat this (root) process could make on its own.
 //
-// A single log line is emitted each time the primary path isn't usable, so
-// a fallback is visible in the actor's log; it only ever names a path via
-// %q, never any file content or other secret.
+// Resolution order:
+//  1. SCION_WORKSPACE_PATH (default "/workspace"; rejected if set but not
+//     absolute) if it and every ancestor directory are searchable by the
+//     scion uid/gid.
+//  2. The scion user's own home directory (lookupUser("scion").HomeDir —
+//     the same value supervisor.Run sets as the child's HOME), under the
+//     same check. This package never reads substrate-serve's own $HOME.
+//  3. Neither usable: an error naming every candidate tried (quoted path
+//     and reason) and the uid they were checked for — nothing else. This
+//     never returns "/" and never leaves cmd.Dir to inherit this process's
+//     own cwd.
 //
-// This same resolved directory is expected to cover BOTH the plain harness
-// child and the tmux session it runs under, without this package ever
-// parsing or rewriting req.StartCmd (an opaque string built client-side in
-// pkg/runtime — see BootstrapRequest.StartCmd's doc comment: "the same
-// command string the k8s runtime places in SCION_START_CMD, a tmux
-// invocation"). handleBootstrap always execs it as `sh -c req.StartCmd`
-// (pkg/sciontool/substrate/server.go); this resolved directory becomes that
-// sh process's cmd.Dir via InitRunOptions.WorkingDir ->
-// supervisor.Config.WorkingDir. tmux's own `new-session`, invoked from
-// within that shell without an explicit -c flag, defaults its initial
-// pane's directory to its invoking client's cwd — i.e. exactly this
-// directory — so the "agent" window (the harness) and the "shell" window
-// `new-window` creates alongside it both land here too, and `scion attach`
-// (which attaches to the existing "agent"/"shell" panes rather than
-// starting a new one) sees the same result. This is deliberately not done
-// by rewriting req.StartCmd to inject a literal `tmux new-session -c <dir>`
-// flag: that string's construction (pkg/runtime/common.go,
-// pkg/runtime/substrate_runtime.go) is shared with, and parity-tested
-// against, every other runtime (see TestBuildCommonRunArgs_NoWorkspaceCwdFlag
-// / TestKubernetesRuntime_BuildPod_NoWorkspaceCwdFlag in pkg/runtime), and
-// duplicating tmux's own cwd-construction logic here would only add a
-// second, driftable place that could disagree with it. A later exec via
-// `su -` (e.g. an operator's own `scion exec`) still lands in $HOME, the
-// same way `docker exec ... su -` does on every other runtime — that is
-// unchanged and left alone (see deploy/substrate/README.md).
-func resolveSubstrateHarnessCwd(d substrateHarnessCwdDeps) string {
-	workspace := d.getenv("SCION_WORKSPACE_PATH")
-	if workspace == "" {
-		workspace = "/workspace"
+// One log line is emitted whenever a candidate is rejected, quoting only
+// the path.
+func resolveSubstrateHarnessCwd(d substrateHarnessCwdDeps) (string, error) {
+	scionUser, err := d.lookupUser("scion")
+	if err != nil {
+		return "", fmt.Errorf("substrate: cannot resolve the scion user for the harness working directory: %w", err)
 	}
-	if info, err := d.stat(workspace); err == nil && info.IsDir() {
-		return workspace
+	uid64, uidErr := strconv.ParseUint(scionUser.Uid, 10, 32)
+	gid64, gidErr := strconv.ParseUint(scionUser.Gid, 10, 32)
+	if uidErr != nil || gidErr != nil {
+		return "", fmt.Errorf("substrate: scion user has an unparseable uid/gid")
 	}
-	log.Info("substrate-serve: workspace path %q is not a directory; falling back to the home directory for the harness cwd", workspace)
+	uid, gid := uint32(uid64), uint32(gid64)
 
-	home := d.getenv("HOME")
-	if home != "" && home != "/" {
-		if info, err := d.stat(home); err == nil && info.IsDir() {
-			return home
+	var tried []string
+	tryCandidate := func(path string) bool {
+		ok, reason := dirUsableForScion(d, path, uid, gid)
+		if ok {
+			return true
+		}
+		log.Info("substrate-serve: harness working directory candidate %q is not usable (%s)", path, reason)
+		tried = append(tried, fmt.Sprintf("%q (%s)", path, reason))
+		return false
+	}
+
+	workspace := d.getenv("SCION_WORKSPACE_PATH")
+	switch {
+	case workspace == "":
+		workspace = "/workspace"
+	case !filepath.IsAbs(workspace):
+		log.Info("substrate-serve: SCION_WORKSPACE_PATH %q is not an absolute path", workspace)
+		tried = append(tried, fmt.Sprintf("%q (not absolute)", workspace))
+		workspace = ""
+	}
+	if workspace != "" && tryCandidate(workspace) {
+		return workspace, nil
+	}
+
+	if home := scionUser.HomeDir; tryCandidate(home) {
+		return home, nil
+	}
+
+	return "", fmt.Errorf("substrate: no usable harness working directory for uid %d: tried %s", uid, strings.Join(tried, ", "))
+}
+
+// dirUsableForScion reports whether candidate and every ancestor directory
+// up to "/" exist, are directories, and are searchable (execute bit) by
+// uid/gid — the exact traversal a chdir(candidate) needs to succeed as that
+// uid. candidate itself is never "/": falling back to the root directory is
+// the bug this whole resolution exists to avoid.
+func dirUsableForScion(d substrateHarnessCwdDeps, candidate string, uid, gid uint32) (ok bool, reason string) {
+	if candidate == "/" {
+		return false, "refusing to use the root directory"
+	}
+	for _, dir := range append(parentDirs(candidate), candidate) {
+		info, err := d.stat(dir)
+		if err != nil {
+			return false, "missing"
+		}
+		if !info.IsDir() {
+			return false, "not a directory"
+		}
+		if !canSearchDir(info, uid, gid) {
+			return false, "not searchable"
 		}
 	}
-	log.Info("substrate-serve: home directory fallback is not a usable directory either; leaving the harness working directory unset rather than falling back to \"/\"")
-	return ""
+	return true, ""
 }
 
 // substrateServePrivilegeDropChecker is the substrate.PrivilegeDropChecker
@@ -243,7 +281,17 @@ func newSubstrateServeServer(runInit func(argv []string, opts InitRunOptions) in
 		substrate.WithPrivilegeDropChecker(substrateServePrivilegeDropChecker),
 		substrate.WithRootfsFixup(substrateServeRootfsFixup),
 		substrate.WithInitRunner(func(argv []string, forwardTermSignal bool) int {
-			return runInit(argv, substrateServeInitOptions(forwardTermSignal))
+			opts, err := substrateServeInitOptions(forwardTermSignal)
+			if err != nil {
+				// Fail the harness start (see resolveSubstrateHarnessCwd's
+				// doc comment): never invoke runInit with no usable
+				// WorkingDir. Logged in full (paths + uid only, no
+				// secrets); the exit code alone flips healthz to
+				// StateInitFailed the same way any other init failure does.
+				log.Error("substrate-serve: %v", err)
+				return exitCodeNoUsableHarnessCwd
+			}
+			return runInit(argv, opts)
 		}),
 	)
 }

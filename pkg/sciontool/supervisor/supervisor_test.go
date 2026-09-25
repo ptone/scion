@@ -106,6 +106,63 @@ func TestSupervisor_RunWithoutWorkingDir_LeavesCmdDirUnset(t *testing.T) {
 	}
 }
 
+// TestSupervisor_RunWithWorkingDir_SetsPWD is the "also take" fix: sh, tmux
+// and Node's process.cwd() prefer PWD over getcwd() when the two agree, so
+// with a symlinked WorkingDir the child must see PWD set to the logical
+// path explicitly — exec.Cmd's own Dir handling does not add it.
+func TestSupervisor_RunWithWorkingDir_SetsPWD(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "env.out")
+	config := DefaultConfig()
+	config.WorkingDir = dir
+	sup := New(config)
+
+	ctx := context.Background()
+	exitCode, err := sup.Run(ctx, []string{"sh", "-c", "printf '%s' \"$PWD\" > " + out})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+
+	got, readErr := os.ReadFile(out)
+	if readErr != nil {
+		t.Fatalf("reading child's captured PWD: %v", readErr)
+	}
+	if string(got) != dir {
+		t.Errorf("child PWD = %q, want %q", got, dir)
+	}
+}
+
+// TestSupervisor_RunWithoutWorkingDir_DoesNotForcePWD proves the scoping:
+// callers that leave WorkingDir at its zero value (every runtime other than
+// substrate) must not get a PWD override at all. Inspects the constructed
+// exec.Cmd.Env directly (this test is in-package) rather than round-tripping
+// through a real shell, since a real shell independently recomputes $PWD via
+// getcwd() whenever the inherited value doesn't match the process's actual
+// cwd — that shell behavior, not supervisor.Run, would otherwise be what the
+// test observed.
+func TestSupervisor_RunWithoutWorkingDir_DoesNotForcePWD(t *testing.T) {
+	wantPWD := os.Getenv("PWD")
+
+	config := DefaultConfig() // WorkingDir left unset (zero value)
+	sup := New(config)
+
+	ctx := context.Background()
+	exitCode, err := sup.Run(ctx, []string{"true"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+
+	if got := getEnvVar(sup.cmd.Env, "PWD"); got != wantPWD {
+		t.Errorf("child env PWD = %q, want the unchanged ambient value %q (WorkingDir==\"\" must not touch PWD)", got, wantPWD)
+	}
+}
+
 func TestSupervisor_RunNoCommand(t *testing.T) {
 	config := DefaultConfig()
 	sup := New(config)
