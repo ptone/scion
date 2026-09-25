@@ -354,8 +354,8 @@ Enabling the tier does five things, all additive:
    (`clusterIpv4Cidr`, cross-checked against
    `ipAllocationPolicy.clusterIpv4CidrBlock` — the script fails if the two
    disagree or if the range is missing, broader than `/8`, or not valid
-   IPv4), which is what scopes the hub-allow firewall rule below to pod
-   traffic rather than to `0.0.0.0/0`.
+   IPv4), which is what scopes the hub-deny firewall rule below to the
+   cluster's own pod traffic.
 2. **Firewall rules, VM tag, and a static internal IP.** Three firewall
    rules are created, all scoped to this hub by an exact
    `scion-deployment=<hub_name>` marker in their description and a
@@ -365,30 +365,23 @@ Enabling the tier does five things, all additive:
      cluster's discovered node tag, priority 900.
    - `scion-hub-<hub_name>-nfs-deny` — denies tcp:2049 from everywhere
      else (`0.0.0.0/0`), priority 950.
-   - `scion-hub-<hub_name>-hub-allow` — allows tcp:8080 from the cluster's
-     discovered pod CIDR, priority 900, no paired deny. This is what lets
-     GKE agent pods reach the hub directly, and it opens tcp:8080 to
-     every pod in the cluster (all namespaces), not only Scion agents.
-     Requests are still authenticated by the hub itself (an agent token,
-     or the IAP assertion for browser users); a small set of endpoints
-     (health checks, login/token flows, OIDC discovery, public settings,
-     static UI assets, the GitHub App webhook endpoint, and endpoints
-     gated by their own secret such as a broker join token or a signed
-     URL) answer without credentials, the same as they do for any other
-     caller.
-     Pod-to-hub traffic on this path is **plain HTTP inside the
-     VPC** — agent tokens are sent as bearer credentials over it, so
-     anything able to observe VPC or node traffic (for example a
-     privileged or hostNetwork pod on a cluster node) can capture them.
-     Keep this cluster's workloads trusted, or restrict who can schedule
-     privileged pods on it. Only the cluster's default pod range
-     (`clusterIpv4Cidr`) is ever admitted; a node pool with an additional,
-     separate pod CIDR is not covered by this rule and its pods cannot
-     reach the hub -- this fails closed (nothing outside the discovered
-     range is let in), not open.
+   - `scion-hub-<hub_name>-hub-deny` — denies tcp:8080 from the cluster's
+     discovered pod CIDR, priority 950, the same scheme as `nfs-deny` (so
+     it beats a network's own default-allow-internal rule). GKE agent
+     pods reach the hub through its existing public IAP URL, the same
+     URL browser users use, not a private VPC path; this rule makes
+     explicit that nothing in the cluster's pod range can reach tcp:8080
+     on the hub VM directly. Deploy-time, a fail-closed check reads the
+     Cloud Run IAP proxy's own egress subnet and refuses to create
+     hub-deny (or anything else) if that subnet's primary range would
+     overlap the discovered pod CIDR, since that would also block the
+     proxy's own traffic to the hub. See "Agent transport auth" below
+     for how agent pods actually authenticate over that public URL.
 
-   The deny rule is created first, then the allow rule, so an interrupted
-   run can never leave the allow rule in place without its paired deny.
+   The two NFS rules are created deny first, then allow, so an
+   interrupted run can never leave the allow rule in place without its
+   paired deny; hub-deny is created alongside nfs-deny, since it has no
+   allow to protect.
 
    If a firewall rule with one of these names already exists but doesn't
    carry the exact marker, the script refuses to touch it and fails rather
@@ -422,12 +415,31 @@ Enabling the tier does five things, all additive:
    address with this name that doesn't carry the marker, or whose
    reserved IP no longer matches the VM's actual IP, fails the run with
    the mismatch and the remediation, exactly like a drifted firewall rule
-   — never auto-corrected. Reserving this address is what makes the
-   hub-allow rule above meaningful: it fixes the one thing (the VM's own
-   address) that the rule's pod-CIDR source range doesn't already pin
-   down.
+   — never auto-corrected. Reserving this address is what gives the
+   shared NFS PV's server field a stable target: without it, a VM
+   recreate would silently point every existing PV at a dead address.
 
-3. **NFS server and export.** Discovery also reads the cluster's node
+3. **Agent transport auth.** Agents dispatched to the GKE cluster reach
+   the hub through the same public IAP URL browser users use,
+   authenticating with a Google OIDC ID token minted by impersonating a
+   dedicated `scion-hub-<hub_name>-transport` service account, marked
+   the same way as every other hybrid-tier resource (an exact
+   `scion-deployment=<hub_name>` description, since service accounts
+   have no labels). Setup: the project's IAP OAuth client ID is read
+   (`gcloud iap settings get --resource-type=iap_web`) and used verbatim
+   as the transport token's audience; the hub's own runtime service
+   account is granted `roles/iam.serviceAccountOpenIdTokenCreator` on
+   the transport SA specifically (not project-wide, and not the broader
+   `serviceAccountTokenCreator`, which this never needs); once the Cloud
+   Run proxy exists, the transport SA is granted
+   `roles/iap.httpsResourceAccessor` on it, the same role and call the
+   human operator's own access uses. `server.auth.transport` in
+   `settings.yaml` records the audience and the transport SA email.
+   IAM changes can take on the order of a minute to propagate; the very
+   first agent dispatch right after a deploy may see a transient
+   authentication failure that a retry resolves.
+
+4. **NFS server and export.** Discovery also reads the cluster's node
    subnet's primary IP range (never the pod CIDR), refusing anything
    `0.0.0.0/0` or broader than `/8`. Once the VM exists, a dedicated
    `scion-nfs` system account (no login shell, no home, primary group
@@ -468,7 +480,7 @@ Enabling the tier does five things, all additive:
    squashing every client to the dedicated identity. There's no separate
    teardown for the export or its backing image file: both are deleted
    along with the VM's boot disk.
-4. **Kubernetes objects.** A cluster-scoped PersistentVolume
+5. **Kubernetes objects.** A cluster-scoped PersistentVolume
    (`scion-hub-<hub_name>-shared`), a namespace (default
    `scion-hub-<hub_name>`), and a PersistentVolumeClaim in that namespace
    (default `scion-hub-<hub_name>-shared`, bound to the PV) are all
@@ -487,7 +499,7 @@ Enabling the tier does five things, all additive:
    refuses, with the fields that differ and the remediation. An existing,
    unmarked namespace is used as-is and never adopted or deleted.
 
-5. **settings.yaml.** Both writes (the initial dev-mode one and the later
+6. **settings.yaml.** Both writes (the initial dev-mode one and the later
    proxy-mode update) add a `server.shared_dir_storage` block (backend
    `nfs`, pointing at the VM's export and the PV the Kubernetes objects
    above create) using the schema already defined for it in the runtime's
@@ -944,8 +956,9 @@ bash scripts/single-node-vm/deploy.sh --delete
 | Cloud Router | `scion-hub-HUB_NAME-router` |
 | Service account | `scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com` |
 | IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` |
-| *If the hybrid tier is on:* NFS allow/deny, hub-allow firewall rules | `scion-hub-HUB_NAME-nfs-allow`, `scion-hub-HUB_NAME-nfs-deny`, `scion-hub-HUB_NAME-hub-allow` |
+| *If the hybrid tier is on:* NFS allow/deny, hub-deny firewall rules | `scion-hub-HUB_NAME-nfs-allow`, `scion-hub-HUB_NAME-nfs-deny`, `scion-hub-HUB_NAME-hub-deny` |
 | *If the hybrid tier is on:* static internal IP reservation | `scion-hub-HUB_NAME-internal-ip` |
+| *If the hybrid tier is on:* agent transport service account | `scion-hub-HUB_NAME-transport@PROJECT_ID.iam.gserviceaccount.com` |
 | *If the hybrid tier is on:* PersistentVolumeClaim, PersistentVolume | `gke_target.pvc_name` (default `scion-hub-HUB_NAME-shared`), `scion-hub-HUB_NAME-shared` |
 | *If the hybrid tier is on and this deployment created it:* Kubernetes namespace | `gke_target.namespace` (default `scion-hub-HUB_NAME`) |
 
