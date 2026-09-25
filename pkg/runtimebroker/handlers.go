@@ -1641,6 +1641,26 @@ func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) 
 	return id
 }
 
+// agentLookupListErr re-runs just the primary, project-scoped Runtime.List
+// call projectScopedTarget's own LookupContainerID call makes internally
+// (scopedNameFilter(id, projectID) against s.manager), returning its error
+// if any. Unlike LookupContainerID, this never turns "found nothing" into
+// an error of its own — a nil return here means that specific List call
+// succeeded, whether or not it matched anything, so a caller can tell "the
+// listing itself failed" apart from "the listing worked and found no
+// match". Used only by stopAgent's substrate-scoped check below (never by
+// projectScopedTarget's own generic callers), so it changes nothing about
+// how any runtime resolves or reports a stop target — it only decides
+// whether stopAgent treats an unresolved target as an explicit failure
+// instead of the idempotent no-op.
+func (s *Server) agentLookupListErr(ctx context.Context, id, projectID string) error {
+	if s.manager == nil {
+		return nil
+	}
+	_, err := s.manager.List(ctx, scopedNameFilter(strings.ToLower(id), projectID))
+	return err
+}
+
 func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
@@ -1652,6 +1672,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	)
 
 	mgr := s.resolveManagerForAgent(ctx, id, projectID)
+	managers := s.allManagers()
 
 	// Resolve the project-scoped container so that same-slug agents in
 	// different projects on this broker don't collide. An empty target means
@@ -1659,6 +1680,27 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// no-op rather than stopping a same-slug agent in another project.
 	target := s.projectScopedTarget(ctx, id, projectID)
 	if target == "" {
+		// projectScopedTarget silently collapses a LookupContainerID error
+		// (e.g. a transient runtime-list failure) into the same "" a
+		// genuine not-found produces, so this process cannot otherwise tell
+		// "nothing here" apart from "couldn't check" — and reporting the
+		// generic idempotent 202 below for the latter would mark a RECORDED,
+		// possibly still-running agent stopped without ever calling Stop.
+		// Only on a broker where at least one registered runtime implements
+		// RecordlessActorProber (substrate) is this worth the extra check:
+		// re-run just the primary list call to see whether it, specifically,
+		// errored (never treating "found nothing" as an error itself, see
+		// agentLookupListErr) and fail explicitly rather than guess. Every
+		// other broker's stop path is unaffected — hasRecordlessProber is
+		// false and this block is skipped entirely, leaving the idempotent
+		// 202 below exactly as it always was.
+		if projectID != "" && hasRecordlessProber(managers) {
+			if lerr := s.agentLookupListErr(ctx, id, projectID); lerr != nil {
+				span.SetStatus(codes.Error, lerr.Error())
+				RuntimeError(w, "Failed to stop agent: "+lerr.Error())
+				return
+			}
+		}
 		// Before treating an unresolved target as an idempotent no-op (the
 		// generic behaviour every runtime relies on), check whether a
 		// runtime process restart left at least one record-less actor in
@@ -1669,8 +1711,17 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// equivalent check: a project-blind stop (solo/CLI) is unaffected,
 		// and a genuinely-absent slug in a project with no record-less
 		// actors still falls through to the idempotent 202 below.
+		//
+		// projectID != "" is, today, always true by the time control
+		// reaches here: projectScopedTarget only returns "" for a non-empty
+		// projectID (an empty projectID falls back to returning id itself,
+		// per its own doc comment), and this handler is only ever reached
+		// with a non-empty id. Kept anyway as defence-in-depth against a
+		// future change to projectScopedTarget's contract, with this
+		// comment corrected to say so rather than the previous, inaccurate
+		// claim that it does live, load-bearing work today.
 		if projectID != "" {
-			atespace, recordless, perr := recordlessActorProbe(ctx, s.allManagers(), projectID)
+			atespace, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
 			if perr != nil {
 				span.SetStatus(codes.Error, perr.Error())
 				RuntimeError(w, "Failed to stop agent: "+perr.Error())
@@ -2985,6 +3036,24 @@ func recordlessActorProbe(ctx context.Context, managers []agent.Manager, project
 	return atespace, actorNames, nil
 }
 
+// hasRecordlessProber reports whether any manager in managers exposes the
+// RecordlessActorProber capability (currently just substrate). stopAgent
+// uses this to scope its stricter lookup-error handling (below) to a broker
+// that actually has a substrate profile registered, leaving every other
+// broker's stop path byte-identical to before this check existed.
+func hasRecordlessProber(managers []agent.Manager) bool {
+	for _, mgr := range managers {
+		am, ok := mgr.(*agent.AgentManager)
+		if !ok || am.Runtime == nil {
+			continue
+		}
+		if _, ok := am.Runtime.(RecordlessActorProber); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // deleteTarget is the single, project-matched agent a delete acts on.
 type deleteTarget struct {
 	mgr         agent.Manager
@@ -3142,6 +3211,29 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		return nil, fmt.Errorf("%w: %v", errDeleteTargetUnknown, listErr)
 	}
 
+	// Before accepting a file-only target below (which reports success —
+	// files deleted, HTTP 204 — while never touching the runtime), check
+	// whether a runtime process restart left at least one record-less actor
+	// in this project's atespace (RecordlessActorProber, substrate-only,
+	// ptone/scion#1808). This runs on every "no runtime entry matched"
+	// outcome, not only when the file scan also finds nothing: a persisted
+	// project directory (a workstation or a PVC-backed $HOME) can resolve a
+	// file-only target even for an agent whose actor is still running,
+	// record-less, on the cluster — reporting that as success would delete
+	// only the files and orphan the actor, its egress policy, and its
+	// worker. Scoped to projectID != "" so a project-blind delete (solo/CLI)
+	// is unaffected; a runtime with no RecordlessActorProber, or a project
+	// whose atespace holds no record-less actor, falls through unchanged.
+	if projectID != "" {
+		atespace, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
+		if perr != nil {
+			return nil, fmt.Errorf("%w: %v", errDeleteTargetUnknown, perr)
+		}
+		if len(recordless) > 0 {
+			return nil, fmt.Errorf("%w: %d actor(s) with no runtime-process record in atespace %q; broker restarted; agent identity unknown; operator cleanup required, see deploy/substrate/README.md", errAgentIdentityUnknown, len(recordless), atespace)
+		}
+	}
+
 	// The agent may exist only as files (never started, or its container is
 	// gone). Look only in this project's directory.
 	resolved, err := s.findAgentProjectDir(id, projectID, projectPathHint)
@@ -3149,24 +3241,6 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		return nil, err
 	}
 	if resolved == "" {
-		// Before reporting not-found (which the hub treats as a completed
-		// delete), check whether a runtime process restart left at least one
-		// record-less actor in this project's atespace (RecordlessActorProber,
-		// substrate-only, ptone/scion#1808): if so, "not found" would be
-		// false — the actor still exists, this process just cannot prove
-		// which project it belongs to. Scoped to projectID != "" so a
-		// project-blind delete (solo/CLI) is unaffected, and to runtimes
-		// that record no record-less actors at all so a genuinely-absent
-		// slug in a project with no record-less actors stays idempotent.
-		if projectID != "" {
-			atespace, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
-			if perr != nil {
-				return nil, fmt.Errorf("%w: %v", errDeleteTargetUnknown, perr)
-			}
-			if len(recordless) > 0 {
-				return nil, fmt.Errorf("%w: %d actor(s) with no runtime-process record in atespace %q; broker restarted; agent identity unknown; operator cleanup required, see deploy/substrate/README.md", errAgentIdentityUnknown, len(recordless), atespace)
-			}
-		}
 		return nil, errDeleteTargetNotFound
 	}
 	s.agentLifecycleLog.Debug("Resolved agent project path for file-only delete",

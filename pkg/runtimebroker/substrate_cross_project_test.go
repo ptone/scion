@@ -54,6 +54,15 @@ func (f *fakeSubstrateControlClient) putActor(atespace, name, uid string) {
 // can both inject actors directly and inspect which calls it received.
 func newTestSubstrateBrokerServer(t *testing.T) (*Server, *fakeSubstrateControlClient) {
 	t.Helper()
+	// substrateAgentRecords/substrateControlTokens are process-wide
+	// (pkg/runtime/substrate_runtime.go), not scoped to the *SubstrateRuntime
+	// instance this test builds below. Without resetting them, a record left
+	// behind by an earlier test in this package — under a UID this fake's
+	// deterministic CreateActor ("uid-"+name) can easily reproduce for a
+	// same-named actor in a later test — would leak in, silently turning a
+	// meant-to-be-record-less actor into a recorded one. Wipe at the start of
+	// every test and restore whatever was there before once it ends.
+	t.Cleanup(runtime.WipeSubstrateAgentStateForTest())
 	fc := newFakeSubstrateControlClient(&substrateEgressRecorder{})
 	actorServer := newFakeSubstrateActorServer()
 	t.Cleanup(actorServer.Close)
