@@ -59,31 +59,48 @@ func substrateSchemaProperties(t *testing.T) map[string]bool {
 
 // v1SubstrateConfigJSONFields returns the set of JSON field names declared on
 // V1SubstrateConfig, derived from its `json` struct tags (stripping
-// ",omitempty" and skipping "-").
+// ",omitempty"). Every field must carry a usable json tag: none of
+// V1SubstrateConfig's fields are deliberately excluded from JSON today, so a
+// missing or "-" json tag fails the test instead of being silently skipped
+// (a silent skip would let a new field bypass the schema tie unnoticed). If
+// V1SubstrateConfig ever gains a field that is genuinely JSON-exempt, that
+// exemption should be visible here rather than absorbed by a blanket skip.
+// It also asserts that each field's `yaml` and `koanf` tag names match its
+// `json` name, since settings files are keyed by the yaml/koanf name.
 func v1SubstrateConfigJSONFields(t *testing.T) map[string]bool {
 	t.Helper()
 
 	rt := reflect.TypeOf(V1SubstrateConfig{})
 	result := make(map[string]bool, rt.NumField())
 	for i := 0; i < rt.NumField(); i++ {
-		tag := rt.Field(i).Tag.Get("json")
-		if tag == "" || tag == "-" {
+		field := rt.Field(i)
+		jsonTag := field.Tag.Get("json")
+		jsonName := strings.Split(jsonTag, ",")[0]
+		if jsonTag == "" || jsonTag == "-" || jsonName == "" || jsonName == "-" {
+			t.Errorf("V1SubstrateConfig.%s has no usable json tag (got %q); every field must "+
+				"name itself explicitly, since none of this struct's fields are deliberately "+
+				"excluded from JSON", field.Name, jsonTag)
 			continue
 		}
-		name := strings.Split(tag, ",")[0]
-		if name == "" || name == "-" {
-			continue
+		result[jsonName] = true
+
+		if yamlName := strings.Split(field.Tag.Get("yaml"), ",")[0]; yamlName != jsonName {
+			t.Errorf("V1SubstrateConfig.%s yaml tag name %q does not match json name %q",
+				field.Name, yamlName, jsonName)
 		}
-		result[name] = true
+		if koanfName := strings.Split(field.Tag.Get("koanf"), ",")[0]; koanfName != jsonName {
+			t.Errorf("V1SubstrateConfig.%s koanf tag name %q does not match json name %q",
+				field.Name, koanfName, jsonName)
+		}
 	}
 	return result
 }
 
 // TestSubstrateSchemaStructTie asserts that the substrate object in the
 // embedded settings-v1 schema and V1SubstrateConfig's json tags name exactly
-// the same set of fields, in both directions. This is the tie test called
-// for by the substrate schema drift fix: it fails if a new V1SubstrateConfig
-// field is ever added without a matching schema property (or vice versa).
+// the same set of fields, in both directions: it fails if a new
+// V1SubstrateConfig field is ever added without a matching schema property
+// (or vice versa).
 func TestSubstrateSchemaStructTie(t *testing.T) {
 	schemaFields := substrateSchemaProperties(t)
 	structFields := v1SubstrateConfigJSONFields(t)
