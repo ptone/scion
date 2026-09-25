@@ -71,7 +71,7 @@ agent_phase() {
 # and duplicate detection. Uses HERDR_PANE_ID set by herdr for child processes.
 register_pane() {
   if [[ -n "${HERDR_PANE_ID:-}" ]]; then
-    herdr pane report-agent "$HERDR_PANE_ID" \
+    "${HERDR_BIN_PATH:-herdr}" pane report-agent "$HERDR_PANE_ID" \
       --source "scion:integration" \
       --agent "scion/${SLUG}" \
       --state idle

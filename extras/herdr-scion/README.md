@@ -18,6 +18,9 @@ A [herdr](https://github.com/herdrdev/herdr) plugin that integrates Scion agents
 - [scion](https://github.com/scion-ai/scion) CLI on PATH
 - `jq` for JSON processing
 - `fzf` (optional) for fuzzy interactive selection; falls back to a numbered menu
+- One of `socat`, `nc` (with `-U` for Unix sockets), or `python3` — used only
+  by the dashboard action to talk to herdr's socket API for `layout.apply`,
+  which has no CLI equivalent
 
 ## Installation
 
@@ -73,6 +76,26 @@ Each Scion agent pane is set up in three steps:
    and the state bridge track panes by.
 3. `herdr pane run <pane_id> "bash scion-attach-wrapper.sh <slug>"` — type
    the wrapper command into the pane's shell and press Enter.
+
+### Interactive Actions (Popup Panes)
+
+`scion-pick-agent.sh` (fzf) and `scion-start-agent.sh` (`read -rp` prompts)
+are interactive. Herdr plugin actions run with piped stdout/stderr and no
+controlling terminal, so an interactive script can't run as an action
+directly. Instead:
+
+- `scion-pick-agent.sh` and `scion-start-agent.sh` are declared as `[[panes]]`
+  entrypoints (`pick` and `start`) in `herdr-plugin.toml`, not as actions.
+- The **Attach to Scion Agent** and **Start Scion Agent** actions run
+  `scion-open-pane.sh`, a small launcher that calls `herdr plugin pane open
+  --plugin scion.herdr-integration --entrypoint <pick|start> --placement
+  overlay --env SCION_TARGET_PANE="$HERDR_PANE_ID"`. This opens the real
+  script in a genuine terminal (an overlay pane), which closes automatically
+  when the script exits.
+- The picker/start scripts split the new agent pane off of
+  `$SCION_TARGET_PANE` (the pane that triggered the action) rather than off
+  the overlay itself, so the agent pane lands next to the user's other panes.
+  Falls back to herdr's default split target if `SCION_TARGET_PANE` is unset.
 
 ### Attach Wrapper
 
@@ -163,10 +186,12 @@ This removes the plugin registration. Existing panes remain open but will not be
 
 | File | Purpose |
 |------|---------|
-| `herdr-plugin.toml` | Plugin manifest (startup hook, actions) |
+| `herdr-plugin.toml` | Plugin manifest (startup hook, actions, panes) |
 | `scion-discover.sh` | Auto-discover agents and create panes |
 | `scion-attach-wrapper.sh` | Attach with reconnection and idempotent start |
-| `scion-pick-agent.sh` | Interactive agent picker |
-| `scion-start-agent.sh` | Template picker and agent launcher |
+| `scion-open-pane.sh` | Launcher: opens the pick/start overlay panes |
+| `scion-pick-agent.sh` | Interactive agent picker (runs as an overlay pane) |
+| `scion-start-agent.sh` | Template picker and agent launcher (runs as an overlay pane) |
 | `scion-state-bridge.sh` | State synchronization daemon |
 | `scion-dashboard.sh` | Tiled layout dashboard |
+| `scion-common.sh` | Shared helpers (pane tracking, socket API access) |

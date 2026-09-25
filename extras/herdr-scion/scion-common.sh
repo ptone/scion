@@ -3,6 +3,12 @@
 #
 # Sourced by all plugin scripts. Do not execute directly.
 
+# Herdr sets HERDR_BIN_PATH to the exact binary running the current
+# server/client for plugin and pane processes. Prefer it over relying on
+# PATH resolution; fall back to "herdr" on PATH when it isn't set (e.g.
+# running a script by hand for testing).
+HERDR_BIN="${HERDR_BIN_PATH:-herdr}"
+
 # Resolve the project CWD from herdr's plugin context.
 #
 # Herdr runs plugin commands with CWD set to the plugin root directory.
@@ -40,7 +46,7 @@ resolve_project_cwd() {
 pane_exists_for_agent() {
   local identifier="$1"
   local panes_json
-  panes_json="$(herdr pane list)" || return 1
+  panes_json="$("$HERDR_BIN" pane list)" || return 1
   echo "$panes_json" \
     | jq -e ".result.panes[] | select(.label == \"scion:${identifier}\")" \
     >/dev/null
@@ -51,21 +57,41 @@ pane_exists_for_agent() {
 pane_id_for_agent() {
   local identifier="$1"
   local panes_json
-  panes_json="$(herdr pane list)" || return 1
+  panes_json="$("$HERDR_BIN" pane list)" || return 1
   echo "$panes_json" \
     | jq -r ".result.panes[] | select(.label == \"scion:${identifier}\") | .pane_id" \
     | head -1
 }
 
+# Resolve the running herdr server's API socket path. $HERDR_SOCKET_PATH is
+# set in the common cases we've verified (pane processes, and plugin actions
+# invoked via `herdr plugin action invoke`), but we don't rely on it holding
+# for every invocation path (e.g. startup hooks) or herdr version. `herdr
+# status server --json` reports the same socket path (.socket) that the CLI
+# itself talks to, and works regardless of how this script was invoked.
+resolve_herdr_socket_path() {
+  if [[ -n "${HERDR_SOCKET_PATH:-}" ]]; then
+    echo "$HERDR_SOCKET_PATH"
+    return 0
+  fi
+
+  local sock
+  sock="$("$HERDR_BIN" status server --json 2>/dev/null | jq -r '.socket // empty')"
+  if [[ -z "$sock" ]]; then
+    return 1
+  fi
+  echo "$sock"
+}
+
 # Send a newline-terminated JSON request directly to herdr's socket API
-# (used for methods with no CLI equivalent, e.g. layout.apply). Requires
-# $HERDR_SOCKET_PATH, which herdr sets for plugin and pane processes.
+# (used for methods with no CLI equivalent, e.g. layout.apply).
 # Prints the raw JSON response line to stdout.
 herdr_socket_request() {
   local request_json="$1"
 
-  if [[ -z "${HERDR_SOCKET_PATH:-}" ]]; then
-    echo "herdr_socket_request: HERDR_SOCKET_PATH is not set" >&2
+  local socket_path
+  if ! socket_path="$(resolve_herdr_socket_path)"; then
+    echo "herdr_socket_request: could not resolve herdr's socket path (\$HERDR_SOCKET_PATH is unset and '$HERDR_BIN status server --json' returned none)" >&2
     return 1
   fi
 
@@ -77,17 +103,17 @@ herdr_socket_request() {
   }
 
   if command -v socat >/dev/null 2>&1; then
-    printf '%s\n' "$request_json" | socat -T 10 - "UNIX-CONNECT:${HERDR_SOCKET_PATH}"
+    printf '%s\n' "$request_json" | socat -T 10 - "UNIX-CONNECT:${socket_path}"
     return $?
   fi
 
   if command -v nc >/dev/null 2>&1 && nc -h 2>&1 | grep -q -- '-U'; then
-    printf '%s\n' "$request_json" | nc -U "${HERDR_SOCKET_PATH}"
+    printf '%s\n' "$request_json" | nc -U "${socket_path}"
     return $?
   fi
 
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$HERDR_SOCKET_PATH" "$request_json" <<'PYEOF'
+    python3 - "$socket_path" "$request_json" <<'PYEOF'
 import socket, sys
 sock_path, request_json = sys.argv[1], sys.argv[2]
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
