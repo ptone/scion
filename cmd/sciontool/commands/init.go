@@ -402,6 +402,25 @@ func reportInitFailure(agentHome string, cause error) {
 	}
 }
 
+// harnessSupervisorConfig builds the supervisor.Config for the harness
+// child process from RunInit's inputs. It is a pure function of its
+// arguments — it reads no globals and has no side effects — so the join
+// between InitRunOptions.WorkingDir and supervisor.Config.WorkingDir can be
+// pinned by a table-driven unit test without invoking RunInit itself.
+func harnessSupervisorConfig(opts InitRunOptions, gracePeriod time.Duration, targetUID, targetGID int, rootless bool, envOverlay map[string]string, nativeTelemetryPolicy string, secretOverrides map[string]string) supervisor.Config {
+	return supervisor.Config{
+		GracePeriod:           gracePeriod,
+		UID:                   targetUID,
+		GID:                   targetGID,
+		Username:              "scion",
+		Rootless:              rootless,
+		EnvOverlay:            envOverlay,
+		NativeTelemetryPolicy: nativeTelemetryPolicy,
+		SecretOverrides:       secretOverrides,
+		WorkingDir:            opts.WorkingDir,
+	}
+}
+
 // RunInit runs the sciontool init logic: it sets up the container user,
 // clones the workspace, runs lifecycle hooks, launches the child process
 // under supervision, and reports status/heartbeats to the Hub until the
@@ -871,17 +890,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	}
 
 	// Create supervisor with configuration
-	config := supervisor.Config{
-		GracePeriod:           gracePeriod,
-		UID:                   targetUID,
-		GID:                   targetGID,
-		Username:              "scion",
-		Rootless:              rootless,
-		EnvOverlay:            harnessEnvOverlay,
-		NativeTelemetryPolicy: nativeTelemetryPolicy,
-		SecretOverrides:       secretOverrides,
-		WorkingDir:            opts.WorkingDir,
-	}
+	config := harnessSupervisorConfig(opts, gracePeriod, targetUID, targetGID, rootless, harnessEnvOverlay, nativeTelemetryPolicy, secretOverrides)
 	sup := supervisor.New(config)
 
 	// Create a cancellable context for graceful shutdown

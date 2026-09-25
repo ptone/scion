@@ -11,9 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
 // hubEnvVars lists the environment variables used by the Hub client.
@@ -1132,5 +1136,46 @@ func TestRequirePrivilegeDropOrFail_SubstrateSucceedsWhenDropped(t *testing.T) {
 func TestRequirePrivilegeDropOrFail_NonSubstrateRootlessUnchanged(t *testing.T) {
 	if err := requirePrivilegeDropOrFail(0, false); err != nil {
 		t.Errorf("requirePrivilegeDropOrFail(0, false) = %v, want nil (non-substrate rootless fallback must be unaffected)", err)
+	}
+}
+
+// TestHarnessSupervisorConfig pins harnessSupervisorConfig as the sole join
+// between RunInit's locals and supervisor.Config: every field must come
+// through unchanged, and WorkingDir in particular must be copied from
+// opts.WorkingDir when set and be "" when it is not (the value every
+// caller except substrate-serve's InitRunner passes, and what docker/k8s
+// depend on for byte-identical behaviour).
+func TestHarnessSupervisorConfig(t *testing.T) {
+	const gracePeriod = 7 * time.Second
+	envOverlay := map[string]string{"FOO": "bar"}
+	secretOverrides := map[string]string{"SECRET": "shh"}
+
+	tests := []struct {
+		name string
+		opts InitRunOptions
+		want string // expected WorkingDir
+	}{
+		{name: "WorkingDir set is copied through", opts: InitRunOptions{WorkingDir: "/workspace"}, want: "/workspace"},
+		{name: "WorkingDir unset is empty", opts: InitRunOptions{}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := harnessSupervisorConfig(tt.opts, gracePeriod, 1000, 1000, false, envOverlay, "enabled", secretOverrides)
+			want := supervisor.Config{
+				GracePeriod:           gracePeriod,
+				UID:                   1000,
+				GID:                   1000,
+				Username:              "scion",
+				Rootless:              false,
+				EnvOverlay:            envOverlay,
+				NativeTelemetryPolicy: "enabled",
+				SecretOverrides:       secretOverrides,
+				WorkingDir:            tt.want,
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("harnessSupervisorConfig() = %+v, want %+v", got, want)
+			}
+		})
 	}
 }
