@@ -1,0 +1,155 @@
+variable "project_id" {
+  description = "GCP project ID (must match the shared-infra apply)."
+  type        = string
+}
+
+variable "region" {
+  description = "Region the shared infra was created in (must match shared-infra)."
+  type        = string
+}
+
+variable "zone" {
+  description = "Zone the shared Filestore instance was created in (must match shared-infra)."
+  type        = string
+}
+
+variable "shared_prefix" {
+  description = "The name_prefix configurations/shared-infra was applied with. Resolves shared infra by naming convention (shared-lookup)."
+  type        = string
+  default     = "tfha"
+}
+
+variable "shared_share_name" {
+  description = "Filestore share_name from shared-infra (module filestore's share_name, default \"scion\")."
+  type        = string
+  default     = "scion"
+}
+
+variable "state_prefix" {
+  description = "The GCS backend prefix this apply's state actually lives at (e.g. \"tfha/hubs/tfha-h1\"), passed alongside -backend-config=\"prefix=...\" at init time. Terraform cannot read its own backend config, so this is how hub_name's validation below catches applying hub_name=X's vars onto a different hub's state file."
+  type        = string
+}
+
+variable "hub_name" {
+  description = "This hub's name. Every hub-scoped resource derives from it (design §3.8)."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{2,15}$", var.hub_name))
+    error_message = "hub_name must match ^[a-z][a-z0-9-]{2,15}$ (design §3.8)."
+  }
+
+  # Denylist by construction: hub_name must live in this project prefix's
+  # own namespace. Without this, values like "scion-hub" or "postgres" pass
+  # the regex above and collide with the live stack's own Cloud Run service
+  # name or the destroy_guard's literal database filter (found in review).
+  validation {
+    condition     = startswith(var.hub_name, "${var.shared_prefix}-")
+    error_message = "hub_name (\"${var.hub_name}\") must start with \"${var.shared_prefix}-\" (design §3.8) — this also rules out collisions with the live stack's own resource names."
+  }
+
+  # Cross-variable validation (needs Terraform >= 1.9, see versions.tf):
+  # state_prefix must exactly match this hub's expected backend prefix.
+  # A `check` block was considered and rejected (tf-review B5) — it only
+  # warns, so a mismatched apply would still proceed and silently apply
+  # hub_name=X's variables onto a different hub's state.
+  validation {
+    condition     = var.state_prefix == "${var.shared_prefix}/hubs/${var.hub_name}"
+    error_message = "state_prefix (\"${var.state_prefix}\") does not match \"${var.shared_prefix}/hubs/${var.hub_name}\" for hub_name=\"${var.hub_name}\" — this looks like hub_name's variables are about to be applied onto a different hub's state. Re-run init with the matching -backend-config prefix, or fix -var hub_name/-var state_prefix."
+  }
+}
+
+variable "hub_image" {
+  description = "Artifact Registry image URI for the hub container (built and pushed after the shared-infra apply creates the repo)."
+  type        = string
+}
+
+variable "image_registry" {
+  description = "Registry the hub rewrites bare agent harness images against (settings.yaml top-level image_registry — design §3.4, found before the tfha-h1 apply: without it, bare images like scion-claude:latest are never rewritten, GKE pulls them from Docker Hub where they don't exist, and phase 1 check 3 fails with ImagePullBackOff). Default null computes to the shared AR repo (<region>-docker.pkg.dev/<project>/<shared_prefix>-scion) from shared-lookup; override only for a variation that publishes agent images elsewhere."
+  type        = string
+  default     = null
+}
+
+variable "iap_oauth_client_id" {
+  description = "OAuth client ID, optional (design §3.4 \"IAP and the OAuth client\"). Not a Terraform-managed prerequisite — see the README's \"IAP OAuth client\" section: discover the project's Google-managed client ID (works immediately for in-org users) or create a custom one in the console for cross-org, then re-apply. Null means the hub and IAP browser login work, but agent transport is disabled."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.iap_oauth_client_id == null || can(regex("^[0-9a-zA-Z-]+\\.apps\\.googleusercontent\\.com$", var.iap_oauth_client_id))
+    error_message = "iap_oauth_client_id must be null or end in .apps.googleusercontent.com."
+  }
+}
+
+variable "iap_members" {
+  description = "Users/groups granted roles/iap.httpsResourceAccessor on this hub's Cloud Run service only."
+  type        = list(string)
+  default     = []
+}
+
+variable "admin_emails" {
+  description = "Emails seeded as hub admins on first boot."
+  type        = list(string)
+  default     = []
+}
+
+variable "min_instances" {
+  description = "Cloud Run min instance count. Phase 1 uses 1 (OQ-4)."
+  type        = number
+  default     = 1
+}
+
+variable "max_instances" {
+  description = "Cloud Run max instance count."
+  type        = number
+  default     = 3
+}
+
+variable "cpu" {
+  type    = string
+  default = "1"
+}
+
+variable "memory" {
+  type    = string
+  default = "1Gi"
+}
+
+variable "timeout" {
+  description = "Request timeout. 3600s for long-lived WebSockets/terminals (design §8)."
+  type        = string
+  default     = "3600s"
+}
+
+variable "hub_write_timeout" {
+  description = "F-110 (design §9): hub http.Server WriteTimeout, rendered into settings.yaml (server.hub.write_timeout). See hub-cloudrun's own variable for the full rationale and its validation (format + bounded by var.timeout) — this is a plain pass-through."
+  type        = string
+  default     = "300s"
+}
+
+variable "broker_write_timeout" {
+  description = "F-110 (design §9): co-located broker http.Server WriteTimeout, rendered into settings.yaml (server.broker.write_timeout). See hub-cloudrun's own variable for the full rationale and its validation (format + bounded by var.timeout) — this is a plain pass-through."
+  type        = string
+  default     = "300s"
+}
+
+variable "nfs_uid" {
+  type    = number
+  default = 1000
+}
+
+variable "nfs_gid" {
+  type    = number
+  default = 1000
+}
+
+variable "nfs_subpath_root" {
+  type    = string
+  default = "projects"
+}
+
+variable "nfs_capacity" {
+  description = "Advertised PV/PVC capacity (bookkeeping only; Filestore Basic doesn't enforce per-subdirectory quotas)."
+  type        = string
+  default     = "1Ti"
+}
