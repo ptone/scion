@@ -24,8 +24,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -74,6 +76,14 @@ type bootstrapFile struct {
 	Path       string `json:"path"`
 	Mode       int    `json:"mode"`
 	ContentB64 string `json:"content_b64"`
+
+	// decodedSize is the exact number of raw (pre-base64) bytes ContentB64
+	// carries. It is set once, when a bootstrapFile is built from a real
+	// []byte payload (never recomputed by decoding ContentB64 back), used
+	// only by buildBootstrapFiles' size-cap check, and — being unexported —
+	// is never part of the JSON wire format encoding/json produces for this
+	// type.
+	decodedSize int64
 }
 
 // bootstrapRequest is the POST /scion/v1/bootstrap body (phase1-spec.md §2.1).
@@ -281,13 +291,168 @@ func substrateSecretCandidates(cfg RunConfig) map[string]string {
 	return secrets
 }
 
-// buildBootstrapFiles assembles the "files" array: ResolvedAuth.Files (read
-// from SourcePath) plus file-type ResolvedSecrets (content already resolved
-// in Value — no disk read needed).
+// maxBootstrapFilesTotalBytes caps the sum of decoded (pre-base64) bytes
+// across every file buildBootstrapFiles ships — the composed home, auth
+// files and file-type secrets combined, after dedup — so a bootstrap
+// payload can never grow unbounded.
+//
+// The number is picked with headroom below the smallest MEASURED limit on
+// this path, not an assumed one. The measurements:
+//   - The router's ingress listener for this route (atenet-router/envoy) has
+//     no request-body cap: no buffer filter and no max_request_bytes are
+//     configured anywhere in its filter chain (set_filter_state -> ext_proc
+//     -> router), the ext_proc filter is header-only (it never inspects the
+//     body), and per_connection_buffer_limit_bytes is unset on both the
+//     listener and the upstream cluster — envoy's 1 MiB default there is a
+//     flow-control watermark, not a cap. The router streams the body through
+//     uninspected. The route's timeout is 300s (idle 330s), well above this
+//     package's own 30s bootstrapRequestTimeout for the POST.
+//   - substrate-serve's own POST /scion/v1/bootstrap handler is therefore the
+//     binding limit: it bounds the raw request body to
+//     maxBootstrapBodyBytes = 64 MiB (pkg/sciontool/substrate/server.go) via
+//     http.MaxBytesReader — about 48 MiB of raw (pre-base64) file bytes once
+//     base64's 4/3 expansion and the JSON envelope are accounted for.
+//
+// The cap here is sized in DECODED bytes but must survive base64 (4/3
+// expansion) plus the surrounding JSON envelope (env map, start_cmd,
+// control_token, per-file path/mode/quoting overhead) once encoded onto the
+// wire: 16 MiB decoded -> ~21.34 MiB base64 -> plus a JSON envelope that is
+// negligible next to file content for any realistic env/start_cmd size. That
+// leaves roughly 3x headroom under the measured 64 MiB serve-side limit.
+const maxBootstrapFilesTotalBytes = 16 * 1024 * 1024
+
+// homeBootstrapFiles walks homeDir — RunConfig.HomeDir, the broker-composed
+// agent home (harness-config home/, the template home, and skills) — and
+// returns one bootstrapFile per regular file it finds, with paths rewritten
+// under containerHome and the source file's own permission bits preserved
+// (mode = perm & 0o777).
+//
+// It never follows a symlink: filepath.WalkDir already doesn't descend into
+// one (each directory entry's type comes from an Lstat-equivalent, the same
+// rule pkg/hub/project_workspace_handlers.go's walkDirSearcher relies on for
+// the same reason, #1850) and this additionally treats a symlink entry, a
+// socket, a device and a fifo alike — none of them is "a file to ship" —
+// skipping and counting each rather than reading through or blocking on it.
+// The only thing ever logged about a skipped entry is its path relative to
+// homeDir; contents are never inspected.
+//
+// homeDir == "" is not an error: it means the caller has no composed home to
+// ship (e.g. a runtime path that never sets RunConfig.HomeDir), and returns
+// (nil, nil) so buildBootstrapFiles' output is byte-for-byte unchanged from
+// before homeBootstrapFiles existed. A homeDir that is set but does not
+// exist, or resolves to something other than a plain directory, IS an
+// error — unlike "no home was composed," that signals something upstream
+// (the broker's own home composition) is broken.
+func homeBootstrapFiles(homeDir, containerHome string) ([]bootstrapFile, error) {
+	if homeDir == "" {
+		return nil, nil
+	}
+
+	rootInfo, err := os.Lstat(homeDir)
+	if err != nil {
+		return nil, fmt.Errorf("substrate: home dir %s: %w", homeDir, err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("substrate: home dir %s is a symlink, refusing to walk it", homeDir)
+	}
+	if !rootInfo.IsDir() {
+		return nil, fmt.Errorf("substrate: home dir %s is not a directory", homeDir)
+	}
+
+	var files []bootstrapFile
+	var skipped []string
+	walkErr := filepath.WalkDir(homeDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("substrate: walk home dir at %s: %w", path, err)
+		}
+		if path == homeDir {
+			return nil
+		}
+		if d.IsDir() {
+			// Directories are never shipped as entries themselves; recurse
+			// into them (the default filepath.WalkDir behavior for a real,
+			// non-symlinked directory entry).
+			return nil
+		}
+
+		rel, relErr := filepath.Rel(homeDir, path)
+		if relErr != nil {
+			return fmt.Errorf("substrate: relativize home file %s: %w", path, relErr)
+		}
+
+		if d.Type()&fs.ModeSymlink != 0 || !d.Type().IsRegular() {
+			skipped = append(skipped, rel)
+			return nil
+		}
+
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return fmt.Errorf("substrate: stat home file %s: %w", rel, infoErr)
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return fmt.Errorf("substrate: read home file %s: %w", rel, readErr)
+		}
+		files = append(files, bootstrapFile{
+			Path:        filepath.Join(containerHome, rel),
+			Mode:        int(info.Mode().Perm()),
+			ContentB64:  base64.StdEncoding.EncodeToString(data),
+			decodedSize: int64(len(data)),
+		})
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	if len(skipped) > 0 {
+		runtimeLog.Info("substrate: skipped non-regular home entries during bootstrap", "count", len(skipped), "paths", skipped)
+	}
+	return files, nil
+}
+
+// dedupeBootstrapFilesByPath concatenates groups in the given order and
+// collapses duplicate Paths to one entry: the LAST occurrence's content
+// wins, but it keeps the position of the FIRST occurrence, so the result is
+// deterministic and stable regardless of how many groups collide on a path.
+// This is where phase1-spec's "one entry per path on the wire" is enforced —
+// substrate-serve is not expected to reconcile duplicates itself.
+func dedupeBootstrapFilesByPath(groups ...[]bootstrapFile) []bootstrapFile {
+	index := make(map[string]int)
+	var out []bootstrapFile
+	for _, group := range groups {
+		for _, f := range group {
+			if i, ok := index[f.Path]; ok {
+				out[i] = f
+				continue
+			}
+			index[f.Path] = len(out)
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// buildBootstrapFiles assembles the "files" array in precedence order: the
+// broker-composed home (RunConfig.HomeDir) first, then ResolvedAuth.Files
+// (read from SourcePath), then file-type ResolvedSecrets — auth and secret
+// entries are expected to override a same-path file the composed home
+// shipped, per the home-delivery design. Duplicate paths across the three
+// sources are deduped (see dedupeBootstrapFilesByPath) so the wire payload
+// never carries two entries for the same Path.
+//
+// The total decoded size across the deduped result is capped at
+// maxBootstrapFilesTotalBytes (see its doc comment for how that number was
+// chosen); the error on overflow names only the cap and the total size,
+// never any path or content.
 func buildBootstrapFiles(cfg RunConfig) ([]bootstrapFile, error) {
 	containerHome := util.GetHomeDir(cfg.UnixUsername)
-	var files []bootstrapFile
 
+	homeFiles, err := homeBootstrapFiles(cfg.HomeDir, containerHome)
+	if err != nil {
+		return nil, err
+	}
+
+	var authFiles []bootstrapFile
 	if cfg.ResolvedAuth != nil {
 		for _, f := range cfg.ResolvedAuth.Files {
 			if f.SourcePath == "" {
@@ -297,23 +462,36 @@ func buildBootstrapFiles(cfg RunConfig) ([]bootstrapFile, error) {
 			if err != nil {
 				return nil, fmt.Errorf("substrate: read auth file %s: %w", f.SourcePath, err)
 			}
-			files = append(files, bootstrapFile{
-				Path:       expandTildeTarget(f.ContainerPath, containerHome),
-				Mode:       defaultFileMode,
-				ContentB64: base64.StdEncoding.EncodeToString(data),
+			authFiles = append(authFiles, bootstrapFile{
+				Path:        expandTildeTarget(f.ContainerPath, containerHome),
+				Mode:        defaultFileMode,
+				ContentB64:  base64.StdEncoding.EncodeToString(data),
+				decodedSize: int64(len(data)),
 			})
 		}
 	}
 
+	var secretFiles []bootstrapFile
 	for _, s := range cfg.ResolvedSecrets {
 		if s.Type != "file" {
 			continue
 		}
-		files = append(files, bootstrapFile{
-			Path:       expandTildeTarget(s.Target, containerHome),
-			Mode:       defaultFileMode,
-			ContentB64: base64.StdEncoding.EncodeToString([]byte(s.Value)),
+		secretFiles = append(secretFiles, bootstrapFile{
+			Path:        expandTildeTarget(s.Target, containerHome),
+			Mode:        defaultFileMode,
+			ContentB64:  base64.StdEncoding.EncodeToString([]byte(s.Value)),
+			decodedSize: int64(len(s.Value)),
 		})
+	}
+
+	files := dedupeBootstrapFilesByPath(homeFiles, authFiles, secretFiles)
+
+	var total int64
+	for _, f := range files {
+		total += f.decodedSize
+	}
+	if total > maxBootstrapFilesTotalBytes {
+		return nil, fmt.Errorf("substrate: bootstrap files total %d bytes exceeds cap of %d bytes", total, maxBootstrapFilesTotalBytes)
 	}
 
 	return files, nil

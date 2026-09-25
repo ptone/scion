@@ -18,6 +18,8 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -33,9 +35,23 @@ import (
 
 const (
 	// maxBootstrapBodyBytes bounds the bootstrap request body (env, files,
-	// start_cmd, control_token). It is generous because files can carry
-	// harness credential bundles, but still bounded so a malformed or
-	// hostile caller can't exhaust memory.
+	// start_cmd, control_token) via http.MaxBytesReader, so an over-limit
+	// body fails closed (the read errors out at the limit) rather than being
+	// buffered without bound.
+	//
+	// This is the binding limit on the whole path, measured against the
+	// actual transport: the router's ingress listener for this route has no
+	// request-body cap of its own (no buffer filter, no max_request_bytes
+	// anywhere in its filter chain, and per_connection_buffer_limit_bytes —
+	// a flow-control watermark, not a cap — is unset on both the listener
+	// and the upstream cluster) and streams the body through uninspected;
+	// its route timeout is 300s. 64 MiB here is therefore the number that
+	// matters, and pkg/runtime/substrate_bootstrap.go's
+	// maxBootstrapFilesTotalBytes (16 MiB decoded, ~21.3 MiB base64) is sized
+	// with headroom under it — see that constant's doc comment for the
+	// full accounting (base64 4/3 expansion plus the JSON envelope). If a
+	// smaller router-side cap is ever added, that constant is the one to
+	// shrink; this one should stay comfortably above it.
 	maxBootstrapBodyBytes = 64 * 1024 * 1024
 
 	// maxExecBodyBytes bounds the exec request body (argv + metadata; no
@@ -242,8 +258,13 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req BootstrapRequest
-	dec := json.NewDecoder(io.LimitReader(r.Body, maxBootstrapBodyBytes+1))
-	if err := dec.Decode(&req); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBootstrapBodyBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "bootstrap request body exceeds limit", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -349,6 +370,15 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 	dir := filepath.Dir(f.Path)
 	created, err := mkdirAllTracked(dir, 0o755)
 	if err != nil {
+		var symErr *errSymlinkComponent
+		if errors.As(err, &symErr) {
+			// Reject the file; name only its own Path, never the internal
+			// ancestor mkdirAllTracked found the symlink at (still just a
+			// path, but there's no reason to expose more than the caller
+			// already gave us) or any content. See errSymlinkComponent's
+			// doc comment for the threat this closes.
+			return fmt.Errorf("bootstrap file %s rejected: path traverses a symlink", f.Path)
+		}
 		return err
 	}
 

@@ -406,6 +406,138 @@ func TestWriteBootstrapFile_SetsModeAndOwnerAtomically(t *testing.T) {
 	})
 }
 
+// TestWriteBootstrapFile_RejectsWriteThroughPreExistingSymlinkDir proves the
+// serve-side symlink-safety fix: an image that ships a directory component
+// as a symlink (e.g. the real-world case this guards, /home/scion/.config
+// -> /etc) must not have a bootstrap file written through it. Before the
+// fix, mkdirAllTracked's os.Stat-based existence check followed the link and
+// os.MkdirAll happily created the remaining path components on the other
+// side of it.
+func TestWriteBootstrapFile_RejectsWriteThroughPreExistingSymlinkDir(t *testing.T) {
+	root := t.TempDir()
+	fakeHome := filepath.Join(root, "home", "scion")
+	outsideTarget := filepath.Join(root, "etc") // stands in for a real /etc
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The image pre-ships fakeHome/.config as a symlink to outsideTarget.
+	configLink := filepath.Join(fakeHome, ".config")
+	if err := os.Symlink(outsideTarget, configLink); err != nil {
+		t.Fatal(err)
+	}
+
+	// A bootstrap file targets a path *inside* the symlinked directory.
+	targetPath := filepath.Join(configLink, "nested", "secret.json")
+	srv := NewServer(WithChownOwner(-1, -1))
+	err := srv.writeBootstrapFile(BootstrapFile{
+		Path:       targetPath,
+		Mode:       0o600,
+		ContentB64: base64.StdEncoding.EncodeToString([]byte("must-not-land-in-etc")),
+	})
+	if err == nil {
+		t.Fatal("writeBootstrapFile through a symlinked directory: expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), targetPath) {
+		t.Errorf("error = %v, want it to name the rejected bootstrap file path %q", err, targetPath)
+	}
+	if strings.Contains(err.Error(), "must-not-land-in-etc") {
+		t.Errorf("error leaked file content: %v", err)
+	}
+
+	// Nothing must have been created on the other side of the symlink.
+	if _, statErr := os.Stat(filepath.Join(outsideTarget, "nested")); statErr == nil {
+		t.Error("a directory was created through the symlink into outsideTarget; the write escaped confinement")
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideTarget, "nested", "secret.json")); statErr == nil {
+		t.Error("the bootstrap file was written through the symlink into outsideTarget")
+	}
+
+	// The symlink itself must be untouched (still a symlink, still pointing
+	// at outsideTarget) — rejecting the file must not disturb the image.
+	info, err := os.Lstat(configLink)
+	if err != nil {
+		t.Fatalf("lstat %s: %v", configLink, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("%s is no longer a symlink after the rejected write", configLink)
+	}
+}
+
+// TestBootstrap_SymlinkedFileRejectionSurfacesAsGenericServerError proves the
+// end-to-end handler path: a symlink-traversal rejection reaches the client
+// as the same generic, content-free 500 every other write failure produces
+// (handleBootstrap never distinguishes it in the response body — only the
+// server log names the path), and the single-shot bootstrap slot behaves
+// like any other failed bootstrap.
+func TestBootstrap_SymlinkedFileRejectionSurfacesAsGenericServerError(t *testing.T) {
+	root := t.TempDir()
+	fakeHome := filepath.Join(root, "home", "scion")
+	outsideTarget := filepath.Join(root, "etc")
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configLink := filepath.Join(fakeHome, ".config")
+	if err := os.Symlink(outsideTarget, configLink); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		Files: []BootstrapFile{
+			{
+				Path:       filepath.Join(configLink, "secret.json"),
+				Mode:       0o600,
+				ContentB64: base64.StdEncoding.EncodeToString([]byte("sentinel-secret-content")),
+			},
+		},
+		StartCmd:     "true",
+		ControlToken: "tok",
+	})
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "sentinel-secret-content") {
+		t.Errorf("response body leaked file content: %q", rec.Body.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideTarget, "secret.json")); statErr == nil {
+		t.Error("the bootstrap file was written through the symlink into outsideTarget")
+	}
+}
+
+// TestBootstrap_OversizedBodyRejectedWithoutOOM proves the http.MaxBytesReader
+// switch: a body over maxBootstrapBodyBytes fails closed (a definite,
+// bounded read error reported as 413) instead of being buffered without
+// limit or silently truncated into a confusing 400.
+func TestBootstrap_OversizedBodyRejectedWithoutOOM(t *testing.T) {
+	srv := NewServer(WithChownOwner(-1, -1))
+
+	oversized := bytes.Repeat([]byte("a"), maxBootstrapBodyBytes+1)
+	body := `{"start_cmd":"true","control_token":"tok","env":{"PADDING":"` + string(oversized) + `"}}`
+
+	req := httptest.NewRequest(http.MethodPost, "/scion/v1/bootstrap", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer any-token")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+	if srv.isBootstrapped() {
+		t.Error("an oversized body must not consume the single-shot bootstrap slot")
+	}
+}
+
 func TestBootstrap_RejectsRelativePath(t *testing.T) {
 	srv := NewServer(
 		WithChownOwner(-1, -1),
