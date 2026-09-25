@@ -46,6 +46,13 @@ const (
 	ErrCodeRuntimeError     = "runtime_error"
 	ErrCodeHubUnreachable   = "hub_unreachable"
 	ErrCodeTemplateError    = "template_error"
+
+	// ErrCodeSubstrateAgentIdentityUnknown marks a delete/stop that could not
+	// be verified as safe because a runtime process restart dropped the
+	// in-memory record needed to tell "not found" apart from "exists, but
+	// unidentifiable" (ptone/scion#1808). Stable so callers (hub, CLI) can
+	// branch on it instead of parsing the message.
+	ErrCodeSubstrateAgentIdentityUnknown = "substrate_agent_identity_unknown"
 )
 
 // writeError writes a JSON error response.
@@ -104,6 +111,15 @@ func MethodNotAllowed(w http.ResponseWriter) {
 // Conflict writes a 409 Conflict response.
 func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+}
+
+// SubstrateAgentIdentityUnknown writes a 409 Conflict response with the
+// stable ErrCodeSubstrateAgentIdentityUnknown code for a delete/stop that a
+// runtime process restart made impossible to verify as safe
+// (ptone/scion#1808). See deploy/substrate/README.md, "After a broker
+// restart", for the operator remedy.
+func SubstrateAgentIdentityUnknown(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusConflict, ErrCodeSubstrateAgentIdentityUnknown, message, nil)
 }
 
 // InternalError writes a 500 Internal Server Error response.

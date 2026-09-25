@@ -743,6 +743,59 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	return agents, nil
 }
 
+// RecordlessActors implements the broker's optional record-less-actor
+// capability (see pkg/runtimebroker's RecordlessActorProber, ptone/scion#1808):
+// given projectID, it returns the atespace that project maps to and the
+// names of every actor in it that this runtime process has no in-memory
+// record for (substrateAgentRecords, keyed by actor UID — lost across a
+// process restart for any actor a previous process created).
+//
+// Positive rule for what counts as a project atespace's actor: Run (above)
+// is the only call site in this runtime that creates an Actor in a
+// project's own atespace, and it creates exactly one per real agent, named
+// cfg.Name. An ActorTemplate's golden actor — created as a side effect of
+// CreateActorTemplate/ensureActorTemplate — is placed in the
+// substrate-reserved "ate-golden" atespace instead, never in a project's
+// atespace (see the DeleteActorTemplate RPC comment,
+// third_party/ateapipb/ateapi.proto: "Delete an ActorTemplate together with
+// its golden actor and golden tag in the reserved ate-golden atespace").
+// ActorTemplate and Tag are themselves distinct resource kinds that
+// ListActors never returns. So every actor ListActors reports for a
+// project's own atespace is a real per-agent actor; scoping the list to
+// that one atespace (both via the request's Atespace field and the
+// defensive equality check below) is the only exclusion this method needs.
+func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID string) (atespace string, actorNames []string, err error) {
+	atespace = substrateAtespaceName(projectID)
+
+	var actors []*ateapipb.Actor
+	pageToken := ""
+	for {
+		resp, err := r.client.ListActors(ctx, &ateapipb.ListActorsRequest{Atespace: atespace, PageToken: pageToken})
+		if err != nil {
+			return atespace, nil, fmt.Errorf("substrate: list actors in atespace %s: %w", atespace, err)
+		}
+		actors = append(actors, resp.GetActors()...)
+		pageToken = resp.GetNextPageToken()
+		if pageToken == "" {
+			break
+		}
+	}
+
+	substrateAgentStateMu.Lock()
+	defer substrateAgentStateMu.Unlock()
+
+	for _, actor := range actors {
+		if actor.GetMetadata().GetAtespace() != atespace {
+			continue
+		}
+		if substrateAgentRecords[actor.GetMetadata().GetUid()] != nil {
+			continue
+		}
+		actorNames = append(actorNames, actor.GetMetadata().GetName())
+	}
+	return atespace, actorNames, nil
+}
+
 // substrateLabelsMatch mirrors the label-filter pattern used by the other
 // runtimes (e.g. CloudRunSandboxRuntime.List): an entry with no explicit
 // label for a filtered project/project-id key still matches on the

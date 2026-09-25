@@ -1291,6 +1291,12 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 			RuntimeError(w, "Failed to delete agent: "+err.Error())
 			return
 		}
+		if errors.Is(err, errAgentIdentityUnknown) {
+			s.agentLifecycleLog.Warn("Agent delete: agent identity unknown after a runtime process restart",
+				"agent_id", id, "project_id", projectID, "error", err)
+			SubstrateAgentIdentityUnknown(w, err.Error())
+			return
+		}
 		Conflict(w, "Failed to delete agent: "+err.Error())
 		return
 	}
@@ -1653,6 +1659,31 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// no-op rather than stopping a same-slug agent in another project.
 	target := s.projectScopedTarget(ctx, id, projectID)
 	if target == "" {
+		// Before treating an unresolved target as an idempotent no-op (the
+		// generic behaviour every runtime relies on), check whether a
+		// runtime process restart left at least one record-less actor in
+		// this project's atespace (RecordlessActorProber, substrate-only,
+		// ptone/scion#1808). This type assertion is a no-op for every other
+		// runtime, so their Stop behaviour here is unchanged. Scoped to
+		// projectID != "" for the same reason as resolveDeleteTarget's
+		// equivalent check: a project-blind stop (solo/CLI) is unaffected,
+		// and a genuinely-absent slug in a project with no record-less
+		// actors still falls through to the idempotent 202 below.
+		if projectID != "" {
+			atespace, recordless, perr := recordlessActorProbe(ctx, s.allManagers(), projectID)
+			if perr != nil {
+				span.SetStatus(codes.Error, perr.Error())
+				RuntimeError(w, "Failed to stop agent: "+perr.Error())
+				return
+			}
+			if len(recordless) > 0 {
+				msg := fmt.Sprintf("%d actor(s) with no runtime-process record in atespace %q; broker restarted; agent identity unknown; operator cleanup required, see deploy/substrate/README.md", len(recordless), atespace)
+				s.agentLifecycleLog.Warn("Agent stop: agent identity unknown after a runtime process restart",
+					"agent_id", id, "project_id", projectID, "error", msg)
+				SubstrateAgentIdentityUnknown(w, msg)
+				return
+			}
+		}
 		s.agentLifecycleLog.Info("Agent stopped (not found in project)",
 			"agent_id", id,
 			"phase", string(state.PhaseStopped))
@@ -2658,6 +2689,30 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID strin
 	return manager
 }
 
+// allManagers returns the default manager plus every distinct auxiliary
+// runtime's manager, in deterministic (sorted-by-name) order. Used by
+// resolveDeleteTarget and the stop path's record-less-actor probe
+// (recordlessActorProbe) to search every registered runtime rather than
+// only the one a slug-based lookup happens to resolve to first — a
+// record-less actor never matches a slug-based lookup at all (see
+// SubstrateRuntime.List's doc comment), so it must not be relied on here.
+func (s *Server) allManagers() []agent.Manager {
+	managers := []agent.Manager{s.manager}
+	s.auxiliaryRuntimesMu.RLock()
+	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
+	for name := range s.auxiliaryRuntimes {
+		auxNames = append(auxNames, name)
+	}
+	sort.Strings(auxNames)
+	for _, name := range auxNames {
+		if aux := s.auxiliaryRuntimes[name]; aux.Manager != nil && aux.Manager != s.manager {
+			managers = append(managers, aux.Manager)
+		}
+	}
+	s.auxiliaryRuntimesMu.RUnlock()
+	return managers
+}
+
 // resolveRuntimeForAgent returns the runtime for direct operations such as
 // exec and log retrieval.
 func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID string) scionrt.Runtime {
@@ -2880,6 +2935,56 @@ var errDeleteTargetNotFound = errors.New("agent not found in project")
 // runtime listing failed.
 var errDeleteTargetUnknown = errors.New("could not list agents to resolve delete target")
 
+// errAgentIdentityUnknown means a runtime process restart dropped the
+// in-memory record a runtime needs to tell "not found" apart from "exists,
+// but this process can no longer identify which project it belongs to," for
+// at least one actor in the atespace a project maps to (see
+// RecordlessActorProber). Reporting not-found here would let the hub treat
+// an unresolved delete/stop as an idempotent success and orphan the actor
+// (ptone/scion#1808).
+var errAgentIdentityUnknown = errors.New("agent identity unknown after a runtime process restart")
+
+// RecordlessActorProber is an optional, runtime-specific capability
+// (type-asserted from agent.Manager.Runtime, never added to the generic
+// runtime.Runtime interface) for a runtime whose List cannot always tell a
+// project-scoped caller "not found" apart from "this process lost the
+// record that would prove it": RecordlessActors reports the atespace
+// projectID maps to and the names of any actor in it with no such record.
+// resolveDeleteTarget and the stop path use this to turn a would-be
+// not-found into an explicit, distinguishable error instead of the normal
+// idempotent 404/202 (ptone/scion#1808).
+type RecordlessActorProber interface {
+	RecordlessActors(ctx context.Context, projectID string) (atespace string, actorNames []string, err error)
+}
+
+// recordlessActorProbe checks every manager in managers that exposes a
+// RecordlessActorProber (currently just substrate) for record-less actors
+// belonging to projectID. A probe error is returned immediately as an
+// explicit failure — never treated as "no record-less actors" — matching
+// how a runtime listing failure elsewhere on this path is never treated as
+// not-found either.
+func recordlessActorProbe(ctx context.Context, managers []agent.Manager, projectID string) (atespace string, actorNames []string, err error) {
+	for _, mgr := range managers {
+		am, ok := mgr.(*agent.AgentManager)
+		if !ok || am.Runtime == nil {
+			continue
+		}
+		prober, ok := am.Runtime.(RecordlessActorProber)
+		if !ok {
+			continue
+		}
+		as, found, perr := prober.RecordlessActors(ctx, projectID)
+		if perr != nil {
+			return "", nil, perr
+		}
+		if len(found) > 0 {
+			atespace = as
+			actorNames = append(actorNames, found...)
+		}
+	}
+	return atespace, actorNames, nil
+}
+
 // deleteTarget is the single, project-matched agent a delete acts on.
 type deleteTarget struct {
 	mgr         agent.Manager
@@ -2937,19 +3042,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		mgr   agent.Manager
 		entry api.AgentInfo
 	}
-	managers := []agent.Manager{s.manager}
-	s.auxiliaryRuntimesMu.RLock()
-	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
-	for name := range s.auxiliaryRuntimes {
-		auxNames = append(auxNames, name)
-	}
-	sort.Strings(auxNames)
-	for _, name := range auxNames {
-		if aux := s.auxiliaryRuntimes[name]; aux.Manager != nil && aux.Manager != s.manager {
-			managers = append(managers, aux.Manager)
-		}
-	}
-	s.auxiliaryRuntimesMu.RUnlock()
+	managers := s.allManagers()
 
 	var listErr error
 	collect := func(filter map[string]string, accept func(api.AgentInfo) bool) []candidate {
@@ -3056,6 +3149,24 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		return nil, err
 	}
 	if resolved == "" {
+		// Before reporting not-found (which the hub treats as a completed
+		// delete), check whether a runtime process restart left at least one
+		// record-less actor in this project's atespace (RecordlessActorProber,
+		// substrate-only, ptone/scion#1808): if so, "not found" would be
+		// false — the actor still exists, this process just cannot prove
+		// which project it belongs to. Scoped to projectID != "" so a
+		// project-blind delete (solo/CLI) is unaffected, and to runtimes
+		// that record no record-less actors at all so a genuinely-absent
+		// slug in a project with no record-less actors stays idempotent.
+		if projectID != "" {
+			atespace, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
+			if perr != nil {
+				return nil, fmt.Errorf("%w: %v", errDeleteTargetUnknown, perr)
+			}
+			if len(recordless) > 0 {
+				return nil, fmt.Errorf("%w: %d actor(s) with no runtime-process record in atespace %q; broker restarted; agent identity unknown; operator cleanup required, see deploy/substrate/README.md", errAgentIdentityUnknown, len(recordless), atespace)
+			}
+		}
 		return nil, errDeleteTargetNotFound
 	}
 	s.agentLifecycleLog.Debug("Resolved agent project path for file-only delete",

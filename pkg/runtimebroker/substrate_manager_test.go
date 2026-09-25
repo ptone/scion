@@ -91,6 +91,13 @@ type fakeSubstrateControlClient struct {
 	// it on some fraction of runs. Mirrors pkg/agent's identically-named
 	// fake (substrate_delete_test.go).
 	forceListOrder []*ateapipb.Actor
+
+	// listActorsErr, when non-nil, makes ListActors fail instead of
+	// returning actors — for a test that exercises the record-less-actor
+	// probe (SubstrateRuntime.RecordlessActors) itself failing, which must
+	// surface as an explicit error rather than being treated as "found
+	// none" (ptone/scion#1808).
+	listActorsErr error
 }
 
 func newFakeSubstrateControlClient(recorder *substrateEgressRecorder) *fakeSubstrateControlClient {
@@ -155,6 +162,9 @@ func (f *fakeSubstrateControlClient) GetActor(ctx context.Context, in *ateapipb.
 func (f *fakeSubstrateControlClient) ListActors(ctx context.Context, in *ateapipb.ListActorsRequest, opts ...grpc.CallOption) (*ateapipb.ListActorsResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.listActorsErr != nil {
+		return nil, f.listActorsErr
+	}
 	if f.forceListOrder != nil {
 		return &ateapipb.ListActorsResponse{Actors: f.forceListOrder}, nil
 	}

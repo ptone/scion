@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -204,8 +205,12 @@ func TestSubstrateBroker_RecordlessActorNotResolvableAcrossProjects(t *testing.T
 // through a request scoped to its OWN project, since nothing here can
 // verify a record-less actor's project identity strongly enough to trust a
 // slug match at all — see pkg/runtime/substrate_runtime.go's List doc
-// comment. A same-project stop/delete is therefore also a no-op, not an
-// error: the actor is left running, and no DeleteActor call is made.
+// comment. A same-project stop/delete therefore never calls Stop/DeleteActor
+// on it and never touches it either way; it surfaces as an explicit 409
+// (RecordlessActorProber finds the project's own atespace holds a
+// record-less actor, ptone/scion#1808) rather than a no-op success, but
+// this test only asserts the actor is left untouched — the status code is
+// covered by the dedicated identity-unknown tests below.
 func TestSubstrateBroker_RecordlessActorNoOpEvenInItsOwnProject(t *testing.T) {
 	const (
 		atespaceA = "scion-aaaaaaaaaaaa"
@@ -444,35 +449,50 @@ func TestSubstrateBroker_DeleteAbsentSlugInProject_NotFound(t *testing.T) {
 	}
 }
 
-// TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOtherProjectUntouched
-// is the same scenario, but with project B holding a record-less actor
-// instead of nothing at all: a record-less actor is never resolvable by
-// slug (it reports its full, project-prefixed actor name — see
-// SubstrateRuntime.List's doc comment), so this must 404 exactly the same
-// way as the no-actor-at-all case above, leaving both actors untouched.
-func TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOtherProjectUntouched(t *testing.T) {
+// decodeBrokerAPIError decodes w's body as the standard ErrorResponse shape
+// and returns the error code, failing the test if the body isn't that shape.
+func decodeBrokerAPIError(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response body is not a valid ErrorResponse: %v (body=%s)", err, w.Body.String())
+	}
+	return resp.Error.Code
+}
+
+// TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOwnAtespace_IdentityUnknown
+// covers a project whose OWN atespace holds a record-less actor — the exact
+// post-restart scenario ptone/scion#1808 fixes: a delete for a slug that
+// does not resolve (a record-less actor is never resolvable by slug — see
+// SubstrateRuntime.List's doc comment) must not be reported as the ordinary
+// idempotent not-found (which the hub treats as a completed delete),
+// because the actor might be the very thing the caller meant. It must
+// return 409 substrate_agent_identity_unknown instead, and DeleteActor must
+// never be called.
+func TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOwnAtespace_IdentityUnknown(t *testing.T) {
 	const (
-		atespaceA = "scion-aaaaaaaaaaaa"
-		actorA    = "proja--dev"
-		projAID   = "aaaaaaaaaaaa"
 		atespaceB = "scion-bbbbbbbbbbbb"
 		actorB    = "projb--dev"
 		projBID   = "bbbbbbbbbbbb"
 	)
 
 	srv, fc := newTestSubstrateBrokerServer(t)
-	runSubstrateAgentForProject(t, srv.manager, "dev", "proja", projAID, testProjectScionDir(t, "proja"))
 	// projB's actor is injected directly (never through this runtime's own
 	// Run), so it genuinely has no in-memory record — simulating a broker
-	// restart.
+	// restart. This server has no auxiliary runtimes registered at all
+	// (newTestSubstrateBrokerServer), so this exercises the fix directly,
+	// not the pre-existing aux-runtime listErr masking (ptone/scion#1808 §a).
 	fc.putActor(atespaceB, actorB, "uid-projb-recordless")
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
 	srv.deleteAgent(w, req, "dev", projBID)
 
-	if w.Code != http.StatusNotFound {
-		t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (no record-having match in project B)`, w.Code, http.StatusNotFound)
+	if w.Code != http.StatusConflict {
+		t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (a record-less actor exists in projB's own atespace)`, w.Code, http.StatusConflict)
+	}
+	if code := decodeBrokerAPIError(t, w); code != ErrCodeSubstrateAgentIdentityUnknown {
+		t.Errorf("deleteAgent(...) error code = %q, want %q", code, ErrCodeSubstrateAgentIdentityUnknown)
 	}
 
 	fc.mu.Lock()
@@ -480,11 +500,163 @@ func TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOtherProjectUntouch
 	if len(fc.deleteActorCalls) != 0 {
 		t.Errorf(`deleteAgent("dev", projB) called DeleteActor %v, want zero`, fc.deleteActorCalls)
 	}
-	if _, ok := fc.actors[atespaceA+"/"+actorA]; !ok {
-		t.Error("projA's actor was removed — it must never be the wrong-actor target")
+	if _, ok := fc.actors[atespaceB+"/"+actorB]; !ok {
+		t.Error("projB's record-less actor was removed — it must be untouched")
+	}
+}
+
+// TestSubstrateBroker_StopAbsentSlugInProject_RecordlessOwnAtespace_IdentityUnknown
+// is stopAgent's counterpart to the delete test above: a stop that would
+// otherwise report the generic idempotent 202 must instead return 409
+// substrate_agent_identity_unknown when the target project's own atespace
+// holds a record-less actor, and must never call Stop/DeleteActor.
+func TestSubstrateBroker_StopAbsentSlugInProject_RecordlessOwnAtespace_IdentityUnknown(t *testing.T) {
+	const (
+		atespaceB = "scion-bbbbbbbbbbbb"
+		actorB    = "projb--dev"
+		projBID   = "bbbbbbbbbbbb"
+	)
+
+	srv, fc := newTestSubstrateBrokerServer(t)
+	fc.putActor(atespaceB, actorB, "uid-projb-recordless")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil)
+	srv.stopAgent(w, req, "dev", projBID)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf(`stopAgent("dev", projB) status = %d, want %d, not 202 — a record-less actor exists in projB's own atespace`, w.Code, http.StatusConflict)
+	}
+	if code := decodeBrokerAPIError(t, w); code != ErrCodeSubstrateAgentIdentityUnknown {
+		t.Errorf("stopAgent(...) error code = %q, want %q", code, ErrCodeSubstrateAgentIdentityUnknown)
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.deleteActorCalls) != 0 {
+		t.Errorf(`stopAgent("dev", projB) called DeleteActor %v, want zero`, fc.deleteActorCalls)
 	}
 	if _, ok := fc.actors[atespaceB+"/"+actorB]; !ok {
-		t.Error("projB's record-less actor was removed — it must be untouched (documented no-op, unrelated to this fix)")
+		t.Error("projB's record-less actor was removed by stop — it must be untouched")
+	}
+}
+
+// TestSubstrateBroker_DeleteProbeError_ExplicitFailureNot404 covers the
+// probe itself failing (a ListActors error inside RecordlessActors): this
+// must surface as an explicit 5xx failure, never as the ordinary
+// not-found/idempotent-success path, since a failed probe proves nothing
+// about whether the actor exists.
+func TestSubstrateBroker_DeleteProbeError_ExplicitFailureNot404(t *testing.T) {
+	const projBID = "bbbbbbbbbbbb"
+
+	srv, fc := newTestSubstrateBrokerServer(t)
+	fc.mu.Lock()
+	fc.listActorsErr = errors.New("simulated ateapi outage")
+	fc.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
+	srv.deleteAgent(w, req, "dev", projBID)
+
+	if w.Code == http.StatusNotFound {
+		t.Errorf(`deleteAgent("dev", projB) status = %d, want an explicit failure, never 404, when the probe itself errors`, w.Code)
+	}
+	if w.Code < 500 {
+		t.Errorf(`deleteAgent("dev", projB) status = %d, want a 5xx (the probe could not determine safety)`, w.Code)
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	if len(fc.deleteActorCalls) != 0 {
+		t.Errorf(`deleteAgent("dev", projB) called DeleteActor %v, want zero`, fc.deleteActorCalls)
+	}
+}
+
+// TestSubstrateBroker_MixedAtespace_RecordedDeletesRecordlessTriggersIdentityUnknown
+// covers a single atespace holding both a record-having actor (this
+// project's real, ordinary agent) and a record-less one (as if this project
+// also had a pre-restart actor). Deleting the record-having agent by its own
+// slug must succeed and touch only that actor; deleting an unrelated,
+// genuinely-absent slug in the same project must return 409, since the
+// record-less actor could be the very thing meant.
+func TestSubstrateBroker_MixedAtespace_RecordedDeletesRecordlessTriggersIdentityUnknown(t *testing.T) {
+	const (
+		atespaceB    = "scion-bbbbbbbbbbbb"
+		recordedName = "projb--dev"
+		ghostName    = "projb--ghost"
+		projBID      = "bbbbbbbbbbbb"
+	)
+
+	t.Run("deleting the recorded agent succeeds and touches only it", func(t *testing.T) {
+		srv, fc := newTestSubstrateBrokerServer(t)
+		runSubstrateAgentForProject(t, srv.manager, "dev", "projb", projBID, testProjectScionDir(t, "projb"))
+		fc.putActor(atespaceB, ghostName, "uid-ghost-recordless")
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil)
+		srv.deleteAgent(w, req, "dev", projBID)
+
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("deleteAgent(dev) status = %d, want %d; body=%s", w.Code, http.StatusNoContent, w.Body.String())
+		}
+		fc.mu.Lock()
+		defer fc.mu.Unlock()
+		if _, ok := fc.actors[atespaceB+"/"+recordedName]; ok {
+			t.Error("the recorded agent is still present after delete")
+		}
+		if _, ok := fc.actors[atespaceB+"/"+ghostName]; !ok {
+			t.Error("the record-less actor was touched by a delete of a different, recorded agent")
+		}
+	})
+
+	t.Run("deleting an unrelated absent slug returns 409", func(t *testing.T) {
+		srv, fc := newTestSubstrateBrokerServer(t)
+		runSubstrateAgentForProject(t, srv.manager, "dev", "projb", projBID, testProjectScionDir(t, "projb"))
+		fc.putActor(atespaceB, ghostName, "uid-ghost-recordless")
+
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/nonexistent-slug", nil)
+		srv.deleteAgent(w, req, "nonexistent-slug", projBID)
+
+		if w.Code != http.StatusConflict {
+			t.Errorf(`deleteAgent(nonexistent-slug) status = %d, want %d`, w.Code, http.StatusConflict)
+		}
+		if code := decodeBrokerAPIError(t, w); code != ErrCodeSubstrateAgentIdentityUnknown {
+			t.Errorf("deleteAgent(...) error code = %q, want %q", code, ErrCodeSubstrateAgentIdentityUnknown)
+		}
+		fc.mu.Lock()
+		defer fc.mu.Unlock()
+		if len(fc.deleteActorCalls) != 0 {
+			t.Errorf(`deleteAgent(nonexistent-slug) called DeleteActor %v, want zero`, fc.deleteActorCalls)
+		}
+		if _, ok := fc.actors[atespaceB+"/"+recordedName]; !ok {
+			t.Error("the unrelated recorded agent was removed by a 409'd delete of an unknown slug")
+		}
+	})
+}
+
+// TestSubstrateBroker_LogsForRecordlessAgent_ExplicitNotFound covers the
+// logs endpoint for a slug that only resolves to a record-less actor: since
+// a record-less actor is never resolvable by slug (SubstrateRuntime.List's
+// doc comment), getLogs must report an explicit 404, never a 200 with an
+// empty body — the hub-visible shape of "empty success" this design's
+// invariant forbids.
+func TestSubstrateBroker_LogsForRecordlessAgent_ExplicitNotFound(t *testing.T) {
+	const (
+		atespaceB = "scion-bbbbbbbbbbbb"
+		actorB    = "projb--dev"
+		projBID   = "bbbbbbbbbbbb"
+	)
+
+	srv, fc := newTestSubstrateBrokerServer(t)
+	fc.putActor(atespaceB, actorB, "uid-projb-recordless")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/dev/logs", nil)
+	srv.getLogs(w, req, "dev", projBID)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf(`getLogs("dev", projB) status = %d, want %d (never a 200 with an empty body)`, w.Code, http.StatusNotFound)
 	}
 }
 
