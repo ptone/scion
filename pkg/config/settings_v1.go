@@ -1116,7 +1116,10 @@ type V1SubstrateConfig struct {
 	// RouterEndpoint is the atenet-router inbound endpoint the broker uses
 	// to reach an actor's control server, e.g.
 	// "http://atenet-router.ate-system.svc:80". Used as a base URL (scheme
-	// required), not a bare host:port.
+	// required), not a bare host:port. This hop is plain HTTP: CAFile and
+	// ClusterTrustBundle below apply only to the ateapi Control gRPC dial
+	// (APIEndpoint), not to this one, and there is no separate TLS setting
+	// for it (see substrate-runtime.md §10).
 	RouterEndpoint string `json:"router_endpoint,omitempty" yaml:"router_endpoint,omitempty" koanf:"router_endpoint"`
 	// TokenAudience is the audience requested for the in-cluster
 	// ServiceAccount TokenRequest used to authenticate to the ateapi
