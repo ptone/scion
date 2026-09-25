@@ -816,6 +816,41 @@ else
   warn "SSH to the VM may fail. Grant roles/iap.tunnelResourceAccessor manually."
 fi
 
+# --- Ensure default VPC network exists ---
+# Enterprise orgs may enforce constraints/compute.skipDefaultNetworkCreation,
+# so new projects have no default network.
+info "Checking default VPC network..."
+if gcloud compute networks describe default \
+    --project="${PROJECT_ID}" &>/dev/null; then
+  echo "  Default network exists."
+else
+  info "Creating default auto-mode VPC network..."
+  gcloud compute networks create default \
+    --subnet-mode=auto \
+    --project="${PROJECT_ID}" \
+    --quiet
+  echo "  Created default VPC network."
+fi
+
+# Ensure internal traffic is allowed (auto-mode networks created via CLI
+# do NOT get the default-allow-internal rule that Console-created ones do).
+# Cloud Run Direct VPC Egress needs tcp:8080 to reach the Hub VM.
+if gcloud compute firewall-rules describe default-allow-internal \
+    --project="${PROJECT_ID}" &>/dev/null; then
+  echo "  Internal firewall rule exists."
+else
+  gcloud compute firewall-rules create default-allow-internal \
+    --project="${PROJECT_ID}" \
+    --network=default \
+    --direction=INGRESS \
+    --action=ALLOW \
+    --rules=tcp,udp,icmp \
+    --source-ranges=10.128.0.0/9 \
+    --priority=65534 \
+    --quiet
+  echo "  Created default-allow-internal firewall rule."
+fi
+
 # --- Cloud Router + Cloud NAT ---
 # The VM has no public IP (--no-address).  Cloud NAT gives it outbound internet
 # access so cloud-init can install packages, download binaries, and pull images.
@@ -887,6 +922,7 @@ else
     --boot-disk-size="${DISK_SIZE}" \
     --image-family=ubuntu-2204-lts \
     --image-project=ubuntu-os-cloud \
+    --shielded-secure-boot \
     --metadata-from-file=user-data="${SCRIPT_DIR}/cloud-init.yaml" \
     --quiet
   echo "  Created VM: ${INSTANCE_NAME} (zone: ${ZONE})"
@@ -1469,15 +1505,17 @@ info "Deploying Cloud Run IAP proxy: ${PROXY_SERVICE}..."
 echo "  Target URL: http://${VM_IP}:8080"
 echo "  Image: ${PROXY_IMAGE}"
 
-gcloud run deploy "${PROXY_SERVICE}" \
+gcloud beta run deploy "${PROXY_SERVICE}" \
   --project="${PROJECT_ID}" \
   --region="${REGION}" \
   --image="${PROXY_IMAGE}" \
+  --service-account="${SA_EMAIL}" \
   --set-env-vars="TARGET_URL=http://${VM_IP}:8080" \
   --network=default \
   --subnet=default \
   --vpc-egress=all-traffic \
-  --allow-unauthenticated \
+  --no-allow-unauthenticated \
+  --iap \
   --port=8080 \
   --quiet
 
@@ -1491,17 +1529,6 @@ if [[ -z "$PROXY_URL" ]]; then
   exit 1
 fi
 echo "  Proxy URL: ${PROXY_URL}"
-
-# --- Enable IAP ---
-# Note: --resource-type=cloud-run is NOT valid for gcloud iap web enable.
-# The supported path for Cloud Run is the --iap flag on the service itself.
-info "Enabling IAP on Cloud Run service..."
-gcloud beta run services update "${PROXY_SERVICE}" \
-  --region="${REGION}" \
-  --project="${PROJECT_ID}" \
-  --iap \
-  --quiet
-echo "  IAP enabled."
 
 # --- Bind IAP access for deployer ---
 info "Binding IAP access for deployer..."
