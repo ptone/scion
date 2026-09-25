@@ -649,12 +649,11 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 // on user.<subscriberID>.notification and on no other subject.
 //
 // Chat notification messages contain the sender's display name and a preview of
-// the message body. authorizeSSESubjects (web.go) only constrains subjects whose
-// first token is "project" or "user": a subscription to "notification.>" is
-// granted to every logged-in session, so publishing chat payloads there hands
-// every browser on the deployment a copy. project.<id>.notification is narrower
-// but still wrong — project membership is not conversation membership, and a DM
-// has no project at all.
+// the message body. notification.* is an explicit pass-through in
+// authorizeSSESubjects (web.go), granted to every logged-in session, so
+// publishing chat payloads there hands every browser on the deployment a
+// copy. project.<id>.notification is narrower but still wrong — project
+// membership is not conversation membership, and a DM has no project at all.
 //
 // A notification with no SubscriberID has no subject that can be scoped to it,
 // so it is dropped rather than broadcast. Agent-status notifications keep using
