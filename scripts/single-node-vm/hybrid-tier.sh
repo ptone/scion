@@ -1555,18 +1555,26 @@ hybrid_internal_ip_teardown_check() {
 # VM's NIC until it's deleted, so deleting it earlier would fail anyway,
 # and a not-yet-confirmed VM is exactly the "don't delete NFS/hub-allow
 # firewall rules yet either" case). When VM_GONE isn't "true", SKIPS the
-# reservation with a reason rather than attempting the delete. Sets
-# HYBRID_INTERNAL_IP_DELETED and HYBRID_INTERNAL_IP_DELETE_FAILED.
+# reservation with a reason rather than attempting the delete -- this is
+# reported distinctly from an attempted-and-failed delete (SKIPPED vs.
+# Kept), so the two are never conflated in the final summary. Sets
+# HYBRID_INTERNAL_IP_DELETED, HYBRID_INTERNAL_IP_DELETE_FAILED,
+# HYBRID_INTERNAL_IP_DELETE_SKIP_REASON (set only for the SKIPPED case)
+# and HYBRID_INTERNAL_IP_DELETE_ERR (set only for an actual delete
+# failure).
 hybrid_internal_ip_teardown_delete() {
   local project_id="$1" region="$2" vm_gone="$3"
   HYBRID_INTERNAL_IP_DELETED=false
   HYBRID_INTERNAL_IP_DELETE_FAILED=false
+  HYBRID_INTERNAL_IP_DELETE_SKIP_REASON=""
+  HYBRID_INTERNAL_IP_DELETE_ERR=""
   if [[ "$HYBRID_INTERNAL_IP_TEARDOWN_READY" != "true" ]]; then
     return 0
   fi
   if [[ "$vm_gone" != "true" ]]; then
     warn "Keeping internal IP reservation ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}: the VM's deletion isn't confirmed yet."
     HYBRID_INTERNAL_IP_DELETE_FAILED=true
+    HYBRID_INTERNAL_IP_DELETE_SKIP_REASON="VM not confirmed gone"
     return 0
   fi
   local delete_err
@@ -1576,8 +1584,9 @@ hybrid_internal_ip_teardown_delete() {
     echo "  Deleted: ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}"
     HYBRID_INTERNAL_IP_DELETED=true
   else
+    HYBRID_INTERNAL_IP_DELETE_ERR="$(cat "${delete_err}")"
     err "Failed to delete internal IP reservation ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}:"
-    err "  $(cat "${delete_err}")"
+    err "  ${HYBRID_INTERNAL_IP_DELETE_ERR}"
     HYBRID_INTERNAL_IP_DELETE_FAILED=true
   fi
   rm -f "${delete_err}"

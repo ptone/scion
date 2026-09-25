@@ -270,6 +270,26 @@ test_deploy_delete_hybrid_order_allow_before_deny() {
     "the allow rule must be deleted before the deny rule (an allow must never briefly exist unpaired)"
 }
 
+test_deploy_delete_hub_allow_deleted_before_deny() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-allow" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "ALLOW" "tcp" "2049" "gke-x-node" "" "scion-hub-${HUB}-nfs" "900"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-deny" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "DENY" "tcp" "2049" "" "0.0.0.0/0" "scion-hub-${HUB}-nfs" "950"
+  seed_firewall_rule_json "scion-hub-${HUB}-hub-allow" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "ALLOW" "tcp" "8080" "" "10.52.0.0/14" "scion-hub-${HUB}-nfs" "900"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  local log hub_allow_line deny_line
+  log="$(gcloud_log)"
+  hub_allow_line="$(line_number "firewall-rules delete scion-hub-${HUB}-hub-allow" "$log")"
+  deny_line="$(line_number "firewall-rules delete scion-hub-${HUB}-nfs-deny" "$log")"
+  assert_true "$([[ -n "$hub_allow_line" && -n "$deny_line" && "$hub_allow_line" -lt "$deny_line" ]] && echo true || echo false)" \
+    "the hub-allow rule must be deleted before the deny rule, the same as the nfs-allow rule"
+  assert_eq "1" "$(gcloud_log | grep -c "firewall-rules delete scion-hub-${HUB}-hub-allow" || true)" \
+    "the hub-allow rule must actually be deleted during teardown, not just left in place"
+}
+
 test_deploy_delete_vm_failure_keeps_hybrid_rules() {
   fresh_gcloud_state
   seed_instance "$INSTANCE_NAME" "us-central1-b"
@@ -330,8 +350,24 @@ test_deploy_delete_internal_ip_kept_when_vm_not_gone() {
     "the internal IP reservation must not be deleted when the VM delete failed"
   assert_contains "$DEPLOY_LOG" "isn't confirmed yet" \
     "deploy.sh should report why the reservation was kept"
-  assert_contains "$DEPLOY_LOG" "Kept internal IP:          scion-hub-${HUB}-internal-ip" \
-    "the summary must report the reservation as kept"
+  assert_contains "$DEPLOY_LOG" "SKIPPED internal IP:       scion-hub-${HUB}-internal-ip (VM not confirmed gone)" \
+    "the summary must report the reservation as SKIPPED, distinct from an attempted-and-failed delete"
+}
+
+test_deploy_delete_internal_ip_kept_when_firewall_rule_delete_failed() {
+  fresh_gcloud_state
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-allow" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "ALLOW" "tcp" "2049" "gke-x-node" "" "scion-hub-${HUB}-nfs" "900"
+  seed_firewall_rule_json "scion-hub-${HUB}-nfs-deny" "scion-deployment=${HUB}" \
+    "default" "INGRESS" "DENY" "tcp" "2049" "" "0.0.0.0/0" "scion-hub-${HUB}-nfs" "950"
+  set_firewall_delete_will_fail "scion-hub-${HUB}-nfs-allow"
+  seed_address "scion-hub-${HUB}-internal-ip" "10.128.0.42" "scion-deployment=${HUB}"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_eq "1" "$DEPLOY_RC" "a hybrid firewall rule delete failure must make teardown exit non-zero"
+  assert_eq "0" "$(gcloud_log | grep -c "addresses delete scion-hub-${HUB}-internal-ip" || true)" \
+    "the internal IP reservation must not be deleted when a hybrid firewall rule failed to delete"
+  assert_contains "$DEPLOY_LOG" "SKIPPED internal IP:       scion-hub-${HUB}-internal-ip (a hybrid-tier firewall rule failed to delete)" \
+    "the summary must report the reservation as SKIPPED, with the reason it was never attempted"
 }
 
 test_deploy_delete_internal_ip_order_after_vm() {
@@ -792,6 +828,44 @@ test_deploy_delete_k8s_all_marked_deletes_all_three() {
   assert_eq "1" "$(kubectl_log | grep -c 'delete pvc' || true)" "the PVC must be deleted"
   assert_eq "1" "$(kubectl_log | grep -c 'delete pv ' || true)" "the PV must be deleted"
   assert_eq "1" "$(kubectl_log | grep -c 'delete namespace' || true)" "the namespace must be deleted"
+}
+
+test_deploy_delete_k8s_delete_failure_stops_all_downstream_deletes() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_k8s_pvc "$K8S_PVC_D" "$K8S_NS_D" "$HUB" "$K8S_PV_D"
+  seed_k8s_pv "$K8S_PV_D" "$HUB" "10.128.0.5" "/srv/scion-shared" "$K8S_NS_D" "$K8S_PVC_D"
+  seed_k8s_namespace "$K8S_NS_D" "$HUB"
+  set_k8s_delete_will_fail "pvc" "${K8S_NS_D}__${K8S_PVC_D}"
+  run_deploy_delete "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  assert_eq "1" "$DEPLOY_RC" "a kubectl delete failure must fail the whole teardown"
+  assert_eq "0" "$(kubectl_log | grep -c 'delete pv ' || true)" \
+    "the PV must not be deleted once the PVC delete ahead of it failed"
+  assert_eq "0" "$(kubectl_log | grep -c 'delete namespace' || true)" \
+    "the namespace must not be deleted once an earlier k8s delete failed"
+  assert_eq "0" "$(gcloud_log | grep -c 'instances delete' || true)" \
+    "the VM must not be deleted when a hybrid-tier Kubernetes object failed to delete"
+  assert_eq "0" "$(gcloud_log | grep -c 'run services delete' || true)" \
+    "Cloud Run must not be deleted when a hybrid-tier Kubernetes object failed to delete"
+  assert_eq "0" "$(gcloud_log | grep -c 'firewall-rules delete' || true)" \
+    "no firewall rule may be deleted when a hybrid-tier Kubernetes object failed to delete"
+}
+
+test_deploy_delete_k8s_deletes_precede_vm_delete() {
+  fresh_gcloud_state
+  seed_instance "$INSTANCE_NAME" "us-central1-b"
+  seed_cluster "mycluster" "default" "mig-a"
+  seed_k8s_pvc "$K8S_PVC_D" "$K8S_NS_D" "$HUB" "$K8S_PV_D"
+  seed_k8s_pv "$K8S_PV_D" "$HUB" "10.128.0.5" "/srv/scion-shared" "$K8S_NS_D" "$K8S_PVC_D"
+  seed_k8s_namespace "$K8S_NS_D" "$HUB"
+  run_deploy_delete "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
+  assert_eq "0" "$DEPLOY_RC" "an all-marked k8s teardown followed by the VM must succeed"
+  local k8s_line vm_line
+  k8s_line="$(line_number "Deleting hybrid-tier Kubernetes objects" "$DEPLOY_LOG")"
+  vm_line="$(line_number "Deleting GCE VM" "$DEPLOY_LOG")"
+  assert_true "$([[ -n "$k8s_line" && -n "$vm_line" && "$k8s_line" -lt "$vm_line" ]] && echo true || echo false)" \
+    "the hybrid-tier Kubernetes deletes must run, and be logged, before the VM delete starts"
 }
 
 test_deploy_delete_k8s_unmarked_pv_aborts_before_any_delete() {

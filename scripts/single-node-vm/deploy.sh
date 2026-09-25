@@ -412,6 +412,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
     echo "  Firewall rule:     ${name} (hybrid tier)"
   done
+  if [[ "${HYBRID_INTERNAL_IP_TEARDOWN_READY:-false}" == "true" ]]; then
+    echo "  Internal IP:       ${HYBRID_INTERNAL_IP_TEARDOWN_NAME} (hybrid tier; deleted only after the VM is confirmed gone)"
+  fi
   echo ""
   if [[ -n "$CONFIG_FILE" && ! -t 0 ]]; then
     info "Non-interactive mode: proceeding with teardown."
@@ -433,13 +436,25 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   # actually deleted.
   K8S_TEARDOWN_OK=true
   PROXY_SERVICE_DELETED=false
+  PROXY_SERVICE_NOT_FOUND=false
   VM_DELETED=false
+  VM_NOT_FOUND=false
   VM_GONE=false
   NAT_DELETED=false
+  NAT_NOT_FOUND=false
   ROUTER_DELETED=false
+  ROUTER_NOT_FOUND=false
   SA_DELETED=false
+  SA_NOT_FOUND=false
   FW_RULE_DELETED=false
+  FW_RULE_NOT_FOUND=false
   HYBRID_TEARDOWN_DELETED=()
+  # Declared here, unconditionally, so the internal-IP delete gate below
+  # can check its count even on a run where hybrid_teardown_delete (the
+  # only place that normally populates it) never gets called at all --
+  # for example, no hybrid firewall rules were ever created for this hub
+  # but the internal IP reservation still was.
+  HYBRID_TEARDOWN_DELETE_FAILED=()
 
   if [[ "$HYBRID_K8S_TEARDOWN_READY" == "true" ]]; then
     info "Deleting hybrid-tier Kubernetes objects..."
@@ -453,13 +468,22 @@ if [[ "$DELETE_MODE" == "true" ]]; then
 
   if [[ "$K8S_TEARDOWN_OK" == "true" ]]; then
     info "Deleting Cloud Run IAP proxy service..."
+    PROXY_SERVICE_DELETE_ERR="$(mktemp)"
     if gcloud run services delete "${PROXY_SERVICE}" \
-        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>"${PROXY_SERVICE_DELETE_ERR}"; then
       echo "  Deleted: ${PROXY_SERVICE}"
       PROXY_SERVICE_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${PROXY_SERVICE_DELETE_ERR}")"; then
+      warn "Cloud Run service ${PROXY_SERVICE} not found or already deleted."
+      PROXY_SERVICE_NOT_FOUND=true
     else
+      # Not a confirmed not-found -- base-resource teardown behavior here
+      # is unchanged from before this classification existed: warn and
+      # continue, never fail the run over an ambiguous base-resource
+      # delete outcome.
       warn "Cloud Run service ${PROXY_SERVICE} not found or already deleted."
     fi
+    rm -f "${PROXY_SERVICE_DELETE_ERR}"
 
     # The hybrid NFS/hub-allow firewall rules and the static internal IP
     # reservation are only safe to delete once this VM is confirmed gone
@@ -481,6 +505,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     elif [[ ${#HYBRID_TEARDOWN_DELETE[@]} -eq 0 && "${HYBRID_INTERNAL_IP_TEARDOWN_READY:-false}" != "true" ]]; then
       warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
       VM_GONE=true
+      VM_NOT_FOUND=true
     else
       VM_LIST_ERR_FILE="$(mktemp)"
       # This list has no --zones, so it's a project-wide AggregatedList.
@@ -496,6 +521,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
         if [[ -z "$VM_LIST_OUTPUT" ]]; then
           warn "GCE VM ${INSTANCE_NAME} not found or already deleted."
           VM_GONE=true
+          VM_NOT_FOUND=true
         else
           err "Failed to delete GCE VM ${INSTANCE_NAME}; it still exists."
           TEARDOWN_HAD_FAILURE=true
@@ -509,32 +535,47 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     fi
 
     info "Deleting Cloud NAT..."
+    NAT_DELETE_ERR="$(mktemp)"
     if gcloud compute routers nats delete "${NAT_NAME}" \
         --router="${ROUTER_NAME}" \
-        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>"${NAT_DELETE_ERR}"; then
       echo "  Deleted: ${NAT_NAME}"
       NAT_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${NAT_DELETE_ERR}")"; then
+      warn "Cloud NAT ${NAT_NAME} not found or already deleted."
+      NAT_NOT_FOUND=true
     else
       warn "Cloud NAT ${NAT_NAME} not found or already deleted."
     fi
+    rm -f "${NAT_DELETE_ERR}"
 
     info "Deleting Cloud Router..."
+    ROUTER_DELETE_ERR="$(mktemp)"
     if gcloud compute routers delete "${ROUTER_NAME}" \
-        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+        --region="${REGION}" --project="${PROJECT_ID}" --quiet 2>"${ROUTER_DELETE_ERR}"; then
       echo "  Deleted: ${ROUTER_NAME}"
       ROUTER_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${ROUTER_DELETE_ERR}")"; then
+      warn "Cloud Router ${ROUTER_NAME} not found or already deleted."
+      ROUTER_NOT_FOUND=true
     else
       warn "Cloud Router ${ROUTER_NAME} not found or already deleted."
     fi
+    rm -f "${ROUTER_DELETE_ERR}"
 
     info "Deleting service account..."
+    SA_DELETE_ERR="$(mktemp)"
     if gcloud iam service-accounts delete "${SA_EMAIL}" \
-        --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+        --project="${PROJECT_ID}" --quiet 2>"${SA_DELETE_ERR}"; then
       echo "  Deleted: ${SA_EMAIL}"
       SA_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${SA_DELETE_ERR}")"; then
+      warn "Service account ${SA_EMAIL} not found or already deleted."
+      SA_NOT_FOUND=true
     else
       warn "Service account ${SA_EMAIL} not found or already deleted."
     fi
+    rm -f "${SA_DELETE_ERR}"
 
     # Note: We intentionally do NOT revoke roles/iap.tunnelResourceAccessor from
     # the deployer. This role is bound to the operator (not a service account) and
@@ -543,13 +584,18 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     info "Skipping IAP tunnel role cleanup (operator may use it for other VMs)."
 
     info "Deleting IAP SSH firewall rule..."
+    FW_RULE_DELETE_ERR="$(mktemp)"
     if gcloud compute firewall-rules delete "${FW_RULE_NAME}" \
-        --project="${PROJECT_ID}" --quiet 2>/dev/null; then
+        --project="${PROJECT_ID}" --quiet 2>"${FW_RULE_DELETE_ERR}"; then
       echo "  Deleted: ${FW_RULE_NAME}"
       FW_RULE_DELETED=true
+    elif _hybrid_gcloud_not_found "$(cat "${FW_RULE_DELETE_ERR}")"; then
+      warn "Firewall rule ${FW_RULE_NAME} not found or already deleted."
+      FW_RULE_NOT_FOUND=true
     else
       warn "Firewall rule ${FW_RULE_NAME} not found or already deleted."
     fi
+    rm -f "${FW_RULE_DELETE_ERR}"
 
     if [[ ${#HYBRID_TEARDOWN_DELETE[@]} -gt 0 ]]; then
       if [[ "$VM_GONE" == "true" ]]; then
@@ -559,15 +605,23 @@ if [[ "$DELETE_MODE" == "true" ]]; then
           TEARDOWN_HAD_FAILURE=true
         fi
       else
-        err "Keeping the hybrid-tier NFS firewall rules because GCE VM ${INSTANCE_NAME} still exists; tcp:2049 access stays restricted. Re-run teardown after the VM is deleted."
+        err "Keeping the hybrid-tier firewall rules and internal IP reservation because GCE VM ${INSTANCE_NAME} still exists; tcp:2049/8080 access and the reserved address stay in place. Re-run teardown after the VM is deleted."
         TEARDOWN_HAD_FAILURE=true
       fi
     fi
 
     if [[ "$HYBRID_INTERNAL_IP_TEARDOWN_READY" == "true" ]]; then
-      info "Deleting hybrid-tier internal IP reservation..."
-      hybrid_internal_ip_teardown_delete "$PROJECT_ID" "$REGION" "$VM_GONE"
-      if [[ "$HYBRID_INTERNAL_IP_DELETE_FAILED" == "true" ]]; then
+      if [[ ${#HYBRID_TEARDOWN_DELETE_FAILED[@]} -eq 0 ]]; then
+        info "Deleting hybrid-tier internal IP reservation..."
+        hybrid_internal_ip_teardown_delete "$PROJECT_ID" "$REGION" "$VM_GONE"
+        if [[ "$HYBRID_INTERNAL_IP_DELETE_FAILED" == "true" ]]; then
+          TEARDOWN_HAD_FAILURE=true
+        fi
+      else
+        warn "Keeping internal IP reservation ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}: a hybrid-tier firewall rule failed to delete; re-run teardown once that's resolved."
+        HYBRID_INTERNAL_IP_DELETED=false
+        HYBRID_INTERNAL_IP_DELETE_FAILED=true
+        HYBRID_INTERNAL_IP_DELETE_SKIP_REASON="a hybrid-tier firewall rule failed to delete"
         TEARDOWN_HAD_FAILURE=true
       fi
     fi
@@ -591,31 +645,43 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   fi
   if [[ "$PROXY_SERVICE_DELETED" == "true" ]]; then
     echo "  Deleted Cloud Run service:  ${PROXY_SERVICE}"
+  elif [[ "${PROXY_SERVICE_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found Cloud Run service: ${PROXY_SERVICE}"
   else
     echo "  Kept Cloud Run service:     ${PROXY_SERVICE}"
   fi
   if [[ "$VM_DELETED" == "true" ]]; then
     echo "  Deleted GCE VM:             ${INSTANCE_NAME}"
+  elif [[ "${VM_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found GCE VM:           ${INSTANCE_NAME}"
   else
     echo "  Kept GCE VM:                ${INSTANCE_NAME}"
   fi
   if [[ "$NAT_DELETED" == "true" ]]; then
     echo "  Deleted Cloud NAT:          ${NAT_NAME}"
+  elif [[ "${NAT_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found Cloud NAT:        ${NAT_NAME}"
   else
     echo "  Kept Cloud NAT:             ${NAT_NAME}"
   fi
   if [[ "$ROUTER_DELETED" == "true" ]]; then
     echo "  Deleted Cloud Router:       ${ROUTER_NAME}"
+  elif [[ "${ROUTER_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found Cloud Router:     ${ROUTER_NAME}"
   else
     echo "  Kept Cloud Router:          ${ROUTER_NAME}"
   fi
   if [[ "$SA_DELETED" == "true" ]]; then
     echo "  Deleted service account:    ${SA_EMAIL}"
+  elif [[ "${SA_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found service account:  ${SA_EMAIL}"
   else
     echo "  Kept service account:       ${SA_EMAIL}"
   fi
   if [[ "$FW_RULE_DELETED" == "true" ]]; then
     echo "  Deleted firewall rule:      ${FW_RULE_NAME}"
+  elif [[ "${FW_RULE_NOT_FOUND:-false}" == "true" ]]; then
+    echo "  Not found firewall rule:    ${FW_RULE_NAME}"
   else
     echo "  Kept firewall rule:         ${FW_RULE_NAME}"
   fi
@@ -625,8 +691,10 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   if [[ -n "${HYBRID_INTERNAL_IP_TEARDOWN_NAME:-}" ]]; then
     if [[ "${HYBRID_INTERNAL_IP_DELETED:-false}" == "true" ]]; then
       echo "  Deleted internal IP:       ${HYBRID_INTERNAL_IP_TEARDOWN_NAME}"
+    elif [[ -n "${HYBRID_INTERNAL_IP_DELETE_SKIP_REASON:-}" ]]; then
+      echo "  SKIPPED internal IP:       ${HYBRID_INTERNAL_IP_TEARDOWN_NAME} (${HYBRID_INTERNAL_IP_DELETE_SKIP_REASON})"
     elif [[ "${HYBRID_INTERNAL_IP_TEARDOWN_READY:-false}" == "true" ]]; then
-      echo "  Kept internal IP:          ${HYBRID_INTERNAL_IP_TEARDOWN_NAME} (delete failed or not attempted)"
+      echo "  Kept internal IP:          ${HYBRID_INTERNAL_IP_TEARDOWN_NAME} (delete failed: ${HYBRID_INTERNAL_IP_DELETE_ERR:-unknown error})"
     fi
   fi
   if [[ "$TEARDOWN_HAD_FAILURE" == "true" ]]; then
