@@ -644,7 +644,7 @@ id ${squash_user} >/dev/null 2>&1 || sudo useradd -r -M -N -g scion -s /usr/sbin
 SQUASH_UID=\$(id -u ${squash_user})
 SQUASH_GROUP=\$(id -gn ${squash_user})
 SQUASH_SHELL=\$(getent passwd ${squash_user} | cut -d: -f7)
-SYS_UID_MAX=\$(awk -F'[ \\t]+' '\$1 == "SYS_UID_MAX" {print \$2}' /etc/login.defs 2>/dev/null | tail -1)
+SYS_UID_MAX=\$(awk -F'[ \\t]+' '\$1 == "SYS_UID_MAX" {print \$2}' /etc/login.defs 2>/dev/null | tail -1 || true)
 case "\$SYS_UID_MAX" in ''|*[!0-9]*) SYS_UID_MAX=999 ;; esac
 SCION_UID=\$(id -u scion)
 SCION_GID=\$(getent group scion | cut -d: -f3)
@@ -802,7 +802,7 @@ vers4.0=n
 udp=n
 NFSCONF
 sudo systemctl mask --now rpcbind.service rpcbind.socket
-systemctl is-enabled rpcbind.socket 2>/dev/null | grep -q masked || { echo "rpcbind.socket did not mask; refusing to continue" >&2; exit 1; }
+[ "\$(systemctl is-enabled rpcbind.socket 2>/dev/null || true)" = masked ] || { echo "rpcbind.socket did not mask; refusing to continue" >&2; exit 1; }
 echo '${export_line}' | sudo tee /etc/exports.d/scion-hub-${hub_name}.exports > /dev/null
 sudo exportfs -ra
 sudo systemctl enable nfs-server

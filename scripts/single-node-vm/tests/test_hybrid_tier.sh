@@ -627,8 +627,9 @@ test_nfs_export_script_v4_only_hardening() {
   assert_contains "$script" "udp=n" "UDP must be disabled"
   assert_contains "$script" "sudo systemctl mask --now rpcbind.service rpcbind.socket" \
     "rpcbind is unneeded once v2/v3 are off and must be masked"
-  assert_contains "$script" 'systemctl is-enabled rpcbind.socket 2>/dev/null | grep -q masked' \
-    "the mask must be verified, not assumed with a swallowed || true"
+  # shellcheck disable=SC2016 # asserting the literal remote-script text, not expanding locally
+  assert_contains "$script" '[ "$(systemctl is-enabled rpcbind.socket 2>/dev/null || true)" = masked ]' \
+    "the mask must be verified without a cmd-under-pipefail | grep -q that fails even on a genuine match, since \`systemctl is-enabled\` itself exits non-zero for a masked unit"
   assert_not_contains "$script" 'mask --now rpcbind.service rpcbind.socket || true' \
     "the mask's own exit status must not be discarded"
 }
@@ -781,7 +782,37 @@ _setup_export_script_fakebins() {
   printf '#!/bin/bash\nexit 0\n' > "$dir/install"
   printf '#!/bin/bash\nexit 0\n' > "$dir/dpkg"
   printf '#!/bin/bash\nexit 0\n' > "$dir/apt-get"
-  printf '#!/bin/bash\nexit 0\n' > "$dir/systemctl"
+  # Realistic systemctl fake, not a blanket exit-0: `mask --now UNIT...`
+  # records each unit as masked (unless MASK_FAILS below asks it not to,
+  # for the "mask silently didn't take" test); `is-enabled UNIT` then
+  # answers the way the real command does -- prints "masked" and exits 1
+  # for a masked unit (the exact behavior that broke the old
+  # `| grep -q masked` check under pipefail), "enabled" and exits 0 for a
+  # unit marked enabled, or a "not found"-shaped error on stderr and a
+  # non-zero exit for anything else. Every other subcommand (daemon-
+  # reload, enable, restart) just succeeds, matching the rest of this
+  # fakebin set.
+  # shellcheck disable=SC2016 # writing a literal fake-binary script body, not expanding now
+  printf '%s\n' \
+    '#!/bin/bash' \
+    "echo \"\$*\" >> \"${dir}/systemctl.log\"" \
+    'if [ "$1" = "mask" ]; then' \
+    '  shift' \
+    '  [ "${1:-}" = "--now" ] && shift' \
+    "  if [ ! -f \"${dir}/.systemctl-mask-fails\" ]; then" \
+    "    for u in \"\$@\"; do touch \"${dir}/.masked-\${u}\"; done" \
+    '  fi' \
+    '  exit 0' \
+    'fi' \
+    'if [ "$1" = "is-enabled" ]; then' \
+    '  u="$2"' \
+    "  if [ -f \"${dir}/.masked-\${u}\" ]; then echo masked; exit 1; fi" \
+    "  if [ -f \"${dir}/.enabled-\${u}\" ]; then echo enabled; exit 0; fi" \
+    '  echo "Failed to get unit file state for ${u}: No such file or directory" >&2' \
+    '  exit 1' \
+    'fi' \
+    'exit 0' \
+    > "$dir/systemctl"
   printf '#!/bin/bash\necho "$*" >> "%s/exportfs.log"\nexit 0\n' "$dir" > "$dir/exportfs"
   printf '#!/bin/bash\nexit 0\n' > "$dir/chown"
   printf '#!/bin/bash\nexit 0\n' > "$dir/chmod"
@@ -876,6 +907,65 @@ test_probe_export_script_executed_fallocate_failure_never_calls_mkfs() {
   assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" "must exit non-zero when fallocate can't reserve the space"
   assert_contains "$out" "insufficient disk space" "must explain why it refused"
   assert_false "$([[ -f "${d}/mkfs.log" ]] && echo true)" "must never format an image that fallocate couldn't create"
+  rm -rf "$d"
+}
+
+# The fake systemctl's `is-enabled` behavior, checked directly against
+# what the real command does for a masked unit, an enabled one, and one
+# it doesn't recognize at all -- proving the fake itself is faithful,
+# not just convenient for the tests below to pass.
+test_systemctl_fake_is_enabled_matches_real_behavior() {
+  local d out rc
+  d="$(mktemp -d)"
+  _setup_export_script_fakebins "$d" "true"
+  PATH="$d:$PATH" systemctl mask --now some.socket >/dev/null 2>&1
+  out="$(PATH="$d:$PATH" systemctl is-enabled some.socket 2>&1)"; rc=$?
+  assert_eq "masked" "$out" "a masked unit's is-enabled must print exactly 'masked'"
+  assert_eq "1" "$rc" "a masked unit's is-enabled must exit non-zero, matching real systemctl"
+
+  touch "${d}/.enabled-other.service"
+  out="$(PATH="$d:$PATH" systemctl is-enabled other.service 2>&1)"; rc=$?
+  assert_eq "enabled" "$out" "an enabled unit's is-enabled must print exactly 'enabled'"
+  assert_eq "0" "$rc" "an enabled unit's is-enabled must exit zero"
+
+  out="$(PATH="$d:$PATH" systemctl is-enabled never-heard-of-this.service 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" "an unknown unit's is-enabled must exit non-zero"
+  rm -rf "$d"
+}
+
+# Prove-it: both of these fail against the pre-fix `| grep -q masked`
+# form (confirmed by hand before the fix landed -- the pipeline's exit
+# status came from `systemctl is-enabled` itself under pipefail, which
+# is non-zero for a masked unit even though grep matched, so the export
+# step aborted on every tier-on deploy). They pass now that the check
+# reads is-enabled's own stdout via `$(... || true)` instead of piping
+# it through grep under pipefail.
+test_probe_export_script_executed_happy_path_reaches_exportfs() {
+  local d rc script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1; rc=$?
+  assert_eq "0" "$rc" "the export script's happy path must exit zero once the rpcbind mask is correctly verified"
+  assert_true "$([[ -f "${d}/exportfs.log" ]] && echo true || echo false)" \
+    "exportfs must actually run once the rpcbind check passes"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_rpcbind_mask_not_verified_fails() {
+  local d out rc script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  # Simulate `systemctl mask --now` silently not taking effect (the fake
+  # systemctl's own mask handler is a no-op when this marker is present).
+  touch "${d}/.systemctl-mask-fails"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" "an unmasked rpcbind.socket must fail the script, not be assumed masked"
+  assert_contains "$out" "rpcbind.socket did not mask" "the failure must name why"
+  assert_false "$([[ -f "${d}/exportfs.log" ]] && echo true)" "exportfs must never run when rpcbind isn't confirmed masked"
   rm -rf "$d"
 }
 
