@@ -80,14 +80,7 @@ func TestSupervisor_RunWithWorkingDir(t *testing.T) {
 // own cwd rather than some directory this change might have introduced.
 func TestSupervisor_RunWithoutWorkingDir_LeavesCmdDirUnset(t *testing.T) {
 	dir := t.TempDir()
-	oldWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("os.Getwd(): %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("os.Chdir(%s): %v", dir, err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Chdir(dir)
 
 	config := DefaultConfig() // WorkingDir left unset (zero value)
 	sup := New(config)
@@ -106,15 +99,23 @@ func TestSupervisor_RunWithoutWorkingDir_LeavesCmdDirUnset(t *testing.T) {
 	}
 }
 
-// TestSupervisor_RunWithWorkingDir_SetsPWD is the "also take" fix: sh, tmux
-// and Node's process.cwd() prefer PWD over getcwd() when the two agree, so
-// with a symlinked WorkingDir the child must see PWD set to the logical
-// path explicitly — exec.Cmd's own Dir handling does not add it.
+// TestSupervisor_RunWithWorkingDir_SetsPWD proves that with a symlinked
+// WorkingDir the child sees PWD set to the logical (symlinked) path, not
+// the physical path getcwd() would report. sh, tmux and Node's
+// process.cwd() prefer the inherited PWD over getcwd() only when the two
+// resolve to the same physical directory; for a plain (non-symlinked)
+// directory the shell recomputes PWD via getcwd() regardless of whether
+// supervisor sets it, so this test uses a symlink to make the PWD-setting
+// code the only thing that can produce the expected value.
 func TestSupervisor_RunWithWorkingDir_SetsPWD(t *testing.T) {
-	dir := t.TempDir()
-	out := filepath.Join(dir, "env.out")
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "ws-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("os.Symlink(%s, %s): %v", real, link, err)
+	}
+	out := filepath.Join(real, "env.out")
 	config := DefaultConfig()
-	config.WorkingDir = dir
+	config.WorkingDir = link
 	sup := New(config)
 
 	ctx := context.Background()
@@ -130,8 +131,8 @@ func TestSupervisor_RunWithWorkingDir_SetsPWD(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("reading child's captured PWD: %v", readErr)
 	}
-	if string(got) != dir {
-		t.Errorf("child PWD = %q, want %q", got, dir)
+	if string(got) != link {
+		t.Errorf("child PWD = %q, want %q (the symlinked WorkingDir, not its physical target)", got, link)
 	}
 }
 
