@@ -482,14 +482,11 @@ print((d.get('ipAllocationPolicy') or {}).get('clusterIpv4CidrBlock') or '')
   # shellcheck disable=SC2034 # consumed by the hub-allow firewall rule
   GKE_POD_CIDR="$pod_cidr"
 
-  # The node tag is read from GKE's own auto-created firewall rules,
-  # rather than from nodePools[].instanceGroupUrls -> instance group ->
-  # instance template -> tags: on Autopilot clusters, the node instance
-  # groups, templates and instances are not visible as Compute resources
-  # in the project at all (a 404 on every instance-group describe call,
-  # even for a cluster with running nodes), so that path can never work
-  # there. The firewall rules GKE creates for every cluster, of either
-  # type, are always present and visible, and the cluster's pod CIDR
+  # Autopilot does not expose node instance groups or templates as
+  # Compute resources in the project -- every instance-group describe
+  # call 404s, even for a cluster with running nodes -- so the tag is
+  # read from GKE's own auto-created firewall rules instead, which exist
+  # identically for every cluster, of either type. The cluster's pod CIDR
   # (unique within a VPC) ties the right pair of rules to this cluster
   # without needing to reconstruct GKE's own truncated-name/hash scheme.
   local fw_list_json fw_list_err
@@ -778,11 +775,17 @@ if mountpoint -q ${export_root}; then
     exit 1
   fi
 fi
-if grep -qxF "${fstab_line}" ${fstab_path} 2>/dev/null; then
-  : # fstab already has exactly the expected line; nothing to add.
-elif awk -v mp="${export_root}" '\$2 == mp { found=1 } END { exit !found }' ${fstab_path} 2>/dev/null; then
+if awk -v mp="${export_root}" -v exact="${fstab_line}" '
+  /^[[:space:]]*#/ { next }
+  \$0 == exact { next }
+  { m2 = \$2; sub(/\/\$/, "", m2); if (m2 == mp) found=1 }
+  END { exit !found }
+' ${fstab_path} 2>/dev/null; then
   echo "${fstab_path} already has a line for ${export_root} that does not match the expected entry; refusing to continue. Expected: ${fstab_line}" >&2
   exit 1
+fi
+if grep -qxF "${fstab_line}" ${fstab_path} 2>/dev/null; then
+  : # fstab already has exactly the expected line; nothing to add.
 else
   echo "${fstab_line}" | sudo tee -a ${fstab_path} > /dev/null
   sudo systemctl daemon-reload
@@ -838,7 +841,24 @@ sudo systemctl mask --now rpcbind.service rpcbind.socket
 echo '${export_line}' | sudo tee /etc/exports.d/scion-hub-${hub_name}.exports > /dev/null
 sudo exportfs -ra
 sudo systemctl enable nfs-server
-if [ "\$NFS_CONF_NEEDS_RESTART" = "true" ] || ! systemctl is-active --quiet nfs-server; then
+# Even with an unchanged config and an already-active server, the kernel's
+# own enabled-version set is what the config drop-in actually controls --
+# an interrupted first run can write the drop-in, die before ever
+# restarting, and leave nfs-server serving whatever it started with
+# (v2/v3/v4.0 all still on). Restart unless the kernel confirms v3 and
+# v4.0 are both off; an unreadable versions file is treated the same as
+# "not confirmed", not as "fine".
+NFS_VERSIONS_OK=false
+if NFS_VERSIONS_CONTENT="\$(cat /proc/fs/nfsd/versions 2>/dev/null)"; then
+  case " \$NFS_VERSIONS_CONTENT " in
+    *" -3 "*)
+      case " \$NFS_VERSIONS_CONTENT " in
+        *" -4.0 "*) NFS_VERSIONS_OK=true ;;
+      esac
+      ;;
+  esac
+fi
+if [ "\$NFS_CONF_NEEDS_RESTART" = "true" ] || ! systemctl is-active --quiet nfs-server || [ "\$NFS_VERSIONS_OK" != "true" ]; then
   sudo systemctl restart nfs-server
 fi
 echo 'NFS export configured.'
@@ -1190,10 +1210,11 @@ _hybrid_ensure_firewall_rule() {
 #                              pod CIDR (GKE_POD_CIDR; set by
 #                              hybrid_discover), priority 900 -- lets GKE
 #                              agent pods reach the hub directly over the
-#                              VPC. No paired deny: the Cloud Run IAP
-#                              proxy already reaches the hub at
-#                              VM_IP:8080 over VPC egress, and a deny
-#                              would cut that off too.
+#                              VPC. No paired deny for hub-allow, by
+#                              design: other VPC-internal reachability to
+#                              this port comes from the network's own
+#                              pre-existing rules, not something this
+#                              tier provisions.
 # The two NFS rules are created deny first, then allow, so an interrupted
 # run can never leave an allow rule in place without its paired deny
 # (teardown deletes in the opposite order: allow first, then deny, for
@@ -1329,7 +1350,7 @@ else:
 # anything. deploy.sh calls this unconditionally in --delete mode, even
 # when the hybrid tier is off in the current config: teardown has no
 # other way to know whether the tier was ever turned on for this hub, so
-# it always checks for (and, if marked, removes) these two rule names.
+# it always checks for (and, if marked, removes) these rule names.
 hybrid_teardown_preflight() {
   local hub_name="$1" project_id="$2"
   hybrid_teardown_check "$hub_name" "$project_id"
@@ -1508,9 +1529,12 @@ hybrid_ensure_internal_ip_new_vm() {
     exit 1
   fi
 
-  gcloud compute addresses create "$name" \
-    --project="$project_id" --region="$region" --subnet="$subnet" \
-    --description="$marker" --quiet
+  if ! gcloud compute addresses create "$name" \
+      --project="$project_id" --region="$region" --subnet="$subnet" \
+      --description="$marker" --quiet; then
+    err "Could not reserve a new internal IP address named ${name}."
+    exit 1
+  fi
   if ! _hybrid_internal_ip_get "$name" "$project_id" "$region"; then
     err "Reserved internal IP ${name}, but could not read it back (status: ${HYBRID_INTERNAL_IP_STATUS}${HYBRID_INTERNAL_IP_ERR:+: ${HYBRID_INTERNAL_IP_ERR}})."
     exit 1
@@ -1698,6 +1722,10 @@ hybrid_hub_url_guard_verify() {
     err "Hub URL guard: could not re-describe VM ${instance_name} to confirm its actual internal IP."
     exit 1
   fi
+  if [[ "$HYBRID_INTERNAL_IP" != "$vm_ip" ]]; then
+    err "Hub URL guard: the resolved internal IP (${HYBRID_INTERNAL_IP}) does not match VM ${instance_name}'s actual internal IP (${vm_ip}). GKE agent pods would reach the wrong address."
+    exit 1
+  fi
 
   local ip_name marker addr_json addr_marker addr_value
   ip_name="$(hybrid_internal_ip_name "$hub_name")"
@@ -1710,6 +1738,10 @@ hybrid_hub_url_guard_verify() {
   addr_value="$(echo "$addr_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('address') or '')")"
   if [[ "$addr_marker" != "$marker" ]]; then
     err "Hub URL guard: internal IP reservation ${ip_name} no longer carries this deployment's marker (found: '${addr_marker}')."
+    exit 1
+  fi
+  if [[ -z "$addr_value" ]] || ! [[ "$addr_value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    err "Hub URL guard: internal IP reservation ${ip_name}'s address ('${addr_value}') is not a valid IPv4 address."
     exit 1
   fi
   if [[ "$addr_value" != "$vm_ip" ]]; then

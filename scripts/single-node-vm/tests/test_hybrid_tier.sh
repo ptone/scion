@@ -290,7 +290,7 @@ test_discover_missing_vms_rule_refused_with_evidence() {
 test_discover_network_mismatch_refused() {
   fresh_gcloud_state
   GKE_NAME="netmismatch"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "netmismatch" "other-vpc" "mig-x"
+  seed_cluster "netmismatch" "other-vpc"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "network mismatch must fail the run"
   assert_contains "$RUN_OUTPUT" "other-vpc" "error should name the cluster's actual network"
@@ -312,7 +312,7 @@ test_discover_cluster_not_found_refused() {
 test_discover_node_subnet_cidr_from_explicit_fixture() {
   fresh_gcloud_state
   GKE_NAME="subnetcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "subnetcluster" "$NETWORK" "mig-x"
+  seed_cluster "subnetcluster" "$NETWORK"
   seed_subnet "default-subnet" "10.4.0.0/22"
   hybrid_discover "$NETWORK"
   assert_eq "10.4.0.0/22" "$GKE_NODE_SUBNET_CIDR" "should discover the subnet's actual primary CIDR, not a hardcoded default"
@@ -321,7 +321,7 @@ test_discover_node_subnet_cidr_from_explicit_fixture() {
 test_discover_node_subnet_region_from_zonal_location() {
   fresh_gcloud_state
   GKE_NAME="zonalcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1-a"
-  seed_cluster "zonalcluster" "$NETWORK" "mig-x"
+  seed_cluster "zonalcluster" "$NETWORK"
   hybrid_discover "$NETWORK"
   assert_eq "1" "$(gcloud_log | grep -c 'networks subnets describe default-subnet --region=us-central1 ' || true)" \
     "a zonal location (us-central1-a) must resolve to its region (us-central1) for the subnet lookup, not be passed through as-is"
@@ -330,7 +330,7 @@ test_discover_node_subnet_region_from_zonal_location() {
 test_discover_node_subnet_describe_failure_refused() {
   fresh_gcloud_state
   GKE_NAME="subnetfailcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "subnetfailcluster" "$NETWORK" "mig-x"
+  seed_cluster "subnetfailcluster" "$NETWORK"
   set_subnet_describe_will_fail "default-subnet"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "an unreadable node subnet must fail discovery"
@@ -340,7 +340,7 @@ test_discover_node_subnet_describe_failure_refused() {
 test_discover_node_subnet_refuses_zero_slash_zero() {
   fresh_gcloud_state
   GKE_NAME="wideopencluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "wideopencluster" "$NETWORK" "mig-x"
+  seed_cluster "wideopencluster" "$NETWORK"
   seed_subnet "default-subnet" "0.0.0.0/0"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "0.0.0.0/0 must never be accepted as an NFS export client range"
@@ -365,7 +365,7 @@ test_validate_node_subnet_cidr_accepts_clean_network() {
 test_discover_node_subnet_refuses_broader_than_slash_8() {
   fresh_gcloud_state
   GKE_NAME="toobroadcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "toobroadcluster" "$NETWORK" "mig-x"
+  seed_cluster "toobroadcluster" "$NETWORK"
   seed_subnet "default-subnet" "10.0.0.0/7"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "anything broader than /8 must be refused"
@@ -374,7 +374,7 @@ test_discover_node_subnet_refuses_broader_than_slash_8() {
 test_discover_node_subnet_accepts_slash_8_boundary() {
   fresh_gcloud_state
   GKE_NAME="boundarycluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "boundarycluster" "$NETWORK" "mig-x"
+  seed_cluster "boundarycluster" "$NETWORK"
   seed_subnet "default-subnet" "10.0.0.0/8"
   hybrid_discover "$NETWORK"
   assert_eq "10.0.0.0/8" "$GKE_NODE_SUBNET_CIDR" "/8 itself is the narrowest allowed refusal boundary, so it must be accepted"
@@ -755,10 +755,11 @@ test_nfs_export_script_fstab_line_nofail_and_no_fsck() {
 test_nfs_export_script_fails_closed_when_not_mounted() {
   local script mount_check_line exit_line
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$HYBRID_NFS_IMAGE_PATH" "20")"
-  # There must be THREE mountpoint checks: the pre-fallocate refusal
-  # check (K4), the before-mount check, and the fail-closed guard after
-  # the mount attempt -- whose failure branch exits non-zero before the
-  # export root is ever chowned/chmoded or the exports file written.
+  # There must be THREE mountpoint checks: the pre-fallocate existing-
+  # mount refusal, the before-mount check, and the fail-closed guard
+  # after the mount attempt -- whose failure branch exits non-zero
+  # before the export root is ever chowned/chmoded or the exports file
+  # written.
   assert_eq "3" "$(echo "$script" | grep -c 'mountpoint -q /srv/scion-shared')" \
     "there must be the pre-fallocate refusal check, a before-mount check, and a fail-closed check after attempting to mount"
   mount_check_line="$(echo "$script" | grep -n 'mountpoint -q /srv/scion-shared' | tail -1 | cut -d: -f1)"
@@ -875,7 +876,11 @@ _setup_export_script_fakebins() {
   # /etc/nfs.conf.d/scion-hub.conf, redirected to a per-test fixture
   # (absent by default, so every existing test -- which never seeds
   # one -- sees "no prior config", matching this fake's own default of
-  # "restart always needed", the same as before this fake existed).
+  # "restart always needed", the same as before this fake existed), and
+  # a read of /proc/fs/nfsd/versions, defaulting to a fixture with v2/v3/
+  # v4.0 already disabled (the state this script's own config produces),
+  # so a test that doesn't care about this check still sees "no restart
+  # needed" from it, same as before this check existed.
   # shellcheck disable=SC2016 # writing a literal fake-binary script body, not expanding now
   printf '%s\n' \
     '#!/bin/bash' \
@@ -884,6 +889,16 @@ _setup_export_script_fakebins() {
     "    exec /bin/cat \"${dir}/.nfs-conf-existing\"" \
     '  else' \
     '    exit 1' \
+    '  fi' \
+    'fi' \
+    'if [ "$#" -eq 1 ] && [ "$1" = "/proc/fs/nfsd/versions" ]; then' \
+    "  if [ -f \"${dir}/.nfsd-versions-unreadable\" ]; then" \
+    '    exit 1' \
+    "  elif [ -f \"${dir}/.nfsd-versions\" ]; then" \
+    "    exec /bin/cat \"${dir}/.nfsd-versions\"" \
+    '  else' \
+    '    echo "-2 -3 +4 -4.0 +4.1"' \
+    '    exit 0' \
     '  fi' \
     'fi' \
     'exec /bin/cat "$@"' \
@@ -908,6 +923,20 @@ set_export_script_nfs_conf_existing() {
 # install where the server was never started by this script.
 set_export_script_nfs_server_active() {
   touch "${1}/.nfs-server-active"
+}
+
+# set_export_script_nfsd_versions DIR CONTENT — seeds the fake `cat`'s
+# answer for a read of /proc/fs/nfsd/versions, in the space-separated
+# +/-prefixed shape the kernel actually renders it.
+set_export_script_nfsd_versions() {
+  printf '%s' "$2" > "${1}/.nfsd-versions"
+}
+
+# set_export_script_nfsd_versions_unreadable DIR — the fake `cat` fails
+# reading /proc/fs/nfsd/versions, as if the nfsd kernel module weren't
+# loaded.
+set_export_script_nfsd_versions_unreadable() {
+  touch "${1}/.nfsd-versions-unreadable"
 }
 
 test_probe_export_script_executed_fails_closed_when_never_mounts() {
@@ -1000,6 +1029,46 @@ test_probe_export_script_executed_ignores_commented_out_fstab_line() {
   rm -rf "$d"
 }
 
+test_probe_export_script_executed_ignores_commented_out_fstab_line_with_no_space_after_hash() {
+  local d rc script image_path fake_fstab
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  fake_fstab="${d}/fstab"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  # No space between "#" and the path: with a space, the shifted-by-one
+  # field split already happens to put the image path (not the
+  # mountpoint) in the position the conflict check reads, so that shape
+  # passes even without an explicit comment skip. Glued directly to the
+  # path, the fields land the same as a live entry, so this specifically
+  # exercises the comment check itself.
+  printf '%s\n' "#${image_path} /srv/scion-shared ext4 loop,nofail,x-systemd.before=nfs-server.service,x-systemd.required-by=nfs-server.service 0 0" > "$fake_fstab"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20" "$fake_fstab")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1; rc=$?
+  assert_eq "0" "$rc" "a commented-out line must be ignored even with no space after the '#'"
+  assert_true "$([[ -f "${d}/tee.log" ]] && grep -qF "${image_path} /srv/scion-shared ext4 loop,nofail" "${d}/tee.log" 2>/dev/null && echo true || echo false)" \
+    "the real fstab line must still be appended when only a commented copy exists"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_refuses_fstab_line_with_trailing_slash_mountpoint() {
+  local d out rc script image_path fake_fstab
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  fake_fstab="${d}/fstab"
+  _setup_export_script_fakebins "$d" "false" "$image_path"
+  # A trailing slash on the mountpoint field is the same mountpoint to
+  # the kernel, but not to a literal string comparison -- must still be
+  # recognized as a conflict, not missed as "a different, unrelated
+  # mountpoint".
+  printf '%s\n' "/var/lib/other/export.img /srv/scion-shared/ ext4 loop,nofail 0 0" > "$fake_fstab"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20" "$fake_fstab")"
+  out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
+  assert_true "$([[ $rc -ne 0 ]] && echo true || echo false)" \
+    "a trailing-slash mountpoint for the same export root must still be refused as a conflict"
+  assert_contains "$out" "does not match the expected entry" "error should explain why"
+  rm -rf "$d"
+}
+
 test_probe_export_script_executed_restarts_nfs_server_on_first_run() {
   local d script image_path
   d="$(mktemp -d)"
@@ -1019,12 +1088,66 @@ test_probe_export_script_executed_skips_restart_when_config_unchanged_and_alread
   _setup_export_script_fakebins "$d" "true" "$image_path"
   set_export_script_nfs_conf_existing "$d" "$(printf '[nfsd]\nvers2=n\nvers3=n\nvers4.0=n\nudp=n')"
   set_export_script_nfs_server_active "$d"
+  set_export_script_nfsd_versions "$d" "-2 -3 +4 -4.0 +4.1"
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
   PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
   assert_false "$([[ -f "${d}/systemctl.log" ]] && grep -qF "restart nfs-server" "${d}/systemctl.log" 2>/dev/null && echo true)" \
-    "an unchanged config with an already-active server must not restart -- avoids an NFSv4 grace-period stall on every redeploy"
+    "an unchanged config with an already-active server confirmed at v4.1-only must not restart -- avoids an NFSv4 grace-period stall on every redeploy"
   assert_true "$([[ -f "${d}/systemctl.log" ]] && grep -qF "enable nfs-server" "${d}/systemctl.log" 2>/dev/null && echo true || echo false)" \
     "enable must still run even when restart is skipped"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_restarts_when_config_changed_and_already_active() {
+  local d script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  # The existing drop-in content differs from what this run would write,
+  # and the server is already active with v4.1-only versions -- restart
+  # must still fire on the config-changed branch alone, not rely on the
+  # inactive-server branch to cover it.
+  set_export_script_nfs_conf_existing "$d" "$(printf '[nfsd]\nvers2=y')"
+  set_export_script_nfs_server_active "$d"
+  set_export_script_nfsd_versions "$d" "-2 -3 +4 -4.0 +4.1"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
+  assert_true "$([[ -f "${d}/systemctl.log" ]] && grep -qF "restart nfs-server" "${d}/systemctl.log" 2>/dev/null && echo true || echo false)" \
+    "a changed config must restart even when the server was already active"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_restarts_when_active_but_kernel_still_serves_v3() {
+  local d script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  # Config unchanged and server active, but the kernel's own enabled-
+  # version set still shows v3 on -- the interrupted-first-run scenario:
+  # the drop-in was written, but nfs-server was never actually restarted
+  # to pick it up, so it's still serving whatever it started with.
+  set_export_script_nfs_conf_existing "$d" "$(printf '[nfsd]\nvers2=n\nvers3=n\nvers4.0=n\nudp=n')"
+  set_export_script_nfs_server_active "$d"
+  set_export_script_nfsd_versions "$d" "-2 +3 +4 -4.0 +4.1"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
+  assert_true "$([[ -f "${d}/systemctl.log" ]] && grep -qF "restart nfs-server" "${d}/systemctl.log" 2>/dev/null && echo true || echo false)" \
+    "the kernel still serving v3 must force a restart even with an unchanged config and an active server"
+  rm -rf "$d"
+}
+
+test_probe_export_script_executed_restarts_when_nfsd_versions_unreadable() {
+  local d script image_path
+  d="$(mktemp -d)"
+  image_path="${d}/export.img"
+  _setup_export_script_fakebins "$d" "true" "$image_path"
+  set_export_script_nfs_conf_existing "$d" "$(printf '[nfsd]\nvers2=n\nvers3=n\nvers4.0=n\nudp=n')"
+  set_export_script_nfs_server_active "$d"
+  set_export_script_nfsd_versions_unreadable "$d"
+  script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
+  PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
+  assert_true "$([[ -f "${d}/systemctl.log" ]] && grep -qF "restart nfs-server" "${d}/systemctl.log" 2>/dev/null && echo true || echo false)" \
+    "an unreadable /proc/fs/nfsd/versions must fail closed toward restarting, not be treated as confirmation"
   rm -rf "$d"
 }
 
@@ -1049,11 +1172,10 @@ test_probe_export_script_executed_uses_the_given_non_default_size() {
   d="$(mktemp -d)"
   image_path="${d}/export.img"
   _setup_export_script_fakebins "$d" "true" "$image_path"
-  # Every other executed test passes "20", which is also the hard-coded
-  # value a mutant that ignores gke_target.shared_dir_image_size_gb
-  # entirely would produce -- a non-default size is the only way to
-  # actually distinguish "the given size was used" from "any size was
-  # used".
+  # Every other executed test passes "20", the same as the default, which
+  # can't distinguish "the given size was used" from "a hard-coded size
+  # was used" -- a non-default size is the only way to tell the two
+  # apart.
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "37")"
   PATH="$d:$PATH" bash -c "$script" >/dev/null 2>&1
   assert_contains "$(cat "${d}/fallocate.log" 2>/dev/null || true)" "-l 37G" \
@@ -1104,11 +1226,11 @@ test_probe_export_script_executed_refuses_wrong_mount_source() {
   local d out rc script image_path
   d="$(mktemp -d)"
   image_path="${d}/export.img"
-  # A pre-existing, already-mounted-elsewhere export root is now caught
-  # by the pre-fallocate refusal (K4), earlier than the post-mount
-  # fail-closed check this test originally targeted -- both checks use
-  # the same findmnt/losetup fakes, so this still exercises "mounted
-  # from the wrong source", just via the earlier of the two guards.
+  # A pre-existing, already-mounted-elsewhere export root is caught by
+  # the pre-fallocate existing-mount refusal, earlier than the post-mount
+  # fail-closed check -- both checks use the same findmnt/losetup fakes,
+  # so this exercises "mounted from the wrong source" via the earlier of
+  # the two guards.
   _setup_export_script_fakebins "$d" "true" "$image_path" "/some/other/image.img"
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
   out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
@@ -1124,9 +1246,10 @@ test_probe_export_script_executed_refuses_wrong_mount_source_after_fresh_mount()
   local d out rc script image_path
   d="$(mktemp -d)"
   image_path="${d}/export.img"
-  # Not mounted at start (so the K4 pre-check doesn't fire), but the
-  # `mount` fake's backing file doesn't match once it does mount --
-  # exercises the separate, post-mount fail-closed check specifically.
+  # Not mounted at start (so the pre-fallocate existing-mount refusal
+  # doesn't fire), but the `mount` fake's backing file doesn't match once
+  # it does mount -- exercises the separate, post-mount fail-closed check
+  # specifically.
   _setup_export_script_fakebins "$d" "becomes" "$image_path" "/some/other/image.img"
   script="$(hybrid_nfs_export_script "/srv/scion-shared" "10.128.0.0/20" "6001" "6000" "abc123" "demohub" "$image_path" "20")"
   out="$(PATH="$d:$PATH" bash -c "$script" 2>&1)"; rc=$?
@@ -3101,7 +3224,7 @@ test_registry_loopback_rejects_lookalike_host() {
 test_discover_pod_cidr_from_cluster_fixture() {
   fresh_gcloud_state
   GKE_NAME="podcidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "podcidrcluster" "$NETWORK" "mig-x"
+  seed_cluster "podcidrcluster" "$NETWORK"
   seed_pod_cidr "podcidrcluster" "10.60.0.0/14"
   hybrid_discover "$NETWORK"
   assert_eq "10.60.0.0/14" "$GKE_POD_CIDR" "must read the actual pod CIDR, not a hardcoded default"
@@ -3110,7 +3233,7 @@ test_discover_pod_cidr_from_cluster_fixture() {
 test_discover_pod_cidr_mismatch_refused() {
   fresh_gcloud_state
   GKE_NAME="mismatchcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "mismatchcluster" "$NETWORK" "mig-x"
+  seed_cluster "mismatchcluster" "$NETWORK"
   seed_pod_cidr_mismatch "mismatchcluster" "10.60.0.0/14" "10.61.0.0/14"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "disagreeing pod CIDR fields must refuse before any create"
@@ -3120,7 +3243,7 @@ test_discover_pod_cidr_mismatch_refused() {
 test_discover_pod_cidr_ignores_services_cidr() {
   fresh_gcloud_state
   GKE_NAME="svccidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "svccidrcluster" "$NETWORK" "mig-x"
+  seed_cluster "svccidrcluster" "$NETWORK"
   # A real cluster describe also carries servicesIpv4Cidr (the Service
   # range, not the pod range) alongside clusterIpv4Cidr -- make sure it's
   # never read as if it were the pod CIDR.
@@ -3132,7 +3255,7 @@ test_discover_pod_cidr_ignores_services_cidr() {
 test_discover_pod_cidr_alt_field_missing_refused() {
   fresh_gcloud_state
   GKE_NAME="halfpodcidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "halfpodcidrcluster" "$NETWORK" "mig-x"
+  seed_cluster "halfpodcidrcluster" "$NETWORK"
   # clusterIpv4Cidr present, ipAllocationPolicy.clusterIpv4CidrBlock missing --
   # cross-checking requires both, not just the one that happens to be there.
   seed_pod_cidr_mismatch "halfpodcidrcluster" "10.60.0.0/14" ""
@@ -3144,7 +3267,7 @@ test_discover_pod_cidr_alt_field_missing_refused() {
 test_discover_pod_cidr_missing_refused() {
   fresh_gcloud_state
   GKE_NAME="nopodcidrcluster"; GKE_PROJECT="$PROJECT"; GKE_LOCATION="us-central1"
-  seed_cluster "nopodcidrcluster" "$NETWORK" "mig-x"
+  seed_cluster "nopodcidrcluster" "$NETWORK"
   seed_pod_cidr_missing "nopodcidrcluster"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a missing pod CIDR must refuse before any create"
@@ -3156,7 +3279,7 @@ test_discover_pod_cidr_refuses_broader_than_slash_8() {
   GKE_NAME="widepodcidrcluster"; GKE_PROJECT="$PROJECT"
   # shellcheck disable=SC2034 # read by hybrid_discover (hybrid-tier.sh)
   GKE_LOCATION="us-central1"
-  seed_cluster "widepodcidrcluster" "$NETWORK" "mig-x"
+  seed_cluster "widepodcidrcluster" "$NETWORK"
   seed_pod_cidr "widepodcidrcluster" "10.0.0.0/7"
   run_expect_fail hybrid_discover "$NETWORK"
   assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" "a pod CIDR broader than /8 must be refused"
@@ -3168,7 +3291,7 @@ test_discover_pod_cidr_refuses_ipv6() {
   GKE_NAME="ipv6podcidrcluster"; GKE_PROJECT="$PROJECT"
   # shellcheck disable=SC2034 # read by hybrid_discover (hybrid-tier.sh)
   GKE_LOCATION="us-central1"
-  seed_cluster "ipv6podcidrcluster" "$NETWORK" "mig-x"
+  seed_cluster "ipv6podcidrcluster" "$NETWORK"
   # A dual-stack or IPv6-only cluster's pod CIDR: everything downstream
   # of this (firewall ranges, address reservations) is IPv4-only, so an
   # IPv6 pod CIDR must be refused, not silently accepted.
@@ -3190,6 +3313,15 @@ test_internal_ip_new_vm_reserves_fresh_when_absent() {
   assert_eq "10.128.0.9" "$HYBRID_INTERNAL_IP" "must read back the reserved address"
   assert_contains "$(gcloud_log)" "compute addresses create scion-hub-${HUB}-internal-ip" \
     "must reserve a fresh address when absent"
+}
+
+test_internal_ip_new_vm_reserve_create_failure_is_explicit_error() {
+  fresh_gcloud_state
+  set_address_create_will_fail "scion-hub-${HUB}-internal-ip"
+  run_expect_fail hybrid_ensure_internal_ip_new_vm "$HUB" "$PROJECT" "us-central1" "default"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a new-VM addresses-create failure must fail the run explicitly, not be silently treated as success"
+  assert_contains "$RUN_OUTPUT" "Could not reserve a new internal IP address" "error should explain why"
 }
 
 test_internal_ip_new_vm_ignores_same_name_reservation_in_another_region() {
@@ -3482,6 +3614,34 @@ test_hub_url_guard_verify_fails_when_vm_actual_ip_diverges_even_if_hybrid_intern
     "the guard must catch the VM's real internal IP having diverged from the reservation, even when \$HYBRID_INTERNAL_IP (read earlier, from the reservation itself on the new-VM path) still equals it -- comparing against \$HYBRID_INTERNAL_IP alone could never catch this"
   assert_contains "$RUN_OUTPUT" "reach the wrong address" "error should explain why"
   unset GCLOUD_STUB_VM_IP
+}
+
+test_hub_url_guard_verify_fails_when_resolved_ip_does_not_match_vm_ip() {
+  fresh_gcloud_state
+  # HYBRID_INTERNAL_IP disagrees with the VM's actual (default-stub)
+  # internal IP directly -- defense in depth on top of the later
+  # reservation-address check, which this scenario never even reaches.
+  HYBRID_INTERNAL_IP="10.128.0.99"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a resolved internal IP that doesn't match the VM's actual internal IP must fail the guard"
+  assert_contains "$RUN_OUTPUT" "does not match VM" "error should explain why"
+  assert_not_contains "$(gcloud_log)" "addresses describe" \
+    "must fail before ever describing the reservation"
+}
+
+test_hub_url_guard_verify_fails_when_reservation_address_is_not_valid_ipv4() {
+  fresh_gcloud_state
+  HYBRID_INTERNAL_IP="10.128.0.5"
+  GKE_POD_CIDR="10.52.0.0/14"
+  seed_instance "$INSTANCE_NAME_TEST" "us-central1-b"
+  seed_address "scion-hub-${HUB}-internal-ip" "not-an-ip" "$MARKER"
+  run_expect_fail hybrid_hub_url_guard_verify "$HUB" "$PROJECT" "us-central1" "$INSTANCE_NAME_TEST" "us-central1-b"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a reservation address that isn't valid IPv4 must fail the guard"
+  assert_contains "$RUN_OUTPUT" "not a valid IPv4 address" "error should explain why"
 }
 
 test_hub_url_guard_verify_fails_on_hub_allow_source_range_drift() {

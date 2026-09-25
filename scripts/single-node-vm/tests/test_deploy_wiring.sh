@@ -102,6 +102,81 @@ run_deploy_delete_interactive() {
   DEPLOY_RC=$?
 }
 
+# _start_deploy_bg CONFIG_FILE LOG_FILE [ENV_ASSIGNMENT...] -- starts
+# deploy.sh (create mode) in the background, in its own process group
+# (job control on for this call only), and sets the global _DEPLOY_BG_PID
+# to its PID. `set -m` makes bash give a backgrounded job its own process
+# group, with the PGID equal to the job's own PID -- that's what lets
+# _stop_deploy_bg below signal every process deploy.sh has spawned, not
+# just deploy.sh itself. _DEPLOY_BG_PID is a global, not an echoed return
+# value: a caller doing `pid="$(_start_deploy_bg ...)"` would run this
+# whole function in a command-substitution subshell, and a subshell that
+# enabled job control sends SIGHUP to its own background jobs the moment
+# it exits -- which happens immediately here, right after backgrounding,
+# killing deploy.sh before it ever gets going. A plain function call has
+# no such subshell, so callers must call this directly, then read
+# _DEPLOY_BG_PID afterward, not wrap the call in `$(...)`.
+#
+# Also snapshots $TMPDIR's own top-level entries to LOG_FILE.before,
+# before deploy.sh ever runs, so _stop_deploy_bg below can tell what it
+# left behind directly in $TMPDIR -- deploy.sh does its own mktemp-based
+# error-file bookkeeping internally (SQUASH_SSH_ERR and friends), each a
+# bare file alongside (not inside) $GCLOUD_STUB_STATE_DIR, with cleanup
+# later in its own linear flow; killed mid-flight, whichever of those it
+# was between creating and removing at that moment stays on disk. Scoped
+# to top-level entries only (not a recursive find): the stub's own state
+# directories legitimately gain new files while deploy.sh runs (sentinels,
+# JSON fixtures) that the calling test still needs to read after this
+# returns, so descending into them and diffing would delete state the
+# test hasn't finished using yet, not just orphaned garbage. Same
+# snapshot-diff technique run_expect_fail uses for the analogous
+# command-substitution-subshell case; written to a file rather than a
+# variable for the same subshell-visibility reason _DEPLOY_BG_PID is a
+# global.
+_start_deploy_bg() {
+  local config_file="$1" log_file="$2"
+  shift 2
+  PATH="$HARNESS_SAFE_PATH" find "${TMPDIR:-/tmp}" -mindepth 1 -maxdepth 1 2>/dev/null \
+    | PATH="$HARNESS_SAFE_PATH" sort > "${log_file}.before"
+  set -m
+  env "$@" bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
+    < /dev/null > "$log_file" 2>&1 &
+  _DEPLOY_BG_PID=$!
+  set +m
+}
+
+# _stop_deploy_bg PID LOG_FILE -- sends SIGTERM to PID's entire process
+# group (not just PID itself), so an in-flight child the stub gcloud
+# spawns dies alongside deploy.sh instead of continuing to run -- and
+# possibly write into this test's just-removed state directory -- after
+# this function returns. Reaps PID via `wait` (bash can only wait on its
+# own direct children) and sets DEPLOY_RC to its exit status, then polls
+# `kill -0` on the group until every member is actually gone, up to a
+# bounded safety timeout, since SIGTERM delivery and process teardown
+# aren't instantaneous even once sent. Finally sweeps $TMPDIR for
+# anything new since _start_deploy_bg's snapshot (LOG_FILE.before) and
+# removes it -- deploy.sh's own temp files, not just a stub subprocess's.
+_stop_deploy_bg() {
+  local pid="$1" log_file="$2"
+  kill -TERM -- "-${pid}" 2>/dev/null || true
+  wait "$pid" 2>/dev/null
+  DEPLOY_RC=$?
+  local waited_ms=0
+  while kill -0 -- "-${pid}" 2>/dev/null && [[ "$waited_ms" -lt 5000 ]]; do
+    sleep 0.05
+    waited_ms=$((waited_ms + 50))
+  done
+  local before_tmp after_tmp
+  before_tmp="$(cat "${log_file}.before" 2>/dev/null || true)"
+  after_tmp="$(PATH="$HARNESS_SAFE_PATH" find "${TMPDIR:-/tmp}" -mindepth 1 -maxdepth 1 2>/dev/null | PATH="$HARNESS_SAFE_PATH" sort)"
+  rm -f "${log_file}.before"
+  if [[ "$after_tmp" != "$before_tmp" ]]; then
+    PATH="$HARNESS_SAFE_PATH" comm -13 <(printf '%s\n' "$before_tmp") <(printf '%s\n' "$after_tmp") | while IFS= read -r _new_tmp_entry; do
+      [[ -n "$_new_tmp_entry" ]] && rm -rf "$_new_tmp_entry"
+    done
+  fi
+}
+
 # run_deploy_create CONFIG_JSON — runs `deploy.sh` (create mode) in the
 # background and stops it once the VM-exists sentinel appears (see the
 # file header) AND the log has gone quiet, rather than a single fixed
@@ -129,16 +204,16 @@ run_deploy_create() {
   rm -f "$sentinel"
   local log_file
   log_file="$(mktemp)"
-  bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null > "$log_file" 2>&1 &
-  local pid=$!
+  local pid
+  _start_deploy_bg "$config_file" "$log_file"
+  pid="$_DEPLOY_BG_PID"
   local waited_ms=0
   while [[ ! -f "$sentinel" && "$waited_ms" -lt 30000 ]]; do
     sleep 0.1
     waited_ms=$((waited_ms + 100))
   done
   if [[ ! -f "$sentinel" ]]; then
-    kill -TERM "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null
+    _stop_deploy_bg "$pid" "$log_file"
     DEPLOY_RC=1
     DEPLOY_LOG="$(cat "$log_file")
 FATAL: run_deploy_create: sentinel '${sentinel}' was never reached within 30000ms -- deploy.sh may be stuck, or this test's expectations no longer match its actual call sequence"
@@ -146,9 +221,7 @@ FATAL: run_deploy_create: sentinel '${sentinel}' was never reached within 30000m
     return 1
   fi
   _wait_for_deploy_log_quiescence "$log_file"
-  kill -TERM "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null
-  DEPLOY_RC=$?
+  _stop_deploy_bg "$pid" "$log_file"
   DEPLOY_LOG="$(cat "$log_file")"
   rm -f "$config_file" "$log_file"
 }
@@ -172,25 +245,23 @@ run_deploy_create_wait_for() {
   rm -f "$sentinel"
   local log_file
   log_file="$(mktemp)"
-  bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test < /dev/null > "$log_file" 2>&1 &
-  local pid=$!
+  local pid
+  _start_deploy_bg "$config_file" "$log_file"
+  pid="$_DEPLOY_BG_PID"
   local waited_ms=0
   while [[ ! -f "$sentinel" && "$waited_ms" -lt 30000 ]]; do
     sleep 0.1
     waited_ms=$((waited_ms + 100))
   done
   if [[ ! -f "$sentinel" ]]; then
-    kill -TERM "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null
+    _stop_deploy_bg "$pid" "$log_file"
     DEPLOY_RC=1
     DEPLOY_LOG="$(cat "$log_file")
 FATAL: run_deploy_create_wait_for: sentinel '${sentinel}' was never reached within 30000ms -- deploy.sh may be stuck, or this test's expectations no longer match its actual call sequence"
     rm -f "$config_file" "$log_file"
     return 1
   fi
-  kill -TERM "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null
-  DEPLOY_RC=$?
+  _stop_deploy_bg "$pid" "$log_file"
   DEPLOY_LOG="$(cat "$log_file")"
   rm -f "$config_file" "$log_file"
 }
@@ -259,21 +330,23 @@ _run_deploy_create_to_settings_yaml_impl() {
   rm -f "$sentinel"
   local log_file
   log_file="$(mktemp)"
-  GCLOUD_STUB_SSH_SUCCEEDS=true IAP_ENFORCEMENT_WAIT_SECS=0 \
-    bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
-    < /dev/null > "$log_file" 2>&1 &
-  local pid=$!
+  local pid
+  _start_deploy_bg "$config_file" "$log_file" \
+    GCLOUD_STUB_SSH_SUCCEEDS=true IAP_ENFORCEMENT_WAIT_SECS=0
+  pid="$_DEPLOY_BG_PID"
   local waited_ms=0
   while [[ ! -f "$sentinel" && "$waited_ms" -lt 30000 ]]; do
     sleep 0.1
     waited_ms=$((waited_ms + 100))
   done
-  if [[ -f "$sentinel" ]]; then
-    _wait_for_deploy_log_quiescence "$log_file"
-  fi
-  kill -TERM "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null
-  DEPLOY_RC=$?
+  # No quiescence poll: the settings.yaml sentinel fires only once the
+  # full --command= string (the whole heredoc) has already been logged
+  # by the SSH dispatcher, so there's nothing later this call needs to
+  # wait for -- stopping here also keeps a dev-mode run from ever
+  # reaching the later proxy-mode write, which is the only thing that
+  # made the two writes distinguishable by log content rather than by
+  # which one this call actually asked for.
+  _stop_deploy_bg "$pid" "$log_file"
   DEPLOY_LOG="$(cat "$log_file")"
   DEPLOY_REACHED_SETTINGS_YAML="$([[ -f "$sentinel" ]] && echo true || echo false)"
   rm -f "$config_file" "$log_file"
@@ -297,27 +370,26 @@ run_deploy_create_to_cloud_run_deploy() {
   printf '%s' "$config_json" > "$config_file"
   local log_file
   log_file="$(mktemp)"
-  GCLOUD_STUB_SSH_SUCCEEDS=true bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
-    < /dev/null > "$log_file" 2>&1 &
-  local pid=$!
+  local pid
+  _start_deploy_bg "$config_file" "$log_file" GCLOUD_STUB_SSH_SUCCEEDS=true
+  pid="$_DEPLOY_BG_PID"
   local waited_ms=0
   while ! grep -q '^run deploy ' "$GCLOUD_STUB_LOG" 2>/dev/null && [[ "$waited_ms" -lt 30000 ]]; do
     sleep 0.1
     waited_ms=$((waited_ms + 100))
   done
   if ! grep -q '^run deploy ' "$GCLOUD_STUB_LOG" 2>/dev/null; then
-    kill -TERM "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null
+    _stop_deploy_bg "$pid" "$log_file"
     DEPLOY_RC=1
     DEPLOY_LOG="$(cat "$log_file")
 FATAL: run_deploy_create_to_cloud_run_deploy: 'run deploy' was never logged within 30000ms"
     rm -f "$config_file" "$log_file"
     return 1
   fi
-  _wait_for_deploy_log_quiescence "$log_file"
-  kill -TERM "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null
-  DEPLOY_RC=$?
+  # No quiescence poll: deploy.sh's own `set -e` ends the run immediately
+  # once the unhandled `run deploy` call fails, so nothing further gets
+  # logged after this point to wait for.
+  _stop_deploy_bg "$pid" "$log_file"
   DEPLOY_LOG="$(cat "$log_file")"
   rm -f "$config_file" "$log_file"
 }
@@ -575,7 +647,7 @@ test_deploy_create_tier_off_no_tags_no_container_calls() {
 
 test_deploy_create_tier_on_tags_new_vm() {
   fresh_gcloud_state
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   run_deploy_create_wait_for "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" \
     "instances-create-completed"
   local log create_line
@@ -592,7 +664,7 @@ test_deploy_create_tier_on_tags_new_vm() {
 test_deploy_create_tier_on_existing_vm_gets_add_tags() {
   fresh_gcloud_state
   seed_instance "$INSTANCE_NAME" "us-central1-b"
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local log
   log="$(gcloud_log)"
@@ -608,7 +680,7 @@ test_deploy_create_tier_on_existing_vm_gets_add_tags() {
 
 test_deploy_create_discovery_before_first_create() {
   fresh_gcloud_state
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local log discover_line first_create_line
   log="$(gcloud_log)"
@@ -620,7 +692,7 @@ test_deploy_create_discovery_before_first_create() {
 
 test_deploy_create_removes_temp_kubeconfig_on_exit() {
   fresh_gcloud_state
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local kubeconfig_path
   kubeconfig_path="$(kubectl_log | head -1 | sed -n 's/^KUBECONFIG=\([^ ]*\) .*/\1/p')"
@@ -726,7 +798,7 @@ test_deploy_create_api_check_tier_on_adds_container() {
   fresh_gcloud_state
   seed_enabled_apis compute.googleapis.com run.googleapis.com iap.googleapis.com \
     cloudbuild.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   local enable_line
   enable_line="$(gcloud_log | grep 'services enable' | head -1)"
@@ -989,7 +1061,7 @@ K8S_PV_D="scion-hub-${HUB}-shared"
 # resources are ever created.
 test_deploy_create_k8s_preflight_unmarked_pv_aborts_before_any_create() {
   fresh_gcloud_state
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   seed_k8s_pv_unmarked "$K8S_PV_D"
   run_deploy_create "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   assert_true "$([[ "$DEPLOY_RC" -ne 0 ]] && echo true || echo false)" \
@@ -1037,7 +1109,7 @@ test_deploy_delete_k8s_cluster_permission_masked_not_read_as_gone() {
 
 test_deploy_delete_k8s_all_marked_deletes_all_three() {
   fresh_gcloud_state
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   seed_k8s_pvc "$K8S_PVC_D" "$K8S_NS_D" "$HUB" "$K8S_PV_D"
   seed_k8s_pv "$K8S_PV_D" "$HUB" "10.128.0.5" "/srv/scion-shared" "$K8S_NS_D" "$K8S_PVC_D"
   seed_k8s_namespace "$K8S_NS_D" "$HUB"
@@ -1051,7 +1123,7 @@ test_deploy_delete_k8s_all_marked_deletes_all_three() {
 test_deploy_delete_k8s_delete_failure_stops_all_downstream_deletes() {
   fresh_gcloud_state
   seed_instance "$INSTANCE_NAME" "us-central1-b"
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   seed_k8s_pvc "$K8S_PVC_D" "$K8S_NS_D" "$HUB" "$K8S_PV_D"
   seed_k8s_pv "$K8S_PV_D" "$HUB" "10.128.0.5" "/srv/scion-shared" "$K8S_NS_D" "$K8S_PVC_D"
   seed_k8s_namespace "$K8S_NS_D" "$HUB"
@@ -1073,7 +1145,7 @@ test_deploy_delete_k8s_delete_failure_stops_all_downstream_deletes() {
 test_deploy_delete_k8s_failure_reports_hybrid_resources_skipped_not_kept() {
   fresh_gcloud_state
   seed_instance "$INSTANCE_NAME" "us-central1-b"
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   seed_k8s_pvc "$K8S_PVC_D" "$K8S_NS_D" "$HUB" "$K8S_PV_D"
   seed_k8s_pv "$K8S_PV_D" "$HUB" "10.128.0.5" "/srv/scion-shared" "$K8S_NS_D" "$K8S_PVC_D"
   seed_k8s_namespace "$K8S_NS_D" "$HUB"
@@ -1130,7 +1202,7 @@ test_deploy_delete_hybrid_rule_delete_failure_reports_downstream_rule_kept() {
 test_deploy_delete_k8s_deletes_precede_vm_delete() {
   fresh_gcloud_state
   seed_instance "$INSTANCE_NAME" "us-central1-b"
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   seed_k8s_pvc "$K8S_PVC_D" "$K8S_NS_D" "$HUB" "$K8S_PV_D"
   seed_k8s_pv "$K8S_PV_D" "$HUB" "10.128.0.5" "/srv/scion-shared" "$K8S_NS_D" "$K8S_PVC_D"
   seed_k8s_namespace "$K8S_NS_D" "$HUB"
@@ -1145,7 +1217,7 @@ test_deploy_delete_k8s_deletes_precede_vm_delete() {
 
 test_deploy_delete_k8s_unmarked_pv_aborts_before_any_delete() {
   fresh_gcloud_state
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   seed_k8s_pv_unmarked "$K8S_PV_D"
   run_deploy_delete "$(base_config_json "$HUB" "$(hybrid_config_fragment)")"
   assert_eq "1" "$DEPLOY_RC" "an unmarked PV must abort the whole teardown"
@@ -1167,7 +1239,7 @@ test_deploy_delete_k8s_unmarked_pv_aborts_before_any_delete() {
 
 test_deploy_create_squash_script_non_numeric_output_fails_before_any_write() {
   fresh_gcloud_state
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   local config_file
   config_file="$(mktemp)"
   printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" > "$config_file"
@@ -1186,7 +1258,7 @@ test_deploy_create_squash_script_non_numeric_output_fails_before_any_write() {
 
 test_deploy_create_squash_script_uid_zero_fails_before_any_write() {
   fresh_gcloud_state
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   local config_file
   config_file="$(mktemp)"
   printf '%s' "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" > "$config_file"
@@ -1325,7 +1397,7 @@ echo x)"
 
 test_deploy_create_tier_on_proxy_settings_yaml_has_shared_dir_storage_block() {
   fresh_gcloud_state
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   run_deploy_create_to_proxy_settings_yaml \
     "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the Phase-5 proxy-mode settings.yaml write"
@@ -1353,12 +1425,21 @@ test_deploy_create_tier_on_proxy_settings_yaml_has_shared_dir_storage_block() {
 
 test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
   fresh_gcloud_state
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   run_deploy_create_to_settings_yaml \
     "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")"
   assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-on create must reach the settings.yaml write"
-  local log
+  local log dev_heredoc
   log="$(gcloud_log)"
+  # Extracted the same way the proxy-mode test extracts its own heredoc
+  # (see test_deploy_create_tier_on_proxy_settings_yaml_has_shared_dir_storage_block),
+  # but taking the FIRST occurrence rather than the last: this call stops
+  # right at the dev-mode sentinel, so in practice the log holds only
+  # this one heredoc, but asserting against the specifically-extracted
+  # dev-mode block (not the whole log) keeps that true by construction
+  # rather than by this call happening to stop early enough.
+  dev_heredoc="$(echo "$log" | awk "/<< 'SETTINGSEOF'/{flag=1; buf=\"\"; next} /^SETTINGSEOF\$/{flag=0; if (!seen) {first=buf; seen=1}} flag{buf=buf \$0 ORS} END{printf \"%s\", first}"; echo x)"
+  dev_heredoc="${dev_heredoc%x}"
 
   assert_contains "$log" "useradd -r -M -N -g scion -s /usr/sbin/nologin scion-nfs" \
     "the squash-identity script must actually be sent over SSH when the tier is on"
@@ -1370,13 +1451,13 @@ test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
   assert_contains "$log" "anonuid=997,anongid=1001" \
     "the export line's anonuid/anongid must be exactly what the squash script returned, wired through unchanged"
 
-  assert_contains "$log" "shared_dir_storage:" \
+  assert_contains "$dev_heredoc" "shared_dir_storage:" \
     "the tier-on settings.yaml write must carry the shared_dir_storage block"
-  assert_contains "$log" 'mount_root: "/srv"' \
+  assert_contains "$dev_heredoc" 'mount_root: "/srv"' \
     "mount_root must be the export root's parent, not the full export root (the pre-fix bug)"
-  assert_contains "$log" 'id: "scion-shared"' \
+  assert_contains "$dev_heredoc" 'id: "scion-shared"' \
     "the share id must be the export root's base name"
-  assert_contains "$log" 'pv_name: "scion-hub-demohub-shared"' \
+  assert_contains "$dev_heredoc" 'pv_name: "scion-hub-demohub-shared"' \
     "pv_name must carry the resolved PVC name"
 
   assert_true "$([[ -f "${KUBECTL_STUB_STATE_DIR}/namespace/scion-hub-${HUB}.json" ]] && echo true || echo false)" \
@@ -1393,7 +1474,7 @@ test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
   create_line="$(echo "$log" | grep 'compute instances create' | head -1)"
   assert_contains "$create_line" "--private-network-ip=10.128.0.9" \
     "the new VM must be created pinned to the reserved internal IP, not left to get an ephemeral one"
-  assert_contains "$log" 'server: "10.128.0.9"' \
+  assert_contains "$dev_heredoc" 'server: "10.128.0.9"' \
     "the settings.yaml shared_dir_storage server field must be the reserved internal IP"
 
   # The hub URL guard's post-create half re-describes the reservation and
@@ -1408,7 +1489,7 @@ test_deploy_create_tier_on_reaches_settings_yaml_with_correct_nfs_and_block() {
 
 test_deploy_create_tier_on_wires_configured_image_size_to_export_script() {
   fresh_gcloud_state
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   # A non-default size: 20 is also what every other fixture happens to
   # produce (the config default), so it can't distinguish "the configured
   # value was used" from "a hard-coded value was used".
@@ -1441,7 +1522,7 @@ test_deploy_create_cloud_run_deploy_no_label_when_service_already_exists() {
 test_deploy_create_tier_on_existing_vm_promotes_current_ip() {
   fresh_gcloud_state
   seed_instance "$INSTANCE_NAME" "us-central1-b"
-  seed_cluster "mycluster" "default" "mig-a"
+  seed_cluster "mycluster" "default"
   run_deploy_create_wait_for "$(base_config_json "$HUB" "$(hybrid_config_fragment)" "registry" "us-docker.pkg.dev/demo-project/scion")" \
     "addresses-create-completed"
   local log

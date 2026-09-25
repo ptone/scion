@@ -455,10 +455,7 @@ clear_gke_node_tag_rules() {
     "${GCLOUD_STUB_STATE_DIR}/gke-node-firewall-rules/gke-$1-"*"-vms.json"
 }
 
-# seed_cluster NAME NETWORK [ignored...] — the fixture cluster's reported
-# network. Any arguments after NETWORK are accepted and ignored (call
-# sites from before node-tag discovery moved to firewall rules used to
-# pass MIG names here; harmless to still pass, nothing reads them).
+# seed_cluster NAME NETWORK — the fixture cluster's reported network.
 # Also writes this cluster's default node-tag firewall rule pair (see
 # _seed_default_gke_node_tag_rules) so discovery succeeds out of the box;
 # tests that care about a specific tag or failure shape override it with
