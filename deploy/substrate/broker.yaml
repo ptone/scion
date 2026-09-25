@@ -112,9 +112,9 @@ roleRef:
 # bound to the broker's ServiceAccount from the *broker* namespace — the two
 # may be the same cluster but are almost certainly different namespaces.
 #
-# SUBSTRATE_WORKER_NAMESPACE is a placeholder pending infra/cluster.md: it
-# may turn out to equal ATE_SYSTEM_NAMESPACE, or be its own namespace (e.g.
-# per WorkerPool). Confirm before applying — see README.
+# SUBSTRATE_WORKER_NAMESPACE is a placeholder resolved per cluster: it may
+# turn out to equal ATE_SYSTEM_NAMESPACE, or be its own namespace (e.g. per
+# WorkerPool). Confirm before applying — see README.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -332,9 +332,9 @@ spec:
             defaultMode: 0400
 ---
 # Router ingress restriction (.design/kubernetes/substrate-runtime.md §5.2
-# fallback requirement): the
-# bootstrap nonce fallback ("first bootstrap wins") is only acceptable with
-# this in place, restricting the router to broker-namespace callers.
+# fallback requirement): the bootstrap nonce fallback ("first bootstrap
+# wins") is only acceptable with this in place, restricting the router to
+# broker-namespace callers.
 #
 # Verified against the upstream install manifests
 # (github.com/agent-substrate/substrate, manifests/ate-install/atenet-router.yaml

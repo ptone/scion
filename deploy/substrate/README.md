@@ -26,9 +26,7 @@ Substrate requires a digest-pinned agent image (`.design/kubernetes/substrate-ru
 (`pkg/runtime/substrate_runtime.go:317`):
 
 ```
-substrate: image "<image>" is not pinned by digest (@sha256:...); set a
-digest image in the agent's template or pass --image (tag resolution is
-a Phase 2 feature)
+substrate: image "<image>" is not pinned by digest (@sha256:...); set a digest image in the agent's template or pass --image (tag resolution is a Phase 2 feature)
 ```
 
 **Pinning the digest in the substrate profile's `harness_overrides` alone
@@ -68,9 +66,11 @@ hub:
   default unconditionally, discarding any pin here regardless of how it was
   set — re-apply it afterward if you go this route.
 
-**Diagnostic:** the image an agent actually resolved to is visible in its
-`scion-agent.json` (the `image` field) in the agent's directory on the
-broker.
+**Diagnostic:** `scion-agent.json` (the `image` field, in the agent's
+directory on the broker) carries the image the agent's persisted config
+resolved to, which `start` uses unless `--image` is passed — `--image` is
+applied only for that one `start` call (`pkg/agent/run.go:353`) and is
+never written back to `scion-agent.json`.
 
 ## Warm the template before first use
 
@@ -116,8 +116,7 @@ well inside the hub's dispatch timeout.
 
 - **Enabling NetworkPolicy enforcement (Calico or GKE Dataplane V2) on an
   existing Substrate cluster that wasn't created with it is not a
-  no-downtime, apply-and-go change.** On `substrate-scion-test`
-  (`infra/cluster.md`, "NetworkPolicy Enforcement (Calico)"), which
+  no-downtime, apply-and-go change.** On `substrate-scion-test`, which
   enforces via the **Calico** add-on, not Dataplane V2, enabling it
   required:
   1. Enable the add-on and enforcement:
@@ -144,21 +143,22 @@ well inside the hub's dispatch timeout.
   Plan this as a maintenance window with a template rebuild, not as a
   same-day toggle, on any cluster where actors are already running. See
   "Known Phase 1 limitations" below for the separate question of whether
-  enforcement is enabled at all, and check `infra/cluster.md` for this
-  cluster's exact, already-executed procedure before repeating any of it.
+  enforcement is enabled at all, and check your own cluster's change
+  history for the exact, already-executed procedure before repeating any
+  of it.
 
 ## Placeholders
 
 Resolve every one of these before applying. None are secret; secrets are
 handled separately (see "Secret creation" below).
 
-| Placeholder | Meaning | `substrate-scion-test` value (from `infra/cluster.md`) |
+| Placeholder | Meaning | `substrate-scion-test` value (example only) |
 |---|---|---|
 | `BROKER_NAMESPACE` | Namespace the broker Deployment and its RBAC live in. **Also the value the router NetworkPolicy's `namespaceSelector` is pinned to** (`atenet-router-restrict-ingress`, templated as `${BROKER_NAMESPACE}`, not hardcoded) — see the callout below the table. | `scion-substrate-broker` (suggested — not cluster-specific) |
 | `BROKER_IMAGE` | Branch-built image containing the `scion` binary (see "Building the broker image") | `us-docker.pkg.dev/<project>/scion/broker@sha256:...` (build it yourself, see below) |
 | `ATE_SYSTEM_NAMESPACE` | Namespace hosting ateapi (`api.<ns>.svc:443`) and `atenet-router` | `ate-system` (upstream default) |
-| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in, for the `pods`/`pods/log` RBAC (`GetLogs`) and for locating Substrate's own controller-generated worker `NetworkPolicy` (verification only — this manifest doesn't create it) | `scion-agents` (per `infra/cluster.md`) |
-| `HUB_ENDPOINT` | The `scion-integration` hub's URL | from `infra/cluster.md` / your hub deployment — not a Substrate-specific value |
+| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in, for the `pods`/`pods/log` RBAC (`GetLogs`) and for locating Substrate's own controller-generated worker `NetworkPolicy` (verification only — this manifest doesn't create it) | `scion-agents` (the `substrate-scion-test` example) |
+| `HUB_ENDPOINT` | The `scion-integration` hub's URL | from your hub deployment — not a Substrate-specific value |
 | `HUB_BROKER_ID` | The broker's stable UUID from `scion runtime-broker register` (not secret — see below) | UUID printed by `register`; there is no fixed value until you actually register |
 | `HUB_CONNECTION_NAME` | The `--name` used at `register` time; also the credentials JSON filename | `scion-integration` (suggested) |
 | `CLUSTER_TRUST_BUNDLE_NAME` | The `ClusterTrustBundle` object verifying ateapi/router TLS | `servicedns.podcert.ate.dev:identity:primary-bundle` |
@@ -402,7 +402,7 @@ the ConfigMap.
 
 ```sh
 # 1. Resolve placeholders (envsubst reads ${VAR} from the environment).
-# Values below are the substrate-scion-test example from infra/cluster.md;
+# Values below are the substrate-scion-test example values;
 # substitute your own cluster's values elsewhere.
 export BROKER_NAMESPACE=scion-substrate-broker
 export BROKER_IMAGE=...
@@ -730,8 +730,7 @@ kubectl run netpol-probe --rm -it --restart=Never \
   `kubectl apply` succeeds either way, which is exactly why the
   verification commands above check actual traffic, not just object
   presence. Checking only `datapathProvider` gives a **false negative on a
-  Calico cluster**: `substrate-scion-test` enforces via Calico
-  (`infra/cluster.md`, "NetworkPolicy Enforcement (Calico)"), and Calico
+  Calico cluster**: `substrate-scion-test` enforces via Calico, and Calico
   clusters don't report `datapathProvider=ADVANCED_DATAPATH` — that field
   only reflects Dataplane V2. Reading `datapathProvider` alone and
   concluding enforcement is off would be wrong on exactly the reference
@@ -746,10 +745,9 @@ kubectl run netpol-probe --rm -it --restart=Never \
   both, and not neither. Where available, also confirm
   `addonsConfig.networkPolicyConfig.disabled` is `false` (a cluster can
   have the add-on enabled per the fields above while a subsequent config
-  change disables it). `infra/cluster.md` documents that
-  `substrate-scion-test` enforces via Calico and how it was enabled;
-  capture this specific command's output directly from the cluster to
-  confirm current state.
+  change disables it). `substrate-scion-test` enforces via Calico; capture
+  this specific command's output directly from your own cluster to confirm
+  current state.
 - **Kubelet health-check probes are exempt from NetworkPolicy on GKE, by
   design, on both enforcement backends.** Neither the router's readiness/
   liveness probes (port 9090) nor the worker pod's `readyz` probe (port
