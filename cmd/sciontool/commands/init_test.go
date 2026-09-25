@@ -7,12 +7,17 @@ package commands
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
 // hubEnvVars lists the environment variables used by the Hub client.
@@ -916,6 +921,26 @@ func TestConfigureGitCommand_SkipsCredentialOverrideForNonRootDifferentTarget(t 
 	}
 }
 
+// TestConfigureGitCommand_PropagatesTrustBundleEnv proves the git-clone leg
+// of the egress_trust_bundle env-propagation path: init's git clone needs
+// GIT_SSL_CAINFO to reach the `git` subprocess. configureGitCommand
+// (init.go, ~line 2507) builds cmd.Env as append(os.Environ(),
+// "GIT_TERMINAL_PROMPT=0") — a full copy of the process environment, not an
+// allowlisted subset — so GIT_SSL_CAINFO (and every other CA-bundle var
+// buildActorTemplate sets on the container) reaches the actual `git`
+// subprocess whenever it is present in the parent's env, with no code
+// change needed here to carry it through.
+func TestConfigureGitCommand_PropagatesTrustBundleEnv(t *testing.T) {
+	t.Setenv("GIT_SSL_CAINFO", "/run/ate/trust-bundle.pem")
+
+	cmd := exec.CommandContext(context.Background(), "git", "status")
+	configureGitCommand(cmd, os.Getuid(), os.Getgid())
+
+	if !slices.Contains(cmd.Env, "GIT_SSL_CAINFO=/run/ate/trust-bundle.pem") {
+		t.Errorf("cmd.Env = %v, want it to contain GIT_SSL_CAINFO=/run/ate/trust-bundle.pem", cmd.Env)
+	}
+}
+
 func TestEnsureWorkspaceOwnership_SkipsChownWhenNonRoot(t *testing.T) {
 	chownCalled := false
 	chown := func(string, int, int) error {
@@ -1072,6 +1097,84 @@ func TestParseCapSetUID(t *testing.T) {
 			got := parseCapSetUID(tc.input)
 			if got != tc.want {
 				t.Errorf("parseCapSetUID() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRequirePrivilegeDropOrFail_SubstrateFailsClosed is the fail-closed
+// case: substrate-serve sets RequirePrivilegeDrop, and setupHostUser did
+// not actually drop privileges (targetUID stayed 0 — the only way that
+// happens on substrate, which always starts the actor as UID 0). RunInit
+// must refuse to start the harness rather than run it as root.
+func TestRequirePrivilegeDropOrFail_SubstrateFailsClosed(t *testing.T) {
+	err := requirePrivilegeDropOrFail(0, true)
+	if err == nil {
+		t.Fatal("requirePrivilegeDropOrFail(0, true) = nil, want an error — substrate must never start the harness as root")
+	}
+	if !errors.Is(err, errPrivilegeDropRequired) {
+		t.Errorf("requirePrivilegeDropOrFail(0, true) = %v, want errPrivilegeDropRequired", err)
+	}
+}
+
+// TestRequirePrivilegeDropOrFail_SubstrateSucceedsWhenDropped confirms the
+// gate does not fire when the drop actually happened (targetUID != 0) —
+// the ordinary, successful case once the actor's capability set and
+// SCION_HOST_UID/GID are both in place.
+func TestRequirePrivilegeDropOrFail_SubstrateSucceedsWhenDropped(t *testing.T) {
+	if err := requirePrivilegeDropOrFail(1000, true); err != nil {
+		t.Errorf("requirePrivilegeDropOrFail(1000, true) = %v, want nil", err)
+	}
+}
+
+// TestRequirePrivilegeDropOrFail_NonSubstrateRootlessUnchanged is the
+// non-substrate control: RequirePrivilegeDrop is false (every runtime
+// except substrate-serve — the plain `sciontool init` CLI entrypoint never
+// sets it), so the generic rootless fallback (e.g. rootless Podman,
+// targetUID legitimately staying 0) is completely unaffected by this
+// gate, exactly as before this change.
+func TestRequirePrivilegeDropOrFail_NonSubstrateRootlessUnchanged(t *testing.T) {
+	if err := requirePrivilegeDropOrFail(0, false); err != nil {
+		t.Errorf("requirePrivilegeDropOrFail(0, false) = %v, want nil (non-substrate rootless fallback must be unaffected)", err)
+	}
+}
+
+// TestHarnessSupervisorConfig pins harnessSupervisorConfig's mapping from
+// its inputs to supervisor.Config: every field must come through unchanged,
+// and WorkingDir in particular must be copied from opts.WorkingDir when set
+// and be "" when it is not (the value every caller except substrate-serve's
+// InitRunner passes, and what docker/k8s depend on for byte-identical
+// behaviour).
+func TestHarnessSupervisorConfig(t *testing.T) {
+	const gracePeriod = 7 * time.Second
+	envOverlay := map[string]string{"FOO": "bar"}
+	secretOverrides := map[string]string{"SECRET": "shh"}
+
+	tests := []struct {
+		name string
+		opts InitRunOptions
+		want string // expected WorkingDir
+	}{
+		{name: "WorkingDir set is copied through", opts: InitRunOptions{WorkingDir: "/workspace"}, want: "/workspace"},
+		{name: "WorkingDir unset is empty", opts: InitRunOptions{}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := harnessSupervisorConfig(tt.opts, gracePeriod, 1000, 1000, false, envOverlay, "enabled", secretOverrides)
+			want := supervisor.Config{
+				GracePeriod:           gracePeriod,
+				UID:                   1000,
+				GID:                   1000,
+				Username:              "scion",
+				Rootless:              false,
+				EnvOverlay:            envOverlay,
+				NativeTelemetryPolicy: "enabled",
+				SecretOverrides:       secretOverrides,
+				WorkingDir:            tt.want,
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("harnessSupervisorConfig() = %+v, want %+v", got, want)
 			}
 		})
 	}
