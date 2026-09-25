@@ -80,6 +80,10 @@ The NFS server is reachable only at its internal IP inside the hub's own VPC,
 so any broker configured with `shared_dir_storage: nfs` must run on that same
 VPC network (or one routed to it) to mount the share.
 
+Agents that `deploy.sh`'s hybrid tier runs on GKE reach the hub itself through
+its public IAP URL, not its internal IP; see the runbook's [Hybrid Tier
+section](agent-runbook-single-node-vm.md#hybrid-tier-optional-gke-attach-and-nfs-firewall-rules).
+
 The hub's own shared-dir file browser (project pages in the web UI) uses this
 same setting and the same confined resolver, so `scratchpad` listings work
 whether the project is browsed via a co-located Docker broker or lives only on
