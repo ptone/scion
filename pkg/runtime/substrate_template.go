@@ -74,11 +74,12 @@ const templateReadyPollInterval = 5 * time.Second
 // the nil pointer as "" while buildActorTemplate substitutes a real default
 // would let a change to that default silently reuse the old golden
 // template), the hardcoded snapshot scope, the container's added
-// capabilities, and the entrypoint version — every template-content
-// input listed in substrate-runtime.md §3. All of these are template
-// content, so changing any of them in settings — or in this runtime's own
-// code, for the capability set — must not silently reuse a stale golden
-// template.
+// capabilities, the entrypoint version, and the conditional
+// egress_trust_bundle input (appended only when non-empty) — every
+// template-content input listed in substrate-runtime.md §3. All of these
+// are template content, so changing any of them in settings — or in this
+// runtime's own code, for the capability set — must not silently reuse a
+// stale golden template.
 func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) string {
 	effectiveResources := resources
 	if effectiveResources == nil {

@@ -107,8 +107,8 @@ type SubstrateRuntime struct {
 var (
 	substrateAgentStateMu sync.Mutex
 	// substrateControlTokens maps "<atespace>/<actor>" to the control_token
-	// minted at bootstrap (substrate-runtime.md §4 step 8: "keep it in memory
-	// keyed by <atespace>/<actor>").
+	// minted at bootstrap (substrate-runtime.md §4 step 8: "keep it in
+	// memory, keyed by `<atespace>/<actor>`").
 	substrateControlTokens = make(map[string]string)
 	// substrateAgentRecords maps actor UID to the label/metadata record
 	// synthesised at Run (substrate-runtime.md §4: "keyed by actor

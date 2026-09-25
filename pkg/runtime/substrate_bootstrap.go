@@ -118,10 +118,11 @@ type execResponse struct {
 	Truncated bool   `json:"truncated"`
 }
 
-// defaultFileMode is applied to every bootstrap file. Neither
-// api.FileMapping nor api.ResolvedSecret carries a mode, so a single
-// conservative, owner-only mode is used for all of them — matching the
-// substrate-runtime.md §5.3 example (384 decimal == 0600 octal).
+// defaultFileMode is applied to every auth and file-type-secret bootstrap
+// file. Neither api.FileMapping nor api.ResolvedSecret carries a mode, so a
+// single conservative, owner-only mode is used for those — matching the
+// substrate-runtime.md §5.3 example (384 decimal == 0600 octal). Home files
+// instead keep their source permission bits (§5.4).
 const defaultFileMode = 0o600
 
 // buildBootstrapEnv assembles the full agent env for the bootstrap payload.

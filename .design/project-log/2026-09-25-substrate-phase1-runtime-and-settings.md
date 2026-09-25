@@ -88,7 +88,7 @@ The serve-side half of this work — the path-safety symlink guard, the two stab
 
 ## Error hygiene
 
-Every `Run` error path that could carry request/response content is routed through a redaction helper before it can reach a returned error string, reusing the same redaction-candidate machinery other runtimes use for their own secret sources. This needed extending twice beyond its original scope: once to cover `ResolvedAuth.EnvVars` and both env- and file-type `ResolvedSecrets` (not just the base config env the helper was originally written for), and once more to key redaction candidates by `"<source>:<name>"` rather than bare name, since two different sources can legitimately share a name (e.g. a file-type secret and an env var both called the same credential name) and would otherwise silently collide in the redaction set, dropping coverage for one of them. `ResolvedAuth.Files`' own contents (credential JSON/tokens read from disk) are a redaction candidate too — an earlier version's stated intent to cover "bootstrap file contents" had never actually been wired up.
+Every `Run` error path that could carry request/response content is routed through a redaction helper before it can reach a returned error string, reusing the shared `redactEnvValues` substitution helper, with its own candidate set. This needed extending twice beyond its original scope: once to cover `ResolvedAuth.EnvVars` and both env- and file-type `ResolvedSecrets` (not just the base config env the helper was originally written for), and once more to key redaction candidates by `"<source>:<name>"` rather than bare name, since two different sources can legitimately share a name (e.g. a file-type secret and an env var both called the same credential name) and would otherwise silently collide in the redaction set, dropping coverage for one of them. `ResolvedAuth.Files`' own contents (credential JSON/tokens read from disk) are a redaction candidate too — an earlier version's stated intent to cover "bootstrap file contents" had never actually been wired up.
 
 ## Accuracy pass over the consolidated logs and design doc
 
@@ -98,10 +98,11 @@ corrected several inaccuracies introduced during consolidation: the
 atespace name has no hash in it (it's a sanitized prefix of the project
 ID, not `sha256(projectID)`); the bootstrap write-path description in the
 substrate-serve log had drifted to describe a superseded, less-safe fix
-rather than the atomic mode-before-content write actually shipped; and the egress-hardening
-notes above described a dedicated blocked-CIDR list that doesn't exist —
-`ValidateEgressAllow` rejects every IP/CIDR outright, and the specific
-ranges are regression-test coverage for that single rule. The design doc
-also gained the healthz `init-failed` state and the harness-env terms in
-the bootstrap env-composition formula, both of which the shipped code
-already implements but the doc had not caught up to.
+rather than the atomic mode-before-content write actually shipped; and
+the egress-hardening notes above described a dedicated blocked-CIDR list
+that doesn't exist — `ValidateEgressAllow` rejects every IP/CIDR
+outright, and the specific ranges are regression-test coverage for that
+single rule. The design doc also gained the healthz `init-failed` state
+and the harness-env terms in the bootstrap env-composition formula, both
+of which the shipped code already implements but the doc had not caught
+up to.

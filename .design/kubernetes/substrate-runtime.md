@@ -268,8 +268,8 @@ CIDRs, catch-alls and internal-shaped hostnames outright.
 ```
 
 - `env` = `cfg.Harness.GetEnv()` (when a harness is set) + `GetTelemetryEnv()`
-  when telemetry is enabled (`cfg.TelemetryEnabled` —
-  `substrate_bootstrap.go:146`), since every other runtime includes these and
+  when telemetry is enabled (the `cfg.TelemetryEnabled` gate in
+  `buildBootstrapEnv`), since every other runtime includes these and
   the harness needs the model, task and telemetry env they carry to start at
   all, + `cfg.Env` + `ResolvedAuth.EnvVars` + env-type `ResolvedSecrets`, plus
   `SCION_RUNTIME=substrate` (which is what lets `sciontool` disable
@@ -278,12 +278,15 @@ CIDRs, catch-alls and internal-shaped hostnames outright.
   built-in `scion` user), so `sciontool init`'s privilege-drop path has a
   target UID/GID to drop to — Substrate's workspace is never bind-mounted
   from the broker's own filesystem, so there is no host identity to mirror
-  the way Docker/Podman do (the NFS backend instead uses a fixed,
-  node-independent `1000:1000` of its own — `pkg/runtime/interface.go:71-74`
-  — rather than mirroring host identity).
-- `mode` is decimal (384 decimal == 0600 octal) — the only mode used for
-  every file, since neither `api.FileMapping` nor `api.ResolvedSecret`
-  carries one.
+  the way Docker/Podman do (the NFS backend instead uses a stable,
+  node-independent identity of its own — the operator-configurable
+  `workspace_storage.nfs.uid`/`gid` settings, default `1000:1000`, carried
+  through as the `NFSUID`/`NFSGID` fields on `RunConfig` — rather than
+  mirroring host identity).
+- `mode` is decimal (384 decimal == 0600 octal). Auth files and file-type
+  secrets always get `0600`, since neither `api.FileMapping` nor
+  `api.ResolvedSecret` carries a mode; home files keep their source
+  permission bits (§5.4).
 - `files` — see §5.4 for composition and precedence, §5.5 for path safety.
 - `start_cmd` — the same tmux command string the k8s runtime's `tmuxCmd`
   builds, through one shared helper (not duplicated a third time).
