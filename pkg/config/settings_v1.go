@@ -1028,18 +1028,19 @@ type V1SubstrateConfig struct {
 	APIEndpoint string `json:"api_endpoint,omitempty" yaml:"api_endpoint,omitempty" koanf:"api_endpoint"`
 	// RouterEndpoint is the atenet-router inbound endpoint the broker uses
 	// to reach an actor's control server, e.g.
-	// "atenet-router.ate-system.svc:80".
+	// "http://atenet-router.ate-system.svc:80". Used as a base URL (scheme
+	// required), not a bare host:port.
 	RouterEndpoint string `json:"router_endpoint,omitempty" yaml:"router_endpoint,omitempty" koanf:"router_endpoint"`
 	// TokenAudience is the audience requested for the in-cluster
 	// ServiceAccount TokenRequest used to authenticate to the ateapi
 	// Control API. Defaults to "api.ate-system.svc" when empty.
 	TokenAudience string `json:"token_audience,omitempty" yaml:"token_audience,omitempty" koanf:"token_audience"`
-	// CAFile is a path to a PEM CA bundle used to verify the ateapi/router
-	// server certificate.
+	// CAFile is a path to a PEM CA bundle used to verify the ateapi Control
+	// gRPC server certificate.
 	CAFile string `json:"ca_file,omitempty" yaml:"ca_file,omitempty" koanf:"ca_file"`
 	// ClusterTrustBundle names a Kubernetes ClusterTrustBundle object
-	// holding the CA used to verify the ateapi/router server certificate.
-	// When both this and CAFile are set, the dialer prefers
+	// holding the CA used to verify the ateapi Control gRPC server
+	// certificate. When both this and CAFile are set, the dialer prefers
 	// ClusterTrustBundle.
 	ClusterTrustBundle string `json:"cluster_trust_bundle,omitempty" yaml:"cluster_trust_bundle,omitempty" koanf:"cluster_trust_bundle"`
 	// SandboxClass selects the actor sandbox isolation technology
