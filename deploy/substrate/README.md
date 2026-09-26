@@ -874,13 +874,36 @@ kubectl run netpol-probe --rm -it --restart=Never \
   §4): worker pods are shared across atespaces and users, so an unfiltered
   worker-pod log read would return other tenants' actor output — and any
   worker-level lines naming other atespaces — alongside the caller's own.
-  Operators can still read a specific actor's own output directly:
+  Operators can still read a worker pod's raw output directly and filter for
+  one actor's lines by matching a structured field rather than a substring:
   ```sh
-  kubectl logs -n <worker-namespace> <worker-pod> -c ateom | grep <actor-uid>
+  kubectl logs -n <worker-namespace> <worker-pod> -c ateom \
+    | jq -c 'select(."ate.actor.uid" == "<actor-uid>")'
   ```
-  Filter by the actor's UID, not its name — actor names are reused across a
-  worker's lifetime, so a name-based filter can pick up another actor's
-  lines.
+  (Confirm the actual field name against your cluster's `ateom` log output —
+  Substrate, not this manifest, owns that log schema.) Match on the actor's
+  UID, not its name — actor names are reused across a worker's lifetime, so a
+  name-based filter can pick up another actor's lines. **This filtered result
+  is not trustworthy attribution.** The field lives in the same stream an
+  actor's own output is written to, so a tenant's stdout can forge it —
+  either by spoofing the field itself or by emitting text containing another
+  actor's uid. Treat the filtered output as untrusted and operator-only:
+  read it over before sharing it with anyone, and never treat a match as
+  proof that the named actor produced that line, and never forward raw
+  worker-pod output to an end user.
+
+  **Upgrading a cluster whose currently-applied manifest still grants
+  `pods`/`pods/log`:** `kubectl apply` leaves an object in place when a
+  newer manifest omits it, so the broker ServiceAccount keeps `get` on
+  `pods` and `pods/log` in `${SUBSTRATE_WORKER_NAMESPACE}` until the
+  standing `Role`/`RoleBinding` are deleted explicitly:
+  ```sh
+  kubectl -n "${SUBSTRATE_WORKER_NAMESPACE}" delete rolebinding scion-substrate-broker-pod-logs --ignore-not-found
+  kubectl -n "${SUBSTRATE_WORKER_NAMESPACE}" delete role        scion-substrate-broker-pod-logs --ignore-not-found
+  # Must print "no":
+  kubectl auth can-i get pods --subresource=log -n "${SUBSTRATE_WORKER_NAMESPACE}" \
+    --as="system:serviceaccount:${BROKER_NAMESPACE}:scion-substrate-broker"
+  ```
 
 ## After a broker restart
 
