@@ -83,7 +83,9 @@ func onlyUnscopedListFails(err error) func(*ateapipb.ListActorsRequest) error {
 // end-to-end restart: an agent started through this broker, then a restart
 // (records and tokens wiped, actor still in ateapi). Delete and stop of that
 // agent in its own project must be 409 identity-unknown and touch nothing; a
-// NEW agent started after the restart must still delete normally.
+// NEW agent started after the restart must still delete normally, and a
+// second new agent must still stop normally (stop is delete in Phase 1, so a
+// successful stop here means the underlying actor is gone).
 func TestSubstrateBroker_RealRestart_PreRestartAgentIs409_NewAgentDeletes(t *testing.T) {
 	srv, fc := newTestSubstrateBrokerServer(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
@@ -117,13 +119,24 @@ func TestSubstrateBroker_RealRestart_PreRestartAgentIs409_NewAgentDeletes(t *tes
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("delete of post-restart agent: status=%d body=%s, want 204", w.Code, w.Body.String())
 	}
+
+	runSubstrateAgentForProject(t, srv.manager, "fresh-stop", "projb", gapProjBID, testProjectScionDir(t, "projb"))
+	w = httptest.NewRecorder()
+	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/fresh-stop/stop", nil), "fresh-stop", gapProjBID)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("stop of post-restart agent: status=%d body=%s, want 202", w.Code, w.Body.String())
+	}
+
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	if _, ok := fc.actors[gapAtespaceB+"/projb--fresh"]; ok {
 		t.Error("post-restart agent still present after a successful delete")
 	}
+	if _, ok := fc.actors[gapAtespaceB+"/projb--fresh-stop"]; ok {
+		t.Error("post-restart agent still present after a successful stop")
+	}
 	if _, ok := fc.actors[gapAtespaceB+"/projb--dev"]; !ok {
-		t.Error("pre-restart actor was removed by the delete of a different agent")
+		t.Error("pre-restart actor was removed by acting on a different agent")
 	}
 }
 
@@ -370,25 +383,27 @@ func unscopedListFailsOnlyOnCallN(n int, err error) func(*ateapipb.ListActorsReq
 // correct idempotent case. The exact failure this exists to catch — the
 // fallback list's own error swallowed as "not found" instead of propagated —
 // would pass every side-effect check below and still be a false success.
-//   - a recorded agent's stop makes 3 unscoped List calls (resolving the
-//     manager, the prober-path primary lookup, and — once that lookup
-//     resolves the target — the agent manager's own Stop-time List). Calls
-//     4+ don't exist for this sequence;
+//   - a recorded agent's stop makes 2 unscoped List calls: the prober-path
+//     lookup's own primary call (must not be swallowed), then — once that
+//     lookup resolves the target container ID — the agent manager's own
+//     Stop-time List. That second call's own failure is tolerable: it
+//     resolves a slug to a container ID for runtimes that only support
+//     lookup-by-name, but Stop is already being called with a container ID
+//     here, so its fallback path (pass the ID through unresolved) still
+//     stops the right target. Calls 3+ don't exist for this sequence;
 //   - an absent slug's stop reaches the prober-path lookup's
-//     backward-compatibility FALLBACK list call too (call 4) before falling
+//     backward-compatibility FALLBACK list call too (call 2) before falling
 //     through to the (scoped, so unaffected by this unscoped-only failure
-//     injection) record-less-actor probe. Calls 1-2 (resolving the manager)
-//     tolerate a transient failure without masking anything, since nothing
-//     downstream depends on their result for an already-absent slug; calls
-//     3-4 (the primary and fallback lookups) must not.
+//     injection) record-less-actor probe. Neither call may be swallowed as
+//     "not found".
 func TestSubstrateBroker_StopTransientLookupFailure_ExplicitErrorNot202(t *testing.T) {
 	cases := []struct {
 		name    string
 		slug    string
 		wantErr map[int]bool // call number -> must be an explicit error
 	}{
-		{"recorded agent", "dev", map[int]bool{1: false, 2: true, 3: false}},
-		{"absent slug (reaches the fallback list call)", "gone", map[int]bool{1: false, 2: false, 3: true, 4: true}},
+		{"recorded agent", "dev", map[int]bool{1: true, 2: false}},
+		{"absent slug (reaches the fallback list call)", "gone", map[int]bool{1: true, 2: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

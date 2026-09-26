@@ -120,7 +120,7 @@ func TestProjectScopedTargetErr_AnyListFailureIsCouldNotDetermine(t *testing.T) 
 				}
 				fc.mu.Unlock()
 
-				target, err := srv.projectScopedTargetErr(context.Background(), slug, gapProjBID)
+				target, _, err := srv.projectScopedTargetErr(context.Background(), slug, gapProjBID)
 
 				fc.mu.Lock()
 				defer fc.mu.Unlock()

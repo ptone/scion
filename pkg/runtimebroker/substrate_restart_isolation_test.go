@@ -177,7 +177,7 @@ func TestProjectScopedTargetErr_TwoAuxMatches_SortedFirstDeterministic(t *testin
 		addAuxRuntime(t, srv, "aux-b", matching("c-b"))
 		addAuxRuntime(t, srv, "aux-a", matching("c-a"))
 
-		target, err := srv.projectScopedTargetErr(context.Background(), "dev", gapProjBID)
+		target, _, err := srv.projectScopedTargetErr(context.Background(), "dev", gapProjBID)
 		if err != nil || target != "c-a" {
 			t.Fatalf("iteration %d: projectScopedTargetErr = (%q, %v), want (\"c-a\", nil)", i, target, err)
 		}
