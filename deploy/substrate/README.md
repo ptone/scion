@@ -902,12 +902,17 @@ Three exit paths matter, and all three are covered, not just the main one:
   resolve the target, fails — delete/stop return an explicit 5xx**, never
   the idempotent 404/202 a failed check would otherwise fall back to. An
   unresolved outcome is never treated as a safe one.
-- **Exec and Message** on a pre-restart agent fail with an explicit error
-  naming the missing control token. This is permanent for that specific
-  actor: `sciontool substrate-serve`'s bootstrap endpoint is one-shot
+- **Exec** on a pre-restart agent fails with an explicit error naming the
+  missing control token. This is permanent for that specific actor:
+  `sciontool substrate-serve`'s bootstrap endpoint is one-shot
   (`.design/kubernetes/substrate-runtime.md` §5), so there is no way for a
   new broker process to re-mint or recover the token an old process already
   used.
+- **Message** is different: the hub accepts it and reports it as delivered,
+  but it is never delivered. The broker's deferred delivery fails, and the
+  hub is not told, so the message stays in the dispatched state. This comes
+  from a general scion message-failure reporting gap that is not specific to
+  this runtime; tracked as a follow-up.
 - **New agents are unaffected.** Any agent this broker process itself
   starts (i.e. anything created after the restart) has a fresh in-memory
   record and control token, and its delete/stop/exec/message all work
