@@ -14,8 +14,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
 )
 
 // errScionUserLookupDisabledInTests is what scionUserLookup/lookupUserByID
@@ -160,6 +162,19 @@ func TestMain(m *testing.M) {
 	}
 	startReaper = func() {}
 
+	// Captured before HOME is redirected below: dirfd.EnsureDirNoFollowRootOwned
+	// (used by configureSharedWorkspaceGit's private-tmp-dir chain check)
+	// requires every ancestor of hooks.PrivateRootTmpDir to be owned by root
+	// or by this process itself and never group-/other-writable. Real "/tmp"
+	// — what os.MkdirTemp("", ...) and so tmpHome below resolve under —
+	// fails that on mode alone, since it's deliberately world-writable. The
+	// real, original $HOME (e.g. "/home/scion") is safe for the same reason
+	// production's real "/home/scion" is: owned by the user actually running
+	// this process, not group- or world-writable, and it's real (unlike
+	// tmpHome, it isn't itself something this binary just created purely to
+	// be swept up as a throwaway).
+	realHome, homeErr := os.UserHomeDir()
+
 	resolveRealGoCaches()
 
 	tmpHome, err := os.MkdirTemp("", "sciontool-test-home-*")
@@ -168,6 +183,9 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	sandboxHomeDir = tmpHome
+	if homeErr != nil || realHome == "" {
+		realHome = tmpHome
+	}
 	_ = os.Setenv("HOME", tmpHome)
 	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpHome, ".config"))
 	if err := disableGoTelemetry(filepath.Join(tmpHome, ".config")); err != nil {
@@ -188,10 +206,33 @@ func TestMain(m *testing.M) {
 	// directly.
 	restoreTokenHome := hub.SetTokenHome(tmpHome)
 
+	privateTmpBase, err := os.MkdirTemp(realHome, ".sciontool-test-private-tmp-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "TestMain: failed to create private-tmp-dir sandbox under %s: %v\n", realHome, err)
+		os.Exit(1)
+	}
+	hooks.PrivateRootTmpDir = filepath.Join(privateTmpBase, "run", "scion", "tmp")
+	if err := os.MkdirAll(hooks.PrivateRootTmpDir, hooks.PrivateRootTmpDirMode); err != nil {
+		fmt.Fprintf(os.Stderr, "TestMain: failed to create private-tmp-dir sandbox chain: %v\n", err)
+		os.Exit(1)
+	}
+	// A test that spins up a real substrate.Server (e.g. via
+	// newSubstrateServeServer) exercises pkg/sciontool/substrate's own
+	// ensurePrivateTmpDir, which reads that package's unexported
+	// privateRootTmpDir var — set independently of hooks.PrivateRootTmpDir
+	// above (Go initializes it from that var's zero-value default at
+	// program start, long before this function reassigns it). Point it at
+	// the same throwaway chain via the exported test seam.
+	restorePrivateRootTmpDir := substrate.SetPrivateRootTmpDirForTest(hooks.PrivateRootTmpDir)
+
 	code := m.Run()
 	restoreTokenHome()
+	restorePrivateRootTmpDir()
 	if err := removeSandboxHome(tmpHome); err != nil {
 		fmt.Fprintf(os.Stderr, "TestMain: failed to remove sandbox home %s: %v\n", tmpHome, err)
+	}
+	if err := removeSandboxHome(privateTmpBase); err != nil {
+		fmt.Fprintf(os.Stderr, "TestMain: failed to remove private-tmp-dir sandbox %s: %v\n", privateTmpBase, err)
 	}
 	os.Exit(code)
 }

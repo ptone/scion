@@ -2777,7 +2777,7 @@ func chownTreeRootOwned(root string, uid, gid int, requirePrivilegeDrop bool) (w
 }
 
 // chownTreeRootOwnedPathBased is chownTreeRootOwned's historical
-// implementation, semantically identical to the pre-unit implementation for
+// implementation, semantically identical to the previous implementation for
 // every runtime except substrate — see chownTreeRootOwned's doc comment for
 // why. (Not byte-for-byte verbatim: the old fileOwnerUID/lchownFn
 // indirection is inlined here to info.Sys().(*syscall.Stat_t)/os.Lchown,
@@ -2877,14 +2877,26 @@ const gitconfigMaxBytes = 1 << 20
 //     all treated identically — start from an empty private copy — since
 //     none of those refusals should be able to fail startup.
 //  2. Seed that content into a file inside a fresh os.MkdirTemp directory
-//     (created at mode 0700, unreadable by anything but root, with an
-//     unpredictable name — nothing the workload can race to plant inside
-//     ahead of time) and run the three `git config --file <that private
-//     file>` calls against it, with GIT_CONFIG_NOSYSTEM=1,
-//     GIT_CONFIG_GLOBAL=/dev/null, HOME pointed at the temp directory
-//     (never the real agentHome, so root's own git invocation cannot be
-//     steered by anything the workload's real $HOME contains), a minimal
-//     environment, cwd "/", and a timeout, all as defense in depth.
+//     created under hooks.PrivateRootTmpDir (/run/scion/tmp), never under
+//     the system temp directory or $TMPDIR: on a runtime where root is a
+//     security boundary, that directory can be world-writable with no
+//     sticky bit, which is enough for the workload to rename the entry
+//     MkdirTemp just created out of the way and plant a symlink at the same
+//     name before root ever uses it — the directory's own 0700 mode and
+//     unpredictable name protect what's INSIDE it, not the entry itself,
+//     which is only as safe as its parent. dirfd.EnsureDirNoFollowRootOwned
+//     verifies every component of hooks.PrivateRootTmpDir's chain — not just
+//     that it's not a symlink, but that each one is genuinely owned by root
+//     (or, with no separate root/workload boundary to protect, by this
+//     process itself) and not writable by anything else — and fails closed,
+//     with no fallback to the system temp directory, the instant any of
+//     that doesn't hold. The three `git config --file <that private file>`
+//     calls that follow it run with GIT_CONFIG_NOSYSTEM=1,
+//     GIT_CONFIG_GLOBAL=/dev/null, HOME and TMPDIR both pointed at the temp
+//     directory (never the real agentHome or the ambient TMPDIR, so root's
+//     own git invocation cannot be steered by anything the workload's real
+//     $HOME or environment contains), a minimal environment, cwd "/", and a
+//     timeout, all as defense in depth.
 //  3. Install the private copy via dirfd.WriteFileNoFollow: temp file
 //     created through .gitconfig's own parent dirfd, fchmod/fchown on that
 //     open fd (preserving the previous file's mode when it had one, 0644
@@ -2911,7 +2923,14 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int) {
 		mode = fi.Mode().Perm()
 	}
 
-	tmpDir, err := os.MkdirTemp("", "scion-gitconfig-*")
+	privateRootDir, err := dirfd.EnsureDirNoFollowRootOwned(hooks.PrivateRootTmpDir, hooks.PrivateRootTmpDirMode)
+	if err != nil {
+		log.Error("Refusing private gitconfig workspace parent %s: %v", hooks.PrivateRootTmpDir, err)
+		return
+	}
+	_ = privateRootDir.Close()
+
+	tmpDir, err := os.MkdirTemp(hooks.PrivateRootTmpDir, "gitconfig-*")
 	if err != nil {
 		log.Error("Failed to create private gitconfig workspace: %v", err)
 		return
@@ -2933,6 +2952,7 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int) {
 		cmd.Dir = "/"
 		cmd.Env = []string{
 			"HOME=" + tmpDir,
+			"TMPDIR=" + tmpDir,
 			"GIT_CONFIG_NOSYSTEM=1",
 			"GIT_CONFIG_GLOBAL=/dev/null",
 			"PATH=" + os.Getenv("PATH"),
@@ -3504,7 +3524,7 @@ func cleanGcloudConfigForMetadata(gcloudDir string, requirePrivilegeDrop bool) {
 // regular file, so it passes every check above) would make root's own init
 // process read the whole thing into memory before the harness ever starts —
 // a self-inflicted OOM, not a privilege issue, but cheap to close. The
-// non-enforced branch stays genuinely byte-identical to the pre-unit
+// non-enforced branch stays genuinely byte-identical to the previous
 // os.ReadFile call, unbounded exactly as it always was.
 func readServicesYAML(path string, requirePrivilegeDrop bool) ([]byte, error) {
 	if !requirePrivilegeDrop {
