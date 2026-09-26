@@ -1491,7 +1491,10 @@ hybrid_teardown_delete() {
   local name delete_err stopped=false
   for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
     if [[ "$stopped" == "true" ]]; then
-      err "Not attempted (kept so tcp:2049 stays denied): ${name}"
+      case "$name" in
+        *-hub-deny) err "Not attempted (kept so pod-range traffic to the hub VM stays denied): ${name}" ;;
+        *) err "Not attempted (kept so tcp:2049 stays denied): ${name}" ;;
+      esac
       HYBRID_TEARDOWN_DELETE_FAILED+=("${name}")
       continue
     fi
@@ -1878,10 +1881,12 @@ hybrid_transport_sa_name() {
 # elsewhere for browser access. Fails closed on an API error or an
 # empty value: an unresolved audience would otherwise only surface much
 # later, as an opaque token-minting or IAP-rejection failure on the hub
-# itself. Sets HYBRID_IAP_CLIENT_ID.
+# itself. Also refuses a value that is not in the OAuth client ID form
+# (<number>-<id>.apps.googleusercontent.com). Sets HYBRID_IAP_CLIENT_ID.
 hybrid_discover_iap_client_id() {
   local project_id="$1"
   local settings_json settings_err client_id
+  local client_id_re='^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$'
   settings_err="$(mktemp)"
   if ! settings_json="$(gcloud iap settings get --project="${project_id}" \
       --resource-type=iap_web --format=json 2>"${settings_err}")"; then
@@ -1900,6 +1905,13 @@ print(((d.get('accessSettings') or {}).get('oauthSettings') or {}).get('clientId
     err "Project ${project_id}'s IAP settings have no OAuth client ID configured. IAP must already have an OAuth client (Google-managed or custom) before the hybrid tier's agent transport auth can be set up; see docs/deploy/agent-runbook-single-node-vm.md Section 7."
     exit 1
   fi
+  # The value is written into both settings.yaml writes as a quoted YAML
+  # string, so anything that is not an OAuth client ID shape is refused
+  # rather than written.
+  if ! [[ "$client_id" =~ $client_id_re ]]; then
+    err "Project ${project_id}'s IAP OAuth client ID '${client_id}' is not in the expected <number>-<id>.apps.googleusercontent.com form. Refusing to write it into settings.yaml."
+    exit 1
+  fi
   HYBRID_IAP_CLIENT_ID="$client_id"
 }
 
@@ -1909,10 +1921,11 @@ print(((d.get('accessSettings') or {}).get('oauthSettings') or {}).get('clientId
 # agent transport ID tokens. Service accounts have no labels, so the
 # ownership marker lives in the description, the same convention as
 # every other hybrid-tier resource. Refuses to adopt a same-name SA
-# that lacks the marker. Sets HYBRID_TRANSPORT_SA_EMAIL.
+# that lacks the marker, or one that has user-managed keys (or whose
+# keys cannot be listed). Sets HYBRID_TRANSPORT_SA_EMAIL.
 hybrid_ensure_transport_sa() {
   local hub_name="$1" project_id="$2"
-  local sa_name sa_email marker desc_json existing_desc describe_err
+  local sa_name sa_email marker desc_json existing_desc describe_err keys_err user_keys
   sa_name="$(hybrid_transport_sa_name "$hub_name")"
   sa_email="${sa_name}@${project_id}.iam.gserviceaccount.com"
   marker="scion-deployment=${hub_name}"
@@ -1923,6 +1936,22 @@ hybrid_ensure_transport_sa() {
     existing_desc="$(echo "$desc_json" | "$PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('description') or '')")"
     if [[ "$existing_desc" != "$marker" ]]; then
       err "Service account ${sa_email} already exists without this deployment's marker. Refusing to adopt it for agent transport auth."
+      exit 1
+    fi
+    keys_err="$(mktemp)"
+    if ! user_keys="$(gcloud iam service-accounts keys list \
+        --iam-account="$sa_email" \
+        --project="$project_id" \
+        --managed-by=user \
+        --format='value(name)' 2>"${keys_err}")"; then
+      err "Could not list the user-managed keys of service account ${sa_email}. Refusing to adopt it for agent transport auth:"
+      err "  $(cat "${keys_err}")"
+      rm -f "${keys_err}"
+      exit 1
+    fi
+    rm -f "${keys_err}"
+    if [[ -n "$user_keys" ]]; then
+      err "Service account ${sa_email} has user-managed keys. Refusing to adopt it for agent transport auth: the hub mints its tokens by impersonation, and this account must have no user-managed keys. Delete the keys, or delete the account and re-run to create it fresh."
       exit 1
     fi
     echo "  Reusing existing transport service account: ${sa_email}"
@@ -2079,11 +2108,18 @@ if 'authorized_domains' in d:
 }
 
 # hybrid_user_access_config_present — true if the config file sets
-# either user access key. deploy.sh uses this to warn, with the tier
-# off, that they are not applied.
+# either user access key, whatever its value. deploy.sh uses this to
+# warn, with the tier off, that they are not applied; the values are not
+# validated then, so a wrongly typed value never stops a tier-off deploy.
 hybrid_user_access_config_present() {
-  _hybrid_read_user_access_config
-  [[ "$HYBRID_CFG_USER_ACCESS_MODE_SET" == "true" || "$HYBRID_CFG_AUTHORIZED_DOMAINS_SET" == "true" ]]
+  if [[ -z "${CONFIG_FILE:-}" || ! -f "${CONFIG_FILE:-}" ]]; then
+    return 1
+  fi
+  "$PYTHON" -c "
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+sys.exit(0 if isinstance(d, dict) and ('user_access_mode' in d or 'authorized_domains' in d) else 1)
+" "$CONFIG_FILE" 2>/dev/null
 }
 
 # _hybrid_is_service_account_domain DOMAIN — true if DOMAIN (lowercase)
@@ -2109,6 +2145,7 @@ _hybrid_is_service_account_domain() {
 # Validates the user access settings the tier writes, before anything is
 # created. Refuses:
 #   - an empty ADMIN_EMAIL (nobody could sign in to invite anyone);
+#   - an ADMIN_EMAIL with inner whitespace or a comma;
 #   - an ADMIN_EMAIL that is a service account (ends in
 #     gserviceaccount.com);
 #   - a configured user_access_mode other than invite_only or
@@ -2127,11 +2164,17 @@ hybrid_resolve_user_access() {
   local wildcard_re="^\\*\\.${label_re}(\\.${label_re})*\$"
   _hybrid_read_user_access_config
 
-  if [[ -z "$admin_email" ]]; then
+  # Trimmed and lowercased before the checks below, which matches the
+  # hub's email normalisation.
+  admin_lower="$(printf '%s' "$admin_email" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "$admin_lower" ]]; then
     err "The hybrid tier configures restricted user access (invite-only by default), which needs admin_email set to the account that signs in first and invites other users."
     exit 1
   fi
-  admin_lower="$(printf '%s' "$admin_email" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$admin_lower" == *[[:space:],]* ]]; then
+    err "admin_email '${admin_email}' must be a single email address, with no spaces or commas."
+    exit 1
+  fi
   if [[ "$admin_lower" == *gserviceaccount.com ]]; then
     err "admin_email '${admin_email}' is a service account. With the hybrid tier on, admin_email must be a user account that can sign in to the web UI."
     exit 1

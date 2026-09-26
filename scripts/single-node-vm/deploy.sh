@@ -423,6 +423,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Cloud NAT:         ${NAT_NAME} (router: ${ROUTER_NAME})"
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
+  echo "  Service account:   $(hybrid_transport_sa_name "${HUB_NAME}")@${PROJECT_ID}.iam.gserviceaccount.com (hybrid tier agent transport; if present and marked)"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
   for name in ${HYBRID_TEARDOWN_DELETE[@]+"${HYBRID_TEARDOWN_DELETE[@]}"}; do
     echo "  Firewall rule:     ${name} (hybrid tier)"
@@ -607,11 +608,14 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     fi
     rm -f "${SA_DELETE_ERR}"
 
-    # The transport SA is checked and deleted unconditionally, the same
-    # as the firewall-rule and internal-IP ownership checks above: the
-    # current config may have the tier off while it was on for a
-    # previous deploy of this same hub, and this is the only way
-    # teardown can find out. Never touches an unmarked same-name SA.
+    # The transport SA is checked and deleted unconditionally, whether
+    # the tier is on or off in the current config: it may have been on
+    # for a previous deploy of this same hub, and this is the only way
+    # teardown can find out. Unlike the firewall-rule and internal-IP
+    # ownership checks, which run before anything is deleted, its
+    # ownership is checked here, after the base resources above are
+    # deleted. An unmarked or unreadable same-name SA is never touched;
+    # it is reported as kept and makes --delete exit non-zero.
     info "Deleting agent transport service account (if present)..."
     PROXY_SERVICE_GONE=false
     if [[ "$PROXY_SERVICE_DELETED" == "true" || "${PROXY_SERVICE_NOT_FOUND:-false}" == "true" ]]; then
