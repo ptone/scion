@@ -2666,8 +2666,11 @@ func chownTreeRootOwned(root string, uid, gid int, requirePrivilegeDrop bool) (w
 }
 
 // chownTreeRootOwnedPathBased is chownTreeRootOwned's historical
-// implementation, kept verbatim for every runtime except substrate — see
-// chownTreeRootOwned's doc comment for why. filepath.WalkDir does not
+// implementation, semantically identical to the pre-unit implementation for
+// every runtime except substrate — see chownTreeRootOwned's doc comment for
+// why. (Not byte-for-byte verbatim: the old fileOwnerUID/lchownFn
+// indirection is inlined here to info.Sys().(*syscall.Stat_t)/os.Lchown,
+// with no behavioural difference.) filepath.WalkDir does not
 // follow a symlinked leaf, and os.Lchown does not follow the leaf either,
 // but both re-resolve every path component above the leaf on every call, so
 // this is not used where requirePrivilegeDrop is true.
