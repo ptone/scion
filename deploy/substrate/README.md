@@ -870,28 +870,27 @@ kubectl run netpol-probe --rm -it --restart=Never \
   §4): worker pods are shared across atespaces and users, so an unfiltered
   worker-pod log read would return other tenants' actor output — and any
   worker-level lines naming other atespaces — alongside the caller's own.
-  Operators can still read a worker pod's raw output directly and filter for
-  one actor's lines by matching a structured field rather than a substring.
-  Not every line is JSON, and the actor fields are nested under a labels
-  object, so a plain `jq` filter aborts on the first non-JSON line:
+  Operators who already hold `get` on `pods/log` in the worker namespace can
+  read a worker pod's full raw output directly, which already contains
+  every tenant's lines; the command below only narrows that same access to
+  one actor's structured lines, as an operator convenience for triage, and
+  is not per-tenant filtering or a security boundary. The actor label is
+  unverified — `ate.actor.uid` sits in the same stream an actor's own
+  stdout is written to, and nothing checks who set it — so a workload can
+  print a JSON line whose `logging.googleapis.com/labels` object names
+  another actor's uid, and this structured match selects it just as it
+  would a genuine line; a plain mention of the uid in unstructured text
+  does not match, because the filter matches only the nested labels field,
+  not free text. Any line that is not a JSON object, including the target
+  actor's own non-JSON output, is dropped and never appears in the result,
+  so treat a match only as a triage hint and never as proof of authorship.
+  Match on the actor's UID rather than its name, since names are reused
+  across a worker's lifetime, and keep the output operator-only: never
+  share it, filtered or raw, with a tenant or any end user.
   ```sh
   kubectl logs -n <worker-namespace> <worker-pod> -c ateom \
-    | jq -Rc 'fromjson? | select(.["logging.googleapis.com/labels"]["ate.actor.uid"] == "<actor-uid>")'
+    | jq -Rc 'fromjson? | objects | select(.["logging.googleapis.com/labels"]?["ate.actor.uid"]? == "<actor-uid>")'
   ```
-  `fromjson?` skips a line it cannot parse instead of aborting; non-JSON
-  lines are dropped by this filter and carry no attribution at all, so they
-  are simply absent from the result rather than included unfiltered. This
-  field shape is emitted by Substrate's `ateom` and may change between
-  Substrate versions. Match on the actor's UID, not its name — actor names
-  are reused across a worker's lifetime, so a name-based filter can pick up
-  another actor's lines. **This filtered result
-  is not trustworthy attribution.** The field lives in the same stream an
-  actor's own output is written to, so a tenant's stdout can forge it —
-  either by spoofing the field itself or by emitting text containing another
-  actor's uid. Treat the filtered output as untrusted and operator-only:
-  read it over before sharing it with anyone, and never treat a match as
-  proof that the named actor produced that line, and never forward raw
-  worker-pod output to an end user.
 
   **Upgrading a cluster whose currently-applied manifest still grants
   `pods`/`pods/log`:** `kubectl apply` leaves an object in place when a
@@ -901,9 +900,18 @@ kubectl run netpol-probe --rm -it --restart=Never \
   ```sh
   kubectl -n "${SUBSTRATE_WORKER_NAMESPACE}" delete rolebinding scion-substrate-broker-pod-logs --ignore-not-found
   kubectl -n "${SUBSTRATE_WORKER_NAMESPACE}" delete role        scion-substrate-broker-pod-logs --ignore-not-found
-  # Must print "no":
+  # Both must print "no":
   kubectl auth can-i get pods --subresource=log -n "${SUBSTRATE_WORKER_NAMESPACE}" \
     --as="system:serviceaccount:${BROKER_NAMESPACE}:scion-substrate-broker"
+  kubectl auth can-i get pods -n "${SUBSTRATE_WORKER_NAMESPACE}" \
+    --as="system:serviceaccount:${BROKER_NAMESPACE}:scion-substrate-broker"
+  ```
+  To confirm no other binding grants the broker's ServiceAccount access
+  outside these two namespaces:
+  ```sh
+  kubectl get rolebindings,clusterrolebindings -A -o json | jq -r --arg ns "${BROKER_NAMESPACE}" \
+    '.items[] | select(any(.subjects[]?; .kind=="ServiceAccount" and .name=="scion-substrate-broker" and .namespace==$ns)) | "\(.kind) \(.metadata.namespace // "-")/\(.metadata.name)"'
+  # Expected: only scion-substrate-broker-tokenrequest and scion-substrate-broker-ctb-reader.
   ```
 
 ## After a broker restart
