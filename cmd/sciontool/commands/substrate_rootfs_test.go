@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // TestCanSearchDir_OwnerFirst pins the kernel's own permission-check order
@@ -99,18 +101,20 @@ func TestFixupRootfsForScion_LeavesAlreadyWideRootAlone(t *testing.T) {
 // uid/gid via chownTreeRootOwned, and a second pass — once a real chown(2)
 // has actually taken effect — makes no further changes.
 //
-// This drives chownTreeRootOwned's own injectable fileOwnerUID/lchownFn
+// This drives chownTreeRootOwned's own injectable chownTreeRootOwnedFilter
 // (init.go) rather than real root-owned files, since this test process has
-// neither. fileOwnerUID's fake reports every entry as root-owned (uid 0)
-// until simulateFixed flips — standing in for what a real chown(2) would
-// leave behind on disk, since chownTreeRootOwned itself only receives an
-// fs.FileInfo per entry, not a mutable path-keyed store, and a real chown
-// isn't available to this test.
+// neither — but the actual chown(2) chownTreeRootOwned (via
+// dirfd.ChownTreeNoFollow) issues runs for real, to uid/gid = the test's own
+// uid/gid (always permitted, and still bumps ctime — see
+// TestWriteEnvFile_DirChownSurvivesSwapAfterWrite for the same technique).
+// The filter fakes "every entry looks root-owned" until simulateFixed flips,
+// standing in for what a real chown(2) would leave behind on disk once the
+// first pass has actually run.
 //
 // This is also the "remove the idempotency guard" mutation check for
-// chownTreeRootOwned's own ownerUID != 0 skip: if that guard were deleted,
-// the second pass below would still call lchownFn on every entry (since the
-// fake's return value no longer gates anything), and the "no calls on the
+// chownTreeRootOwned's own filter-driven skip: if that guard were deleted
+// (the filter's return value stopped gating anything), the second pass
+// below would still chown every entry, and the "no ctime change on the
 // second pass" assertion would fail.
 func TestFixupRootfsForScion_ChownsRootOwnedHomeEntriesThenIsIdempotent(t *testing.T) {
 	home := t.TempDir()
@@ -131,33 +135,48 @@ func TestFixupRootfsForScion_ChownsRootOwnedHomeEntriesThenIsIdempotent(t *testi
 		t.Fatal(err)
 	}
 
-	origOwner, origChown := fileOwnerUID, lchownFn
-	t.Cleanup(func() { fileOwnerUID, lchownFn = origOwner, origChown })
+	origFilter := chownTreeRootOwnedFilter
+	t.Cleanup(func() { chownTreeRootOwnedFilter = origFilter })
 
 	var simulateFixed bool
-	var chownCalls []string
-	fileOwnerUID = func(fs.FileInfo) (uint32, bool) {
-		if simulateFixed {
-			return 1000, true
-		}
-		return 0, true
-	}
-	lchownFn = func(path string, uid, gid int) error {
-		chownCalls = append(chownCalls, path)
-		return nil
-	}
+	chownTreeRootOwnedFilter = func(uint32) bool { return !simulateFixed }
 
-	fixupRootfsForScion(root, home, 1000, 1000)
-	if len(chownCalls) == 0 {
-		t.Fatal("first call: expected root-owned home entries to be chowned, got none")
+	uid, gid := os.Getuid(), os.Getgid()
+	aCtimeBefore := ctimeOfFile(t, filepath.Join(home, "a"))
+	// A brief settle so the ctime bump below is measurably distinct even on
+	// filesystems/clock sources with coarse timestamp resolution.
+	time.Sleep(15 * time.Millisecond)
+
+	fixupRootfsForScion(root, home, uid, gid)
+	aCtimeAfterFirst := ctimeOfFile(t, filepath.Join(home, "a"))
+	if aCtimeAfterFirst == aCtimeBefore {
+		t.Fatal("first call: expected root-owned home entries to be chowned, ctime did not advance")
 	}
 
 	simulateFixed = true
-	chownCalls = nil
-	fixupRootfsForScion(root, home, 1000, 1000)
-	if len(chownCalls) != 0 {
-		t.Errorf("second call: got %d chown calls, want 0 — a real chown(2) would already have fixed ownership by now", len(chownCalls))
+	time.Sleep(15 * time.Millisecond)
+	fixupRootfsForScion(root, home, uid, gid)
+	aCtimeAfterSecond := ctimeOfFile(t, filepath.Join(home, "a"))
+	if aCtimeAfterSecond != aCtimeAfterFirst {
+		t.Error("second call: ctime advanced again — a real chown(2) would already have fixed ownership by now")
 	}
+}
+
+// ctimeOfFile returns path's change time — chown(2) always bumps it, even
+// when it sets the same uid/gid a file already has, so "ctime advanced" is a
+// reliable proxy for "chown actually ran against this path" without needing
+// real root.
+func ctimeOfFile(t *testing.T, path string) syscall.Timespec {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat %s: %v", path, err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("no *syscall.Stat_t for %s", path)
+	}
+	return st.Ctim
 }
 
 // TestFixupWorldWritableTmpDirSticky_SetsStickyOnWorldWritable proves
@@ -362,9 +381,10 @@ func TestFixupRootfsForScion_FixesTmpAndVarTmpStickyBit(t *testing.T) {
 
 // TestFixupRootfsForScion_NoopWhenAlreadyCorrect proves the doc comment's
 // "idempotent: when neither condition needs fixing, this makes no changes"
-// claim end to end, using the real (non-faked) fileOwnerUID and lchownFn: a
-// t.TempDir()'s entries are owned by the test's own uid, not root, so
-// nothing here should be touched at all. Combined with
+// claim end to end, using the real (non-faked) chownTreeRootOwnedFilter
+// (isRootOwned) and dirfd.ChownTreeNoFollow: a t.TempDir()'s entries are
+// owned by the test's own uid, not root, so nothing here should be touched
+// at all. Combined with
 // TestFixupRootfsForScion_ChownsRootOwnedHomeEntriesThenIsIdempotent above
 // (which proves the info-on-change log line stays silent by inspection:
 // fixupRootfsForScion's only log.Info call is gated on
@@ -382,7 +402,7 @@ func TestFixupRootfsForScion_NoopWhenAlreadyCorrect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	beforeUID, ok := fileOwnerUID(statFile(t, filepath.Join(home, "a")))
+	beforeUID, ok := ownerUIDOf(statFile(t, filepath.Join(home, "a")))
 	if !ok {
 		t.Fatal("could not read the test file's owning uid")
 	}
@@ -396,7 +416,7 @@ func TestFixupRootfsForScion_NoopWhenAlreadyCorrect(t *testing.T) {
 	if got := rootInfo.Mode().Perm(); got != 0o755 {
 		t.Errorf("root mode = %o, want unchanged 0755", got)
 	}
-	afterUID, ok := fileOwnerUID(statFile(t, filepath.Join(home, "a")))
+	afterUID, ok := ownerUIDOf(statFile(t, filepath.Join(home, "a")))
 	if !ok {
 		t.Fatal("could not read the test file's owning uid")
 	}
@@ -412,4 +432,16 @@ func statFile(t *testing.T, path string) fs.FileInfo {
 		t.Fatal(err)
 	}
 	return info
+}
+
+// ownerUIDOf reads a file's owning uid from its already-stat'd fs.FileInfo —
+// a small test-local replacement for the old fileOwnerUID package var (now
+// removed; chownTreeRootOwned's real implementation reads ownership via its
+// own fd-relative fstatat, not this path).
+func ownerUIDOf(info fs.FileInfo) (uid uint32, ok bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return stat.Uid, true
 }
