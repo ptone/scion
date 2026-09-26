@@ -871,6 +871,9 @@ func TestLookupAgent_AuxiliaryLoopStopsAfterFirstMatch(t *testing.T) {
 // record but no container id" classification directly: LookupContainerID
 // must satisfy errors.Is(err, ErrAgentNotFound) so restartAgent/stopAgent
 // fold it into the idempotent not-found path (skip stop, proceed to start).
+// It also checks the error message identifies the no-container-ID branch,
+// since the generic agent-not-found path also satisfies errors.Is(err,
+// ErrAgentNotFound) and would otherwise let a plain no-match pass.
 func TestLookupContainerID_NoContainerIDIsErrAgentNotFound(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
