@@ -12,11 +12,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
@@ -438,12 +438,23 @@ func indexByte(s string, c byte) int {
 	return -1
 }
 
-// chownRecursive changes ownership of a directory and all its contents.
+// chownRecursive changes ownership of a directory and all its contents to
+// uid:gid, unconditionally (every entry, not just root-owned ones — the
+// home directory this is called on belongs entirely to the workload user
+// both before and after the drop, so there is no "leave root-owned entries
+// alone" distinction to make here, unlike chownTreeRootOwned).
+//
+// It walks via dirfd.ChownTreeNoFollow: every subdirectory is opened
+// relative to its own already-open parent directory fd
+// (openat(O_DIRECTORY|O_NOFOLLOW)), and every chown is
+// fchownat(dirFd, name, uid, gid, AT_SYMLINK_NOFOLLOW) issued against that
+// fd — never a full-path os.Lchown, which re-resolves every intermediate
+// path component on every call and can be redirected by a symlink a
+// scion-uid process (a sidecar service, or a process a pre-start hook
+// spawned) swaps into one of them between this walk visiting that
+// component and the Lchown call for something beneath it. sup.Run calls
+// this while such processes may already be alive, so that window is real.
 func chownRecursive(root string, uid, gid int) error {
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		return os.Lchown(path, uid, gid)
-	})
+	_, _, err := dirfd.ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true })
+	return err
 }
