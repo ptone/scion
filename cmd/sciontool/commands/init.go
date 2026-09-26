@@ -498,6 +498,7 @@ func harnessSupervisorConfig(opts InitRunOptions, gracePeriod time.Duration, tar
 		NativeTelemetryPolicy: nativeTelemetryPolicy,
 		SecretOverrides:       secretOverrides,
 		WorkingDir:            opts.WorkingDir,
+		RequirePrivilegeDrop:  opts.RequirePrivilegeDrop,
 	}
 }
 
@@ -810,7 +811,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// may write files owned by root:root into the bind-mounted workspace
 	// or the agent home directory. The non-root broker cannot delete
 	// root-owned files later, so we chown them now.
-	runPostPreStartOwnershipFixup(targetUID, targetGID, agentHome)
+	runPostPreStartOwnershipFixup(targetUID, targetGID, agentHome, opts.RequirePrivilegeDrop)
 
 	// Resolve the harness working directory now — after runGitCloneWorkspace
 	// and the post-pre-start-hook ownership fixup above have both run, and
@@ -909,7 +910,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Info("Starting %d sidecar service(s)...", len(specs))
 			svcManager = services.New(gracePeriod)
 			svcCtx := context.Background()
-			if err := runServicesStart(svcCtx, svcManager, specs, targetUID, targetGID, "scion"); err != nil {
+			if err := runServicesStart(svcCtx, svcManager, specs, targetUID, targetGID, "scion", opts.RequirePrivilegeDrop); err != nil {
 				log.Error("Failed to start services: %v", err)
 				// Continue — service failure shouldn't block harness
 			}
@@ -1924,7 +1925,7 @@ var runPostPreStartOwnershipFixup = postPreStartOwnershipFixup
 
 // postPreStartOwnershipFixup chowns root-owned files that pre-start hooks
 // (which run before the privilege drop) left in the workspace or agent home.
-func postPreStartOwnershipFixup(targetUID, targetGID int, agentHome string) {
+func postPreStartOwnershipFixup(targetUID, targetGID int, agentHome string, requirePrivilegeDrop bool) {
 	if targetUID == 0 || os.Geteuid() != 0 {
 		return
 	}
@@ -1936,7 +1937,7 @@ func postPreStartOwnershipFixup(targetUID, targetGID int, agentHome string) {
 		if dir == "" {
 			continue
 		}
-		if _, _, err := chownTreeRootOwned(dir, targetUID, targetGID); err != nil {
+		if _, _, err := chownTreeRootOwned(dir, targetUID, targetGID, requirePrivilegeDrop); err != nil {
 			log.Error("Failed to chown %s after pre-start hooks: %v", dir, err)
 		}
 	}
@@ -1948,8 +1949,8 @@ func postPreStartOwnershipFixup(targetUID, targetGID int, agentHome string) {
 // the resolver runs before sidecar services start, without a test having to
 // spawn a real sidecar process. Production code always leaves this at its
 // default; only a test replaces it.
-var runServicesStart = func(ctx context.Context, m *services.Manager, specs []api.ServiceSpec, uid, gid int, username string) error {
-	return m.Start(ctx, specs, uid, gid, username)
+var runServicesStart = func(ctx context.Context, m *services.Manager, specs []api.ServiceSpec, uid, gid int, username string, requirePrivilegeDrop bool) error {
+	return m.Start(ctx, specs, uid, gid, username, requirePrivilegeDrop)
 }
 
 // runMetadataServerStart is (*metadata.Server).Start's call site as a
@@ -2641,23 +2642,77 @@ var chownTreeRootOwnedFilter = isRootOwned
 // substrate specifically — by fixupRootfsForScion. Returns the number of
 // entries the walk visited in total (so a no-op call's own cost is still
 // measurable — see fixupRootfsForScion's unconditional log.Debug) and the
-// number actually rechowned.
+// number actually rechowned. A missing root (e.g. no /workspace) is a
+// silent no-op — nil, 0, 0 — on both branches below, exactly like the
+// historical filepath.WalkDir behaviour (WalkDir passes the root's own
+// lstat error to the callback, which returns nil).
 //
-// Both call sites run as root while a scion-uid process may already be
-// alive (pre-start hooks themselves run dropped to scion before this runs at
-// :760, and fixupRootfsForScion's own callers are documented pre-scion but
-// share this helper with the one that isn't) — so this delegates to
-// dirfd.ChownTreeNoFollow, the same openat(O_NOFOLLOW) fd-relative walk
-// supervisor.chownRecursive uses, rather than a full-path filepath.WalkDir +
-// os.Lchown(path): a full-path Lchown re-resolves every intermediate
-// component on every call, so a scion-uid process that swaps a real
-// intermediate directory the walk already entered for a symlink mid-walk
-// can redirect a later Lchown call outside the tree. The fd-relative walk
-// holds each directory open by fd for as long as it is being walked, so a
-// symlink swapped into its name in its parent afterward cannot redirect
-// anything already in flight beneath it.
-func chownTreeRootOwned(root string, uid, gid int) (walked, changed int, err error) {
-	return dirfd.ChownTreeNoFollow(root, uid, gid, chownTreeRootOwnedFilter)
+// requirePrivilegeDrop is the caller's own opts.RequirePrivilegeDrop (true
+// only for substrate). The call from postPreStartOwnershipFixup runs on
+// every runtime whenever the calling process is root, not just substrate,
+// while sidecar services/pre-start-spawned processes may already be alive —
+// but only substrate has an actual, less-privileged workload user on the
+// other side of that boundary to defend against, and only substrate has an
+// ancestor-path symlink threat model where a workload process can plant one
+// (see dirfd.OpenParentNoFollow's doc comment). A legitimate non-substrate
+// setup can symlink an ancestor of $HOME or /workspace (e.g. from a
+// bind-mounted host path), and refusing that would break it. So:
+//   - requirePrivilegeDrop == false: the historical filepath.WalkDir +
+//     os.Lchown(path) walk, unconditionally chowning the root filter admits
+//     — this is byte-identical to the pre-existing behaviour, ancestor
+//     symlinks and all.
+//   - requirePrivilegeDrop == true: dirfd.ChownTreeNoFollow, the same
+//     openat(O_NOFOLLOW) fd-relative walk supervisor.chownRecursive uses,
+//     with its hard-link guard enabled — never a full-path os.Lchown, which
+//     re-resolves every intermediate component on every call and can be
+//     redirected by a symlink a scion-uid process swaps into one of them
+//     mid-walk.
+func chownTreeRootOwned(root string, uid, gid int, requirePrivilegeDrop bool) (walked, changed int, err error) {
+	if !requirePrivilegeDrop {
+		return chownTreeRootOwnedPathBased(root, uid, gid)
+	}
+	walked, changed, err = dirfd.ChownTreeNoFollow(root, uid, gid, chownTreeRootOwnedFilter, true, func(name string, cerr error) {
+		if errors.Is(cerr, dirfd.ErrHardlinkedRegularFile) {
+			log.Info("chownTreeRootOwned: WARN: skipping %s: %v", name, cerr)
+			return
+		}
+		log.Error("chownTreeRootOwned: failed to chown %s: %v", name, cerr)
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, 0, nil
+	}
+	return walked, changed, err
+}
+
+// chownTreeRootOwnedPathBased is chownTreeRootOwned's historical
+// implementation, kept verbatim for every runtime except substrate — see
+// chownTreeRootOwned's doc comment for why. filepath.WalkDir does not
+// follow a symlinked leaf, and os.Lchown does not follow the leaf either,
+// but both re-resolve every path component above the leaf on every call, so
+// this is not used where requirePrivilegeDrop is true.
+func chownTreeRootOwnedPathBased(root string, uid, gid int) (walked, changed int, err error) {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			// Skip permission errors on walk (e.g., lost+found).
+			return nil
+		}
+		walked++
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !chownTreeRootOwnedFilter(stat.Uid) {
+			return nil
+		}
+		if chErr := os.Lchown(path, uid, gid); chErr != nil {
+			log.Error("chownTreeRootOwned: failed to chown %s: %v", path, chErr)
+			return nil
+		}
+		changed++
+		return nil
+	})
+	return walked, changed, err
 }
 
 func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, chown func(string, int, int) error) {
@@ -3200,7 +3255,9 @@ func cleanGcloudConfigForMetadata(gcloudDir string, requirePrivilegeDrop bool) {
 	}
 	defer func() { _ = dir.Close() }()
 
-	if _, err := dirfd.RemoveContentsNoFollow(dir, func(name string) bool { return name == gcloudConfigKeepFile }); err != nil {
+	if _, err := dirfd.RemoveContentsNoFollow(dir, func(name string) bool { return name == gcloudConfigKeepFile }, func(name string, rerr error) {
+		log.Debug("Could not remove gcloud config entry %s: %v", name, rerr)
+	}); err != nil {
 		log.Debug("Could not clean gcloud config dir %s: %v", gcloudDir, err)
 	}
 }

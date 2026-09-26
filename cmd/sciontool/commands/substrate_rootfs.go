@@ -75,7 +75,11 @@ func fixupRootfsForScion(root, home string, uid, gid int) {
 	tmpChanged := fixupWorldWritableTmpDirSticky(filepath.Join(root, "tmp"))
 	varTmpChanged := fixupWorldWritableTmpDirSticky(filepath.Join(root, "var", "tmp"))
 
-	homeWalked, homeChanged, err := chownTreeRootOwned(home, uid, gid)
+	// fixupRootfsForScion is substrate-only (see substrate_serve.go's call
+	// site), so this always exercises chownTreeRootOwned's hardened,
+	// no-follow branch — there is no non-substrate caller of this function
+	// for whom byte-identical historical behaviour would need preserving.
+	homeWalked, homeChanged, err := chownTreeRootOwned(home, uid, gid, true)
 	if err != nil {
 		log.Error("fixupRootfsForScion: failed to walk %s: %v", home, err)
 	}

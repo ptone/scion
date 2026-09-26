@@ -543,7 +543,7 @@ func TestChownRecursive_ChownsUnconditionallyAndSurvivesSymlink(t *testing.T) {
 	time.Sleep(15 * time.Millisecond)
 
 	uid, gid := os.Getuid(), os.Getgid()
-	if err := chownRecursive(root, uid, gid); err != nil {
+	if err := chownRecursive(root, uid, gid, false); err != nil {
 		t.Fatalf("chownRecursive: %v", err)
 	}
 
@@ -552,6 +552,54 @@ func TestChownRecursive_ChownsUnconditionallyAndSurvivesSymlink(t *testing.T) {
 	}
 	if lstatCtime(t, victimFile) != victimBefore {
 		t.Error("victim file behind the symlink was chowned — the symlink was followed")
+	}
+}
+
+// TestChownRecursive_Enforced_SkipsHardlinkedRegularFile proves the
+// hard-link guard is enabled when requirePrivilegeDrop is true: a regular
+// file with more than one hard link is left unchowned.
+func TestChownRecursive_Enforced_SkipsHardlinkedRegularFile(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, filepath.Join(root, "hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	before := lstatCtime(t, target)
+	time.Sleep(15 * time.Millisecond)
+
+	uid, gid := os.Getuid(), os.Getgid()
+	if err := chownRecursive(root, uid, gid, true); err != nil {
+		t.Fatalf("chownRecursive: %v", err)
+	}
+	if lstatCtime(t, target) != before {
+		t.Error("hard-linked file was chowned despite requirePrivilegeDrop=true")
+	}
+}
+
+// TestChownRecursive_NonEnforced_ChownsHardlinkedRegularFile proves the
+// gating's other half: the hard-link guard is disabled (historical
+// behaviour) when requirePrivilegeDrop is false.
+func TestChownRecursive_NonEnforced_ChownsHardlinkedRegularFile(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, filepath.Join(root, "hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	before := lstatCtime(t, target)
+	time.Sleep(15 * time.Millisecond)
+
+	uid, gid := os.Getuid(), os.Getgid()
+	if err := chownRecursive(root, uid, gid, false); err != nil {
+		t.Fatalf("chownRecursive: %v", err)
+	}
+	if lstatCtime(t, target) == before {
+		t.Error("expected the hard-linked file to be chowned when requirePrivilegeDrop is false")
 	}
 }
 

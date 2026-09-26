@@ -52,7 +52,7 @@ func withRunGitCloneWorkspace(t *testing.T, f func(uid, gid int, agentHome strin
 
 // withRunPostPreStartOwnershipFixup temporarily overrides the
 // runPostPreStartOwnershipFixup package var.
-func withRunPostPreStartOwnershipFixup(t *testing.T, f func(uid, gid int, agentHome string)) {
+func withRunPostPreStartOwnershipFixup(t *testing.T, f func(uid, gid int, agentHome string, requirePrivilegeDrop bool)) {
 	t.Helper()
 	orig := runPostPreStartOwnershipFixup
 	runPostPreStartOwnershipFixup = f
@@ -61,7 +61,7 @@ func withRunPostPreStartOwnershipFixup(t *testing.T, f func(uid, gid int, agentH
 
 // withRunServicesStart temporarily overrides the runServicesStart package
 // var.
-func withRunServicesStart(t *testing.T, f func(ctx context.Context, m *services.Manager, specs []api.ServiceSpec, uid, gid int, username string) error) {
+func withRunServicesStart(t *testing.T, f func(ctx context.Context, m *services.Manager, specs []api.ServiceSpec, uid, gid int, username string, requirePrivilegeDrop bool) error) {
 	t.Helper()
 	orig := runServicesStart
 	runServicesStart = f
@@ -238,10 +238,10 @@ func TestRunInit_ResolveWorkingDir_CalledAfterCloneAndOverridesWorkingDir(t *tes
 		order = append(order, "clone")
 		return nil
 	})
-	withRunPostPreStartOwnershipFixup(t, func(uid, gid int, home string) {
+	withRunPostPreStartOwnershipFixup(t, func(uid, gid int, home string, requirePrivilegeDrop bool) {
 		order = append(order, "fixup")
 	})
-	withRunServicesStart(t, func(_ context.Context, _ *services.Manager, _ []api.ServiceSpec, _, _ int, _ string) error {
+	withRunServicesStart(t, func(_ context.Context, _ *services.Manager, _ []api.ServiceSpec, _, _ int, _ string, _ bool) error {
 		order = append(order, "sidecars")
 		return nil
 	})
@@ -397,7 +397,7 @@ func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
 	withRunGitCloneWorkspace(t, func(uid, gid int, home string) error { return nil })
 
 	var sidecarsRan, metadataRan, secretsRan bool
-	withRunServicesStart(t, func(context.Context, *services.Manager, []api.ServiceSpec, int, int, string) error {
+	withRunServicesStart(t, func(context.Context, *services.Manager, []api.ServiceSpec, int, int, string, bool) error {
 		sidecarsRan = true
 		return nil
 	})
