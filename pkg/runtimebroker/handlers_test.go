@@ -2368,7 +2368,7 @@ func TestResolveManagerForOpts_NoProfile(t *testing.T) {
 	srv, _ := newTestServerWithProvisionCapture()
 
 	opts := api.StartOptions{Name: "test-agent"}
-	mgr := srv.resolveManagerForOpts(opts)
+	mgr, _ := srv.resolveManagerForOpts(opts)
 
 	// With no profile, should return the default manager
 	if mgr != srv.manager {
@@ -2383,7 +2383,7 @@ func TestResolveManagerForOpts_ProfileNotInSettings(t *testing.T) {
 		Name:    "test-agent",
 		Profile: "nonexistent-profile",
 	}
-	mgr := srv.resolveManagerForOpts(opts)
+	mgr, _ := srv.resolveManagerForOpts(opts)
 
 	// Profile not found in settings should return the default manager
 	if mgr != srv.manager {
@@ -2421,7 +2421,7 @@ runtimes:
 		Profile:     "apple",
 		ProjectPath: projectPath,
 	}
-	mgr := srv.resolveManagerForOpts(opts)
+	mgr, _ := srv.resolveManagerForOpts(opts)
 
 	// Profile specifies "container" runtime which differs from mock's "mock",
 	// so we should get a different manager
@@ -2458,7 +2458,7 @@ runtimes:
 		Profile:     "local",
 		ProjectPath: projectPath,
 	}
-	mgr := srv.resolveManagerForOpts(opts)
+	mgr, _ := srv.resolveManagerForOpts(opts)
 
 	// Profile specifies "docker" runtime which matches the broker's runtime,
 	// so we should get the same manager
