@@ -1532,7 +1532,37 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		callerUser := GetUserIdentityFromContext(ctx)
+
 		if existingBroker != nil {
+			// SECURITY-GATE: CheckAccess — this deprecated embedded-broker path
+			// overwrites an existing broker record and mints a fresh secret for
+			// it, so the caller must be authorized against the resolved broker
+			// before either happens. Authorized == system super-admin, OR the
+			// caller is the broker itself (HMAC identity whose BrokerID()
+			// matches the target), OR the caller is the user recorded as the
+			// broker's creator. This mirrors authorizedForBrokerOwnerAction
+			// (pkg/hub/handlers_brokers.go) inline rather than calling it,
+			// because that helper is not yet on this branch's base.
+			// TODO(security): consolidate onto authorizedForBrokerOwnerAction
+			// once the broker-ownership branch merges.
+			brokerIdent := GetBrokerIdentityFromContext(ctx)
+			authorized := false
+			switch {
+			case callerUser != nil && s.authzService.IsSystemAdmin(ctx, callerUser.ID()):
+				authorized = true
+			case brokerIdent != nil && brokerIdent.BrokerID() == existingBroker.ID:
+				authorized = true
+			case callerUser != nil && callerUser.ID() == existingBroker.CreatedBy:
+				authorized = true
+			}
+			if !authorized {
+				logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "broker", ID: existingBroker.ID}, ActionUpdate,
+					"caller is not the broker's creator, the broker itself, or a super-admin")
+				writeForbidden(w, "not authorized to modify this broker")
+				return
+			}
+
 			// Update existing broker
 			broker = existingBroker
 			broker.Name = req.Broker.Name
@@ -1562,6 +1592,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				ConnectionState: "connected",
 				Capabilities:    req.Broker.Capabilities,
 				Profiles:        req.Broker.Profiles,
+			}
+
+			// Record ownership on the newly created broker so the overwrite
+			// path gated above has a recorded owner to authorize against; a
+			// broker with no recorded owner has nothing for that check to
+			// match.
+			if callerUser != nil {
+				broker.CreatedBy = callerUser.ID()
 			}
 
 			if err := s.store.CreateRuntimeBroker(ctx, broker); err != nil {
