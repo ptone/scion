@@ -587,6 +587,42 @@ func resolveWorkspaceSubdir(projectRoot, subdir string) (string, error) {
 	return realJoined, nil
 }
 
+// checkAgentDirContained computes the on-disk directory for agentName under
+// projectDir exactly as config.GetAgentDir does, and confirms the result is
+// still a direct child of the same root config.SelectAgentsRoot selected --
+// the external agents dir when sharedWorkspace is true and one is
+// configured, else <projectDir>/agents (GetAgentDir is defined in terms of
+// SelectAgentsRoot, so the two roots can never drift apart).
+//
+// Both ProvisionAgent and GetAgent call this immediately after resolving
+// agentName into a directory, before either one creates, removes, or
+// otherwise acts on it: ProvisionAgent's git-clone and worktree branches
+// clear an existing workspace under agentDir, and GetAgent's stale-
+// directory branch removes agentDir outright. agentName is expected to be a
+// single path element by the time it reaches either function (see
+// runtimebroker's isSingleCleanPathElement, the other half of this
+// defense-in-depth pair), but neither caller is guaranteed to have gone
+// through that check -- Reprovision calls ProvisionAgent directly, not
+// through GetAgent -- so this fails closed on its own rather than trust the
+// caller.
+func checkAgentDirContained(projectDir, agentName string, sharedWorkspace bool) (string, error) {
+	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
+	agentsRoot := filepath.Clean(config.SelectAgentsRoot(projectDir, sharedWorkspace))
+	cleanAgentDir := filepath.Clean(agentDir)
+	// Both conditions matter: Dir(...) != root catches a name that is
+	// outside the root entirely (e.g. "../sibling"); Base(...) != agentName
+	// catches a name that cleans down to a direct child of the root but
+	// isn't the single path element it claims to be (e.g. "x/../y" cleans
+	// to <root>/y, a direct child, even though agentName itself is not
+	// "y"). The broker's isSingleCleanPathElement enforces the same
+	// single-element rule at the request boundary; this enforces it again
+	// here, independently, for every caller.
+	if filepath.Dir(cleanAgentDir) != agentsRoot || filepath.Base(cleanAgentDir) != agentName {
+		return "", fmt.Errorf("agent %q is not a single path element under %s", agentName, agentsRoot)
+	}
+	return agentDir, nil
+}
+
 func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {
 	provisionStart := time.Now()
 	// 1. Prepare agent directories
@@ -630,7 +666,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
-	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
+	agentDir, err := checkAgentDirContained(projectDir, agentName, sharedWorkspace)
+	if err != nil {
+		return "", "", nil, err
+	}
 	agentHome := config.GetAgentHomePath(projectDir, agentName)
 	// In worktree mode the workspace lives under agentDir so git's relative
 	// worktree pointers resolve correctly. In shared-workspace mode there is
@@ -1884,21 +1923,9 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		agentName, templateName, harnessConfig, projectPath, projectDir)
 
 	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
-	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
-
-	// Defense in depth: confirm agentDir is still a direct child of the same
-	// root GetAgentDir selected it under -- the external agents dir when
-	// sharedWorkspace is true and one is configured, else
-	// <projectDir>/agents (config.SelectAgentsRoot; GetAgentDir is defined
-	// in terms of it, so the two roots can never drift apart). agentName is
-	// expected to be a single path element by the time it reaches here, but
-	// this function has more than one caller, and the stale-directory branch
-	// below acts on whatever agentDir resolves to. A non-conforming
-	// agentName must fail closed here, before that branch runs, rather than
-	// operate on whatever the join happened to produce.
-	agentsRoot := filepath.Clean(config.SelectAgentsRoot(projectDir, sharedWorkspace))
-	if cleanAgentDir := filepath.Clean(agentDir); filepath.Dir(cleanAgentDir) != agentsRoot {
-		return "", "", "", nil, fmt.Errorf("agent %q resolves outside %s", agentName, agentsRoot)
+	agentDir, err := checkAgentDirContained(projectDir, agentName, sharedWorkspace)
+	if err != nil {
+		return "", "", "", nil, err
 	}
 
 	agentHome := config.GetAgentHomePath(projectDir, agentName)
