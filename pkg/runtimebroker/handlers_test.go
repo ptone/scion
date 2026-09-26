@@ -485,6 +485,37 @@ func TestCreateAgentMissingName(t *testing.T) {
 	}
 }
 
+// TestCreateAgentRejectsMultiSegmentName is the regression anchor for the
+// isSingleCleanPathElement check added to createAgent. req.Name is joined
+// onto a directory as a single path segment all the way down to
+// GetAgentDir, so a name that isn't exactly one clean segment must be
+// rejected here rather than reaching that join. GetAgentDir/GetAgent (in
+// pkg/agent) enforce the same constraint independently before their own
+// stale-directory removal branch; this covers the same shape earlier, at
+// the request boundary, for every name this check can see regardless of
+// what a caller intended.
+func TestCreateAgentRejectsMultiSegmentName(t *testing.T) {
+	srv := newTestServer(t)
+
+	for _, name := range []string{"../sibling", "a/../..", "..", ".", "a/b", "/etc"} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(CreateAgentRequest{Name: name})
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(body)))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("name %q: expected status %d, got %d: %s", name, http.StatusBadRequest, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 // TestCreateAgentFullStart_HarnessConfigNotFound proves the fix for
 // ptone/scion#1316 fault 3: when Start fails because a configured
 // harness-config name does not resolve anywhere the broker looked, the

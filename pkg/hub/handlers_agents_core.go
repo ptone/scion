@@ -2390,7 +2390,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	}
 
 	// Apply updates
+	var newDisplayNameKey string
 	if updates.Name != "" {
+		key, err := api.ValidateDisplayName(updates.Name)
+		if err != nil {
+			ValidationError(w, "Invalid name: "+err.Error(), nil)
+			return
+		}
+		newDisplayNameKey = key
 		agent.Name = updates.Name
 	}
 	if updates.Labels != nil {
@@ -2560,7 +2567,29 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		}
 	}
 
-	if err := s.store.UpdateAgent(ctx, agent); err != nil {
+	if updates.Name != "" {
+		// Name and its identity key are written in the same transaction:
+		// the key row is what makes the key's per-project uniqueness a
+		// database invariant, so it must never be able to drift from the
+		// Name it was computed from. Only append newDisplayNameKey when it
+		// differs from Slug, so the common case -- the display name's key
+		// already equals Slug (e.g. a freshly created agent) -- writes a
+		// single row instead of a self-collision.
+		keys := []string{agent.Slug}
+		if newDisplayNameKey != agent.Slug {
+			keys = append(keys, newDisplayNameKey)
+		}
+		err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.UpdateAgent(ctx, agent); err != nil {
+				return err
+			}
+			return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys)
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	} else if err := s.store.UpdateAgent(ctx, agent); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -2809,8 +2838,9 @@ func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store
 	}
 }
 
-// eventTargetsAgent checks whether a scheduled event's payload targets the
-// given agent by matching agent ID or name/slug.
+// eventTargetsAgent reports whether a scheduled event's payload targets
+// agent, by ID or Slug only. Name is a mutable display field, not an
+// identifier, so it must not be used to select an agent's scheduled events.
 func eventTargetsAgent(evt store.ScheduledEvent, agent *store.Agent) bool {
 	var payload struct {
 		AgentID   string `json:"agentId"`
@@ -2822,7 +2852,7 @@ func eventTargetsAgent(evt store.ScheduledEvent, agent *store.Agent) bool {
 	if payload.AgentID != "" && payload.AgentID == agent.ID {
 		return true
 	}
-	if payload.AgentName != "" && (payload.AgentName == agent.Name || payload.AgentName == agent.Slug) {
+	if payload.AgentName != "" && payload.AgentName == agent.Slug {
 		return true
 	}
 	return false
