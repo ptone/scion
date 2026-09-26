@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -461,6 +462,73 @@ func TestLimitsHandler_SymlinkAtLimitsPathIsRefused(t *testing.T) {
 	h := &LimitsHandler{limitsPath: limitsPath}
 	_, err := h.readLimitsState()
 	assert.Error(t, err, "expected a symlink at limitsPath to be refused, not followed")
+}
+
+// wantAgentLimitsMaxBytes is this test's OWN, independently hardcoded copy
+// of the size bound limits.go documents for agentLimitsMaxBytes (1 MiB) —
+// not a reference to that constant. See status_test.go's
+// wantAgentInfoMaxBytes for why a test that instead sized its fixture as
+// agentLimitsMaxBytes+1 could never notice a regression that widens that
+// constant: the fixture and the cap would drift together.
+const wantAgentLimitsMaxBytes = 1 << 20
+
+// limitsStateJSONOfSize returns a syntactically valid, LimitsState-shaped
+// JSON document of exactly n bytes, by padding the started_at field. n must
+// be at least the length of the zero-padding LimitsState marshals to.
+func limitsStateJSONOfSize(t *testing.T, n int) []byte {
+	t.Helper()
+	base, err := json.Marshal(LimitsState{StartedAt: ""})
+	if err != nil {
+		t.Fatalf("marshal base LimitsState: %v", err)
+	}
+	pad := n - len(base)
+	if pad < 0 {
+		t.Fatalf("limitsStateJSONOfSize: n=%d is smaller than the unpadded encoding (%d bytes)", n, len(base))
+	}
+	// 'a' padding, not NUL bytes: json.Marshal escapes a control character
+	// like NUL as \u0000 (6 bytes of output per 1 byte of input), which would
+	// make the padding math below wrong. 'a' round-trips as a single byte.
+	padded, err := json.Marshal(LimitsState{StartedAt: strings.Repeat("a", pad)})
+	if err != nil {
+		t.Fatalf("marshal padded LimitsState: %v", err)
+	}
+	if len(padded) != n {
+		t.Fatalf("limitsStateJSONOfSize(%d) produced %d bytes", n, len(padded))
+	}
+	return padded
+}
+
+// TestLimitsHandler_OversizeRegularLimitsPathIsRefused proves the size bound
+// on readLimitsState is enforced against an actual regular file, not just a
+// symlink or a fixture that would fail to parse regardless of the cap: the
+// fixture here is syntactically valid, LimitsState-shaped JSON one byte over
+// wantAgentLimitsMaxBytes, which would unmarshal successfully if the cap did not
+// refuse it first. This fails if the cap is removed or widened.
+func TestLimitsHandler_OversizeRegularLimitsPathIsRefused(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, os.WriteFile(limitsPath, limitsStateJSONOfSize(t, wantAgentLimitsMaxBytes+1), 0o600))
+
+	h := &LimitsHandler{limitsPath: limitsPath}
+	_, err := h.readLimitsState()
+	assert.Error(t, err, "expected an oversize regular agent-limits.json to be refused")
+}
+
+// TestLimitsHandler_AtCapRegularLimitsPathIsRead is
+// OversizeRegularLimitsPathIsRefused's companion: the same valid-JSON shape
+// at exactly wantAgentLimitsMaxBytes (not one byte over) is read and parsed
+// successfully, pinning the boundary at the documented cap.
+func TestLimitsHandler_AtCapRegularLimitsPathIsRead(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, os.WriteFile(limitsPath, limitsStateJSONOfSize(t, wantAgentLimitsMaxBytes), 0o600))
+
+	h := &LimitsHandler{limitsPath: limitsPath}
+	ls, err := h.readLimitsState()
+	require.NoError(t, err)
+	assert.NotNil(t, ls)
 }
 
 // readLimitsFile reads and parses an agent-limits.json file for test assertions.
