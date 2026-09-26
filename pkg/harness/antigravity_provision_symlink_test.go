@@ -93,15 +93,25 @@ func TestAntigravityProvisionRefusesSymlinkedAgentsDir(t *testing.T) {
 
 // TestAntigravityProvisionRefusesSymlinkedHooksJsonTmp reproduces, end to
 // end against the real antigravity/provision.py and its staged
-// scion_harness.py, a workload committing ".agents/hooks.json.tmp" as a
-// symlink to a file it does not own. _generate_hooks_json's call into
-// scion_harness.atomic_write_json must never write through that symlink: the
-// temp file is opened O_CREAT|O_EXCL|O_NOFOLLOW, so a pre-existing symlink at
-// the temp name is refused rather than followed. provision.py's own
-// try/except around the call turns that refusal into a logged warning, not a
-// crash — this test asserts the sentinel file's content is byte-for-byte
-// unchanged, and would fail if the guard were removed (the sentinel would be
-// overwritten with the generated hooks.json content instead).
+// scion_harness.py, a workload committing a symlink to a file it does not
+// own at the exact name scion_harness.atomic_write_json is about to create
+// its temp file at. _generate_hooks_json's call into atomic_write_json must
+// never write through that symlink: the temp file is opened
+// O_CREAT|O_EXCL|O_NOFOLLOW, so a pre-existing symlink there is refused
+// rather than followed. provision.py's own try/except around the call turns
+// that refusal into a logged warning, not a crash — this test asserts the
+// sentinel file's content is byte-for-byte unchanged, and would fail if the
+// guard were removed (the sentinel would be overwritten with the generated
+// hooks.json content instead).
+//
+// The real temp name is unique per call (pid + a monotonic timestamp + a
+// counter — see scion_harness._atomic_tmp_name), precisely so a workload
+// cannot predict and pre-plant a symlink at it the way it could when the
+// name was the fixed "hooks.json.tmp". This test's injected Python
+// monkeypatches _atomic_tmp_name to a fixed, known name before importing
+// provision, so it can still plant the symlink at the exact path this call
+// will use — mirroring how scion_harness_test.py's own unit tests prove the
+// same O_EXCL guard.
 func TestAntigravityProvisionRefusesSymlinkedHooksJsonTmp(t *testing.T) {
 	pyPath, err := exec.LookPath("python3")
 	if err != nil {
@@ -123,13 +133,16 @@ func TestAntigravityProvisionRefusesSymlinkedHooksJsonTmp(t *testing.T) {
 	if err := os.WriteFile(sentinelFile, []byte(sentinelContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tmpLink := filepath.Join(agentsDir, "hooks.json.tmp")
+	const fixedTmpName = "hooks.json.tmp-fixed-for-test"
+	tmpLink := filepath.Join(agentsDir, fixedTmpName)
 	if err := os.Symlink(sentinelFile, tmpLink); err != nil {
 		t.Fatal(err)
 	}
 
 	code := "import sys\n" +
 		"sys.path.insert(0, " + pyQuote(dir) + ")\n" +
+		"import scion_harness\n" +
+		"scion_harness._atomic_tmp_name = lambda name: " + pyQuote(fixedTmpName) + "\n" +
 		"import provision\n" +
 		"provision._generate_hooks_json(" + pyQuote(dir) + ")\n"
 
@@ -148,18 +161,72 @@ func TestAntigravityProvisionRefusesSymlinkedHooksJsonTmp(t *testing.T) {
 		t.Errorf("sentinel file = %q, want %q (hooks.json content must never be written through the symlink)", got, sentinelContent)
 	}
 
-	// hooks.json.tmp itself must still be exactly the symlink the workload
+	// The planted symlink itself must still be exactly what the workload
 	// planted, and hooks.json must never have been created via a rename over
 	// or alongside it.
 	info, err := os.Lstat(tmpLink)
 	if err != nil {
-		t.Fatalf("lstat hooks.json.tmp: %v", err)
+		t.Fatalf("lstat %s: %v", fixedTmpName, err)
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
-		t.Errorf("hooks.json.tmp is no longer a symlink (mode %v) — provision.py replaced it", info.Mode())
+		t.Errorf("%s is no longer a symlink (mode %v) — provision.py replaced it", fixedTmpName, info.Mode())
 	}
 	if _, err := os.Lstat(filepath.Join(agentsDir, "hooks.json")); err == nil {
 		t.Errorf("hooks.json was created in %s despite the refused write", agentsDir)
+	}
+}
+
+// TestAntigravityProvisionUnaffectedByStaleFixedNameTmpFile proves the flip
+// side of the name change above: a leftover file that happens to sit at the
+// OLD, pre-fix fixed temp name ("hooks.json.tmp") — e.g. left over from a
+// container image built before this fix, or a workload artifact that
+// happens to collide with the old convention — has no effect on a real
+// provisioning run, because the real temp name is no longer derived from
+// that fixed string. hooks.json is created normally, with real content, and
+// the stale file is left untouched.
+func TestAntigravityProvisionUnaffectedByStaleFixedNameTmpFile(t *testing.T) {
+	pyPath, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available; skipping script integration test")
+	}
+
+	dir := t.TempDir()
+	if err := config.SeedHarnessConfigFromDir(dir, harnessesEmbed.FS, "antigravity", false); err != nil {
+		t.Fatalf("SeedHarnessConfigFromDir: %v", err)
+	}
+
+	workspace := t.TempDir()
+	agentsDir := filepath.Join(workspace, ".agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleTmp := filepath.Join(agentsDir, "hooks.json.tmp")
+	const staleContent = "leftover from a pre-fix image\n"
+	if err := os.WriteFile(staleTmp, []byte(staleContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code := "import sys\n" +
+		"sys.path.insert(0, " + pyQuote(dir) + ")\n" +
+		"import provision\n" +
+		"provision._generate_hooks_json(" + pyQuote(dir) + ")\n"
+
+	cmd := exec.Command(pyPath, "-c", code)
+	cmd.Env = append(os.Environ(), "SCION_WORKSPACE_PATH="+workspace)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("_generate_hooks_json: %v\noutput:\n%s", err, out)
+	}
+
+	if _, err := os.Lstat(filepath.Join(agentsDir, "hooks.json")); err != nil {
+		t.Errorf("hooks.json was not created in %s: %v (a stale legacy-named temp file must not block a real write)", agentsDir, err)
+	}
+	staleGot, err := os.ReadFile(staleTmp)
+	if err != nil {
+		t.Fatalf("read stale tmp file: %v", err)
+	}
+	if string(staleGot) != staleContent {
+		t.Errorf("stale legacy-named temp file was modified: %q", staleGot)
 	}
 }
 
