@@ -563,7 +563,7 @@ func (s *Server) shutdownExisting() {
 		return
 	}
 	req.Header.Set("Metadata-Flavor", "Google")
-	token, err := os.ReadFile(shutdownTokenPath(s.config.Port))
+	token, err := readShutdownToken(shutdownTokenPath(s.config.Port))
 	if err != nil {
 		log.Debug("Could not read metadata shutdown token for port %d: %v", s.config.Port, err)
 		return
@@ -613,6 +613,35 @@ func (s *Server) ensureShutdownToken() error {
 	s.shutdownToken = hex.EncodeToString(tokenBytes)
 	s.shutdownTokenPath = shutdownTokenPath(s.config.Port)
 	return writeShutdownToken(s.shutdownTokenPath, s.shutdownToken)
+}
+
+// shutdownTokenMaxBytes bounds readShutdownToken's read: the token is a
+// fixed-length hex string plus a newline, so anything this long already
+// isn't the file writeShutdownToken produces.
+const shutdownTokenMaxBytes = 256
+
+// readShutdownToken reads the shutdown token writeShutdownToken wrote,
+// without following a symlink and without treating anything but a regular
+// file as a source of trust: the token path is a predictable name under
+// os.TempDir(), so a shared, world-writable directory lets another user
+// plant something there before this process's own writeShutdownToken has
+// run (e.g. between init runs bootstrap resets), and shutdownExisting sends
+// whatever it reads here to another process's authenticated endpoint.
+func readShutdownToken(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("shutdown token path %s is not a regular file", path)
+	}
+	return io.ReadAll(io.LimitReader(f, shutdownTokenMaxBytes))
 }
 
 func writeShutdownToken(path, token string) error {

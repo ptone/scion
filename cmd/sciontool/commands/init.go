@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -1158,15 +1159,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 			// credential helper (which runs as the scion user) can read it.
 			initialToken := os.Getenv("GITHUB_TOKEN")
 			if initialToken != "" {
-				if err := hub.WriteGitHubTokenFile(tokenPath, initialToken); err != nil {
+				// Ownership is applied by WriteGitHubTokenFile itself
+				// (fchown on the open fd, before the rename onto the final
+				// path), not by a separate path-based os.Chown afterwards.
+				if err := hub.WriteGitHubTokenFile(tokenPath, initialToken, targetUID, targetGID); err != nil {
 					log.Error("Failed to write initial GitHub token file: %v", err)
 				} else {
 					log.Info("Wrote initial GitHub token to %s", tokenPath)
-					if targetUID > 0 {
-						if err := os.Chown(tokenPath, targetUID, targetGID); err != nil {
-							log.Error("Failed to chown GitHub token file to UID=%d: %v", targetUID, err)
-						}
-					}
 				}
 			}
 
@@ -1181,14 +1180,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 					log.Error("Failed to parse GitHub token expiry %q: %v", expiryStr, err)
 				} else {
 					// Write the initial expiry so the credential helper can
-					// detect stale tokens even before the first refresh cycle.
-					if err := hub.WriteGitHubTokenExpiry(tokenPath, ghTokenExpiry); err != nil {
+					// detect stale tokens even before the first refresh
+					// cycle. Ownership is applied on the fd, as above.
+					if err := hub.WriteGitHubTokenExpiry(tokenPath, ghTokenExpiry, targetUID, targetGID); err != nil {
 						log.Error("Failed to write initial GitHub token expiry file: %v", err)
-					} else if targetUID > 0 {
-						expiryPath := hub.GitHubTokenExpiryPath(tokenPath)
-						if err := os.Chown(expiryPath, targetUID, targetGID); err != nil {
-							log.Error("Failed to chown GitHub token expiry file to UID=%d: %v", targetUID, err)
-						}
 					}
 					// Schedule first refresh 10 minutes before expiry (tokens last 1 hour)
 					ghRefreshAt := ghTokenExpiry.Add(-10 * time.Minute)
@@ -1494,11 +1489,34 @@ func registerLifecycleTelemetryHandler(manager *hooks.LifecycleManager, provider
 	return handler
 }
 
-// readHarnessExitCode reads and parses the harness exit-code file written by the
-// tmux agent-window wrapper. Returns nil if the file is missing or unparseable
-// (e.g. the container was SIGKILLed/OOM-killed before the harness could write).
+// harnessExitCodeMaxBytes bounds the read in readHarnessExitCode: the file
+// only ever holds a small decimal exit code, so any read this long has
+// already found something other than what the harness wrapper writes.
+const harnessExitCodeMaxBytes = 32
+
+// readHarnessExitCode reads and parses the harness exit-code file written by
+// the tmux agent-window wrapper. Returns nil if the file is missing or
+// unparseable (e.g. the container was SIGKILLed/OOM-killed before the
+// harness could write), and also — without blocking and without reading —
+// if the path is a symlink or isn't a regular file: this process runs as
+// root, and the workload owns the directory this path lives in, so a FIFO
+// planted here must not be able to make root's shutdown path hang forever,
+// and a symlink must not be able to make it parse an unrelated file's
+// contents as an exit code. O_NONBLOCK is what keeps a FIFO's open() itself
+// from blocking on a reader when there is no writer.
 func readHarnessExitCode() *int {
-	data, err := os.ReadFile(state.HarnessExitCodeFile)
+	f, err := os.OpenFile(state.HarnessExitCodeFile, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return nil
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, harnessExitCodeMaxBytes))
 	if err != nil {
 		return nil
 	}

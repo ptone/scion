@@ -7,7 +7,10 @@ package commands
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
@@ -156,5 +159,58 @@ func TestReadHarnessExitCode(t *testing.T) {
 	}
 	if got := readHarnessExitCode(); got != nil {
 		t.Errorf("expected nil for garbage, got %v", *got)
+	}
+}
+
+// TestReadHarnessExitCode_SymlinkRefused proves that a workload-planted
+// symlink at the exit-code path can't make root's shutdown path read (and
+// parse as an exit code) an unrelated file's contents: readHarnessExitCode
+// must return nil without touching the symlink's target.
+func TestReadHarnessExitCode_SymlinkRefused(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(target, []byte("42"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	_ = os.Remove(state.HarnessExitCodeFile)
+	if err := os.Symlink(target, state.HarnessExitCodeFile); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(state.HarnessExitCodeFile) })
+
+	if got := readHarnessExitCode(); got != nil {
+		t.Errorf("expected nil for a symlinked exit-code path, got %v", *got)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(data) != "42" {
+		t.Errorf("symlink target was modified: %q", data)
+	}
+}
+
+// TestReadHarnessExitCode_FIFODoesNotBlock proves that a workload-planted
+// FIFO at the exit-code path can't make root's shutdown path hang forever
+// waiting for a writer: readHarnessExitCode must return nil promptly
+// (O_NONBLOCK on open, then a regular-file check before ever reading).
+func TestReadHarnessExitCode_FIFODoesNotBlock(t *testing.T) {
+	_ = os.Remove(state.HarnessExitCodeFile)
+	if err := syscall.Mkfifo(state.HarnessExitCodeFile, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(state.HarnessExitCodeFile) })
+
+	done := make(chan *int, 1)
+	go func() { done <- readHarnessExitCode() }()
+
+	select {
+	case got := <-done:
+		if got != nil {
+			t.Errorf("expected nil for a FIFO exit-code path, got %v", *got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readHarnessExitCode blocked on a FIFO with no writer")
 	}
 }
