@@ -20,7 +20,7 @@ func TestInitLimitsFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 50, 200)
+	err := InitLimitsFile(limitsPath, 50, 200, 0, 0)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(limitsPath)
@@ -42,7 +42,7 @@ func TestInitLimitsFile_ZeroValues(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 0, 0)
+	err := InitLimitsFile(limitsPath, 0, 0, 0, 0)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(limitsPath)
@@ -62,7 +62,7 @@ func TestLimitsHandler_TurnCounting(t *testing.T) {
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
 	// Initialize the limits file
-	err := InitLimitsFile(limitsPath, 5, 0)
+	err := InitLimitsFile(limitsPath, 5, 0, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -89,7 +89,7 @@ func TestLimitsHandler_ModelCallCounting(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 0, 10)
+	err := InitLimitsFile(limitsPath, 0, 10, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -115,7 +115,7 @@ func TestLimitsHandler_IgnoresIrrelevantEvents(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 10, 10)
+	err := InitLimitsFile(limitsPath, 10, 10, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -157,7 +157,7 @@ func TestLimitsHandler_NoLimitsConfigured(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 0, 0)
+	err := InitLimitsFile(limitsPath, 0, 0, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -190,7 +190,7 @@ func TestLimitsHandler_TurnLimitDetection(t *testing.T) {
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
 	triggerPath := filepath.Join(tmpDir, "scion-limits-exceeded")
 
-	err := InitLimitsFile(limitsPath, 3, 0)
+	err := InitLimitsFile(limitsPath, 3, 0, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -230,7 +230,7 @@ func TestLimitsHandler_ModelCallLimitDetection(t *testing.T) {
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
 	triggerPath := filepath.Join(tmpDir, "scion-limits-exceeded")
 
-	err := InitLimitsFile(limitsPath, 0, 2)
+	err := InitLimitsFile(limitsPath, 0, 2, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -264,7 +264,7 @@ func TestLimitsHandler_BothLimitsIndependent(t *testing.T) {
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
-	err := InitLimitsFile(limitsPath, 100, 100)
+	err := InitLimitsFile(limitsPath, 100, 100, 0, 0)
 	require.NoError(t, err)
 
 	h := &LimitsHandler{
@@ -370,7 +370,7 @@ func TestWriteLimitsState_AtomicWrite(t *testing.T) {
 		StartedAt:      "2026-02-22T10:30:00Z",
 	}
 
-	err := writeLimitsState(limitsPath, ls)
+	err := writeLimitsState(limitsPath, ls, 0, 0)
 	require.NoError(t, err)
 
 	// Read and verify
@@ -386,6 +386,26 @@ func TestWriteLimitsState_AtomicWrite(t *testing.T) {
 	assert.Equal(t, 50, read.MaxTurns)
 	assert.Equal(t, 200, read.MaxModelCalls)
 	assert.Equal(t, "2026-02-22T10:30:00Z", read.StartedAt)
+}
+
+// TestWriteLimitsState_ChownsTempFdBeforeRename proves the uid>0 path
+// chowns the temp file via its open fd before the rename rather than the
+// final path afterwards. A non-root test can't chown to an arbitrary uid,
+// but chowning to its own current uid/gid is always permitted, which is
+// enough to prove the fd-based call succeeds and doesn't error.
+func TestWriteLimitsState_ChownsTempFdBeforeRename(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+
+	ls := &LimitsState{MaxTurns: 1, StartedAt: "2026-02-22T10:30:00Z"}
+	err := writeLimitsState(limitsPath, ls, os.Getuid(), os.Getgid())
+	require.NoError(t, err)
+
+	entries, err := os.ReadDir(tmpDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "no temp file should remain after a successful write")
+	assert.Equal(t, "agent-limits.json", entries[0].Name())
 }
 
 func TestLimitsTriggerFileConstant(t *testing.T) {

@@ -8,6 +8,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -212,5 +214,32 @@ func TestReadHarnessExitCode_FIFODoesNotBlock(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("readHarnessExitCode blocked on a FIFO with no writer")
+	}
+}
+
+// TestReadHarnessExitCode_BoundedRead proves an oversized exit-code file is
+// bounded by harnessExitCodeMaxBytes rather than read in full. The first
+// harnessExitCodeMaxBytes bytes are all-digit and parse to 42 on their own;
+// thousands of further digit bytes follow, which would overflow int (and
+// so fail to parse) if the read weren't bounded. A bounded read must
+// return 42; an unbounded one would return nil.
+func TestReadHarnessExitCode_BoundedRead(t *testing.T) {
+	_ = os.Remove(state.HarnessExitCodeFile)
+	leading := strings.Repeat("0", harnessExitCodeMaxBytes-2) + "42"
+	if len(leading) != harnessExitCodeMaxBytes {
+		t.Fatalf("test setup: leading prefix is %d bytes, want %d", len(leading), harnessExitCodeMaxBytes)
+	}
+	oversized := leading + strings.Repeat("9", 1000)
+	if _, err := strconv.Atoi(oversized); err == nil {
+		t.Fatal("test setup: the full oversized content must not parse as an int (it needs to overflow)")
+	}
+	if err := os.WriteFile(state.HarnessExitCodeFile, []byte(oversized), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(state.HarnessExitCodeFile) })
+
+	got := readHarnessExitCode()
+	if got == nil || *got != 42 {
+		t.Errorf("readHarnessExitCode() = %v, want 42 (derived from only the first %d bytes)", got, harnessExitCodeMaxBytes)
 	}
 }

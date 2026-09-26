@@ -1322,17 +1322,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 	maxModelCalls := handlers.ParseEnvInt("SCION_MAX_MODEL_CALLS")
 	if maxTurns > 0 || maxModelCalls > 0 {
 		limitsPath := filepath.Join(agentHome, "agent-limits.json")
-		if err := handlers.InitLimitsFile(limitsPath, maxTurns, maxModelCalls); err != nil {
+		// InitLimitsFile chowns the file itself (fchown on the temp file's
+		// fd, before the rename) when targetUID > 0, so hook processes
+		// running as the dropped-privilege scion user can read/write it.
+		if err := handlers.InitLimitsFile(limitsPath, maxTurns, maxModelCalls, targetUID, targetGID); err != nil {
 			log.Error("Failed to initialize agent-limits.json: %v", err)
 		} else {
 			log.Info("Limits initialized: max_turns=%d, max_model_calls=%d", maxTurns, maxModelCalls)
-		}
-		// Chown the limits file so the scion user (hook processes) can read/write it.
-		// Init runs as root but hooks run as the dropped-privilege scion user.
-		if targetUID != 0 {
-			if err := os.Chown(limitsPath, targetUID, targetGID); err != nil {
-				log.Error("Failed to chown agent-limits.json: %v", err)
-			}
 		}
 		// Remove stale trigger file from a previous run
 		_ = os.Remove(handlers.LimitsTriggerFile)
@@ -1565,14 +1561,21 @@ const harnessExitCodeMaxBytes = 32
 // the tmux agent-window wrapper. Returns nil if the file is missing or
 // unparseable (e.g. the container was SIGKILLed/OOM-killed before the
 // harness could write), and also — without blocking and without reading —
-// if the path is a symlink or isn't a regular file: this process runs as
-// root, and the workload owns the directory this path lives in, so a FIFO
-// planted here must not be able to make root's shutdown path hang forever,
-// and a symlink must not be able to make it parse an unrelated file's
-// contents as an exit code. O_NONBLOCK is what keeps a FIFO's open() itself
-// from blocking on a reader when there is no writer.
+// if any component of the path is a symlink or the leaf isn't a regular
+// file: this process runs as root, and the workload owns the directory
+// this path lives in, so a FIFO planted here must not be able to make
+// root's shutdown path hang forever, and a symlink at the leaf or at an
+// intermediate directory component must not be able to make it parse an
+// unrelated file's contents as an exit code. O_NONBLOCK is what keeps a
+// FIFO's open() itself from blocking on a reader when there is no writer.
 func readHarnessExitCode() *int {
-	f, err := os.OpenFile(state.HarnessExitCodeFile, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(state.HarnessExitCodeFile)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil
 	}
