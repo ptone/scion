@@ -382,6 +382,70 @@ func TestReadUnderRootNoFollow_RefusesIntermediateSymlinkInsideRoot(t *testing.T
 	}
 }
 
+// TestReadUnderRootNoFollow_FailedSecondIntermediateDoesNotCloseItsFdNumberTwice
+// proves that when the walk has already opened one intermediate directory
+// (root/a) and the NEXT component (root/a/b) fails to open, the fd number
+// this package closed for "a" is not closed a SECOND time by the function's
+// own deferred cleanup. This matters because this walk can run in root's
+// own multi-threaded PID-1 process: between the first (correct) close and a
+// hypothetical second one, the kernel is free to have already handed that
+// exact number to a completely unrelated fd opened by another goroutine, so
+// a second close would silently close somebody else's file instead of
+// erroring.
+//
+// Detecting this requires an OBSERVABLE, not just a clean run under the
+// race detector (which does not track OS file descriptor lifetimes at all):
+// the moment this package closes "a"'s fd, the test's hook immediately
+// dup2's a sentinel pipe onto that exact number, deterministically
+// re-claiming it regardless of what the kernel's normal allocator would
+// otherwise have done with it. If the walk's cleanup closes that number a
+// second time, the dup'd sentinel is what gets closed, and a subsequent
+// fcntl(F_GETFD) on that number reports EBADF instead of succeeding. This
+// test fails if the "owns the fd" tracking is not reset the instant the fd
+// is closed in the loop (i.e. it fails against the double-close and passes
+// once the close and the ownership reset happen together).
+func TestReadUnderRootNoFollow_FailedSecondIntermediateDoesNotCloseItsFdNumberTwice(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "a"), 0o700); err != nil {
+		t.Fatalf("mkdir a: %v", err)
+	}
+	// "b" is deliberately absent under "a": the walk opens "a" successfully
+	// (first intermediate, depth 1) and then fails to open "b" (second
+	// intermediate, depth 2) — the two-or-more-intermediate shape the bug
+	// requires, since the very first component is never "owned" yet when
+	// it's opened.
+
+	sentinelRead, sentinelWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = sentinelRead.Close() }()
+	defer func() { _ = sentinelWrite.Close() }()
+
+	claimedFd := -1
+	readUnderRootIntermediateCloseTestHook = func(closedFd int) {
+		claimedFd = closedFd
+		if derr := syscall.Dup2(int(sentinelRead.Fd()), closedFd); derr != nil {
+			t.Fatalf("dup2 sentinel onto claimed fd %d: %v", closedFd, derr)
+		}
+	}
+	defer func() { readUnderRootIntermediateCloseTestHook = nil }()
+
+	_, err = ReadUnderRootNoFollow(root, filepath.Join(root, "a", "b", "f"), 1024)
+	if err == nil {
+		t.Fatal("expected an error walking through a missing second intermediate directory, got nil")
+	}
+	if claimedFd < 0 {
+		t.Fatal("test hook never fired — this run never reached a second intermediate component, so it proves nothing")
+	}
+
+	// If the walk's own cleanup double-closed claimedFd, the sentinel dup
+	// planted at that exact number would already be gone.
+	if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(claimedFd), uintptr(syscall.F_GETFD), 0); errno != 0 {
+		t.Fatalf("fd %d was closed a second time after this package already closed it once (want the sentinel dup to remain live): %v", claimedFd, errno)
+	}
+}
+
 func TestRelUnderRoot_RejectsRootItself(t *testing.T) {
 	root := t.TempDir()
 	if _, err := relUnderRoot(root, root); !errors.Is(err, ErrPathEscapesRoot) {
