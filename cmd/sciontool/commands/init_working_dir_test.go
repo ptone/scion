@@ -108,8 +108,8 @@ func writeServicesYAML(t *testing.T, agentHome string) {
 
 // scionMetadataAndSecretEnvVars lists every SCION_* environment variable
 // RunInit reads (directly, or through metadata.ConfigFromEnv) to decide
-// whether to start the metadata server or fetch secrets from the Hub.
-// setupRunInitAsRootlessScion unsets each of these outright.
+// whether to start the metadata server, stage secrets, or fetch secrets from
+// the Hub. setupRunInitAsRootlessScion unsets each of these outright.
 var scionMetadataAndSecretEnvVars = []string{
 	"SCION_METADATA_MODE",
 	"SCION_METADATA_PORT",
@@ -118,6 +118,11 @@ var scionMetadataAndSecretEnvVars = []string{
 	"SCION_METADATA_PROJECT_ID",
 	"SCION_NETWORK_MODE",
 	"SCION_SECRET_KEYS",
+	// SCION_STAGED_SECRETS carries a base64-encoded secrets blob RunInit
+	// decodes and writes to agentHome before re-execing itself; it isn't a
+	// Hub fetch, but it is a secret-handling input RunInit reads on this
+	// path.
+	"SCION_STAGED_SECRETS",
 }
 
 // setupRunInitAsRootlessScion configures the environment a single RunInit
@@ -160,14 +165,35 @@ func setupRunInitAsRootlessScion(t *testing.T, agentHome string) {
 	})
 }
 
+// setupRunInitAsRootlessScionEnvVarsUnderTest is
+// TestSetupRunInitAsRootlessScion_DisablesMetadataServerAndTelemetry's own
+// copy of the environment variables setupRunInitAsRootlessScion must unset,
+// written out independently of scionMetadataAndSecretEnvVars (rather than
+// looping that var itself for both the ambient setenv below and the
+// after-the-fact assertion). If an entry were ever dropped from
+// scionMetadataAndSecretEnvVars, this test must still set it to an ambient
+// value and still assert it is gone, or the two lists drifting apart in
+// lockstep would silently stop testing anything.
+var setupRunInitAsRootlessScionEnvVarsUnderTest = []string{
+	"SCION_METADATA_MODE",
+	"SCION_METADATA_PORT",
+	"SCION_METADATA_BIND_ADDRESS",
+	"SCION_METADATA_SA_EMAIL",
+	"SCION_METADATA_PROJECT_ID",
+	"SCION_NETWORK_MODE",
+	"SCION_SECRET_KEYS",
+	"SCION_STAGED_SECRETS",
+}
+
 // TestSetupRunInitAsRootlessScion_DisablesMetadataServerAndTelemetry pins
 // the hermeticity setupRunInitAsRootlessScion promises every RunInit test in
 // this file, independent of the environment the test binary runs in: with
 // an agent container's own metadata, secret and telemetry settings present,
-// the helper leaves RunInit nothing that would start the metadata server or
-// the telemetry pipeline (both bind fixed loopback ports) or fetch secrets.
+// the helper leaves RunInit nothing that would start the metadata server,
+// stage or fetch secrets, or start the telemetry pipeline (both server
+// paths bind fixed loopback ports).
 func TestSetupRunInitAsRootlessScion_DisablesMetadataServerAndTelemetry(t *testing.T) {
-	for _, k := range scionMetadataAndSecretEnvVars {
+	for _, k := range setupRunInitAsRootlessScionEnvVarsUnderTest {
 		t.Setenv(k, "ambient")
 	}
 	t.Setenv("SCION_METADATA_MODE", "assign")
@@ -175,7 +201,7 @@ func TestSetupRunInitAsRootlessScion_DisablesMetadataServerAndTelemetry(t *testi
 
 	setupRunInitAsRootlessScion(t, t.TempDir())
 
-	for _, k := range []string{"SCION_METADATA_MODE", "SCION_SECRET_KEYS"} {
+	for _, k := range setupRunInitAsRootlessScionEnvVarsUnderTest {
 		if v, ok := os.LookupEnv(k); ok {
 			t.Errorf("%s = %q after setupRunInitAsRootlessScion, want it absent", k, v)
 		}
@@ -319,6 +345,16 @@ func TestRunInit_ResolveWorkingDirError_ReturnsExitCode18AndNeverStartsHarness(t
 	}
 }
 
+// testAuthToken and testStagedSecretKey are the credential and secret-key
+// name TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
+// stages, so its assertion that neither one crosses into the Hub failure
+// report checks the exact values the test itself set rather than a
+// separately hand-typed literal.
+const (
+	testAuthToken       = "test-token"
+	testStagedSecretKey = "some-key"
+)
+
 // TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
 // covers the other half of the fail-closed contract: not just that the
 // harness child never starts (the previous test), but that none of the
@@ -332,8 +368,8 @@ func TestRunInit_ResolveWorkingDirError_ReturnsExitCode18AndNeverStartsHarness(t
 // httptest server rather than a closed port, so the test also pins what
 // reportInitFailure's best-effort Hub report actually sends on this path:
 // exactly one request, to the agent's status endpoint, carrying the error
-// phase and the resolver's own message, and nothing that looks like the
-// staged secret key.
+// phase and the resolver's own message, and neither the requested secret
+// key name nor the auth token value.
 func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch(t *testing.T) {
 	agentHome := t.TempDir()
 	setupRunInitAsRootlessScion(t, agentHome)
@@ -354,9 +390,9 @@ func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
 
 	t.Setenv("SCION_METADATA_MODE", "block")
 	t.Setenv("SCION_HUB_ENDPOINT", hubServer.URL)
-	t.Setenv("SCION_AUTH_TOKEN", "test-token")
+	t.Setenv("SCION_AUTH_TOKEN", testAuthToken)
 	t.Setenv("SCION_AGENT_ID", "test-agent")
-	t.Setenv("SCION_SECRET_KEYS", "some-key")
+	t.Setenv("SCION_SECRET_KEYS", testStagedSecretKey)
 
 	withRunGitCloneWorkspace(t, func(uid, gid int, home string) error { return nil })
 
@@ -418,8 +454,11 @@ func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
 	if reported.Message != resolverErr.Error() {
 		t.Errorf("hub-reported message = %q, want %q", reported.Message, resolverErr.Error())
 	}
-	if strings.Contains(string(req.body), "some-key") {
-		t.Error("hub request body names the staged secret key; the failure report must carry no secrets")
+	if strings.Contains(string(req.body), testStagedSecretKey) {
+		t.Error("hub request body names the requested secret key; the failure report must not name the requested secret keys")
+	}
+	if strings.Contains(string(req.body), testAuthToken) {
+		t.Error("hub request body contains the auth token value; the failure report must carry no secrets")
 	}
 }
 
