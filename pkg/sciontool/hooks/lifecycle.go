@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // LifecycleManager handles Scion lifecycle hooks.
@@ -30,6 +31,48 @@ type LifecycleManager struct {
 	// container-script harness provisioner) need HOME to point at the
 	// scion user's home directory where the harness bundle is staged.
 	AgentHome string
+
+	// EnforcePrivilegeDrop selects privilege-drop-enforced mode (set from
+	// InitRunOptions.RequirePrivilegeDrop — substrate-serve only). false
+	// (the zero value) keeps executeScript's behaviour byte-identical to
+	// before this field existed: every hook script runs via the calling
+	// process's own credentials, exactly as today, on every other runtime.
+	//
+	// true switches executeScript to the fstat-based root/drop decision
+	// (DecideExecAsRoot): a script runs as root only if it and every
+	// directory in its chain up to "/" are root-owned and not group- or
+	// world-writable; otherwise it runs dropped to WorkloadUID/WorkloadGID.
+	// This applies to every event, not just pre-start — see
+	// DecideExecAsRoot's doc comment for why there is no per-event
+	// exception.
+	EnforcePrivilegeDrop bool
+
+	// WorkloadUID and WorkloadGID are the uid/gid a dropped hook script
+	// runs as in enforced mode — the same target identity RunInit resolves
+	// for the harness child process itself (setupHostUser's targetUID/
+	// targetGID). Ignored when EnforcePrivilegeDrop is false.
+	WorkloadUID int
+	WorkloadGID int
+
+	// WorkloadUsername is the workload account name (always "scion" for
+	// every current caller — the same literal harnessSupervisorConfig
+	// passes to supervisor.Config.Username), used to set HOME/USER/LOGNAME
+	// for a dropped hook exactly like the harness process gets them
+	// (supervisor.Supervisor.Run). Ignored when EnforcePrivilegeDrop is
+	// false.
+	WorkloadUsername string
+
+	// WorkloadWorkingDir is the working directory a dropped hook script
+	// runs in, matching the harness child's own resolved cwd
+	// (InitRunOptions.WorkingDir / ResolveWorkingDir, threaded into
+	// supervisor.Config.WorkingDir). Empty leaves the dropped hook's cwd
+	// unset, inheriting init's own — RunInit sets this only after the
+	// working directory has actually been resolved, so a pre-start hook
+	// (which runs before that resolution) will see it empty even in
+	// enforced mode; every later event (post-start, pre-stop, session-end)
+	// runs after it has been set. Ignored when EnforcePrivilegeDrop is
+	// false.
+	WorkloadWorkingDir string
 }
 
 // NewLifecycleManager creates a new lifecycle manager.
@@ -193,8 +236,16 @@ func (m *LifecycleManager) runScriptHooks(eventName string) error {
 	return nil
 }
 
-// executeScript runs a hook script.
+// executeScript runs a hook script. When EnforcePrivilegeDrop is false (the
+// zero value), this is exactly today's behaviour, unchanged: every runtime
+// other than substrate-serve keeps running every hook script via the
+// calling process's own credentials, with no ownership check at all. See
+// executeScriptEnforced for the privilege-drop-enforced path.
 func (m *LifecycleManager) executeScript(path string) error {
+	if m.EnforcePrivilegeDrop {
+		return m.executeScriptEnforced(path)
+	}
+
 	// Check if executable
 	info, err := os.Stat(path)
 	if err != nil {
@@ -217,6 +268,90 @@ func (m *LifecycleManager) executeScript(path string) error {
 	return nil
 }
 
+// executeScriptEnforced is executeScript's privilege-drop-enforced path. The
+// script is opened with O_NOFOLLOW at every path component from "/" down to
+// its own directory (openChainNoFollow), then opened itself with O_NOFOLLOW
+// relative to that verified parent (openScriptNoFollow) — never re-resolved
+// by path — and executed via its own already-open file descriptor
+// (/proc/self/fd/<n>, see execViaFd), so the exact file DecideExecAsRoot
+// inspects is provably the exact file exec(2) runs: nothing can swap it in
+// between the check and the exec.
+//
+// DecideExecAsRoot then decides, from those fstat results alone, whether the
+// script runs as root (the calling process's own credentials — init already
+// runs as root pre-drop) or dropped to WorkloadUID/WorkloadGID with
+// WorkloadUsername's HOME/USER/LOGNAME and WorkloadWorkingDir, matching how
+// the harness child process itself gets dropped (supervisor.Supervisor.Run).
+func (m *LifecycleManager) executeScriptEnforced(path string) error {
+	dir := filepath.Dir(path)
+	name := filepath.Base(path)
+
+	dirFd, chain, err := openChainNoFollow(dir)
+	if err != nil {
+		return fmt.Errorf("hooks: %s: %w", path, err)
+	}
+	scriptFd, scriptOwnership, err := openScriptNoFollow(dirFd, name)
+	_ = closeFd(dirFd)
+	if err != nil {
+		return fmt.Errorf("hooks: %s: %w", path, err)
+	}
+	defer func() { _ = closeFd(scriptFd) }()
+
+	executable, err := fdIsExecutable(scriptFd)
+	if err != nil {
+		return fmt.Errorf("hooks: %s: %w", path, err)
+	}
+	if !executable {
+		fmt.Fprintf(os.Stderr, "[sciontool] Warning: hook script %s is not executable, skipping\n", path)
+		return nil
+	}
+
+	asRoot := DecideExecAsRoot(scriptOwnership, chain)
+	if !asRoot {
+		fmt.Fprintf(os.Stderr,
+			"[sciontool] hook script %s is not root-protected (owner/mode); running as the workload uid=%d gid=%d instead of root\n",
+			path, m.WorkloadUID, m.WorkloadGID)
+	}
+	cmd := m.buildEnforcedCmd(scriptFd, path, asRoot)
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("execution failed: %w", err)
+	}
+	return nil
+}
+
+// buildEnforcedCmd builds the *exec.Cmd executeScriptEnforced runs, without
+// running it — split out purely so a test can assert on the constructed
+// Credential/Env/Dir directly (none of which requires any privilege to
+// inspect) without needing CAP_SETUID/CAP_SETGID to exercise the "dropped"
+// branch, or a root-owned fixture to exercise the "as root" branch.
+//
+// asRoot is DecideExecAsRoot's own result for this script — the only input
+// this function trusts to pick a branch; it does not re-derive or
+// second-guess it.
+func (m *LifecycleManager) buildEnforcedCmd(scriptFd int, path string, asRoot bool) *exec.Cmd {
+	cmd := execViaFd(scriptFd, path)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+
+	if asRoot {
+		cmd.Env = m.hookEnv()
+		return cmd
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid: uint32(m.WorkloadUID),
+			Gid: uint32(m.WorkloadGID),
+		},
+	}
+	cmd.Env = m.droppedHookEnv()
+	if m.WorkloadWorkingDir != "" {
+		cmd.Dir = m.WorkloadWorkingDir
+	}
+	return cmd
+}
+
 // hookEnv builds the environment for hook scripts. When AgentHome is set,
 // HOME is overridden so that $HOME in hook scripts resolves to the scion
 // user's home directory rather than root's. PYTHONDONTWRITEBYTECODE is set
@@ -236,4 +371,39 @@ func (m *LifecycleManager) hookEnv() []string {
 		}
 	}
 	return append(env, override)
+}
+
+// droppedHookEnv builds the environment for a hook script that
+// executeScriptEnforced has decided to run dropped: the same base env
+// hookEnv builds (AgentHome-overridden HOME, PYTHONDONTWRITEBYTECODE), plus
+// USER/LOGNAME set to WorkloadUsername — matching how
+// supervisor.Supervisor.Run sets HOME/USER/LOGNAME for the harness child
+// process itself when it drops privileges, so a dropped hook sees the same
+// identity-derived environment the harness does. A no-op for USER/LOGNAME
+// when WorkloadUsername is empty.
+func (m *LifecycleManager) droppedHookEnv() []string {
+	env := m.hookEnv()
+	if m.WorkloadUsername == "" {
+		return env
+	}
+	env = setEnvVar(env, "USER", m.WorkloadUsername)
+	env = setEnvVar(env, "LOGNAME", m.WorkloadUsername)
+	return env
+}
+
+// setEnvVar sets key=value in a KEY=VALUE environment slice, replacing an
+// existing entry for key in place or appending a new one — the same
+// behaviour as pkg/sciontool/supervisor's own unexported setEnvVar, kept as
+// a separate copy here rather than an import so this leaf package does not
+// need to depend on the supervisor package purely for a five-line string
+// helper.
+func setEnvVar(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }

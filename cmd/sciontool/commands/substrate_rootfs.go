@@ -100,6 +100,7 @@ func fixupRootfsForScionUser(root string) {
 		return
 	}
 	fixupRootfsForScion(root, scionUser.HomeDir, uid, gid)
+	fixupEnforcedHooksDirChain()
 }
 
 // parentDirs returns every proper ancestor directory of path, from "/"
