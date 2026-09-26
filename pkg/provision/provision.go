@@ -349,7 +349,15 @@ func gitCloneWorkspace(ctx context.Context, in ProvisionInput) error {
 
 		// No .git — the prior attempt died mid-clone, leaving partial contents
 		// behind. Clear the directory so provisioning self-heals on retry
-		// without manual intervention, then clone once more.
+		// without manual intervention, then clone once more. Refuse when a
+		// "worktrees" subdirectory already holds anything: for
+		// worktree-per-agent, that directory holds every agent's checkout,
+		// and clearing the base out from under them would destroy work that
+		// has nothing to do with this clone's own failure.
+		if nonEmpty, checkErr := dirHasEntries(filepath.Join(in.Resolved.HostPath, "worktrees")); checkErr != nil || nonEmpty {
+			return fmt.Errorf("git clone failed (dir not empty) and checking %s/worktrees before clearing the shared base failed or found it non-empty (err=%v, nonEmpty=%v); refusing to clear it",
+				in.Resolved.HostPath, checkErr, nonEmpty)
+		}
 		slog.Warn("ProvisionShared: workspace not empty and no .git (incomplete prior clone), cleaning and retrying",
 			"project_id", in.ProjectID, "path", in.Resolved.HostPath)
 		if cleanErr := removeDirContents(in.Resolved.HostPath); cleanErr != nil {
@@ -382,10 +390,66 @@ func removeDirContents(dir string) error {
 	return nil
 }
 
+// dirHasEntries reports whether dir exists and contains at least one entry.
+// A missing directory reports false with a nil error: there is nothing in
+// it, by definition.
+func dirHasEntries(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(entries) > 0, nil
+}
+
 // WorktreePath returns the canonical worktree path for a given agent within
 // a shared base checkout: <hostPath>/worktrees/<agentID>.
 func WorktreePath(hostPath, agentID string) string {
 	return filepath.Join(hostPath, "worktrees", agentID)
+}
+
+// IsRealWorktreeDir reports whether path is a git worktree that belongs to
+// the shared base checkout at base: a real directory (not a symlink)
+// containing a .git file (not a directory, and not a symlink) whose
+// "gitdir: " target resolves inside base's own .git/worktrees admin
+// directory. Any other entry at path — a plain file, a directory without a
+// matching worktree admin entry, or a symlink at any point in the chain —
+// is not a worktree this checkout owns, and must never be reused, mounted,
+// or removed as if it were one.
+func IsRealWorktreeDir(path, base string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return false
+	}
+
+	gitFile := filepath.Join(path, ".git")
+	gfi, err := os.Lstat(gitFile)
+	if err != nil || gfi.IsDir() || gfi.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return false
+	}
+	content := strings.TrimSpace(string(data))
+	target, ok := strings.CutPrefix(content, "gitdir: ")
+	if !ok || target == "" {
+		return false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(path, target)
+	}
+	target = filepath.Clean(target)
+
+	worktreesAdminDir := filepath.Clean(filepath.Join(base, ".git", "worktrees"))
+	rel, err := filepath.Rel(worktreesAdminDir, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
 
 // ensureWorktree creates or attaches to a per-agent worktree if the mode is
@@ -418,9 +482,14 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		branchName = sanitizeBranchName(in.AgentName)
 	}
 
-	// If this agent's own worktree directory already exists, register
-	// (idempotent) and return.
-	if _, err := os.Stat(worktreePath); err == nil {
+	// If this agent's own worktree directory already exists, reuse it only
+	// if it is a real worktree of this base — never a plain file, a foreign
+	// directory, or a symlink, none of which this checkout created and none
+	// of which are safe to mount or to remove.
+	if _, err := os.Lstat(worktreePath); err == nil {
+		if !IsRealWorktreeDir(worktreePath, base) {
+			return fmt.Errorf("ProvisionShared: %s exists but is not a git worktree of this checkout; refusing to reuse or remove it", worktreePath)
+		}
 		slog.Debug("ProvisionShared: worktree already exists",
 			"agent_id", in.AgentID, "path", worktreePath)
 		return RegisterSharer(base, branchName, worktreePath, in.AgentID)
@@ -435,13 +504,19 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 
 	// --- JOIN check: does a worktree for this branch already exist? ---
 
-	// 1. Check the sharer registry.
+	// 1. Check the sharer registry. The registry is data written by every
+	// worktree-mode agent's own container (it lives under the shared,
+	// read-write-mounted .git), so its worktreePath is untrusted: only join
+	// it when the path it names is a real worktree of this same base.
 	sharers, existingWtPath, err := ListSharers(base, branchName)
 	if err != nil {
 		return fmt.Errorf("ProvisionShared: list sharers for branch %q: %w", branchName, err)
 	}
 	if len(sharers) > 0 && existingWtPath != "" {
-		if _, statErr := os.Stat(existingWtPath); statErr == nil {
+		if _, statErr := os.Lstat(existingWtPath); statErr == nil {
+			if !IsRealWorktreeDir(existingWtPath, base) {
+				return fmt.Errorf("ProvisionShared: the sharer registry for branch %q names %s, which is not a git worktree of this checkout; refusing to join it", branchName, existingWtPath)
+			}
 			slog.Info("ProvisionShared: joining existing worktree (registry)",
 				"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath,
 				"existing_sharers", sharers)
@@ -452,7 +527,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 	}
 
 	// 2. Check git worktree list for a prior-run worktree without a registry entry.
-	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" {
+	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" && IsRealWorktreeDir(existingPath, base) {
 		slog.Info("ProvisionShared: joining pre-existing worktree (git)",
 			"agent_id", in.AgentID, "branch", branchName, "path", existingPath)
 		return RegisterSharer(base, branchName, existingPath, in.AgentID)
