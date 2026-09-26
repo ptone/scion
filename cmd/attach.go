@@ -159,6 +159,17 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 		return fmt.Errorf("attach is not supported for managed agents — use scion message and scion look")
 	}
 
+	// The substrate runtime has no exec/attach/TTY primitive in this phase
+	// (pkg/runtime.SubstrateRuntime.Attach); its runtime broker rejects the
+	// PTY stream after the WebSocket upgrade has already happened, so that
+	// rejection never reaches this CLI process. Reject here instead, using
+	// the runtime value already returned by the agent GET above — the same
+	// shape as the managed-agent check above — so the user gets a fixed,
+	// explicit, non-zero-exit error before any WebSocket dial is attempted.
+	if agent.Runtime == "substrate" {
+		return fmt.Errorf("attach is not supported for agents on the substrate runtime in this phase")
+	}
+
 	// Check agent lifecycle status - the agent must be running to attach.
 	agentPhase, _ := hubAgentPhaseActivity(agent.Phase, agent.Activity, agent.Status)
 	if agentPhase != string(state.PhaseRunning) {
