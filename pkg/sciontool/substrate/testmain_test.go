@@ -96,6 +96,22 @@ func removeSandboxHome(dir string) {
 	}
 }
 
+// disableGoTelemetry writes the go command's own telemetry mode file
+// ("off") under configHome, the directory a child `go` process will use as
+// os.UserConfigDir(). In the default "local" mode every `go` invocation
+// writes counters under $XDG_CONFIG_HOME/go/telemetry and may start a
+// detached helper that recreates that tree after the parent exits — and so
+// after TestMain's cleanup, or t.TempDir's, has already removed it.
+// GOTELEMETRY is not settable through the environment; the mode file is
+// the supported switch (it is what `go telemetry off` writes).
+func disableGoTelemetry(configHome string) error {
+	dir := filepath.Join(configHome, "go", "telemetry")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "mode"), []byte("off"), 0o644)
+}
+
 // TestMain clears every Hub- and privilege-drop-related environment
 // variable, and redirects HOME/XDG_*/SCION_WORKSPACE_PATH/the Hub token
 // home/pkg/sciontool/log's own log file to one per-binary temp directory,
@@ -137,6 +153,9 @@ func TestMain(m *testing.M) {
 	sandboxHomeDir = tmpHome
 	_ = os.Setenv("HOME", tmpHome)
 	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpHome, ".config"))
+	if err := disableGoTelemetry(filepath.Join(tmpHome, ".config")); err != nil {
+		fmt.Fprintf(os.Stderr, "TestMain: failed to disable go telemetry in the sandbox home: %v\n", err)
+	}
 	_ = os.Setenv("XDG_DATA_HOME", filepath.Join(tmpHome, ".local", "share"))
 	_ = os.Setenv("XDG_CACHE_HOME", filepath.Join(tmpHome, ".cache"))
 	_ = os.Setenv("XDG_STATE_HOME", filepath.Join(tmpHome, ".local", "state"))
@@ -162,22 +181,11 @@ func TestGoCachesEscapeSandboxHOME(t *testing.T) {
 		t.Fatal("sandboxHomeDir was not set by TestMain")
 	}
 
-	// The child `go env` call below must not write into sandboxHomeDir
-	// itself: go's own telemetry counters live under
-	// $XDG_CONFIG_HOME/go/telemetry regardless of GOCACHE/GOMODCACHE (go
-	// treats GOTELEMETRY/GOTELEMETRYDIR as read-only, derived values, not
-	// settable env vars), and that write can outlive this call — go's
-	// telemetry uploader can run detached in the background. Pointing only
-	// XDG_CONFIG_HOME at this test's own t.TempDir() keeps that unrelated
-	// write out of the directory this test (and TestMain's cleanup)
-	// actually cares about, and lets the testing package's own
-	// unconditional cleanup remove it. HOME must stay exactly what TestMain
-	// set it to (sandboxHomeDir): GOMODCACHE/GOPATH default to paths under
-	// $HOME, so overriding HOME here would make this test check a directory
-	// that resolveRealGoCaches never had a chance to protect.
-	childConfigHome := t.TempDir()
+	// HOME and XDG_CONFIG_HOME stay exactly what TestMain set them to:
+	// GOMODCACHE/GOPATH default to paths under $HOME, and TestMain's
+	// disableGoTelemetry seed under $XDG_CONFIG_HOME is what keeps this
+	// child's own telemetry out of the sandbox home (checked below).
 	cmd := exec.Command("go", "env", "GOCACHE", "GOMODCACHE")
-	cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+childConfigHome)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("go env GOCACHE GOMODCACHE: %v", err)
@@ -196,9 +204,45 @@ func TestGoCachesEscapeSandboxHOME(t *testing.T) {
 		}
 	}
 
-	for _, rel := range []string{filepath.Join(".cache", "go-build"), filepath.Join("go", "pkg", "mod")} {
+	for _, rel := range []string{filepath.Join(".cache", "go-build"), filepath.Join("go", "pkg", "mod"), filepath.Join(".config", "go", "telemetry", "local")} {
 		if _, err := os.Stat(filepath.Join(sandboxHomeDir, rel)); err == nil {
-			t.Errorf("sandbox home contains %s after a child go invocation; a real cache was written there instead of the real machine's", rel)
+			t.Errorf("sandbox home contains %s after a child go invocation; the child go process wrote there instead of outside the sandbox", rel)
 		}
+	}
+}
+
+// TestRemoveSandboxHome_RemovesReadOnlyModuleCacheShapedTree pins
+// removeSandboxHome's contract: a tree shaped like a Go module cache
+// (read-only directories holding read-only files, which a plain
+// os.RemoveAll cannot unlink) is removed completely.
+func TestRemoveSandboxHome_RemovesReadOnlyModuleCacheShapedTree(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sandbox")
+	modDir := filepath.Join(root, "go", "pkg", "mod", "example.com", "m@v1.0.0")
+	if err := os.MkdirAll(modDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "go.mod"), []byte("module example.com/m\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{modDir, filepath.Dir(modDir)} {
+		if err := os.Chmod(d, 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// If removeSandboxHome fails, restore write access so t.TempDir's own
+	// cleanup can still remove the tree.
+	t.Cleanup(func() {
+		_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+			if err == nil {
+				_ = os.Chmod(p, info.Mode()|0o200)
+			}
+			return nil
+		})
+	})
+
+	removeSandboxHome(root)
+
+	if _, err := os.Lstat(root); !os.IsNotExist(err) {
+		t.Errorf("removeSandboxHome left %s behind (Lstat err = %v); read-only module-cache files must not survive cleanup", root, err)
 	}
 }
