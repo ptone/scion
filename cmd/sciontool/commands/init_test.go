@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -855,6 +856,81 @@ func TestWriteEnvFile_RefusesSymlinkAtFinalPath(t *testing.T) {
 	}
 	if linkInfo.Mode()&os.ModeSymlink == 0 {
 		t.Error("the symlink at the final path should be untouched")
+	}
+}
+
+// TestWriteEnvFile_DirChownSurvivesSwapAfterWrite proves the fix for the
+// scenario where the workload — which owns $HOME and can observe the
+// scion-env write completing (e.g. via inotify on $HOME/.scion) — renames
+// $HOME/.scion away and drops a symlink to a victim directory in its place
+// before root's directory chown runs. The chown must land on the original
+// directory (wherever its entry ended up), never on the victim, because it
+// operates on a directory fd resolved before the swap rather than
+// re-resolving the path afterward.
+//
+// The swap is injected through writeEnvFileAfterWriteForTest rather than a
+// real race, so this is deterministic: the seam fires at exactly the
+// window the real exploit needs (after the file write, before the
+// directory chown), which a symlink planted before the call does not
+// exercise — the write itself already refuses a pre-existing symlink, so
+// only a swap injected in that specific window can distinguish the fix
+// from the original path-based chown.
+func TestWriteEnvFile_DirChownSurvivesSwapAfterWrite(t *testing.T) {
+	tmpHome := t.TempDir()
+	victimDir := filepath.Join(tmpHome, "victim-dir")
+	if err := os.MkdirAll(victimDir, 0700); err != nil {
+		t.Fatalf("mkdir victim: %v", err)
+	}
+	victimInfoBefore, err := os.Stat(victimDir)
+	if err != nil {
+		t.Fatalf("stat victim before: %v", err)
+	}
+
+	scionDir := filepath.Join(tmpHome, ".scion")
+	movedDir := filepath.Join(tmpHome, ".scion.moved")
+
+	writeEnvFileAfterWriteForTest = func(dir string) {
+		if err := os.Rename(dir, movedDir); err != nil {
+			t.Errorf("swap: rename %s: %v", dir, err)
+			return
+		}
+		if err := os.Symlink(victimDir, dir); err != nil {
+			t.Errorf("swap: symlink %s -> %s: %v", dir, victimDir, err)
+		}
+	}
+	t.Cleanup(func() { writeEnvFileAfterWriteForTest = nil })
+
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+	writeEnvFile(tmpHome, os.Getuid(), os.Getgid())
+
+	// The victim directory must be completely untouched: same mode, same
+	// change time (chowning even to the same uid/gid still bumps ctime, so
+	// an unchanged ctime proves chown(2) never ran against it).
+	victimInfoAfter, err := os.Stat(victimDir)
+	if err != nil {
+		t.Fatalf("stat victim after: %v", err)
+	}
+	victimStBefore := victimInfoBefore.Sys().(*syscall.Stat_t)
+	victimStAfter := victimInfoAfter.Sys().(*syscall.Stat_t)
+	if victimStAfter.Ctim != victimStBefore.Ctim {
+		t.Error("victim directory's change time advanced: it was chowned")
+	}
+
+	// ".scion" itself must still be the symlink the swap planted — nothing
+	// should have unlinked or replaced it either.
+	linkInfo, err := os.Lstat(scionDir)
+	if err != nil {
+		t.Fatalf("lstat .scion: %v", err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Error("expected .scion to still be the symlink the swap planted")
+	}
+
+	// The real directory, now at its moved-away path, is the one that
+	// should have been chowned (here, to the test's own uid/gid, which is
+	// always permitted and still bumps ctime).
+	if _, err := os.Stat(movedDir); err != nil {
+		t.Fatalf("stat moved-away original .scion: %v", err)
 	}
 }
 
