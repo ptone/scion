@@ -54,6 +54,27 @@ func OpenDirNoFollow(path string) (*os.File, error) {
 // unexported — this package's own tests are the only thing that may set it).
 var chownWalkTestHook func(name string)
 
+// chownLeafTestHook, when non-nil, fires in chownWalkChildren right after a
+// non-directory entry has been resolved to an O_PATH fd and before that fd
+// is fstat'd/fchown'd (i.e. immediately before chownWalkLeaf runs). It
+// receives the entry's leaf name — purely informational, for the same
+// reason and with the same "no real operation ever derives from it" and
+// fd-immutability guarantee as chownWalkTestHook's doc comment describes.
+// This is what lets a test drive "the leaf's name is swapped for something
+// else immediately after this package resolved it to a descriptor"
+// deterministically: because every decision after this point is made
+// against the already-open fd, nothing the test does to the name at this
+// point can change what gets chowned. Always nil in production; unexported.
+var chownLeafTestHook func(name string)
+
+// chownDirPreChownTestHook, when non-nil, fires in chownWalkDir right after
+// a directory entry has been fstat'd and before it is fchown'd (i.e.
+// strictly earlier than chownWalkTestHook, which fires after the chown
+// decision, right before recursion). Same purpose as chownLeafTestHook,
+// for the directory-entry chown itself rather than the leaf case. Always
+// nil in production; unexported.
+var chownDirPreChownTestHook func(name string)
+
 // maxWalkDepth bounds the recursion ChownTreeNoFollow and
 // RemoveContentsNoFollow perform. Both hold one open file descriptor per
 // level of nesting for the lifetime of that level's recursive call, and
@@ -168,6 +189,11 @@ func chownWalkChildren(dir *os.File, uid, gid int, shouldChown func(entryUID uin
 	dirFd := int(dir.Fd())
 	names, err := dir.Readdirnames(-1)
 	if err != nil {
+		// "." stands in for "this directory itself" — there is no single
+		// entry name to blame for a failure to list it at all.
+		if onErr != nil {
+			onErr(".", err)
+		}
 		return 0, 0
 	}
 
@@ -194,8 +220,20 @@ func chownWalkChildren(dir *os.File, uid, gid int, shouldChown func(entryUID uin
 		// stat-then-act pair on the same open).
 		pfd, operr := syscall.Openat(dirFd, name, unix.O_PATH|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 		if operr != nil {
-			// Vanished between listing and this open — skip.
+			// A plain "vanished between listing and this open" (ENOENT) is
+			// not reported — that's an ordinary, expected race with the
+			// directory's own contents, not a problem with this package's
+			// handling of it. Anything else (EMFILE/ENFILE — the exact
+			// fd-exhaustion signal the depth cap's own doc describes,
+			// EACCES, etc.) is reported: it means an entry was silently
+			// skipped for a reason worth knowing about.
+			if onErr != nil && !errors.Is(operr, unix.ENOENT) {
+				onErr(name, operr)
+			}
 			continue
+		}
+		if chownLeafTestHook != nil {
+			chownLeafTestHook(name)
 		}
 		w, c := chownWalkLeaf(pfd, name, uid, gid, shouldChown, guardHardlinks, onErr)
 		walked += w
@@ -214,10 +252,16 @@ func chownWalkDir(childFd int, name string, uid, gid int, shouldChown func(entry
 
 	var st unix.Stat_t
 	if serr := unix.Fstat(childFd, &st); serr != nil {
+		if onErr != nil {
+			onErr(name, serr)
+		}
 		return 0, 0
 	}
 	walked = 1
 	if shouldChown(st.Uid) {
+		if chownDirPreChownTestHook != nil {
+			chownDirPreChownTestHook(name)
+		}
 		if cerr := unix.Fchownat(childFd, "", uid, gid, unix.AT_EMPTY_PATH); cerr != nil {
 			if onErr != nil {
 				onErr(name, cerr)
@@ -251,6 +295,9 @@ func chownWalkLeaf(pfd int, name string, uid, gid int, shouldChown func(entryUID
 
 	var st unix.Stat_t
 	if serr := unix.Fstat(pfd, &st); serr != nil {
+		if onErr != nil {
+			onErr(name, serr)
+		}
 		return 0, 0
 	}
 	walked = 1
@@ -281,6 +328,17 @@ func chownWalkLeaf(pfd int, name string, uid, gid int, shouldChown func(entryUID
 // nil in production; unexported, this package's own tests are the only
 // thing that may set it.
 var removeWalkTestHook func(name string)
+
+// removeWalkPreOpenTestHook, when non-nil, fires right after Fstatat has
+// classified an entry as a directory and right before the
+// O_NOFOLLOW openat that resolves it for real. This is the one window
+// removeWalkTestHook (which fires after that openat) cannot cover: it lets
+// a test prove that a symlink swapped into name's place in exactly that
+// gap is refused (openat with O_NOFOLLOW fails, ELOOP) rather than
+// followed, since O_NOFOLLOW — not the earlier Fstatat classification — is
+// the only thing standing between this window and following the swap.
+// Always nil in production; unexported.
+var removeWalkPreOpenTestHook func(name string)
 
 // RemoveContentsNoFollow removes every entry inside dir except those for
 // which keep(name) returns true, without ever following a symlink or
@@ -316,6 +374,9 @@ func removeWalkChildren(dir *os.File, keep func(name string) bool, onErr func(st
 		}
 		var st unix.Stat_t
 		if serr := unix.Fstatat(dirFd, name, &st, unix.AT_SYMLINK_NOFOLLOW); serr != nil {
+			if onErr != nil && !errors.Is(serr, unix.ENOENT) {
+				onErr(name, serr)
+			}
 			continue
 		}
 
@@ -326,11 +387,17 @@ func removeWalkChildren(dir *os.File, keep func(name string) bool, onErr func(st
 				}
 				continue
 			}
+			if removeWalkPreOpenTestHook != nil {
+				removeWalkPreOpenTestHook(name)
+			}
 			childFd, oerr := syscall.Openat(dirFd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 			if oerr != nil {
 				// No longer a plain directory (raced out from under us,
 				// e.g. swapped for a symlink) — refuse rather than follow;
 				// skip this entry entirely, leaving it in place.
+				if onErr != nil && !errors.Is(oerr, unix.ENOENT) {
+					onErr(name, oerr)
+				}
 				continue
 			}
 			child := os.NewFile(uintptr(childFd), name)

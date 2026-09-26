@@ -841,7 +841,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 	servicesPath := filepath.Join(agentHome, ".scion", "scion-services.yaml")
 	log.Debug("Looking for services config at: %s", servicesPath)
-	if data, err := os.ReadFile(servicesPath); err == nil {
+	if data, err := readServicesYAML(servicesPath, opts.RequirePrivilegeDrop); err == nil {
 		var specs []api.ServiceSpec
 		if err := yaml.Unmarshal(data, &specs); err != nil {
 			log.Error("Failed to parse scion-services.yaml: %v", err)
@@ -2911,12 +2911,25 @@ func blockClaudeDebugSymlink(debugDir string, requirePrivilegeDrop bool) {
 		return
 	}
 	defer func() { _ = d.Close() }()
+	if blockClaudeDebugAfterEnsureForTest != nil {
+		blockClaudeDebugAfterEnsureForTest(debugDir)
+	}
 	if err := d.Chmod(0555); err != nil {
 		log.Error("Failed to chmod debug directory %s: %v", debugDir, err)
 		return
 	}
 	log.Debug("Blocked debug symlink: set %s to read-only", debugDir)
 }
+
+// blockClaudeDebugAfterEnsureForTest is a test-only seam: it fires after
+// EnsureDirNoFollow(debugDir) has already returned its fd and before the
+// chmod that follows. It lets a test simulate the workload swapping
+// debugDir's own entry in its parent for a symlink to a victim directory in
+// that exact window — the same style of deterministic race injection as
+// writeEnvFileAfterWriteForTest — and prove the chmod that follows still
+// lands on the fd EnsureDirNoFollow already resolved, never on whatever the
+// entry becomes afterward. Always nil in production.
+var blockClaudeDebugAfterEnsureForTest func(debugDir string)
 
 // scionEnvVarPrefixes lists environment variable prefixes that are written
 // to the scion-env file for shell sessions to source.
@@ -3199,6 +3212,79 @@ func cleanGcloudConfigForMetadata(gcloudDir string, requirePrivilegeDrop bool) {
 	}); err != nil {
 		log.Debug("Could not clean gcloud config dir %s: %v", gcloudDir, err)
 	}
+}
+
+// readServicesYAML reads the sidecar-services config file at path.
+// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop (true only
+// for substrate).
+//
+// On every OTHER runtime this keeps the exact historical behaviour —
+// os.ReadFile(path), which follows a symlink at any component — unchanged:
+// a legitimate non-substrate setup may symlink this file (e.g. from a
+// mounted config directory), and refusing that would break it, with no
+// privilege boundary at stake to justify the change.
+//
+// On substrate this reads as root, after pre-start hooks have already run
+// as the workload user (which owns $HOME/.scion outright): a symlink
+// planted at path must not let root read and act on an arbitrary file's
+// content. dirfd.OpenParentNoFollow + O_NOFOLLOW refuses (rather than
+// follows) a symlinked path, and the opened fd is fstat'd and refused
+// unless it is a single-link regular file — a hardlink to an unrelated
+// (possibly root-owned) file would otherwise pass a bare "is this a
+// regular file" check. A refusal here is logged (path only) and reported
+// as an error, which the caller already treats as "no services to start"
+// rather than a fatal init error — a planted symlink must not be able to
+// stop the workload from starting.
+//
+// This does NOT defend against the workload simply overwriting the file's
+// CONTENT in place — no symlink needed, since it owns the containing
+// directory outright, and pre-start hooks (which run as the workload user)
+// complete before this is ever read. That is accepted rather than defended
+// against for the SERVICE IDENTITY dimension: no service this file can
+// describe ever runs above the workload's own uid. Manager.Start takes
+// exactly one uid/gid pair for the whole batch of services, sourced from
+// RunInit's own RequirePrivilegeDrop-enforced drop target
+// (requirePrivilegeDropOrFail fails RunInit closed before this point if
+// that target is uid 0 — see its own doc comment), never from any field
+// the parsed YAML controls — the service spec type carries no uid/gid/user/
+// capability field at all. So a rewritten file can only make root start
+// additional processes running AS the workload — no privilege the workload
+// does not already have as itself by just running its own code. The
+// service NAME dimension (a workload-chosen Name used to build a log file
+// path) is a separate, defended-against instance of the same content-trust
+// class — see validateServiceName's doc comment.
+func readServicesYAML(path string, requirePrivilegeDrop bool) ([]byte, error) {
+	if !requirePrivilegeDrop {
+		return os.ReadFile(path)
+	}
+
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Error("Refusing to read %s: %v", path, err)
+		}
+		return nil, err
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Error("Refusing to read %s: not a plain file", path)
+		}
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		return nil, err
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
+		log.Error("Refusing to read %s: not a single-link regular file", path)
+		return nil, fmt.Errorf("refusing to read %s: not a single-link regular file", path)
+	}
+	return io.ReadAll(f)
 }
 
 // hasCapSetUID checks whether the current process has CAP_SETUID (bit 7)
