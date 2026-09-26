@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -395,6 +397,113 @@ func TestStartAgentViaHub_Site2_SubstrateAgent_ReturnsExplicitError(t *testing.T
 	require.Error(t, err)
 	const wantMsg = "attach is not supported for agents on the substrate runtime in this phase"
 	assert.Equal(t, wantMsg, err.Error(), "substrate start -a must fail with the fixed message, got: %v", err)
+}
+
+// TestStartAgentViaHub_Site1_SubstrateAgent_ReturnsExplicitError mirrors
+// TestStartAgentViaHub_Site2_SubstrateAgent_ReturnsExplicitError, but drives
+// startAgentViaHub() through the workspace-upload branch (site 1, ~common.go
+// :1104) instead of the ready: label (site 2): a non-git project directory
+// with one file makes startAgentViaHub collect workspaceFiles, the mock
+// Create response returns a matching UploadURLs entry so the upload+finalize
+// path runs, and the post-finalize polling GET reports Runtime: "substrate".
+// The same fixed, explicit, non-zero-exit error must be returned, and the
+// WebSocket dial step must never be reached.
+func TestStartAgentViaHub_Site1_SubstrateAgent_ReturnsExplicitError(t *testing.T) {
+	clearAppTokenSources(t)
+
+	restore := saveAttachTestState()
+	defer restore()
+	attach = true
+	templateName = ""
+	labelFlags = nil
+	runtimeBrokerID = ""
+	harnessConfigFlag = ""
+	harnessAuthFlag = ""
+
+	// A non-git project directory with one file, so the workspace-scan in
+	// startAgentViaHub collects it into workspaceFiles — the precondition for
+	// the create request to carry WorkspaceFiles and for a Hub response with
+	// UploadURLs to route into the workspace-upload branch.
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "project")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "hello.txt"), []byte("hi"), 0644))
+	scionDir := filepath.Join(projectDir, ".scion")
+	require.NoError(t, os.MkdirAll(scionDir, 0755))
+
+	const (
+		projectID = "proj-start-substrate-site1"
+		agentName = "start-substrate-site1-agent"
+		agentID   = "start-substrate-site1-uuid"
+	)
+
+	// A file:// upload URL short-circuits transfer.Client.UploadFile into a
+	// local file write, so the test doesn't need an HTTP PUT handler too.
+	uploadDest := filepath.Join(tmpDir, "uploaded", "hello.txt")
+
+	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
+	agentsPath := "/api/v1/projects/" + projectID + "/agents"
+	projectGetPath := "/api/v1/projects/" + projectID
+	// startAgentViaHub finalizes against resp.Agent.Slug, falling back to
+	// agentName when Slug is unset — the mock Create response below leaves
+	// Slug unset, so the finalize call lands on agentName.
+	finalizePath := "/api/v1/agents/" + agentName + "/workspace/sync-to/finalize"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.Method == http.MethodGet && r.URL.Path == projectGetPath:
+			// Git-remote display: return a project with no GitRemote to suppress output.
+			_ = json.NewEncoder(w).Encode(hubclient.Project{ID: projectID, Name: "test"})
+
+		case r.Method == http.MethodPost && r.URL.Path == agentsPath:
+			// Create: return UploadURLs for the one collected file, routing
+			// startAgentViaHub into the workspace-upload branch (site 1).
+			_ = json.NewEncoder(w).Encode(hubclient.CreateAgentResponse{
+				Agent: &hubclient.Agent{ID: agentID, Name: agentName},
+				UploadURLs: []transfer.UploadURLInfo{
+					{Path: "hello.txt", URL: "file://" + uploadDest, Method: "PUT"},
+				},
+			})
+
+		case r.Method == http.MethodPost && r.URL.Path == finalizePath:
+			_ = json.NewEncoder(w).Encode(hubclient.SyncToFinalizeResponse{Applied: true, FilesApplied: 1})
+
+		case r.Method == http.MethodGet && r.URL.Path == agentPath:
+			// Suspend check (pre-create) and post-finalize polling both hit
+			// this path; report running with a substrate runtime so the
+			// polling loop's running-phase branch is exercised.
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{
+				ID:      agentID,
+				Name:    agentName,
+				Phase:   "running",
+				Runtime: "substrate",
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:      client,
+		Endpoint:    srv.URL,
+		ProjectID:   projectID,
+		ProjectPath: scionDir,
+	}
+
+	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+
+	require.Error(t, err)
+	const wantMsg = "attach is not supported for agents on the substrate runtime in this phase"
+	assert.Equal(t, wantMsg, err.Error(), "substrate start -a via the workspace-upload path must fail with the fixed message, got: %v", err)
 }
 
 // TestAttachViaHub_SubstrateAgent_ReturnsExplicitError verifies that attach on
