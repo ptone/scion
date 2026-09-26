@@ -46366,6 +46366,7 @@ type RuntimeBrokerMutation struct {
 	supported_harnesses            *string
 	resources                      *string
 	runtimes                       *string
+	default_profile                *string
 	labels                         *map[string]string
 	annotations                    *map[string]string
 	endpoint                       *string
@@ -47018,6 +47019,55 @@ func (m *RuntimeBrokerMutation) ResetRuntimes() {
 	delete(m.clearedFields, runtimebroker.FieldRuntimes)
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (m *RuntimeBrokerMutation) SetDefaultProfile(s string) {
+	m.default_profile = &s
+}
+
+// DefaultProfile returns the value of the "default_profile" field in the mutation.
+func (m *RuntimeBrokerMutation) DefaultProfile() (r string, exists bool) {
+	v := m.default_profile
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDefaultProfile returns the old "default_profile" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldDefaultProfile(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDefaultProfile is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDefaultProfile requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDefaultProfile: %w", err)
+	}
+	return oldValue.DefaultProfile, nil
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (m *RuntimeBrokerMutation) ClearDefaultProfile() {
+	m.default_profile = nil
+	m.clearedFields[runtimebroker.FieldDefaultProfile] = struct{}{}
+}
+
+// DefaultProfileCleared returns if the "default_profile" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) DefaultProfileCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldDefaultProfile]
+	return ok
+}
+
+// ResetDefaultProfile resets all changes to the "default_profile" field.
+func (m *RuntimeBrokerMutation) ResetDefaultProfile() {
+	m.default_profile = nil
+	delete(m.clearedFields, runtimebroker.FieldDefaultProfile)
+}
+
 // SetLabels sets the "labels" field.
 func (m *RuntimeBrokerMutation) SetLabels(value map[string]string) {
 	m.labels = &value
@@ -47601,7 +47651,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -47637,6 +47687,9 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	}
 	if m.runtimes != nil {
 		fields = append(fields, runtimebroker.FieldRuntimes)
+	}
+	if m.default_profile != nil {
+		fields = append(fields, runtimebroker.FieldDefaultProfile)
 	}
 	if m.labels != nil {
 		fields = append(fields, runtimebroker.FieldLabels)
@@ -47706,6 +47759,8 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.Resources()
 	case runtimebroker.FieldRuntimes:
 		return m.Runtimes()
+	case runtimebroker.FieldDefaultProfile:
+		return m.DefaultProfile()
 	case runtimebroker.FieldLabels:
 		return m.Labels()
 	case runtimebroker.FieldAnnotations:
@@ -47763,6 +47818,8 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldResources(ctx)
 	case runtimebroker.FieldRuntimes:
 		return m.OldRuntimes(ctx)
+	case runtimebroker.FieldDefaultProfile:
+		return m.OldDefaultProfile(ctx)
 	case runtimebroker.FieldLabels:
 		return m.OldLabels(ctx)
 	case runtimebroker.FieldAnnotations:
@@ -47879,6 +47936,13 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetRuntimes(v)
+		return nil
+	case runtimebroker.FieldDefaultProfile:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDefaultProfile(v)
 		return nil
 	case runtimebroker.FieldLabels:
 		v, ok := value.(map[string]string)
@@ -48027,6 +48091,9 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldRuntimes) {
 		fields = append(fields, runtimebroker.FieldRuntimes)
 	}
+	if m.FieldCleared(runtimebroker.FieldDefaultProfile) {
+		fields = append(fields, runtimebroker.FieldDefaultProfile)
+	}
 	if m.FieldCleared(runtimebroker.FieldLabels) {
 		fields = append(fields, runtimebroker.FieldLabels)
 	}
@@ -48085,6 +48152,9 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldRuntimes:
 		m.ClearRuntimes()
+		return nil
+	case runtimebroker.FieldDefaultProfile:
+		m.ClearDefaultProfile()
 		return nil
 	case runtimebroker.FieldLabels:
 		m.ClearLabels()
@@ -48156,6 +48226,9 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldRuntimes:
 		m.ResetRuntimes()
+		return nil
+	case runtimebroker.FieldDefaultProfile:
+		m.ResetDefaultProfile()
 		return nil
 	case runtimebroker.FieldLabels:
 		m.ResetLabels()
