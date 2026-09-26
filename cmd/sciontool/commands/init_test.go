@@ -20,6 +20,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
@@ -1293,6 +1294,147 @@ func TestRequirePrivilegeDropOrFail_SubstrateSucceedsWhenDropped(t *testing.T) {
 func TestRequirePrivilegeDropOrFail_NonSubstrateRootlessUnchanged(t *testing.T) {
 	if err := requirePrivilegeDropOrFail(0, 0, false); err != nil {
 		t.Errorf("requirePrivilegeDropOrFail(0, 0, false) = %v, want nil (non-substrate rootless fallback must be unaffected)", err)
+	}
+}
+
+// TestRequirePrivilegeDropOrFail_EnforcedRefusesRootGID is round 5's B1
+// clamp: in enforced mode a non-root UID paired with a root (0) GID must be
+// refused, because the supervisor's and manager's credential drop both use
+// UID>0 && GID>0 and would otherwise skip the drop entirely (full root). The
+// pre-round-5 uid-only predicate let exactly this pair through.
+func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootGID(t *testing.T) {
+	err := requirePrivilegeDropOrFail(1000, 0, true)
+	if !errors.Is(err, errPrivilegeDropRequired) {
+		t.Fatalf("requirePrivilegeDropOrFail(1000, 0, true) = %v, want errPrivilegeDropRequired", err)
+	}
+	if err := requirePrivilegeDropOrFail(1000, 0, false); err != nil {
+		t.Errorf("requirePrivilegeDropOrFail(1000, 0, false) = %v, want nil (non-enforced mode is unaffected)", err)
+	}
+}
+
+// TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop is round 5's
+// seam A(1) test (round-4 High-2 / O26 / D3): with euid stubbed to 0, the
+// body of postPreStartOwnershipFixup must forward its own
+// requirePrivilegeDrop, unchanged, to chownTreeRootOwned for every directory
+// it fixes up. Hardcoding false there would silently fall back to the
+// path-based walk with no hard-link guard in enforced mode.
+func TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		t.Run(map[bool]string{true: "enforced", false: "non-enforced"}[want], func(t *testing.T) {
+			origGeteuid, origChown := postPreStartGeteuid, runChownTreeRootOwned
+			t.Cleanup(func() { postPreStartGeteuid, runChownTreeRootOwned = origGeteuid, origChown })
+
+			workspace := t.TempDir()
+			agentHome := t.TempDir()
+			t.Setenv("SCION_WORKSPACE_PATH", workspace)
+
+			type call struct {
+				dir      string
+				uid, gid int
+				rpd      bool
+			}
+			var calls []call
+			postPreStartGeteuid = func() int { return 0 }
+			runChownTreeRootOwned = func(root string, uid, gid int, requirePrivilegeDrop bool) (int, int, error) {
+				calls = append(calls, call{root, uid, gid, requirePrivilegeDrop})
+				return 0, 0, nil
+			}
+
+			postPreStartOwnershipFixup(1000, 1001, agentHome, want)
+
+			wantCalls := []call{{workspace, 1000, 1001, want}, {agentHome, 1000, 1001, want}}
+			if !reflect.DeepEqual(calls, wantCalls) {
+				t.Fatalf("chownTreeRootOwned calls = %+v, want %+v", calls, wantCalls)
+			}
+		})
+	}
+}
+
+// TestSetupHostUser_ForwardsRequirePrivilegeDrop is round 5's seam A(2)
+// test (round-4 Low-1 / O27 / D2): with getuid, CAP_SETUID and the UID-map
+// check stubbed to "root, capable, mapped", setupHostUser must reach
+// adjustScionUser and forward its own requirePrivilegeDrop to it unchanged,
+// along with the parsed SCION_HOST_UID/GID.
+func TestSetupHostUser_ForwardsRequirePrivilegeDrop(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		t.Run(map[bool]string{true: "enforced", false: "non-enforced"}[want], func(t *testing.T) {
+			origGetuid, origCap, origMapped, origAdjust := setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser
+			t.Cleanup(func() {
+				setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser = origGetuid, origCap, origMapped, origAdjust
+			})
+			t.Setenv("SCION_HOST_UID", "1234")
+			t.Setenv("SCION_HOST_GID", "5678")
+			t.Setenv("SCION_KEEPID_UID", "")
+
+			setupHostUserGetuid = func() int { return 0 }
+			setupHostUserHasCapSetUID = func() bool { return true }
+			setupHostUserIsUIDMapped = func(int) bool { return true }
+			called := 0
+			var gotUID, gotGID int
+			var gotHostUID, gotHostGID string
+			var gotRPD bool
+			runAdjustScionUser = func(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop bool) (int, int, bool) {
+				called++
+				gotUID, gotGID, gotHostUID, gotHostGID, gotRPD = uid, gid, hostUID, hostGID, requirePrivilegeDrop
+				return uid, gid, false
+			}
+
+			uid, gid, rootless := setupHostUser(want)
+
+			if called != 1 {
+				t.Fatalf("adjustScionUser called %d times, want 1", called)
+			}
+			if gotRPD != want {
+				t.Errorf("adjustScionUser got requirePrivilegeDrop=%v, want %v", gotRPD, want)
+			}
+			if gotUID != 1234 || gotGID != 5678 || gotHostUID != "1234" || gotHostGID != "5678" {
+				t.Errorf("adjustScionUser got (%d, %d, %q, %q), want (1234, 5678, \"1234\", \"5678\")", gotUID, gotGID, gotHostUID, gotHostGID)
+			}
+			if uid != 1234 || gid != 5678 || rootless {
+				t.Errorf("setupHostUser = (%d, %d, %v), want adjustScionUser's (1234, 5678, false)", uid, gid, rootless)
+			}
+		})
+	}
+}
+
+// TestRunServicesStart_DefaultForwardsRequirePrivilegeDrop exercises the
+// DEFAULT runServicesStart body (round-4 High-3 / O28 / D1), which the
+// RunInit threading test replaces with a stub: with requirePrivilegeDrop
+// true and <name>.stdout.log pre-planted as a hard link to a victim file,
+// the service must be refused (so the default body forwarded the flag to
+// Manager.Start), and the victim's content must be unchanged.
+func TestRunServicesStart_DefaultForwardsRequirePrivilegeDrop(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	log.SetLogPath(filepath.Join(home, "agent.log"))
+	logDir := filepath.Join(home, ".scion", "services", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(home, "victim")
+	if err := os.WriteFile(victim, []byte("v"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(victim, filepath.Join(logDir, "svc.stdout.log")); err != nil {
+		t.Fatal(err)
+	}
+
+	m := services.New(5 * time.Second)
+	err := runServicesStart(context.Background(), m, []api.ServiceSpec{{Name: "svc", Command: []string{"sh", "-c", "echo PWNED"}}}, 0, 0, "", true)
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = m.Shutdown(ctx)
+	}()
+	if err == nil || !strings.Contains(err.Error(), "hard-linked") {
+		t.Errorf("default runServicesStart err = %v, want the hard-linked log refusal (requirePrivilegeDrop must reach Manager.Start)", err)
+	}
+	got, rerr := os.ReadFile(victim)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(got) != "v" {
+		t.Errorf("victim content = %q, want %q (unchanged)", got, "v")
 	}
 }
 

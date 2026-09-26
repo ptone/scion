@@ -135,7 +135,16 @@ func TestChownTreeNoFollow_FilterSkipsNonMatchingEntries(t *testing.T) {
 	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A subdirectory too, so the directory branch's own shouldChown check
+	// (chownWalkDir) is exercised, not only the leaf branch's.
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	before := ctimeOf(t, target)
+	subBefore := ctimeOf(t, sub)
+	rootBefore := ctimeOf(t, root)
+	ctimeSettle()
 
 	uid, gid := os.Getuid(), os.Getgid()
 	walked, changed, err := ChownTreeNoFollow(root, uid, gid, func(entryUID uint32) bool {
@@ -144,14 +153,20 @@ func TestChownTreeNoFollow_FilterSkipsNonMatchingEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ChownTreeNoFollow: %v", err)
 	}
-	if walked != 2 {
-		t.Errorf("walked = %d, want 2", walked)
+	if walked != 3 {
+		t.Errorf("walked = %d, want 3 (root, file, sub)", walked)
 	}
 	if changed != 0 {
 		t.Errorf("changed = %d, want 0 (filter should have skipped every entry)", changed)
 	}
 	if ctimeOf(t, target) != before {
 		t.Error("file was chowned despite the filter returning false")
+	}
+	if ctimeOf(t, sub) != subBefore {
+		t.Error("subdirectory was chowned despite the filter returning false")
+	}
+	if ctimeOf(t, root) != rootBefore {
+		t.Error("root was chowned despite the filter returning false")
 	}
 }
 
@@ -174,6 +189,11 @@ func TestChownTreeNoFollow_SymlinkEntryNotFollowed(t *testing.T) {
 	if err := os.Symlink(victim, link); err != nil {
 		t.Fatal(err)
 	}
+	// Without this, a chown that wrongly follows the symlink can land in the
+	// same coarse-clock tick as the baselines above, leave ctime unchanged,
+	// and let the assertions below pass by accident (round-4 High-1: the
+	// no-follow mutations were caught only 0-4 times in 40 runs).
+	ctimeSettle()
 
 	uid, gid := os.Getuid(), os.Getgid()
 	if _, _, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, false, nil); err != nil {
@@ -192,6 +212,45 @@ func TestChownTreeNoFollow_SymlinkEntryNotFollowed(t *testing.T) {
 	}
 	if linkInfo.Mode()&os.ModeSymlink == 0 {
 		t.Fatal("expected the entry to still be a symlink")
+	}
+}
+
+// TestChownTreeNoFollow_SymlinkToRegularFileEntryNotFollowed is the leaf
+// counterpart of TestChownTreeNoFollow_SymlinkEntryNotFollowed: a symlink
+// inside the tree pointing at a regular file outside it. The O_DIRECTORY
+// attempt fails for it (ENOTDIR whether or not that open uses O_NOFOLLOW),
+// so this entry is resolved only by the leaf openat(O_PATH|O_NOFOLLOW). If
+// that open followed the link, the fd-based fchownat would chown the victim
+// file itself. This test guards the leaf resolution independently of the
+// directory one.
+func TestChownTreeNoFollow_SymlinkToRegularFileEntryNotFollowed(t *testing.T) {
+	root := t.TempDir()
+	victimDir := t.TempDir()
+	victimFile := filepath.Join(victimDir, "secret")
+	if err := os.WriteFile(victimFile, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "escape")
+	if err := os.Symlink(victimFile, link); err != nil {
+		t.Fatal(err)
+	}
+	victimBefore := ctimeOf(t, victimFile)
+	linkBefore := ctimeOf(t, link)
+	ctimeSettle()
+
+	uid, gid := os.Getuid(), os.Getgid()
+	walked, changed, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, false, nil)
+	if err != nil {
+		t.Fatalf("ChownTreeNoFollow: %v", err)
+	}
+	if walked != 2 || changed != 2 {
+		t.Errorf("walked, changed = %d, %d; want 2, 2 (root + the symlink itself)", walked, changed)
+	}
+	if ctimeOf(t, victimFile) != victimBefore {
+		t.Error("victim file (the symlink's target) was chowned: the leaf open followed the symlink")
+	}
+	if ctimeOf(t, link) == linkBefore {
+		t.Error("the symlink itself was not chowned; expected the walk to chown the link, not skip it")
 	}
 }
 
