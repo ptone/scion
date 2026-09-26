@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
 // openScriptForTest is a small helper that opens path (via the same
@@ -360,7 +362,10 @@ func TestBuildEnforcedCmd_AsRootRunsShellAndPythonShebangs(t *testing.T) {
 			_ = chain
 
 			m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: dir}
-			cmd := m.buildEnforcedCmd(f, script, event, true)
+			cmd, err := m.buildEnforcedCmd(f, script, event, true)
+			if err != nil {
+				t.Fatalf("event %s script %s: buildEnforcedCmd: %v", event, name, err)
+			}
 			// buildEnforcedCmd already sets cmd.Stdout (to os.Stderr, so the
 			// hook's own output surfaces in the caller's log); override it
 			// here to capture output instead, since cmd.Output() refuses to
@@ -397,17 +402,23 @@ func TestExecuteScriptEnforced_NonExecutableScriptIsSkipped(t *testing.T) {
 }
 
 // TestBuildEnforcedCmd_AsRoot verifies the "as root" branch at pre-start
-// runs the hook via the calling process's own credentials (no Credential
-// override) and the plain hookEnv (AgentHome-owned HOME, no USER/LOGNAME
-// rewrite, no hardening) — the provisioner's own required environment.
+// still runs a project/hub pre-start hook (any root-eligible script other
+// than the harness-provision wrapper) via the calling process's own
+// credentials (no Credential override) and the plain hookEnv (AgentHome-owned
+// HOME, no USER/LOGNAME rewrite, no hardening) — that hook's own required
+// environment, unchanged from before the provisioner-specific carve-out
+// below existed.
 func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "20-harness-provision")
+	script := filepath.Join(dir, "30-project-custom")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
 	f, _ := openScriptForTest(t, script)
 
 	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
-	cmd := m.buildEnforcedCmd(f, script, EventPreStart, true)
+	cmd, err := m.buildEnforcedCmd(f, script, EventPreStart, true)
+	if err != nil {
+		t.Fatalf("buildEnforcedCmd: %v", err)
+	}
 
 	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Credential != nil {
 		t.Fatal("expected no Credential override for the as-root branch")
@@ -416,7 +427,7 @@ func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 		t.Errorf("expected no Dir override for the as-root branch, got %q", cmd.Dir)
 	}
 	if got := findEnvVar(cmd.Env, "HOME"); got != "/home/scion" {
-		t.Errorf("HOME = %q, want /home/scion (the provisioner's required env, unhardened at pre-start)", got)
+		t.Errorf("HOME = %q, want /home/scion (the hook's required env, unhardened at pre-start)", got)
 	}
 	if got := findEnvVar(cmd.Env, "PYTHONNOUSERSITE"); got != "1" {
 		t.Errorf("PYTHONNOUSERSITE = %q, want \"1\" (cheap even at pre-start, and the only guard if a re-bootstrap ever runs pre-start over a $HOME the workload already touched)", got)
@@ -425,7 +436,96 @@ func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 		t.Errorf("SCION_HOOK_PATH = %q, want %q", got, script)
 	}
 	if cmd.Dir != "" {
-		t.Errorf("Dir = %q, want unset at pre-start (the provisioner keeps init's own cwd, unaffected by the post-workload hardening)", cmd.Dir)
+		t.Errorf("Dir = %q, want unset at pre-start (the hook keeps init's own cwd, unaffected by the post-workload hardening)", cmd.Dir)
+	}
+}
+
+// TestBuildEnforcedCmd_HarnessProvisionRunsDroppedNotRoot proves the one
+// carve-out in the as-root pre-start branch: a script named exactly
+// harness.HarnessProvisionHookFilename is still opened via the same
+// fd-anchored, root-owned-chain-verified path every other asRoot script
+// uses (this test's own f came from that same helper), but the command
+// buildEnforcedCmd hands back for it runs under the workload's own uid/gid,
+// with supplementary groups cleared, never as root — because what that
+// wrapper execs (`sciontool harness provision`, and the harness's own
+// provisioner script) reads and writes $HOME and /workspace, both fully
+// workload-controlled, unlike a project/hub hook's own root-eligible use of
+// pre-start (TestBuildEnforcedCmd_AsRoot above). This test would fail if the
+// carve-out were removed (the wrapper would run with no Credential, i.e. as
+// root) or if the name check were inverted (a project/hub hook would then be
+// dropped instead of the provisioner).
+func TestBuildEnforcedCmd_HarnessProvisionRunsDroppedNotRoot(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, harness.HarnessProvisionHookFilename)
+	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
+	f, _ := openScriptForTest(t, script)
+
+	m := &LifecycleManager{
+		EnforcePrivilegeDrop: true,
+		AgentHome:            "/home/scion",
+		WorkloadUID:          1000,
+		WorkloadGID:          1000,
+		WorkloadUsername:     "scion",
+	}
+	// asRoot=true: DecideExecAsRoot's own classification for this script,
+	// exactly as it would be for the real, root-owned staged wrapper. The
+	// carve-out applies to that classification's result, not instead of it.
+	cmd, err := m.buildEnforcedCmd(f, script, EventPreStart, true)
+	if err != nil {
+		t.Fatalf("buildEnforcedCmd: %v", err)
+	}
+
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential == nil {
+		t.Fatal("expected a Credential override dropping the harness-provision wrapper off root")
+	}
+	cred := cmd.SysProcAttr.Credential
+	if cred.Uid != 1000 || cred.Gid != 1000 {
+		t.Errorf("Credential = %+v, want uid=gid=1000", cred)
+	}
+	if cred.Groups == nil || len(cred.Groups) != 0 {
+		t.Errorf("Credential.Groups = %v, want an empty (not nil) slice — supplementary groups cleared explicitly", cred.Groups)
+	}
+	if got := findEnvVar(cmd.Env, "HOME"); got != "/home/scion" {
+		t.Errorf("HOME = %q, want /home/scion (the provisioner still needs its own agent home)", got)
+	}
+	if got := findEnvVar(cmd.Env, "PYTHONNOUSERSITE"); got != "1" {
+		t.Errorf("PYTHONNOUSERSITE = %q, want \"1\"", got)
+	}
+	if got := findEnvVar(cmd.Env, "SCION_HOOK_PATH"); got != script {
+		t.Errorf("SCION_HOOK_PATH = %q, want %q", got, script)
+	}
+}
+
+// TestBuildEnforcedCmd_HarnessProvisionFailsClosedWithoutWorkloadUID proves
+// the carve-out above never falls back to running the provisioner as root
+// when no valid workload uid/gid is on hand to drop to — it refuses to
+// build a runnable command at all. This test would fail if that guard were
+// removed (buildEnforcedCmd would instead hand back a runnable root
+// command, uid 0, for the zero-value WorkloadUID/WorkloadGID below).
+func TestBuildEnforcedCmd_HarnessProvisionFailsClosedWithoutWorkloadUID(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, harness.HarnessProvisionHookFilename)
+	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
+	f, _ := openScriptForTest(t, script)
+
+	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
+	if _, err := m.buildEnforcedCmd(f, script, EventPreStart, true); err == nil {
+		t.Fatal("expected an error refusing to run the harness-provision wrapper with no valid workload uid, got nil")
+	}
+}
+
+// TestHarnessProvisionHookFilenameMatchesWriter proves this package's own
+// harnessProvisionHookFilename constant — duplicated rather than imported;
+// see its own doc comment for why — never drifts from the name
+// pkg/harness.ContainerScriptHarness actually stages the wrapper under. A
+// silent mismatch here would reopen the exact hole the carve-out above
+// exists to close: DecideExecAsRoot would still classify the real, staged
+// wrapper asRoot, but buildEnforcedCmd's name check would no longer match
+// it, so it would fall straight through to running fully as root again.
+func TestHarnessProvisionHookFilenameMatchesWriter(t *testing.T) {
+	if harnessProvisionHookFilename != harness.HarnessProvisionHookFilename {
+		t.Fatalf("harnessProvisionHookFilename = %q, pkg/harness.HarnessProvisionHookFilename = %q; these must stay equal",
+			harnessProvisionHookFilename, harness.HarnessProvisionHookFilename)
 	}
 }
 
@@ -445,7 +545,10 @@ func TestBuildEnforcedCmd_AsRootPostWorkloadEvent(t *testing.T) {
 
 	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
 	for _, event := range []string{EventPostStart, EventPreStop, EventSessionEnd} {
-		cmd := m.buildEnforcedCmd(f, script, event, true)
+		cmd, err := m.buildEnforcedCmd(f, script, event, true)
+		if err != nil {
+			t.Fatalf("event %s: buildEnforcedCmd: %v", event, err)
+		}
 		if got := findEnvVar(cmd.Env, "HOME"); got != "/root" {
 			t.Errorf("event %s: HOME = %q, want /root (never the workload-owned home)", event, got)
 		}
@@ -496,7 +599,10 @@ func TestHardenedRootHookEnv_DropsInterpreterAndLoaderRedirectors(t *testing.T) 
 	f, _ := openScriptForTest(t, script)
 
 	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
-	cmd := m.buildEnforcedCmd(f, script, EventPostStart, true)
+	cmd, err := m.buildEnforcedCmd(f, script, EventPostStart, true)
+	if err != nil {
+		t.Fatalf("buildEnforcedCmd: %v", err)
+	}
 
 	for key := range redirectors {
 		if got := findEnvVar(cmd.Env, key); got != "" {
@@ -533,7 +639,10 @@ func TestHardenedRootHookEnv_EnvIsExactlyAllowlistPlusOverrides(t *testing.T) {
 	f, _ := openScriptForTest(t, script)
 
 	m := &LifecycleManager{EnforcePrivilegeDrop: true}
-	cmd := m.buildEnforcedCmd(f, script, EventPostStart, true)
+	cmd, err := m.buildEnforcedCmd(f, script, EventPostStart, true)
+	if err != nil {
+		t.Fatalf("buildEnforcedCmd: %v", err)
+	}
 
 	allowed := map[string]bool{
 		"HOME":                    true,
@@ -584,7 +693,10 @@ func TestBuildEnforcedCmd_Dropped(t *testing.T) {
 		WorkloadUsername:     "scion",
 		WorkloadWorkingDir:   "/workspace",
 	}
-	cmd := m.buildEnforcedCmd(f, script, EventSessionEnd, false)
+	cmd, err := m.buildEnforcedCmd(f, script, EventSessionEnd, false)
+	if err != nil {
+		t.Fatalf("buildEnforcedCmd: %v", err)
+	}
 
 	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential == nil {
 		t.Fatal("expected a Credential override for the dropped branch")
@@ -707,6 +819,11 @@ func TestExecuteScriptEnforced_WorkloadOwnedRunsDropped_PythonShebang(t *testing
 // skipped, DecideExecAsRoot's own table tests (privilege_test.go) already
 // prove the decision logic this real exec depends on, without needing a
 // real filesystem at all.
+//
+// Uses a project/hub hook name (30-project-custom), not the harness-provision
+// wrapper: that one root-eligible pre-start script now runs dropped instead
+// — see TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot
+// immediately below for its own real-exec proof.
 func TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to create a root-owned, non-world-writable directory outside /tmp; DecideExecAsRoot's table tests already cover the decision itself")
@@ -721,7 +838,7 @@ func TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot(t *testing.T) {
 	}
 
 	marker := filepath.Join(dir, "marker")
-	script := filepath.Join(dir, "pre-start.d", "20-harness-provision")
+	script := filepath.Join(dir, "pre-start.d", "30-project-custom")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nid -u > "+marker+"\n")
 	if err := os.Chmod(filepath.Join(dir, "pre-start.d"), 0o755); err != nil {
 		t.Fatal(err)
@@ -740,6 +857,58 @@ func TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot(t *testing.T) {
 	}
 	if string(got) != "0\n" {
 		t.Errorf("hook ran as uid %q, want \"0\\n\" (root)", got)
+	}
+}
+
+// TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot is
+// TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot's counterpart for the
+// one root-eligible pre-start script that carve-out now drops: the same
+// root-owned, non-writable directory chain (proving DecideExecAsRoot still
+// classifies the genuine, root-owned wrapper asRoot — the fd-anchored open
+// is unaffected by this fix), but the script is named exactly
+// harness.HarnessProvisionHookFilename and the marker it writes must show
+// the workload uid, never 0. This would fail if the carve-out in
+// buildEnforcedCmd were removed or its name check broken.
+func TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create a root-owned, non-world-writable directory outside /tmp; TestBuildEnforcedCmd_HarnessProvisionRunsDroppedNotRoot is the unprivileged-safe equivalent")
+	}
+	const dropUID, dropGID = 65534, 65534
+	dir, err := os.MkdirTemp("/root", "hooks-enforced-test-*")
+	if err != nil {
+		t.Skipf("could not create a root-owned fixture under /root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(dir, "marker")
+	script := filepath.Join(dir, "pre-start.d", harness.HarnessProvisionHookFilename)
+	mustWriteExecutableScript(t, script, "#!/bin/sh\nid -u > "+marker+"\n")
+	if err := os.Chmod(filepath.Join(dir, "pre-start.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The marker's own directory must be writable by dropUID once the drop
+	// happens, exactly like the plain-dropped real-exec tests above.
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &LifecycleManager{EnforcePrivilegeDrop: true, WorkloadUID: dropUID, WorkloadGID: dropGID, WorkloadUsername: "nobody"}
+	if err := m.executeScriptEnforced(script, EventPreStart); err != nil {
+		t.Fatalf("executeScriptEnforced: %v", err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	wantUID := []byte(itoa(dropUID) + "\n")
+	if string(got) != string(wantUID) {
+		t.Errorf("hook ran as uid %q, want %q (the distinct workload uid, never root, proving the drop actually happened)", got, wantUID)
 	}
 }
 
