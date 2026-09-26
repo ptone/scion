@@ -158,7 +158,11 @@ func (s *Server) handleTemplateFiles(w http.ResponseWriter, r *http.Request, tem
 
 	template, err := s.store.GetTemplate(r.Context(), templateID)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Template")
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 

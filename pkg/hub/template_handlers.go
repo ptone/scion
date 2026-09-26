@@ -458,7 +458,11 @@ func (s *Server) getTemplateV2(w http.ResponseWriter, r *http.Request, id string
 	ctx := r.Context()
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		if err == store.ErrNotFound {
+			NotFound(w, "Template")
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 
@@ -673,7 +677,11 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		if err == store.ErrNotFound {
+			NotFound(w, "Template")
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 
@@ -741,7 +749,11 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		if err == store.ErrNotFound {
+			NotFound(w, "Template")
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 
@@ -798,7 +810,11 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		if err == store.ErrNotFound {
+			NotFound(w, "Template")
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 
@@ -855,7 +871,11 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 	ctx := r.Context()
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		if err == store.ErrNotFound {
+			NotFound(w, "Template")
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 
