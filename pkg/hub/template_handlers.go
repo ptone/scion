@@ -1020,12 +1020,13 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	// Detect a name collision at the destination BEFORE any storage write.
-	// The clone below copies files to a path derived from (scope, scopeID,
-	// slug); if a record already occupies that path, copying into it first
-	// and only checking for the collision at CreateTemplate time would
-	// silently overwrite the existing record's files ahead of ever reporting
-	// the conflict — and the failure-path cleanup a few lines down would
-	// then delete a prefix this request never owned.
+	// This is a fast path for the common, non-concurrent case: it lets an
+	// ordinary colliding request fail with 409 before touching storage at
+	// all. It is not sufficient on its own — two requests can both pass this
+	// check before either has written a record — so the storage path below
+	// is also made request-unique, and CreateTemplate's own uniqueness
+	// constraint (handled further down) is what actually guarantees exactly
+	// one request wins a given (scope, slug) destination.
 	if existing, err := s.store.GetTemplateBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && err != store.ErrNotFound {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1034,14 +1035,21 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	// Generate storage path for the clone
-	storagePath := storage.TemplateStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug)
+	// Generate a storage path for the clone that is unique to this request
+	// (suffixed with the clone's own ID) rather than deterministic from
+	// (scope, scopeID, slug) alone. Two concurrent requests cloning into the
+	// same destination name would otherwise compute the identical path; if
+	// one of them then loses the race below and runs its failure-path
+	// DeletePrefix, it would delete the files the other just copied. A
+	// request-unique path means the failure cleanup below can only ever
+	// remove a subtree this request itself created.
+	storagePath := storage.TemplateStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug) + "/" + clone.ID
 	clone.StoragePath = storagePath
 
 	stor := s.GetStorage()
 	if stor != nil {
 		clone.StorageBucket = stor.Bucket()
-		clone.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), clone.Scope, clone.ScopeID, clone.Slug)
+		clone.StorageURI = "gs://" + stor.Bucket() + "/" + storagePath + "/"
 	}
 
 	// Copy files from source to clone location

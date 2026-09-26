@@ -1038,7 +1038,8 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 	// Detect a name collision at the destination BEFORE any storage write —
 	// see the matching comment in handleTemplateClone (template_handlers.go)
 	// for why this must run ahead of the copy below rather than only being
-	// caught by CreateHarnessConfig's own uniqueness check.
+	// caught by CreateHarnessConfig's own uniqueness check, and why it is
+	// only a fast path rather than a full fix for concurrent requests.
 	if existing, err := s.store.GetHarnessConfigBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && err != store.ErrNotFound {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1047,13 +1048,16 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	storagePath := storage.HarnessConfigStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug)
+	// Request-unique storage path — see the matching comment in
+	// handleTemplateClone for why the deterministic (scope, scopeID, slug)
+	// path alone is not concurrency-safe.
+	storagePath := storage.HarnessConfigStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug) + "/" + clone.ID
 	clone.StoragePath = storagePath
 
 	stor := s.GetStorage()
 	if stor != nil {
 		clone.StorageBucket = stor.Bucket()
-		clone.StorageURI = storage.HarnessConfigStorageURI(s.HubID(), stor.Bucket(), clone.Scope, clone.ScopeID, clone.Slug)
+		clone.StorageURI = "gs://" + stor.Bucket() + "/" + storagePath + "/"
 	}
 
 	if stor != nil && len(source.Files) > 0 && source.StoragePath != "" {
