@@ -1151,9 +1151,9 @@ func TestResolveSubstrateHarnessCwd_EffectiveCwd_RelativeHomeDir_NeverUsed(t *te
 // withScionUserLookup-faked "scion" user — the real lookup is disabled
 // under test, see TestMain), proving the wiring — not just
 // resolveSubstrateHarnessCwd in isolation — actually threads
-// SCION_WORKSPACE_PATH into the resolver's result. Resolution is no longer
-// eager: substrateServeInitOptions itself does not touch the filesystem, so
-// this calls the returned ResolveWorkingDir, exactly as RunInit does.
+// SCION_WORKSPACE_PATH into the resolver's result. Resolution is lazy:
+// substrateServeInitOptions itself never touches the filesystem, so this
+// calls the returned ResolveWorkingDir directly, exactly as RunInit does.
 func TestSubstrateServeInitOptions_ResolveWorkingDir_SetsWorkingDirFromRealEnv(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SCION_WORKSPACE_PATH", dir)
@@ -1193,11 +1193,13 @@ func TestSubstrateServeInitOptions_ResolveWorkingDir_FallsBackToHomeFromRealEnv(
 }
 
 // TestSubstrateServeInitOptions_ResolveWorkingDir_BothUnusable_ReturnsError
-// covers the case substrate-serve used to short-circuit on before ever
-// calling runInit: with the workspace and the scion user's home both
-// unusable by the fake scion uid/gid, the resolver returns an error instead
-// of ever picking a directory. Never invoking it (as substrateServeInitOptions
-// itself no longer does) would silently lose this failure mode.
+// covers the resolver's own contract when both candidates are unusable: with
+// the workspace and the scion user's home both unusable by the fake scion
+// uid/gid, the resolver returns an error instead of ever picking a
+// directory. substrateServeInitOptions never invokes the resolver itself —
+// RunInit does, after preparing the workspace — so this test calls the
+// closure directly, to pin that the resolver itself, not the wiring around
+// it, is what returns the error.
 func TestSubstrateServeInitOptions_ResolveWorkingDir_BothUnusable_ReturnsError(t *testing.T) {
 	agentHome := t.TempDir()
 	workspace := t.TempDir()
@@ -1212,26 +1214,25 @@ func TestSubstrateServeInitOptions_ResolveWorkingDir_BothUnusable_ReturnsError(t
 	}
 }
 
-// TestSubstrateServeInitOptions_ResolveWorkingDir_SeesWorkspaceAfterSimulatedClone
-// is the fixed counterpart to the historical ordering defect this package
-// used to have: substrateServeInitOptions resolved the harness working
-// directory synchronously, before RunInit — and hence before RunInit's own
-// workspace-clone step — ever ran, so a workspace that started out
-// unsearchable by the scion uid and only became searchable once the clone
-// completed always resolved to the wrong (fallback) directory. See the
-// sciontool/serve project log for the live defect this closes.
-//
-// Here, ResolveWorkingDir is only invoked after the simulated clone step —
-// exactly how RunInit calls it now (see InitRunOptions.ResolveWorkingDir's
-// doc comment, init.go) — so resolution correctly sees the workspace as
-// usable.
+// TestSubstrateServeInitOptions_ResolveWorkingDir_IsLazy_SeesStateAtCallTime
+// pins that the ResolveWorkingDir closure substrateServeInitOptions returns
+// is lazy: it reads the filesystem only when invoked, not when built, so a
+// candidate whose usability changes between substrateServeInitOptions
+// building the InitRunOptions and something calling ResolveWorkingDir — here,
+// simulating the workspace clone chowning it to the scion uid — is seen
+// correctly at call time. RunInit's own guarantee that it calls
+// ResolveWorkingDir only after the real workspace clone and ownership fixup
+// run is pinned separately, by
+// TestRunInit_ResolveWorkingDir_CalledAfterCloneAndOverridesWorkingDir
+// (init_working_dir_test.go), which drives RunInit itself; this test does
+// not exercise RunInit at all.
 //
 // workspace and home are created directly under os.TempDir() (not via
 // t.TempDir(), whose nested per-test directory is itself mode 0700 and would
 // make every candidate "not searchable" for an unrelated reason, regardless
 // of this test's own chmods) so their searchability is controlled by this
 // test's own chmod calls alone.
-func TestSubstrateServeInitOptions_ResolveWorkingDir_SeesWorkspaceAfterSimulatedClone(t *testing.T) {
+func TestSubstrateServeInitOptions_ResolveWorkingDir_IsLazy_SeesStateAtCallTime(t *testing.T) {
 	workspace, err := os.MkdirTemp("", "cwd-ordering-workspace-*")
 	if err != nil {
 		t.Fatalf("MkdirTemp(workspace): %v", err)
@@ -1262,8 +1263,7 @@ func TestSubstrateServeInitOptions_ResolveWorkingDir_SeesWorkspaceAfterSimulated
 
 	// Simulate the workspace clone step's real effect (ensureWorkspaceOwnership
 	// chowning the workspace to the scion uid) completing before resolution
-	// is ever invoked — unlike the historical defect, where resolution ran
-	// first.
+	// is invoked, mirroring RunInit's own call order.
 	if err := os.Chmod(workspace, 0o777); err != nil {
 		t.Fatalf("os.Chmod(workspace): %v", err)
 	}
@@ -1289,13 +1289,12 @@ func TestSubstrateServeInitOptions_ResolveWorkingDir_SeesWorkspaceAfterSimulated
 //     see handleBootstrap) — resolution itself is RunInit's job now, not
 //     substrateServeInitOptions's, so this test invokes the closure the
 //     stub received exactly as RunInit would;
-//  2. argv (childArgs) is exactly ["sh", "-c", req.StartCmd] — unchanged
-//     from before this fix — proving the fix never parses or rewrites the
-//     tmux invocation string that pkg/runtime builds; it only adds a cwd via
-//     InitRunOptions, which is what makes cmd.Dir apply uniformly to that
-//     whole `sh -c "tmux new-session ..."` process (see
-//     resolveSubstrateHarnessCwd's doc comment for why that single
-//     mechanism covers both the plain child and the tmux session).
+//  2. argv (childArgs) is exactly ["sh", "-c", req.StartCmd] — the wiring
+//     never parses or rewrites the tmux invocation string that pkg/runtime
+//     builds; it only adds a cwd via InitRunOptions, which is what makes
+//     cmd.Dir apply uniformly to that whole `sh -c "tmux new-session ..."`
+//     process (see resolveSubstrateHarnessCwd's doc comment for why that
+//     single mechanism covers both the plain child and the tmux session).
 //
 // The InitRunner runs in handleBootstrap's own goroutine (server.go), so a
 // version of this test that used an unsynchronised package-level var
@@ -1370,17 +1369,16 @@ func TestSubstrateServeBootstrap_ThreadsWorkingDirToInitRunner(t *testing.T) {
 }
 
 // TestSubstrateServeInitRunner_AlwaysCallsRunInit proves substrateServeInitRunner
-// no longer resolves the harness working directory itself before deciding
+// never resolves the harness working directory itself before deciding
 // whether to call runInit: it always forwards to runInit, passing along an
 // InitRunOptions.ResolveWorkingDir closure for RunInit to call once the
 // workspace is ready. Even when the workspace and the scion user's home are
-// both unusable (the exact condition that used to short-circuit here with
-// exitCodeNoUsableHarnessCwd before ever calling runInit), runInit is still
-// invoked; RunInit's own contract for a ResolveWorkingDir error — never
-// starting the harness, returning exitCodeNoUsableHarnessCwd — is covered
-// directly by TestRunInit_ResolveWorkingDirError_ReturnsExitCode18AndNeverStartsHarness
-// (init_test.go), since that is RunInit's responsibility now, not this
-// wrapper's.
+// both unusable, runInit is still invoked; RunInit's own contract for a
+// ResolveWorkingDir error — never starting the harness, returning
+// exitCodeNoUsableHarnessCwd — is covered directly by
+// TestRunInit_ResolveWorkingDirError_ReturnsExitCode18AndNeverStartsHarness
+// (init_working_dir_test.go), since that is RunInit's responsibility, not
+// this wrapper's.
 func TestSubstrateServeInitRunner_AlwaysCallsRunInit(t *testing.T) {
 	agentHome := t.TempDir()
 	workspace := t.TempDir()
