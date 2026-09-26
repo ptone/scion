@@ -883,18 +883,26 @@ func TestExecuteScriptEnforced_HarnessProvisionHookRunsDroppedNotRoot(t *testing
 		t.Fatal(err)
 	}
 
-	marker := filepath.Join(dir, "marker")
+	// The marker lives in a SEPARATE directory, never on the script's own
+	// chain: chmoding dir itself (or pre-start.d) world-writable to let
+	// dropUID write the marker would make rootProtected's own group/other-
+	// write check fail on a chain component, so DecideExecAsRoot would
+	// classify this script dropped on chain grounds alone — masking whether
+	// the carve-out this test exists to prove (a name-based drop of a
+	// script DecideExecAsRoot would otherwise still classify asRoot) is
+	// actually what caused the drop. dir and pre-start.d stay root-owned,
+	// 0755, for exactly that reason.
+	markerDir := t.TempDir()
+	if err := os.Chmod(markerDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(markerDir, "marker")
 	script := filepath.Join(dir, "pre-start.d", harness.HarnessProvisionHookFilename)
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nid -u > "+marker+"\n")
 	if err := os.Chmod(filepath.Join(dir, "pre-start.d"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(script, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// The marker's own directory must be writable by dropUID once the drop
-	// happens, exactly like the plain-dropped real-exec tests above.
-	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatal(err)
 	}
 
