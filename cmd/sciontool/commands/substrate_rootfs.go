@@ -119,7 +119,7 @@ func fixupWorldWritableTmpDirSticky(dir string) bool {
 	const worldWritable = 0o002
 	const sticky = 0o1000
 
-	fd, err := syscall.Open(dir, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY, 0)
+	fd, err := syscall.Open(dir, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Error("fixupRootfsForScion: failed to open %s: %v", dir, err)

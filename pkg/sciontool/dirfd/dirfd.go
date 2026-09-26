@@ -57,12 +57,12 @@ func OpenParentNoFollow(path string) (dirFd int, leaf string, err error) {
 	leaf = parts[len(parts)-1]
 	dirs := parts[:len(parts)-1]
 
-	fd, err := syscall.Open(string(filepath.Separator), syscall.O_DIRECTORY|syscall.O_RDONLY, 0)
+	fd, err := syscall.Open(string(filepath.Separator), syscall.O_DIRECTORY|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, "", fmt.Errorf("dirfd: open /: %w", err)
 	}
 	for _, name := range dirs {
-		child, oerr := syscall.Openat(fd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY, 0)
+		child, oerr := syscall.Openat(fd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		_ = syscall.Close(fd)
 		if oerr != nil {
 			return -1, "", fmt.Errorf("dirfd: open %s: %w", name, oerr)
@@ -74,10 +74,11 @@ func OpenParentNoFollow(path string) (dirFd int, leaf string, err error) {
 
 // CreateExclAt creates name in the directory referenced by dirFd with
 // O_CREAT|O_EXCL|O_NOFOLLOW, so a pre-existing entry (including a symlink)
-// at name is refused rather than truncated or followed.
+// at name is refused rather than truncated or followed. The returned fd is
+// close-on-exec (see OpenAt's doc comment for why that's forced here).
 func CreateExclAt(dirFd int, name string, mode os.FileMode) (*os.File, error) {
 	fd, err := syscall.Openat(dirFd, name,
-		syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY|syscall.O_NOFOLLOW, uint32(mode))
+		syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, uint32(mode))
 	if err != nil {
 		return nil, err
 	}
@@ -87,14 +88,48 @@ func CreateExclAt(dirFd int, name string, mode os.FileMode) (*os.File, error) {
 // OpenAt opens name in the directory referenced by dirFd with the given
 // flags and mode via openat(2). Callers that need the no-follow guarantee
 // must include syscall.O_NOFOLLOW in flags themselves; this helper doesn't
-// force it, since some callers (e.g. walking further into a subdirectory)
-// legitimately want other flag combinations.
+// force that, since some callers (e.g. walking further into a
+// subdirectory) legitimately want other flag combinations.
+//
+// O_CLOEXEC is always forced in, regardless of flags: unlike os.OpenFile,
+// the raw syscall.Openat this wraps does not set it, and every fd this
+// package hands back either sits behind a privilege boundary (a cached log
+// fd, a token read/write fd) or is meant to be used and closed within this
+// process — never leaked into a child this process execs, which on
+// Substrate is the workload itself running with dropped privileges.
 func OpenAt(dirFd int, name string, flags int, mode os.FileMode) (*os.File, error) {
-	fd, err := syscall.Openat(dirFd, name, flags, uint32(mode))
+	fd, err := syscall.Openat(dirFd, name, flags|syscall.O_CLOEXEC, uint32(mode))
 	if err != nil {
 		return nil, err
 	}
 	return os.NewFile(uintptr(fd), name), nil
+}
+
+// EnsureDirNoFollow resolves path via OpenParentNoFollow, creates the leaf
+// as a directory if it doesn't already exist (mkdirat, so nothing can be
+// planted there as a side effect of the create itself), and returns an
+// open O_DIRECTORY|O_NOFOLLOW fd for it — refusing a symlink at the leaf
+// exactly like every other op in this package. The caller owns the
+// returned fd and must close it.
+//
+// Because the fd is resolved once and returned to the caller, an operation
+// against it (e.g. Fchown) stays correct even if something later replaces
+// the directory's entry in its parent: a file descriptor refers to the
+// inode it was opened against, not the path used to open it, so there is
+// no window between "ensure the directory exists" and "operate on it" for
+// a path-based swap to land in.
+func EnsureDirNoFollow(path string, mode os.FileMode) (*os.File, error) {
+	dirFd, leaf, err := OpenParentNoFollow(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	if err := syscall.Mkdirat(dirFd, leaf, uint32(mode)); err != nil && err != syscall.EEXIST {
+		return nil, fmt.Errorf("dirfd: mkdir %s: %w", path, err)
+	}
+
+	return OpenAt(dirFd, leaf, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY, 0)
 }
 
 // RenameAt renames oldName to newName, both resolved relative to dirFd via
@@ -114,9 +149,11 @@ func UnlinkAt(dirFd int, name string) error {
 //
 // This opens the entry (never following a symlink, and non-blocking so a
 // planted FIFO can't hang the check) purely to fstat it, then closes it
-// immediately; it is a refusal check, not a read.
+// immediately; it is a refusal check, not a read. The fd is close-on-exec
+// for the brief window it's open, in case another goroutine execs a child
+// concurrently.
 func RefuseSymlinkOrNonRegularAt(dirFd int, name string) error {
-	fd, err := syscall.Openat(dirFd, name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	fd, err := syscall.Openat(dirFd, name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
