@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1026,6 +1027,52 @@ func TestReadShutdownToken_SymlinkRefused(t *testing.T) {
 	}
 	if string(data) != "do-not-touch" {
 		t.Errorf("symlink target was modified: %q", data)
+	}
+}
+
+// TestReadShutdownToken_FIFODoesNotBlock proves that a FIFO planted at the
+// (predictable, shared os.TempDir()) shutdown-token path can't hang
+// shutdownExisting forever: readShutdownToken must return an error
+// promptly instead of blocking in open(2) waiting for a writer.
+func TestReadShutdownToken_FIFODoesNotBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shutdown.token")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := readShutdownToken(path)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expected an error reading a FIFO shutdown-token path, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readShutdownToken blocked on a FIFO with no writer")
+	}
+}
+
+// TestReadShutdownToken_BoundedRead proves an oversized file at the
+// shutdown-token path is bounded by shutdownTokenMaxBytes rather than read
+// in full: writeShutdownToken never produces a file this large, so
+// anything longer already isn't a token this process wrote.
+func TestReadShutdownToken_BoundedRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shutdown.token")
+	oversized := strings.Repeat("a", shutdownTokenMaxBytes*4)
+	if err := os.WriteFile(path, []byte(oversized), 0o600); err != nil {
+		t.Fatalf("write oversized file: %v", err)
+	}
+
+	got, err := readShutdownToken(path)
+	if err != nil {
+		t.Fatalf("readShutdownToken: %v", err)
+	}
+	if len(got) != shutdownTokenMaxBytes {
+		t.Errorf("read %d bytes, want bounded to %d", len(got), shutdownTokenMaxBytes)
 	}
 }
 
