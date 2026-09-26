@@ -1458,6 +1458,60 @@ func TestBlockClaudeDebugSymlink_Enforced_CreatesAndChmodsRealDir(t *testing.T) 
 	}
 }
 
+// TestBlockClaudeDebugSymlink_Enforced_ChmodSurvivesSwapAfterEnsure is T3a's
+// core regression test: a workload process that renames debugDir away and
+// plants a symlink to a victim directory in its place, in the exact window
+// between EnsureDirNoFollow returning its fd and the chmod that follows,
+// must not have the chmod land on the victim. The chmod is fd-based
+// (d.Chmod, not os.Chmod(debugDir)), so it stays bound to the original
+// directory no matter what its entry in the parent becomes afterward.
+func TestBlockClaudeDebugSymlink_Enforced_ChmodSurvivesSwapAfterEnsure(t *testing.T) {
+	tmpHome := t.TempDir()
+	victim := t.TempDir()
+	if err := os.Chmod(victim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	debugDir := filepath.Join(tmpHome, ".claude", "debug")
+	movedDir := filepath.Join(tmpHome, ".claude", "debug.moved")
+
+	blockClaudeDebugAfterEnsureForTest = func(dir string) {
+		if err := os.Rename(dir, movedDir); err != nil {
+			t.Errorf("swap: rename %s: %v", dir, err)
+			return
+		}
+		if err := os.Symlink(victim, dir); err != nil {
+			t.Errorf("swap: symlink %s -> %s: %v", dir, victim, err)
+		}
+	}
+	t.Cleanup(func() { blockClaudeDebugAfterEnsureForTest = nil })
+
+	blockClaudeDebugSymlink(debugDir, true)
+
+	victimInfo, err := os.Stat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := victimInfo.Mode().Perm(); got != 0o700 {
+		t.Errorf("victim mode = %o, want unchanged 0700 — chmod followed the swapped-in symlink", got)
+	}
+
+	linkInfo, err := os.Lstat(debugDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Error("expected debugDir to still be the symlink the swap planted")
+	}
+
+	movedInfo, err := os.Stat(movedDir)
+	if err != nil {
+		t.Fatalf("stat moved-away original debugDir: %v", err)
+	}
+	if got := movedInfo.Mode().Perm(); got != 0o555 {
+		t.Errorf("moved-away original debugDir mode = %o, want 0555 — the held fd's chmod should have landed here", got)
+	}
+}
+
 // TestCleanGcloudConfigForMetadata_NonEnforced_KeepsHistoricalBehaviour
 // proves non-substrate runtimes are byte-identical: entries under gcloudDir
 // (except the preserved ADC file) are removed via the historical
@@ -1713,6 +1767,46 @@ func TestChownTreeRootOwned_Enforced_RefusesAncestorSymlink(t *testing.T) {
 	}
 }
 
+// TestChownTreeRootOwned_Enforced_SkipsHardlinkedFile is T3b's core
+// regression test: N1's enforced branch chowns specifically root-owned
+// entries, so a pre-planted hard link to a root-owned file is exactly what
+// it would hand over if the hard-link guard were ever disabled for this
+// call site. Forces the root-owned filter, creates a hard-linked pair, and
+// asserts the target is left untouched.
+func TestChownTreeRootOwned_Enforced_SkipsHardlinkedFile(t *testing.T) {
+	origFilter := chownTreeRootOwnedFilter
+	t.Cleanup(func() { chownTreeRootOwnedFilter = origFilter })
+	chownTreeRootOwnedFilter = func(uint32) bool { return true }
+
+	home := t.TempDir()
+	target := filepath.Join(home, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, filepath.Join(home, "hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	targetBefore := ownedTargetCtime(t, target)
+	time.Sleep(15 * time.Millisecond)
+
+	uid, gid := os.Getuid(), os.Getgid()
+	if _, _, err := chownTreeRootOwned(home, uid, gid, true); err != nil {
+		t.Fatalf("chownTreeRootOwned: %v", err)
+	}
+	if ownedTargetCtime(t, target) != targetBefore {
+		t.Error("hard-linked target was chowned despite the enforced hard-link guard")
+	}
+}
+
+func ownedTargetCtime(t *testing.T, path string) syscall.Timespec {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat %s: %v", path, err)
+	}
+	return info.Sys().(*syscall.Stat_t).Ctim
+}
+
 func TestIsRootOwned(t *testing.T) {
 	if !isRootOwned(0) {
 		t.Error("isRootOwned(0) = false, want true")
@@ -1781,5 +1875,105 @@ func TestWriteEnvFile_ChownGating(t *testing.T) {
 				t.Errorf("chown occurred = %v, want %v", gotChown, tt.wantChown)
 			}
 		})
+	}
+}
+
+// TestReadServicesYAML_NonEnforced_FollowsSymlink proves non-substrate
+// runtimes are byte-identical to the historical os.ReadFile: a symlinked
+// services config is followed and its content returned.
+func TestReadServicesYAML_NonEnforced_FollowsSymlink(t *testing.T) {
+	tmpHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(tmpHome, "real-services.yaml")
+	content := []byte("- name: foo\n  command: [\"true\"]\n")
+	if err := os.WriteFile(real, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
+	if err := os.Symlink(real, servicesPath); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := readServicesYAML(servicesPath, false)
+	if err != nil {
+		t.Fatalf("readServicesYAML: %v", err)
+	}
+	if string(data) != string(content) {
+		t.Errorf("data = %q, want %q", data, content)
+	}
+}
+
+// TestReadServicesYAML_Enforced_RefusesSymlink is the core regression test:
+// a symlink planted at scion-services.yaml (deterministic — the workload
+// can plant it any time before this is read) must never be read through in
+// enforced mode.
+func TestReadServicesYAML_Enforced_RefusesSymlink(t *testing.T) {
+	tmpHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(tmpHome, "victim.yaml")
+	if err := os.WriteFile(victim, []byte("do-not-read"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
+	if err := os.Symlink(victim, servicesPath); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := readServicesYAML(servicesPath, true)
+	if err == nil {
+		t.Fatalf("expected an error refusing the symlink, got data=%q", data)
+	}
+	if data != nil {
+		t.Errorf("expected no data on refusal, got %q", data)
+	}
+	linkInfo, err := os.Lstat(servicesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Error("expected scion-services.yaml to still be the symlink the test planted")
+	}
+}
+
+// TestReadServicesYAML_Enforced_ReadsRealFile proves the legitimate case
+// still works: a real, single-link regular file is read normally in
+// enforced mode.
+func TestReadServicesYAML_Enforced_ReadsRealFile(t *testing.T) {
+	tmpHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
+	content := []byte("- name: foo\n  command: [\"true\"]\n")
+	if err := os.WriteFile(servicesPath, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := readServicesYAML(servicesPath, true)
+	if err != nil {
+		t.Fatalf("readServicesYAML: %v", err)
+	}
+	if string(data) != string(content) {
+		t.Errorf("data = %q, want %q", data, content)
+	}
+}
+
+// TestReadServicesYAML_Enforced_MissingFileIsQuietError proves a missing
+// file is reported as an ordinary error (matching os.ReadFile's contract,
+// which the caller already treats as "no services to start") without being
+// logged as a refused symlink.
+func TestReadServicesYAML_Enforced_MissingFileIsQuietError(t *testing.T) {
+	tmpHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
+
+	if _, err := readServicesYAML(servicesPath, true); err == nil {
+		t.Fatal("expected an error for a missing file")
 	}
 }

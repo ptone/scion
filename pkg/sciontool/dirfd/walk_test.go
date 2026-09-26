@@ -6,6 +6,7 @@ package dirfd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -449,17 +450,22 @@ func TestRemoveContentsNoFollow_SurvivesSubdirSwapMidWalk(t *testing.T) {
 }
 
 // TestChownTreeNoFollow_ReportsPerEntryChownFailureViaOnErr proves per-entry
-// chown failures are surfaced through onErr rather than silently discarded.
-// Chowning to uid 0 (root) as a non-root test process is guaranteed to fail
-// with EPERM for both the root directory itself (surfaced via the returned
-// err, unaffected by this change) and for a child entry (previously
-// silently swallowed).
+// chown failures are surfaced through onErr rather than silently discarded,
+// for BOTH the leaf branch (chownWalkLeaf) and the directory branch
+// (chownWalkDir) — a subdirectory entry exercises the latter. Chowning to
+// uid 0 (root) as a non-root test process is guaranteed to fail with EPERM
+// for the root directory itself (surfaced via the returned err, unaffected
+// by this change), for a leaf child entry, and for a subdirectory entry
+// (previously silently swallowed for the directory branch specifically).
 func TestChownTreeNoFollow_ReportsPerEntryChownFailureViaOnErr(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("running as root: chowning to uid 0 would trivially succeed")
 	}
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "child"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "subdir"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -470,14 +476,16 @@ func TestChownTreeNoFollow_ReportsPerEntryChownFailureViaOnErr(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected chowning root to uid 0 as non-root to fail")
 	}
-	found := false
-	for _, name := range onErrCalls {
-		if name == "child" {
-			found = true
+	for _, want := range []string{"child", "subdir"} {
+		found := false
+		for _, name := range onErrCalls {
+			if name == want {
+				found = true
+			}
 		}
-	}
-	if !found {
-		t.Errorf("expected onErr to be called for \"child\", got calls: %v", onErrCalls)
+		if !found {
+			t.Errorf("expected onErr to be called for %q, got calls: %v", want, onErrCalls)
+		}
 	}
 }
 
@@ -630,5 +638,190 @@ func TestRemoveContentsNoFollow_DepthCapStopsDescendingAndReportsViaOnErr(t *tes
 	}
 	if _, err := os.Stat(tooDeepFile); err != nil {
 		t.Errorf("expected the file beyond the depth cap to survive: %v", err)
+	}
+}
+
+// TestChownTreeNoFollow_LeafSwapAfterResolveDoesNotRedirectChown is the
+// core regression test for the single-resolve TOCTOU closure: once a
+// non-directory entry has been resolved to an O_PATH fd, nothing that
+// happens to its NAME afterward — including being replaced with a hard
+// link to a victim file — can redirect the chown that fd is about to
+// receive. Exercised with the hard-link guard both off and on: the guard
+// decides based on the PRE-swap inode's Nlink (1, since the swap hasn't
+// happened yet when the fd is resolved), so it must not affect this
+// property either way.
+func TestChownTreeNoFollow_LeafSwapAfterResolveDoesNotRedirectChown(t *testing.T) {
+	for _, guard := range []bool{false, true} {
+		t.Run(fmt.Sprintf("guardHardlinks=%v", guard), func(t *testing.T) {
+			root, victimDir := t.TempDir(), t.TempDir()
+			victim := filepath.Join(victimDir, "victim")
+			if err := os.WriteFile(victim, []byte("v"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			leaf := filepath.Join(root, "leaf")
+			if err := os.WriteFile(leaf, []byte("l"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			victimBefore := ctimeOf(t, victim)
+			movedBefore := ctimeOf(t, leaf)
+			ctimeSettle()
+
+			var fired bool
+			chownLeafTestHook = func(name string) {
+				if name != "leaf" || fired {
+					return
+				}
+				fired = true
+				if err := os.Rename(leaf, leaf+".moved"); err != nil {
+					t.Errorf("swap: rename: %v", err)
+					return
+				}
+				if err := os.Link(victim, leaf); err != nil {
+					t.Errorf("swap: link: %v", err)
+					return
+				}
+				// link(2) itself bumps the victim's ctime (Nlink changed);
+				// re-snapshot so the assertion below only catches a chown,
+				// not the link creation.
+				victimBefore = ctimeOf(t, victim)
+				ctimeSettle()
+			}
+			t.Cleanup(func() { chownLeafTestHook = nil })
+
+			uid, gid := os.Getuid(), os.Getgid()
+			_, _, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, guard, nil)
+			if err != nil {
+				t.Fatalf("ChownTreeNoFollow: %v", err)
+			}
+			if !fired {
+				t.Fatal("test hook never fired — test is not exercising the intended window")
+			}
+
+			if ctimeOf(t, victim) != victimBefore {
+				t.Error("victim file was chowned via the leaf name swapped in after resolve")
+			}
+			if ctimeOf(t, leaf+".moved") == movedBefore {
+				t.Error("the original (held-fd) leaf was not chowned")
+			}
+		})
+	}
+}
+
+// TestChownTreeNoFollow_DirEntrySwapAfterFstatDoesNotRedirectChown mirrors
+// the leaf test above for a directory entry: once chownWalkDir has fstat'd
+// the entry, swapping its name in the parent for a symlink to a victim
+// directory — immediately before the fchownat call — must not redirect
+// that chown. This closes the same TOCTOU shape one level earlier than
+// TestChownTreeNoFollow_SurvivesIntermediateDirSwapMidWalk (which proves
+// recursion survives a later swap); this one proves the directory's OWN
+// chown does.
+func TestChownTreeNoFollow_DirEntrySwapAfterFstatDoesNotRedirectChown(t *testing.T) {
+	root, victimDir := t.TempDir(), t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(root, "sub.moved")
+
+	victimBefore := ctimeOf(t, victimDir)
+	subBefore := ctimeOf(t, sub)
+	ctimeSettle()
+
+	var fired bool
+	chownDirPreChownTestHook = func(name string) {
+		if name != "sub" || fired {
+			return
+		}
+		fired = true
+		if err := os.Rename(sub, moved); err != nil {
+			t.Errorf("swap: rename: %v", err)
+			return
+		}
+		if err := os.Symlink(victimDir, sub); err != nil {
+			t.Errorf("swap: symlink: %v", err)
+		}
+		ctimeSettle()
+	}
+	t.Cleanup(func() { chownDirPreChownTestHook = nil })
+
+	uid, gid := os.Getuid(), os.Getgid()
+	_, _, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, false, nil)
+	if err != nil {
+		t.Fatalf("ChownTreeNoFollow: %v", err)
+	}
+	if !fired {
+		t.Fatal("test hook never fired — test is not exercising the intended window")
+	}
+
+	if ctimeOf(t, victimDir) != victimBefore {
+		t.Error("victim directory was chowned via the symlink swapped in after fstat")
+	}
+	if ctimeOf(t, moved) == subBefore {
+		t.Error("the original (held-fd) subdirectory was not chowned")
+	}
+	linkInfo, err := os.Lstat(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Error("expected root/sub to still be the symlink the swap planted")
+	}
+}
+
+// TestRemoveContentsNoFollow_RefusesSymlinkSwappedInBeforeSubdirOpen is T2's
+// core regression test: the ONLY thing that stops a symlink swapped into a
+// subdirectory's name — after Fstatat has already classified it as a
+// directory, but before the O_NOFOLLOW openat resolves it for real — from
+// being followed is that openat's own O_NOFOLLOW flag. Without it, this
+// would open (and then empty) the victim directory the symlink points at.
+func TestRemoveContentsNoFollow_RefusesSymlinkSwappedInBeforeSubdirOpen(t *testing.T) {
+	root := t.TempDir()
+	victim := t.TempDir()
+	sentinel := filepath.Join(victim, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var fired bool
+	removeWalkPreOpenTestHook = func(name string) {
+		if name != "sub" || fired {
+			return
+		}
+		fired = true
+		if err := os.RemoveAll(sub); err != nil {
+			t.Errorf("swap: remove: %v", err)
+			return
+		}
+		if err := os.Symlink(victim, sub); err != nil {
+			t.Errorf("swap: symlink: %v", err)
+		}
+	}
+	t.Cleanup(func() { removeWalkPreOpenTestHook = nil })
+
+	dir, err := OpenDirNoFollow(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+
+	if _, err := RemoveContentsNoFollow(dir, nil, nil); err != nil {
+		t.Fatalf("RemoveContentsNoFollow: %v", err)
+	}
+	if !fired {
+		t.Fatal("test hook never fired — test is not exercising the intended window")
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("victim sentinel must survive: %v", err)
+	}
+	linkInfo, err := os.Lstat(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Error("expected root/sub to still be the symlink the swap planted")
 	}
 }
