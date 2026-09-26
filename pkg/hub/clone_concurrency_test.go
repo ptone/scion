@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -64,13 +65,13 @@ const cloneRaceGoroutines = 20
 // raceRequestIDKey carries a per-goroutine request identity through the
 // request context so copyBarrier (below) can tell racing requests apart even
 // when they compute the identical storage path — which is exactly what
-// happens when the fix under test is reverted, the scenario the revert-proof
-// in the task brief exercises. Identifying requests by the directory portion
-// of the path they copy into would break in that scenario: with the fix
-// reverted, every racing request computes the same deterministic
-// (scope, scopeID, slug) path with no per-request suffix, so all of them
-// would look like the same "request" to the barrier and only one would ever
-// arrive, hanging the other n-1 forever.
+// happens with the per-request storage suffix reverted (ptone/scion#1975).
+// Identifying requests by the directory portion of the path they copy into
+// would break in that scenario: with the suffix reverted, every racing
+// request computes the same deterministic (scope, scopeID, slug) path with
+// no per-request suffix, so all of them would look like the same "request"
+// to the barrier and only one would ever arrive, hanging the other n-1
+// forever.
 type raceRequestIDKey struct{}
 
 func withRaceRequestID(ctx context.Context, id int) context.Context {
@@ -111,9 +112,9 @@ func raceRequest(srv *Server, token, method, path string, body interface{}, id i
 // guarantees every racing request has already passed its pre-check
 // (GetTemplateBySlug/GetHarnessConfigBySlug, which runs before the storage
 // path is even computed) before any of them reaches
-// CreateTemplate/CreateHarnessConfig — the interleaving the fix in ab627649
-// exists for, rather than one the goroutine scheduler only produces some of
-// the time.
+// CreateTemplate/CreateHarnessConfig — the interleaving the per-request
+// storage suffix fix (ptone/scion#1975) exists for, rather than one the
+// goroutine scheduler only produces some of the time.
 //
 // Each request is identified by the raceRequestID carried on its context
 // (see raceRequest), not by the path it copies into: with the fix reverted,
@@ -125,13 +126,28 @@ func raceRequest(srv *Server, token, method, path string, body interface{}, id i
 // marked seen, so a second Copy call for the same request returns
 // immediately from the already-closed release channel instead of
 // re-arriving at the barrier.
+//
+// If a future change let some racing request exit before its first Copy
+// call (a new early validation, a transient store error on the fast-path
+// read), fewer than n requests would ever arrive and a waiter would block
+// forever. arrive guards against that by giving up after
+// copyBarrierArriveTimeout and recording the timeout so the test goroutine
+// can fail with a clear message instead of hanging until go test's global
+// timeout.
 type copyBarrier struct {
-	mu      sync.Mutex
-	n       int
-	seen    map[int]bool
-	arrived int
-	release chan struct{}
+	mu       sync.Mutex
+	n        int
+	seen     map[int]bool
+	arrived  int
+	release  chan struct{}
+	timedOut bool
 }
+
+// copyBarrierArriveTimeout bounds how long a single arrive call waits to be
+// released. It only matters when the barrier is stuck (see arrive's doc
+// comment above); it just needs to be comfortably longer than any real test
+// run.
+const copyBarrierArriveTimeout = 10 * time.Second
 
 func newCopyBarrier(n int) *copyBarrier {
 	return &copyBarrier{
@@ -145,7 +161,7 @@ func (b *copyBarrier) arrive(id int) {
 	b.mu.Lock()
 	if b.seen[id] {
 		b.mu.Unlock()
-		<-b.release
+		b.wait()
 		return
 	}
 	b.seen[id] = true
@@ -157,7 +173,33 @@ func (b *copyBarrier) arrive(id int) {
 		close(b.release)
 		return
 	}
-	<-b.release
+	b.wait()
+}
+
+// wait blocks until the barrier releases or copyBarrierArriveTimeout
+// elapses, whichever comes first. On timeout it records the failure for
+// failed to report and returns, so the calling request proceeds rather than
+// hanging.
+func (b *copyBarrier) wait() {
+	select {
+	case <-b.release:
+	case <-time.After(copyBarrierArriveTimeout):
+		b.mu.Lock()
+		b.timedOut = true
+		b.mu.Unlock()
+	}
+}
+
+// failed reports whether any arrive call gave up waiting instead of being
+// released normally, i.e. fewer than n racing requests ever reached Copy.
+// Tests that use a copyBarrier should call this after every request they
+// fired has returned and t.Fatalf if it reports true, since that means the
+// assertions that follow would be checking a race that never happened as
+// intended.
+func (b *copyBarrier) failed() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.timedOut
 }
 
 // assertNoOrphanedCloneStorage asserts that, under basePath (the
@@ -214,6 +256,16 @@ func assertExactlyOneWinner(t *testing.T, n int, fire func(idx int) int) {
 	assert.Equal(t, n-1, conflicts, "every other concurrent clone must be rejected as a conflict")
 }
 
+// requireCopyBarrierNotTimedOut fails the test immediately if the given
+// copyBarrier had to give up waiting for a racing request (see
+// copyBarrier.failed). Call it once every request fired against the barrier
+// has returned, before trusting any assertion that depends on all of them
+// having interleaved at the barrier as intended.
+func requireCopyBarrierNotTimedOut(t *testing.T, b *copyBarrier) {
+	t.Helper()
+	require.False(t, b.failed(), "copyBarrier gave up waiting for a racing request to reach Copy; see copyBarrier's doc comment")
+}
+
 func TestTemplateClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *testing.T) {
 	srv, s := testServer(t)
 	stor := newCloneMockStorage("test-bucket")
@@ -242,6 +294,7 @@ func TestTemplateClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *testin
 			"scope": "global",
 		}, idx)
 	})
+	requireCopyBarrierNotTimedOut(t, stor.raceBarrier)
 
 	winner, err := s.GetTemplateBySlug(ctx, "race-clone-global", store.TemplateScopeGlobal, "")
 	require.NoError(t, err)
@@ -285,6 +338,8 @@ func TestTemplateClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *testi
 			"scopeId": project.ID,
 		}, idx)
 	})
+
+	requireCopyBarrierNotTimedOut(t, stor.raceBarrier)
 
 	winner, err := s.GetTemplateBySlug(ctx, "race-clone-project", store.TemplateScopeProject, project.ID)
 	require.NoError(t, err)
@@ -337,6 +392,8 @@ func TestTemplateClone_ConcurrentSameName_UserScope_SameOwner_ExactlyOneWinner(t
 		}, idx)
 	})
 
+	requireCopyBarrierNotTimedOut(t, stor.raceBarrier)
+
 	winner, err := s.GetTemplateBySlug(ctx, "race-clone-user", store.TemplateScopeUser, alice.ID)
 	require.NoError(t, err)
 	require.NotEmpty(t, winner.Files)
@@ -375,6 +432,8 @@ func TestHarnessConfigClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *t
 			"scope": "global",
 		}, idx)
 	})
+
+	requireCopyBarrierNotTimedOut(t, stor.raceBarrier)
 
 	winner, err := s.GetHarnessConfigBySlug(ctx, "race-clone-global", store.HarnessConfigScopeGlobal, "")
 	require.NoError(t, err)
@@ -418,6 +477,8 @@ func TestHarnessConfigClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *
 			"scopeId": project.ID,
 		}, idx)
 	})
+
+	requireCopyBarrierNotTimedOut(t, stor.raceBarrier)
 
 	winner, err := s.GetHarnessConfigBySlug(ctx, "race-clone-project", store.HarnessConfigScopeProject, project.ID)
 	require.NoError(t, err)
@@ -468,12 +529,16 @@ func fireLegacyCanonicalMix(srv *Server, token, url, canonicalScope, scopeID, na
 			defer wg.Done()
 			// Legacy requests are rejected before ever reaching Copy, so
 			// this ID is never consulted by the copyBarrier; it only needs
-			// to be a valid raceRequest argument.
+			// to be a valid raceRequest argument. It is offset from the
+			// canonical requests' IDs below so that every concurrently
+			// fired request in this test has a distinct identity, even
+			// though legacy and canonical requests are fired in separate
+			// loops that each start counting from 0.
 			legacyCodes[idx] = raceRequest(srv, token, http.MethodPost, url, map[string]interface{}{
 				"name":    name,
 				"scope":   "grove",
 				"scopeId": scopeID,
-			}, idx)
+			}, 1000+idx)
 		}(i)
 	}
 	for i := 0; i < canonicalScopeMixGoroutines; i++ {
@@ -514,6 +579,7 @@ func TestTemplateClone_ConcurrentLegacyAndCanonicalScope_OneCanonicalWinnerNoOrp
 
 	legacyCodes, canonicalCodes := fireLegacyCanonicalMix(srv, token,
 		"/api/v1/templates/"+source.ID+"/clone", "project", project.ID, "race-clone-legacy-mix")
+	requireCopyBarrierNotTimedOut(t, stor.raceBarrier)
 
 	for _, c := range legacyCodes {
 		assert.Equal(t, http.StatusBadRequest, c,
@@ -571,6 +637,7 @@ func TestHarnessConfigClone_ConcurrentLegacyAndCanonicalScope_OneCanonicalWinner
 
 	legacyCodes, canonicalCodes := fireLegacyCanonicalMix(srv, token,
 		"/api/v1/harness-configs/"+source.ID+"/clone", "project", project.ID, "race-clone-legacy-mix")
+	requireCopyBarrierNotTimedOut(t, stor.raceBarrier)
 
 	for _, c := range legacyCodes {
 		assert.Equal(t, http.StatusBadRequest, c,
