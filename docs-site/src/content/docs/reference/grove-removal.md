@@ -50,6 +50,7 @@ agents and make sure hub and broker are on the same release.
 | hub accepted and stored unrecognized `scope` values on template create/clone, notification subscription-template create, and harness-config create/clone (e.g. the removed `grove` scope, or any other unrecognized value) | rejected with 400 (echoing the rejected value); use `global`, `project` or `user` for templates and harness configs, `project` or `agent` for subscription templates |
 | harness-config update (`PUT /api/v1/harness-configs/{id}`) accepted `scope`, `scopeId`, `ownerId`, `storagePath`, `storageUri` and `storageBucket` from the request body | update keeps the stored record's scope, scope ID, owner and storage location, matching template updates |
 | pre-existing stored `scope='grove'` rows in `templates`, `harness_configs` and `subscription_templates` | normalized to `scope='project'` automatically on hub boot; no action needed |
+| `groveId` in hub event payloads; metric attribute `scope="grove"` | `projectId`; `scope="project"` (update dashboards and alerts) |
 <!-- Rows are appended here as later changes merge. -->
 
 ## Extras / telemetry
