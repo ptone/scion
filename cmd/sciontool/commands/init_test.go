@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -1298,11 +1299,11 @@ func TestRequirePrivilegeDropOrFail_NonSubstrateRootlessUnchanged(t *testing.T) 
 	}
 }
 
-// TestRequirePrivilegeDropOrFail_EnforcedRefusesRootGID is round 5's B1
+// TestRequirePrivilegeDropOrFail_EnforcedRefusesRootGID proves the gid
 // clamp: in enforced mode a non-root UID paired with a root (0) GID must be
 // refused, because the supervisor's and manager's credential drop both use
-// UID>0 && GID>0 and would otherwise skip the drop entirely (full root). The
-// pre-round-5 uid-only predicate let exactly this pair through.
+// UID>0 && GID>0 and would otherwise skip the drop entirely (full root). A
+// uid-only predicate would let exactly this pair through.
 func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootGID(t *testing.T) {
 	err := requirePrivilegeDropOrFail(1000, 0, true)
 	if !errors.Is(err, errPrivilegeDropRequired) {
@@ -1314,7 +1315,7 @@ func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootGID(t *testing.T) {
 }
 
 // TestRequirePrivilegeDropOrFail_EnforcedRefusesRootUIDWithNonRootGID is
-// the other half of the B1 predicate: UID 0 paired with a non-root GID must
+// the other half of the gid-clamp predicate: UID 0 paired with a non-root GID must
 // still be refused in enforced mode (the gid clamp must not replace the
 // original uid check).
 func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootUIDWithNonRootGID(t *testing.T) {
@@ -1323,9 +1324,8 @@ func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootUIDWithNonRootGID(t *test
 	}
 }
 
-// TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop is round 5's
-// seam A(1) test (round-4 High-2 / O26 / D3): with euid stubbed to 0, the
-// body of postPreStartOwnershipFixup must forward its own
+// TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop proves that,
+// with euid stubbed to 0, the body of postPreStartOwnershipFixup forwards its own
 // requirePrivilegeDrop, unchanged, to chownTreeRootOwned for every directory
 // it fixes up. Hardcoding false there would silently fall back to the
 // path-based walk with no hard-link guard in enforced mode.
@@ -1361,9 +1361,9 @@ func TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop(t *testing.T) {
 	}
 }
 
-// TestSetupHostUser_ForwardsRequirePrivilegeDrop is round 5's seam A(2)
-// test (round-4 Low-1 / O27 / D2): with getuid, CAP_SETUID and the UID-map
-// check stubbed to "root, capable, mapped", setupHostUser must reach
+// TestSetupHostUser_ForwardsRequirePrivilegeDrop proves that, with getuid,
+// CAP_SETUID and the UID-map check stubbed to "root, capable, mapped",
+// setupHostUser reaches
 // adjustScionUser and forward its own requirePrivilegeDrop to it unchanged,
 // along with the parsed SCION_HOST_UID/GID.
 func TestSetupHostUser_ForwardsRequirePrivilegeDrop(t *testing.T) {
@@ -1409,8 +1409,8 @@ func TestSetupHostUser_ForwardsRequirePrivilegeDrop(t *testing.T) {
 }
 
 // TestRunServicesStart_DefaultForwardsRequirePrivilegeDrop exercises the
-// DEFAULT runServicesStart body (round-4 High-3 / O28 / D1), which the
-// RunInit threading test replaces with a stub: with requirePrivilegeDrop
+// DEFAULT runServicesStart body, which the RunInit threading test replaces
+// with a stub: with requirePrivilegeDrop
 // true and <name>.stdout.log pre-planted as a hard link to a victim file,
 // the service must be refused (so the default body forwarded the flag to
 // Manager.Start), and the victim's content must be unchanged.
@@ -1568,7 +1568,7 @@ func TestBlockClaudeDebugSymlink_NonEnforced_KeepsHistoricalPathBasedBehaviour(t
 }
 
 // TestBlockClaudeDebugSymlink_Enforced_RefusesSymlinkAndLeavesVictimUnchanged
-// is N2's core regression test: a symlink planted at ~/.claude/debug before
+// is the core regression test: a symlink planted at ~/.claude/debug before
 // this runs, pointing at a victim directory, must never be chmod'd through —
 // deterministic, no race required, since the symlink already exists when
 // this function runs (matching the real exploit: a pre-start hook or
@@ -1625,8 +1625,8 @@ func TestBlockClaudeDebugSymlink_Enforced_CreatesAndChmodsRealDir(t *testing.T) 
 	}
 }
 
-// TestBlockClaudeDebugSymlink_Enforced_ChmodSurvivesSwapAfterEnsure is T3a's
-// core regression test: a workload process that renames debugDir away and
+// TestBlockClaudeDebugSymlink_Enforced_ChmodSurvivesSwapAfterEnsure is the
+// core regression test for the swap-after-resolve race: a workload process that renames debugDir away and
 // plants a symlink to a victim directory in its place, in the exact window
 // between EnsureDirNoFollow returning its fd and the chmod that follows,
 // must not have the chmod land on the victim. The chmod is fd-based
@@ -1711,7 +1711,7 @@ func TestCleanGcloudConfigForMetadata_NonEnforced_KeepsHistoricalBehaviour(t *te
 }
 
 // TestCleanGcloudConfigForMetadata_Enforced_RefusesSymlinkAndLeavesVictimUnchanged
-// is N3's core deterministic regression test: gcloudDir itself is a symlink
+// is the core deterministic regression test: gcloudDir itself is a symlink
 // to a victim directory (planted before this runs, matching the real
 // exploit — no race required to demonstrate the class), and enforced mode
 // must refuse it outright rather than enumerating/deleting through it.
@@ -1839,7 +1839,7 @@ func TestCleanGcloudConfigForMetadata_Enforced_SymlinkLogsErrorLine(t *testing.T
 }
 
 // TestChownTreeRootOwned_DirectCall is a thin call-site test proving
-// chownTreeRootOwned (N1), in enforced mode, delegates to the shared
+// chownTreeRootOwned, in enforced mode, delegates to the shared
 // dirfd.ChownTreeNoFollow walk with the root-owned-only filter — the deeper
 // symlink-swap race itself is covered once, thoroughly, at the dirfd level
 // (TestChownTreeNoFollow_SurvivesIntermediateDirSwapMidWalk).
@@ -1893,7 +1893,7 @@ func TestChownTreeRootOwned_NonEnforced_UsesPathBasedWalk(t *testing.T) {
 	}
 }
 
-// TestChownTreeRootOwned_MissingRootIsSilentNoop proves R5(a): a missing
+// TestChownTreeRootOwned_MissingRootIsSilentNoop proves that a missing
 // root is a silent no-op (nil, 0, 0) on both branches, restoring the
 // historical filepath.WalkDir contract (WalkDir passes the root's own lstat
 // error to the callback, which returns nil) rather than surfacing as an
@@ -1912,8 +1912,8 @@ func TestChownTreeRootOwned_MissingRootIsSilentNoop(t *testing.T) {
 	}
 }
 
-// TestChownTreeRootOwned_NonEnforced_FollowsAncestorSymlink proves R5(b)'s
-// gating: on non-enforced runtimes, an ancestor-path symlink is followed
+// TestChownTreeRootOwned_NonEnforced_FollowsAncestorSymlink proves the
+// runtime gating: on non-enforced runtimes, an ancestor-path symlink is followed
 // (the historical filepath.WalkDir behaviour), not refused — a legitimate
 // non-substrate setup may symlink an ancestor of the walked root (e.g. from
 // a bind-mounted host path), and refusing that would break it.
@@ -1949,8 +1949,8 @@ func TestChownTreeRootOwned_NonEnforced_FollowsAncestorSymlink(t *testing.T) {
 	}
 }
 
-// TestChownTreeRootOwned_Enforced_RefusesAncestorSymlink proves R5(b)'s
-// other half: on substrate (enforced), the same ancestor-path symlink is
+// TestChownTreeRootOwned_Enforced_RefusesAncestorSymlink proves the other
+// half of the same runtime gating: on substrate (enforced), the same ancestor-path symlink is
 // refused rather than followed, so the whole fixup for that root is skipped
 // (nothing chowned) instead of silently descending through workload-
 // controlled redirection.
@@ -1984,8 +1984,8 @@ func TestChownTreeRootOwned_Enforced_RefusesAncestorSymlink(t *testing.T) {
 	}
 }
 
-// TestChownTreeRootOwned_Enforced_SkipsHardlinkedFile is T3b's core
-// regression test: N1's enforced branch chowns specifically root-owned
+// TestChownTreeRootOwned_Enforced_SkipsHardlinkedFile is the core
+// regression test: the enforced branch chowns specifically root-owned
 // entries, so a pre-planted hard link to a root-owned file is exactly what
 // it would hand over if the hard-link guard were ever disabled for this
 // call site. Forces the root-owned filter, creates a hard-linked pair, and
@@ -2211,7 +2211,7 @@ func TestReadServicesYAML_Enforced_MissingFileIsQuietError(t *testing.T) {
 	}
 }
 
-// TestReadServicesYAML_Enforced_RefusesHardlink is R2(a): the Nlink check
+// TestReadServicesYAML_Enforced_RefusesHardlink proves the Nlink check
 // is the only defence against a pre-planted hard link to a root-only file
 // on the same filesystem — a workload process can hard-link to a file it
 // does not own (hard-linking only needs write access to the directory the
@@ -2256,8 +2256,7 @@ func TestReadServicesYAML_Enforced_RefusesAncestorSymlink(t *testing.T) {
 	}
 }
 
-// TestReadServicesYAML_Enforced_RefusesFifoWithoutHang is R2(b): proves
-// BOTH the S_IFREG check (a FIFO must be refused, not read as if it were a
+// TestReadServicesYAML_Enforced_RefusesFifoWithoutHang proves BOTH the S_IFREG check (a FIFO must be refused, not read as if it were a
 // regular file) and O_NONBLOCK (the refusal must not require a writer to
 // ever show up — a backgrounded pre-start-hook child could hold a FIFO
 // open at this exact path and never write to it, which would otherwise
@@ -2296,7 +2295,7 @@ func TestReadServicesYAML_Enforced_RefusesFifoWithoutHang(t *testing.T) {
 	}
 }
 
-// TestReadServicesYAML_Enforced_RefusesOverCapFile is R8: bounds the
+// TestReadServicesYAML_Enforced_RefusesOverCapFile bounds the
 // enforced-mode read so a workload-planted multi-GB regular file cannot
 // make root's own init process read the whole thing into memory before the
 // harness ever starts.
@@ -2342,8 +2341,7 @@ func TestReadServicesYAML_Enforced_ReadsAtCapFile(t *testing.T) {
 // leaf open is read-only: a 0444 scion-services.yaml must still be read.
 // An O_RDWR open (which would also sidestep the FIFO-blocking O_NONBLOCK
 // guard, since a read-write FIFO open never blocks) needs write permission
-// and fails here. Kills round-4 C4, which the auditor classed as an
-// equivalent mutant. Like the L3 tests, this discriminates only as non-root
+// and fails here. This discriminates only as non-root
 // (root bypasses the permission check), so it skips as root.
 func TestReadServicesYAML_Enforced_ReadsReadOnlyFile(t *testing.T) {
 	if os.Geteuid() == 0 {
@@ -2367,10 +2365,10 @@ func TestReadServicesYAML_Enforced_ReadsReadOnlyFile(t *testing.T) {
 	}
 }
 
-// TestReadServicesYAML_NonEnforced_ReadsOverCapFile pins round 4's claim
-// that the R8 1 MiB cap is enforced-mode only: the non-enforced branch is
-// an unbounded os.ReadFile, byte-identical to its pre-unit behaviour, so a
-// file over the cap is returned whole (round-4 Info-3 / C5).
+// TestReadServicesYAML_NonEnforced_ReadsOverCapFile pins the claim that the
+// 1 MiB cap is enforced-mode only: the non-enforced branch is an unbounded
+// os.ReadFile, byte-identical to its previous behaviour, so a file over the
+// cap is returned whole.
 func TestReadServicesYAML_NonEnforced_ReadsOverCapFile(t *testing.T) {
 	tmpHome := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
@@ -2596,6 +2594,227 @@ func TestConfigureSharedWorkspaceGit_HardlinkedFileRefused(t *testing.T) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if ok && st.Nlink != 1 {
 		t.Errorf("gitconfigPath Nlink = %d, want 1 (should be a fresh file after install)", st.Nlink)
+	}
+}
+
+// wantGitconfigMaxBytes is this test's OWN, independently hardcoded copy of
+// the size bound init.go documents for gitconfigMaxBytes (1 MiB) — not a
+// reference to that constant. See pkg/sciontool/hooks/handlers's
+// wantAgentInfoMaxBytes for why a test that instead sized its fixture as
+// gitconfigMaxBytes+1 could never notice a regression that widens that
+// constant: the fixture and the cap would drift together.
+const wantGitconfigMaxBytes = 1 << 20
+
+// gitconfigCommentOfSize returns a syntactically inert (comment-only), valid
+// git-config-file body of exactly n bytes: git ignores a line starting with
+// ";" entirely, so this content survives a raw byte-for-byte read but can
+// never itself produce a parse error or a stray key/value pair regardless of
+// whether the size cap that is supposed to refuse it actually does.
+func gitconfigCommentOfSize(n int, marker string) string {
+	const prefix, suffix = "; ", "\n"
+	pad := n - len(prefix) - len(marker) - len(suffix)
+	if pad < 0 {
+		pad = 0
+	}
+	return prefix + marker + strings.Repeat("a", pad) + suffix
+}
+
+// TestConfigureSharedWorkspaceGit_OversizeRegularGitconfigStartsEmpty proves
+// the size bound on the pre-existing .gitconfig read is enforced against an
+// actual regular file: a marker-bearing file one byte over gitconfigMaxBytes
+// is refused, so the rewrite starts from an empty private copy exactly like
+// a missing file would, and the marker never reaches the installed result.
+// This fails if the cap is removed or widened, since the marker would then
+// survive the read (git preserves an unrecognized leading comment verbatim)
+// and show up in the final gitconfig.
+func TestConfigureSharedWorkspaceGit_OversizeRegularGitconfigStartsEmpty(t *testing.T) {
+	agentHome := t.TempDir()
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	const marker = "OVERSIZE-MARKER-DO-NOT-PRESERVE"
+	content := gitconfigCommentOfSize(wantGitconfigMaxBytes+1, marker)
+	if len(content) != wantGitconfigMaxBytes+1 {
+		t.Fatalf("test fixture is %d bytes, want %d", len(content), wantGitconfigMaxBytes+1)
+	}
+	if err := os.WriteFile(gitconfigPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write oversize gitconfig: %v", err)
+	}
+
+	configureSharedWorkspaceGit(agentHome, 0, 0)
+
+	finalContent, err := os.ReadFile(gitconfigPath)
+	if err != nil {
+		t.Fatalf("read final gitconfig: %v", err)
+	}
+	if strings.Contains(string(finalContent), marker) {
+		t.Errorf("final gitconfig contains the oversize file's marker, meaning the size cap did not refuse it: %q", finalContent)
+	}
+	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
+		t.Errorf("user.email = %q, want agent@scion.dev (the rewrite should still complete from an empty seed)", got)
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_AtCapRegularGitconfigIsPreserved is
+// OversizeRegularGitconfigStartsEmpty's companion: the same marker-bearing
+// content at exactly wantGitconfigMaxBytes (not one byte over) is read and
+// carried through into the installed result, pinning the boundary at the
+// documented cap.
+func TestConfigureSharedWorkspaceGit_AtCapRegularGitconfigIsPreserved(t *testing.T) {
+	agentHome := t.TempDir()
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	const marker = "AT-CAP-MARKER"
+	content := gitconfigCommentOfSize(wantGitconfigMaxBytes, marker)
+	if len(content) != wantGitconfigMaxBytes {
+		t.Fatalf("test fixture is %d bytes, want %d", len(content), wantGitconfigMaxBytes)
+	}
+	if err := os.WriteFile(gitconfigPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write at-cap gitconfig: %v", err)
+	}
+
+	configureSharedWorkspaceGit(agentHome, 0, 0)
+
+	finalContent, err := os.ReadFile(gitconfigPath)
+	if err != nil {
+		t.Fatalf("read final gitconfig: %v", err)
+	}
+	if !strings.Contains(string(finalContent), marker) {
+		t.Errorf("final gitconfig does not contain the at-cap file's marker; the read should have succeeded at exactly the cap")
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_TmpdirRaceCannotDiscloseArbitraryFile
+// reproduces the vulnerability class this fix closes: the private directory
+// configureSharedWorkspaceGit stages a rewritten gitconfig in used to be
+// os.MkdirTemp("", ...) — i.e. under $TMPDIR (or os.TempDir() if unset), a
+// location a concurrent workload-uid process can freely write to. A racer
+// goroutine watches that same directory, and the instant it sees an entry
+// whose name mentions "gitconfig" appear, renames it away and plants a
+// symlink at the same name pointing at an attacker-controlled directory
+// that itself contains "gitconfig" symlinked to a victim file. At the
+// pre-fix implementation this reliably wins: git's own file creation writes
+// through the symlink chain into the victim (a root write to an arbitrary
+// file), and the read-back discloses the victim's content into the
+// installed, workload-owned ~/.gitconfig (a root read of an arbitrary file,
+// handed to the workload).
+//
+// At the fixed implementation, TMPDIR has no bearing at all on where the
+// private directory is created — it is anchored under
+// hooks.PrivateRootTmpDir instead, verified component-by-component by
+// dirfd.EnsureDirNoFollowRootOwned — so nothing bearing the name
+// "gitconfig" ever appears under the directory this racer watches, the
+// racer's swap has nothing to land on, and the victim is untouched
+// regardless of how the race would have gone. This same test file, run
+// unmodified against the pre-fix implementation, fails.
+func TestConfigureSharedWorkspaceGit_TmpdirRaceCannotDiscloseArbitraryFile(t *testing.T) {
+	agentHome := t.TempDir()
+
+	// racerParent stands in for a workload-writable directory: t.TempDir()
+	// itself, owned by this test process, exactly the shape TMPDIR pointing
+	// at a workload-controlled scratch directory would have. Setting TMPDIR
+	// is the whole point: it must have zero effect on the fixed
+	// implementation.
+	racerParent := t.TempDir()
+	t.Setenv("TMPDIR", racerParent)
+
+	victim := filepath.Join(t.TempDir(), "victim")
+	const victimContent = "ROOT-SECRET-DO-NOT-DISCLOSE\n"
+	if err := os.WriteFile(victim, []byte(victimContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evilDir := t.TempDir()
+	if err := os.Symlink(victim, filepath.Join(evilDir, "gitconfig")); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			entries, err := os.ReadDir(racerParent)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				name := e.Name()
+				if !strings.Contains(name, "gitconfig") {
+					continue
+				}
+				p := filepath.Join(racerParent, name)
+				away := p + ".raced-away"
+				if os.Rename(p, away) != nil {
+					continue
+				}
+				_ = os.Symlink(evilDir, p)
+			}
+		}
+	}()
+
+	configureSharedWorkspaceGit(agentHome, 0, 0)
+
+	close(stop)
+	wg.Wait()
+
+	entries, err := os.ReadDir(racerParent)
+	if err != nil {
+		t.Fatalf("read racer dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("TMPDIR-watched directory %s is not empty after configureSharedWorkspaceGit: %v — the private directory must never be derived from TMPDIR/os.TempDir()", racerParent, entries)
+	}
+
+	victimAfter, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(victimAfter) != victimContent {
+		t.Errorf("victim file was modified: %q, want unchanged %q", victimAfter, victimContent)
+	}
+
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	finalContent, err := os.ReadFile(gitconfigPath)
+	if err != nil {
+		t.Fatalf("read final gitconfig: %v", err)
+	}
+	if strings.Contains(string(finalContent), "ROOT-SECRET") {
+		t.Fatalf("final gitconfig discloses the victim's content: %q", finalContent)
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed proves the
+// other half of the fix: dirfd.EnsureDirNoFollowRootOwned's chain check is
+// what actually runs, not a check that always happens to pass. Pointing
+// hooks.PrivateRootTmpDir under a chain that fails verification (here,
+// explicitly making the immediate parent group/other-writable, the same
+// shape a misconfigured or attacker-influenced "/run" would have — real
+// "/tmp" above it fails the same check independently, for the same reason
+// the brief's premise treats it as unsafe) must make
+// configureSharedWorkspaceGit refuse to create anything there and return
+// without installing a gitconfig — never falling back to os.TempDir() or
+// any other location.
+func TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed(t *testing.T) {
+	origDir := hooks.PrivateRootTmpDir
+	t.Cleanup(func() { hooks.PrivateRootTmpDir = origDir })
+
+	badParent := t.TempDir()
+	if err := os.Chmod(badParent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	hooks.PrivateRootTmpDir = filepath.Join(badParent, "tmp")
+
+	agentHome := t.TempDir()
+	configureSharedWorkspaceGit(agentHome, 0, 0)
+
+	if _, err := os.Stat(hooks.PrivateRootTmpDir); err == nil {
+		t.Errorf("expected %s to not be created when its parent chain fails verification", hooks.PrivateRootTmpDir)
+	}
+	if _, err := os.Stat(filepath.Join(agentHome, ".gitconfig")); err == nil {
+		t.Error("expected no .gitconfig to be installed when the private directory chain fails closed")
 	}
 }
 

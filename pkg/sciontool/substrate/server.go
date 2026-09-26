@@ -307,6 +307,25 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The private, root-only scratch directory RunInit uses to stage
+	// content it must both write and read back before installing the
+	// result into a workload-owned location (see cmd/sciontool/commands'
+	// configureSharedWorkspaceGit) gets the same fail-closed, cleared-at-
+	// every-bootstrap treatment as the enforced hooks dir above, for the
+	// same reason: a stale entry left by an earlier bootstrap of a reused
+	// actor must never be visible to this one.
+	if err := ensurePrivateTmpDir(); err != nil {
+		var pathErr *bootstrapPathError
+		if errors.As(err, &pathErr) {
+			log.Error("bootstrap: rejected private tmp dir: %v", redactErr(err))
+			http.Error(w, pathErr.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		log.Error("bootstrap: failed to prepare private tmp dir: %v", redactErr(err))
+		http.Error(w, "failed to prepare private tmp dir", http.StatusInternalServerError)
+		return
+	}
+
 	for _, f := range req.Files {
 		if err := s.writeBootstrapFile(f); err != nil {
 			// Deliberately do not include the file's content or the

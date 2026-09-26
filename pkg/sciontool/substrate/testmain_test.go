@@ -166,6 +166,17 @@ func TestMain(m *testing.M) {
 	log.SetLogPath(filepath.Join(tmpHome, "agent.log"))
 	restoreTokenHome := hub.SetTokenHome(tmpHome)
 
+	// Redirect ensurePrivateTmpDir's target at a throwaway directory this
+	// (unprivileged) test binary itself owns, for the same reason HOME/XDG
+	// are redirected above: production never reassigns privateRootTmpDir,
+	// and the real path it defaults to ("/run/scion/tmp") lives under a
+	// root-owned "/run" this test binary has no permission to create
+	// anything under. Any individual test that specifically exercises the
+	// real default (e.g. proving the production path name itself is right)
+	// overrides and restores this var itself, the same way
+	// withEnforcedHooksFixture does for enforcedHooksDir.
+	privateRootTmpDir = filepath.Join(tmpHome, "run", "scion", "tmp")
+
 	code := m.Run()
 	restoreTokenHome()
 	if err := removeSandboxHome(tmpHome); err != nil {
