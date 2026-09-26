@@ -790,8 +790,9 @@ class TestAtomicWriteJsonSymlinkGuards(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         self.assertEqual(data, {"second": True})
-        # No leftover temp file after a successful write.
-        self.assertFalse(os.path.exists(path + ".tmp"))
+        # No leftover temp file after a successful write: the directory must
+        # contain exactly the final name, nothing else.
+        self.assertEqual(os.listdir(os.path.dirname(path)), ["out.json"])
 
     def test_symlinked_parent_directory_is_refused(self):
         # Mirrors a workload committing ".agents" as a symlink to a directory
@@ -809,31 +810,45 @@ class TestAtomicWriteJsonSymlinkGuards(unittest.TestCase):
         self.assertEqual(os.listdir(sentinel_dir), [])
 
     def test_symlinked_temp_target_is_refused_and_sentinel_untouched(self):
-        # Mirrors a workload committing "hooks.json.tmp" as a symlink to a
-        # file it does not own: the write must never go through that symlink.
+        # Mirrors a workload committing a symlink at the exact temp name
+        # atomic_write_json is about to create: the write must never go
+        # through that symlink. The real temp name is unique per call (pid +
+        # a monotonic timestamp) precisely so this can't be predicted and
+        # pre-planted from outside; _atomic_tmp_name is monkeypatched to a
+        # fixed, known name so the test can still plant the adversarial entry
+        # at the exact path this call will use, and prove O_EXCL still
+        # refuses a pre-existing entry there rather than following or
+        # truncating it.
         directory = tempfile.mkdtemp()
+        fixed_tmp_name = ".hooks.json.tmp-fixed-for-test"
         sentinel_file = os.path.join(directory, "sentinel.txt")
         with open(sentinel_file, "w", encoding="utf-8") as f:
             f.write("original contents\n")
-        os.symlink(sentinel_file, os.path.join(directory, "hooks.json.tmp"))
+        os.symlink(sentinel_file, os.path.join(directory, fixed_tmp_name))
 
-        with self.assertRaises(OSError):
-            sh.atomic_write_json(os.path.join(directory, "hooks.json"), {"y": 1})
+        with mock.patch.object(sh, "_atomic_tmp_name", return_value=fixed_tmp_name):
+            with self.assertRaises(OSError):
+                sh.atomic_write_json(os.path.join(directory, "hooks.json"), {"y": 1})
 
         with open(sentinel_file, encoding="utf-8") as f:
             self.assertEqual(f.read(), "original contents\n")
         self.assertFalse(os.path.exists(os.path.join(directory, "hooks.json")))
 
     def test_fifo_at_temp_target_does_not_hang(self):
+        # Same predictability problem as the symlink test above: the FIFO
+        # must sit at the exact name atomic_write_json will try to create, so
+        # _atomic_tmp_name is monkeypatched to a fixed name for this call.
         directory = tempfile.mkdtemp()
-        fifo_path = os.path.join(directory, "out.json.tmp")
+        fixed_tmp_name = ".out.json.tmp-fixed-for-test"
+        fifo_path = os.path.join(directory, fixed_tmp_name)
         os.mkfifo(fifo_path)
 
         result: dict[str, BaseException | None] = {"error": None}
 
         def call():
             try:
-                sh.atomic_write_json(os.path.join(directory, "out.json"), {"z": 1})
+                with mock.patch.object(sh, "_atomic_tmp_name", return_value=fixed_tmp_name):
+                    sh.atomic_write_json(os.path.join(directory, "out.json"), {"z": 1})
             except BaseException as exc:  # noqa: BLE001 - captured for the main thread
                 result["error"] = exc
 
@@ -845,6 +860,38 @@ class TestAtomicWriteJsonSymlinkGuards(unittest.TestCase):
             "atomic_write_json hung opening a pre-existing FIFO at the temp path",
         )
         self.assertIsInstance(result["error"], OSError)
+
+    def test_stale_temp_file_does_not_block_a_later_write(self):
+        # A leftover from an old, killed-mid-write process (or, before this
+        # fix, simply the previous call's own fixed ".tmp" name) must never
+        # permanently block every subsequent write the way a fixed temp name
+        # would: the unique-per-call name means a stale file sitting at some
+        # OTHER call's old temp name is simply irrelevant to this one.
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "out.json")
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            f.write("leftover from a previous, interrupted write\n")
+        # Also plant one at the pre-fix fixed name this exact call would have
+        # used, to prove specifically that reintroducing the old name would
+        # have collided where the new one does not.
+        with open(os.path.join(directory, f".{os.path.basename(path)}.tmp"), "w", encoding="utf-8"):
+            pass
+
+        sh.atomic_write_json(path, {"ok": True})
+
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"ok": True})
+
+    def test_temp_name_is_unique_per_call(self):
+        # Pins the property the two tests above depend on: two calls in a
+        # row never reuse the same temp name, so the second call's own
+        # O_EXCL create can never spuriously collide with the first call's
+        # (already-renamed-away) temp file.
+        first = sh._atomic_tmp_name("out.json")
+        second = sh._atomic_tmp_name("out.json")
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith(".out.json.tmp-"))
+        self.assertTrue(second.startswith(".out.json.tmp-"))
 
 
 if __name__ == "__main__":
