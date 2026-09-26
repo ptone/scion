@@ -20,6 +20,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // maxServiceNameLen bounds a service Name. A legitimate service Name is a
@@ -53,8 +54,21 @@ var ErrInvalidServiceName = errors.New("invalid service name")
 // no valid caller is ever affected, on any runtime.
 //
 // Rejected: an empty name, ".", "..", any name containing a path separator
-// ('/' or the platform's os.PathSeparator), any name containing a NUL byte,
-// and any name longer than maxServiceNameLen.
+// ('/' or the platform's os.PathSeparator), any name containing a NUL byte
+// or any other control character, and any name longer than
+// maxServiceNameLen.
+//
+// The control-character rule (beyond NUL) exists independently of the
+// path-escape defense above: a VALID name — one with no path separator,
+// so it passes every other rule — can still contain a newline or other
+// control character, and unlike an invalid name (which always goes through
+// SafeNameForLog before it's logged), a valid name is logged raw at every
+// log.TaggedInfo("service:"+name, ...) call site and in openLogs' own error
+// messages. That would let a workload-chosen but otherwise "valid" name
+// forge additional log lines. Note this is deliberately a narrow denylist
+// (reject control characters) rather than a broader allowlist restricting
+// the character set outright — the latter risks breaking existing
+// legitimate service names and is tracked separately.
 func ValidateServiceName(name string) error {
 	switch {
 	case name == "":
@@ -71,6 +85,8 @@ func ValidateServiceName(name string) error {
 		return fmt.Errorf("%w: contains a path separator", ErrInvalidServiceName)
 	case strings.ContainsRune(name, 0):
 		return fmt.Errorf("%w: contains a NUL byte", ErrInvalidServiceName)
+	case strings.IndexFunc(name, unicode.IsControl) >= 0:
+		return fmt.Errorf("%w: contains a control character", ErrInvalidServiceName)
 	default:
 		return nil
 	}

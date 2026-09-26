@@ -916,9 +916,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 			// unconditionally, on every runtime. An invalid Name drops
 			// only that one service (logged, name quoted/capped/escaped —
 			// never emit a raw workload-chosen string into the log) —
-			// every other service, valid or not, still gets its own
-			// chance to start, consistent with the per-service drop
-			// behaviour openLogs failures already have.
+			// every other valid service still gets its own chance to
+			// start, consistent with the per-service drop behaviour
+			// openLogs failures already have.
 			specs = validateServiceSpecs(specs)
 			if len(specs) > 0 {
 				log.Info("Starting %d sidecar service(s)...", len(specs))
@@ -3358,7 +3358,15 @@ func cleanGcloudConfigForMetadata(gcloudDir string, requirePrivilegeDrop bool) {
 // does not already have as itself by just running its own code. The
 // service NAME dimension (a workload-chosen Name used to build a log file
 // path) is a separate, defended-against instance of the same content-trust
-// class — see validateServiceName's doc comment.
+// class — see services.ValidateServiceName's doc comment.
+//
+// The enforced branch's read is bounded (servicesYAMLMaxBytes): without a
+// bound, a workload-planted multi-GB regular file (still a single-link
+// regular file, so it passes every check above) would make root's own init
+// process read the whole thing into memory before the harness ever starts —
+// a self-inflicted OOM, not a privilege issue, but cheap to close. The
+// non-enforced branch stays genuinely byte-identical to the pre-unit
+// os.ReadFile call, unbounded exactly as it always was.
 func readServicesYAML(path string, requirePrivilegeDrop bool) ([]byte, error) {
 	if !requirePrivilegeDrop {
 		return os.ReadFile(path)
@@ -3390,8 +3398,22 @@ func readServicesYAML(path string, requirePrivilegeDrop bool) ([]byte, error) {
 		log.Error("Refusing to read %s: not a single-link regular file", path)
 		return nil, fmt.Errorf("refusing to read %s: not a single-link regular file", path)
 	}
-	return io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, servicesYAMLMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > servicesYAMLMaxBytes {
+		log.Error("Refusing to read %s: exceeds %d bytes", path, servicesYAMLMaxBytes)
+		return nil, fmt.Errorf("refusing to read %s: exceeds %d bytes", path, servicesYAMLMaxBytes)
+	}
+	return data, nil
 }
+
+// servicesYAMLMaxBytes bounds readServicesYAML's enforced-mode read. A
+// legitimate scion-services.yaml describing even a large number of
+// sidecars is a few kilobytes; 1 MiB is generous headroom with no
+// legitimate case anywhere near it.
+const servicesYAMLMaxBytes = 1 << 20
 
 // validateServiceSpecs is the authoritative gate for the service-Name-as-
 // path-component content-trust class (see services.ValidateServiceName's
@@ -3399,9 +3421,9 @@ func readServicesYAML(path string, requirePrivilegeDrop bool) ([]byte, error) {
 // scion-services.yaml is parsed, before any consumer of Name ever sees it,
 // and drops any spec whose Name is invalid — logged, name
 // quoted/capped/escaped via services.SafeNameForLog, never a raw
-// workload-chosen string — while keeping every other spec, valid or not,
-// so one bad entry cannot take down the rest of the batch. Applies
-// unconditionally, on every runtime: a legitimate Name is a plain
+// workload-chosen string — while keeping every other valid spec, regardless
+// of position, so one bad entry cannot take down the rest of the batch.
+// Applies unconditionally, on every runtime: a legitimate Name is a plain
 // identifier, so no valid caller is ever affected.
 func validateServiceSpecs(specs []api.ServiceSpec) []api.ServiceSpec {
 	valid := make([]api.ServiceSpec, 0, len(specs))
