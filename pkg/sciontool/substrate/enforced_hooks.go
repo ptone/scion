@@ -20,7 +20,6 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -76,15 +75,21 @@ func redirectEnforcedHooksPath(path string) (string, bool) {
 }
 
 // clearEnforcedHooksDir removes every entry under hooks.EnforcedHooksDir
-// (never the directory itself), so a re-bootstrap never leaves a stale hook
-// behind from a previous bootstrap call. It is symlink-safe the same way
-// mkdirAllTracked's own trust model is documented to be: substrate-serve is
-// the sole writer to this directory (nothing else in the actor has ever had
-// a reason to write under it, since it is created and populated only by
-// this file's own redirect), and this runs before the harness — and so the
-// workload — ever starts, so there is no concurrent writer to race. A
-// directory entry is recursed into and then rmdir'd; every other entry type,
-// including a symlink, is unlinked directly and never followed.
+// (never the directory itself). handleBootstrap treats a non-nil return as a
+// bootstrap failure — aborting before any file is written or init starts —
+// so this is what makes "a hook removed since a previous bootstrap survives
+// into this one" impossible: either the clear succeeds and stale content is
+// gone before anything new is written, or it fails and the bootstrap never
+// proceeds far enough for anything (stale or fresh) to run at all.
+//
+// It is symlink-safe the same way mkdirAllTracked's own trust model is
+// documented to be: substrate-serve is the sole writer to this directory
+// (nothing else in the actor has ever had a reason to write under it, since
+// it is created and populated only by this file's own redirect), and this
+// runs before the harness — and so the workload — ever starts, so there is
+// no concurrent writer to race. A directory entry is recursed into and then
+// rmdir'd; every other entry type, including a symlink, is unlinked
+// directly and never followed.
 //
 // A missing hooks.EnforcedHooksDir (the common case: nothing has ever
 // bootstrapped this actor before) is not an error.
@@ -133,20 +138,4 @@ func clearDirContents(dir string) error {
 		}
 	}
 	return nil
-}
-
-// logEnforcedHooksClearFailure is writeBootstrapFile's error handling for
-// clearEnforcedHooksDir, pulled out to keep that call site a single line: a
-// clear failure is logged and otherwise ignored (best-effort — the
-// subsequent per-file mkdirAllTracked/writeFileAtomicMode calls still
-// enforce every real safety property, most importantly the never-chown
-// rule; a leftover stale file from a prior bootstrap merely re-adds a hook
-// that will be overwritten by this bootstrap's own files at the same path
-// anyway) rather than failing the whole bootstrap over a best-effort
-// cleanup step.
-func logEnforcedHooksClearFailure(err error) {
-	if err == nil {
-		return
-	}
-	log.Error("bootstrap: failed to clear stale enforced hooks dir %s: %v", enforcedHooksDir, err)
 }

@@ -287,10 +287,25 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	// hooks.EnforcedHooksDir instead of the workload's home (see
 	// writeBootstrapFile's redirectEnforcedHooksPath call below); clear any
 	// stale content there first so a hook removed since a previous
-	// bootstrap can never survive into this one. Best-effort: see
-	// logEnforcedHooksClearFailure's doc comment for why a failure here
-	// doesn't abort the bootstrap.
-	logEnforcedHooksClearFailure(clearEnforcedHooksDir())
+	// bootstrap cannot survive into this one. Fail-CLOSED, not best-effort:
+	// a clear failure aborts the bootstrap before any file is written or
+	// init starts, exactly like a writeBootstrapFile error below — a stale,
+	// still root-owned hook a failed clear left behind must never run.
+	if err := clearEnforcedHooksDir(); err != nil {
+		var pathErr *bootstrapPathError
+		if errors.As(err, &pathErr) {
+			// Same reasoning as the writeBootstrapFile 422 branch below:
+			// a path-shape rejection (here, a symlinked or non-directory
+			// enforced hooks root) is answered with the error's own stable
+			// Code and Path.
+			log.Error("bootstrap: rejected enforced hooks dir: %v", redactErr(err))
+			http.Error(w, pathErr.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		log.Error("bootstrap: failed to clear enforced hooks dir: %v", redactErr(err))
+		http.Error(w, "failed to clear enforced hooks dir", http.StatusInternalServerError)
+		return
+	}
 
 	for _, f := range req.Files {
 		if err := s.writeBootstrapFile(f); err != nil {

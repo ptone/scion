@@ -17,7 +17,7 @@ import (
 
 // EnforcedHooksDir is the dedicated, root-owned directory substrate-serve's
 // bootstrap handler redirects broker-delivered $HOME/.scion/hooks/ content
-// into, in privilege-drop-enforced mode. Kept as a single named constant —
+// into, in privilege-drop-enforced mode. Kept as a single named identifier —
 // not derived from anything else — so switching it later (e.g. if the
 // live rootfs stat of "/run" ever changes) is a one-line change shared by
 // both the writer (pkg/sciontool/substrate's writeBootstrapFile) and the
@@ -28,7 +28,23 @@ import (
 // system-default fallback): that directory's contents come from the image,
 // not from a per-agent bootstrap write, and mixing the two would make a
 // bootstrap-delivered file indistinguishable from one baked into the image.
-const EnforcedHooksDir = "/run/scion/hooks"
+//
+// A package var, not a const, purely so a test can point it at a throwaway
+// directory (e.g. to exercise skipRefusedEntry's EnforcedHooksDir exception
+// without writing to the real, root-owned "/run/scion/hooks"). Production
+// code never reassigns it.
+var EnforcedHooksDir = "/run/scion/hooks"
+
+// ErrScriptRefused is wrapped into the error openScriptNoFollow returns when
+// the leaf itself — never a directory-chain component, which fails a
+// different way (classifyChainOpenError) and is never treated as skippable
+// — is a symlink or not a regular file. LifecycleManager's runScriptHooks
+// uses errors.Is against this sentinel to decide whether a refused entry
+// under a workload-owned hooks directory should be logged and skipped
+// (letting the event's remaining hooks still run) instead of aborting the
+// whole event — see skipRefusedEntry's own doc comment for why, and why
+// EnforcedHooksDir is excluded from that treatment.
+var ErrScriptRefused = errors.New("hooks: script is a symlink or not a regular file")
 
 // openChainNoFollow opens every path component from "/" down to (and
 // including) dir, refusing to follow a symlink at any component
@@ -91,10 +107,18 @@ func openScriptNoFollow(parentFd int, name string) (fd int, ownership NodeOwners
 	// /proc/self/fd/<n> (see execViaFd), which requires the fd to still be
 	// open in the forked child at the moment it resolves that magic symlink
 	// during its own execve(2). See execViaFd's doc comment.
+	//
+	// This does mean the fd is inheritable by any OTHER child this process
+	// forks while it is open — every hook runs synchronously and
+	// LifecycleManager forks nothing else concurrently, so in practice
+	// nothing else ever inherits it, but that is an invariant of the
+	// caller's control flow, not something this function enforces. If a
+	// future caller ever forks concurrently while a hook is running, revisit
+	// this rather than assuming it still holds.
 	f, err := unix.Openat(parentFd, name, unix.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, unix.ELOOP) {
-			return -1, NodeOwnership{}, fmt.Errorf("hooks: script %q is a symlink; refusing", name)
+			return -1, NodeOwnership{}, fmt.Errorf("hooks: script %q is a symlink; refusing: %w", name, ErrScriptRefused)
 		}
 		return -1, NodeOwnership{}, err
 	}
@@ -105,7 +129,7 @@ func openScriptNoFollow(parentFd int, name string) (fd int, ownership NodeOwners
 	}
 	if raw.Mode&unix.S_IFMT != unix.S_IFREG {
 		_ = unix.Close(f)
-		return -1, NodeOwnership{}, fmt.Errorf("hooks: %q is not a regular file; refusing", name)
+		return -1, NodeOwnership{}, fmt.Errorf("hooks: %q is not a regular file; refusing: %w", name, ErrScriptRefused)
 	}
 	return f, ownershipFromStat(raw), nil
 }

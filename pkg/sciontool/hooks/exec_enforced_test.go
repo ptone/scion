@@ -5,8 +5,10 @@ Copyright 2026 The Scion Authors.
 package hooks
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -93,7 +95,9 @@ func TestOpenChainNoFollow_RefusesSymlinkedDir(t *testing.T) {
 }
 
 // TestOpenScriptNoFollow_RefusesSymlinkedScript asserts a symlinked hook
-// script is refused, never executed as either root or the workload.
+// script is refused, never executed as either root or the workload, and that
+// the refusal is ErrScriptRefused so runScriptHooks' skip-not-abort logic
+// can recognize it.
 func TestOpenScriptNoFollow_RefusesSymlinkedScript(t *testing.T) {
 	dir := t.TempDir()
 	real := filepath.Join(dir, "real-script")
@@ -109,14 +113,122 @@ func TestOpenScriptNoFollow_RefusesSymlinkedScript(t *testing.T) {
 	}
 	defer func() { _ = closeFd(dirFd) }()
 
-	if _, _, err := openScriptNoFollow(dirFd, "20-harness-provision"); err == nil {
+	_, _, err = openScriptNoFollow(dirFd, "20-harness-provision")
+	if err == nil {
 		t.Fatal("expected openScriptNoFollow to refuse a symlinked script")
+	}
+	if !errors.Is(err, ErrScriptRefused) {
+		t.Errorf("error = %v, want it to wrap ErrScriptRefused", err)
 	}
 }
 
-// TestBuildEnforcedCmd_AsRoot verifies the "as root" branch runs the hook
-// via the calling process's own credentials (no Credential override) and
-// the plain hookEnv (AgentHome-overridden HOME, no USER/LOGNAME rewrite).
+// TestPrepareEnforcedExec_WorkloadWritableChainYieldsDropped feeds
+// prepareEnforcedExec a script under a REAL, unprivileged filesystem
+// fixture — t.TempDir(), which sits under the world-writable os.TempDir()
+// ("/tmp", mode 1777 on every Linux system) — and asserts the DECISION it
+// derives from real fstat results is "drop", not a fabricated NodeOwnership
+// value. This is the direct, unprivileged proof that a workload-planted
+// hook (the scenario this whole mechanism exists to close) is dropped: it
+// needs no privilege at all, because dropping requires no privilege — only
+// running the process as a genuinely different uid does.
+func TestPrepareEnforcedExec_WorkloadWritableChainYieldsDropped(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "pre-start.d", "30-project-custom")
+	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
+
+	prep, err := prepareEnforcedExec(script)
+	if err != nil {
+		t.Fatalf("prepareEnforcedExec: %v", err)
+	}
+	defer func() { _ = closeFd(prep.fd) }()
+
+	if !prep.executable {
+		t.Error("expected the script to be reported executable")
+	}
+	if prep.asRoot {
+		t.Error("expected a script under a world-writable ancestor (t.TempDir()/os.TempDir()) to be dropped, got asRoot=true")
+	}
+}
+
+// TestExecViaFd_RunsShebangScript proves execViaFd's /proc/self/fd/<n> exec
+// actually runs a shebang script end to end, unprivileged (the as-root
+// branch — no SysProcAttr.Credential — needs no capability to run).
+func TestExecViaFd_RunsShebangScript(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "hook")
+	mustWriteExecutableScript(t, script, "#!/bin/sh\necho -n hello\n")
+
+	fd, err := unix.Open(script, unix.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = closeFd(fd) }()
+
+	out, err := execViaFd(fd, script).Output()
+	if err != nil {
+		t.Fatalf("execViaFd(...).Output(): %v", err)
+	}
+	if string(out) != "hello" {
+		t.Errorf("output = %q, want %q", out, "hello")
+	}
+}
+
+// TestExecViaFd_SwapAfterOpenRunsOriginalInode is the committed form of the
+// TOCTOU probe: it opens a script, then REPLACES the directory entry at
+// that same path with a brand-new inode (remove, then create — not a
+// truncate-in-place, which would rewrite the already-open fd's own
+// content), and asserts execViaFd still runs the ORIGINAL content. This is
+// what proves the file DecideExecAsRoot inspects (via the fd this test
+// keeps open across the swap) is provably the file that runs, matching
+// executeScriptEnforced's own no-TOCTOU construction.
+func TestExecViaFd_SwapAfterOpenRunsOriginalInode(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "hook")
+	mustWriteExecutableScript(t, script, "#!/bin/sh\necho -n original\n")
+
+	fd, err := unix.Open(script, unix.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = closeFd(fd) }()
+
+	if err := os.Remove(script); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteExecutableScript(t, script, "#!/bin/sh\necho -n replaced\n")
+
+	out, err := execViaFd(fd, script).Output()
+	if err != nil {
+		t.Fatalf("execViaFd(...).Output(): %v", err)
+	}
+	if string(out) != "original" {
+		t.Errorf("output = %q, want %q (the original inode, not the swapped-in replacement)", out, "original")
+	}
+}
+
+// TestExecuteScriptEnforced_NonExecutableScriptIsSkipped proves the
+// not-executable check runs on the already-open fd (fdIsExecutable) and
+// results in a skip, not an error and not an exec attempt.
+func TestExecuteScriptEnforced_NonExecutableScriptIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "pre-start.d", "not-executable")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &LifecycleManager{EnforcePrivilegeDrop: true, WorkloadUID: os.Getuid(), WorkloadGID: os.Getgid()}
+	if err := m.executeScriptEnforced(script, EventPreStart); err != nil {
+		t.Fatalf("executeScriptEnforced: %v, want nil (skip, not error, for a non-executable script)", err)
+	}
+}
+
+// TestBuildEnforcedCmd_AsRoot verifies the "as root" branch at pre-start
+// runs the hook via the calling process's own credentials (no Credential
+// override) and the plain hookEnv (AgentHome-owned HOME, no USER/LOGNAME
+// rewrite, no hardening) — the provisioner's own required environment.
 func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "20-harness-provision")
@@ -124,7 +236,7 @@ func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 	fd, _ := openScriptForTest(t, script)
 
 	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
-	cmd := m.buildEnforcedCmd(fd, script, true)
+	cmd := m.buildEnforcedCmd(fd, script, EventPreStart, true)
 
 	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Credential != nil {
 		t.Fatal("expected no Credential override for the as-root branch")
@@ -133,7 +245,42 @@ func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 		t.Errorf("expected no Dir override for the as-root branch, got %q", cmd.Dir)
 	}
 	if got := findEnvVar(cmd.Env, "HOME"); got != "/home/scion" {
-		t.Errorf("HOME = %q, want /home/scion", got)
+		t.Errorf("HOME = %q, want /home/scion (the provisioner's required env, unhardened at pre-start)", got)
+	}
+	if got := findEnvVar(cmd.Env, "SCION_HOOK_PATH"); got != script {
+		t.Errorf("SCION_HOOK_PATH = %q, want %q", got, script)
+	}
+}
+
+// TestBuildEnforcedCmd_AsRootPostWorkloadEvent is the Medium-severity
+// hardening this round fixes: a root-eligible hook at any event AFTER
+// pre-start (post-start here) must never run with HOME pointed at the
+// workload's own home directory — that would let a root-run python/bash/
+// git/pip hook load workload-planted rc/site/config files and execute them
+// as root, the same escalation class DecideExecAsRoot exists to close.
+func TestBuildEnforcedCmd_AsRootPostWorkloadEvent(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "10-post-start")
+	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
+	fd, _ := openScriptForTest(t, script)
+
+	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
+	cmd := m.buildEnforcedCmd(fd, script, EventPostStart, true)
+
+	if got := findEnvVar(cmd.Env, "HOME"); got != "/root" {
+		t.Errorf("HOME = %q, want /root (never the workload-owned home) for a root hook at post-start", got)
+	}
+	if got := findEnvVar(cmd.Env, "PYTHONNOUSERSITE"); got != "1" {
+		t.Errorf("PYTHONNOUSERSITE = %q, want \"1\"", got)
+	}
+	if got := findEnvVar(cmd.Env, "PATH"); got != "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" {
+		t.Errorf("PATH = %q, want the fixed, minimal PATH", got)
+	}
+	for _, event := range []string{EventPreStop, EventSessionEnd} {
+		cmd := m.buildEnforcedCmd(fd, script, event, true)
+		if got := findEnvVar(cmd.Env, "HOME"); got != "/root" {
+			t.Errorf("event %s: HOME = %q, want /root", event, got)
+		}
 	}
 }
 
@@ -155,7 +302,7 @@ func TestBuildEnforcedCmd_Dropped(t *testing.T) {
 		WorkloadUsername:     "scion",
 		WorkloadWorkingDir:   "/workspace",
 	}
-	cmd := m.buildEnforcedCmd(fd, script, false)
+	cmd := m.buildEnforcedCmd(fd, script, EventSessionEnd, false)
 
 	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential == nil {
 		t.Fatal("expected a Credential override for the dropped branch")
@@ -170,6 +317,7 @@ func TestBuildEnforcedCmd_Dropped(t *testing.T) {
 		{"HOME", "/home/scion"},
 		{"USER", "scion"},
 		{"LOGNAME", "scion"},
+		{"SCION_HOOK_PATH", script},
 	} {
 		if got := findEnvVar(cmd.Env, tc.key); got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.key, got, tc.want)
@@ -178,70 +326,72 @@ func TestBuildEnforcedCmd_Dropped(t *testing.T) {
 }
 
 // TestExecuteScriptEnforced_WorkloadOwnedRunsDropped is an end-to-end
-// exercise of the dropped path that does not require root: it drops to the
-// TEST'S OWN uid/gid (a no-op transition the kernel always permits, unlike
-// dropping to a genuinely different uid, which needs CAP_SETUID/CAP_SETGID
-// this test environment does not have — see the package doc comment on
-// testing without root). The hook script under t.TempDir() is naturally
-// "workload-owned" for this decision regardless of who runs the test,
-// because t.TempDir() lives under a world-writable os.TempDir() ("/tmp",
-// mode 1777 on every Linux system) — so DecideExecAsRoot's chain check
-// fails on that ancestor's world-write bit independent of ownership,
-// letting this test assert the real behavior without fabricating anything.
+// exercise of the dropped path. It needs CAP_SETGID (root) because Go's
+// os/exec calls setgroups(2) whenever SysProcAttr.Credential is set
+// (matching supervisor.Supervisor.Run's own Credential shape — no Groups, no
+// NoSetGroups override — see buildEnforcedCmd), and setgroups(2) requires
+// that capability unconditionally, even to drop to the calling process's own
+// current uid/gid.
+//
+// When it runs (euid == 0), it drops to a genuinely different, non-zero uid
+// (65534, traditionally "nobody") rather than self-dropping to the test's
+// own uid: euid 0 self-dropping to WorkloadUID = os.Getuid() = 0 would make
+// the "it ran as the workload uid" assertion pass whether or not the drop
+// actually happened, since 0 == 0 either way. Using 65534 makes the marker
+// file's content only match if the credential switch was real.
+// TestPrepareEnforcedExec_WorkloadWritableChainYieldsDropped above is the
+// unprivileged equivalent for the decision itself.
 func TestExecuteScriptEnforced_WorkloadOwnedRunsDropped(t *testing.T) {
 	if os.Geteuid() != 0 {
-		// Go's os/exec calls setgroups(2) whenever SysProcAttr.Credential is
-		// set (matching supervisor.Supervisor.Run's own Credential shape —
-		// no Groups, no NoSetGroups override — see buildEnforcedCmd), and
-		// setgroups(2) requires CAP_SETGID unconditionally, even to drop to
-		// the calling process's own current uid/gid. TestBuildEnforcedCmd_
-		// Dropped already covers the decision and the constructed Credential/
-		// env/cwd without running the process; this one additionally proves
-		// the real exec succeeds and lands at the right uid, which needs
-		// that capability. Skip rather than require sudo.
-		t.Skip("requires CAP_SETGID (root) to exercise the real setgroups(2)+exec path; see TestBuildEnforcedCmd_Dropped for the unprivileged-safe equivalent")
+		t.Skip("requires CAP_SETGID (root) to exercise the real setgroups(2)+exec path; see TestPrepareEnforcedExec_WorkloadWritableChainYieldsDropped and TestBuildEnforcedCmd_Dropped for the unprivileged-safe equivalents")
 	}
+	const dropUID, dropGID = 65534, 65534
 	dir := t.TempDir()
+	// World-writable so uid 65534 -- distinct from the real root this test
+	// runs as -- can create the marker file after the drop.
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
 	marker := filepath.Join(dir, "marker")
 	script := filepath.Join(dir, "pre-start.d", "30-project-custom")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nid -u > "+marker+"\n")
 
 	m := &LifecycleManager{
 		EnforcePrivilegeDrop: true,
-		WorkloadUID:          os.Getuid(),
-		WorkloadGID:          os.Getgid(),
-		WorkloadUsername:     "scion",
+		WorkloadUID:          dropUID,
+		WorkloadGID:          dropGID,
+		WorkloadUsername:     "nobody",
 	}
-	if err := m.executeScriptEnforced(script); err != nil {
+	if err := m.executeScriptEnforced(script, EventPreStart); err != nil {
 		t.Fatalf("executeScriptEnforced: %v", err)
 	}
 	got, err := os.ReadFile(marker)
 	if err != nil {
 		t.Fatalf("read marker: %v", err)
 	}
-	wantUID := []byte(itoa(os.Getuid()) + "\n")
+	wantUID := []byte(itoa(dropUID) + "\n")
 	if string(got) != string(wantUID) {
-		t.Errorf("hook ran as uid %q, want %q (the workload uid)", got, wantUID)
+		t.Errorf("hook ran as uid %q, want %q (the distinct workload uid, proving the drop actually happened)", got, wantUID)
 	}
 }
 
 // TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot is the real-exec
 // counterpart of TestBuildEnforcedCmd_AsRoot: it requires an actual
 // root-owned, non-writable directory chain outside of any world-writable
-// temp dir (t.TempDir() will never do — see the package doc comment above
-// on why /tmp itself always fails the chain check), which in turn requires
-// both root and write access to a location under "/" — this container's own
-// "/" is root-owned 0755, so an unprivileged test cannot create anything
-// there at all. Skipped unless running as root, with the reason recorded
-// (see brief guidance on testing ownership-sensitive code without root);
-// DecideExecAsRoot's own unit tests (privilege_test.go) already prove the
-// decision logic this real exec depends on, without needing a real
-// filesystem at all.
+// temp dir (t.TempDir() will never do — see
+// TestPrepareEnforcedExec_WorkloadWritableChainYieldsDropped's own doc
+// comment on why /tmp itself always fails the chain check), which in turn
+// requires both root and write access to a location under "/" — this
+// container's own "/" is root-owned 0755, so an unprivileged test cannot
+// create anything there at all. Skipped unless running as root; when
+// skipped, DecideExecAsRoot's own table tests (privilege_test.go) already
+// prove the decision logic this real exec depends on, without needing a
+// real filesystem at all.
 func TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to create a root-owned, non-world-writable directory outside /tmp; DecideExecAsRoot's table tests already cover the decision itself")
 	}
-	dir, err := os.MkdirTemp("/root", "sb-dev-hooks-test-*")
+	dir, err := os.MkdirTemp("/root", "hooks-enforced-test-*")
 	if err != nil {
 		t.Skipf("could not create a root-owned fixture under /root: %v", err)
 	}
@@ -261,7 +411,7 @@ func TestExecuteScriptEnforced_RootOwnedChainRunsAsRoot(t *testing.T) {
 	}
 
 	m := &LifecycleManager{EnforcePrivilegeDrop: true, WorkloadUID: 1000, WorkloadGID: 1000}
-	if err := m.executeScriptEnforced(script); err != nil {
+	if err := m.executeScriptEnforced(script, EventPreStart); err != nil {
 		t.Fatalf("executeScriptEnforced: %v", err)
 	}
 	got, err := os.ReadFile(marker)
@@ -294,6 +444,90 @@ func TestExecuteScriptEnforced_NonEnforcedModeUnchanged(t *testing.T) {
 	}
 	if string(got) != "ran" {
 		t.Fatalf("expected the legacy exec path to run the script unconditionally, got %q", got)
+	}
+}
+
+// TestRunPreStart_EnforcedModeSkipsRefusedWorkloadEntryButRunsSiblings
+// proves the skip-not-abort behavior: a workload-planted symlink under a
+// non-EnforcedHooksDir hooks directory must not DoS the event's other,
+// legitimate hooks.
+func TestRunPreStart_EnforcedModeSkipsRefusedWorkloadEntryButRunsSiblings(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "marker")
+	good := filepath.Join(dir, "pre-start.d", "10-good")
+	mustWriteExecutableScript(t, good, "#!/bin/sh\necho -n ran >> "+marker+"\n")
+	bad := filepath.Join(dir, "pre-start.d", "05-bad-symlink")
+	if err := os.Symlink("/nonexistent", bad); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &LifecycleManager{
+		EnforcePrivilegeDrop: true,
+		HooksDirs:            []string{dir},
+		Handlers:             map[string][]Handler{},
+		WorkloadUID:          os.Getuid(),
+		WorkloadGID:          os.Getgid(),
+	}
+	err := m.RunPreStart()
+
+	// The refused symlink must never abort iteration, regardless of what
+	// happens to 10-good next. When this test runs as root, 10-good's own
+	// drop-to-self-uid exec fully succeeds and err is nil. When it does not
+	// (this container, and CI in general), 10-good's exec still fails, but
+	// for an unrelated reason — dropping needs CAP_SETGID even to the
+	// calling process's own current uid/gid (see
+	// TestExecuteScriptEnforced_WorkloadOwnedRunsDropped's doc comment) — so
+	// the resulting error mentions 10-good, never 05-bad-symlink. Asserting
+	// on which script the error names, rather than requiring err == nil,
+	// makes this test prove the skip-not-abort property in both
+	// environments instead of only under root.
+	if err == nil {
+		got, readErr := os.ReadFile(marker)
+		if readErr != nil {
+			t.Fatalf("expected the sibling hook to have run: %v", readErr)
+		}
+		if string(got) != "ran" {
+			t.Errorf("marker = %q, want %q", got, "ran")
+		}
+		return
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "05-bad-symlink") {
+		t.Fatalf("RunPreStart error mentions the refused symlink; it must be skipped, not aborted on: %v", err)
+	}
+	if !strings.Contains(msg, "10-good") {
+		t.Fatalf("RunPreStart error does not mention the sibling hook; iteration did not reach it: %v", err)
+	}
+}
+
+// TestRunPreStart_EnforcedModeHardFailsRefusedEntryUnderEnforcedHooksDir
+// proves the exception: a refused entry under EnforcedHooksDir itself (the
+// root-owned, broker-delivered directory, never workload-writable) still
+// hard-fails the event instead of being silently skipped — an anomaly there
+// is worth aborting over, not routine workload nuisance.
+func TestRunPreStart_EnforcedModeHardFailsRefusedEntryUnderEnforcedHooksDir(t *testing.T) {
+	dir := t.TempDir()
+	orig := EnforcedHooksDir
+	EnforcedHooksDir = dir
+	t.Cleanup(func() { EnforcedHooksDir = orig })
+
+	if err := os.MkdirAll(filepath.Join(dir, "pre-start.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(dir, "pre-start.d", "05-bad-symlink")
+	if err := os.Symlink("/nonexistent", bad); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &LifecycleManager{
+		EnforcePrivilegeDrop: true,
+		HooksDirs:            []string{dir},
+		Handlers:             map[string][]Handler{},
+		WorkloadUID:          os.Getuid(),
+		WorkloadGID:          os.Getgid(),
+	}
+	if err := m.RunPreStart(); err == nil {
+		t.Fatal("expected RunPreStart to hard-fail on a refused entry under the (test's stand-in for the) enforced hooks dir")
 	}
 }
 
