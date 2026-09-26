@@ -19,6 +19,8 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1164,31 +1167,21 @@ func (c *Client) StartGitHubTokenRefresh(ctx context.Context, config *GitHubToke
 				continue
 			}
 
-			// Write the fresh token and expiry to the token file
+			// Write the fresh token and expiry to the token file. Ownership
+			// is applied by WriteGitHubTokenFile/WriteGitHubTokenExpiry
+			// themselves (fchown on the open fd, before the rename) rather
+			// than by a separate path-based os.Chown call afterwards.
 			if config.TokenPath != "" {
-				if writeErr := WriteGitHubTokenFile(config.TokenPath, newToken); writeErr != nil {
+				if writeErr := WriteGitHubTokenFile(config.TokenPath, newToken, config.ChownUID, config.ChownGID); writeErr != nil {
 					if config.OnError != nil {
 						config.OnError(fmt.Errorf("failed to write GitHub token file: %w", writeErr))
 					}
 				} else {
 					// Write the companion expiry file so the credential helper
 					// (a separate process) can detect stale tokens.
-					if expiryErr := WriteGitHubTokenExpiry(config.TokenPath, newExpiry); expiryErr != nil {
+					if expiryErr := WriteGitHubTokenExpiry(config.TokenPath, newExpiry, config.ChownUID, config.ChownGID); expiryErr != nil {
 						if config.OnError != nil {
 							config.OnError(fmt.Errorf("failed to write GitHub token expiry file: %w", expiryErr))
-						}
-					}
-					if config.ChownUID > 0 {
-						if chownErr := os.Chown(config.TokenPath, config.ChownUID, config.ChownGID); chownErr != nil {
-							if config.OnError != nil {
-								config.OnError(fmt.Errorf("failed to chown GitHub token file: %w", chownErr))
-							}
-						}
-						expiryPath := GitHubTokenExpiryPath(config.TokenPath)
-						if chownErr := os.Chown(expiryPath, config.ChownUID, config.ChownGID); chownErr != nil {
-							if config.OnError != nil {
-								config.OnError(fmt.Errorf("failed to chown GitHub token expiry file: %w", chownErr))
-							}
 						}
 					}
 				}
@@ -1213,23 +1206,124 @@ func (c *Client) StartGitHubTokenRefresh(ctx context.Context, config *GitHubToke
 	return done
 }
 
-// WriteGitHubTokenFile writes a GitHub token to the specified path atomically.
-func WriteGitHubTokenFile(path, token string) error {
+// githubTokenFileMode is the mode both the token file and its companion
+// expiry file are created with. It has not changed by this hardening: only
+// how it gets applied has (fchmod on the open fd instead of the mode
+// argument to a path-based write).
+const githubTokenFileMode = 0600
+
+// fchownFn performs the fd-based ownership change writeFileNoFollowChown
+// uses. It is a package var purely so tests that don't run as root can
+// replace it with a fake and still exercise the call site; production code
+// never overrides it.
+var fchownFn = syscall.Fchown
+
+// WriteGitHubTokenFile writes a GitHub token to the specified path
+// atomically. When uid > 0, the final file is chowned to uid:gid (the
+// scion container user); uid <= 0 leaves ownership as the writing process
+// (matching the zero-value "skip chown" contract the caller configs already
+// document). See writeFileNoFollowChown for the symlink/non-regular-file
+// handling this relies on.
+func WriteGitHubTokenFile(path, token string, uid, gid int) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create token file directory: %w", err)
 	}
-
-	// Write to temp file then rename for atomicity
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
+	if err := writeFileNoFollowChown(path, []byte(token), githubTokenFileMode, uid, gid); err != nil {
 		return fmt.Errorf("failed to write GitHub token file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("failed to rename GitHub token file: %w", err)
+	return nil
+}
+
+// writeFileNoFollowChown atomically writes data to path without ever
+// following a symlink or chowning/chmoding by path.
+//
+// It refuses outright — no write at all — if path already exists as a
+// symlink or as any non-regular file (a plain os.Lstat, which never follows
+// the final component either), so a workload that has planted one there
+// gets an error back instead of root silently operating on whatever that
+// entry points to.
+//
+// Otherwise it creates a randomly named file in the same directory with
+// O_CREATE|O_EXCL|O_NOFOLLOW (so a planted file or symlink at the temp name
+// itself can't be reused or followed either), writes the content, fsyncs,
+// sets the final owner and mode on the open file descriptor — fchown/fchmod,
+// never a path-based chown/chmod that could follow a symlink swapped in
+// after the fact — and only then renames the temp file onto path. rename(2)
+// replaces path's directory entry directly, without dereferencing it, so
+// this is safe even if path changes between the Lstat above and the
+// rename.
+func writeFileNoFollowChown(path string, data []byte, mode os.FileMode, uid, gid int) (err error) {
+	if fi, lerr := os.Lstat(path); lerr == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to write %s: existing path is a symlink", path)
+		}
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("refusing to write %s: existing path is not a regular file", path)
+		}
+	} else if !os.IsNotExist(lerr) {
+		return fmt.Errorf("failed to stat %s: %w", path, lerr)
+	}
+
+	dir := filepath.Dir(path)
+	tmpName, err := randomTempFileName(dir, filepath.Base(path))
+	if err != nil {
+		return err
+	}
+
+	f, err := os.OpenFile(tmpName, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, mode)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, werr := f.Write(data); werr != nil {
+		_ = f.Close()
+		err = fmt.Errorf("failed to write temp file: %w", werr)
+		return err
+	}
+	if serr := f.Sync(); serr != nil {
+		_ = f.Close()
+		err = fmt.Errorf("failed to fsync temp file: %w", serr)
+		return err
+	}
+	if uid > 0 {
+		if cerr := fchownFn(int(f.Fd()), uid, gid); cerr != nil {
+			_ = f.Close()
+			err = fmt.Errorf("failed to chown temp file: %w", cerr)
+			return err
+		}
+	}
+	if cerr := f.Chmod(mode); cerr != nil {
+		_ = f.Close()
+		err = fmt.Errorf("failed to chmod temp file: %w", cerr)
+		return err
+	}
+	if cerr := f.Close(); cerr != nil {
+		err = fmt.Errorf("failed to close temp file: %w", cerr)
+		return err
+	}
+	if rerr := os.Rename(tmpName, path); rerr != nil {
+		err = fmt.Errorf("failed to rename temp file to %s: %w", path, rerr)
+		return err
 	}
 	return nil
+}
+
+// randomTempFileName returns a temp file path in dir derived from base, with
+// enough random bits in the name that a workload can't predict or
+// preemptively plant it — the O_EXCL on its creation only helps if the name
+// wasn't guessable in the first place.
+func randomTempFileName(dir, base string) (string, error) {
+	var buf [12]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("failed to generate temp file name: %w", err)
+	}
+	return filepath.Join(dir, fmt.Sprintf(".%s.%s.tmp", base, hex.EncodeToString(buf[:]))), nil
 }
 
 // ReadGitHubTokenFile reads a GitHub token from the specified path.
@@ -1249,10 +1343,14 @@ func GitHubTokenExpiryPath(tokenPath string) string {
 
 // WriteGitHubTokenExpiry writes the token expiry time to a companion file
 // alongside the token file. This allows the credential helper (a separate
-// process) to check whether the cached token is still valid.
-func WriteGitHubTokenExpiry(tokenPath string, expiry time.Time) error {
+// process) to check whether the cached token is still valid. Ownership
+// follows the same uid/gid contract as WriteGitHubTokenFile.
+func WriteGitHubTokenExpiry(tokenPath string, expiry time.Time, uid, gid int) error {
 	expiryPath := GitHubTokenExpiryPath(tokenPath)
-	return os.WriteFile(expiryPath, []byte(expiry.Format(time.RFC3339)), 0600)
+	if err := writeFileNoFollowChown(expiryPath, []byte(expiry.Format(time.RFC3339)), githubTokenFileMode, uid, gid); err != nil {
+		return fmt.Errorf("failed to write GitHub token expiry file: %w", err)
+	}
+	return nil
 }
 
 // ReadGitHubTokenExpiry reads the token expiry time from the companion expiry

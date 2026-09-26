@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -141,7 +142,7 @@ func write(level, tag, format string, args ...interface{}) {
 	mu.Lock()
 	// Use more permissive 0666 so that if created as root, it can be written to by others
 	// (subject to directory permissions and umask).
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	f, err := openLogFileNoFollow(logPath, 0666)
 	if err != nil {
 		// If we can't write to agent.log, try to fall back to /tmp and enable debug
 		if logPath != "/tmp/agent.log" {
@@ -163,7 +164,7 @@ func write(level, tag, format string, args ...interface{}) {
 			fmt.Fprint(os.Stderr, fallbackMsg)
 
 			// Retry with new path
-			f, err = os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+			f, err = openLogFileNoFollow(logPath, 0666)
 			if err != nil {
 				// Total failure
 				mu.Unlock()
@@ -180,6 +181,37 @@ func write(level, tag, format string, args ...interface{}) {
 	_, _ = f.WriteString(fileEntry)
 	_ = f.Close()
 	mu.Unlock()
+}
+
+// openLogFileNoFollow opens path for appending, the same way the historical
+// os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, mode) call did,
+// except it never follows a symlink at path and refuses to write to
+// anything that isn't a regular file.
+//
+// This process runs as root for its whole lifetime on Substrate (see
+// fixupRootfsForScion's doc comment in cmd/sciontool/commands), and logPath
+// normally lives under $HOME, which the scion user can write to. Without
+// O_NOFOLLOW, replacing $HOME/agent.log with a symlink would make root
+// create or append to whatever it points at; a symlink or non-regular entry
+// here now surfaces as an open/stat error instead, which callers already
+// treat the same way a missing/unwritable log path has always been
+// treated: fall back to /tmp/agent.log, or (if that also fails) drop the
+// line silently rather than block startup on logging.
+func openLogFileNoFollow(path string, mode os.FileMode) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, mode)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("log path %s is not a regular file", path)
+	}
+	return f, nil
 }
 
 // slogHandler implements slog.Handler by bridging to our write function.
