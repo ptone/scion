@@ -746,6 +746,8 @@ func TestValidateServiceName(t *testing.T) {
 		{name: ".", wantErr: true},
 		{name: "..", wantErr: true},
 		{name: "has\x00nul", wantErr: true},
+		{name: "a\nb", wantErr: true},   // newline: log-line-forging vector
+		{name: "a\x1bb", wantErr: true}, // ESC: terminal/log-escape-sequence vector
 		{name: strings.Repeat("x", maxServiceNameLen+1), wantErr: true},
 	}
 	for _, tt := range tests {
