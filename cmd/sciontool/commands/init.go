@@ -835,13 +835,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// silently a no-op on VirtioFS mounts used by the Apple VZ runtime.
 	if isClaude(childArgs) {
 		debugDir := filepath.Join(agentHome, ".claude", "debug")
-		if err := os.MkdirAll(debugDir, 0755); err != nil {
-			log.Error("Failed to create debug directory %s: %v", debugDir, err)
-		} else if err := os.Chmod(debugDir, 0555); err != nil {
-			log.Error("Failed to chmod debug directory %s: %v", debugDir, err)
-		} else {
-			log.Debug("Blocked debug symlink: set %s to read-only", debugDir)
-		}
+		blockClaudeDebugSymlink(debugDir, opts.RequirePrivilegeDrop)
 	}
 
 	servicesPath := filepath.Join(agentHome, ".scion", "scion-services.yaml")
@@ -890,7 +884,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// during its first-run configuration detection.
 		// We preserve application_default_credentials.json which may be
 		// bind-mounted as a secret (gcloud-adc).
-		cleanGcloudConfigForMetadata(filepath.Join(agentHome, ".config", "gcloud"))
+		cleanGcloudConfigForMetadata(filepath.Join(agentHome, ".config", "gcloud"), opts.RequirePrivilegeDrop)
 		// Wire up dynamic token retrieval so the metadata server always
 		// uses the latest agent token after refresh, not the startup value.
 		metaCfg.TokenFunc = func() string {
@@ -2565,54 +2559,44 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 	return nil
 }
 
-// lchownFn is chownTreeRootOwned's os.Lchown call site as a package var, and
-// fileOwnerUID is its "read this entry's owning uid" call site, so tests can
-// drive chownTreeRootOwned's decision logic (which entries count as
-// root-owned, and what happens when they're chowned) without needing the
-// test process to actually own root-owned files or hold CAP_CHOWN itself.
-var (
-	lchownFn     = os.Lchown
-	fileOwnerUID = func(info fs.FileInfo) (uid uint32, ok bool) {
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			return 0, false
-		}
-		return stat.Uid, true
-	}
-)
+// isRootOwned is chownTreeRootOwned's default shouldChown filter: only
+// entries whose current owning uid is 0 (root) are eligible.
+func isRootOwned(entryUID uint32) bool { return entryUID == 0 }
 
-// chownTreeRootOwned recursively chowns files owned by root (UID 0) to
-// the specified uid:gid. Files already owned by the target user are
-// skipped for efficiency. It is called both after pre-start hooks, to fix
-// up files created by provisioners running as root (which would otherwise
-// be undeletable by the non-root broker), and — for substrate specifically
-// — by fixupRootfsForScion. Returns the number of entries the walk visited
-// in total (so a no-op call's own cost is still measurable — see
-// fixupRootfsForScion's unconditional log.Debug) and the number actually
-// rechowned.
+// chownTreeRootOwnedFilter is chownTreeRootOwned's shouldChown call site as
+// a package var, so a test can simulate "every entry looks root-owned" (and
+// later "no entry does, because a real chown(2) already fixed them") without
+// needing the test process to actually own root-owned files or hold
+// CAP_CHOWN itself — the real chown(2) calls chownTreeRootOwned issues
+// still run for real underneath. Production code always leaves this at its
+// default, isRootOwned.
+var chownTreeRootOwnedFilter = isRootOwned
+
+// chownTreeRootOwned recursively chowns entries owned by root (UID 0) to
+// the specified uid:gid; entries already owned by anyone else (typically the
+// target user already) are left alone. It is called both after pre-start
+// hooks, to fix up files created by provisioners running as root (which
+// would otherwise be undeletable by the non-root broker), and — for
+// substrate specifically — by fixupRootfsForScion. Returns the number of
+// entries the walk visited in total (so a no-op call's own cost is still
+// measurable — see fixupRootfsForScion's unconditional log.Debug) and the
+// number actually rechowned.
+//
+// Both call sites run as root while a scion-uid process may already be
+// alive (pre-start hooks themselves run dropped to scion before this runs at
+// :760, and fixupRootfsForScion's own callers are documented pre-scion but
+// share this helper with the one that isn't) — so this delegates to
+// dirfd.ChownTreeNoFollow, the same openat(O_NOFOLLOW) fd-relative walk
+// supervisor.chownRecursive uses, rather than a full-path filepath.WalkDir +
+// os.Lchown(path): a full-path Lchown re-resolves every intermediate
+// component on every call, so a scion-uid process that swaps a real
+// intermediate directory the walk already entered for a symlink mid-walk
+// can redirect a later Lchown call outside the tree. The fd-relative walk
+// holds each directory open by fd for as long as it is being walked, so a
+// symlink swapped into its name in its parent afterward cannot redirect
+// anything already in flight beneath it.
 func chownTreeRootOwned(root string, uid, gid int) (walked, changed int, err error) {
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// Skip permission errors on walk (e.g., lost+found).
-			return nil
-		}
-		walked++
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		ownerUID, ok := fileOwnerUID(info)
-		if !ok || ownerUID != 0 {
-			return nil
-		}
-		if chErr := lchownFn(path, uid, gid); chErr != nil {
-			log.Error("chownTreeRootOwned: failed to chown %s: %v", path, chErr)
-			return nil
-		}
-		changed++
-		return nil
-	})
-	return walked, changed, err
+	return dirfd.ChownTreeNoFollow(root, uid, gid, chownTreeRootOwnedFilter)
 }
 
 func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, chown func(string, int, int) error) {
@@ -2811,6 +2795,61 @@ func isClaude(childArgs []string) bool {
 	return false
 }
 
+// blockClaudeDebugSymlink pre-creates debugDir ($HOME/.claude/debug) as
+// read-only (0555) so Claude Code cannot later create a symlink inside it —
+// see this function's call site for why that matters.
+//
+// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop (true only
+// for substrate). On every OTHER runtime this keeps the exact historical
+// behaviour — os.MkdirAll followed by os.Chmod(debugDir, ...) — unchanged: a
+// legitimate non-substrate setup may bind-mount or symlink .claude itself
+// (e.g. from a host directory), and refusing that would break it, with no
+// privilege boundary at stake to justify the change.
+//
+// On substrate this runs as root: os.MkdirAll silently succeeds (via
+// os.Stat, which follows symlinks) if debugDir already exists as anything,
+// including a symlink, and the os.Chmod that follows it then chmods
+// whatever that symlink points at — so a scion-uid process (a sidecar
+// service, or a process a pre-start hook spawned) that plants
+// ~/.claude/debug as a symlink to an arbitrary root-owned directory before
+// this runs gets that directory chmod'd to 0555 (world-readable) by root.
+// dirfd.EnsureDirNoFollow refuses a symlinked leaf outright instead of
+// creating/resolving through it, and the chmod that follows is fchmod on
+// the fd EnsureDirNoFollow already resolved, never a path-based os.Chmod
+// that could be redirected by anything changed afterward. A refusal is
+// logged (path only) and this simply skips the chmod rather than failing
+// init closed — a planted symlink must not be able to stop the workload
+// from starting.
+func blockClaudeDebugSymlink(debugDir string, requirePrivilegeDrop bool) {
+	if !requirePrivilegeDrop {
+		if err := os.MkdirAll(debugDir, 0755); err != nil {
+			log.Error("Failed to create debug directory %s: %v", debugDir, err)
+		} else if err := os.Chmod(debugDir, 0555); err != nil {
+			log.Error("Failed to chmod debug directory %s: %v", debugDir, err)
+		} else {
+			log.Debug("Blocked debug symlink: set %s to read-only", debugDir)
+		}
+		return
+	}
+
+	d, err := dirfd.EnsureDirNoFollow(debugDir, 0755)
+	if err != nil {
+		// Refuse (e.g. a symlink or non-directory at debugDir) rather than
+		// follow/create through it — but this hardening is a convenience
+		// mitigation for a Claude Code quirk, not something the workload's
+		// startup can be allowed to depend on: log and move on instead of
+		// failing init closed.
+		log.Error("Refusing debug directory %s: not a plain directory", debugDir)
+		return
+	}
+	defer func() { _ = d.Close() }()
+	if err := d.Chmod(0555); err != nil {
+		log.Error("Failed to chmod debug directory %s: %v", debugDir, err)
+		return
+	}
+	log.Debug("Blocked debug symlink: set %s to read-only", debugDir)
+}
+
 // scionEnvVarPrefixes lists environment variable prefixes that are written
 // to the scion-env file for shell sessions to source.
 var scionEnvVarPrefixes = []string{
@@ -2821,6 +2860,20 @@ var scionEnvVarPrefixes = []string{
 // writeEnvFileAfterWriteForTest is a test-only seam (see its call site in
 // writeEnvFile). Production code never sets it.
 var writeEnvFileAfterWriteForTest func(scionDir string)
+
+// scionDirOwnerUID is writeEnvFile's "who owns the already-open .scion dir
+// fd" call site, factored out as a package var so a test can simulate a
+// root-owned directory (uid 0) without needing the test process to actually
+// be root — see writeEnvFile's chown-gating doc comment for why only that
+// state should trigger a chown. Production code always leaves this at its
+// real, fd-based syscall.Fstat implementation.
+var scionDirOwnerUID = func(fd int) (uint32, error) {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return 0, err
+	}
+	return st.Uid, nil
+}
 
 // writeEnvFile writes critical SCION_* environment variables to a shell-sourceable
 // file at ~/.scion/scion-env. Some harnesses (e.g. Gemini CLI) re-exec with a
@@ -2880,12 +2933,28 @@ func writeEnvFile(agentHome string, uid, gid int) {
 	}
 
 	if uid > 0 {
-		// fchown the same fd EnsureDirNoFollow resolved above — never a
-		// path-based os.Chown, which would re-resolve ".scion" from
-		// scratch and could be redirected to an arbitrary directory by a
-		// symlink the workload swapped in after that resolution.
-		if err := scionDirFile.Chown(uid, gid); err != nil {
-			log.Error("Failed to chown %s: %v", scionDir, err)
+		// Fstat the SAME held fd (never re-resolving the path) to check who
+		// currently owns .scion before chowning it. writeEnvFile runs on
+		// every refresh, not just the first time: once .scion is already
+		// owned by the target uid (the normal steady-state case, after the
+		// first run's chown already landed), re-chowning it to the same
+		// value on every subsequent refresh is a pure no-op that still
+		// costs a chown(2) syscall for nothing. Root-owned (uid 0) is the
+		// only state this should actually act on — the first run, before
+		// any chown has happened yet; any other owner is unexpected (never
+		// legitimately produced by this function or EnsureDirNoFollow's own
+		// mkdirat) and is left alone rather than blindly reassigned.
+		st, serr := scionDirOwnerUID(int(scionDirFile.Fd()))
+		if serr != nil {
+			log.Error("Failed to stat %s: %v", scionDir, serr)
+		} else if st == 0 {
+			// fchown the same fd EnsureDirNoFollow resolved above — never a
+			// path-based os.Chown, which would re-resolve ".scion" from
+			// scratch and could be redirected to an arbitrary directory by
+			// a symlink the workload swapped in after that resolution.
+			if err := scionDirFile.Chown(uid, gid); err != nil {
+				log.Error("Failed to chown %s: %v", scionDir, err)
+			}
 		}
 	}
 
@@ -2987,24 +3056,71 @@ func fetchSecretOverrides(client *hub.Client, keys []string) map[string]string {
 	return overrides
 }
 
+// gcloudConfigKeepFile is the one entry cleanGcloudConfigForMetadata never
+// removes: it may be bind-mounted as a gcloud-adc secret, independent of the
+// rest of gcloud's local config state.
+const gcloudConfigKeepFile = "application_default_credentials.json"
+
 // cleanGcloudConfigForMetadata removes gcloud configuration state files from
 // the given directory while preserving application_default_credentials.json,
 // which may be bind-mounted as a gcloud-adc secret. Clearing the config state
 // forces gcloud to re-initialize and discover the emulated metadata server.
-func cleanGcloudConfigForMetadata(gcloudDir string) {
-	entries, err := os.ReadDir(gcloudDir)
-	if err != nil {
-		// Directory doesn't exist — nothing to clean.
+//
+// requirePrivilegeDrop is RunInit's own opts.RequirePrivilegeDrop (true only
+// for substrate). On every OTHER runtime this keeps the exact historical
+// path-based behaviour (os.ReadDir + os.RemoveAll by joined path) —
+// unchanged, because a legitimate non-substrate setup may bind-mount a
+// symlink at gcloudDir itself (e.g. a host-mounted gcloud config directory)
+// and refusing that would break it, with no privilege boundary at stake to
+// justify the behaviour change.
+//
+// On substrate this runs as root, after sidecar services have already
+// started (so a scion-uid process may already be alive), against a
+// directory the scion user owns: a symlink planted there — deterministically
+// before this runs, or swapped mid-walk once it's a real directory being
+// emptied — must not let root delete or descend into an attacker-chosen
+// target. dirfd.OpenDirNoFollow refuses (rather than follows) a symlinked
+// gcloudDir outright, and dirfd.RemoveContentsNoFollow removes its contents
+// via unlinkat relative to that held fd (recursing into subdirectories the
+// same fd-relative way), never re-resolving a joined path string. A refusal
+// here is logged (path only) and this simply skips the cleanup rather than
+// failing init closed — a planted symlink must not be able to stop the
+// workload from starting.
+func cleanGcloudConfigForMetadata(gcloudDir string, requirePrivilegeDrop bool) {
+	if !requirePrivilegeDrop {
+		entries, err := os.ReadDir(gcloudDir)
+		if err != nil {
+			// Directory doesn't exist — nothing to clean.
+			return
+		}
+		for _, e := range entries {
+			if e.Name() == gcloudConfigKeepFile {
+				continue
+			}
+			p := filepath.Join(gcloudDir, e.Name())
+			if err := os.RemoveAll(p); err != nil {
+				log.Debug("Could not remove gcloud config entry %s: %v", p, err)
+			}
+		}
 		return
 	}
-	for _, e := range entries {
-		if e.Name() == "application_default_credentials.json" {
-			continue
+
+	dir, err := dirfd.OpenDirNoFollow(gcloudDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			// Refuse (e.g. a symlink or non-directory at gcloudDir) rather
+			// than follow it — but this cleanup is a best-effort
+			// convenience for gcloud auto-discovery, not something the
+			// workload's startup can be allowed to depend on: log and move
+			// on instead of failing init closed.
+			log.Error("Refusing to clean gcloud config dir %s: not a plain directory", gcloudDir)
 		}
-		p := filepath.Join(gcloudDir, e.Name())
-		if err := os.RemoveAll(p); err != nil {
-			log.Debug("Could not remove gcloud config entry %s: %v", p, err)
-		}
+		return
+	}
+	defer func() { _ = dir.Close() }()
+
+	if _, err := dirfd.RemoveContentsNoFollow(dir, func(name string) bool { return name == gcloudConfigKeepFile }); err != nil {
+		log.Debug("Could not clean gcloud config dir %s: %v", gcloudDir, err)
 	}
 }
 
