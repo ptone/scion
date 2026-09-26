@@ -489,6 +489,19 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// The hub injects SCION_METADATA_MODE (and SA details) via
 		// resolvedEnv when dispatching a start for a provisioned agent.
 		gcpMetadataMode = mode
+		// The current hub always writes SCION_METADATA_MODE_SOURCE=hub
+		// alongside its own authoritative mode (DispatchAgentStart,
+		// DispatchAgentRestart, buildCreateRequest). A hub old enough to
+		// predate that write won't send the marker at all, and on such a hub
+		// this value could be whatever a stray stored env var or secret
+		// happened to contain rather than a real dispatch decision. Downgrade
+		// an elevated (non-block) mode to the secure default in that case;
+		// an already-garbage mode still falls through to the allow-list
+		// rejection below unchanged, marker or not.
+		elevated := gcpMetadataMode == store.GCPMetadataModeAssign || gcpMetadataMode == store.GCPMetadataModePassthrough
+		if elevated && env["SCION_METADATA_MODE_SOURCE"] != "hub" {
+			gcpMetadataMode = store.GCPMetadataModeBlock
+		}
 	}
 	// Allow-list, not a deny-list. The previous form tested for the two modes
 	// that need the redirect and let everything else fall through untouched,
