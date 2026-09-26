@@ -676,6 +676,11 @@ func TestChownTreeNoFollow_LeafSwapAfterResolveDoesNotRedirectChown(t *testing.T
 					t.Errorf("swap: rename: %v", err)
 					return
 				}
+				// rename(2) itself bumps the renamed inode's ctime;
+				// re-snapshot AFTER the rename so the held-fd assertion
+				// below ("the original leaf was chowned") can't pass
+				// vacuously just because the rename already advanced it.
+				movedBefore = ctimeOf(t, leaf+".moved")
 				if err := os.Link(victim, leaf); err != nil {
 					t.Errorf("swap: link: %v", err)
 					return
@@ -737,6 +742,12 @@ func TestChownTreeNoFollow_DirEntrySwapAfterFstatDoesNotRedirectChown(t *testing
 			t.Errorf("swap: rename: %v", err)
 			return
 		}
+		// rename(2) itself bumps the renamed inode's ctime; re-snapshot
+		// AFTER the rename so the held-fd assertion below ("the original
+		// subdirectory was chowned") can't pass vacuously just because the
+		// rename already advanced it — this is exactly what made the
+		// assertion below unable to fail before this fix.
+		subBefore = ctimeOf(t, moved)
 		if err := os.Symlink(victimDir, sub); err != nil {
 			t.Errorf("swap: symlink: %v", err)
 		}
@@ -765,6 +776,69 @@ func TestChownTreeNoFollow_DirEntrySwapAfterFstatDoesNotRedirectChown(t *testing
 	}
 	if linkInfo.Mode()&os.ModeSymlink == 0 {
 		t.Error("expected root/sub to still be the symlink the swap planted")
+	}
+}
+
+// TestChownTreeNoFollow_DirEntrySwapToHardlinkedFileDoesNotRedirectChown is
+// the real security property the swap test above only established
+// indirectly: the entry swapped in at a directory's name after it has been
+// resolved and fstat'd need not be another directory or a symlink — it can
+// be a hard link to a REGULAR victim file. A name-based
+// fchownat(parentFd, name, AT_SYMLINK_NOFOLLOW) would chown the victim
+// through that hard link, bypassing BOTH the hard-link guard (which is
+// only ever checked in the leaf branch, never the directory branch — a
+// directory can't itself be hard-linked, but the workload can swap the
+// NAME the directory branch is about to act on for something that can be)
+// and the shouldChown decision (made on the pre-swap directory's fstat,
+// not on the victim's). The fd-based AT_EMPTY_PATH chown, resolved before
+// any of this happens, is immune. guardHardlinks=true is deliberately
+// exercised here: if the swapped-in hard link were ever visited as an
+// ordinary leaf entry after the swap, the guard would skip it, so any
+// post-swap ctime bump on the victim can only come from the directory
+// branch's own chown landing on it.
+func TestChownTreeNoFollow_DirEntrySwapToHardlinkedFileDoesNotRedirectChown(t *testing.T) {
+	root := t.TempDir()
+	victim := filepath.Join(root, "victim-src") // same filesystem so link(2) works
+	if err := os.WriteFile(victim, []byte("v"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var victimBefore syscall.Timespec
+	fired := false
+	chownDirPreChownTestHook = func(name string) {
+		if name != "sub" || fired {
+			return
+		}
+		fired = true
+		if err := os.Rename(sub, filepath.Join(root, "sub.moved")); err != nil {
+			t.Errorf("swap: rename: %v", err)
+			return
+		}
+		if err := os.Link(victim, sub); err != nil {
+			t.Errorf("swap: link: %v", err)
+			return
+		}
+		// link(2) itself bumps the victim's ctime (Nlink changed);
+		// re-snapshot so the assertion below only catches a chown, not the
+		// link creation.
+		victimBefore = ctimeOf(t, victim)
+		ctimeSettle()
+	}
+	t.Cleanup(func() { chownDirPreChownTestHook = nil })
+
+	uid, gid := os.Getuid(), os.Getgid()
+	if _, _, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !fired {
+		t.Fatal("test hook never fired — test is not exercising the intended window")
+	}
+	if ctimeOf(t, victim) != victimBefore {
+		t.Error("directory-branch chown landed on a hard-linked regular file swapped in after fstat")
 	}
 }
 
