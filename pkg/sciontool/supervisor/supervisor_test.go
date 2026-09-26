@@ -656,17 +656,38 @@ func TestSupervisor_Run_RequirePrivilegeDropRefusesUndroppableCredentials(t *tes
 	}
 }
 
-// TestSupervisor_Run_NoRequirePrivilegeDropRunsWithoutCredentials is B2's
-// twin: the same UID 0 config with RequirePrivilegeDrop=false still runs
-// the child (non-substrate rootless/root behaviour is unchanged).
+// TestSupervisor_Run_NoRequirePrivilegeDropRunsWithoutCredentials is the
+// enforced hard-error's non-enforced twin: with RequirePrivilegeDrop=false,
+// every one of the same UID/GID pairs that refuses to run in enforced mode
+// must still run the child without a Credential — including a non-root UID
+// paired with a root (0) GID, which the credential-drop predicate itself
+// (UID>0 && GID>0) does not treat the same as UID>0 alone. Non-substrate
+// runtimes commonly pass a non-root UID with GID 0, so this pairing must
+// stay a plain "no drop" rather than an error whenever enforcement is off.
 func TestSupervisor_Run_NoRequirePrivilegeDropRunsWithoutCredentials(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "ran")
-	sup := New(DefaultConfig())
-	exitCode, err := sup.Run(context.Background(), []string{"sh", "-c", "touch " + marker})
-	if err != nil || exitCode != 0 {
-		t.Fatalf("Run = (%d, %v), want (0, nil)", exitCode, err)
+	cases := []struct {
+		name     string
+		uid, gid int
+	}{
+		{name: "both0", uid: 0, gid: 0},
+		{name: "gid0", uid: 1000, gid: 0},
+		{name: "uid0", uid: 0, gid: 1000},
 	}
-	if _, statErr := os.Stat(marker); statErr != nil {
-		t.Errorf("child did not run: %v", statErr)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "ran")
+			config := DefaultConfig()
+			config.UID = tc.uid
+			config.GID = tc.gid
+			sup := New(config)
+
+			exitCode, err := sup.Run(context.Background(), []string{"sh", "-c", "touch " + marker})
+			if err != nil || exitCode != 0 {
+				t.Fatalf("Run(UID=%d, GID=%d) = (%d, %v), want (0, nil)", tc.uid, tc.gid, exitCode, err)
+			}
+			if _, statErr := os.Stat(marker); statErr != nil {
+				t.Errorf("child did not run: %v", statErr)
+			}
+		})
 	}
 }

@@ -1065,3 +1065,33 @@ func TestRemoveContentsNoFollow_ReportsPerEntryStatFailureViaOnErr(t *testing.T)
 		t.Errorf("f should survive (fail-safe: a skipped entry is never deleted): %v", err)
 	}
 }
+
+// TestChownTreeNoFollow_RootSwapAfterOpenDoesNotRedirectChown proves root's
+// own chown acts on the file descriptor ChownTreeNoFollow already opened,
+// not on whatever directory entry root's path currently names. The
+// caller-supplied shouldChown callback runs between root's open/fstat and
+// root's chown, so this test uses it to swap root's directory entry at
+// exactly that point, with no production hook involved: a path-based chown
+// would then re-resolve the (now missing) name and fail, while an
+// fd-based chown still lands on the held inode.
+func TestChownTreeNoFollow_RootSwapAfterOpenDoesNotRedirectChown(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "root")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first := true
+	should := func(uint32) bool {
+		if first {
+			first = false
+			if err := os.Rename(root, filepath.Join(parent, "moved")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return true
+	}
+	walked, changed, err := ChownTreeNoFollow(root, os.Getuid(), os.Getgid(), should, true, nil)
+	if err != nil || walked != 1 || changed != 1 {
+		t.Fatalf("ChownTreeNoFollow = (%d, %d, %v), want (1, 1, nil): root chown must act on the held fd, not re-resolve root's path", walked, changed, err)
+	}
+}

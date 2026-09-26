@@ -27,15 +27,14 @@ var ErrNoCommand = errors.New("no command specified")
 // ErrPrivilegeDropRequired is returned by Run when Config.RequirePrivilegeDrop
 // is set but Config.UID/GID do not both pass the same UID>0 && GID>0
 // predicate the credential drop itself uses (see Run's Credential-setting
-// block). This is round 5's B2 hardening: a "no drop" decision reaching this
-// point in enforced mode must be a hard, fail-closed error rather than a
-// silent run-as-root — the same fail-closed principle
-// commands.requirePrivilegeDropOrFail already applies one layer up, at
-// RunInit's own call site. In practice, round 5's B1 clamp on
-// requirePrivilegeDropOrFail already makes this unreachable in enforced mode
-// (it refuses to reach Supervisor.Run at all unless UID>0 && GID>0), so this
-// is belt-and-suspenders against a future caller that constructs a
-// Config directly, bypassing RunInit's own check.
+// block): a "no drop" decision reaching this point in enforced mode must be
+// a hard, fail-closed error rather than a silent run-as-root — the same
+// fail-closed principle commands.requirePrivilegeDropOrFail already applies
+// one layer up, at RunInit's own call site. In practice, the equivalent
+// clamp on requirePrivilegeDropOrFail already makes this unreachable in
+// enforced mode (it refuses to reach Supervisor.Run at all unless UID>0 &&
+// GID>0), so this is belt-and-suspenders against a future caller that
+// constructs a Config directly, bypassing RunInit's own check.
 var ErrPrivilegeDropRequired = errors.New("privilege drop required but UID/GID were not both set; refusing to run the child as root")
 
 // Config holds configuration for the Supervisor.
