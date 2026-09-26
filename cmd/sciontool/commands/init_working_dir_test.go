@@ -521,8 +521,8 @@ func TestRunInit_NilResolveWorkingDir_UsesStaticWorkingDirUnchanged(t *testing.T
 	}
 }
 
-// TestRunInit_ThreadsRequirePrivilegeDropToEveryGatedCallSite is T4(b)'s
-// core regression test: it drives RunInit end to end (with every real
+// TestRunInit_ThreadsRequirePrivilegeDropToEveryGatedCallSite is the core
+// regression test: it drives RunInit end to end (with every real
 // downstream step stubbed via its own package-var seam) and asserts that
 // each of the RequirePrivilegeDrop-gated call sites receives exactly the
 // value InitRunOptions.RequirePrivilegeDrop was set to — for both true and
