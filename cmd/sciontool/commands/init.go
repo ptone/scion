@@ -890,7 +890,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
 	// The workspace is pre-cloned on the host; agents need credentials to push/pull.
 	if resolveIsSharedGitWorkspace() {
-		configureSharedWorkspaceGit(agentHome)
+		configureSharedWorkspaceGit(agentHome, targetUID, targetGID)
 	}
 
 	// Write critical environment variables to a shell-sourceable file so that
@@ -2846,17 +2846,106 @@ func resolveIsSharedGitWorkspace() bool {
 	return os.Getenv("SCION_SHARED_WORKSPACE") == "true"
 }
 
+// gitconfigMaxBytes bounds configureSharedWorkspaceGit's read of an existing
+// $HOME/.gitconfig. A legitimate gitconfig is a handful of lines; 1 MiB is
+// generous headroom with no legitimate case anywhere near it.
+const gitconfigMaxBytes = 1 << 20
+
 // configureSharedWorkspaceGit sets up git credentials for shared-workspace
 // (git-workspace hybrid) projects. The workspace is a pre-cloned git repo shared
 // by all agents; each agent gets its own credential helper in $HOME/.gitconfig
 // so credentials don't pollute the shared workspace.
-func configureSharedWorkspaceGit(agentHome string) {
+//
+// This runs as root, before the harness starts, against a path inside
+// agentHome — a directory the workload owns outright and can replace any
+// entry in at any time. A symlink planted at .gitconfig would previously
+// have made the three `git config --file` calls below read from and write
+// into an arbitrary file the symlink points at (git config's own file
+// handling follows symlinks unconditionally, the same way a path-based
+// os.Chmod does); a FIFO would have made the first of those calls block
+// forever, hanging RunInit.
+//
+// The fix runs git itself — never a hand-written config parser, which would
+// mean re-implementing git's own merge/idempotency semantics and owning
+// that forever — against a private copy in a temp directory only root can
+// reach, then installs the result the same fd-based, no-follow way every
+// other atomic write in this codebase does:
+//
+//  1. Read any existing .gitconfig with dirfd.ReadFileNoFollow: no-follow,
+//     bounded, and refuses anything but a single-link regular file. A
+//     symlink, FIFO, hardlink, oversized file, or simply no file at all are
+//     all treated identically — start from an empty private copy — since
+//     none of those refusals should be able to fail startup.
+//  2. Seed that content into a file inside a fresh os.MkdirTemp directory
+//     (created at mode 0700, unreadable by anything but root, with an
+//     unpredictable name — nothing the workload can race to plant inside
+//     ahead of time) and run the three `git config --file <that private
+//     file>` calls against it, with GIT_CONFIG_NOSYSTEM=1,
+//     GIT_CONFIG_GLOBAL=/dev/null, HOME pointed at the temp directory
+//     (never the real agentHome, so root's own git invocation cannot be
+//     steered by anything the workload's real $HOME contains), a minimal
+//     environment, cwd "/", and a timeout, all as defense in depth.
+//  3. Install the private copy via dirfd.WriteFileNoFollow: temp file
+//     created through .gitconfig's own parent dirfd, fchmod/fchown on that
+//     open fd (preserving the previous file's mode when it had one, 0644
+//     otherwise), then an fd-relative rename over .gitconfig. renameat
+//     replaces the directory entry itself without ever following it, so a
+//     symlink or FIFO planted there in the meantime is replaced outright,
+//     never read through or written into.
+func configureSharedWorkspaceGit(agentHome string, uid, gid int) {
 	log.Info("Configuring git credentials for shared workspace")
+
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+
+	existing, err := dirfd.ReadFileNoFollow(gitconfigPath, gitconfigMaxBytes)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Error("Refusing existing %s: %v; starting from an empty gitconfig", gitconfigPath, err)
+	}
+	// Lstat never follows a symlink, so this can only ever report the mode
+	// of the real entry at gitconfigPath (or nothing, if it's absent or not
+	// a regular file) — it exists purely to preserve a legitimate existing
+	// file's permission bits across the rewrite; it has no bearing on
+	// content trust, which comes entirely from ReadFileNoFollow above.
+	mode := os.FileMode(0644)
+	if fi, lerr := os.Lstat(gitconfigPath); lerr == nil && fi.Mode().IsRegular() {
+		mode = fi.Mode().Perm()
+	}
+
+	tmpDir, err := os.MkdirTemp("", "scion-gitconfig-*")
+	if err != nil {
+		log.Error("Failed to create private gitconfig workspace: %v", err)
+		return
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	privatePath := filepath.Join(tmpDir, "gitconfig")
+	if len(existing) > 0 {
+		if werr := os.WriteFile(privatePath, existing, 0600); werr != nil {
+			log.Error("Failed to seed private gitconfig: %v", werr)
+			return
+		}
+	}
+
+	runPrivateGitConfig := func(args ...string) bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "git", append([]string{"config", "--file", privatePath}, args...)...)
+		cmd.Dir = "/"
+		cmd.Env = []string{
+			"HOME=" + tmpDir,
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_CONFIG_GLOBAL=/dev/null",
+			"PATH=" + os.Getenv("PATH"),
+		}
+		if out, cerr := cmd.CombinedOutput(); cerr != nil {
+			log.Error("Failed to run git config %v: %s %v", args, string(out), cerr)
+			return false
+		}
+		return true
+	}
 
 	// Configure credential helper using sciontool's credential-helper command,
 	// which handles both GITHUB_TOKEN env var and GitHub App token refresh.
-	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-
 	var credentialHelper string
 	if os.Getenv("SCION_GITHUB_APP_ENABLED") == "true" {
 		// Use sciontool credential-helper for GitHub App token refresh
@@ -2865,29 +2954,29 @@ func configureSharedWorkspaceGit(agentHome string) {
 		// Simple credential helper using GITHUB_TOKEN env var
 		credentialHelper = `!f() { echo "password=${GITHUB_TOKEN}"; echo "username=oauth2"; }; f`
 	}
-
-	// Use git config to set the credential helper in the user's gitconfig.
 	// This is idempotent and works even if provisioning already set it.
-	cmd := exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Error("Failed to configure credential helper: %s %v", string(out), err)
-	}
+	runPrivateGitConfig("credential.helper", credentialHelper)
 
 	// Configure git identity for the agent
 	agentName := os.Getenv("SCION_AGENT_NAME")
 	if agentName == "" {
 		agentName = "unknown"
 	}
-
 	configs := []struct{ key, value string }{
 		{"user.name", fmt.Sprintf("Scion Agent (%s)", agentName)},
 		{"user.email", "agent@scion.dev"},
 	}
 	for _, cfg := range configs {
-		cmd := exec.Command("git", "config", "--file", gitconfigPath, cfg.key, cfg.value)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			log.Error("Failed to set git config %s: %s %v", cfg.key, string(out), err)
-		}
+		runPrivateGitConfig(cfg.key, cfg.value)
+	}
+
+	result, err := os.ReadFile(privatePath)
+	if err != nil {
+		log.Error("Failed to read back private gitconfig: %v", err)
+		return
+	}
+	if err := dirfd.WriteFileNoFollow(gitconfigPath, result, mode, uid, gid); err != nil {
+		log.Error("Failed to install %s: %v", gitconfigPath, err)
 	}
 }
 
