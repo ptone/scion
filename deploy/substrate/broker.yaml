@@ -108,41 +108,6 @@ roleRef:
   name: scion-substrate-broker-ctb-reader
   apiGroup: rbac.authorization.k8s.io
 ---
-# GetLogs (.design/kubernetes/substrate-runtime.md §4) reads the current worker pod's logs via
-# client-go PodLogs. This is a namespaced Role in the *worker* namespace,
-# bound to the broker's ServiceAccount from the *broker* namespace — the two
-# may be the same cluster but are almost certainly different namespaces.
-#
-# SUBSTRATE_WORKER_NAMESPACE is a placeholder resolved per cluster: it may
-# turn out to equal ATE_SYSTEM_NAMESPACE, or be its own namespace (e.g. per
-# WorkerPool). Confirm before applying — see README.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: scion-substrate-broker-pod-logs
-  namespace: ${SUBSTRATE_WORKER_NAMESPACE}
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get"]
-  - apiGroups: [""]
-    resources: ["pods/log"]
-    verbs: ["get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: scion-substrate-broker-pod-logs
-  namespace: ${SUBSTRATE_WORKER_NAMESPACE}
-subjects:
-  - kind: ServiceAccount
-    name: scion-substrate-broker
-    namespace: ${BROKER_NAMESPACE}
-roleRef:
-  kind: Role
-  name: scion-substrate-broker-pod-logs
-  apiGroup: rbac.authorization.k8s.io
----
 # Settings file holding the substrate runtime profile. Mounted at
 # $HOME/.scion/settings.yaml in the broker container (config.GetGlobalDir()
 # is always $HOME/.scion — see
