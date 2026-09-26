@@ -802,13 +802,13 @@ func TestStatusHandler_FifoAtStatusPathDoesNotHangUpdate(t *testing.T) {
 	}
 }
 
-// TestStatusHandler_SymlinkAtStatusPathIsBoundedNotFollowed proves a
+// TestStatusHandler_SymlinkAtStatusPathIsRefusedNotFollowed proves a
 // symlink swapped in at agent-info.json — here pointing at a large file
-// standing in for /dev/zero — is refused rather than read without bound.
-// This fails if the read's LimitReader cap is removed (root would buffer
-// the whole file) or if the O_NOFOLLOW refusal is dropped (root would
-// follow the symlink at all).
-func TestStatusHandler_SymlinkAtStatusPathIsBoundedNotFollowed(t *testing.T) {
+// standing in for /dev/zero — is refused outright (the O_NOFOLLOW open
+// itself fails on the symlink) rather than followed. This fails if the
+// O_NOFOLLOW refusal is dropped (root would follow the symlink and, only
+// then, run into whatever bound applies to the target).
+func TestStatusHandler_SymlinkAtStatusPathIsRefusedNotFollowed(t *testing.T) {
 	tmpDir := t.TempDir()
 	big := filepath.Join(tmpDir, "huge")
 	// One byte over agentInfoMaxBytes: enough to prove the bound is
@@ -839,6 +839,26 @@ func TestStatusHandler_SymlinkAtStatusPathIsBoundedNotFollowed(t *testing.T) {
 	fi, err := os.Lstat(statusPath)
 	require.NoError(t, err)
 	assert.Zero(t, fi.Mode()&os.ModeSymlink, "statusPath should no longer be a symlink after a write")
+}
+
+// TestStatusHandler_OversizeRegularStatusPathReturnsEmptyMap proves the size
+// bound is enforced on an actual regular file (not a symlink to one): an
+// agent-info.json one byte over agentInfoMaxBytes is refused, falling back
+// to the same empty-map state a missing file already produces. This fails
+// if the read's LimitReader cap is removed or widened, since a plain
+// regular file at exactly this path is exactly what the cap exists to
+// bound — a symlink to an oversize file (see the refusal test above) never
+// even reaches the size check, since O_NOFOLLOW refuses it first.
+func TestStatusHandler_OversizeRegularStatusPathReturnsEmptyMap(t *testing.T) {
+	tmpDir := t.TempDir()
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	if err := os.WriteFile(statusPath, make([]byte, agentInfoMaxBytes+1), 0o600); err != nil {
+		t.Fatalf("write oversize agent-info.json: %v", err)
+	}
+
+	h := &StatusHandler{StatusPath: statusPath}
+	info := h.readAgentInfoMap()
+	assert.Empty(t, info, "an oversize regular StatusPath should read back as empty state, not error out")
 }
 
 // TestStatusHandler_NonRegularStatusPathReturnsEmptyMap proves that reading

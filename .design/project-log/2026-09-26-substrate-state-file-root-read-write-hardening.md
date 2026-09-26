@@ -7,7 +7,7 @@
 
 Four root-context filesystem operations read or wrote files under the
 workload-owned home directory using path-following, unbounded primitives
-(`os.ReadFile`, `os.Stat`, `os.ReadFile`, and a path-based `os.Chmod`). Because
+(`os.ReadFile`, `os.Stat`, and a path-based `os.Chmod`). Because
 the workload owns the containing directory outright, it can unlink and
 replace any entry there at any time, regardless of that entry's own
 ownership — directory write permission governs create/unlink, not file
@@ -40,7 +40,7 @@ ownership.
 
 ## Solution
 
-Added a shared pair of primitives in `pkg/sciontool/dirfd/safeio.go`,
+Added a set of shared primitives in `pkg/sciontool/dirfd/safeio.go`,
 following the same pattern already used by `readServicesYAML` and
 `writeLimitsState`:
 
@@ -96,9 +96,11 @@ behavior.
 
 ## Notes
 
-- Behavior for legitimate inputs is unchanged; only how a hostile
-  substitution at these paths is handled differs (refused instead of
-  followed/blocked/unbounded).
+- Behavior for legitimate inputs is unchanged, except that symlinked or
+  hard-linked referents are now refused rather than followed: a plain,
+  single-link regular file at each of these paths reads and writes exactly
+  as before. A hostile substitution (symlink, FIFO, hardlink, oversize file)
+  is now refused instead of followed, blocked on, or read without bound.
 - Whether `agent-info.json` still needs to be widened to mode 0644 at all
   (versus granting the broker read access some other way) is an open
   question, not addressed here.
