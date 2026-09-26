@@ -283,6 +283,15 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	s.controlToken = req.ControlToken
 	s.mu.Unlock()
 
+	// Enforced-mode broker-delivered hook content lands under
+	// hooks.EnforcedHooksDir instead of the workload's home (see
+	// writeBootstrapFile's redirectEnforcedHooksPath call below); clear any
+	// stale content there first so a hook removed since a previous
+	// bootstrap can never survive into this one. Best-effort: see
+	// logEnforcedHooksClearFailure's doc comment for why a failure here
+	// doesn't abort the bootstrap.
+	logEnforcedHooksClearFailure(clearEnforcedHooksDir())
+
 	for _, f := range req.Files {
 		if err := s.writeBootstrapFile(f); err != nil {
 			// Deliberately do not include the file's content or the
@@ -408,6 +417,20 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 	// mkdirAllTracked walks and the path the file is ultimately written to
 	// name exactly the same components.
 	path := filepath.Clean(f.Path)
+
+	// Enforced-mode redirect: a path under $HOME/.scion/hooks/ (the scion
+	// home as bootstrap knows it) is delivered under the dedicated,
+	// root-owned hooks.EnforcedHooksDir instead, and must never be chowned
+	// to the workload the way every other bootstrap-written file is below —
+	// see redirectEnforcedHooksPath's own doc comment for why. This must run
+	// on the CLEANED path: matching before Clean would let a ".." or a
+	// doubled separator dodge or spoof the prefix check.
+	chownUID, chownGID := s.chownUID, s.chownGID
+	if redirected, ok := redirectEnforcedHooksPath(path); ok {
+		path = redirected
+		chownUID, chownGID = -1, -1
+	}
+
 	dir := filepath.Dir(path)
 	created, err := mkdirAllTracked(dir, 0o755)
 	if err != nil {
@@ -440,13 +463,13 @@ func (s *Server) writeBootstrapFile(f BootstrapFile) error {
 	// symlink at the leaf is safe by construction: it is atomically replaced
 	// by a new regular file, and whatever it used to point at is never
 	// written through and is left untouched.
-	if err := writeFileAtomicMode(dir, path, content, mode, s.chownUID, s.chownGID); err != nil {
+	if err := writeFileAtomicMode(dir, path, content, mode, chownUID, chownGID); err != nil {
 		return err
 	}
 
-	if s.chownUID >= 0 && s.chownGID >= 0 {
+	if chownUID >= 0 && chownGID >= 0 {
 		for _, d := range created {
-			_ = os.Chown(d, s.chownUID, s.chownGID)
+			_ = os.Chown(d, chownUID, chownGID)
 		}
 	}
 	return nil

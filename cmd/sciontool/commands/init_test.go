@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
@@ -1175,6 +1176,35 @@ func TestHarnessSupervisorConfig(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("harnessSupervisorConfig() = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestResolveProjectHookPath(t *testing.T) {
+	tests := []struct {
+		name                 string
+		agentHome            string
+		requirePrivilegeDrop bool
+		want                 string
+	}{
+		{
+			name:                 "non-enforced mode stays under agentHome",
+			agentHome:            "/home/scion",
+			requirePrivilegeDrop: false,
+			want:                 "/home/scion/.scion/hooks/pre-start.d/30-project-custom",
+		},
+		{
+			name:                 "enforced mode redirects to hooks.EnforcedHooksDir, independent of agentHome",
+			agentHome:            "/home/scion",
+			requirePrivilegeDrop: true,
+			want:                 hooks.EnforcedHooksDir + "/pre-start.d/30-project-custom",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveProjectHookPath(tt.agentHome, tt.requirePrivilegeDrop); got != tt.want {
+				t.Errorf("resolveProjectHookPath(%q, %v) = %q, want %q", tt.agentHome, tt.requirePrivilegeDrop, got, tt.want)
 			}
 		})
 	}
