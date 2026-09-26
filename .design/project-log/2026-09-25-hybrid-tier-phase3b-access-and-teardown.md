@@ -4,10 +4,10 @@ Branch `scion/hybrid-tier-p3`, the same fork PR as Phase 3a and the other Phase 
 
 ## Overview
 
-Widens hub-deny to all protocols, gives the transport service account a hashed id, makes
-transport SA create and teardown treat only a positive not-found as absent, adds restricted user
-access to the settings the tier writes, and adds tests that parse both settings.yaml writes as
-YAML and cover `deploy.sh`'s transport wiring end to end against the stubs.
+hub-deny denies all protocols and ports from the pod CIDR; the transport service account id is a
+hub-name prefix plus a hash; transport SA create and teardown treat only a positive not-found as
+absent; the settings the tier writes include restricted user access; and tests parse both
+settings.yaml writes as YAML and cover `deploy.sh`'s transport wiring end to end against the stubs.
 
 ## hub-deny on all protocols
 
@@ -20,7 +20,7 @@ the node's primary address, which `nfs-allow` (source tag, priority 900) admits 
 rule. Firewall source tags match only a VM's primary address, so `nfs-allow` does not cover pod
 addresses. Only the default pod range is covered; additional pod ranges (node-pool or
 cluster-level) and pod traffic that leaves with the node's address are not, and the runbook says
-so, with the remedy. Detecting additional ranges was not added: ranges added after a deploy would
+so, with the remedy. Additional pod ranges are not detected: ranges added after a deploy would
 still be uncovered until the next one, and the remedy is a single equivalent rule per range.
 
 ## Transport service account id
@@ -76,4 +76,4 @@ token is refused.
   failure, both overlap shapes plus an empty or unparsable subnet range, and every user access
   refusal. The `iap settings get` stub requires `--resource-type=iap_web`. The absence check scans
   extensionless files and `.design/project-log`, case-insensitively, for every spelling.
-- Suite: 1124 assertions across 424 tests at the time of this entry, under bash 5 and bash 3.2.
+- Suite: 1182 assertions across 437 tests at the time of this entry, under bash 5 and bash 3.2.
