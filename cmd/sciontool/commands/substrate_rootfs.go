@@ -15,10 +15,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
-// fixupRootfsForScion corrects two observed conditions in a Substrate
+// fixupRootfsForScion corrects three observed conditions in a Substrate
 // actor's rootfs that otherwise make dropping from root to the scion user
-// impossible, no matter what capabilities the actor holds or how correctly
-// SCION_HOST_UID/GID get applied:
+// impossible, or unsafe, no matter what capabilities the actor holds or how
+// correctly SCION_HOST_UID/GID get applied:
 //
 //   - (i) '/' itself comes up too restrictive for the scion user to even
 //     traverse into. agent-substrate/substrate's
@@ -31,15 +31,26 @@ import (
 //     the specific upstream mechanism is not identified. Either way the
 //     effect is the same: the scion user can't read or write its own home
 //     directory.
+//   - (iii) /tmp and /var/tmp come up 0777 without the sticky bit, instead
+//     of the 1777 their image layer (a Debian base) sets. The same
+//     mode-bit-loss mechanism as (i) is suspected but not confirmed. A
+//     shared, world-writable directory without the sticky bit lets any
+//     process rename or delete another user's entries in it, and it also
+//     turns off the kernel's protected_symlinks/protected_hardlinks
+//     defenses, which only apply to sticky world-writable directories —
+//     both matter here because this process, root, later creates and
+//     opens predictable paths under /tmp on the scion user's behalf.
 //
 // root and home are parameters — not hardcoded to "/" and a resolved
 // $HOME — purely so a test can point them at a t.TempDir() standing in for
-// the real rootfs and home directory.
+// the real rootfs and home directory. /tmp and /var/tmp are derived from
+// root the same way, so a test root without either subdirectory just skips
+// that part of the fixup (see fixupWorldWritableTmpDirSticky's doc comment).
 //
-// Idempotent: when neither condition needs fixing, this makes no changes.
-// It always logs one debug line with the home walk's duration and entry
-// count — including on a no-op call, since the /bootstrap call site hits
-// this on every actor start and is by design a no-op once startup has
+// Idempotent: when none of the three conditions need fixing, this makes no
+// changes. It always logs one debug line with the home walk's duration and
+// entry count — including on a no-op call, since the /bootstrap call site
+// hits this on every actor start and is by design a no-op once startup has
 // already fixed things up, so that cost would otherwise never be
 // measurable at all — and logs one additional info line, with what
 // changed, only when something actually did.
@@ -61,6 +72,9 @@ func fixupRootfsForScion(root, home string, uid, gid int) {
 		}
 	}
 
+	tmpChanged := fixupWorldWritableTmpDirSticky(filepath.Join(root, "tmp"))
+	varTmpChanged := fixupWorldWritableTmpDirSticky(filepath.Join(root, "var", "tmp"))
+
 	homeWalked, homeChanged, err := chownTreeRootOwned(home, uid, gid)
 	if err != nil {
 		log.Error("fixupRootfsForScion: failed to walk %s: %v", home, err)
@@ -74,10 +88,63 @@ func fixupRootfsForScion(root, home string, uid, gid int) {
 	log.Debug("fixupRootfsForScion: walked %s in %s (%d entries, %d rechowned)",
 		home, time.Since(start), homeWalked, homeChanged)
 
-	if rootChanged || homeChanged > 0 {
-		log.Info("fixupRootfsForScion: fixed up rootfs in %s (root chmod to 0755: %v, home entries rechowned: %d)",
-			time.Since(start), rootChanged, homeChanged)
+	if rootChanged || homeChanged > 0 || tmpChanged || varTmpChanged {
+		log.Info("fixupRootfsForScion: fixed up rootfs in %s (root chmod to 0755: %v, home entries rechowned: %d, tmp sticky bit set: %v, var/tmp sticky bit set: %v)",
+			time.Since(start), rootChanged, homeChanged, tmpChanged, varTmpChanged)
 	}
+}
+
+// fixupWorldWritableTmpDirSticky sets a temp directory (/tmp or /var/tmp) to
+// 01777 when it is world-writable but missing the sticky bit — condition
+// (iii) in fixupRootfsForScion's doc comment. Returns whether it changed
+// anything.
+//
+// It opens dir with O_DIRECTORY|O_NOFOLLOW, so a symlink planted at that
+// path is refused (open fails) rather than followed, and it sets the mode
+// with fchmod on the resulting fd rather than a path-based chmod, so a
+// symlink swapped in between the open and the chmod can't redirect this at
+// an arbitrary path — unlike the root chmod above, whose target ("/") is
+// never attacker-controlled, /tmp's own entries are exactly what a
+// workload can already write to.
+//
+// A missing directory, or one this process can't even open (e.g. a
+// permissions oddity), is logged and treated as "nothing changed" rather
+// than fatal: this is defence in depth alongside the token-writer hardening
+// (WriteGitHubTokenFile and friends), not the only thing standing between a
+// workload and root, so failing the whole rootfs fixup over it would cost
+// more than it buys. Not every rootfs this runs against — including every
+// test double — has a /tmp or /var/tmp, so a missing directory specifically
+// is not even logged.
+func fixupWorldWritableTmpDirSticky(dir string) bool {
+	const worldWritable = 0o002
+	const sticky = 0o1000
+
+	fd, err := syscall.Open(dir, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY, 0)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Error("fixupRootfsForScion: failed to open %s: %v", dir, err)
+		}
+		return false
+	}
+	defer func() { _ = syscall.Close(fd) }()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		log.Error("fixupRootfsForScion: failed to stat %s: %v", dir, err)
+		return false
+	}
+
+	perm := st.Mode & 0o7777
+	if perm&worldWritable == 0 || perm&sticky != 0 {
+		// Not world-writable, or already sticky: nothing to do.
+		return false
+	}
+
+	if err := syscall.Fchmod(fd, 0o1777); err != nil {
+		log.Error("fixupRootfsForScion: failed to chmod %s to 01777: %v", dir, err)
+		return false
+	}
+	return true
 }
 
 // fixupRootfsForScionUser resolves the image's "scion" user (through the
