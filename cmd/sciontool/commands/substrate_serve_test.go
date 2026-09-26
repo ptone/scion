@@ -1286,7 +1286,7 @@ func TestSubstrateServeInitOptions_ResolveWorkingDir_IsLazy_SeesStateAtCallTime(
 //  1. the InitRunOptions the InitRunner receives carries a ResolveWorkingDir
 //     that, once invoked, resolves from the bootstrap request's own env
 //     (req.Env is applied via os.Setenv before the init runner is invoked —
-//     see handleBootstrap) — resolution itself is RunInit's job now, not
+//     see handleBootstrap) — resolution itself is RunInit's job, not
 //     substrateServeInitOptions's, so this test invokes the closure the
 //     stub received exactly as RunInit would;
 //  2. argv (childArgs) is exactly ["sh", "-c", req.StartCmd] — the wiring

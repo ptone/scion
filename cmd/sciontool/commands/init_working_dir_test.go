@@ -8,12 +8,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/user"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -101,6 +105,20 @@ func writeServicesYAML(t *testing.T, agentHome string) {
 	}
 }
 
+// scionMetadataAndSecretEnvVars lists every SCION_* environment variable
+// RunInit reads (directly, or through metadata.ConfigFromEnv) to decide
+// whether to start the metadata server or fetch secrets from the Hub.
+// setupRunInitAsRootlessScion unsets each of these outright.
+var scionMetadataAndSecretEnvVars = []string{
+	"SCION_METADATA_MODE",
+	"SCION_METADATA_PORT",
+	"SCION_METADATA_BIND_ADDRESS",
+	"SCION_METADATA_SA_EMAIL",
+	"SCION_METADATA_PROJECT_ID",
+	"SCION_NETWORK_MODE",
+	"SCION_SECRET_KEYS",
+}
+
 // setupRunInitAsRootlessScion configures the environment a single RunInit
 // call in this file needs to reach past setupHostUser as the same "rootless,
 // already the scion user" case substrate-serve runs under in production,
@@ -115,22 +133,35 @@ func setupRunInitAsRootlessScion(t *testing.T, agentHome string) {
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv("SCION_HOST_GID", "")
 	t.Setenv("SCION_GIT_CLONE_URL", "")
-	// SCION_METADATA_MODE and SCION_SECRET_KEYS are deliberately left
-	// untouched here (not even set to ""): os.LookupEnv treats "present but
-	// empty" as a real, if malformed, value — for SCION_METADATA_MODE that
-	// still starts a metadata server in the default "block" mode — so a
-	// case that needs either path enabled sets it itself, and every other
-	// case relies on the ambient environment (scrubbed of SCION_* before
-	// the test binary ever runs) genuinely not having it set.
+	// Every var in scionMetadataAndSecretEnvVars is unset outright, not just
+	// set to "": os.LookupEnv (metadata.ConfigFromEnv's own check for
+	// SCION_METADATA_MODE) treats "present but empty" as a real, if
+	// malformed, value — for SCION_METADATA_MODE that still starts a
+	// metadata server in the default "block" mode. t.Setenv runs first, so
+	// whatever ambient value the container this test binary happens to run
+	// in has set (this project's own agent containers set
+	// SCION_METADATA_MODE) is restored at cleanup; os.Unsetenv then makes
+	// the variable genuinely absent for the test itself. A case that needs
+	// either path enabled sets the relevant var itself, after this call.
+	for _, k := range scionMetadataAndSecretEnvVars {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
+	// The telemetry pipeline defaults to enabled and binds a local OTLP
+	// receiver on fixed loopback ports (4317/4318). Every RunInit call in
+	// this file drives the real telemetry.New(), so leaving it enabled
+	// would make these tests bind those ports for real and collide with
+	// anything else already listening on them.
+	t.Setenv("SCION_TELEMETRY_ENABLED", "false")
 	t.Setenv("HOME", agentHome)
 	withScionUserLookup(t, func(string) (*user.User, error) {
 		return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: agentHome}, nil
 	})
 }
 
-// TestRunInit_ResolveWorkingDir_CalledAfterCloneAndOverridesWorkingDir is the
-// ordering fix's own regression test: it proves RunInit calls
-// InitRunOptions.ResolveWorkingDir only after runGitCloneWorkspace and the
+// TestRunInit_ResolveWorkingDir_CalledAfterCloneAndOverridesWorkingDir is
+// RunInit's ordering regression test for ResolveWorkingDir: it proves RunInit
+// calls InitRunOptions.ResolveWorkingDir only after runGitCloneWorkspace and the
 // post-pre-start-hook ownership fixup (the two workspace-preparation steps
 // InitRunOptions.ResolveWorkingDir's doc comment says it must follow) have
 // run, and before the earliest of the harness-adjacent steps that follow it
@@ -268,13 +299,32 @@ func TestRunInit_ResolveWorkingDirError_ReturnsExitCode18AndNeverStartsHarness(t
 // (a staged scion-services.yaml, SCION_METADATA_MODE, and a configured hub
 // client plus SCION_SECRET_KEYS), so if a regression moved ResolveWorkingDir
 // to run after any of them, this test would see that one's seam called
-// despite the resolver error.
+// despite the resolver error. The hub client is pointed at a local
+// httptest server rather than a closed port, so the test also pins what
+// reportInitFailure's best-effort Hub report actually sends on this path:
+// exactly one request, to the agent's status endpoint, carrying the error
+// phase and the resolver's own message, and nothing that looks like the
+// staged secret key.
 func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch(t *testing.T) {
 	agentHome := t.TempDir()
 	setupRunInitAsRootlessScion(t, agentHome)
 	writeServicesYAML(t, agentHome)
+
+	var (
+		mu          sync.Mutex
+		hubRequests []hubStatusRequest
+	)
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		hubRequests = append(hubRequests, hubStatusRequest{path: r.URL.Path, body: body})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(hubServer.Close)
+
 	t.Setenv("SCION_METADATA_MODE", "block")
-	t.Setenv("SCION_HUB_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("SCION_HUB_ENDPOINT", hubServer.URL)
 	t.Setenv("SCION_AUTH_TOKEN", "test-token")
 	t.Setenv("SCION_AGENT_ID", "test-agent")
 	t.Setenv("SCION_SECRET_KEYS", "some-key")
@@ -316,6 +366,39 @@ func TestRunInit_ResolveWorkingDirError_NeverStartsSidecarsMetadataOrSecretFetch
 	if secretsRan {
 		t.Error("the hub secret fetch ran despite a ResolveWorkingDir error; it must never run")
 	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hubRequests) != 1 {
+		t.Fatalf("hub server received %d request(s), want exactly 1 (the failure report)", len(hubRequests))
+	}
+	req := hubRequests[0]
+	if req.path != "/api/v1/agents/test-agent/status" {
+		t.Errorf("hub request path = %q, want the agent status endpoint", req.path)
+	}
+	var reported struct {
+		Phase   string `json:"phase"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(req.body, &reported); err != nil {
+		t.Fatalf("unmarshal hub request body %q: %v", req.body, err)
+	}
+	if reported.Phase != string(state.PhaseError) {
+		t.Errorf("hub-reported phase = %q, want %q", reported.Phase, state.PhaseError)
+	}
+	if reported.Message != resolverErr.Error() {
+		t.Errorf("hub-reported message = %q, want %q", reported.Message, resolverErr.Error())
+	}
+	if strings.Contains(string(req.body), "some-key") {
+		t.Error("hub request body names the staged secret key; the failure report must carry no secrets")
+	}
+}
+
+// hubStatusRequest is one request recorded by a test's httptest.Server
+// standing in for the Hub's agent-status endpoint.
+type hubStatusRequest struct {
+	path string
+	body []byte
 }
 
 // TestRunInit_NilResolveWorkingDir_UsesStaticWorkingDirUnchanged pins the
