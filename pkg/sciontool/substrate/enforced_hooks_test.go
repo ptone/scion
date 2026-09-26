@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // withEnforcedHooksFixture points enforcedHooksHomePrefix and
@@ -269,13 +270,31 @@ func TestBootstrap_ClearsStaleEnforcedHooksContentBeforeWriting(t *testing.T) {
 	}
 }
 
+// waitInitCalled polls a channel-backed init-started signal for a bounded
+// time and reports whether it fired. handleBootstrap starts runInit in a
+// goroutine, so reading a plain bool immediately after the HTTP response
+// returns cannot reliably observe whether it ran: this polls briefly instead
+// of racing that goroutine outright. The status-code and no-file-written
+// assertions alongside this one carry the real weight of each test; this is
+// a best-effort strengthening, not the only signal.
+func waitInitCalled(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	case <-time.After(200 * time.Millisecond):
+		return false
+	}
+}
+
 // TestBootstrap_ClearFailureAbortsBootstrapBeforeAnyWriteOrInit proves the
 // fail-closed contract: when clearEnforcedHooksDir fails (here, because
 // enforcedHooksDir is a symlink — a stand-in for any clear failure, e.g.
 // EIO/EROFS/EPERM on a real deployment), handleBootstrap must abort BEFORE
 // writing any bootstrap file and BEFORE starting init, not log-and-continue.
 // A stale, still root-owned hook a failed clear left behind must never get
-// the chance to run.
+// the chance to run. A symlinked root is specifically a *bootstrapPathError,
+// so this covers the 422 branch; TestBootstrap_ClearFailureGenericErrorAborts
+// BootstrapBeforeAnyWriteOrInit below covers the generic-error 500 branch.
 func TestBootstrap_ClearFailureAbortsBootstrapBeforeAnyWriteOrInit(t *testing.T) {
 	homePrefix, _ := withEnforcedHooksFixture(t)
 
@@ -296,7 +315,7 @@ func TestBootstrap_ClearFailureAbortsBootstrapBeforeAnyWriteOrInit(t *testing.T)
 	}
 	enforcedHooksDir = link
 
-	var initCalled bool
+	initCalled := make(chan struct{}, 1)
 	req := BootstrapRequest{
 		Files: []BootstrapFile{
 			{
@@ -311,22 +330,90 @@ func TestBootstrap_ClearFailureAbortsBootstrapBeforeAnyWriteOrInit(t *testing.T)
 	srv := NewServer(
 		WithChownOwner(-1, -1),
 		WithInitRunner(func(argv []string, forwardTermSignal bool) int {
-			initCalled = true
+			initCalled <- struct{}{}
 			return 0
 		}),
 	)
 
 	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", req)
-	if rec.Code == http.StatusOK {
-		t.Fatalf("bootstrap status = %d, want a non-200 failure when the stale-hook clear itself fails", rec.Code)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bootstrap status = %d, want 422 (a symlinked enforced-hooks root is a bootstrapPathError)", rec.Code)
 	}
-	if initCalled {
+	if waitInitCalled(initCalled) {
 		t.Error("init must never start when the enforced-hooks clear failed")
 	}
 	// No file should have been written under the real (non-symlinked)
 	// target either — the clear failure must abort before the file loop.
 	if _, err := os.Stat(filepath.Join(real, "pre-start.d", "20-harness-provision")); !os.IsNotExist(err) {
 		t.Errorf("expected no file written past a failed clear, stat err=%v", err)
+	}
+}
+
+// TestBootstrap_ClearFailureGenericErrorAbortsBootstrapBeforeAnyWriteOrInit
+// is the 500-branch sibling of the 422 test above: a clear failure that is
+// NOT a *bootstrapPathError (here, a permission error removing a stale entry
+// — the failure mode that actually motivated the fail-closed fix: EIO/EROFS/
+// EPERM/EACCES on a real deployment) must still abort the bootstrap before
+// any file is written or init starts, answering 500, not 422 and not 200.
+// Skipped as root: root bypasses the DAC permission check this fixture
+// depends on to make the removal fail in the first place.
+func TestBootstrap_ClearFailureGenericErrorAbortsBootstrapBeforeAnyWriteOrInit(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the directory-permission check this fixture uses to make the clear fail")
+	}
+	homePrefix, hooksDir := withEnforcedHooksFixture(t)
+
+	// Stage a stale entry, then remove write permission on its parent so
+	// clearDirContents' os.Remove of the entry fails with EACCES — a
+	// generic error, not a *bootstrapPathError — once the clear tries to
+	// remove it.
+	staleDir := filepath.Join(hooksDir, "pre-start.d")
+	if err := os.MkdirAll(staleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stalePath := filepath.Join(staleDir, "30-project-custom")
+	if err := os.WriteFile(stalePath, []byte("stale"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(staleDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(staleDir, 0o755) })
+
+	initCalled := make(chan struct{}, 1)
+	req := BootstrapRequest{
+		Files: []BootstrapFile{
+			{
+				Path:       filepath.Join(homePrefix, "pre-start.d", "20-harness-provision"),
+				Mode:       0o755,
+				ContentB64: base64.StdEncoding.EncodeToString([]byte("#!/bin/sh\nexit 0\n")),
+			},
+		},
+		StartCmd:     "true",
+		ControlToken: "tok",
+	}
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int {
+			initCalled <- struct{}{}
+			return 0
+		}),
+	)
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("bootstrap status = %d, want 500 (a permission error clearing a stale entry is not a bootstrapPathError)", rec.Code)
+	}
+	if waitInitCalled(initCalled) {
+		t.Error("init must never start when the enforced-hooks clear failed")
+	}
+	if _, err := os.Stat(filepath.Join(hooksDir, "pre-start.d", "20-harness-provision")); !os.IsNotExist(err) {
+		t.Errorf("expected no file written past a failed clear, stat err=%v", err)
+	}
+	// The stale entry must still be there — the clear failed, it did not
+	// silently succeed by skipping the unremovable entry.
+	if _, err := os.Stat(stalePath); err != nil {
+		t.Errorf("expected the stale entry to remain after a failed clear: %v", err)
 	}
 }
 

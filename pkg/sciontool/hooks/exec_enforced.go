@@ -7,9 +7,9 @@ package hooks
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -102,22 +102,20 @@ func openChainNoFollow(dir string) (fd int, chain []NodeOwnership, err error) {
 // symlink there (O_NOFOLLOW), never blocking on the open regardless of file
 // type (O_NONBLOCK), and refusing anything that is not a regular file once
 // opened — a FIFO, device, or socket is rejected the same way a symlink is,
-// via ErrScriptRefused, never executed. Returns the open fd (caller must
+// via ErrScriptRefused, never executed. Returns the open file (caller must
 // close it) and its own ownership.
-func openScriptNoFollow(parentFd int, name string) (fd int, ownership NodeOwnership, err error) {
-	// Deliberately no O_CLOEXEC: the caller execs this exact fd via
-	// /proc/self/fd/<n> (see execViaFd), which requires the fd to still be
-	// open in the forked child at the moment it resolves that magic symlink
-	// during its own execve(2). See execViaFd's doc comment.
-	//
-	// This does mean the fd is inheritable by any OTHER child this process
-	// forks while it is open — every hook runs synchronously and
-	// LifecycleManager forks nothing else concurrently, so in practice
-	// nothing else ever inherits it, but that is an invariant of the
-	// caller's control flow, not something this function enforces. If a
-	// future caller ever forks concurrently while a hook is running, revisit
-	// this rather than assuming it still holds.
-	//
+//
+// The fd IS opened O_CLOEXEC, unlike the leaf open this replaced: the
+// caller no longer execs this fd at its own, arbitrary fd number (see
+// execViaFd's doc comment for why — it passes the returned *os.File via
+// exec.Cmd.ExtraFiles instead, which lands a fresh, independently-flagged
+// duplicate at a fixed fd in the child regardless of this fd's own
+// CLOEXEC bit). Keeping this copy CLOEXEC means it can never leak into
+// any OTHER, unrelated child this process forks while it happens to be
+// open — a hook script (which can carry secrets; 30-project-custom is
+// 0700 for exactly that reason) would otherwise be readable by any such
+// child, not just the one that is supposed to run it.
+func openScriptNoFollow(parentFd int, name string) (f *os.File, ownership NodeOwnership, err error) {
 	// O_NONBLOCK: without it, opening a workload-planted FIFO with no writer
 	// blocks this open(2) call forever, hanging all hook processing — a
 	// availability hole a workload can trigger just by mknod-ing a FIFO
@@ -127,10 +125,10 @@ func openScriptNoFollow(parentFd int, name string) (fd int, ownership NodeOwners
 	// device or socket) once the open has returned. O_NONBLOCK has no effect
 	// on a regular file's own I/O, so it changes nothing for the ordinary
 	// case this function exists to handle.
-	f, err := unix.Openat(parentFd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	fd, err := unix.Openat(parentFd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, unix.ELOOP) {
-			return -1, NodeOwnership{}, fmt.Errorf("hooks: script %q is a symlink; refusing: %w", name, ErrScriptRefused)
+			return nil, NodeOwnership{}, fmt.Errorf("hooks: script %q is a symlink; refusing: %w", name, ErrScriptRefused)
 		}
 		if errors.Is(err, unix.ENXIO) {
 			// A socket special file (and some device files with no
@@ -139,20 +137,23 @@ func openScriptNoFollow(parentFd int, name string) (fd int, ownership NodeOwners
 			// never gets a chance to run. Refuse it the same way, via the
 			// same sentinel, rather than surfacing a bare "no such device or
 			// address" as an unrelated I/O error.
-			return -1, NodeOwnership{}, fmt.Errorf("hooks: %q cannot be opened as a regular file (ENXIO); refusing: %w", name, ErrScriptRefused)
+			return nil, NodeOwnership{}, fmt.Errorf("hooks: %q cannot be opened as a regular file (ENXIO); refusing: %w", name, ErrScriptRefused)
 		}
-		return -1, NodeOwnership{}, err
+		return nil, NodeOwnership{}, err
 	}
 	var raw unix.Stat_t
-	if statErr := unix.Fstat(f, &raw); statErr != nil {
-		_ = unix.Close(f)
-		return -1, NodeOwnership{}, statErr
+	if statErr := unix.Fstat(fd, &raw); statErr != nil {
+		_ = unix.Close(fd)
+		return nil, NodeOwnership{}, statErr
 	}
 	if raw.Mode&unix.S_IFMT != unix.S_IFREG {
-		_ = unix.Close(f)
-		return -1, NodeOwnership{}, fmt.Errorf("hooks: %q is not a regular file (mode %#o); refusing: %w", name, raw.Mode&unix.S_IFMT, ErrScriptRefused)
+		_ = unix.Close(fd)
+		return nil, NodeOwnership{}, fmt.Errorf("hooks: %q is not a regular file (mode %#o); refusing: %w", name, raw.Mode&unix.S_IFMT, ErrScriptRefused)
 	}
-	return f, ownershipFromStat(raw), nil
+	// os.NewFile, not the raw fd, from here on: it owns the fd's lifecycle
+	// (Close clears the runtime finalizer it registers), and it is what
+	// exec.Cmd.ExtraFiles requires.
+	return os.NewFile(uintptr(fd), name), ownershipFromStat(raw), nil
 }
 
 // fstatOwnership Fstats an already-open directory fd and converts the
@@ -169,32 +170,50 @@ func ownershipFromStat(st unix.Stat_t) NodeOwnership {
 	return NodeOwnership{UID: st.Uid, Perm: uint32(st.Mode) & 0o7777}
 }
 
+// execFdSlot is the fixed fd number the script file lands at in the child
+// process: exec.Cmd.ExtraFiles' entry 0 becomes fd 3 (0, 1, 2 are stdin/
+// stdout/stderr), and execViaFd always passes exactly one file, so the
+// child's copy is always fd 3 — never the parent's own, arbitrary fd
+// number for f. execScriptPath is the fixed path that resolves it.
+const execFdSlot = 3
+
+var execScriptPath = fmt.Sprintf("/proc/self/fd/%d", execFdSlot)
+
 // execViaFd builds an *exec.Cmd that runs the file referenced by the
-// already-open, already-verified fd — never displayPath, which is used only
+// already-open, already-verified f — never displayPath, which is used only
 // for argv[0]/logging and is never itself opened or resolved again.
 //
 // This is the fexecve(3)-equivalent trick for a language (Go) whose os/exec
 // has no native fexecve: /proc/self/fd/<n> is a magic symlink the kernel
 // resolves directly to the fd's own open file description, not through a
-// further filesystem path lookup, so execve("/proc/self/fd/<n>") runs
-// exactly the inode fd refers to regardless of what (if anything) now sits
-// at the script's original path. fd must be open without O_CLOEXEC (see
-// openScriptNoFollow) so the forked child — which inherits the parent's fd
-// table at fork(2), before its own execve(2) — still has it open at the
-// moment the kernel resolves that path during the exec syscall itself
-// (path resolution happens before the "point of no return" where O_CLOEXEC
-// descriptors are closed on a successful exec).
-func execViaFd(fd int, displayPath string) *exec.Cmd {
-	cmd := exec.Command("/proc/self/fd/" + strconv.Itoa(fd))
+// further filesystem path lookup, so execve() on it runs exactly the inode
+// f refers to regardless of what (if anything) now sits at the script's
+// original path.
+//
+// f is passed via cmd.ExtraFiles, not opened without O_CLOEXEC and exec'd
+// at its own fd number: ExtraFiles makes exec.Cmd dup f into a FRESH file
+// descriptor at a fixed slot (execFdSlot, i.e. fd 3) in the child, post-fork
+// and pre-exec — a duplicate with its own independent close-on-exec flag
+// (cleared by that dup, regardless of f's own), so it correctly survives
+// the child's own subsequent exec (needed for a shebang script: the kernel
+// hands the interpreter that same path, which must still resolve). f itself
+// stays exactly as CLOEXEC as openScriptNoFollow opened it throughout: it
+// is never inherited by any OTHER, unrelated child this process might fork,
+// only by this one, through the explicit ExtraFiles hand-off — which is the
+// reason for this construction over the simpler "open without CLOEXEC and
+// exec /proc/self/fd/<original-number>" one it replaced.
+func execViaFd(f *os.File, displayPath string) *exec.Cmd {
+	cmd := exec.Command(execScriptPath)
 	cmd.Args = []string{displayPath}
+	cmd.ExtraFiles = []*os.File{f}
 	return cmd
 }
 
-// fdIsExecutable Fstats an already-open fd and reports whether any of the
+// fdIsExecutable Fstats an already-open file and reports whether any of the
 // owner/group/other execute bits is set.
-func fdIsExecutable(fd int) (bool, error) {
+func fdIsExecutable(f *os.File) (bool, error) {
 	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
+	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
 		return false, err
 	}
 	return st.Mode&0o111 != 0, nil

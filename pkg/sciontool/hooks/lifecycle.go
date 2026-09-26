@@ -308,10 +308,10 @@ func (m *LifecycleManager) executeScript(path, eventName string) error {
 // enforcedExecPrep is prepareEnforcedExec's result: everything
 // executeScriptEnforced needs to build and run the command, plus enough for
 // a test to assert the root/drop decision against real on-disk state
-// without running anything or needing any privilege. fd is the script's own
-// open file descriptor (caller must close it) if err is nil.
+// without running anything or needing any privilege. file is the script's
+// own open file (caller must close it) if err is nil.
 type enforcedExecPrep struct {
-	fd         int
+	file       *os.File
 	executable bool
 	asRoot     bool
 }
@@ -332,20 +332,20 @@ func prepareEnforcedExec(path string) (enforcedExecPrep, error) {
 	if err != nil {
 		return enforcedExecPrep{}, fmt.Errorf("hooks: %s: %w", path, err)
 	}
-	scriptFd, scriptOwnership, err := openScriptNoFollow(dirFd, name)
+	scriptFile, scriptOwnership, err := openScriptNoFollow(dirFd, name)
 	_ = closeFd(dirFd)
 	if err != nil {
 		return enforcedExecPrep{}, fmt.Errorf("hooks: %s: %w", path, err)
 	}
 
-	executable, err := fdIsExecutable(scriptFd)
+	executable, err := fdIsExecutable(scriptFile)
 	if err != nil {
-		_ = closeFd(scriptFd)
+		_ = scriptFile.Close()
 		return enforcedExecPrep{}, fmt.Errorf("hooks: %s: %w", path, err)
 	}
 
 	return enforcedExecPrep{
-		fd:         scriptFd,
+		file:       scriptFile,
 		executable: executable,
 		asRoot:     DecideExecAsRoot(scriptOwnership, chain),
 	}, nil
@@ -361,7 +361,7 @@ func (m *LifecycleManager) executeScriptEnforced(path, eventName string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = closeFd(prep.fd) }()
+	defer func() { _ = prep.file.Close() }()
 
 	if !prep.executable {
 		fmt.Fprintf(os.Stderr, "[sciontool] Warning: hook script %s is not executable, skipping\n", path)
@@ -372,7 +372,7 @@ func (m *LifecycleManager) executeScriptEnforced(path, eventName string) error {
 			"[sciontool] hook script %s is not root-protected (owner/mode); running as the workload uid=%d gid=%d instead of root\n",
 			path, m.WorkloadUID, m.WorkloadGID)
 	}
-	cmd := m.buildEnforcedCmd(prep.fd, path, eventName, prep.asRoot)
+	cmd := m.buildEnforcedCmd(prep.file, path, eventName, prep.asRoot)
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("execution failed: %w", err)
@@ -397,8 +397,8 @@ func (m *LifecycleManager) executeScriptEnforced(path, eventName string) error {
 // "/proc/self/fd/<n>" (execViaFd's own fexecve-equivalent construction), not
 // this path — a script relying on `dirname "$0"` would otherwise silently
 // break only on substrate. See §8.1 of the substrate runtime design doc.
-func (m *LifecycleManager) buildEnforcedCmd(scriptFd int, path, eventName string, asRoot bool) *exec.Cmd {
-	cmd := execViaFd(scriptFd, path)
+func (m *LifecycleManager) buildEnforcedCmd(scriptFile *os.File, path, eventName string, asRoot bool) *exec.Cmd {
+	cmd := execViaFd(scriptFile, path)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
@@ -409,9 +409,28 @@ func (m *LifecycleManager) buildEnforcedCmd(scriptFd int, path, eventName string
 			// all — there is no workload-owned $HOME content yet for it to
 			// load — and the provisioner specifically needs
 			// HOME=AgentHome to find the harness bundle it staged there.
-			cmd.Env = m.hookEnv()
+			// PYTHONNOUSERSITE is still set here too: it costs the
+			// provisioner nothing (it needs HOME, not Python's per-user
+			// site-packages lookup) and removes one vector for the one
+			// scenario (a re-bootstrap over a $HOME a workload already
+			// touched — see .design/kubernetes/substrate-runtime.md §11)
+			// where this branch's own "no workload yet" premise would not
+			// hold.
+			cmd.Env = setEnvVar(m.hookEnv(), "PYTHONNOUSERSITE", "1")
 		} else {
 			cmd.Env = m.hardenedRootHookEnv()
+			// Never inherit init's cwd. Nothing in sciontool ever chdirs,
+			// so that cwd is whatever the image sets (e.g. Dockerfile
+			// WORKDIR /workspace) — the workload's own, workload-writable
+			// git workspace, not root's. Many interpreters and tools
+			// resolve code relative to cwd (python3 -c/-m puts '' first on
+			// sys.path, node -e uses ./node_modules, make reads
+			// ./Makefile, dotenv loaders read ./.env): left unset, a root
+			// hook that merely runs one of those tools would load
+			// workload-planted content from cwd, the same escalation class
+			// HOME=/root above exists to close. A hook that genuinely needs
+			// the workspace must cd there explicitly.
+			cmd.Dir = "/"
 		}
 		cmd.Env = setEnvVar(cmd.Env, "SCION_HOOK_PATH", path)
 		return cmd
@@ -470,6 +489,36 @@ func (m *LifecycleManager) droppedHookEnv() []string {
 	return env
 }
 
+// rootHookEnvAllowlist is the complete, closed set of variable NAMES
+// hardenedRootHookEnv keeps from the inherited process environment —
+// everything else is dropped outright, not merely overridden. init's own
+// environment carries every key substrate-serve's bootstrap applied via
+// os.Setenv (harness env, operator template/cfg env, resolved auth and
+// secret env — pkg/runtime/substrate_bootstrap.go's buildBootstrapEnv), any
+// of which could in principle be an interpreter or loader redirector —
+// PYTHONPATH, PYTHONSTARTUP, BASH_ENV, ENV, LD_PRELOAD, LD_LIBRARY_PATH,
+// NODE_OPTIONS, PERL5LIB/PERL5OPT, RUBYLIB/RUBYOPT, XDG_CONFIG_HOME (git's
+// global config, e.g. core.fsmonitor), GIT_CONFIG_* — pointed at a
+// workload-writable location. HOME=/root and a fixed PATH alone do not stop
+// a tool that reads one of those directly instead of resolving through HOME
+// or PATH: the same escalation class DecideExecAsRoot and the HOME override
+// exist to close, reopened through the environment.
+//
+// This is a closed list of exact names, not a set of name/prefix patterns:
+// no root-eligible hook shipped today (there is none after pre-start —
+// broker delivery is pre-start only, and no image ships anything in
+// /etc/scion/hooks) reads any SCION_* variable, so none is allowlisted by
+// name or by a blanket "SCION_" prefix; a future hook that genuinely needs
+// one adds it here, by name, with its own justification, rather than
+// inheriting the whole namespace on the assumption that SCION_* values are
+// never a workload-controlled path. LANG and TERM are the only two kept:
+// display/locale hints a hook's own output formatting might consult, never
+// a code or config search path.
+var rootHookEnvAllowlist = map[string]bool{
+	"LANG": true,
+	"TERM": true,
+}
+
 // hardenedRootHookEnv builds the environment for a root-eligible hook script
 // at any event AFTER pre-start (post-start, pre-stop, session-end) — i.e.
 // while or after the workload has had control of $HOME. hookEnv's own
@@ -480,10 +529,16 @@ func (m *LifecycleManager) droppedHookEnv() []string {
 // customization, ~/.gitconfig, a pip user config) and execute it as root:
 // exactly the escalation class DecideExecAsRoot exists to close, reintroduced
 // through the environment instead of the exec path. So a root hook at these
-// events instead gets HOME=/root (never workload-owned), PYTHONNOUSERSITE=1
+// events gets HOME=/root (never workload-owned), PYTHONNOUSERSITE=1
 // (disables Python's per-user site-packages lookup, which HOME would
 // otherwise influence), and a fixed, minimal PATH that never includes
-// anything workload-writable.
+// anything workload-writable — and, unlike hookEnv, does NOT otherwise
+// inherit the process environment at all: only the exact names in
+// rootHookEnvAllowlist survive from it, so an interpreter/loader redirector
+// variable (see that var's own doc comment) never reaches this branch
+// regardless of where it came from. The dropped branch (droppedHookEnv) is
+// unaffected by any of this — a dropped hook gets the same environment the
+// harness child process itself gets, unfiltered.
 //
 // Pre-start is exempt — see buildEnforcedCmd's own call site — because the
 // only root-eligible pre-start hooks are the container-script harness's
@@ -491,7 +546,17 @@ func (m *LifecycleManager) droppedHookEnv() []string {
 // workload exists at all, and the provisioner specifically needs
 // HOME=AgentHome to find the harness bundle it staged there.
 func (m *LifecycleManager) hardenedRootHookEnv() []string {
-	env := m.hookEnv()
+	var env []string
+	for _, e := range os.Environ() {
+		key, _, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		if rootHookEnvAllowlist[key] {
+			env = append(env, e)
+		}
+	}
+	env = append(env, "PYTHONDONTWRITEBYTECODE=1")
 	env = setEnvVar(env, "HOME", "/root")
 	env = setEnvVar(env, "PYTHONNOUSERSITE", "1")
 	env = setEnvVar(env, "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")

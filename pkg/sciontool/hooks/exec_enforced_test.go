@@ -5,8 +5,10 @@ Copyright 2026 The Scion Authors.
 package hooks
 
 import (
+	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,23 +18,23 @@ import (
 )
 
 // openScriptForTest is a small helper that opens path (via the same
-// symlink-safe walk executeScriptEnforced uses) and returns its fd and
+// symlink-safe walk executeScriptEnforced uses) and returns its file and
 // chain, for tests that want to drive buildEnforcedCmd directly without
 // invoking cmd.Run() (which would require real privilege to exercise the
 // dropped branch's setgroups(2) call in this test environment).
-func openScriptForTest(t *testing.T, path string) (fd int, chain []NodeOwnership) {
+func openScriptForTest(t *testing.T, path string) (f *os.File, chain []NodeOwnership) {
 	t.Helper()
 	dirFd, chain, err := openChainNoFollow(filepath.Dir(path))
 	if err != nil {
 		t.Fatalf("openChainNoFollow: %v", err)
 	}
-	fd, _, err = openScriptNoFollow(dirFd, filepath.Base(path))
+	f, _, err = openScriptNoFollow(dirFd, filepath.Base(path))
 	_ = closeFd(dirFd)
 	if err != nil {
 		t.Fatalf("openScriptNoFollow: %v", err)
 	}
-	t.Cleanup(func() { _ = closeFd(fd) })
-	return fd, chain
+	t.Cleanup(func() { _ = f.Close() })
+	return f, chain
 }
 
 func mustWriteExecutableScript(t *testing.T, path, content string) {
@@ -229,7 +231,7 @@ func TestPrepareEnforcedExec_WorkloadWritableChainYieldsDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareEnforcedExec: %v", err)
 	}
-	defer func() { _ = closeFd(prep.fd) }()
+	defer func() { _ = prep.file.Close() }()
 
 	if !prep.executable {
 		t.Error("expected the script to be reported executable")
@@ -247,13 +249,13 @@ func TestExecViaFd_RunsShebangScript(t *testing.T) {
 	script := filepath.Join(dir, "hook")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\necho -n hello\n")
 
-	fd, err := unix.Open(script, unix.O_RDONLY, 0)
+	f, err := os.Open(script)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer func() { _ = closeFd(fd) }()
+	defer func() { _ = f.Close() }()
 
-	out, err := execViaFd(fd, script).Output()
+	out, err := execViaFd(f, script).Output()
 	if err != nil {
 		t.Fatalf("execViaFd(...).Output(): %v", err)
 	}
@@ -275,23 +277,103 @@ func TestExecViaFd_SwapAfterOpenRunsOriginalInode(t *testing.T) {
 	script := filepath.Join(dir, "hook")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\necho -n original\n")
 
-	fd, err := unix.Open(script, unix.O_RDONLY, 0)
+	f, err := os.Open(script)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer func() { _ = closeFd(fd) }()
+	defer func() { _ = f.Close() }()
 
 	if err := os.Remove(script); err != nil {
 		t.Fatal(err)
 	}
 	mustWriteExecutableScript(t, script, "#!/bin/sh\necho -n replaced\n")
 
-	out, err := execViaFd(fd, script).Output()
+	out, err := execViaFd(f, script).Output()
 	if err != nil {
 		t.Fatalf("execViaFd(...).Output(): %v", err)
 	}
 	if string(out) != "original" {
 		t.Errorf("output = %q, want %q (the original inode, not the swapped-in replacement)", out, "original")
+	}
+}
+
+// findPython3 locates python3 for the shebang-exec tests, skipping them
+// (not failing) if it is not installed in this environment.
+func findPython3(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not found in PATH")
+	}
+	return path
+}
+
+// TestExecViaFd_RunsPython3ShebangScript is TestExecViaFd_RunsShebangScript's
+// `#!/usr/bin/env python3` counterpart: the fd-3/ExtraFiles construction
+// (execViaFd) must work identically regardless of which interpreter the
+// kernel's binfmt_script handler re-execs — a `/bin/sh` shebang and a
+// `/usr/bin/env python3` one go through two different re-exec paths (env(1)
+// itself execs python3 as a second hop), so both are exercised explicitly.
+func TestExecViaFd_RunsPython3ShebangScript(t *testing.T) {
+	findPython3(t)
+	dir := t.TempDir()
+	script := filepath.Join(dir, "hook")
+	mustWriteExecutableScript(t, script, "#!/usr/bin/env python3\nimport sys\nsys.stdout.write('hello')\n")
+
+	f, err := os.Open(script)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	out, err := execViaFd(f, script).Output()
+	if err != nil {
+		t.Fatalf("execViaFd(...).Output(): %v", err)
+	}
+	if string(out) != "hello" {
+		t.Errorf("output = %q, want %q", out, "hello")
+	}
+}
+
+// TestBuildEnforcedCmd_AsRootRunsShellAndPythonShebangs runs the actual
+// as-root branch end to end (no SysProcAttr.Credential is set on this
+// branch, so it needs no privilege) for both a shell and a python3 hook, at
+// both a pre-start event (hookEnv, unhardened) and a post-workload event
+// (hardenedRootHookEnv's allowlisted env and fixed PATH) — proving the
+// fd-3 mechanics and the hardened/allowlisted environment do not, between
+// them, break either interpreter's own shebang re-exec.
+func TestBuildEnforcedCmd_AsRootRunsShellAndPythonShebangs(t *testing.T) {
+	findPython3(t)
+	dir := t.TempDir()
+
+	scripts := map[string]string{
+		"shell.sh": "#!/bin/sh\necho -n shell-ok\n",
+		"py.py":    "#!/usr/bin/env python3\nimport sys\nsys.stdout.write('python-ok')\n",
+	}
+	want := map[string]string{"shell.sh": "shell-ok", "py.py": "python-ok"}
+
+	for _, event := range []string{EventPreStart, EventPostStart} {
+		for name, content := range scripts {
+			script := filepath.Join(dir, event, name)
+			mustWriteExecutableScript(t, script, content)
+			f, chain := openScriptForTest(t, script)
+			_ = chain
+
+			m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: dir}
+			cmd := m.buildEnforcedCmd(f, script, event, true)
+			// buildEnforcedCmd already sets cmd.Stdout (to os.Stderr, so the
+			// hook's own output surfaces in the caller's log); override it
+			// here to capture output instead, since cmd.Output() refuses to
+			// run when Stdout is already set.
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("event %s script %s: cmd.Run(): %v", event, name, err)
+			}
+			if out.String() != want[name] {
+				t.Errorf("event %s script %s: output = %q, want %q", event, name, out.String(), want[name])
+			}
+		}
 	}
 }
 
@@ -322,10 +404,10 @@ func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "20-harness-provision")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
-	fd, _ := openScriptForTest(t, script)
+	f, _ := openScriptForTest(t, script)
 
 	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
-	cmd := m.buildEnforcedCmd(fd, script, EventPreStart, true)
+	cmd := m.buildEnforcedCmd(f, script, EventPreStart, true)
 
 	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Credential != nil {
 		t.Fatal("expected no Credential override for the as-root branch")
@@ -336,40 +418,151 @@ func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 	if got := findEnvVar(cmd.Env, "HOME"); got != "/home/scion" {
 		t.Errorf("HOME = %q, want /home/scion (the provisioner's required env, unhardened at pre-start)", got)
 	}
+	if got := findEnvVar(cmd.Env, "PYTHONNOUSERSITE"); got != "1" {
+		t.Errorf("PYTHONNOUSERSITE = %q, want \"1\" (cheap even at pre-start, and the only guard if a re-bootstrap ever runs pre-start over a $HOME the workload already touched)", got)
+	}
 	if got := findEnvVar(cmd.Env, "SCION_HOOK_PATH"); got != script {
 		t.Errorf("SCION_HOOK_PATH = %q, want %q", got, script)
 	}
+	if cmd.Dir != "" {
+		t.Errorf("Dir = %q, want unset at pre-start (the provisioner keeps init's own cwd, unaffected by the post-workload hardening)", cmd.Dir)
+	}
 }
 
-// TestBuildEnforcedCmd_AsRootPostWorkloadEvent is the Medium-severity
-// hardening this round fixes: a root-eligible hook at any event AFTER
-// pre-start (post-start here) must never run with HOME pointed at the
-// workload's own home directory — that would let a root-run python/bash/
-// git/pip hook load workload-planted rc/site/config files and execute them
-// as root, the same escalation class DecideExecAsRoot exists to close.
+// TestBuildEnforcedCmd_AsRootPostWorkloadEvent is the hardening a root-
+// eligible hook at any event AFTER pre-start needs: it must never run with
+// HOME pointed at the workload's own home directory, and it must never run
+// with init's own cwd, which — since nothing in sciontool ever chdirs — is
+// whatever the image sets (e.g. a Dockerfile WORKDIR), the workload's own
+// writable git workspace. Either one left unguarded lets a root-run
+// python/bash/git/pip/node hook load workload-planted content and execute
+// it as root, the same escalation class DecideExecAsRoot exists to close.
 func TestBuildEnforcedCmd_AsRootPostWorkloadEvent(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "10-post-start")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
-	fd, _ := openScriptForTest(t, script)
+	f, _ := openScriptForTest(t, script)
 
 	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
-	cmd := m.buildEnforcedCmd(fd, script, EventPostStart, true)
-
-	if got := findEnvVar(cmd.Env, "HOME"); got != "/root" {
-		t.Errorf("HOME = %q, want /root (never the workload-owned home) for a root hook at post-start", got)
-	}
-	if got := findEnvVar(cmd.Env, "PYTHONNOUSERSITE"); got != "1" {
-		t.Errorf("PYTHONNOUSERSITE = %q, want \"1\"", got)
-	}
-	if got := findEnvVar(cmd.Env, "PATH"); got != "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" {
-		t.Errorf("PATH = %q, want the fixed, minimal PATH", got)
-	}
-	for _, event := range []string{EventPreStop, EventSessionEnd} {
-		cmd := m.buildEnforcedCmd(fd, script, event, true)
+	for _, event := range []string{EventPostStart, EventPreStop, EventSessionEnd} {
+		cmd := m.buildEnforcedCmd(f, script, event, true)
 		if got := findEnvVar(cmd.Env, "HOME"); got != "/root" {
-			t.Errorf("event %s: HOME = %q, want /root", event, got)
+			t.Errorf("event %s: HOME = %q, want /root (never the workload-owned home)", event, got)
 		}
+		if got := findEnvVar(cmd.Env, "PYTHONNOUSERSITE"); got != "1" {
+			t.Errorf("event %s: PYTHONNOUSERSITE = %q, want \"1\"", event, got)
+		}
+		if got := findEnvVar(cmd.Env, "PATH"); got != "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" {
+			t.Errorf("event %s: PATH = %q, want the fixed, minimal PATH", event, got)
+		}
+		if cmd.Dir != "/" {
+			t.Errorf("event %s: Dir = %q, want \"/\" (never init's own cwd, which is the workload-writable image WORKDIR)", event, cmd.Dir)
+		}
+	}
+}
+
+// TestHardenedRootHookEnv_DropsInterpreterAndLoaderRedirectors proves the
+// hardened root env is built from an allowlist, not inherited wholesale:
+// even when init's own process environment carries interpreter/loader
+// redirector variables (which substrate-serve's bootstrap can set from
+// harness/operator/auth env via os.Setenv), none of them reach a root hook
+// at a post-pre-start event. HOME/PATH/PYTHONNOUSERSITE alone would not
+// stop a tool that reads one of these directly instead of resolving through
+// HOME or PATH.
+func TestHardenedRootHookEnv_DropsInterpreterAndLoaderRedirectors(t *testing.T) {
+	redirectors := map[string]string{
+		"PYTHONPATH":        "/home/scion/lib",
+		"PYTHONSTARTUP":     "/home/scion/.pythonrc",
+		"BASH_ENV":          "/home/scion/.bashenv",
+		"ENV":               "/home/scion/.shrc",
+		"LD_PRELOAD":        "/home/scion/evil.so",
+		"LD_LIBRARY_PATH":   "/home/scion/lib",
+		"NODE_OPTIONS":      "--require /home/scion/evil.js",
+		"NODE_PATH":         "/home/scion/node_modules",
+		"PERL5LIB":          "/home/scion/perl5",
+		"PERL5OPT":          "-Mevil",
+		"RUBYLIB":           "/home/scion/ruby",
+		"RUBYOPT":           "-revil",
+		"XDG_CONFIG_HOME":   "/home/scion/.config",
+		"GIT_CONFIG_GLOBAL": "/home/scion/.gitconfig",
+	}
+	for key, value := range redirectors {
+		t.Setenv(key, value)
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "10-post-start")
+	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
+	f, _ := openScriptForTest(t, script)
+
+	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
+	cmd := m.buildEnforcedCmd(f, script, EventPostStart, true)
+
+	for key := range redirectors {
+		if got := findEnvVar(cmd.Env, key); got != "" {
+			t.Errorf("%s = %q, want absent from a hardened root hook's environment", key, got)
+		}
+	}
+	// Control: the hardening's own overrides must still be present.
+	if got := findEnvVar(cmd.Env, "HOME"); got != "/root" {
+		t.Errorf("HOME = %q, want /root", got)
+	}
+}
+
+// TestHardenedRootHookEnv_EnvIsExactlyAllowlistPlusOverrides proves the
+// asRoot post-workload environment is a closed set: nothing beyond the
+// explicit overrides this hardening itself sets (HOME, PATH,
+// PYTHONNOUSERSITE, PYTHONDONTWRITEBYTECODE, SCION_HOOK_PATH) and the exact
+// names in rootHookEnvAllowlist. It seeds the inherited process environment
+// with allowlisted vars (LANG, TERM), a var that LOOKS safe but is
+// deliberately not allowlisted (TZ), a non-allowlisted SCION_* var (no hook
+// consumes any SCION_* value, so none is allowlisted by name or by a
+// blanket prefix — see rootHookEnvAllowlist's own doc comment), and a
+// redirector (PYTHONPATH), and asserts the first two are the ONLY ones that
+// survive.
+func TestHardenedRootHookEnv_EnvIsExactlyAllowlistPlusOverrides(t *testing.T) {
+	t.Setenv("LANG", "en_US.UTF-8")
+	t.Setenv("TERM", "xterm-256color")
+	t.Setenv("TZ", "UTC")
+	t.Setenv("SCION_RUNTIME", "substrate")
+	t.Setenv("PYTHONPATH", "/home/scion/lib")
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "10-post-start")
+	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
+	f, _ := openScriptForTest(t, script)
+
+	m := &LifecycleManager{EnforcePrivilegeDrop: true}
+	cmd := m.buildEnforcedCmd(f, script, EventPostStart, true)
+
+	allowed := map[string]bool{
+		"HOME":                    true,
+		"PATH":                    true,
+		"PYTHONNOUSERSITE":        true,
+		"PYTHONDONTWRITEBYTECODE": true,
+		"SCION_HOOK_PATH":         true,
+	}
+	for name := range rootHookEnvAllowlist {
+		allowed[name] = true
+	}
+	for _, e := range cmd.Env {
+		key, _, _ := strings.Cut(e, "=")
+		if !allowed[key] {
+			t.Errorf("unexpected env var %q reached a hardened root hook's environment", key)
+		}
+	}
+
+	if got := findEnvVar(cmd.Env, "LANG"); got != "en_US.UTF-8" {
+		t.Errorf("LANG = %q, want %q", got, "en_US.UTF-8")
+	}
+	if got := findEnvVar(cmd.Env, "TERM"); got != "xterm-256color" {
+		t.Errorf("TERM = %q, want %q", got, "xterm-256color")
+	}
+	if got := findEnvVar(cmd.Env, "TZ"); got != "" {
+		t.Errorf("TZ = %q, want absent (looks safe but is not allowlisted)", got)
+	}
+	if got := findEnvVar(cmd.Env, "SCION_RUNTIME"); got != "" {
+		t.Errorf("SCION_RUNTIME = %q, want absent (no hook consumes it, so no SCION_* var is allowlisted by name or prefix)", got)
 	}
 }
 
@@ -381,7 +574,7 @@ func TestBuildEnforcedCmd_Dropped(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "session-end")
 	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
-	fd, _ := openScriptForTest(t, script)
+	f, _ := openScriptForTest(t, script)
 
 	m := &LifecycleManager{
 		EnforcePrivilegeDrop: true,
@@ -391,7 +584,7 @@ func TestBuildEnforcedCmd_Dropped(t *testing.T) {
 		WorkloadUsername:     "scion",
 		WorkloadWorkingDir:   "/workspace",
 	}
-	cmd := m.buildEnforcedCmd(fd, script, EventSessionEnd, false)
+	cmd := m.buildEnforcedCmd(f, script, EventSessionEnd, false)
 
 	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential == nil {
 		t.Fatal("expected a Credential override for the dropped branch")
@@ -461,6 +654,44 @@ func TestExecuteScriptEnforced_WorkloadOwnedRunsDropped(t *testing.T) {
 	wantUID := []byte(itoa(dropUID) + "\n")
 	if string(got) != string(wantUID) {
 		t.Errorf("hook ran as uid %q, want %q (the distinct workload uid, proving the drop actually happened)", got, wantUID)
+	}
+}
+
+// TestExecuteScriptEnforced_WorkloadOwnedRunsDropped_PythonShebang is
+// TestExecuteScriptEnforced_WorkloadOwnedRunsDropped's `#!/usr/bin/env
+// python3` counterpart, proving the fd-3 mechanics survive the dropped
+// branch's own real setuid/setgid exec for the two-hop env(1)->python3
+// re-exec, not just a shell script. Same root/CAP_SETGID gate as that test.
+func TestExecuteScriptEnforced_WorkloadOwnedRunsDropped_PythonShebang(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires CAP_SETGID (root) to exercise the real setgroups(2)+exec path; see TestExecViaFd_RunsPython3ShebangScript for the unprivileged-safe equivalent")
+	}
+	findPython3(t)
+	const dropUID, dropGID = 65534, 65534
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "marker")
+	script := filepath.Join(dir, "pre-start.d", "30-project-custom")
+	mustWriteExecutableScript(t, script,
+		"#!/usr/bin/env python3\nimport os\nwith open("+`"`+marker+`"`+", 'w') as f:\n    f.write(str(os.getuid()))\n")
+
+	m := &LifecycleManager{
+		EnforcePrivilegeDrop: true,
+		WorkloadUID:          dropUID,
+		WorkloadGID:          dropGID,
+		WorkloadUsername:     "nobody",
+	}
+	if err := m.executeScriptEnforced(script, EventPreStart); err != nil {
+		t.Fatalf("executeScriptEnforced: %v", err)
+	}
+	got, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if string(got) != itoa(dropUID) {
+		t.Errorf("hook ran as uid %q, want %q (the distinct workload uid, proving the drop actually happened)", got, itoa(dropUID))
 	}
 }
 
