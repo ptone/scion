@@ -672,11 +672,25 @@ dotenv loaders read `./.env`), so leaving it unpinned would reopen the same
 class of hole through the working directory instead of the environment. A
 hook that genuinely needs the workspace must `cd` there explicitly. Pre-start
 is exempt from the `HOME`/cwd hardening (though it does still get
-`PYTHONNOUSERSITE=1`, which costs it nothing) because its only root-eligible
-hooks (the provisioner and any project/hub hook) run once, before the
-workload exists at all, and the provisioner specifically needs the
-agent-home `HOME` to find its bundle — see §11 for the invariant that
-exemption depends on.
+`PYTHONNOUSERSITE=1`, which costs it nothing) because its only remaining
+root-eligible hook — a project/hub hook — runs once, before the workload
+exists at all, and needs the agent-home `HOME` to find what was staged there
+— see §11 for the invariant that exemption depends on.
+
+The container-script harness's own pre-start provisioner is no longer part of
+this exemption at all: `buildEnforcedCmd` recognizes it by its fixed staged
+name (`pkg/harness.HarnessProvisionHookFilename`) and runs it under the
+workload's own uid/gid instead, with supplementary groups cleared, regardless
+of `DecideExecAsRoot`'s own root-eligible classification for it. The wrapper
+script itself stays root-owned and trusted — that classification still proves
+it is the genuine, broker-delivered file — but what it execs
+(`sciontool harness provision`, and in turn the harness's own `provision.py`)
+reads and writes `$HOME` and `/workspace`, both fully workload-controlled, so
+running it as root was never actually safe even under the "before the
+workload exists" premise: `$HOME` and `/workspace` are exactly the paths that
+premise is about. Because this drop does not depend on $HOME being fresh, it
+is unconditionally safe under a resume/re-bootstrap over a persisted `$HOME`
+too, unlike the project/hub hook case §11 still tracks.
 
 **No TOCTOU.** The script is opened with `O_NOFOLLOW` at every path
 component from `/` down to its own directory, then opened itself with
@@ -1058,16 +1072,20 @@ every runtime — not a substrate-specific mechanism:
 - The sdsmint trust-bundle projection (§7.1) as a supported, tested
   configuration on more than one cluster.
 - The pre-start `HOME=<agent home>` exception in §8.1's lifecycle hook
-  privilege enforcement (`buildEnforcedCmd`, `eventName == EventPreStart`)
-  is safe under Phase 1's own invariants: bootstrap is one-shot per actor
-  process (a repeat gets 409, checked before any side effect), and each
-  actor resumes from a golden snapshot taken before its own bootstrap ever
-  ran, so no workload code has touched `$HOME` when a root pre-start hook
-  runs. `Suspender`/`Resume` or any other mechanism that re-runs pre-start
-  over a `$HOME` an earlier bootstrap already populated would invalidate
-  that premise — a root pre-start hook (the harness provisioner, or a
-  project/hub hook) would then be reading a HOME the workload had already
-  had a chance to write into. Revisit the exception (e.g. by having the
-  bootstrap redirect's clear step report whether it found prior content,
-  and treating that as "a workload may already have run here") before any
-  such mechanism ships.
+  privilege enforcement (`buildEnforcedCmd`, `eventName == EventPreStart`) is
+  safe under Phase 1's own invariants for the one root-eligible hook it still
+  applies to — a project/hub hook: bootstrap is one-shot per actor process (a
+  repeat gets 409, checked before any side effect), and each actor resumes
+  from a golden snapshot taken before its own bootstrap ever ran, so no
+  workload code has touched `$HOME` when that hook runs. `Suspender`/`Resume`
+  or any other mechanism that re-runs pre-start over a `$HOME` an earlier
+  bootstrap already populated would invalidate that premise — a root
+  project/hub hook would then be reading a HOME the workload had already had
+  a chance to write into. Revisit the exception (e.g. by having the bootstrap
+  redirect's clear step report whether it found prior content, and treating
+  that as "a workload may already have run here") before any such mechanism
+  ships. The harness provisioner no longer shares this exposure: it runs
+  under the workload's own uid/gid regardless of `$HOME`'s freshness (§8.1),
+  so a resume/re-bootstrap over a persisted `$HOME` cannot turn it into a
+  root write against workload-controlled content the way it still could for
+  a project/hub hook.
