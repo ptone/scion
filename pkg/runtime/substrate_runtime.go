@@ -23,12 +23,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -49,8 +47,14 @@ const (
 	actorRunningPollInterval   = 2 * time.Second
 	defaultHealthzTimeout      = 5 * time.Minute
 	defaultExecTimeout         = 60 * time.Second
-	substrateLogTailLines      = 2000
 )
+
+// ErrLogsNotSupported is returned by GetLogs instead of reading worker pod
+// logs. Worker pods are shared across atespaces and users, so a pod-level
+// log read would return other tenants' actor output — and any worker-level
+// lines naming other atespaces — alongside the caller's own; see
+// .design/kubernetes/substrate-runtime.md §4. Match with errors.Is.
+var ErrLogsNotSupported = errors.New("agent logs are not available on the substrate runtime; operators can read an actor's output with kubectl, filtered by the actor's uid")
 
 // substrateAgentRecord holds the fields List needs that ListActors cannot
 // return (Substrate actors carry no labels — substrate-runtime.md §4), synthesised
@@ -74,7 +78,7 @@ type SubstrateRuntime struct {
 	client    ateapipb.ControlClient
 	conn      *grpc.ClientConn // non-nil only when this runtime opened it (nil for injected test clients)
 	router    *substrate.RouterClient
-	k8sClient kubernetes.Interface // for PodLogs (GetLogs) and the dialer's own TokenRequest calls
+	k8sClient kubernetes.Interface // for the dialer's own TokenRequest calls
 
 	now   func() time.Time
 	sleep func(time.Duration)
@@ -954,47 +958,13 @@ func substratePhase(s ateapipb.ActorState) string {
 	}
 }
 
-// GetLogs implements substrate-runtime.md §4: GetActor →
-// status.worker_assignment → client-go PodLogs (tail 2000 lines).
-//
-// API-shape note: an earlier design assumed an extra GetWorker call was
-// needed to resolve "GetActor → status.worker → pod name/namespace", but
-// ActorStatus.worker_assignment already carries worker_pod and
-// worker_namespace directly (a deliberate denormalization — see the proto
-// comment on WorkerAssignment: "readers on a hot path do not have to fetch
-// the Worker at all"). No separate GetWorker call is needed or made.
+// GetLogs does not read worker pod logs (substrate-runtime.md §4). Worker
+// pods are shared across atespaces and users, so a pod-level log read would
+// return other tenants' actor output — and any worker-level lines naming
+// other atespaces — alongside the caller's own. It returns
+// ErrLogsNotSupported and makes no ateapi or Kubernetes call.
 func (r *SubstrateRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	atespace, actorName, err := splitSubstrateID(id)
-	if err != nil {
-		return "", err
-	}
-
-	actor, err := r.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: actorName}})
-	if err != nil {
-		return "", fmt.Errorf("substrate: get actor %s: %w", id, err)
-	}
-
-	wa := actor.GetStatus().GetWorkerAssignment()
-	if wa == nil || wa.GetWorkerPod() == "" {
-		return "", fmt.Errorf("substrate: actor %s has no assigned worker (state: %s)", id, actor.GetStatus().GetState())
-	}
-	if r.k8sClient == nil {
-		return "", fmt.Errorf("substrate: no Kubernetes client configured for pod logs")
-	}
-
-	tailLines := int64(substrateLogTailLines)
-	req := r.k8sClient.CoreV1().Pods(wa.GetWorkerNamespace()).GetLogs(wa.GetWorkerPod(), &corev1.PodLogOptions{TailLines: &tailLines})
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		return "", fmt.Errorf("substrate: stream logs for %s (pod %s/%s): %w", id, wa.GetWorkerNamespace(), wa.GetWorkerPod(), err)
-	}
-	defer func() { _ = stream.Close() }()
-
-	data, err := io.ReadAll(stream)
-	if err != nil {
-		return "", fmt.Errorf("substrate: read logs for %s: %w", id, err)
-	}
-	return string(data), nil
+	return "", ErrLogsNotSupported
 }
 
 // Exec implements substrate-runtime.md §4: POST /scion/v1/exec via the
