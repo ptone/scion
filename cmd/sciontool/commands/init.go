@@ -130,6 +130,13 @@ type InitRunOptions struct {
 	// RunInit's historical behaviour, unconditionally, for `sciontool init`
 	// and every runtime other than substrate.
 	//
+	// Superseded outright by ResolveWorkingDir below when both are set: its
+	// result is what reaches the harness, and this field is ignored. No
+	// caller sets both today — substrate-serve's InitRunner sets only
+	// ResolveWorkingDir, and every other caller sets only WorkingDir, if
+	// anything — so this precedence is a documented default for a future
+	// caller rather than a path any current one exercises.
+	//
 	// Set only by `sciontool substrate-serve`'s InitRunner wiring
 	// (cmd/sciontool/commands/substrate_serve.go's substrateServeInitOptions),
 	// never by an environment variable a workload could set itself and never
@@ -143,6 +150,37 @@ type InitRunOptions struct {
 	// (see substrateServeInitOptions's doc comment for how the value is
 	// resolved, including the $HOME fallback).
 	WorkingDir string
+
+	// ResolveWorkingDir, when non-nil, is called once by RunInit — after
+	// gitCloneWorkspace and the post-pre-start-hook ownership fixup below
+	// have both run, and before harnessSupervisorConfig builds the
+	// supervisor.Config — to compute the harness child's working directory
+	// in place of the static WorkingDir field above.
+	//
+	// That placement is not incidental: a resolver that needs to know
+	// whether a directory is actually usable (searchable by the scion
+	// uid/gid) has to run after every step that can change that — and on
+	// substrate, both of the steps above can. gitCloneWorkspace's
+	// ensureWorkspaceOwnership chowns the workspace to the scion uid (or
+	// creates it via git init in the first place); the ownership fixup that
+	// follows pre-start hooks chowns any root-owned files a provisioner left
+	// behind. Calling the resolver any earlier — as substrate-serve used to,
+	// by resolving before ever invoking RunInit — sees the workspace in
+	// whatever state the broker's bind mount left it in: for a fresh
+	// git-clone agent, root-owned and not yet searchable by the scion uid,
+	// which resolves to the wrong directory.
+	//
+	// nil (the zero value) for every caller except substrate-serve's
+	// InitRunner wiring (substrateServeInitOptions): RunInit's behaviour is
+	// then exactly WorkingDir's own zero-value contract above, unchanged.
+	//
+	// An error from ResolveWorkingDir fails RunInit closed with
+	// exitCodeNoUsableHarnessCwd: the harness is never started, and RunInit
+	// never falls back to WorkingDir's own zero-value "inherit this
+	// process's cwd" behaviour or to "/" — see resolveSubstrateHarnessCwd's
+	// doc comment (substrate_serve.go) for why "/" specifically must never
+	// be used.
+	ResolveWorkingDir func() (string, error)
 }
 
 // errPrivilegeDropRequired is returned when RequirePrivilegeDrop is set and
@@ -187,6 +225,17 @@ func requirePrivilegeDropOrFail(targetUID int, requirePrivilegeDrop bool) error 
 // for why that direct Hub report, not a broker heartbeat fallback, is the
 // only thing that makes this failure visible on substrate.
 const exitCodePrivilegeDropRequired = 17
+
+// exitCodeNoUsableHarnessCwd is the exit code RunInit returns when
+// InitRunOptions.ResolveWorkingDir is set and returns an error — never for
+// any other reason. It stays a distinct value, the same reasoning as
+// exitCodePrivilegeDropRequired above: so an operator reading
+// substrate-serve's own logged exit code can tell which failure this was.
+// RunInit reports PhaseError the same way — via reportInitFailure — before
+// returning it; see ResolveWorkingDir's doc comment for the fail-closed
+// contract this enforces (never starts the harness, never falls back to
+// WorkingDir's zero-value behaviour or to "/").
+const exitCodeNoUsableHarnessCwd = 18
 
 // privilegeDropPreconditionDeps groups checkPrivilegeDropFeasible's external
 // dependencies so tests can substitute all of them, rather than depending on
@@ -637,7 +686,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// first also prevents provisioner-created files (e.g. .agents/) from
 	// causing isWorkspaceEmpty to return false and skipping the clone.
 	// See: https://github.com/ptone/scion/issues/739
-	if err := gitCloneWorkspace(targetUID, targetGID, agentHome); err != nil {
+	if err := runGitCloneWorkspace(targetUID, targetGID, agentHome); err != nil {
 		log.Error("Git clone failed: %v", err)
 
 		// Update local agent-info.json to error state so local status readers
@@ -887,6 +936,26 @@ func RunInit(args []string, opts InitRunOptions) int {
 		} else if len(keys) > 0 {
 			log.Error("SCION_SECRET_KEYS is set but hub client is not configured — cannot fetch secrets")
 		}
+	}
+
+	// Resolve the harness working directory now — after runGitCloneWorkspace
+	// and the pre-start-hook ownership fixup above have both run, and before
+	// harnessSupervisorConfig builds the supervisor.Config — so a resolver
+	// that depends on the workspace being present and searchable by the
+	// scion uid (substrate-serve's, in particular) sees it in its final
+	// state rather than whatever the broker's bind mount left it in. See
+	// InitRunOptions.ResolveWorkingDir's doc comment for why this placement
+	// matters and what nil means for every other caller. ResolveWorkingDir's
+	// result supersedes opts.WorkingDir outright when both are set — see
+	// that field's own doc comment for why no caller does today.
+	if opts.ResolveWorkingDir != nil {
+		workingDir, err := opts.ResolveWorkingDir()
+		if err != nil {
+			log.Error("%v", err)
+			reportInitFailure(agentHome, err)
+			return exitCodeNoUsableHarnessCwd
+		}
+		opts.WorkingDir = workingDir
 	}
 
 	// Create supervisor with configuration
@@ -1751,6 +1820,15 @@ var runDirectSetUID = directSetUID
 // every other test in the same binary that shells out — stubbed to a
 // no-op by TestMain for exactly that reason.
 var startReaper = supervisor.StartReaper
+
+// runGitCloneWorkspace is gitCloneWorkspace's own call site as a package
+// var, the same reason as startReaper above: a test driving RunInit needs to
+// observe (and, for the ordering RunInit's InitRunOptions.ResolveWorkingDir
+// depends on, control) when the workspace clone step runs, without shelling
+// out to a real git process or depending on SCION_GIT_CLONE_URL pointing at
+// a reachable remote. Production code always leaves this at its default;
+// only a test replaces it.
+var runGitCloneWorkspace = gitCloneWorkspace
 
 // setupHostUser realigns the container's "scion" user to SCION_HOST_UID/GID
 // so the harness (and, for substrate, execAsUserCmd) can drop privileges
