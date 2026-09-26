@@ -160,56 +160,6 @@ a bound Unix socket, each wrapped in a goroutine with a hard timeout so a
 regression back to blocking behavior fails the test instead of hanging the
 binary.
 
-## Working-directory hardening, a closed env allowlist, and the fd-3 exec construction
-
-A hardened root hook after pre-start (post-start/pre-stop/session-end) still
-inherited init's own working directory, which — nothing in `sciontool` ever
-calls `Chdir` — is whatever the image sets as its `WORKDIR` (the workload's
-own, writable git workspace). A root hook invoking a tool that resolves code
-relative to its cwd (`python3 -c`/`-m`, `node -e`, `make`, a dotenv loader)
-would load workload-planted content and run it as root, the same escalation
-class `hardenedRootHookEnv`'s `HOME=/root` exists to close. `buildEnforcedCmd`
-now pins `cmd.Dir = "/"` for every root-eligible hook at an event after
-pre-start; pre-start itself is unaffected (its cwd stays whatever init's own
-already is), and it now also gets `PYTHONNOUSERSITE=1` — cheap, and the only
-guard available for the one scenario (a re-bootstrap over a `$HOME` a
-workload already touched — see the design doc's Phase 2 section) where its
-own "no workload yet" premise would not hold.
-
-`hardenedRootHookEnv` no longer inherits the process environment and strips
-a denylist; it now builds the environment from a closed allowlist of exact
-variable names only (`LANG`, `TERM`) plus its own fixed overrides (`HOME`,
-`PATH`, `PYTHONNOUSERSITE`, `PYTHONDONTWRITEBYTECODE`, `SCION_HOOK_PATH`).
-Deliberately excluded: `TZ` (looks equally safe but is not on the list), and
-every `SCION_*` variable, by name or by prefix — no root-eligible hook today
-reads any of them, and passing an entire namespace through on the assumption
-that none of its values is ever a workload-controlled path is exactly the
-kind of inherited trust this hardening exists to remove. A future hook that
-genuinely needs one adds it by name, with its own justification.
-
-The fd the script is opened on is now `O_CLOEXEC`. It reaches the child not
-by surviving the fork non-CLOEXEC at its own (arbitrary) descriptor number,
-but through `exec.Cmd.ExtraFiles`, which duplicates it into a fresh,
-independently-flagged descriptor at the fixed slot 3 in that one child —
-`ExtraFiles`' own dup clears close-on-exec on the duplicate regardless of the
-source descriptor's flag, which is what lets a shebang interpreter's own
-re-exec of `/proc/self/fd/3` still resolve it. The net effect: the script
-(which can carry secrets — `30-project-custom` is `0700` for exactly that
-reason) is never inheritable by any OTHER, unrelated child this process
-might fork while it happens to be open, only by the one child that is
-actually supposed to run it. Verified end to end for both a `#!/bin/sh` and
-a `#!/usr/bin/env python3` hook, on the as-root branch unprivileged and on
-the dropped branch under the existing root/`CAP_SETGID` gate.
-
-The stale-hook-clear fail-closed test previously covered only the
-`bootstrapPathError` (422) branch; a second test now covers a generic
-clear error (a permission failure removing a stale entry — the failure mode
-that actually motivated the fix) and its 500 response, skipped as root since
-root bypasses the DAC check the fixture depends on. The `initCalled`
-assertions in both tests now use a buffered channel with a bounded wait
-instead of reading a plain bool immediately after the response returns,
-since `handleBootstrap` starts init in a goroutine.
-
 ## Working-directory hardening, environment allowlist, and fd-passing
 
 Further scrutiny of the hardened-root-hook change surfaced one more gap in
