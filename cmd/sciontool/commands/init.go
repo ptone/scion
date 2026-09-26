@@ -511,6 +511,14 @@ func harnessSupervisorConfig(opts InitRunOptions, gracePeriod time.Duration, tar
 // This is the exact logic `sciontool init -- <cmd>` runs; it is exported
 // so other subcommands can reuse it instead of forking a copy.
 func RunInit(args []string, opts InitRunOptions) int {
+	// Gate the hub token file's owner check to substrate only, before any
+	// ReadTokenFile/ChownTokenFile call can happen: substrate is the one
+	// runtime RequirePrivilegeDrop is set for, and therefore the one
+	// runtime that always has a less-privileged workload user to defend
+	// the token file against. See EnforceTokenFileOwnerChecks's doc
+	// comment for why every other runtime leaves this at its default.
+	hub.EnforceTokenFileOwnerChecks(opts.RequirePrivilegeDrop)
+
 	// Start the reaper goroutine for zombie process cleanup.
 	// This is critical when running as PID 1 in a container.
 	startReaper()
