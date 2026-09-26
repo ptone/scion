@@ -136,6 +136,24 @@ func resolveAttachOptions() ([]wsclient.AttachOption, transportauth.TokenSource,
 	return opts, transportSrc, nil
 }
 
+// attachUnsupportedErr returns a fixed, explicit error for a runtime that has
+// no exec/attach/TTY primitive to dial, or nil when the given runtime
+// supports attach. It covers managed agents (a `managed:`-prefixed runtime)
+// and, in this phase, the substrate runtime (pkg/runtime.SubstrateRuntime.Attach)
+// — whose broker rejects the PTY stream only after the WebSocket upgrade has
+// already happened, so that rejection never reaches the CLI process. Every
+// attach entry point (both the direct `scion attach` path and the
+// `scion start -a` / `scion resume -a` paths) must call this before dialing.
+func attachUnsupportedErr(agentRuntime string) error {
+	if strings.HasPrefix(agentRuntime, "managed:") {
+		return fmt.Errorf("attach is not supported for managed agents — use scion message and scion look")
+	}
+	if agentRuntime == "substrate" {
+		return fmt.Errorf("attach is not supported for agents on the substrate runtime in this phase")
+	}
+	return nil
+}
+
 // attachViaHub attaches to an agent via Hub WebSocket connection.
 func attachViaHub(hubCtx *HubContext, agentName string) error {
 	PrintUsingHub(hubCtx.Endpoint)
@@ -155,19 +173,15 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 		return wrapHubError(fmt.Errorf("failed to get agent '%s': %w", agentName, err))
 	}
 
-	if strings.HasPrefix(agent.Runtime, "managed:") {
-		return fmt.Errorf("attach is not supported for managed agents — use scion message and scion look")
-	}
-
-	// The substrate runtime has no exec/attach/TTY primitive in this phase
-	// (pkg/runtime.SubstrateRuntime.Attach); its runtime broker rejects the
-	// PTY stream after the WebSocket upgrade has already happened, so that
-	// rejection never reaches this CLI process. Reject here instead, using
-	// the runtime value already returned by the agent GET above — the same
-	// shape as the managed-agent check above — so the user gets a fixed,
-	// explicit, non-zero-exit error before any WebSocket dial is attempted.
-	if agent.Runtime == "substrate" {
-		return fmt.Errorf("attach is not supported for agents on the substrate runtime in this phase")
+	// Some runtimes have no exec/attach/TTY primitive to dial: managed agents
+	// never did, and the substrate runtime's broker rejects the PTY stream
+	// only after the WebSocket upgrade has already happened (see
+	// attachUnsupportedErr), so that rejection never reaches this CLI
+	// process. Reject here instead, using the runtime value already returned
+	// by the agent GET above, so the user gets a fixed, explicit,
+	// non-zero-exit error before any WebSocket dial is attempted.
+	if err := attachUnsupportedErr(agent.Runtime); err != nil {
+		return err
 	}
 
 	// Check agent lifecycle status - the agent must be running to attach.

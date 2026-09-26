@@ -230,8 +230,9 @@ func TestAttachViaHub_IAPMode_EmptyToken_PassesGate(t *testing.T) {
 // exercising the attach path of startAgentViaHub() (site 2, the ready: label).
 // It handles the suspend-check GET, project GET (git-remote display), agent
 // CREATE POST, and the polling GET — all of which are reached before the token
-// gate in the non-workspace-upload code path.
-func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID string) *httptest.Server {
+// gate in the non-workspace-upload code path. The polling GET reports the
+// given agentRuntime (use "" for a normal non-managed, non-substrate agent).
+func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID, agentRuntime string) *httptest.Server {
 	t.Helper()
 	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
 	agentsPath := "/api/v1/projects/" + projectID + "/agents"
@@ -250,9 +251,10 @@ func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID stri
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			// Suspend check (pre-create) and polling (post-create): return running.
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{
-				ID:    agentID,
-				Name:  agentName,
-				Phase: "running",
+				ID:      agentID,
+				Name:    agentName,
+				Phase:   "running",
+				Runtime: agentRuntime,
 			})
 
 		case r.Method == http.MethodPost && r.URL.Path == agentsPath:
@@ -334,7 +336,7 @@ func TestStartAgentViaHub_Site2_PlainMode_EmptyToken_RequiresAppToken(t *testing
 		agentID   = "start-plain-uuid"
 	)
 
-	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID)
+	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID, "")
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
 
@@ -350,6 +352,49 @@ func TestStartAgentViaHub_Site2_PlainMode_EmptyToken_RequiresAppToken(t *testing
 	require.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "no access token found for Hub"),
 		"plain mode with empty token should reach 'no access token found for Hub' in startAgentViaHub site 2; got: %v", err)
+}
+
+// TestStartAgentViaHub_Site2_SubstrateAgent_ReturnsExplicitError directly
+// calls startAgentViaHub() with attach=true on an agent whose runtime is
+// "substrate" and exercises site 2 (the ready: label in the main polling
+// path). A substrate agent started with `-a` must fail with the same fixed,
+// explicit, non-zero-exit error as `scion attach` itself, and never reach the
+// WebSocket dial step — this is the same silent-failure bug on a sibling
+// code path.
+func TestStartAgentViaHub_Site2_SubstrateAgent_ReturnsExplicitError(t *testing.T) {
+	clearAppTokenSources(t)
+
+	restore := saveAttachTestState()
+	defer restore()
+	attach = true
+	templateName = ""
+	labelFlags = nil
+	runtimeBrokerID = ""
+	harnessConfigFlag = ""
+	harnessAuthFlag = ""
+
+	const (
+		projectID = "proj-start-substrate-321"
+		agentName = "start-substrate-agent"
+		agentID   = "start-substrate-uuid"
+	)
+
+	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID, "substrate")
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  srv.URL,
+		ProjectID: projectID,
+		// ProjectPath is empty → workspace scan and hubsync calls are skipped.
+	}
+
+	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+
+	require.Error(t, err)
+	const wantMsg = "attach is not supported for agents on the substrate runtime in this phase"
+	assert.Equal(t, wantMsg, err.Error(), "substrate start -a must fail with the fixed message, got: %v", err)
 }
 
 // TestAttachViaHub_SubstrateAgent_ReturnsExplicitError verifies that attach on
@@ -428,6 +473,11 @@ func TestAttachViaHub_DockerAgent_UnaffectedBySubstrateCheck(t *testing.T) {
 	require.Error(t, err, "expected a WS dial error — the docker path must reach the dial step unchanged")
 	assert.NotContains(t, err.Error(), "attach is not supported for agents on the substrate runtime",
 		"docker agent must not be rejected by the substrate guard, got: %v", err)
+	// Pin that the phase and token gates were actually passed and the
+	// WebSocket dial itself was reached (pkg/wsclient/pty.go:123/125), not
+	// some other, earlier failure that happens to also be non-nil.
+	assert.Contains(t, err.Error(), "connection failed",
+		"docker agent should fail at the WS dial step, got: %v", err)
 }
 
 // TestStartAgentViaHub_Site2_IAPMode_EmptyToken_PassesGate directly calls
@@ -467,7 +517,7 @@ func TestStartAgentViaHub_Site2_IAPMode_EmptyToken_PassesGate(t *testing.T) {
 		agentID   = "start-iap-uuid"
 	)
 
-	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID)
+	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID, "")
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
 
