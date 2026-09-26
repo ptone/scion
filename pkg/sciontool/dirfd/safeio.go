@@ -242,6 +242,19 @@ func relUnderRoot(root, path string) (string, error) {
 // There is no separate stat anywhere in this path: the file is fstat'd and
 // read exactly once, from the same fd the walk verified, by
 // ReadAtNoFollow.
+// readUnderRootIntermediateCloseTestHook, when non-nil, fires in
+// ReadUnderRootNoFollow immediately after an owned intermediate directory
+// fd is closed — whether the next component's openat succeeded or not. It
+// receives the exact fd number that was just closed, purely informational,
+// so a test can immediately dup a sentinel onto that number (claiming it
+// deterministically, rather than hoping the kernel's normal allocator
+// happens to reuse it for something else first) and later prove this
+// package's own deferred closer never touches that number again. Always
+// nil in production; unexported — this package's own tests are the only
+// thing that may set it. Same purpose as walk.go's chownWalkTestHook
+// family; see its doc comment.
+var readUnderRootIntermediateCloseTestHook func(closedFd int)
+
 func ReadUnderRootNoFollow(root, path string, max int64) ([]byte, error) {
 	rel, err := relUnderRoot(root, path)
 	if err != nil {
@@ -267,6 +280,19 @@ func ReadUnderRootNoFollow(root, path string, max int64) ([]byte, error) {
 		child, operr := syscall.Openat(curFd, name, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		if ownsCur {
 			_ = syscall.Close(curFd)
+			if readUnderRootIntermediateCloseTestHook != nil {
+				readUnderRootIntermediateCloseTestHook(curFd)
+			}
+			// Mark curFd's ownership released the instant it's closed, not
+			// after the error check below: on an error return, the deferred
+			// closer above would otherwise still see ownsCur==true and close
+			// this same (already-closed) fd number a second time. In a
+			// multi-threaded process — this walk can run in root's own
+			// PID-1 — a second goroutine can have already been handed that
+			// number back by the kernel between the two closes, so the
+			// second close would silently close somebody else's fd instead
+			// of erroring.
+			ownsCur = false
 		}
 		if operr != nil {
 			return nil, fmt.Errorf("dirfd: open %s: %w", name, operr)
