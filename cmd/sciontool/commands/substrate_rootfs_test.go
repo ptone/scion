@@ -160,6 +160,179 @@ func TestFixupRootfsForScion_ChownsRootOwnedHomeEntriesThenIsIdempotent(t *testi
 	}
 }
 
+// TestFixupWorldWritableTmpDirSticky_SetsStickyOnWorldWritable proves
+// condition (iii) from fixupRootfsForScion's doc comment: a world-writable
+// directory missing the sticky bit (the observed Substrate /tmp state) gets
+// set to 01777.
+func TestFixupWorldWritableTmpDirSticky_SetsStickyOnWorldWritable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	if changed := fixupWorldWritableTmpDirSticky(dir); !changed {
+		t.Fatal("expected fixupWorldWritableTmpDirSticky to report a change")
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSticky == 0 {
+		t.Errorf("mode = %v, want the sticky bit set", info.Mode())
+	}
+	if got := info.Mode().Perm(); got != 0o777 {
+		t.Errorf("perm = %o, want 0777", got)
+	}
+}
+
+// TestFixupWorldWritableTmpDirSticky_LeavesAlreadyStickyAlone is the "only
+// ever fix the missing-sticky case" idempotency check: a directory that
+// already has the sticky bit (e.g. a real 1777 /tmp) is left completely
+// alone, and fixupWorldWritableTmpDirSticky reports no change.
+func TestFixupWorldWritableTmpDirSticky_LeavesAlreadyStickyAlone(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, os.ModeSticky|0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	if changed := fixupWorldWritableTmpDirSticky(dir); changed {
+		t.Error("expected no change for an already-sticky directory")
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSticky == 0 {
+		t.Error("sticky bit should still be set")
+	}
+	if got := info.Mode().Perm(); got != 0o777 {
+		t.Errorf("perm = %o, want unchanged 0777", got)
+	}
+}
+
+// TestFixupWorldWritableTmpDirSticky_LeavesNonWorldWritableAlone proves the
+// fixup never widens or narrows a directory that isn't already
+// world-writable — this is a defence-in-depth fixup for the observed
+// 0777-no-sticky case specifically, not a general "make /tmp public" step.
+func TestFixupWorldWritableTmpDirSticky_LeavesNonWorldWritableAlone(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if changed := fixupWorldWritableTmpDirSticky(dir); changed {
+		t.Error("expected no change for a non-world-writable directory")
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Errorf("perm = %o, want unchanged 0755", got)
+	}
+}
+
+// TestFixupWorldWritableTmpDirSticky_MissingDirIsNoop proves a rootfs
+// without the directory at all (every current test double, and any real
+// rootfs image that lacks a /var/tmp) is handled as "nothing to fix", not
+// an error.
+func TestFixupWorldWritableTmpDirSticky_MissingDirIsNoop(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "does-not-exist")
+
+	if changed := fixupWorldWritableTmpDirSticky(dir); changed {
+		t.Error("expected no change for a missing directory")
+	}
+}
+
+// TestFixupWorldWritableTmpDirSticky_RefusesSymlink proves that a symlink
+// planted at the tmp-dir path (instead of a real directory) is refused via
+// O_NOFOLLOW rather than followed to whatever it points at.
+func TestFixupWorldWritableTmpDirSticky_RefusesSymlink(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target-dir")
+	if err := os.Mkdir(target, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "tmp")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if changed := fixupWorldWritableTmpDirSticky(link); changed {
+		t.Error("expected no change when the tmp-dir path is a symlink")
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSticky != 0 {
+		t.Error("symlink target must be untouched, but the sticky bit was set")
+	}
+}
+
+// TestFixupRootfsForScion_FixesTmpAndVarTmpStickyBit proves
+// fixupRootfsForScion itself drives the /tmp and /var/tmp fixup (not just
+// the standalone helper), deriving both paths from its root parameter, and
+// that the combined info log line's gate includes them (the "only when
+// something changed" idempotency guard from the two-condition version of
+// this test above).
+func TestFixupRootfsForScion_FixesTmpAndVarTmpStickyBit(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+
+	// Mkdir's mode argument is subject to umask, so chmod explicitly
+	// afterwards to get the exact 0777-no-sticky starting condition this
+	// test needs, the same way the root-chmod tests above do.
+	tmpDir := filepath.Join(root, "tmp")
+	if err := os.Mkdir(tmpDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tmpDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	varTmpDir := filepath.Join(root, "var", "tmp")
+	if err := os.MkdirAll(varTmpDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(varTmpDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	fixupRootfsForScion(root, home, 1000, 1000)
+
+	for _, dir := range []string{tmpDir, varTmpDir} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSticky == 0 {
+			t.Errorf("%s: mode = %v, want the sticky bit set", dir, info.Mode())
+		}
+		if got := info.Mode().Perm(); got != 0o777 {
+			t.Errorf("%s: perm = %o, want 0777", dir, got)
+		}
+	}
+
+	// Idempotent: a second call makes no further changes and doesn't error.
+	fixupRootfsForScion(root, home, 1000, 1000)
+	for _, dir := range []string{tmpDir, varTmpDir} {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o777 {
+			t.Errorf("%s: perm = %o, want unchanged 0777 after the second call", dir, got)
+		}
+	}
+}
+
 // TestFixupRootfsForScion_NoopWhenAlreadyCorrect proves the doc comment's
 // "idempotent: when neither condition needs fixing, this makes no changes"
 // claim end to end, using the real (non-faked) fileOwnerUID and lchownFn: a
