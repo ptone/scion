@@ -576,3 +576,144 @@ func TestOpenLogs_NonEnforced_AllowsHardlinkedLogPath(t *testing.T) {
 	}
 	svc.closeLogs()
 }
+
+// countLogDirFds returns the number of this process's currently open file
+// descriptors that refer to a path inside logDir, by reading
+// /proc/self/fd and resolving each entry's symlink target.
+func countLogDirFds(t *testing.T, logDir string) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatalf("ReadDir /proc/self/fd: %v", err)
+	}
+	count := 0
+	for _, e := range entries {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if err != nil {
+			continue // fd closed between ReadDir and Readlink; not ours
+		}
+		if strings.HasPrefix(target, logDir+"/") {
+			count++
+		}
+	}
+	return count
+}
+
+// TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure is T5's core
+// regression test for the two R2 fd-leak fixes: closing a service's own
+// partial fds when its own log-open fails, and closing the fds of every
+// service that never gets a chance to start because an earlier one's
+// start() call failed. Neither path is exercised by
+// TestManager_Start_DropsOnlyTheServiceWithASymlinkedLogPath, which plants
+// its symlink at the FIRST file openLogs opens (so no partial-open fd ever
+// exists) and never drives a start() failure.
+//
+// "second"'s stderr log is a planted symlink, so its stdout opens fine and
+// its stderr fails — a genuine partial-open. "bad" names a nonexistent
+// binary, so its logs open fine but its start() fails, which must close
+// both "bad"'s own fds and "fourth"'s (which never got a chance to start).
+// Only "first" should have any fds left open under logDir once Start
+// returns, and none once Shutdown completes.
+func TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	home := os.Getenv("HOME")
+	logDir := filepath.Join(home, ".scion", "services", "logs")
+
+	// Warmup: absorb the logger's own lazy agent.log open (a one-time fd
+	// this package's log calls create, unrelated to service log fds) and
+	// establish logDir on disk before the real test measures fd deltas.
+	warmup := New(5 * time.Second)
+	if err := warmup.Start(context.Background(), []api.ServiceSpec{{Name: "warmup", Command: []string{"true"}}}, 0, 0, "", true); err != nil {
+		t.Fatalf("warmup Start: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	warmupCtx, warmupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = warmup.Shutdown(warmupCtx)
+	warmupCancel()
+
+	victim := t.TempDir()
+	if err := os.Symlink(filepath.Join(victim, "victim.log"), filepath.Join(logDir, "second.stderr.log")); err != nil {
+		t.Fatal(err)
+	}
+
+	specs := []api.ServiceSpec{
+		{Name: "first", Command: []string{"sleep", "60"}},
+		{Name: "second", Command: []string{"sleep", "60"}},
+		{Name: "bad", Command: []string{"/nonexistent/binary-for-fd-leak-test"}},
+		{Name: "fourth", Command: []string{"sleep", "60"}},
+	}
+
+	before := countLogDirFds(t, logDir)
+
+	mgr := New(5 * time.Second)
+	_ = mgr.Start(context.Background(), specs, 0, 0, "", true) // error expected; fds are what this checks
+
+	afterStart := countLogDirFds(t, logDir)
+	if delta := afterStart - before; delta != 3 {
+		t.Errorf("open fds under logDir after Start = %d (delta %d), want delta 3 (only \"first\"'s stdout+stderr+lifecycle)", afterStart, delta)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = mgr.Shutdown(shutdownCtx)
+	cancel()
+
+	afterShutdown := countLogDirFds(t, logDir)
+	if afterShutdown != before {
+		t.Errorf("open fds under logDir after Shutdown = %d, want %d (back to baseline, no leak)", afterShutdown, before)
+	}
+}
+
+// TestOpenLogNoFollow_RefusesFifoWithoutBlocking is L1: proves the
+// S_IFREG check in openLogNoFollow refuses a FIFO planted at a log path —
+// even one with a reader already attached, so open(2) itself would
+// otherwise succeed and hang were it not for O_NONBLOCK — rather than
+// hanging startup or silently writing into a pipe nothing reads from
+// correctly.
+func TestOpenLogNoFollow_RefusesFifoWithoutBlocking(t *testing.T) {
+	dir := t.TempDir()
+	fifoPath := filepath.Join(dir, "evil.stdout.log")
+	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold a reader open on the FIFO so a blocking open on the write side
+	// would otherwise succeed immediately (proving the refusal is the
+	// S_IFREG check, not an incidental ENXIO from having no reader).
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		f, err := os.OpenFile(fifoPath, os.O_RDONLY, 0)
+		if err == nil {
+			_ = f.Close()
+		}
+	}()
+	t.Cleanup(func() {
+		// Unblock the reader goroutine if openLogNoFollow itself didn't.
+		if fd, err := syscall.Open(fifoPath, syscall.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = syscall.Close(fd)
+		}
+	})
+
+	dirFd, err := syscall.Open(dir, syscall.O_DIRECTORY|syscall.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	done := make(chan error, 1)
+	go func() {
+		flags := syscall.O_APPEND | syscall.O_CREAT | syscall.O_WRONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+		_, err := openLogNoFollow(dirFd, "evil.stdout.log", flags, 0644, false)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expected an error refusing the FIFO, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("openLogNoFollow blocked on a FIFO instead of refusing it")
+	}
+}
