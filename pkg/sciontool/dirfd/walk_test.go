@@ -899,3 +899,110 @@ func TestRemoveContentsNoFollow_RefusesSymlinkSwappedInBeforeSubdirOpen(t *testi
 		t.Error("expected root/sub to still be the symlink the swap planted")
 	}
 }
+
+// TestChownTreeNoFollow_ReportsPerEntryOpenFailureViaOnErr is R5's chown-
+// walk guard for the L3 "non-ENOENT open/stat failure" onErr sites: a real,
+// deterministic, non-fault-injected trigger. Removing search (execute)
+// permission on a directory makes every openat/fstatat relative to it fail
+// EACCES for anything inside it, for a non-root process — no seam needed.
+// Proves both that onErr fires with the entry's name and the real error,
+// and that the entry is left un-chowned (fail-safe: a skipped entry is
+// never acted on).
+func TestChownTreeNoFollow_ReportsPerEntryOpenFailureViaOnErr(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: root bypasses the permission check this test relies on")
+	}
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(sub, "f")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fBefore := ctimeOf(t, f)
+	ctimeSettle()
+
+	// Read-but-no-search: os.ReadDir(sub) (and this package's own
+	// Readdirnames on an already-open fd) still lists "f", but any
+	// openat/fstatat relative to sub's fd trying to resolve "f" fails
+	// EACCES — sub's own listing succeeded, its contents did not resolve.
+	if err := os.Chmod(sub, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var onErrCalls []string
+	var gotEACCES bool
+	uid, gid := os.Getuid(), os.Getgid()
+	_, _, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, false, func(name string, e error) {
+		onErrCalls = append(onErrCalls, name)
+		if name == "f" && e == syscall.EACCES {
+			gotEACCES = true
+		}
+	})
+	// Restore before any further path-based inspection (including this
+	// test's own ctimeOf call below), which would otherwise also be
+	// refused by the same permission this test just applied.
+	_ = os.Chmod(sub, 0o755)
+	if err != nil {
+		t.Fatalf("ChownTreeNoFollow: %v", err)
+	}
+	if !gotEACCES {
+		t.Errorf("expected onErr to be called with \"f\"/EACCES, got calls: %v", onErrCalls)
+	}
+	if ctimeOf(t, f) != fBefore {
+		t.Error("f was chowned despite the open failure — a skipped entry must be left un-chowned")
+	}
+}
+
+// TestRemoveContentsNoFollow_ReportsPerEntryStatFailureViaOnErr is R5's
+// remove-walk twin: the same real EACCES trigger, this time hitting
+// RemoveContentsNoFollow's own Fstatat call. Proves onErr fires and that
+// the entry survives (fail-safe: a skipped entry is never deleted).
+func TestRemoveContentsNoFollow_ReportsPerEntryStatFailureViaOnErr(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: root bypasses the permission check this test relies on")
+	}
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(sub, "f")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, err := OpenDirNoFollow(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+
+	if err := os.Chmod(sub, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var onErrCalls []string
+	var gotEACCES bool
+	if _, err := RemoveContentsNoFollow(dir, nil, func(name string, e error) {
+		onErrCalls = append(onErrCalls, name)
+		if name == "f" && e == syscall.EACCES {
+			gotEACCES = true
+		}
+	}); err != nil {
+		_ = os.Chmod(sub, 0o755)
+		t.Fatalf("RemoveContentsNoFollow: %v", err)
+	}
+	// Restore before inspecting: os.Stat(f) below needs search permission
+	// on sub too.
+	_ = os.Chmod(sub, 0o755)
+
+	if !gotEACCES {
+		t.Errorf("expected onErr to be called with \"f\"/EACCES, got calls: %v", onErrCalls)
+	}
+	if _, err := os.Stat(f); err != nil {
+		t.Errorf("f should survive (fail-safe: a skipped entry is never deleted): %v", err)
+	}
+}
