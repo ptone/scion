@@ -62,3 +62,37 @@ func TestTemplateNotFound_ConsistentAcrossGetDownloadAndFiles(t *testing.T) {
 		})
 	}
 }
+
+// TestTemplateNotFound_MissingID_UploadFinalizeValidate pins the same
+// missing-ID mapping for upload, finalize and validate: each fetches the
+// template with GetTemplate before doing anything else, including
+// authorization, so a missing ID must 404 with "Template not found" the same
+// way get/download/files do. Upload and finalize authorize with
+// authorize(...ActionUpdate), which returns 403 rather than 404 for a
+// template the caller cannot access — unlike the ActionRead paths above —
+// so there is no not-found/inaccessible parity to compare here; this only
+// pins the missing-ID mapping itself.
+func TestTemplateNotFound_MissingID_UploadFinalizeValidate(t *testing.T) {
+	srv, _, alice, _, _ := setupTemplateScopeTest(t)
+	missingID := tid("not-found-missing-upload-finalize-validate")
+
+	type route struct {
+		name   string
+		method string
+		path   func(id string) string
+	}
+	routes := []route{
+		{"upload", http.MethodPost, func(id string) string { return "/api/v1/templates/" + id + "/upload" }},
+		{"finalize", http.MethodPost, func(id string) string { return "/api/v1/templates/" + id + "/finalize" }},
+		{"validate", http.MethodGet, func(id string) string { return "/api/v1/templates/" + id + "/validate" }},
+	}
+
+	for _, rt := range routes {
+		t.Run(rt.name, func(t *testing.T) {
+			rec := doRequestAsUser(t, srv, alice, rt.method, rt.path(missingID), nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "a nonexistent template must 404 on %s; got: %s", rt.name, rec.Body.String())
+			assert.JSONEq(t, `{"error":{"code":"not_found","message":"Template not found"}}`, rec.Body.String(),
+				"a nonexistent template must map to the Template not-found body on %s", rt.name)
+		})
+	}
+}
