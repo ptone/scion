@@ -444,11 +444,14 @@ trusted) before it can make its first model call.
 
 `sciontool substrate-serve` supplies `RunInit` a working-directory resolver
 (`InitRunOptions.ResolveWorkingDir`) rather than a precomputed value.
-`RunInit` calls it after the workspace has been cloned and after pre-start
-hooks have run — the two steps that can change whether a directory is
-searchable by the `scion` uid — and before it builds `supervisor.Run`'s
-config, threading the result into the same optional `WorkingDir` field every
-other runtime's call site leaves unset (so their behavior is unchanged):
+`RunInit` calls it directly after the workspace has been cloned and the
+post-pre-start-hook ownership fixup has run — the two steps that can change
+whether a directory is searchable by the `scion` uid — and before anything
+that starts a long-running component on the harness's behalf (sidecar
+services, the metadata server, the hub secret fetch) or builds
+`supervisor.Run`'s config, threading the result into the same optional
+`WorkingDir` field every other runtime's call site leaves unset (so their
+behavior is unchanged):
 
 - **Primary candidate:** `SCION_WORKSPACE_PATH`, required absolute, default
   `/workspace`.
@@ -460,9 +463,10 @@ other runtime's call site leaves unset (so their behavior is unchanged):
   candidate is accepted only if it, and every one of its ancestors
   (including through a symlink target), stats as searchable by the target
   uid/gid — never merely by what root itself can traverse. If neither
-  candidate is usable, the harness is never started: `RunInit` returns
-  `exitCodeNoUsableHarnessCwd` (18), which is logged and reported to the Hub
-  through the same init-failure path other init failures use, and
+  candidate is usable, the harness is never started, and neither are the
+  sidecar services, the metadata server, or the hub secret fetch: `RunInit`
+  returns `exitCodeNoUsableHarnessCwd` (18), which is logged and reported to
+  the Hub through the same init-failure path other init failures use, and
   `/healthz` reflects `init-failed`. The control server
   itself stays up — Substrate does not treat a PID 1 exit as a failure
   signal (§5.1, §10) — so the actor keeps running and holding its worker
