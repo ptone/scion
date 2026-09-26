@@ -975,6 +975,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
+	// System env set above always wins: track the names already present so
+	// the secret-injection loops below can skip any secret whose target
+	// collides with one. Symmetric with the docker/podman/apple_container
+	// runtime's equivalent check in buildCommonRunArgs.
+	envVarNames := make(map[string]struct{}, len(envVars))
+	for _, ev := range envVars {
+		envVarNames[ev.Name] = struct{}{}
+	}
+
 	// Secret mounting: determine strategy and inject secrets
 	var extraVolumes []corev1.Volume
 	var extraVolumeMounts []corev1.VolumeMount
@@ -1031,6 +1040,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			for _, s := range config.ResolvedSecrets {
 				switch s.Type {
 				case "environment":
+					if _, collides := envVarNames[s.Target]; collides {
+						continue
+					}
 					envVars = append(envVars, corev1.EnvVar{
 						Name: s.Target,
 						ValueFrom: &corev1.EnvVarSource{
@@ -1040,6 +1052,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 							},
 						},
 					})
+					envVarNames[s.Target] = struct{}{}
 				case "file":
 					target := expandTildeTarget(s.Target, fmt.Sprintf("/home/%s", config.UnixUsername))
 					extraVolumeMounts = append(extraVolumeMounts, corev1.VolumeMount{
@@ -1057,6 +1070,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			for _, s := range config.ResolvedSecrets {
 				switch s.Type {
 				case "environment":
+					if _, collides := envVarNames[s.Target]; collides {
+						continue
+					}
 					envVars = append(envVars, corev1.EnvVar{
 						Name: s.Target,
 						ValueFrom: &corev1.EnvVarSource{
@@ -1066,6 +1082,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 							},
 						},
 					})
+					envVarNames[s.Target] = struct{}{}
 				case "file":
 					hasFileSecrets = true
 				case "variable":
