@@ -510,9 +510,59 @@ func TestManager_Start_DropsOnlyTheServiceWithASymlinkedLogPath(t *testing.T) {
 }
 
 // TestOpenLogs_Enforced_RefusesHardlinkedLogPath proves the hard-link guard
-// addendum: a pre-planted hard link to an unrelated regular file at a log
-// path is refused when requirePrivilegeDrop is true.
+// addendum on every one of openLogs' three call sites: a pre-planted hard
+// link to an unrelated regular file at a log path is refused when
+// requirePrivilegeDrop is true. Each subtest hard-links exactly ONE of the
+// three paths (the other two are fresh), so each subtest fails if and only
+// if that one call site stops forwarding requirePrivilegeDrop as checkNlink
+// (round-4 High-4 / Required-2: only stdout was covered before).
 func TestOpenLogs_Enforced_RefusesHardlinkedLogPath(t *testing.T) {
+	for _, suffix := range []string{".stdout.log", ".stderr.log", ".lifecycle.log"} {
+		t.Run(suffix, func(t *testing.T) {
+			cleanup := setupTestEnv(t)
+			defer cleanup()
+
+			home := os.Getenv("HOME")
+			logDir := filepath.Join(home, ".scion", "services", "logs")
+			if err := os.MkdirAll(logDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			target := filepath.Join(logDir, "unrelated-target")
+			if err := os.WriteFile(target, []byte("existing content"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(target, filepath.Join(logDir, "evil"+suffix)); err != nil {
+				t.Fatal(err)
+			}
+
+			logDirFd, err := syscall.Open(logDir, syscall.O_DIRECTORY|syscall.O_RDONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = syscall.Close(logDirFd) }()
+
+			svc := &managedService{spec: api.ServiceSpec{Name: "evil"}, logDir: logDir}
+			err = svc.openLogs(logDirFd, true)
+			svc.closeLogs()
+			if err == nil {
+				t.Fatalf("expected openLogs to refuse the hard-linked evil%s in enforced mode, got nil", suffix)
+			}
+			if !strings.Contains(err.Error(), "hard-linked") || !strings.Contains(err.Error(), "evil"+suffix) {
+				t.Errorf("expected the hard-link refusal for evil%s, got: %v", suffix, err)
+			}
+		})
+	}
+}
+
+// TestManager_Start_Enforced_DropsServiceWithHardlinkedLogPath proves that
+// Manager.Start itself forwards requirePrivilegeDrop to openLogs (round-4
+// O29): with requirePrivilegeDrop=true, a service whose <name>.stdout.log is
+// a pre-planted hard link to a victim file is dropped (never started), the
+// victim's content and size are unchanged, and a sibling service still
+// starts. The enforced=false twin below proves the fixture itself is not
+// what refuses the service.
+func TestManager_Start_Enforced_DropsServiceWithHardlinkedLogPath(t *testing.T) {
 	cleanup := setupTestEnv(t)
 	defer cleanup()
 
@@ -521,25 +571,84 @@ func TestOpenLogs_Enforced_RefusesHardlinkedLogPath(t *testing.T) {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-
-	target := filepath.Join(logDir, "unrelated-target")
-	if err := os.WriteFile(target, []byte("existing content"), 0o644); err != nil {
+	victim := filepath.Join(home, "victim")
+	if err := os.WriteFile(victim, []byte("v"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(logDir, "evil.stdout.log")
-	if err := os.Link(target, link); err != nil {
+	if err := os.Link(victim, filepath.Join(logDir, "evil.stdout.log")); err != nil {
 		t.Fatal(err)
 	}
 
-	logDirFd, err := syscall.Open(logDir, syscall.O_DIRECTORY|syscall.O_RDONLY, 0)
-	if err != nil {
+	mgr := New(5 * time.Second)
+	specs := []api.ServiceSpec{
+		{Name: "evil", Command: []string{"sh", "-c", "echo PWNED"}},
+		{Name: "ok", Command: []string{"sleep", "60"}},
+	}
+	err := mgr.Start(context.Background(), specs, 0, 0, "", true)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = mgr.Shutdown(shutdownCtx)
+	}()
+	if err == nil || !strings.Contains(err.Error(), "hard-linked") {
+		t.Errorf("expected Start to report the hard-linked log refusal, got: %v", err)
+	}
+
+	mgr.mu.Lock()
+	started := make([]string, len(mgr.services))
+	for i, svc := range mgr.services {
+		started[i] = svc.spec.Name
+	}
+	mgr.mu.Unlock()
+	if len(started) != 1 || started[0] != "ok" {
+		t.Fatalf("started services = %v, want [ok]: the service with the hard-linked log must be dropped in enforced mode", started)
+	}
+
+	got, rerr := os.ReadFile(victim)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(got) != "v" {
+		t.Errorf("victim content = %q, want %q (unchanged)", got, "v")
+	}
+}
+
+// TestManager_Start_NonEnforced_StartsServiceWithHardlinkedLogPath is the
+// twin of the test above: the identical fixture with
+// requirePrivilegeDrop=false starts the service, proving the enforced test's
+// refusal comes from the forwarded flag, not from something else in the
+// fixture.
+func TestManager_Start_NonEnforced_StartsServiceWithHardlinkedLogPath(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	home := os.Getenv("HOME")
+	logDir := filepath.Join(home, ".scion", "services", "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = syscall.Close(logDirFd) }()
+	shared := filepath.Join(home, "shared")
+	if err := os.WriteFile(shared, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(shared, filepath.Join(logDir, "linked.stdout.log")); err != nil {
+		t.Fatal(err)
+	}
 
-	svc := &managedService{spec: api.ServiceSpec{Name: "evil"}, logDir: logDir}
-	if err := svc.openLogs(logDirFd, true); err == nil {
-		t.Fatal("expected openLogs to refuse the hard-linked log path in enforced mode")
+	mgr := New(5 * time.Second)
+	if err := mgr.Start(context.Background(), []api.ServiceSpec{{Name: "linked", Command: []string{"sleep", "60"}}}, 0, 0, "", false); err != nil {
+		t.Fatalf("non-enforced Start: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = mgr.Shutdown(shutdownCtx)
+	}()
+	mgr.mu.Lock()
+	n := len(mgr.services)
+	mgr.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("started %d services, want 1 (non-enforced mode must accept a hard-linked log)", n)
 	}
 }
 
@@ -640,9 +749,34 @@ func TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Optional-3 (round-4 O24/O25): openLogNoFollow's OWN refusal paths
+	// must close the fd they opened. "fifo"'s stderr log is a FIFO with a
+	// reader attached (so the write-side open succeeds and only the S_IFREG
+	// check refuses it); "linked"'s stderr log is a hard link (refused only
+	// by the enforced Nlink check). Their reader fd is opened before the
+	// baseline is taken, so it cancels out of the delta.
+	fifoPath := filepath.Join(logDir, "fifo.stderr.log")
+	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rfd, err := syscall.Open(fifoPath, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatalf("open FIFO reader: %v", err)
+	}
+	defer func() { _ = syscall.Close(rfd) }()
+	linkTarget := filepath.Join(logDir, "link-target")
+	if err := os.WriteFile(linkTarget, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(linkTarget, filepath.Join(logDir, "linked.stderr.log")); err != nil {
+		t.Fatal(err)
+	}
+
 	specs := []api.ServiceSpec{
 		{Name: "first", Command: []string{"sleep", "60"}},
 		{Name: "second", Command: []string{"sleep", "60"}},
+		{Name: "fifo", Command: []string{"sleep", "60"}},
+		{Name: "linked", Command: []string{"sleep", "60"}},
 		{Name: "bad", Command: []string{"/nonexistent/binary-for-fd-leak-test"}},
 		{Name: "fourth", Command: []string{"sleep", "60"}},
 	}
@@ -746,8 +880,11 @@ func TestValidateServiceName(t *testing.T) {
 		{name: ".", wantErr: true},
 		{name: "..", wantErr: true},
 		{name: "has\x00nul", wantErr: true},
-		{name: "a\nb", wantErr: true},   // newline: log-line-forging vector
-		{name: "a\x1bb", wantErr: true}, // ESC: terminal/log-escape-sequence vector
+		{name: "a\nb", wantErr: true},     // newline: log-line-forging vector
+		{name: "a\x1bb", wantErr: true},   // ESC: terminal/log-escape-sequence vector
+		{name: "a\x7fb", wantErr: true},   // DEL: outside C0, still a control character
+		{name: "a\u0085b", wantErr: true}, // NEL (C1): a line break to some log consumers
+		{name: "a\u009bb", wantErr: true}, // CSI (C1): 8-bit escape introducer on some terminals
 		{name: strings.Repeat("x", maxServiceNameLen+1), wantErr: true},
 	}
 	for _, tt := range tests {
