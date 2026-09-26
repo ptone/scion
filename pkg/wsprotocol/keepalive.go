@@ -36,7 +36,36 @@ import (
 // StartKeepalive itself only performs the initial setup (arming the
 // deadline, installing the pong handler) before returning; the recurring
 // ping loop is started in a goroutine and does not block the caller.
+//
+// A zero or negative PingInterval, PongWait, or WriteWait in cfg falls back
+// to the matching package default instead of being used as-is: a zero
+// PingInterval would panic in time.NewTicker, and a zero PongWait would arm
+// a read deadline in the past, failing the very next read immediately. If
+// the resulting PingInterval is not below PongWait — for example a partial
+// config that sets only a small PongWait, pairing it with the PingInterval
+// default — PingInterval is pulled in under PongWait instead, so the first
+// ping always has a chance to land before the deadline it is meant to
+// extend.
 func StartKeepalive(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, cfg ConnectionConfig) error {
+	if cfg.PingInterval <= 0 {
+		cfg.PingInterval = DefaultPingInterval
+	}
+	if cfg.PongWait <= 0 {
+		cfg.PongWait = DefaultPongWait
+	}
+	if cfg.WriteWait <= 0 {
+		cfg.WriteWait = DefaultWriteWait
+	}
+	// A PingInterval at or beyond PongWait would let the read deadline expire
+	// before the first ping is ever sent, dropping the connection repeatedly
+	// instead of keeping it alive. This can only happen with a partial
+	// config — e.g. only PongWait set, pairing a much smaller caller-supplied
+	// PongWait with the PingInterval default above — so pull the interval in
+	// under the wait instead of leaving it to silently degrade.
+	if cfg.PingInterval >= cfg.PongWait {
+		cfg.PingInterval = cfg.PongWait - cfg.PongWait/10
+	}
+
 	if err := conn.SetReadDeadline(time.Now().Add(cfg.PongWait)); err != nil {
 		return err
 	}
