@@ -1199,10 +1199,16 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 			}
 			agentPhase, _ := hubAgentPhaseActivity(agent.Phase, agent.Activity, agent.Status)
 			if agentPhase == string(state.PhaseRunning) {
-				// Use the agent's ID and runtime from the latest fetch
+				// agentID keeps its prior value (the create response's ID, or
+				// agentName) unless this fetch returned a non-empty one, since
+				// an empty ID here would be a regression, not new information.
 				if agent.ID != "" {
 					agentID = agent.ID
 				}
+				// agentRuntime always takes this fetch's value, even if empty:
+				// unlike agentID there is no better fallback to protect, and
+				// "" is itself a meaningful attach-is-supported value to
+				// attachUnsupportedErr below.
 				agentRuntime = agent.Runtime
 				goto ready
 			}
