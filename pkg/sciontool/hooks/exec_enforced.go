@@ -99,9 +99,11 @@ func openChainNoFollow(dir string) (fd int, chain []NodeOwnership, err error) {
 
 // openScriptNoFollow opens the leaf script by name, relative to the
 // already-opened and verified parent directory fd, refusing to follow a
-// symlink there (O_NOFOLLOW) and refusing anything that is not a regular
-// file once opened. Returns the open fd (caller must close it) and its own
-// ownership.
+// symlink there (O_NOFOLLOW), never blocking on the open regardless of file
+// type (O_NONBLOCK), and refusing anything that is not a regular file once
+// opened — a FIFO, device, or socket is rejected the same way a symlink is,
+// via ErrScriptRefused, never executed. Returns the open fd (caller must
+// close it) and its own ownership.
 func openScriptNoFollow(parentFd int, name string) (fd int, ownership NodeOwnership, err error) {
 	// Deliberately no O_CLOEXEC: the caller execs this exact fd via
 	// /proc/self/fd/<n> (see execViaFd), which requires the fd to still be
@@ -115,10 +117,29 @@ func openScriptNoFollow(parentFd int, name string) (fd int, ownership NodeOwners
 	// caller's control flow, not something this function enforces. If a
 	// future caller ever forks concurrently while a hook is running, revisit
 	// this rather than assuming it still holds.
-	f, err := unix.Openat(parentFd, name, unix.O_RDONLY|unix.O_NOFOLLOW, 0)
+	//
+	// O_NONBLOCK: without it, opening a workload-planted FIFO with no writer
+	// blocks this open(2) call forever, hanging all hook processing — a
+	// availability hole a workload can trigger just by mknod-ing a FIFO
+	// where a hook script is expected. O_NONBLOCK makes the open return
+	// immediately regardless of the file type; the fstat-and-reject-non-
+	// regular check right below is what actually refuses the FIFO (or a
+	// device or socket) once the open has returned. O_NONBLOCK has no effect
+	// on a regular file's own I/O, so it changes nothing for the ordinary
+	// case this function exists to handle.
+	f, err := unix.Openat(parentFd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, unix.ELOOP) {
 			return -1, NodeOwnership{}, fmt.Errorf("hooks: script %q is a symlink; refusing: %w", name, ErrScriptRefused)
+		}
+		if errors.Is(err, unix.ENXIO) {
+			// A socket special file (and some device files with no
+			// corresponding device) fails open(2) itself with ENXIO, before
+			// there is ever an fd to fstat — the regular-file check below
+			// never gets a chance to run. Refuse it the same way, via the
+			// same sentinel, rather than surfacing a bare "no such device or
+			// address" as an unrelated I/O error.
+			return -1, NodeOwnership{}, fmt.Errorf("hooks: %q cannot be opened as a regular file (ENXIO); refusing: %w", name, ErrScriptRefused)
 		}
 		return -1, NodeOwnership{}, err
 	}
@@ -129,7 +150,7 @@ func openScriptNoFollow(parentFd int, name string) (fd int, ownership NodeOwners
 	}
 	if raw.Mode&unix.S_IFMT != unix.S_IFREG {
 		_ = unix.Close(f)
-		return -1, NodeOwnership{}, fmt.Errorf("hooks: %q is not a regular file; refusing: %w", name, ErrScriptRefused)
+		return -1, NodeOwnership{}, fmt.Errorf("hooks: %q is not a regular file (mode %#o); refusing: %w", name, raw.Mode&unix.S_IFMT, ErrScriptRefused)
 	}
 	return f, ownershipFromStat(raw), nil
 }
