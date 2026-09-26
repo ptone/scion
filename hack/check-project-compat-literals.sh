@@ -89,7 +89,6 @@ allowed_paths=(
   # test: it subscribes to the legacy wildcard and asserts nothing is ever
   # delivered there.
   "^pkg/hub/events_test.go$"
-  "^pkg/hub/events_postgres_test.go$"
   "^pkg/hub/fs_safety_test.go$"
   "^pkg/hub/handlers_broker_inbound_test.go$"
   "^pkg/hub/handlers_envsecret_authz_test.go$"
@@ -196,8 +195,6 @@ allowed_paths=(
   "^pkg/config/settings.go$"
   "^pkg/config/settings_v1.go$"
   "^pkg/config/shared_dirs.go$"
-  "^pkg/hub/events.go$"
-  "^pkg/hub/events_postgres.go$"
   "^pkg/hub/fs_safety.go$"
   "^pkg/hub/handlers_auth.go$"
   "^pkg/hub/handlers_broker_inbound.go$"
