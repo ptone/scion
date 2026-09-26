@@ -150,9 +150,10 @@ var defaultSubstrateHarnessCwdDeps = substrateHarnessCwdDeps{
 // Substrate (see InitRunOptions.WorkingDir). Called via
 // substrateResolveHarnessWorkingDir, RunInit's InitRunOptions.ResolveWorkingDir
 // hook for a substrate-serve-driven run — which RunInit invokes only after
-// the workspace has been cloned (see that field's doc comment, init.go) —
-// so SCION_WORKSPACE_PATH below is checked in the state the clone leaves it
-// in, not the state the broker's bind mount left it in beforehand.
+// the workspace has been cloned and the post-pre-start-hook ownership fixup
+// has run (see that field's doc comment, init.go) — so SCION_WORKSPACE_PATH
+// below is checked in the state those two steps leave it in, not the state
+// the broker's bind mount left it in beforehand.
 //
 // supervisor.Run's chdir happens via SysProcAttr.Credential AFTER the
 // privilege drop to the scion uid/gid, not before, so a candidate that a
@@ -357,11 +358,11 @@ var bootstrapRootfsFixup = fixupRootfsForScionUser
 // newSubstrateServeServer so a test can drive it directly without standing
 // up a Server.
 //
-// Unlike before this fix, this wrapper never resolves the harness working
-// directory itself and never short-circuits runInit: it always delegates,
-// and it is RunInit — after preparing the workspace — that calls
-// ResolveWorkingDir and fails closed with exitCodeNoUsableHarnessCwd (never
-// invoking the harness) if that errors. See
+// This wrapper never resolves the harness working directory itself and
+// never short-circuits runInit: it always delegates, and it is RunInit —
+// after preparing the workspace — that calls ResolveWorkingDir and fails
+// closed with exitCodeNoUsableHarnessCwd (never invoking the harness) if
+// that errors. See
 // InitRunOptions.ResolveWorkingDir's doc comment (init.go) for why that
 // placement matters and StateInitFailed's doc comment (pkg/sciontool/
 // substrate) for why RunInit's own exit code is not otherwise acted on

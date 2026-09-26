@@ -151,35 +151,39 @@ type InitRunOptions struct {
 	// resolved, including the $HOME fallback).
 	WorkingDir string
 
-	// ResolveWorkingDir, when non-nil, is called once by RunInit — after
-	// gitCloneWorkspace and the post-pre-start-hook ownership fixup below
-	// have both run, and before harnessSupervisorConfig builds the
-	// supervisor.Config — to compute the harness child's working directory
-	// in place of the static WorkingDir field above.
+	// ResolveWorkingDir, when non-nil, is called once by RunInit — directly
+	// after gitCloneWorkspace and the post-pre-start-hook ownership fixup
+	// have both run, and before anything else that starts a long-running
+	// component on the harness's behalf (sidecar services, the metadata
+	// server, the hub secret fetch) or before harnessSupervisorConfig builds
+	// the supervisor.Config — to compute the harness child's working
+	// directory in place of the static WorkingDir field above.
 	//
 	// That placement is not incidental: a resolver that needs to know
 	// whether a directory is actually usable (searchable by the scion
-	// uid/gid) has to run after every step that can change that — and on
-	// substrate, both of the steps above can. gitCloneWorkspace's
+	// uid/gid) has to run after every step that can change that, and before
+	// any step whose work would be wasted (and, on the fail-closed exit
+	// path, left running) if the resolver then errors. gitCloneWorkspace's
 	// ensureWorkspaceOwnership chowns the workspace to the scion uid (or
 	// creates it via git init in the first place); the ownership fixup that
 	// follows pre-start hooks chowns any root-owned files a provisioner left
-	// behind. Calling the resolver any earlier — as substrate-serve used to,
-	// by resolving before ever invoking RunInit — sees the workspace in
-	// whatever state the broker's bind mount left it in: for a fresh
-	// git-clone agent, root-owned and not yet searchable by the scion uid,
-	// which resolves to the wrong directory.
+	// behind. Those are the two steps a resolver's usability check depends
+	// on; nothing after them changes it. A resolver called before both has
+	// seen the workspace in whatever state the broker's bind mount left it
+	// in: for a fresh git-clone agent, root-owned and not yet searchable by
+	// the scion uid, which resolves to the wrong directory.
 	//
 	// nil (the zero value) for every caller except substrate-serve's
 	// InitRunner wiring (substrateServeInitOptions): RunInit's behaviour is
 	// then exactly WorkingDir's own zero-value contract above, unchanged.
 	//
 	// An error from ResolveWorkingDir fails RunInit closed with
-	// exitCodeNoUsableHarnessCwd: the harness is never started, and RunInit
-	// never falls back to WorkingDir's own zero-value "inherit this
-	// process's cwd" behaviour or to "/" — see resolveSubstrateHarnessCwd's
-	// doc comment (substrate_serve.go) for why "/" specifically must never
-	// be used.
+	// exitCodeNoUsableHarnessCwd: the harness is never started, sidecar
+	// services/the metadata server/the hub secret fetch never start either,
+	// and RunInit never falls back to WorkingDir's own zero-value "inherit
+	// this process's cwd" behaviour or to "/" — see
+	// resolveSubstrateHarnessCwd's doc comment (substrate_serve.go) for why
+	// "/" specifically must never be used.
 	ResolveWorkingDir func() (string, error)
 }
 
@@ -743,19 +747,29 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// may write files owned by root:root into the bind-mounted workspace
 	// or the agent home directory. The non-root broker cannot delete
 	// root-owned files later, so we chown them now.
-	if targetUID != 0 && os.Geteuid() == 0 {
-		workspacePath := os.Getenv("SCION_WORKSPACE_PATH")
-		if workspacePath == "" {
-			workspacePath = "/workspace"
+	runPostPreStartOwnershipFixup(targetUID, targetGID, agentHome)
+
+	// Resolve the harness working directory now — after runGitCloneWorkspace
+	// and the post-pre-start-hook ownership fixup above have both run, and
+	// before anything that starts a long-running component on the harness's
+	// behalf (sidecar services, the metadata server, the hub secret fetch)
+	// or builds the supervisor.Config — so a resolver that depends on the
+	// workspace being present and searchable by the scion uid
+	// (substrate-serve's, in particular) sees it in its final state rather
+	// than whatever the broker's bind mount left it in, and a resolver
+	// failure exits before any of those start. See
+	// InitRunOptions.ResolveWorkingDir's doc comment for why this placement
+	// matters and what nil means for every other caller. ResolveWorkingDir's
+	// result supersedes opts.WorkingDir outright when both are set — see
+	// that field's own doc comment for why no caller does today.
+	if opts.ResolveWorkingDir != nil {
+		workingDir, err := opts.ResolveWorkingDir()
+		if err != nil {
+			log.Error("%v", err)
+			reportInitFailure(agentHome, err)
+			return exitCodeNoUsableHarnessCwd
 		}
-		for _, dir := range []string{workspacePath, agentHome} {
-			if dir == "" {
-				continue
-			}
-			if _, _, err := chownTreeRootOwned(dir, targetUID, targetGID); err != nil {
-				log.Error("Failed to chown %s after pre-start hooks: %v", dir, err)
-			}
-		}
+		opts.WorkingDir = workingDir
 	}
 
 	// Load the env overlay produced by the pre-start provisioner. Resolve
@@ -830,7 +844,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Info("Starting %d sidecar service(s)...", len(specs))
 			svcManager = services.New(gracePeriod)
 			svcCtx := context.Background()
-			if err := svcManager.Start(svcCtx, specs, targetUID, targetGID, "scion"); err != nil {
+			if err := runServicesStart(svcCtx, svcManager, specs, targetUID, targetGID, "scion"); err != nil {
 				log.Error("Failed to start services: %v", err)
 				// Continue — service failure shouldn't block harness
 			}
@@ -902,7 +916,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 		metadataServer = metadata.New(*metaCfg)
 		metaCtx := context.Background()
-		if err := metadataServer.Start(metaCtx); err != nil {
+		if err := runMetadataServerStart(metaCtx, metadataServer); err != nil {
 			log.Error("Failed to start metadata server: %v", err)
 			// Continue — metadata failure shouldn't block harness
 		} else {
@@ -932,30 +946,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 	if secretKeysRaw := os.Getenv("SCION_SECRET_KEYS"); secretKeysRaw != "" {
 		keys := splitSecretKeys(secretKeysRaw)
 		if len(keys) > 0 && hubClient != nil && hubClient.IsConfigured() {
-			secretOverrides = fetchSecretOverrides(hubClient, keys)
+			secretOverrides = runFetchSecretOverrides(hubClient, keys)
 		} else if len(keys) > 0 {
 			log.Error("SCION_SECRET_KEYS is set but hub client is not configured — cannot fetch secrets")
 		}
-	}
-
-	// Resolve the harness working directory now — after runGitCloneWorkspace
-	// and the pre-start-hook ownership fixup above have both run, and before
-	// harnessSupervisorConfig builds the supervisor.Config — so a resolver
-	// that depends on the workspace being present and searchable by the
-	// scion uid (substrate-serve's, in particular) sees it in its final
-	// state rather than whatever the broker's bind mount left it in. See
-	// InitRunOptions.ResolveWorkingDir's doc comment for why this placement
-	// matters and what nil means for every other caller. ResolveWorkingDir's
-	// result supersedes opts.WorkingDir outright when both are set — see
-	// that field's own doc comment for why no caller does today.
-	if opts.ResolveWorkingDir != nil {
-		workingDir, err := opts.ResolveWorkingDir()
-		if err != nil {
-			log.Error("%v", err)
-			reportInitFailure(agentHome, err)
-			return exitCodeNoUsableHarnessCwd
-		}
-		opts.WorkingDir = workingDir
 	}
 
 	// Create supervisor with configuration
@@ -1829,6 +1823,60 @@ var startReaper = supervisor.StartReaper
 // a reachable remote. Production code always leaves this at its default;
 // only a test replaces it.
 var runGitCloneWorkspace = gitCloneWorkspace
+
+// runPostPreStartOwnershipFixup is postPreStartOwnershipFixup's call site as
+// a package var, for the same reason as runGitCloneWorkspace above: the
+// ordering contract InitRunOptions.ResolveWorkingDir depends on must observe
+// that the resolver runs after this step, and the real step only does
+// anything when the calling process is root. Production code always leaves
+// this at its default; only a test replaces it.
+var runPostPreStartOwnershipFixup = postPreStartOwnershipFixup
+
+// postPreStartOwnershipFixup chowns root-owned files that pre-start hooks
+// (which run before the privilege drop) left in the workspace or agent home.
+func postPreStartOwnershipFixup(targetUID, targetGID int, agentHome string) {
+	if targetUID == 0 || os.Geteuid() != 0 {
+		return
+	}
+	workspacePath := os.Getenv("SCION_WORKSPACE_PATH")
+	if workspacePath == "" {
+		workspacePath = "/workspace"
+	}
+	for _, dir := range []string{workspacePath, agentHome} {
+		if dir == "" {
+			continue
+		}
+		if _, _, err := chownTreeRootOwned(dir, targetUID, targetGID); err != nil {
+			log.Error("Failed to chown %s after pre-start hooks: %v", dir, err)
+		}
+	}
+}
+
+// runServicesStart is (*services.Manager).Start's call site as a package
+// var, the same reason as runGitCloneWorkspace above: the ordering contract
+// InitRunOptions.ResolveWorkingDir depends on must observe (from a test) that
+// the resolver runs before sidecar services start, without a test having to
+// spawn a real sidecar process. Production code always leaves this at its
+// default; only a test replaces it.
+var runServicesStart = func(ctx context.Context, m *services.Manager, specs []api.ServiceSpec, uid, gid int, username string) error {
+	return m.Start(ctx, specs, uid, gid, username)
+}
+
+// runMetadataServerStart is (*metadata.Server).Start's call site as a
+// package var, the same reason as runServicesStart above: a test must be
+// able to observe that the resolver runs before the metadata server starts
+// without a test binding a real listener socket. Production code always
+// leaves this at its default; only a test replaces it.
+var runMetadataServerStart = func(ctx context.Context, s *metadata.Server) error {
+	return s.Start(ctx)
+}
+
+// runFetchSecretOverrides is fetchSecretOverrides's call site as a package
+// var, the same reason as runServicesStart above: a test must be able to
+// observe that the resolver runs before the hub secret fetch without a test
+// making a real hub request. Production code always leaves this at its
+// default; only a test replaces it.
+var runFetchSecretOverrides = fetchSecretOverrides
 
 // setupHostUser realigns the container's "scion" user to SCION_HOST_UID/GID
 // so the harness (and, for substrate, execAsUserCmd) can drop privileges
