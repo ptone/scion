@@ -988,28 +988,7 @@ kubectl -n "${BROKER_NAMESPACE}" get pod "$POD" \
 #    from that can resolve and reach api.${ATE_SYSTEM_NAMESPACE}.svc:443
 #    directly (inside the cluster network) -- it is a headless,
 #    cluster-internal service name, so it does not resolve from a
-#    workstation. From a workstation, port-forward instead and keep TLS
-#    verification anchored to the in-cluster name via -authority, which
-#    also sets the TLS server name used for verification (the help text for
-#    grpcurl's own -authority flag, and its use via grpc.WithAuthority --
-#    cmd/grpcurl/grpcurl.go in fullstorydev/grpcurl). Run the port-forward
-#    and both calls in their own subshell, so ATE_TOKEN stays scoped to it
-#    just like the in-cluster form below, and stop the port-forward by its
-#    own PID rather than a job number:
-#      (
-#        kubectl -n "${ATE_SYSTEM_NAMESPACE}" port-forward svc/api 9555:443 &
-#        pf=$!
-#        export ATE_TOKEN="$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
-#          --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
-#        grpcurl -cacert ate-ca.pem -authority api.${ATE_SYSTEM_NAMESPACE}.svc \
-#          -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
-#          -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
-#          localhost:9555 ateapi.Control/DeleteActorEgressPolicy
-#        # (same substitution for the GetActorEgressPolicy verification
-#        # call below, run inside this same subshell)
-#        kill "$pf"
-#      )
-#    Once verification reads NotFound, proceed to step 2.
+#    workstation (see the workstation form after the in-cluster form below).
 #
 #    The token is held in an exported environment variable, never written to
 #    a file and never put on grpcurl's command line: with -expand-headers,
@@ -1037,6 +1016,34 @@ kubectl get clustertrustbundle "${CLUSTER_TRUST_BUNDLE_NAME}" \
 )   # ATE_TOKEN is gone as soon as the subshell exits, whatever happened inside
 #    Expect a NotFound gRPC status. Anything else means the policy is still
 #    there; do not proceed to step 2 until it reads NotFound.
+#
+#    From a workstation: the CA bundle is already fetched above by the same
+#    command; port-forward instead of reaching the cluster-internal service
+#    name directly, and keep TLS verification anchored to the in-cluster
+#    name via -authority, which also sets the TLS server name used for
+#    verification (the help text for grpcurl's own -authority flag, and its
+#    use via grpc.WithAuthority -- cmd/grpcurl/grpcurl.go in
+#    fullstorydev/grpcurl). Run the port-forward and both calls in their own
+#    subshell, so ATE_TOKEN stays scoped to it just like the in-cluster form
+#    above; guard the port-forward with a trap right after capturing its
+#    PID, so it is stopped whether the subshell exits normally, is
+#    interrupted, or is terminated; and wait for it to actually be
+#    listening before the first grpcurl call:
+#      (
+#        kubectl -n "${ATE_SYSTEM_NAMESPACE}" port-forward svc/api 9555:443 &
+#        pf=$!
+#        trap 'kill "$pf" 2>/dev/null' EXIT INT TERM
+#        sleep 2   # give the port-forward time to start listening
+#        export ATE_TOKEN="$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
+#          --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
+#        grpcurl -cacert ate-ca.pem -authority api.${ATE_SYSTEM_NAMESPACE}.svc \
+#          -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
+#          -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
+#          localhost:9555 ateapi.Control/DeleteActorEgressPolicy
+#        # (same substitution for the GetActorEgressPolicy verification
+#        # call above, run inside this same subshell)
+#      )
+#    Once verification reads NotFound, proceed to step 2.
 
 # 2. Delete the actor itself, any_state so a non-RUNNING actor isn't
 #    rejected:
