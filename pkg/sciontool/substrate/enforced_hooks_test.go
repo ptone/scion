@@ -269,6 +269,67 @@ func TestBootstrap_ClearsStaleEnforcedHooksContentBeforeWriting(t *testing.T) {
 	}
 }
 
+// TestBootstrap_ClearFailureAbortsBootstrapBeforeAnyWriteOrInit proves the
+// fail-closed contract: when clearEnforcedHooksDir fails (here, because
+// enforcedHooksDir is a symlink — a stand-in for any clear failure, e.g.
+// EIO/EROFS/EPERM on a real deployment), handleBootstrap must abort BEFORE
+// writing any bootstrap file and BEFORE starting init, not log-and-continue.
+// A stale, still root-owned hook a failed clear left behind must never get
+// the chance to run.
+func TestBootstrap_ClearFailureAbortsBootstrapBeforeAnyWriteOrInit(t *testing.T) {
+	homePrefix, _ := withEnforcedHooksFixture(t)
+
+	// Make the clear itself fail: point enforcedHooksDir at a symlink
+	// (clearDirContents refuses to operate through a symlinked root, per
+	// TestClearEnforcedHooksDir_RefusesSymlinkedRoot below) rather than a
+	// real directory. withEnforcedHooksFixture's own cleanup still restores
+	// the true original enforcedHooksDir afterward, since it captured that
+	// value before this reassignment ever ran.
+	base := realTempDir(t)
+	real := filepath.Join(base, "real-hooks-dir")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "hooks-dir-symlink")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	enforcedHooksDir = link
+
+	var initCalled bool
+	req := BootstrapRequest{
+		Files: []BootstrapFile{
+			{
+				Path:       filepath.Join(homePrefix, "pre-start.d", "20-harness-provision"),
+				Mode:       0o755,
+				ContentB64: base64.StdEncoding.EncodeToString([]byte("#!/bin/sh\nexit 0\n")),
+			},
+		},
+		StartCmd:     "true",
+		ControlToken: "tok",
+	}
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int {
+			initCalled = true
+			return 0
+		}),
+	)
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", req)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("bootstrap status = %d, want a non-200 failure when the stale-hook clear itself fails", rec.Code)
+	}
+	if initCalled {
+		t.Error("init must never start when the enforced-hooks clear failed")
+	}
+	// No file should have been written under the real (non-symlinked)
+	// target either — the clear failure must abort before the file loop.
+	if _, err := os.Stat(filepath.Join(real, "pre-start.d", "20-harness-provision")); !os.IsNotExist(err) {
+		t.Errorf("expected no file written past a failed clear, stat err=%v", err)
+	}
+}
+
 func TestClearEnforcedHooksDir_RefusesSymlinkedRoot(t *testing.T) {
 	base := realTempDir(t)
 	real := filepath.Join(base, "real")

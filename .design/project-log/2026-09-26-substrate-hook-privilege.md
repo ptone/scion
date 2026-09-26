@@ -50,13 +50,20 @@ content.
 
 `writeBootstrapFile` now redirects any path under exactly
 `$HOME/.scion/hooks/` to a dedicated directory, `hooks.EnforcedHooksDir`
-(`/run/scion/hooks` — a single named constant), created with `O_NOFOLLOW` at
-every level, root-owned, and never chowned. `$HOME/.scion/hooks` itself
-stays registered with the lifecycle manager and subject to the same
-ownership rule, so anything the workload plants there after the fact is
-still dropped. The redirect directory is cleared before each bootstrap
-writes into it, so stale content from an earlier bootstrap can never
-survive. `cmd/sciontool/commands/init.go`'s abort-on-failure check for
+(`/run/scion/hooks` — a single named constant), root-owned and never
+chowned. Directories along the way are created by the existing
+`mkdirAllTracked` (an `Lstat`-then-`os.Mkdir` walk that refuses a symlinked
+or non-directory component — not an `openat`/`mkdirat` sequence with
+`O_NOFOLLOW`), safe under bootstrap's own documented trust model:
+substrate-serve is the sole writer and this all runs before the workload
+exists. `$HOME/.scion/hooks` itself stays registered with the lifecycle
+manager and subject to the same ownership rule, so anything the workload
+plants there after the fact is still dropped. The redirect directory is
+cleared before each bootstrap writes into it, and — this is what actually
+makes stale content unable to survive, not the clear attempt alone — a
+clear failure now aborts the bootstrap before any file is written or init
+starts, rather than logging and continuing.
+`cmd/sciontool/commands/init.go`'s abort-on-failure check for
 `30-project-custom` looks in the redirected location in enforced mode.
 
 `fixupEnforcedHooksDirChain` (its own file,
@@ -94,4 +101,42 @@ the fixup.
 The redirect above assumes `/run` is a real, root-owned, non-writable
 directory on the root overlay (confirmed live on the current actor image).
 If that ever stops holding for a given deployment, `hooks.EnforcedHooksDir`
-is a single constant to repoint (e.g. to `/etc/scion/broker-hooks`).
+is a single package var to repoint (e.g. to `/etc/scion/broker-hooks`).
+
+## Follow-up hardening
+
+Further scrutiny of the initial change surfaced a correctness gap and a
+latent security gap, both fixed on the same branch:
+
+- **Fail-closed stale-hook clear.** `handleBootstrap` used to log and
+  continue if clearing `hooks.EnforcedHooksDir` failed, which could let a
+  hub-removed hook survive (still root-owned) and run on the next bootstrap.
+  A clear failure now aborts the bootstrap the same way a `writeBootstrapFile`
+  failure does — before any file is written or init starts.
+- **Root-hook environment hardening.** A root-eligible hook at any event
+  after pre-start (post-start/pre-stop/session-end) used to inherit
+  `HOME=<agent home>` — the workload's own, workload-owned directory — which
+  would let a root-run python/bash/git/pip hook load workload-planted
+  rc/site/config files and execute them as root. Such a hook now gets
+  `HOME=/root`, `PYTHONNOUSERSITE=1`, and a fixed minimal `PATH`
+  (`LifecycleManager.hardenedRootHookEnv`). Pre-start is exempt: its only
+  root-eligible hooks run once, before the workload exists, and the
+  provisioner specifically needs the agent home to find its bundle.
+- **Skip, don't abort, on a refused workload-owned entry.** A symlink or
+  non-regular entry a workload plants under a hooks directory other than
+  `hooks.EnforcedHooksDir` used to abort every later hook for that event.
+  It is now logged and skipped instead — `DecideExecAsRoot` would drop such
+  an entry anyway, so refusing to run it was already correct; aborting the
+  rest of the event on top of that was an availability regression the
+  workload could trigger against its own later hooks. A refusal under
+  `hooks.EnforcedHooksDir` itself still hard-fails, since broker-delivered
+  content is never expected to contain one.
+- **`SCION_HOOK_PATH`.** A hook run via `/proc/self/fd/<n>` sees `$0` as
+  that magic path, not its own location. `SCION_HOOK_PATH` is now set to the
+  real path so a script relying on it (e.g. `dirname "$0"`) still works.
+- Added unprivileged tests exercising the exec mechanism directly (a
+  shebang script run through `execViaFd`, a swap-after-open proving the
+  original inode still runs, a non-executable skip) and the decision fed
+  from real fstat results on an unprivileged fixture (`prepareEnforcedExec`,
+  split out from `executeScriptEnforced` for exactly this purpose) — none of
+  this previously needed root to test, and now it is.
