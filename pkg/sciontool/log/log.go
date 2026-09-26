@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 )
 
 var (
@@ -23,6 +25,16 @@ var (
 	quiet       atomic.Bool
 	mu          sync.Mutex
 	initialized bool
+	// logFile is the cached, already-opened handle for logPath, guarded by
+	// mu. Every log line used to reopen logPath from scratch, which gave a
+	// workload a fresh chance on every single line to swap in a hardlink to
+	// a root-owned file (a regular file, so it passes the open regular-file
+	// check) between one line and the next; caching the fd for the life of
+	// the process means only the very first open can be raced, and it's
+	// checked (Nlink==1, single-link regular file) before ever being
+	// cached. SetLogPath and the /tmp/agent.log fallback both close and nil
+	// this so the next line reopens against the new path.
+	logFile *os.File
 )
 
 // SetQuiet suppresses stderr log output (but preserves file logging).
@@ -70,23 +82,31 @@ func SetDebug(enabled bool) {
 	debug = enabled
 }
 
-// Chown changes the ownership of the log file.
+// Chown changes the ownership of the log file. It chowns the already-open
+// cached fd (fchown) rather than the path, so a symlink or hardlink swapped
+// in at logPath after the fact can't redirect it. If no line has been
+// logged yet, there's no fd to chown; the next write() call opens and
+// caches one under the current (already correct, post-drop) ownership
+// path, so this is a no-op rather than a gap.
 func Chown(uid, gid int) error {
 	mu.Lock()
 	defer mu.Unlock()
-	if logPath == "" {
+	if logFile == nil {
 		return nil
 	}
-	if _, err := os.Stat(logPath); os.IsNotExist(err) {
-		return nil
-	}
-	return os.Chown(logPath, uid, gid)
+	return logFile.Chown(uid, gid)
 }
 
-// SetLogPath sets the path to the log file. Primarily for testing.
+// SetLogPath sets the path to the log file. Primarily for testing. Closes
+// and drops any cached fd for the previous path so the next line opens
+// (and re-validates) the new one.
 func SetLogPath(path string) {
 	mu.Lock()
 	defer mu.Unlock()
+	if logFile != nil {
+		_ = logFile.Close()
+		logFile = nil
+	}
 	logPath = path
 	initialized = true // Consider it initialized if path is explicitly set
 }
@@ -138,78 +158,112 @@ func write(level, tag, format string, args ...interface{}) {
 		fmt.Fprint(os.Stderr, stderrEntry)
 	}
 
-	// Write to agent.log
+	// Write to agent.log, through the cached fd (opened and validated once;
+	// see logFile's doc comment).
 	mu.Lock()
+	f, err := getLogFileLocked()
+	if err == nil {
+		_, _ = f.WriteString(fileEntry)
+	}
+	mu.Unlock()
+}
+
+// getLogFileLocked returns the cached log file, opening (and validating)
+// one against logPath if none is cached yet, falling back to
+// /tmp/agent.log on failure exactly as the historical per-line open did.
+// Callers must hold mu.
+func getLogFileLocked() (*os.File, error) {
+	if logFile != nil {
+		return logFile, nil
+	}
+
 	// Use more permissive 0666 so that if created as root, it can be written to by others
 	// (subject to directory permissions and umask).
 	f, err := openLogFileNoFollow(logPath, 0666)
-	if err != nil {
-		// If we can't write to agent.log, try to fall back to /tmp and enable debug
-		if logPath != "/tmp/agent.log" {
-			debug = true
-			oldPath := logPath
-			logPath = "/tmp/agent.log"
-
-			// Get system info for debugging
-			uid := os.Getuid()
-			gid := os.Getgid()
-			username := "unknown"
-			if u, err := user.Current(); err == nil {
-				username = u.Username
-			}
-			sysInfo := fmt.Sprintf("UID=%d, GID=%d, USER=%s, HOME=%s, SCION_HOST_UID=%s, SCION_HOST_GID=%s",
-				uid, gid, username, os.Getenv("HOME"), os.Getenv("SCION_HOST_UID"), os.Getenv("SCION_HOST_GID"))
-
-			fallbackMsg := fmt.Sprintf("[sciontool] WARNING: Failed to write to %s: %v. Falling back to /tmp/agent.log and enabling debug mode. %s\n", oldPath, err, sysInfo)
-			fmt.Fprint(os.Stderr, fallbackMsg)
-
-			// Retry with new path
-			f, err = openLogFileNoFollow(logPath, 0666)
-			if err != nil {
-				// Total failure
-				mu.Unlock()
-				return
-			}
-			// Write the fallback message to the new log file too
-			_, _ = f.WriteString(timestamp + " " + fallbackMsg)
-		} else {
-			// Already at /tmp/agent.log and it failed
-			mu.Unlock()
-			return
-		}
+	if err == nil {
+		logFile = f
+		return logFile, nil
 	}
-	_, _ = f.WriteString(fileEntry)
-	_ = f.Close()
-	mu.Unlock()
+
+	// If we can't write to agent.log, try to fall back to /tmp and enable debug
+	if logPath == "/tmp/agent.log" {
+		// Already at /tmp/agent.log and it failed
+		return nil, err
+	}
+
+	debug = true
+	oldPath := logPath
+	logPath = "/tmp/agent.log"
+
+	// Get system info for debugging
+	uid := os.Getuid()
+	gid := os.Getgid()
+	username := "unknown"
+	if u, uerr := user.Current(); uerr == nil {
+		username = u.Username
+	}
+	sysInfo := fmt.Sprintf("UID=%d, GID=%d, USER=%s, HOME=%s, SCION_HOST_UID=%s, SCION_HOST_GID=%s",
+		uid, gid, username, os.Getenv("HOME"), os.Getenv("SCION_HOST_UID"), os.Getenv("SCION_HOST_GID"))
+
+	fallbackMsg := fmt.Sprintf("[sciontool] WARNING: Failed to write to %s: %v. Falling back to /tmp/agent.log and enabling debug mode. %s\n", oldPath, err, sysInfo)
+	fmt.Fprint(os.Stderr, fallbackMsg)
+
+	// Retry with new path
+	f, err = openLogFileNoFollow(logPath, 0666)
+	if err != nil {
+		// Total failure
+		return nil, err
+	}
+	logFile = f
+	// Write the fallback message to the new log file too
+	_, _ = logFile.WriteString(time.Now().Format("2006-01-02 15:04:05") + " " + fallbackMsg)
+	return logFile, nil
 }
 
 // openLogFileNoFollow opens path for appending, the same way the historical
 // os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, mode) call did,
-// except it never follows a symlink at path and refuses to write to
-// anything that isn't a regular file.
+// except:
+//   - it never follows a symlink at any component of path, not just the
+//     final one (see the dirfd package doc comment) — a workload that owns
+//     an intermediate directory such as $HOME can otherwise redirect the
+//     open into an arbitrary directory even though the leaf itself is
+//     never a symlink;
+//   - O_NONBLOCK keeps a FIFO planted at path from blocking this open (and
+//     therefore every later log line, since write() holds mu while this
+//     runs) forever waiting for a reader that will never come;
+//   - it refuses to write to anything that isn't a regular file with
+//     exactly one link, so a hardlink to a root-owned file (which passes a
+//     bare "is this a regular file" check, since a hardlink IS a regular
+//     file) is refused instead of silently appended to.
 //
 // This process runs as root for its whole lifetime on Substrate (see
 // fixupRootfsForScion's doc comment in cmd/sciontool/commands), and logPath
-// normally lives under $HOME, which the scion user can write to. Without
-// O_NOFOLLOW, replacing $HOME/agent.log with a symlink would make root
-// create or append to whatever it points at; a symlink or non-regular entry
-// here now surfaces as an open/stat error instead, which callers already
-// treat the same way a missing/unwritable log path has always been
-// treated: fall back to /tmp/agent.log, or (if that also fails) drop the
-// line silently rather than block startup on logging.
+// normally lives under $HOME, which the scion user can write to. A symlink,
+// hardlink, FIFO, or other non-regular entry here now surfaces as an
+// open/stat error instead, which callers already treat the same way a
+// missing/unwritable log path has always been treated: fall back to
+// /tmp/agent.log, or (if that also fails) drop the line silently rather
+// than block startup on logging.
 func openLogFileNoFollow(path string, mode os.FileMode) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|syscall.O_NOFOLLOW, mode)
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
 	if err != nil {
 		return nil, err
 	}
-	info, err := f.Stat()
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	f, err := dirfd.OpenAt(dirFd, leaf,
+		syscall.O_APPEND|syscall.O_CREAT|syscall.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, mode)
 	if err != nil {
+		return nil, err
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
-	if !info.Mode().IsRegular() {
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
 		_ = f.Close()
-		return nil, fmt.Errorf("log path %s is not a regular file", path)
+		return nil, fmt.Errorf("log path %s is not a single-link regular file", path)
 	}
 	return f, nil
 }

@@ -7,7 +7,9 @@ package log
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // TestOpenLogFileNoFollow_NormalWrite proves the hardened open still behaves
@@ -101,5 +103,154 @@ func TestOpenLogFileNoFollow_RefusesDirectory(t *testing.T) {
 
 	if _, err := openLogFileNoFollow(path, 0666); err == nil {
 		t.Fatal("expected an error opening a directory as a log path, got nil")
+	}
+}
+
+// TestOpenLogFileNoFollow_RefusesHardlink proves that a hardlink to a
+// root-owned file at the log path can't be used to make root append log
+// lines to it: a hardlink passes a bare "is this a regular file" check
+// (it IS a regular file), so openLogFileNoFollow must also check the link
+// count and refuse anything other than a single-link regular file. The
+// hardlink's target must be left untouched.
+func TestOpenLogFileNoFollow_RefusesHardlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "victim")
+	if err := os.WriteFile(target, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	path := filepath.Join(dir, "agent.log")
+	if err := os.Link(target, path); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+
+	if _, err := openLogFileNoFollow(path, 0666); err == nil {
+		t.Fatal("expected an error opening a hardlinked log path, got nil")
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(data) != "do-not-touch" {
+		t.Errorf("hardlink target was modified: %q", data)
+	}
+}
+
+// TestOpenLogFileNoFollow_FIFODoesNotBlock proves that a FIFO planted at
+// the log path can't hang root's logging (and, since write() holds the
+// package mutex while opening, every later log call in the process) by
+// blocking open(2) forever waiting for a reader: O_NONBLOCK must make the
+// open return promptly.
+func TestOpenLogFileNoFollow_FIFODoesNotBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.log")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := openLogFileNoFollow(path, 0666)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expected an error opening a FIFO log path, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("openLogFileNoFollow blocked on a FIFO with no reader")
+	}
+}
+
+// TestWrite_CachesLogFileAcrossCalls proves the log fd is opened once and
+// reused, not reopened on every line: after the first write, replacing the
+// path's directory entry (e.g. a workload swapping in a hardlink) must not
+// affect where subsequent lines in this process go, because write() never
+// looks the path up again.
+func TestWrite_CachesLogFileAcrossCalls(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.log")
+	cleanup := setLogPathForTest(t, path)
+	defer cleanup()
+
+	Info("first line")
+
+	// Swap the directory entry for something else entirely; the cached fd
+	// from the first write still points at the original (now-unlinked)
+	// inode.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("replaced\n"), 0o600); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+
+	Info("second line")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read replacement path: %v", err)
+	}
+	if string(data) != "replaced\n" {
+		t.Errorf("replacement file was modified via the stale fd: %q", data)
+	}
+
+	mu.Lock()
+	f := logFile
+	mu.Unlock()
+	if f == nil {
+		t.Fatal("expected a cached log file")
+	}
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("stat cached fd: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("cached fd no longer points at a regular file")
+	}
+}
+
+// TestChown_UsesCachedFd proves Chown fchowns the already-open cached fd
+// rather than looking the path up again.
+func TestChown_UsesCachedFd(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.log")
+	cleanup := setLogPathForTest(t, path)
+	defer cleanup()
+
+	if err := Chown(os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("Chown with no cached fd: %v", err)
+	}
+
+	Info("a line, to open and cache the fd")
+
+	if err := Chown(os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("Chown with a cached fd: %v", err)
+	}
+}
+
+// setLogPathForTest points the package-level log path at path for the
+// duration of a test and restores the previous state afterward.
+func setLogPathForTest(t *testing.T, path string) func() {
+	t.Helper()
+	mu.Lock()
+	origPath := logPath
+	origFile := logFile
+	origInitialized := initialized
+	logFile = nil
+	mu.Unlock()
+
+	SetLogPath(path)
+
+	return func() {
+		mu.Lock()
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		logPath = origPath
+		logFile = origFile
+		initialized = origInitialized
+		mu.Unlock()
 	}
 }
