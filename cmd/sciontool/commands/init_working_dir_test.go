@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"gopkg.in/yaml.v3"
 )
 
@@ -157,6 +158,34 @@ func setupRunInitAsRootlessScion(t *testing.T, agentHome string) {
 	withScionUserLookup(t, func(string) (*user.User, error) {
 		return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: agentHome}, nil
 	})
+}
+
+// TestSetupRunInitAsRootlessScion_DisablesMetadataServerAndTelemetry pins
+// the hermeticity setupRunInitAsRootlessScion promises every RunInit test in
+// this file, independent of the environment the test binary runs in: with
+// an agent container's own metadata, secret and telemetry settings present,
+// the helper leaves RunInit nothing that would start the metadata server or
+// the telemetry pipeline (both bind fixed loopback ports) or fetch secrets.
+func TestSetupRunInitAsRootlessScion_DisablesMetadataServerAndTelemetry(t *testing.T) {
+	for _, k := range scionMetadataAndSecretEnvVars {
+		t.Setenv(k, "ambient")
+	}
+	t.Setenv("SCION_METADATA_MODE", "assign")
+	t.Setenv("SCION_TELEMETRY_ENABLED", "true")
+
+	setupRunInitAsRootlessScion(t, t.TempDir())
+
+	for _, k := range []string{"SCION_METADATA_MODE", "SCION_SECRET_KEYS"} {
+		if v, ok := os.LookupEnv(k); ok {
+			t.Errorf("%s = %q after setupRunInitAsRootlessScion, want it absent", k, v)
+		}
+	}
+	if cfg := metadata.ConfigFromEnv(); cfg != nil {
+		t.Errorf("metadata.ConfigFromEnv() = %+v after setupRunInitAsRootlessScion, want nil (RunInit would start a metadata server)", cfg)
+	}
+	if telemetry.LoadConfig().Enabled {
+		t.Error("telemetry.LoadConfig().Enabled = true after setupRunInitAsRootlessScion, want false (RunInit would bind the OTLP receiver ports)")
+	}
 }
 
 // TestRunInit_ResolveWorkingDir_CalledAfterCloneAndOverridesWorkingDir is
