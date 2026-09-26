@@ -18,6 +18,7 @@ import os
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
 from typing import Any
 from unittest import mock
@@ -758,6 +759,92 @@ class TestOriginalAPI(unittest.TestCase):
         with mock.patch("sys.stderr", new_callable=io.StringIO) as fake_stderr:
             sh.warn("test warning")
             self.assertIn("scion_harness: test warning", fake_stderr.getvalue())
+
+
+# ---------------------------------------------------------------------------
+# atomic_write_json: refuses to write through a planted symlink or FIFO
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicWriteJsonSymlinkGuards(unittest.TestCase):
+    """atomic_write_json must never follow a symlink or block on a FIFO
+    planted at either the parent directory or the temp file name, regardless
+    of which uid calls it — this is the guard that protects every caller of
+    the helper, not just the ones already careful about their own inputs.
+    """
+
+    def test_normal_write_creates_expected_content(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "nested", "out.json")
+        sh.atomic_write_json(path, {"b": 2, "a": 1})
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        # sort_keys=True, indent=2, trailing newline — the documented format,
+        # unchanged by the guard.
+        self.assertEqual(content, '{\n  "a": 1,\n  "b": 2\n}\n')
+
+    def test_overwrite_replaces_content_atomically(self):
+        path = os.path.join(tempfile.mkdtemp(), "out.json")
+        sh.atomic_write_json(path, {"first": True})
+        sh.atomic_write_json(path, {"second": True})
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data, {"second": True})
+        # No leftover temp file after a successful write.
+        self.assertFalse(os.path.exists(path + ".tmp"))
+
+    def test_symlinked_parent_directory_is_refused(self):
+        # Mirrors a workload committing ".agents" as a symlink to a directory
+        # it does not own: writing hooks.json must never land inside that
+        # target directory.
+        root = tempfile.mkdtemp()
+        sentinel_dir = os.path.join(root, "sentinel")
+        os.makedirs(sentinel_dir)
+        planted_parent = os.path.join(root, ".agents")
+        os.symlink(sentinel_dir, planted_parent)
+
+        with self.assertRaises(OSError):
+            sh.atomic_write_json(os.path.join(planted_parent, "hooks.json"), {"x": 1})
+
+        self.assertEqual(os.listdir(sentinel_dir), [])
+
+    def test_symlinked_temp_target_is_refused_and_sentinel_untouched(self):
+        # Mirrors a workload committing "hooks.json.tmp" as a symlink to a
+        # file it does not own: the write must never go through that symlink.
+        directory = tempfile.mkdtemp()
+        sentinel_file = os.path.join(directory, "sentinel.txt")
+        with open(sentinel_file, "w", encoding="utf-8") as f:
+            f.write("original contents\n")
+        os.symlink(sentinel_file, os.path.join(directory, "hooks.json.tmp"))
+
+        with self.assertRaises(OSError):
+            sh.atomic_write_json(os.path.join(directory, "hooks.json"), {"y": 1})
+
+        with open(sentinel_file, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "original contents\n")
+        self.assertFalse(os.path.exists(os.path.join(directory, "hooks.json")))
+
+    def test_fifo_at_temp_target_does_not_hang(self):
+        directory = tempfile.mkdtemp()
+        fifo_path = os.path.join(directory, "out.json.tmp")
+        os.mkfifo(fifo_path)
+
+        result: dict[str, BaseException | None] = {"error": None}
+
+        def call():
+            try:
+                sh.atomic_write_json(os.path.join(directory, "out.json"), {"z": 1})
+            except BaseException as exc:  # noqa: BLE001 - captured for the main thread
+                result["error"] = exc
+
+        thread = threading.Thread(target=call, daemon=True)
+        thread.start()
+        thread.join(timeout=5)
+        self.assertFalse(
+            thread.is_alive(),
+            "atomic_write_json hung opening a pre-existing FIFO at the temp path",
+        )
+        self.assertIsInstance(result["error"], OSError)
 
 
 if __name__ == "__main__":

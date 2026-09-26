@@ -74,13 +74,43 @@ def load_json(path: str) -> Any:
 
 
 def atomic_write_json(path: str, payload: Any) -> None:
-    """Write JSON atomically: tmp file + os.replace, sorted keys, trailing newline."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-        f.write("\n")
-    os.replace(tmp, path)
+    """Write JSON atomically: tmp file + os.replace, sorted keys, trailing newline.
+
+    Every filesystem operation after the initial os.makedirs is anchored to an
+    open directory file descriptor for path's parent, opened with
+    O_DIRECTORY|O_NOFOLLOW: if the parent is a symlink (e.g. a workload
+    replaced an expected directory with one pointing elsewhere), that open
+    fails immediately instead of silently writing through it. The temp file
+    is then created relative to that same directory fd with
+    O_CREAT|O_EXCL|O_NOFOLLOW, so a pre-existing entry at the temp name — a
+    symlink to an arbitrary target, a leftover regular file, or a FIFO — also
+    fails immediately (EEXIST) instead of being followed or, for a FIFO,
+    blocking this call forever waiting for a reader. This makes the guard
+    independent of which uid calls it: it refuses the same way whether this
+    runs as root or as an unprivileged user.
+    """
+    directory = os.path.dirname(path) or "."
+    name = os.path.basename(path)
+    os.makedirs(directory, exist_ok=True)
+
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        tmp_name = name + ".tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fd = os.open(tmp_name, flags, 0o666, dir_fd=dir_fd)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+                f.write("\n")
+        except BaseException:
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def read_manifest(manifest_path: str | None = None) -> dict[str, Any]:
