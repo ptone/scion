@@ -906,8 +906,10 @@ kubectl run netpol-probe --rm -it --restart=Never \
   kubectl auth can-i get pods -n "${SUBSTRATE_WORKER_NAMESPACE}" \
     --as="system:serviceaccount:${BROKER_NAMESPACE}:scion-substrate-broker"
   ```
-  To confirm no other binding grants the broker's ServiceAccount access
-  outside these two namespaces:
+  To list every binding, in any namespace, that names the broker's
+  ServiceAccount directly as a subject (bindings to a group that contains it,
+  such as `system:serviceaccounts:${BROKER_NAMESPACE}`, are not listed; the
+  `can-i` checks above do account for those):
   ```sh
   kubectl get rolebindings,clusterrolebindings -A -o json | jq -r --arg ns "${BROKER_NAMESPACE}" \
     '.items[] | select(any(.subjects[]?; .kind=="ServiceAccount" and .name=="scion-substrate-broker" and .namespace==$ns)) | "\(.kind) \(.metadata.namespace // "-")/\(.metadata.name)"'
