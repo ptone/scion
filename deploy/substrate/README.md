@@ -29,6 +29,21 @@ Substrate requires a digest-pinned agent image (`.design/kubernetes/substrate-ru
 substrate: image "<image>" is not pinned by digest (@sha256:...); set a digest image in the agent's template or pass --image (tag resolution is a Phase 2 feature)
 ```
 
+**How to pin:** pin by digest in the template's `scion-agent.yaml` `image:`
+(honoured at runtime) or with `--image`.
+
+**Resolution order:** harness-config → broker profile (fallback) → template
+→ `--image`; the last one set wins. The broker active-profile image applies
+only when neither the template nor `--image` sets one.
+
+**Enforcement:** any image not pinned by digest is refused — the fail-closed
+error above. ANY digest-pinned image is accepted: substrate does NOT
+restrict which images users may run. An operator who needs that has no
+control in Phase 1. The broker profile pin is **not** an enforcement
+point — it is the operator default/fallback, and it loses to the template
+and `--image`. The only enforcement is the fail-closed "pinned by digest"
+check above, which is source-agnostic.
+
 **Pinning the digest in the substrate profile's `harness_overrides` alone
 is NOT sufficient on a default install.** Why:
 
@@ -71,6 +86,11 @@ directory on the broker) carries the image the agent's persisted config
 resolved to, which `start` uses unless `--image` is passed — `--image` is
 applied only for that one `start` call (`pkg/agent/run.go:353`) and is
 never written back to `scion-agent.json`.
+
+**Hub column note:** the hub's template image/config fields are not
+populated by the template-upload path, though the file is read at runtime.
+Verify the running image from the resolved actor image or broker log line,
+not from the hub template record.
 
 ## Warm the template before first use
 
