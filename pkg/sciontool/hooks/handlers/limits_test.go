@@ -429,6 +429,40 @@ func TestSignalLimitsExceeded_CreatesTriggerFile(t *testing.T) {
 	assert.NoError(t, err, "trigger file should exist after signalLimitsExceeded")
 }
 
+// TestLimitsHandler_ReadLimitsStateNormalRead proves the hardened read
+// still returns ordinary limits state for a plain, legitimate file.
+func TestLimitsHandler_ReadLimitsStateNormalRead(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, InitLimitsFile(limitsPath, 7, 9, 0, 0))
+
+	h := &LimitsHandler{limitsPath: limitsPath}
+	ls, err := h.readLimitsState()
+	require.NoError(t, err)
+	assert.Equal(t, 7, ls.MaxTurns)
+	assert.Equal(t, 9, ls.MaxModelCalls)
+}
+
+// TestLimitsHandler_SymlinkAtLimitsPathIsRefused proves a symlink swapped
+// in at agent-limits.json (the workload owns the containing directory and
+// can always do this) is refused rather than followed. This fails if
+// readLimitsState is ever reverted to a plain os.ReadFile, which follows
+// symlinks unconditionally.
+func TestLimitsHandler_SymlinkAtLimitsPathIsRefused(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	secret := filepath.Join(tmpDir, "root-only-secret.json")
+	require.NoError(t, os.WriteFile(secret, []byte(`{"turn_count":999}`), 0o600))
+
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+	require.NoError(t, os.Symlink(secret, limitsPath))
+
+	h := &LimitsHandler{limitsPath: limitsPath}
+	_, err := h.readLimitsState()
+	assert.Error(t, err, "expected a symlink at limitsPath to be refused, not followed")
+}
+
 // readLimitsFile reads and parses an agent-limits.json file for test assertions.
 func readLimitsFile(t *testing.T, path string) LimitsState {
 	t.Helper()
