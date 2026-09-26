@@ -875,6 +875,13 @@ func TestWriteEnvFile_RefusesSymlinkAtFinalPath(t *testing.T) {
 // exercise — the write itself already refuses a pre-existing symlink, so
 // only a swap injected in that specific window can distinguish the fix
 // from the original path-based chown.
+//
+// scionDirOwnerUID is also overridden here to report uid 0 (root): without
+// this, writeEnvFile's O1 owner-gating skips the chown entirely, because a
+// freshly-created .scion directory is owned by the (non-root) test process
+// itself, not root — which would make this test pass by doing nothing on
+// the chown path at all. Forcing "currently root-owned" is what actually
+// drives the fd-based chown this test exists to exercise.
 func TestWriteEnvFile_DirChownSurvivesSwapAfterWrite(t *testing.T) {
 	tmpHome := t.TempDir()
 	victimDir := filepath.Join(tmpHome, "victim-dir")
@@ -889,16 +896,37 @@ func TestWriteEnvFile_DirChownSurvivesSwapAfterWrite(t *testing.T) {
 	scionDir := filepath.Join(tmpHome, ".scion")
 	movedDir := filepath.Join(tmpHome, ".scion.moved")
 
+	var movedStBefore *syscall.Stat_t
 	writeEnvFileAfterWriteForTest = func(dir string) {
 		if err := os.Rename(dir, movedDir); err != nil {
 			t.Errorf("swap: rename %s: %v", dir, err)
 			return
 		}
+		// Snapshot ctime right after the rename, before writeEnvFile's own
+		// chown call runs against whatever fd it still holds — this is the
+		// "before" baseline the final assertion below needs, captured at
+		// movedDir's own final path (it didn't exist under that name before
+		// this rename, so there's no earlier point to snapshot it at).
+		movedInfoBefore, serr := os.Lstat(movedDir)
+		if serr != nil {
+			t.Errorf("lstat moved dir right after rename: %v", serr)
+			return
+		}
+		movedStBefore = movedInfoBefore.Sys().(*syscall.Stat_t)
+		// A brief settle so the chown call below is guaranteed to bump
+		// ctime by a measurable amount — see dirfd's ctimeSettle for why
+		// this matters on this test suite's filesystem/clock source.
+		time.Sleep(15 * time.Millisecond)
+
 		if err := os.Symlink(victimDir, dir); err != nil {
 			t.Errorf("swap: symlink %s -> %s: %v", dir, victimDir, err)
 		}
 	}
 	t.Cleanup(func() { writeEnvFileAfterWriteForTest = nil })
+
+	origOwnerUID := scionDirOwnerUID
+	scionDirOwnerUID = func(int) (uint32, error) { return 0, nil }
+	t.Cleanup(func() { scionDirOwnerUID = origOwnerUID })
 
 	t.Setenv("SCION_AGENT_NAME", "test-agent")
 	writeEnvFile(tmpHome, os.Getuid(), os.Getgid())
@@ -928,9 +956,19 @@ func TestWriteEnvFile_DirChownSurvivesSwapAfterWrite(t *testing.T) {
 
 	// The real directory, now at its moved-away path, is the one that
 	// should have been chowned (here, to the test's own uid/gid, which is
-	// always permitted and still bumps ctime).
-	if _, err := os.Stat(movedDir); err != nil {
+	// always permitted and still bumps ctime). Asserting the ctime actually
+	// advanced (not just that the directory still exists) is what stops
+	// this test from passing by doing nothing on the chown path.
+	if movedStBefore == nil {
+		t.Fatal("hook never captured movedStBefore — test setup is broken")
+	}
+	movedInfoAfter, err := os.Stat(movedDir)
+	if err != nil {
 		t.Fatalf("stat moved-away original .scion: %v", err)
+	}
+	movedStAfter := movedInfoAfter.Sys().(*syscall.Stat_t)
+	if movedStAfter.Ctim == movedStBefore.Ctim {
+		t.Error("moved-away .scion directory's change time did not advance: it was not chowned")
 	}
 }
 
@@ -1268,12 +1306,14 @@ func TestHarnessSupervisorConfig(t *testing.T) {
 	secretOverrides := map[string]string{"SECRET": "shh"}
 
 	tests := []struct {
-		name string
-		opts InitRunOptions
-		want string // expected WorkingDir
+		name             string
+		opts             InitRunOptions
+		want             string // expected WorkingDir
+		wantPrivDropDrop bool
 	}{
 		{name: "WorkingDir set is copied through", opts: InitRunOptions{WorkingDir: "/workspace"}, want: "/workspace"},
 		{name: "WorkingDir unset is empty", opts: InitRunOptions{}, want: ""},
+		{name: "RequirePrivilegeDrop is copied through", opts: InitRunOptions{RequirePrivilegeDrop: true}, want: "", wantPrivDropDrop: true},
 	}
 
 	for _, tt := range tests {
@@ -1289,6 +1329,7 @@ func TestHarnessSupervisorConfig(t *testing.T) {
 				NativeTelemetryPolicy: "enabled",
 				SecretOverrides:       secretOverrides,
 				WorkingDir:            tt.want,
+				RequirePrivilegeDrop:  tt.wantPrivDropDrop,
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("harnessSupervisorConfig() = %+v, want %+v", got, want)
@@ -1497,9 +1538,9 @@ func TestCleanGcloudConfigForMetadata_Enforced_MissingDirIsNoop(t *testing.T) {
 }
 
 // TestChownTreeRootOwned_DirectCall is a thin call-site test proving
-// chownTreeRootOwned (N1) delegates to the shared dirfd.ChownTreeNoFollow
-// walk with the root-owned-only filter — the deeper symlink-swap race
-// itself is covered once, thoroughly, at the dirfd level
+// chownTreeRootOwned (N1), in enforced mode, delegates to the shared
+// dirfd.ChownTreeNoFollow walk with the root-owned-only filter — the deeper
+// symlink-swap race itself is covered once, thoroughly, at the dirfd level
 // (TestChownTreeNoFollow_SurvivesIntermediateDirSwapMidWalk).
 func TestChownTreeRootOwned_DirectCall(t *testing.T) {
 	origFilter := chownTreeRootOwnedFilter
@@ -1512,7 +1553,7 @@ func TestChownTreeRootOwned_DirectCall(t *testing.T) {
 	}
 
 	uid, gid := os.Getuid(), os.Getgid()
-	walked, changed, err := chownTreeRootOwned(home, uid, gid)
+	walked, changed, err := chownTreeRootOwned(home, uid, gid, true)
 	if err != nil {
 		t.Fatalf("chownTreeRootOwned: %v", err)
 	}
@@ -1524,11 +1565,191 @@ func TestChownTreeRootOwned_DirectCall(t *testing.T) {
 	}
 }
 
+// TestChownTreeRootOwned_NonEnforced_UsesPathBasedWalk proves the non-
+// enforced branch drives the SAME chownTreeRootOwnedFilter decision through
+// the historical filepath.WalkDir+os.Lchown implementation, not the
+// fd-based one — both walks visit and chown the same entries here.
+func TestChownTreeRootOwned_NonEnforced_UsesPathBasedWalk(t *testing.T) {
+	origFilter := chownTreeRootOwnedFilter
+	t.Cleanup(func() { chownTreeRootOwnedFilter = origFilter })
+	chownTreeRootOwnedFilter = func(uint32) bool { return true }
+
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "a"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	uid, gid := os.Getuid(), os.Getgid()
+	walked, changed, err := chownTreeRootOwned(home, uid, gid, false)
+	if err != nil {
+		t.Fatalf("chownTreeRootOwned: %v", err)
+	}
+	if walked != 2 {
+		t.Errorf("walked = %d, want 2", walked)
+	}
+	if changed != 2 {
+		t.Errorf("changed = %d, want 2", changed)
+	}
+}
+
+// TestChownTreeRootOwned_MissingRootIsSilentNoop proves R5(a): a missing
+// root is a silent no-op (nil, 0, 0) on both branches, restoring the
+// historical filepath.WalkDir contract (WalkDir passes the root's own lstat
+// error to the callback, which returns nil) rather than surfacing as an
+// error.
+func TestChownTreeRootOwned_MissingRootIsSilentNoop(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+
+	for _, enforced := range []bool{false, true} {
+		walked, changed, err := chownTreeRootOwned(missing, os.Getuid(), os.Getgid(), enforced)
+		if err != nil {
+			t.Errorf("enforced=%v: err = %v, want nil", enforced, err)
+		}
+		if walked != 0 || changed != 0 {
+			t.Errorf("enforced=%v: walked=%d changed=%d, want 0, 0", enforced, walked, changed)
+		}
+	}
+}
+
+// TestChownTreeRootOwned_NonEnforced_FollowsAncestorSymlink proves R5(b)'s
+// gating: on non-enforced runtimes, an ancestor-path symlink is followed
+// (the historical filepath.WalkDir behaviour), not refused — a legitimate
+// non-substrate setup may symlink an ancestor of the walked root (e.g. from
+// a bind-mounted host path), and refusing that would break it.
+func TestChownTreeRootOwned_NonEnforced_FollowsAncestorSymlink(t *testing.T) {
+	origFilter := chownTreeRootOwnedFilter
+	t.Cleanup(func() { chownTreeRootOwnedFilter = origFilter })
+	chownTreeRootOwnedFilter = func(uint32) bool { return true }
+
+	real := t.TempDir()
+	actual := filepath.Join(real, "actual")
+	if err := os.Mkdir(actual, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actual, "a"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	link := filepath.Join(parent, "home-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	// "home-link" is an ANCESTOR (intermediate) component of root, not
+	// root's own leaf — "actual" is the real, walked directory.
+	root := filepath.Join(link, "actual")
+
+	uid, gid := os.Getuid(), os.Getgid()
+	walked, changed, err := chownTreeRootOwned(root, uid, gid, false)
+	if err != nil {
+		t.Fatalf("chownTreeRootOwned: %v", err)
+	}
+	if walked != 2 || changed != 2 {
+		t.Errorf("walked=%d changed=%d, want 2, 2 — expected the ancestor symlink to be followed", walked, changed)
+	}
+}
+
+// TestChownTreeRootOwned_Enforced_RefusesAncestorSymlink proves R5(b)'s
+// other half: on substrate (enforced), the same ancestor-path symlink is
+// refused rather than followed, so the whole fixup for that root is skipped
+// (nothing chowned) instead of silently descending through workload-
+// controlled redirection.
+func TestChownTreeRootOwned_Enforced_RefusesAncestorSymlink(t *testing.T) {
+	origFilter := chownTreeRootOwnedFilter
+	t.Cleanup(func() { chownTreeRootOwnedFilter = origFilter })
+	chownTreeRootOwnedFilter = func(uint32) bool { return true }
+
+	real := t.TempDir()
+	actual := filepath.Join(real, "actual")
+	if err := os.Mkdir(actual, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actual, "a"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	link := filepath.Join(parent, "home-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(link, "actual")
+
+	uid, gid := os.Getuid(), os.Getgid()
+	walked, changed, err := chownTreeRootOwned(root, uid, gid, true)
+	if err == nil {
+		t.Fatal("expected an error refusing the ancestor symlink in enforced mode")
+	}
+	if walked != 0 || changed != 0 {
+		t.Errorf("walked=%d changed=%d, want 0, 0", walked, changed)
+	}
+}
+
 func TestIsRootOwned(t *testing.T) {
 	if !isRootOwned(0) {
 		t.Error("isRootOwned(0) = false, want true")
 	}
 	if isRootOwned(1000) {
 		t.Error("isRootOwned(1000) = true, want false")
+	}
+}
+
+// scionEnvFileCtime returns the ctime of $HOME/.scion for an owner-gating
+// test below, after writeEnvFile has already run once to create it.
+func scionEnvFileCtime(t *testing.T, tmpHome string) syscall.Timespec {
+	t.Helper()
+	info, err := os.Stat(filepath.Join(tmpHome, ".scion"))
+	if err != nil {
+		t.Fatalf("stat .scion: %v", err)
+	}
+	return info.Sys().(*syscall.Stat_t).Ctim
+}
+
+// TestWriteEnvFile_ChownGating covers all three owner states O1's fstat gate
+// distinguishes: root-owned (uid 0) triggers the chown; anything else — the
+// target uid itself (the normal steady-state case, once a previous run's
+// chown already landed) or any other unexpected uid — is left alone. Each
+// case drives scionDirOwnerUID directly rather than needing a real
+// differently-owned directory (this test process cannot create one without
+// real root).
+//
+// The "before" ctime is captured via writeEnvFileAfterWriteForTest, firing
+// right after the env-file write/rename (which itself bumps .scion's own
+// ctime, since that changes the directory's entries) and right before the
+// chown gate runs — not before the whole call — so the content-write's own
+// ctime bump doesn't get misread as evidence the chown ran.
+func TestWriteEnvFile_ChownGating(t *testing.T) {
+	tests := []struct {
+		name      string
+		reportUID uint32
+		wantChown bool
+	}{
+		{name: "root-owned (uid 0) triggers chown", reportUID: 0, wantChown: true},
+		{name: "already owned by target uid: no-op skip", reportUID: uint32(os.Getuid()), wantChown: false},
+		{name: "unexpected other owner: refuse/skip", reportUID: 424242, wantChown: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			t.Setenv("SCION_AGENT_NAME", "test-agent")
+
+			origOwnerUID := scionDirOwnerUID
+			t.Cleanup(func() { scionDirOwnerUID = origOwnerUID })
+			scionDirOwnerUID = func(int) (uint32, error) { return tt.reportUID, nil }
+
+			var before syscall.Timespec
+			writeEnvFileAfterWriteForTest = func(dir string) {
+				before = scionEnvFileCtime(t, tmpHome)
+				time.Sleep(15 * time.Millisecond)
+			}
+			t.Cleanup(func() { writeEnvFileAfterWriteForTest = nil })
+
+			writeEnvFile(tmpHome, os.Getuid(), os.Getgid())
+			after := scionEnvFileCtime(t, tmpHome)
+
+			gotChown := after != before
+			if gotChown != tt.wantChown {
+				t.Errorf("chown occurred = %v, want %v", gotChown, tt.wantChown)
+			}
+		})
 	}
 }

@@ -66,6 +66,18 @@ type Config struct {
 	// the caller resolves it (see commands.InitRunOptions.WorkingDir, set
 	// only by substrate-serve's InitRunner wiring).
 	WorkingDir string
+	// RequirePrivilegeDrop is the caller's own
+	// commands.InitRunOptions.RequirePrivilegeDrop (true only for
+	// substrate). It gates chownRecursive's hard-link guard: a regular file
+	// with more than one hard link is skipped rather than chowned only when
+	// this is true, since the guard is new, security-motivated behaviour —
+	// a legitimately hard-linked file under a non-substrate container's home
+	// directory would otherwise be silently left unowned by the target user
+	// and break writes, with no privilege boundary at stake to justify that
+	// on runtimes other than substrate. The fd-relative, no-follow walk
+	// itself (see chownRecursive's doc comment) is unconditional — it is
+	// behaviour-preserving and has no legitimate dependent case.
+	RequirePrivilegeDrop bool
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -157,7 +169,7 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	// UID/GID from the credential drop) gets permission denied on its own home.
 	if s.config.UID > 0 && s.config.GID > 0 && s.config.Username != "" {
 		home := "/home/" + s.config.Username
-		err := chownRecursive(home, s.config.UID, s.config.GID)
+		err := chownRecursive(home, s.config.UID, s.config.GID, s.config.RequirePrivilegeDrop)
 		if err != nil {
 			log.Error("Failed to chown home directory %s: %v", home, err)
 		} else {
@@ -444,17 +456,35 @@ func indexByte(s string, c byte) int {
 // both before and after the drop, so there is no "leave root-owned entries
 // alone" distinction to make here, unlike chownTreeRootOwned).
 //
-// It walks via dirfd.ChownTreeNoFollow: every subdirectory is opened
-// relative to its own already-open parent directory fd
-// (openat(O_DIRECTORY|O_NOFOLLOW)), and every chown is
-// fchownat(dirFd, name, uid, gid, AT_SYMLINK_NOFOLLOW) issued against that
-// fd — never a full-path os.Lchown, which re-resolves every intermediate
-// path component on every call and can be redirected by a symlink a
-// scion-uid process (a sidecar service, or a process a pre-start hook
-// spawned) swaps into one of them between this walk visiting that
-// component and the Lchown call for something beneath it. sup.Run calls
-// this while such processes may already be alive, so that window is real.
-func chownRecursive(root string, uid, gid int) error {
-	_, _, err := dirfd.ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true })
+// It walks via dirfd.ChownTreeNoFollow: every entry is resolved to a file
+// descriptor exactly once (openat(O_DIRECTORY|O_NOFOLLOW) for a directory,
+// openat(O_PATH|O_NOFOLLOW) otherwise), and every chown is
+// fchownat(fd, "", uid, gid, AT_EMPTY_PATH) issued against that same fd —
+// never a full-path os.Lchown, which re-resolves every intermediate path
+// component on every call and can be redirected by a symlink a scion-uid
+// process (a sidecar service, or a process a pre-start hook spawned) swaps
+// into one of them between this walk visiting that component and the
+// Lchown call for something beneath it. sup.Run calls this while such
+// processes may already be alive, so that window is real. This part is
+// unconditional on every runtime: it is behaviour-preserving (every entry
+// still ends up chowned exactly as before) and has no legitimate case that
+// depends on the old, re-resolving behaviour.
+//
+// requirePrivilegeDrop gates the walk's hard-link guard only — see
+// Config.RequirePrivilegeDrop's doc comment for why that one part of this
+// is new behaviour that must not change non-substrate runtimes.
+//
+// Per-entry chown failures and hard-link-guard skips are logged (entry name
+// only) rather than silently discarded.
+func chownRecursive(root string, uid, gid int, requirePrivilegeDrop bool) error {
+	_, _, err := dirfd.ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, requirePrivilegeDrop, func(name string, cerr error) {
+		if errors.Is(cerr, dirfd.ErrHardlinkedRegularFile) {
+			// pkg/sciontool/log has no dedicated Warn level; Info is the
+			// closest non-fatal level it offers.
+			log.Info("chownRecursive: WARN: skipping %s: %v", name, cerr)
+			return
+		}
+		log.Error("chownRecursive: failed to chown %s: %v", name, cerr)
+	})
 	return err
 }

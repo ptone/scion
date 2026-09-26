@@ -105,7 +105,7 @@ func TestChownTreeNoFollow_ChownsMatchingEntriesOnly(t *testing.T) {
 	uid, gid := os.Getuid(), os.Getgid()
 	walked, changed, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool {
 		return true // stand-in for a real filter; exercised for real below.
-	})
+	}, false, nil)
 	if err != nil {
 		t.Fatalf("ChownTreeNoFollow: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestChownTreeNoFollow_FilterSkipsNonMatchingEntries(t *testing.T) {
 	uid, gid := os.Getuid(), os.Getgid()
 	walked, changed, err := ChownTreeNoFollow(root, uid, gid, func(entryUID uint32) bool {
 		return entryUID != uint32(os.Getuid()) // never true for our own files
-	})
+	}, false, nil)
 	if err != nil {
 		t.Fatalf("ChownTreeNoFollow: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestChownTreeNoFollow_SymlinkEntryNotFollowed(t *testing.T) {
 	}
 
 	uid, gid := os.Getuid(), os.Getgid()
-	if _, _, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }); err != nil {
+	if _, _, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, false, nil); err != nil {
 		t.Fatalf("ChownTreeNoFollow: %v", err)
 	}
 
@@ -205,7 +205,7 @@ func TestChownTreeNoFollow_SymlinkEntryNotFollowed(t *testing.T) {
 // is entered, so nothing that happens to its *name* in the parent
 // afterward can redirect any operation still in flight underneath it.
 //
-// The swap is injected via ChownWalkTestHook, fired right after the walk
+// The swap is injected via chownWalkTestHook, fired right after the walk
 // opens the subdirectory's fd and before it processes that subdirectory's
 // own entries — the same window the class's real, timing-dependent exploit
 // needs, made deterministic exactly like writeEnvFileAfterWriteForTest
@@ -238,7 +238,7 @@ func TestChownTreeNoFollow_SurvivesIntermediateDirSwapMidWalk(t *testing.T) {
 
 	moved := filepath.Join(root, "cache.moved")
 	var swapped bool
-	ChownWalkTestHook = func(name string) {
+	chownWalkTestHook = func(name string) {
 		if swapped || name != "cache" {
 			return
 		}
@@ -251,10 +251,10 @@ func TestChownTreeNoFollow_SurvivesIntermediateDirSwapMidWalk(t *testing.T) {
 			t.Errorf("swap: symlink: %v", err)
 		}
 	}
-	t.Cleanup(func() { ChownWalkTestHook = nil })
+	t.Cleanup(func() { chownWalkTestHook = nil })
 
 	uid, gid := os.Getuid(), os.Getgid()
-	if _, _, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }); err != nil {
+	if _, _, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, false, nil); err != nil {
 		t.Fatalf("ChownTreeNoFollow: %v", err)
 	}
 	if !swapped {
@@ -309,7 +309,7 @@ func TestRemoveContentsNoFollow_RemovesEverythingExceptKept(t *testing.T) {
 	}
 	defer func() { _ = dir.Close() }()
 
-	removed, err := RemoveContentsNoFollow(dir, func(name string) bool { return name == "keep" })
+	removed, err := RemoveContentsNoFollow(dir, func(name string) bool { return name == "keep" }, nil)
 	if err != nil {
 		t.Fatalf("RemoveContentsNoFollow: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestRemoveContentsNoFollow_RefusesSymlinkedSubdirEntry(t *testing.T) {
 	// A symlink entry is not a directory (unix.S_IFDIR won't match its own
 	// lstat), so it takes the non-directory unlinkat branch and is removed
 	// as a link — but the victim it pointed at must survive.
-	if _, err := RemoveContentsNoFollow(dir, nil); err != nil {
+	if _, err := RemoveContentsNoFollow(dir, nil, nil); err != nil {
 		t.Fatalf("RemoveContentsNoFollow: %v", err)
 	}
 	if _, err := os.Stat(sentinel); err != nil {
@@ -393,7 +393,7 @@ func TestRemoveContentsNoFollow_SurvivesSubdirSwapMidWalk(t *testing.T) {
 
 	moved := filepath.Join(root, "gcloud-sub.moved")
 	var swapped bool
-	RemoveWalkTestHook = func(name string) {
+	removeWalkTestHook = func(name string) {
 		if swapped || name != "gcloud-sub" {
 			return
 		}
@@ -406,7 +406,7 @@ func TestRemoveContentsNoFollow_SurvivesSubdirSwapMidWalk(t *testing.T) {
 			t.Errorf("swap: symlink: %v", err)
 		}
 	}
-	t.Cleanup(func() { RemoveWalkTestHook = nil })
+	t.Cleanup(func() { removeWalkTestHook = nil })
 
 	dir, err := OpenDirNoFollow(root)
 	if err != nil {
@@ -414,7 +414,7 @@ func TestRemoveContentsNoFollow_SurvivesSubdirSwapMidWalk(t *testing.T) {
 	}
 	defer func() { _ = dir.Close() }()
 
-	if _, err := RemoveContentsNoFollow(dir, nil); err != nil {
+	if _, err := RemoveContentsNoFollow(dir, nil, nil); err != nil {
 		t.Fatalf("RemoveContentsNoFollow: %v", err)
 	}
 	if !swapped {
@@ -445,5 +445,190 @@ func TestRemoveContentsNoFollow_SurvivesSubdirSwapMidWalk(t *testing.T) {
 	movedInnerFile := filepath.Join(moved, "inner")
 	if _, err := os.Stat(movedInnerFile); !os.IsNotExist(err) {
 		t.Errorf("expected the original subdirectory's inner file to be removed, got err=%v", err)
+	}
+}
+
+// TestChownTreeNoFollow_ReportsPerEntryChownFailureViaOnErr proves per-entry
+// chown failures are surfaced through onErr rather than silently discarded.
+// Chowning to uid 0 (root) as a non-root test process is guaranteed to fail
+// with EPERM for both the root directory itself (surfaced via the returned
+// err, unaffected by this change) and for a child entry (previously
+// silently swallowed).
+func TestChownTreeNoFollow_ReportsPerEntryChownFailureViaOnErr(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chowning to uid 0 would trivially succeed")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "child"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var onErrCalls []string
+	_, _, err := ChownTreeNoFollow(root, 0, 0, func(uint32) bool { return true }, false, func(name string, e error) {
+		onErrCalls = append(onErrCalls, name)
+	})
+	if err == nil {
+		t.Fatal("expected chowning root to uid 0 as non-root to fail")
+	}
+	found := false
+	for _, name := range onErrCalls {
+		if name == "child" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected onErr to be called for \"child\", got calls: %v", onErrCalls)
+	}
+}
+
+// TestChownTreeNoFollow_GuardHardlinksSkipsMultiplyLinkedRegularFile proves
+// the hard-link guard: a workload can pre-plant a hard link to a file it
+// does not own (hard-linking only needs write access to the directory the
+// link is created in), so a regular file with more than one link is skipped
+// rather than chowned when guardHardlinks is true, and reported via onErr.
+func TestChownTreeNoFollow_GuardHardlinksSkipsMultiplyLinkedRegularFile(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "hardlink")
+	if err := os.Link(target, link); err != nil {
+		t.Fatal(err)
+	}
+	before := ctimeOf(t, target)
+	ctimeSettle()
+
+	reported := map[string]bool{}
+	uid, gid := os.Getuid(), os.Getgid()
+	_, changed, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, true, func(name string, e error) {
+		if e == ErrHardlinkedRegularFile {
+			reported[name] = true
+		}
+	})
+	if err != nil {
+		t.Fatalf("ChownTreeNoFollow: %v", err)
+	}
+	if !reported["target"] || !reported["hardlink"] {
+		t.Fatalf("expected onErr to report ErrHardlinkedRegularFile for both entries, got: %v", reported)
+	}
+	if changed != 1 {
+		// root itself is still chowned normally (it isn't a regular file,
+		// so the hard-link guard never applies to it) — only "target" and
+		// "hardlink" (the two entries sharing the guarded inode) must be
+		// skipped.
+		t.Errorf("changed = %d, want 1 (root only — both hard-linked entries must be skipped)", changed)
+	}
+	if ctimeOf(t, target) != before {
+		t.Error("target file's ctime advanced — it was chowned despite the hard-link guard")
+	}
+}
+
+// TestChownTreeNoFollow_GuardHardlinksDisabledStillChownsMultiplyLinkedFile
+// proves guardHardlinks=false preserves the historical (non-enforced)
+// behaviour: a hard-linked regular file is chowned like any other entry.
+func TestChownTreeNoFollow_GuardHardlinksDisabledStillChownsMultiplyLinkedFile(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.WriteFile(target, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "hardlink")
+	if err := os.Link(target, link); err != nil {
+		t.Fatal(err)
+	}
+	before := ctimeOf(t, target)
+	ctimeSettle()
+
+	uid, gid := os.Getuid(), os.Getgid()
+	_, _, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, false, nil)
+	if err != nil {
+		t.Fatalf("ChownTreeNoFollow: %v", err)
+	}
+	if ctimeOf(t, target) == before {
+		t.Error("expected the hard-linked file to be chowned when guardHardlinks is false")
+	}
+}
+
+// TestChownTreeNoFollow_DepthCapStopsDescendingAndReportsViaOnErr proves the
+// depth cap: a directory at or beyond the cap is itself still visited and
+// chowned, but the walk does not descend into it, and onErr is told why.
+func TestChownTreeNoFollow_DepthCapStopsDescendingAndReportsViaOnErr(t *testing.T) {
+	origDepth := maxWalkDepth
+	maxWalkDepth = 2
+	t.Cleanup(func() { maxWalkDepth = origDepth })
+
+	root := t.TempDir()
+	level1 := filepath.Join(root, "level1")
+	level2 := filepath.Join(level1, "level2")
+	tooDeepFile := filepath.Join(level2, "too-deep")
+	if err := os.MkdirAll(level2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tooDeepFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tooDeepBefore := ctimeOf(t, tooDeepFile)
+	ctimeSettle()
+
+	var gotCutoff bool
+	uid, gid := os.Getuid(), os.Getgid()
+	walked, _, err := ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, false, func(name string, e error) {
+		if e == ErrMaxWalkDepthExceeded {
+			gotCutoff = true
+		}
+	})
+	if err != nil {
+		t.Fatalf("ChownTreeNoFollow: %v", err)
+	}
+	if !gotCutoff {
+		t.Fatal("expected onErr to report ErrMaxWalkDepthExceeded")
+	}
+	// root, level1, level2 — not too-deep-file, which is beyond the cap.
+	if walked != 3 {
+		t.Errorf("walked = %d, want 3 (root, level1, level2 — not the file beyond the cap)", walked)
+	}
+	if ctimeOf(t, tooDeepFile) != tooDeepBefore {
+		t.Error("expected the file beyond the depth cap to be left untouched")
+	}
+}
+
+// TestRemoveContentsNoFollow_DepthCapStopsDescendingAndReportsViaOnErr
+// mirrors the chown depth-cap test for the delete walk.
+func TestRemoveContentsNoFollow_DepthCapStopsDescendingAndReportsViaOnErr(t *testing.T) {
+	origDepth := maxWalkDepth
+	maxWalkDepth = 2
+	t.Cleanup(func() { maxWalkDepth = origDepth })
+
+	root := t.TempDir()
+	level1 := filepath.Join(root, "level1")
+	level2 := filepath.Join(level1, "level2")
+	tooDeepFile := filepath.Join(level2, "too-deep")
+	if err := os.MkdirAll(level2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tooDeepFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir, err := OpenDirNoFollow(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dir.Close() }()
+
+	var gotCutoff bool
+	if _, err := RemoveContentsNoFollow(dir, nil, func(name string, e error) {
+		if e == ErrMaxWalkDepthExceeded {
+			gotCutoff = true
+		}
+	}); err != nil {
+		t.Fatalf("RemoveContentsNoFollow: %v", err)
+	}
+	if !gotCutoff {
+		t.Fatal("expected onErr to report ErrMaxWalkDepthExceeded")
+	}
+	if _, err := os.Stat(tooDeepFile); err != nil {
+		t.Errorf("expected the file beyond the depth cap to survive: %v", err)
 	}
 }
