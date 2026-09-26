@@ -736,8 +736,9 @@ every runtime — not a substrate-specific mechanism:
   pre-delete state, only accepts CRASHED/RUNNING/PAUSED actors
   (`third_party/ateapipb/ateapi.proto:46-47`), and a deleted actor simply
   stops being listed. `ActorStatus.state` is also required on every listed
-  actor, so a record-less `DELETING` actor can only ever disappear next,
-  never re-enter a live state.
+  actor, so a listed actor's state is never zero-valued/unknown; DELETING
+  actors are observed either to finish deleting or to stay stuck, and none
+  returns to a live state.
   **It is one of two documented exceptions to the invariant stated above**
   (the other is a second substrate profile on a different ateapi endpoint,
   not probed until its first `Run`; see `deploy/substrate/README.md`): a
