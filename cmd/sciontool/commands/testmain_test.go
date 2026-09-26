@@ -352,7 +352,7 @@ func TestRemoveSandboxHome_DoesNotTouchSymlinkTargetsOutsideTree(t *testing.T) {
 
 	fi, err := os.Stat(outsideFile)
 	if err != nil {
-		t.Fatalf("the symlink target %s was removed or is no longer reachable: %v", outsideFile, err)
+		t.Fatalf("the symlink target %s was removed or is unreachable: %v", outsideFile, err)
 	}
 	if fi.Mode() != wantMode {
 		t.Errorf("the symlink target %s has mode %v, want unchanged %v; removeSandboxHome must not chmod through a symlink", outsideFile, fi.Mode(), wantMode)
