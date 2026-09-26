@@ -2101,6 +2101,48 @@ func TestReadServicesYAML_Enforced_RefusesFifoWithoutHang(t *testing.T) {
 	}
 }
 
+// TestReadServicesYAML_Enforced_RefusesOverCapFile is R8: bounds the
+// enforced-mode read so a workload-planted multi-GB regular file cannot
+// make root's own init process read the whole thing into memory before the
+// harness ever starts.
+func TestReadServicesYAML_Enforced_RefusesOverCapFile(t *testing.T) {
+	tmpHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
+	oversized := bytes.Repeat([]byte("a"), servicesYAMLMaxBytes+1)
+	if err := os.WriteFile(servicesPath, oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if data, err := readServicesYAML(servicesPath, true); err == nil {
+		t.Errorf("expected an error for an over-cap file, got %d bytes", len(data))
+	}
+}
+
+// TestReadServicesYAML_Enforced_ReadsAtCapFile proves the boundary itself
+// still works: a file exactly at the cap is read successfully.
+func TestReadServicesYAML_Enforced_ReadsAtCapFile(t *testing.T) {
+	tmpHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
+	atCap := bytes.Repeat([]byte("a"), servicesYAMLMaxBytes)
+	if err := os.WriteFile(servicesPath, atCap, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := readServicesYAML(servicesPath, true)
+	if err != nil {
+		t.Fatalf("readServicesYAML: %v", err)
+	}
+	if len(data) != servicesYAMLMaxBytes {
+		t.Errorf("len(data) = %d, want %d", len(data), servicesYAMLMaxBytes)
+	}
+}
+
 // TestValidateServiceSpecs_DropsInvalidNamesKeepsValidOnes proves the
 // authoritative parse-time gate: an invalid Name is dropped from the list
 // (logged, never a raw workload-chosen string), while every valid entry —

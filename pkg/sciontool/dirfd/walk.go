@@ -135,13 +135,18 @@ var ErrMaxWalkDepthExceeded = errors.New("dirfd: max walk depth exceeded, not de
 // are never subject to this check.
 //
 // onErr, if non-nil, is called for every per-entry problem that does not
-// abort the walk: a failed chown, a hard-link guard skip, or a depth-cap
-// cutoff (see maxWalkDepth). It receives the entry's leaf name only — never
-// a full path, and never file content — so a caller logging it cannot leak
-// anything beyond a bare filename. onErr may be nil, in which case these
-// events are silently discarded (matching the historical behaviour before
-// this parameter existed); callers that want them logged should pass a
-// closure that does so.
+// abort the walk: a failed chown, a hard-link guard skip, a depth-cap
+// cutoff (see maxWalkDepth), a directory listing failure (reported with the
+// name "." — there is no single entry name to blame for failing to list a
+// directory at all), or any per-entry open/stat failure other than the
+// ordinary "it vanished between listing and this call" case (ENOENT, which
+// is not reported — that is an expected race with the directory's own
+// contents, not a problem with this package's handling of it). It receives
+// the entry's leaf name only — never a full path, and never file content —
+// so a caller logging it cannot leak anything beyond a bare filename. onErr
+// may be nil, in which case these events are silently discarded (matching
+// the historical behaviour before this parameter existed); callers that
+// want them logged should pass a closure that does so.
 //
 // Returns the number of entries visited (including root itself) and the
 // number actually chowned. Only an error opening or stat'ing root itself is
@@ -353,10 +358,11 @@ var removeWalkPreOpenTestHook func(name string)
 // dir itself. Recursion is bounded by maxWalkDepth, reported via onErr.
 //
 // onErr, if non-nil, is called for every per-entry problem that does not
-// abort the cleanup: a failed removal, or a depth-cap cutoff. It receives
-// the entry's leaf name only. onErr may be nil, in which case these events
-// are silently discarded, matching the historical os.RemoveAll-per-entry
-// loop's best-effort behaviour.
+// abort the cleanup: a failed removal, a depth-cap cutoff, or a per-entry
+// stat/open failure other than the ordinary "it vanished" case (ENOENT,
+// not reported). It receives the entry's leaf name only. onErr may be nil,
+// in which case these events are silently discarded, matching the
+// historical os.RemoveAll-per-entry loop's best-effort behaviour.
 func RemoveContentsNoFollow(dir *os.File, keep func(name string) bool, onErr func(name string, err error)) (removed int, err error) {
 	return removeWalkChildren(dir, keep, onErr, 1)
 }
