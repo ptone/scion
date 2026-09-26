@@ -210,8 +210,8 @@ var errPrivilegeDropRequired = errors.New("privilege drop to the scion user did 
 // targetUID==0, so this stays fail-closed if a future change to the
 // broker-side UID/GID resolution ever produces a non-root UID paired with a
 // still-root (0) GID: today that combination cannot occur because
-// pkg/runtime/substrate_bootstrap.go:196 hardcodes SCION_HOST_GID to "1000"
-// for every substrate actor, but this clamp does not depend on that staying
+// buildBootstrapEnv in pkg/runtime/substrate_bootstrap.go hardcodes SCION_HOST_GID
+// to "1000" for every substrate actor, but this clamp does not depend on that staying
 // true. This does not change behaviour for any UID/GID pair the current
 // code can actually produce.
 func requirePrivilegeDropOrFail(targetUID, targetGID int, requirePrivilegeDrop bool) error {
