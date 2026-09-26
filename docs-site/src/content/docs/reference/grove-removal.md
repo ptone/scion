@@ -32,6 +32,7 @@ agents and make sure hub and broker are on the same release.
 | Removed | Replacement / action |
 | --- | --- |
 | `.scion/grove-id` file | migrated automatically to `.scion/project-id`. If the file is committed, commit the rename. |
+| `~/.scion/groves/`, `~/.scion/grove-configs/` | moved automatically to `~/.scion/projects/` and `~/.scion/project-configs/`, with symlinks left at the old paths. If both exist, scion warns and uses the project-named directory. Directories on another filesystem or owned by another user must be moved by hand (scion prints the command). |
 <!-- Rows are appended here as later changes merge. -->
 
 ## Wire / env / labels
