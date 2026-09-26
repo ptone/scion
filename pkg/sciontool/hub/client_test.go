@@ -981,7 +981,7 @@ func TestTokenFile_WriteAndRead(t *testing.T) {
 	})
 
 	t.Run("write and read round-trip", func(t *testing.T) {
-		err := WriteTokenFile("my-refreshed-token")
+		err := WriteTokenFile("my-refreshed-token", 0, 0)
 		require.NoError(t, err)
 
 		token := ReadTokenFile()
@@ -989,11 +989,211 @@ func TestTokenFile_WriteAndRead(t *testing.T) {
 	})
 
 	t.Run("overwrite with newer token", func(t *testing.T) {
-		err := WriteTokenFile("even-newer-token")
+		err := WriteTokenFile("even-newer-token", 0, 0)
 		require.NoError(t, err)
 
 		token := ReadTokenFile()
 		assert.Equal(t, "even-newer-token", token)
+	})
+}
+
+// TestWriteTokenFile_Hardening exercises writeFileNoFollowChown's
+// symlink/non-regular-file refusal and its random (not predictable) temp
+// name through the hub agent-token entry point. The token used to be
+// written with a plain os.WriteFile to a fixed path+".tmp" name followed by
+// a path-based rename and a separate path-based os.Chown — both followed a
+// symlink planted at that fixed name or at the final path.
+func TestWriteTokenFile_Hardening(t *testing.T) {
+	t.Run("a planted symlink at the legacy fixed temp name is never reused or followed", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0700))
+
+		victim := filepath.Join(scionDir, "victim")
+		require.NoError(t, os.WriteFile(victim, []byte("orig"), 0600))
+		legacyTmp := filepath.Join(scionDir, TokenFile+".tmp")
+		require.NoError(t, os.Symlink(victim, legacyTmp))
+
+		require.NoError(t, WriteTokenFile("tok", 0, 0))
+		assert.Equal(t, "tok", ReadTokenFile())
+
+		data, err := os.ReadFile(victim)
+		require.NoError(t, err)
+		assert.Equal(t, "orig", string(data), "the legacy temp name's symlink target must be untouched")
+
+		linkInfo, err := os.Lstat(legacyTmp)
+		require.NoError(t, err)
+		assert.NotZero(t, linkInfo.Mode()&os.ModeSymlink, "the decoy symlink itself must survive unchanged")
+	})
+
+	t.Run("a hardlink at the legacy fixed temp name is never reused or followed", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0700))
+
+		victim := filepath.Join(scionDir, "victim")
+		require.NoError(t, os.WriteFile(victim, []byte("orig"), 0600))
+		legacyTmp := filepath.Join(scionDir, TokenFile+".tmp")
+		require.NoError(t, os.Link(victim, legacyTmp))
+
+		require.NoError(t, WriteTokenFile("tok", 0, 0))
+		assert.Equal(t, "tok", ReadTokenFile())
+
+		data, err := os.ReadFile(victim)
+		require.NoError(t, err)
+		assert.Equal(t, "orig", string(data), "the legacy temp name's hardlink target must be untouched")
+	})
+}
+
+// TestWriteTokenFile_RefusesSymlinkedScionDir proves that replacing
+// $HOME/.scion itself — not just the scion-token leaf — with a symlink
+// can't redirect the write: a leaf-only O_NOFOLLOW doesn't protect against
+// this, since O_NOFOLLOW only applies to a path's final component, and
+// scion owns $HOME and so can always swap out ".scion" for a symlink to an
+// attacker-controlled directory.
+func TestWriteTokenFile_RefusesSymlinkedScionDir(t *testing.T) {
+	home := t.TempDir()
+	cleanup := SetTokenHome(home)
+	defer cleanup()
+
+	attackerDir := filepath.Join(home, "attacker-dir")
+	require.NoError(t, os.MkdirAll(attackerDir, 0700))
+	victim := filepath.Join(attackerDir, "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("orig"), 0600))
+
+	// ".scion" is normally a real directory root creates under $HOME; here
+	// it's a symlink to an attacker-controlled directory instead.
+	require.NoError(t, os.Symlink(attackerDir, filepath.Join(home, ".scion")))
+
+	err := WriteTokenFile("tok", 0, 0)
+	require.Error(t, err)
+
+	entries, rerr := os.ReadDir(attackerDir)
+	require.NoError(t, rerr)
+	require.Len(t, entries, 1, "nothing should have been written into the attacker directory")
+	assert.Equal(t, "victim", entries[0].Name())
+
+	data, rerr := os.ReadFile(victim)
+	require.NoError(t, rerr)
+	assert.Equal(t, "orig", string(data), "the victim file must be untouched")
+}
+
+// TestClient_StartTokenRefresh_RefusesSymlinkAtTokenPath proves the refresh
+// loop refuses a symlink planted at the final scion-token path instead of
+// writing the refreshed token through it and then chowning whatever it
+// points at: the fake chown seam only ever accepts a file descriptor, never
+// a path, so this also proves ownership can't be redirected by a symlink
+// swapped in after the write.
+func TestClient_StartTokenRefresh_RefusesSymlinkAtTokenPath(t *testing.T) {
+	home := t.TempDir()
+	cleanup := SetTokenHome(home)
+	defer cleanup()
+
+	scionDir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(scionDir, 0700))
+
+	victim := filepath.Join(scionDir, "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("orig"), 0600))
+	tokenPath := filepath.Join(scionDir, TokenFile)
+	require.NoError(t, os.Symlink(victim, tokenPath))
+
+	origChown := fchownFn
+	t.Cleanup(func() { fchownFn = origChown })
+	var chownCalled bool
+	fchownFn = func(fd, uid, gid int) error {
+		chownCalled = true
+		return nil
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"token":"new-token","expires_at":"2030-01-01T00:00:00Z"}`))
+	}))
+	defer server.Close()
+
+	client := NewClientWithConfig(server.URL, "old-token", "agent-123")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	done := client.StartTokenRefresh(ctx, &TokenRefreshConfig{
+		RefreshAt: time.Now(),
+		Timeout:   time.Second,
+		ChownUID:  1000,
+		ChownGID:  1000,
+	})
+	<-done
+
+	// The chown seam only ever takes a file descriptor (never a path), so
+	// "chown followed the symlink" is structurally impossible here; what we
+	// still need to prove is that the victim was never touched at all and
+	// that the symlink itself survives.
+	assert.False(t, chownCalled, "the chown seam must never run against a symlinked token path")
+
+	data, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, "orig", string(data), "the symlink target must be untouched")
+
+	linkInfo, lerr := os.Lstat(tokenPath)
+	require.NoError(t, lerr)
+	assert.NotZero(t, linkInfo.Mode()&os.ModeSymlink, "the symlink at the final path must be untouched")
+}
+
+// TestChownTokenFile proves ChownTokenFile fixes ownership via an fd-based
+// fchown and refuses a symlink or hardlink at the token path instead of
+// following it.
+func TestChownTokenFile(t *testing.T) {
+	t.Run("refuses a symlink at the token path", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0700))
+
+		victim := filepath.Join(scionDir, "victim")
+		require.NoError(t, os.WriteFile(victim, []byte("orig"), 0600))
+		require.NoError(t, os.Symlink(victim, filepath.Join(scionDir, TokenFile)))
+
+		err := ChownTokenFile(os.Getuid(), os.Getgid())
+		require.Error(t, err)
+	})
+
+	t.Run("refuses a hardlink at the token path", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0700))
+
+		victim := filepath.Join(scionDir, "victim")
+		require.NoError(t, os.WriteFile(victim, []byte("orig"), 0600))
+		require.NoError(t, os.Link(victim, filepath.Join(scionDir, TokenFile)))
+
+		err := ChownTokenFile(os.Getuid(), os.Getgid())
+		require.Error(t, err)
+	})
+
+	t.Run("chowns a regular token file via the fd", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		require.NoError(t, WriteTokenFile("tok", 0, 0))
+
+		// uid<=0 skips chown in the writer, so an ordinary non-root test can
+		// still exercise ChownTokenFile itself by chowning to its own
+		// uid/gid, which is always permitted.
+		err := ChownTokenFile(os.Getuid(), os.Getgid())
+		require.NoError(t, err)
 	})
 }
 
@@ -1014,7 +1214,7 @@ func TestNewClient_UsesTokenFile(t *testing.T) {
 	})
 
 	t.Run("prefers file token over env token", func(t *testing.T) {
-		err := WriteTokenFile("refreshed-file-token")
+		err := WriteTokenFile("refreshed-file-token", 0, 0)
 		require.NoError(t, err)
 
 		client := NewClient()
