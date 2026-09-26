@@ -6,6 +6,7 @@ package commands
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 )
@@ -920,22 +923,58 @@ func TestRunInit_Enforced_RootGIDFromSetupHostUser_FailsClosed(t *testing.T) {
 		orig := runSetupHostUser
 		uid, gid := pair[0], pair[1]
 		runSetupHostUser = func(bool) (int, int, bool) { return uid, gid, false }
+		t.Cleanup(func() { runSetupHostUser = orig })
 		got := RunInit([]string{"true"}, InitRunOptions{ForwardTermSignal: false, RequirePrivilegeDrop: true})
-		runSetupHostUser = orig
 		if got != exitCodePrivilegeDropRequired {
 			t.Errorf("setupHostUser=(%d,%d): RunInit() = %d, want exitCodePrivilegeDropRequired (%d)", uid, gid, got, exitCodePrivilegeDropRequired)
 		}
 	}
 }
 
+// TestRunInit_Enforced_RootlessFromSetupHostUser_FailsClosedBeforeServices
+// pins that RunInit's enforced gate does not exempt setupHostUser's rootless
+// result: setupHostUser returns (0, 0, true) both for a root process
+// without CAP_SETUID and for an unmapped target UID, and in both cases PID 1
+// is still real root. The gate must refuse (exit
+// exitCodePrivilegeDropRequired) before git clone or services start ever
+// run: those two downstream steps receive the same targetUID/targetGID the
+// gate itself saw, and the supervisor's own independent refusal one layer
+// down only protects the harness child, not git clone or the sidecar
+// services started before it.
+func TestRunInit_Enforced_RootlessFromSetupHostUser_FailsClosedBeforeServices(t *testing.T) {
+	agentHome := t.TempDir()
+	setupRunInitAsRootlessScion(t, agentHome)
+	writeServicesYAMLWithInvalidEntry(t, agentHome)
+
+	orig := runSetupHostUser
+	runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, true }
+	t.Cleanup(func() { runSetupHostUser = orig })
+
+	cloneReached, servicesReached := false, false
+	withRunGitCloneWorkspace(t, func(int, int, string) error { cloneReached = true; return nil })
+	withRunServicesStart(t, func(_ context.Context, _ *services.Manager, _ []api.ServiceSpec, uid, gid int, _ string, _ bool) error {
+		servicesReached = true
+		t.Logf("services started with uid=%d gid=%d in enforced mode", uid, gid)
+		return nil
+	})
+
+	got := RunInit([]string{"true"}, InitRunOptions{ForwardTermSignal: false, RequirePrivilegeDrop: true})
+	if got != exitCodePrivilegeDropRequired {
+		t.Errorf("setupHostUser=(0,0,rootless=true): RunInit() = %d, want exitCodePrivilegeDropRequired (%d)", got, exitCodePrivilegeDropRequired)
+	}
+	if cloneReached || servicesReached {
+		t.Errorf("enforced + rootless root: gitClone reached=%v, servicesStart reached=%v; want neither (they would run as uid 0)", cloneReached, servicesReached)
+	}
+}
+
 // TestSeamDefaultsAreRealFunctions pins that every test-only seam RunInit's
 // setup path exposes (see runAdjustScionUser, runChownTreeRootOwned,
-// setupHostUserHasCapSetUID and setupHostUserIsUIDMapped's doc comments)
-// still defaults to the real function it wraps. A default that silently
-// became a stub would skip the checks or side effects those functions
-// perform in production, while every test — which only ever reassigns the
-// var for the duration of its own run, never inspects its starting value —
-// would keep passing.
+// setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, setupHostUserGetuid
+// and postPreStartGeteuid's doc comments) still defaults to the real
+// function it wraps. A default that silently became a stub would skip the
+// checks or side effects those functions perform in production, while every
+// test — which only ever reassigns the var for the duration of its own run,
+// never inspects its starting value — would keep passing.
 func TestSeamDefaultsAreRealFunctions(t *testing.T) {
 	ptr := func(f any) uintptr { return reflect.ValueOf(f).Pointer() }
 	for name, pair := range map[string][2]any{
@@ -943,6 +982,8 @@ func TestSeamDefaultsAreRealFunctions(t *testing.T) {
 		"runChownTreeRootOwned":     {runChownTreeRootOwned, chownTreeRootOwned},
 		"setupHostUserHasCapSetUID": {setupHostUserHasCapSetUID, hasCapSetUID},
 		"setupHostUserIsUIDMapped":  {setupHostUserIsUIDMapped, isUIDMapped},
+		"setupHostUserGetuid":       {setupHostUserGetuid, os.Getuid},
+		"postPreStartGeteuid":       {postPreStartGeteuid, os.Geteuid},
 	} {
 		if ptr(pair[0]) != ptr(pair[1]) {
 			t.Errorf("%s default is not the real function", name)
