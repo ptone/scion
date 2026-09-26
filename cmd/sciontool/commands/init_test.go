@@ -20,6 +20,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
@@ -1613,13 +1614,63 @@ func TestCleanGcloudConfigForMetadata_Enforced_CleansRealDir(t *testing.T) {
 }
 
 // TestCleanGcloudConfigForMetadata_Enforced_MissingDirIsNoop proves the
-// "nothing to clean" case is unaffected by the enforced-mode rewrite.
+// "nothing to clean" case is unaffected by the enforced-mode rewrite, and
+// specifically that it is NOT misreported as a refused symlink: a missing
+// directory must never produce an Error log line, only a genuinely refused
+// symlink should. errors.Is(err, os.ErrNotExist) is what tells the two
+// apart — os.IsNotExist would not (see readServicesYAML/OpenDirNoFollow's
+// own doc comments for the same distinction), so this pins the log-level
+// behaviour a mutation back to os.IsNotExist would silently break.
 func TestCleanGcloudConfigForMetadata_Enforced_MissingDirIsNoop(t *testing.T) {
 	tmpHome := t.TempDir()
+	logPath := filepath.Join(tmpHome, "capture.log")
+	log.SetLogPath(logPath)
+	log.SetQuiet(true)
+	t.Cleanup(func() { log.SetQuiet(false) })
+
 	gcloudDir := filepath.Join(tmpHome, ".config", "gcloud")
-	// Does not panic or error visibly; nothing to assert beyond "doesn't
-	// crash" since there's nothing on disk to check.
 	cleanGcloudConfigForMetadata(gcloudDir, true)
+
+	// No log call at all is the expected outcome for a genuinely missing
+	// directory, so the log file may not even exist yet.
+	data, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reading captured log: %v", err)
+	}
+	if strings.Contains(string(data), "ERROR") {
+		t.Errorf("a missing gcloud dir must not log an Error line, got: %s", data)
+	}
+}
+
+// TestCleanGcloudConfigForMetadata_Enforced_SymlinkLogsErrorLine is the
+// discriminating half of the test above: a genuinely refused symlink DOES
+// log an Error line, proving the missing-dir test isn't just vacuously
+// passing because nothing is ever logged at all.
+func TestCleanGcloudConfigForMetadata_Enforced_SymlinkLogsErrorLine(t *testing.T) {
+	tmpHome := t.TempDir()
+	logPath := filepath.Join(tmpHome, "capture.log")
+	log.SetLogPath(logPath)
+	log.SetQuiet(true)
+	t.Cleanup(func() { log.SetQuiet(false) })
+
+	victim := t.TempDir()
+	gcloudDir := filepath.Join(tmpHome, ".config", "gcloud")
+	if err := os.MkdirAll(filepath.Dir(gcloudDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, gcloudDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanGcloudConfigForMetadata(gcloudDir, true)
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading captured log: %v", err)
+	}
+	if !strings.Contains(string(data), "ERROR") {
+		t.Errorf("expected a refused symlink to log an Error line, got: %s", data)
+	}
 }
 
 // TestChownTreeRootOwned_DirectCall is a thin call-site test proving
