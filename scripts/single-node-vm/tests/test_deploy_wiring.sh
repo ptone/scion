@@ -294,16 +294,23 @@ run_deploy_create_to_proxy_settings_yaml() {
 
 # _run_deploy_create_to_settings_yaml_impl CONFIG_JSON MODE ("dev" or
 # "proxy") — shared implementation. Sets DEPLOY_RC, DEPLOY_LOG, and
-# DEPLOY_REACHED_SETTINGS_YAML.
+# DEPLOY_REACHED_SETTINGS_YAML. Waits up to 30 s for the dev-mode write
+# and 120 s for the proxy-mode write, which comes after several times as
+# many gcloud calls (a tier-on run through Phase 5 makes the most); set
+# DEPLOY_TEST_BUDGET_MS to override both on a slow machine. The wait ends
+# as soon as the sentinel appears, so a larger budget costs nothing on a
+# passing run.
 _run_deploy_create_to_settings_yaml_impl() {
-  local config_json="$1" mode="$2" config_file
+  local config_json="$1" mode="$2" config_file budget_ms
   config_file="$(mktemp)"
   printf '%s' "$config_json" > "$config_file"
   local sentinel
   if [[ "$mode" == "proxy" ]]; then
     sentinel="${GCLOUD_STUB_STATE_DIR}/settings-yaml-proxy-mode-written"
+    budget_ms="${DEPLOY_TEST_BUDGET_MS:-120000}"
   else
     sentinel="${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
+    budget_ms="${DEPLOY_TEST_BUDGET_MS:-30000}"
   fi
   rm -f "$sentinel"
   local log_file
@@ -313,7 +320,7 @@ _run_deploy_create_to_settings_yaml_impl() {
     GCLOUD_STUB_SSH_SUCCEEDS=true IAP_ENFORCEMENT_WAIT_SECS=0
   pid="$_DEPLOY_BG_PID"
   local waited_ms=0
-  while [[ ! -f "$sentinel" && "$waited_ms" -lt 30000 ]]; do
+  while [[ ! -f "$sentinel" && "$waited_ms" -lt "$budget_ms" ]]; do
     sleep 0.1
     waited_ms=$((waited_ms + 100))
   done
@@ -1726,10 +1733,64 @@ test_deploy_create_tier_off_ignores_user_access_config() {
   assert_not_contains "$(gcloud_log)" "user_access_mode" "tier off must not write user_access_mode"
 }
 
+test_deploy_create_tier_off_wrongly_typed_user_access_config_warns_only() {
+  fresh_gcloud_state
+  run_deploy_create_to_proxy_settings_yaml \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" "a tier-off create with no user access keys must reach the proxy-mode write"
+  local plain_log plain_dev plain_proxy typed_log
+  plain_log="$(gcloud_log)"
+  plain_dev="$(_settings_heredoc_nth "$plain_log" 1)"
+  plain_proxy="$(_settings_heredoc_nth "$plain_log" 2)"
+  fresh_gcloud_state
+  run_deploy_create_to_proxy_settings_yaml \
+    "$(base_config_json "$HUB" ", \"user_access_mode\": 5, \"authorized_domains\": \"example.com\"" "registry" "us-docker.pkg.dev/demo-project/scion")"
+  assert_eq "true" "$DEPLOY_REACHED_SETTINGS_YAML" \
+    "with the tier off, wrongly typed user access keys must not stop the deploy"
+  assert_contains "$DEPLOY_LOG" "applied only when the hybrid tier is on; ignoring them" \
+    "tier off must still warn that the user access keys are not applied"
+  assert_not_contains "$DEPLOY_LOG" "Invalid user access settings" "tier off must not validate the key values"
+  typed_log="$(gcloud_log)"
+  assert_eq "$plain_dev" "$(_settings_heredoc_nth "$typed_log" 1)" \
+    "the tier-off dev-mode settings.yaml must be byte-identical to a run without the keys"
+  assert_eq "$plain_proxy" "$(_settings_heredoc_nth "$typed_log" 2)" \
+    "the tier-off proxy-mode settings.yaml must be byte-identical to a run without the keys"
+}
+
 # =====================================================================
 # Teardown of the agent transport service account, as deploy.sh
 # reports it.
 # =====================================================================
+
+test_deploy_delete_lists_transport_sa_before_confirmation() {
+  fresh_gcloud_state
+  local email list_at first_delete_at
+  email="$(hybrid_transport_sa_name "$HUB")@demo-project.iam.gserviceaccount.com"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  assert_contains "$DEPLOY_LOG" "  Service account:   ${email} (hybrid tier agent transport; if present and marked)" \
+    "the will-be-deleted list must name the transport SA"
+  list_at="$(echo "$DEPLOY_LOG" | grep -n -F "Service account:   ${email}" | head -1 | cut -d: -f1)"
+  first_delete_at="$(echo "$DEPLOY_LOG" | grep -n "Non-interactive mode: proceeding with teardown\|Deleting " | head -1 | cut -d: -f1)"
+  assert_true "$([[ -n "$list_at" && ( -z "$first_delete_at" || "$list_at" -lt "$first_delete_at" ) ]] && echo true || echo false)" \
+    "the transport SA must be listed before teardown proceeds"
+}
+
+test_deploy_delete_proxy_delete_failure_still_removes_transport_sa_iap_binding() {
+  fresh_gcloud_state
+  local email binding_line
+  email="$(hybrid_transport_sa_name "$HUB")@demo-project.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  set_run_service_delete_error "scion-hub-${HUB}-iap-proxy"
+  run_deploy_delete "$(base_config_json "$HUB")"
+  binding_line="$(gcloud_log | grep '^iap web remove-iam-policy-binding ' || true)"
+  assert_contains "$binding_line" "--member=serviceAccount:${email}" \
+    "with the Cloud Run delete failed, the transport SA's IAP binding on it must still be removed"
+  assert_contains "$binding_line" "--service=scion-hub-${HUB}-iap-proxy" \
+    "the binding removal must target the hub's own Cloud Run service"
+  assert_contains "$(gcloud_log)" "iam service-accounts delete ${email} " \
+    "the marked transport SA is still deleted once its binding is removed"
+}
+
 
 test_deploy_delete_transport_sa_deleted_and_reported() {
   fresh_gcloud_state

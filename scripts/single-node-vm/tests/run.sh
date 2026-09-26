@@ -22,6 +22,12 @@
 # subprocess against the same stub, to cover the wiring between the two
 # files that function-level tests can't reach).
 #
+# Also requires python3 and a Go toolchain: the settings.yaml parse tests
+# run `go run -buildvcs=false tests/lib/settings-yaml-to-json.go` from the
+# repository root, which needs the repository's github.com/knadh/koanf
+# YAML parser module in the Go module cache (fetched on first use when
+# the network allows it). Without Go, those tests fail rather than skip.
+#
 # Requires bash >= 4 (uses `mapfile` and associative arrays). This is a
 # dev-only test runner, not a deployment artifact: deploy.sh and
 # hybrid-tier.sh themselves target bash 3.2+ (macOS's shipped /bin/bash),

@@ -313,6 +313,31 @@ set_service_account_delete_will_fail() {
   touch "${GCLOUD_STUB_STATE_DIR}/service-accounts/$1.json.delete-fail"
 }
 
+# set_service_account_delete_not_found EMAIL — `describe` still finds
+# this service account, but the next `delete` reports NOT_FOUND (it was
+# deleted in between).
+set_service_account_delete_not_found() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/service-accounts"
+  touch "${GCLOUD_STUB_STATE_DIR}/service-accounts/$1.json.delete-not-found"
+}
+
+# set_service_account_user_keys EMAIL KEY_NAME... — `keys list
+# --managed-by=user` for exactly this service account returns these key
+# names.
+set_service_account_user_keys() {
+  local email="$1"
+  shift
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/service-accounts"
+  printf '%s\n' "$@" > "${GCLOUD_STUB_STATE_DIR}/service-accounts/${email}.json.user-keys"
+}
+
+# set_service_account_keys_list_error EMAIL — `keys list` for exactly
+# this service account fails with a PERMISSION_DENIED error.
+set_service_account_keys_list_error() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/service-accounts"
+  touch "${GCLOUD_STUB_STATE_DIR}/service-accounts/$1.json.keys-list-error"
+}
+
 # set_service_account_describe_error EMAIL [MESSAGE] — `describe` for
 # exactly this service account fails with MESSAGE, or by default a
 # realistic PERMISSION_DENIED error that says nothing about existence.
@@ -375,6 +400,13 @@ seed_run_service_exists() {
 set_run_service_describe_error() {
   mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
   touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.describe-error"
+}
+
+# set_run_service_delete_error NAME — `run services delete` for this
+# service fails with an error that is not a not-found.
+set_run_service_delete_error() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+  touch "${GCLOUD_STUB_STATE_DIR}/run-services/$1.delete-error"
 }
 
 # set_run_service_list_error — the next `run services list` call fails

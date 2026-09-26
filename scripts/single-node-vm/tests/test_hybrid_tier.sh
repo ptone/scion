@@ -3334,6 +3334,26 @@ test_teardown_delete_stops_after_allow_failure_deny_survives() {
     "the deny rule (not just some rule) must be the one recorded as queued-behind"
 }
 
+test_teardown_delete_not_attempted_message_per_rule() {
+  fresh_gcloud_state
+  seed_firewall_rule_desc_only "$ALLOW_NAME" "$MARKER"
+  seed_firewall_rule_desc_only "$HUB_DENY_NAME" "$MARKER"
+  seed_firewall_rule_desc_only "$DENY_NAME" "$MARKER"
+  set_firewall_delete_will_fail "$ALLOW_NAME"
+  HYBRID_TEARDOWN_DELETE=("$ALLOW_NAME" "$HUB_DENY_NAME" "$DENY_NAME")
+  local stderr_file stderr_output
+  stderr_file="$(mktemp)"
+  hybrid_teardown_delete "$PROJECT" 2>"${stderr_file}"
+  stderr_output="$(cat "${stderr_file}")"
+  rm -f "${stderr_file}"
+  assert_contains "$stderr_output" "Not attempted (kept so pod-range traffic to the hub VM stays denied): ${HUB_DENY_NAME}" \
+    "the not-attempted line for the pod-range deny must say what it keeps denied"
+  assert_contains "$stderr_output" "Not attempted (kept so tcp:2049 stays denied): ${DENY_NAME}" \
+    "the not-attempted line for the NFS deny must say what it keeps denied"
+  assert_not_contains "$stderr_output" "tcp:2049 stays denied): ${HUB_DENY_NAME}" \
+    "the pod-range deny must not be described as the NFS deny"
+}
+
 test_teardown_delete_confirms_already_gone_via_list() {
   fresh_gcloud_state
   HYBRID_TEARDOWN_DELETE=("$ALLOW_NAME")
@@ -3969,19 +3989,20 @@ test_internal_ip_guard_verify_fails_when_reservation_missing() {
 }
 
 # =====================================================================
-# No artifact of a pod-to-hub allow rule remains.
+# No pod-to-hub allow rule, or guard function for one, exists in the
+# scripts or docs.
 # =====================================================================
 
 test_no_hub_allow_artifact_remains_in_scripts_or_docs() {
   # Scans every text file under scripts/single-node-vm (including the
   # extensionless stubs in tests/lib), docs/ and .design/project-log/,
-  # for any spelling of the name (hub-allow, hub_allow, "hub allow", in
-  # any case) and the guard function's name. The one exclusion is
+  # for any spelling of the name (hub-allow, hub_allow, "hub allow",
+  # hubAllow, in any case) and the guard function's name. The one exclusion is
   # this file, where this test's own name and patterns spell the string
   # out.
   local hits repo_root
   repo_root="$(cd "${TIER_DIR}/../.." && pwd)"
-  hits="$(grep -rIniE 'hub[-_ ]allow|hybrid_hub_url_guard' \
+  hits="$(grep -rIniE 'hub[-_ ]?allow|hybrid_hub_url_guard' \
     "${TIER_DIR}" "${repo_root}/docs" "${repo_root}/.design/project-log" \
     --exclude='test_hybrid_tier.sh' \
     2>/dev/null || true)"
@@ -4020,6 +4041,19 @@ test_discover_iap_client_id_refused_on_api_error() {
   assert_contains "$RUN_OUTPUT" "Could not read project" "error should explain the read failure"
 }
 
+test_discover_iap_client_id_refused_when_malformed() {
+  local bad
+  for bad in 'x" injected: "y' '123-abc.apps.googleusercontent.com.evil.example' 'abc-def.apps.googleusercontent.com' \
+      '123-abc def.apps.googleusercontent.com' "$(printf '123-abc.apps.googleusercontent.com\nmode: open')"; do
+    fresh_gcloud_state
+    set_iap_client_id "$bad"
+    run_expect_fail hybrid_discover_iap_client_id "$PROJECT"
+    assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+      "a client id not in the OAuth client id form must be refused (got '${bad}')"
+    assert_contains "$RUN_OUTPUT" "is not in the expected" "the error should say the client id has the wrong form"
+  done
+}
+
 test_transport_sa_name_shape_and_length() {
   local name hub
   for hub in x demohub team-alpha-prod a-very-long-hub-nm xxxxxxxxxxx-yyyyyyyy; do
@@ -4035,6 +4069,12 @@ test_transport_sa_name_shape_and_length() {
   done
   assert_eq "scion-tp-demohub-bcaae3f2" "$(hybrid_transport_sa_name "demohub")" \
     "a short hub name keeps its full name plus the 8-hex hash of the full name"
+}
+
+test_transport_sa_name_hash_keeps_leading_zeros() {
+  # cksum("hub-6") is 127372129 (0x7978b61), seven hex digits unpadded.
+  assert_eq "scion-tp-hub-6-07978b61" "$(hybrid_transport_sa_name "hub-6")" \
+    "the hash is always 8 hex digits, zero-padded"
 }
 
 test_transport_sa_name_stable_across_runs() {
@@ -4089,6 +4129,43 @@ test_ensure_transport_sa_reuses_when_marked() {
   hybrid_ensure_transport_sa "$HUB" "$PROJECT"
   assert_eq "0" "$(gcloud_log | grep -c 'iam service-accounts create' || true)" \
     "an already-marked, matching transport SA must not be recreated"
+}
+
+test_ensure_transport_sa_adopts_marked_without_user_keys() {
+  fresh_gcloud_state
+  local email keys_line
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  hybrid_ensure_transport_sa "$HUB" "$PROJECT"
+  assert_eq "$email" "$HYBRID_TRANSPORT_SA_EMAIL" "a marked SA with no user-managed keys is adopted"
+  keys_line="$(gcloud_log | grep '^iam service-accounts keys list' || true)"
+  assert_contains "$keys_line" "--iam-account=${email}" "adoption must list the keys of the adopted SA"
+  assert_contains "$keys_line" "--managed-by=user" "adoption must list user-managed keys only"
+}
+
+test_ensure_transport_sa_refused_when_user_keys_present() {
+  fresh_gcloud_state
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  set_service_account_user_keys "$email" "projects/${PROJECT}/serviceAccounts/${email}/keys/0123abcd"
+  run_expect_fail hybrid_ensure_transport_sa "$HUB" "$PROJECT"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a marked SA with user-managed keys must be refused, not adopted"
+  assert_contains "$RUN_OUTPUT" "has user-managed keys" "the error should name the keys"
+}
+
+test_ensure_transport_sa_refused_on_keys_list_error() {
+  fresh_gcloud_state
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  set_service_account_keys_list_error "$email"
+  run_expect_fail hybrid_ensure_transport_sa "$HUB" "$PROJECT"
+  assert_true "$([[ $RUN_EXIT_CODE -ne 0 ]] && echo true || echo false)" \
+    "a keys list failure must refuse adoption, not read as no keys"
+  assert_contains "$RUN_OUTPUT" "Could not list the user-managed keys" "the error should say the keys could not be listed"
+  assert_contains "$RUN_OUTPUT" "PERMISSION_DENIED" "the list error must be printed"
 }
 
 test_ensure_transport_sa_refused_when_unmarked() {
@@ -4268,6 +4345,18 @@ test_teardown_transport_sa_describe_permission_denied_is_a_failure() {
   assert_contains "$out" "PERMISSION_DENIED" "the describe error must be printed"
 }
 
+test_teardown_transport_sa_gone_at_delete_reported_not_found() {
+  fresh_gcloud_state
+  local email
+  email="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
+  seed_service_account "$email" "$MARKER"
+  set_service_account_delete_not_found "$email"
+  hybrid_teardown_transport_sa "$HUB" "$PROJECT" "${INSTANCE_NAME_TEST}-iap-proxy" "us-central1" "false"
+  assert_eq "true" "$HYBRID_TRANSPORT_SA_NOT_FOUND" "an SA found by describe but not found by delete is reported not found"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETED" "it must not be reported as deleted by this teardown"
+  assert_eq "false" "$HYBRID_TRANSPORT_SA_DELETE_FAILED" "a positive not-found on delete is not a failure"
+}
+
 test_teardown_transport_sa_delete_failure_reported() {
   fresh_gcloud_state
   local email
@@ -4416,6 +4505,40 @@ test_user_access_refuses_service_account_admin_email() {
       "Robot@Demo-Project.IAM.GServiceAccount.COM" "123456789-compute@developer.gserviceaccount.com"; do
     _expect_user_access_refused "$email" "is a service account" "admin_email '${email}'"
   done
+}
+
+test_user_access_refuses_admin_email_with_whitespace_or_comma() {
+  fresh_gcloud_state
+  _user_access_config '{}'
+  local sa email
+  sa="$(hybrid_transport_sa_name "$HUB")@${PROJECT}.iam.gserviceaccount.com"
+  _expect_user_access_refused "${sa} " "is a service account" "a service-account admin_email with a trailing space"
+  _expect_user_access_refused "$(printf '%s\t' "$sa")" "is a service account" "a service-account admin_email with a trailing tab"
+  _expect_user_access_refused "$(printf ' \t%s' "$sa")" "is a service account" "a service-account admin_email with leading whitespace"
+  for email in "${sa},admin@example.com" "admin@example.com,${sa}" "admin@example.com, ${sa}" \
+      "admin@example.com ${sa}" "$(printf 'admin@example.com\t%s' "$sa")"; do
+    _expect_user_access_refused "$email" "must be a single email address" "admin_email '${email}'"
+  done
+  _expect_user_access_refused "   " "needs admin_email set" "a whitespace-only admin_email"
+}
+
+test_user_access_accepts_ordinary_admin_email() {
+  fresh_gcloud_state
+  _user_access_config '{}'
+  hybrid_resolve_user_access "Admin.User@Example.com"
+  assert_eq "invite_only" "$HYBRID_USER_ACCESS_MODE" "an ordinary user admin_email passes"
+  hybrid_resolve_user_access " admin@example.com "
+  assert_eq "invite_only" "$HYBRID_USER_ACCESS_MODE" "surrounding whitespace on an ordinary admin_email is trimmed and passes"
+}
+
+test_user_access_config_present_ignores_value_types() {
+  fresh_gcloud_state
+  _user_access_config '{"user_access_mode": 5}'
+  assert_true "$(hybrid_user_access_config_present && echo true || echo false)" \
+    "a wrongly typed user_access_mode still counts as present, without exiting"
+  _user_access_config '{"authorized_domains": "example.com"}'
+  assert_true "$(hybrid_user_access_config_present && echo true || echo false)" \
+    "a wrongly typed authorized_domains still counts as present, without exiting"
 }
 
 test_user_access_config_present_detects_either_key() {

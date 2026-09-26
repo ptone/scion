@@ -124,6 +124,24 @@ case "${1:-} ${2:-} ${3:-} ${4:-}" in
     require_project "$@"
     exit 0
     ;;
+  "iam service-accounts keys list")
+    require_project "$@"
+    require_flag iam-account "$@"
+    if [[ "$(get_flag managed-by "$@" || true)" != "user" ]]; then
+      echo "gcloud-stub: keys list is expected to pass --managed-by=user on: $*" >&2
+      exit 1
+    fi
+    sa_email="$(get_flag iam-account "$@")"
+    f="${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
+    if [[ -f "${f}.keys-list-error" ]]; then
+      echo "gcloud-stub: ERROR: (gcloud.iam.service-accounts.keys.list) PERMISSION_DENIED: Permission iam.serviceAccountKeys.list denied on resource" >&2
+      exit 1
+    fi
+    if [[ -f "${f}.user-keys" ]]; then
+      cat "${f}.user-keys"
+    fi
+    exit 0
+    ;;
 esac
 
 case "${1:-} ${2:-}" in
@@ -609,6 +627,12 @@ json.dump({'email': email, 'description': desc}, open(path, 'w'))
       echo "gcloud-stub: simulated delete failure for service account ${sa_email}" >&2
       exit 1
     fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json.delete-not-found" ]]; then
+      # Found by describe, gone by the time of the delete.
+      rm -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
+      echo "gcloud-stub: ERROR: (gcloud.iam.service-accounts.delete) NOT_FOUND: Unknown service account" >&2
+      exit 1
+    fi
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json" ]]; then
       rm -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
       exit 0
@@ -670,6 +694,11 @@ json.dump({'email': email, 'description': desc}, open(path, 'w'))
     exit 0
     ;;
   "run services delete")
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.delete-error" ]]; then
+      echo "gcloud-stub: ERROR: (gcloud.run.services.delete) PERMISSION_DENIED: simulated delete failure for service [${name}]" >&2
+      exit 1
+    fi
     exit 0
     ;;
   "run services describe")
