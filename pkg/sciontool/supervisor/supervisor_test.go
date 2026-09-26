@@ -519,7 +519,7 @@ func TestMergeEnvOverlay_Helper(t *testing.T) {
 }
 
 // TestChownRecursive_ChownsUnconditionallyAndSurvivesSymlink is a thin
-// call-site test proving chownRecursive (P1b) delegates to the shared
+// call-site test proving chownRecursive delegates to the shared
 // dirfd.ChownTreeNoFollow walk unconditionally (every entry, not just
 // root-owned ones — unlike chownTreeRootOwned) and never follows a symlink.
 // The deeper intermediate-directory-swap race itself is covered once,
@@ -617,8 +617,8 @@ func lstatCtime(t *testing.T, path string) syscall.Timespec {
 	return st.Ctim
 }
 
-// TestSupervisor_Run_RequirePrivilegeDropRefusesUndroppableCredentials is
-// round 5's B2: with RequirePrivilegeDrop set, a Config whose UID or GID
+// TestSupervisor_Run_RequirePrivilegeDropRefusesUndroppableCredentials proves
+// that, with RequirePrivilegeDrop set, a Config whose UID or GID
 // fails the credential drop's own UID>0 && GID>0 predicate must make Run
 // return (1, ErrPrivilegeDropRequired) WITHOUT starting the child, rather
 // than silently running it with no Credential (i.e. as whatever this

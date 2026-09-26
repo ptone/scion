@@ -446,7 +446,7 @@ func ownerUIDOf(info fs.FileInfo) (uid uint32, ok bool) {
 	return stat.Uid, true
 }
 
-// TestFixupRootfsForScion_Enforced_RefusesAncestorSymlink is T4(a)'s core
+// TestFixupRootfsForScion_Enforced_RefusesAncestorSymlink is the core
 // regression test: fixupRootfsForScion is reachable only from substrate-
 // serve (fixupRootfsForScionUser -> startupRootfsFixup/bootstrapRootfsFixup
 // in substrate_serve.go), so its own chownTreeRootOwned call is hardcoded

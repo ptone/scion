@@ -404,7 +404,7 @@ func TestMergeEnv(t *testing.T) {
 	}
 }
 
-// TestOpenLogs_RefusesPreplantedSymlink is P1a's core deterministic
+// TestOpenLogs_RefusesPreplantedSymlink is the core deterministic
 // regression test: a symlink already sitting at a service's log path
 // (planted by a scion-uid process during the window root spends blocked on
 // an earlier service's ReadyCheck, in the real exploit) must never be
@@ -451,15 +451,15 @@ func TestOpenLogs_RefusesPreplantedSymlink(t *testing.T) {
 	}
 }
 
-// TestManager_Start_DropsOnlyTheServiceWithASymlinkedLogPath is P1a's
+// TestManager_Start_DropsOnlyTheServiceWithASymlinkedLogPath is the
 // call-site-level regression test: a symlink planted at one service's log
 // path must never be opened/created/appended through — but it must also not
 // prevent any OTHER service (including ones later in specs) from starting.
 // An all-or-nothing policy here would hand a workload process a
 // denial-of-service lever against every sidecar merely by planting one
 // symlink, which contradicts the "a planted symlink must not be able to
-// stop the workload from starting" principle applied elsewhere in this unit
-// (see cmd/sciontool/commands/init.go's N2/N3 hardening).
+// stop the workload from starting" principle applied elsewhere
+// (see cmd/sciontool/commands/init.go's own hardening).
 func TestManager_Start_DropsOnlyTheServiceWithASymlinkedLogPath(t *testing.T) {
 	cleanup := setupTestEnv(t)
 	defer cleanup()
@@ -515,7 +515,7 @@ func TestManager_Start_DropsOnlyTheServiceWithASymlinkedLogPath(t *testing.T) {
 // requirePrivilegeDrop is true. Each subtest hard-links exactly ONE of the
 // three paths (the other two are fresh), so each subtest fails if and only
 // if that one call site stops forwarding requirePrivilegeDrop as checkNlink
-// (round-4 High-4 / Required-2: only stdout was covered before).
+// (previously only stdout was covered).
 func TestOpenLogs_Enforced_RefusesHardlinkedLogPath(t *testing.T) {
 	for _, suffix := range []string{".stdout.log", ".stderr.log", ".lifecycle.log"} {
 		t.Run(suffix, func(t *testing.T) {
@@ -556,8 +556,8 @@ func TestOpenLogs_Enforced_RefusesHardlinkedLogPath(t *testing.T) {
 }
 
 // TestManager_Start_Enforced_DropsServiceWithHardlinkedLogPath proves that
-// Manager.Start itself forwards requirePrivilegeDrop to openLogs (round-4
-// O29): with requirePrivilegeDrop=true, a service whose <name>.stdout.log is
+// Manager.Start itself forwards requirePrivilegeDrop to openLogs: with
+// requirePrivilegeDrop=true, a service whose <name>.stdout.log is
 // a pre-planted hard link to a victim file is dropped (never started), the
 // victim's content and size are unchanged, and a sibling service still
 // starts. The enforced=false twin below proves the fixture itself is not
@@ -710,8 +710,8 @@ func countLogDirFds(t *testing.T, logDir string) int {
 	return count
 }
 
-// TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure is T5's core
-// regression test for the two R2 fd-leak fixes: closing a service's own
+// TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure is the core
+// regression test for the two fd-leak fixes: closing a service's own
 // partial fds when its own log-open fails, and closing the fds of every
 // service that never gets a chance to start because an earlier one's
 // start() call failed. Neither path is exercised by
@@ -749,8 +749,8 @@ func TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Optional-3 (round-4 O24/O25): openLogNoFollow's OWN refusal paths
-	// must close the fd they opened. "fifo"'s stderr log is a FIFO with a
+	// openLogNoFollow's OWN refusal paths (not just the caller's) must close
+	// the fd they opened. "fifo"'s stderr log is a FIFO with a
 	// reader attached (so the write-side open succeeds and only the S_IFREG
 	// check refuses it); "linked"'s stderr log is a hard link (refused only
 	// by the enforced Nlink check). Their reader fd is opened before the
@@ -801,7 +801,7 @@ func TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure(t *testing.T) {
 	}
 }
 
-// TestOpenLogNoFollow_RefusesFifoWithoutBlocking is L1: proves the
+// TestOpenLogNoFollow_RefusesFifoWithoutBlocking proves the
 // S_IFREG check in openLogNoFollow refuses a FIFO planted at a log path —
 // even one with a reader already attached, so open(2) itself would
 // otherwise succeed immediately were it not for the S_IFREG check —
@@ -815,7 +815,7 @@ func TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure(t *testing.T) {
 // the FIFO itself: with no reader, the write-side open would instead fail
 // with ENXIO, which also satisfies a bare err!=nil check and would make
 // this test pass regardless of whether the S_IFREG check exists at all
-// (that was the round-3 gap: the original version raced a reader-attach
+// (an earlier version of this test raced a reader-attach
 // goroutine against the write-side open with no synchronisation, and the
 // write side almost always won, so it was actually exercising the ENXIO
 // path, not S_IFREG).

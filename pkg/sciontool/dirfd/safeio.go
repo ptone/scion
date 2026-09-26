@@ -219,6 +219,19 @@ func relUnderRoot(root, path string) (string, error) {
 	return rel, nil
 }
 
+// readUnderRootIntermediateCloseTestHook, when non-nil, fires in
+// ReadUnderRootNoFollow immediately after an owned intermediate directory
+// fd is closed — whether the next component's openat succeeded or not. It
+// receives the exact fd number that was just closed, purely informational,
+// so a test can immediately dup a sentinel onto that number (claiming it
+// deterministically, rather than hoping the kernel's normal allocator
+// happens to reuse it for something else first) and later prove this
+// package's own deferred closer never touches that number again. Always
+// nil in production; unexported — this package's own tests are the only
+// thing that may set it. Same purpose as walk.go's chownWalkTestHook
+// family; see its doc comment.
+var readUnderRootIntermediateCloseTestHook func(closedFd int)
+
 // ReadUnderRootNoFollow reads path, which must resolve to somewhere inside
 // root, by walking from root down to path one component at a time with
 // openat(..., O_NOFOLLOW): root itself is opened once via OpenDirNoFollow
@@ -242,19 +255,6 @@ func relUnderRoot(root, path string) (string, error) {
 // There is no separate stat anywhere in this path: the file is fstat'd and
 // read exactly once, from the same fd the walk verified, by
 // ReadAtNoFollow.
-// readUnderRootIntermediateCloseTestHook, when non-nil, fires in
-// ReadUnderRootNoFollow immediately after an owned intermediate directory
-// fd is closed — whether the next component's openat succeeded or not. It
-// receives the exact fd number that was just closed, purely informational,
-// so a test can immediately dup a sentinel onto that number (claiming it
-// deterministically, rather than hoping the kernel's normal allocator
-// happens to reuse it for something else first) and later prove this
-// package's own deferred closer never touches that number again. Always
-// nil in production; unexported — this package's own tests are the only
-// thing that may set it. Same purpose as walk.go's chownWalkTestHook
-// family; see its doc comment.
-var readUnderRootIntermediateCloseTestHook func(closedFd int)
-
 func ReadUnderRootNoFollow(root, path string, max int64) ([]byte, error) {
 	rel, err := relUnderRoot(root, path)
 	if err != nil {

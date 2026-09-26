@@ -157,7 +157,7 @@ func New(gracePeriod time.Duration) *Manager {
 // service's logs fail to open" policy would hand a scion-uid process a
 // denial-of-service lever against every sidecar merely by planting one
 // symlink — exactly the kind of workload-triggerable startup failure the
-// N2/N3 hardening in cmd/sciontool/commands/init.go deliberately avoids
+// hardening in cmd/sciontool/commands/init.go deliberately avoids
 // ("a planted symlink must not be able to stop the workload from
 // starting"). Log fds already opened for a service that is then dropped
 // (either because its own logs failed to open, or because a later service's

@@ -191,8 +191,9 @@ func TestChownTreeNoFollow_SymlinkEntryNotFollowed(t *testing.T) {
 	}
 	// Without this, a chown that wrongly follows the symlink can land in the
 	// same coarse-clock tick as the baselines above, leave ctime unchanged,
-	// and let the assertions below pass by accident (round-4 High-1: the
-	// no-follow mutations were caught only 0-4 times in 40 runs).
+	// and let the assertions below pass by accident — a no-follow regression
+	// here was observed to be caught only intermittently across many runs
+	// without this settle.
 	ctimeSettle()
 
 	uid, gid := os.Getuid(), os.Getgid()
@@ -425,7 +426,7 @@ func TestRemoveContentsNoFollow_RefusesSymlinkedSubdirEntry(t *testing.T) {
 
 // TestRemoveContentsNoFollow_SurvivesSubdirSwapMidWalk mirrors
 // TestChownTreeNoFollow_SurvivesIntermediateDirSwapMidWalk for the delete
-// walk N3 needs: a scion-uid process swaps a subdirectory already entered by
+// walk: a scion-uid process swaps a subdirectory already entered by
 // the walk for a symlink to a victim directory before the walk finishes
 // deleting that subdirectory's own contents. The victim must never be
 // touched, and the walk must keep operating on the fd it already holds for
@@ -901,7 +902,7 @@ func TestChownTreeNoFollow_DirEntrySwapToHardlinkedFileDoesNotRedirectChown(t *t
 	}
 }
 
-// TestRemoveContentsNoFollow_RefusesSymlinkSwappedInBeforeSubdirOpen is T2's
+// TestRemoveContentsNoFollow_RefusesSymlinkSwappedInBeforeSubdirOpen is the
 // core regression test: the ONLY thing that stops a symlink swapped into a
 // subdirectory's name — after Fstatat has already classified it as a
 // directory, but before the O_NOFOLLOW openat resolves it for real — from
@@ -959,8 +960,8 @@ func TestRemoveContentsNoFollow_RefusesSymlinkSwappedInBeforeSubdirOpen(t *testi
 	}
 }
 
-// TestChownTreeNoFollow_ReportsPerEntryOpenFailureViaOnErr is R5's chown-
-// walk guard for the L3 "non-ENOENT open/stat failure" onErr sites: a real,
+// TestChownTreeNoFollow_ReportsPerEntryOpenFailureViaOnErr guards the chown
+// walk's "non-ENOENT open/stat failure" onErr reporting: a real,
 // deterministic, non-fault-injected trigger. Removing search (execute)
 // permission on a directory makes every openat/fstatat relative to it fail
 // EACCES for anything inside it, for a non-root process — no seam needed.
@@ -1015,7 +1016,7 @@ func TestChownTreeNoFollow_ReportsPerEntryOpenFailureViaOnErr(t *testing.T) {
 	}
 }
 
-// TestRemoveContentsNoFollow_ReportsPerEntryStatFailureViaOnErr is R5's
+// TestRemoveContentsNoFollow_ReportsPerEntryStatFailureViaOnErr is the
 // remove-walk twin: the same real EACCES trigger, this time hitting
 // RemoveContentsNoFollow's own Fstatat call. Proves onErr fires and that
 // the entry survives (fail-safe: a skipped entry is never deleted).
