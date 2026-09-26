@@ -55,7 +55,7 @@ func TestManager_StartAndShutdown(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := mgr.Start(ctx, specs, 0, 0, ""); err != nil {
+	if err := mgr.Start(ctx, specs, 0, 0, "", false); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
 
@@ -104,7 +104,7 @@ func TestManager_RestartOnFailure(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := mgr.Start(ctx, specs, 0, 0, ""); err != nil {
+	if err := mgr.Start(ctx, specs, 0, 0, "", false); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
 
@@ -139,7 +139,7 @@ func TestManager_RestartAlways(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := mgr.Start(ctx, specs, 0, 0, ""); err != nil {
+	if err := mgr.Start(ctx, specs, 0, 0, "", false); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
 
@@ -174,7 +174,7 @@ func TestManager_RestartNo(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := mgr.Start(ctx, specs, 0, 0, ""); err != nil {
+	if err := mgr.Start(ctx, specs, 0, 0, "", false); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
 
@@ -209,7 +209,7 @@ func TestManager_MaxRestarts(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := mgr.Start(ctx, specs, 0, 0, ""); err != nil {
+	if err := mgr.Start(ctx, specs, 0, 0, "", false); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
 
@@ -245,7 +245,7 @@ func TestManager_LogFiles(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := mgr.Start(ctx, specs, 0, 0, ""); err != nil {
+	if err := mgr.Start(ctx, specs, 0, 0, "", false); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
 
@@ -304,7 +304,7 @@ func TestManager_ServiceEnv(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := mgr.Start(ctx, specs, 0, 0, ""); err != nil {
+	if err := mgr.Start(ctx, specs, 0, 0, "", false); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
 
@@ -339,7 +339,7 @@ func TestManager_StartOrder(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := mgr.Start(ctx, specs, 0, 0, ""); err != nil {
+	if err := mgr.Start(ctx, specs, 0, 0, "", false); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
 
@@ -433,7 +433,7 @@ func TestOpenLogs_RefusesPreplantedSymlink(t *testing.T) {
 	defer func() { _ = syscall.Close(logDirFd) }()
 
 	svc := &managedService{spec: api.ServiceSpec{Name: "evil"}, logDir: logDir}
-	if err := svc.openLogs(logDirFd); err == nil {
+	if err := svc.openLogs(logDirFd, false); err == nil {
 		t.Fatal("expected openLogs to refuse the pre-planted symlink, got nil error")
 	}
 
@@ -449,15 +449,16 @@ func TestOpenLogs_RefusesPreplantedSymlink(t *testing.T) {
 	}
 }
 
-// TestManager_Start_OpensAllLogsBeforeStartingAnyService is P1a's
-// call-site-level regression test: because ALL services' logs are now
-// opened (and chowned) before ANY service is started, a symlink planted at
-// a LATER service's log path is refused before the EARLIER service(s) in
-// the list ever get a chance to run — closing the window entirely rather
-// than just narrowing it, since there is no longer a point in Start() where
-// one service is alive as the target user while another service's log is
-// still being opened by path.
-func TestManager_Start_OpensAllLogsBeforeStartingAnyService(t *testing.T) {
+// TestManager_Start_DropsOnlyTheServiceWithASymlinkedLogPath is P1a's
+// call-site-level regression test: a symlink planted at one service's log
+// path must never be opened/created/appended through — but it must also not
+// prevent any OTHER service (including ones later in specs) from starting.
+// An all-or-nothing policy here would hand a workload process a
+// denial-of-service lever against every sidecar merely by planting one
+// symlink, which contradicts the "a planted symlink must not be able to
+// stop the workload from starting" principle applied elsewhere in this unit
+// (see cmd/sciontool/commands/init.go's N2/N3 hardening).
+func TestManager_Start_DropsOnlyTheServiceWithASymlinkedLogPath(t *testing.T) {
 	cleanup := setupTestEnv(t)
 	defer cleanup()
 
@@ -468,9 +469,6 @@ func TestManager_Start_OpensAllLogsBeforeStartingAnyService(t *testing.T) {
 	}
 	victim := t.TempDir()
 	victimTarget := filepath.Join(victim, "victim.log")
-	// "second" is the SECOND service in the spec list — under the historical
-	// interleaved open+start behaviour, "first" would already be running by
-	// the time this symlink was reached.
 	link := filepath.Join(logDir, "second.stdout.log")
 	if err := os.Symlink(victimTarget, link); err != nil {
 		t.Fatal(err)
@@ -480,11 +478,12 @@ func TestManager_Start_OpensAllLogsBeforeStartingAnyService(t *testing.T) {
 	specs := []api.ServiceSpec{
 		{Name: "first", Command: []string{"sleep", "60"}},
 		{Name: "second", Command: []string{"sleep", "60"}},
+		{Name: "third", Command: []string{"sleep", "60"}},
 	}
 
-	err := mgr.Start(context.Background(), specs, 0, 0, "")
+	err := mgr.Start(context.Background(), specs, 0, 0, "", false)
 	if err == nil {
-		t.Fatal("expected Start to fail on the symlinked log path")
+		t.Fatal("expected Start to report an error for the symlinked log path")
 	}
 
 	if _, statErr := os.Stat(victimTarget); !os.IsNotExist(statErr) {
@@ -492,9 +491,88 @@ func TestManager_Start_OpensAllLogsBeforeStartingAnyService(t *testing.T) {
 	}
 
 	mgr.mu.Lock()
-	started := len(mgr.services)
-	mgr.mu.Unlock()
-	if started != 0 {
-		t.Errorf("expected no service to have been started (all logs are opened before any start), got %d started", started)
+	started := make([]string, len(mgr.services))
+	for i, svc := range mgr.services {
+		started[i] = svc.spec.Name
 	}
+	mgr.mu.Unlock()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = mgr.Shutdown(shutdownCtx)
+	}()
+
+	if len(started) != 2 || started[0] != "first" || started[1] != "third" {
+		t.Fatalf("started services = %v, want [first third] — only \"second\" (the one with the symlinked log) should be dropped", started)
+	}
+}
+
+// TestOpenLogs_Enforced_RefusesHardlinkedLogPath proves the hard-link guard
+// addendum: a pre-planted hard link to an unrelated regular file at a log
+// path is refused when requirePrivilegeDrop is true.
+func TestOpenLogs_Enforced_RefusesHardlinkedLogPath(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	home := os.Getenv("HOME")
+	logDir := filepath.Join(home, ".scion", "services", "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(logDir, "unrelated-target")
+	if err := os.WriteFile(target, []byte("existing content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(logDir, "evil.stdout.log")
+	if err := os.Link(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	logDirFd, err := syscall.Open(logDir, syscall.O_DIRECTORY|syscall.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Close(logDirFd) }()
+
+	svc := &managedService{spec: api.ServiceSpec{Name: "evil"}, logDir: logDir}
+	if err := svc.openLogs(logDirFd, true); err == nil {
+		t.Fatal("expected openLogs to refuse the hard-linked log path in enforced mode")
+	}
+}
+
+// TestOpenLogs_NonEnforced_AllowsHardlinkedLogPath proves the gating: a
+// hard-linked log path is NOT refused when requirePrivilegeDrop is false —
+// a legitimately hard-linked log file under a non-substrate container must
+// keep working exactly as it did before the hard-link guard existed.
+func TestOpenLogs_NonEnforced_AllowsHardlinkedLogPath(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	home := os.Getenv("HOME")
+	logDir := filepath.Join(home, ".scion", "services", "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(logDir, "unrelated-target")
+	if err := os.WriteFile(target, []byte("existing content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(logDir, "ok.stdout.log")
+	if err := os.Link(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	logDirFd, err := syscall.Open(logDir, syscall.O_DIRECTORY|syscall.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Close(logDirFd) }()
+
+	svc := &managedService{spec: api.ServiceSpec{Name: "ok"}, logDir: logDir}
+	if err := svc.openLogs(logDirFd, false); err != nil {
+		t.Fatalf("expected non-enforced mode to allow a hard-linked log path, got: %v", err)
+	}
+	svc.closeLogs()
 }
