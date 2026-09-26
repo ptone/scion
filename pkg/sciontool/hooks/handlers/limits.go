@@ -14,9 +14,15 @@ import (
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
+
+// agentLimitsMaxBytes bounds readLimitsState's read. A legitimate
+// agent-limits.json is a handful of integer counters; 1 MiB is generous
+// headroom with no legitimate case anywhere near it.
+const agentLimitsMaxBytes = 1 << 20
 
 // ExitCodeLimitsExceeded is the exit code used when an agent is stopped due to
 // exceeding configured limits (max_turns, max_model_calls, or max_duration).
@@ -197,8 +203,18 @@ func (h *LimitsHandler) triggerLimitsExceeded(message string) {
 }
 
 // readLimitsState reads the agent-limits.json file.
+//
+// LimitsHandler is only ever constructed inside the dropped `sciontool
+// hook` subprocess today, so this read is not currently a privilege-
+// boundary crossing — but its sibling writeLimitsState is already
+// fd-based and no-follow, and a future caller that moves this into root's
+// own context should not silently inherit an unhardened read just because
+// this one predates that hardening. dirfd.ReadFileNoFollow gives it the
+// same symlink/FIFO/oversize refusals as every other root-context state
+// read in this codebase, at no behavioral cost to the current dropped
+// caller.
 func (h *LimitsHandler) readLimitsState() (*LimitsState, error) {
-	data, err := os.ReadFile(h.limitsPath)
+	data, err := dirfd.ReadFileNoFollow(h.limitsPath, agentLimitsMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", h.limitsPath, err)
 	}
