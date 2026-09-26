@@ -186,6 +186,33 @@ func TestFixupWorldWritableTmpDirSticky_SetsStickyOnWorldWritable(t *testing.T) 
 	}
 }
 
+// TestFixupWorldWritableTmpDirSticky_OnlyAddsStickyBit proves the fixup
+// adds just the sticky bit rather than forcing the mode to exactly 01777:
+// a world-writable directory that's more restrictive than 0777 elsewhere
+// (e.g. 0773, no group-other split relevant here) must keep those other
+// bits as they were.
+func TestFixupWorldWritableTmpDirSticky_OnlyAddsStickyBit(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o773); err != nil {
+		t.Fatal(err)
+	}
+
+	if changed := fixupWorldWritableTmpDirSticky(dir); !changed {
+		t.Fatal("expected fixupWorldWritableTmpDirSticky to report a change")
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSticky == 0 {
+		t.Errorf("mode = %v, want the sticky bit set", info.Mode())
+	}
+	if got := info.Mode().Perm(); got != 0o773 {
+		t.Errorf("perm = %o, want unchanged 0773 (sticky bit added, not widened to 0777)", got)
+	}
+}
+
 // TestFixupWorldWritableTmpDirSticky_LeavesAlreadyStickyAlone is the "only
 // ever fix the missing-sticky case" idempotency check: a directory that
 // already has the sticky bit (e.g. a real 1777 /tmp) is left completely
