@@ -140,8 +140,10 @@ func fixupWorldWritableTmpDirSticky(dir string) bool {
 		return false
 	}
 
-	if err := syscall.Fchmod(fd, 0o1777); err != nil {
-		log.Error("fixupRootfsForScion: failed to chmod %s to 01777: %v", dir, err)
+	// Add only the sticky bit, rather than forcing the full mode to 01777:
+	// a dir already at, say, 0773 should end up 01773, not widened to 0777.
+	if err := syscall.Fchmod(fd, perm|sticky); err != nil {
+		log.Error("fixupRootfsForScion: failed to chmod %s to add the sticky bit: %v", dir, err)
 		return false
 	}
 	return true
