@@ -130,16 +130,55 @@ handed to the scion user), and bounds the read. `ReadGitHubTokenFile` and
 credential helper, the `gh` wrapper, and `doctor`, all scion-invoked, never
 from `sciontool init`.
 
-### scion-env writer (`cmd/sciontool/commands/init.go`)
+### scion-env writer and its directory (`cmd/sciontool/commands/init.go`)
 
 `writeEnvFile` had the same write-then-path-chown shape as the token writers:
 a plain `os.WriteFile` to a fixed `.tmp` name, `os.Rename`, then a separate
-path-based `os.Chown` on the final `$HOME/.scion/scion-env` path. It now writes
-through the exported `hub.WriteFileNoFollowChown` (fchown on the fd, before
-the rename); the directory itself (`$HOME/.scion`) is still chowned by path
-separately, since that's a directory-ownership operation `WriteFileNoFollowChown`
-doesn't cover and was already the established pattern for directory ownership
-elsewhere in `init.go`.
+path-based `os.Chown` on both the final `$HOME/.scion/scion-env` path and the
+`$HOME/.scion` directory itself. The file write now goes through the exported
+`hub.WriteFileNoFollowChown` (fchown on the fd, before the rename).
+
+The directory chown was still path-based and reachable after `sup.Run` (the
+GitHub-token refresh loop's `OnRefreshed` callback calls `writeEnvFile` on
+every refresh, for the life of the agent) — a workload that renames
+`$HOME/.scion` away and drops a symlink to another directory in the window
+between the file write completing and the chown running gets that other
+directory chowned to the scion user, which owns `$HOME` and can then trivially
+escalate further (e.g. targeting `/etc`). `writeEnvFile` now resolves and
+creates `.scion` via the new `dirfd.EnsureDirNoFollow` (an `openat` chain plus
+`mkdirat`, ignoring `EEXIST`) once, and chowns that same held file descriptor
+afterward — a file descriptor stays bound to the inode it was opened against
+regardless of what happens to the directory's entry in its parent afterward,
+so there is no window left for a path-based swap to land in.
+
+### `O_CLOEXEC` on every `dirfd`-opened descriptor
+
+`dirfd`'s `openat`/`open` calls didn't set `O_CLOEXEC`, unlike the
+`os.OpenFile` calls they replaced — Go's raw `syscall.Open`/`syscall.Openat`
+don't add it themselves. This meant the cached log fd (held open for the
+process's whole life, including across the exec that starts the harness) and
+every short-lived token/dir fd could be inherited by a child process, most
+notably the workload itself once privileges are dropped. Every open in
+`dirfd` (`OpenParentNoFollow`'s walk, `CreateExclAt`, `OpenAt`,
+`EnsureDirNoFollow`, `RefuseSymlinkOrNonRegularAt`) now forces `O_CLOEXEC` in,
+regardless of what flags the caller passes. The one raw `syscall.Open` outside
+the package (`fixupWorldWritableTmpDirSticky`'s `/tmp`/`/var/tmp` fixup) got
+the same flag directly.
+
+### Token file owner check gated to substrate
+
+The owner check `ReadTokenFile`/`readTokenFileGuarded` already applied
+(owner must be root or the containing directory's owner) and the same check
+newly added to `ChownTokenFile` are both gated behind
+`hub.EnforceTokenFileOwnerChecks`, called once at the top of `RunInit` with
+`opts.RequirePrivilegeDrop` — true only for substrate, which is the one
+runtime that requires privilege drop and therefore always has an actual
+less-privileged workload user to defend the token file against. Every other
+runtime (docker, podman, k8s, local `sciontool init`) leaves the checks off by
+default, which makes the non-substrate behavior provably unchanged rather than
+relying on an argument about every runtime's token-provisioning path.
+`ChownTokenFile`'s regular-file and `Nlink == 1` checks are unconditional on
+every runtime, as before.
 
 ## Notes
 
@@ -149,3 +188,9 @@ elsewhere in `init.go`.
   package: the content is short-lived (a token valid for at most a few hours,
   or an env file rewritten on every refresh), and every caller uses a mode no
   wider than its target needs. Documented on the function.
+- No other path-based `os.Chown` remains on a workload-writable path in
+  `cmd/sciontool/commands/init.go` or `pkg/sciontool/hub`. The two remaining
+  path-based mode changes in `init.go` — the `.claude/debug` directory chmod
+  and, in `substrate_rootfs.go`, the root chmod to `0755` — both run before
+  the harness/workload exists, so there is no less-privileged user yet to
+  redirect them.
