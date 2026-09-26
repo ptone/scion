@@ -66,6 +66,15 @@ const (
 	// Either way this constant lets broker-level callers and tests branch on
 	// it, not (yet) the hub or the CLI.
 	ErrCodeSubstrateAgentIdentityUnknown = "substrate_agent_identity_unknown"
+
+	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
+	// declines to serve at all, rather than one that failed. The broker uses
+	// this for the substrate runtime's ErrLogsNotSupported
+	// (pkg/runtime/substrate_runtime.go): reading a shared worker pod's logs
+	// would expose another tenant's actor output, so the runtime never makes
+	// the underlying call and this code is the client-visible signal that
+	// the feature, not the request, is the reason.
+	ErrCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
 )
 
 // writeError writes a JSON error response.
@@ -133,6 +142,16 @@ func Conflict(w http.ResponseWriter, message string) {
 // restart", for the operator remedy.
 func SubstrateAgentIdentityUnknown(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeSubstrateAgentIdentityUnknown, message, nil)
+}
+
+// RuntimeLogsUnsupported writes a 501 Not Implemented response with the
+// stable ErrCodeRuntimeLogsUnsupported code for a runtime that declines to
+// serve logs at all (e.g. the substrate runtime's ErrLogsNotSupported).
+// message must not name any atespace, worker, pod, namespace, actor or
+// agent — see pkg/runtime.ErrLogsNotSupported for the fixed text this is
+// meant to carry.
+func RuntimeLogsUnsupported(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeLogsUnsupported, message, nil)
 }
 
 // InternalError writes a 500 Internal Server Error response.

@@ -2356,6 +2356,10 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 	}
 	logs, err := rt.GetLogs(ctx, containerID)
 	if err != nil {
+		if errors.Is(err, scionrt.ErrLogsNotSupported) {
+			RuntimeLogsUnsupported(w, err.Error())
+			return
+		}
 		RuntimeError(w, "Failed to get logs: "+err.Error())
 		return
 	}
