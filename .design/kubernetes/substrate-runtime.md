@@ -641,6 +641,22 @@ session-end, closing the hole even for hooks that only ever fire before the
 workload could plant anything, so the rule stays a single, auditable
 invariant rather than a list of trusted event names.
 
+**Root hooks after pre-start get a hardened environment, not the workload's
+own HOME.** A root-eligible hook still needs *some* environment, and the
+naive choice — the same `HOME=<agent home>` a pre-start hook needs to find
+the harness bundle it staged there — would, for any later event
+(post-start/pre-stop/session-end), point a root process at a directory the
+workload has had full control of since the harness started. A root hook
+that happens to invoke python, bash, git, or pip would load workload-planted
+rc/site/config files and run them as root: the same escalation class this
+whole mechanism exists to close, reintroduced through the environment
+instead of the exec path. So a root-eligible hook at any event *after*
+pre-start instead gets `HOME=/root`, `PYTHONNOUSERSITE=1`, and a fixed,
+minimal `PATH` (`pkg/sciontool/hooks.LifecycleManager.hardenedRootHookEnv`).
+Pre-start is exempt because its only root-eligible hooks (the provisioner
+and any project/hub hook) run once, before the workload exists at all, and
+the provisioner specifically needs the agent-home `HOME` to find its bundle.
+
 **No TOCTOU.** The script is opened with `O_NOFOLLOW` at every path
 component from `/` down to its own directory, then opened itself with
 `O_NOFOLLOW` relative to that already-verified parent fd — never re-resolved
@@ -650,6 +666,22 @@ native fexecve). The file `DecideExecAsRoot` inspects is therefore provably
 the exact file `exec(2)` runs. A symlinked hook or a symlinked directory
 anywhere in the chain is refused outright, never followed and never treated
 as "does not exist" (`pkg/sciontool/hooks/exec_enforced.go`).
+
+One observable difference from the non-enforced exec path: since the script
+runs via `/proc/self/fd/<n>`, a shebang interpreter sees `$0` as that magic
+path, not the script's own location — a hook relying on `` `dirname "$0"` ``
+would break on substrate only. `SCION_HOOK_PATH` is set in the hook's
+environment to the real path as a workaround.
+
+A refused entry (symlink or non-regular file) under a hooks directory other
+than `hooks.EnforcedHooksDir` is logged and skipped, not treated as a hard
+failure: `DecideExecAsRoot` would drop such an entry anyway, so refusing to
+run it is already correct, and letting it abort every later hook for the
+same event would let a workload trivially disable its own remaining
+post-start/pre-stop/session-end hooks by planting one broken entry ahead of
+them. A refusal under `hooks.EnforcedHooksDir` itself still hard-fails the
+event — broker-delivered content is never expected to contain one, so its
+presence there is treated as an anomaly worth aborting over.
 
 **Where trusted, broker-delivered content lives.** The container-script
 harness's pre-start wrapper (`20-harness-provision`) and any project/hub
@@ -663,28 +695,45 @@ ever runs, and so always dropped even though they are broker/operator
 content, not workload content. `writeBootstrapFile` closes that gap with a
 path redirect (`pkg/sciontool/substrate/enforced_hooks.go`): a path under
 exactly `$HOME/.scion/hooks/` is rewritten to
-`<hooks.EnforcedHooksDir>/<rest>` — a dedicated directory
-(`/run/scion/hooks`; a single named constant so the location can change in
-one place if `/run`'s own live properties ever require it) — created with
-`O_NOFOLLOW` at every level, root-owned, and **never chowned**. Any other
-bootstrap path is unaffected. `$HOME/.scion/hooks` itself stays registered
-with the lifecycle manager and subject to the same ownership rule, so
-anything the workload plants there afterward is still, correctly, dropped.
-The redirect directory is cleared (symlink-safe, never following) before
-each bootstrap writes into it, so a hook removed since a previous bootstrap
-can never survive into this one.
+`<hooks.EnforcedHooksDir>/<rest>` — a dedicated directory (`/run/scion/hooks`;
+a single named constant so the location can change in one place if `/run`'s
+own live properties ever require it). Directories along the way are created
+by `mkdirAllTracked` (unchanged, shared with every other bootstrap path):
+an `Lstat`-then-`os.Mkdir` walk, refusing any existing component that is a
+symlink or not a directory, *not* an `openat`/`mkdirat` sequence with
+`O_NOFOLLOW` — that is safe under bootstrap's own documented trust model
+(substrate-serve is the sole writer, and this all runs before the harness —
+and so the workload — ever starts, so there is no concurrent writer to race
+a check against a create), the same model the rest of `writeBootstrapFile`
+already relies on. Every directory and file this redirect creates is
+root-owned (the process is root at this point) and **never chowned**
+afterward. Any other bootstrap path is unaffected. `$HOME/.scion/hooks`
+itself stays registered with the lifecycle manager and subject to the same
+ownership rule, so anything the workload plants there afterward is still,
+correctly, dropped.
 
-**Rootfs hardening.** `mkdirAllTracked` only `chmod`s directories it
-creates; a pre-existing ancestor of `hooks.EnforcedHooksDir` (`/`, `/run`)
-keeps whatever mode/owner it already had. `fixupEnforcedHooksDirChain`
+The redirect directory is cleared (symlink-safe, never following) before
+each bootstrap writes into it — and, unlike every other step in this
+paragraph, this one is fail-closed by consequence rather than by
+construction: `handleBootstrap` treats a clear failure as a bootstrap
+failure, aborting before any file is written or init starts, rather than
+logging and continuing. That is what actually keeps a hook removed since a
+previous bootstrap from surviving into this one — a clear that merely tried
+and failed would not.
+
+**Rootfs hardening, and where fail-closed actually rests.** `mkdirAllTracked`
+only `chmod`s directories it creates; a pre-existing ancestor of
+`hooks.EnforcedHooksDir` (`/`, `/run`) keeps whatever mode/owner it already
+had. `fixupEnforcedHooksDirChain`
 (`cmd/sciontool/commands/substrate_enforced_hooks.go`), run at the same two
 call sites as `fixupRootfsForScion` (substrate-serve startup and the
 `/bootstrap` fallback), strips any group/other-write bit and corrects
-non-root ownership on every existing ancestor. If a bad mode or owner
-survives anyway (e.g. a read-only rootfs), the result is a hook that runs
-dropped instead of as root — fail-closed, never the reverse — since
-`DecideExecAsRoot` checks the real filesystem state at hook-exec time
-regardless of whether this fixup ran or succeeded.
+non-root ownership on every existing ancestor. This fixup is a proactive
+correction, not the safety property itself: whether or not it runs or
+succeeds, `DecideExecAsRoot` re-checks the real filesystem state at
+hook-exec time and is what actually decides root vs. dropped. If a bad mode
+or owner survives anyway (e.g. a read-only rootfs), the result is simply a
+hook that runs dropped instead of as root — fail-closed, never the reverse.
 
 ## 9. Delete semantics
 
