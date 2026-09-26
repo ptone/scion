@@ -524,7 +524,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	}
 
 	// Set up scion user UID/GID to match host user
-	targetUID, targetGID, rootless := setupHostUser(opts.RequirePrivilegeDrop)
+	targetUID, targetGID, rootless := runSetupHostUser(opts.RequirePrivilegeDrop)
 	log.Info("setupHostUser result: targetUID=%d, targetGID=%d, rootless=%v (now euid=%d, egid=%d)", targetUID, targetGID, rootless, os.Geteuid(), os.Getegid())
 
 	// Fail closed rather than start the harness as root (see
@@ -836,12 +836,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// silently a no-op on VirtioFS mounts used by the Apple VZ runtime.
 	if isClaude(childArgs) {
 		debugDir := filepath.Join(agentHome, ".claude", "debug")
-		blockClaudeDebugSymlink(debugDir, opts.RequirePrivilegeDrop)
+		runBlockClaudeDebugSymlink(debugDir, opts.RequirePrivilegeDrop)
 	}
 
 	servicesPath := filepath.Join(agentHome, ".scion", "scion-services.yaml")
 	log.Debug("Looking for services config at: %s", servicesPath)
-	if data, err := readServicesYAML(servicesPath, opts.RequirePrivilegeDrop); err == nil {
+	if data, err := runReadServicesYAML(servicesPath, opts.RequirePrivilegeDrop); err == nil {
 		var specs []api.ServiceSpec
 		if err := yaml.Unmarshal(data, &specs); err != nil {
 			log.Error("Failed to parse scion-services.yaml: %v", err)
@@ -885,7 +885,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// during its first-run configuration detection.
 		// We preserve application_default_credentials.json which may be
 		// bind-mounted as a secret (gcloud-adc).
-		cleanGcloudConfigForMetadata(filepath.Join(agentHome, ".config", "gcloud"), opts.RequirePrivilegeDrop)
+		runCleanGcloudConfigForMetadata(filepath.Join(agentHome, ".config", "gcloud"), opts.RequirePrivilegeDrop)
 		// Wire up dynamic token retrieval so the metadata server always
 		// uses the latest agent token after refresh, not the startup value.
 		metaCfg.TokenFunc = func() string {
@@ -1845,6 +1845,21 @@ var runDirectSetUID = directSetUID
 // no-op by TestMain for exactly that reason.
 var startReaper = supervisor.StartReaper
 
+// runSetupHostUser is setupHostUser's own call site as a package var. A
+// test driving RunInit end to end with RequirePrivilegeDrop: true cannot
+// reach any of the enforced-mode-gated call sites downstream (writeEnvFile,
+// blockClaudeDebugSymlink, runServicesStart, cleanGcloudConfigForMetadata,
+// readServicesYAML) without first getting past requirePrivilegeDropOrFail's
+// fail-closed check just below — which requires a non-zero targetUID, and
+// the real setupHostUser only ever returns that as an actual root process
+// (it returns 0 for a non-root test process; see its own doc comment).
+// This lets a test return (1000, 1000, false) — "as if" a real
+// privilege-drop had already succeeded — so it can drive every downstream
+// enforced-mode call site's own argument-threading with a non-root test
+// process. Production code always leaves this at its default; only a test
+// replaces it.
+var runSetupHostUser = setupHostUser
+
 // runGitCloneWorkspace is gitCloneWorkspace's own call site as a package
 // var, the same reason as startReaper above: a test driving RunInit needs to
 // observe (and, for the ordering RunInit's InitRunOptions.ResolveWorkingDir
@@ -1891,6 +1906,18 @@ func postPreStartOwnershipFixup(targetUID, targetGID int, agentHome string, requ
 var runServicesStart = func(ctx context.Context, m *services.Manager, specs []api.ServiceSpec, uid, gid int, username string, requirePrivilegeDrop bool) error {
 	return m.Start(ctx, specs, uid, gid, username, requirePrivilegeDrop)
 }
+
+// runBlockClaudeDebugSymlink, runCleanGcloudConfigForMetadata and
+// runReadServicesYAML are blockClaudeDebugSymlink's, cleanGcloudConfigForMetadata's
+// and readServicesYAML's own call sites as package vars, the same reason as
+// runServicesStart above: a test driving RunInit needs to observe that each
+// one receives the correct requirePrivilegeDrop argument (see
+// runSetupHostUser's doc comment for why a non-root test can reach these
+// call sites with RequirePrivilegeDrop: true at all). Production code
+// always leaves these at their defaults; only a test replaces them.
+var runBlockClaudeDebugSymlink = blockClaudeDebugSymlink
+var runCleanGcloudConfigForMetadata = cleanGcloudConfigForMetadata
+var runReadServicesYAML = readServicesYAML
 
 // runMetadataServerStart is (*metadata.Server).Start's call site as a
 // package var, the same reason as runServicesStart above: a test must be

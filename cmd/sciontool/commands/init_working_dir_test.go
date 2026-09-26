@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -494,5 +495,84 @@ func TestRunInit_NilResolveWorkingDir_UsesStaticWorkingDirUnchanged(t *testing.T
 	}
 	if got := strings.TrimSpace(string(raw)); got != staticDir {
 		t.Errorf("harness ran with cwd %q, want the static WorkingDir %q", got, staticDir)
+	}
+}
+
+// TestRunInit_ThreadsRequirePrivilegeDropToEveryGatedCallSite is T4(b)'s
+// core regression test: it drives RunInit end to end (with every real
+// downstream step stubbed via its own package-var seam) and asserts that
+// each of the RequirePrivilegeDrop-gated call sites receives exactly the
+// value InitRunOptions.RequirePrivilegeDrop was set to — for both true and
+// false. runSetupHostUser is stubbed to return a non-zero uid/gid so a
+// non-root test process can get past requirePrivilegeDropOrFail's
+// fail-closed check with RequirePrivilegeDrop: true and reach every
+// downstream site at all (see its own doc comment).
+func TestRunInit_ThreadsRequirePrivilegeDropToEveryGatedCallSite(t *testing.T) {
+	for _, requirePrivilegeDrop := range []bool{true, false} {
+		t.Run(fmt.Sprintf("RequirePrivilegeDrop=%v", requirePrivilegeDrop), func(t *testing.T) {
+			agentHome := t.TempDir()
+			setupRunInitAsRootlessScion(t, agentHome)
+			writeServicesYAML(t, agentHome)
+			t.Setenv("SCION_METADATA_MODE", "block")
+
+			origSetupHostUser := runSetupHostUser
+			runSetupHostUser = func(bool) (int, int, bool) { return os.Getuid(), os.Getgid(), false }
+			t.Cleanup(func() { runSetupHostUser = origSetupHostUser })
+
+			withRunGitCloneWorkspace(t, func(uid, gid int, home string) error { return nil })
+			withRunMetadataServerStart(t, func(context.Context, *metadata.Server) error { return nil })
+			withRunFetchSecretOverrides(t, func(*hub.Client, []string) map[string]string { return nil })
+
+			var gotFixup, gotServices, gotDebug, gotGcloud, gotServicesYAML *bool
+
+			withRunPostPreStartOwnershipFixup(t, func(uid, gid int, home string, rpd bool) {
+				gotFixup = &rpd
+			})
+			withRunServicesStart(t, func(_ context.Context, _ *services.Manager, _ []api.ServiceSpec, _, _ int, _ string, rpd bool) error {
+				gotServices = &rpd
+				return nil
+			})
+
+			origDebug := runBlockClaudeDebugSymlink
+			runBlockClaudeDebugSymlink = func(debugDir string, rpd bool) { gotDebug = &rpd }
+			t.Cleanup(func() { runBlockClaudeDebugSymlink = origDebug })
+
+			origGcloud := runCleanGcloudConfigForMetadata
+			runCleanGcloudConfigForMetadata = func(dir string, rpd bool) { gotGcloud = &rpd }
+			t.Cleanup(func() { runCleanGcloudConfigForMetadata = origGcloud })
+
+			origReadYAML := runReadServicesYAML
+			runReadServicesYAML = func(path string, rpd bool) ([]byte, error) {
+				gotServicesYAML = &rpd
+				return origReadYAML(path, rpd)
+			}
+			t.Cleanup(func() { runReadServicesYAML = origReadYAML })
+
+			opts := InitRunOptions{
+				ForwardTermSignal:    false,
+				RequirePrivilegeDrop: requirePrivilegeDrop,
+			}
+			// "claude" as the child's own argv[0] makes isClaude true so the
+			// debug-symlink seam actually fires; the exit code is otherwise
+			// irrelevant — every seam this test cares about runs well
+			// before the real child would ever be exec'd.
+			_ = RunInit([]string{"claude", "sh", "-c", "true"}, opts)
+
+			for name, got := range map[string]*bool{
+				"runPostPreStartOwnershipFixup":   gotFixup,
+				"runServicesStart":                gotServices,
+				"runBlockClaudeDebugSymlink":      gotDebug,
+				"runCleanGcloudConfigForMetadata": gotGcloud,
+				"runReadServicesYAML":             gotServicesYAML,
+			} {
+				if got == nil {
+					t.Errorf("%s: seam was never called", name)
+					continue
+				}
+				if *got != requirePrivilegeDrop {
+					t.Errorf("%s: requirePrivilegeDrop = %v, want %v", name, *got, requirePrivilegeDrop)
+				}
+			}
+		})
 	}
 }
