@@ -993,7 +993,7 @@ kubectl -n "${BROKER_NAMESPACE}" get pod "$POD" \
 #    also sets the TLS server name used for verification (the help text for
 #    grpcurl's own -authority flag, and its use via grpc.WithAuthority --
 #    cmd/grpcurl/grpcurl.go in fullstorydev/grpcurl):
-#      kubectl -n "${BROKER_NAMESPACE}" port-forward svc/api 9555:443 &
+#      kubectl -n "${ATE_SYSTEM_NAMESPACE}" port-forward svc/api 9555:443 &
 #      grpcurl -cacert ate-ca.pem -authority api.${ATE_SYSTEM_NAMESPACE}.svc \
 #        -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
 #        -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
