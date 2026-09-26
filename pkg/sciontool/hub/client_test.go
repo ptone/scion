@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1132,7 +1133,7 @@ func TestGitHubTokenFile_WriteAndRead(t *testing.T) {
 	})
 
 	t.Run("write and read round-trip", func(t *testing.T) {
-		err := WriteGitHubTokenFile(tokenPath, "ghs_test_token")
+		err := WriteGitHubTokenFile(tokenPath, "ghs_test_token", 0, 0)
 		require.NoError(t, err)
 
 		token := ReadGitHubTokenFile(tokenPath)
@@ -1140,11 +1141,175 @@ func TestGitHubTokenFile_WriteAndRead(t *testing.T) {
 	})
 
 	t.Run("overwrites with newer token", func(t *testing.T) {
-		err := WriteGitHubTokenFile(tokenPath, "ghs_newer_token")
+		err := WriteGitHubTokenFile(tokenPath, "ghs_newer_token", 0, 0)
 		require.NoError(t, err)
 
 		token := ReadGitHubTokenFile(tokenPath)
 		assert.Equal(t, "ghs_newer_token", token)
+	})
+}
+
+// TestWriteGitHubTokenFile_Hardening exercises writeFileNoFollowChown's
+// symlink/non-regular-file refusal, its fd-based chown/chmod, and its use
+// of a random (not predictable) temp name, through the public
+// WriteGitHubTokenFile entry point.
+func TestWriteGitHubTokenFile_Hardening(t *testing.T) {
+	t.Run("normal write sets content and mode, and chowns via the injected fd seam", func(t *testing.T) {
+		tokenPath := filepath.Join(t.TempDir(), "github-token")
+
+		origChown := fchownFn
+		t.Cleanup(func() { fchownFn = origChown })
+		var chownCalled bool
+		var gotUID, gotGID int
+		fchownFn = func(fd, uid, gid int) error {
+			chownCalled = true
+			gotUID, gotGID = uid, gid
+			return nil
+		}
+
+		require.NoError(t, WriteGitHubTokenFile(tokenPath, "ghs_token", 1000, 1000))
+
+		assert.True(t, chownCalled, "expected the fd-based chown seam to run")
+		assert.Equal(t, 1000, gotUID)
+		assert.Equal(t, 1000, gotGID)
+
+		info, err := os.Lstat(tokenPath)
+		require.NoError(t, err)
+		assert.True(t, info.Mode().IsRegular())
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+		assert.Equal(t, "ghs_token", ReadGitHubTokenFile(tokenPath))
+	})
+
+	t.Run("uid <= 0 skips the chown seam entirely", func(t *testing.T) {
+		tokenPath := filepath.Join(t.TempDir(), "github-token")
+
+		origChown := fchownFn
+		t.Cleanup(func() { fchownFn = origChown })
+		var chownCalled bool
+		fchownFn = func(fd, uid, gid int) error {
+			chownCalled = true
+			return nil
+		}
+
+		require.NoError(t, WriteGitHubTokenFile(tokenPath, "ghs_token", 0, 0))
+		assert.False(t, chownCalled, "uid<=0 must not call the chown seam")
+	})
+
+	t.Run("refuses a planted symlink at the final path, target untouched", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "secret")
+		require.NoError(t, os.WriteFile(target, []byte("do-not-touch"), 0600))
+
+		tokenPath := filepath.Join(dir, "github-token")
+		require.NoError(t, os.Symlink(target, tokenPath))
+
+		err := WriteGitHubTokenFile(tokenPath, "ghs_token", 0, 0)
+		require.Error(t, err)
+
+		linkInfo, lerr := os.Lstat(tokenPath)
+		require.NoError(t, lerr)
+		assert.NotZero(t, linkInfo.Mode()&os.ModeSymlink, "the symlink at the final path should be untouched")
+
+		data, rerr := os.ReadFile(target)
+		require.NoError(t, rerr)
+		assert.Equal(t, "do-not-touch", string(data))
+	})
+
+	t.Run("refuses a planted non-regular file (a directory) at the final path", func(t *testing.T) {
+		tokenPath := filepath.Join(t.TempDir(), "github-token")
+		require.NoError(t, os.Mkdir(tokenPath, 0700))
+
+		err := WriteGitHubTokenFile(tokenPath, "ghs_token", 0, 0)
+		require.Error(t, err)
+
+		info, serr := os.Stat(tokenPath)
+		require.NoError(t, serr)
+		assert.True(t, info.IsDir(), "the directory at the final path should be untouched")
+	})
+
+	t.Run("a planted symlink at the old fixed temp name is never reused or followed", func(t *testing.T) {
+		dir := t.TempDir()
+		tokenPath := filepath.Join(dir, "github-token")
+
+		// The pre-hardening writer used path+".tmp" as a predictable temp
+		// name. Plant a symlink there to prove the hardened writer creates
+		// a randomly named temp file instead of reusing (or following)
+		// that name.
+		decoyTarget := filepath.Join(dir, "decoy-target")
+		require.NoError(t, os.WriteFile(decoyTarget, []byte("untouched"), 0600))
+		require.NoError(t, os.Symlink(decoyTarget, tokenPath+".tmp"))
+
+		require.NoError(t, WriteGitHubTokenFile(tokenPath, "ghs_token", 0, 0))
+		assert.Equal(t, "ghs_token", ReadGitHubTokenFile(tokenPath))
+
+		data, rerr := os.ReadFile(decoyTarget)
+		require.NoError(t, rerr)
+		assert.Equal(t, "untouched", string(data), "the decoy at the legacy temp name must be untouched")
+
+		linkInfo, lerr := os.Lstat(tokenPath + ".tmp")
+		require.NoError(t, lerr)
+		assert.NotZero(t, linkInfo.Mode()&os.ModeSymlink, "the decoy symlink itself must survive unchanged")
+	})
+
+	t.Run("replaces an existing regular file atomically", func(t *testing.T) {
+		tokenPath := filepath.Join(t.TempDir(), "github-token")
+		require.NoError(t, os.WriteFile(tokenPath, []byte("old"), 0600))
+
+		require.NoError(t, WriteGitHubTokenFile(tokenPath, "new-token", 0, 0))
+		assert.Equal(t, "new-token", ReadGitHubTokenFile(tokenPath))
+	})
+
+	t.Run("leaves no temp file behind on success", func(t *testing.T) {
+		dir := t.TempDir()
+		tokenPath := filepath.Join(dir, "github-token")
+
+		require.NoError(t, WriteGitHubTokenFile(tokenPath, "ghs_token", 0, 0))
+
+		entries, err := os.ReadDir(dir)
+		require.NoError(t, err)
+		require.Len(t, entries, 1, "only the final token file should remain in the directory")
+		assert.Equal(t, "github-token", entries[0].Name())
+	})
+}
+
+// TestWriteGitHubTokenExpiry_Hardening covers the expiry file's own
+// symlink refusal and fd-based chown, mirroring
+// TestWriteGitHubTokenFile_Hardening: the token and expiry files are
+// separate writes on separate paths, so each needs its own coverage.
+func TestWriteGitHubTokenExpiry_Hardening(t *testing.T) {
+	t.Run("normal write sets mode and chowns via the injected fd seam", func(t *testing.T) {
+		tokenPath := filepath.Join(t.TempDir(), "github-token")
+
+		origChown := fchownFn
+		t.Cleanup(func() { fchownFn = origChown })
+		var gotUID int
+		fchownFn = func(fd, uid, gid int) error {
+			gotUID = uid
+			return nil
+		}
+
+		expiry := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+		require.NoError(t, WriteGitHubTokenExpiry(tokenPath, expiry, 2000, 2000))
+		assert.Equal(t, 2000, gotUID)
+
+		info, err := os.Lstat(GitHubTokenExpiryPath(tokenPath))
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	})
+
+	t.Run("refuses a planted symlink at the expiry path, target untouched", func(t *testing.T) {
+		dir := t.TempDir()
+		tokenPath := filepath.Join(dir, "github-token")
+		target := filepath.Join(dir, "secret")
+		require.NoError(t, os.WriteFile(target, []byte("do-not-touch"), 0600))
+		require.NoError(t, os.Symlink(target, GitHubTokenExpiryPath(tokenPath)))
+
+		err := WriteGitHubTokenExpiry(tokenPath, time.Now(), 0, 0)
+		require.Error(t, err)
+
+		data, rerr := os.ReadFile(target)
+		require.NoError(t, rerr)
+		assert.Equal(t, "do-not-touch", string(data))
 	})
 }
 
@@ -1255,6 +1420,45 @@ func TestClient_StartGitHubTokenRefresh(t *testing.T) {
 		<-done
 		assert.GreaterOrEqual(t, errorCount, 1, "should have called OnError at least once")
 	})
+
+	// This proves the refresh loop calls into the hardened
+	// WriteGitHubTokenFile rather than writing the token file itself: a
+	// planted symlink at the token path must be refused (surfaced via
+	// OnError) with its target left untouched, not silently followed.
+	t.Run("refuses a planted symlink at the token path via the hardened writer", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "secret")
+		require.NoError(t, os.WriteFile(target, []byte("do-not-touch"), 0600))
+		tokenPath := filepath.Join(dir, "github-token")
+		require.NoError(t, os.Symlink(target, tokenPath))
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			futureExpiry := time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"token":"ghs_refreshed","expires_at":"` + futureExpiry + `"}`))
+		}))
+		defer server.Close()
+
+		client := NewClientWithConfig(server.URL, "hub-token", "agent-123")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+
+		var errs []error
+		done := client.StartGitHubTokenRefresh(ctx, &GitHubTokenRefreshConfig{
+			RefreshAt: time.Now(),
+			TokenPath: tokenPath,
+			OnError:   func(err error) { errs = append(errs, err) },
+		})
+		<-done
+
+		require.NotEmpty(t, errs, "expected the write to fail because the token path is a symlink")
+
+		data, rerr := os.ReadFile(target)
+		require.NoError(t, rerr)
+		assert.Equal(t, "do-not-touch", string(data), "the refresh loop must not have followed the symlink")
+	})
 }
 
 func TestGitHubTokenExpiry_WriteAndRead(t *testing.T) {
@@ -1268,7 +1472,7 @@ func TestGitHubTokenExpiry_WriteAndRead(t *testing.T) {
 
 	t.Run("write and read round-trip", func(t *testing.T) {
 		expiry := time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC)
-		err := WriteGitHubTokenExpiry(tokenPath, expiry)
+		err := WriteGitHubTokenExpiry(tokenPath, expiry, 0, 0)
 		require.NoError(t, err)
 
 		got, err := ReadGitHubTokenExpiry(tokenPath)
@@ -1291,14 +1495,14 @@ func TestIsGitHubTokenExpired(t *testing.T) {
 
 	t.Run("returns true when token is expired", func(t *testing.T) {
 		expiry := time.Now().Add(-1 * time.Hour) // expired 1 hour ago
-		err := WriteGitHubTokenExpiry(tokenPath, expiry)
+		err := WriteGitHubTokenExpiry(tokenPath, expiry, 0, 0)
 		require.NoError(t, err)
 		assert.True(t, IsGitHubTokenExpired(tokenPath))
 	})
 
 	t.Run("returns false when token is still valid", func(t *testing.T) {
 		expiry := time.Now().Add(1 * time.Hour) // valid for 1 more hour
-		err := WriteGitHubTokenExpiry(tokenPath, expiry)
+		err := WriteGitHubTokenExpiry(tokenPath, expiry, 0, 0)
 		require.NoError(t, err)
 		assert.False(t, IsGitHubTokenExpired(tokenPath))
 	})

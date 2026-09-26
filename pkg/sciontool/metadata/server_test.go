@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -981,6 +982,50 @@ func TestMetadataServer_ShutdownEndpoint(t *testing.T) {
 	// Server should no longer be reachable
 	if srv.probeHealth() {
 		t.Fatal("expected server to be unreachable after shutdown")
+	}
+}
+
+func TestReadShutdownToken_RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shutdown.token")
+	if err := writeShutdownToken(path, "a-token"); err != nil {
+		t.Fatalf("writeShutdownToken: %v", err)
+	}
+
+	got, err := readShutdownToken(path)
+	if err != nil {
+		t.Fatalf("readShutdownToken: %v", err)
+	}
+	if string(got) != "a-token\n" {
+		t.Errorf("got %q, want %q", got, "a-token\n")
+	}
+}
+
+// TestReadShutdownToken_SymlinkRefused proves that another user who can
+// plant a symlink at the (predictable, shared os.TempDir()) shutdown-token
+// path can't make shutdownExisting read and forward an unrelated file's
+// contents as the shutdown token: readShutdownToken must refuse without
+// following the symlink.
+func TestReadShutdownToken_SymlinkRefused(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "secret")
+	if err := os.WriteFile(target, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	path := filepath.Join(dir, "shutdown.token")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if _, err := readShutdownToken(path); err == nil {
+		t.Fatal("expected an error reading a symlinked shutdown-token path, got nil")
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(data) != "do-not-touch" {
+		t.Errorf("symlink target was modified: %q", data)
 	}
 }
 
