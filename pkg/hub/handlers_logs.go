@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -26,6 +27,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
+
+// brokerCodeRuntimeLogsUnsupported mirrors the wire value of
+// pkg/runtimebroker.ErrCodeRuntimeLogsUnsupported, the code a runtime broker
+// sends when its runtime declines a logs request outright (e.g. the
+// substrate runtime's ErrLogsNotSupported). Kept as a literal rather than an
+// import: pkg/hub only ever talks to the broker over HTTP.
+const brokerCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
 
 // handleAgentLogs handles GET /api/v1/agents/{id}/logs
 // and GET /api/v1/projects/{projectId}/agents/{agentId}/logs
@@ -77,6 +85,17 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 	logs, err := dispatcher.DispatchAgentLogs(ctx, agent, tail)
 	if err != nil {
 		slog.Error("agent log relay failed", "agent_id", agentID, "project_id", agent.ProjectID, "error", err)
+		// The broker declined outright (e.g. the substrate runtime's
+		// ErrLogsNotSupported) rather than failing to reach the runtime.
+		// Pass its status, code and fixed message straight through instead
+		// of re-wrapping them in a generic gateway error — matching on both
+		// the status and the code keeps every other broker error, including
+		// any other 501, on the unchanged path below.
+		var se *brokerStatusError
+		if errors.As(err, &se) && se.StatusCode == http.StatusNotImplemented && se.brokerErrorCode() == brokerCodeRuntimeLogsUnsupported {
+			writeError(w, http.StatusNotImplemented, brokerCodeRuntimeLogsUnsupported, se.brokerErrorMessage(), nil)
+			return
+		}
 		writeError(w, http.StatusBadGateway, ErrCodeInternalError,
 			"Failed to retrieve logs from broker: "+err.Error(), nil)
 		return
