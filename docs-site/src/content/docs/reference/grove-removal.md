@@ -57,6 +57,7 @@ agents and make sure hub and broker are on the same release.
 | Removed | Replacement / action |
 | --- | --- |
 | telemetry attributes `scion.grove`, `scion.grove.id`, `scion.grove_id` as identity keys | `scion.project`, `scion.project.id`, `scion.project_id`. The old names are still stripped from user-supplied attributes. |
+| broker-inbound and chat-integration topics `scion.grove.*` | `scion.project.*` (Telegram v1 route imports are converted automatically) |
 <!-- Rows are appended here as later changes merge. -->
 
 ## Finish
