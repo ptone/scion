@@ -2469,6 +2469,13 @@ func TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched(t *testing.T) {
 	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
 		t.Errorf("user.email = %q, want agent@scion.dev", got)
 	}
+	finalContent, err := os.ReadFile(gitconfigPath)
+	if err != nil {
+		t.Fatalf("read final gitconfig: %v", err)
+	}
+	if strings.Contains(string(finalContent), "do-not-touch") {
+		t.Errorf("final gitconfig contains the victim's content, meaning the read followed the symlink: %q", finalContent)
+	}
 }
 
 // TestConfigureSharedWorkspaceGit_FifoDoesNotHang proves a FIFO planted at
@@ -2632,5 +2639,12 @@ func TestConfigureSharedWorkspaceGit_AmbientHomeMatchingAgentHomeSymlinkRefused(
 	}
 	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
 		t.Errorf("user.email = %q, want agent@scion.dev", got)
+	}
+	finalContent, err := os.ReadFile(gitconfigPath)
+	if err != nil {
+		t.Fatalf("read final gitconfig: %v", err)
+	}
+	if strings.Contains(string(finalContent), "do-not-touch") {
+		t.Errorf("final gitconfig contains the victim's content, meaning the read followed the symlink: %q", finalContent)
 	}
 }
