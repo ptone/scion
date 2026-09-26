@@ -169,7 +169,7 @@ handled separately (see "Secret creation" below).
 | `BROKER_NAMESPACE` | Namespace the broker Deployment and its RBAC live in. **Also the value the router NetworkPolicy's `namespaceSelector` is pinned to** (`atenet-router-restrict-ingress`, templated as `${BROKER_NAMESPACE}`, not hardcoded) — see the callout below the table. | `scion-substrate-broker` (suggested — not cluster-specific) |
 | `BROKER_IMAGE` | Branch-built image containing the `scion` binary (see "Building the broker image") | `us-docker.pkg.dev/<project>/scion/broker@sha256:...` (build it yourself, see below) |
 | `ATE_SYSTEM_NAMESPACE` | Namespace hosting ateapi (`api.<ns>.svc:443`) and `atenet-router` | `ate-system` (upstream default) |
-| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in, for the `pods`/`pods/log` RBAC (`GetLogs`) and for locating Substrate's own controller-generated worker `NetworkPolicy` (verification only — this manifest doesn't create it) | `scion-agents` (the `substrate-scion-test` example) |
+| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in. Not read by anything this manifest applies (agent logs are not supported on the substrate runtime in this phase — see "Logs" below); used only for locating Substrate's own controller-generated worker `NetworkPolicy` and for the verification commands below (verification only — this manifest doesn't create either) | `scion-agents` (the `substrate-scion-test` example) |
 | `HUB_ENDPOINT` | The `scion-integration` hub's URL | from your hub deployment — not a Substrate-specific value |
 | `HUB_BROKER_ID` | The broker's stable UUID from `scion runtime-broker register` (not secret — see below) | UUID printed by `register`; there is no fixed value until you actually register |
 | `HUB_CONNECTION_NAME` | The `--name` used at `register` time; also the credentials JSON filename | `scion-integration` (suggested) |
@@ -482,7 +482,7 @@ access at all. Two options that don't require one:
 # cluster existed): https://github.com/yannh/kubeconform
 go install github.com/yannh/kubeconform/cmd/kubeconform@latest
 kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/broker.rendered.yaml
-# => Summary: 11 resources found in 1 file - Valid: 11, Invalid: 0, Errors: 0, Skipped: 0
+# => Summary: 9 resources found in 1 file - Valid: 9, Invalid: 0, Errors: 0, Skipped: 0
 
 # Once you *do* have cluster access:
 kubectl apply --dry-run=client -f /tmp/broker.rendered.yaml
@@ -868,6 +868,19 @@ kubectl run netpol-probe --rm -it --restart=Never \
   **a CA rotation on this cluster requires
   restarting the broker Deployment** (a rolling restart is sufficient) to
   pick it up.
+- **Logs.** `scion logs` and the web log view return an explicit
+  not-supported error for a substrate agent in this phase
+  (`pkg/runtime.ErrLogsNotSupported`, `.design/kubernetes/substrate-runtime.md`
+  §4): worker pods are shared across atespaces and users, so an unfiltered
+  worker-pod log read would return other tenants' actor output — and any
+  worker-level lines naming other atespaces — alongside the caller's own.
+  Operators can still read a specific actor's own output directly:
+  ```sh
+  kubectl logs -n <worker-namespace> <worker-pod> -c ateom | grep <actor-uid>
+  ```
+  Filter by the actor's UID, not its name — actor names are reused across a
+  worker's lifetime, so a name-based filter can pick up another actor's
+  lines.
 
 ## After a broker restart
 
@@ -1220,7 +1233,7 @@ that case.
 ## Files
 
 - `broker.yaml` — Namespace, ServiceAccount, RBAC (TokenRequest-on-self,
-  ClusterTrustBundle read, worker-namespace pod/log read), ConfigMap
+  ClusterTrustBundle read), ConfigMap
   (substrate runtime profile), Deployment, and the router NetworkPolicy
   (`atenet-router-restrict-ingress`, restricting router ingress to the
   broker namespace). The worker-side NetworkPolicy is Substrate's own —
