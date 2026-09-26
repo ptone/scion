@@ -107,6 +107,29 @@ func writeServicesYAML(t *testing.T, agentHome string) {
 	}
 }
 
+// writeServicesYAMLWithInvalidEntry is writeServicesYAML plus one entry
+// whose Name is invalid (services.ValidateServiceName rejects any embedded
+// path separator) — for the one test that needs to prove the parse-time
+// gate actually drops it before anything downstream ever sees it.
+func writeServicesYAMLWithInvalidEntry(t *testing.T, agentHome string) {
+	t.Helper()
+	dir := filepath.Join(agentHome, ".scion")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	specs := []api.ServiceSpec{
+		{Name: "order-probe", Command: []string{"true"}},
+		{Name: "../escape", Command: []string{"true"}},
+	}
+	data, err := yaml.Marshal(specs)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scion-services.yaml"), data, 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
 // scionMetadataAndSecretEnvVars lists every SCION_* environment variable
 // RunInit reads (directly, or through metadata.ConfigFromEnv) to decide
 // whether to start the metadata server, stage secrets, or fetch secrets from
@@ -512,11 +535,21 @@ func TestRunInit_ThreadsRequirePrivilegeDropToEveryGatedCallSite(t *testing.T) {
 		t.Run(fmt.Sprintf("RequirePrivilegeDrop=%v", requirePrivilegeDrop), func(t *testing.T) {
 			agentHome := t.TempDir()
 			setupRunInitAsRootlessScion(t, agentHome)
-			writeServicesYAML(t, agentHome)
+			// One valid entry plus one invalid entry: proves the parse-time
+			// gate (validateServiceSpecs, called right after
+			// yaml.Unmarshal, before runServicesStart is ever reached) is
+			// what actually filters the invalid entry out — not just
+			// Manager.Start's own belt-and-suspenders re-check, which the
+			// runServicesStart seam below bypasses entirely.
+			writeServicesYAMLWithInvalidEntry(t, agentHome)
 			t.Setenv("SCION_METADATA_MODE", "block")
 
+			var gotSetupHostUser *bool
 			origSetupHostUser := runSetupHostUser
-			runSetupHostUser = func(bool) (int, int, bool) { return os.Getuid(), os.Getgid(), false }
+			runSetupHostUser = func(rpd bool) (int, int, bool) {
+				gotSetupHostUser = &rpd
+				return os.Getuid(), os.Getgid(), false
+			}
 			t.Cleanup(func() { runSetupHostUser = origSetupHostUser })
 
 			withRunGitCloneWorkspace(t, func(uid, gid int, home string) error { return nil })
@@ -528,8 +561,10 @@ func TestRunInit_ThreadsRequirePrivilegeDropToEveryGatedCallSite(t *testing.T) {
 			withRunPostPreStartOwnershipFixup(t, func(uid, gid int, home string, rpd bool) {
 				gotFixup = &rpd
 			})
-			withRunServicesStart(t, func(_ context.Context, _ *services.Manager, _ []api.ServiceSpec, _, _ int, _ string, rpd bool) error {
+			var gotSpecs []api.ServiceSpec
+			withRunServicesStart(t, func(_ context.Context, _ *services.Manager, specs []api.ServiceSpec, _, _ int, _ string, rpd bool) error {
 				gotServices = &rpd
+				gotSpecs = specs
 				return nil
 			})
 
@@ -559,6 +594,7 @@ func TestRunInit_ThreadsRequirePrivilegeDropToEveryGatedCallSite(t *testing.T) {
 			_ = RunInit([]string{"claude", "sh", "-c", "true"}, opts)
 
 			for name, got := range map[string]*bool{
+				"runSetupHostUser":                gotSetupHostUser,
 				"runPostPreStartOwnershipFixup":   gotFixup,
 				"runServicesStart":                gotServices,
 				"runBlockClaudeDebugSymlink":      gotDebug,
@@ -572,6 +608,20 @@ func TestRunInit_ThreadsRequirePrivilegeDropToEveryGatedCallSite(t *testing.T) {
 				if *got != requirePrivilegeDrop {
 					t.Errorf("%s: requirePrivilegeDrop = %v, want %v", name, *got, requirePrivilegeDrop)
 				}
+			}
+
+			// The parse-time gate (validateServiceSpecs) must be what
+			// filtered the invalid entry: runServicesStart is a seam here,
+			// so Manager.Start's own belt-and-suspenders re-check never
+			// runs at all in this test — if the specs the seam received
+			// still contained the invalid entry, only the parse gate could
+			// be the thing missing.
+			var gotNames []string
+			for _, s := range gotSpecs {
+				gotNames = append(gotNames, s.Name)
+			}
+			if len(gotNames) != 1 || gotNames[0] != "order-probe" {
+				t.Errorf("specs reaching runServicesStart = %v, want [order-probe] — the parse-time gate should have dropped the invalid entry before this seam ever saw it", gotNames)
 			}
 		})
 	}
