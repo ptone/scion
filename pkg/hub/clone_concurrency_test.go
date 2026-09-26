@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -44,14 +45,51 @@ import (
 // pins the fix: each clone request now writes to a storage path unique to
 // itself, so a losing request's cleanup can only ever remove its own
 // subtree, and exactly one request ends up with a usable record.
+//
+// Making the race reproducible: without synchronization, whether two
+// requests actually interleave the way the fix cares about is up to the Go
+// scheduler, and measurement showed the unsynchronized version of this suite
+// caught a reverted fix in only a small fraction of runs. Every test below
+// instead installs a copyBarrier on the mock storage's Copy method so that
+// every racing request is guaranteed to pass the pre-check
+// (GetTemplateBySlug/GetHarnessConfigBySlug) before any of them reaches
+// CreateTemplate/CreateHarnessConfig, which is the interleaving the fix
+// exists for. Each test also asserts, via assertNoOrphanedCloneStorage, that
+// no storage survives under the destination prefix except the winner's own
+// subtree.
 // ============================================================================
 
 const cloneRaceGoroutines = 20
 
+// raceRequestIDKey carries a per-goroutine request identity through the
+// request context so copyBarrier (below) can tell racing requests apart even
+// when they compute the identical storage path — which is exactly what
+// happens when the fix under test is reverted, the scenario the revert-proof
+// in the task brief exercises. Identifying requests by the directory portion
+// of the path they copy into would break in that scenario: with the fix
+// reverted, every racing request computes the same deterministic
+// (scope, scopeID, slug) path with no per-request suffix, so all of them
+// would look like the same "request" to the barrier and only one would ever
+// arrive, hanging the other n-1 forever.
+type raceRequestIDKey struct{}
+
+func withRaceRequestID(ctx context.Context, id int) context.Context {
+	return context.WithValue(ctx, raceRequestIDKey{}, id)
+}
+
+func raceRequestIDFromContext(ctx context.Context) (int, bool) {
+	id, ok := ctx.Value(raceRequestIDKey{}).(int)
+	return id, ok
+}
+
 // raceRequest performs an HTTP request without using *testing.T, so it is
 // safe to call from concurrent goroutines (t.Fatalf/require are not
-// goroutine-safe when called outside the test's own goroutine).
-func raceRequest(srv *Server, token, method, path string, body interface{}) int {
+// goroutine-safe when called outside the test's own goroutine). id
+// identifies this call to a copyBarrier installed on the server's storage,
+// if any; callers that don't need barrier synchronization can pass any
+// value, since cloneMockStorage.Copy only consults it when a raceBarrier is
+// set.
+func raceRequest(srv *Server, token, method, path string, body interface{}, id int) int {
 	var bodyBytes []byte
 	if body != nil {
 		bodyBytes, _ = json.Marshal(body)
@@ -61,14 +99,94 @@ func raceRequest(srv *Server, token, method, path string, body interface{}) int 
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req = req.WithContext(withRaceRequestID(req.Context(), id))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec.Code
 }
 
+// copyBarrier makes concurrent clone requests interleave deterministically.
+// arrive blocks the calling goroutine until n distinct requests have all
+// made their first Copy call, then releases every one of them at once. That
+// guarantees every racing request has already passed its pre-check
+// (GetTemplateBySlug/GetHarnessConfigBySlug, which runs before the storage
+// path is even computed) before any of them reaches
+// CreateTemplate/CreateHarnessConfig — the interleaving the fix in ab627649
+// exists for, rather than one the goroutine scheduler only produces some of
+// the time.
+//
+// Each request is identified by the raceRequestID carried on its context
+// (see raceRequest), not by the path it copies into: with the fix reverted,
+// every racing request computes the identical storage path, so a
+// path-derived identity would collapse all of them into a single arrival
+// and the barrier would never release. A request that copies more than one
+// file only ever contributes to the arrival count once: its first Copy call
+// arrives and blocks, and by the time it is released its own ID is already
+// marked seen, so a second Copy call for the same request returns
+// immediately from the already-closed release channel instead of
+// re-arriving at the barrier.
+type copyBarrier struct {
+	mu      sync.Mutex
+	n       int
+	seen    map[int]bool
+	arrived int
+	release chan struct{}
+}
+
+func newCopyBarrier(n int) *copyBarrier {
+	return &copyBarrier{
+		n:       n,
+		seen:    make(map[int]bool),
+		release: make(chan struct{}),
+	}
+}
+
+func (b *copyBarrier) arrive(id int) {
+	b.mu.Lock()
+	if b.seen[id] {
+		b.mu.Unlock()
+		<-b.release
+		return
+	}
+	b.seen[id] = true
+	b.arrived++
+	last := b.arrived == b.n
+	b.mu.Unlock()
+
+	if last {
+		close(b.release)
+		return
+	}
+	<-b.release
+}
+
+// assertNoOrphanedCloneStorage asserts that, under basePath (the
+// deterministic <resource-kind>/<scope-layout>/<slug> prefix shared by every
+// racing request, before the per-request clone-ID suffix the fix adds), the
+// mock storage holds only the winner's own <cloneID>/... subtree. Every
+// losing request's subtree must have been removed by its own failure-path
+// DeletePrefix; any object under basePath outside the winner's subtree means
+// a loser's cleanup ran on a prefix it did not own, or a winner's files were
+// never cleaned up as expected.
+func assertNoOrphanedCloneStorage(t *testing.T, stor *cloneMockStorage, basePath, winnerID string) {
+	t.Helper()
+	stor.mu.Lock()
+	defer stor.mu.Unlock()
+
+	wantPrefix := basePath + "/" + winnerID + "/"
+	for p := range stor.objects {
+		if !strings.HasPrefix(p, basePath+"/") {
+			continue
+		}
+		assert.True(t, strings.HasPrefix(p, wantPrefix),
+			"found storage left over outside the winning clone's own subtree: %s (winner's subtree is %s)", p, wantPrefix)
+	}
+}
+
 // assertExactlyOneWinner runs n concurrent requests via fire and asserts
-// exactly one 201 and the rest 409.
-func assertExactlyOneWinner(t *testing.T, n int, fire func() int) {
+// exactly one 201 and the rest 409. fire receives the goroutine's index,
+// which it should pass through to raceRequest as the barrier request ID.
+func assertExactlyOneWinner(t *testing.T, n int, fire func(idx int) int) {
 	t.Helper()
 	var wg sync.WaitGroup
 	codes := make([]int, n)
@@ -76,7 +194,7 @@ func assertExactlyOneWinner(t *testing.T, n int, fire func() int) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			codes[idx] = fire()
+			codes[idx] = fire(idx)
 		}(i)
 	}
 	wg.Wait()
@@ -99,6 +217,7 @@ func assertExactlyOneWinner(t *testing.T, n int, fire func() int) {
 func TestTemplateClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *testing.T) {
 	srv, s := testServer(t)
 	stor := newCloneMockStorage("test-bucket")
+	stor.raceBarrier = newCopyBarrier(cloneRaceGoroutines)
 	srv.SetStorage(stor)
 	ctx := context.Background()
 
@@ -117,11 +236,11 @@ func TestTemplateClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *testin
 	source.ContentHash = computeContentHash(source.Files)
 	require.NoError(t, s.CreateTemplate(ctx, source))
 
-	assertExactlyOneWinner(t, cloneRaceGoroutines, func() int {
+	assertExactlyOneWinner(t, cloneRaceGoroutines, func(idx int) int {
 		return raceRequest(srv, testDevToken, http.MethodPost, "/api/v1/templates/"+source.ID+"/clone", map[string]interface{}{
 			"name":  "race-clone-global",
 			"scope": "global",
-		})
+		}, idx)
 	})
 
 	winner, err := s.GetTemplateBySlug(ctx, "race-clone-global", store.TemplateScopeGlobal, "")
@@ -133,11 +252,15 @@ func TestTemplateClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *testin
 		require.Equal(t, http.StatusOK, getRec.Code,
 			"every file on the winning record must be readable through the files API: %s", getRec.Body.String())
 	}
+
+	basePath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeGlobal, "", "race-clone-global")
+	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
 }
 
 func TestTemplateClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *testing.T) {
 	srv, s, alice, _, project := setupTemplateAuthzTest(t)
 	stor := newCloneMockStorage("test-bucket")
+	stor.raceBarrier = newCopyBarrier(cloneRaceGoroutines)
 	srv.SetStorage(stor)
 	ctx := context.Background()
 
@@ -155,12 +278,12 @@ func TestTemplateClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *testi
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(alice.ID, alice.Email, alice.DisplayName, alice.Role, ClientTypeWeb)
 	require.NoError(t, err)
 
-	assertExactlyOneWinner(t, cloneRaceGoroutines, func() int {
+	assertExactlyOneWinner(t, cloneRaceGoroutines, func(idx int) int {
 		return raceRequest(srv, token, http.MethodPost, "/api/v1/templates/"+source.ID+"/clone", map[string]interface{}{
 			"name":    "race-clone-project",
 			"scope":   "project",
 			"scopeId": project.ID,
-		})
+		}, idx)
 	})
 
 	winner, err := s.GetTemplateBySlug(ctx, "race-clone-project", store.TemplateScopeProject, project.ID)
@@ -172,15 +295,24 @@ func TestTemplateClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *testi
 		require.Equal(t, http.StatusOK, getRec.Code,
 			"every file on the winning record must be readable through the files API: %s", getRec.Body.String())
 	}
+
+	basePath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeProject, project.ID, "race-clone-project")
+	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
 }
 
 // TestTemplateClone_ConcurrentSameName_UserScope_SameOwner_ExactlyOneWinner
 // confirms the fix does not regress the already-closed cross-owner case: a
 // single owner racing clones into their own user scope must still resolve
-// to exactly one winner with intact files.
+// to exactly one winner with intact files. It reads the winner's files back
+// through the files API, like the global- and project-scope variants above:
+// without that readback (and without the copyBarrier forcing the
+// interleaving), this test could pass whether or not the fix is present,
+// since a record can exist with a populated file manifest while the
+// underlying storage has actually been deleted out from under it.
 func TestTemplateClone_ConcurrentSameName_UserScope_SameOwner_ExactlyOneWinner(t *testing.T) {
 	srv, s, alice, _, _ := setupTemplateAuthzTest(t)
 	stor := newCloneMockStorage("test-bucket")
+	stor.raceBarrier = newCopyBarrier(cloneRaceGoroutines)
 	srv.SetStorage(stor)
 	ctx := context.Background()
 
@@ -198,21 +330,31 @@ func TestTemplateClone_ConcurrentSameName_UserScope_SameOwner_ExactlyOneWinner(t
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(alice.ID, alice.Email, alice.DisplayName, alice.Role, ClientTypeWeb)
 	require.NoError(t, err)
 
-	assertExactlyOneWinner(t, cloneRaceGoroutines, func() int {
+	assertExactlyOneWinner(t, cloneRaceGoroutines, func(idx int) int {
 		return raceRequest(srv, token, http.MethodPost, "/api/v1/templates/"+source.ID+"/clone", map[string]interface{}{
 			"name":  "race-clone-user",
 			"scope": "user",
-		})
+		}, idx)
 	})
 
 	winner, err := s.GetTemplateBySlug(ctx, "race-clone-user", store.TemplateScopeUser, alice.ID)
 	require.NoError(t, err)
 	require.NotEmpty(t, winner.Files)
+
+	for _, f := range winner.Files {
+		getRec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/templates/"+winner.ID+"/files/"+f.Path, nil)
+		require.Equal(t, http.StatusOK, getRec.Code,
+			"every file on the winning record must be readable through the files API: %s", getRec.Body.String())
+	}
+
+	basePath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeUser, alice.ID, "race-clone-user")
+	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
 }
 
 func TestHarnessConfigClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *testing.T) {
 	srv, s := testServer(t)
 	stor := newCloneMockStorage("test-bucket")
+	stor.raceBarrier = newCopyBarrier(cloneRaceGoroutines)
 	srv.SetStorage(stor)
 	ctx := context.Background()
 
@@ -227,11 +369,11 @@ func TestHarnessConfigClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *t
 	source.ContentHash = computeContentHash(source.Files)
 	require.NoError(t, s.CreateHarnessConfig(ctx, source))
 
-	assertExactlyOneWinner(t, cloneRaceGoroutines, func() int {
+	assertExactlyOneWinner(t, cloneRaceGoroutines, func(idx int) int {
 		return raceRequest(srv, testDevToken, http.MethodPost, "/api/v1/harness-configs/"+source.ID+"/clone", map[string]interface{}{
 			"name":  "race-clone-global",
 			"scope": "global",
-		})
+		}, idx)
 	})
 
 	winner, err := s.GetHarnessConfigBySlug(ctx, "race-clone-global", store.HarnessConfigScopeGlobal, "")
@@ -243,11 +385,15 @@ func TestHarnessConfigClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *t
 		require.Equal(t, http.StatusOK, getRec.Code,
 			"every file on the winning record must be readable through the files API: %s", getRec.Body.String())
 	}
+
+	basePath := storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeGlobal, "", "race-clone-global")
+	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
 }
 
 func TestHarnessConfigClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *testing.T) {
 	srv, s, alice, _, project := setupTemplateAuthzTest(t)
 	stor := newCloneMockStorage("test-bucket")
+	stor.raceBarrier = newCopyBarrier(cloneRaceGoroutines)
 	srv.SetStorage(stor)
 	ctx := context.Background()
 
@@ -265,12 +411,12 @@ func TestHarnessConfigClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(alice.ID, alice.Email, alice.DisplayName, alice.Role, ClientTypeWeb)
 	require.NoError(t, err)
 
-	assertExactlyOneWinner(t, cloneRaceGoroutines, func() int {
+	assertExactlyOneWinner(t, cloneRaceGoroutines, func(idx int) int {
 		return raceRequest(srv, token, http.MethodPost, "/api/v1/harness-configs/"+source.ID+"/clone", map[string]interface{}{
 			"name":    "race-clone-project",
 			"scope":   "project",
 			"scopeId": project.ID,
-		})
+		}, idx)
 	})
 
 	winner, err := s.GetHarnessConfigBySlug(ctx, "race-clone-project", store.HarnessConfigScopeProject, project.ID)
@@ -282,4 +428,179 @@ func TestHarnessConfigClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *
 		require.Equal(t, http.StatusOK, getRec.Code,
 			"every file on the winning record must be readable through the files API: %s", getRec.Body.String())
 	}
+
+	basePath := storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeProject, project.ID, "race-clone-project")
+	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
+}
+
+// ============================================================================
+// ptone/scion#1975 O3: a concurrent mix of legacy ("grove") and canonical
+// ("project") scope spellings racing the same destination name.
+//
+// isValidTemplateScope / isValidHarnessConfigScope reject "grove" with 400
+// before authorization, the collision lookup, or any storage write runs
+// (upstream 9385d07b); template_clone_scope_test.go already pins that
+// rejection for a solitary legacy request. This suite additionally mixes
+// legacy requests into the same concurrent race as canonical ones, to pin
+// that a legacy request never sneaks in as the winner, never leaves storage
+// behind, and never disturbs the canonical requests' single-winner
+// guarantee — since a legacy request never reaches GetTemplateBySlug or
+// Copy, the copyBarrier below is still sized to the canonical request count
+// only.
+// ============================================================================
+
+const (
+	legacyScopeMixGoroutines    = 10
+	canonicalScopeMixGoroutines = 10
+)
+
+// fireLegacyCanonicalMix runs legacyScopeMixGoroutines requests using the
+// legacy scope name and canonicalScopeMixGoroutines requests using the
+// canonical scope name concurrently, all against the same destination name,
+// and returns their status codes.
+func fireLegacyCanonicalMix(srv *Server, token, url, canonicalScope, scopeID, name string) (legacyCodes, canonicalCodes []int) {
+	legacyCodes = make([]int, legacyScopeMixGoroutines)
+	canonicalCodes = make([]int, canonicalScopeMixGoroutines)
+	var wg sync.WaitGroup
+	for i := 0; i < legacyScopeMixGoroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			// Legacy requests are rejected before ever reaching Copy, so
+			// this ID is never consulted by the copyBarrier; it only needs
+			// to be a valid raceRequest argument.
+			legacyCodes[idx] = raceRequest(srv, token, http.MethodPost, url, map[string]interface{}{
+				"name":    name,
+				"scope":   "grove",
+				"scopeId": scopeID,
+			}, idx)
+		}(i)
+	}
+	for i := 0; i < canonicalScopeMixGoroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			canonicalCodes[idx] = raceRequest(srv, token, http.MethodPost, url, map[string]interface{}{
+				"name":    name,
+				"scope":   canonicalScope,
+				"scopeId": scopeID,
+			}, idx)
+		}(i)
+	}
+	wg.Wait()
+	return legacyCodes, canonicalCodes
+}
+
+func TestTemplateClone_ConcurrentLegacyAndCanonicalScope_OneCanonicalWinnerNoOrphans(t *testing.T) {
+	srv, s, alice, _, project := setupTemplateAuthzTest(t)
+	stor := newCloneMockStorage("test-bucket")
+	stor.raceBarrier = newCopyBarrier(canonicalScopeMixGoroutines)
+	srv.SetStorage(stor)
+	ctx := context.Background()
+
+	sourcePath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeGlobal, "", "race-source-legacy-mix")
+	files := []store.TemplateFile{{Path: "scion-agent.yaml", Size: int64(len("scion-agent-config: race\n"))}}
+	stor.seedObject(sourcePath+"/scion-agent.yaml", []byte("scion-agent-config: race\n"))
+	source := &store.Template{
+		ID: api.NewUUID(), Slug: "race-source-legacy-mix", Name: "Source", Harness: "claude",
+		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
+		StoragePath: sourcePath, StorageBucket: "test-bucket", Files: files,
+	}
+	source.ContentHash = computeContentHash(source.Files)
+	require.NoError(t, s.CreateTemplate(ctx, source))
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(alice.ID, alice.Email, alice.DisplayName, alice.Role, ClientTypeWeb)
+	require.NoError(t, err)
+
+	legacyCodes, canonicalCodes := fireLegacyCanonicalMix(srv, token,
+		"/api/v1/templates/"+source.ID+"/clone", "project", project.ID, "race-clone-legacy-mix")
+
+	for _, c := range legacyCodes {
+		assert.Equal(t, http.StatusBadRequest, c,
+			"every legacy-scope request must be rejected with 400 regardless of the concurrent canonical requests")
+	}
+
+	var winners, conflicts int
+	for _, c := range canonicalCodes {
+		switch c {
+		case http.StatusCreated:
+			winners++
+		case http.StatusConflict:
+			conflicts++
+		default:
+			t.Errorf("unexpected status code %d from a concurrent canonical clone", c)
+		}
+	}
+	assert.Equal(t, 1, winners, "exactly one canonical clone to the same name must win")
+	assert.Equal(t, canonicalScopeMixGoroutines-1, conflicts, "every other canonical clone must be rejected as a conflict")
+
+	winner, err := s.GetTemplateBySlug(ctx, "race-clone-legacy-mix", store.TemplateScopeProject, project.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, winner.Files)
+
+	for _, f := range winner.Files {
+		getRec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/templates/"+winner.ID+"/files/"+f.Path, nil)
+		require.Equal(t, http.StatusOK, getRec.Code,
+			"every file on the winning record must be readable through the files API: %s", getRec.Body.String())
+	}
+
+	basePath := storage.TemplateStoragePath(srv.HubID(), store.TemplateScopeProject, project.ID, "race-clone-legacy-mix")
+	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
+}
+
+func TestHarnessConfigClone_ConcurrentLegacyAndCanonicalScope_OneCanonicalWinnerNoOrphans(t *testing.T) {
+	srv, s, alice, _, project := setupTemplateAuthzTest(t)
+	stor := newCloneMockStorage("test-bucket")
+	stor.raceBarrier = newCopyBarrier(canonicalScopeMixGoroutines)
+	srv.SetStorage(stor)
+	ctx := context.Background()
+
+	sourcePath := storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeGlobal, "", "race-source-legacy-mix")
+	files := []store.TemplateFile{{Path: "config.yaml", Size: int64(len("harness: claude\n"))}}
+	stor.seedObject(sourcePath+"/config.yaml", []byte("harness: claude\n"))
+	source := &store.HarnessConfig{
+		ID: api.NewUUID(), Slug: "race-source-legacy-mix", Name: "Source", Harness: "claude",
+		Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
+		StoragePath: sourcePath, StorageBucket: "test-bucket", Files: files,
+	}
+	source.ContentHash = computeContentHash(source.Files)
+	require.NoError(t, s.CreateHarnessConfig(ctx, source))
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(alice.ID, alice.Email, alice.DisplayName, alice.Role, ClientTypeWeb)
+	require.NoError(t, err)
+
+	legacyCodes, canonicalCodes := fireLegacyCanonicalMix(srv, token,
+		"/api/v1/harness-configs/"+source.ID+"/clone", "project", project.ID, "race-clone-legacy-mix")
+
+	for _, c := range legacyCodes {
+		assert.Equal(t, http.StatusBadRequest, c,
+			"every legacy-scope request must be rejected with 400 regardless of the concurrent canonical requests")
+	}
+
+	var winners, conflicts int
+	for _, c := range canonicalCodes {
+		switch c {
+		case http.StatusCreated:
+			winners++
+		case http.StatusConflict:
+			conflicts++
+		default:
+			t.Errorf("unexpected status code %d from a concurrent canonical clone", c)
+		}
+	}
+	assert.Equal(t, 1, winners, "exactly one canonical clone to the same name must win")
+	assert.Equal(t, canonicalScopeMixGoroutines-1, conflicts, "every other canonical clone must be rejected as a conflict")
+
+	winner, err := s.GetHarnessConfigBySlug(ctx, "race-clone-legacy-mix", store.HarnessConfigScopeProject, project.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, winner.Files)
+
+	for _, f := range winner.Files {
+		getRec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/harness-configs/"+winner.ID+"/files/"+f.Path, nil)
+		require.Equal(t, http.StatusOK, getRec.Code,
+			"every file on the winning record must be readable through the files API: %s", getRec.Body.String())
+	}
+
+	basePath := storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeProject, project.ID, "race-clone-legacy-mix")
+	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
 }
