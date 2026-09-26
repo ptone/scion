@@ -641,34 +641,70 @@ session-end, closing the hole even for hooks that only ever fire before the
 workload could plant anything, so the rule stays a single, auditable
 invariant rather than a list of trusted event names.
 
-**Root hooks after pre-start get a hardened environment, not the workload's
-own HOME.** A root-eligible hook still needs *some* environment, and the
-naive choice — the same `HOME=<agent home>` a pre-start hook needs to find
-the harness bundle it staged there — would, for any later event
-(post-start/pre-stop/session-end), point a root process at a directory the
-workload has had full control of since the harness started. A root hook
-that happens to invoke python, bash, git, or pip would load workload-planted
-rc/site/config files and run them as root: the same escalation class this
-whole mechanism exists to close, reintroduced through the environment
-instead of the exec path. So a root-eligible hook at any event *after*
-pre-start instead gets `HOME=/root`, `PYTHONNOUSERSITE=1`, and a fixed,
-minimal `PATH` (`pkg/sciontool/hooks.LifecycleManager.hardenedRootHookEnv`).
-Pre-start is exempt because its only root-eligible hooks (the provisioner
-and any project/hub hook) run once, before the workload exists at all, and
-the provisioner specifically needs the agent-home `HOME` to find its bundle.
+**Root hooks after pre-start get a hardened environment and cwd, not the
+workload's own HOME or working directory.** A root-eligible hook still
+needs *some* environment, and the naive choice — the same `HOME=<agent
+home>` a pre-start hook needs to find the harness bundle it staged there —
+would, for any later event (post-start/pre-stop/session-end), point a root
+process at a directory the workload has had full control of since the
+harness started. A root hook that happens to invoke python, bash, git, or
+pip would load workload-planted rc/site/config files and run them as root:
+the same escalation class this whole mechanism exists to close, reintroduced
+through the environment instead of the exec path. So a root-eligible hook at
+any event *after* pre-start instead gets `HOME=/root`, `PYTHONNOUSERSITE=1`,
+and a fixed, minimal `PATH`
+(`pkg/sciontool/hooks.LifecycleManager.hardenedRootHookEnv`) — built from a
+closed allowlist of exact variable names (`LANG`, `TERM` — display/locale
+hints a hook's own output formatting might consult, never a code or config
+search path; deliberately not `TZ`, and not any `SCION_*` variable by name or
+by a blanket prefix, since no root-eligible hook today reads either) rather
+than inheriting the rest of init's own environment, so an interpreter or
+config-loader redirector variable
+(`PYTHONPATH`, `BASH_ENV`, `LD_PRELOAD`, `XDG_CONFIG_HOME`, and similarly for
+Node/Perl/Ruby/git) pointed at a workload-writable location by harness,
+template, or operator configuration cannot reach it either — and `cmd.Dir`
+is pinned to `/`, never left to inherit init's own cwd, which (nothing in
+`sciontool` ever calls `Chdir`) is whatever the image sets as its `WORKDIR`,
+i.e. the workload's own writable git workspace: many interpreters and tools
+resolve code relative to cwd (`python3 -c`/`-m` puts `''` first on
+`sys.path`, `node -e` reads `./node_modules`, `make` reads `./Makefile`,
+dotenv loaders read `./.env`), so leaving it unpinned would reopen the same
+class of hole through the working directory instead of the environment. A
+hook that genuinely needs the workspace must `cd` there explicitly. Pre-start
+is exempt from the `HOME`/cwd hardening (though it does still get
+`PYTHONNOUSERSITE=1`, which costs it nothing) because its only root-eligible
+hooks (the provisioner and any project/hub hook) run once, before the
+workload exists at all, and the provisioner specifically needs the
+agent-home `HOME` to find its bundle — see §11 for the invariant that
+exemption depends on.
 
 **No TOCTOU.** The script is opened with `O_NOFOLLOW` at every path
 component from `/` down to its own directory, then opened itself with
 `O_NOFOLLOW` relative to that already-verified parent fd — never re-resolved
-by path — and executed via its own open file descriptor
-(`/proc/self/fd/<n>`, the fexecve(3)-equivalent for a language with no
-native fexecve). The file `DecideExecAsRoot` inspects is therefore provably
-the exact file `exec(2)` runs. A symlinked hook or a symlinked directory
+by path. The file `DecideExecAsRoot` inspects is therefore provably the
+exact file `exec(2)` runs. A symlinked hook or a symlinked directory
 anywhere in the chain is refused outright, never followed and never treated
 as "does not exist" (`pkg/sciontool/hooks/exec_enforced.go`).
 
+**Execution.** The script's own open file is opened `O_CLOEXEC` — unlike
+every other fd this construction opens on the way there, this one carries a
+secret-grade script (`30-project-custom` is `0700` for exactly that reason)
+and must never leak into any OTHER, unrelated child this process happens to
+fork while it is open. It is handed to the child through
+`exec.Cmd.ExtraFiles`, which lands it as a fresh, independently-flagged
+duplicate at the fixed descriptor 3 in *that* child only, and the command
+execs `/proc/self/fd/3` (the fexecve(3)-equivalent for a language with no
+native fexecve) — a magic symlink the kernel resolves directly to that open
+file description, not through a further filesystem path lookup, so it runs
+exactly the inode that was checked regardless of what (if anything) now sits
+at the script's original path. Go's `ExtraFiles` dup clears the close-on-exec
+flag on the duplicate independent of the source fd's own, which is what lets
+it survive the child's own exec — required for a shebang script, since the
+kernel hands the interpreter that same `/proc/self/fd/3` path, which the
+interpreter then opens again itself.
+
 One observable difference from the non-enforced exec path: since the script
-runs via `/proc/self/fd/<n>`, a shebang interpreter sees `$0` as that magic
+runs via `/proc/self/fd/3`, a shebang interpreter sees `$0` as that magic
 path, not the script's own location — a hook relying on `` `dirname "$0"` ``
 would break on substrate only. `SCION_HOOK_PATH` is set in the hook's
 environment to the real path as a workaround.
@@ -1021,3 +1057,17 @@ every runtime — not a substrate-specific mechanism:
   symlink from a hostile one.
 - The sdsmint trust-bundle projection (§7.1) as a supported, tested
   configuration on more than one cluster.
+- The pre-start `HOME=<agent home>` exception in §8.1's lifecycle hook
+  privilege enforcement (`buildEnforcedCmd`, `eventName == EventPreStart`)
+  is safe under Phase 1's own invariants: bootstrap is one-shot per actor
+  process (a repeat gets 409, checked before any side effect), and each
+  actor resumes from a golden snapshot taken before its own bootstrap ever
+  ran, so no workload code has touched `$HOME` when a root pre-start hook
+  runs. `Suspender`/`Resume` or any other mechanism that re-runs pre-start
+  over a `$HOME` an earlier bootstrap already populated would invalidate
+  that premise — a root pre-start hook (the harness provisioner, or a
+  project/hub hook) would then be reading a HOME the workload had already
+  had a chance to write into. Revisit the exception (e.g. by having the
+  bootstrap redirect's clear step report whether it found prior content,
+  and treating that as "a workload may already have run here") before any
+  such mechanism ships.
