@@ -3,7 +3,7 @@
 **Date:** 2026-09-26
 **Component:** `cmd/sciontool/commands/init.go`, `pkg/sciontool/supervisor`, `pkg/sciontool/dirfd`
 
-See `2026-09-26-substrate-rootfs-op-symlink-hardening.md` for the fd-based tree-walk primitives and the fail-closed privilege-drop gate this entry hardens the verification of, and that entry's own "Hardening after independent review" section for the pattern this continues.
+See `2026-09-26-substrate-rootfs-op-symlink-hardening.md` for the fd-based tree-walk primitives and the fail-closed privilege-drop gate this entry hardens the verification of, and that entry's own "Further hardening" section for the pattern this continues.
 
 ## What this closes
 
