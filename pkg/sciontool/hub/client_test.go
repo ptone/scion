@@ -23,7 +23,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -997,7 +999,135 @@ func TestTokenFile_WriteAndRead(t *testing.T) {
 	})
 }
 
-// TestWriteTokenFile_Hardening exercises writeFileNoFollowChown's
+// TestReadTokenFile_Hardening proves the root read path (ReadTokenFile,
+// used by sciontool init for the metadata server's outbound-token function,
+// the initial non-empty check, and the SIGUSR2 auth-reset reread) refuses a
+// symlink, a hardlink, or a FIFO at the token path instead of reading
+// (and, in production, forwarding to the Hub as a bearer token) whatever
+// they resolve to.
+func TestReadTokenFile_Hardening(t *testing.T) {
+	t.Run("refuses a symlink to a root-only file, target untouched", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0700))
+
+		victim := filepath.Join(scionDir, "root-only-secret")
+		require.NoError(t, os.WriteFile(victim, []byte("do-not-leak"), 0600))
+		require.NoError(t, os.Symlink(victim, filepath.Join(scionDir, TokenFile)))
+
+		assert.Equal(t, "", ReadTokenFile(), "a symlinked token path must read as absent, not the symlink's target")
+
+		data, err := os.ReadFile(victim)
+		require.NoError(t, err)
+		assert.Equal(t, "do-not-leak", string(data))
+	})
+
+	t.Run("refuses a hardlink to another file", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0700))
+
+		victim := filepath.Join(scionDir, "victim")
+		require.NoError(t, os.WriteFile(victim, []byte("do-not-leak"), 0600))
+		require.NoError(t, os.Link(victim, filepath.Join(scionDir, TokenFile)))
+
+		assert.Equal(t, "", ReadTokenFile(), "a hardlinked token path must read as absent")
+	})
+
+	t.Run("refuses a FIFO without blocking", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0700))
+		require.NoError(t, syscall.Mkfifo(filepath.Join(scionDir, TokenFile), 0o600))
+
+		done := make(chan string, 1)
+		go func() { done <- ReadTokenFile() }()
+
+		select {
+		case got := <-done:
+			assert.Equal(t, "", got, "a FIFO token path must read as absent")
+		case <-time.After(2 * time.Second):
+			t.Fatal("ReadTokenFile blocked on a FIFO with no writer")
+		}
+	})
+
+	t.Run("refuses a directory at the token path", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(filepath.Join(scionDir, TokenFile), 0700))
+
+		assert.Equal(t, "", ReadTokenFile())
+	})
+
+	t.Run("reads a normal token file written by WriteTokenFile", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		require.NoError(t, WriteTokenFile("a-real-token", 0, 0))
+		assert.Equal(t, "a-real-token", ReadTokenFile())
+	})
+
+	t.Run("reads a token file the host wrote directly (no prior chown)", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(scionDir, TokenFile), []byte("host-written-token\n"), 0600))
+
+		assert.Equal(t, "host-written-token", ReadTokenFile())
+	})
+
+	t.Run("refuses a symlinked .scion directory, target untouched", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		attackerDir := filepath.Join(home, "attacker-dir")
+		require.NoError(t, os.MkdirAll(attackerDir, 0700))
+		victim := filepath.Join(attackerDir, "root-only-secret")
+		require.NoError(t, os.WriteFile(victim, []byte("do-not-leak"), 0600))
+		require.NoError(t, os.WriteFile(filepath.Join(attackerDir, TokenFile), []byte("do-not-leak"), 0600))
+
+		require.NoError(t, os.Symlink(attackerDir, filepath.Join(home, ".scion")))
+
+		assert.Equal(t, "", ReadTokenFile(), "a symlinked .scion directory must read as absent, not follow into the attacker directory")
+
+		data, err := os.ReadFile(victim)
+		require.NoError(t, err)
+		assert.Equal(t, "do-not-leak", string(data))
+	})
+
+	t.Run("bounds the read on an oversized file", func(t *testing.T) {
+		home := t.TempDir()
+		cleanup := SetTokenHome(home)
+		defer cleanup()
+
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0700))
+		oversized := strings.Repeat("a", tokenFileMaxBytes*4)
+		require.NoError(t, os.WriteFile(filepath.Join(scionDir, TokenFile), []byte(oversized), 0600))
+
+		got := ReadTokenFile()
+		assert.Len(t, got, tokenFileMaxBytes, "the read should be bounded to tokenFileMaxBytes")
+	})
+}
+
+// TestWriteTokenFile_Hardening exercises WriteFileNoFollowChown's
 // symlink/non-regular-file refusal and its random (not predictable) temp
 // name through the hub agent-token entry point. The token used to be
 // written with a plain os.WriteFile to a fixed path+".tmp" name followed by
@@ -1349,7 +1479,7 @@ func TestGitHubTokenFile_WriteAndRead(t *testing.T) {
 	})
 }
 
-// TestWriteGitHubTokenFile_Hardening exercises writeFileNoFollowChown's
+// TestWriteGitHubTokenFile_Hardening exercises WriteFileNoFollowChown's
 // symlink/non-regular-file refusal, its fd-based chown/chmod, and its use
 // of a random (not predictable) temp name, through the public
 // WriteGitHubTokenFile entry point.
