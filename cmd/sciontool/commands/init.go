@@ -209,13 +209,13 @@ var errPrivilegeDropRequired = errors.New("privilege drop to the scion user did 
 // uses (UID>0 && GID>0 — see setupHostUser/adjustScionUser), not just
 // targetUID==0, so this stays fail-closed if a future change to the
 // broker-side UID/GID resolution ever produces a non-root UID paired with a
-// still-root (0) GID: today that combination cannot occur (setupHostUser and
-// adjustScionUser both resolve UID and GID together, from the same source),
-// but this clamp does not depend on that staying true. Defence in depth,
-// round 5: this does not change behaviour for any UID/GID pair the current
+// still-root (0) GID: today that combination cannot occur because
+// pkg/runtime/substrate_bootstrap.go:196 hardcodes SCION_HOST_GID to "1000"
+// for every substrate actor, but this clamp does not depend on that staying
+// true. This does not change behaviour for any UID/GID pair the current
 // code can actually produce.
 func requirePrivilegeDropOrFail(targetUID, targetGID int, requirePrivilegeDrop bool) error {
-	if requirePrivilegeDrop && !(targetUID > 0 && targetGID > 0) {
+	if requirePrivilegeDrop && (targetUID <= 0 || targetGID <= 0) {
 		return errPrivilegeDropRequired
 	}
 	return nil
@@ -1963,21 +1963,20 @@ var runGitCloneWorkspace = gitCloneWorkspace
 // this at its default; only a test replaces it.
 var runPostPreStartOwnershipFixup = postPreStartOwnershipFixup
 
-// postPreStartGeteuid is os.Geteuid's call site as a package var, round 5's
-// seam A(1): postPreStartOwnershipFixup's real euid check (below) makes the
-// body — including the requirePrivilegeDrop value forwarded to
+// postPreStartGeteuid is os.Geteuid's call site as a package var: it is a
+// seam, because postPreStartOwnershipFixup's real euid check (below) makes
+// the body — including the requirePrivilegeDrop value forwarded to
 // chownTreeRootOwned — unreachable from a non-root test process, since every
 // unit test runs as whatever non-root UID the test binary itself has.
 // Production code always leaves this at its default; only a test replaces
 // it to simulate euid 0 without actually running as root.
 var postPreStartGeteuid = os.Geteuid
 
-// runChownTreeRootOwned is chownTreeRootOwned's call site as a package var,
-// round 5's seam A(1): lets a test (with postPreStartGeteuid stubbed to
-// report euid 0) capture the requirePrivilegeDrop value postPreStartOwnershipFixup
-// forwards, without the test actually performing a real recursive chown.
-// Production code always leaves this at its default; only a test replaces
-// it.
+// runChownTreeRootOwned is chownTreeRootOwned's call site as a package var:
+// this seam lets a test (with postPreStartGeteuid stubbed to report euid 0)
+// capture the requirePrivilegeDrop value postPreStartOwnershipFixup forwards,
+// without the test actually performing a real recursive chown. Production
+// code always leaves this at its default; only a test replaces it.
 var runChownTreeRootOwned = chownTreeRootOwned
 
 // postPreStartOwnershipFixup chowns root-owned files that pre-start hooks
@@ -2040,12 +2039,12 @@ var runFetchSecretOverrides = fetchSecretOverrides
 
 // setupHostUserGetuid, setupHostUserHasCapSetUID and setupHostUserIsUIDMapped
 // are os.Getuid's, hasCapSetUID's and isUIDMapped's call sites inside
-// setupHostUser, as package vars — round 5's seam A(2). setupHostUser's real
-// early-return checks (a non-root euid, an absent CAP_SETUID, an unmapped
-// UID) make its adjustScionUser call unreachable from a non-root test
-// process: a unit test binary is never root, never holds CAP_SETUID, and
-// runs in a user namespace where the test's own arbitrary target UID is not
-// mapped. Stubbing all three lets a test simulate "as if root, with the
+// setupHostUser, as package vars: these are seams, because setupHostUser's
+// real early-return checks (a non-root euid, an absent CAP_SETUID, an
+// unmapped UID) make its adjustScionUser call unreachable from a non-root
+// test process: a unit test binary is never root, never holds CAP_SETUID,
+// and runs in a user namespace where the test's own arbitrary target UID is
+// not mapped. Stubbing all three lets a test simulate "as if root, with the
 // capability, with a mapped UID" and reach runAdjustScionUser below to
 // capture the requirePrivilegeDrop value setupHostUser forwards to it.
 // Production code always leaves these at their defaults; only a test
@@ -2055,8 +2054,8 @@ var setupHostUserHasCapSetUID = hasCapSetUID
 var setupHostUserIsUIDMapped = isUIDMapped
 
 // runAdjustScionUser is adjustScionUser's call site inside setupHostUser, as
-// a package var — round 5's seam A(2), paired with the three vars above so a
-// test can reach this call and observe the requirePrivilegeDrop argument
+// a package var: this seam is paired with the three vars above so a test
+// can reach this call and observe the requirePrivilegeDrop argument
 // setupHostUser forwards to it without performing a real usermod/groupmod or
 // /etc/passwd edit. Production code always leaves this at its default; only
 // a test replaces it.
