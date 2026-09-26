@@ -906,13 +906,28 @@ func RunInit(args []string, opts InitRunOptions) int {
 		var specs []api.ServiceSpec
 		if err := yaml.Unmarshal(data, &specs); err != nil {
 			log.Error("Failed to parse scion-services.yaml: %v", err)
-		} else if len(specs) > 0 {
-			log.Info("Starting %d sidecar service(s)...", len(specs))
-			svcManager = services.New(gracePeriod)
-			svcCtx := context.Background()
-			if err := runServicesStart(svcCtx, svcManager, specs, targetUID, targetGID, "scion", opts.RequirePrivilegeDrop); err != nil {
-				log.Error("Failed to start services: %v", err)
-				// Continue — service failure shouldn't block harness
+		} else {
+			// Authoritative gate for the service-Name-as-path-component
+			// content-trust class: reject anything that isn't safe to use
+			// as a single path component BEFORE any consumer of Name
+			// (openLogs' log-path builder, but also every log tag this
+			// package emits) ever sees it. See ValidateServiceName's own
+			// doc comment for the exact rule and why this runs
+			// unconditionally, on every runtime. An invalid Name drops
+			// only that one service (logged, name quoted/capped/escaped —
+			// never emit a raw workload-chosen string into the log) —
+			// every other service, valid or not, still gets its own
+			// chance to start, consistent with the per-service drop
+			// behaviour openLogs failures already have.
+			specs = validateServiceSpecs(specs)
+			if len(specs) > 0 {
+				log.Info("Starting %d sidecar service(s)...", len(specs))
+				svcManager = services.New(gracePeriod)
+				svcCtx := context.Background()
+				if err := runServicesStart(svcCtx, svcManager, specs, targetUID, targetGID, "scion", opts.RequirePrivilegeDrop); err != nil {
+					log.Error("Failed to start services: %v", err)
+					// Continue — service failure shouldn't block harness
+				}
 			}
 		}
 	}
@@ -3373,6 +3388,28 @@ func readServicesYAML(path string, requirePrivilegeDrop bool) ([]byte, error) {
 		return nil, fmt.Errorf("refusing to read %s: not a single-link regular file", path)
 	}
 	return io.ReadAll(f)
+}
+
+// validateServiceSpecs is the authoritative gate for the service-Name-as-
+// path-component content-trust class (see services.ValidateServiceName's
+// own doc comment for the exact rule): it runs immediately after
+// scion-services.yaml is parsed, before any consumer of Name ever sees it,
+// and drops any spec whose Name is invalid — logged, name
+// quoted/capped/escaped via services.SafeNameForLog, never a raw
+// workload-chosen string — while keeping every other spec, valid or not,
+// so one bad entry cannot take down the rest of the batch. Applies
+// unconditionally, on every runtime: a legitimate Name is a plain
+// identifier, so no valid caller is ever affected.
+func validateServiceSpecs(specs []api.ServiceSpec) []api.ServiceSpec {
+	valid := make([]api.ServiceSpec, 0, len(specs))
+	for _, spec := range specs {
+		if err := services.ValidateServiceName(spec.Name); err != nil {
+			log.Error("Dropping service with invalid name %s: %v", services.SafeNameForLog(spec.Name), err)
+			continue
+		}
+		valid = append(valid, spec)
+	}
+	return valid
 }
 
 // hasCapSetUID checks whether the current process has CAP_SETUID (bit 7)

@@ -208,6 +208,19 @@ func (m *Manager) Start(ctx context.Context, specs []api.ServiceSpec, uid, gid i
 	svcs := make([]*managedService, 0, len(specs))
 	var openErrs []string
 	for _, spec := range specs {
+		// Belt-and-suspenders: the authoritative gate is at YAML parse time
+		// (cmd/sciontool/commands, right after yaml.Unmarshal — see
+		// ValidateServiceName's own doc comment for why), but Start itself
+		// must not trust an already-invalid Name either, in case a future
+		// or test caller reaches it directly without going through that
+		// gate. Drop only this one service, exactly like an open-logs
+		// failure below.
+		if err := ValidateServiceName(spec.Name); err != nil {
+			safeName := SafeNameForLog(spec.Name)
+			log.Error("service %s: %v — service will not start", safeName, err)
+			openErrs = append(openErrs, fmt.Sprintf("%s: %v", safeName, err))
+			continue
+		}
 		svc := &managedService{
 			spec:     spec,
 			done:     make(chan struct{}),
