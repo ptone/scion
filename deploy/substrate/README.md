@@ -871,15 +871,20 @@ kubectl run netpol-probe --rm -it --restart=Never \
   worker-pod log read would return other tenants' actor output — and any
   worker-level lines naming other atespaces — alongside the caller's own.
   Operators can still read a worker pod's raw output directly and filter for
-  one actor's lines by matching a structured field rather than a substring:
+  one actor's lines by matching a structured field rather than a substring.
+  Not every line is JSON, and the actor fields are nested under a labels
+  object, so a plain `jq` filter aborts on the first non-JSON line:
   ```sh
   kubectl logs -n <worker-namespace> <worker-pod> -c ateom \
-    | jq -c 'select(."ate.actor.uid" == "<actor-uid>")'
+    | jq -Rc 'fromjson? | select(.["logging.googleapis.com/labels"]["ate.actor.uid"] == "<actor-uid>")'
   ```
-  (Confirm the actual field name against your cluster's `ateom` log output —
-  Substrate, not this manifest, owns that log schema.) Match on the actor's
-  UID, not its name — actor names are reused across a worker's lifetime, so a
-  name-based filter can pick up another actor's lines. **This filtered result
+  `fromjson?` skips a line it cannot parse instead of aborting; non-JSON
+  lines are dropped by this filter and carry no attribution at all, so they
+  are simply absent from the result rather than included unfiltered. This
+  field shape is emitted by Substrate's `ateom` and may change between
+  Substrate versions. Match on the actor's UID, not its name — actor names
+  are reused across a worker's lifetime, so a name-based filter can pick up
+  another actor's lines. **This filtered result
   is not trustworthy attribution.** The field lives in the same stream an
   actor's own output is written to, so a tenant's stdout can forge it —
   either by spoofing the field itself or by emitting text containing another
