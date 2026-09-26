@@ -1101,6 +1101,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 					if !attach {
 						return nil
 					}
+					if err := attachUnsupportedErr(agent.Runtime); err != nil {
+						return err
+					}
 					// Fall through to attach logic below
 					agentID := agent.ID
 					if agentID == "" {
@@ -1168,8 +1171,10 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 
 	// Attach mode: wait for agent to be running, then attach via WebSocket
 	agentID := ""
+	agentRuntime := ""
 	if resp.Agent != nil {
 		agentID = resp.Agent.ID
+		agentRuntime = resp.Agent.Runtime
 	}
 	if agentID == "" {
 		agentID = agentName
@@ -1194,10 +1199,11 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 			}
 			agentPhase, _ := hubAgentPhaseActivity(agent.Phase, agent.Activity, agent.Status)
 			if agentPhase == string(state.PhaseRunning) {
-				// Use the agent's ID from the latest fetch
+				// Use the agent's ID and runtime from the latest fetch
 				if agent.ID != "" {
 					agentID = agent.ID
 				}
+				agentRuntime = agent.Runtime
 				goto ready
 			}
 			if agentPhase == string(state.PhaseError) || agentPhase == string(state.PhaseStopped) {
@@ -1211,6 +1217,10 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	}
 
 ready:
+	if err := attachUnsupportedErr(agentRuntime); err != nil {
+		return err
+	}
+
 	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode
 	// there is no application-level token by design, so transport auth must be
 	// determined before deciding whether an app token is required.
