@@ -135,16 +135,17 @@ func raceRequest(srv *Server, token, method, path string, body interface{}, id i
 // can fail with a clear message instead of hanging until go test's global
 // timeout.
 type copyBarrier struct {
-	mu       sync.Mutex
-	n        int
-	seen     map[int]bool
-	arrived  int
-	release  chan struct{}
-	timedOut bool
+	mu          sync.Mutex
+	n           int
+	seen        map[int]bool
+	arrived     int
+	release     chan struct{}
+	releaseOnce sync.Once
+	timedOut    bool
 }
 
 // copyBarrierArriveTimeout bounds how long a single arrive call waits to be
-// released. It only matters when the barrier is stuck (see arrive's doc
+// released. It only matters when the barrier is stuck (see copyBarrier's doc
 // comment above); it just needs to be comfortably longer than any real test
 // run.
 const copyBarrierArriveTimeout = 10 * time.Second
@@ -170,16 +171,20 @@ func (b *copyBarrier) arrive(id int) {
 	b.mu.Unlock()
 
 	if last {
-		close(b.release)
+		b.releaseOnce.Do(func() { close(b.release) })
 		return
 	}
 	b.wait()
 }
 
 // wait blocks until the barrier releases or copyBarrierArriveTimeout
-// elapses, whichever comes first. On timeout it records the failure for
-// failed to report and returns, so the calling request proceeds rather than
-// hanging.
+// elapses, whichever comes first. On timeout it records the failure so
+// `failed` can report it, then closes release through releaseOnce so it
+// happens exactly once even if arrive already closed it or an earlier
+// timeout already did: later Copy calls from the same request then find
+// release already closed instead of each waiting out their own
+// copyBarrierArriveTimeout. Either way wait returns so the calling request
+// proceeds rather than hanging.
 func (b *copyBarrier) wait() {
 	select {
 	case <-b.release:
@@ -187,6 +192,7 @@ func (b *copyBarrier) wait() {
 		b.mu.Lock()
 		b.timedOut = true
 		b.mu.Unlock()
+		b.releaseOnce.Do(func() { close(b.release) })
 	}
 }
 
@@ -495,12 +501,12 @@ func TestHarnessConfigClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *
 }
 
 // ============================================================================
-// ptone/scion#1975 O3: a concurrent mix of legacy ("grove") and canonical
+// ptone/scion#1975: a concurrent mix of legacy ("grove") and canonical
 // ("project") scope spellings racing the same destination name.
 //
 // isValidTemplateScope / isValidHarnessConfigScope reject "grove" with 400
 // before authorization, the collision lookup, or any storage write runs
-// (upstream 9385d07b); template_clone_scope_test.go already pins that
+// (#1968); template_clone_scope_test.go already pins that
 // rejection for a solitary legacy request. This suite additionally mixes
 // legacy requests into the same concurrent race as canonical ones, to pin
 // that a legacy request never sneaks in as the winner, never leaves storage
