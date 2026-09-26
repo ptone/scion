@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -398,5 +399,102 @@ func TestMergeEnv(t *testing.T) {
 	}
 	if found["CUSTOM"] != "value" {
 		t.Errorf("expected CUSTOM=value, got CUSTOM=%s", found["CUSTOM"])
+	}
+}
+
+// TestOpenLogs_RefusesPreplantedSymlink is P1a's core deterministic
+// regression test: a symlink already sitting at a service's log path
+// (planted by a scion-uid process during the window root spends blocked on
+// an earlier service's ReadyCheck, in the real exploit) must never be
+// opened through — os.OpenFile's old O_CREATE|O_APPEND (no O_NOFOLLOW)
+// would follow it and create/append to the target as root. dirfd.OpenAt
+// with O_NOFOLLOW here refuses it outright instead.
+func TestOpenLogs_RefusesPreplantedSymlink(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	home := os.Getenv("HOME")
+	logDir := filepath.Join(home, ".scion", "services", "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	victim := t.TempDir()
+	victimTarget := filepath.Join(victim, "victim.log")
+	link := filepath.Join(logDir, "evil.stdout.log")
+	if err := os.Symlink(victimTarget, link); err != nil {
+		t.Fatal(err)
+	}
+
+	logDirFd, err := syscall.Open(logDir, syscall.O_DIRECTORY|syscall.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Close(logDirFd) }()
+
+	svc := &managedService{spec: api.ServiceSpec{Name: "evil"}, logDir: logDir}
+	if err := svc.openLogs(logDirFd); err == nil {
+		t.Fatal("expected openLogs to refuse the pre-planted symlink, got nil error")
+	}
+
+	if _, err := os.Stat(victimTarget); !os.IsNotExist(err) {
+		t.Errorf("victim target must not have been created through the symlink, stat err=%v", err)
+	}
+	linkInfo, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Error("expected the log path to still be the symlink the test planted")
+	}
+}
+
+// TestManager_Start_OpensAllLogsBeforeStartingAnyService is P1a's
+// call-site-level regression test: because ALL services' logs are now
+// opened (and chowned) before ANY service is started, a symlink planted at
+// a LATER service's log path is refused before the EARLIER service(s) in
+// the list ever get a chance to run — closing the window entirely rather
+// than just narrowing it, since there is no longer a point in Start() where
+// one service is alive as the target user while another service's log is
+// still being opened by path.
+func TestManager_Start_OpensAllLogsBeforeStartingAnyService(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	home := os.Getenv("HOME")
+	logDir := filepath.Join(home, ".scion", "services", "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	victim := t.TempDir()
+	victimTarget := filepath.Join(victim, "victim.log")
+	// "second" is the SECOND service in the spec list — under the historical
+	// interleaved open+start behaviour, "first" would already be running by
+	// the time this symlink was reached.
+	link := filepath.Join(logDir, "second.stdout.log")
+	if err := os.Symlink(victimTarget, link); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := New(5 * time.Second)
+	specs := []api.ServiceSpec{
+		{Name: "first", Command: []string{"sleep", "60"}},
+		{Name: "second", Command: []string{"sleep", "60"}},
+	}
+
+	err := mgr.Start(context.Background(), specs, 0, 0, "")
+	if err == nil {
+		t.Fatal("expected Start to fail on the symlinked log path")
+	}
+
+	if _, statErr := os.Stat(victimTarget); !os.IsNotExist(statErr) {
+		t.Errorf("victim target must not have been created through the symlink, stat err=%v", statErr)
+	}
+
+	mgr.mu.Lock()
+	started := len(mgr.services)
+	mgr.mu.Unlock()
+	if started != 0 {
+		t.Errorf("expected no service to have been started (all logs are opened before any start), got %d started", started)
 	}
 }
