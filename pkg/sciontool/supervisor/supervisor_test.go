@@ -516,3 +516,54 @@ func TestMergeEnvOverlay_Helper(t *testing.T) {
 		}
 	})
 }
+
+// TestChownRecursive_ChownsUnconditionallyAndSurvivesSymlink is a thin
+// call-site test proving chownRecursive (P1b) delegates to the shared
+// dirfd.ChownTreeNoFollow walk unconditionally (every entry, not just
+// root-owned ones — unlike chownTreeRootOwned) and never follows a symlink.
+// The deeper intermediate-directory-swap race itself is covered once,
+// thoroughly, at the dirfd level
+// (TestChownTreeNoFollow_SurvivesIntermediateDirSwapMidWalk).
+func TestChownRecursive_ChownsUnconditionallyAndSurvivesSymlink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	victim := t.TempDir()
+	victimFile := filepath.Join(victim, "secret")
+	if err := os.WriteFile(victimFile, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+
+	before := lstatCtime(t, filepath.Join(root, "a"))
+	victimBefore := lstatCtime(t, victimFile)
+	time.Sleep(15 * time.Millisecond)
+
+	uid, gid := os.Getuid(), os.Getgid()
+	if err := chownRecursive(root, uid, gid); err != nil {
+		t.Fatalf("chownRecursive: %v", err)
+	}
+
+	if lstatCtime(t, filepath.Join(root, "a")) == before {
+		t.Error("expected \"a\" to be chowned (unconditional, unlike chownTreeRootOwned's root-owned-only filter)")
+	}
+	if lstatCtime(t, victimFile) != victimBefore {
+		t.Error("victim file behind the symlink was chowned — the symlink was followed")
+	}
+}
+
+func lstatCtime(t *testing.T, path string) syscall.Timespec {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat %s: %v", path, err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("no *syscall.Stat_t for %s", path)
+	}
+	return st.Ctim
+}
