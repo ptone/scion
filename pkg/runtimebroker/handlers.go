@@ -1782,18 +1782,22 @@ func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) 
 
 // auxListAgentsSorted queries every currently registered auxiliary runtime
 // with filter, in sorted name order (the same order allManagers() uses), and
-// returns the first non-empty match after filterAgents narrows it. A match
-// is authoritative: once one auxiliary runtime's List call succeeds and
-// filterAgents leaves at least one entry, the remaining auxiliary runtimes
-// are not consulted at all, regardless of whether an earlier or later one in
-// the sorted order would have failed to list. Only when no auxiliary runtime
-// produces a match does a List error along the way turn into an
-// ErrAgentListUnavailable-wrapped error — an error from a runtime that was
-// never going to match anyway must not block a genuine match found
+// returns the first non-empty match after filterAgents narrows it, together
+// with the agent.Manager whose List call produced that match — the prober
+// stop path dispatches Stop through that same manager, never a manager
+// re-derived from a later, independent lookup, so the container ID and the
+// manager it is sent to always come from the same runtime (ptone/scion#1808).
+// A match is authoritative: once one auxiliary runtime's List call succeeds
+// and filterAgents leaves at least one entry, the remaining auxiliary
+// runtimes are not consulted at all, regardless of whether an earlier or
+// later one in the sorted order would have failed to list. Only when no
+// auxiliary runtime produces a match does a List error along the way turn
+// into an ErrAgentListUnavailable-wrapped error — an error from a runtime
+// that was never going to match anyway must not block a genuine match found
 // elsewhere, and the fixed iteration order keeps that decision the same
 // from one call to the next instead of depending on Go's randomized map
-// order (ptone/scion#1808).
-func (s *Server) auxListAgentsSorted(ctx context.Context, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, error) {
+// order.
+func (s *Server) auxListAgentsSorted(ctx context.Context, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, error) {
 	s.auxiliaryRuntimesMu.RLock()
 	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
 	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
@@ -1814,13 +1818,13 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, filter map[string]stri
 			continue
 		}
 		if matched := filterAgents(auxAgents); len(matched) > 0 {
-			return matched, nil
+			return matched, auxRuntimes[rtName].Manager, nil
 		}
 	}
 	if listErr != nil {
-		return nil, fmt.Errorf("%w: %v", ErrAgentListUnavailable, listErr)
+		return nil, nil, fmt.Errorf("%w: %v", ErrAgentListUnavailable, listErr)
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 // projectScopedTargetErr is projectScopedTarget's stricter twin, used only by
@@ -1830,53 +1834,66 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, filter map[string]stri
 // already surface a real error (wrapping ErrAgentListUnavailable, or an
 // ambiguous-match error) instead of collapsing every non-success outcome into
 // "" — so this is no longer about preserving an error that would otherwise be
-// lost. The one remaining, deliberate difference is auxiliary-runtime
-// strictness: LookupContainerID silently skips an auxiliary runtime's List
-// error and moves on to the next one, so a transient failure on the one
-// auxiliary runtime that actually holds the agent looks exactly like a
-// genuine not-found. auxListAgentsSorted instead keeps scanning in a fixed
-// order and only turns a List error into a real failure when no auxiliary
-// runtime produces a match — a match found elsewhere is authoritative over
-// an error seen along the way. This is a full, independent re-implementation
-// of LookupContainerID's resolution steps rather than a wrapper around it,
-// specifically so that LookupContainerID/projectScopedTarget stay untouched
-// — and therefore provably byte-identical — for every broker without a
-// registered prober. Errors are typed exactly as LookupContainerID's are
-// (ErrAgentListUnavailable for a listing failure, an unwrapped
-// uniqueAgentEntry error for an ambiguous match, ErrAgentNotFound for a
-// matched record with no container ID — the one exception is the unwrapped
-// "agent manager not available" error returned when s.manager is nil) so
-// callers can use the same errors.Is(err, ErrAgentNotFound) test either
-// function's error satisfies
-// (ptone/scion#1808).
+// lost. The remaining, deliberate differences are auxiliary-runtime
+// strictness and manager coherence:
 //
-// The rule is: 5xx when the lookup cannot determine the target, i.e. any
-// list error before a match is found. The two resolution stages run in
-// order, and an error in the earlier one is decisive: if the project-scoped
-// stage finds no match and its auxiliary scan returns an error, this
-// returns that error (5xx, fail-closed) without running the unscoped
-// fallback stage (scion.name + agentsWithoutProjectLabel), even though that
-// fallback stage might have matched. That errs toward an explicit failure,
-// never toward a false not-found or a wrong target.
-func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID string) (string, error) {
+//   - LookupContainerID silently skips an auxiliary runtime's List error and
+//     moves on to the next one, so a transient failure on the one auxiliary
+//     runtime that actually holds the agent looks exactly like a genuine
+//     not-found. auxListAgentsSorted instead keeps scanning in a fixed order
+//     and only turns a List error into a real failure when no auxiliary
+//     runtime produces a match — a match found elsewhere is authoritative
+//     over an error seen along the way.
+//
+// This is a full, independent re-implementation of LookupContainerID's
+// resolution steps rather than a wrapper around it, specifically so that
+// LookupContainerID/projectScopedTarget stay untouched — and therefore
+// provably byte-identical — for every broker without a registered prober.
+// Errors are typed exactly as LookupContainerID's are (ErrAgentListUnavailable
+// for a listing failure, an unwrapped uniqueAgentEntry error for an ambiguous
+// match, ErrAgentNotFound for a matched record with no container ID — the one
+// exception is the unwrapped "agent manager not available" error returned
+// when s.manager is nil) so callers can use the same errors.Is(err,
+// ErrAgentNotFound) test either function's error satisfies.
+//
+// The rule is: 5xx when the lookup cannot determine the target: a
+// primary-list error, or a stage that ends with no match after any
+// auxiliary list error. The two resolution stages run in order, and an
+// error in the earlier one is decisive: if the project-scoped stage finds no
+// match and its auxiliary scan returns an error, this returns that error
+// (5xx, fail-closed) without running the unscoped fallback stage
+// (scion.name + agentsWithoutProjectLabel), even though that fallback stage
+// might have matched. That errs toward an explicit failure, never toward a
+// false not-found or a wrong target.
+//
+// Besides the target container ID, this also returns the agent.Manager
+// whose List call produced the matching entry — s.manager for a match found
+// on the primary stage or the fallback's own re-list, or the specific
+// auxiliary runtime's manager for a match auxListAgentsSorted found — so the
+// caller can dispatch Stop through that same manager instead of re-deriving
+// one from a second, independent lookup that could resolve to a different
+// runtime (ptone/scion#1808).
+func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID string) (string, agent.Manager, error) {
 	if s.manager == nil {
-		return "", fmt.Errorf("agent manager not available")
+		return "", nil, fmt.Errorf("agent manager not available")
 	}
 
 	slug := strings.ToLower(id)
 	filter := scopedNameFilter(slug, projectID)
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
-		return "", fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		return "", nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 	}
 	agents = agentsForProject(agents, projectID)
+	matchManager := s.manager
 
 	if len(agents) == 0 {
-		auxAgents, auxErr := s.auxListAgentsSorted(ctx, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
+		auxAgents, auxManager, auxErr := s.auxListAgentsSorted(ctx, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
 		if auxErr != nil {
-			return "", auxErr
+			return "", nil, auxErr
 		}
 		agents = auxAgents
+		matchManager = auxManager
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
@@ -1889,20 +1906,22 @@ func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID strin
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
 		if err != nil {
-			return "", fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+			return "", nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
 		agents = agentsWithoutProjectLabel(agents)
+		matchManager = s.manager
 		if len(agents) == 0 {
-			auxAgents, auxErr := s.auxListAgentsSorted(ctx, fallbackFilter, agentsWithoutProjectLabel)
+			auxAgents, auxManager, auxErr := s.auxListAgentsSorted(ctx, fallbackFilter, agentsWithoutProjectLabel)
 			if auxErr != nil {
-				return "", auxErr
+				return "", nil, auxErr
 			}
 			agents = auxAgents
+			matchManager = auxManager
 		}
 	}
 
 	if len(agents) == 0 {
-		return "", nil
+		return "", nil, nil
 	}
 
 	entry, err := uniqueAgentEntry(slug, agents)
@@ -1912,7 +1931,7 @@ func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID strin
 		// Returned unwrapped, exactly as LookupContainerID returns it: it
 		// isn't ErrAgentNotFound, so the caller surfaces it as a real error
 		// rather than folding it into the idempotent not-found path.
-		return "", err
+		return "", nil, err
 	}
 
 	containerID := entry.Labels["scion.container.id"]
@@ -1926,9 +1945,9 @@ func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID strin
 		// Matches LookupContainerID's own form: a matched record with no
 		// addressable container ID folds into "not found" rather than a
 		// listing failure.
-		return "", fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
+		return "", nil, fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
 	}
-	return containerID, nil
+	return containerID, matchManager, nil
 }
 
 // hasRecordlessProber reports whether the default runtime or any currently
@@ -1972,8 +1991,6 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		attribute.String("scion.project.id", projectID),
 	)
 
-	mgr := s.resolveManagerForAgent(ctx, id, projectID)
-
 	// Resolve the project-scoped container so that same-slug agents in
 	// different projects on this broker don't collide. An empty target means
 	// the agent isn't present in this project; treat that as an idempotent
@@ -1989,20 +2006,31 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// instead: unlike LookupContainerID, it doesn't silently skip an
 	// auxiliary runtime's List error in favor of trying the next one, so a
 	// transient failure on the one auxiliary runtime that actually holds the
-	// agent can't be misread as a genuine not-found (ptone/scion#1808).
-	// ErrAgentNotFound from either path still means "not found" — only a
-	// different error aborts here rather than falling through to the
-	// record-less-actor probe below.
-	var target string
+	// agent can't be misread as a genuine not-found. ErrAgentNotFound from
+	// either path still means "not found" — only a different error aborts
+	// here rather than falling through to the record-less-actor probe below.
+	// That same lookup also supplies the manager Stop is dispatched through
+	// below: the manager whose List call actually produced the matched
+	// entry, not one re-resolved by a second, independent lookup that scans
+	// auxiliary runtimes in a different (map) order and so could land on a
+	// different runtime than the one the target container ID came from
+	// (ptone/scion#1808). Every other broker keeps calling
+	// projectScopedTarget/resolveManagerForAgent exactly as before:
+	// hasRecordlessProber is false and this branch is skipped entirely.
+	var (
+		target string
+		mgr    agent.Manager
+	)
 	if projectID != "" && s.hasRecordlessProber() {
 		var lerr error
-		target, lerr = s.projectScopedTargetErr(ctx, id, projectID)
+		target, mgr, lerr = s.projectScopedTargetErr(ctx, id, projectID)
 		if lerr != nil && !errors.Is(lerr, ErrAgentNotFound) {
 			span.SetStatus(codes.Error, lerr.Error())
 			RuntimeError(w, "Failed to stop agent: "+lerr.Error())
 			return
 		}
 	} else {
+		mgr = s.resolveManagerForAgent(ctx, id, projectID)
 		var err error
 		target, err = s.projectScopedTarget(ctx, id, projectID)
 		if err != nil {
