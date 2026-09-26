@@ -1313,6 +1313,16 @@ func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootGID(t *testing.T) {
 	}
 }
 
+// TestRequirePrivilegeDropOrFail_EnforcedRefusesRootUIDWithNonRootGID is
+// the other half of the B1 predicate: UID 0 paired with a non-root GID must
+// still be refused in enforced mode (the gid clamp must not replace the
+// original uid check).
+func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootUIDWithNonRootGID(t *testing.T) {
+	if err := requirePrivilegeDropOrFail(0, 1000, true); !errors.Is(err, errPrivilegeDropRequired) {
+		t.Fatalf("requirePrivilegeDropOrFail(0, 1000, true) = %v, want errPrivilegeDropRequired", err)
+	}
+}
+
 // TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop is round 5's
 // seam A(1) test (round-4 High-2 / O26 / D3): with euid stubbed to 0, the
 // body of postPreStartOwnershipFixup must forward its own
@@ -2312,6 +2322,59 @@ func TestReadServicesYAML_Enforced_ReadsAtCapFile(t *testing.T) {
 	}
 	if len(data) != servicesYAMLMaxBytes {
 		t.Errorf("len(data) = %d, want %d", len(data), servicesYAMLMaxBytes)
+	}
+}
+
+// TestReadServicesYAML_Enforced_ReadsReadOnlyFile pins that the enforced
+// leaf open is read-only: a 0444 scion-services.yaml must still be read.
+// An O_RDWR open (which would also sidestep the FIFO-blocking O_NONBLOCK
+// guard, since a read-write FIFO open never blocks) needs write permission
+// and fails here. Kills round-4 C4, which the auditor classed as an
+// equivalent mutant. Like the L3 tests, this discriminates only as non-root
+// (root bypasses the permission check), so it skips as root.
+func TestReadServicesYAML_Enforced_ReadsReadOnlyFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permission checks; this property is only observable as non-root")
+	}
+	tmpHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
+	if err := os.WriteFile(servicesPath, []byte("- name: chrome\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := readServicesYAML(servicesPath, true)
+	if err != nil {
+		t.Fatalf("readServicesYAML on a read-only file: %v", err)
+	}
+	if string(data) != "- name: chrome\n" {
+		t.Errorf("data = %q, want the file's content", data)
+	}
+}
+
+// TestReadServicesYAML_NonEnforced_ReadsOverCapFile pins round 4's claim
+// that the R8 1 MiB cap is enforced-mode only: the non-enforced branch is
+// an unbounded os.ReadFile, byte-identical to its pre-unit behaviour, so a
+// file over the cap is returned whole (round-4 Info-3 / C5).
+func TestReadServicesYAML_NonEnforced_ReadsOverCapFile(t *testing.T) {
+	tmpHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
+	overCap := bytes.Repeat([]byte("a"), servicesYAMLMaxBytes+1)
+	if err := os.WriteFile(servicesPath, overCap, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := readServicesYAML(servicesPath, false)
+	if err != nil {
+		t.Fatalf("non-enforced readServicesYAML: %v", err)
+	}
+	if len(data) != servicesYAMLMaxBytes+1 {
+		t.Errorf("len(data) = %d, want %d (non-enforced mode must not apply the cap)", len(data), servicesYAMLMaxBytes+1)
 	}
 }
 
