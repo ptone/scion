@@ -523,9 +523,11 @@ Enabling the tier does six things, all additive:
    proxy-mode update) add a `server.shared_dir_storage` block (backend
    `nfs`, pointing at the VM's export and the PV the Kubernetes objects
    above create) using the schema already defined for it in the runtime's
-   own settings package. The `gke` runtime and profile settings are not
-   written yet, so nothing yet tells the hub's `gke` runtime to point GKE
-   agents at the internal IP reserved in item 2 — see Known limits below.
+   own settings package. The tier does not write the hub's `gke` runtime
+   or profile settings; configure the `gke` runtime separately. GKE
+   agents reach the hub through its public IAP URL (item 3); the internal
+   IP reserved in item 2 is used only for the NFS server address in the
+   PV and in `server.shared_dir_storage`.
 
    **Restricted user access.** With the tier on, both writes also set
    `server.auth.user_access_mode`: `invite_only` by default, or
@@ -590,10 +592,14 @@ that `--delete` always checks for (and, if marked, removes) the three
 hybrid firewall rules and the static internal IP reservation, all by
 name, whether or not the current config has the tier enabled — teardown
 has no other way to know whether the tier was ever turned on for this
-hub. This adds one read-only `firewall-rules list` call and one read-only
-`addresses list` call to every `--delete` run and, rarely, can make it
-refuse to proceed (see below); it does not change what gets deleted for a
-hub that never had the tier on. A VM delete failure with nothing
+hub. It also always looks up the agent transport service account by name
+and, if it carries this hub's marker, removes it (see below). This adds
+one read-only `firewall-rules list` call, one read-only `addresses list`
+call and one `service-accounts describe` call to every `--delete` run
+and, rarely, can make it refuse to proceed (see below); it does not
+change what gets deleted for a hub that never had the tier on. A
+transport service account whose state can't be read, or that exists
+without this hub's marker, is kept and makes `--delete` exit non-zero. A VM delete failure with nothing
 hybrid-tier present also still warns and continues, exactly as it always
 has; only with hybrid-tier resources present does a VM delete failure or
 an unconfirmed VM state fail the run (see below).
@@ -683,7 +689,12 @@ all on the hub VM's own boot disk, so they're deleted along with the VM.
 
 `scripts/single-node-vm/tests/run.sh` runs the hybrid-tier logic against a
 stubbed `gcloud` — no GCP project is contacted. Useful when validating a
-change to `hybrid-tier.sh` before a real deployment.
+change to `hybrid-tier.sh` before a real deployment. It needs bash 4 or
+later, `python3`, and a Go toolchain: the `settings.yaml` parse tests run
+`go run` on `tests/lib/settings-yaml-to-json.go` from the repository
+root, which uses the repository's `github.com/knadh/koanf` YAML parser
+module (downloaded into the Go module cache on first use if it is not
+already there).
 
 ---
 
