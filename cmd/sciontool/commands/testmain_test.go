@@ -72,13 +72,18 @@ func resolveRealGoCaches() {
 }
 
 // removeSandboxHome makes every file and directory under dir writable by
-// its owner, then removes the tree. A real module cache directory (which
-// resolveRealGoCaches exists to prevent from ever being written here, but
-// this is the backstop) contains read-only files and directories by
-// design, so a plain os.RemoveAll can silently leave them behind. Any
-// error still remaining after the chmod pass is reported instead of
-// ignored.
-func removeSandboxHome(dir string) {
+// its owner, then removes the tree, and returns whatever os.RemoveAll still
+// couldn't clear. A real module cache directory (which resolveRealGoCaches
+// exists to prevent from ever being written here, but this is the backstop)
+// contains read-only files and directories by design, so a plain
+// os.RemoveAll can silently leave them behind. filepath.Walk uses Lstat and
+// never descends into a symlink, and the chmod pass never follows one either
+// (a symlink's own Lstat mode is always 0o777 on Linux, so the
+// mode&0o200==0 guard never fires for one) — a symlink inside dir that
+// points outside it is removed as a link, but its target is left untouched.
+// The caller decides whether and how to report a non-nil error; this
+// function does not print anything itself.
+func removeSandboxHome(dir string) error {
 	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // best effort; the RemoveAll below reports what's left.
@@ -88,9 +93,7 @@ func removeSandboxHome(dir string) {
 		}
 		return nil
 	})
-	if err := os.RemoveAll(dir); err != nil {
-		fmt.Fprintf(os.Stderr, "TestMain: failed to remove sandbox home %s: %v\n", dir, err)
-	}
+	return os.RemoveAll(dir)
 }
 
 // disableGoTelemetry writes the go command's own telemetry mode file
@@ -187,7 +190,9 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 	restoreTokenHome()
-	removeSandboxHome(tmpHome)
+	if err := removeSandboxHome(tmpHome); err != nil {
+		fmt.Fprintf(os.Stderr, "TestMain: failed to remove sandbox home %s: %v\n", tmpHome, err)
+	}
 	os.Exit(code)
 }
 
@@ -262,9 +267,101 @@ func TestRemoveSandboxHome_RemovesReadOnlyModuleCacheShapedTree(t *testing.T) {
 		})
 	})
 
-	removeSandboxHome(root)
-
+	if err := removeSandboxHome(root); err != nil {
+		t.Errorf("removeSandboxHome(%s) = %v, want nil", root, err)
+	}
 	if _, err := os.Lstat(root); !os.IsNotExist(err) {
 		t.Errorf("removeSandboxHome left %s behind (Lstat err = %v); read-only module-cache files must not survive cleanup", root, err)
+	}
+}
+
+// TestRemoveSandboxHome_ReportsErrorWhenRemovalFails pins the other half of
+// removeSandboxHome's contract: when the chmod pass cannot make a directory
+// removable — here, a directory with no read or execute bit, which the
+// mode|0o200 chmod pass only ever adds a write bit to, never read or
+// execute — the underlying os.RemoveAll failure is returned rather than
+// swallowed.
+func TestRemoveSandboxHome_ReportsErrorWhenRemovalFails(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root bypasses the permission check this test depends on")
+	}
+	root := filepath.Join(t.TempDir(), "sandbox")
+	blocked := filepath.Join(root, "blocked")
+	if err := os.MkdirAll(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, "file"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No read or execute bit: removeSandboxHome's chmod pass only ORs in
+	// 0o200 (owner-write), so it cannot restore the read+execute access
+	// os.RemoveAll needs to list and remove blocked's own contents.
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(blocked, 0o755)
+	})
+
+	err := removeSandboxHome(root)
+	if err == nil {
+		t.Fatal("removeSandboxHome(root) = nil, want a non-nil error because blocked could not be emptied")
+	}
+	if _, statErr := os.Lstat(blocked); statErr != nil {
+		t.Errorf("Lstat(%s) = %v after a failed removeSandboxHome; want the blocked directory to still exist, matching the reported error", blocked, statErr)
+	}
+}
+
+// TestRemoveSandboxHome_DoesNotTouchSymlinkTargetsOutsideTree pins the
+// symlink-safety property removeSandboxHome depends on filepath.Walk and
+// os.RemoveAll for: a symlink inside dir that points at a file outside it
+// is itself removed, but the file it points at is never chmod'd, its
+// content never touched, and it still exists afterward. filepath.Walk's own
+// Lstat-based info always reports 0o777 for a symlink regardless of its
+// target, so the write-bit guard never fires for one; a change that re-stats
+// the path instead (following the link) would defeat that.
+func TestRemoveSandboxHome_DoesNotTouchSymlinkTargetsOutsideTree(t *testing.T) {
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "keep-me")
+	if err := os.WriteFile(outsideFile, []byte("do not touch"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(outsideFile, 0o600) })
+	wantMode := os.FileMode(0o400)
+	if fi, err := os.Stat(outsideFile); err != nil {
+		t.Fatal(err)
+	} else {
+		wantMode = fi.Mode()
+	}
+
+	root := filepath.Join(t.TempDir(), "sandbox")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	escape := filepath.Join(root, "escape")
+	if err := os.Symlink(outsideFile, escape); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeSandboxHome(root); err != nil {
+		t.Fatalf("removeSandboxHome(%s) = %v, want nil", root, err)
+	}
+	if _, err := os.Lstat(root); !os.IsNotExist(err) {
+		t.Errorf("removeSandboxHome left %s behind (Lstat err = %v)", root, err)
+	}
+
+	fi, err := os.Stat(outsideFile)
+	if err != nil {
+		t.Fatalf("the symlink target %s was removed or is no longer reachable: %v", outsideFile, err)
+	}
+	if fi.Mode() != wantMode {
+		t.Errorf("the symlink target %s has mode %v, want unchanged %v; removeSandboxHome must not chmod through a symlink", outsideFile, fi.Mode(), wantMode)
+	}
+	raw, err := os.ReadFile(outsideFile)
+	if err != nil {
+		t.Fatalf("reading the symlink target %s: %v", outsideFile, err)
+	}
+	if string(raw) != "do not touch" {
+		t.Errorf("the symlink target %s content changed to %q", outsideFile, raw)
 	}
 }
