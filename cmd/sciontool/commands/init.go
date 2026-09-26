@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -1151,10 +1152,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 
 			// Read the agent token from the canonical token file (written by
 			// the host-side agent manager before the container started).
-			// Init runs as root — chown the file so the scion user can read it.
+			// Init runs as root — chown the file so the scion user can read
+			// it. ChownTokenFile resolves the file via a symlink-safe fd
+			// chain and fchowns the open fd, rather than a path-based chown
+			// that a symlink swapped in after this point (this runs after
+			// sup.Run has started, so the workload is already alive) could
+			// redirect to an arbitrary file.
 			token := hub.ReadTokenFile()
 			if token != "" && targetUID > 0 {
-				if err := os.Chown(hub.TokenFilePath(), targetUID, targetGID); err != nil {
+				if err := hub.ChownTokenFile(targetUID, targetGID); err != nil {
 					log.Error("Failed to chown token file to UID=%d: %v", targetUID, err)
 				}
 			}

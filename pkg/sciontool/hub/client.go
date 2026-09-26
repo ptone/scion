@@ -37,6 +37,7 @@ import (
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -165,6 +166,16 @@ type Client struct {
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
 	oidcSource     transportauth.TokenSource // transport-layer OIDC token source (nil = disabled)
+	// tokenChownUID and tokenChownGID are the ownership StartTokenRefresh
+	// applies (via WriteTokenFile) to the token file after every refresh.
+	// Guarded by tokenMu alongside token itself. Set once, before the
+	// refresh loop's first iteration; RefreshToken reads them under the
+	// same lock it already takes to update token, so a direct RefreshToken
+	// call outside StartTokenRefresh (as tests do) sees the zero value and
+	// skips the chown, matching WriteTokenFile's own "uid<=0 skips chown"
+	// contract.
+	tokenChownUID int
+	tokenChownGID int
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -754,11 +765,15 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	// Update the client's token under write lock
 	c.tokenMu.Lock()
 	c.token = result.Token
+	chownUID, chownGID := c.tokenChownUID, c.tokenChownGID
 	c.tokenMu.Unlock()
 
 	// Persist the new token to a file so child processes can read it.
 	// Errors are non-fatal — the in-memory token is already updated.
-	if err := WriteTokenFile(result.Token); err != nil {
+	// Ownership is applied by WriteTokenFile itself (fchown on the open fd,
+	// before the rename onto the final path), not by a separate path-based
+	// os.Chown call afterwards.
+	if err := WriteTokenFile(result.Token, chownUID, chownGID); err != nil {
 		// Log will be handled by caller; we don't import log here
 		_ = err
 	}
@@ -904,6 +919,13 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 		retryMax = retryBase
 	}
 
+	if config != nil {
+		c.tokenMu.Lock()
+		c.tokenChownUID = config.ChownUID
+		c.tokenChownGID = config.ChownGID
+		c.tokenMu.Unlock()
+	}
+
 	go func() {
 		defer close(done)
 
@@ -975,15 +997,6 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 			consecutiveFailures = 0
 			authLostNotified = false
 			tokenExpiry = newExpiry
-
-			// Fix ownership after atomic rewrite (init runs as root).
-			if config.ChownUID > 0 {
-				if chownErr := os.Chown(TokenFilePath(), config.ChownUID, config.ChownGID); chownErr != nil {
-					if config.OnError != nil {
-						config.OnError(fmt.Errorf("failed to chown token file: %w", chownErr))
-					}
-				}
-			}
 
 			if config != nil && config.OnRefreshed != nil {
 				config.OnRefreshed(newExpiry)
@@ -1236,48 +1249,63 @@ func WriteGitHubTokenFile(path, token string, uid, gid int) error {
 }
 
 // writeFileNoFollowChown atomically writes data to path without ever
-// following a symlink or chowning/chmoding by path.
+// following a symlink — at path's own leaf or at any directory component
+// above it — and without chowning/chmoding by path.
 //
-// It refuses outright — no write at all — if path already exists as a
-// symlink or as any non-regular file (a plain os.Lstat, which never follows
-// the final component either), so a workload that has planted one there
-// gets an error back instead of root silently operating on whatever that
-// entry points to.
+// It resolves path's parent directory via dirfd.OpenParentNoFollow, which
+// walks every component from "/" down with O_NOFOLLOW: a workload that
+// owns an intermediate directory (e.g. $HOME, or $HOME/.scion) and swaps
+// it for a symlink gets the walk refused, not silently followed into an
+// attacker-chosen directory. Every remaining step — the pre-check, the
+// temp file's creation, and the final rename — happens via the *at()
+// syscalls relative to that one directory fd, never by path again.
+//
+// It refuses outright — no write at all — if path's leaf already exists as
+// a symlink or as any non-regular file, so a workload that has planted one
+// there gets an error back instead of root silently operating on whatever
+// that entry points to.
 //
 // Otherwise it creates a randomly named file in the same directory with
-// O_CREATE|O_EXCL|O_NOFOLLOW (so a planted file or symlink at the temp name
+// O_CREAT|O_EXCL|O_NOFOLLOW (so a planted file or symlink at the temp name
 // itself can't be reused or followed either), writes the content, fsyncs,
 // sets the final owner and mode on the open file descriptor — fchown/fchmod,
 // never a path-based chown/chmod that could follow a symlink swapped in
-// after the fact — and only then renames the temp file onto path. rename(2)
-// replaces path's directory entry directly, without dereferencing it, so
-// this is safe even if path changes between the Lstat above and the
-// rename.
+// after the fact — and only then renames the temp file onto the leaf name.
+// rename(2) replaces the directory entry directly, without dereferencing
+// it, so this is safe even if the leaf changes between the pre-check above
+// and the rename.
+//
+// A process that crashes between creating the temp file and the rename
+// leaks one 0600 temp file with a live token in it; the random name means
+// leaked temp files accumulate rather than being overwritten by the next
+// write, as the old fixed ".tmp" name was. This is accepted rather than
+// swept: tokens written here are valid for at most a few hours, the files
+// are 0600, and a sweeper would itself need to distinguish a genuine crash
+// leftover from a temp file another write is still in the middle of
+// producing.
 func writeFileNoFollowChown(path string, data []byte, mode os.FileMode, uid, gid int) (err error) {
-	if fi, lerr := os.Lstat(path); lerr == nil {
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing to write %s: existing path is a symlink", path)
-		}
-		if !fi.Mode().IsRegular() {
-			return fmt.Errorf("refusing to write %s: existing path is not a regular file", path)
-		}
-	} else if !os.IsNotExist(lerr) {
-		return fmt.Errorf("failed to stat %s: %w", path, lerr)
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
+	if err != nil {
+		return fmt.Errorf("failed to open parent directory of %s: %w", path, err)
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	if rerr := dirfd.RefuseSymlinkOrNonRegularAt(dirFd, leaf); rerr != nil {
+		return fmt.Errorf("refusing to write %s: %w", path, rerr)
 	}
 
-	dir := filepath.Dir(path)
-	tmpName, err := randomTempFileName(dir, filepath.Base(path))
+	tmpName, err := randomTempFileName(leaf)
 	if err != nil {
 		return err
 	}
 
-	f, err := os.OpenFile(tmpName, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, mode)
+	f, err := dirfd.CreateExclAt(dirFd, tmpName, mode)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer func() {
 		if err != nil {
-			_ = os.Remove(tmpName)
+			_ = dirfd.UnlinkAt(dirFd, tmpName)
 		}
 	}()
 
@@ -1307,23 +1335,25 @@ func writeFileNoFollowChown(path string, data []byte, mode os.FileMode, uid, gid
 		err = fmt.Errorf("failed to close temp file: %w", cerr)
 		return err
 	}
-	if rerr := os.Rename(tmpName, path); rerr != nil {
+	if rerr := dirfd.RenameAt(dirFd, tmpName, leaf); rerr != nil {
 		err = fmt.Errorf("failed to rename temp file to %s: %w", path, rerr)
 		return err
 	}
 	return nil
 }
 
-// randomTempFileName returns a temp file path in dir derived from base, with
-// enough random bits in the name that a workload can't predict or
-// preemptively plant it — the O_EXCL on its creation only helps if the name
-// wasn't guessable in the first place.
-func randomTempFileName(dir, base string) (string, error) {
+// randomTempFileName returns a temp file name derived from base, with
+// enough random bits that a workload can't predict or preemptively plant
+// it — the O_EXCL on its creation only helps if the name wasn't guessable
+// in the first place. The name is relative (no directory component): the
+// caller creates it via dirfd.CreateExclAt against an already-resolved
+// directory fd.
+func randomTempFileName(base string) (string, error) {
 	var buf [12]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", fmt.Errorf("failed to generate temp file name: %w", err)
 	}
-	return filepath.Join(dir, fmt.Sprintf(".%s.%s.tmp", base, hex.EncodeToString(buf[:]))), nil
+	return fmt.Sprintf(".%s.%s.tmp", base, hex.EncodeToString(buf[:])), nil
 }
 
 // ReadGitHubTokenFile reads a GitHub token from the specified path.
@@ -1347,10 +1377,7 @@ func GitHubTokenExpiryPath(tokenPath string) string {
 // follows the same uid/gid contract as WriteGitHubTokenFile.
 func WriteGitHubTokenExpiry(tokenPath string, expiry time.Time, uid, gid int) error {
 	expiryPath := GitHubTokenExpiryPath(tokenPath)
-	if err := writeFileNoFollowChown(expiryPath, []byte(expiry.Format(time.RFC3339)), githubTokenFileMode, uid, gid); err != nil {
-		return fmt.Errorf("failed to write GitHub token expiry file: %w", err)
-	}
-	return nil
+	return writeFileNoFollowChown(expiryPath, []byte(expiry.Format(time.RFC3339)), githubTokenFileMode, uid, gid)
 }
 
 // ReadGitHubTokenExpiry reads the token expiry time from the companion expiry
@@ -1504,10 +1531,18 @@ func TokenFilePath() string {
 	return filepath.Join(tokenHomeResolver(), ".scion", TokenFile)
 }
 
-// WriteTokenFile writes the agent token to the canonical token file.
-// Called by sciontool init to seed the initial value and by the refresh
-// loop to persist updated tokens. Written atomically via temp file + rename.
-func WriteTokenFile(token string) error {
+// tokenFileMode is the mode the agent token file is created with.
+const tokenFileMode = 0600
+
+// WriteTokenFile writes the agent token to the canonical token file. Called
+// by sciontool init to seed the initial value and by the refresh loop to
+// persist updated tokens. When uid > 0, the final file is chowned to
+// uid:gid (the scion container user) via writeFileNoFollowChown — an fchown
+// on the open file descriptor, before the rename, never a path-based chown
+// that a symlink swapped in afterwards could redirect. uid <= 0 leaves
+// ownership as the writing process, matching the zero-value "skip chown"
+// contract TokenRefreshConfig.ChownUID already documents.
+func WriteTokenFile(token string, uid, gid int) error {
 	// Guardrail: under `go test`, refuse to write the real token file unless a
 	// test has explicitly isolated it via SetTokenHome. resolveTokenHome
 	// resolves to the live scion user's home inside agent containers, so a test
@@ -1526,14 +1561,48 @@ func WriteTokenFile(token string) error {
 		return fmt.Errorf("failed to create token file directory: %w", err)
 	}
 
-	// Write to temp file then rename for atomicity
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
+	if err := writeFileNoFollowChown(path, []byte(token), tokenFileMode, uid, gid); err != nil {
 		return fmt.Errorf("failed to write token file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("failed to rename token file: %w", err)
+	return nil
+}
+
+// ChownTokenFile fixes the ownership of an already-written token file to
+// uid:gid — used when the token file was written by another process (the
+// host-side agent manager, before this container started) and this
+// (root) process only needs to hand it off to the scion user, not rewrite
+// its content.
+//
+// It resolves the token file's parent directory the same symlink-safe way
+// writeFileNoFollowChown does (dirfd.OpenParentNoFollow), then opens the
+// leaf itself without following a symlink, and refuses to chown anything
+// but a single-link regular file — a hardlink to a root-owned file would
+// otherwise pass a bare "is this a regular file" check and hand that file
+// to the scion user. The chown is fchown on that open fd, never a
+// path-based chown that a symlink swapped in afterwards could redirect.
+func ChownTokenFile(uid, gid int) error {
+	path := TokenFilePath()
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
+	if err != nil {
+		return fmt.Errorf("failed to open parent directory of token file: %w", err)
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open token file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		return fmt.Errorf("failed to stat token file: %w", err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
+		return fmt.Errorf("refusing to chown token file: not a single-link regular file")
+	}
+	if err := f.Chown(uid, gid); err != nil {
+		return fmt.Errorf("failed to chown token file: %w", err)
 	}
 	return nil
 }
