@@ -74,11 +74,17 @@ type substrateAgentRecord struct {
 
 // SubstrateRuntime implements runtime.Runtime for Agent Substrate.
 type SubstrateRuntime struct {
-	cfg       config.V1SubstrateConfig
-	client    ateapipb.ControlClient
-	conn      *grpc.ClientConn // non-nil only when this runtime opened it (nil for injected test clients)
-	router    *substrate.RouterClient
-	k8sClient kubernetes.Interface // for the dialer's own TokenRequest calls
+	cfg    config.V1SubstrateConfig
+	client ateapipb.ControlClient
+	conn   *grpc.ClientConn // non-nil only when this runtime opened it (nil for injected test clients)
+	router *substrate.RouterClient
+	// k8sClient is not read by any runtime method — the dialer receives its
+	// own clientset directly as a Dial parameter (below) and never reads
+	// this field back. Retained anyway so tests can inject a fake clientset
+	// and assert, with a real client-go fake's Actions(), that GetLogs makes
+	// no Kubernetes call — a meaningful regression guard only as long as
+	// this field stays unread by anything else.
+	k8sClient kubernetes.Interface
 
 	now   func() time.Time
 	sleep func(time.Duration)
