@@ -16,6 +16,8 @@ package services
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -716,4 +718,107 @@ func TestOpenLogNoFollow_RefusesFifoWithoutBlocking(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("openLogNoFollow blocked on a FIFO instead of refusing it")
 	}
+}
+
+// TestValidateServiceName covers the rejection table for the service-Name-
+// as-path-component content-trust class: a workload-writable
+// scion-services.yaml can set Name to anything, and openLogs builds a path
+// by simple string concatenation (Name + ".stdout.log", passed straight to
+// an openat(2) that does not split on "/"), so a Name containing ".." or a
+// path separator can escape the log directory entirely.
+func TestValidateServiceName(t *testing.T) {
+	tests := []struct {
+		name    string
+		valid   bool
+		wantErr bool
+	}{
+		{name: "chrome", valid: true},
+		{name: "vnc-server_2", valid: true},
+		{name: "../escape", wantErr: true},
+		{name: "a/b", wantErr: true},
+		{name: "", wantErr: true},
+		{name: ".", wantErr: true},
+		{name: "..", wantErr: true},
+		{name: "has\x00nul", wantErr: true},
+		{name: strings.Repeat("x", maxServiceNameLen+1), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%q", tt.name), func(t *testing.T) {
+			err := ValidateServiceName(tt.name)
+			if tt.valid && err != nil {
+				t.Errorf("ValidateServiceName(%q) = %v, want nil", tt.name, err)
+			}
+			if tt.wantErr && err == nil {
+				t.Errorf("ValidateServiceName(%q) = nil, want an error", tt.name)
+			}
+			if tt.wantErr && !errors.Is(err, ErrInvalidServiceName) {
+				t.Errorf("ValidateServiceName(%q) error %v does not wrap ErrInvalidServiceName", tt.name, err)
+			}
+		})
+	}
+}
+
+func TestSafeNameForLog_TruncatesAndEscapes(t *testing.T) {
+	got := SafeNameForLog("line1\nline2")
+	if strings.Contains(got, "\n") {
+		t.Errorf("SafeNameForLog left a literal newline in %q — log injection risk", got)
+	}
+	long := strings.Repeat("x", 200)
+	got2 := SafeNameForLog(long)
+	if len(got2) > 100 {
+		t.Errorf("SafeNameForLog did not bound the output length: len=%d", len(got2))
+	}
+}
+
+// TestManager_Start_DropsInvalidNamesButStartsOthers is the core
+// regression test: a table of invalid Names, each dropped without creating
+// anything outside logDir, alongside a normal Name that still starts and
+// opens its three logs normally. Mutation: removing ValidateServiceName's
+// call in Start makes the "../escape" case create a file outside logDir.
+func TestManager_Start_DropsInvalidNamesButStartsOthers(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	home := os.Getenv("HOME")
+	escapeTarget := filepath.Join(home, ".scion", "services", "escape.stdout.log")
+
+	specs := []api.ServiceSpec{
+		{Name: "../escape", Command: []string{"true"}},
+		{Name: "a/b", Command: []string{"true"}},
+		{Name: "", Command: []string{"true"}},
+		{Name: ".", Command: []string{"true"}},
+		{Name: "..", Command: []string{"true"}},
+		{Name: "chrome", Command: []string{"sleep", "60"}},
+	}
+
+	mgr := New(5 * time.Second)
+	err := mgr.Start(context.Background(), specs, 0, 0, "", false)
+	if err == nil {
+		t.Fatal("expected Start to report errors for the invalid names")
+	}
+
+	if _, statErr := os.Stat(escapeTarget); !os.IsNotExist(statErr) {
+		t.Errorf("\"../escape\" must not have created a file outside logDir, stat err=%v", statErr)
+	}
+
+	mgr.mu.Lock()
+	started := make([]string, len(mgr.services))
+	for i, svc := range mgr.services {
+		started[i] = svc.spec.Name
+	}
+	mgr.mu.Unlock()
+	if len(started) != 1 || started[0] != "chrome" {
+		t.Fatalf("started services = %v, want [chrome] — only the valid name should start", started)
+	}
+
+	logDir := filepath.Join(home, ".scion", "services", "logs")
+	for _, suffix := range []string{"stdout.log", "stderr.log", "lifecycle.log"} {
+		if _, err := os.Stat(filepath.Join(logDir, "chrome."+suffix)); err != nil {
+			t.Errorf("expected chrome.%s to exist: %v", suffix, err)
+		}
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = mgr.Shutdown(shutdownCtx)
 }
