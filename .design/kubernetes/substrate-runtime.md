@@ -703,17 +703,23 @@ every runtime — not a substrate-specific mechanism:
   later auxiliary runtime's own list error only becomes "could not
   determine" when no auxiliary runtime produces a match at all, so the
   outcome never depends on Go's randomized map iteration order. The rule is
-  5xx when the lookup cannot determine the target: any list error before a
-  match is found. The lookup runs a project-scoped stage and then an
-  unscoped fallback stage (`scion.name` plus entries with no project label),
-  and an error in the project-scoped stage is decisive: if that stage finds
-  no match and its auxiliary scan errors, the lookup returns 5xx
-  (fail-closed) without running the fallback stage, even though the
-  fallback stage might have matched. Any of these outcomes returns an
-  explicit 5xx rather than falling back to the idempotent 202. Every runtime
-  without that capability is unaffected: `hasRecordlessProber` is false and
-  `stopAgent` keeps calling `projectScopedTarget` exactly as before,
-  unchanged.
+  5xx when the lookup cannot determine the target: a primary-list error, or
+  a stage that ends with no match after any auxiliary list error. The lookup
+  runs a project-scoped stage and then an unscoped fallback stage
+  (`scion.name` plus entries with no project label), and an error in the
+  project-scoped stage is decisive: if that stage finds no match and its
+  auxiliary scan errors, the lookup returns 5xx (fail-closed) without
+  running the fallback stage, even though the fallback stage might have
+  matched. Any of these outcomes returns an explicit 5xx rather than falling
+  back to the idempotent 202. This same lookup also determines which
+  manager `stopAgent` dispatches `Stop` through — the manager whose `List`
+  call actually produced the matched entry, not a manager re-resolved by a
+  second, independent lookup, which scans auxiliary runtimes in a different
+  (map) order and so could return a manager for a different runtime than
+  the one the target container ID came from. Every runtime without that
+  capability is unaffected: `hasRecordlessProber` is false and `stopAgent`
+  keeps calling `projectScopedTarget`/`resolveManagerForAgent` exactly as
+  before, unchanged.
 - **A record-less actor already in `ACTOR_STATE_DELETING` is excluded from
   the count above.** Stop is Delete in Phase 1 (§4's `Stop` row): it drops
   this process's own in-memory record immediately, but Delete is
@@ -722,14 +728,16 @@ every runtime — not a substrate-specific mechanism:
   stop-then-delete sequence — no restart at all — would falsely report
   "broker restarted" for as long as that actor stayed listed. Excluding it
   is safe with respect to the egress leak this whole mechanism exists to
-  prevent: there is no transition out of `DELETING` back to a live state;
-  `RevertActor` only accepts CRASHED/RUNNING/PAUSED actors
+  prevent: an actor already in `DELETING` already had its egress policy
+  removed first (Delete's own ordering, above), so there is nothing left for
+  the count to protect, whether or not its `DELETING` state itself ever
+  resolves. The proto documents no transition out of `DELETING` back to a
+  live state either: `RevertActor`, the one RPC that returns an actor to a
+  pre-delete state, only accepts CRASHED/RUNNING/PAUSED actors
   (`third_party/ateapipb/ateapi.proto:46-47`), and a deleted actor simply
-  stops being listed. `ActorStatus.state` is also required on every
-  listed actor, so a record-less `DELETING` actor can only ever disappear
-  next, never re-enter a live state. An actor already in `DELETING` also
-  already had its egress policy removed first (Delete's own ordering,
-  above), so there is nothing left for the count to protect.
+  stops being listed. `ActorStatus.state` is also required on every listed
+  actor, so a record-less `DELETING` actor can only ever disappear next,
+  never re-enter a live state.
   **It is one of two documented exceptions to the invariant stated above**
   (the other is a second substrate profile on a different ateapi endpoint,
   not probed until its first `Run`; see `deploy/substrate/README.md`): a
@@ -778,8 +786,10 @@ every runtime — not a substrate-specific mechanism:
   closed with an explicit error rather than the idempotent path they would
   otherwise fall back to (§9) — the actor is not touched either way, but the
   caller is no longer told it is gone when it isn't. A record-less actor
-  already in `ACTOR_STATE_DELETING` is the one exception: it is never
-  counted, so an ordinary same-project stop-then-delete sequence with no
+  already in `ACTOR_STATE_DELETING` is one of two exceptions (the other: a
+  second substrate profile on a different ateapi endpoint, not probed until
+  its first `Run`): it is never counted, so an ordinary same-project
+  stop-then-delete sequence with no
   restart involved stays the ordinary idempotent 404/202 (§9). The same
   exclusion also means a *pre-restart* actor stuck in `DELETING` (e.g. a
   pre-restart `Stop` that never finished) is not counted either — its

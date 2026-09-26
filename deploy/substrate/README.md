@@ -986,29 +986,46 @@ kubectl -n "${BROKER_NAMESPACE}" get pod "$POD" \
 #    named by substrate.cluster_trust_bundle, or the file named by
 #    substrate.ca_file if you use that instead); and a host to run grpcurl
 #    from that can resolve and reach api.${ATE_SYSTEM_NAMESPACE}.svc:443
-#    directly (inside the cluster network).
+#    directly (inside the cluster network) -- it is a headless,
+#    cluster-internal service name, so it does not resolve from a
+#    workstation. From a workstation, port-forward instead and keep TLS
+#    verification anchored to the in-cluster name via -authority, which
+#    also sets the TLS server name used for verification (the help text for
+#    grpcurl's own -authority flag, and its use via grpc.WithAuthority --
+#    cmd/grpcurl/grpcurl.go in fullstorydev/grpcurl):
+#      kubectl -n "${BROKER_NAMESPACE}" port-forward svc/api 9555:443 &
+#      grpcurl -cacert ate-ca.pem -authority api.${ATE_SYSTEM_NAMESPACE}.svc \
+#        -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
+#        -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
+#        localhost:9555 ateapi.Control/DeleteActorEgressPolicy
+#    (same substitution for the GetActorEgressPolicy verification call
+#    below). Stop the port-forward (`kill %1`) once verification reads
+#    NotFound.
 #
 #    The token is held in an exported environment variable, never written to
 #    a file and never put on grpcurl's command line: with -expand-headers,
 #    grpcurl itself replaces ${ATE_TOKEN} in the header with the value of
 #    that environment variable, and the single quotes stop the shell from
 #    expanding it first, so argv only ever contains the literal text
-#    '${ATE_TOKEN}'.
+#    '${ATE_TOKEN}'. The export and both calls run in a subshell, so
+#    ATE_TOKEN is gone as soon as it exits -- whether or not the calls
+#    inside succeed -- with no separate `unset` needed.
 kubectl get clustertrustbundle "${CLUSTER_TRUST_BUNDLE_NAME}" \
   -o jsonpath='{.spec.trustBundle}' > ate-ca.pem
-export ATE_TOKEN="$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
-  --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
-grpcurl -cacert ate-ca.pem -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
-  -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
-  api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/DeleteActorEgressPolicy
+(
+  export ATE_TOKEN="$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
+    --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
+  grpcurl -cacert ate-ca.pem -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
+    -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
+    api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/DeleteActorEgressPolicy
 
-#    Verify the policy is actually gone before touching the actor — an
-#    orphaned policy after step 2 is invisible to this whole mechanism, so
-#    this check matters, not just as a courtesy:
-grpcurl -cacert ate-ca.pem -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
-  -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
-  api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/GetActorEgressPolicy
-unset ATE_TOKEN
+  #  Verify the policy is actually gone before touching the actor — an
+  #  orphaned policy after step 2 is invisible to this whole mechanism, so
+  #  this check matters, not just as a courtesy:
+  grpcurl -cacert ate-ca.pem -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
+    -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
+    api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/GetActorEgressPolicy
+)   # ATE_TOKEN is gone as soon as the subshell exits, whatever happened inside
 #    Expect a NotFound gRPC status. Anything else means the policy is still
 #    there; do not proceed to step 2 until it reads NotFound.
 
@@ -1019,17 +1036,23 @@ kubectl ate delete actor -a <atespace> <actor> --any-state
 # 3. Force-delete the hub's own agent record so it doesn't keep dispatching
 #    to an actor that no longer exists. `scion delete --force` does not
 #    exist (checked, cmd/delete.go has no --force flag) — call the hub API
-#    directly, with the hub token you already hold (the same one `scion`
-#    itself uses; do not create or expect any separate "~/.scion/token"
-#    file — nothing in this codebase creates one). Nothing that expands a
+#    directly, with the access token from `~/.scion/credentials.json` (mode
+#    0600; `pkg/credentials/store.go`) — the same one `scion` itself uses to
+#    authenticate; do not create or expect any separate "~/.scion/token"
+#    file — nothing in this codebase creates one. Nothing that expands a
 #    secret may appear on the command line (shell history, `ps`,
-#    `/proc/<pid>/cmdline`) or be left behind if this is interrupted:
-read -rs TOKEN            # paste the hub token; not echoed, not in history
-HDR=$(mktemp); trap 'rm -f "$HDR"' EXIT INT TERM
-printf 'Authorization: Bearer %s\n' "$TOKEN" > "$HDR"; chmod 600 "$HDR"
-unset TOKEN
-curl --fail-with-body -X DELETE \
-  "https://<hub-endpoint>/api/v1/agents/<agent-id>?force=true" -H @"$HDR"
+#    `/proc/<pid>/cmdline`) or be left behind if this is interrupted: the
+#    whole read/write/curl sequence runs in a subshell, so its EXIT trap
+#    fires — removing the header file — as soon as curl returns, not only
+#    when the surrounding interactive shell eventually exits.
+(
+  read -rs TOKEN          # paste the hub token; not echoed, not in history
+  HDR=$(mktemp); trap 'rm -f "$HDR"' EXIT INT TERM
+  printf 'Authorization: Bearer %s\n' "$TOKEN" > "$HDR"; chmod 600 "$HDR"
+  unset TOKEN
+  curl --fail-with-body -X DELETE \
+    "https://<hub-endpoint>/api/v1/agents/<agent-id>?force=true" -H @"$HDR"
+)
 ```
 
 `--fail-with-body` makes a 401/403/404 exit non-zero (with the body still
