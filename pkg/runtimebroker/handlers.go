@@ -479,6 +479,22 @@ func (s *Server) attachSkillResolver(ctx context.Context, r *http.Request, in sk
 	return ctx
 }
 
+// isSingleCleanPathElement reports whether name is safe to join onto a
+// directory as exactly one path segment: no path separator, not "." or
+// "..", and unchanged by filepath.Clean (which also rejects an empty
+// string). Every agent-addressing path built from a request-supplied name
+// in this package and in pkg/agent joins that name onto a root this way, so
+// an identifier that fails this check must never reach one of those joins.
+func isSingleCleanPathElement(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, os.PathSeparator) {
+		return false
+	}
+	return filepath.Clean(name) == name
+}
+
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	createStart := time.Now()
@@ -496,6 +512,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Validate required fields
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	// req.Name is joined onto a directory as a single path segment all the
+	// way down (buildStartContext -> opts.Name -> GetAgentDir), so it must
+	// be exactly that: reject anything that would join as more than one
+	// segment, or as ".." / ".", before it reaches any of those joins.
+	// GetAgentDir/GetAgent enforce the same constraint independently as the
+	// backstop in front of their own stale-directory removal branch; this
+	// rejects the same shape earlier, at the request boundary.
+	if !isSingleCleanPathElement(req.Name) {
+		ValidationError(w, "name must be a single path element", nil)
 		return
 	}
 

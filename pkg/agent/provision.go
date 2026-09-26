@@ -1885,6 +1885,22 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 
 	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
 	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
+
+	// Defense in depth: confirm agentDir is still a direct child of the same
+	// root GetAgentDir selected it under -- the external agents dir when
+	// sharedWorkspace is true and one is configured, else
+	// <projectDir>/agents (config.SelectAgentsRoot; GetAgentDir is defined
+	// in terms of it, so the two roots can never drift apart). agentName is
+	// expected to be a single path element by the time it reaches here, but
+	// this function has more than one caller, and the stale-directory branch
+	// below acts on whatever agentDir resolves to. A non-conforming
+	// agentName must fail closed here, before that branch runs, rather than
+	// operate on whatever the join happened to produce.
+	agentsRoot := filepath.Clean(config.SelectAgentsRoot(projectDir, sharedWorkspace))
+	if cleanAgentDir := filepath.Clean(agentDir); filepath.Dir(cleanAgentDir) != agentsRoot {
+		return "", "", "", nil, fmt.Errorf("agent %q resolves outside %s", agentName, agentsRoot)
+	}
+
 	agentHome := config.GetAgentHomePath(projectDir, agentName)
 	var agentWorkspace string
 	if !sharedWorkspace {
