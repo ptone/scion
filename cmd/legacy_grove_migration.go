@@ -39,7 +39,22 @@ var warnRemovedLegacyEnvOnce sync.Once
 // pkg/runtimebroker/server.go:(*Server).Start).
 func warnRemovedLegacyEnv() {
 	warnRemovedLegacyEnvOnce.Do(func() {
+		// Also switch per-project on-disk migration (config.ReadProjectID,
+		// via config.MigrateLegacyProject) from its slog default — right for
+		// hub, runtime broker, and sciontool — to stderr lines, matching
+		// this process's own reporting.
+		config.SetProjectMigrationReporter(stderrReporter{})
 		config.WarnRemovedLegacyEnv(os.Getenv, stderrReporter{})
+
+		// Migrate the global ~/.scion layout before any command scans
+		// ~/.scion/projects or ~/.scion/project-configs: this Once-guarded
+		// hook already runs before Execute()'s early config.LoadSettings
+		// call and before PersistentPreRunE's own project/settings
+		// resolution, so every discovery and project-load path downstream
+		// sees the canonical layout already in place.
+		if globalDir, err := config.GetGlobalDir(); err == nil {
+			config.MigrateLegacyGlobalLayout(globalDir, stderrReporter{})
+		}
 	})
 }
 

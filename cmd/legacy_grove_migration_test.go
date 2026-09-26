@@ -18,10 +18,12 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/spf13/cobra"
 )
 
@@ -161,5 +163,216 @@ func TestWarnRemovedLegacyEnv_StderrOnlyUnderJSON(t *testing.T) {
 	var projects []json.RawMessage
 	if err := json.Unmarshal(stdoutBytes, &projects); err != nil {
 		t.Fatalf("stdout is not valid JSON: %v (stdout=%q)", err, stdoutText)
+	}
+}
+
+// captureStdIO redirects os.Stdout and os.Stderr for the duration of fn and
+// returns everything written to each.
+func captureStdIO(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+	origOut, origErr := os.Stdout, os.Stderr
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout, os.Stderr = outW, errW
+	// Cleanup, not just the explicit restore below, so a panic or t.Fatal
+	// inside fn can't leave every later test in this binary writing to a
+	// closed pipe. It also closes the write ends (ignoring errors, since the
+	// explicit Close calls below may already have run) so a t.Fatal inside
+	// fn can't leave the drain goroutines parked on a pipe whose write end
+	// is never closed.
+	t.Cleanup(func() {
+		os.Stdout, os.Stderr = origOut, origErr
+		_ = outW.Close()
+		_ = errW.Close()
+	})
+
+	// Drain both pipes concurrently so a caller that writes more than the
+	// pipe buffer holds can't deadlock: io.Copy on each pipe blocks until
+	// its write end is closed, so both must be read before that close can
+	// be waited on.
+	var wg sync.WaitGroup
+	var outBuf, errBuf strings.Builder
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(&outBuf, outR)
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = io.Copy(&errBuf, errR)
+	}()
+
+	fn()
+	os.Stdout, os.Stderr = origOut, origErr
+	_ = outW.Close()
+	_ = errW.Close()
+	wg.Wait()
+	return outBuf.String(), errBuf.String()
+}
+
+// TestProjectMigration_StderrOnly is the CLI-side check that migrating a
+// project's .scion/grove-id (config.ReadProjectID, via
+// config.MigrateLegacyProject) writes its "scion: migrated ..." line to
+// stderr only, using the same stderrReporter the CLI boot hook installs
+// (config.SetProjectMigrationReporter in warnRemovedLegacyEnv), and that a
+// second read of the same directory in the same process is silent.
+func TestProjectMigration_StderrOnly(t *testing.T) {
+	config.SetProjectMigrationReporter(stderrReporter{})
+	t.Cleanup(func() { config.SetProjectMigrationReporter(config.NewSlogReporter()) })
+
+	scionDir := filepath.Join(t.TempDir(), "myproj", ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, "grove-id"), []byte("legacy-uuid\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var id string
+	var readErr error
+	stdout, stderr := captureStdIO(t, func() {
+		id, readErr = config.ReadProjectID(scionDir)
+	})
+
+	if readErr != nil {
+		t.Fatalf("ReadProjectID: %v", readErr)
+	}
+	if id != "legacy-uuid" {
+		t.Errorf("ReadProjectID = %q, want %q", id, "legacy-uuid")
+	}
+	if stdout != "" {
+		t.Errorf("stdout leaked migration output: %q", stdout)
+	}
+	wantLine := "scion: migrated " + filepath.Join(scionDir, "grove-id") +
+		" -> " + filepath.Join(scionDir, "project-id") + "\n"
+	if stderr != wantLine {
+		t.Errorf("stderr = %q, want %q", stderr, wantLine)
+	}
+
+	// Second read of the same directory, same process: silent (the event
+	// was already reported once for this directory).
+	stdout2, stderr2 := captureStdIO(t, func() {
+		_, _ = config.ReadProjectID(scionDir)
+	})
+	if stdout2 != "" || stderr2 != "" {
+		t.Errorf("second read was not silent: stdout=%q stderr=%q", stdout2, stderr2)
+	}
+}
+
+// TestProjectMigration_ConflictNamesPathsAndRemedy is the CLI-side check
+// that a grove-id/project-id conflict warning names both paths and a
+// remedy, not just "(current behaviour)": stderrReporter.Conflict prints
+// config.MigrateLegacyProject's detail verbatim, so this pins the format at
+// the integration point a user actually sees.
+func TestProjectMigration_ConflictNamesPathsAndRemedy(t *testing.T) {
+	config.SetProjectMigrationReporter(stderrReporter{})
+	t.Cleanup(func() { config.SetProjectMigrationReporter(config.NewSlogReporter()) })
+
+	scionDir := filepath.Join(t.TempDir(), "myproj", ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(scionDir, "grove-id")
+	newPath := filepath.Join(scionDir, "project-id")
+	if err := os.WriteFile(oldPath, []byte("legacy-uuid"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("canonical-uuid"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var id string
+	var readErr error
+	stdout, stderr := captureStdIO(t, func() {
+		id, readErr = config.ReadProjectID(scionDir)
+	})
+
+	if readErr != nil {
+		t.Fatalf("ReadProjectID: %v", readErr)
+	}
+	if id != "canonical-uuid" {
+		t.Errorf("ReadProjectID = %q, want %q (canonical wins)", id, "canonical-uuid")
+	}
+	if stdout != "" {
+		t.Errorf("stdout leaked migration output: %q", stdout)
+	}
+	wantLine := "scion: warning: both " + oldPath + " and " + newPath +
+		" exist with different values; using project-id. " +
+		"Remove " + oldPath + " (after checking its value) to silence this warning.\n"
+	if stderr != wantLine {
+		t.Errorf("stderr = %q, want %q", stderr, wantLine)
+	}
+}
+
+// TestGlobalLayoutMigration_CLIStderrOnlyUnderJSON is the end-to-end CLI
+// check for the global ~/.scion layout migration (config.MigrateLegacyGlobalLayout,
+// wired into the same Once-guarded boot hook as the legacy-env warning): a
+// legacy ~/.scion/groves/<name> entry is migrated before "project list"
+// scans ~/.scion/projects, the migration line goes to stderr only, and
+// stdout stays valid, parseable JSON under --format json.
+func TestGlobalLayoutMigration_CLIStderrOnlyUnderJSON(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_HOST_UID", "")
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+
+	acme := filepath.Join(home, ".scion", "groves", "acme")
+	if err := os.MkdirAll(acme, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(acme, "workspace.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The warning/migration hook is sync.Once-guarded per process; reset it
+	// so this test observes it regardless of test execution order.
+	warnRemovedLegacyEnvOnce = sync.Once{}
+	t.Cleanup(func() { warnRemovedLegacyEnvOnce = sync.Once{} })
+	t.Cleanup(func() { config.SetProjectMigrationReporter(config.NewSlogReporter()) })
+
+	savedFormat, savedProjectPath, savedGlobal, savedNoHub, savedHubEndpoint :=
+		outputFormat, projectPath, globalMode, noHub, hubEndpoint
+	t.Cleanup(func() {
+		outputFormat, projectPath, globalMode, noHub, hubEndpoint =
+			savedFormat, savedProjectPath, savedGlobal, savedNoHub, savedHubEndpoint
+	})
+
+	rootCmd.SetArgs([]string{"project", "list", "--format", "json"})
+	t.Cleanup(func() { rootCmd.SetArgs(nil) })
+
+	var runErr error
+	stdout, stderr := captureStdIO(t, func() {
+		runErr = rootCmd.Execute()
+	})
+	if runErr != nil {
+		t.Fatalf("rootCmd.Execute() = %v", runErr)
+	}
+
+	wantLine := "scion: migrated " + acme + " -> " + filepath.Join(home, ".scion", "projects", "acme")
+	if !strings.Contains(stderr, wantLine) {
+		t.Fatalf("stderr = %q, want it to contain %q", stderr, wantLine)
+	}
+	if strings.Contains(stdout, "scion:") {
+		t.Fatalf("stdout leaked migration output: %q", stdout)
+	}
+	var projects []json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &projects); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v (stdout=%q)", err, stdout)
+	}
+
+	// The symlink left behind at the old path means it still resolves too.
+	data, err := os.ReadFile(filepath.Join(acme, "workspace.txt"))
+	if err != nil {
+		t.Fatalf("legacy path no longer resolves through the symlink: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "hello" {
+		t.Errorf("content through legacy path = %q, want %q", got, "hello")
 	}
 }

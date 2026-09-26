@@ -942,6 +942,17 @@ func (s *Server) Start(ctx context.Context) error {
 	// once, not twice. On-disk layout migration is expected to run at this
 	// same hook point.
 	config.WarnRemovedLegacyEnvOnce(os.Getenv, config.NewSlogReporter())
+	// Per-project migration (config.ReadProjectID, as projects load) reports
+	// through slog here too. This is already the default, but set it
+	// explicitly so all three boot hooks (CLI, hub, broker) are visible at
+	// their call sites.
+	config.SetProjectMigrationReporter(config.NewSlogReporter())
+	// Migrate the global ~/.scion layout before scanning projects/ below.
+	if globalDir, err := config.GetGlobalDir(); err == nil {
+		config.MigrateLegacyGlobalLayoutOnce(globalDir, config.NewSlogReporter())
+	} else {
+		slog.Warn("skipping legacy layout migration: could not resolve global directory", "error", err)
+	}
 
 	// Discover auxiliary runtimes (e.g. Kubernetes) from project settings
 	// so that agents running on non-default runtimes can be found after
