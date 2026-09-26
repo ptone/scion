@@ -2789,29 +2789,35 @@ func TestConfigureSharedWorkspaceGit_TmpdirRaceCannotDiscloseArbitraryFile(t *te
 // TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed proves the
 // other half of the fix: dirfd.EnsureDirNoFollowRootOwned's chain check is
 // what actually runs, not a check that always happens to pass. Pointing
-// hooks.PrivateRootTmpDir under a chain that fails verification (here,
-// explicitly making the immediate parent group/other-writable, the same
-// shape a misconfigured or attacker-influenced "/run" would have — real
-// "/tmp" above it fails the same check independently, for the same reason
-// the brief's premise treats it as unsafe) must make
-// configureSharedWorkspaceGit refuse to create anything there and return
-// without installing a gitconfig — never falling back to os.TempDir() or
-// any other location.
+// hooks.PrivateRootTmpDir directly at a directory that already EXISTS but
+// is group/other-writable (the same shape a misconfigured or attacker-
+// influenced "/run" would have) must make configureSharedWorkspaceGit
+// refuse to create anything there and return without installing a
+// gitconfig — never falling back to os.TempDir() or any other location.
+// The target must already exist, not merely have a bad-mode ancestor: if it
+// didn't exist, a chain-check bypass and a genuine chain-check refusal would
+// both manifest as "no gitconfig installed" (os.MkdirTemp itself would fail
+// against a nonexistent directory either way), so the test would not
+// actually distinguish the two.
 func TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed(t *testing.T) {
 	origDir := hooks.PrivateRootTmpDir
 	t.Cleanup(func() { hooks.PrivateRootTmpDir = origDir })
 
-	badParent := t.TempDir()
-	if err := os.Chmod(badParent, 0o777); err != nil {
+	badDir := t.TempDir()
+	if err := os.Chmod(badDir, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	hooks.PrivateRootTmpDir = filepath.Join(badParent, "tmp")
+	hooks.PrivateRootTmpDir = badDir
 
 	agentHome := t.TempDir()
 	configureSharedWorkspaceGit(agentHome, 0, 0)
 
-	if _, err := os.Stat(hooks.PrivateRootTmpDir); err == nil {
-		t.Errorf("expected %s to not be created when its parent chain fails verification", hooks.PrivateRootTmpDir)
+	entries, err := os.ReadDir(badDir)
+	if err != nil {
+		t.Fatalf("read badDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected nothing to be created inside %s when its own mode fails verification, got %v", badDir, entries)
 	}
 	if _, err := os.Stat(filepath.Join(agentHome, ".gitconfig")); err == nil {
 		t.Error("expected no .gitconfig to be installed when the private directory chain fails closed")
