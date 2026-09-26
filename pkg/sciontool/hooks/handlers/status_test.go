@@ -841,24 +841,76 @@ func TestStatusHandler_SymlinkAtStatusPathIsRefusedNotFollowed(t *testing.T) {
 	assert.Zero(t, fi.Mode()&os.ModeSymlink, "statusPath should no longer be a symlink after a write")
 }
 
+// wantAgentInfoMaxBytes is this test's OWN, independently hardcoded copy of
+// the size bound status.go documents for agentInfoMaxBytes (1 MiB) — not a
+// reference to that constant. A test that sized its fixture as
+// agentInfoMaxBytes+1 would track any future change to that constant
+// automatically, including a regression that widens it: the fixture and the
+// cap it's supposed to test would drift together, and the "one byte over"
+// fixture would always be refused no matter how wide the cap became,
+// silently proving nothing. Anchoring to an independent, hardcoded
+// expectation of what the cap SHOULD be is what lets this test actually
+// notice if agentInfoMaxBytes is ever widened.
+const wantAgentInfoMaxBytes = 1 << 20
+
+// jsonObjectOfSize returns a syntactically valid JSON object of exactly n
+// bytes: {"k":"aaa...a"}, with the "a" run padded to make up the difference.
+// n must be at least 8 (the length of `{"k":""}`).
+func jsonObjectOfSize(n int) []byte {
+	const prefix, suffix = `{"k":"`, `"}`
+	pad := n - len(prefix) - len(suffix)
+	if pad < 0 {
+		pad = 0
+	}
+	buf := make([]byte, 0, n)
+	buf = append(buf, prefix...)
+	for i := 0; i < pad; i++ {
+		buf = append(buf, 'a')
+	}
+	buf = append(buf, suffix...)
+	return buf
+}
+
 // TestStatusHandler_OversizeRegularStatusPathReturnsEmptyMap proves the size
 // bound is enforced on an actual regular file (not a symlink to one): an
 // agent-info.json one byte over agentInfoMaxBytes is refused, falling back
-// to the same empty-map state a missing file already produces. This fails
-// if the read's LimitReader cap is removed or widened, since a plain
-// regular file at exactly this path is exactly what the cap exists to
-// bound — a symlink to an oversize file (see the refusal test above) never
-// even reaches the size check, since O_NOFOLLOW refuses it first.
+// to the same empty-map state a missing file already produces. The fixture
+// is syntactically valid JSON that would unmarshal to a non-empty map if the
+// cap did not refuse it first — a fixture built purely from NUL bytes would
+// fail json.Unmarshal regardless of the cap, so it would pass this test even
+// with the cap removed or widened to any size; this fixture only passes
+// because the SIZE bound is what refuses it. A symlink to an oversize file
+// (see the refusal test above) never even reaches the size check, since
+// O_NOFOLLOW refuses it first.
 func TestStatusHandler_OversizeRegularStatusPathReturnsEmptyMap(t *testing.T) {
 	tmpDir := t.TempDir()
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
-	if err := os.WriteFile(statusPath, make([]byte, agentInfoMaxBytes+1), 0o600); err != nil {
+	if err := os.WriteFile(statusPath, jsonObjectOfSize(wantAgentInfoMaxBytes+1), 0o600); err != nil {
 		t.Fatalf("write oversize agent-info.json: %v", err)
 	}
 
 	h := &StatusHandler{StatusPath: statusPath}
 	info := h.readAgentInfoMap()
 	assert.Empty(t, info, "an oversize regular StatusPath should read back as empty state, not error out")
+}
+
+// TestStatusHandler_AtCapRegularStatusPathIsRead is
+// OversizeRegularStatusPathReturnsEmptyMap's companion: the same valid-JSON
+// shape at exactly agentInfoMaxBytes (not one byte over) is read and parsed
+// successfully, proving the boundary sits exactly at the documented cap and
+// that jsonObjectOfSize itself produces parseable content.
+func TestStatusHandler_AtCapRegularStatusPathIsRead(t *testing.T) {
+	tmpDir := t.TempDir()
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	if err := os.WriteFile(statusPath, jsonObjectOfSize(wantAgentInfoMaxBytes), 0o600); err != nil {
+		t.Fatalf("write at-cap agent-info.json: %v", err)
+	}
+
+	h := &StatusHandler{StatusPath: statusPath}
+	info := h.readAgentInfoMap()
+	if got, ok := info["k"]; !ok || len(got.(string)) == 0 {
+		t.Errorf("readAgentInfoMap() = %v, want the at-cap file's own \"k\" value parsed back", info)
+	}
 }
 
 // TestStatusHandler_NonRegularStatusPathReturnsEmptyMap proves that reading
