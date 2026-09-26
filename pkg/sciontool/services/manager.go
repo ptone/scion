@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
@@ -145,23 +146,59 @@ func New(gracePeriod time.Duration) *Manager {
 }
 
 // Start launches all services in order, honoring ready checks between them.
+//
+// All service log files are opened (and, if running as root, chowned) for
+// EVERY service BEFORE any service is started. This closes a window where
+// root would otherwise open/chown service N+1's logs while service N is
+// already alive and running as the (less-privileged) target user: on
+// Substrate that window is wide (root blocks on service N's ReadyCheck,
+// which can be a long TCP/HTTP wait), giving a live scion-uid process ample
+// time to symlink-swap a not-yet-opened log path and have root create/append
+// to and chown an arbitrary target through it. Opening every log up front,
+// before any workload code has had a chance to run as the target user under
+// this manager's watch, removes that window entirely. This ordering change
+// is behaviour-preserving (every log still ends up opened, chowned, and
+// used exactly as before) so it applies on every runtime, not just
+// Substrate.
 func (m *Manager) Start(ctx context.Context, specs []api.ServiceSpec, uid, gid int, username string) error {
 	home := os.Getenv("HOME")
-	logDir := filepath.Join(home, ".scion", "services", "logs")
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return fmt.Errorf("failed to create service log directory: %w", err)
+	scionDir := filepath.Join(home, ".scion")
+	servicesDir := filepath.Join(scionDir, "services")
+	logDir := filepath.Join(servicesDir, "logs")
+
+	// EnsureDirNoFollow only creates its own leaf (it requires the parent
+	// chain to already exist, unlike os.MkdirAll) — walk the fixed nesting
+	// depth under $HOME one level at a time so an as-yet-missing $HOME/.scion
+	// doesn't fail the resolution of $HOME/.scion/services below it.
+	scionDirFile, err := dirfd.EnsureDirNoFollow(scionDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create .scion directory: %w", err)
+	}
+	_ = scionDirFile.Close()
+
+	svcDirFile, err := dirfd.EnsureDirNoFollow(servicesDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create service directory: %w", err)
+	}
+	defer func() { _ = svcDirFile.Close() }()
+	if uid > 0 && gid > 0 {
+		_ = svcDirFile.Chown(uid, gid)
 	}
 
-	// Chown the log directory to target user if running as root
+	logDirFile, err := dirfd.EnsureDirNoFollow(logDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create service log directory: %w", err)
+	}
+	defer func() { _ = logDirFile.Close() }()
 	if uid > 0 && gid > 0 {
-		_ = os.Chown(filepath.Join(home, ".scion", "services"), uid, gid)
-		_ = os.Chown(logDir, uid, gid)
+		_ = logDirFile.Chown(uid, gid)
 	}
 
 	m.mu.Lock()
 	m.services = make([]*managedService, 0, len(specs))
 	m.mu.Unlock()
 
+	svcs := make([]*managedService, 0, len(specs))
 	for _, spec := range specs {
 		svc := &managedService{
 			spec:     spec,
@@ -173,19 +210,26 @@ func (m *Manager) Start(ctx context.Context, specs []api.ServiceSpec, uid, gid i
 			env:      mergeEnv(os.Environ(), spec.Env, uid, username),
 		}
 
-		if err := svc.openLogs(); err != nil {
+		if err := svc.openLogs(int(logDirFile.Fd())); err != nil {
 			return fmt.Errorf("service %s: failed to open log files: %w", spec.Name, err)
 		}
 
-		// Chown log files if running as non-root target
+		// Chown log files (fd-based fchown; never a path-based chown that
+		// could be redirected by a symlink swapped in after the open) if
+		// running as non-root target.
 		if uid > 0 && gid > 0 {
 			for _, f := range []*os.File{svc.stdoutFile, svc.stderrFile, svc.lifecycleFile} {
 				if f != nil {
-					_ = os.Chown(f.Name(), uid, gid)
+					_ = f.Chown(uid, gid)
 				}
 			}
 		}
 
+		svcs = append(svcs, svc)
+	}
+
+	for _, svc := range svcs {
+		spec := svc.spec
 		if err := svc.start(); err != nil {
 			svc.writeLifecycle("Service failed to start: %v", err)
 			log.TaggedInfo("service:"+spec.Name, "Failed to start: %v", err)
@@ -411,23 +455,49 @@ func (m *Manager) monitorService(ctx context.Context, svc *managedService) {
 	}
 }
 
-func (svc *managedService) openLogs() error {
-	var err error
-	flags := os.O_APPEND | os.O_CREATE | os.O_WRONLY
+// openLogs opens this service's three log files relative to logDirFd — an
+// already-open, symlink-safe fd for svc.logDir (see dirfd.EnsureDirNoFollow)
+// — via openat(2) with O_NOFOLLOW, so a symlink planted at any of the leaf
+// names is refused rather than followed. Each opened fd is fstat'd and
+// refused unless it is a single-link regular file: a hardlink to an
+// unrelated (possibly root-owned) file would otherwise pass a bare
+// "is this a regular file" check.
+func (svc *managedService) openLogs(logDirFd int) error {
+	flags := syscall.O_APPEND | syscall.O_CREAT | syscall.O_WRONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
 
-	svc.stdoutFile, err = os.OpenFile(filepath.Join(svc.logDir, svc.spec.Name+".stdout.log"), flags, 0644)
+	var err error
+	svc.stdoutFile, err = openLogNoFollow(logDirFd, svc.spec.Name+".stdout.log", flags, 0644)
 	if err != nil {
 		return err
 	}
-	svc.stderrFile, err = os.OpenFile(filepath.Join(svc.logDir, svc.spec.Name+".stderr.log"), flags, 0644)
+	svc.stderrFile, err = openLogNoFollow(logDirFd, svc.spec.Name+".stderr.log", flags, 0644)
 	if err != nil {
 		return err
 	}
-	svc.lifecycleFile, err = os.OpenFile(filepath.Join(svc.logDir, svc.spec.Name+".lifecycle.log"), flags, 0644)
+	svc.lifecycleFile, err = openLogNoFollow(logDirFd, svc.spec.Name+".lifecycle.log", flags, 0644)
 	if err != nil {
 		return err
 	}
 	return nil
+}
+
+// openLogNoFollow opens name relative to dirFd and refuses to hand back
+// anything other than a single-link regular file.
+func openLogNoFollow(dirFd int, name string, flags int, mode os.FileMode) (*os.File, error) {
+	f, err := dirfd.OpenAt(dirFd, name, flags, mode)
+	if err != nil {
+		return nil, err
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
+		_ = f.Close()
+		return nil, fmt.Errorf("refusing to open %s: not a single-link regular file", name)
+	}
+	return f, nil
 }
 
 func (svc *managedService) closeLogs() {
