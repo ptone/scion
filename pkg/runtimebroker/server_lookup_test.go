@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -888,6 +889,9 @@ func TestLookupContainerID_NoContainerIDIsErrAgentNotFound(t *testing.T) {
 	if !errors.Is(err, ErrAgentNotFound) {
 		t.Errorf("expected errors.Is(err, ErrAgentNotFound), got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "no container ID") {
+		t.Errorf("expected error to identify the no-container-ID branch, got: %v", err)
+	}
 }
 
 // TestLookupContainerID_AmbiguousMatchIsNotErrAgentNotFound proves the
@@ -921,13 +925,13 @@ func TestLookupContainerID_AmbiguousMatchIsNotErrAgentNotFound(t *testing.T) {
 	}
 }
 
-// TestLookupContainerID_ListingErrorIsNotErrAgentNotFound proves that a
+// TestLookupContainerID_ListingErrorIsListUnavailable proves that a
 // runtime listing failure (the manager's List call itself erroring) also
 // must NOT satisfy errors.Is(err, ErrAgentNotFound): it is a retryable
 // infrastructure problem, not evidence the agent doesn't exist. It must
 // instead satisfy errors.Is(err, ErrAgentListUnavailable), which is what
 // callers such as controlchannel.go branch on.
-func TestLookupContainerID_ListingErrorIsNotErrAgentNotFound(t *testing.T) {
+func TestLookupContainerID_ListingErrorIsListUnavailable(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{
 		{
