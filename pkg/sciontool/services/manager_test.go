@@ -670,9 +670,21 @@ func TestManager_Start_NoFdLeakOnPartialOpenOrStartFailure(t *testing.T) {
 // TestOpenLogNoFollow_RefusesFifoWithoutBlocking is L1: proves the
 // S_IFREG check in openLogNoFollow refuses a FIFO planted at a log path —
 // even one with a reader already attached, so open(2) itself would
-// otherwise succeed and hang were it not for O_NONBLOCK — rather than
-// hanging startup or silently writing into a pipe nothing reads from
-// correctly.
+// otherwise succeed immediately were it not for the S_IFREG check —
+// rather than silently writing into a pipe nothing reads from correctly.
+//
+// The reader is attached SYNCHRONOUSLY, in the test body, before
+// openLogNoFollow is ever called — not in a background goroutine racing
+// against it. A non-blocking read-open of a FIFO succeeds immediately
+// (there is no reader-arrival race to win or lose), so by the time
+// openLogNoFollow runs, the write-side open() is guaranteed to succeed on
+// the FIFO itself: with no reader, the write-side open would instead fail
+// with ENXIO, which also satisfies a bare err!=nil check and would make
+// this test pass regardless of whether the S_IFREG check exists at all
+// (that was the round-3 gap: the original version raced a reader-attach
+// goroutine against the write-side open with no synchronisation, and the
+// write side almost always won, so it was actually exercising the ENXIO
+// path, not S_IFREG).
 func TestOpenLogNoFollow_RefusesFifoWithoutBlocking(t *testing.T) {
 	dir := t.TempDir()
 	fifoPath := filepath.Join(dir, "evil.stdout.log")
@@ -680,23 +692,11 @@ func TestOpenLogNoFollow_RefusesFifoWithoutBlocking(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Hold a reader open on the FIFO so a blocking open on the write side
-	// would otherwise succeed immediately (proving the refusal is the
-	// S_IFREG check, not an incidental ENXIO from having no reader).
-	readerDone := make(chan struct{})
-	go func() {
-		defer close(readerDone)
-		f, err := os.OpenFile(fifoPath, os.O_RDONLY, 0)
-		if err == nil {
-			_ = f.Close()
-		}
-	}()
-	t.Cleanup(func() {
-		// Unblock the reader goroutine if openLogNoFollow itself didn't.
-		if fd, err := syscall.Open(fifoPath, syscall.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
-			_ = syscall.Close(fd)
-		}
-	})
+	rfd, err := syscall.Open(fifoPath, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatalf("open reader: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(rfd) })
 
 	dirFd, err := syscall.Open(dir, syscall.O_DIRECTORY|syscall.O_RDONLY, 0)
 	if err != nil {
@@ -707,13 +707,19 @@ func TestOpenLogNoFollow_RefusesFifoWithoutBlocking(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		flags := syscall.O_APPEND | syscall.O_CREAT | syscall.O_WRONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
-		_, err := openLogNoFollow(dirFd, "evil.stdout.log", flags, 0644, false)
+		f, err := openLogNoFollow(dirFd, "evil.stdout.log", flags, 0644, false)
+		if f != nil {
+			_ = f.Close()
+		}
 		done <- err
 	}()
 	select {
 	case err := <-done:
 		if err == nil {
-			t.Error("expected an error refusing the FIFO, got nil")
+			t.Fatal("expected an error refusing the FIFO, got nil")
+		}
+		if !strings.Contains(err.Error(), "not a regular file") {
+			t.Errorf("expected the S_IFREG refusal message, got: %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("openLogNoFollow blocked on a FIFO instead of refusing it")
