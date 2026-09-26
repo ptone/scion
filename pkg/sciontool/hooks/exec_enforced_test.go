@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -119,6 +120,94 @@ func TestOpenScriptNoFollow_RefusesSymlinkedScript(t *testing.T) {
 	}
 	if !errors.Is(err, ErrScriptRefused) {
 		t.Errorf("error = %v, want it to wrap ErrScriptRefused", err)
+	}
+}
+
+// callWithTimeout runs fn in a goroutine and fails the test if it does not
+// return within d, rather than letting a hang in fn (e.g. a regression back
+// to a blocking open) hang the whole test binary. A regression is then a
+// clean, fast test FAILURE instead of a CI timeout with no useful signal.
+func callWithTimeout(t *testing.T, d time.Duration, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		fn()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("did not return within %s — likely a regression to a blocking open", d)
+	}
+}
+
+// TestOpenScriptNoFollow_RefusesWriterlessFIFOWithoutBlocking is the
+// regression test for the hang a writerless FIFO used to cause: opening a
+// FIFO nobody has open for writing blocks a plain O_RDONLY open(2) forever,
+// which would hang all hook processing if a workload ever planted one under
+// a hooks directory. openScriptNoFollow's O_NONBLOCK open plus the
+// fstat-and-reject-non-regular check must refuse it instead — wrapped in
+// ErrScriptRefused, exactly like a symlink — and must do so promptly. Run
+// under callWithTimeout so a regression back to blocking behavior is a fast
+// test failure, never a hung test binary.
+func TestOpenScriptNoFollow_RefusesWriterlessFIFOWithoutBlocking(t *testing.T) {
+	dir := t.TempDir()
+	fifoPath := filepath.Join(dir, "not-a-script")
+	if err := unix.Mkfifo(fifoPath, 0o755); err != nil {
+		t.Skipf("mkfifo unavailable in this environment: %v", err)
+	}
+
+	dirFd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		t.Fatalf("open dir: %v", err)
+	}
+	defer func() { _ = closeFd(dirFd) }()
+
+	var gotErr error
+	callWithTimeout(t, 5*time.Second, func() {
+		_, _, gotErr = openScriptNoFollow(dirFd, "not-a-script")
+	})
+	if gotErr == nil {
+		t.Fatal("expected openScriptNoFollow to refuse a writerless FIFO, got nil error")
+	}
+	if !errors.Is(gotErr, ErrScriptRefused) {
+		t.Errorf("error = %v, want it to wrap ErrScriptRefused", gotErr)
+	}
+}
+
+// TestOpenScriptNoFollow_RefusesUnixSocket covers the other non-regular type
+// cheap to create in a test: a bound AF_UNIX socket special file. Unlike a
+// FIFO, opening a socket special file via plain open(2) fails immediately
+// (ENXIO) rather than blocking, but it must still be refused via
+// ErrScriptRefused, not treated as a generic open error.
+func TestOpenScriptNoFollow_RefusesUnixSocket(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "not-a-script")
+
+	sockFd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err != nil {
+		t.Skipf("AF_UNIX socket unavailable: %v", err)
+	}
+	defer func() { _ = closeFd(sockFd) }()
+	if err := unix.Bind(sockFd, &unix.SockaddrUnix{Name: sockPath}); err != nil {
+		t.Skipf("bind unavailable in this environment: %v", err)
+	}
+
+	dirFd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		t.Fatalf("open dir: %v", err)
+	}
+	defer func() { _ = closeFd(dirFd) }()
+
+	var gotErr error
+	callWithTimeout(t, 5*time.Second, func() {
+		_, _, gotErr = openScriptNoFollow(dirFd, "not-a-script")
+	})
+	if gotErr == nil {
+		t.Fatal("expected openScriptNoFollow to refuse a socket special file, got nil error")
+	}
+	if !errors.Is(gotErr, ErrScriptRefused) {
+		t.Errorf("error = %v, want it to wrap ErrScriptRefused", gotErr)
 	}
 }
 

@@ -140,3 +140,22 @@ latent security gap, both fixed on the same branch:
   from real fstat results on an unprivileged fixture (`prepareEnforcedExec`,
   split out from `executeScriptEnforced` for exactly this purpose) — none of
   this previously needed root to test, and now it is.
+
+## Writerless-FIFO hang fix
+
+`openScriptNoFollow`'s leaf open used plain `O_RDONLY|O_NOFOLLOW`. Opening a
+FIFO with no writer blocks that syscall indefinitely, so a workload that
+plants one under a hooks directory (e.g. `~/.scion/hooks/session-end`) could
+hang all hook processing. The open now also sets `O_NONBLOCK`, which returns
+immediately regardless of file type; the existing fstat-and-reject-non-regular
+check then refuses the FIFO the same way it already refuses a symlink, via
+`ErrScriptRefused`. A socket special file fails the open itself with `ENXIO`
+before there is an fd to fstat, so that errno is now also mapped to
+`ErrScriptRefused` rather than surfacing as a generic I/O error. Neither
+change touches the rest of the open/exec construction (the `O_NOFOLLOW`
+chain walk, the fd-relative script open, or `execViaFd`).
+
+A regression test drives `openScriptNoFollow` against a writerless FIFO and
+a bound Unix socket, each wrapped in a goroutine with a hard timeout so a
+regression back to blocking behavior fails the test instead of hanging the
+binary.
