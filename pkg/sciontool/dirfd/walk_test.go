@@ -5,6 +5,7 @@ Copyright 2026 The Scion Authors.
 package dirfd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -37,11 +38,27 @@ func ctimeOf(t *testing.T, path string) syscall.Timespec {
 	return st.Ctim
 }
 
-func TestOpenDirNoFollow_MissingIsNotExist(t *testing.T) {
+func TestOpenDirNoFollow_MissingLeafIsNotExist(t *testing.T) {
 	dir := t.TempDir()
 	_, err := OpenDirNoFollow(filepath.Join(dir, "missing"))
-	if !os.IsNotExist(err) {
-		t.Fatalf("expected IsNotExist, got %v", err)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected errors.Is(err, os.ErrNotExist), got %v", err)
+	}
+}
+
+// TestOpenDirNoFollow_MissingIntermediateComponentIsNotExist proves the
+// errors.Is-not-os.IsNotExist distinction called out in OpenDirNoFollow's
+// doc comment: when the missing component is an intermediate directory (not
+// path's own leaf), the error comes back wrapped via OpenParentNoFollow's
+// fmt.Errorf, which os.IsNotExist does not see through but errors.Is does.
+func TestOpenDirNoFollow_MissingIntermediateComponentIsNotExist(t *testing.T) {
+	dir := t.TempDir()
+	_, err := OpenDirNoFollow(filepath.Join(dir, "missing-parent", "leaf"))
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected errors.Is(err, os.ErrNotExist), got %v", err)
+	}
+	if os.IsNotExist(err) {
+		t.Log("os.IsNotExist now also recognizes this — the doc comment's warning may be stale")
 	}
 }
 

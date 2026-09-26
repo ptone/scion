@@ -2893,6 +2893,19 @@ func blockClaudeDebugSymlink(debugDir string, requirePrivilegeDrop bool) {
 		return
 	}
 
+	// EnsureDirNoFollow only creates its own leaf (it requires the parent
+	// chain to already exist, unlike os.MkdirAll) — this runs before the
+	// harness itself has started, so $HOME/.claude may not exist yet.
+	// Ensure it first, no-follow at every component just like the leaf
+	// below, then close it: only the leaf (debugDir) needs to stay open for
+	// the chmod.
+	claudeDir, err := dirfd.EnsureDirNoFollow(filepath.Dir(debugDir), 0755)
+	if err != nil {
+		log.Error("Refusing debug directory %s: parent is not a plain directory", debugDir)
+		return
+	}
+	_ = claudeDir.Close()
+
 	d, err := dirfd.EnsureDirNoFollow(debugDir, 0755)
 	if err != nil {
 		// Refuse (e.g. a symlink or non-directory at debugDir) rather than
@@ -3168,7 +3181,14 @@ func cleanGcloudConfigForMetadata(gcloudDir string, requirePrivilegeDrop bool) {
 
 	dir, err := dirfd.OpenDirNoFollow(gcloudDir)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		// errors.Is, not os.IsNotExist: OpenDirNoFollow's error is wrapped
+		// with fmt.Errorf when a missing component is one of gcloudDir's
+		// intermediate directories (e.g. $HOME/.config itself doesn't exist
+		// yet) rather than gcloudDir's own leaf, and os.IsNotExist only
+		// unwraps the specific *PathError/*LinkError/*SyscallError types,
+		// not an arbitrary %w chain — it would otherwise misreport that
+		// entirely ordinary case as a refused symlink.
+		if !errors.Is(err, os.ErrNotExist) {
 			// Refuse (e.g. a symlink or non-directory at gcloudDir) rather
 			// than follow it — but this cleanup is a best-effort
 			// convenience for gcloud auto-discovery, not something the
