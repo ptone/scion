@@ -204,8 +204,18 @@ var errPrivilegeDropRequired = errors.New("privilege drop to the scion user did 
 // "correctly still UID 0" outcome, unlike other runtimes' rootless mode).
 // Kept separate from setupHostUser so it's testable without depending on
 // the real CAP_SETUID/os.Getuid() environment a unit test runs in.
-func requirePrivilegeDropOrFail(targetUID int, requirePrivilegeDrop bool) error {
-	if requirePrivilegeDrop && targetUID == 0 {
+//
+// targetGID is checked against the same predicate the actual privilege drop
+// uses (UID>0 && GID>0 — see setupHostUser/adjustScionUser), not just
+// targetUID==0, so this stays fail-closed if a future change to the
+// broker-side UID/GID resolution ever produces a non-root UID paired with a
+// still-root (0) GID: today that combination cannot occur (setupHostUser and
+// adjustScionUser both resolve UID and GID together, from the same source),
+// but this clamp does not depend on that staying true. Defence in depth,
+// round 5: this does not change behaviour for any UID/GID pair the current
+// code can actually produce.
+func requirePrivilegeDropOrFail(targetUID, targetGID int, requirePrivilegeDrop bool) error {
+	if requirePrivilegeDrop && !(targetUID > 0 && targetGID > 0) {
 		return errPrivilegeDropRequired
 	}
 	return nil
@@ -531,7 +541,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// InitRunOptions.RequirePrivilegeDrop's doc comment). No secrets in this
 	// error: setupHostUser's own preceding log lines carry the specific
 	// reason (missing capability, unmapped UID, etc.).
-	if err := requirePrivilegeDropOrFail(targetUID, opts.RequirePrivilegeDrop); err != nil {
+	if err := requirePrivilegeDropOrFail(targetUID, targetGID, opts.RequirePrivilegeDrop); err != nil {
 		log.Error("%v", err)
 		// Report the failure the same way the git-clone failure path below
 		// does (local agent-info state to PhaseError, plus a best-effort
@@ -1892,10 +1902,27 @@ var runGitCloneWorkspace = gitCloneWorkspace
 // this at its default; only a test replaces it.
 var runPostPreStartOwnershipFixup = postPreStartOwnershipFixup
 
+// postPreStartGeteuid is os.Geteuid's call site as a package var, round 5's
+// seam A(1): postPreStartOwnershipFixup's real euid check (below) makes the
+// body — including the requirePrivilegeDrop value forwarded to
+// chownTreeRootOwned — unreachable from a non-root test process, since every
+// unit test runs as whatever non-root UID the test binary itself has.
+// Production code always leaves this at its default; only a test replaces
+// it to simulate euid 0 without actually running as root.
+var postPreStartGeteuid = os.Geteuid
+
+// runChownTreeRootOwned is chownTreeRootOwned's call site as a package var,
+// round 5's seam A(1): lets a test (with postPreStartGeteuid stubbed to
+// report euid 0) capture the requirePrivilegeDrop value postPreStartOwnershipFixup
+// forwards, without the test actually performing a real recursive chown.
+// Production code always leaves this at its default; only a test replaces
+// it.
+var runChownTreeRootOwned = chownTreeRootOwned
+
 // postPreStartOwnershipFixup chowns root-owned files that pre-start hooks
 // (which run before the privilege drop) left in the workspace or agent home.
 func postPreStartOwnershipFixup(targetUID, targetGID int, agentHome string, requirePrivilegeDrop bool) {
-	if targetUID == 0 || os.Geteuid() != 0 {
+	if targetUID == 0 || postPreStartGeteuid() != 0 {
 		return
 	}
 	workspacePath := os.Getenv("SCION_WORKSPACE_PATH")
@@ -1906,7 +1933,7 @@ func postPreStartOwnershipFixup(targetUID, targetGID int, agentHome string, requ
 		if dir == "" {
 			continue
 		}
-		if _, _, err := chownTreeRootOwned(dir, targetUID, targetGID, requirePrivilegeDrop); err != nil {
+		if _, _, err := runChownTreeRootOwned(dir, targetUID, targetGID, requirePrivilegeDrop); err != nil {
 			log.Error("Failed to chown %s after pre-start hooks: %v", dir, err)
 		}
 	}
@@ -1950,6 +1977,30 @@ var runMetadataServerStart = func(ctx context.Context, s *metadata.Server) error
 // default; only a test replaces it.
 var runFetchSecretOverrides = fetchSecretOverrides
 
+// setupHostUserGetuid, setupHostUserHasCapSetUID and setupHostUserIsUIDMapped
+// are os.Getuid's, hasCapSetUID's and isUIDMapped's call sites inside
+// setupHostUser, as package vars — round 5's seam A(2). setupHostUser's real
+// early-return checks (a non-root euid, an absent CAP_SETUID, an unmapped
+// UID) make its adjustScionUser call unreachable from a non-root test
+// process: a unit test binary is never root, never holds CAP_SETUID, and
+// runs in a user namespace where the test's own arbitrary target UID is not
+// mapped. Stubbing all three lets a test simulate "as if root, with the
+// capability, with a mapped UID" and reach runAdjustScionUser below to
+// capture the requirePrivilegeDrop value setupHostUser forwards to it.
+// Production code always leaves these at their defaults; only a test
+// replaces them.
+var setupHostUserGetuid = os.Getuid
+var setupHostUserHasCapSetUID = hasCapSetUID
+var setupHostUserIsUIDMapped = isUIDMapped
+
+// runAdjustScionUser is adjustScionUser's call site inside setupHostUser, as
+// a package var — round 5's seam A(2), paired with the three vars above so a
+// test can reach this call and observe the requirePrivilegeDrop argument
+// setupHostUser forwards to it without performing a real usermod/groupmod or
+// /etc/passwd edit. Production code always leaves this at its default; only
+// a test replaces it.
+var runAdjustScionUser = adjustScionUser
+
 // setupHostUser realigns the container's "scion" user to SCION_HOST_UID/GID
 // so the harness (and, for substrate, execAsUserCmd) can drop privileges
 // from root to it. requirePrivilegeDrop is RunInit's own
@@ -1965,7 +2016,7 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 	// files have correct host ownership via the keep-id mapping. We return
 	// rootless=true so the supervisor sets HOME/USER/LOGNAME without
 	// attempting a credential drop.
-	if os.Getuid() != 0 {
+	if setupHostUserGetuid() != 0 {
 		if scionUser, err := scionUserLookup("scion"); err == nil {
 			scionUID, _ := strconv.Atoi(scionUser.Uid)
 			if os.Getuid() == scionUID {
@@ -1981,7 +2032,7 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 	// sandboxes on Cloud Run) where CAP_SETUID is absent. In these
 	// environments, setuid/setgid syscalls return EPERM. Fall back to
 	// rootless-equivalent mode: no privilege drop, no usermod.
-	if !hasCapSetUID() {
+	if !setupHostUserHasCapSetUID() {
 		log.Info("Running as root but CAP_SETUID is absent (restricted sandbox); " +
 			"skipping privilege operations — process will remain UID 0")
 		return 0, 0, true
@@ -2055,12 +2106,12 @@ func setupHostUser(requirePrivilegeDrop bool) (int, int, bool) {
 	// available. If the target UID falls outside any mapped range, chown
 	// and credential-based exec would fail with EINVAL. In this case, skip
 	// remapping and run as container root (which IS the host user).
-	if !isUIDMapped(uid) {
+	if !setupHostUserIsUIDMapped(uid) {
 		log.Info("UID %d is not mapped in the container user namespace (rootless container); skipping user remapping", uid)
 		return 0, 0, true
 	}
 
-	return adjustScionUser(uid, gid, hostUID, hostGID, requirePrivilegeDrop)
+	return runAdjustScionUser(uid, gid, hostUID, hostGID, requirePrivilegeDrop)
 }
 
 // adjustScionUser realigns the "scion" user to (uid, gid) — matching an

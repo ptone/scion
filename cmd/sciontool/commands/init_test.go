@@ -1265,12 +1265,12 @@ func TestParseCapSetUID(t *testing.T) {
 // happens on substrate, which always starts the actor as UID 0). RunInit
 // must refuse to start the harness rather than run it as root.
 func TestRequirePrivilegeDropOrFail_SubstrateFailsClosed(t *testing.T) {
-	err := requirePrivilegeDropOrFail(0, true)
+	err := requirePrivilegeDropOrFail(0, 0, true)
 	if err == nil {
-		t.Fatal("requirePrivilegeDropOrFail(0, true) = nil, want an error — substrate must never start the harness as root")
+		t.Fatal("requirePrivilegeDropOrFail(0, 0, true) = nil, want an error — substrate must never start the harness as root")
 	}
 	if !errors.Is(err, errPrivilegeDropRequired) {
-		t.Errorf("requirePrivilegeDropOrFail(0, true) = %v, want errPrivilegeDropRequired", err)
+		t.Errorf("requirePrivilegeDropOrFail(0, 0, true) = %v, want errPrivilegeDropRequired", err)
 	}
 }
 
@@ -1279,8 +1279,8 @@ func TestRequirePrivilegeDropOrFail_SubstrateFailsClosed(t *testing.T) {
 // the ordinary, successful case once the actor's capability set and
 // SCION_HOST_UID/GID are both in place.
 func TestRequirePrivilegeDropOrFail_SubstrateSucceedsWhenDropped(t *testing.T) {
-	if err := requirePrivilegeDropOrFail(1000, true); err != nil {
-		t.Errorf("requirePrivilegeDropOrFail(1000, true) = %v, want nil", err)
+	if err := requirePrivilegeDropOrFail(1000, 1000, true); err != nil {
+		t.Errorf("requirePrivilegeDropOrFail(1000, 1000, true) = %v, want nil", err)
 	}
 }
 
@@ -1291,8 +1291,8 @@ func TestRequirePrivilegeDropOrFail_SubstrateSucceedsWhenDropped(t *testing.T) {
 // targetUID legitimately staying 0) is completely unaffected by this
 // gate, exactly as before this change.
 func TestRequirePrivilegeDropOrFail_NonSubstrateRootlessUnchanged(t *testing.T) {
-	if err := requirePrivilegeDropOrFail(0, false); err != nil {
-		t.Errorf("requirePrivilegeDropOrFail(0, false) = %v, want nil (non-substrate rootless fallback must be unaffected)", err)
+	if err := requirePrivilegeDropOrFail(0, 0, false); err != nil {
+		t.Errorf("requirePrivilegeDropOrFail(0, 0, false) = %v, want nil (non-substrate rootless fallback must be unaffected)", err)
 	}
 }
 
