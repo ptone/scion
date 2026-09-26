@@ -1296,3 +1296,239 @@ func TestHarnessSupervisorConfig(t *testing.T) {
 		})
 	}
 }
+
+// TestBlockClaudeDebugSymlink_NonEnforced_KeepsHistoricalPathBasedBehaviour
+// proves non-substrate runtimes are byte-identical to the pre-fix code: a
+// pre-existing symlink at debugDir is followed (os.MkdirAll short-circuits,
+// os.Chmod chmods the target) exactly like the original inline
+// os.MkdirAll+os.Chmod did. This is deliberate — see blockClaudeDebugSymlink's
+// doc comment for why a legitimate non-substrate setup may symlink .claude
+// itself (e.g. to a mounted volume), and refusing that would break it.
+func TestBlockClaudeDebugSymlink_NonEnforced_KeepsHistoricalPathBasedBehaviour(t *testing.T) {
+	tmpHome := t.TempDir()
+	victim := t.TempDir()
+	if err := os.Chmod(victim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	debugDir := filepath.Join(tmpHome, ".claude", "debug")
+	if err := os.Symlink(victim, debugDir); err != nil {
+		t.Fatal(err)
+	}
+
+	blockClaudeDebugSymlink(debugDir, false)
+
+	info, err := os.Stat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o555 {
+		t.Errorf("non-enforced mode: victim mode = %o, want 0555 (historical behaviour: chmod follows the symlink)", got)
+	}
+}
+
+// TestBlockClaudeDebugSymlink_Enforced_RefusesSymlinkAndLeavesVictimUnchanged
+// is N2's core regression test: a symlink planted at ~/.claude/debug before
+// this runs, pointing at a victim directory, must never be chmod'd through —
+// deterministic, no race required, since the symlink already exists when
+// this function runs (matching the real exploit: a pre-start hook or
+// sidecar plants it before line 836 in RunInit is reached).
+func TestBlockClaudeDebugSymlink_Enforced_RefusesSymlinkAndLeavesVictimUnchanged(t *testing.T) {
+	tmpHome := t.TempDir()
+	victim := t.TempDir()
+	if err := os.Chmod(victim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	debugDir := filepath.Join(tmpHome, ".claude", "debug")
+	if err := os.Symlink(victim, debugDir); err != nil {
+		t.Fatal(err)
+	}
+
+	blockClaudeDebugSymlink(debugDir, true)
+
+	info, err := os.Stat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("enforced mode must fail closed: victim mode = %o, want unchanged 0700", got)
+	}
+	linkInfo, err := os.Lstat(debugDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Error("expected debugDir to still be the symlink the test planted — nothing should have removed or replaced it")
+	}
+}
+
+// TestBlockClaudeDebugSymlink_Enforced_CreatesAndChmodsRealDir proves the
+// legitimate case still works under enforced mode: when debugDir doesn't
+// exist yet (the common case, and $HOME/.claude may not exist yet either,
+// since this runs before the harness itself starts), it gets created and
+// chmod'd 0555 exactly as intended.
+func TestBlockClaudeDebugSymlink_Enforced_CreatesAndChmodsRealDir(t *testing.T) {
+	tmpHome := t.TempDir()
+	debugDir := filepath.Join(tmpHome, ".claude", "debug")
+
+	blockClaudeDebugSymlink(debugDir, true)
+
+	info, err := os.Stat(debugDir)
+	if err != nil {
+		t.Fatalf("expected debugDir to be created: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o555 {
+		t.Errorf("mode = %o, want 0555", got)
+	}
+}
+
+// TestCleanGcloudConfigForMetadata_NonEnforced_KeepsHistoricalBehaviour
+// proves non-substrate runtimes are byte-identical: entries under gcloudDir
+// (except the preserved ADC file) are removed via the historical
+// os.ReadDir+os.RemoveAll path, including through a symlinked gcloudDir
+// itself — a legitimate non-substrate setup may bind-mount or symlink
+// ~/.config/gcloud, and refusing that would break it.
+func TestCleanGcloudConfigForMetadata_NonEnforced_KeepsHistoricalBehaviour(t *testing.T) {
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "credentials.db"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, gcloudConfigKeepFile), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tmpHome := t.TempDir()
+	gcloudDir := filepath.Join(tmpHome, "gcloud-link")
+	if err := os.Symlink(real, gcloudDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanGcloudConfigForMetadata(gcloudDir, false)
+
+	if _, err := os.Stat(filepath.Join(real, "credentials.db")); !os.IsNotExist(err) {
+		t.Errorf("non-enforced mode: expected credentials.db to be removed through the symlink (historical behaviour), err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(real, gcloudConfigKeepFile)); err != nil {
+		t.Errorf("expected %s to be preserved: %v", gcloudConfigKeepFile, err)
+	}
+}
+
+// TestCleanGcloudConfigForMetadata_Enforced_RefusesSymlinkAndLeavesVictimUnchanged
+// is N3's core deterministic regression test: gcloudDir itself is a symlink
+// to a victim directory (planted before this runs, matching the real
+// exploit — no race required to demonstrate the class), and enforced mode
+// must refuse it outright rather than enumerating/deleting through it.
+func TestCleanGcloudConfigForMetadata_Enforced_RefusesSymlinkAndLeavesVictimUnchanged(t *testing.T) {
+	victim := t.TempDir()
+	sentinel := filepath.Join(victim, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("do-not-delete"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tmpHome := t.TempDir()
+	gcloudDir := filepath.Join(tmpHome, ".config", "gcloud")
+	if err := os.MkdirAll(filepath.Dir(gcloudDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, gcloudDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanGcloudConfigForMetadata(gcloudDir, true)
+
+	entries, err := os.ReadDir(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "sentinel" {
+		t.Errorf("victim directory contents changed: %v", entries)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("sentinel must survive: %v", err)
+	}
+	linkInfo, err := os.Lstat(gcloudDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Error("expected gcloudDir to still be the symlink the test planted")
+	}
+}
+
+// TestCleanGcloudConfigForMetadata_Enforced_CleansRealDir proves the
+// legitimate case still works under enforced mode: a real gcloudDir has its
+// entries removed except the preserved ADC file.
+func TestCleanGcloudConfigForMetadata_Enforced_CleansRealDir(t *testing.T) {
+	tmpHome := t.TempDir()
+	gcloudDir := filepath.Join(tmpHome, ".config", "gcloud")
+	if err := os.MkdirAll(gcloudDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gcloudDir, "credentials.db"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gcloudDir, gcloudConfigKeepFile), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanGcloudConfigForMetadata(gcloudDir, true)
+
+	if _, err := os.Stat(filepath.Join(gcloudDir, "credentials.db")); !os.IsNotExist(err) {
+		t.Errorf("expected credentials.db to be removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(gcloudDir, gcloudConfigKeepFile)); err != nil {
+		t.Errorf("expected %s to be preserved: %v", gcloudConfigKeepFile, err)
+	}
+}
+
+// TestCleanGcloudConfigForMetadata_Enforced_MissingDirIsNoop proves the
+// "nothing to clean" case is unaffected by the enforced-mode rewrite.
+func TestCleanGcloudConfigForMetadata_Enforced_MissingDirIsNoop(t *testing.T) {
+	tmpHome := t.TempDir()
+	gcloudDir := filepath.Join(tmpHome, ".config", "gcloud")
+	// Does not panic or error visibly; nothing to assert beyond "doesn't
+	// crash" since there's nothing on disk to check.
+	cleanGcloudConfigForMetadata(gcloudDir, true)
+}
+
+// TestChownTreeRootOwned_DirectCall is a thin call-site test proving
+// chownTreeRootOwned (N1) delegates to the shared dirfd.ChownTreeNoFollow
+// walk with the root-owned-only filter — the deeper symlink-swap race
+// itself is covered once, thoroughly, at the dirfd level
+// (TestChownTreeNoFollow_SurvivesIntermediateDirSwapMidWalk).
+func TestChownTreeRootOwned_DirectCall(t *testing.T) {
+	origFilter := chownTreeRootOwnedFilter
+	t.Cleanup(func() { chownTreeRootOwnedFilter = origFilter })
+	chownTreeRootOwnedFilter = func(uint32) bool { return true } // simulate root-owned
+
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "a"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	uid, gid := os.Getuid(), os.Getgid()
+	walked, changed, err := chownTreeRootOwned(home, uid, gid)
+	if err != nil {
+		t.Fatalf("chownTreeRootOwned: %v", err)
+	}
+	if walked != 2 { // root dir + "a"
+		t.Errorf("walked = %d, want 2", walked)
+	}
+	if changed != 2 {
+		t.Errorf("changed = %d, want 2", changed)
+	}
+}
+
+func TestIsRootOwned(t *testing.T) {
+	if !isRootOwned(0) {
+		t.Error("isRootOwned(0) = false, want true")
+	}
+	if isRootOwned(1000) {
+		t.Error("isRootOwned(1000) = true, want false")
+	}
+}

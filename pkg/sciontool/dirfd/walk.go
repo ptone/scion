@@ -15,10 +15,17 @@ import (
 // OpenDirNoFollow resolves path via OpenParentNoFollow and opens the leaf
 // itself with O_DIRECTORY|O_NOFOLLOW — refusing (not following) a symlink at
 // the leaf, and refusing anything that isn't a directory. Unlike
-// EnsureDirNoFollow, it never creates path: a missing leaf is reported as an
-// os.IsNotExist error, exactly like os.Open would, so callers that treat "no
-// such directory" as a legitimate no-op (e.g. "nothing to clean up yet")
-// keep that behaviour. The caller owns the returned fd and must close it.
+// EnsureDirNoFollow, it never creates path: a missing path is reported as an
+// error satisfying errors.Is(err, os.ErrNotExist), exactly like os.Open
+// would, so callers that treat "no such directory" as a legitimate no-op
+// (e.g. "nothing to clean up yet") keep that behaviour. The caller owns the
+// returned fd and must close it.
+//
+// Use errors.Is, not os.IsNotExist, to check this: when the missing
+// component is one of path's intermediate directories rather than its own
+// leaf, the error comes back wrapped (via OpenParentNoFollow's fmt.Errorf),
+// and os.IsNotExist only unwraps the specific *PathError/*LinkError/
+// *SyscallError types, not an arbitrary %w chain.
 func OpenDirNoFollow(path string) (*os.File, error) {
 	dirFd, leaf, err := OpenParentNoFollow(path)
 	if err != nil {
