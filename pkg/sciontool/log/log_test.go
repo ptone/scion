@@ -230,6 +230,27 @@ func TestChown_UsesCachedFd(t *testing.T) {
 	}
 }
 
+// TestOpenLogFileNoFollow_FdIsCloseOnExec proves the log fd — cached for
+// the process's whole life and, on Substrate, held open across the exec
+// that starts the workload under dropped privileges — is close-on-exec, so
+// it never leaks a writable handle to root's log into that child.
+func TestOpenLogFileNoFollow_FdIsCloseOnExec(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.log")
+	f, err := openLogFileNoFollow(path, 0666)
+	if err != nil {
+		t.Fatalf("openLogFileNoFollow: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), uintptr(syscall.F_GETFD), 0)
+	if errno != 0 {
+		t.Fatalf("fcntl(F_GETFD): %v", errno)
+	}
+	if flags&syscall.FD_CLOEXEC == 0 {
+		t.Error("log fd is not close-on-exec")
+	}
+}
+
 // setLogPathForTest points the package-level log path at path for the
 // duration of a test and restores the previous state afterward.
 func setLogPathForTest(t *testing.T, path string) func() {

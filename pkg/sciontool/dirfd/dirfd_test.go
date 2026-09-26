@@ -156,3 +156,93 @@ func TestRefuseSymlinkOrNonRegularAt(t *testing.T) {
 		}
 	})
 }
+
+// isCloexec reports whether fd has FD_CLOEXEC set, via fcntl(F_GETFD).
+func isCloexec(t *testing.T, fd int) bool {
+	t.Helper()
+	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), uintptr(syscall.F_GETFD), 0)
+	if errno != 0 {
+		t.Fatalf("fcntl(F_GETFD): %v", errno)
+	}
+	return flags&syscall.FD_CLOEXEC != 0
+}
+
+// TestFdsAreCloseOnExec proves every fd this package hands back is
+// close-on-exec, so it never leaks into a child process this one execs —
+// on Substrate, that child is the workload itself, running with dropped
+// privileges. Go's raw syscall.Open/Openat, unlike os.OpenFile, do not set
+// O_CLOEXEC by default, so this has to be forced explicitly.
+func TestFdsAreCloseOnExec(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("OpenParentNoFollow's parent fd", func(t *testing.T) {
+		leafPath := filepath.Join(dir, "a", "file")
+		if err := os.MkdirAll(filepath.Dir(leafPath), 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		fd, _, err := OpenParentNoFollow(leafPath)
+		if err != nil {
+			t.Fatalf("OpenParentNoFollow: %v", err)
+		}
+		defer func() { _ = syscall.Close(fd) }()
+		if !isCloexec(t, fd) {
+			t.Error("parent fd is not close-on-exec")
+		}
+	})
+
+	t.Run("CreateExclAt", func(t *testing.T) {
+		if err := os.MkdirAll(filepath.Join(dir, "b"), 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		fd, _, err := OpenParentNoFollow(filepath.Join(dir, "b", "file"))
+		if err != nil {
+			t.Fatalf("OpenParentNoFollow: %v", err)
+		}
+		defer func() { _ = syscall.Close(fd) }()
+
+		f, err := CreateExclAt(fd, "created", 0o600)
+		if err != nil {
+			t.Fatalf("CreateExclAt: %v", err)
+		}
+		defer func() { _ = f.Close() }()
+		if !isCloexec(t, int(f.Fd())) {
+			t.Error("CreateExclAt's fd is not close-on-exec")
+		}
+	})
+
+	t.Run("OpenAt", func(t *testing.T) {
+		if err := os.MkdirAll(filepath.Join(dir, "c"), 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "c", "existing"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		fd, _, err := OpenParentNoFollow(filepath.Join(dir, "c", "existing"))
+		if err != nil {
+			t.Fatalf("OpenParentNoFollow: %v", err)
+		}
+		defer func() { _ = syscall.Close(fd) }()
+
+		// Deliberately don't OR in O_CLOEXEC here: OpenAt must force it in
+		// regardless of what the caller passes.
+		f, err := OpenAt(fd, "existing", syscall.O_RDONLY, 0)
+		if err != nil {
+			t.Fatalf("OpenAt: %v", err)
+		}
+		defer func() { _ = f.Close() }()
+		if !isCloexec(t, int(f.Fd())) {
+			t.Error("OpenAt's fd is not close-on-exec even though the caller didn't ask for it")
+		}
+	})
+
+	t.Run("EnsureDirNoFollow", func(t *testing.T) {
+		f, err := EnsureDirNoFollow(filepath.Join(dir, "d"), 0o755)
+		if err != nil {
+			t.Fatalf("EnsureDirNoFollow: %v", err)
+		}
+		defer func() { _ = f.Close() }()
+		if !isCloexec(t, int(f.Fd())) {
+			t.Error("EnsureDirNoFollow's fd is not close-on-exec")
+		}
+	})
+}
