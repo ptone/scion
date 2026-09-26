@@ -2418,3 +2418,219 @@ func TestValidateServiceSpecs_DropsInvalidNamesKeepsValidOnes(t *testing.T) {
 		}
 	}
 }
+
+// gitConfigGet reads key from the gitconfig file at path via git itself,
+// returning "" if the key is absent or the file can't be read — good enough
+// for test assertions, which always know what they expect to find.
+func gitConfigGet(t *testing.T, path, key string) string {
+	t.Helper()
+	out, err := exec.Command("git", "config", "--file", path, "--get", key).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched proves a symlink
+// planted at $HOME/.gitconfig (something the workload can always do, since
+// it owns $HOME outright) is never read through or written through: this
+// fails if the read is reverted to following symlinks (the private copy
+// would start seeded with the victim's content) or if the install is
+// reverted to a path-based write (the victim's content or permissions would
+// be modified through the symlink).
+func TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched(t *testing.T) {
+	agentHome := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	if err := os.Symlink(victim, gitconfigPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	configureSharedWorkspaceGit(agentHome, 0, 0)
+
+	data, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(data) != "do-not-touch" {
+		t.Errorf("victim was modified: %q", data)
+	}
+
+	fi, err := os.Lstat(gitconfigPath)
+	if err != nil {
+		t.Fatalf("lstat gitconfig: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Error("gitconfigPath is still a symlink after configureSharedWorkspaceGit")
+	}
+	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
+		t.Errorf("user.email = %q, want agent@scion.dev", got)
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_FifoDoesNotHang proves a FIFO planted at
+// $HOME/.gitconfig with no writer is refused immediately rather than
+// hanging RunInit forever. This fails if the read is ever reverted to a
+// plain os.ReadFile/os.Stat, or if the non-regular-file refusal is dropped.
+func TestConfigureSharedWorkspaceGit_FifoDoesNotHang(t *testing.T) {
+	agentHome := t.TempDir()
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	if err := syscall.Mkfifo(gitconfigPath, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		configureSharedWorkspaceGit(agentHome, 0, 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("configureSharedWorkspaceGit blocked on a FIFO planted at .gitconfig")
+	}
+
+	fi, err := os.Lstat(gitconfigPath)
+	if err != nil {
+		t.Fatalf("lstat gitconfig: %v", err)
+	}
+	if !fi.Mode().IsRegular() {
+		t.Errorf("gitconfigPath mode = %v, want a regular file", fi.Mode())
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_PreservesExistingUnrelatedKeys proves a
+// legitimate pre-existing .gitconfig's unrelated content survives the
+// rewrite byte-for-byte in the sections that matter: this exercises the
+// "read into a private copy, run real git against it" path for the ordinary
+// (non-hostile) case, not just the refusal paths.
+func TestConfigureSharedWorkspaceGit_PreservesExistingUnrelatedKeys(t *testing.T) {
+	agentHome := t.TempDir()
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	if err := os.WriteFile(gitconfigPath, []byte("[foo]\n\tbar = baz\n"), 0o644); err != nil {
+		t.Fatalf("write gitconfig: %v", err)
+	}
+
+	configureSharedWorkspaceGit(agentHome, 0, 0)
+
+	if got := gitConfigGet(t, gitconfigPath, "foo.bar"); got != "baz" {
+		t.Errorf("foo.bar = %q, want baz (pre-existing unrelated key lost)", got)
+	}
+	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
+		t.Errorf("user.email = %q, want agent@scion.dev", got)
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_IdempotentOnSecondRun proves running
+// configureSharedWorkspaceGit twice in a row (e.g. across a restart)
+// produces the same stable content — no duplicated keys, no drift — rather
+// than accumulating a new credential.helper/user.* entry on every run.
+func TestConfigureSharedWorkspaceGit_IdempotentOnSecondRun(t *testing.T) {
+	agentHome := t.TempDir()
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+
+	configureSharedWorkspaceGit(agentHome, 0, 0)
+	first, err := os.ReadFile(gitconfigPath)
+	if err != nil {
+		t.Fatalf("read after first run: %v", err)
+	}
+
+	configureSharedWorkspaceGit(agentHome, 0, 0)
+	second, err := os.ReadFile(gitconfigPath)
+	if err != nil {
+		t.Fatalf("read after second run: %v", err)
+	}
+
+	if string(first) != string(second) {
+		t.Errorf("gitconfig drifted across a second run:\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_HardlinkedFileRefused proves a hardlink to
+// an unrelated (possibly root-owned) file planted at $HOME/.gitconfig is
+// refused rather than read: hardlinking only requires write access to the
+// containing directory, not ownership of the target, so a workload that
+// owns $HOME can point .gitconfig at any file it can merely see.
+func TestConfigureSharedWorkspaceGit_HardlinkedFileRefused(t *testing.T) {
+	agentHome := t.TempDir()
+	original := filepath.Join(agentHome, "original")
+	if err := os.WriteFile(original, []byte("[secret]\n\ttoken = do-not-read\n"), 0o600); err != nil {
+		t.Fatalf("write original: %v", err)
+	}
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	if err := os.Link(original, gitconfigPath); err != nil {
+		t.Fatalf("hardlink: %v", err)
+	}
+
+	configureSharedWorkspaceGit(agentHome, 0, 0)
+
+	if got := gitConfigGet(t, gitconfigPath, "secret.token"); got != "" {
+		t.Errorf("secret.token = %q, want empty (hardlinked content must not have been read)", got)
+	}
+	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
+		t.Errorf("user.email = %q, want agent@scion.dev", got)
+	}
+
+	originalData, err := os.ReadFile(original)
+	if err != nil {
+		t.Fatalf("read original: %v", err)
+	}
+	if !strings.Contains(string(originalData), "do-not-read") {
+		t.Errorf("original hardlinked file was modified: %q", originalData)
+	}
+
+	fi, err := os.Lstat(gitconfigPath)
+	if err != nil {
+		t.Fatalf("lstat gitconfig: %v", err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if ok && st.Nlink != 1 {
+		t.Errorf("gitconfigPath Nlink = %d, want 1 (should be a fresh file after install)", st.Nlink)
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_AmbientHomeMatchingAgentHomeSymlinkRefused
+// covers the runtime where root's own inherited HOME equals the workload's
+// home directory (root PID-1 init runs this before ever dropping
+// privileges, with whatever HOME the container started it with — often the
+// same $HOME the workload itself will use). It proves the ambient HOME
+// environment variable has no bearing on which file gets protected or how:
+// a hostile .gitconfig at agentHome is still refused via the no-follow
+// read, never a workload-controlled "global" config consulted because HOME
+// happens to already point there.
+func TestConfigureSharedWorkspaceGit_AmbientHomeMatchingAgentHomeSymlinkRefused(t *testing.T) {
+	agentHome := t.TempDir()
+	t.Setenv("HOME", agentHome)
+
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	if err := os.Symlink(victim, gitconfigPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	configureSharedWorkspaceGit(agentHome, 0, 0)
+
+	data, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(data) != "do-not-touch" {
+		t.Errorf("victim was modified: %q", data)
+	}
+	fi, err := os.Lstat(gitconfigPath)
+	if err != nil {
+		t.Fatalf("lstat gitconfig: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Error("gitconfigPath is still a symlink after configureSharedWorkspaceGit")
+	}
+	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
+		t.Errorf("user.email = %q, want agent@scion.dev", got)
+	}
+}
