@@ -352,6 +352,84 @@ func TestStartAgentViaHub_Site2_PlainMode_EmptyToken_RequiresAppToken(t *testing
 		"plain mode with empty token should reach 'no access token found for Hub' in startAgentViaHub site 2; got: %v", err)
 }
 
+// TestAttachViaHub_SubstrateAgent_ReturnsExplicitError verifies that attach on
+// an agent whose runtime is "substrate" fails with a fixed, explicit,
+// non-zero-exit error and never reaches the WebSocket dial step. It also
+// checks that the error text carries no infra-specific details (only the
+// fixed message is present).
+func TestAttachViaHub_SubstrateAgent_ReturnsExplicitError(t *testing.T) {
+	clearAppTokenSources(t)
+
+	const (
+		projectID = "proj-substrate-123"
+		agentName = "substrate-agent"
+		agentID   = "agent-uuid-substrate"
+	)
+
+	srv := newAttachMockHubServer(t, projectID, agentName, agentID, "substrate")
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  srv.URL,
+		ProjectID: projectID,
+	}
+
+	err = attachViaHub(hubCtx, agentName)
+
+	require.Error(t, err)
+	const wantMsg = "attach is not supported for agents on the substrate runtime in this phase"
+	assert.Equal(t, wantMsg, err.Error(), "substrate attach must fail with the fixed message, got: %v", err)
+
+	// No infra-specific details (namespaces, atespaces, actor names, node/pod
+	// names, URLs, image refs) may leak into the user-facing message.
+	for _, leak := range []string{"atespace", "namespace", "://", projectID, agentID, srv.URL} {
+		assert.NotContains(t, err.Error(), leak, "error message must not leak infra detail %q", leak)
+	}
+}
+
+// TestAttachViaHub_DockerAgent_UnaffectedBySubstrateCheck verifies that an
+// agent with a non-substrate, non-managed runtime (e.g. "docker") is
+// unaffected by the substrate guard and follows the existing path — reaching
+// the WebSocket dial step and failing there (the mock server doesn't
+// implement a WS upgrade), exactly as it did before the substrate check was
+// added.
+func TestAttachViaHub_DockerAgent_UnaffectedBySubstrateCheck(t *testing.T) {
+	clearAppTokenSources(t)
+
+	orig := resolveAttachTransportFn
+	resolveAttachTransportFn = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
+		return &fakeTransportSource{
+			token:  "fake-oidc-token",
+			expiry: time.Now().Add(1 * time.Hour),
+		}, transportauth.HeaderProxyAuthorization, nil
+	}
+	defer func() { resolveAttachTransportFn = orig }()
+
+	const (
+		projectID = "proj-docker-123"
+		agentName = "docker-agent"
+		agentID   = "agent-uuid-docker"
+	)
+
+	srv := newAttachMockHubServer(t, projectID, agentName, agentID, "docker")
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  srv.URL,
+		ProjectID: projectID,
+	}
+
+	err = attachViaHub(hubCtx, agentName)
+
+	require.Error(t, err, "expected a WS dial error — the docker path must reach the dial step unchanged")
+	assert.NotContains(t, err.Error(), "attach is not supported for agents on the substrate runtime",
+		"docker agent must not be rejected by the substrate guard, got: %v", err)
+}
+
 // TestStartAgentViaHub_Site2_IAPMode_EmptyToken_PassesGate directly calls
 // startAgentViaHub() with attach=true and exercises site 2 (the ready: label in
 // the main polling path). With a transport source present (IAP mode) and an empty
