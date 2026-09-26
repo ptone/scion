@@ -368,11 +368,7 @@ func (s *Server) handleHarnessConfigByID(w http.ResponseWriter, r *http.Request)
 		// (ptone/scion#1916), so the two outcomes cannot be told apart by
 		// message text either — including on the clone route, whose read of
 		// its source is gated by this same fetch.
-		if errors.Is(err, store.ErrNotFound) {
-			NotFound(w, "HarnessConfig")
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeStoreErr(w, err, "HarnessConfig")
 		return
 	}
 
@@ -1040,7 +1036,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 	// for why this must run ahead of the copy below rather than only being
 	// caught by CreateHarnessConfig's own uniqueness check, and why it is
 	// only a fast path rather than a full fix for concurrent requests.
-	if existing, err := s.store.GetHarnessConfigBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && err != store.ErrNotFound {
+	if existing, err := s.store.GetHarnessConfigBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeErrorFromErr(w, err, "")
 		return
 	} else if existing != nil {
@@ -1057,7 +1053,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 	stor := s.GetStorage()
 	if stor != nil {
 		clone.StorageBucket = stor.Bucket()
-		clone.StorageURI = "gs://" + stor.Bucket() + "/" + storagePath + "/"
+		clone.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
 	if stor != nil && len(source.Files) > 0 && source.StoragePath != "" {
@@ -1079,7 +1075,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 		if stor != nil {
 			_ = stor.DeletePrefix(ctx, storagePath)
 		}
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
 			return
 		}

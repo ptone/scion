@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -458,11 +459,7 @@ func (s *Server) getTemplateV2(w http.ResponseWriter, r *http.Request, id string
 	ctx := r.Context()
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		if err == store.ErrNotFound {
-			NotFound(w, "Template")
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -677,11 +674,7 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		if err == store.ErrNotFound {
-			NotFound(w, "Template")
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -749,11 +742,7 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		if err == store.ErrNotFound {
-			NotFound(w, "Template")
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -810,11 +799,7 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		if err == store.ErrNotFound {
-			NotFound(w, "Template")
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -871,11 +856,7 @@ func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, 
 	ctx := r.Context()
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
-		if err == store.ErrNotFound {
-			NotFound(w, "Template")
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -910,11 +891,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		// A genuinely missing source uses the same "Template not found"
 		// message authorizeRead below writes on denial (ptone/scion#1916),
 		// so the two outcomes cannot be told apart by message text either.
-		if err == store.ErrNotFound {
-			NotFound(w, "Template")
-		} else {
-			writeErrorFromErr(w, err, "")
-		}
+		writeStoreErr(w, err, "Template")
 		return
 	}
 
@@ -1047,7 +1024,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	// is also made request-unique, and CreateTemplate's own uniqueness
 	// constraint (handled further down) is what actually guarantees exactly
 	// one request wins a given (scope, slug) destination.
-	if existing, err := s.store.GetTemplateBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && err != store.ErrNotFound {
+	if existing, err := s.store.GetTemplateBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeErrorFromErr(w, err, "")
 		return
 	} else if existing != nil {
@@ -1069,7 +1046,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	stor := s.GetStorage()
 	if stor != nil {
 		clone.StorageBucket = stor.Bucket()
-		clone.StorageURI = "gs://" + stor.Bucket() + "/" + storagePath + "/"
+		clone.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
 	// Copy files from source to clone location
@@ -1092,7 +1069,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		if stor != nil {
 			_ = stor.DeletePrefix(ctx, storagePath)
 		}
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
 			return
 		}
