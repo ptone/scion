@@ -1986,8 +1986,11 @@ func TestReadServicesYAML_Enforced_ReadsRealFile(t *testing.T) {
 
 // TestReadServicesYAML_Enforced_MissingFileIsQuietError proves a missing
 // file is reported as an ordinary error (matching os.ReadFile's contract,
-// which the caller already treats as "no services to start") without being
-// logged as a refused symlink.
+// which the caller already treats as "no services to start") WITHOUT being
+// logged as a refused symlink — captures real log output and asserts no
+// ERROR line, not just err!=nil (a bare err!=nil check can't distinguish
+// "quiet ENOENT" from "logged refusal", so it doesn't discriminate the
+// errors.Is-vs-os.IsNotExist gate this function relies on).
 func TestReadServicesYAML_Enforced_MissingFileIsQuietError(t *testing.T) {
 	tmpHome := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
@@ -1995,8 +1998,106 @@ func TestReadServicesYAML_Enforced_MissingFileIsQuietError(t *testing.T) {
 	}
 	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
 
+	logPath := filepath.Join(tmpHome, "capture.log")
+	log.SetLogPath(logPath)
+	log.SetQuiet(true)
+	t.Cleanup(func() { log.SetQuiet(false) })
+
 	if _, err := readServicesYAML(servicesPath, true); err == nil {
 		t.Fatal("expected an error for a missing file")
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reading captured log: %v", err)
+	}
+	if strings.Contains(string(data), "ERROR") {
+		t.Errorf("a missing services file must not log an Error line, got: %s", data)
+	}
+}
+
+// TestReadServicesYAML_Enforced_RefusesHardlink is R2(a): the Nlink check
+// is the only defence against a pre-planted hard link to a root-only file
+// on the same filesystem — a workload process can hard-link to a file it
+// does not own (hard-linking only needs write access to the directory the
+// link is created in). Without it, root would read and parse that file's
+// content as if it were the services config.
+func TestReadServicesYAML_Enforced_RefusesHardlink(t *testing.T) {
+	tmpHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
+	victim := filepath.Join(tmpHome, "victim")
+	if err := os.WriteFile(victim, []byte("secret: do-not-read"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(victim, servicesPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if data, err := readServicesYAML(servicesPath, true); err == nil {
+		t.Errorf("hard-linked services file was read: %q", data)
+	}
+}
+
+// TestReadServicesYAML_Enforced_RefusesAncestorSymlink proves the no-follow
+// resolution applies to every component of the path, not just the leaf: a
+// symlinked $HOME/.scion (an ancestor of the services file, not the file
+// itself) must be refused, not followed.
+func TestReadServicesYAML_Enforced_RefusesAncestorSymlink(t *testing.T) {
+	tmpHome, real := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "scion-services.yaml"), []byte("- name: x\n  command: [\"true\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scionDir := filepath.Join(tmpHome, ".scion")
+	if err := os.Symlink(real, scionDir); err != nil {
+		t.Fatal(err)
+	}
+
+	servicesPath := filepath.Join(scionDir, "scion-services.yaml")
+	if data, err := readServicesYAML(servicesPath, true); err == nil {
+		t.Errorf("ancestor symlink (.scion) was followed: %q", data)
+	}
+}
+
+// TestReadServicesYAML_Enforced_RefusesFifoWithoutHang is R2(b): proves
+// BOTH the S_IFREG check (a FIFO must be refused, not read as if it were a
+// regular file) and O_NONBLOCK (the refusal must not require a writer to
+// ever show up — a backgrounded pre-start-hook child could hold a FIFO
+// open at this exact path and never write to it, which would otherwise
+// hang root's init before the harness ever starts). A reader is held open
+// (as openLogNoFollow's own FIFO test does) so the O_NONBLOCK open itself
+// succeeds instead of failing ENXIO — the point is that the SUBSEQUENT
+// fstat/S_IFREG check refuses it, and that neither step ever blocks.
+func TestReadServicesYAML_Enforced_RefusesFifoWithoutHang(t *testing.T) {
+	tmpHome := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
+	if err := syscall.Mkfifo(servicesPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rfd, err := syscall.Open(servicesPath, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatalf("open reader: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(rfd) })
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := readServicesYAML(servicesPath, true)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("FIFO accepted as services file")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("readServicesYAML hung on a FIFO")
 	}
 }
 
