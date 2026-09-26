@@ -2838,21 +2838,21 @@ func writeEnvFile(agentHome string, uid, gid int) {
 	}
 
 	envPath := filepath.Join(scionDir, "scion-env")
-	tmpPath := envPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
-		log.Error("Failed to write temporary scion-env file: %v", err)
-		return
-	}
-	if err := os.Rename(tmpPath, envPath); err != nil {
-		log.Error("Failed to atomically rename scion-env file: %v", err)
-		_ = os.Remove(tmpPath)
+	content := []byte(strings.Join(lines, "\n") + "\n")
+	// Ownership of the file itself is applied by WriteFileNoFollowChown
+	// (fchown on the open fd, before the rename onto the final path), not
+	// by a separate path-based os.Chown call afterwards: this file lives
+	// under $HOME/.scion, which the scion user owns and can replace with a
+	// symlink between an old-style write+rename and a path-based chown.
+	if err := hub.WriteFileNoFollowChown(envPath, content, 0644, uid, gid); err != nil {
+		log.Error("Failed to write scion-env file: %v", err)
 		return
 	}
 
 	if uid > 0 {
-		// Chown the directory and file so the scion user can read them
+		// Chown the directory (the file's own ownership was already
+		// handled above) so the scion user can read it.
 		_ = os.Chown(scionDir, uid, gid)
-		_ = os.Chown(envPath, uid, gid)
 	}
 
 	log.Debug("Wrote %d env vars to %s", len(lines)-1, envPath)
