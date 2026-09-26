@@ -87,14 +87,16 @@ about**, holding a worker indefinitely
 hub/broker dispatch-timeout gap, not substrate-specific, but a cold
 template build is the easiest way to hit it on this runtime).
 
-**Warming a golden for a brand-new project needs the project's atespace to
-exist first.** An atespace is created lazily, on the broker's first
-`ensureAtespace` call for that project (normally the project's first agent
-create) — it does not exist merely because the project does. An operator
-pre-warming a golden ahead of that first create must create the atespace
-directly first — `kubectl-ate create atespace <atespace>`, the same call
-`ensureAtespace` itself makes — or `CreateActorTemplate` fails closed with
-`FailedPrecondition`.
+**Warming a golden for a brand-new project by calling `CreateActorTemplate`
+directly needs the project's atespace to exist first.** An atespace is
+created lazily, on the broker's first `ensureAtespace` call for that project
+(normally the project's first agent create) — it does not exist merely
+because the project does. An operator pre-warming a golden this way, ahead
+of that first create, must create the atespace directly first —
+`kubectl ate create atespace <atespace>`, the same call `ensureAtespace`
+itself makes — or `CreateActorTemplate` fails closed with
+`FailedPrecondition`. (The `scion start` warm-up below creates the atespace
+itself.)
 
 **Before pointing real traffic at a new template** (a new image digest,
 resource shape, sandbox class, `worker_selector`, or `egress_trust_bundle`
@@ -349,10 +351,12 @@ user's own home directory if that path (or any ancestor) isn't searchable
 by the scion uid/gid — never substrate-serve's own root `$HOME`, since the
 child's chdir happens after the privilege drop (see
 `resolveSubstrateHarnessCwd`, `cmd/sciontool/commands/substrate_serve.go`).
-Neither candidate usable fails the harness start rather than ever falling
-back to `/`. A later exec via `su -` (as above) still resets cwd to `$HOME`
-on login, exactly as `docker exec ... su -` does on every other runtime, so
-that part is expected and unchanged.
+Resolution runs inside `RunInit` after the workspace clone and the
+post-pre-start-hook ownership fixup, so a git-clone agent's `/workspace` is
+checked once it is scion-owned. Neither candidate usable fails the harness
+start rather than ever falling back to `/`. A later exec via `su -` (as
+above) still resets cwd to `$HOME` on login, exactly as `docker exec ... su
+-` does on every other runtime, so that part is expected and unchanged.
 
 ### `server.broker.broker_id` in the ConfigMap
 
@@ -908,11 +912,13 @@ Three exit paths matter, and all three are covered, not just the main one:
   (`.design/kubernetes/substrate-runtime.md` §5), so there is no way for a
   new broker process to re-mint or recover the token an old process already
   used.
-- **Message** is different: the hub accepts it and reports it as delivered,
-  but it is never delivered. The broker's deferred delivery fails, and the
-  hub is not told, so the message stays in the dispatched state. This comes
-  from a general scion message-failure reporting gap that is not specific to
-  this runtime; tracked as a follow-up.
+- **Message** is different: the hub accepts it and its API response says the
+  message was delivered, but it is never delivered, and the hub's message
+  record stays in the dispatched state rather than being marked failed. A
+  user-sent message is dispatched to the broker without the message ID the
+  broker needs to report a buffered-delivery failure back to the hub, so the
+  broker's failure is logged on the broker only. This is a general scion
+  gap, not specific to this runtime; tracked as a follow-up.
 - **New agents are unaffected.** Any agent this broker process itself
   starts (i.e. anything created after the restart) has a fresh in-memory
   record and control token, and its delete/stop/exec/message all work
