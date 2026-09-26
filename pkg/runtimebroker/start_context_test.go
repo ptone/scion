@@ -15,7 +15,9 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -394,6 +396,639 @@ func TestBuildStartContext_GitClone(t *testing.T) {
 	}
 }
 
+// TestRedactCloneURL covers the userinfo shapes a clone URL can carry: a
+// user:pass pair, a username-only token (the "https://TOKEN@host" form,
+// which net/url's Redacted() alone would leave visible since there is no
+// password to mask), a token carried in the query string or fragment
+// instead of userinfo, and an unparseable URL — none of which may ever be
+// logged or returned to a client raw.
+func TestRedactCloneURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "user and password",
+			in:   "https://user:supersecret@github.com/org/repo.git",
+			want: "https://github.com/org/repo.git",
+		},
+		{
+			name: "username-only token",
+			in:   "https://ghp_supersecrettoken@github.com/org/repo.git",
+			want: "https://github.com/org/repo.git",
+		},
+		{
+			name: "token in query string",
+			in:   "https://github.com/org/repo.git?access_token=supersecret",
+			want: "https://github.com/org/repo.git",
+		},
+		{
+			name: "token in fragment",
+			in:   "https://github.com/org/repo.git#access_token=supersecret",
+			want: "https://github.com/org/repo.git",
+		},
+		{
+			name: "no credentials",
+			in:   "https://github.com/org/repo.git",
+			want: "https://github.com/org/repo.git",
+		},
+		{
+			name: "unparseable",
+			in:   "://not a url",
+			want: "<unparseable>",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactCloneURL(tt.in)
+			if got != tt.want {
+				t.Errorf("redactCloneURL(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			if strings.Contains(got, "supersecret") {
+				t.Errorf("redactCloneURL(%q) leaked a credential: %q", tt.in, got)
+			}
+		})
+	}
+}
+
+// TestSanitizeCloneErrorText covers the two forms a clone URL can take
+// inside a provisioning error: the exact raw URL this package embeds into
+// its own error text, and git's own reformatted echo of the same URL in its
+// stderr output (which already strips userinfo on its own, but can still
+// carry the query string or fragment).
+func TestSanitizeCloneErrorText(t *testing.T) {
+	t.Run("userinfo and query embedded verbatim", func(t *testing.T) {
+		rawURL := "https://SUPERSECRETTOKEN@127.0.0.1:1/x.git?access_token=QSECRET"
+		errText := "ProvisionShared: git clone: git clone " + rawURL + ": exit status 128"
+		got := sanitizeCloneErrorText(errText, rawURL)
+		if strings.Contains(got, "SUPERSECRETTOKEN") {
+			t.Errorf("sanitized error text still contains the userinfo token: %q", got)
+		}
+		if strings.Contains(got, "QSECRET") {
+			t.Errorf("sanitized error text still contains the query-string token: %q", got)
+		}
+		if !strings.Contains(got, "127.0.0.1") {
+			t.Errorf("expected the host to remain in the sanitized text, got: %q", got)
+		}
+	})
+
+	t.Run("a fragment embedded verbatim", func(t *testing.T) {
+		rawURL := "https://127.0.0.1:1/x.git#FRAGMENTTOKEN"
+		errText := "git clone " + rawURL + ": exit status 128"
+		got := sanitizeCloneErrorText(errText, rawURL)
+		if strings.Contains(got, "FRAGMENTTOKEN") {
+			t.Errorf("sanitized error text still contains the fragment: %q", got)
+		}
+	})
+
+	t.Run("a differently formatted echo of the same URL", func(t *testing.T) {
+		// git's own diagnostic output strips userinfo on its own when it
+		// echoes a URL, but can still carry the query string, in a form
+		// that differs from the exact raw URL string (for example a
+		// trailing slash) — so a wholesale match against the raw URL alone
+		// does not catch it; the query-string strip must apply on its own.
+		rawURL := "https://SUPERSECRETTOKEN@127.0.0.1:1/x.git?access_token=QSECRET"
+		errText := "fatal: unable to access 'https://127.0.0.1:1/x.git?access_token=QSECRET/'"
+		got := sanitizeCloneErrorText(errText, rawURL)
+		if strings.Contains(got, "QSECRET") {
+			t.Errorf("sanitized error text still contains the query-string token from a reformatted echo: %q", got)
+		}
+	})
+
+	t.Run("an unparseable URL still strips the exact raw text", func(t *testing.T) {
+		rawURL := "https://user:TOKEN@host/%zz"
+		errText := "git clone " + rawURL + ": exit status 128"
+		got := sanitizeCloneErrorText(errText, rawURL)
+		if strings.Contains(got, "TOKEN") {
+			t.Errorf("sanitized error text still contains the credential from an unparseable URL: %q", got)
+		}
+		if strings.Contains(got, rawURL) {
+			t.Errorf("sanitized error text still contains the raw URL verbatim: %q", got)
+		}
+	})
+
+	t.Run("empty inputs pass through unchanged", func(t *testing.T) {
+		if got := sanitizeCloneErrorText("", "https://host/r.git"); got != "" {
+			t.Errorf("expected empty errText to stay empty, got %q", got)
+		}
+		if got := sanitizeCloneErrorText("some error", ""); got != "some error" {
+			t.Errorf("expected an empty rawURL to leave errText unchanged, got %q", got)
+		}
+	})
+}
+
+// TestTryProvisionWorktree_FallbackFailureLogNeverContainsCredentials drives
+// a fresh agent's first provisioning attempt against an unreachable URL
+// carrying both a userinfo token and a query-string token through
+// provision.ProvisionShared's real git clone, and captures the resulting
+// slog.Warn log line next to the already-redacted clone_url attribute.
+// Neither token may appear anywhere in the captured log output.
+func TestTryProvisionWorktree_FallbackFailureLogNeverContainsCredentials(t *testing.T) {
+	requireWorktreeGit(t)
+
+	const secretToken = "SUPERSECRETSAUCE"
+	credentialedURL := "https://" + secretToken + "@127.0.0.1:1/x.git?access_token=" + secretToken
+
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(oldLogger)
+
+	opts := &api.StartOptions{}
+	_, _ = srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name:          "agent-a",
+		AgentID:       "agent-a",
+		ProjectID:     "p1",
+		ProjectSlug:   "proj",
+		ProjectPath:   projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: credentialedURL}},
+	}, opts, map[string]string{})
+
+	logged := buf.String()
+	if strings.Contains(logged, secretToken) {
+		t.Errorf("provisioning-failure log must never contain the clone URL's token, got: %s", logged)
+	}
+}
+
+// TestBuildStartContext_WorktreePerAgentStart_PreExistedFailureLogNeverContainsCredentials
+// is the preExisted-path counterpart: a second start for an agent whose
+// worktree already exists, injected with a credentialed URL and a
+// provisioning failure, must never write the clone URL's userinfo or
+// query-string token to the slog.Error log line at that call site either.
+func TestBuildStartContext_WorktreePerAgentStart_PreExistedFailureLogNeverContainsCredentials(t *testing.T) {
+	requireWorktreeGit(t)
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	in := startContextInputs{
+		Name:          "agent-a",
+		AgentID:       "agent-a",
+		ProjectID:     "p1",
+		ProjectSlug:   "proj",
+		ProjectPath:   projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc},
+		Operation:     opHTTPStart,
+	}
+
+	sc1, err := srv.buildStartContext(context.Background(), in)
+	if err != nil {
+		t.Fatalf("first buildStartContext failed: %v", err)
+	}
+	worktreePath := sc1.Opts.Workspace
+	if worktreePath == "" {
+		t.Fatal("expected a worktree Workspace path to be set")
+	}
+
+	// Corrupt the sharer marker so RegisterSharer's re-registration on the
+	// next call fails: base is two levels above the per-agent worktree
+	// (<base>/worktrees/<agentID>).
+	base := filepath.Dir(filepath.Dir(worktreePath))
+	markerPath := filepath.Join(base, ".git", "scion-sharers", "agent-a.json")
+	if err := os.MkdirAll(filepath.Dir(markerPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(markerPath, []byte("{not valid json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	const secretToken = "SUPERSECRETSAUCE"
+	in.Config.GitClone = &api.GitCloneConfig{URL: "https://" + secretToken + "@127.0.0.1:1/x.git?access_token=" + secretToken}
+
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(oldLogger)
+
+	if _, err := srv.buildStartContext(context.Background(), in); err == nil {
+		t.Fatal("expected the second buildStartContext to fail")
+	}
+
+	logged := buf.String()
+	if strings.Contains(logged, secretToken) {
+		t.Errorf("the preExisted-failure log must never contain the clone URL's token, got: %s", logged)
+	}
+}
+
+// TestIsStrictWorktreeChild guards the only shape of path
+// tryProvisionWorktree is ever allowed to pass to `git worktree remove` or
+// os.RemoveAll: a real descendant of <base>/worktrees, never that directory
+// itself and never something outside it. An empty AgentID makes
+// provision.WorktreePath resolve to the shared "worktrees" parent directory
+// of every agent (GoogleCloudPlatform/scion#1931) — the shape this check
+// exists to reject.
+func TestIsStrictWorktreeChild(t *testing.T) {
+	base := "/proj/workspace"
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"real descendant", "/proj/workspace/worktrees/agent-1", true},
+		{"nested descendant", "/proj/workspace/worktrees/agent-1/sub", true},
+		{"the worktrees dir itself", "/proj/workspace/worktrees", false},
+		{"the worktrees dir with trailing slash", "/proj/workspace/worktrees/", false},
+		{"a sibling directory", "/proj/workspace/other", false},
+		{"outside the project entirely", "/etc/passwd", false},
+		{"a relative segment resolving back out", "/proj/workspace/worktrees/../other", false},
+		{"empty path", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isStrictWorktreeChild(base, tt.path); got != tt.want {
+				t.Errorf("isStrictWorktreeChild(%q, %q) = %v, want %v", base, tt.path, got, tt.want)
+			}
+		})
+	}
+	if isStrictWorktreeChild("", "/proj/workspace/worktrees/agent-1") {
+		t.Error("expected false when base is empty")
+	}
+}
+
+// TestShouldCleanupPartialWorktree_NeverTheSharedWorktreesDir is the direct
+// unit-level guard for GoogleCloudPlatform/scion#1931: provision.WorktreePath
+// resolves to the shared "worktrees" parent directory itself when AgentID is
+// empty, so a resolver bug that ever produces that value as "the worktree
+// path" must never be allowed to authorize its removal — nor to authorize
+// removing anything that pre-existed.
+func TestShouldCleanupPartialWorktree_NeverTheSharedWorktreesDir(t *testing.T) {
+	projectRoot := "/proj/workspace"
+	sharedWorktreesDir := filepath.Join(projectRoot, "worktrees")
+	ownWorktree := filepath.Join(sharedWorktreesDir, "agent-1")
+
+	tests := []struct {
+		name         string
+		projectRoot  string
+		worktreePath string
+		preExisted   bool
+		want         bool
+	}{
+		{"normal partial cleanup, not preExisted", projectRoot, ownWorktree, false, true},
+		{"never when preExisted, even for a valid own path", projectRoot, ownWorktree, true, false},
+		{"never the shared worktrees dir itself, even if not preExisted", projectRoot, sharedWorktreesDir, false, false},
+		{"never outside the project", projectRoot, "/etc/passwd", false, false},
+		{"empty worktreePath", projectRoot, "", false, false},
+		{"empty projectRoot", "", ownWorktree, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldCleanupPartialWorktree(tt.projectRoot, tt.worktreePath, tt.preExisted); got != tt.want {
+				t.Errorf("shouldCleanupPartialWorktree(%q, %q, %v) = %v, want %v",
+					tt.projectRoot, tt.worktreePath, tt.preExisted, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTryProvisionWorktree_InvalidAgentIDLeavesSharedBaseIntact is an
+// end-to-end guard (through the real resolveWorktreeProvision ->
+// tryProvisionWorktree path, not a hand-built worktreeProvisionResult) for
+// an AgentID of "..". Since provision.WorktreePath(base, agentID) is
+// filepath.Join(base, "worktrees", agentID), an AgentID of ".." would
+// otherwise resolve to base itself (filepath.Join cleans "worktrees/.."
+// away) — the shared clone root holding the common .git and every other
+// agent's worktrees. isValidPathComponent rejects this AgentID outright,
+// before anything is resolved or created on disk; validateMountedWorktree
+// is a second, independent check on whatever path is finally about to be
+// mounted, in case the first rejection were ever bypassed.
+func TestTryProvisionWorktree_InvalidAgentIDLeavesSharedBaseIntact(t *testing.T) {
+	requireWorktreeGit(t)
+
+	for _, agentID := range []string{"..", "a/b"} {
+		t.Run("agentID="+agentID, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+
+			projectPath := filepath.Join(t.TempDir(), "proj")
+			if err := os.MkdirAll(projectPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			invalidGitClone := &api.GitCloneConfig{URL: filepath.Join(t.TempDir(), "does-not-exist.git")}
+
+			opts := &api.StartOptions{}
+			ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+				Name: "agent-evil", AgentID: agentID,
+				ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+				Config:        &CreateAgentConfig{GitClone: invalidGitClone},
+			}, opts, map[string]string{})
+
+			if ok {
+				t.Error("expected ok=false for an invalid AgentID")
+			}
+			if err == nil {
+				t.Error("expected an error rejecting the invalid AgentID")
+			}
+
+			// The shared base must never be created, let alone removed, as a
+			// side effect of this rejected attempt: any stat error other than
+			// "does not exist" would indicate something unexpected happened
+			// to it.
+			base := filepath.Join(projectPath, "workspace")
+			if _, statErr := os.Stat(base); statErr != nil && !os.IsNotExist(statErr) {
+				t.Fatalf("unexpected error checking the shared base for AgentID=%q: %v", agentID, statErr)
+			}
+		})
+	}
+}
+
+// setUpAgent1SharedBase provisions a first agent's real worktree via
+// tryProvisionWorktree, establishing the shared base clone that later
+// scenarios in this file plant adversarial state under.
+func setUpAgent1SharedBase(t *testing.T, srv *Server, projectPath, bare string) {
+	t.Helper()
+	opts := &api.StartOptions{}
+	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name: "agent-1", AgentID: "agent-1",
+		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
+	}, opts, map[string]string{})
+	if err != nil || !ok {
+		t.Fatalf("setup: tryProvisionWorktree for agent-1: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestTryProvisionWorktree_SymlinkedOwnWorktreeRejected proves a symlink
+// planted at an agent's own worktree target — pointing at a directory
+// outside the shared base — is rejected rather than mounted, and that the
+// symlink and its target are left untouched.
+func TestTryProvisionWorktree_SymlinkedOwnWorktreeRejected(t *testing.T) {
+	requireWorktreeGit(t)
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setUpAgent1SharedBase(t, srv, projectPath, bare)
+
+	base := filepath.Join(projectPath, "workspace")
+	outsideDir := t.TempDir()
+	sentinelFile := filepath.Join(outsideDir, "sentinel.txt")
+	const sentinelContent = "must not be mounted"
+	if err := os.WriteFile(sentinelFile, []byte(sentinelContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	agent2Path := filepath.Join(base, "worktrees", "agent-2")
+	if err := os.Symlink(outsideDir, agent2Path); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := &api.StartOptions{}
+	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name: "agent-2", AgentID: "agent-2",
+		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
+	}, opts, map[string]string{})
+
+	if ok {
+		t.Error("expected ok=false for a symlinked worktree target")
+	}
+	if err == nil {
+		t.Fatal("expected an error rejecting the symlinked worktree target")
+	}
+	if opts.Workspace != "" {
+		t.Errorf("expected no workspace to be mounted, got %q", opts.Workspace)
+	}
+	if target, readErr := os.Readlink(agent2Path); readErr != nil || target != outsideDir {
+		t.Errorf("expected the symlink to survive unchanged, got target=%q err=%v", target, readErr)
+	}
+	if got, readErr := os.ReadFile(sentinelFile); readErr != nil || string(got) != sentinelContent {
+		t.Errorf("expected the outside file to survive untouched, got %q err=%v", got, readErr)
+	}
+}
+
+// TestTryProvisionWorktree_SymlinkedWorktreesDirRejected proves that if the
+// shared base's own "worktrees" directory is itself a symlink to somewhere
+// outside the base, provisioning is rejected before it creates anything
+// through that symlink.
+func TestTryProvisionWorktree_SymlinkedWorktreesDirRejected(t *testing.T) {
+	requireWorktreeGit(t)
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setUpAgent1SharedBase(t, srv, projectPath, bare)
+
+	base := filepath.Join(projectPath, "workspace")
+	worktreesDir := filepath.Join(base, "worktrees")
+	outsideDir := t.TempDir()
+
+	if err := os.RemoveAll(worktreesDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideDir, worktreesDir); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := &api.StartOptions{}
+	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name: "agent-2", AgentID: "agent-2",
+		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
+	}, opts, map[string]string{})
+
+	if ok {
+		t.Error("expected ok=false when the worktrees directory is a symlink")
+	}
+	if err == nil {
+		t.Fatal("expected an error rejecting the symlinked worktrees directory")
+	}
+	entries, _ := os.ReadDir(outsideDir)
+	if len(entries) != 0 {
+		t.Errorf("expected nothing created in the outside directory, found: %v", entries)
+	}
+}
+
+// TestTryProvisionWorktree_SharerRegistryOutsidePathRejected proves that a
+// sharer-registry marker naming a worktree path outside the shared base is
+// never joined or mounted.
+func TestTryProvisionWorktree_SharerRegistryOutsidePathRejected(t *testing.T) {
+	requireWorktreeGit(t)
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setUpAgent1SharedBase(t, srv, projectPath, bare)
+
+	base := filepath.Join(projectPath, "workspace")
+	outsideDir := t.TempDir()
+	sentinelFile := filepath.Join(outsideDir, "sentinel.txt")
+	const sentinelContent = "must not be mounted"
+	if err := os.WriteFile(sentinelFile, []byte(sentinelContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := provision.RegisterSharer(base, "agent-3", outsideDir, "some-other-agent"); err != nil {
+		t.Fatalf("plant sharer marker: %v", err)
+	}
+
+	opts := &api.StartOptions{}
+	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name: "agent-3", AgentID: "agent-3",
+		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
+	}, opts, map[string]string{})
+
+	if ok {
+		t.Error("expected ok=false when the sharer registry names a path outside the base")
+	}
+	if err == nil {
+		t.Fatal("expected an error rejecting the sharer-registry entry")
+	}
+	if opts.Workspace != "" {
+		t.Errorf("expected no workspace to be mounted, got %q", opts.Workspace)
+	}
+	if got, readErr := os.ReadFile(sentinelFile); readErr != nil || string(got) != sentinelContent {
+		t.Errorf("expected the outside file to survive untouched, got %q err=%v", got, readErr)
+	}
+}
+
+// TestTryProvisionWorktree_SharerRegistryFakeGitfileStillRejected proves the
+// final mount-time gate catches a sharer-registry entry that would pass
+// ensureWorktree's own worktree-shape check — a .git gitfile whose target
+// textually resolves under the base's own admin directory — but whose
+// physical location is still outside the base's "worktrees" directory once
+// symlinks are resolved.
+func TestTryProvisionWorktree_SharerRegistryFakeGitfileStillRejected(t *testing.T) {
+	requireWorktreeGit(t)
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setUpAgent1SharedBase(t, srv, projectPath, bare)
+
+	base := filepath.Join(projectPath, "workspace")
+	outsideDir := t.TempDir()
+	sentinelFile := filepath.Join(outsideDir, "sentinel.txt")
+	const sentinelContent = "must not be mounted"
+	if err := os.WriteFile(sentinelFile, []byte(sentinelContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	adminEntry := filepath.Join(base, ".git", "worktrees", "fake-entry")
+	if err := os.WriteFile(filepath.Join(outsideDir, ".git"), []byte("gitdir: "+adminEntry+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := provision.RegisterSharer(base, "agent-3", outsideDir, "some-other-agent"); err != nil {
+		t.Fatalf("plant sharer marker: %v", err)
+	}
+
+	opts := &api.StartOptions{}
+	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name: "agent-3", AgentID: "agent-3",
+		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
+	}, opts, map[string]string{})
+
+	if ok {
+		t.Error("expected ok=false when the sharer registry names a path outside the base, even with a matching gitfile")
+	}
+	if err == nil {
+		t.Fatal("expected an error rejecting the sharer-registry entry")
+	}
+	if opts.Workspace != "" {
+		t.Errorf("expected no workspace to be mounted, got %q", opts.Workspace)
+	}
+	if got, readErr := os.ReadFile(sentinelFile); readErr != nil || string(got) != sentinelContent {
+		t.Errorf("expected the outside file to survive untouched, got %q err=%v", got, readErr)
+	}
+}
+
+// TestBuildStartContext_GitCloneDebugLogRedactsCredentials proves the
+// git-clone-mode debug log never contains a clone URL's embedded
+// credentials, whether they are a user:pass pair or a username-only token.
+func TestBuildStartContext_GitCloneDebugLogRedactsCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		url  string
+	}{
+		{name: "user and password", url: "https://user:supersecret@github.com/org/repo.git"},
+		{name: "username-only token", url: "https://supersecret@github.com/org/repo.git"},
+		{name: "token in query string", url: "https://github.com/org/repo.git?access_token=supersecret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			cfg.Debug = true
+			srv := newTestServerForStartContext(t, cfg)
+
+			var buf bytes.Buffer
+			srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+			_, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:        "agent-1",
+				ProjectPath: "/some/path",
+				Config: &CreateAgentConfig{
+					GitClone: &api.GitCloneConfig{
+						URL:    tc.url,
+						Branch: "main",
+					},
+				},
+				HTTPRequest: r,
+				Operation:   opCreate,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			logged := buf.String()
+			if strings.Contains(logged, "supersecret") {
+				t.Errorf("debug log must not contain the clone URL's credentials, got: %s", logged)
+			}
+			if !strings.Contains(logged, "github.com") {
+				t.Errorf("expected the redacted cloneURL to still be logged, got: %s", logged)
+			}
+		})
+	}
+}
+
 func TestBuildStartContext_NilHTTPRequest(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
@@ -429,6 +1064,38 @@ func TestBuildStartContext_RequiresOperation(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Operation not set") {
 		t.Errorf("error = %q, want it to contain %q", err.Error(), "Operation not set")
+	}
+}
+
+// TestBuildStartContext_FreshProvisionSetOnlyForCreate proves
+// sc.Opts.FreshProvision is true only for opCreate and false for
+// opHTTPStart and opHTTPRestart (GoogleCloudPlatform/scion#1931).
+func TestBuildStartContext_FreshProvisionSetOnlyForCreate(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	for _, tt := range []struct {
+		op   startOperation
+		want bool
+	}{
+		{op: opCreate, want: true},
+		{op: opHTTPStart, want: false},
+		{op: opHTTPRestart, want: false},
+	} {
+		t.Run(string(tt.op), func(t *testing.T) {
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:        "agent-1",
+				ProjectPath: "/some/path",
+				Operation:   tt.op,
+			})
+			if err != nil {
+				t.Fatalf("buildStartContext failed: %v", err)
+			}
+			if sc.Opts.FreshProvision != tt.want {
+				t.Errorf("Opts.FreshProvision = %v, want %v for %s", sc.Opts.FreshProvision, tt.want, tt.op)
+			}
+		})
 	}
 }
 
@@ -1380,6 +2047,161 @@ func TestResolveWorktreeProvision_NoGitClone(t *testing.T) {
 	}
 }
 
+// TestResolveWorktreeProvision_MissingIDs is the defense-in-depth guard for
+// GoogleCloudPlatform/scion#1931's worktree-per-agent start path: without
+// both AgentID and ProjectID, provision.WorktreePath(base, "") resolves to
+// the shared "worktrees" parent directory every agent's worktree lives
+// under, not a per-agent path. Provisioning must be skipped entirely (fall
+// back to clone-per-agent) rather than ever touching that shared path.
+func TestResolveWorktreeProvision_MissingIDs(t *testing.T) {
+	base := worktreeProvisionInput{
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		GitClone:      &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+		ProjectPath:   "/some/path",
+		ProjectID:     "proj-1",
+		AgentID:       "agent-1",
+	}
+
+	missingAgentID := base
+	missingAgentID.AgentID = ""
+	if result := resolveWorktreeProvision(missingAgentID); result.ShouldProvision {
+		t.Fatal("expected ShouldProvision=false when AgentID is empty")
+	} else if !strings.Contains(result.Reason, "AgentID") {
+		t.Errorf("expected reason to mention AgentID, got %q", result.Reason)
+	}
+
+	missingProjectID := base
+	missingProjectID.ProjectID = ""
+	if result := resolveWorktreeProvision(missingProjectID); result.ShouldProvision {
+		t.Fatal("expected ShouldProvision=false when ProjectID is empty")
+	} else if !strings.Contains(result.Reason, "ProjectID") {
+		t.Errorf("expected reason to mention ProjectID, got %q", result.Reason)
+	}
+
+	if result := resolveWorktreeProvision(base); !result.ShouldProvision {
+		eligible, _ := runtime.WorktreeModeEligible()
+		if eligible {
+			t.Errorf("expected ShouldProvision=true when both IDs are set, reason: %s", result.Reason)
+		}
+	}
+}
+
+// TestTryProvisionWorktree_MissingIdentityOnStart_FailsClosed proves a
+// start dispatch (never a create) with no valid agent identity fails the
+// request instead of silently falling back to an in-container clone, which
+// would mount a fresh, empty workspace over whatever this agent's real
+// worktree holds — a create with the same missing identity still falls
+// back, since a fresh create has no existing worktree to protect.
+// TestResolveWorktreeProvision_InvalidIDsRejected is the table test for an
+// AgentID or ProjectID that is any of the listed invalid or malformed
+// values: each must be rejected, never reaching path construction.
+func TestResolveWorktreeProvision_InvalidIDsRejected(t *testing.T) {
+	projectDir := t.TempDir()
+	invalidValues := []string{
+		"..",
+		".",
+		"../../x",
+		"a/b",
+		"/tmp/abs",
+		"agent-1/",
+		"",
+		"a\\b",
+		"a\x00b",
+	}
+	for _, id := range invalidValues {
+		t.Run("agentID="+id, func(t *testing.T) {
+			result := resolveWorktreeProvision(worktreeProvisionInput{
+				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+				GitClone:      &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+				ProjectPath:   projectDir,
+				ProjectID:     "proj-1",
+				AgentID:       id,
+			})
+			if result.ShouldProvision {
+				t.Fatalf("expected ShouldProvision=false for AgentID=%q", id)
+			}
+			if !result.MissingIdentity {
+				t.Errorf("expected MissingIdentity=true for AgentID=%q, reason: %s", id, result.Reason)
+			}
+		})
+		t.Run("projectID="+id, func(t *testing.T) {
+			result := resolveWorktreeProvision(worktreeProvisionInput{
+				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+				GitClone:      &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+				ProjectPath:   projectDir,
+				ProjectID:     id,
+				AgentID:       "agent-1",
+			})
+			if result.ShouldProvision {
+				t.Fatalf("expected ShouldProvision=false for ProjectID=%q", id)
+			}
+			if !result.MissingIdentity {
+				t.Errorf("expected MissingIdentity=true for ProjectID=%q, reason: %s", id, result.Reason)
+			}
+		})
+	}
+
+	// A literal-looking "%2e%2e" is an ordinary, if unusual, directory
+	// name, since nothing decodes it, and must be accepted like any other
+	// opaque ID.
+	if !isValidPathComponent("%2e%2e") {
+		t.Error(`expected "%2e%2e" to be a valid path component (a literal name, not interpreted)`)
+	}
+}
+
+func TestTryProvisionWorktree_MissingIdentityOnStart_FailsClosed(t *testing.T) {
+	requireWorktreeGit(t)
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := &api.StartOptions{}
+	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name:          "some-agent",
+		AgentID:       "", // missing
+		ProjectID:     "p1",
+		ProjectPath:   projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc},
+		Operation:     opHTTPStart,
+	}, opts, map[string]string{})
+
+	if err == nil {
+		t.Fatal("expected tryProvisionWorktree to fail closed when AgentID is missing on a start dispatch")
+	}
+	if ok {
+		t.Error("expected ok=false alongside the error")
+	}
+	if opts.GitClone != nil {
+		t.Error("expected no fallback to an in-container clone")
+	}
+
+	// The same missing-identity case on a create dispatch still falls back.
+	opts2 := &api.StartOptions{}
+	ok2, err2 := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name:          "some-agent",
+		AgentID:       "",
+		ProjectID:     "p1",
+		ProjectPath:   projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc},
+		Operation:     opCreate,
+	}, opts2, map[string]string{})
+	if err2 != nil {
+		t.Fatalf("expected create to fall back cleanly, got error: %v", err2)
+	}
+	if ok2 {
+		t.Error("expected ok=false (fallback), got true")
+	}
+}
+
 func TestResolveWorktreeProvision_GitTooOld_Fallback(t *testing.T) {
 	projectDir := t.TempDir()
 
@@ -1532,6 +2354,17 @@ func TestResolveWorktreeProvision_FullCloneDepth(t *testing.T) {
 	}
 }
 
+// requireWorktreeGit skips the test when the host's git is too old for
+// worktree-per-agent mode (--relative-paths requires git >= 2.47). CI's git
+// is new enough; this keeps the suite green on an older host git (for
+// example, stock Ubuntu 24.04 ships git 2.43).
+func requireWorktreeGit(t *testing.T) {
+	t.Helper()
+	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+		t.Skip("worktree mode not eligible on this host: " + reason)
+	}
+}
+
 // initBareRepoWithCommit creates a bare git repo (default branch main) seeded
 // with one commit, and returns its path for use as a GitClone URL.
 func initBareRepoWithCommit(t *testing.T) string {
@@ -1600,12 +2433,15 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 
 	// Provision agent-b with --branch "agent-a" → should JOIN, not fail.
 	opts := &api.StartOptions{}
-	ok := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-b", AgentID: "agent-b",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc, Branch: "agent-a"},
 	}, opts, map[string]string{})
+	if err != nil {
+		t.Fatalf("tryProvisionWorktree returned an error: %v", err)
+	}
 
 	if !ok {
 		t.Fatal("expected JOIN to succeed, got ok=false (fell back to clone-per-agent)")
@@ -1640,6 +2476,587 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 	}
 	if _, err := os.Stat(agentAWt); err != nil {
 		t.Errorf("agent-a worktree was destroyed: %v", err)
+	}
+}
+
+// TestTryProvisionWorktree_JoinTargetPreExisting_FailsInsteadOfFallback
+// covers a JOIN agent whose own WorktreePath(base, "agent-b") never exists
+// (it shares agent-a's worktree instead): the preExisted check also
+// consults the sharer registry, so it still recognizes that a real, live
+// worktree it is about to attach to already exists. A provisioning failure
+// on the JOIN fails the start — no removal (there is nothing at agent-b's
+// own path to remove anyway), and no silent fallback to an in-container
+// clone, which would abandon agent-a's live worktree without ever mounting
+// it for agent-b.
+func TestTryProvisionWorktree_JoinTargetPreExisting_FailsInsteadOfFallback(t *testing.T) {
+	requireWorktreeGit(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions, so the read-only sharer dir fault injection below never fails")
+	}
+	t.Setenv("SCION_HOST_UID", "")
+
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up the shared base + agent-a's worktree on branch "agent-a", as
+	// the JOIN target.
+	resolved, err := runtime.NewLocalBackend().Resolve(runtime.ResolveInput{
+		ProjectDir: projectPath, ProjectID: "p1", AgentID: "agent-a",
+		Mode: store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "agent-a", AgentName: "agent-a", GitClone: gc,
+	}); err != nil {
+		t.Fatalf("setup agent-a: %v", err)
+	}
+	base := resolved.HostPath
+	agentAWt := provision.WorktreePath(base, "agent-a")
+	if _, err := os.Stat(agentAWt); err != nil {
+		t.Fatalf("agent-a worktree missing after setup: %v", err)
+	}
+
+	// Make the sharer registry directory read-only: ListSharers (a read of
+	// an existing, valid marker) still succeeds and reports agent-a's
+	// worktree, but RegisterSharer's write to add agent-b as a sharer fails
+	// — a failure that happens only because a real JOIN target exists.
+	sharerDir := filepath.Join(base, ".git", "scion-sharers")
+	if err := os.Chmod(sharerDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sharerDir, 0o755) })
+
+	// Simulate un-pushed work in agent-a's live worktree.
+	const unpushedContent = "package main // un-pushed change\n"
+	unpushedFile := filepath.Join(agentAWt, "unpushed.go")
+	if err := os.WriteFile(unpushedFile, []byte(unpushedContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent-b attempts to JOIN branch "agent-a": must fail outright.
+	opts := &api.StartOptions{}
+	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name: "agent-b", AgentID: "agent-b",
+		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc, Branch: "agent-a"},
+	}, opts, map[string]string{})
+
+	if err == nil {
+		t.Fatalf("expected tryProvisionWorktree to fail when the JOIN target's registration write fails, got ok=%v", ok)
+	}
+	if ok {
+		t.Error("expected ok=false alongside the error")
+	}
+
+	// Agent-a's worktree and its un-pushed file must survive untouched.
+	if _, statErr := os.Stat(agentAWt); statErr != nil {
+		t.Errorf("agent-a's worktree must survive a failed JOIN, stat error: %v", statErr)
+	}
+	got, readErr := os.ReadFile(unpushedFile)
+	if readErr != nil {
+		t.Fatalf("un-pushed file must survive a failed JOIN, but reading it failed: %v", readErr)
+	}
+	if string(got) != unpushedContent {
+		t.Errorf("un-pushed file content = %q, want %q", got, unpushedContent)
+	}
+}
+
+// TestBuildStartContext_WorktreePerAgentOnStart_TakesWorktreePathAndReusesIt
+// proves a start dispatch (Operation opHTTPStart) with WorkspaceMode
+// worktree-per-agent and GitClone set takes create's worktree-per-agent
+// path, not the in-container clone path — and that re-running start against
+// the same agent reuses the existing worktree instead of recreating it
+// (GoogleCloudPlatform/scion#1931).
+func TestBuildStartContext_WorktreePerAgentOnStart_TakesWorktreePathAndReusesIt(t *testing.T) {
+	requireWorktreeGit(t)
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	in := startContextInputs{
+		Name:          "agent-a",
+		AgentID:       "agent-a",
+		ProjectID:     "p1",
+		ProjectSlug:   "proj",
+		ProjectPath:   projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc},
+		Operation:     opHTTPStart,
+	}
+
+	sc1, err := srv.buildStartContext(context.Background(), in)
+	if err != nil {
+		t.Fatalf("first buildStartContext failed: %v", err)
+	}
+	if sc1.Opts.GitClone != nil {
+		t.Errorf("expected GitClone to be suppressed by the worktree path, got %+v", sc1.Opts.GitClone)
+	}
+	firstWorkspace := sc1.Opts.Workspace
+	if firstWorkspace == "" {
+		t.Fatal("expected a worktree Workspace path to be set")
+	}
+	if _, err := os.Stat(firstWorkspace); err != nil {
+		t.Fatalf("expected worktree to exist on disk: %v", err)
+	}
+
+	// Simulate un-pushed work in the worktree between the two starts.
+	const unpushedContent = "package main // un-pushed change\n"
+	unpushedFile := filepath.Join(firstWorkspace, "unpushed.go")
+	if err := os.WriteFile(unpushedFile, []byte(unpushedContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-run start for the same agent: must reuse the existing worktree, not
+	// recreate it or fall back to the in-container clone path.
+	sc2, err := srv.buildStartContext(context.Background(), in)
+	if err != nil {
+		t.Fatalf("second buildStartContext (reuse) failed: %v", err)
+	}
+	if sc2.Opts.GitClone != nil {
+		t.Errorf("expected GitClone to remain suppressed on reuse, got %+v", sc2.Opts.GitClone)
+	}
+	if sc2.Opts.Workspace != firstWorkspace {
+		t.Errorf("expected start to reuse the same worktree path %q, got %q", firstWorkspace, sc2.Opts.Workspace)
+	}
+
+	// Reuse must not run any destructive git operation (e.g. git clean -fdx)
+	// against the existing worktree: the un-pushed file must still be there.
+	got, err := os.ReadFile(unpushedFile)
+	if err != nil {
+		t.Fatalf("un-pushed file must survive a worktree-reuse start, but reading it failed: %v", err)
+	}
+	if string(got) != unpushedContent {
+		t.Errorf("un-pushed file content = %q, want %q", got, unpushedContent)
+	}
+}
+
+// TestBuildStartContext_WorktreePerAgentEnvParity extends
+// TestStartAndCreate_GitWorkspaceEnvParity (clone-per-agent) to
+// worktree-per-agent: create and start, each provisioning a fresh agent's
+// own worktree for the first time, must produce identical
+// SCION_WORKSPACE_MODE/SCION_WORKSPACE_GIT env, and both must omit
+// SCION_GIT_CLONE_URL since the worktree path suppresses the in-container
+// clone on both operations.
+func TestBuildStartContext_WorktreePerAgentEnvParity(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+
+	createProjectPath := filepath.Join(t.TempDir(), "proj-create")
+	if err := os.MkdirAll(createProjectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	createSC, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:          "agent-create",
+		AgentID:       "agent-create",
+		ProjectID:     "p1",
+		ProjectSlug:   "proj-create",
+		ProjectPath:   createProjectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc},
+		Operation:     opCreate,
+	})
+	if err != nil {
+		t.Fatalf("create buildStartContext failed: %v", err)
+	}
+
+	startProjectPath := filepath.Join(t.TempDir(), "proj-start")
+	if err := os.MkdirAll(startProjectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	startSC, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:          "agent-start",
+		AgentID:       "agent-start",
+		ProjectID:     "p2",
+		ProjectSlug:   "proj-start",
+		ProjectPath:   startProjectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc},
+		Operation:     opHTTPStart,
+	})
+	if err != nil {
+		t.Fatalf("start buildStartContext failed: %v", err)
+	}
+
+	for _, key := range []string{"SCION_WORKSPACE_MODE", "SCION_WORKSPACE_GIT", "SCION_GIT_CLONE_URL"} {
+		createVal, createOK := createSC.Opts.Env[key]
+		startVal, startOK := startSC.Opts.Env[key]
+		if createOK != startOK || createVal != startVal {
+			t.Errorf("%s: create=%q(present=%v) start=%q(present=%v), want identical", key, createVal, createOK, startVal, startOK)
+		}
+	}
+	if _, ok := createSC.Opts.Env["SCION_GIT_CLONE_URL"]; ok {
+		t.Errorf("expected SCION_GIT_CLONE_URL absent for create worktree-per-agent, got %q", createSC.Opts.Env["SCION_GIT_CLONE_URL"])
+	}
+	if createSC.Opts.GitClone != nil {
+		t.Errorf("expected create's in-container GitClone to be suppressed by the worktree path, got %+v", createSC.Opts.GitClone)
+	}
+	if startSC.Opts.GitClone != nil {
+		t.Errorf("expected start's in-container GitClone to be suppressed by the worktree path, got %+v", startSC.Opts.GitClone)
+	}
+}
+
+// TestBuildStartContext_WorktreePerAgentStart_ProvisioningFailureNeverRemovesExistingWorktree
+// covers GoogleCloudPlatform/scion#1931's worktree-reuse path: on a second
+// start (or restart) for an agent whose worktree already exists, a
+// provisioning failure must fail the request and must never touch the
+// existing worktree, since it may hold un-pushed work.
+func TestBuildStartContext_WorktreePerAgentStart_ProvisioningFailureNeverRemovesExistingWorktree(t *testing.T) {
+	requireWorktreeGit(t)
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	in := startContextInputs{
+		Name:          "agent-a",
+		AgentID:       "agent-a",
+		ProjectID:     "p1",
+		ProjectSlug:   "proj",
+		ProjectPath:   projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc},
+		Operation:     opHTTPStart,
+	}
+
+	sc1, err := srv.buildStartContext(context.Background(), in)
+	if err != nil {
+		t.Fatalf("first buildStartContext failed: %v", err)
+	}
+	worktreePath := sc1.Opts.Workspace
+	if worktreePath == "" {
+		t.Fatal("expected a worktree Workspace path to be set")
+	}
+
+	// Simulate un-pushed work in the agent's live worktree.
+	const unpushedContent = "package main // un-pushed change\n"
+	unpushedFile := filepath.Join(worktreePath, "unpushed.go")
+	if err := os.WriteFile(unpushedFile, []byte(unpushedContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt the sharer marker so RegisterSharer's re-registration on the
+	// next call fails: base is two levels above the per-agent worktree
+	// (<base>/worktrees/<agentID>).
+	base := filepath.Dir(filepath.Dir(worktreePath))
+	markerPath := filepath.Join(base, ".git", "scion-sharers", "agent-a.json")
+	if err := os.MkdirAll(filepath.Dir(markerPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(markerPath, []byte("{not valid json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Start again: provisioning must fail (corrupt marker), and the request
+	// itself must fail — no removal, no fallback to an in-container clone.
+	_, err = srv.buildStartContext(context.Background(), in)
+	if err == nil {
+		t.Fatal("expected buildStartContext to fail when provisioning the existing worktree errors")
+	}
+
+	// The client-facing error must be generic: the underlying ProvisionShared
+	// error (which can embed a raw clone URL, e.g. from git's own error text)
+	// is logged server-side only, never returned to the caller.
+	wantErr := `worktree-per-agent: provisioning failed for the existing worktree of agent "agent-a"; the existing workspace was left untouched`
+	if err.Error() != wantErr {
+		t.Errorf("error = %q, want %q", err.Error(), wantErr)
+	}
+
+	// The worktree and its un-pushed file must be untouched.
+	if _, statErr := os.Stat(worktreePath); statErr != nil {
+		t.Errorf("expected the existing worktree to survive the provisioning failure, stat error: %v", statErr)
+	}
+	got, readErr := os.ReadFile(unpushedFile)
+	if readErr != nil {
+		t.Fatalf("un-pushed file must survive a failed re-provision, but reading it failed: %v", readErr)
+	}
+	if string(got) != unpushedContent {
+		t.Errorf("un-pushed file content = %q, want %q", got, unpushedContent)
+	}
+}
+
+// TestBuildStartContext_WorktreePerAgentStart_MissingMarkersFailsInsteadOfSelfHeal
+// is the fault-injection guard for GoogleCloudPlatform/scion#1931: when the
+// provisioning sentinel and the shared base's .git are both missing (as
+// provision.ProvisionShared's own self-heal expects for a first-time
+// provision), but this agent's worktree already exists on disk with
+// un-pushed work, the start must fail with a clear error instead of letting
+// ProvisionShared's gitCloneWorkspace -> removeDirContents wipe the shared
+// base — and everything under it, including this worktree — while still
+// returning success.
+func TestBuildStartContext_WorktreePerAgentStart_MissingMarkersFailsInsteadOfSelfHeal(t *testing.T) {
+	requireWorktreeGit(t)
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	in := startContextInputs{
+		Name:          "agent-a",
+		AgentID:       "agent-a",
+		ProjectID:     "p1",
+		ProjectSlug:   "proj",
+		ProjectPath:   projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc},
+		Operation:     opHTTPStart,
+	}
+
+	sc1, err := srv.buildStartContext(context.Background(), in)
+	if err != nil {
+		t.Fatalf("first buildStartContext failed: %v", err)
+	}
+	worktreePath := sc1.Opts.Workspace
+	if worktreePath == "" {
+		t.Fatal("expected a worktree Workspace path to be set")
+	}
+
+	const unpushedContent = "package main // un-pushed change\n"
+	unpushedFile := filepath.Join(worktreePath, "unpushed.go")
+	if err := os.WriteFile(unpushedFile, []byte(unpushedContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove both markers ProvisionShared checks for "already provisioned":
+	// the sentinel file (in the project root, the parent of the shared
+	// "workspace" dir) and the shared base's own .git.
+	base := filepath.Dir(filepath.Dir(worktreePath)) // .../workspace
+	sentinelPath := filepath.Join(filepath.Dir(base), provision.ProvisionSentinelFile)
+	if err := os.Remove(sentinelPath); err != nil {
+		t.Fatalf("failed to remove sentinel for fault injection: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(base, ".git")); err != nil {
+		t.Fatalf("failed to remove base .git for fault injection: %v", err)
+	}
+
+	// Start again: must fail closed, not self-heal by wiping the base.
+	_, err = srv.buildStartContext(context.Background(), in)
+	if err == nil {
+		t.Fatal("expected buildStartContext to fail when the sentinel and base .git are both missing")
+	}
+
+	// The worktree and its un-pushed file must survive: ProvisionShared's
+	// self-heal (removeDirContents on the shared base) must never have run.
+	if _, statErr := os.Stat(worktreePath); statErr != nil {
+		t.Errorf("expected the existing worktree to survive, stat error: %v", statErr)
+	}
+	got, readErr := os.ReadFile(unpushedFile)
+	if readErr != nil {
+		t.Fatalf("un-pushed file must survive, but reading it failed: %v", readErr)
+	}
+	if string(got) != unpushedContent {
+		t.Errorf("un-pushed file content = %q, want %q", got, unpushedContent)
+	}
+}
+
+// TestBuildStartContext_WorktreePerAgentStart_SingleMissingMarkerFailsClosed
+// pins worktreeBaseIsProvisioned's contract for each marker independently:
+// removing only the sentinel, or only the base's .git, must each alone
+// still fail the start closed. The joint test above (removing both) does
+// not distinguish which check did the work.
+func TestBuildStartContext_WorktreePerAgentStart_SingleMissingMarkerFailsClosed(t *testing.T) {
+	requireWorktreeGit(t)
+
+	for _, tc := range []struct {
+		name           string
+		removeSentinel bool
+		removeGit      bool
+	}{
+		{name: "sentinel only missing", removeSentinel: true},
+		{name: "base .git only missing", removeGit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+
+			bare := initBareRepoWithCommit(t)
+			gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+
+			projectPath := filepath.Join(t.TempDir(), "proj")
+			if err := os.MkdirAll(projectPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			in := startContextInputs{
+				Name:          "agent-a",
+				AgentID:       "agent-a",
+				ProjectID:     "p1",
+				ProjectSlug:   "proj",
+				ProjectPath:   projectPath,
+				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+				Config:        &CreateAgentConfig{GitClone: gc},
+				Operation:     opHTTPStart,
+			}
+
+			sc1, err := srv.buildStartContext(context.Background(), in)
+			if err != nil {
+				t.Fatalf("first buildStartContext failed: %v", err)
+			}
+			worktreePath := sc1.Opts.Workspace
+			if worktreePath == "" {
+				t.Fatal("expected a worktree Workspace path to be set")
+			}
+
+			const unpushedContent = "package main // un-pushed change\n"
+			unpushedFile := filepath.Join(worktreePath, "unpushed.go")
+			if err := os.WriteFile(unpushedFile, []byte(unpushedContent), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			base := filepath.Dir(filepath.Dir(worktreePath)) // .../workspace
+			if tc.removeSentinel {
+				sentinelPath := filepath.Join(filepath.Dir(base), provision.ProvisionSentinelFile)
+				if err := os.Remove(sentinelPath); err != nil {
+					t.Fatalf("failed to remove sentinel for fault injection: %v", err)
+				}
+			}
+			if tc.removeGit {
+				if err := os.RemoveAll(filepath.Join(base, ".git")); err != nil {
+					t.Fatalf("failed to remove base .git for fault injection: %v", err)
+				}
+			}
+
+			_, err = srv.buildStartContext(context.Background(), in)
+			if err == nil {
+				t.Fatalf("expected buildStartContext to fail when %s", tc.name)
+			}
+
+			if _, statErr := os.Stat(worktreePath); statErr != nil {
+				t.Errorf("expected the existing worktree to survive, stat error: %v", statErr)
+			}
+			got, readErr := os.ReadFile(unpushedFile)
+			if readErr != nil {
+				t.Fatalf("un-pushed file must survive, but reading it failed: %v", readErr)
+			}
+			if string(got) != unpushedContent {
+				t.Errorf("un-pushed file content = %q, want %q", got, unpushedContent)
+			}
+		})
+	}
+}
+
+// TestBuildStartContext_WorktreePerAgentCreate_ProvisioningFailureCleansUpPartial
+// proves create's own partial-worktree cleanup on a provisioning failure is
+// unchanged: when the agent's worktree does not exist yet (a fresh create),
+// a failure still removes only what this call created.
+func TestBuildStartContext_WorktreePerAgentCreate_ProvisioningFailureCleansUpPartial(t *testing.T) {
+	requireWorktreeGit(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions, so the read-only sharer dir fault injection below never fails")
+	}
+
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Force RegisterSharer to fail on this agent's very first provision, by
+	// pre-creating a plain file where the scion-sharers directory must go.
+	// The shared base clone doesn't exist yet, so create it via the resolve
+	// path first: run the same resolution buildStartContext uses.
+	resolved, err := runtime.NewLocalBackend().Resolve(runtime.ResolveInput{
+		ProjectDir: projectPath, ProjectID: "p1", AgentID: "agent-a",
+		Mode: store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	base := resolved.HostPath
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(base, ".git")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Clone the shared base ourselves so we control it before provisioning.
+	cloneCmd := exec.Command("git", "clone", bare, base)
+	if out, cloneErr := cloneCmd.CombinedOutput(); cloneErr != nil {
+		t.Fatalf("git clone: %v: %s", cloneErr, out)
+	}
+	// Pre-create the marker directory read-only, so ListSharers (a read of a
+	// not-yet-existing file, which is not an error) still lets git worktree
+	// add succeed, but the subsequent RegisterSharer's write into this same
+	// directory fails — reproducing a failure that happens only after this
+	// call has already created the worktree on disk.
+	sharerDir := filepath.Join(base, ".git", "scion-sharers")
+	if err := os.MkdirAll(sharerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sharerDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sharerDir, 0o755) })
+
+	in := startContextInputs{
+		Name:          "agent-a",
+		AgentID:       "agent-a",
+		ProjectID:     "p1",
+		ProjectSlug:   "proj",
+		ProjectPath:   projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc},
+		Operation:     opCreate,
+	}
+
+	sc, err := srv.buildStartContext(context.Background(), in)
+	// The worktree provisioning failure falls back to clone-per-agent (a
+	// fresh agent has no existing worktree to protect), so the overall
+	// request still succeeds — it is not the same failure mode as the
+	// existing-worktree case above.
+	if err != nil {
+		t.Fatalf("buildStartContext should fall back to clone-per-agent, not fail outright: %v", err)
+	}
+	if sc.Opts.GitClone == nil {
+		t.Error("expected fallback to in-container clone mode (GitClone set) when worktree provisioning fails on a fresh create")
+	}
+
+	// This call's own partial worktree must have been cleaned up.
+	worktreePath := filepath.Join(base, "worktrees", "agent-a")
+	if _, statErr := os.Stat(worktreePath); !os.IsNotExist(statErr) {
+		t.Errorf("expected the partial worktree created by this call to be cleaned up, stat error: %v", statErr)
 	}
 }
 

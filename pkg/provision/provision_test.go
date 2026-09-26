@@ -585,6 +585,132 @@ func TestProvision_WorktreePerAgent_FullCloneDepth(t *testing.T) {
 	}
 }
 
+// TestProvision_SelfHealRefusesWhenSiblingWorktreePresent proves the
+// self-heal path in gitCloneWorkspace (reached when the provisioning
+// sentinel and the base's own .git are both missing) refuses to clear the
+// shared base when a "worktrees" subdirectory already holds another
+// agent's checkout, instead of silently wiping it.
+func TestProvision_SelfHealRefusesWhenSiblingWorktreePresent(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// Provision agent-1 normally: creates the shared base plus agent-1's worktree.
+	if err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-selfheal-1",
+		AgentID:   "agent-1",
+		AgentName: "agent-1",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
+	}); err != nil {
+		t.Fatalf("initial provision: %v", err)
+	}
+
+	agent1Worktree := WorktreePath(hostPath, "agent-1")
+	sentinelFile := filepath.Join(agent1Worktree, "sentinel.go")
+	if err := os.WriteFile(sentinelFile, []byte("package main // must survive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate corruption: both the provisioning sentinel and the base's
+	// own .git go missing, but agent-1's worktree under worktrees/ is
+	// still there.
+	if err := os.Remove(filepath.Join(projectDir, ProvisionSentinelFile)); err != nil {
+		t.Fatalf("remove sentinel: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(hostPath, ".git")); err != nil {
+		t.Fatalf("remove base .git: %v", err)
+	}
+
+	// Provision agent-2 against the same shared base: ProvisionShared sees
+	// the sentinel is gone, tries to clone into hostPath, finds it
+	// non-empty (worktrees/agent-1 is there) with no .git, and must refuse
+	// to self-heal by clearing it rather than wiping agent-1's worktree.
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-selfheal-1",
+		AgentID:   "agent-2",
+		AgentName: "agent-2",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
+	})
+	if err == nil {
+		t.Fatal("expected ProvisionShared to fail rather than clear a base with a sibling worktree present")
+	}
+
+	if _, statErr := os.Stat(agent1Worktree); statErr != nil {
+		t.Errorf("agent-1's worktree must survive, stat error: %v", statErr)
+	}
+	got, readErr := os.ReadFile(sentinelFile)
+	if readErr != nil {
+		t.Fatalf("agent-1's file must survive, but reading it failed: %v", readErr)
+	}
+	if string(got) != "package main // must survive\n" {
+		t.Errorf("sentinel file content changed: %q", got)
+	}
+}
+
+// TestProvision_SelfHealRefusesWhenWorktreesCheckErrors proves the self-heal
+// guard fails closed, rather than silently proceeding, when it cannot even
+// determine whether "worktrees" holds anything — for example because
+// "worktrees" itself is a regular file rather than a directory, which makes
+// the check's own directory read return an error rather than "not found".
+func TestProvision_SelfHealRefusesWhenWorktreesCheckErrors(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// A non-empty, un-provisioned workspace dir (no sentinel, no .git): the
+	// clone attempt inside ProvisionShared fails with "not an empty
+	// directory", reaching the self-heal check.
+	if err := os.MkdirAll(hostPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	preExistingFile := filepath.Join(hostPath, "pre-existing.txt")
+	if err := os.WriteFile(preExistingFile, []byte("must survive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// "worktrees" is a plain file, not a directory: the self-heal check's
+	// own os.ReadDir on it fails with an error other than "not exist".
+	worktreesAsFile := filepath.Join(hostPath, "worktrees")
+	if err := os.WriteFile(worktreesAsFile, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-selfheal-2",
+		AgentID:   "agent-1",
+		AgentName: "agent-1",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
+	})
+	if err == nil {
+		t.Fatal("expected ProvisionShared to fail rather than clear a base whose worktrees entry cannot be checked")
+	}
+
+	got, readErr := os.ReadFile(preExistingFile)
+	if readErr != nil {
+		t.Fatalf("pre-existing file must survive, but reading it failed: %v", readErr)
+	}
+	if string(got) != "must survive" {
+		t.Errorf("pre-existing file content changed: %q", got)
+	}
+	if fi, statErr := os.Stat(worktreesAsFile); statErr != nil || fi.IsDir() {
+		t.Errorf("expected worktreesAsFile to survive unchanged as a plain file, stat: %+v, err: %v", fi, statErr)
+	}
+}
+
 // --- WorktreePath ---
 
 func TestWorktreePath(t *testing.T) {
@@ -593,6 +719,93 @@ func TestWorktreePath(t *testing.T) {
 	if got != want {
 		t.Errorf("WorktreePath() = %q, want %q", got, want)
 	}
+}
+
+// --- IsRealWorktreeDir ---
+
+func TestIsRealWorktreeDir(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	base := filepath.Join(projectDir, "workspace")
+	if err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: base, Backend: "local"},
+		ProjectID: "proj-real-wt-1",
+		AgentID:   "agent-1",
+		AgentName: "agent-1",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main"},
+	}); err != nil {
+		t.Fatalf("initial provision: %v", err)
+	}
+	realWorktree := WorktreePath(base, "agent-1")
+
+	t.Run("a real worktree", func(t *testing.T) {
+		if !IsRealWorktreeDir(realWorktree, base) {
+			t.Error("expected the freshly created worktree to be recognized as real")
+		}
+	})
+
+	t.Run("a plain file", func(t *testing.T) {
+		p := filepath.Join(base, "worktrees", "not-a-dir")
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if IsRealWorktreeDir(p, base) {
+			t.Error("expected a plain file to be rejected")
+		}
+	})
+
+	t.Run("a symlink to a directory", func(t *testing.T) {
+		target := t.TempDir()
+		p := filepath.Join(base, "worktrees", "a-symlink")
+		if err := os.Symlink(target, p); err != nil {
+			t.Fatal(err)
+		}
+		if IsRealWorktreeDir(p, base) {
+			t.Error("expected a symlink to be rejected even when it points at a directory")
+		}
+	})
+
+	t.Run("a directory with no .git at all", func(t *testing.T) {
+		p := filepath.Join(base, "worktrees", "no-git")
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if IsRealWorktreeDir(p, base) {
+			t.Error("expected a directory with no .git to be rejected")
+		}
+	})
+
+	t.Run("a directory whose .git is itself a directory", func(t *testing.T) {
+		p := filepath.Join(base, "worktrees", "git-is-a-dir")
+		if err := os.MkdirAll(filepath.Join(p, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if IsRealWorktreeDir(p, base) {
+			t.Error("expected a directory whose .git is a directory (a full clone, not a worktree) to be rejected")
+		}
+	})
+
+	t.Run("a .git file pointing outside this base's admin directory", func(t *testing.T) {
+		p := filepath.Join(base, "worktrees", "foreign-gitfile")
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		outsideAdminDir := filepath.Join(t.TempDir(), ".git", "worktrees", "elsewhere")
+		if err := os.MkdirAll(outsideAdminDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p, ".git"), []byte("gitdir: "+outsideAdminDir+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if IsRealWorktreeDir(p, base) {
+			t.Error("expected a .git file pointing outside this base's admin directory to be rejected")
+		}
+	})
 }
 
 // --- Create-or-Attach + Sharer Registration ---
