@@ -520,11 +520,21 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
 
 	// Build the remote create request
+	//
+	// Name carries agent.Slug, not agent.Name: the broker's create/replay
+	// path (handlers.go's createAgent, and everything downstream of it,
+	// including GetAgentDir) addresses the agent's on-disk directory using
+	// this Name field directly, exactly like the Slug that start, stop,
+	// restart and delete already send. Slug is immutable post-create and is
+	// validated at creation time; Name is a PATCHable display field (see
+	// applyAgentUpdate) that must never reach a path computation on its own,
+	// including for a row whose Name and Slug already diverged before that
+	// PATCH validation existed.
 	req := &RemoteCreateAgentRequest{
 		RequestID:     api.NewUUID(),
 		ID:            agent.ID,
 		Slug:          agent.Slug,
-		Name:          agent.Name,
+		Name:          agent.Slug,
 		ProjectID:     agent.ProjectID,
 		UserID:        agent.OwnerID,
 		HubEndpoint:   d.effectiveAgentHubEndpoint(),
