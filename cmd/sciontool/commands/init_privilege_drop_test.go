@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -902,4 +903,49 @@ func TestDirectSetUIDAt_PasswdEntryNoMatchingGroupLine_GroupIsBestEffort(t *test
 // is faked.
 func wrapPasswdEntryNotRewritten(err error) error {
 	return fmt.Errorf("/etc/group: %w", err)
+}
+
+// TestRunInit_Enforced_RootGIDFromSetupHostUser_FailsClosed pins RunInit's
+// only production call to requirePrivilegeDropOrFail (in RunInit itself): it
+// must forward setupHostUser's real targetUID and targetGID, unchanged, not
+// a swapped argument or a hardcoded value. Each pair below fails the gate's
+// UID>0 && GID>0 predicate for a different reason (a root GID, or a negative
+// UID/GID), so a call site that substitutes the wrong value, or a predicate
+// that only checks for a zero UID/GID instead of a non-positive one, lets at
+// least one of them through.
+func TestRunInit_Enforced_RootGIDFromSetupHostUser_FailsClosed(t *testing.T) {
+	for _, pair := range [][2]int{{1000, 0}, {1000, -1}, {-1, 1000}} {
+		scrubHubEnv(t)
+		t.Setenv("HOME", t.TempDir())
+		orig := runSetupHostUser
+		uid, gid := pair[0], pair[1]
+		runSetupHostUser = func(bool) (int, int, bool) { return uid, gid, false }
+		got := RunInit([]string{"true"}, InitRunOptions{ForwardTermSignal: false, RequirePrivilegeDrop: true})
+		runSetupHostUser = orig
+		if got != exitCodePrivilegeDropRequired {
+			t.Errorf("setupHostUser=(%d,%d): RunInit() = %d, want exitCodePrivilegeDropRequired (%d)", uid, gid, got, exitCodePrivilegeDropRequired)
+		}
+	}
+}
+
+// TestSeamDefaultsAreRealFunctions pins that every test-only seam RunInit's
+// setup path exposes (see runAdjustScionUser, runChownTreeRootOwned,
+// setupHostUserHasCapSetUID and setupHostUserIsUIDMapped's doc comments)
+// still defaults to the real function it wraps. A default that silently
+// became a stub would skip the checks or side effects those functions
+// perform in production, while every test — which only ever reassigns the
+// var for the duration of its own run, never inspects its starting value —
+// would keep passing.
+func TestSeamDefaultsAreRealFunctions(t *testing.T) {
+	ptr := func(f any) uintptr { return reflect.ValueOf(f).Pointer() }
+	for name, pair := range map[string][2]any{
+		"runAdjustScionUser":        {runAdjustScionUser, adjustScionUser},
+		"runChownTreeRootOwned":     {runChownTreeRootOwned, chownTreeRootOwned},
+		"setupHostUserHasCapSetUID": {setupHostUserHasCapSetUID, hasCapSetUID},
+		"setupHostUserIsUIDMapped":  {setupHostUserIsUIDMapped, isUIDMapped},
+	} {
+		if ptr(pair[0]) != ptr(pair[1]) {
+			t.Errorf("%s default is not the real function", name)
+		}
+	}
 }
