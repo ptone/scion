@@ -455,6 +455,31 @@ func reportInitFailure(agentHome string, cause error) {
 	}
 }
 
+// resolveProjectHookPath returns the path RunInit checks to decide whether a
+// project pre-start hook was staged (30-project-custom) and so must abort
+// startup on failure. Extracted as its own pure function of agentHome and
+// requirePrivilegeDrop — rather than left inline — so this join between
+// InitRunOptions.RequirePrivilegeDrop and where bootstrap actually delivers
+// the file can be pinned by a table-driven unit test without invoking
+// RunInit itself (which, under RequirePrivilegeDrop: true, cannot reach this
+// far in a test environment lacking a real CAP_SETUID/CAP_SETGID privilege
+// drop — see requirePrivilegeDropOrFail).
+//
+// In privilege-drop-enforced mode, substrate-serve's bootstrap handler
+// redirects everything under $HOME/.scion/hooks/ to the root-owned
+// hooks.EnforcedHooksDir instead of chowning it to the workload like the
+// rest of the composed home (pkg/sciontool/substrate's writeBootstrapFile) —
+// see the LifecycleManager registration a few lines above this function's
+// call site — so the staged file, if any, lives there instead of under
+// agentHome.
+func resolveProjectHookPath(agentHome string, requirePrivilegeDrop bool) string {
+	dir := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d")
+	if requirePrivilegeDrop {
+		dir = filepath.Join(hooks.EnforcedHooksDir, "pre-start.d")
+	}
+	return filepath.Join(dir, "30-project-custom")
+}
+
 // harnessSupervisorConfig builds the supervisor.Config for the harness
 // child process from RunInit's inputs. It is a pure function of its
 // arguments — it reads no globals and has no side effects — so the join
@@ -619,9 +644,37 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Initialize lifecycle hooks manager
 	lifecycleManager := hooks.NewLifecycleManager()
 	lifecycleManager.AgentHome = agentHome
+	// Privilege-drop-enforced mode (substrate-serve only — see
+	// InitRunOptions.RequirePrivilegeDrop) makes hook script execution a
+	// function of each script's own fstat'd ownership (DecideExecAsRoot)
+	// instead of always running as the calling process's credentials. This
+	// is the same targetUID/targetGID setupHostUser resolved for the
+	// harness child process itself, and "scion" is the same literal
+	// harnessSupervisorConfig passes as supervisor.Config.Username.
+	lifecycleManager.EnforcePrivilegeDrop = opts.RequirePrivilegeDrop
+	lifecycleManager.WorkloadUID = targetUID
+	lifecycleManager.WorkloadGID = targetGID
+	lifecycleManager.WorkloadUsername = "scion"
+	if opts.RequirePrivilegeDrop {
+		// The dedicated, root-owned directory substrate-serve's bootstrap
+		// handler redirects broker-delivered $HOME/.scion/hooks/ content
+		// into (pkg/sciontool/substrate's writeBootstrapFile), instead of
+		// chowning it to the workload like the rest of the composed home.
+		// Registered before $HOME/.scion/hooks below so trusted,
+		// broker-delivered content still runs before anything staged
+		// per-agent, matching the system-then-per-agent ordering
+		// AddHooksDir's own doc comment describes.
+		lifecycleManager.AddHooksDir(hooks.EnforcedHooksDir)
+	}
 	// Register the per-agent hooks directory so container-script harnesses
 	// (whose pre-start wrapper is staged at $HOME/.scion/hooks/pre-start.d/)
-	// participate in the standard hook discovery alongside system hooks.
+	// participate in the standard hook discovery alongside system hooks. In
+	// enforced mode this directory no longer carries broker-delivered
+	// content (redirected above), but stays registered and subject to the
+	// same ownership check: anything the workload itself later plants here
+	// (e.g. a session-end script) is workload-owned by construction — the
+	// home directory chown (supervisor.Supervisor.Run) — and so always
+	// runs dropped, never as root.
 	lifecycleManager.AddHooksDir(filepath.Join(agentHome, ".scion", "hooks"))
 
 	// Register status and logging handlers for lifecycle events
@@ -679,7 +732,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Detect whether a project pre-start hook was staged by the broker.
 	// The presence of this file means the operator explicitly configured a hook
 	// and startup should be aborted if it fails (abort-on-failure policy).
-	projectHookPath := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d", "30-project-custom")
+	projectHookPath := resolveProjectHookPath(agentHome, opts.RequirePrivilegeDrop)
 	_, projectHookStatErr := os.Stat(projectHookPath)
 	projectHookStaged := projectHookStatErr == nil
 
@@ -771,6 +824,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 		opts.WorkingDir = workingDir
 	}
+	// Mirror the harness child's own resolved cwd into the lifecycle
+	// manager now that it is final, so a dropped post-start/pre-stop/
+	// session-end hook (executeScriptEnforced) gets the same cwd the
+	// harness process itself runs in — "env and cwd handled the same way as
+	// the harness process". A pre-start hook runs before this line, so a
+	// dropped pre-start hook's cwd is whatever init's own cwd already is,
+	// same as this field's zero-value contract.
+	lifecycleManager.WorkloadWorkingDir = opts.WorkingDir
 
 	// Load the env overlay produced by the pre-start provisioner. Resolve
 	// any from_file references to in-memory values so secrets are not
