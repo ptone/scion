@@ -818,6 +818,47 @@ func TestWriteEnvFile_ReflectsUpdatedGitHubToken(t *testing.T) {
 	}
 }
 
+// TestWriteEnvFile_RefusesSymlinkAtFinalPath proves writeEnvFile no longer
+// writes through a plain os.WriteFile+os.Rename: a workload that has
+// replaced $HOME/.scion/scion-env with a symlink must have the write
+// refused, with the symlink's target left untouched, instead of root
+// following it.
+func TestWriteEnvFile_RefusesSymlinkAtFinalPath(t *testing.T) {
+	tmpHome := t.TempDir()
+	scionDir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatalf("mkdir .scion: %v", err)
+	}
+
+	victim := filepath.Join(scionDir, "victim")
+	if err := os.WriteFile(victim, []byte("do-not-touch"), 0600); err != nil {
+		t.Fatalf("write victim: %v", err)
+	}
+	envPath := filepath.Join(scionDir, "scion-env")
+	if err := os.Symlink(victim, envPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+	writeEnvFile(tmpHome, 0, 0)
+
+	data, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(data) != "do-not-touch" {
+		t.Errorf("symlink target was modified: %q", data)
+	}
+
+	linkInfo, err := os.Lstat(envPath)
+	if err != nil {
+		t.Fatalf("lstat scion-env: %v", err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink at the final path should be untouched")
+	}
+}
+
 func TestGitCloneWorkspace_DefaultEnvValues(t *testing.T) {
 	// Set SCION_GIT_CLONE_URL to trigger the clone path, but use a URL
 	// that will cause a predictable early failure (non-existent host).
