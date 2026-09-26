@@ -445,3 +445,47 @@ func ownerUIDOf(info fs.FileInfo) (uid uint32, ok bool) {
 	}
 	return stat.Uid, true
 }
+
+// TestFixupRootfsForScion_Enforced_RefusesAncestorSymlink is T4(a)'s core
+// regression test: fixupRootfsForScion is reachable only from substrate-
+// serve (fixupRootfsForScionUser -> startupRootfsFixup/bootstrapRootfsFixup
+// in substrate_serve.go), so its own chownTreeRootOwned call is hardcoded
+// to enforced (true) — see that call site's own comment. This proves that
+// hardcoding actually matters: an ancestor-path symlink of home must be
+// refused (nothing chowned through it), which only holds if the enforced,
+// no-follow branch is really the one running.
+func TestFixupRootfsForScion_Enforced_RefusesAncestorSymlink(t *testing.T) {
+	origFilter := chownTreeRootOwnedFilter
+	t.Cleanup(func() { chownTreeRootOwnedFilter = origFilter })
+	chownTreeRootOwnedFilter = func(uint32) bool { return true }
+
+	real := t.TempDir()
+	actual := filepath.Join(real, "actual")
+	if err := os.Mkdir(actual, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(actual, "marker")
+	if err := os.WriteFile(marker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	homeLink := filepath.Join(parent, "home-link")
+	if err := os.Symlink(real, homeLink); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(homeLink, "actual")
+
+	markerBefore := ctimeOfFile(t, marker)
+	time.Sleep(15 * time.Millisecond)
+
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fixupRootfsForScion(root, home, os.Getuid(), os.Getgid())
+
+	markerAfter := ctimeOfFile(t, marker)
+	if markerAfter != markerBefore {
+		t.Error("marker's ctime advanced: the ancestor symlink was followed and chowned through — fixupRootfsForScion is not really enforced")
+	}
+}
