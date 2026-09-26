@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 )
 
@@ -1945,5 +1946,33 @@ func TestReadServicesYAML_Enforced_MissingFileIsQuietError(t *testing.T) {
 
 	if _, err := readServicesYAML(servicesPath, true); err == nil {
 		t.Fatal("expected an error for a missing file")
+	}
+}
+
+// TestValidateServiceSpecs_DropsInvalidNamesKeepsValidOnes proves the
+// authoritative parse-time gate: an invalid Name is dropped from the list
+// (logged, never a raw workload-chosen string), while every valid entry —
+// regardless of position — passes through unchanged.
+func TestValidateServiceSpecs_DropsInvalidNamesKeepsValidOnes(t *testing.T) {
+	specs := []api.ServiceSpec{
+		{Name: "chrome", Command: []string{"true"}},
+		{Name: "../escape", Command: []string{"true"}},
+		{Name: "vnc", Command: []string{"true"}},
+	}
+
+	got := validateServiceSpecs(specs)
+
+	var names []string
+	for _, s := range got {
+		names = append(names, s.Name)
+	}
+	want := []string{"chrome", "vnc"}
+	if len(names) != len(want) {
+		t.Fatalf("validateServiceSpecs() = %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Errorf("validateServiceSpecs()[%d] = %q, want %q", i, names[i], want[i])
+		}
 	}
 }
