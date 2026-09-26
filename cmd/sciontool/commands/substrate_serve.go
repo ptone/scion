@@ -76,29 +76,16 @@ func init() {
 		"Address to listen on (the router targets :80 by default; overridable for tests)")
 }
 
-// exitCodeNoUsableHarnessCwd is returned by substrate-serve's InitRunner
-// wiring (never by RunInit itself) when resolveSubstrateHarnessCwd could not
-// find any directory usable by the scion uid — see its doc comment. Kept
-// distinct from a plain 1 for the same reason as
-// exitCodePrivilegeDropRequired: so an operator reading the logged exit code
-// can tell which failure this was.
-const exitCodeNoUsableHarnessCwd = 18
-
 // substrateServeInitOptions returns the InitRunOptions substrate-serve's
-// InitRunner passes to RunInit for one child invocation, or an error when
-// resolveSubstrateHarnessCwd found no directory usable by the scion uid at
-// all — the caller must fail the harness start rather than invoke RunInit
-// with an empty/unusable WorkingDir (Go chdirs after the privilege drop, so
-// an unset cmd.Dir inherits this process's own cwd, "/").
-func substrateServeInitOptions(forwardTermSignal bool) (InitRunOptions, error) {
-	workingDir, err := resolveSubstrateHarnessCwd(defaultSubstrateHarnessCwdDeps)
-	if err != nil {
-		return InitRunOptions{}, err
-	}
-	// One line per start, quoting only the path: a later chdir failure
-	// (e.g. a TOCTOU race) surfaces as a bare "permission denied" that
-	// doesn't name the directory, so this is what makes that diagnosable.
-	log.Info("substrate-serve: harness working directory %q", workingDir)
+// InitRunner passes to RunInit for one child invocation. Unlike a plain
+// static WorkingDir, ResolveWorkingDir defers resolution to RunInit itself,
+// which calls it only after the workspace has actually been prepared (see
+// InitRunOptions.ResolveWorkingDir's doc comment) — calling
+// resolveSubstrateHarnessCwd here instead, before RunInit ever runs, would
+// see the workspace in whatever state the broker's bind mount left it in,
+// not the state gitCloneWorkspace and the pre-start-hook ownership fixup
+// leave it in.
+func substrateServeInitOptions(forwardTermSignal bool) InitRunOptions {
 	return InitRunOptions{
 		ForwardTermSignal: forwardTermSignal,
 		// RequirePrivilegeDrop: true — substrate always starts the actor as
@@ -106,8 +93,28 @@ func substrateServeInitOptions(forwardTermSignal bool) (InitRunOptions, error) {
 		// root," never a legitimate rootless outcome (see
 		// InitRunOptions.RequirePrivilegeDrop).
 		RequirePrivilegeDrop: true,
-		WorkingDir:           workingDir,
-	}, nil
+		ResolveWorkingDir:    substrateResolveHarnessWorkingDir,
+	}
+}
+
+// substrateResolveHarnessWorkingDir is the InitRunOptions.ResolveWorkingDir
+// RunInit calls for a substrate-serve-driven init run. It resolves against
+// the real process environment, filesystem, and "scion" user
+// (defaultSubstrateHarnessCwdDeps) — never a test's fakes, since production
+// always reaches this function through substrateServeInitOptions above.
+func substrateResolveHarnessWorkingDir() (string, error) {
+	workingDir, err := resolveSubstrateHarnessCwd(defaultSubstrateHarnessCwdDeps)
+	if err != nil {
+		return "", err
+	}
+	// One line per start, quoting only the path: a later chdir failure
+	// (e.g. a TOCTOU race) surfaces as a bare "permission denied" that
+	// doesn't name the directory, so this is what makes that diagnosable.
+	// Emitted here, at resolution time (after RunInit has prepared the
+	// workspace), rather than when substrateServeInitOptions builds the
+	// InitRunOptions — the value logged is the one actually resolved.
+	log.Info("substrate-serve: harness working directory %q", workingDir)
+	return workingDir, nil
 }
 
 // substrateHarnessCwdDeps groups resolveSubstrateHarnessCwd's external
@@ -140,7 +147,12 @@ var defaultSubstrateHarnessCwdDeps = substrateHarnessCwdDeps{
 // harness child (and, via tmux's own cwd inheritance, its tmux session too —
 // see the "agent"/"shell" window reasoning in the project log) should start
 // in, mirroring the image's WORKDIR that ateom does not apply under
-// Substrate (see InitRunOptions.WorkingDir).
+// Substrate (see InitRunOptions.WorkingDir). Called via
+// substrateResolveHarnessWorkingDir, RunInit's InitRunOptions.ResolveWorkingDir
+// hook for a substrate-serve-driven run — which RunInit invokes only after
+// the workspace has been cloned (see that field's doc comment, init.go) —
+// so SCION_WORKSPACE_PATH below is checked in the state the clone leaves it
+// in, not the state the broker's bind mount left it in beforehand.
 //
 // supervisor.Run's chdir happens via SysProcAttr.Credential AFTER the
 // privilege drop to the scion uid/gid, not before, so a candidate that a
@@ -307,33 +319,6 @@ func dirsSearchable(d substrateHarnessCwdDeps, dirs []string, uid, gid uint32) (
 	return true, ""
 }
 
-// substrateServeReportCwdFailure reports the no-usable-harness-cwd (exit-18)
-// failure to the Hub the same way requirePrivilegeDropOrFail's failure does
-// in RunInit (init.go): a best-effort direct Hub call plus local agent-info
-// state, via the shared reportInitFailure helper. Without this, the Hub is
-// never told the agent failed on this path, since it returns before
-// RunInit — and hence before RunInit's own reportInitFailure calls — ever
-// runs; only the actor log and healthz's StateInitFailed would show it. See
-// reportInitFailure's doc comment for why the direct Hub call is the
-// primary signal on substrate specifically. cause is always
-// resolveSubstrateHarnessCwd's own paths+uid-only error, never one built
-// from raw input, so it's safe to surface verbatim per reportInitFailure's
-// contract.
-//
-// agentHome (where the local agent-info.json write lands) mirrors
-// resolveAgentHome's own rootless fallback: the scion user's home when it
-// can be looked up, else $HOME. Substrate always runs this path as root
-// before any privilege drop, so — unlike the harness child itself — this
-// process can typically still write there even when resolveSubstrateHarnessCwd
-// judged the same directory unusable for the dropped-privilege child.
-func substrateServeReportCwdFailure(d substrateHarnessCwdDeps, cause error) {
-	agentHome := os.Getenv("HOME")
-	if scionUser, err := d.lookupUser("scion"); err == nil {
-		agentHome = scionUser.HomeDir
-	}
-	reportInitFailure(agentHome, cause)
-}
-
 // substrateServePrivilegeDropChecker is the substrate.PrivilegeDropChecker
 // substrate-serve wires into its Server (see checkPrivilegeDropFeasible's
 // doc comment for what it actually checks).
@@ -366,35 +351,24 @@ var startupRootfsFixup = fixupRootfsForScionUser
 // touching a real rootfs.
 var bootstrapRootfsFixup = fixupRootfsForScionUser
 
-// substrateServeInitRunner builds the substrate.InitRunner that resolves the
-// harness working directory and then delegates to runInit. Extracted from
-// newSubstrateServeServer so a test can drive it directly — including the
-// no-usable-cwd path, which must return exitCodeNoUsableHarnessCwd rather
-// than delegate to runInit at all — without standing up a Server.
+// substrateServeInitRunner builds the substrate.InitRunner that delegates to
+// runInit, passing along the InitRunOptions substrateServeInitOptions built
+// (including its ResolveWorkingDir closure). Extracted from
+// newSubstrateServeServer so a test can drive it directly without standing
+// up a Server.
 //
-// The init runner's own exit code is deliberately not acted on here beyond
-// what WithInitRunner's caller (handleBootstrap) already does (log it,
-// flip healthz to StateInitFailed) — substrate-serve does not exit the
-// process on a non-zero init. See StateInitFailed's doc comment for why:
-// Substrate does not observe a PID 1 exit as a failure signal at all, so
-// exiting would only lose the control server (and exec-based diagnosis)
-// for no compensating benefit.
+// Unlike before this fix, this wrapper never resolves the harness working
+// directory itself and never short-circuits runInit: it always delegates,
+// and it is RunInit — after preparing the workspace — that calls
+// ResolveWorkingDir and fails closed with exitCodeNoUsableHarnessCwd (never
+// invoking the harness) if that errors. See
+// InitRunOptions.ResolveWorkingDir's doc comment (init.go) for why that
+// placement matters and StateInitFailed's doc comment (pkg/sciontool/
+// substrate) for why RunInit's own exit code is not otherwise acted on
+// here: substrate-serve does not exit the process on a non-zero init.
 func substrateServeInitRunner(runInit func(argv []string, opts InitRunOptions) int) substrate.InitRunner {
 	return func(argv []string, forwardTermSignal bool) int {
-		opts, err := substrateServeInitOptions(forwardTermSignal)
-		if err != nil {
-			// Fail the harness start (see resolveSubstrateHarnessCwd's
-			// doc comment): never invoke runInit with no usable
-			// WorkingDir. Logged in full (paths + uid only, no
-			// secrets); the exit code alone flips healthz to
-			// StateInitFailed the same way any other init failure does,
-			// and substrateServeReportCwdFailure gives the Hub the same
-			// direct report RunInit's own failure paths would.
-			log.Error("substrate-serve: %v", err)
-			substrateServeReportCwdFailure(defaultSubstrateHarnessCwdDeps, err)
-			return exitCodeNoUsableHarnessCwd
-		}
-		return runInit(argv, opts)
+		return runInit(argv, substrateServeInitOptions(forwardTermSignal))
 	}
 }
 

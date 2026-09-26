@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 )
 
@@ -887,70 +886,6 @@ func TestResolveSubstrateHarnessCwd_BothUnusable_ReturnsErrorNamingPathsAndUID(t
 	}
 }
 
-// -----------------------------------------------------------------------
-// substrateServeReportCwdFailure (the exit-18 Hub report Optional).
-// -----------------------------------------------------------------------
-
-// TestSubstrateServeReportCwdFailure_WritesPhaseErrorAndMessage proves the
-// no-usable-harness-cwd path reports to local agent-info state the same way
-// reportInitFailure's other callers do (see
-// TestReportInitFailure_WritesPhaseErrorAndMessage), driven directly
-// against a fake lookupUser and a temp directory rather than through the
-// real resolveSubstrateHarnessCwd/newSubstrateServeServer wiring — that
-// wiring is covered separately by
-// TestSubstrateServeBootstrap_NoUsableHarnessCwd_ReportsInitFailureToLocalState.
-func TestSubstrateServeReportCwdFailure_WritesPhaseErrorAndMessage(t *testing.T) {
-	scrubHubEnv(t)
-	tmpHome := t.TempDir()
-	cause := fmt.Errorf("substrate: no usable harness working directory for uid 1000: tried %q (missing), %q (missing)", "/workspace", "/home/scion")
-
-	substrateServeReportCwdFailure(substrateHarnessCwdDeps{
-		lookupUser: func(string) (*user.User, error) {
-			return &user.User{HomeDir: tmpHome}, nil
-		},
-	}, cause)
-
-	raw, err := os.ReadFile(filepath.Join(tmpHome, "agent-info.json"))
-	if err != nil {
-		t.Fatalf("expected agent-info.json to be written: %v", err)
-	}
-	var info struct {
-		Phase  string `json:"phase"`
-		Detail struct {
-			Message string `json:"message"`
-		} `json:"detail"`
-	}
-	if err := json.Unmarshal(raw, &info); err != nil {
-		t.Fatalf("unmarshal agent-info.json %q: %v", raw, err)
-	}
-	if info.Phase != string(state.PhaseError) {
-		t.Errorf("agent-info.json phase = %q, want %q", info.Phase, state.PhaseError)
-	}
-	if info.Detail.Message != cause.Error() {
-		t.Errorf("agent-info.json detail.message = %q, want %q", info.Detail.Message, cause.Error())
-	}
-}
-
-// TestSubstrateServeReportCwdFailure_FallsBackToHOMEWhenScionUserLookupFails
-// covers substrateServeReportCwdFailure's own fallback: if the "scion" user
-// can't be looked up either, the local report still has to land somewhere,
-// so it falls back to $HOME — mirroring resolveAgentHome's own rootless
-// fallback (init.go) — rather than losing the report entirely.
-func TestSubstrateServeReportCwdFailure_FallsBackToHOMEWhenScionUserLookupFails(t *testing.T) {
-	scrubHubEnv(t)
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	cause := fmt.Errorf("substrate: cannot resolve the scion user for the harness working directory: user: unknown user scion")
-
-	substrateServeReportCwdFailure(substrateHarnessCwdDeps{
-		lookupUser: func(string) (*user.User, error) { return nil, fmt.Errorf("user: unknown user scion") },
-	}, cause)
-
-	if _, err := os.ReadFile(filepath.Join(tmpHome, "agent-info.json")); err != nil {
-		t.Fatalf("expected agent-info.json to be written under the $HOME fallback: %v", err)
-	}
-}
-
 // assertRealChdirSucceeds spawns a real child process with cmd.Dir=dir — the
 // same mechanism supervisor.Run uses — and fails the test if the child
 // can't actually start there. This is what makes the tests below assert the
@@ -1210,46 +1145,135 @@ func TestResolveSubstrateHarnessCwd_EffectiveCwd_RelativeHomeDir_NeverUsed(t *te
 	}
 }
 
-// TestSubstrateServeInitOptions_SetsWorkingDirFromRealEnv drives
-// substrateServeInitOptions end to end against the real
-// defaultSubstrateHarnessCwdDeps (real os.Getenv/os.Stat, and a
+// TestSubstrateServeInitOptions_ResolveWorkingDir_SetsWorkingDirFromRealEnv
+// drives substrateServeInitOptions's ResolveWorkingDir end to end against
+// the real defaultSubstrateHarnessCwdDeps (real os.Getenv/os.Stat, and a
 // withScionUserLookup-faked "scion" user — the real lookup is disabled
 // under test, see TestMain), proving the wiring — not just
 // resolveSubstrateHarnessCwd in isolation — actually threads
-// SCION_WORKSPACE_PATH into InitRunOptions.WorkingDir.
-func TestSubstrateServeInitOptions_SetsWorkingDirFromRealEnv(t *testing.T) {
+// SCION_WORKSPACE_PATH into the resolver's result. Resolution is no longer
+// eager: substrateServeInitOptions itself does not touch the filesystem, so
+// this calls the returned ResolveWorkingDir, exactly as RunInit does.
+func TestSubstrateServeInitOptions_ResolveWorkingDir_SetsWorkingDirFromRealEnv(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("SCION_WORKSPACE_PATH", dir)
 	withScionUserLookup(t, func(string) (*user.User, error) {
 		return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: t.TempDir()}, nil
 	})
 
-	opts, err := substrateServeInitOptions(false)
+	opts := substrateServeInitOptions(false)
+	got, err := opts.ResolveWorkingDir()
 	if err != nil {
-		t.Fatalf("substrateServeInitOptions(false) error = %v", err)
+		t.Fatalf("ResolveWorkingDir() error = %v", err)
 	}
-	if opts.WorkingDir != dir {
-		t.Errorf("substrateServeInitOptions(false).WorkingDir = %q, want %q", opts.WorkingDir, dir)
+	if got != dir {
+		t.Errorf("ResolveWorkingDir() = %q, want %q", got, dir)
 	}
 }
 
-// TestSubstrateServeInitOptions_FallsBackToHomeFromRealEnv is
-// TestSubstrateServeInitOptions_SetsWorkingDirFromRealEnv's fallback
-// counterpart against the real deps: the scion user's home (via
+// TestSubstrateServeInitOptions_ResolveWorkingDir_FallsBackToHomeFromRealEnv
+// is TestSubstrateServeInitOptions_ResolveWorkingDir_SetsWorkingDirFromRealEnv's
+// fallback counterpart against the real deps: the scion user's home (via
 // withScionUserLookup), not $HOME, is what's used.
-func TestSubstrateServeInitOptions_FallsBackToHomeFromRealEnv(t *testing.T) {
+func TestSubstrateServeInitOptions_ResolveWorkingDir_FallsBackToHomeFromRealEnv(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("SCION_WORKSPACE_PATH", filepath.Join(t.TempDir(), "does-not-exist"))
 	withScionUserLookup(t, func(string) (*user.User, error) {
 		return &user.User{Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: home}, nil
 	})
 
-	opts, err := substrateServeInitOptions(false)
+	opts := substrateServeInitOptions(false)
+	got, err := opts.ResolveWorkingDir()
 	if err != nil {
-		t.Fatalf("substrateServeInitOptions(false) error = %v", err)
+		t.Fatalf("ResolveWorkingDir() error = %v", err)
 	}
-	if opts.WorkingDir != home {
-		t.Errorf("substrateServeInitOptions(false).WorkingDir = %q, want fallback %q", opts.WorkingDir, home)
+	if got != home {
+		t.Errorf("ResolveWorkingDir() = %q, want fallback %q", got, home)
+	}
+}
+
+// TestSubstrateServeInitOptions_ResolveWorkingDir_BothUnusable_ReturnsError
+// covers the case substrate-serve used to short-circuit on before ever
+// calling runInit: with the workspace and the scion user's home both
+// unusable by the fake scion uid/gid, the resolver returns an error instead
+// of ever picking a directory. Never invoking it (as substrateServeInitOptions
+// itself no longer does) would silently lose this failure mode.
+func TestSubstrateServeInitOptions_ResolveWorkingDir_BothUnusable_ReturnsError(t *testing.T) {
+	agentHome := t.TempDir()
+	workspace := t.TempDir()
+	withScionUserLookup(t, func(string) (*user.User, error) {
+		return &user.User{Uid: "1", Gid: "1", HomeDir: agentHome}, nil
+	})
+	t.Setenv("SCION_WORKSPACE_PATH", workspace)
+
+	opts := substrateServeInitOptions(false)
+	if _, err := opts.ResolveWorkingDir(); err == nil {
+		t.Fatal("ResolveWorkingDir() error = nil, want an error (workspace and scion home are both unusable by the fake scion uid/gid 1/1)")
+	}
+}
+
+// TestSubstrateServeInitOptions_ResolveWorkingDir_SeesWorkspaceAfterSimulatedClone
+// is the fixed counterpart to the historical ordering defect this package
+// used to have: substrateServeInitOptions resolved the harness working
+// directory synchronously, before RunInit — and hence before RunInit's own
+// workspace-clone step — ever ran, so a workspace that started out
+// unsearchable by the scion uid and only became searchable once the clone
+// completed always resolved to the wrong (fallback) directory. See the
+// sciontool/serve project log for the live defect this closes.
+//
+// Here, ResolveWorkingDir is only invoked after the simulated clone step —
+// exactly how RunInit calls it now (see InitRunOptions.ResolveWorkingDir's
+// doc comment, init.go) — so resolution correctly sees the workspace as
+// usable.
+//
+// workspace and home are created directly under os.TempDir() (not via
+// t.TempDir(), whose nested per-test directory is itself mode 0700 and would
+// make every candidate "not searchable" for an unrelated reason, regardless
+// of this test's own chmods) so their searchability is controlled by this
+// test's own chmod calls alone.
+func TestSubstrateServeInitOptions_ResolveWorkingDir_SeesWorkspaceAfterSimulatedClone(t *testing.T) {
+	workspace, err := os.MkdirTemp("", "cwd-ordering-workspace-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp(workspace): %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
+	// Mode 0700: not yet searchable by the fake scion uid/gid below —
+	// modelling a fresh git-clone agent's workspace before the clone step
+	// has chowned it to the scion uid.
+	if err := os.Chmod(workspace, 0o700); err != nil {
+		t.Fatalf("os.Chmod(workspace): %v", err)
+	}
+
+	home, err := os.MkdirTemp("", "cwd-ordering-home-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp(home): %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	if err := os.Chmod(home, 0o777); err != nil {
+		t.Fatalf("os.Chmod(home): %v", err)
+	}
+
+	withScionUserLookup(t, func(string) (*user.User, error) {
+		return &user.User{Uid: "1", Gid: "1", HomeDir: home}, nil
+	})
+	t.Setenv("SCION_WORKSPACE_PATH", workspace)
+
+	opts := substrateServeInitOptions(false)
+
+	// Simulate the workspace clone step's real effect (ensureWorkspaceOwnership
+	// chowning the workspace to the scion uid) completing before resolution
+	// is ever invoked — unlike the historical defect, where resolution ran
+	// first.
+	if err := os.Chmod(workspace, 0o777); err != nil {
+		t.Fatalf("os.Chmod(workspace): %v", err)
+	}
+
+	got, err := opts.ResolveWorkingDir()
+	if err != nil {
+		t.Fatalf("ResolveWorkingDir() error = %v", err)
+	}
+	if got != workspace {
+		t.Errorf("ResolveWorkingDir() = %q, want %q", got, workspace)
 	}
 }
 
@@ -1259,9 +1283,12 @@ func TestSubstrateServeInitOptions_FallsBackToHomeFromRealEnv(t *testing.T) {
 // TestSubstrateServeBootstrap_SkipRootfsFixupEnvSet_StillRejectsUnfixedRootfs
 // already does, and proves two things at once:
 //
-//  1. the InitRunOptions the InitRunner receives carries WorkingDir resolved
-//     from the bootstrap request's own env (req.Env is applied via
-//     os.Setenv before the init runner is invoked — see handleBootstrap);
+//  1. the InitRunOptions the InitRunner receives carries a ResolveWorkingDir
+//     that, once invoked, resolves from the bootstrap request's own env
+//     (req.Env is applied via os.Setenv before the init runner is invoked —
+//     see handleBootstrap) — resolution itself is RunInit's job now, not
+//     substrateServeInitOptions's, so this test invokes the closure the
+//     stub received exactly as RunInit would;
 //  2. argv (childArgs) is exactly ["sh", "-c", req.StartCmd] — unchanged
 //     from before this fix — proving the fix never parses or rewrites the
 //     tmux invocation string that pkg/runtime builds; it only adds a cwd via
@@ -1327,37 +1354,34 @@ func TestSubstrateServeBootstrap_ThreadsWorkingDirToInitRunner(t *testing.T) {
 	if len(got.argv) != len(wantArgv) || got.argv[0] != wantArgv[0] || got.argv[1] != wantArgv[1] || got.argv[2] != wantArgv[2] {
 		t.Errorf("init runner argv = %v, want %v (the tmux invocation string must stay untouched)", got.argv, wantArgv)
 	}
-	if got.opts.WorkingDir != workspace {
-		t.Errorf("init runner InitRunOptions.WorkingDir = %q, want %q (resolved from the bootstrap request's own SCION_WORKSPACE_PATH)", got.opts.WorkingDir, workspace)
+	if got.opts.ResolveWorkingDir == nil {
+		t.Fatal("init runner InitRunOptions.ResolveWorkingDir = nil, want a resolver")
+	}
+	resolved, err := got.opts.ResolveWorkingDir()
+	if err != nil {
+		t.Fatalf("ResolveWorkingDir() error = %v", err)
+	}
+	if resolved != workspace {
+		t.Errorf("ResolveWorkingDir() = %q, want %q (resolved from the bootstrap request's own SCION_WORKSPACE_PATH)", resolved, workspace)
 	}
 	if !got.opts.RequirePrivilegeDrop {
 		t.Error("init runner InitRunOptions.RequirePrivilegeDrop = false, want true (unaffected by this change)")
 	}
 }
 
-// TestSubstrateServeBootstrap_NoUsableHarnessCwd_ReportsInitFailureToLocalState
-// drives a real bootstrap request through newSubstrateServeServer (the same
-// wiring runSubstrateServe uses) all the way to the no-usable-harness-cwd
-// (exit-18) path, and proves substrateServeReportCwdFailure is actually
-// wired in there — not just available as a helper — the same way
-// TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure proves RunInit's
-// own staged-secrets failure path is wired to reportInitFailure.
-//
-// Both candidates are made unusable by giving the scion identity a uid/gid
-// that doesn't match this test process's own (real files/dirs are owned by
-// the real test process, so an unrelated uid/gid fails canSearchDir's
-// owner/group checks and, since t.TempDir() dirs are typically not
-// world-searchable, its "other" check too — no chmod needed). The local
-// agent-info.json write itself still succeeds because it runs as this
-// (real, owning) process, not as the simulated scion uid — exactly the
-// substrate-serve-runs-as-root-before-the-drop asymmetry
-// substrateServeReportCwdFailure's own doc comment describes.
-func TestSubstrateServeBootstrap_NoUsableHarnessCwd_ReportsInitFailureToLocalState(t *testing.T) {
-	scrubHubEnv(t)
-	origPD := defaultPrivilegeDropPreconditionDeps
-	t.Cleanup(func() { defaultPrivilegeDropPreconditionDeps = origPD })
-	defaultPrivilegeDropPreconditionDeps = fakePrivilegeDropDeps(t)
-
+// TestSubstrateServeInitRunner_AlwaysCallsRunInit proves substrateServeInitRunner
+// no longer resolves the harness working directory itself before deciding
+// whether to call runInit: it always forwards to runInit, passing along an
+// InitRunOptions.ResolveWorkingDir closure for RunInit to call once the
+// workspace is ready. Even when the workspace and the scion user's home are
+// both unusable (the exact condition that used to short-circuit here with
+// exitCodeNoUsableHarnessCwd before ever calling runInit), runInit is still
+// invoked; RunInit's own contract for a ResolveWorkingDir error — never
+// starting the harness, returning exitCodeNoUsableHarnessCwd — is covered
+// directly by TestRunInit_ResolveWorkingDirError_ReturnsExitCode18AndNeverStartsHarness
+// (init_test.go), since that is RunInit's responsibility now, not this
+// wrapper's.
+func TestSubstrateServeInitRunner_AlwaysCallsRunInit(t *testing.T) {
 	agentHome := t.TempDir()
 	workspace := t.TempDir()
 	withScionUserLookup(t, func(string) (*user.User, error) {
@@ -1366,99 +1390,26 @@ func TestSubstrateServeBootstrap_NoUsableHarnessCwd_ReportsInitFailureToLocalSta
 	t.Setenv("SCION_WORKSPACE_PATH", workspace)
 
 	var initCalled bool
+	var gotOpts InitRunOptions
 	stubRunInit := func(argv []string, opts InitRunOptions) int {
 		initCalled = true
-		return 0
-	}
-
-	srv := newSubstrateServeServer(stubRunInit)
-	rec := doSubstrateServeJSON(t, srv, "POST", "/scion/v1/bootstrap", "any-token", map[string]any{
-		"env":           map[string]string{},
-		"files":         []any{},
-		"start_cmd":     "true",
-		"control_token": "tok",
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bootstrap status = %d, want 200 (the no-usable-cwd failure surfaces asynchronously, after acceptance — see handleBootstrap); body=%s", rec.Code, rec.Body.String())
-	}
-
-	// handleBootstrap runs the init runner in its own goroutine. Poll
-	// /healthz for StateInitFailed rather than for agent-info.json's mere
-	// existence on disk: the init-runner goroutine sets
-	// s.initFailed under s.mu only AFTER newSubstrateServeServer's wrapper
-	// (substrateServeInitOptions's error path) returns, and that wrapper
-	// calls substrateServeReportCwdFailure — which does the agent-info.json
-	// write — synchronously, in program order, before it returns. So by the
-	// time this goroutine observes s.initFailed==true through s.mu, the
-	// write has already happened-before it: a real synchronization edge and
-	// proof the goroutine ran to completion, neither of which "the file
-	// exists" gives (that goroutine could still be inside SetMessage /
-	// hub.NewClient when the file first appears).
-	var lastState string
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		healthz := doSubstrateServeJSON(t, srv, "GET", "/scion/v1/healthz", "", nil)
-		var body struct {
-			State string `json:"state"`
-		}
-		if err := json.Unmarshal(healthz.Body.Bytes(), &body); err == nil {
-			lastState = body.State
-			if lastState == "init-failed" {
-				break
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if lastState != "init-failed" {
-		t.Fatalf("healthz state = %q, want %q (after 2s)", lastState, "init-failed")
-	}
-
-	raw, readErr := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
-	if readErr != nil {
-		t.Fatalf("expected agent-info.json to be written to the scion home after the no-usable-cwd path: %v", readErr)
-	}
-	if initCalled {
-		t.Error("the init runner was invoked despite no usable harness cwd; the harness must never start")
-	}
-	var info struct {
-		Phase string `json:"phase"`
-	}
-	if err := json.Unmarshal(raw, &info); err != nil {
-		t.Fatalf("unmarshal agent-info.json %q: %v", raw, err)
-	}
-	if info.Phase != string(state.PhaseError) {
-		t.Errorf("agent-info.json phase = %q, want %q", info.Phase, state.PhaseError)
-	}
-}
-
-// TestSubstrateServeInitRunner_NoUsableHarnessCwd_ReturnsExitCode18 drives
-// substrateServeInitRunner directly (no HTTP layer) and asserts its exact
-// return value: the substrate.InitRunner contract only carries an int back
-// to the caller, so a mutant that returns any other non-zero code (e.g. 1)
-// would still make the harness fail to start while losing the distinct,
-// operator-facing discriminator this exit code exists to provide.
-func TestSubstrateServeInitRunner_NoUsableHarnessCwd_ReturnsExitCode18(t *testing.T) {
-	scrubHubEnv(t)
-	agentHome := t.TempDir()
-	workspace := t.TempDir()
-	withScionUserLookup(t, func(string) (*user.User, error) {
-		return &user.User{Uid: "1", Gid: "1", HomeDir: agentHome}, nil
-	})
-	t.Setenv("SCION_WORKSPACE_PATH", workspace)
-
-	var initCalled bool
-	stubRunInit := func(argv []string, opts InitRunOptions) int {
-		initCalled = true
+		gotOpts = opts
 		return 0
 	}
 
 	got := substrateServeInitRunner(stubRunInit)([]string{"sh", "-c", "true"}, false)
 
-	if got != exitCodeNoUsableHarnessCwd {
-		t.Errorf("substrateServeInitRunner(...)(...) = %d, want %d (exitCodeNoUsableHarnessCwd)", got, exitCodeNoUsableHarnessCwd)
+	if !initCalled {
+		t.Fatal("runInit was not invoked; substrateServeInitRunner must always forward to runInit and let RunInit itself decide, via ResolveWorkingDir, whether the harness can start")
 	}
-	if initCalled {
-		t.Error("runInit was invoked despite no usable harness cwd; the harness must never start")
+	if got != 0 {
+		t.Errorf("substrateServeInitRunner(...)(...) = %d, want the stub's own return value (0)", got)
+	}
+	if gotOpts.ResolveWorkingDir == nil {
+		t.Fatal("InitRunOptions.ResolveWorkingDir = nil, want a resolver")
+	}
+	if _, err := gotOpts.ResolveWorkingDir(); err == nil {
+		t.Error("ResolveWorkingDir() error = nil, want an error (workspace and scion home are both unusable by the fake scion uid/gid 1/1)")
 	}
 }
 
