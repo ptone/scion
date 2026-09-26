@@ -1174,7 +1174,6 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	agentRuntime := ""
 	if resp.Agent != nil {
 		agentID = resp.Agent.ID
-		agentRuntime = resp.Agent.Runtime
 	}
 	if agentID == "" {
 		agentID = agentName
