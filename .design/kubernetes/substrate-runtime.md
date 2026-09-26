@@ -442,8 +442,12 @@ Cloud Run, which all honor it. Left unhandled, the harness process tree
 at `/`, which fails the agent's own folder-trust check (only `/workspace` is
 trusted) before it can make its first model call.
 
-`sciontool substrate-serve` resolves a working directory itself and passes
-it to `RunInit`/`supervisor.Run` as an optional `WorkingDir`, a field every
+`sciontool substrate-serve` supplies `RunInit` a working-directory resolver
+(`InitRunOptions.ResolveWorkingDir`) rather than a precomputed value.
+`RunInit` calls it after the workspace has been cloned and after pre-start
+hooks have run — the two steps that can change whether a directory is
+searchable by the `scion` uid — and before it builds `supervisor.Run`'s
+config, threading the result into the same optional `WorkingDir` field every
 other runtime's call site leaves unset (so their behavior is unchanged):
 
 - **Primary candidate:** `SCION_WORKSPACE_PATH`, required absolute, default
@@ -456,10 +460,10 @@ other runtime's call site leaves unset (so their behavior is unchanged):
   candidate is accepted only if it, and every one of its ancestors
   (including through a symlink target), stats as searchable by the target
   uid/gid — never merely by what root itself can traverse. If neither
-  candidate is usable, the harness is never started: the in-process init
-  runner returns `exitCodeNoUsableHarnessCwd` (18), which is logged and
-  reported to the Hub through the same init-failure path other init
-  failures use, and `/healthz` reflects `init-failed`. The control server
+  candidate is usable, the harness is never started: `RunInit` returns
+  `exitCodeNoUsableHarnessCwd` (18), which is logged and reported to the Hub
+  through the same init-failure path other init failures use, and
+  `/healthz` reflects `init-failed`. The control server
   itself stays up — Substrate does not treat a PID 1 exit as a failure
   signal (§5.1, §10) — so the actor keeps running and holding its worker
   until it is stopped. This replaces a silent fallback to an unset

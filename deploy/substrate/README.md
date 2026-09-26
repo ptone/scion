@@ -23,7 +23,7 @@ expose those unauthenticated surfaces beyond the cluster boundary.
 
 Substrate requires a digest-pinned agent image (`.design/kubernetes/substrate-runtime.md`
 §3). Without one, `scion start` on a `substrate` profile fails closed
-(`pkg/runtime/substrate_runtime.go:316`):
+(`pkg/runtime/substrate_runtime.go:339`):
 
 ```
 substrate: image "<image>" is not pinned by digest (@sha256:...); set a digest image in the agent's template or pass --image (tag resolution is a Phase 2 feature)
@@ -86,6 +86,15 @@ about**, holding a worker indefinitely
 (`.design/kubernetes/substrate-runtime.md` §10 — this is a generic
 hub/broker dispatch-timeout gap, not substrate-specific, but a cold
 template build is the easiest way to hit it on this runtime).
+
+**Warming a golden for a brand-new project needs the project's atespace to
+exist first.** An atespace is created lazily, on the broker's first
+`ensureAtespace` call for that project (normally the project's first agent
+create) — it does not exist merely because the project does. An operator
+pre-warming a golden ahead of that first create must create the atespace
+directly first — `kubectl-ate create atespace <atespace>`, the same call
+`ensureAtespace` itself makes — or `CreateActorTemplate` fails closed with
+`FailedPrecondition`.
 
 **Before pointing real traffic at a new template** (a new image digest,
 resource shape, sandbox class, `worker_selector`, or `egress_trust_bundle`
@@ -1027,12 +1036,20 @@ kubectl get clustertrustbundle "${CLUSTER_TRUST_BUNDLE_NAME}" \
 #    subshell, so ATE_TOKEN stays scoped to it just like the in-cluster form
 #    above; guard the port-forward with a trap right after capturing its
 #    PID, so it is stopped whether the subshell exits normally, is
-#    interrupted, or is terminated; and wait for it to actually be
-#    listening before the first grpcurl call:
+#    interrupted, or is terminated. A separate `INT TERM` trap that exits is
+#    required alongside the `EXIT` one: a trap only runs a handler and
+#    resumes the script at the next command, so an `EXIT INT TERM` trap
+#    whose handler is just the cleanup would kill the port-forward on
+#    Ctrl-C and then keep going into `export ATE_TOKEN=...` and the grpcurl
+#    calls below instead of stopping the block — `exit 130` (128+SIGINT) on
+#    `INT TERM` makes the interrupt actually stop the block, and that exit
+#    is what then fires the `EXIT` trap's cleanup. Wait for the
+#    port-forward to actually be listening before the first grpcurl call:
 #      (
 #        kubectl -n "${ATE_SYSTEM_NAMESPACE}" port-forward svc/api 9555:443 &
 #        pf=$!
-#        trap 'kill "$pf" 2>/dev/null' EXIT INT TERM
+#        trap 'kill "$pf" 2>/dev/null' EXIT
+#        trap 'exit 130' INT TERM
 #        sleep 2   # give the port-forward time to start listening
 #        export ATE_TOKEN="$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
 #          --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
@@ -1060,10 +1077,14 @@ kubectl ate delete actor -a <atespace> <actor> --any-state
 #    `/proc/<pid>/cmdline`) or be left behind if this is interrupted: the
 #    whole read/write/curl sequence runs in a subshell, so its EXIT trap
 #    fires — removing the header file — as soon as curl returns, not only
-#    when the surrounding interactive shell eventually exits.
+#    when the surrounding interactive shell eventually exits. A separate
+#    `INT TERM` trap that exits is required alongside the `EXIT` one, the
+#    same reasoning as the port-forward subshell above: without it, an
+#    interrupt would remove the header file and then fall through to the
+#    curl call instead of stopping the block.
 (
   read -rs TOKEN          # paste the hub token; not echoed, not in history
-  HDR=$(mktemp); trap 'rm -f "$HDR"' EXIT INT TERM
+  HDR=$(mktemp); trap 'rm -f "$HDR"' EXIT; trap 'exit 130' INT TERM
   printf 'Authorization: Bearer %s\n' "$TOKEN" > "$HDR"; chmod 600 "$HDR"
   unset TOKEN
   curl --fail-with-body -X DELETE \
