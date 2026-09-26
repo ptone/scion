@@ -969,12 +969,13 @@ func TestRunInit_Enforced_RootlessFromSetupHostUser_FailsClosedBeforeServices(t 
 
 // TestSeamDefaultsAreRealFunctions pins that every test-only seam RunInit's
 // setup path exposes (see runAdjustScionUser, runChownTreeRootOwned,
-// setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, setupHostUserGetuid
-// and postPreStartGeteuid's doc comments) still defaults to the real
-// function it wraps. A default that silently became a stub would skip the
-// checks or side effects those functions perform in production, while every
-// test — which only ever reassigns the var for the duration of its own run,
-// never inspects its starting value — would keep passing.
+// setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, setupHostUserGetuid,
+// postPreStartGeteuid, runSetupHostUser, and runDirectSetUID's doc comments)
+// still defaults to the real function it wraps. A default that silently
+// became a stub would skip the checks or side effects those functions
+// perform in production, while every test — which only ever reassigns the
+// var for the duration of its own run, never inspects its starting value —
+// would keep passing.
 func TestSeamDefaultsAreRealFunctions(t *testing.T) {
 	ptr := func(f any) uintptr { return reflect.ValueOf(f).Pointer() }
 	for name, pair := range map[string][2]any{
@@ -984,6 +985,8 @@ func TestSeamDefaultsAreRealFunctions(t *testing.T) {
 		"setupHostUserIsUIDMapped":  {setupHostUserIsUIDMapped, isUIDMapped},
 		"setupHostUserGetuid":       {setupHostUserGetuid, os.Getuid},
 		"postPreStartGeteuid":       {postPreStartGeteuid, os.Geteuid},
+		"runSetupHostUser":          {runSetupHostUser, setupHostUser},
+		"runDirectSetUID":           {runDirectSetUID, directSetUID},
 	} {
 		if ptr(pair[0]) != ptr(pair[1]) {
 			t.Errorf("%s default is not the real function", name)

@@ -1493,6 +1493,19 @@ func TestHarnessSupervisorConfig(t *testing.T) {
 	}
 }
 
+// TestHarnessSupervisorConfig_RequirePrivilegeDropIgnoresRootless pins that
+// an enforced RequirePrivilegeDrop threads through to supervisor.Config
+// unconditionally — a rootless setup-host-user result must not silently
+// clear it. Rootless and RequirePrivilegeDrop are independent signals to
+// the supervisor: the former describes the host UID-mapping state, the
+// latter is the fail-closed enforcement flag from InitRunOptions.
+func TestHarnessSupervisorConfig_RequirePrivilegeDropIgnoresRootless(t *testing.T) {
+	got := harnessSupervisorConfig(InitRunOptions{RequirePrivilegeDrop: true}, 0, 0, 0, true, nil, "", nil)
+	if !got.RequirePrivilegeDrop || !got.Rootless {
+		t.Fatalf("enforced+rootless: RequirePrivilegeDrop=%v Rootless=%v, want both true", got.RequirePrivilegeDrop, got.Rootless)
+	}
+}
+
 func TestResolveProjectHookPath(t *testing.T) {
 	tests := []struct {
 		name                 string
