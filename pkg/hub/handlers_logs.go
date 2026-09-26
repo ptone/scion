@@ -35,6 +35,14 @@ import (
 // import: pkg/hub only ever talks to the broker over HTTP.
 const brokerCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
 
+// runtimeLogsUnsupportedMessage is the hub's own fixed text for a
+// runtime_logs_unsupported response — never the broker-supplied message.
+// Any broker (including one this hub does not otherwise trust — a
+// user-registered or misconfigured one) can put arbitrary text in its own
+// response body; matching the code is not a reason to repeat that text
+// verbatim under the hub's response.
+const runtimeLogsUnsupportedMessage = "agent logs are not available on this agent's runtime in this phase"
+
 // handleAgentLogs handles GET /api/v1/agents/{id}/logs
 // and GET /api/v1/projects/{projectId}/agents/{agentId}/logs
 // It proxies the request to the agent's runtime broker to read agent.log.
@@ -87,13 +95,15 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 		slog.Error("agent log relay failed", "agent_id", agentID, "project_id", agent.ProjectID, "error", err)
 		// The broker declined outright (e.g. the substrate runtime's
 		// ErrLogsNotSupported) rather than failing to reach the runtime.
-		// Pass its status, code and fixed message straight through instead
-		// of re-wrapping them in a generic gateway error — matching on both
-		// the status and the code keeps every other broker error, including
-		// any other 501, on the unchanged path below.
+		// Pass its status and code straight through instead of re-wrapping
+		// them in a generic gateway error — matching on both the status and
+		// the code keeps every other broker error, including any other 501,
+		// on the unchanged path below. The message is the hub's own fixed
+		// text, not the broker's: any broker can put arbitrary text in its
+		// response body, and this response must stay clean regardless.
 		var se *brokerStatusError
 		if errors.As(err, &se) && se.StatusCode == http.StatusNotImplemented && se.brokerErrorCode() == brokerCodeRuntimeLogsUnsupported {
-			writeError(w, http.StatusNotImplemented, brokerCodeRuntimeLogsUnsupported, se.brokerErrorMessage(), nil)
+			writeError(w, http.StatusNotImplemented, brokerCodeRuntimeLogsUnsupported, runtimeLogsUnsupportedMessage, nil)
 			return
 		}
 		writeError(w, http.StatusBadGateway, ErrCodeInternalError,

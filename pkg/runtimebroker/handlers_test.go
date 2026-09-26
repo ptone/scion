@@ -764,10 +764,12 @@ runtimes:
 
 // TestAgentLogsRuntimeNotSupported verifies that a runtime declining logs
 // outright (runtime.ErrLogsNotSupported — the substrate runtime's contract)
-// maps to an explicit 501 with the runtime_logs_unsupported code, and that
-// the response body carries none of the fixture's identifiers.
+// maps to an explicit 501 with the runtime_logs_unsupported code and the
+// sentinel's own fixed message body, even when the runtime wraps the
+// sentinel with extra identifying text: errors.Is matches through a wrap,
+// so the response must use the sentinel's own Error() text, never the
+// wrapped error's, or a wrapper could leak an id through this path.
 func TestAgentLogsRuntimeNotSupported(t *testing.T) {
-	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 
 	origWd, err := os.Getwd()
@@ -803,11 +805,13 @@ runtimes:
 	}
 
 	// No agent.log on disk — forces fallback to the runtime's GetLogs, the
-	// substrate path this fixture stands in for.
+	// substrate path this fixture stands in for. The wrap carries text that
+	// must never reach the response body.
+	const wrappedIdentifier = "scion-hostile-atespace/leaked-actor-name"
 	rt := &runtime.MockRuntime{
 		NameFunc: func() string { return "substrate" },
 		GetLogsFunc: func(_ context.Context, _ string) (string, error) {
-			return "", runtime.ErrLogsNotSupported
+			return "", fmt.Errorf("substrate: get actor %s: %w", wrappedIdentifier, runtime.ErrLogsNotSupported)
 		},
 	}
 
@@ -847,8 +851,12 @@ runtimes:
 		t.Errorf("expected message %q, got %q", runtime.ErrLogsNotSupported.Error(), resp.Error.Message)
 	}
 
-	if body := w.Body.String(); strings.Contains(body, "substrate-actor") {
+	body := w.Body.String()
+	if strings.Contains(body, "substrate-actor") {
 		t.Errorf("response body leaks the agent/actor name: %s", body)
+	}
+	if strings.Contains(body, wrappedIdentifier) {
+		t.Errorf("response body leaks the wrapped identifier: %s", body)
 	}
 }
 
