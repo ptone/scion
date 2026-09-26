@@ -74,7 +74,7 @@ unchanged.
 ### Scion hub agent-token writer (`pkg/sciontool/hub/client.go`)
 
 `WriteTokenFile` now takes `(token string, uid, gid int)` and routes through the
-same `writeFileNoFollowChown` helper the GitHub token writer uses (itself now
+same `WriteFileNoFollowChown` helper the GitHub token writer uses (itself now
 resolved through `dirfd.OpenParentNoFollow` rather than a bare `os.Lstat` +
 path-based create/rename). `Client` gained `tokenChownUID`/`tokenChownGID`
 fields, set once by `StartTokenRefresh` from its config and read by
@@ -112,26 +112,40 @@ directory more restrictive than `0777` elsewhere keeps those other bits.
 "failed to write GitHub token expiry file" prefix; the refresh loop's own wrap
 at the call site already adds it once.
 
+### Scion hub token read (`pkg/sciontool/hub/client.go`)
+
+`ReadTokenFile` — called by `sciontool init` (root, for its whole life) to seed
+the metadata server's outbound-token function, to check whether a token is
+present, and to reread the token during SIGUSR2 auth-reset — used a plain
+`os.ReadFile`, so a workload that swaps `~/.scion/scion-token` for a symlink or
+hardlink to a root-readable file could make root read that file's contents and
+forward them to the Hub as if they were the agent's bearer token. It now goes
+through `readTokenFileGuarded`, which resolves the parent directory via
+`dirfd.OpenParentNoFollow`, opens the leaf with `O_NOFOLLOW|O_NONBLOCK`,
+refuses anything but a single-link regular file, checks the owner is either
+root or the containing directory's own owner (the two legitimate states: the
+host-written initial file, or one `WriteTokenFile`/`ChownTokenFile` has since
+handed to the scion user), and bounds the read. `ReadGitHubTokenFile` and
+`ReadGitHubTokenExpiry` remain out of scope: they're only called from the
+credential helper, the `gh` wrapper, and `doctor`, all scion-invoked, never
+from `sciontool init`.
+
+### scion-env writer (`cmd/sciontool/commands/init.go`)
+
+`writeEnvFile` had the same write-then-path-chown shape as the token writers:
+a plain `os.WriteFile` to a fixed `.tmp` name, `os.Rename`, then a separate
+path-based `os.Chown` on the final `$HOME/.scion/scion-env` path. It now writes
+through the exported `hub.WriteFileNoFollowChown` (fchown on the fd, before
+the rename); the directory itself (`$HOME/.scion`) is still chowned by path
+separately, since that's a directory-ownership operation `WriteFileNoFollowChown`
+doesn't cover and was already the established pattern for directory ownership
+elsewhere in `init.go`.
+
 ## Notes
 
-- The random-name temp file `writeFileNoFollowChown` creates can leak one 0600
-  file with a live token in it if the process crashes between creation and the
-  rename. This is accepted rather than swept: tokens are valid for at most a
-  few hours, the files are 0600, and a sweeper would need to distinguish a
-  crash leftover from a write still in progress. Documented on the function.
-- Root never reads the GitHub token/expiry files back — `ReadGitHubTokenFile`
-  and `ReadGitHubTokenExpiry` are only called from the credential helper, the
-  `gh` wrapper, and `doctor`, all of which run as the scion user, not from
-  `sciontool init`. The scion hub token is a different story: `sciontool init`
-  (root, for its whole life) does call `hub.ReadTokenFile()` itself — to seed
-  the metadata server's outbound-token function, to check whether a token is
-  present, and to reread the token during SIGUSR2 auth-reset — and that read
-  path (`os.ReadFile`, no `O_NOFOLLOW` or regular-file check) isn't hardened by
-  this change. A workload that swaps `~/.scion/scion-token` for a symlink to a
-  root-readable file could make root send that file's contents to the Hub as
-  if it were the agent's bearer token. This is a real, separate (read-side, not
-  write-side) gap outside this change's scope and needs its own follow-up.
-- `cmd/sciontool/commands/init.go`'s `writeEnvFile` (`$HOME/.scion/scion-env`)
-  has the same write-then-path-chown shape as the files hardened here (plain
-  `os.WriteFile`/`os.Rename`, then `os.Chown` on the final path) and was not in
-  scope for this change; noted for a future pass.
+- The random-name temp file `WriteFileNoFollowChown` creates can leak one file
+  with the write's content in it if the process crashes between creation and
+  the rename. This is accepted rather than swept for the callers in this
+  package: the content is short-lived (a token valid for at most a few hours,
+  or an env file rewritten on every refresh), and every caller uses a mode no
+  wider than its target needs. Documented on the function.
