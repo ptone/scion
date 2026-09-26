@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -117,19 +118,28 @@ func TestProjectAgentUpdate_AuthorizationGap(t *testing.T) {
 
 	t.Run("project member can update", func(t *testing.T) {
 		f := projectAgentAuthzSetup(t)
+		// applyAgentUpdate requires updates.Name to slugify to the agent's
+		// existing Slug (Slug is immutable post-create and is what every
+		// hub->broker dispatch path uses to address the agent's on-disk
+		// directory) -- an unrestricted display-name rename is no longer
+		// accepted. Uppercasing the existing slug is a legitimate rename
+		// that still normalizes back to the same Slug, so it still proves
+		// this caller is authorized to update the field.
+		newName := strings.ToUpper(f.target.Slug)
 		rec := doRequestAsUser(t, f.srv, f.member, http.MethodPatch, f.targetPath(),
-			map[string]interface{}{"name": "renamed-by-member"})
+			map[string]interface{}{"name": newName})
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 		got, err := f.store.GetAgent(context.Background(), f.target.ID)
 		require.NoError(t, err)
-		assert.Equal(t, "renamed-by-member", got.Name)
+		assert.Equal(t, newName, got.Name)
 	})
 
 	t.Run("admin can update", func(t *testing.T) {
 		f := projectAgentAuthzSetup(t)
+		newName := strings.ToUpper(f.target.Slug)
 		rec := doRequestAsUser(t, f.srv, f.admin, http.MethodPatch, f.targetPath(),
-			map[string]interface{}{"name": "renamed-by-admin"})
+			map[string]interface{}{"name": newName})
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 

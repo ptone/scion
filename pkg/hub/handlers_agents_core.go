@@ -2365,6 +2365,25 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 
 	// Apply updates
 	if updates.Name != "" {
+		// Name must slugify to the agent's existing Slug. Slug is immutable
+		// after create and is the value every hub->broker dispatch path uses
+		// to address the agent's on-disk directory (see buildCreateRequest,
+		// start/stop/restart/delete). Accepting a Name unrelated to the Slug
+		// here would let it diverge from Slug, and some dispatch paths still
+		// forward Name instead of Slug downstream — so this field must stay
+		// constrained to values that are indistinguishable from the slug for
+		// path-addressing purposes, not merely validated on their own.
+		newSlug, err := api.ValidateAgentName(updates.Name)
+		if err != nil {
+			ValidationError(w, "Invalid name: "+err.Error(), nil)
+			return
+		}
+		if newSlug != agent.Slug {
+			ValidationError(w, "name must match the agent's existing slug", map[string]interface{}{
+				"slug": agent.Slug,
+			})
+			return
+		}
 		agent.Name = updates.Name
 	}
 	if updates.Labels != nil {
