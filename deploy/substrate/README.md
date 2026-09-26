@@ -992,15 +992,24 @@ kubectl -n "${BROKER_NAMESPACE}" get pod "$POD" \
 #    verification anchored to the in-cluster name via -authority, which
 #    also sets the TLS server name used for verification (the help text for
 #    grpcurl's own -authority flag, and its use via grpc.WithAuthority --
-#    cmd/grpcurl/grpcurl.go in fullstorydev/grpcurl):
-#      kubectl -n "${ATE_SYSTEM_NAMESPACE}" port-forward svc/api 9555:443 &
-#      grpcurl -cacert ate-ca.pem -authority api.${ATE_SYSTEM_NAMESPACE}.svc \
-#        -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
-#        -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
-#        localhost:9555 ateapi.Control/DeleteActorEgressPolicy
-#    (same substitution for the GetActorEgressPolicy verification call
-#    below). Stop the port-forward (`kill %1`) once verification reads
-#    NotFound.
+#    cmd/grpcurl/grpcurl.go in fullstorydev/grpcurl). Run the port-forward
+#    and both calls in their own subshell, so ATE_TOKEN stays scoped to it
+#    just like the in-cluster form below, and stop the port-forward by its
+#    own PID rather than a job number:
+#      (
+#        kubectl -n "${ATE_SYSTEM_NAMESPACE}" port-forward svc/api 9555:443 &
+#        pf=$!
+#        export ATE_TOKEN="$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
+#          --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
+#        grpcurl -cacert ate-ca.pem -authority api.${ATE_SYSTEM_NAMESPACE}.svc \
+#          -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
+#          -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
+#          localhost:9555 ateapi.Control/DeleteActorEgressPolicy
+#        # (same substitution for the GetActorEgressPolicy verification
+#        # call below, run inside this same subshell)
+#        kill "$pf"
+#      )
+#    Once verification reads NotFound, proceed to step 2.
 #
 #    The token is held in an exported environment variable, never written to
 #    a file and never put on grpcurl's command line: with -expand-headers,
