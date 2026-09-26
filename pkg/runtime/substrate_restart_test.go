@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -338,12 +339,10 @@ func TestSubstrateRestart_ExecAfterWipe_ExplicitNoTokenError(t *testing.T) {
 
 // TestSubstrateRestart_LogsAfterWipe_ExplicitErrorNeverEmptySuccess pins
 // that GetLogs — unlike Exec — does not depend on substrateAgentRecords or
-// substrateControlTokens at all (it resolves the actor and its worker
-// assignment directly from atespace/actor in id, via GetActor), so a
-// restart by itself never silently empties out its result. When the actor
-// cannot actually produce logs (e.g. no assigned worker, or — as in this
-// test harness — no Kubernetes client configured), it still surfaces a real
-// error, never ("", nil).
+// substrateControlTokens at all (it returns ErrLogsNotSupported
+// unconditionally, without resolving the id or making any call), so a
+// restart by itself never silently empties out its result. It never
+// surfaces ("", nil).
 func TestSubstrateRestart_LogsAfterWipe_ExplicitErrorNeverEmptySuccess(t *testing.T) {
 	rec := &callRecorder{}
 	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
@@ -356,8 +355,8 @@ func TestSubstrateRestart_LogsAfterWipe_ExplicitErrorNeverEmptySuccess(t *testin
 	wipeSubstrateAgentStateForRestart(t)
 
 	logs, err := rt.GetLogs(context.Background(), id)
-	if err == nil {
-		t.Fatalf("GetLogs() after a restart wipe: error = nil, logs = %q, want an explicit error (this harness has no Kubernetes client configured)", logs)
+	if !errors.Is(err, ErrLogsNotSupported) {
+		t.Fatalf("GetLogs() after a restart wipe: error = %v, want errors.Is(err, ErrLogsNotSupported)", err)
 	}
 	if logs != "" {
 		t.Errorf("GetLogs() logs = %q, want empty alongside a non-nil error", logs)
