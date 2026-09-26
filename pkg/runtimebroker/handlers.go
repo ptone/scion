@@ -2357,7 +2357,10 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 	logs, err := rt.GetLogs(ctx, containerID)
 	if err != nil {
 		if errors.Is(err, scionrt.ErrLogsNotSupported) {
-			RuntimeLogsUnsupported(w, err.Error())
+			// The sentinel's own fixed text, never err.Error(): errors.Is also
+			// matches a wrapped error, and a wrapping fmt.Errorf could carry an
+			// atespace or actor id that must never reach this response body.
+			RuntimeLogsUnsupported(w, scionrt.ErrLogsNotSupported.Error())
 			return
 		}
 		RuntimeError(w, "Failed to get logs: "+err.Error())

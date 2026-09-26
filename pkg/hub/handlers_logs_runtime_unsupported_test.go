@@ -26,8 +26,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const testRuntimeLogsUnsupportedMessage = "agent logs are not available on the substrate runtime; operators can read an actor's output with kubectl, filtered by the actor's uid"
-
 // createLoggableAgent creates a running agent through the same dispatcher
 // used by the logs test, so GET .../logs has an agent to dispatch to.
 func createLoggableAgent(t *testing.T, srv *Server, projectID string) string {
@@ -44,17 +42,21 @@ func createLoggableAgent(t *testing.T, srv *Server, projectID string) string {
 	return resp.Agent.ID
 }
 
-// TestHandleAgentLogs_RuntimeLogsUnsupported_Passthrough covers case (a): a
-// broker 501/runtime_logs_unsupported error (the substrate runtime's
+// TestHandleAgentLogs_RuntimeLogsUnsupported_Passthrough: a broker
+// 501/runtime_logs_unsupported error (the substrate runtime's
 // ErrLogsNotSupported, relayed as a *brokerStatusError) reaches the caller
-// with the same status and code and a clean message — no re-wrapping, no
-// nested JSON.
+// with the same status and code and the hub's own fixed message — never the
+// broker-supplied text. The broker's body here deliberately carries a
+// hostile, atespace-like string in its message to prove the hub does not
+// repeat it: any broker that reports this status and code gets the same
+// hub-side response, regardless of what it puts in its own body.
 func TestHandleAgentLogs_RuntimeLogsUnsupported_Passthrough(t *testing.T) {
+	const hostileBrokerMessage = "leaked: scion-tenant-atespace/other-actor-name worker-pod-7"
 	disp := &createAgentDispatcher{
 		createPhase: string(state.PhaseRunning),
 		logsErr: &brokerStatusError{
 			StatusCode: http.StatusNotImplemented,
-			Body:       `{"error":{"code":"runtime_logs_unsupported","message":"` + testRuntimeLogsUnsupportedMessage + `"}}`,
+			Body:       `{"error":{"code":"runtime_logs_unsupported","message":"` + hostileBrokerMessage + `"}}`,
 		},
 	}
 	srv, _, project := setupCreateAgentServer(t, disp)
@@ -67,16 +69,18 @@ func TestHandleAgentLogs_RuntimeLogsUnsupported_Passthrough(t *testing.T) {
 	var errResp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
 	assert.Equal(t, "runtime_logs_unsupported", errResp.Error.Code)
-	assert.Equal(t, testRuntimeLogsUnsupportedMessage, errResp.Error.Message)
-	// The message is the broker's fixed sentence, not a re-serialized copy of
-	// its JSON body.
-	assert.NotContains(t, errResp.Error.Message, "{")
-	assert.NotContains(t, errResp.Error.Message, "runtime broker returned error")
+	assert.Equal(t, runtimeLogsUnsupportedMessage, errResp.Error.Message)
+	// The hub's own constant, not the broker's arbitrary text, no matter
+	// what the broker put in its body.
+	assert.NotContains(t, errResp.Error.Message, "scion-tenant-atespace")
+	assert.NotContains(t, errResp.Error.Message, "other-actor-name")
+	assert.NotContains(t, errResp.Error.Message, "worker-pod-7")
+	assert.NotContains(t, rec.Body.String(), "scion-tenant-atespace")
 }
 
-// TestHandleAgentLogs_SameStatusDifferentCode_UnchangedPath covers case (b):
-// a broker error with the same 501 status but a different code must not be
-// mistaken for the substrate sentinel — it keeps today's generic 502 path.
+// TestHandleAgentLogs_SameStatusDifferentCode_UnchangedPath: a broker error
+// with the same 501 status but a different code must not be mistaken for
+// the substrate sentinel — it keeps the generic 502 path.
 func TestHandleAgentLogs_SameStatusDifferentCode_UnchangedPath(t *testing.T) {
 	disp := &createAgentDispatcher{
 		createPhase: string(state.PhaseRunning),
@@ -98,9 +102,9 @@ func TestHandleAgentLogs_SameStatusDifferentCode_UnchangedPath(t *testing.T) {
 	assert.Contains(t, errResp.Error.Message, "Failed to retrieve logs from broker")
 }
 
-// TestHandleAgentLogs_UnrelatedBrokerError_UnchangedPath covers case (c): an
-// ordinary (non-*brokerStatusError) dispatch failure is unaffected and keeps
-// the existing 502 mapping byte-for-byte.
+// TestHandleAgentLogs_UnrelatedBrokerError_UnchangedPath: an ordinary
+// (non-*brokerStatusError) dispatch failure is unaffected and keeps the
+// existing 502 mapping byte-for-byte.
 func TestHandleAgentLogs_UnrelatedBrokerError_UnchangedPath(t *testing.T) {
 	disp := &createAgentDispatcher{
 		createPhase: string(state.PhaseRunning),
