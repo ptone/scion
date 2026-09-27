@@ -1,0 +1,103 @@
+# Substrate rebase onto d9b9e6a2e
+
+Rebased the substrate integration commits onto a newer upstream commit
+(d9b9e6a2e). Most of the substrate commits applied without incident. Two
+areas needed more than a textual merge to reconcile correctly, and one
+upstream interface addition needed a real implementation rather than a
+mechanical carry-forward.
+
+## Stop-lookup error handling
+
+Upstream landed its own fix for the same underlying bug substrate's own
+restart-safety work had already fixed specially: a project-scoped stop
+whose container lookup failed (a transient listing error, an ambiguous
+match) was silently treated as "not found," reporting a false success
+instead of surfacing the failure. Upstream's fix changed
+`projectScopedTarget` to return `(string, error)`, propagating
+`LookupContainerID`'s own error for every runtime.
+
+`LookupContainerID` does not cover two properties substrate's own fix relies
+on: auxiliary-runtime list-failure strictness (an auxiliary runtime's list
+error is silently skipped in favor of the next one, so a transient failure
+on the one auxiliary runtime that actually holds the agent can still look
+like a genuine not-found) and manager coherence (the stop dispatches through
+a manager re-resolved by a second, independent lookup, which can land on a
+different runtime than the one that produced the matched container ID).
+
+Resolution: non-prober brokers use upstream's `projectScopedTarget` exactly
+as it ships. Brokers with a `RecordlessActorProber` runtime registered
+(substrate) use `projectScopedTargetErr`, a stricter, independent
+re-implementation that scans auxiliary runtimes in a fixed order (a match
+found elsewhere is authoritative over an earlier auxiliary error) and
+returns the manager whose list call actually produced the match, so `Stop`
+is always dispatched through that same manager. Errors are typed the same
+way upstream's are (a listing-failure sentinel, an unwrapped ambiguous-match
+error, a not-found sentinel for a matched record with no container ID) so a
+caller can use the same `errors.Is` check against either path's result. A
+substrate-only sentinel that predated upstream's fix was dropped in favor of
+upstream's own.
+
+One behavior changed as a direct consequence: a matched agent record with no
+resolvable container ID now folds into the idempotent "not found" response
+on the prober path too, matching upstream's own handling of that case,
+instead of reporting a failure. This is unrelated to the restart-safety
+scenario the prober path exists for (a runtime process restart leaving a
+record-less actor behind) — that path is unchanged: an ambiguous match, an
+auxiliary listing failure, and a genuine record-less actor after a restart
+all still produce their original results.
+
+## ExecWithStdin
+
+Upstream added `ExecWithStdin(ctx, id, cmd, stdin io.Reader) (string, error)`
+to the shared runtime interface, so that a caller delivering a secret (the
+reset-auth token) pipes it through the exec'd command's stdin instead of
+embedding it in the command's argv, where it stays readable from the host
+process's own command line for the life of the exec. Every other runtime
+implementation gained this method; substrate's did not exist on the base
+this interface change landed on.
+
+Substrate's own exec transport is an HTTP call to the in-actor control
+server (`ExecRequest{Argv, User, TimeoutS}`, no stdin field). Implemented
+the same protection for substrate: `ExecRequest` gained an optional `Stdin`
+byte field, and `ExecResponse` gained a `StdinSupported` flag the control
+server sets on every request it handles. A non-empty `Stdin` is piped into
+the exec'd command's standard input instead of being interpolated into the
+command line, bounded by the same request-body size limit the rest of the
+request already uses — no new unbounded read. The client caps the amount of
+stdin it will read from the caller at the same limit, and never includes the
+content it read in an error. If a response comes back without
+`StdinSupported` set while stdin was sent, the client treats that as a hard
+failure rather than an ambiguous success — an older control server would
+otherwise silently ignore the field and still report a clean exit for a
+command that never received its input. Plain `Exec` sends no stdin and is
+unaffected.
+
+## Test fallout from the stop-lookup reconciliation
+
+Running the full test suites (not the rebase mechanics themselves) surfaced
+two more points the textual merge could not see:
+
+- A test asserting that a non-prober broker's stop lookup failure produces
+  the idempotent 202 was pinning the exact behavior the stop-lookup
+  reconciliation above deliberately changed. Renamed and re-asserted against
+  the corrected outcome (a real error), with the failing-lookup call count
+  kept as a sanity check that the path under test actually ran.
+- A file-and-line-keyed guard over root-context exec call sites had its
+  tracked line number invalidated by the `ExecWithStdin` change, which added
+  lines above the guarded call site. Updated the tracked line; no new
+  unguarded exec call site was introduced.
+
+## Verification
+
+Full build passes. The runtime, runtime broker, sciontool, and sciontool
+command packages all pass their existing and updated tests, including new
+tests for the stdin protocol: a non-empty `Stdin` reaches the exec'd
+command's real standard input through the real HTTP handler and a real
+subprocess; the secret never appears in the argv the handler hands the
+process; an oversize payload is rejected without echoing it back; a
+response missing `StdinSupported` while stdin was sent is a client error;
+and plain `Exec` sends no `Stdin` field. The hub package's existing
+project-scoped agent authorization tests pass unchanged on the rebased
+tree, and a live run of a standalone hub server against a real database
+confirmed the property those tests guard: an access token scoped to one
+project cannot list or read another project's agent.
