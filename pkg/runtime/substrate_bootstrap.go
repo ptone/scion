@@ -777,6 +777,14 @@ func readExecStdin(stdin io.Reader) ([]byte, error) {
 	return data, nil
 }
 
+// errStdinUnsupported marks a doExec failure caused specifically by the
+// control server not confirming StdinSupported for a request that sent
+// stdin — as distinct from a transport error, an authorization failure, or
+// any other way doExec can fail. A caller that wants to name version skew
+// specifically, and only that, checks errors.Is(err, errStdinUnsupported)
+// rather than treating every doExec error the same way.
+var errStdinUnsupported = errors.New("control server did not confirm stdin support")
+
 // doExec sends argv through the router to the actor's control server,
 // authorized with the actor's control_token (substrate-runtime.md §4). When
 // stdin is non-empty, it is delivered via execRequest.Stdin rather than
@@ -827,8 +835,12 @@ func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actor
 		// understood Stdin — an older sciontool image in the actor would
 		// silently ignore the field and still report a normal exit code,
 		// which must never be mistaken for the command having received its
-		// input. Fail closed rather than trust an ambiguous success.
-		return out, fmt.Errorf("substrate: exec on %s/%s: control server did not confirm stdin support; refusing to treat the result as having received it", atespace, actorName)
+		// input. Fail closed rather than trust an ambiguous success. Wraps
+		// errStdinUnsupported specifically (rather than just this message)
+		// so a caller like ExecWithStdin's capability probe can tell this
+		// exact condition apart from every other way doExec can fail, and
+		// only name version skew for this one.
+		return out, fmt.Errorf("substrate: exec on %s/%s: %w; refusing to treat the result as having received it", atespace, actorName, errStdinUnsupported)
 	}
 	if out.ExitCode != 0 {
 		return out, fmt.Errorf("substrate: exec on %s/%s exited %d: %s", atespace, actorName, out.ExitCode, out.Stderr)

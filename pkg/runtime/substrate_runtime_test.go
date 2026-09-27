@@ -1265,7 +1265,11 @@ func TestSubstrateExecWithStdin_MissingStdinSupportedIsError(t *testing.T) {
 		t.Fatalf("exec calls to the server = %d, want exactly 1 (the probe only, real command must never run)", got)
 	}
 	if fa.lastExec == nil || len(fa.lastExec.Argv) != 1 || fa.lastExec.Argv[0] != "true" {
-		t.Errorf("the one exec call's argv = %v, want the probe's [\"true\"] — the real command must never reach the server", fa.lastExec)
+		var argv []string
+		if fa.lastExec != nil {
+			argv = fa.lastExec.Argv
+		}
+		t.Errorf("the one exec call's argv = %v, want the probe's [\"true\"] — the real command must never reach the server", argv)
 	}
 }
 
@@ -1281,7 +1285,11 @@ func TestSubstrateExecWithStdin_OversizeRejectedWithoutEchoing(t *testing.T) {
 	substrateControlTokens[id] = "tok-123"
 	substrateAgentStateMu.Unlock()
 
-	over := strings.NewReader(secret + strings.Repeat("A", maxExecStdinBytes))
+	// Exactly one byte over the cap — not some comfortably-over size — so
+	// this pins the boundary itself rather than merely "oversize inputs are
+	// rejected somewhere."
+	filler := maxExecStdinBytes + 1 - len(secret)
+	over := strings.NewReader(secret + strings.Repeat("A", filler))
 
 	_, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, over)
 	if err == nil {
@@ -1352,28 +1360,194 @@ func TestSubstrateExecWithStdin_ProbeStopsBeforeRealCommandOnOldServer(t *testin
 	}
 }
 
-// A real client-to-real-server round trip (this package's SubstrateRuntime
-// against a real pkg/sciontool/substrate.Server, with no fake standing in
-// for either side) was attempted here and is not feasible from this
-// package's tests: a real bootstrap call unconditionally prepares a
-// root-owned private scratch directory and clears a root-owned enforced-
-// hooks directory (pkg/sciontool/substrate/server.go's handleBootstrap),
-// both fail-closed without root — exactly as they should in production —
-// and neither has an exported seam this package's tests can redirect (only
-// that package's own TestMain does, for its own tests). The real round trip
-// — a real ExecRequest decoded by the real handler, piped into a real `cat`
-// subprocess, with the secret coming back out through real stdout — is
-// proven server-side instead, in
-// pkg/sciontool/substrate/server_test.go's TestExec_StdinRoundTripsThroughRealCommand
-// and TestExec_StdinNeverReachesSpawnedArgv. What this package's own tests
-// prove is the client's side of the contract: what it puts on the wire
-// (TestSubstrateExecWithStdin_DeliversViaStdinFieldNotArgv), and how it
-// reacts when the wire's other end doesn't confirm support
-// (TestSubstrateExecWithStdin_MissingStdinSupportedIsError,
-// TestSubstrateExecWithStdin_ProbeStopsBeforeRealCommandOnOldServer, the
-// latter decoding the real ExecRequest/ExecResponse types so the wire
-// contract itself, not just this package's mirrored copy of it, is what the
-// test exercises).
+// newRealSubstrateServeHarness starts a real pkg/sciontool/substrate.Server
+// behind httptest, bootstraps it for real over HTTP, and returns a
+// SubstrateRuntime pointed at it plus the agent id to use — no fake stands
+// in for either the client or the server. SetPrivateRootTmpDirForTest
+// redirects the server's private-scratch-directory bootstrap step at a
+// throwaway directory this test process does own (the real default,
+// "/run/scion/tmp", requires root); a missing enforced-hooks directory is
+// already a no-op in production code, so nothing else needs redirecting.
+func newRealSubstrateServeHarness(t *testing.T) (*SubstrateRuntime, string) {
+	t.Helper()
+
+	restoreTmpDir := sciontoolsubstrate.SetPrivateRootTmpDirForTest(t.TempDir())
+	t.Cleanup(restoreTmpDir)
+
+	srv := sciontoolsubstrate.NewServer(
+		sciontoolsubstrate.WithChownOwner(-1, -1),
+		sciontoolsubstrate.WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+	server := httptest.NewServer(srv.Handler())
+	t.Cleanup(server.Close)
+
+	const controlToken = "real-harness-control-token"
+	bootstrapBody, err := json.Marshal(sciontoolsubstrate.BootstrapRequest{
+		StartCmd:     "true",
+		ControlToken: controlToken,
+	})
+	if err != nil {
+		t.Fatalf("marshal bootstrap request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/scion/v1/bootstrap", bytes.NewReader(bootstrapBody))
+	if err != nil {
+		t.Fatalf("build bootstrap request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer any-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("bootstrap request: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("bootstrap status = %d, want 200", resp.StatusCode)
+	}
+
+	resetSubstrateAgentStateForTest(t)
+	rt := NewSubstrateRuntimeForTest(nil, substrate.NewRouterClient(server.URL), nil, config.V1SubstrateConfig{})
+	id := "scion-proj/agent-real-harness"
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = controlToken
+	substrateAgentStateMu.Unlock()
+
+	return rt, id
+}
+
+// TestSubstrateExecWithStdin_EndToEndRealControlServer wires a real
+// SubstrateRuntime client to a real pkg/sciontool/substrate.Server handler
+// over httptest — no fakes on either side of the exec path — and proves the
+// full round trip: the client's probe and its real exec both reach a real
+// handler backed by a real subprocess, and the secret sent as stdin comes
+// back out through that subprocess's real stdout. This is the only test
+// that exercises the probe's happy path (a real "true" invocation) against
+// a real server, not a fake that would accept any argv it was handed.
+func TestSubstrateExecWithStdin_EndToEndRealControlServer(t *testing.T) {
+	const secret = "S3CR3T-END-TO-END-REAL-SERVER"
+
+	rt, id := newRealSubstrateServeHarness(t)
+
+	out, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, strings.NewReader(secret))
+	if err != nil {
+		t.Fatalf("ExecWithStdin() error = %v", err)
+	}
+	if out != secret {
+		t.Errorf("ExecWithStdin() = %q, want %q from a real cat subprocess echoing real stdin", out, secret)
+	}
+}
+
+// TestSubstrateExecWithStdin_ExactCapAcceptedByRealControlServer sends
+// exactly maxExecStdinBytes through the real server harness, so the server's
+// own request-body LimitReader — not just the client's own cap check — is
+// what accepts it. Proves the derived cap is not merely internally
+// consistent on the client side but actually usable end to end.
+func TestSubstrateExecWithStdin_ExactCapAcceptedByRealControlServer(t *testing.T) {
+	rt, id := newRealSubstrateServeHarness(t)
+
+	payload := bytes.Repeat([]byte("A"), maxExecStdinBytes)
+	out, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("ExecWithStdin() at exactly the cap: error = %v", err)
+	}
+	if len(out) != maxExecStdinBytes {
+		t.Errorf("ExecWithStdin() at the cap returned %d bytes, want %d", len(out), maxExecStdinBytes)
+	}
+}
+
+// TestExecRequestAtCap_MarshalledSizeWithinServerLimit pins the arithmetic
+// the derived cap depends on: a realistic ExecWithStdin call (resetAuth's
+// own write-then-rename argv, plus stdin at exactly maxExecStdinBytes),
+// marshalled exactly as doExec marshals it, must fit within the server's own
+// MaxExecBodyBytes. Without this, a change to ExecEnvelopeAllowanceBytes or
+// to the 3/4 factor could silently break the derivation with nothing to
+// catch it — the end-to-end tests above only prove today's numbers work,
+// not that the formula stays correct if either constant changes independently.
+func TestExecRequestAtCap_MarshalledSizeWithinServerLimit(t *testing.T) {
+	resetAuthArgv := []string{"sh", "-c",
+		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
+			"mkdir -p \"$TOKEN_DIR\" && " +
+			"cat > \"$TOKEN_DIR/scion-token.tmp\" && " +
+			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
+	}
+
+	body, err := json.Marshal(execRequest{
+		Argv:     resetAuthArgv,
+		User:     "scion",
+		TimeoutS: 60,
+		Stdin:    make([]byte, maxExecStdinBytes),
+	})
+	if err != nil {
+		t.Fatalf("marshal execRequest at the cap: %v", err)
+	}
+	if len(body) > sciontoolsubstrate.MaxExecBodyBytes {
+		t.Errorf("marshalled ExecRequest at the cap is %d bytes, want <= MaxExecBodyBytes (%d) — the derived cap no longer fits the server's limit",
+			len(body), sciontoolsubstrate.MaxExecBodyBytes)
+	}
+}
+
+// TestSubstrateExecWithStdin_ProbeErrorAttribution pins that the capability
+// probe names version skew ONLY when the control server itself answered but
+// never confirmed StdinSupported — every other way the probe can fail
+// (a transport error, an authorization rejection) is passed through
+// unchanged, since neither has anything to do with an old sciontool image.
+func TestSubstrateExecWithStdin_ProbeErrorAttribution(t *testing.T) {
+	const skewPhrase = "may be running an image older"
+
+	t.Run("transport error is not named as version skew", func(t *testing.T) {
+		rec := &callRecorder{}
+		rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+		id := "scion-proj/agent-a"
+		substrateAgentStateMu.Lock()
+		substrateControlTokens[id] = "tok-123"
+		substrateAgentStateMu.Unlock()
+		closeServer() // the router now points at a closed listener.
+
+		_, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, strings.NewReader("x"))
+		if err == nil {
+			t.Fatal("expected an error against a closed server, got nil")
+		}
+		if strings.Contains(err.Error(), skewPhrase) {
+			t.Errorf("transport error was misreported as version skew: %v", err)
+		}
+	})
+
+	t.Run("an authorization error is not named as version skew", func(t *testing.T) {
+		rec := &callRecorder{}
+		rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+		defer closeServer()
+		id := "scion-proj/agent-a"
+		substrateAgentStateMu.Lock()
+		substrateControlTokens[id] = "tok-123"
+		substrateAgentStateMu.Unlock()
+		fa.execStatus = http.StatusUnauthorized
+
+		_, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, strings.NewReader("x"))
+		if err == nil {
+			t.Fatal("expected an error for a 401 response, got nil")
+		}
+		if strings.Contains(err.Error(), skewPhrase) {
+			t.Errorf("authorization error was misreported as version skew: %v", err)
+		}
+	})
+
+	t.Run("a missing stdin_supported confirmation is named as version skew", func(t *testing.T) {
+		rec := &callRecorder{}
+		rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+		defer closeServer()
+		id := "scion-proj/agent-a"
+		substrateAgentStateMu.Lock()
+		substrateControlTokens[id] = "tok-123"
+		substrateAgentStateMu.Unlock()
+		fa.execResp = execResponse{ExitCode: 0} // no StdinSupported.
+
+		_, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, strings.NewReader("x"))
+		if err == nil {
+			t.Fatal("expected an error when stdin support is never confirmed, got nil")
+		}
+		if !strings.Contains(err.Error(), skewPhrase) {
+			t.Errorf("expected the version-skew explanation for an unconfirmed StdinSupported, got: %v", err)
+		}
+	})
+}
 
 // -----------------------------------------------------------------------
 // Redaction: no secret env values leak into a Run error

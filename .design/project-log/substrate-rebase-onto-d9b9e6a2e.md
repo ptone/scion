@@ -85,6 +85,25 @@ all if it doesn't. The check on the real exec's own response is kept as a
 second layer regardless. Plain `Exec` sends no stdin and is unaffected by
 either check.
 
+The probe names version skew in its error only when that specific check —
+the control server answered but never confirmed `StdinSupported` — is what
+failed. A transport error reaching the probe, or an authorization rejection,
+has nothing to do with an old image and is passed through unchanged rather
+than being misreported as version skew.
+
+A correction to an earlier note in this entry: the client-side capability
+probe and cap derivation were first covered only against a fake control
+server, on the stated (incorrect) premise that a real client-to-real-server
+test wasn't reachable from this package without root — the real control
+server's bootstrap path prepares a root-owned scratch directory. That premise
+was wrong: the server package exports a seam for exactly this
+(`SetPrivateRootTmpDirForTest`), already used by another package's tests, and
+a missing hooks directory is already a no-op. A real client against a real
+server, both over `httptest`, is now covered directly, including the probe's
+own happy path (a real `true` invocation reaching a real server) and the
+exact stdin cap accepted through the real server's own request-size limit,
+not just the client's.
+
 ## Test fallout from the stop-lookup reconciliation
 
 Running the full test suites (not the rebase mechanics themselves) surfaced
@@ -105,21 +124,31 @@ two more points the textual merge could not see:
 Full build passes. The runtime, runtime broker, sciontool, and sciontool
 command packages all pass their existing and updated tests, including tests
 for the stdin protocol: a non-empty `Stdin` reaches the exec'd command's
-real standard input through the real HTTP handler and a real subprocess
-(`pkg/sciontool/substrate`'s `TestExec_StdinRoundTripsThroughRealCommand`);
-the secret never appears in the argv the handler hands the process
-(`TestExec_StdinNeverReachesSpawnedArgv`, which spies on the real exec-boundary
-seam while still running the real handler and a real subprocess); an
-oversize payload is rejected without echoing it back, both server-side and
-client-side; a response missing `StdinSupported` while stdin was sent is a
-client error; and plain `Exec` sends no `Stdin` field. The probe's own
-version-skew behavior is proven two ways: against the package's usual fake
+real standard input through the real HTTP handler and a real subprocess, on
+both sides of the client/server boundary independently and together —
+server-side (`pkg/sciontool/substrate`'s `TestExec_StdinRoundTripsThroughRealCommand`)
+and end to end (`pkg/runtime`'s real-client-against-real-server test, which
+also exercises the probe's own happy path); the secret never appears in the
+argv the handler hands the process (`TestExec_StdinNeverReachesSpawnedArgv`,
+which spies on the real exec-boundary seam while still running the real
+handler and a real subprocess); the exact stdin cap is accepted both by the
+client's own check and, separately, by the real server's own request-size
+limit; a marshalled request at the cap is checked directly against the
+server's byte limit, so a future change to either constant the cap is
+derived from would be caught even if the end-to-end cases happened to still
+pass; an oversize payload exactly one byte over the cap is rejected without
+echoing it back, both server-side and client-side; a response missing
+`StdinSupported` while stdin was sent is a client error, with the
+version-skew wording confirmed present only for that specific failure and
+absent for a transport error or an authorization rejection reaching the same
+probe; and plain `Exec` sends no `Stdin` field. The probe's version-skew
+detection itself is proven two ways: against the package's usual fake
 control server, and separately against a hand-written handler that decodes
 the real, shared `ExecRequest`/`ExecResponse` types the way an
 implementation predating `Stdin` would, confirming that in either case the
-real command is never sent — only the probe's own no-op reaches the
-control server. The hub package's existing project-scoped agent
-authorization tests pass unchanged on the rebased tree, and a live run of a
-standalone hub server against a real database confirmed the property those
-tests guard: an access token scoped to one project cannot list or read
-another project's agent.
+real command is never sent — only the probe's own no-op reaches the control
+server. The hub package's existing project-scoped agent authorization tests
+pass unchanged on the rebased tree, and a live run of a standalone hub
+server against a real database confirmed the property those tests guard: an
+access token scoped to one project cannot list or read another project's
+agent.

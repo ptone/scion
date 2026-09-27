@@ -996,11 +996,16 @@ func (r *SubstrateRuntime) Exec(ctx context.Context, id string, cmd []string) (s
 	return res.Stdout, nil
 }
 
-// execStdinProbeArgv is a no-op command the capability probe below runs: it
-// exists purely to elicit a stdin_supported response, never to do real work,
-// so it is harmless on a control server old enough not to understand Stdin
-// at all (it just runs "true" and ignores whatever it was sent).
-var execStdinProbeArgv = []string{"true"}
+// execStdinProbeArgv returns a fresh no-op argv slice for the capability
+// probe below to run: it exists purely to elicit a stdin_supported response,
+// never to do real work, so it is harmless on a control server old enough
+// not to understand Stdin at all (it just runs "true" and ignores whatever
+// it was sent). A function returning a new slice each call, rather than a
+// shared package variable, so nothing else in the package could mutate what
+// the probe runs.
+func execStdinProbeArgv() []string {
+	return []string{"true"}
+}
 
 // ExecWithStdin implements the Runtime interface's stdin-piped exec (see
 // interface.go's doc comment): stdin is delivered via execRequest.Stdin over
@@ -1041,8 +1046,17 @@ func (r *SubstrateRuntime) ExecWithStdin(ctx context.Context, id string, cmd []s
 		return "", err
 	}
 
-	if _, err := doExec(ctx, r.router, atespace, actorName, token, execStdinProbeArgv, []byte("x"), r.ExecUser(), defaultExecTimeout); err != nil {
-		return "", fmt.Errorf("substrate: stdin capability probe failed for %s (control server may be running an image older than the reset-auth stdin change; upgrade the actor's sciontool image): %w", id, err)
+	if _, err := doExec(ctx, r.router, atespace, actorName, token, execStdinProbeArgv(), []byte("x"), r.ExecUser(), defaultExecTimeout); err != nil {
+		if errors.Is(err, errStdinUnsupported) {
+			// Only this specific failure means what it says: the probe
+			// reached the control server, ran, and the server never
+			// confirmed it understood Stdin. Any other probe failure
+			// (a transport error, an auth rejection, "true" missing from
+			// the image) has nothing to do with version skew and must not
+			// be reported as if it did.
+			return "", fmt.Errorf("substrate: stdin capability probe failed for %s: control server may be running an image older than the reset-auth stdin change; upgrade the actor's sciontool image: %w", id, err)
+		}
+		return "", fmt.Errorf("substrate: stdin capability probe failed for %s: %w", id, err)
 	}
 
 	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, data, r.ExecUser(), defaultExecTimeout)
