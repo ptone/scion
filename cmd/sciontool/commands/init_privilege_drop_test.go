@@ -342,6 +342,49 @@ func TestCheckPrivilegeDropFeasible_TraversableAndOwned_Passes(t *testing.T) {
 	}
 }
 
+// TestCheckPrivilegeDropFeasible_SetuidRootSudo_Fails proves the fail-closed
+// precondition added for the sudo hardening: a setuid-root "sudo" binary
+// found under any one of the fixed system directories must refuse
+// bootstrap, exactly like every other precondition in this function —
+// catching a stale golden template that skipped the rootfs fixup's own
+// setuid strip.
+func TestCheckPrivilegeDropFeasible_SetuidRootSudo_Fails(t *testing.T) {
+	for _, dir := range sudoCheckDirs {
+		t.Run(dir, func(t *testing.T) {
+			d := fakePrivilegeDropDeps(t)
+			path := filepath.Join("/", dir, "sudo")
+			d.statPath = statPathOverride(path, fakeFileInfo{mode: os.ModeSetuid | 0o755, uid: 0, gid: 0})
+			if err := checkPrivilegeDropFeasible(d); !errors.Is(err, errPrivilegeDropPrecondition) {
+				t.Errorf("checkPrivilegeDropFeasible() = %v, want errPrivilegeDropPrecondition (setuid-root sudo at %s)", err, path)
+			}
+		})
+	}
+}
+
+// TestCheckPrivilegeDropFeasible_SudoSetuidButNotOwnedByRoot_Passes proves
+// the check is specifically about a ROOT-owned setuid binary: a setuid
+// binary owned by some other uid (never a real sudo installation, but
+// worth pinning so the check doesn't over-fire on owner alone) does not
+// trip the precondition.
+func TestCheckPrivilegeDropFeasible_SudoSetuidButNotOwnedByRoot_Passes(t *testing.T) {
+	d := fakePrivilegeDropDeps(t)
+	d.statPath = statPathOverride("/usr/bin/sudo", fakeFileInfo{mode: os.ModeSetuid | 0o755, uid: 1000, gid: 1000})
+	if err := checkPrivilegeDropFeasible(d); err != nil {
+		t.Errorf("checkPrivilegeDropFeasible() = %v, want nil (setuid binary not owned by root)", err)
+	}
+}
+
+// TestCheckPrivilegeDropFeasible_NonSetuidSudo_Passes is the expected
+// steady state after the rootfs fixup's setuid strip has run: a root-owned
+// "sudo" binary with no setuid bit must never trip this precondition.
+func TestCheckPrivilegeDropFeasible_NonSetuidSudo_Passes(t *testing.T) {
+	d := fakePrivilegeDropDeps(t)
+	d.statPath = statPathOverride("/usr/bin/sudo", fakeFileInfo{mode: 0o755, uid: 0, gid: 0})
+	if err := checkPrivilegeDropFeasible(d); err != nil {
+		t.Errorf("checkPrivilegeDropFeasible() = %v, want nil (non-setuid sudo)", err)
+	}
+}
+
 // TestDefaultPrivilegeDropPreconditionDeps_LookupUserGoesThroughScionUserLookup
 // pins defaultPrivilegeDropPreconditionDeps.lookupUser's routing through the
 // scionUserLookup var (see its own doc comment for why this must be a

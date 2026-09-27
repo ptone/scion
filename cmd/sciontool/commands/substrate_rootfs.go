@@ -41,6 +41,22 @@ import (
 //     both matter here because this process, root, later creates and
 //     opens predictable paths under /tmp on the scion user's behalf.
 //
+// It also corrects a fourth condition that isn't a rootfs oddity but a
+// deliberate image posture this runtime alone can't tolerate:
+//
+//   - (iv) the image ships the scion user a passwordless sudo grant
+//     (/etc/sudoers.d/scion, /etc/sudoers.d/scion-firewall — "scion
+//     ALL=(ALL) NOPASSWD:ALL") on the assumption that sudo's own setuid bit
+//     never survives into a running actor. On a runtime where root is a
+//     security boundary, if that assumption is ever violated — a stale
+//     golden template, or a rootfs mechanism that restores setuid the same
+//     way it's observed restoring ownership in (ii) — the grant plus an
+//     intact setuid bit is a single, no-password command away from full
+//     root. Every other runtime this codebase targets keeps sudo and its
+//     setuid bit intact on purpose (root is not a security boundary there),
+//     so this half of the fixup, like the rest of this function, only ever
+//     runs from Substrate's own call sites.
+//
 // root and home are parameters — not hardcoded to "/" and a resolved
 // $HOME — purely so a test can point them at a t.TempDir() standing in for
 // the real rootfs and home directory. /tmp and /var/tmp are derived from
@@ -75,6 +91,22 @@ func fixupRootfsForScion(root, home string, uid, gid int) {
 	tmpChanged := fixupWorldWritableTmpDirSticky(filepath.Join(root, "tmp"))
 	varTmpChanged := fixupWorldWritableTmpDirSticky(filepath.Join(root, "var", "tmp"))
 
+	// PRIMARY control (condition (iv)): strip sudo's setuid/setgid/sticky
+	// bits wherever a "sudo" binary is found under one of the fixed system
+	// directories root-context code trusts (see the rootexec package's own
+	// SearchPath) — the same directories, never a PATH search. This is what
+	// checkPrivilegeDropFeasible's own sudo check (init.go) actually
+	// enforces; the sudoers-grant removal below is defense in depth, not
+	// the control that check relies on.
+	sudoSetuidChanged := stripSudoSetuidBits(root)
+
+	// SECONDARY control: remove the passwordless-sudo grants outright. Kept
+	// even though the setuid strip above is what actually closes the
+	// escalation (a non-setuid sudo binary can't do anything a grant alone
+	// would use), because removing the grant costs nothing and a future
+	// setuid restoration would otherwise still be paired with a live grant.
+	sudoersChanged := removeSudoersGrants(root)
+
 	// fixupRootfsForScion is substrate-only (see substrate_serve.go's call
 	// site), so this always exercises chownTreeRootOwned's hardened,
 	// no-follow branch — there is no non-substrate caller of this function
@@ -92,10 +124,113 @@ func fixupRootfsForScion(root, home string, uid, gid int) {
 	log.Debug("fixupRootfsForScion: walked %s in %s (%d entries, %d rechowned)",
 		home, time.Since(start), homeWalked, homeChanged)
 
-	if rootChanged || homeChanged > 0 || tmpChanged || varTmpChanged {
-		log.Info("fixupRootfsForScion: fixed up rootfs in %s (root chmod to 0755: %v, home entries rechowned: %d, tmp sticky bit set: %v, var/tmp sticky bit set: %v)",
-			time.Since(start), rootChanged, homeChanged, tmpChanged, varTmpChanged)
+	if rootChanged || homeChanged > 0 || tmpChanged || varTmpChanged || sudoSetuidChanged || sudoersChanged {
+		log.Info("fixupRootfsForScion: fixed up rootfs in %s (root chmod to 0755: %v, home entries rechowned: %d, tmp sticky bit set: %v, var/tmp sticky bit set: %v, sudo setuid stripped: %v, sudoers grants removed: %v)",
+			time.Since(start), rootChanged, homeChanged, tmpChanged, varTmpChanged, sudoSetuidChanged, sudoersChanged)
 	}
+}
+
+// sudoCheckDirs are the fixed system directories a "sudo" binary could
+// legitimately live in — the same list rootexec.SearchPath uses, restated
+// here rather than imported so this file (which builds without CGO
+// concerns or any dependency beyond the standard library plus this
+// package's own log helper) doesn't need to pull in pkg/sciontool/rootexec
+// purely for four string literals both checkPrivilegeDropFeasible (below,
+// same package) and this function need to agree on.
+var sudoCheckDirs = []string{"usr/sbin", "usr/bin", "sbin", "bin"}
+
+// stripSudoSetuidBits strips the setuid, setgid, and sticky special mode
+// bits from every "sudo" binary found under root's copy of sudoCheckDirs.
+// Returns whether anything was actually changed.
+//
+// Each candidate is opened with O_NOFOLLOW on the leaf component only (a
+// directory symlink earlier in the path — e.g. a merged-/usr image's
+// "/bin" -> "usr/bin" — is followed as normal; only a symlink AT "sudo"
+// itself is refused, the same "resolve, then verify the real destination"
+// shape rootexec.Resolve uses, except here the four candidate paths
+// commonly resolve to the very same inode rather than four distinct
+// binaries). fchmod runs on the open fd, never a path-based chmod, so a
+// symlink swapped in between the open and the chmod can't redirect this
+// call onto an arbitrary target's permissions. Anything that isn't a
+// regular file (already a symlink refused above, or some other special
+// file) is left alone.
+func stripSudoSetuidBits(root string) (changed bool) {
+	for _, dir := range sudoCheckDirs {
+		if stripSetuidBitsNoFollow(filepath.Join(root, dir, "sudo")) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// specialModeBits are the setuid, setgid, and sticky bits — everything
+// stripSetuidBitsNoFollow removes.
+const specialModeBits = syscall.S_ISUID | syscall.S_ISGID | syscall.S_ISVTX
+
+func stripSetuidBitsNoFollow(path string) bool {
+	fd, err := syscall.Open(path, syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Error("fixupRootfsForScion: failed to open %s: %v", path, err)
+		}
+		return false
+	}
+	defer func() { _ = syscall.Close(fd) }()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		log.Error("fixupRootfsForScion: failed to stat %s: %v", path, err)
+		return false
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		return false
+	}
+	perm := st.Mode & 0o7777
+	if perm&specialModeBits == 0 {
+		return false
+	}
+	if err := syscall.Fchmod(fd, perm&^uint32(specialModeBits)); err != nil {
+		log.Error("fixupRootfsForScion: failed to strip setuid/setgid/sticky bits from %s: %v", path, err)
+		return false
+	}
+	log.Info("fixupRootfsForScion: stripped setuid/setgid/sticky bits from %s", path)
+	return true
+}
+
+// sudoersGrantNames are the passwordless-sudo grant files the image ships
+// for the scion user, removed outright as defense in depth alongside the
+// setuid strip above.
+var sudoersGrantNames = []string{"scion", "scion-firewall"}
+
+// removeSudoersGrants unlinks root's copy of every name in
+// sudoersGrantNames under /etc/sudoers.d. The containing directory is
+// opened once with O_DIRECTORY|O_NOFOLLOW (refusing a symlink planted at
+// /etc/sudoers.d itself), and every removal is unlinkat against that one
+// verified directory fd, by name — never a re-joined path string. A
+// missing directory or a missing individual grant is treated as "already
+// gone", not an error.
+func removeSudoersGrants(root string) (changed bool) {
+	dirPath := filepath.Join(root, "etc", "sudoers.d")
+	dirFd, err := syscall.Open(dirPath, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Error("fixupRootfsForScion: failed to open %s: %v", dirPath, err)
+		}
+		return false
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	for _, name := range sudoersGrantNames {
+		if err := syscall.Unlinkat(dirFd, name); err != nil {
+			if !os.IsNotExist(err) {
+				log.Error("fixupRootfsForScion: failed to remove %s/%s: %v", dirPath, name, err)
+			}
+			continue
+		}
+		log.Info("fixupRootfsForScion: removed %s/%s", dirPath, name)
+		changed = true
+	}
+	return changed
 }
 
 // fixupWorldWritableTmpDirSticky sets a temp directory (/tmp or /var/tmp) to

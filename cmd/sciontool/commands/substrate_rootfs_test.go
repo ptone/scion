@@ -7,6 +7,7 @@ package commands
 import (
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -444,6 +445,205 @@ func ownerUIDOf(info fs.FileInfo) (uid uint32, ok bool) {
 		return 0, false
 	}
 	return stat.Uid, true
+}
+
+// plantSetuidSudo creates a regular file at root/dir/sudo with the setuid,
+// setgid, and sticky bits all set, standing in for an image that shipped a
+// setuid-root sudo binary. os.Chmod's own special-bit handling is used
+// directly (unlike a plain executable's permission bits, Go's os.Chmod does
+// apply os.ModeSetuid/ModeSetgid/ModeSticky correctly), so no umask
+// workaround is needed the way the plain-permission tests above need one.
+func plantSetuidSudo(t *testing.T, root, dir string) string {
+	t.Helper()
+	fullDir := filepath.Join(root, dir)
+	if err := os.MkdirAll(fullDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(fullDir, "sudo")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, os.ModeSetuid|os.ModeSetgid|os.ModeSticky|0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestStripSudoSetuidBits_StripsSetuidSetgidStickyFromEveryCandidateDir
+// proves stripSudoSetuidBits reaches every one of sudoCheckDirs, strips all
+// three special bits (not just setuid), and leaves the file's other
+// permission bits and content untouched.
+func TestStripSudoSetuidBits_StripsSetuidSetgidStickyFromEveryCandidateDir(t *testing.T) {
+	root := t.TempDir()
+	var paths []string
+	for _, dir := range sudoCheckDirs {
+		paths = append(paths, plantSetuidSudo(t, root, dir))
+	}
+
+	if !stripSudoSetuidBits(root) {
+		t.Fatal("stripSudoSetuidBits() = false, want true (planted setuid binaries)")
+	}
+
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+			t.Errorf("%s: mode = %v, want setuid/setgid/sticky all cleared", path, info.Mode())
+		}
+		if info.Mode().Perm() != 0o755 {
+			t.Errorf("%s: perm = %o, want unchanged 0755", path, info.Mode().Perm())
+		}
+	}
+
+	// Idempotent: a second call finds nothing left to strip.
+	if stripSudoSetuidBits(root) {
+		t.Error("stripSudoSetuidBits() second call = true, want false (nothing left to strip)")
+	}
+}
+
+// TestStripSudoSetuidBits_RefusesSymlinkedLeaf proves a symlink planted at
+// the "sudo" name itself is refused (O_NOFOLLOW on the leaf), not followed
+// and chmod'd through to whatever it points at.
+func TestStripSudoSetuidBits_RefusesSymlinkedLeaf(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "usr", "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(root, "victim")
+	if err := os.WriteFile(victim, []byte("victim"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(victim, os.ModeSetuid|0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dir, "sudo")); err != nil {
+		t.Fatal(err)
+	}
+
+	stripSudoSetuidBits(root)
+
+	info, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSetuid == 0 {
+		t.Error("victim's setuid bit was cleared through a symlink; the leaf open must refuse to follow it")
+	}
+}
+
+// TestRemoveSudoersGrants_RemovesBothNamesLeavesOthersAlone proves both
+// grant files are removed, an unrelated file in the same directory survives,
+// and a missing directory or missing individual grant is a benign no-op.
+func TestRemoveSudoersGrants_RemovesBothNamesLeavesOthersAlone(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "etc", "sudoers.d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range sudoersGrantNames {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("scion ALL=(ALL) NOPASSWD:ALL\n"), 0o440); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unrelated := filepath.Join(dir, "README")
+	if err := os.WriteFile(unrelated, []byte("unrelated"), 0o440); err != nil {
+		t.Fatal(err)
+	}
+
+	if !removeSudoersGrants(root) {
+		t.Fatal("removeSudoersGrants() = false, want true (planted grants)")
+	}
+	for _, name := range sudoersGrantNames {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s still exists after removeSudoersGrants, err=%v", name, err)
+		}
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Errorf("unrelated file %s was removed or is inaccessible: %v", unrelated, err)
+	}
+
+	// Second call: nothing left to remove, no error, benign false.
+	if removeSudoersGrants(root) {
+		t.Error("removeSudoersGrants() second call = true, want false (nothing left)")
+	}
+	// A root with no /etc/sudoers.d at all is equally benign.
+	if removeSudoersGrants(t.TempDir()) {
+		t.Error("removeSudoersGrants() on a root with no sudoers.d = true, want false")
+	}
+}
+
+// TestFixupRootfsForScion_StripsSudoSetuidAndRemovesSudoersGrantsOnEveryCall
+// proves the sudo hardening runs as part of fixupRootfsForScion itself —
+// the one function both of substrate-serve's rootfs-fixup call sites
+// invoke (startup and the /bootstrap fallback) — and that it re-applies on
+// every call rather than a one-shot, golden-boot-only action: the setuid
+// bit and the sudoers grant are re-planted between two calls, standing in
+// for a persisted rootfs that reverted them between bootstraps, and both
+// calls strip/remove them again.
+func TestFixupRootfsForScion_StripsSudoSetuidAndRemovesSudoersGrantsOnEveryCall(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	sudoersDir := filepath.Join(root, "etc", "sudoers.d")
+
+	for i := 0; i < 2; i++ {
+		sudoPath := plantSetuidSudo(t, root, "usr/bin")
+		if err := os.MkdirAll(sudoersDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sudoersDir, "scion"), []byte("scion ALL=(ALL) NOPASSWD:ALL\n"), 0o440); err != nil {
+			t.Fatal(err)
+		}
+
+		fixupRootfsForScion(root, home, 1000, 1000)
+
+		info, err := os.Stat(sudoPath)
+		if err != nil {
+			t.Fatalf("call %d: stat sudo binary: %v", i, err)
+		}
+		if info.Mode()&os.ModeSetuid != 0 {
+			t.Errorf("call %d: sudo binary still setuid after fixupRootfsForScion", i)
+		}
+		if _, err := os.Stat(filepath.Join(sudoersDir, "scion")); !os.IsNotExist(err) {
+			t.Errorf("call %d: sudoers grant still present after fixupRootfsForScion, err=%v", i, err)
+		}
+	}
+}
+
+// TestFixupRootfsForScionUser_RunsSudoFixup proves the sudo hardening is
+// reachable through fixupRootfsForScionUser — the function both real
+// call sites (substrate_serve.go's startupRootfsFixup and
+// bootstrapRootfsFixup package vars) actually invoke — not just through a
+// direct call to fixupRootfsForScion that a real bootstrap would never
+// make.
+func TestFixupRootfsForScionUser_RunsSudoFixup(t *testing.T) {
+	origLookup := scionUserLookup
+	t.Cleanup(func() { scionUserLookup = origLookup })
+	root := t.TempDir()
+	home := filepath.Join(root, "home", "scion")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	scionUserLookup = func(string) (*user.User, error) {
+		return &user.User{Uid: "1000", Gid: "1000", HomeDir: home}, nil
+	}
+
+	sudoPath := plantSetuidSudo(t, root, "usr/bin")
+
+	fixupRootfsForScionUser(root)
+
+	info, err := os.Stat(sudoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSetuid != 0 {
+		t.Error("sudo binary still setuid after fixupRootfsForScionUser")
+	}
 }
 
 // TestFixupRootfsForScion_Enforced_RefusesAncestorSymlink is the core
