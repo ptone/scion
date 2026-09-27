@@ -7,6 +7,7 @@ package commands
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -50,6 +51,43 @@ func TestVerifySelfBinaryRootOwned_AcceptsRealRootOwnedBinary(t *testing.T) {
 	}
 	if err := verifySelfBinaryRootOwned(); err != nil {
 		t.Errorf("verifySelfBinaryRootOwned() = %v, want nil (running as root)", err)
+	}
+}
+
+// TestRunSubstrateServe_CallsSelfBinaryIntegrityCheckBeforeListening proves
+// runSubstrateServe actually wires in the self-binary integrity check (not
+// just that verifySelfBinaryRootOwned works correctly in isolation): a
+// failing check must refuse to start the HTTP server at all, before ever
+// attempting to listen — proven here by closing the reserved port first, so
+// a real listen attempt would otherwise succeed instead of hitting the
+// address-in-use failure the other ordering tests in this file use.
+func TestRunSubstrateServe_CallsSelfBinaryIntegrityCheckBeforeListening(t *testing.T) {
+	origFixup := startupRootfsFixup
+	t.Cleanup(func() { startupRootfsFixup = origFixup })
+	startupRootfsFixup = func(string) {}
+
+	origCheck := runSelfBinaryIntegrityCheck
+	t.Cleanup(func() { runSelfBinaryIntegrityCheck = origCheck })
+	var called bool
+	runSelfBinaryIntegrityCheck = func() error {
+		called = true
+		return errors.New("boom")
+	}
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a port: %v", err)
+	}
+	addr := l.Addr().String()
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := runSubstrateServe(addr); code != 1 {
+		t.Fatalf("runSubstrateServe() = %d, want 1 (the self-binary integrity check failed)", code)
+	}
+	if !called {
+		t.Error("runSubstrateServe returned without ever calling the self-binary integrity check")
 	}
 }
 
