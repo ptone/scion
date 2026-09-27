@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -691,19 +690,18 @@ func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.A
 		return
 	}
 
-	workspacePath, err := s.hubManagedProjectPath(project.Slug)
-	if err != nil {
-		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: failed to get project path", "error", err)
+	// Use the project-level storage path for hub-managed projects. Landing
+	// goes through the same landProjectWorkspace helper syncWorkspaceOnStop
+	// uses: this prefix is filled by the same broker upload the stop-sync
+	// path writes to, so it must go through the same lock + admin-surface
+	// rebuild, not a direct SyncFromGCS.
+	projectStoragePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
+	if err := s.landProjectWorkspace(ctx, project, projectStoragePath); err != nil {
+		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: workspace landing did not complete cleanly",
+			"project_id", project.ID, "storagePath", projectStoragePath, "error", err)
 		return
 	}
 
-	// Use the project-level storage path for hub-managed projects
-	projectStoragePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), projectStoragePath+"/files", workspacePath); err != nil {
-		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: GCS download failed",
-			"project_id", project.ID, "storagePath", projectStoragePath, "error", err)
-	} else {
-		s.workspaceLog.Info("syncHubManagedWorkspaceBack: workspace synced to Hub filesystem",
-			"project_id", project.ID, "path", workspacePath)
-	}
+	s.workspaceLog.Info("syncHubManagedWorkspaceBack: workspace synced to Hub filesystem",
+		"project_id", project.ID)
 }

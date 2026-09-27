@@ -763,6 +763,16 @@ type syncedGitHeadInfo struct {
 //     (2) — never from anything pod/GCS-provided. Hub-native workspaces
 //     (remote.RemoteURL == "") get identity+core only, no remote: there is no
 //     upstream to synthesize.
+//
+// Only .git itself is Lstat'ed to enforce the shape gate above; the
+// allowlisted entries underneath it (objects, refs, HEAD, etc.) are trusted
+// to be what they claim to be. That is safe for the landings this function
+// is written for — a sync mirror such as rclone's, which does not carry
+// symlinks into the destination by default — but a landing mechanism that
+// does preserve symlinks (e.g. a tar-based copy) could have a symlinked
+// allowlisted entry resolve outside the gitdir. Callers landing from such a
+// mechanism should Lstat each allowlisted entry themselves before calling
+// this, or avoid trusting FilterSyncedGitMetadata's allowlist rebuild alone.
 func FilterSyncedGitMetadata(workspacePath string, remote SyncedGitRemote) error {
 	gitDir := filepath.Join(workspacePath, ".git")
 	info, err := os.Lstat(gitDir)
@@ -824,6 +834,30 @@ func FilterSyncedGitMetadata(workspacePath string, remote SyncedGitRemote) error
 	}
 
 	return nil
+}
+
+// LandSyncedGitWorkspace runs sync — a caller-provided download step, e.g.
+// an rclone-backed GCS mirror — into workspacePath, then unconditionally
+// rebuilds the workspace's .git admin surface via FilterSyncedGitMetadata,
+// regardless of whether sync succeeded.
+//
+// The rebuild must be unconditional because a sync mirror is not
+// all-or-nothing: an I/O error on one file (for example, a path that fits
+// under the source root but exceeds the destination's longer path length
+// limit) does not stop it from copying the rest, so a landing whose sync
+// step reports an error can still have copied an unsafe .git admin surface.
+// Skipping the rebuild on any sync error would leave that surface standing.
+//
+// Callers that copy a workspace snapshot onto a host directory a host-side
+// git will later run in should route through this rather than calling their
+// sync step directly, so the rebuild can never be missed for a given
+// landing path. It returns a combined error if either step failed; the
+// workspace is left safe to use either way, since whatever landed is
+// rebuilt to the allowlist regardless of the sync step's outcome.
+func LandSyncedGitWorkspace(workspacePath string, remote SyncedGitRemote, sync func() error) error {
+	syncErr := sync()
+	filterErr := FilterSyncedGitMetadata(workspacePath, remote)
+	return errors.Join(syncErr, filterErr)
 }
 
 // checkSyncedGitFormatSupported reads extensions.objectFormat and
@@ -981,6 +1015,16 @@ func writeSyncedGitConfig(gitDir string, remote SyncedGitRemote, branch string) 
 		{"core.logallrefupdates", "true"},
 		{"user.name", "Scion"},
 		{"user.email", "agent@scion.dev"},
+		// The allowlist rebuild deletes .git/modules/, but a submodule whose
+		// gitdir lives in the working tree (<sub>/.git/ as a real directory,
+		// the pre-absorb layout) is content outside the gitdir the allowlist
+		// cannot reach — its hooks/config are not ours to rebuild. These two
+		// keys stop a default `git pull` from recursing into any such
+		// submodule at all, so its hooks/fsmonitor never run. This is
+		// independent of, and does not wait for, the hardened pull wrapper's
+		// planned --no-recurse-submodules flag (a second layer).
+		{"fetch.recurseSubmodules", "false"},
+		{"submodule.recurse", "false"},
 	}
 	for _, kv := range base {
 		if err := set(kv[0], kv[1]); err != nil {

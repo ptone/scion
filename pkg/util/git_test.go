@@ -15,6 +15,7 @@
 package util
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -942,6 +943,77 @@ func TestFilterSyncedGitMetadata_HooksFilterConfig(t *testing.T) {
 	requireNoMarkers(t, markerDir)
 }
 
+// TestFilterSyncedGitMetadata_ObjectsInfoRemoved is a dedicated,
+// revert-checked test for the objects/info/{alternates,http-alternates}
+// removal (P1-review R2): either file can point the object store at a
+// different repository entirely — a cross-tenant read on a host where
+// multiple projects' .git directories live side by side. Written as its own
+// test (rather than folded into another test's fixture) so a no-op change
+// to that removal fails only this test, not a broader one that happens to
+// still pass for other reasons.
+func TestFilterSyncedGitMetadata_ObjectsInfoRemoved(t *testing.T) {
+	sourceDir := setupGitRepo(t)
+	cloneDir := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(cloneDir, sourceDir, "", ""); err != nil {
+		t.Fatalf("Clone failed: %v", err)
+	}
+	objectsInfo := filepath.Join(cloneDir, ".git", "objects", "info")
+	if err := os.MkdirAll(objectsInfo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	otherObjectStore := filepath.Join(t.TempDir(), "other-repo-objects")
+	if err := os.WriteFile(filepath.Join(objectsInfo, "alternates"), []byte(otherObjectStore+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(objectsInfo, "http-alternates"), []byte("https://example.invalid/other-repo.git/objects\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FilterSyncedGitMetadata(cloneDir, SyncedGitRemote{RemoteURL: sourceDir}); err != nil {
+		t.Fatalf("FilterSyncedGitMetadata failed: %v", err)
+	}
+
+	if _, err := os.Stat(objectsInfo); !os.IsNotExist(err) {
+		t.Errorf("expected objects/info to be removed entirely, stat err: %v", err)
+	}
+}
+
+// TestLandSyncedGitWorkspace_FilterRunsUnconditionally covers the P1-review
+// fix for the landing-failure case: a sync mirror is not all-or-nothing (an
+// I/O error on one file does not stop it from copying the rest), so a
+// landing whose sync step reports an error must still have its admin
+// surface rebuilt. A landed hook must not survive just because the sync
+// call that copied it also failed.
+func TestLandSyncedGitWorkspace_FilterRunsUnconditionally(t *testing.T) {
+	sourceDir := setupGitRepo(t)
+	cloneDir := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(cloneDir, sourceDir, "", ""); err != nil {
+		t.Fatalf("Clone failed: %v", err)
+	}
+	hookPath := filepath.Join(cloneDir, ".git", "hooks", "post-merge")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\necho ran\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	simulatedSyncErr := errors.New("simulated partial sync failure")
+	err := LandSyncedGitWorkspace(cloneDir, SyncedGitRemote{RemoteURL: sourceDir}, func() error {
+		// The provided sync step stands in for a mirror that copied the hook
+		// above (already on disk, above) before reporting an error partway
+		// through — exactly the rclone partial-copy-on-IO-error behavior
+		// this fix targets.
+		return simulatedSyncErr
+	})
+	if err == nil {
+		t.Fatal("expected LandSyncedGitWorkspace to report the sync error")
+	}
+	if !errors.Is(err, simulatedSyncErr) {
+		t.Errorf("expected the returned error to wrap the sync error, got: %v", err)
+	}
+	if _, statErr := os.Stat(hookPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected the hook to be removed by the rebuild even though sync reported an error, stat err: %v", statErr)
+	}
+}
+
 // TestFilterSyncedGitMetadata_CommondirRedirection covers matrix case (d): a
 // .git/commondir written into the landed .git repoints git's common dir
 // (config, hooks, objects, refs) at a separate working-tree directory
@@ -1075,6 +1147,94 @@ func TestFilterSyncedGitMetadata_SubmoduleGitdir(t *testing.T) {
 	requireNoMarkers(t, markerDir)
 }
 
+// TestFilterSyncedGitMetadata_WorktreeSubmoduleGitdir covers the P1-review
+// fix for the working-tree submodule case: a submodule whose gitdir lives in
+// the working tree (<sub>/.git/ as a real directory — the "pre-absorb"
+// layout, as opposed to the .git/modules/<sub> layout the previous test
+// covers) is content outside the top-level .git directory the allowlist
+// rebuild cannot reach at all.
+// Closing this needs the regenerated config to stop a default pull from
+// recursing into any submodule (fetch.recurseSubmodules=false,
+// submodule.recurse=false in writeSyncedGitConfig's base keys) — the
+// allowlist has no way to reach sub/.git in the first place.
+func TestFilterSyncedGitMetadata_WorktreeSubmoduleGitdir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	subUpstream := setupGitRepo(t)
+	superUpstream := setupGitRepo(t)
+	gitC(t, superUpstream, "-c", "protocol.file.allow=always", "submodule", "add", "-q", subUpstream, "sub")
+	gitC(t, superUpstream, "commit", "-q", "-m", "add submodule")
+
+	cloneDir := filepath.Join(t.TempDir(), "workspace")
+	cmd := exec.Command("git", "-c", "protocol.file.allow=always", "clone", "-q", "--recurse-submodules", superUpstream, cloneDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone --recurse-submodules failed: %v (%s)", err, out)
+	}
+	gitDir := filepath.Join(cloneDir, ".git")
+	subWorkDir := filepath.Join(cloneDir, "sub")
+	subGitDir := filepath.Join(subWorkDir, ".git")
+
+	// Relocate the submodule's gitdir into the working tree as a real
+	// directory (the pre-absorb layout), replacing the gitfile the
+	// --recurse-submodules clone created.
+	if err := os.Remove(subGitDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(gitDir, "modules", "sub"), subGitDir); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("git", "-C", subGitDir, "config", "--unset", "core.worktree").Run()
+
+	// Advance the submodule so a subsequent superproject pull has a gitlink
+	// bump to fetch.
+	commitNewFile(t, subUpstream, "sub-new.txt", "sub new content")
+	gitC(t, filepath.Join(superUpstream, "sub"), "-c", "protocol.file.allow=always", "pull", "-q", "origin",
+		strings.TrimSpace(gitC(t, subUpstream, "branch", "--show-current")))
+	gitC(t, superUpstream, "commit", "-qam", "bump submodule")
+
+	markerDir := t.TempDir()
+	marker := filepath.Join(markerDir, "submodule-ranmarker")
+	for _, hook := range []string{"reference-transaction", "post-merge", "post-checkout"} {
+		script := "#!/bin/sh\necho " + hook + " >> " + marker + "\n"
+		if err := os.WriteFile(filepath.Join(subGitDir, "hooks", hook), []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fsmonitorLine := "\n[core]\n\tfsmonitor = \"echo FSM >> " + marker + "; false\"\n"
+	f, err := os.OpenFile(filepath.Join(subGitDir, "config"), os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(fsmonitorLine); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	if err := FilterSyncedGitMetadata(cloneDir, SyncedGitRemote{RemoteURL: superUpstream}); err != nil {
+		t.Fatalf("FilterSyncedGitMetadata failed: %v", err)
+	}
+
+	// Unlike .git/modules/sub, sub/.git/ sits in the working tree and is
+	// outside the top-level .git the allowlist rebuild operates on — it is
+	// expected to still be standing. Closure here comes from the
+	// regenerated config's submodule-recursion keys, not from this
+	// directory being removed.
+	if _, err := os.Stat(subGitDir); err != nil {
+		t.Fatalf("expected sub/.git to remain (outside .git's allowlist rebuild): %v", err)
+	}
+
+	result, err := PullSharedWorkspace(cloneDir, "")
+	if err != nil {
+		t.Fatalf("PullSharedWorkspace failed: %v", err)
+	}
+	if !result.Updated {
+		t.Error("expected Updated=true after pull with new commits")
+	}
+	requireNoMarkers(t, markerDir)
+}
+
 // TestFilterSyncedGitMetadata_GitfileFailsClosed covers matrix case (f): a
 // landed ".git" that is a plain file (a "gitdir: <path>" redirect, as used
 // by worktrees and submodule checkouts) rather than a real directory
@@ -1097,15 +1257,26 @@ func TestFilterSyncedGitMetadata_GitfileFailsClosed(t *testing.T) {
 }
 
 // TestFilterSyncedGitMetadata_SymlinkFailsClosed is TestFilterSyncedGitMetadata_GitfileFailsClosed's
-// symlink variant.
+// symlink variant. The target is deliberately a real, valid gitdir (as
+// another project's .git would be) rather than an empty directory: an empty
+// target is rejected by HEAD validation alone and would pass even with the
+// shape gate removed, so it would not actually exercise the gate this test
+// is for. The case the gate exists for is a symlink into a valid gitdir
+// that must be left completely alone.
 func TestFilterSyncedGitMetadata_SymlinkFailsClosed(t *testing.T) {
-	workspacePath := t.TempDir()
-	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
-	if err := os.MkdirAll(elsewhere, 0755); err != nil {
+	otherProjectDir := setupGitRepo(t)
+	otherGitDir := filepath.Join(otherProjectDir, ".git")
+	if _, err := os.Stat(filepath.Join(otherGitDir, "hooks")); err != nil {
+		t.Fatalf("test assumption broken: expected %s/hooks to exist", otherGitDir)
+	}
+	configBefore, err := os.ReadFile(filepath.Join(otherGitDir, "config"))
+	if err != nil {
 		t.Fatal(err)
 	}
+
+	workspacePath := t.TempDir()
 	gitLink := filepath.Join(workspacePath, ".git")
-	if err := os.Symlink(elsewhere, gitLink); err != nil {
+	if err := os.Symlink(otherGitDir, gitLink); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1115,8 +1286,20 @@ func TestFilterSyncedGitMetadata_SymlinkFailsClosed(t *testing.T) {
 	if _, err := os.Lstat(gitLink); !os.IsNotExist(err) {
 		t.Errorf("expected the symlink to be removed, stat err: %v", err)
 	}
-	if _, err := os.Stat(elsewhere); err != nil {
-		t.Errorf("the symlink target must not itself be touched: %v", err)
+
+	// The symlink target — another project's real, valid gitdir — must be
+	// completely untouched: no hooks removal, no config regeneration. If the
+	// shape gate ran the rebuild through the symlink instead of refusing it,
+	// both of these would fail.
+	if _, err := os.Stat(filepath.Join(otherGitDir, "hooks")); err != nil {
+		t.Errorf("symlink target's hooks dir must survive untouched: %v", err)
+	}
+	configAfter, err := os.ReadFile(filepath.Join(otherGitDir, "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(configBefore) != string(configAfter) {
+		t.Errorf("symlink target's config must survive untouched:\nbefore:\n%s\nafter:\n%s", configBefore, configAfter)
 	}
 }
 
@@ -1310,6 +1493,13 @@ func TestFilterSyncedGitMetadata_BranchNameConfigEscaping(t *testing.T) {
 		if strings.Contains(config, forbidden) {
 			t.Errorf("regenerated config unexpectedly contains unexpected content %q:\n%s", forbidden, config)
 		}
+	}
+	// Pin the charset layer specifically (on top of the "no unexpected
+	// content" checks above): the actual behavior for a branch name outside
+	// [A-Za-z0-9._/-] is to skip branch tracking entirely, not to escape and
+	// write it. No [branch section at all should be present for this name.
+	if strings.Contains(config, "[branch") {
+		t.Errorf("expected no branch.* section for a charset-rejected branch name, got:\n%s", config)
 	}
 	// Whatever was written must still be a valid, parseable config file —
 	// proving the section header was not terminated early.

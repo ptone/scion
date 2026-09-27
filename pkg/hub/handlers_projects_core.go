@@ -1180,47 +1180,8 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 		return
 	}
 
-	// Download from GCS to Hub filesystem
-	workspacePath, err := s.hubManagedProjectPath(project.Slug)
-	if err != nil {
-		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: failed to get project path", "agent_id", agent.ID, "error", err)
-		return
-	}
-
-	// Landing (the raw, untrusted download) and its admin-surface rebuild
-	// must be atomic with respect to any host-side git run against this same
-	// workspace (e.g. the pull handler below) — otherwise a pull could start
-	// reading the directory in the window between the raw download landing
-	// and the rebuild completing. Hold the per-project lock across both
-	// steps; PullSharedWorkspace's caller takes the same lock.
-	lock := s.lockWorkspaceGit(project.ID)
-	lock.Lock()
-	defer lock.Unlock()
-
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
-		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: GCS download failed",
-			"agent_id", agent.ID,
-			"project_id", project.ID, "error", err)
-		return
-	}
-
-	// The synced content is a raw filesystem snapshot from the agent's
-	// workspace and is not trusted: rebuild its .git admin surface (hooks,
-	// info/, execution-bearing config, and any gitdir-redirection entries
-	// such as commondir or modules/) before this directory is ever used for
-	// a host-side git operation (e.g. workspace/pull). Only a
-	// shared-workspace project has a host-known-good remote to regenerate
-	// config against; other projects get a config with no remote at all.
-	syncedRemote := util.SyncedGitRemote{}
-	if project.IsSharedWorkspace() {
-		syncedRemote.RemoteURL = resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
-	}
-	if err := util.FilterSyncedGitMetadata(workspacePath, syncedRemote); err != nil {
-		// Fail closed: FilterSyncedGitMetadata already removes the .git it
-		// could not safely rebuild (non-real directory, unsupported repo
-		// format, invalid HEAD), so there is nothing further to quarantine
-		// here — just log and stop treating this landing as successful.
-		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: failed to filter synced git metadata",
+	if err := s.landProjectWorkspace(ctx, project, storagePath); err != nil {
+		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: workspace landing did not complete cleanly",
 			"agent_id", agent.ID,
 			"project_id", project.ID, "error", err)
 		return
@@ -1228,7 +1189,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 
 	s.agentLifecycleLog.Info("syncWorkspaceOnStop: workspace synced back to Hub",
 		"agent_id", agent.ID,
-		"project_id", project.ID, "path", workspacePath)
+		"project_id", project.ID)
 }
 
 // lockWorkspaceGit returns the process-local mutex serializing workspace
@@ -1249,6 +1210,52 @@ func (s *Server) lockWorkspaceGit(projectID string) *sync.Mutex {
 		s.workspaceGitLocks[projectID] = m
 	}
 	return m
+}
+
+// landProjectWorkspace is the single landing path for a hub-managed
+// project's workspace: every call site that copies a workspace snapshot
+// onto hubManagedProjectPath must go through this, not call SyncFromGCS
+// directly, or the admin-surface rebuild can be skipped for that path
+// entirely.
+//
+// It downloads storagePath's "files" prefix from GCS onto the project's
+// filesystem path, then rebuilds the landed .git's admin surface, holding
+// the per-project lock across both steps so a concurrent pull can never
+// observe a partially landed or partially rebuilt directory.
+//
+// The rebuild runs unconditionally, whether or not the download succeeded:
+// rclone's sync.Sync is not all-or-nothing — an I/O error on one file (for
+// example a path that fits under the source root but exceeds the
+// destination's longer path length limit) does not stop it from copying
+// the rest, so a partially failed download can still have copied an unsafe
+// .git admin surface. landProjectWorkspace reports an error if either step
+// failed, but the workspace is left safe to use either way: whatever landed
+// is rebuilt to the allowlist regardless of the download's outcome.
+func (s *Server) landProjectWorkspace(ctx context.Context, project *store.Project, storagePath string) error {
+	stor := s.GetStorage()
+	if stor == nil {
+		return fmt.Errorf("landProjectWorkspace: storage backend not configured")
+	}
+	workspacePath, err := s.hubManagedProjectPath(project.Slug)
+	if err != nil {
+		return fmt.Errorf("landProjectWorkspace: resolve project path: %w", err)
+	}
+
+	lock := s.lockWorkspaceGit(project.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Only a shared-workspace project has a host-known-good remote to
+	// regenerate config against; other projects get a config with no remote
+	// at all.
+	syncedRemote := util.SyncedGitRemote{}
+	if project.IsSharedWorkspace() {
+		syncedRemote.RemoteURL = resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
+	}
+
+	return util.LandSyncedGitWorkspace(workspacePath, syncedRemote, func() error {
+		return gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath)
+	})
 }
 
 func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
