@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -643,6 +644,57 @@ func TestFixupRootfsForScionUser_RunsSudoFixup(t *testing.T) {
 	}
 	if info.Mode()&os.ModeSetuid != 0 {
 		t.Error("sudo binary still setuid after fixupRootfsForScionUser")
+	}
+}
+
+// TestSudoHardeningOnlyReachableFromSubstrateServe is the parity guard for
+// the sudo hardening: every other runtime this codebase targets (Docker,
+// Kubernetes, Apple containers, rootless) keeps sudo and its setuid bit
+// intact on purpose — root is not a security boundary there. The strip/
+// removal (fixupRootfsForScionUser, called at both of substrate-serve's own
+// rootfs-fixup call sites) and the fail-closed precondition
+// (checkPrivilegeDropFeasible, wired only into substrate-serve's own
+// PrivilegeDropChecker) must never be reachable from any other file in this
+// package, which — unlike substrate_serve.go — is where a non-substrate
+// runtime's own init path lives. This scans every non-test source file
+// (excluding the two files that legitimately define/call these directly)
+// for a call to either, so a future call site added anywhere else in this
+// package fails this test rather than silently changing non-substrate
+// runtime behavior.
+func TestSudoHardeningOnlyReachableFromSubstrateServe(t *testing.T) {
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// substrate_rootfs.go defines fixupRootfsForScionUser; init.go defines
+	// checkPrivilegeDropFeasible; substrate_serve.go is the only legitimate
+	// caller of either.
+	allowed := map[string]bool{
+		"substrate_rootfs.go": true,
+		"init.go":             true,
+		"substrate_serve.go":  true,
+	}
+	forbidden := []string{"fixupRootfsForScionUser(", "checkPrivilegeDropFeasible("}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || allowed[name] {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		content := string(data)
+		for _, call := range forbidden {
+			if strings.Contains(content, call) {
+				t.Errorf("%s calls %s — this must only ever be reachable from substrate-serve's own wiring, never a non-substrate runtime's code path",
+					name, strings.TrimSuffix(call, "("))
+			}
+		}
 	}
 }
 
