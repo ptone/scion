@@ -388,6 +388,26 @@ func WorktreePath(hostPath, agentID string) string {
 	return filepath.Join(hostPath, WorktreesSubdir, agentID)
 }
 
+// validateJoinCandidate reports whether path is a genuine, in-tree worktree
+// of base (ValidateWorktreeForBase) and is therefore safe for ensureWorktree
+// to attach a joining agent to. source is a short label identifying which
+// JOIN discovery path produced the candidate, for the warning log.
+//
+// This is the full relationship check, not just lexical containment: it
+// additionally proves candidate is a real worktree of base (its gitfile
+// resolves to base's admin dir and the admin dir's back-link resolves back to
+// candidate), which lexical containment alone cannot — a discovery path can
+// be steered by an in-tree-but-fake directory or by a rewritten
+// base/.git/worktrees/<name>/gitdir back-link pointing outside the tree.
+func validateJoinCandidate(base, path, agentID, branchName, source string) bool {
+	if err := ValidateWorktreeForBase(base, path); err != nil {
+		slog.Warn("ProvisionShared: join candidate failed worktree relationship validation, refusing to join",
+			"agent_id", agentID, "branch", branchName, "path", path, "source", source, "error", err)
+		return false
+	}
+	return true
+}
+
 // ensureWorktree creates or attaches to a per-agent worktree if the mode is
 // WorktreePerAgent. For SharedPlain mode this is a no-op.
 //
@@ -441,21 +461,24 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		return fmt.Errorf("ProvisionShared: list sharers for branch %q: %w", branchName, err)
 	}
 	if len(sharers) > 0 && existingWtPath != "" {
-		if _, statErr := os.Stat(existingWtPath); statErr == nil {
+		if valErr := ValidateWorktreeForBase(base, existingWtPath); valErr == nil {
 			slog.Info("ProvisionShared: joining existing worktree (registry)",
 				"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath,
 				"existing_sharers", sharers)
 			return RegisterSharer(base, branchName, existingWtPath, in.AgentID)
+		} else {
+			slog.Warn("ProvisionShared: registry worktree path failed relationship validation, will create new worktree",
+				"agent_id", in.AgentID, "branch", branchName, "stale_path", existingWtPath, "error", valErr)
 		}
-		slog.Warn("ProvisionShared: registry points to missing path, will create new worktree",
-			"agent_id", in.AgentID, "branch", branchName, "stale_path", existingWtPath)
 	}
 
 	// 2. Check git worktree list for a prior-run worktree without a registry entry.
 	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" {
-		slog.Info("ProvisionShared: joining pre-existing worktree (git)",
-			"agent_id", in.AgentID, "branch", branchName, "path", existingPath)
-		return RegisterSharer(base, branchName, existingPath, in.AgentID)
+		if validateJoinCandidate(base, existingPath, in.AgentID, branchName, "git-worktree-list") {
+			slog.Info("ProvisionShared: joining pre-existing worktree (git)",
+				"agent_id", in.AgentID, "branch", branchName, "path", existingPath)
+			return RegisterSharer(base, branchName, existingPath, in.AgentID)
+		}
 	}
 
 	// --- CREATE: no existing worktree for this branch ---
@@ -479,7 +502,8 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		// Branch collision: the proactive JOIN checks above should catch this,
 		// but handle defensively in case of a race or stale state.
 		if strings.Contains(outputStr, "already checked out") || strings.Contains(outputStr, "already used by worktree") {
-			if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
+			if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" &&
+				validateJoinCandidate(base, attachPath, in.AgentID, branchName, "git-fallback") {
 				slog.Info("ProvisionShared: attaching to existing worktree (git fallback)",
 					"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
 				return RegisterSharer(base, branchName, attachPath, in.AgentID)
@@ -496,7 +520,8 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 			if err != nil {
 				reuse := strings.TrimSpace(string(output))
 				if strings.Contains(reuse, "already checked out") || strings.Contains(reuse, "already used by worktree") {
-					if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
+					if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" &&
+						validateJoinCandidate(base, attachPath, in.AgentID, branchName, "reuse-fallback") {
 						slog.Info("ProvisionShared: attaching to existing worktree (reuse fallback)",
 							"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
 						return RegisterSharer(base, branchName, attachPath, in.AgentID)
