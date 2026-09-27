@@ -5,10 +5,12 @@ Copyright 2026 The Scion Authors.
 package commands
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"io/fs"
 	"os"
 	"os/user"
@@ -20,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
 // trustedTestRoot creates a fresh directory to stand in for a fixup's
@@ -674,6 +677,239 @@ func TestFindSetuidRootSudo_PassesAfterFixupNeutralizesSymlinkedSudo(t *testing.
 
 	if found := findSetuidRootSudo(statPath); found != "" {
 		t.Errorf("findSetuidRootSudo() = %q after stripSudoSetuidBits ran through a fully-trusted symlink chain, want \"\" (the fixup should have neutralized the real destination)", found)
+	}
+}
+
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// everything written to it. log.write always writes to whatever os.Stderr
+// currently is (read fresh on each call, never cached), so this needs no
+// change to the log package itself. Not safe to run with t.Parallel(); none
+// of this file's tests use it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	// Some other test elsewhere in this package's suite exercises a real
+	// cobra command invocation that calls log.SetQuiet(true) without ever
+	// resetting it (it's the production PersistentPreRun behavior for hook
+	// subcommands, not a test-only setting), which would otherwise silently
+	// suppress every stderr write regardless of test order. Force it off
+	// for the duration of this capture so the result reflects this test's
+	// own behavior, not accumulated global state from elsewhere in the
+	// suite.
+	log.SetQuiet(false)
+	t.Cleanup(func() { log.SetQuiet(false) })
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	fn()
+	os.Stderr = orig
+	_ = w.Close()
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	_ = r.Close()
+	return buf.String()
+}
+
+// TestAncestorSymlinkIsRootOwned_TrueForSelfOwnedSymlinkedDir proves the
+// positive path of the exact predicate that decides stripSetuidBitsNoFollow's
+// log level: a candidate whose immediate parent directory entry is itself a
+// symlink owned by this process (the merged-/usr compatibility shape, e.g.
+// "/bin" -> "usr/bin", is root-owned on a real substrate actor; a
+// non-root test process reproduces the same shape with a self-owned
+// symlink, since dirfd's own chainIsTrusted treats uid-or-self identically
+// everywhere else in this trust chain).
+func TestAncestorSymlinkIsRootOwned_TrueForSelfOwnedSymlinkedDir(t *testing.T) {
+	root := trustedTestRoot(t)
+	real := filepath.Join(root, "usr", "bin")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "bin")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if !ancestorSymlinkIsRootOwned(filepath.Join(link, "sudo")) {
+		t.Error("ancestorSymlinkIsRootOwned() = false, want true for a self-owned symlinked parent directory")
+	}
+}
+
+// TestAncestorSymlinkIsRootOwned_FalseForPlainDirectory proves the negative
+// path: an ordinary (non-symlink) parent directory is never classified as
+// the merged-/usr compatibility case, regardless of its ownership — this is
+// what keeps a genuinely untrusted chain (e.g. a workload-writable
+// directory, which VerifyRootOwnedExecutable already refuses on its own
+// merits) logged at ERROR rather than downgraded.
+func TestAncestorSymlinkIsRootOwned_FalseForPlainDirectory(t *testing.T) {
+	root := trustedTestRoot(t)
+	dir := filepath.Join(root, "usr", "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if ancestorSymlinkIsRootOwned(filepath.Join(dir, "sudo")) {
+		t.Error("ancestorSymlinkIsRootOwned() = true, want false for a plain (non-symlink) parent directory")
+	}
+}
+
+// TestAncestorSymlinkIsRootOwned_FalseWhenParentMissing proves the
+// fail-closed default: a candidate whose parent cannot even be statted
+// (e.g. it doesn't exist) is never classified as the compatibility case.
+func TestAncestorSymlinkIsRootOwned_FalseWhenParentMissing(t *testing.T) {
+	root := trustedTestRoot(t)
+	if ancestorSymlinkIsRootOwned(filepath.Join(root, "does-not-exist", "sudo")) {
+		t.Error("ancestorSymlinkIsRootOwned() = true, want false when the parent directory does not exist")
+	}
+}
+
+// TestStripSetuidBitsNoFollow_MergedUsrCompatSymlinkLogsDebugNotError is the
+// literal, observable version of the classification fix: with a merged-/usr
+// shaped fixture (a self-owned symlinked "bin" standing in for the real
+// image's root-owned one), the candidate reached only through that
+// compatibility symlink is skipped WITHOUT an ERROR line — and, since
+// log.Debug only emits with debug logging enabled, this also proves nothing
+// escalates to ERROR once debug is off (the default in production).
+func TestStripSetuidBitsNoFollow_MergedUsrCompatSymlinkLogsDebugNotError(t *testing.T) {
+	root := trustedTestRoot(t)
+	realDir := filepath.Join(root, "usr", "bin")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(root, "bin")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(linkDir, "sudo")
+
+	log.SetDebug(true)
+	t.Cleanup(func() { log.SetDebug(false) })
+
+	output := captureStderr(t, func() {
+		if stripSetuidBitsNoFollow(candidate) {
+			t.Error("stripSetuidBitsNoFollow() = true for a candidate that was never actually written")
+		}
+	})
+
+	if strings.Contains(output, "ERROR") {
+		t.Errorf("stderr = %q, want no ERROR line for a candidate reached only through a self/root-owned compatibility symlink", output)
+	}
+	if !strings.Contains(output, "DEBUG") {
+		t.Errorf("stderr = %q, want a DEBUG line explaining the skip", output)
+	}
+}
+
+// TestStripSetuidBitsNoFollow_UntrustedAncestorStillLogsError proves the
+// paired negative: a candidate that fails VerifyRootOwnedExecutable for a
+// reason OTHER than a compatibility symlink (here, a plain, non-symlink
+// parent directory that VerifyRootOwnedExecutable still won't produce a
+// leaf for — a missing grandparent making the whole lookup fail with an
+// error that is not ENOENT-shaped at the leaf) still logs at ERROR, and the
+// candidate is still refused. Real-world equivalent: a workload-writable
+// directory somewhere in the chain, or any other unexpected failure —
+// ancestorSymlinkIsRootOwned only ever downgrades the one narrow shape it
+// exists for.
+func TestStripSetuidBitsNoFollow_UntrustedAncestorStillLogsError(t *testing.T) {
+	root := trustedTestRoot(t)
+	dir := filepath.Join(root, "usr", "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	untrustedDir := filepath.Join(root, "untrusted")
+	if err := os.MkdirAll(untrustedDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(untrustedDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(untrustedDir, "victim-sudo")
+	if err := os.WriteFile(victim, []byte("victim"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(victim, os.ModeSetuid|0o755); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(dir, "sudo")
+	if err := os.Symlink(victim, candidate); err != nil {
+		t.Fatal(err)
+	}
+
+	log.SetDebug(true)
+	t.Cleanup(func() { log.SetDebug(false) })
+
+	output := captureStderr(t, func() {
+		if stripSetuidBitsNoFollow(candidate) {
+			t.Error("stripSetuidBitsNoFollow() = true for a symlink through a workload-writable directory")
+		}
+	})
+
+	if !strings.Contains(output, "ERROR") {
+		t.Errorf("stderr = %q, want an ERROR line for a symlink reached through a workload-writable directory", output)
+	}
+
+	info, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSetuid == 0 {
+		t.Error("victim's setuid bit was cleared despite sitting behind a workload-writable directory")
+	}
+}
+
+// TestStripSetuidBitsNoFollow_MissingCandidateLogsNothing proves the other
+// half of the errors.Is fix: a candidate directory that simply doesn't
+// exist at all (the common case for every SearchPath entry that doesn't
+// ship "sudo") produces no log line at any level, matching the original,
+// pre-regression intent — VerifyRootOwnedExecutable's error here is
+// %w-wrapped, so the fix must use errors.Is(err, fs.ErrNotExist), not
+// os.IsNotExist, to actually recognize it.
+func TestStripSetuidBitsNoFollow_MissingCandidateLogsNothing(t *testing.T) {
+	root := trustedTestRoot(t)
+	candidate := filepath.Join(root, "usr", "local", "sbin", "sudo")
+
+	log.SetDebug(true)
+	t.Cleanup(func() { log.SetDebug(false) })
+
+	output := captureStderr(t, func() {
+		if stripSetuidBitsNoFollow(candidate) {
+			t.Error("stripSetuidBitsNoFollow() = true for a candidate whose directory doesn't exist")
+		}
+	})
+
+	if output != "" {
+		t.Errorf("stderr = %q, want no log line at all for a simply-missing candidate", output)
+	}
+}
+
+// TestStripSudoSetuidBits_MergedUsrCompatSymlinkStillStripsRealSudo proves
+// the log-level change above never affects the actual outcome: even though
+// the "bin" entry is skipped (reached only through a compatibility
+// symlink), stripSudoSetuidBits still finds and neutralizes the real sudo
+// binary through its own, more direct "usr/bin" candidate — the trust
+// decision is unchanged, only the noise around one redundant alias is.
+func TestStripSudoSetuidBits_MergedUsrCompatSymlinkStillStripsRealSudo(t *testing.T) {
+	root := trustedTestRoot(t)
+	realDir := filepath.Join(root, "usr", "bin")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(root, "bin")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	sudoPath := plantSetuidSudo(t, root, "usr/bin")
+
+	if !stripSudoSetuidBits(root) {
+		t.Fatal("stripSudoSetuidBits() = false, want true (the real sudo binary should still be found and stripped)")
+	}
+	info, err := os.Lstat(sudoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		t.Errorf("sudo's special bits = %v after stripSudoSetuidBits, want all three cleared", info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky))
 	}
 }
 
