@@ -37,25 +37,58 @@ import (
 )
 
 // SearchPath is the fixed, hardcoded list of directories Resolve searches,
-// in order, for a bare command name. It deliberately does not include
-// "/usr/local/sbin" or "/usr/local/bin" (a common home for locally-installed
-// software, and not guaranteed root-owned on every image), and it
-// deliberately does not include "/opt/scion/bin": that directory's
+// in order — the standard root PATH (Debian's default, and the same order
+// pkg/runtime's own Cloud Run sandbox runtime already uses), not a
+// hand-picked subset: "/usr/local/sbin" and "/usr/local/bin" are included
+// because a real scion agent image installs some root-owned tools (git,
+// among others) only there, and excluding them silently broke resolution
+// on exactly those images. Including them is still safe: Resolve's fd-walk
+// verification requires every directory in the chain, and the binary
+// itself, to be root-owned (or, on a runtime with no separate root/
+// workload identity at all, self-owned) and free of the group- and
+// other-write bits — a workload-owned or group-writable "/usr/local/bin"
+// (e.g. the historical Debian "root:staff 2775" shape) is refused, not
+// silently trusted because of its name.
+//
+// It deliberately does not include "/opt/scion/bin": that directory's
 // ownership varies by how a given image stages sciontool itself, and a
 // caller that needs to re-invoke this same binary should resolve it via
 // "/proc/self/exe" (the running inode) instead of a PATH search — see this
 // package's doc comment and cmd/sciontool/commands' reExecWithCleanEnv for
-// why a path-based re-exec of "myself" is its own, distinct hazard that a
-// fixed search list does not solve.
+// why a path-based re-exec of "myself" is its own, distinct hazard a fixed
+// search list does not solve. Also excluded: "/usr/local/share/npm-global/
+// bin" (workload-owned by design), "/usr/local/go/bin", and any gcloud SDK
+// bin directory.
 //
 // This list is intentionally NOT os.Getenv("PATH") and Resolve never reads
-// that variable: every entry here is a location every supported image
-// installs only root-owned system binaries into, regardless of whether that
-// image also happens to merge "/bin" into "/usr/bin" (Resolve's
-// verification tolerates that — see OpenNoFollowRootOwnedFile — the
-// directories named here are what a caller may point PATH-free tooling at,
-// not a claim that each is a distinct inode).
-var SearchPath = []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+// that variable: every entry here is a location every supported image is
+// expected to install only root-owned content into — verified per call, not
+// assumed from the name — regardless of whether that image also happens to
+// merge "/bin" into "/usr/bin" (Resolve's verification tolerates that; see
+// VerifyRootOwnedExecutable — the directories named here are what a caller
+// may point PATH-free tooling at, not a claim that each is a distinct
+// inode). This is also the list the sudo-hardening precondition
+// (cmd/sciontool/commands' findSetuidRootSudo) scans, via SudoCheckDirs
+// below, so the two can never drift apart.
+var SearchPath = []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+
+// SudoCheckDirs returns SearchPath's entries as directories relative to a
+// filesystem root rather than absolute paths, for callers (the sudo
+// bootstrap fixup and its bootstrap precondition) that need to join it
+// against a root other than "/" (a test fixture) or that already work in
+// terms of relative directory names. A function, not a precomputed slice,
+// so it always reflects SearchPath's current value rather than whatever it
+// was at package-init time. Sharing this, rather than each caller
+// hardcoding its own copy of the same directory names, is what keeps the
+// fixup's own strip and the precondition's own check from silently
+// drifting onto two different lists.
+func SudoCheckDirs() []string {
+	dirs := make([]string, len(SearchPath))
+	for i, d := range SearchPath {
+		dirs[i] = strings.TrimPrefix(d, "/")
+	}
+	return dirs
+}
 
 // errNotBareName is returned by Resolve when name is empty or already
 // contains a path separator — Resolve exists to turn a bare name into a
@@ -63,18 +96,24 @@ var SearchPath = []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"}
 var errNotBareName = errors.New("rootexec: not a bare command name")
 
 // Resolve searches SearchPath, in order, for name, and returns the first
-// candidate that verifies as trusted: every real directory in its resolved
-// path, and the resolved binary itself, owned by uid 0 (or this process's
-// own euid — see dirfd's chainIsTrusted for why) and free of the group- and
-// other-write bits.
+// candidate — e.g. "/usr/sbin/iptables" — whose entire symlink chain (if
+// any) and final destination verify as trusted: every real directory along
+// the way, each symlink hop's own owner, and the destination binary itself,
+// owned by uid 0 (or this process's own euid — see dirfd's chainIsTrusted
+// for why) and free of the group- and other-write bits.
 //
-// A candidate is first fully resolved with filepath.EvalSymlinks, so a
-// legitimate root-installed symlink chain (e.g. Debian's
-// "/usr/sbin/iptables" -> "/etc/alternatives/iptables" ->
-// "/usr/sbin/iptables-nft", all root-owned directories) is followed rather
-// than refused outright; OpenNoFollowRootOwnedFile then verifies the fully
-// resolved destination's own chain by fd, so a hop through anything
-// workload-writable is what actually gets refused, not symlinks as a class.
+// Resolve returns the CANDIDATE path, never the resolved destination.
+// Several binaries this package resolves (Debian's "iptables", reached
+// through "/etc/alternatives/iptables" to a "xtables-nft-multi" multi-call
+// binary; some coreutils/busybox builds behave the same way for "whoami",
+// "sh", and others) decide their own behavior from argv[0]'s basename. A
+// caller that went on to exec the fully-resolved destination instead of
+// the candidate would hand such a binary the wrong argv[0] and get a
+// dispatch error, even though the exact same inode ends up running either
+// way — so the verification (dirfd.VerifyRootOwnedExecutable) checks the
+// whole chain hop by hop without ever collapsing it to a single resolved
+// path, and Resolve hands the caller back the one path whose basename is
+// guaranteed to be the name it asked for.
 //
 // Fails closed: if name is not found as a trusted executable under any
 // SearchPath entry, Resolve returns an error and the caller must not exec
@@ -87,31 +126,14 @@ func Resolve(name string) (string, error) {
 	var errs []error
 	for _, dir := range SearchPath {
 		candidate := filepath.Join(dir, name)
-		resolved, err := verifyTrustedExecutable(candidate)
-		if err != nil {
+		if err := dirfd.VerifyRootOwnedExecutable(candidate); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", candidate, err))
 			continue
 		}
-		return resolved, nil
+		return candidate, nil
 	}
 	return "", fmt.Errorf("rootexec: %q not found as a trusted executable under %s: %w",
 		name, strings.Join(SearchPath, ":"), errors.Join(errs...))
-}
-
-// verifyTrustedExecutable resolves candidate's full symlink chain, then
-// verifies the destination the way OpenNoFollowRootOwnedFile's own doc
-// comment describes, returning the destination path on success.
-func verifyTrustedExecutable(candidate string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(candidate)
-	if err != nil {
-		return "", err
-	}
-	f, err := dirfd.OpenNoFollowRootOwnedFile(resolved)
-	if err != nil {
-		return "", err
-	}
-	_ = f.Close()
-	return resolved, nil
 }
 
 // Env builds a hardened environment for a root-context exec.Cmd: the fixed
