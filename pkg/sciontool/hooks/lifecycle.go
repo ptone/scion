@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
 // harnessProvisionHookFilename must stay equal to
@@ -457,7 +459,17 @@ func (m *LifecycleManager) buildEnforcedCmd(scriptFile *os.File, path, eventName
 			// the provisioner above, there is no fixed-name carve-out here:
 			// closing that scenario for project/hub hooks is unchanged,
 			// tracked work, not part of this branch's own fix.
-			cmd.Env = setEnvVar(m.hookEnv(), "PYTHONNOUSERSITE", "1")
+			//
+			// rootexec.SanitizeInheritedEnv keeps every other inherited,
+			// workload-derived variable this branch needs (HOME=AgentHome
+			// above all) but replaces PATH with rootexec's own fixed list
+			// and strips LD_*/BASH_ENV/ENV/IFS/GIT_*(other than the two
+			// V-A' deliberately sets)/PYTHON* outright: this hook still
+			// runs as root, and PID 1's own inherited PATH includes a
+			// directory the workload owns outright (see the rootexec
+			// package doc comment) — the one thing this branch may never
+			// simply inherit, even though it inherits everything else.
+			cmd.Env = setEnvVar(rootexec.SanitizeInheritedEnv(m.hookEnv()), "PYTHONNOUSERSITE", "1")
 		} else {
 			cmd.Env = m.hardenedRootHookEnv()
 			// Never inherit init's cwd. Nothing in sciontool ever chdirs,
