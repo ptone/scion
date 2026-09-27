@@ -199,9 +199,9 @@ func TestTryProvisionWorktree_Start_StitchesRepoRoot(t *testing.T) {
 		t.Fatalf("RunConfig.RepoRoot = %q, want %q (the shared base)", gotRoot, wantRoot)
 	}
 	// ContainerWorkspace is what actually selects the mount branch in
-	// pkg/runtime/common.go (round-2 review finding R1) — asserting only on
-	// RepoRoot after EvalSymlinks can hide a lexical mismatch that still
-	// misroutes the mount. Confirm it lands under /repo-root, not the
+	// pkg/runtime/common.go — asserting only on RepoRoot after EvalSymlinks
+	// can hide a lexical mismatch that still misroutes the mount. Confirm it
+	// lands under /repo-root, not the
 	// full-root-fallback's /workspace.
 	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
 		t.Fatalf("RunConfig.ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
@@ -321,7 +321,7 @@ func TestTryProvisionWorktree_Start_RepoRootSurvivesResume(t *testing.T) {
 		t.Fatalf("resume RunConfig.Workspace = %q, want %q (the worktree, recovered via the persisted Volumes mount)", gotWorkspace, wantWorkspace)
 	}
 	// See the StitchesRepoRoot test for why ContainerWorkspace, not just
-	// RepoRoot, must be asserted (round-2 review finding R1).
+	// RepoRoot, must be asserted.
 	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
 		t.Fatalf("resume RunConfig.ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
 	}
@@ -414,8 +414,7 @@ func TestCreateAgent_WiresProvisionedWorktreeRepoRootOntoStartContext(t *testing
 		t.Fatalf("RunConfig.RepoRoot = %q, want %q (the shared base)", gotRoot, wantRoot)
 	}
 	// See TestTryProvisionWorktree_Start_StitchesRepoRoot for why
-	// ContainerWorkspace, not just RepoRoot, must be asserted (round-2 review
-	// finding R1).
+	// ContainerWorkspace, not just RepoRoot, must be asserted.
 	if wantContainerWorkspace := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != wantContainerWorkspace {
 		t.Fatalf("RunConfig.ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, wantContainerWorkspace)
 	}
@@ -428,11 +427,11 @@ func jsonStr(s string) string {
 }
 
 // TestTryProvisionWorktree_Start_SymlinkedBase_ContainerWorkspaceStaysConsistent
-// is the required R2 regression guard for round-2 review finding R1: when the
-// broker's project path runs through a symlink (a symlinked $HOME, a
-// symlinked projects dir, or macOS's /var -> /private/var), the repo root
-// validateProvisionedWorktreeRepoRoot returns must stay lexically consistent
-// with the unresolved RunConfig.Workspace, or pkg/runtime/common.go's
+// is a regression guard: when the broker's project path runs through a
+// symlink (a symlinked $HOME, a symlinked projects dir, or macOS's
+// /var -> /private/var), the repo root validateProvisionedWorktreeRepoRoot
+// returns must stay lexically consistent with the unresolved
+// RunConfig.Workspace, or pkg/runtime/common.go's
 // filepath.Rel(RepoRoot, Workspace) breaks and misroutes the mount into the
 // full-root fallback branch (ContainerWorkspace == "/workspace" instead of
 // "/repo-root/worktrees/<id>", and in-container git breaks again).
