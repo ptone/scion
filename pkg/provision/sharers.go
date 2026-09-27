@@ -38,9 +38,17 @@ func sharerPath(base, branch string) string {
 	return filepath.Join(base, ".git", sharerDir, sanitizeBranchName(branch)+".json")
 }
 
-// readMarker loads the marker file for a branch. Returns nil (no error) when
-// the file does not exist.
-func readMarker(path string) (*sharerMarker, error) {
+// readMarker loads the marker file for a branch under base. Returns nil (no
+// error) when the file does not exist.
+//
+// This is the single read boundary every consumer of the sharer registry
+// passes through (RegisterSharer, UnregisterSharer, ListSharers,
+// FindBranchForAgent). A marker's WorktreePath is untrusted on-disk state —
+// it must resolve to an in-tree worktree under base or the whole marker is
+// treated as invalid and discarded (not just the path field), since an
+// actor able to set WorktreePath could set Sharers too. Callers observe this
+// as worktreePath=="" and must not use "" as a target to mount or remove.
+func readMarker(base, path string) (*sharerMarker, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -51,6 +59,11 @@ func readMarker(path string) (*sharerMarker, error) {
 	var m sharerMarker
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, err
+	}
+	if !WorktreeIsLexicallyUnderBase(base, m.WorktreePath) {
+		slog.Warn("sharer marker worktreePath is not in-tree under base; discarding marker",
+			"path", path, "worktreePath", m.WorktreePath)
+		return nil, nil
 	}
 	return &m, nil
 }
@@ -91,7 +104,7 @@ func writeMarkerAtomic(path string, m *sharerMarker) error {
 // Callers MUST hold the per-project advisory lock / provision mutex.
 func RegisterSharer(base, branch, worktreePath, agentID string) error {
 	p := sharerPath(base, branch)
-	m, err := readMarker(p)
+	m, err := readMarker(base, p)
 	if err != nil {
 		return err
 	}
@@ -118,7 +131,7 @@ func RegisterSharer(base, branch, worktreePath, agentID string) error {
 // Callers MUST hold the per-project advisory lock / provision mutex.
 func UnregisterSharer(base, branch, agentID string) (remaining []string, worktreePath string, err error) {
 	p := sharerPath(base, branch)
-	m, err := readMarker(p)
+	m, err := readMarker(base, p)
 	if err != nil {
 		return nil, "", err
 	}
@@ -142,7 +155,7 @@ func UnregisterSharer(base, branch, agentID string) (remaining []string, worktre
 // branch. If no marker exists, sharers is nil and worktreePath is "".
 func ListSharers(base, branch string) ([]string, string, error) {
 	p := sharerPath(base, branch)
-	m, err := readMarker(p)
+	m, err := readMarker(base, p)
 	if err != nil {
 		return nil, "", err
 	}
@@ -168,7 +181,7 @@ func FindBranchForAgent(base, agentID string) (branch, worktreePath string, foun
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
-		m, err := readMarker(filepath.Join(dir, e.Name()))
+		m, err := readMarker(base, filepath.Join(dir, e.Name()))
 		if err != nil {
 			// A single corrupted/unreadable marker must not block the whole
 			// scan (and thus all agent deletions). Skip it and keep looking;

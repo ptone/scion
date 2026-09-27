@@ -653,6 +653,76 @@ func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 	assert.Contains(t, sharers, "agent-b")
 }
 
+// TestProvision_WorktreePerAgent_OutOfTreeMarker_CreatesFreshWorktree covers
+// Phase 1 acceptance: a sharer marker whose recorded WorktreePath is not
+// in-tree under base must not redirect a JOINing agent's workspace. The read
+// boundary (readMarker) discards the whole marker, ListSharers returns
+// worktreePath="", and ProvisionShared falls through to create a fresh
+// worktree for the joining agent instead of reusing the out-of-tree path.
+//
+// The out-of-tree marker is planted for a branch that has no real git worktree
+// backing it — the registry entry is the only place the (fake) association
+// lives, matching the actual exposure: a peer with RW access to the shared
+// .git can write a marker for a branch it never actually checked out.
+func TestProvision_WorktreePerAgent_OutOfTreeMarker_CreatesFreshWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// Establish the shared base checkout via an unrelated agent/branch.
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-outoftree-1",
+		AgentID:   "agent-setup",
+		AgentName: "setup-branch",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.NoError(t, err)
+
+	branch := "shared-branch"
+
+	// A peer plants an out-of-tree marker directly (simulating a write
+	// through the RW .git bind mount) for a branch that has no real git
+	// worktree, pointing WorktreePath at a host directory outside the base
+	// worktree tree.
+	outside := t.TempDir()
+	require.NoError(t, RegisterSharer(hostPath, branch, outside, "agent-c"))
+
+	// Sanity: the marker with an out-of-tree path is unreadable through the
+	// registry API — the whole marker (including its sharer entry) is discarded.
+	sharers, wtPath, err := ListSharers(hostPath, branch)
+	require.NoError(t, err)
+	assert.Empty(t, wtPath, "marker with an out-of-tree worktreePath must not surface it")
+	assert.Empty(t, sharers, "marker with an out-of-tree worktreePath must be discarded wholesale, not just its path")
+
+	// The victim agent provisions on the same branch. It must NOT be
+	// redirected to the out-of-tree external directory; it must get a fresh
+	// in-tree worktree.
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-outoftree-1",
+		AgentID:   "agent-victim",
+		AgentName: branch,
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	})
+	require.NoError(t, err)
+
+	wtVictim := WorktreePath(hostPath, "agent-victim")
+	require.DirExists(t, wtVictim, "provisioning must create a fresh in-tree worktree when the marker's path is out-of-tree")
+
+	_, wtPath, err = ListSharers(hostPath, branch)
+	require.NoError(t, err)
+	assert.Equal(t, wtVictim, wtPath, "registry must record the fresh in-tree worktree, not the out-of-tree path")
+	assert.NotEqual(t, outside, wtPath)
+}
+
 func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	locker := newTestLocker()
