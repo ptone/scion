@@ -12,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
 // fixupRootfsForScion corrects three observed conditions in a Substrate
@@ -97,15 +99,17 @@ func fixupRootfsForScion(root, home string, uid, gid int) {
 	// SearchPath) — the same directories, never a PATH search. This is what
 	// checkPrivilegeDropFeasible's own sudo check (init.go) actually
 	// enforces; the sudoers-grant removal below is defense in depth, not
-	// the control that check relies on.
-	sudoSetuidChanged := stripSudoSetuidBits(root)
+	// the control that check relies on. Routed through the runStripSudoSetuidBits
+	// var (see its own doc comment) rather than called directly.
+	sudoSetuidChanged := runStripSudoSetuidBits(root)
 
 	// SECONDARY control: remove the passwordless-sudo grants outright. Kept
 	// even though the setuid strip above is what actually closes the
 	// escalation (a non-setuid sudo binary can't do anything a grant alone
 	// would use), because removing the grant costs nothing and a future
 	// setuid restoration would otherwise still be paired with a live grant.
-	sudoersChanged := removeSudoersGrants(root)
+	// Routed through the runRemoveSudoersGrants var for the same reason.
+	sudoersChanged := runRemoveSudoersGrants(root)
 
 	// fixupRootfsForScion is substrate-only (see substrate_serve.go's call
 	// site), so this always exercises chownTreeRootOwned's hardened,
@@ -131,29 +135,42 @@ func fixupRootfsForScion(root, home string, uid, gid int) {
 }
 
 // sudoCheckDirs are the fixed system directories a "sudo" binary could
-// legitimately live in — the same list rootexec.SearchPath uses, restated
-// here rather than imported so this file (which builds without CGO
-// concerns or any dependency beyond the standard library plus this
-// package's own log helper) doesn't need to pull in pkg/sciontool/rootexec
-// purely for four string literals both checkPrivilegeDropFeasible (below,
-// same package) and this function need to agree on.
-var sudoCheckDirs = []string{"usr/sbin", "usr/bin", "sbin", "bin"}
+// legitimately live in, as directories relative to a filesystem root.
+// Derived from rootexec.SearchPath (via rootexec.SudoCheckDirs) rather than
+// a separate hardcoded copy, so this fixup, the bootstrap precondition in
+// checkPrivilegeDropFeasible (below, same package), and the PATH resolver
+// itself can never drift onto three different lists of directories to
+// trust.
+var sudoCheckDirs = rootexec.SudoCheckDirs()
+
+// runStripSudoSetuidBits is fixupRootfsForScion's own call to
+// stripSudoSetuidBits, as a package var — the same reason as
+// startupRootfsFixup (substrate_serve.go): a test needs to observe whether
+// the sudo fixup actually ran, from an arbitrary caller (including a
+// non-substrate RunInit path it must never run from), without depending on
+// a real setuid binary or a real rootfs.
+var runStripSudoSetuidBits = stripSudoSetuidBits
+
+// runRemoveSudoersGrants is the identical seam for removeSudoersGrants.
+var runRemoveSudoersGrants = removeSudoersGrants
 
 // stripSudoSetuidBits strips the setuid, setgid, and sticky special mode
 // bits from every "sudo" binary found under root's copy of sudoCheckDirs.
 // Returns whether anything was actually changed.
 //
-// Each candidate is opened with O_NOFOLLOW on the leaf component only (a
-// directory symlink earlier in the path — e.g. a merged-/usr image's
-// "/bin" -> "usr/bin" — is followed as normal; only a symlink AT "sudo"
-// itself is refused, the same "resolve, then verify the real destination"
-// shape rootexec.Resolve uses, except here the four candidate paths
-// commonly resolve to the very same inode rather than four distinct
-// binaries). fchmod runs on the open fd, never a path-based chmod, so a
-// symlink swapped in between the open and the chmod can't redirect this
-// call onto an arbitrary target's permissions. Anything that isn't a
-// regular file (already a symlink refused above, or some other special
-// file) is left alone.
+// Each candidate's full chain — including any symlink hops, such as an
+// alternatives-managed sudo implementation — is verified root-owned by
+// dirfd.VerifyRootOwnedExecutable before anything is touched (the same
+// verification rootexec.Resolve applies to an external tool), so a
+// symlinked sudo is neutralized at its real destination rather than
+// silently left with its setuid bit intact (which would otherwise make the
+// bootstrap precondition below — which follows symlinks deliberately, to
+// catch exactly this — refuse every future bootstrap on that image). Only
+// once the whole chain checks out is filepath.EvalSymlinks used to find
+// that destination, and dirfd.OpenNoFollowRootOwnedFile opens it for the
+// fchmod strip; fchmod runs on that open fd, never a path-based chmod, so a
+// symlink swapped in between the checks and the fchmod can't redirect this
+// call onto an arbitrary target's permissions.
 func stripSudoSetuidBits(root string) (changed bool) {
 	for _, dir := range sudoCheckDirs {
 		if stripSetuidBitsNoFollow(filepath.Join(root, dir, "sudo")) {
@@ -168,32 +185,45 @@ func stripSudoSetuidBits(root string) (changed bool) {
 const specialModeBits = syscall.S_ISUID | syscall.S_ISGID | syscall.S_ISVTX
 
 func stripSetuidBitsNoFollow(path string) bool {
-	fd, err := syscall.Open(path, syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
-	if err != nil {
+	if err := dirfd.VerifyRootOwnedExecutable(path); err != nil {
 		if !os.IsNotExist(err) {
-			log.Error("fixupRootfsForScion: failed to open %s: %v", path, err)
+			log.Error("fixupRootfsForScion: refusing untrusted sudo candidate %s: %v", path, err)
 		}
 		return false
 	}
-	defer func() { _ = syscall.Close(fd) }()
-
-	var st syscall.Stat_t
-	if err := syscall.Fstat(fd, &st); err != nil {
-		log.Error("fixupRootfsForScion: failed to stat %s: %v", path, err)
+	// The whole chain (if path is a symlink, e.g. an alternatives-managed
+	// sudo implementation) just verified as entirely root-controlled, so
+	// resolving it here cannot be redirected by anything the workload
+	// could have swapped in — the same reasoning rootexec.Resolve's own
+	// doc comment gives for trusting a chain once every hop checks out.
+	dest, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		log.Error("fixupRootfsForScion: failed to resolve %s: %v", path, err)
 		return false
 	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+	f, err := dirfd.OpenNoFollowRootOwnedFile(dest)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Error("fixupRootfsForScion: failed to open %s: %v", dest, err)
+		}
+		return false
+	}
+	defer func() { _ = f.Close() }()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		log.Error("fixupRootfsForScion: failed to stat %s: %v", dest, err)
 		return false
 	}
 	perm := st.Mode & 0o7777
 	if perm&specialModeBits == 0 {
 		return false
 	}
-	if err := syscall.Fchmod(fd, perm&^uint32(specialModeBits)); err != nil {
-		log.Error("fixupRootfsForScion: failed to strip setuid/setgid/sticky bits from %s: %v", path, err)
+	if err := syscall.Fchmod(int(f.Fd()), perm&^uint32(specialModeBits)); err != nil {
+		log.Error("fixupRootfsForScion: failed to strip setuid/setgid/sticky bits from %s: %v", dest, err)
 		return false
 	}
-	log.Info("fixupRootfsForScion: stripped setuid/setgid/sticky bits from %s", path)
+	log.Info("fixupRootfsForScion: stripped setuid/setgid/sticky bits from %s (via %s)", dest, path)
 	return true
 }
 

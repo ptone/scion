@@ -409,11 +409,18 @@ func findSetuidRootSudo(statPath func(string) (fs.FileInfo, error)) string {
 		candidate := filepath.Join("/", dir, "sudo")
 		info, err := statPath(candidate)
 		if err != nil {
-			continue
+			if os.IsNotExist(err) {
+				continue
+			}
+			// Never-fail-open: a stat error other than "not there at all"
+			// (EACCES, ELOOP, EIO, ...) means this candidate's real state
+			// could not be determined, which this precondition treats the
+			// same as finding a problem, not as "assume it's fine".
+			return candidate
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {
-			continue
+			return candidate
 		}
 		if info.Mode()&os.ModeSetuid != 0 && stat.Uid == 0 {
 			return candidate
