@@ -935,6 +935,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// the hub sent none, which is every local and file-mode dispatch.
 	ctx = withHubAgentDefaults(ctx, req.Config)
 
+	// Carry the broker-provisioned-worktree signal (set above inside
+	// buildStartContext's tryProvisionWorktree call) into provisioning/start,
+	// so pkg/agent's Start/ProvisionAgent can resolve RepoRoot directly for
+	// this workspace instead of routing it through detectRepoRoot's
+	// user-`--workspace`-override skip. No-op unless tryProvisionWorktree
+	// actually provisioned a worktree for this dispatch.
+	if sc.ProvisionedWorktreeRoot != "" {
+		ctx = api.ContextWithProvisionedWorktree(ctx, sc.ProvisionedWorktreeRoot)
+	}
+
 	// Branch based on provision-only flag
 	if req.ProvisionOnly {
 		// Provision only: set up dirs, worktree, templates without starting the container.

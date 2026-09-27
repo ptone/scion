@@ -52,6 +52,15 @@ type startContext struct {
 	// yet (GoogleCloudPlatform/scion#127 P3b); this exists so the broker's
 	// own classifications survive the function that computes them.
 	EnvClassifications map[string]api.EnvKind
+
+	// ProvisionedWorktreeRoot is the shared-base repo root when
+	// tryProvisionWorktree provisioned a broker-managed worktree for this
+	// dispatch, or "" otherwise. It never crosses the wire — it is broker-local
+	// state, discovered only as a side effect of buildStartContext's own
+	// provisioning work. The caller threads it onto ctx via
+	// api.ContextWithProvisionedWorktree before calling Manager.Start/Provision,
+	// exactly like withHubAgentDefaults threads req.Config's agent_defaults.
+	ProvisionedWorktreeRoot string
 }
 
 // startContextInputs captures the handler-specific fields that vary across
@@ -641,10 +650,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// is git-backed, provision a shared base clone + per-agent worktree on
 	// the host BEFORE the container starts, then dual-mount it. This avoids
 	// the full in-container clone. Falls through to clone-per-agent on error
-	// or if git is too old (< 2.47).
+	// or if git is too old (< 2.48).
 	worktreeProvisioned := false
+	var provisionedWorktreeRoot string
 	if in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
-		worktreeProvisioned = s.tryProvisionWorktree(ctx, in, &opts, env)
+		worktreeProvisioned, provisionedWorktreeRoot = s.tryProvisionWorktree(ctx, in, &opts, env)
 	}
 
 	// --- Git clone mode ---
@@ -753,10 +763,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	mgr := s.resolveManagerForOpts(opts)
 
 	return &startContext{
-		Opts:               opts,
-		TemplateSlug:       templateSlug,
-		Manager:            mgr,
-		EnvClassifications: envCls,
+		Opts:                    opts,
+		TemplateSlug:            templateSlug,
+		Manager:                 mgr,
+		EnvClassifications:      envCls,
+		ProvisionedWorktreeRoot: provisionedWorktreeRoot,
 	}, nil
 }
 
@@ -775,10 +786,19 @@ func (e *startContextError) Error() string {
 
 // tryProvisionWorktree attempts to provision a per-agent worktree on the host
 // for worktree-per-agent mode. On success it sets opts.Workspace to the
-// worktree path and returns true (opts.GitClone is NOT set, suppressing the
-// in-container clone). On failure or if git is too old, it logs a warning and
-// returns false so the caller falls through to clone-per-agent.
-func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string) bool {
+// worktree path and returns (true, repoRoot), where repoRoot is the shared
+// base clone's path — the git repo root that owns this worktree
+// (opts.GitClone is NOT set, suppressing the in-container clone). On failure
+// or if git is too old, it logs a warning and returns (false, "") so the
+// caller falls through to clone-per-agent.
+//
+// The caller threads repoRoot onto ctx via api.ContextWithProvisionedWorktree
+// so pkg/agent/run.go's Start can resolve RunConfig.RepoRoot directly for
+// this workspace, instead of routing it through detectRepoRoot's
+// explicit-`--workspace`-skips-detection heuristic — that heuristic exists
+// for a user's own --workspace override (#642) and must not swallow the
+// broker's own worktree provisioning too.
+func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string) (bool, string) {
 	runtimeName := ""
 	if s.runtime != nil {
 		runtimeName = s.runtime.Name()
@@ -801,7 +821,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 			slog.Warn("worktree-per-agent: falling back to clone-per-agent",
 				"agent_id", in.AgentID, "reason", result.Reason)
 		}
-		return false
+		return false, ""
 	}
 
 	// Set Ctx from the buildStartContext context.
@@ -844,7 +864,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 					"agent_id", in.AgentID, "path", result.WorktreePath)
 			}
 		}
-		return false
+		return false, ""
 	}
 
 	// Source the authoritative worktree path from the sharer registry.
@@ -874,7 +894,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 			"workspace", result.WorktreePath,
 			"project_root", result.ProjectRoot)
 	}
-	return true
+	return true, result.ProjectRoot
 }
 
 // projectProvisionMutex returns the per-project mutex for serializing worktree
