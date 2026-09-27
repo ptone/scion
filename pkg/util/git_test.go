@@ -945,9 +945,8 @@ func TestFilterSyncedGitMetadata_HooksFilterConfig(t *testing.T) {
 
 // TestFilterSyncedGitMetadata_ObjectsInfoRemoved is a dedicated,
 // revert-checked test for the objects/info/{alternates,http-alternates}
-// removal (P1-review R2): either file can point the object store at a
-// different repository entirely — a cross-tenant read on a host where
-// multiple projects' .git directories live side by side. Written as its own
+// removal: these files can point the object store at a different
+// repository, so the filter must strip them. Written as its own
 // test (rather than folded into another test's fixture) so a no-op change
 // to that removal fails only this test, not a broader one that happens to
 // still pass for other reasons.
@@ -978,8 +977,8 @@ func TestFilterSyncedGitMetadata_ObjectsInfoRemoved(t *testing.T) {
 	}
 }
 
-// TestLandSyncedGitWorkspace_FilterRunsUnconditionally covers the P1-review
-// fix for the landing-failure case: a sync mirror is not all-or-nothing (an
+// TestLandSyncedGitWorkspace_FilterRunsUnconditionally covers the fix for
+// the landing-failure case: a sync mirror is not all-or-nothing (an
 // I/O error on one file does not stop it from copying the rest), so a
 // landing whose sync step reports an error must still have its admin
 // surface rebuilt. A landed hook must not survive just because the sync
@@ -1147,8 +1146,8 @@ func TestFilterSyncedGitMetadata_SubmoduleGitdir(t *testing.T) {
 	requireNoMarkers(t, markerDir)
 }
 
-// TestFilterSyncedGitMetadata_WorktreeSubmoduleGitdir covers the P1-review
-// fix for the working-tree submodule case: a submodule whose gitdir lives in
+// TestFilterSyncedGitMetadata_WorktreeSubmoduleGitdir covers the fix for
+// the working-tree submodule case: a submodule whose gitdir lives in
 // the working tree (<sub>/.git/ as a real directory — the "pre-absorb"
 // layout, as opposed to the .git/modules/<sub> layout the previous test
 // covers) is content outside the top-level .git directory the allowlist
