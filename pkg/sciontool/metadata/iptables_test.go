@@ -113,6 +113,29 @@ func TestIPTablesCmd_RealBinaryDispatchesCorrectly(t *testing.T) {
 	}
 }
 
+// TestIptablesCmd_EnvIsFromScratch proves iptablesCmd's returned *exec.Cmd
+// never inherits this process's own ambient environment: cmd.Env left nil
+// (Go's exec.Cmd default) would silently fall back to os.Environ(), letting
+// an inherited LD_PRELOAD/BASH_ENV/etc. reach the root-context iptables
+// invocation even though its argv[0]/path is already a verified absolute
+// path unaffected by $PATH itself.
+func TestIptablesCmd_EnvIsFromScratch(t *testing.T) {
+	t.Setenv("LD_PRELOAD", "/should/not/leak.so")
+
+	cmd, err := iptablesCmd("-V")
+	if err != nil {
+		t.Skipf("iptables not resolvable as a trusted binary in this environment: %v", err)
+	}
+	if cmd.Env == nil {
+		t.Fatal("iptablesCmd's cmd.Env is nil, which defaults to inheriting this process's full ambient environment")
+	}
+	for _, kv := range cmd.Env {
+		if strings.Contains(kv, "should/not/leak") {
+			t.Errorf("cmd.Env = %v, leaked an ambient environment value: %q", cmd.Env, kv)
+		}
+	}
+}
+
 func TestSetupIPTablesRedirect_NoIPTables(t *testing.T) {
 	// This test verifies that setupIPTablesRedirect returns an error when
 	// iptables is not available (which is the case in most test environments).
