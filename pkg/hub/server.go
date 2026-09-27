@@ -797,12 +797,21 @@ type RemoteAgentInfo struct {
 
 // Server is the Hub API HTTP server.
 type Server struct {
-	config                 ServerConfig
-	store                  store.Store
-	httpServer             *http.Server
-	mux                    *http.ServeMux
-	mu                     sync.RWMutex
-	startTime              time.Time
+	config     ServerConfig
+	store      store.Store
+	httpServer *http.Server
+	mux        *http.ServeMux
+	mu         sync.RWMutex
+	startTime  time.Time
+	// workspaceGitLocksMu/workspaceGitLocks serialize, per hub-managed project
+	// workspace, landing a workspace sync (SyncFromGCS + admin-surface rebuild)
+	// against any host-side git run in that same workspace (e.g. the
+	// "pull latest" handler). Without this, a rebuild could complete after a
+	// concurrent pull has already started reading the directory, or a second
+	// concurrent landing could re-create content between a rebuild and the
+	// pull that immediately follows it. See lockWorkspaceGit.
+	workspaceGitLocksMu    sync.Mutex
+	workspaceGitLocks      map[string]*sync.Mutex
 	dispatcher             AgentDispatcher         // Optional dispatcher for co-located runtime broker
 	storage                storage.Storage         // Optional storage backend for templates
 	secretBackend          secret.SecretBackend    // Optional secret backend

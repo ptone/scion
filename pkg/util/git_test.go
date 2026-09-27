@@ -804,6 +804,520 @@ func TestPullSharedWorkspace(t *testing.T) {
 	})
 }
 
+// gitC runs a git command against dir and fails the test on error, returning
+// combined output for callers that want to inspect it.
+func gitC(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v (%s)", args, err, out)
+	}
+	return string(out)
+}
+
+// commitNewFile adds a file with the given content to dir and commits it,
+// for use as "new upstream content" a subsequent pull should fast-forward
+// onto.
+func commitNewFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitC(t, dir, "add", name)
+	gitC(t, dir, "commit", "-m", "add "+name)
+}
+
+// requireNoMarkers fails the test if any file exists under markerDir,
+// reporting their names. Tests create markerDir empty and write hooks/
+// filters that write into it; a non-empty markerDir after a pull means a
+// landed hook or filter executed.
+func requireNoMarkers(t *testing.T, markerDir string) {
+	t.Helper()
+	entries, _ := os.ReadDir(markerDir)
+	var leftover []string
+	for _, e := range entries {
+		leftover = append(leftover, e.Name())
+	}
+	if len(leftover) != 0 {
+		t.Errorf("a landed hook/filter executed; found marker files: %v", leftover)
+	}
+}
+
+// TestFilterSyncedGitMetadata_HooksFilterConfig covers matrix cases (a)-(c): a
+// sync-carried post-checkout/post-merge hook, a filter.*+info/attributes
+// smudge driver, and core.fsmonitor/core.hooksPath in config. It proves none
+// of them survive FilterSyncedGitMetadata in executable form, none execute
+// on a subsequent host-side `git pull --ff-only`, and shared-workspace pull
+// itself keeps working end to end. Each assertion fails if the
+// FilterSyncedGitMetadata call is removed: the allowlist/config assertions
+// fail because the landed files/keys would still be present verbatim, and
+// the "no markers" assertion fails because a fast-forward `git pull` invokes
+// `post-merge` (verified separately against an unfiltered clone).
+func TestFilterSyncedGitMetadata_HooksFilterConfig(t *testing.T) {
+	sourceDir := setupGitRepo(t)
+
+	cloneDir := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(cloneDir, sourceDir, "", ""); err != nil {
+		t.Fatalf("Clone failed: %v", err)
+	}
+
+	markerDir := t.TempDir()
+	gitDir := filepath.Join(cloneDir, ".git")
+
+	// (a) Write a sync-carried post-checkout/post-merge hook.
+	hooksDir := filepath.Join(gitDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	hookScript := "#!/bin/sh\necho ranmarker > " + filepath.Join(markerDir, "hook-ranmarker") + "\n"
+	for _, name := range []string{"post-merge", "post-checkout"} {
+		if err := os.WriteFile(filepath.Join(hooksDir, name), []byte(hookScript), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// (b) Write a filter.*+info/attributes smudge driver.
+	infoDir := filepath.Join(gitDir, "info")
+	if err := os.MkdirAll(infoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(infoDir, "attributes"), []byte("* filter=custom\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// (c) Write execution-bearing config keys.
+	landedConfig := [][]string{
+		{"filter.custom.smudge", "sh -c 'echo ranmarker > " + filepath.Join(markerDir, "filter-ranmarker") + "'"},
+		{"filter.custom.required", "true"},
+		{"core.fsmonitor", "sh -c 'echo ranmarker > " + filepath.Join(markerDir, "fsmonitor-ranmarker") + "'"},
+		{"core.hooksPath", "/tmp/custom-hooks"},
+	}
+	for _, kv := range landedConfig {
+		gitC(t, cloneDir, "config", kv[0], kv[1])
+	}
+
+	if err := FilterSyncedGitMetadata(cloneDir, SyncedGitRemote{RemoteURL: sourceDir}); err != nil {
+		t.Fatalf("FilterSyncedGitMetadata failed: %v", err)
+	}
+
+	// Allowlist assertions: hooks/ and info/ are gone entirely, not emptied.
+	if _, err := os.Stat(hooksDir); !os.IsNotExist(err) {
+		t.Errorf("expected hooks dir to be removed entirely, stat err: %v", err)
+	}
+	if _, err := os.Stat(infoDir); !os.IsNotExist(err) {
+		t.Errorf("expected info dir to be removed entirely, stat err: %v", err)
+	}
+	configBytes, err := os.ReadFile(filepath.Join(gitDir, "config"))
+	if err != nil {
+		t.Fatalf("reading regenerated config: %v", err)
+	}
+	config := string(configBytes)
+	for _, forbidden := range []string{"custom", "fsmonitor", "hooksPath", "ranmarker"} {
+		if strings.Contains(config, forbidden) {
+			t.Errorf("regenerated config unexpectedly contains %q:\n%s", forbidden, config)
+		}
+	}
+	if !strings.Contains(config, sourceDir) {
+		t.Errorf("regenerated config missing remote URL %q:\n%s", sourceDir, config)
+	}
+
+	// New upstream commit so the pull below exercises the fast-forward path
+	// that would invoke post-merge.
+	commitNewFile(t, sourceDir, "new.txt", "new content")
+
+	result, err := PullSharedWorkspace(cloneDir, "")
+	if err != nil {
+		t.Fatalf("PullSharedWorkspace failed after neutralization: %v", err)
+	}
+	if !result.Updated {
+		t.Error("expected Updated=true after pull with new commits")
+	}
+	content, err := os.ReadFile(filepath.Join(cloneDir, "new.txt"))
+	if err != nil {
+		t.Fatal("new.txt should exist after pull (objects/refs must still sync)")
+	}
+	if string(content) != "new content" {
+		t.Errorf("unexpected content: %q", content)
+	}
+	requireNoMarkers(t, markerDir)
+}
+
+// TestFilterSyncedGitMetadata_CommondirRedirection covers matrix case (d): a
+// .git/commondir written into the landed .git repoints git's common dir
+// (config, hooks, objects, refs) at a separate working-tree directory
+// carrying its own config+hooks. A denylist that only strips .git/hooks and
+// .git/config does not close this —
+// git follows the redirect and never looks at the top-level .git/hooks at
+// all. The allowlist rebuild closes it by deleting "commondir" itself (not
+// on any allowlist), so no redirect exists to follow.
+func TestFilterSyncedGitMetadata_CommondirRedirection(t *testing.T) {
+	sourceDir := setupGitRepo(t)
+	cloneDir := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(cloneDir, sourceDir, "", ""); err != nil {
+		t.Fatalf("Clone failed: %v", err)
+	}
+	gitDir := filepath.Join(cloneDir, ".git")
+
+	markerDir := t.TempDir()
+	marker := filepath.Join(markerDir, "commondir-ranmarker")
+
+	// The redirected common dir must be a fully functional gitdir (its own
+	// objects/refs/config matching the real repo) for git to actually honor
+	// the redirect and complete a pull through it — otherwise git just fails
+	// outright rather than exercising the redirect. Build it as a copy of
+	// the pristine, cloned .git, then add a hook that records execution.
+	customCommon := filepath.Join(t.TempDir(), "custom-common")
+	if err := CopyDir(gitDir, customCommon); err != nil {
+		t.Fatal(err)
+	}
+	customHooks := filepath.Join(customCommon, "hooks")
+	if err := os.MkdirAll(customHooks, 0755); err != nil {
+		t.Fatal(err)
+	}
+	hookScript := "#!/bin/sh\necho ranmarker > " + marker + "\n"
+	if err := os.WriteFile(filepath.Join(customHooks, "post-merge"), []byte(hookScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	relPath, err := filepath.Rel(gitDir, customCommon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte(relPath+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FilterSyncedGitMetadata(cloneDir, SyncedGitRemote{RemoteURL: sourceDir}); err != nil {
+		t.Fatalf("FilterSyncedGitMetadata failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "commondir")); !os.IsNotExist(err) {
+		t.Errorf("expected commondir to be removed, stat err: %v", err)
+	}
+
+	commitNewFile(t, sourceDir, "new.txt", "new content")
+	if _, err := PullSharedWorkspace(cloneDir, ""); err != nil {
+		t.Fatalf("PullSharedWorkspace failed after neutralization: %v", err)
+	}
+	requireNoMarkers(t, markerDir)
+}
+
+// TestFilterSyncedGitMetadata_SubmoduleGitdir covers matrix case (e):
+// .git/modules/<sub>/{hooks,config} reached through a submodule gitlink,
+// whose hooks/fsmonitor can run during a plain `git pull` (default
+// fetch.recurseSubmodules=on-demand recurses into an already-initialized
+// submodule using *its own* gitdir's config/hooks). The allowlist rebuild
+// closes this by deleting "modules/" itself, so .git/modules/<sub> does not
+// exist for git to recurse into.
+func TestFilterSyncedGitMetadata_SubmoduleGitdir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	subUpstream := setupGitRepo(t)
+	superUpstream := setupGitRepo(t)
+	gitC(t, superUpstream, "-c", "protocol.file.allow=always", "submodule", "add", "-q", subUpstream, "sub")
+	gitC(t, superUpstream, "commit", "-q", "-m", "add submodule")
+
+	cloneDir := filepath.Join(t.TempDir(), "workspace")
+	cmd := exec.Command("git", "-c", "protocol.file.allow=always", "clone", "-q", "--recurse-submodules", superUpstream, cloneDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clone --recurse-submodules failed: %v (%s)", err, out)
+	}
+	gitDir := filepath.Join(cloneDir, ".git")
+	modulesDir := filepath.Join(gitDir, "modules", "sub")
+	if _, err := os.Stat(modulesDir); err != nil {
+		t.Fatalf("expected .git/modules/sub to exist after --recurse-submodules clone: %v", err)
+	}
+
+	// Advance the submodule so a subsequent superproject pull has a gitlink
+	// bump to fetch.
+	commitNewFile(t, subUpstream, "sub-new.txt", "sub new content")
+	gitC(t, filepath.Join(superUpstream, "sub"), "-c", "protocol.file.allow=always", "pull", "-q", "origin",
+		strings.TrimSpace(gitC(t, subUpstream, "branch", "--show-current")))
+	gitC(t, superUpstream, "commit", "-qam", "bump submodule")
+
+	markerDir := t.TempDir()
+	marker := filepath.Join(markerDir, "submodule-ranmarker")
+	for _, hook := range []string{"reference-transaction", "post-merge", "post-checkout"} {
+		script := "#!/bin/sh\necho " + hook + " >> " + marker + "\n"
+		if err := os.WriteFile(filepath.Join(modulesDir, "hooks", hook), []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fsmonitorLine := "\n[core]\n\tfsmonitor = \"echo FSM >> " + marker + "; false\"\n"
+	f, err := os.OpenFile(filepath.Join(modulesDir, "config"), os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(fsmonitorLine); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	if err := FilterSyncedGitMetadata(cloneDir, SyncedGitRemote{RemoteURL: superUpstream}); err != nil {
+		t.Fatalf("FilterSyncedGitMetadata failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "modules")); !os.IsNotExist(err) {
+		t.Errorf("expected modules/ to be removed entirely, stat err: %v", err)
+	}
+
+	// Default git pull (no --recurse-submodules override) must not resurrect
+	// or execute anything from the deleted modules/sub. Unlike the other
+	// cases, pull succeeding is not asserted here: CloneSharedWorkspace never
+	// passes --recurse-submodules, so a legitimate hub-managed clone never
+	// has .git/modules/<sub> populated in the first place (a submodule
+	// gitlink with no initialized .git/modules entry is exactly the state a
+	// normal, non-hardened shared-workspace clone would be in) — pull may
+	// legitimately fail trying to update an uninitialized submodule. What
+	// matters for this test is that nothing from the deleted modules/sub
+	// executes either way.
+	_, _ = PullSharedWorkspace(cloneDir, "")
+	requireNoMarkers(t, markerDir)
+}
+
+// TestFilterSyncedGitMetadata_GitfileFailsClosed covers matrix case (f): a
+// landed ".git" that is a plain file (a "gitdir: <path>" redirect, as used
+// by worktrees and submodule checkouts) rather than a real directory
+// redirects git to a location this function never inspects.
+// FilterSyncedGitMetadata must refuse to partially strip through it: it
+// removes the entry and returns an error.
+func TestFilterSyncedGitMetadata_GitfileFailsClosed(t *testing.T) {
+	workspacePath := t.TempDir()
+	gitFile := filepath.Join(workspacePath, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: /tmp/somewhere-else\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FilterSyncedGitMetadata(workspacePath, SyncedGitRemote{}); err == nil {
+		t.Fatal("expected FilterSyncedGitMetadata to fail closed on a gitfile .git")
+	}
+	if _, err := os.Stat(gitFile); !os.IsNotExist(err) {
+		t.Errorf("expected the gitfile to be removed, stat err: %v", err)
+	}
+}
+
+// TestFilterSyncedGitMetadata_SymlinkFailsClosed is TestFilterSyncedGitMetadata_GitfileFailsClosed's
+// symlink variant.
+func TestFilterSyncedGitMetadata_SymlinkFailsClosed(t *testing.T) {
+	workspacePath := t.TempDir()
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitLink := filepath.Join(workspacePath, ".git")
+	if err := os.Symlink(elsewhere, gitLink); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FilterSyncedGitMetadata(workspacePath, SyncedGitRemote{}); err == nil {
+		t.Fatal("expected FilterSyncedGitMetadata to fail closed on a symlinked .git")
+	}
+	if _, err := os.Lstat(gitLink); !os.IsNotExist(err) {
+		t.Errorf("expected the symlink to be removed, stat err: %v", err)
+	}
+	if _, err := os.Stat(elsewhere); err != nil {
+		t.Errorf("the symlink target must not itself be touched: %v", err)
+	}
+}
+
+// TestFilterSyncedGitMetadata_MissingGitDirNoOp covers matrix case (g): a
+// workspace with no .git at all (a hub-native project with no repository, or
+// one whose pod never created one) is a no-op, not an error — absence is not
+// an execution vector.
+func TestFilterSyncedGitMetadata_MissingGitDirNoOp(t *testing.T) {
+	dir := t.TempDir()
+	if err := FilterSyncedGitMetadata(dir, SyncedGitRemote{}); err != nil {
+		t.Fatalf("expected no-op for missing .git, got: %v", err)
+	}
+}
+
+// TestFilterSyncedGitMetadata_NonDefaultBranch covers matrix case (h): a
+// workspace whose HEAD is on a non-default branch must have branch tracking
+// regenerated for *that* branch (not a hardcoded default), or the
+// subsequent pull fails with "no tracking information" in an otherwise
+// ordinary workspace.
+func TestFilterSyncedGitMetadata_NonDefaultBranch(t *testing.T) {
+	sourceDir := setupGitRepo(t)
+	gitC(t, sourceDir, "checkout", "-q", "-b", "feature")
+	commitNewFile(t, sourceDir, "feature.txt", "feature content")
+
+	cloneDir := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(cloneDir, sourceDir, "feature", ""); err != nil {
+		t.Fatalf("Clone failed: %v", err)
+	}
+	branch := strings.TrimSpace(gitC(t, cloneDir, "branch", "--show-current"))
+	if branch != "feature" {
+		t.Fatalf("expected clone to be on branch 'feature', got %q", branch)
+	}
+
+	if err := FilterSyncedGitMetadata(cloneDir, SyncedGitRemote{RemoteURL: sourceDir}); err != nil {
+		t.Fatalf("FilterSyncedGitMetadata failed: %v", err)
+	}
+
+	configBytes, err := os.ReadFile(filepath.Join(cloneDir, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(configBytes), `branch "feature"`) {
+		t.Errorf("expected regenerated config to track branch 'feature', got:\n%s", configBytes)
+	}
+
+	commitNewFile(t, sourceDir, "feature2.txt", "more feature content")
+	result, err := PullSharedWorkspace(cloneDir, "")
+	if err != nil {
+		t.Fatalf("PullSharedWorkspace failed on non-default branch: %v", err)
+	}
+	if !result.Updated {
+		t.Error("expected Updated=true after pull with new commits")
+	}
+}
+
+// TestFilterSyncedGitMetadata_GarbageHeadFailsClosed covers matrix case (i):
+// a HEAD that is neither a valid refs/heads/<name> symref nor a bare hex
+// object id (e.g. a HEAD of "ref: ../../elsewhere") is rejected rather than
+// carried into the rebuilt repo.
+func TestFilterSyncedGitMetadata_GarbageHeadFailsClosed(t *testing.T) {
+	sourceDir := setupGitRepo(t)
+	cloneDir := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(cloneDir, sourceDir, "", ""); err != nil {
+		t.Fatalf("Clone failed: %v", err)
+	}
+
+	for _, headContent := range []string{
+		"ref: ../../elsewhere\n",
+		"not-a-ref-or-oid\n",
+		"deadbeef\n", // valid hex, wrong length
+	} {
+		t.Run(strings.TrimSpace(headContent), func(t *testing.T) {
+			cd := filepath.Join(t.TempDir(), "workspace")
+			if err := CopyDir(cloneDir, cd); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cd, ".git", "HEAD"), []byte(headContent), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := FilterSyncedGitMetadata(cd, SyncedGitRemote{RemoteURL: sourceDir}); err == nil {
+				t.Fatalf("expected FilterSyncedGitMetadata to fail closed on HEAD=%q", headContent)
+			}
+			if _, err := os.Stat(filepath.Join(cd, ".git")); !os.IsNotExist(err) {
+				t.Errorf("expected .git to be removed after a garbage-HEAD rejection, stat err: %v", err)
+			}
+		})
+	}
+}
+
+// TestFilterSyncedGitMetadata_UnsupportedFormatRejected covers matrix case
+// (j): a landed repo declaring a non-sha1 object format or reftable ref
+// storage is rejected outright — the allowlist drops reftable/, and a
+// regenerated config would drop the extension key git needs to read either
+// format, so carrying it forward would corrupt access rather than secure it.
+func TestFilterSyncedGitMetadata_UnsupportedFormatRejected(t *testing.T) {
+	sourceDir := setupGitRepo(t)
+
+	for _, tc := range []struct {
+		name string
+		key  string
+		val  string
+	}{
+		{"sha256", "extensions.objectFormat", "sha256"},
+		{"reftable", "extensions.refStorage", "reftable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cloneDir := filepath.Join(t.TempDir(), "workspace")
+			if err := CloneSharedWorkspace(cloneDir, sourceDir, "", ""); err != nil {
+				t.Fatalf("Clone failed: %v", err)
+			}
+			gitC(t, cloneDir, "config", tc.key, tc.val)
+
+			if err := FilterSyncedGitMetadata(cloneDir, SyncedGitRemote{RemoteURL: sourceDir}); err == nil {
+				t.Fatalf("expected FilterSyncedGitMetadata to reject %s=%s", tc.key, tc.val)
+			}
+			if _, err := os.Stat(filepath.Join(cloneDir, ".git")); !os.IsNotExist(err) {
+				t.Errorf("expected .git to be removed after format rejection, stat err: %v", err)
+			}
+		})
+	}
+}
+
+// TestFilterSyncedGitMetadata_HubNativeNoRemote covers matrix case (k): when
+// the caller has no legitimate remote for the workspace (e.g. a hub-native
+// project with no git remote), FilterSyncedGitMetadata does not fabricate
+// one from anything in the landed directory — the regenerated config
+// carries identity+core only, no remote or branch section at all.
+func TestFilterSyncedGitMetadata_HubNativeNoRemote(t *testing.T) {
+	sourceDir := setupGitRepo(t)
+	cloneDir := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(cloneDir, sourceDir, "", ""); err != nil {
+		t.Fatalf("Clone failed: %v", err)
+	}
+
+	if err := FilterSyncedGitMetadata(cloneDir, SyncedGitRemote{}); err != nil {
+		t.Fatalf("FilterSyncedGitMetadata failed: %v", err)
+	}
+
+	configBytes, err := os.ReadFile(filepath.Join(cloneDir, ".git", "config"))
+	if err != nil {
+		t.Fatalf("reading regenerated config: %v", err)
+	}
+	config := string(configBytes)
+	if strings.Contains(config, "[remote") || strings.Contains(config, sourceDir) {
+		t.Errorf("expected no remote section when no remote is known, got:\n%s", config)
+	}
+	if !strings.Contains(config, "[user]") {
+		t.Errorf("expected identity to still be configured, got:\n%s", config)
+	}
+}
+
+// TestFilterSyncedGitMetadata_BranchNameConfigEscaping covers matrix case
+// (l): git ref names may legally contain '"' and ']' (verified:
+// refs/heads/a"b]x passes `git check-ref-format`). A workspace landed with
+// HEAD on such a branch must not be able to use the branch name to terminate
+// a `[branch "<name>"]` config section early and add keys not derived from
+// host state. The regenerated config must contain no such unexpected key,
+// whether because the branch name was charset-rejected (the actual behavior:
+// it's outside [A-Za-z0-9._/-]) or because it was safely escaped.
+func TestFilterSyncedGitMetadata_BranchNameConfigEscaping(t *testing.T) {
+	sourceDir := setupGitRepo(t)
+	cloneDir := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(cloneDir, sourceDir, "", ""); err != nil {
+		t.Fatalf("Clone failed: %v", err)
+	}
+	gitDir := filepath.Join(cloneDir, ".git")
+
+	branch := `a"b]x`
+	if !isValidGitRefName("refs/heads/" + branch) {
+		t.Fatalf("test assumption broken: refs/heads/%s is no longer accepted by check-ref-format", branch)
+	}
+
+	headSHA := strings.TrimSpace(gitC(t, cloneDir, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(gitDir, "refs", "heads", branch), []byte(headSHA+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/"+branch+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FilterSyncedGitMetadata(cloneDir, SyncedGitRemote{RemoteURL: sourceDir}); err != nil {
+		t.Fatalf("FilterSyncedGitMetadata failed: %v", err)
+	}
+
+	configBytes, err := os.ReadFile(filepath.Join(gitDir, "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(configBytes)
+	for _, forbidden := range []string{"fsmonitor", "hooksPath", "hook", "ranmarker"} {
+		if strings.Contains(config, forbidden) {
+			t.Errorf("regenerated config unexpectedly contains unexpected content %q:\n%s", forbidden, config)
+		}
+	}
+	// Whatever was written must still be a valid, parseable config file —
+	// proving the section header was not terminated early.
+	if out, err := exec.Command("git", "config", "--file", filepath.Join(gitDir, "config"), "--list").CombinedOutput(); err != nil {
+		t.Errorf("regenerated config is not valid after a special-character branch name: %v (%s)", err, out)
+	}
+}
+
 func TestSanitizeGitOutput(t *testing.T) {
 	tests := []struct {
 		name   string

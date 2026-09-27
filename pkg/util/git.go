@@ -15,11 +15,13 @@
 package util
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -685,6 +687,325 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 func isRemoteBranchNotFound(stderr string) bool {
 	lower := strings.ToLower(stderr)
 	return strings.Contains(lower, "remote branch") && strings.Contains(lower, "not found")
+}
+
+// SyncedGitRemote describes the host-known-good remote configuration to
+// regenerate into a synced workspace's .git/config. Leave RemoteURL empty for
+// workspaces that have no legitimate git remote (e.g. hub-native projects);
+// FilterSyncedGitMetadata then writes a config with no remote or branch
+// tracking sections at all.
+type SyncedGitRemote struct {
+	RemoteURL string
+}
+
+// syncedGitDirAllowlist is the set of top-level .git entries that survive an
+// admin-surface rebuild in FilterSyncedGitMetadata. Everything else is
+// deleted.
+//
+// This is deliberately an allowlist rather than a denylist. git has more than
+// one way to redirect config/hook lookup to a different location in the
+// tree — a "commondir" file repoints the whole gitdir's config/hooks/objects/
+// refs at another directory, and ".git/modules/<sub>/{hooks,config}" (reached
+// via a submodule gitlink) carries its own hooks that fire on fetch even
+// without an explicit --recurse-submodules. A denylist that only knows to
+// strip "hooks/", "config", and "info/" leaves both standing. Keeping only
+// the content/hash entries a shared-workspace or hub-native checkout
+// legitimately needs, and deleting everything else, closes redirection
+// vectors by construction rather than by enumeration.
+var syncedGitDirAllowlist = map[string]bool{
+	"HEAD":        true,
+	"objects":     true,
+	"refs":        true,
+	"packed-refs": true,
+	"index":       true,
+	"logs":        true,
+	"shallow":     true,
+}
+
+// syncedGitHeadInfo is the validated content of a landed .git/HEAD.
+type syncedGitHeadInfo struct {
+	branch   string // set when HEAD is a symref to refs/heads/<branch>
+	detached bool   // true when HEAD is a bare object id
+}
+
+// FilterSyncedGitMetadata rebuilds the admin surface of a .git directory that
+// was just landed by copying an untrusted workspace snapshot (a container
+// filesystem sync, or a GCS blob mirrored from one) onto a host directory
+// that host-side git will later run in. Call it immediately after any such
+// landing, before that directory is used for any host-side git operation,
+// and on every landing (a repeated sync can re-create anything a one-time
+// rebuild would leave in place).
+//
+// Shape gate: a missing .git is a no-op — hub-native projects legitimately
+// have none, and absence is not an execution vector. A .git that is not a
+// real directory (a symlink, or a gitfile whose "gitdir: <path>" redirects
+// elsewhere) is itself the redirection surface this function exists to
+// close: it is removed outright and an error is returned, rather than
+// attempting a partial strip through the redirect.
+//
+// A real .git directory is rebuilt in place:
+//
+//  1. The landed (not yet touched) config is checked for
+//     extensions.objectFormat / extensions.refStorage. A non-sha1 object
+//     format or reftable ref storage changes the on-disk layout in ways the
+//     allowlist below and the regenerated config do not account for, so such
+//     a repo is rejected (removed, error returned) rather than corrupted.
+//  2. The landed (not yet touched) HEAD is validated: it must be a symref to
+//     refs/heads/<valid ref name> or a bare hex object id. Anything else
+//     (e.g. a HEAD of "ref: ../../elsewhere") is rejected the same way.
+//  3. Every top-level .git entry not in syncedGitDirAllowlist is deleted —
+//     explicitly including commondir, modules/, worktrees/, hooks/, config,
+//     config.worktree, and info/. Within the kept objects/ tree,
+//     objects/info/ (which holds alternates and http-alternates — both can
+//     point the object store at another tenant's repository) is removed too.
+//  4. .git/config is replaced wholesale with a minimal config built from the
+//     caller-supplied, host-known-good remote and the branch validated in
+//     (2) — never from anything pod/GCS-provided. Hub-native workspaces
+//     (remote.RemoteURL == "") get identity+core only, no remote: there is no
+//     upstream to synthesize.
+func FilterSyncedGitMetadata(workspacePath string, remote SyncedGitRemote) error {
+	gitDir := filepath.Join(workspacePath, ".git")
+	info, err := os.Lstat(gitDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Hub-native projects legitimately have no .git; with none
+			// present there is no admin surface to neutralize.
+			return nil
+		}
+		return fmt.Errorf("stat %s: %w", gitDir, err)
+	}
+	if !info.IsDir() {
+		// A gitfile (a plain file containing "gitdir: <elsewhere>") or a
+		// symlink both redirect git to a directory this function never
+		// inspects. Do not attempt to neutralize through the redirect;
+		// remove it outright so nothing later mistakes it for a usable,
+		// neutralized repository.
+		_ = RemoveAllSafe(gitDir)
+		return fmt.Errorf("filter synced git metadata: %s is not a real directory (gitfile/symlink); removed rather than partially neutralized", gitDir)
+	}
+
+	if err := checkSyncedGitFormatSupported(gitDir); err != nil {
+		_ = RemoveAllSafe(gitDir)
+		return fmt.Errorf("filter synced git metadata: %w", err)
+	}
+
+	head, err := validateSyncedGitHead(gitDir)
+	if err != nil {
+		_ = RemoveAllSafe(gitDir)
+		return fmt.Errorf("filter synced git metadata: %w", err)
+	}
+
+	entries, err := os.ReadDir(gitDir)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", gitDir, err)
+	}
+	for _, e := range entries {
+		if syncedGitDirAllowlist[e.Name()] {
+			continue
+		}
+		if err := RemoveAllSafe(filepath.Join(gitDir, e.Name())); err != nil {
+			return fmt.Errorf("remove non-allowlisted git dir entry %q: %w", e.Name(), err)
+		}
+	}
+
+	// objects/info/ (alternates, http-alternates) can point the object store
+	// at another tenant's repository. objects/ is otherwise content-only
+	// (hashes), so this is the one thing removed from inside it.
+	if err := RemoveAllSafe(filepath.Join(gitDir, "objects", "info")); err != nil {
+		return fmt.Errorf("remove objects/info: %w", err)
+	}
+
+	branch := ""
+	if !head.detached {
+		branch = head.branch
+	}
+	if err := writeSyncedGitConfig(gitDir, remote, branch); err != nil {
+		return fmt.Errorf("regenerate synced git config: %w", err)
+	}
+
+	return nil
+}
+
+// checkSyncedGitFormatSupported reads extensions.objectFormat and
+// extensions.refStorage from the landed (untrusted) .git/config, before it
+// is deleted or regenerated — this is the only point that information is
+// available. Scion always clones sha1/files repositories; a landed repo
+// declaring anything else is rejected rather than silently corrupted (the
+// allowlist drops reftable/, and a regenerated config would drop the
+// extension key git needs to read a non-default format). sha256/reftable
+// shared-workspace repos are a documented non-goal.
+func checkSyncedGitFormatSupported(gitDir string) error {
+	configPath := filepath.Join(gitDir, "config")
+	if _, err := os.Stat(configPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat landed config: %w", err)
+	}
+
+	objectFormat, err := readGitConfigValue(configPath, "extensions.objectFormat")
+	if err != nil {
+		return fmt.Errorf("read extensions.objectFormat: %w", err)
+	}
+	if objectFormat != "" && objectFormat != "sha1" {
+		return fmt.Errorf("unsupported extensions.objectFormat %q", objectFormat)
+	}
+
+	refStorage, err := readGitConfigValue(configPath, "extensions.refStorage")
+	if err != nil {
+		return fmt.Errorf("read extensions.refStorage: %w", err)
+	}
+	if refStorage == "reftable" {
+		return fmt.Errorf("unsupported extensions.refStorage %q", refStorage)
+	}
+
+	return nil
+}
+
+// readGitConfigValue reads a single key from a config file on disk using
+// `git config -f`, a plumbing read of that file's text with no repository
+// context and no hook/filter execution. A missing key (exit status 1) is
+// reported as "", nil; any other failure (e.g. an unparseable config file)
+// is propagated so callers can fail closed rather than guess.
+func readGitConfigValue(configPath, key string) (string, error) {
+	cmd := exec.Command("git", "config", "-f", configPath, "--get", key)
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// validateSyncedGitHead reads and validates a landed .git/HEAD. It must be
+// either a symref to refs/heads/<valid ref name> or a bare hex object id;
+// anything else (a HEAD of "ref: ../../elsewhere", garbage content, etc.) is
+// rejected.
+func validateSyncedGitHead(gitDir string) (syncedGitHeadInfo, error) {
+	headBytes, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
+	if err != nil {
+		return syncedGitHeadInfo{}, fmt.Errorf("read HEAD: %w", err)
+	}
+	head := strings.TrimSpace(string(headBytes))
+
+	const symrefPrefix = "ref: "
+	if strings.HasPrefix(head, symrefPrefix) {
+		ref := strings.TrimPrefix(head, symrefPrefix)
+		const branchPrefix = "refs/heads/"
+		if !strings.HasPrefix(ref, branchPrefix) || len(ref) == len(branchPrefix) {
+			return syncedGitHeadInfo{}, fmt.Errorf("HEAD symref %q does not point at a branch under refs/heads/", ref)
+		}
+		if !isValidGitRefName(ref) {
+			return syncedGitHeadInfo{}, fmt.Errorf("HEAD symref %q is not a valid ref name", ref)
+		}
+		return syncedGitHeadInfo{branch: strings.TrimPrefix(ref, branchPrefix)}, nil
+	}
+
+	if isHexObjectID(head) {
+		return syncedGitHeadInfo{detached: true}, nil
+	}
+
+	return syncedGitHeadInfo{}, fmt.Errorf("HEAD content %q is neither a valid branch symref nor a hex object id", head)
+}
+
+// isValidGitRefName reports whether ref is a well-formed git reference name,
+// deferring to git's own check-ref-format rather than reimplementing its
+// rules (which reject ".." path traversal, among others).
+func isValidGitRefName(ref string) bool {
+	return exec.Command("git", "check-ref-format", ref).Run() == nil
+}
+
+// isHexObjectID reports whether s is a plausible sha1 object id: exactly 40
+// lowercase hex characters. (sha256 repositories are rejected earlier, by
+// checkSyncedGitFormatSupported, so 40 is the only length considered here.)
+func isHexObjectID(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// syncedGitSafeBranchName restricts the charset FilterSyncedGitMetadata will
+// write into config as a branch name, on top of isValidGitRefName. git ref
+// names may legally contain characters such as '"' and ']' — safe once
+// written through `git config --file` (which owns escaping; see
+// writeSyncedGitConfig) but not trusted any further than necessary: a branch
+// name outside this charset is simply not written into the regenerated
+// config — the remote is still configured, just without branch tracking for
+// it, the same "no tracking information" degrade as any other branch that
+// happens to have no tracking configured.
+var syncedGitSafeBranchName = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// writeSyncedGitConfig atomically replaces gitDir/config with a minimal,
+// host-generated config. Every value is written through `git config --file`
+// — never string-templated into the file as text. This matters because
+// branch is derived from the landed .git/HEAD and so is not fully trusted
+// even after ref-name validation: git ref names may legally contain '"' and
+// ']', and a naive `[branch "<name>"]` text template could let such a branch
+// name terminate the section header early and add config keys not derived
+// from host state (e.g. core.fsmonitor, a hook). `git config --file` parses
+// and re-escapes the key/value itself, so this holds regardless of what
+// characters branch contains.
+//
+// When remote.RemoteURL is empty (no legitimate remote is known for this
+// workspace, e.g. a hub-native project), no remote or branch section is
+// written at all, rather than trusting anything from the landed config.
+func writeSyncedGitConfig(gitDir string, remote SyncedGitRemote, branch string) error {
+	configPath := filepath.Join(gitDir, "config")
+	tmpPath := configPath + ".tmp"
+	if err := os.WriteFile(tmpPath, nil, 0644); err != nil {
+		return err
+	}
+
+	set := func(key, value string) error {
+		cmd := exec.Command("git", "config", "--file", tmpPath, key, value)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("git config --file %s: %w (%s)", key, err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+
+	base := [][2]string{
+		{"core.repositoryformatversion", "0"},
+		{"core.filemode", "true"},
+		{"core.bare", "false"},
+		{"core.logallrefupdates", "true"},
+		{"user.name", "Scion"},
+		{"user.email", "agent@scion.dev"},
+	}
+	for _, kv := range base {
+		if err := set(kv[0], kv[1]); err != nil {
+			return err
+		}
+	}
+
+	if remote.RemoteURL != "" {
+		if err := set("remote.origin.url", remote.RemoteURL); err != nil {
+			return err
+		}
+		if err := set("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+			return err
+		}
+		if branch != "" && syncedGitSafeBranchName.MatchString(branch) {
+			if err := set(fmt.Sprintf("branch.%s.remote", branch), "origin"); err != nil {
+				return err
+			}
+			if err := set(fmt.Sprintf("branch.%s.merge", branch), "refs/heads/"+branch); err != nil {
+				return err
+			}
+		}
+	}
+
+	return os.Rename(tmpPath, configPath)
 }
 
 // PullCommitInfo describes a single commit that was pulled.

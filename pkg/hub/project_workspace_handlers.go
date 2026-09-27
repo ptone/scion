@@ -1388,6 +1388,14 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 
 	token := s.resolveCloneToken(ctx, project)
 
+	// Serialize against a concurrent workspace sync landing (syncWorkspaceOnStop)
+	// for the same project: without this, a pull could start reading the
+	// directory in the window between a raw, untrusted download landing and
+	// its admin-surface rebuild completing.
+	lock := s.lockWorkspaceGit(project.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	pullResult, err := util.PullSharedWorkspace(workspacePath, token)
 	if err != nil {
 		slog.Warn("shared workspace pull failed",

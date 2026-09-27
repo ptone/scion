@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -1186,15 +1187,68 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 		return
 	}
 
+	// Landing (the raw, untrusted download) and its admin-surface rebuild
+	// must be atomic with respect to any host-side git run against this same
+	// workspace (e.g. the pull handler below) — otherwise a pull could start
+	// reading the directory in the window between the raw download landing
+	// and the rebuild completing. Hold the per-project lock across both
+	// steps; PullSharedWorkspace's caller takes the same lock.
+	lock := s.lockWorkspaceGit(project.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: GCS download failed",
 			"agent_id", agent.ID,
 			"project_id", project.ID, "error", err)
-	} else {
-		s.agentLifecycleLog.Info("syncWorkspaceOnStop: workspace synced back to Hub",
-			"agent_id", agent.ID,
-			"project_id", project.ID, "path", workspacePath)
+		return
 	}
+
+	// The synced content is a raw filesystem snapshot from the agent's
+	// workspace and is not trusted: rebuild its .git admin surface (hooks,
+	// info/, execution-bearing config, and any gitdir-redirection entries
+	// such as commondir or modules/) before this directory is ever used for
+	// a host-side git operation (e.g. workspace/pull). Only a
+	// shared-workspace project has a host-known-good remote to regenerate
+	// config against; other projects get a config with no remote at all.
+	syncedRemote := util.SyncedGitRemote{}
+	if project.IsSharedWorkspace() {
+		syncedRemote.RemoteURL = resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
+	}
+	if err := util.FilterSyncedGitMetadata(workspacePath, syncedRemote); err != nil {
+		// Fail closed: FilterSyncedGitMetadata already removes the .git it
+		// could not safely rebuild (non-real directory, unsupported repo
+		// format, invalid HEAD), so there is nothing further to quarantine
+		// here — just log and stop treating this landing as successful.
+		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: failed to filter synced git metadata",
+			"agent_id", agent.ID,
+			"project_id", project.ID, "error", err)
+		return
+	}
+
+	s.agentLifecycleLog.Info("syncWorkspaceOnStop: workspace synced back to Hub",
+		"agent_id", agent.ID,
+		"project_id", project.ID, "path", workspacePath)
+}
+
+// lockWorkspaceGit returns the process-local mutex serializing workspace
+// sync landing (SyncFromGCS + admin-surface rebuild) and host-side git
+// execution (e.g. workspace/pull) for the given project, creating it on
+// first use. Locks are never removed — the key space is bounded by the
+// number of distinct hub-managed projects a hub has ever synced or pulled,
+// which is small and stable.
+func (s *Server) lockWorkspaceGit(projectID string) *sync.Mutex {
+	s.workspaceGitLocksMu.Lock()
+	defer s.workspaceGitLocksMu.Unlock()
+	if s.workspaceGitLocks == nil {
+		s.workspaceGitLocks = make(map[string]*sync.Mutex)
+	}
+	m, ok := s.workspaceGitLocks[projectID]
+	if !ok {
+		m = &sync.Mutex{}
+		s.workspaceGitLocks[projectID] = m
+	}
+	return m
 }
 
 func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
