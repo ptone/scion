@@ -373,7 +373,43 @@ func verifySelfBinaryRootOwned() error {
 	if err != nil {
 		return fmt.Errorf("running executable %s is not a trusted, root-owned binary: %w", resolved, err)
 	}
-	_ = f.Close()
+	defer func() { _ = f.Close() }()
+
+	// The two steps above verify a PATH — readlink's own on-disk string,
+	// re-resolved a second time — not the in-memory image actually
+	// running. Opening "/proc/self/exe" itself (rather than a path derived
+	// from it) always names the exact running inode: it's a kernel magic
+	// symlink resolved against this process's own in-kernel reference, not
+	// a second userspace path lookup, so it can't be redirected by
+	// anything that happened to the on-disk path between the two steps
+	// above. Comparing its inode against the just-verified file's binds
+	// this whole check to the binary that is actually running, not merely
+	// to whatever a fresh lookup of the same name finds right now.
+	running, err := os.Open(rootexec.SelfExe())
+	if err != nil {
+		return fmt.Errorf("open running executable: %w", err)
+	}
+	defer func() { _ = running.Close() }()
+	return sameInode(running, f)
+}
+
+// sameInode reports an error unless a and b are open file descriptors on
+// the identical underlying inode (matching device and inode number, the
+// only identity a filesystem actually guarantees — two different paths, or
+// even the same path resolved twice, can otherwise land on different
+// files).
+func sameInode(a, b *os.File) error {
+	var sa, sb syscall.Stat_t
+	if err := syscall.Fstat(int(a.Fd()), &sa); err != nil {
+		return fmt.Errorf("fstat %s: %w", a.Name(), err)
+	}
+	if err := syscall.Fstat(int(b.Fd()), &sb); err != nil {
+		return fmt.Errorf("fstat %s: %w", b.Name(), err)
+	}
+	if sa.Dev != sb.Dev || sa.Ino != sb.Ino {
+		return fmt.Errorf("%s (dev=%d ino=%d) is not the same file as %s (dev=%d ino=%d)",
+			a.Name(), sa.Dev, sa.Ino, b.Name(), sb.Dev, sb.Ino)
+	}
 	return nil
 }
 

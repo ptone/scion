@@ -54,6 +54,63 @@ func TestVerifySelfBinaryRootOwned_AcceptsRealRootOwnedBinary(t *testing.T) {
 	}
 }
 
+// TestSameInode_AcceptsTwoDescriptorsOnTheSameFile proves the positive
+// path: two independently opened file descriptors on the exact same path
+// (the ordinary case — nothing swapped it out from under either open) are
+// accepted.
+func TestSameInode_AcceptsTwoDescriptorsOnTheSameFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "same")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+	b, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b.Close() }()
+
+	if err := sameInode(a, b); err != nil {
+		t.Errorf("sameInode() = %v, want nil for two descriptors on the same file", err)
+	}
+}
+
+// TestSameInode_RefusesTwoDifferentFiles proves the negative path this
+// exists for: verifySelfBinaryRootOwned's whole point is to bind the
+// verified-root-owned check to the exact inode this process is running, not
+// merely to whatever a second, independent path lookup happens to find —
+// two genuinely different files (even the same size/content) must be
+// refused.
+func TestSameInode_RefusesTwoDifferentFiles(t *testing.T) {
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "a")
+	pathB := filepath.Join(dir, "b")
+	if err := os.WriteFile(pathA, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathB, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, err := os.Open(pathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Close() }()
+	b, err := os.Open(pathB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = b.Close() }()
+
+	if err := sameInode(a, b); err == nil {
+		t.Error("sameInode() = nil, want an error for two distinct files")
+	}
+}
+
 // TestRunSubstrateServe_CallsSelfBinaryIntegrityCheckBeforeListening proves
 // runSubstrateServe actually wires in the self-binary integrity check (not
 // just that verifySelfBinaryRootOwned works correctly in isolation): a
