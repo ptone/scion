@@ -317,3 +317,201 @@ func TestEnsureDirNoFollowRootOwned_RootOwnedChain(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 }
+
+// TestAmbientTempDirTrusted_AcceptsTrustedDirUnderTrustedParent is the
+// positive path achievable without real root: a self-owned directory, free
+// of the group/other-write bits, under an entirely trusted ancestor chain
+// must be accepted (chainIsTrusted's ordinary rule — no sticky bit
+// involved).
+func TestAmbientTempDirTrusted_AcceptsTrustedDirUnderTrustedParent(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	dir := filepath.Join(base, "tmp-like")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if !AmbientTempDirTrusted(dir) {
+		t.Error("AmbientTempDirTrusted() = false, want true (self-owned, non-group/other-writable dir under a trusted parent)")
+	}
+}
+
+// TestAmbientTempDirTrusted_AcceptsStickyRootOwnedDir is the genuine
+// root-only happy path for the sticky-bit branch (real "/tmp"'s own
+// shape): a sticky, world-writable directory is only accepted when it is
+// actually owned by uid 0 — this process's own euid must BE 0 to construct
+// that fixture at all, so this skips otherwise, the same convention
+// TestEnsureDirNoFollowRootOwned_RootOwnedChain uses.
+func TestAmbientTempDirTrusted_AcceptsStickyRootOwnedDir(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to create and own a genuinely root-owned sticky dir")
+	}
+	base, err := os.MkdirTemp("/root", "dirfd-ambienttmp-test-*")
+	if err != nil {
+		t.Skipf("could not create a fixture under /root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	if err := os.Chmod(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "tmp-like")
+	if err := os.Mkdir(dir, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+
+	if !AmbientTempDirTrusted(dir) {
+		t.Error("AmbientTempDirTrusted() = false, want true (sticky, root-owned dir under a trusted parent)")
+	}
+}
+
+// TestAmbientTempDirTrusted_RefusesWhenParentIsWorkloadWritable proves the
+// ancestor-chain check actually runs: a sticky, otherwise-acceptable
+// directory whose PARENT is workload-writable must be refused, since the
+// workload could rename the directory itself out of the way and plant a
+// symlink at the same name before it is ever used — the sticky bit only
+// protects entries already inside it, not its own directory entry in an
+// untrusted parent.
+func TestAmbientTempDirTrusted_RefusesWhenParentIsWorkloadWritable(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	untrustedParent := filepath.Join(base, "untrusted-parent")
+	if err := os.Mkdir(untrustedParent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(untrustedParent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(untrustedParent, "tmp-like")
+	if err := os.Mkdir(dir, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+
+	if AmbientTempDirTrusted(dir) {
+		t.Error("AmbientTempDirTrusted() = true, want false (parent is group/other-writable)")
+	}
+}
+
+// TestAmbientTempDirTrusted_RefusesSymlinkedLeaf proves a symlink planted at
+// the checked path itself is refused, never followed.
+func TestAmbientTempDirTrusted_RefusesSymlinkedLeaf(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(real, 0o1777); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if AmbientTempDirTrusted(link) {
+		t.Error("AmbientTempDirTrusted() = true, want false (path itself is a symlink)")
+	}
+}
+
+// mustWriteExecutable creates an executable regular file at path with the
+// given content, for VerifyRootOwnedExecutable's fixtures.
+func mustWriteExecutable(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestVerifyRootOwnedExecutable_AcceptsPlainTrustedRegularFile is the
+// no-symlinks-at-all base case.
+func TestVerifyRootOwnedExecutable_AcceptsPlainTrustedRegularFile(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	bin := filepath.Join(base, "tool")
+	mustWriteExecutable(t, bin, "#!/bin/sh\necho ok\n")
+
+	if err := VerifyRootOwnedExecutable(bin); err != nil {
+		t.Errorf("VerifyRootOwnedExecutable(%q) = %v, want nil", bin, err)
+	}
+}
+
+// TestVerifyRootOwnedExecutable_FollowsMultiHopSymlinkChainWhenAllTrusted
+// mirrors Debian's real iptables layout ("iptables" -> "alternatives/
+// iptables" -> "xtables-nft-multi", two hops) entirely under a trusted
+// chain, and proves the walk follows both hops and accepts the real
+// destination — the shape rootexec.Resolve depends on to keep working for
+// any multi-call binary reached through a legitimate root-installed
+// alternatives-style symlink.
+func TestVerifyRootOwnedExecutable_FollowsMultiHopSymlinkChainWhenAllTrusted(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	altDir := filepath.Join(base, "alternatives")
+	if err := os.Mkdir(altDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(base, "xtables-nft-multi")
+	mustWriteExecutable(t, dest, "#!/bin/sh\necho dispatch\n")
+
+	hop1 := filepath.Join(altDir, "iptables")
+	if err := os.Symlink(dest, hop1); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(base, "iptables")
+	if err := os.Symlink(hop1, candidate); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := VerifyRootOwnedExecutable(candidate); err != nil {
+		t.Errorf("VerifyRootOwnedExecutable(%q) = %v, want nil (fully trusted 2-hop chain)", candidate, err)
+	}
+}
+
+// TestVerifyRootOwnedExecutable_RefusesHopThroughUntrustedDir proves that
+// even a symlink chain that eventually reaches a trusted destination is
+// refused if any INTERMEDIATE hop's own containing directory is not
+// trusted — following a legitimate-looking alternatives chain must not
+// smuggle a workload-writable directory into the trusted result.
+func TestVerifyRootOwnedExecutable_RefusesHopThroughUntrustedDir(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	untrustedDir := filepath.Join(base, "untrusted")
+	if err := os.Mkdir(untrustedDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(untrustedDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(base, "real-tool")
+	mustWriteExecutable(t, dest, "#!/bin/sh\necho ok\n")
+
+	hop1 := filepath.Join(untrustedDir, "tool")
+	if err := os.Symlink(dest, hop1); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(base, "tool")
+	if err := os.Symlink(hop1, candidate); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := VerifyRootOwnedExecutable(candidate); err == nil {
+		t.Error("VerifyRootOwnedExecutable() = nil, want an error (intermediate hop lives in an untrusted directory)")
+	}
+}
+
+// TestVerifyRootOwnedExecutable_RefusesSymlinkLoop proves a symlink cycle
+// fails closed instead of looping forever.
+func TestVerifyRootOwnedExecutable_RefusesSymlinkLoop(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	a := filepath.Join(base, "a")
+	b := filepath.Join(base, "b")
+	if err := os.Symlink(b, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(a, b); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := VerifyRootOwnedExecutable(a); err == nil {
+		t.Error("VerifyRootOwnedExecutable() = nil, want an error (symlink loop)")
+	}
+}

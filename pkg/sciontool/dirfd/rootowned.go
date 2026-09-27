@@ -5,11 +5,14 @@ Copyright 2026 The Scion Authors.
 package dirfd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // trustedChainModeBits are the permission bits chainIsTrusted refuses on any
@@ -206,13 +209,21 @@ func OpenNoFollowRootOwnedFile(path string) (*os.File, error) {
 // path itself is opened with O_DIRECTORY|O_NOFOLLOW, so a symlink planted at
 // path's own name is refused (reported as untrusted) rather than followed,
 // and the result is fstatted rather than trusted from a separate
-// stat-by-path call. Unlike OpenParentNoFollowRootOwned, this does not walk
-// any ancestor: the question this answers is only "can some workload
-// process rename or replace the entry os.MkdirTemp is about to create
-// inside path", which depends solely on path's own mode and sticky bit, not
-// on any parent's.
+// stat-by-path call. Its own ancestor chain is verified too, via
+// OpenParentNoFollowRootOwned: a sticky bit on path itself is not enough if
+// its parent is workload-writable, since the workload could then rename
+// path (or an ancestor of it) out of the way and plant a symlink at the
+// same name before path is ever used — the sticky bit only protects
+// entries that already exist inside path, not path's own directory entry
+// in its parent.
 func AmbientTempDirTrusted(path string) bool {
-	fd, err := syscall.Open(path, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	dirFd, leaf, err := OpenParentNoFollowRootOwned(path)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	fd, err := syscall.Openat(dirFd, leaf, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return false
 	}
@@ -221,8 +232,107 @@ func AmbientTempDirTrusted(path string) bool {
 	if err := syscall.Fstat(fd, &st); err != nil {
 		return false
 	}
-	if st.Mode&syscall.S_ISVTX != 0 {
+	if st.Mode&syscall.S_ISVTX != 0 && st.Uid == 0 {
 		return true
 	}
-	return st.Uid == 0 && uint32(st.Mode)&trustedChainModeBits == 0
+	return chainIsTrusted(st.Uid, uint32(st.Mode), uint32(os.Geteuid()))
+}
+
+// maxSymlinkHops bounds VerifyRootOwnedExecutable's manual symlink-chain
+// walk, generously beyond any real installation this codebase's search
+// paths are expected to encounter (Debian's update-alternatives chains are
+// two hops).
+const maxSymlinkHops = 20
+
+// VerifyRootOwnedExecutable verifies that candidate — and, if it is a
+// symlink, every hop of its symlink chain down to the final destination —
+// are each root-owned (or self-owned, on a runtime with no separate root/
+// workload identity to protect against at all) and free of the group- and
+// other-write bits, including each hop's own containing-directory chain
+// (walked from "/" via OpenParentNoFollowRootOwned, exactly like a
+// standalone file's). This is what makes it safe for a caller to go on to
+// exec candidate itself, rather than the fully-resolved destination: once
+// every hop and its own directory chain are proven under root's (or self's)
+// exclusive control, the workload has no write access anywhere along the
+// path a later, real execve() would re-walk, so there is no window between
+// this check and that exec for anything to change.
+//
+// A legitimate root-installed symlink chain (Debian's "iptables" ->
+// "/etc/alternatives/iptables" -> "xtables-nft-multi", a multi-call binary
+// that dispatches on argv[0]'s own basename) is followed and verified hop
+// by hop, never refused outright the way OpenNoFollowRootOwnedFile's single
+// O_NOFOLLOW open refuses any symlink at its own leaf. A caller that needs
+// a multi-call binary's dispatch to work needs candidate's OWN basename to
+// survive into argv[0], which only holds if it goes on to exec candidate
+// itself, not whatever this walk resolves it to — so this function never
+// returns the resolved path, only whether exec'ing candidate is safe.
+func VerifyRootOwnedExecutable(candidate string) error {
+	selfUID := uint32(os.Geteuid())
+	current := candidate
+	visited := make(map[string]bool, maxSymlinkHops)
+
+	for hop := 0; hop < maxSymlinkHops; hop++ {
+		if visited[current] {
+			return fmt.Errorf("dirfd: symlink loop resolving %s", candidate)
+		}
+		visited[current] = true
+
+		dirFd, leaf, err := OpenParentNoFollowRootOwned(current)
+		if err != nil {
+			return fmt.Errorf("dirfd: %s: %w", candidate, err)
+		}
+
+		fd, openErr := syscall.Openat(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+		if openErr == nil {
+			var st syscall.Stat_t
+			statErr := syscall.Fstat(fd, &st)
+			_ = syscall.Close(fd)
+			_ = syscall.Close(dirFd)
+			if statErr != nil {
+				return fmt.Errorf("dirfd: fstat %s: %w", current, statErr)
+			}
+			if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+				return fmt.Errorf("dirfd: %s is not a regular file (mode %#o)", current, st.Mode&syscall.S_IFMT)
+			}
+			if !chainIsTrusted(st.Uid, uint32(st.Mode), selfUID) {
+				return fmt.Errorf("dirfd: %s is not root-owned (or self-owned) and free of group/other write (uid=%d mode=%#o)", current, st.Uid, st.Mode&0o7777)
+			}
+			return nil
+		}
+		if !errors.Is(openErr, syscall.ELOOP) {
+			_ = syscall.Close(dirFd)
+			return fmt.Errorf("dirfd: open %s: %w", current, openErr)
+		}
+
+		// current's leaf is a symlink: verify the symlink directory entry's
+		// own OWNER (unix.Fstatat with AT_SYMLINK_NOFOLLOW is the
+		// fd-relative equivalent of Lstat — a fresh workload-planted
+		// symlink here would show the workload's own uid). A symlink's own
+		// permission bits are not meaningful on Linux — the kernel reports
+		// (and largely ignores) a fixed mode for every symlink regardless
+		// of anything resembling a chmod — so only ownership is checked
+		// here, unlike chainIsTrusted's combined uid+mode rule for a real
+		// file or directory. Then read the target and continue the walk.
+		var lst unix.Stat_t
+		if err := unix.Fstatat(dirFd, leaf, &lst, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			_ = syscall.Close(dirFd)
+			return fmt.Errorf("dirfd: lstat %s: %w", current, err)
+		}
+		if lst.Uid != 0 && lst.Uid != selfUID {
+			_ = syscall.Close(dirFd)
+			return fmt.Errorf("dirfd: symlink %s is not owned by root (or self) (uid=%d)", current, lst.Uid)
+		}
+		buf := make([]byte, 4096)
+		n, rlErr := unix.Readlinkat(dirFd, leaf, buf)
+		_ = syscall.Close(dirFd)
+		if rlErr != nil {
+			return fmt.Errorf("dirfd: readlink %s: %w", current, rlErr)
+		}
+		target := string(buf[:n])
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(current), target)
+		}
+		current = filepath.Clean(target)
+	}
+	return fmt.Errorf("dirfd: too many symlink hops resolving %s (> %d)", candidate, maxSymlinkHops)
 }
