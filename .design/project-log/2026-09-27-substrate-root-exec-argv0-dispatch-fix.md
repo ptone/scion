@@ -37,8 +37,8 @@ calling process) and free of group/other write — but returns the verified
 CANDIDATE path, never a resolved destination. Every caller already passed
 that value as the command path or embedded it directly in generated script
 text without a separate override, so this one change fixed every affected
-site uniformly; each site was re-audited individually as part of this fix
-to confirm none of them separately re-derived a bare name after resolution.
+site uniformly; each site was checked individually to confirm none of them
+separately re-derived a bare name after resolution.
 
 The fixed search list now matches the standard root PATH order
 (`/usr/local/sbin`, `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`,
@@ -93,7 +93,6 @@ a negative-only assertion is exactly the shape that let this regression
 through undetected in the first place.
 
 Build, vet, and the full test suite for every touched package are green
-under a scrubbed environment. The mutation-testing kit covering this area
-gained five new rows for this fix (each individually confirmed to be
-caught, not merely present) and a full rerun of the existing suite against
-this change confirmed no unrelated regression.
+under a scrubbed environment. Each new regression test was confirmed to
+fail when the fix it covers is reverted, and a full rerun of the existing
+suite confirmed no unrelated regression.
