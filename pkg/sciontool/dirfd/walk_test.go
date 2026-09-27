@@ -270,7 +270,7 @@ func TestChownTreeNoFollow_SymlinkToRegularFileEntryNotFollowed(t *testing.T) {
 // opens the subdirectory's fd and before it processes that subdirectory's
 // own entries — the same window the class's real, timing-dependent exploit
 // needs, made deterministic exactly like writeEnvFileAfterWriteForTest
-// does for the tmptoken unit's own race.
+// does for writeEnvFile's directory-chown race.
 func TestChownTreeNoFollow_SurvivesIntermediateDirSwapMidWalk(t *testing.T) {
 	root := t.TempDir()
 	victim := t.TempDir()

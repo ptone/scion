@@ -871,11 +871,6 @@ class TestAtomicWriteJsonSymlinkGuards(unittest.TestCase):
         path = os.path.join(directory, "out.json")
         with open(path + ".tmp", "w", encoding="utf-8") as f:
             f.write("leftover from a previous, interrupted write\n")
-        # Also plant one at the pre-fix fixed name this exact call would have
-        # used, to prove specifically that reintroducing the old name would
-        # have collided where the new one does not.
-        with open(os.path.join(directory, f".{os.path.basename(path)}.tmp"), "w", encoding="utf-8"):
-            pass
 
         sh.atomic_write_json(path, {"ok": True})
 

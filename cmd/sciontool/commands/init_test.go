@@ -883,7 +883,7 @@ func TestWriteEnvFile_RefusesSymlinkAtFinalPath(t *testing.T) {
 // from the original path-based chown.
 //
 // scionDirOwnerUID is also overridden here to report uid 0 (root): without
-// this, writeEnvFile's O1 owner-gating skips the chown entirely, because a
+// this, writeEnvFile's owner gating skips the chown entirely, because a
 // freshly-created .scion directory is owned by the (non-root) test process
 // itself, not root — which would make this test pass by doing nothing on
 // the chown path at all. Forcing "currently root-owned" is what actually
@@ -2045,8 +2045,9 @@ func scionEnvFileCtime(t *testing.T, tmpHome string) syscall.Timespec {
 	return info.Sys().(*syscall.Stat_t).Ctim
 }
 
-// TestWriteEnvFile_ChownGating covers all three owner states O1's fstat gate
-// distinguishes: root-owned (uid 0) triggers the chown; anything else — the
+// TestWriteEnvFile_ChownGating covers all three owner states writeEnvFile's
+// fstat-based owner gate distinguishes: root-owned (uid 0) triggers the
+// chown; anything else — the
 // target uid itself (the normal steady-state case, once a previous run's
 // chown already landed) or any other unexpected uid — is left alone. Each
 // case drives scionDirOwnerUID directly rather than needing a real
