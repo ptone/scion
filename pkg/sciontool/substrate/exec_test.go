@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -174,6 +175,37 @@ func currentUsername(t *testing.T) string {
 		t.Skipf("could not resolve current username: %v", err)
 	}
 	return u.Username
+}
+
+// TestRunExec_ChildEnvNeverContainsScionAgentVars pins "safe today" for the
+// widened SearchPath's side effect: on some images, "whoami" is a shim that
+// (when SCION_AGENT_NAME or SCION_AGENT_SLUG is set) prints that value
+// instead of the real effective user, which — IF this process's own
+// SCION_AGENT_NAME ever matched the target user's name AND that env
+// somehow reached the child — would make execAsUserCmd's own
+// "$(whoami)" == "$1" comparison pass as root, skipping the su drop
+// entirely. It is not exploitable today because runExec builds the child's
+// environment from scratch (rootexec.Env plus only the CA-bundle pairs),
+// never from this process's own os.Environ() — pinned here directly:
+// nothing under a "SCION_" prefix ever reaches the child, checked by
+// asking the real child to print its own environment.
+func TestRunExec_ChildEnvNeverContainsScionAgentVars(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a real subprocess")
+	}
+	t.Setenv("SCION_AGENT_NAME", "should-not-leak")
+	t.Setenv("SCION_AGENT_SLUG", "should-not-leak-slug")
+	t.Setenv("SCION_UNRELATED_VAR", "should-not-leak-either")
+
+	me := currentUsername(t)
+	resp := runExec(context.Background(), me, []string{"env"}, 5*time.Second)
+
+	if resp.ExitCode != 0 {
+		t.Fatalf("exit_code = %d, want 0 (stderr=%q)", resp.ExitCode, resp.Stderr)
+	}
+	if strings.Contains(resp.Stdout, "SCION_") {
+		t.Errorf("runExec's child environment leaked a SCION_* variable:\n%s", resp.Stdout)
+	}
 }
 
 func TestRunExec_TimeoutKillsProcess(t *testing.T) {
