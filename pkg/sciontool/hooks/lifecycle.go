@@ -464,7 +464,8 @@ func (m *LifecycleManager) buildEnforcedCmd(scriptFile *os.File, path, eventName
 			// workload-derived variable this branch needs (HOME=AgentHome
 			// above all) but replaces PATH with rootexec's own fixed list
 			// and strips LD_*/BASH_ENV/ENV/IFS/GIT_*(other than the two
-			// V-A' deliberately sets)/PYTHON* outright: this hook still
+			// names a shared-workspace git rewrite deliberately sets
+			// itself)/PYTHON* outright: this hook still
 			// runs as root, and PID 1's own inherited PATH includes a
 			// directory the workload owns outright (see the rootexec
 			// package doc comment) — the one thing this branch may never

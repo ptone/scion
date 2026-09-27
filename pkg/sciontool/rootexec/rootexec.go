@@ -144,8 +144,9 @@ var noInheritedExecEnvNames = map[string]bool{
 
 // isNeverInheritedExecEnvName reports whether key must never survive into a
 // root exec's environment: an exact match against noInheritedExecEnvNames,
-// or an LD_*, GIT_* (except the two V-A' deliberately sets — see
-// SanitizeInheritedEnv's caller), or PYTHON* prefix.
+// or an LD_*, GIT_* (except the two names a shared-workspace git rewrite
+// deliberately sets itself — see SanitizeInheritedEnv's caller), or
+// PYTHON* prefix.
 func isNeverInheritedExecEnvName(key string) bool {
 	if noInheritedExecEnvNames[key] {
 		return true
