@@ -1025,47 +1025,87 @@ func TestFixupRootfsForScionUser_RunsSudoFixup(t *testing.T) {
 // sudoHardeningCallAllowlist is the parity guard for the sudo hardening:
 // every other runtime this codebase targets (Docker, Kubernetes, Apple
 // containers, rootless) keeps sudo and its setuid bit intact on purpose —
-// root is not a security boundary there. Each of these functions must only
-// ever be reached through the one legitimate chain substrate-serve wires up
-// (checkPrivilegeDropFeasible <- substrateServePrivilegeDropChecker;
-// fixupRootfsForScionUser <- startupRootfsFixup/bootstrapRootfsFixup package
-// vars <- substrate-serve's own two rootfs-fixup call sites;
-// fixupRootfsForScionUser -> fixupRootfsForScion -> stripSudoSetuidBits/
-// removeSudoersGrants through the runStripSudoSetuidBits/
-// runRemoveSudoersGrants seams), keyed by the ENCLOSING FUNCTION a
-// reference appears in, not by file: an earlier version of this guard
-// allowlisted init.go wholesale, which would have let a call added inside
-// RunInit itself (also in init.go) through undetected.
+// root is not a security boundary there. Each of these names must only
+// ever be REFERENCED (called, passed as a value, aliased — any use of the
+// identifier at all, not just a direct call) from the one legitimate
+// location(s) listed, keyed by name:
 //
-// The empty string "" as an enclosing function name means "a top-level var
-// declaration's initializer", for the two package vars in substrate_serve.go
-// that hold fixupRootfsForScionUser as a value, not a call.
+//	fixupRootfsForScionUser        <- the startupRootfsFixup/bootstrapRootfsFixup
+//	                                   package vars' own initializers
+//	startupRootfsFixup             <- runSubstrateServe (call site 1)
+//	bootstrapRootfsFixup           <- substrateServeRootfsFixup (call site 2)
+//	fixupRootfsForScion            <- fixupRootfsForScionUser
+//	runStripSudoSetuidBits         <- fixupRootfsForScion
+//	runRemoveSudoersGrants         <- fixupRootfsForScion
+//	stripSudoSetuidBits            <- the runStripSudoSetuidBits package var's
+//	                                   own initializer
+//	removeSudoersGrants            <- the runRemoveSudoersGrants package var's
+//	                                   own initializer
+//	checkPrivilegeDropFeasible     <- substrateServePrivilegeDropChecker
+//	substrateServePrivilegeDropChecker <- newSubstrateServeServer (wired into
+//	                                   the Server as its PrivilegeDropChecker)
+//
+// A location of the form "var:X" means "the initializer expression of the
+// package-level var declared as X" — pinned to that one specific declaring
+// var, not "any top-level var in any file": an earlier version of this
+// guard allowed any top-level value, which would have let a *new*
+// package-level var silently pick up one of these functions too. A plain
+// function name means "anywhere in that function's body".
+//
+// This is deliberately about REFERENCES, not just calls: a mis-wiring can
+// take the shape of a direct call (fixupRootfsForScionUser("/") inside
+// RunInit), a call through an existing seam (startupRootfsFixup("/") inside
+// RunInit — the most natural copy-paste of the legitimate call site), or a
+// local alias (fx := fixupRootfsForScionUser; fx("/")) — the last of these
+// is caught by flagging the alias ASSIGNMENT itself (an illegitimate
+// reference to the tracked name), never by trying to track what the alias
+// is later called as.
 var sudoHardeningCallAllowlist = map[string]map[string]bool{
 	"fixupRootfsForScionUser": {
-		"": true, // substrate_serve.go: startupRootfsFixup / bootstrapRootfsFixup
+		"var:startupRootfsFixup":   true,
+		"var:bootstrapRootfsFixup": true,
+	},
+	"startupRootfsFixup": {
+		"runSubstrateServe": true,
+	},
+	"bootstrapRootfsFixup": {
+		"substrateServeRootfsFixup": true,
 	},
 	"fixupRootfsForScion": {
 		"fixupRootfsForScionUser": true,
 	},
+	"runStripSudoSetuidBits": {
+		"fixupRootfsForScion": true,
+	},
+	"runRemoveSudoersGrants": {
+		"fixupRootfsForScion": true,
+	},
 	"stripSudoSetuidBits": {
-		"": true, // substrate_rootfs.go: runStripSudoSetuidBits seam var
+		"var:runStripSudoSetuidBits": true,
 	},
 	"removeSudoersGrants": {
-		"": true, // substrate_rootfs.go: runRemoveSudoersGrants seam var
+		"var:runRemoveSudoersGrants": true,
 	},
 	"checkPrivilegeDropFeasible": {
 		"substrateServePrivilegeDropChecker": true,
 	},
+	"substrateServePrivilegeDropChecker": {
+		"newSubstrateServeServer": true,
+	},
 }
 
-// TestSudoHardeningOnlyReachableFromItsOwnWiring walks every non-test .go
-// file in this package and flags any reference (call, or bare value as in
-// "var x = fixupRootfsForScionUser") to one of sudoHardeningCallAllowlist's
-// keys whose enclosing function is not on that key's own allowlist — so a
-// future call site added anywhere else in this package (including inside
+// TestSudoHardeningOnlyReachableFromItsOwnWiring walks every *ast.Ident in
+// every non-test .go file in this package and flags any occurrence of one
+// of sudoHardeningCallAllowlist's tracked names — whether it's the function
+// being called, a bare value passed or assigned, or anything else — whose
+// location is not on that name's own allowlist. Declaring positions (a
+// FuncDecl's own name; a ValueSpec's own declared names) are excluded, since
+// those are definitions, not references. A future call, alias or
+// pass-by-value added anywhere else in this package — including inside
 // RunInit, which shares init.go with the legitimate
-// checkPrivilegeDropFeasible definition) fails this test rather than
-// silently changing non-substrate runtime behavior.
+// checkPrivilegeDropFeasible definition, and including through an existing
+// seam var rather than the underlying function directly — fails this test
+// rather than silently changing non-substrate runtime behavior.
 func TestSudoHardeningOnlyReachableFromItsOwnWiring(t *testing.T) {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -1090,12 +1130,55 @@ func TestSudoHardeningOnlyReachableFromItsOwnWiring(t *testing.T) {
 			t.Fatalf("parse %s: %v", path, err)
 		}
 
+		// declaring collects the position of every *ast.Ident that is a
+		// DEFINITION rather than a use: a FuncDecl's own name, and a
+		// top-level ValueSpec's own declared names (the "X" in
+		// "var X = ..."). These must never be checked against the
+		// allowlist — the declaration of, say, fixupRootfsForScion itself
+		// is not a "reference to fixupRootfsForScion" in the sense this
+		// guard cares about.
+		declaring := map[token.Pos]bool{}
+		// varInitializerLocation maps a package-level ValueSpec value
+		// expression's [start,end) position range to "var:<declared name>",
+		// so a reference inside that initializer is attributed to the
+		// specific var being declared, not to "package scope" generically.
+		type varInit struct {
+			pos, end token.Pos
+			location string
+		}
+		var varInits []varInit
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				declaring[d.Name.Pos()] = true
+			case *ast.GenDecl:
+				if d.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range d.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for _, n := range vs.Names {
+						declaring[n.Pos()] = true
+					}
+					if len(vs.Names) == 1 && len(vs.Values) == 1 {
+						varInits = append(varInits, varInit{
+							pos:      vs.Values[0].Pos(),
+							end:      vs.Values[0].End(),
+							location: "var:" + vs.Names[0].Name,
+						})
+					}
+				}
+			}
+		}
+
 		// funcNameAt reports the name of the FuncDecl enclosing pos, or ""
-		// if pos is at package (top-level var declaration) scope. This
-		// codebase's sudo-hardening call chain never nests these
-		// references inside a closure, so (unlike rootexec/guard_test.go's
-		// funcLike machinery) FuncDecl ranges alone are precise enough
-		// here.
+		// if pos is not inside any function body. This codebase's
+		// sudo-hardening call chain never nests these references inside a
+		// closure, so (unlike rootexec/guard_test.go's funcLike machinery)
+		// FuncDecl ranges alone are precise enough here.
 		funcNameAt := func(pos token.Pos) string {
 			var enclosing string
 			var enclosingLen token.Pos
@@ -1114,36 +1197,40 @@ func TestSudoHardeningOnlyReachableFromItsOwnWiring(t *testing.T) {
 			return enclosing
 		}
 
-		check := func(ident *ast.Ident) {
-			allowed, tracked := sudoHardeningCallAllowlist[ident.Name]
-			if !tracked {
-				return
-			}
-			enclosing := funcNameAt(ident.Pos())
-			if !allowed[enclosing] {
-				line := fset.Position(ident.Pos()).Line
-				where := enclosing
-				if where == "" {
-					where = "package scope"
+		// locationAt reports where pos is: a "var:X" package-level
+		// initializer, an enclosing function's name, or "package scope" as
+		// a last resort (a location no allowlist entry ever names, so it
+		// fails closed rather than being silently treated as allowed).
+		locationAt := func(pos token.Pos) string {
+			for _, vi := range varInits {
+				if vi.pos <= pos && pos < vi.end {
+					return vi.location
 				}
-				violations = append(violations, fmt.Sprintf(
-					"%s:%d: %s referenced from %s, which is not on its sudo-hardening allowlist",
-					name, line, ident.Name, where))
 			}
+			if fn := funcNameAt(pos); fn != "" {
+				return fn
+			}
+			return "package scope"
 		}
 
 		ast.Inspect(f, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.CallExpr:
-				if id, ok := x.Fun.(*ast.Ident); ok {
-					check(id)
-				}
-			case *ast.ValueSpec:
-				for _, v := range x.Values {
-					if id, ok := v.(*ast.Ident); ok {
-						check(id)
-					}
-				}
+			id, ok := n.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if declaring[id.Pos()] {
+				return true
+			}
+			allowed, tracked := sudoHardeningCallAllowlist[id.Name]
+			if !tracked {
+				return true
+			}
+			where := locationAt(id.Pos())
+			if !allowed[where] {
+				line := fset.Position(id.Pos()).Line
+				violations = append(violations, fmt.Sprintf(
+					"%s:%d: %s referenced from %s, which is not on its sudo-hardening allowlist",
+					name, line, id.Name, where))
 			}
 			return true
 		})
@@ -1151,7 +1238,7 @@ func TestSudoHardeningOnlyReachableFromItsOwnWiring(t *testing.T) {
 
 	if len(violations) > 0 {
 		sort.Strings(violations)
-		t.Errorf("found %d sudo-hardening reference(s) outside their allowed enclosing function:\n%s",
+		t.Errorf("found %d sudo-hardening reference(s) outside their allowed location:\n%s",
 			len(violations), strings.Join(violations, "\n"))
 	}
 }
