@@ -530,6 +530,20 @@ func checkWorkspaceGit(failures *int) {
 
 	fmt.Println("\n--- Workspace/Git State ---")
 
+	if os.Geteuid() == 0 {
+		// This check passes HOME through so `git status` picks up the
+		// invoking user's own gitconfig (needed for a normal, non-root
+		// doctor run against a shared workspace with a different owning
+		// uid — see safe.directory below). Doing that as root would let a
+		// workload-writable ~/.gitconfig ("safe.directory=*") or
+		// /workspace/.git/config ("core.fsmonitor=<cmd>") run arbitrary
+		// code as root; no shipped path runs doctor as root, so this is a
+		// belt-and-suspenders refusal for a human invoking it that way
+		// directly, not a case this binary needs to actually support.
+		fmt.Println("[INFO] Running as root — skipping git workspace check (would trust a workload-controlled gitconfig)")
+		return
+	}
+
 	gitCtx, gitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer gitCancel()
 	gitPath, err := rootexec.Resolve("git")
