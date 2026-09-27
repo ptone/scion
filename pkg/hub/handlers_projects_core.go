@@ -1240,6 +1240,9 @@ func (s *Server) landProjectWorkspace(ctx context.Context, project *store.Projec
 	if err != nil {
 		return fmt.Errorf("landProjectWorkspace: resolve project path: %w", err)
 	}
+	if err := os.MkdirAll(workspacePath, 0755); err != nil {
+		return fmt.Errorf("landProjectWorkspace: create project directory: %w", err)
+	}
 
 	lock := s.lockWorkspaceGit(project.ID)
 	lock.Lock()
@@ -1254,9 +1257,16 @@ func (s *Server) landProjectWorkspace(ctx context.Context, project *store.Projec
 	}
 
 	return util.LandSyncedGitWorkspace(workspacePath, syncedRemote, func() error {
-		return gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath)
+		return syncFromGCSFunc(ctx, stor.Bucket(), storagePath+"/files", workspacePath)
 	})
 }
+
+// syncFromGCSFunc is a package-level indirection over gcp.SyncFromGCS.
+// Production code never reassigns it; it exists so tests can substitute a
+// local, filesystem-only stand-in for the download step without a real GCS
+// backend or emulator (this repo has no GCS test infrastructure — see
+// pkg/hub/project_cache_landing_test.go).
+var syncFromGCSFunc = gcp.SyncFromGCS
 
 func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

@@ -21,7 +21,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -120,7 +119,7 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Perform the cache refresh
-	resp, err := s.refreshProjectCacheFromBroker(ctx, project, brokerID, stor)
+	resp, err := s.refreshProjectCacheFromBroker(ctx, project, brokerID)
 	if err != nil {
 		RuntimeError(w, "Cache refresh failed: "+err.Error())
 		return
@@ -199,14 +198,13 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := os.MkdirAll(cachePath, 0755); err != nil {
-		s.workspaceLog.Error("failed to create cache directory", "project_id", project.ID, "error", err)
-		InternalError(w)
-		return
-	}
-
+	// Route through the single landing helper (lock + unconditional
+	// admin-surface rebuild): this downloads into the same
+	// hubManagedProjectPath directory workspace/pull operates on, so it goes
+	// through the same rebuild as the stop-sync and hub-managed-back landing
+	// paths, not a direct download.
 	storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", cachePath); err != nil {
+	if err := s.landProjectWorkspace(ctx, project, storagePath); err != nil {
 		RuntimeError(w, "Failed to download workspace from GCS: "+err.Error())
 		return
 	}
@@ -251,7 +249,7 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 
 // refreshProjectCacheFromBroker triggers a broker to upload the project workspace
 // to GCS, then downloads it to the hub's local cache.
-func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, project *store.Project, brokerID string, stor storage.Storage) (*ProjectCacheRefreshResponse, error) {
+func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, project *store.Project, brokerID string) (*ProjectCacheRefreshResponse, error) {
 	cc := s.GetControlChannelManager()
 	if cc == nil {
 		return nil, fmt.Errorf("control channel not available")
@@ -281,17 +279,11 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, project *sto
 		return nil, fmt.Errorf("broker upload failed: %w", err)
 	}
 
-	// Download from GCS to local cache
-	cachePath, err := s.hubManagedProjectPath(project.Slug)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve cache path: %w", err)
-	}
-
-	if err := os.MkdirAll(cachePath, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create cache directory: %w", err)
-	}
-
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", cachePath); err != nil {
+	// Download from GCS to local cache. Routes through the single landing
+	// helper (lock + unconditional admin-surface rebuild) for the same
+	// reason handleProjectCacheNotify does: this writes into the same
+	// hubManagedProjectPath directory workspace/pull operates on.
+	if err := s.landProjectWorkspace(ctx, project, storagePath); err != nil {
 		return nil, fmt.Errorf("GCS download failed: %w", err)
 	}
 
