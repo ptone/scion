@@ -35,6 +35,25 @@ func TestResolve_FindsRealSystemBinaries(t *testing.T) {
 	}
 }
 
+// TestSearchPath_IncludesUsrLocalDirectories pins the default SearchPath
+// value itself (not a synthetic override): "/usr/local/sbin" and
+// "/usr/local/bin" must be present, ahead of "/usr/sbin" and "/usr/bin" in
+// the standard root PATH order, since a real scion agent image installs
+// git (among other tools) only under "/usr/local/bin" — narrowing this
+// list back to the historical four directories silently broke every
+// caller that needs one of those on such an image.
+func TestSearchPath_IncludesUsrLocalDirectories(t *testing.T) {
+	want := []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+	if len(SearchPath) != len(want) {
+		t.Fatalf("SearchPath = %v, want %v", SearchPath, want)
+	}
+	for i, dir := range want {
+		if SearchPath[i] != dir {
+			t.Errorf("SearchPath[%d] = %q, want %q (full: %v)", i, SearchPath[i], dir, SearchPath)
+		}
+	}
+}
+
 // selfOwnedTrustedDir creates a fresh, self-owned, non-group/other-writable
 // directory to anchor a SearchPath fixture under. It deliberately does not
 // use t.TempDir() (which resolves under os.TempDir(), i.e. "/tmp" — world-
