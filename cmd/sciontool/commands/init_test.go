@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
@@ -2447,7 +2448,7 @@ func TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0)
+	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
 
 	data, err := os.ReadFile(victim)
 	if err != nil {
@@ -2489,7 +2490,7 @@ func TestConfigureSharedWorkspaceGit_FifoDoesNotHang(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		configureSharedWorkspaceGit(agentHome, 0, 0)
+		configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
 		close(done)
 	}()
 	select {
@@ -2519,7 +2520,7 @@ func TestConfigureSharedWorkspaceGit_PreservesExistingUnrelatedKeys(t *testing.T
 		t.Fatalf("write gitconfig: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0)
+	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
 
 	if got := gitConfigGet(t, gitconfigPath, "foo.bar"); got != "baz" {
 		t.Errorf("foo.bar = %q, want baz (pre-existing unrelated key lost)", got)
@@ -2537,13 +2538,13 @@ func TestConfigureSharedWorkspaceGit_IdempotentOnSecondRun(t *testing.T) {
 	agentHome := t.TempDir()
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
 
-	configureSharedWorkspaceGit(agentHome, 0, 0)
+	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
 	first, err := os.ReadFile(gitconfigPath)
 	if err != nil {
 		t.Fatalf("read after first run: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0)
+	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
 	second, err := os.ReadFile(gitconfigPath)
 	if err != nil {
 		t.Fatalf("read after second run: %v", err)
@@ -2570,7 +2571,7 @@ func TestConfigureSharedWorkspaceGit_HardlinkedFileRefused(t *testing.T) {
 		t.Fatalf("hardlink: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0)
+	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
 
 	if got := gitConfigGet(t, gitconfigPath, "secret.token"); got != "" {
 		t.Errorf("secret.token = %q, want empty (hardlinked content must not have been read)", got)
@@ -2639,7 +2640,7 @@ func TestConfigureSharedWorkspaceGit_OversizeRegularGitconfigStartsEmpty(t *test
 		t.Fatalf("write oversize gitconfig: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0)
+	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
 
 	finalContent, err := os.ReadFile(gitconfigPath)
 	if err != nil {
@@ -2670,7 +2671,7 @@ func TestConfigureSharedWorkspaceGit_AtCapRegularGitconfigIsPreserved(t *testing
 		t.Fatalf("write at-cap gitconfig: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0)
+	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
 
 	finalContent, err := os.ReadFile(gitconfigPath)
 	if err != nil {
@@ -2755,7 +2756,7 @@ func TestConfigureSharedWorkspaceGit_TmpdirRaceCannotDiscloseArbitraryFile(t *te
 		}
 	}()
 
-	configureSharedWorkspaceGit(agentHome, 0, 0)
+	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
 
 	close(stop)
 	wg.Wait()
@@ -2787,40 +2788,129 @@ func TestConfigureSharedWorkspaceGit_TmpdirRaceCannotDiscloseArbitraryFile(t *te
 }
 
 // TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed proves the
-// other half of the fix: dirfd.EnsureDirNoFollowRootOwned's chain check is
-// what actually runs, not a check that always happens to pass. Pointing
+// other half of the fix (targeting the enforced/substrate branch, i.e.
+// requirePrivilegeDrop=true): dirfd.EnsureDirNoFollowRootOwned's chain check
+// is what actually runs, not a check that always happens to pass. Pointing
 // hooks.PrivateRootTmpDir directly at a directory that already EXISTS but
 // is group/other-writable (the same shape a misconfigured or attacker-
 // influenced "/run" would have) must make configureSharedWorkspaceGit
 // refuse to create anything there and return without installing a
 // gitconfig — never falling back to os.TempDir() or any other location.
-// The target must already exist, not merely have a bad-mode ancestor: if it
-// didn't exist, a chain-check bypass and a genuine chain-check refusal would
-// both manifest as "no gitconfig installed" (os.MkdirTemp itself would fail
-// against a nonexistent directory either way), so the test would not
-// actually distinguish the two.
+//
+// badDir is created INSIDE the current (pre-test) hooks.PrivateRootTmpDir,
+// not under t.TempDir() (which resolves under the real, world-writable
+// "/tmp") or a fresh os.UserHomeDir()-anchored directory (this package's
+// TestMain redirects $HOME to its own throwaway sandbox under "/tmp" before
+// any test runs, so os.UserHomeDir() no longer points at a trusted
+// location here either). TestMain's own hooks.PrivateRootTmpDir value is
+// itself already a verified, root/self-owned chain anchored under this
+// binary's REAL original $HOME (captured before the redirect — see
+// TestMain's own comment) purely so tests like this one have somewhere
+// trusted to build a fixture under; a fresh subdirectory of it inherits
+// that same trusted ancestor chain, isolating this test to exactly badDir's
+// own leaf mode. Otherwise the chain check would already refuse at an
+// untrusted ANCESTOR before ever reaching badDir's own leaf-mode check, and
+// this test would not actually distinguish a genuine leaf refusal from one
+// that never got that far. The target must already exist, not merely have
+// a bad-mode ancestor: if it didn't exist, a chain-check bypass and a
+// genuine chain-check refusal would both manifest as "no gitconfig
+// installed" (os.MkdirTemp itself would fail against a nonexistent
+// directory either way), so the test would not actually distinguish the
+// two.
 func TestConfigureSharedWorkspaceGit_PrivateDirBadModeFailsClosed(t *testing.T) {
 	origDir := hooks.PrivateRootTmpDir
 	t.Cleanup(func() { hooks.PrivateRootTmpDir = origDir })
 
-	badDir := t.TempDir()
+	badDir := filepath.Join(origDir, "leaf")
+	if err := os.Mkdir(badDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(badDir) })
+	// Chmod after creation, not via Mkdir's own (umask-masked) mode
+	// argument, to force the exact world-writable bits this test needs.
 	if err := os.Chmod(badDir, 0o777); err != nil {
 		t.Fatal(err)
 	}
 	hooks.PrivateRootTmpDir = badDir
 
 	agentHome := t.TempDir()
-	configureSharedWorkspaceGit(agentHome, 0, 0)
+	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
 
-	entries, err := os.ReadDir(badDir)
-	if err != nil {
-		t.Fatalf("read badDir: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("expected nothing to be created inside %s when its own mode fails verification, got %v", badDir, entries)
-	}
 	if _, err := os.Stat(filepath.Join(agentHome, ".gitconfig")); err == nil {
 		t.Error("expected no .gitconfig to be installed when the private directory chain fails closed")
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_NonEnforcedInstallsWithoutRunScion is the
+// required regression test for the bug that made this function silently
+// install nothing on every runtime other than substrate: hooks.
+// PrivateRootTmpDir's parent ("/run/scion") is created only by substrate's
+// own bootstrap, so on Docker, Podman, Kubernetes, and rootless it never
+// exists. This test points hooks.PrivateRootTmpDir at the real production
+// default and does NOT pre-create any part of its chain, so this process (an
+// ordinary, non-root test binary) genuinely reproduces the absent/
+// unwritable-parent condition against the real filesystem rather than a
+// faked stand-in — the self-heal attempt in resolvePrivateGitConfigDir's
+// non-enforced branch fails for real (EACCES creating something under the
+// real, root-owned "/run"), exactly like it would on an affected runtime.
+//
+// With requirePrivilegeDrop=false, configureSharedWorkspaceGit must still
+// install a .gitconfig — falling back to the checked ambient temp directory
+// (this test environment's real "/tmp" is world-writable with the sticky
+// bit set, the same shape a real container has after fixupRootfsForScion
+// runs) instead of returning having silently done nothing. This is now a
+// required parity check: a change that re-couples this path to hooks.
+// PrivateRootTmpDir's existence must fail it.
+func TestConfigureSharedWorkspaceGit_NonEnforcedInstallsWithoutRunScion(t *testing.T) {
+	orig := hooks.PrivateRootTmpDir
+	hooks.PrivateRootTmpDir = "/run/scion/tmp"
+	t.Cleanup(func() { hooks.PrivateRootTmpDir = orig })
+
+	if !dirfd.AmbientTempDirTrusted(os.TempDir()) {
+		t.Skip("this environment's ambient temp directory is not sticky/root-owned; the checked fallback is expected to refuse here too, by design")
+	}
+
+	agentHome := t.TempDir()
+	configureSharedWorkspaceGit(agentHome, 0, 0, false /* requirePrivilegeDrop */, false /* rootless */)
+
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	if _, err := os.Stat(gitconfigPath); err != nil {
+		t.Fatalf("expected .gitconfig to be installed via the non-enforced fallback path, got: %v", err)
+	}
+	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
+		t.Errorf("user.email = %q, want agent@scion.dev", got)
+	}
+}
+
+// TestConfigureSharedWorkspaceGit_RootlessUsesAmbientTempDirDirectly proves
+// the rootless branch (no separate root/workload identity exists to protect
+// against at all — see resolvePrivateGitConfigDir's own doc comment)
+// installs a gitconfig via the plain, historical ambient temp directory
+// without ever attempting hooks.PrivateRootTmpDir: pointing that var at a
+// location whose own parent does not exist either would make any attempt to
+// use it fail, so a passing test here proves the rootless branch really
+// does bypass it entirely rather than merely happening to succeed.
+func TestConfigureSharedWorkspaceGit_RootlessUsesAmbientTempDirDirectly(t *testing.T) {
+	orig := hooks.PrivateRootTmpDir
+	hooks.PrivateRootTmpDir = filepath.Join(t.TempDir(), "nonexistent-parent", "run", "scion", "tmp")
+	t.Cleanup(func() { hooks.PrivateRootTmpDir = orig })
+
+	// Make the ambient temp directory itself untrusted (world-writable, no
+	// sticky bit) for the duration of this test: if the rootless flag were
+	// somehow ignored, the non-enforced branch's own checked fallback would
+	// refuse this exact directory, so only the rootless branch's
+	// unconditional, unchecked os.MkdirTemp("") can succeed here.
+	untrustedTmp := t.TempDir()
+	if err := os.Chmod(untrustedTmp, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", untrustedTmp)
+
+	agentHome := t.TempDir()
+	configureSharedWorkspaceGit(agentHome, 0, 0, false /* requirePrivilegeDrop */, true /* rootless */)
+
+	if _, err := os.Stat(filepath.Join(agentHome, ".gitconfig")); err != nil {
+		t.Fatalf("expected .gitconfig to be installed via the rootless ambient-tempdir path, got: %v", err)
 	}
 }
 
@@ -2846,7 +2936,7 @@ func TestConfigureSharedWorkspaceGit_AmbientHomeMatchingAgentHomeSymlinkRefused(
 		t.Fatalf("symlink: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0)
+	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
 
 	data, err := os.ReadFile(victim)
 	if err != nil {

@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -890,7 +891,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
 	// The workspace is pre-cloned on the host; agents need credentials to push/pull.
 	if resolveIsSharedGitWorkspace() {
-		configureSharedWorkspaceGit(agentHome, targetUID, targetGID)
+		configureSharedWorkspaceGit(agentHome, targetUID, targetGID, opts.RequirePrivilegeDrop, rootless)
 	}
 
 	// Write critical environment variables to a shell-sourceable file so that
@@ -1815,22 +1816,23 @@ func extractChildCommand(args []string) []string {
 // because the kernel populates that file from the execve(2) arguments and
 // never updates it afterward.
 //
+// Uses rootexec.SelfExe() ("/proc/self/exe"), never os.Executable(): this
+// runs as root, and os.Executable() re-reads this binary's path from disk —
+// if that path sits somewhere workload-writable on a given runtime, a
+// binary planted there between process start and this call would be the
+// one re-executed as root. "/proc/self/exe" is the kernel's own magic
+// symlink to the already-running inode, so it always re-execs the exact
+// image already in memory, regardless of what (if anything) now sits at
+// its on-disk path — the same reasoning execAsUserCmd's doc comment
+// (pkg/sciontool/substrate) gives for resolving "sh"/"su" up front rather
+// than leaving them for a shell to look up later.
+//
 // On success this function does not return (the process image is replaced).
 // On failure it returns an error and the caller should continue — the
 // in-process environment is already clean, only /proc exposure remains.
 func reExecWithCleanEnv() error {
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve executable: %w", err)
-	}
-	// Resolve symlinks (/proc/self/exe → real path) because some kernels
-	// require the execve target to be a regular file, not a symlink.
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return fmt.Errorf("resolve symlinks: %w", err)
-	}
 	log.Info("Re-execing to clear staged secrets from /proc/%d/environ", os.Getpid())
-	return syscall.Exec(exe, os.Args, os.Environ())
+	return syscall.Exec(rootexec.SelfExe(), os.Args, os.Environ())
 }
 
 // setupHostUser modifies the scion user's UID/GID to match the host user.
@@ -2904,7 +2906,14 @@ const gitconfigMaxBytes = 1 << 20
 //     replaces the directory entry itself without ever following it, so a
 //     symlink or FIFO planted there in the meantime is replaced outright,
 //     never read through or written into.
-func configureSharedWorkspaceGit(agentHome string, uid, gid int) {
+//
+// requirePrivilegeDrop and rootless are RunInit's own opts.RequirePrivilegeDrop
+// and the rootless flag setupHostUser returns — see resolvePrivateGitConfigDir
+// for how they pick where the private copy in step 2 above actually lives:
+// substrate is the only runtime whose bootstrap creates hooks.PrivateRootTmpDir
+// ahead of time, so every other runtime needs its own way to get a verified
+// location.
+func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivilegeDrop, rootless bool) {
 	log.Info("Configuring git credentials for shared workspace")
 
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
@@ -2923,16 +2932,9 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int) {
 		mode = fi.Mode().Perm()
 	}
 
-	privateRootDir, err := dirfd.EnsureDirNoFollowRootOwned(hooks.PrivateRootTmpDir, hooks.PrivateRootTmpDirMode)
+	tmpDir, err := resolvePrivateGitConfigDir(requirePrivilegeDrop, rootless)
 	if err != nil {
-		log.Error("Refusing private gitconfig workspace parent %s: %v", hooks.PrivateRootTmpDir, err)
-		return
-	}
-	_ = privateRootDir.Close()
-
-	tmpDir, err := os.MkdirTemp(hooks.PrivateRootTmpDir, "gitconfig-*")
-	if err != nil {
-		log.Error("Failed to create private gitconfig workspace: %v", err)
+		log.Error("Refusing private gitconfig workspace parent: %v", err)
 		return
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
@@ -2948,15 +2950,26 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int) {
 	runPrivateGitConfig := func(args ...string) bool {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "git", append([]string{"config", "--file", privatePath}, args...)...)
+		gitPath, rerr := rootexec.Resolve("git")
+		if rerr != nil {
+			log.Error("Failed to resolve a trusted git binary: %v", rerr)
+			return false
+		}
+		cmd := exec.CommandContext(ctx, gitPath, append([]string{"config", "--file", privatePath}, args...)...)
 		cmd.Dir = "/"
-		cmd.Env = []string{
-			"HOME=" + tmpDir,
-			"TMPDIR=" + tmpDir,
+		// Built entirely from scratch (rootexec.Env), not derived from this
+		// process's own environment in any way: HOME and TMPDIR are both
+		// explicitly pointed at tmpDir (never the real agentHome or the
+		// ambient TMPDIR, so root's own git invocation cannot be steered by
+		// anything the workload's real $HOME or environment contains — and
+		// there is no inherited TMPDIR value for this child at all, since
+		// nothing here is inherited).
+		cmd.Env = rootexec.Env(
+			"HOME="+tmpDir,
+			"TMPDIR="+tmpDir,
 			"GIT_CONFIG_NOSYSTEM=1",
 			"GIT_CONFIG_GLOBAL=/dev/null",
-			"PATH=" + os.Getenv("PATH"),
-		}
+		)
 		if out, cerr := cmd.CombinedOutput(); cerr != nil {
 			log.Error("Failed to run git config %v: %s %v", args, string(out), cerr)
 			return false
@@ -2998,6 +3011,87 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int) {
 	if err := dirfd.WriteFileNoFollow(gitconfigPath, result, mode, uid, gid); err != nil {
 		log.Error("Failed to install %s: %v", gitconfigPath, err)
 	}
+}
+
+// resolvePrivateGitConfigDir creates and returns the private, root-only
+// scratch directory configureSharedWorkspaceGit stages its rewritten
+// gitconfig in, choosing among three strategies depending on how this
+// process is running. Every strategy either verifies its parent directory
+// by fd-walk or is the plain historical os.MkdirTemp("") used only where
+// there is provably no root/workload boundary to cross at all — never a
+// silent, unverified fallback.
+func resolvePrivateGitConfigDir(requirePrivilegeDrop, rootless bool) (string, error) {
+	if rootless {
+		// PID 1 IS the workload's own uid here (setupHostUser's rootless
+		// case: no separate root identity exists to drop from or protect
+		// against — see dirfd's chainIsTrusted "uid == selfUID" reasoning).
+		// There is no privilege boundary this directory could ever cross,
+		// so the plain, historical ambient temp directory is exactly as
+		// safe as any other scratch file the workload already owns
+		// outright — verifying it further would only ever refuse the real
+		// default (/tmp) for no protective effect.
+		return os.MkdirTemp("", "scion-gitconfig-*")
+	}
+
+	if requirePrivilegeDrop {
+		// Substrate: bootstrap already created and verified
+		// hooks.PrivateRootTmpDir's entire chain before RunInit ever
+		// started (ensurePrivateTmpDir) — keep relying on exactly that,
+		// unchanged, failing closed with no fallback if it is somehow no
+		// longer trusted by the time this runs.
+		f, err := dirfd.EnsureDirNoFollowRootOwned(hooks.PrivateRootTmpDir, hooks.PrivateRootTmpDirMode)
+		if err != nil {
+			return "", err
+		}
+		_ = f.Close()
+		return os.MkdirTemp(hooks.PrivateRootTmpDir, "gitconfig-*")
+	}
+
+	// A real root PID 1 on a runtime that never runs substrate's bootstrap
+	// (Docker, Podman, Kubernetes, Apple containers): nothing has created
+	// hooks.PrivateRootTmpDir's parent here. Self-heal onto the same
+	// hardened location substrate uses: EnsureDirNoFollowRootOwned already
+	// verifies "/run" itself is root-owned and not group/other-writable
+	// before creating anything under it (it walks and checks every real
+	// ancestor, not just the final component — see its own doc comment),
+	// so this never creates "/run/scion" under an untrusted "/run". "/run"
+	// is a standard FHS directory present and root-owned on every Linux
+	// container image this repository ships (confirmed against the
+	// Dockerfiles under image-build/ and the top-level Dockerfile: none of
+	// them touch "/run" at all, so it is whatever the base image and
+	// container runtime provide — universally root-owned tmpfs or a plain
+	// root-owned directory in every image inspected), so this succeeds in
+	// the overwhelming majority of real deployments; the two calls below
+	// are two separate leaf-creation steps (parent-of-parent, then the
+	// final directory), never a change to EnsureDirNoFollowRootOwned's own
+	// contract of only ever creating the leaf of whatever path it is given.
+	parent := filepath.Dir(hooks.PrivateRootTmpDir)
+	if pf, perr := dirfd.EnsureDirNoFollowRootOwned(parent, hooks.PrivateRootTmpDirMode); perr == nil {
+		_ = pf.Close()
+		if f, err := dirfd.EnsureDirNoFollowRootOwned(hooks.PrivateRootTmpDir, hooks.PrivateRootTmpDirMode); err == nil {
+			_ = f.Close()
+			if dir, err := os.MkdirTemp(hooks.PrivateRootTmpDir, "gitconfig-*"); err == nil {
+				return dir, nil
+			}
+		}
+	}
+
+	// "/run" itself is missing, not root-owned, or otherwise untrusted on
+	// this runtime — or this process could not write under it for some
+	// other reason. Fall back to the historical ambient temp directory,
+	// but — unlike the pre-fix code — only after independently verifying it
+	// cannot be used to stage a symlink swap: either it carries the sticky
+	// bit (only an entry's own owner may rename or remove it there, the
+	// same property a hardened "/tmp" relies on) or it is itself root-owned
+	// and not group/other-writable. Never fall back silently into an
+	// unverified location — if neither location checks out, refuse outright
+	// rather than fail open.
+	base := os.TempDir()
+	if !dirfd.AmbientTempDirTrusted(base) {
+		return "", fmt.Errorf("neither %s nor the ambient temp directory %s are a verified root-owned (or sticky) location",
+			hooks.PrivateRootTmpDir, base)
+	}
+	return os.MkdirTemp("", "scion-gitconfig-*")
 }
 
 func configureGitCommand(cmd *exec.Cmd, uid, gid int) {
