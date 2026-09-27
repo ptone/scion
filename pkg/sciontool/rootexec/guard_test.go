@@ -39,28 +39,26 @@ var guardedDirs = []string{
 // in guardedDirs whose command argument this guard's static check cannot
 // itself prove routes through rootexec.Resolve (or is otherwise not a
 // PATH-searched bare name), keyed by "relative/path.go:line" (the line of
-// the call's opening parenthesis) with a one-line reason. Every entry here
-// was individually classified in notes/rootexec-exec-site-classification.md
-// — this map is the enforceable half of that classification, not a
-// substitute for reading it.
+// the call's opening parenthesis) with a one-line reason. Each reason below
+// is the record of why that site is exempt — there is no separate document
+// to cross-reference.
 //
 // A revert of any of these call sites back to an actual bare name literal
 // is still caught: the allowlist only excuses "this guard cannot prove the
 // current expression safe by itself", never "any expression is fine here".
 var execSiteAllowlist = map[string]string{
-	// Before T0 (before RunInit's own workload-facing state exists at all —
-	// no directory the workload will later own has been populated yet):
-	// realigning the "scion" system account's uid/gid. Unchanged since the
-	// prior audit round classified this exact site SAFE on that basis.
-	"cmd/sciontool/commands/init.go:2270": "before T0 (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2275": "before T0 (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2377": "before T0 (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2386": "before T0 (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	// Runs before RunInit populates any workload-owned directory, so no
+	// workload-influenceable PATH entry exists yet: realigning the "scion"
+	// system account's uid/gid.
+	"cmd/sciontool/commands/init.go:2270": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2275": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2377": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2386": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
 
 	// gitCloneWorkspace's clone-path git calls: configureGitCommand sets a
 	// Credential to (uid, gid) whenever uid > 0, which requirePrivilegeDropOrFail
 	// (RunInit, before this ever runs) guarantees on substrate. These always
-	// run dropped there; see notes/rootexec-exec-site-classification.md.
+	// run dropped there.
 	"cmd/sciontool/commands/init.go:2568": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
 	"cmd/sciontool/commands/init.go:2586": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
 	"cmd/sciontool/commands/init.go:2601": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
@@ -81,10 +79,10 @@ var execSiteAllowlist = map[string]string{
 	"cmd/sciontool/commands/harness.go:157": "runs inside the already-dropped harness-provision subprocess; never root",
 
 	// hooks/lifecycle.go's non-enforced executeScript: unchanged, pre-
-	// existing behavior for every runtime except substrate (EnforcePrivilegeDrop
-	// is false there), where root is not a security boundary under the
-	// binding premise. path is an absolute path built by the caller, not a
-	// bare name.
+	// existing behavior for every runtime except substrate
+	// (EnforcePrivilegeDrop is false there) — root is not a security
+	// boundary on those runtimes. path is an absolute path built by the
+	// caller, not a bare name.
 	"pkg/sciontool/hooks/lifecycle.go:309": "non-enforced branch (non-substrate runtimes only); path is an absolute path, not a bare name",
 
 	// execViaFd's fexecve-equivalent: execScriptPath is the fixed

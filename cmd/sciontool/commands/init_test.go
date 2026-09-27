@@ -2440,8 +2440,9 @@ func gitConfigGet(t *testing.T, path, key string) string {
 // be modified through the symlink).
 // TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit is the required
 // regression test for the private-directory git invocation: with a planted
-// "git" placed first on $PATH (the auditor's PoC shape, standing in for
-// substrate's real workload-owned npm-global/bin), the real, trusted git
+// "git" placed first on $PATH (the attack shape a planted binary first on
+// PATH would take, standing in for substrate's real workload-owned
+// npm-global/bin), the real, trusted git
 // must still run — rootexec.Resolve's fixed search list, not $PATH, decides
 // which binary this function execs — so the planted one never runs, and the
 // gitconfig content this function is supposed to produce still appears.

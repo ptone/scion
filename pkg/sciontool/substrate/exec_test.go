@@ -128,7 +128,8 @@ func TestRunExec_StderrCappedIndependently(t *testing.T) {
 
 // TestRunExec_NeverConsultsPATHForShOrSu is the required regression test
 // for runExec's own wrapper: with $PATH pointed at a directory containing
-// planted "sh" and "su" scripts (the auditor's PoC shape) that each leave a
+// planted "sh" and "su" scripts (the attack shape a planted binary first on
+// PATH would take) that each leave a
 // marker file if ever run, the real system sh/su must still be what
 // actually executes — rootexec.Resolve's fixed search list, embedded
 // directly into the generated script by execAsUserCmd, is what decides,
