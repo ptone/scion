@@ -385,6 +385,78 @@ func TestCheckPrivilegeDropFeasible_NonSetuidSudo_Passes(t *testing.T) {
 	}
 }
 
+// notStatTFileInfo is an fs.FileInfo whose Sys() deliberately does not
+// return a *syscall.Stat_t, for TestFindSetuidRootSudo_FailsClosedOnNonNotExistStatError's
+// "can't even determine the owner" case.
+type notStatTFileInfo struct{}
+
+func (notStatTFileInfo) Name() string       { return "sudo" }
+func (notStatTFileInfo) Size() int64        { return 0 }
+func (notStatTFileInfo) Mode() fs.FileMode  { return os.ModeSetuid | 0o755 }
+func (notStatTFileInfo) ModTime() time.Time { return time.Time{} }
+func (notStatTFileInfo) IsDir() bool        { return false }
+func (notStatTFileInfo) Sys() any           { return "not a *syscall.Stat_t" }
+
+// statErrorAt returns a statPath fake that returns err for exactly path,
+// and a plain ENOENT *fs.PathError for anything else — so a table test can
+// drive findSetuidRootSudo's loop past every OTHER sudoCheckDirs entry
+// (genuinely absent) and stop precisely at the one candidate under test.
+func statErrorAt(path string, err error) func(string) (fs.FileInfo, error) {
+	return func(p string) (fs.FileInfo, error) {
+		if p == path {
+			return nil, err
+		}
+		return nil, &fs.PathError{Op: "stat", Path: p, Err: syscall.ENOENT}
+	}
+}
+
+// TestFindSetuidRootSudo_FailsClosedOnNonNotExistStatError proves the
+// never-fail-open branch: a stat error other than "not there at all" is
+// treated the same as finding a setuid-root binary (report the candidate),
+// not silently skipped like a genuinely missing candidate. Table over the
+// shapes that distinguish it from ENOENT — EACCES, ELOOP, and EIO, plus a
+// FileInfo whose Sys() isn't a *syscall.Stat_t at all — paired with the
+// positive case (ENOENT everywhere) returning "".
+func TestFindSetuidRootSudo_FailsClosedOnNonNotExistStatError(t *testing.T) {
+	firstCandidate := filepath.Join("/", sudoCheckDirs[0], "sudo")
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"EACCES", &fs.PathError{Op: "stat", Path: firstCandidate, Err: syscall.EACCES}},
+		{"ELOOP", &fs.PathError{Op: "stat", Path: firstCandidate, Err: syscall.ELOOP}},
+		{"EIO", &fs.PathError{Op: "stat", Path: firstCandidate, Err: syscall.EIO}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := findSetuidRootSudo(statErrorAt(firstCandidate, tc.err)); got != firstCandidate {
+				t.Errorf("findSetuidRootSudo() = %q, want %q (fail closed on a non-ENOENT stat error)", got, firstCandidate)
+			}
+		})
+	}
+
+	t.Run("Sys_not_Stat_t", func(t *testing.T) {
+		stat := func(p string) (fs.FileInfo, error) {
+			if p == firstCandidate {
+				return notStatTFileInfo{}, nil
+			}
+			return nil, &fs.PathError{Op: "stat", Path: p, Err: syscall.ENOENT}
+		}
+		if got := findSetuidRootSudo(stat); got != firstCandidate {
+			t.Errorf("findSetuidRootSudo() = %q, want %q (fail closed when Sys() isn't *syscall.Stat_t)", got, firstCandidate)
+		}
+	})
+
+	t.Run("genuinely_absent_everywhere", func(t *testing.T) {
+		stat := func(p string) (fs.FileInfo, error) {
+			return nil, &fs.PathError{Op: "stat", Path: p, Err: syscall.ENOENT}
+		}
+		if got := findSetuidRootSudo(stat); got != "" {
+			t.Errorf("findSetuidRootSudo() = %q, want \"\" when every candidate is genuinely absent", got)
+		}
+	})
+}
+
 // TestDefaultPrivilegeDropPreconditionDeps_LookupUserGoesThroughScionUserLookup
 // pins defaultPrivilegeDropPreconditionDeps.lookupUser's routing through the
 // scionUserLookup var (see its own doc comment for why this must be a
