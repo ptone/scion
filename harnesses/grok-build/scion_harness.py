@@ -110,8 +110,9 @@ def atomic_write_json(path: str, payload: Any) -> None:
     replaced an expected directory with one pointing elsewhere), that open
     fails immediately instead of silently writing through it. The temp file
     is then created relative to that same directory fd with a name unique to
-    this call (pid + a monotonic timestamp, matching the Go side's
-    ".<leaf>.tmp-<pid>-<ns>" convention) and O_CREAT|O_EXCL|O_NOFOLLOW, so a
+    this call (pid + a monotonic timestamp + a same-process counter, see
+    _atomic_tmp_name, matching the Go side's ".<leaf>.tmp-<pid>-<ns>"
+    convention) and O_CREAT|O_EXCL|O_NOFOLLOW, so a
     pre-existing entry at that exact name — a symlink to an arbitrary target,
     a leftover regular file, or a FIFO — also fails immediately (EEXIST)
     instead of being followed or, for a FIFO, blocking this call forever
