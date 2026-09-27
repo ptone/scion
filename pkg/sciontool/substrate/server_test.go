@@ -1050,6 +1050,59 @@ func TestBootstrap_PrivilegeDropCheckerSeesReqEnv(t *testing.T) {
 	}
 }
 
+// TestBootstrap_ReqEnvNeverSetsPathOrDangerousVarsOnPID1 proves the req.Env
+// loop refuses to apply PATH, LD_*, BASH_ENV, ENV, or IFS onto
+// substrate-serve's own PID 1 environment, regardless of what a bootstrap
+// request supplies — those specifically influence how this still-root
+// process (and anything it execs while inheriting its environment) resolves
+// and runs code, unlike an ordinary workload variable, which req.Env must
+// still be able to set (see TestBootstrap_WritesFilesWithParentDirsAndEnv).
+func TestBootstrap_ReqEnvNeverSetsPathOrDangerousVarsOnPID1(t *testing.T) {
+	dangerous := map[string]string{
+		"PATH":            "/workload-owned/bin:/usr/bin",
+		"LD_PRELOAD":      "/workload-owned/evil.so",
+		"LD_LIBRARY_PATH": "/workload-owned",
+		"BASH_ENV":        "/workload-owned/evil.sh",
+		"ENV":             "/workload-owned/evil.sh",
+		"IFS":             ":",
+	}
+	const benignVar = "SCION_SUBSTRATE_REQENV_BENIGN_TEST_VAR"
+
+	before := make(map[string]string, len(dangerous))
+	for k := range dangerous {
+		before[k] = os.Getenv(k)
+		t.Cleanup(func(k, v string) func() { return func() { _ = os.Setenv(k, v) } }(k, before[k]))
+	}
+	t.Setenv(benignVar, "")
+
+	reqEnv := map[string]string{benignVar: "from-req-env"}
+	for k, v := range dangerous {
+		reqEnv[k] = v
+	}
+
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		Env:          reqEnv,
+		StartCmd:     "true",
+		ControlToken: "tok",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	for k, v := range dangerous {
+		if got := os.Getenv(k); got == v {
+			t.Errorf("%s = %q after bootstrap; req.Env must never set this on PID 1's own environment", k, got)
+		}
+	}
+	if got := os.Getenv(benignVar); got != "from-req-env" {
+		t.Errorf("%s = %q, want %q — an ordinary workload var must still pass through", benignVar, got, "from-req-env")
+	}
+}
+
 // TestBootstrap_RootfsFixupRunsBeforePrivilegeDropChecker proves call site 2
 // (see RootfsFixup's doc comment): handleBootstrap must run it before the
 // privilege-drop precondition, which depends on the rootfs it corrects

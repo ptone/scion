@@ -360,6 +360,26 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for k, v := range req.Env {
+		if isPID1RootLookupEnvVar(k) {
+			// req.Env is broker/operator-supplied workload environment,
+			// applied here directly onto substrate-serve's own PID 1 —
+			// which still runs as root and execs a number of things itself
+			// before ever dropping privilege. This process's root-context
+			// exec sites no longer resolve a bare command name through
+			// $PATH at all (see pkg/sciontool/rootexec), but PATH, LD_*,
+			// BASH_ENV, ENV, and IFS influence process behavior more
+			// broadly than just that one lookup (LD_PRELOAD in particular
+			// affects the dynamic loader for anything this process execs
+			// with an inherited environment, regardless of how the
+			// executable's path was found) — so none of them are ever
+			// allowed to reach PID 1's own environment via this loop,
+			// no matter what the request asks for. The harness child
+			// still receives the workload's real values for these later,
+			// through its own env construction, not through PID 1's own
+			// os.Environ().
+			log.Debug("bootstrap: refusing to set %s on substrate-serve's own PID 1 environment", k)
+			continue
+		}
 		if err := os.Setenv(k, v); err != nil {
 			log.Error("bootstrap: failed to set env var %s: %v", k, err)
 		}
@@ -417,6 +437,20 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// isPID1RootLookupEnvVar reports whether key must never be applied to
+// substrate-serve's own PID 1 process environment via req.Env, regardless
+// of what a bootstrap request asks for: PATH, LD_* (LD_PRELOAD and
+// LD_LIBRARY_PATH above all), BASH_ENV, ENV, and IFS all influence how a
+// process — or anything it execs while still inheriting its environment —
+// resolves and runs code, not merely which value a workload script sees.
+func isPID1RootLookupEnvVar(key string) bool {
+	switch key {
+	case "PATH", "BASH_ENV", "ENV", "IFS":
+		return true
+	}
+	return strings.HasPrefix(key, "LD_")
 }
 
 // writeBootstrapFile decodes and writes one bootstrap file, creating any
