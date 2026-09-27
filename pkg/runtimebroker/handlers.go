@@ -936,13 +936,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx = withHubAgentDefaults(ctx, req.Config)
 
 	// Carry the broker-provisioned-worktree signal (set above inside
-	// buildStartContext's tryProvisionWorktree call) into provisioning/start,
-	// so pkg/agent's Start/ProvisionAgent can resolve RepoRoot directly for
-	// this workspace instead of routing it through detectRepoRoot's
-	// user-`--workspace`-override skip. No-op unless tryProvisionWorktree
-	// actually provisioned a worktree for this dispatch.
-	if sc.ProvisionedWorktreeRoot != "" {
-		ctx = api.ContextWithProvisionedWorktree(ctx, sc.ProvisionedWorktreeRoot)
+	// buildStartContext's tryProvisionWorktree call) into provisioning/start.
+	// See api.ContextWithProvisionedWorktreeRepoRoot for what this unlocks.
+	// No-op unless tryProvisionWorktree actually provisioned a worktree for
+	// this dispatch.
+	if sc.ProvisionedWorktreeRepoRoot != "" {
+		ctx = api.ContextWithProvisionedWorktreeRepoRoot(ctx, sc.ProvisionedWorktreeRepoRoot)
 	}
 
 	// Branch based on provision-only flag

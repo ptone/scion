@@ -53,14 +53,15 @@ type startContext struct {
 	// own classifications survive the function that computes them.
 	EnvClassifications map[string]api.EnvKind
 
-	// ProvisionedWorktreeRoot is the shared-base repo root when
+	// ProvisionedWorktreeRepoRoot is the shared-base repo root when
 	// tryProvisionWorktree provisioned a broker-managed worktree for this
 	// dispatch, or "" otherwise. It never crosses the wire — it is broker-local
 	// state, discovered only as a side effect of buildStartContext's own
 	// provisioning work. The caller threads it onto ctx via
-	// api.ContextWithProvisionedWorktree before calling Manager.Start/Provision,
-	// exactly like withHubAgentDefaults threads req.Config's agent_defaults.
-	ProvisionedWorktreeRoot string
+	// api.ContextWithProvisionedWorktreeRepoRoot before calling
+	// Manager.Start/Provision, exactly like withHubAgentDefaults threads
+	// req.Config's agent_defaults.
+	ProvisionedWorktreeRepoRoot string
 }
 
 // startContextInputs captures the handler-specific fields that vary across
@@ -763,11 +764,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	mgr := s.resolveManagerForOpts(opts)
 
 	return &startContext{
-		Opts:                    opts,
-		TemplateSlug:            templateSlug,
-		Manager:                 mgr,
-		EnvClassifications:      envCls,
-		ProvisionedWorktreeRoot: provisionedWorktreeRoot,
+		Opts:                        opts,
+		TemplateSlug:                templateSlug,
+		Manager:                     mgr,
+		EnvClassifications:          envCls,
+		ProvisionedWorktreeRepoRoot: provisionedWorktreeRoot,
 	}, nil
 }
 
@@ -792,12 +793,8 @@ func (e *startContextError) Error() string {
 // or if git is too old, it logs a warning and returns (false, "") so the
 // caller falls through to clone-per-agent.
 //
-// The caller threads repoRoot onto ctx via api.ContextWithProvisionedWorktree
-// so pkg/agent/run.go's Start can resolve RunConfig.RepoRoot directly for
-// this workspace, instead of routing it through detectRepoRoot's
-// explicit-`--workspace`-skips-detection heuristic — that heuristic exists
-// for a user's own --workspace override (#642) and must not swallow the
-// broker's own worktree provisioning too.
+// The caller threads repoRoot onto ctx via
+// api.ContextWithProvisionedWorktreeRepoRoot; see that function's doc for why.
 func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string) (bool, string) {
 	runtimeName := ""
 	if s.runtime != nil {
