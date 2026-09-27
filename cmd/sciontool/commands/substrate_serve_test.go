@@ -25,6 +25,34 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 )
 
+// TestVerifySelfBinaryRootOwned_RefusesNonRootOwnedBinary proves
+// verifySelfBinaryRootOwned does real fd-walk verification against this
+// process's own running binary, not a stub: a `go test` binary's
+// "/proc/self/exe" is owned by whichever uid built it, never root in this
+// sandbox, so this must return an error rather than silently passing.
+func TestVerifySelfBinaryRootOwned_RefusesNonRootOwnedBinary(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires a non-root euid to exercise the refusal path")
+	}
+	if err := verifySelfBinaryRootOwned(); err == nil {
+		t.Error("verifySelfBinaryRootOwned() = nil, want an error (this test binary is not root-owned)")
+	}
+}
+
+// TestVerifySelfBinaryRootOwned_AcceptsRealRootOwnedBinary is the genuine
+// root-only happy path, mirroring
+// TestEnsureDirNoFollowRootOwned_RootOwnedChain's own shape: running as
+// root, this process's own "/proc/self/exe" (the real `go test` binary,
+// built and owned by root in that case) must pass.
+func TestVerifySelfBinaryRootOwned_AcceptsRealRootOwnedBinary(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to exercise the accept path against a genuinely root-owned running binary")
+	}
+	if err := verifySelfBinaryRootOwned(); err != nil {
+		t.Errorf("verifySelfBinaryRootOwned() = %v, want nil (running as root)", err)
+	}
+}
+
 func TestSubstrateServeCommand_Help(t *testing.T) {
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
@@ -236,6 +264,13 @@ func TestRunSubstrateServe_CallsRootfsFixupBeforeListening(t *testing.T) {
 		called = true
 		gotRoot = root
 	}
+	// The real self-binary integrity check would fail here regardless (this
+	// process is a `go test` binary, not the actor's own root-owned
+	// image) — stub it so this test's actual claim (fixup ordering,
+	// relative to ListenAndServe) isn't masked by an unrelated failure.
+	origCheck := runSelfBinaryIntegrityCheck
+	t.Cleanup(func() { runSelfBinaryIntegrityCheck = origCheck })
+	runSelfBinaryIntegrityCheck = func() error { return nil }
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -263,6 +298,9 @@ func TestRunSubstrateServe_DoesNotLeakSignalGoroutine(t *testing.T) {
 	orig := startupRootfsFixup
 	t.Cleanup(func() { startupRootfsFixup = orig })
 	startupRootfsFixup = func(string) {}
+	origCheck := runSelfBinaryIntegrityCheck
+	t.Cleanup(func() { runSelfBinaryIntegrityCheck = origCheck })
+	runSelfBinaryIntegrityCheck = func() error { return nil }
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -332,6 +370,9 @@ func TestRunSubstrateServe_RootfsFixupEnvUnset_CallSite1Runs(t *testing.T) {
 	t.Cleanup(func() { startupRootfsFixup = orig })
 	var called bool
 	startupRootfsFixup = func(string) { called = true }
+	origCheck := runSelfBinaryIntegrityCheck
+	t.Cleanup(func() { runSelfBinaryIntegrityCheck = origCheck })
+	runSelfBinaryIntegrityCheck = func() error { return nil }
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

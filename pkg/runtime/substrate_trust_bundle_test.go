@@ -247,6 +247,35 @@ func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
 	}
 }
 
+// TestBuildActorTemplate_LaunchArgv0IsAlwaysAbsolute is the guard test for
+// the substrate actor's own launch entrypoint: PID 1's argv[0] is exec'd by
+// whatever starts the container, before any of this codebase's own code
+// (including pkg/sciontool/rootexec's fixed-PATH resolver) ever runs, so a
+// bare name here would be looked up against the container's own PATH —
+// which on this runtime includes a workload-owned directory ahead of any
+// trusted system directory (see the rootexec package doc comment for the
+// general shape of that hazard). Every container in the template, across
+// the fixture table, must have an absolute argv[0]. Kubernetes's own
+// "sciontool provision"/"sciontool" init-container argv are deliberately
+// out of scope: that runtime rebuilds its container from a fresh image
+// layer on every restart, so there is no persistent, workload-writable
+// PATH entry for a bare name there to resolve against.
+func TestBuildActorTemplate_LaunchArgv0IsAlwaysAbsolute(t *testing.T) {
+	for _, tc := range substrateTemplateNameFixtures() {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpl := buildActorTemplate("scion-test", "scion-abc123", tc.image, tc.sc, tc.resources)
+			for _, c := range tmpl.Containers {
+				if len(c.Command) == 0 {
+					t.Fatalf("container %q has an empty Command", c.Name)
+				}
+				if !strings.HasPrefix(c.Command[0], "/") {
+					t.Errorf("container %q Command[0] = %q, want an absolute path", c.Name, c.Command[0])
+				}
+			}
+		})
+	}
+}
+
 // TestSubstrateTemplateName_UnchangedWhenEgressTrustBundleUnset pins the
 // literal name substrateTemplateName produces, with EgressTrustBundle
 // unset, across a table of fixture configs (the original fixture plus one
