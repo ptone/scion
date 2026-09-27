@@ -17,7 +17,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
 )
 
@@ -340,6 +342,54 @@ func substrateServeRootfsFixup() {
 	bootstrapRootfsFixup("/")
 }
 
+// verifySelfBinaryRootOwned verifies that the binary actually running as
+// this process — resolved via "/proc/self/exe", the kernel's own magic
+// symlink to the running inode (rootexec.SelfExe; see its own doc comment
+// for why this, and not os.Executable(), is the right way to name "the
+// binary that is really running") — is a trusted, root-owned regular file:
+// every real directory in its resolved path, and the file itself, owned by
+// uid 0 and free of the group- and other-write bits. This is the identical
+// fd-walk check rootexec.Resolve applies to any bare command name it looks
+// up (dirfd.OpenNoFollowRootOwnedFile), reused here to verify PID 1's own
+// on-disk identity instead of an external tool's.
+//
+// Run once, before this process ever reports healthy: a substrate actor
+// whose PID 1 is somehow reached through a workload-writable path — rather
+// than this build's own absolute, image-installed
+// "/usr/local/bin/sciontool" (see buildActorTemplate's Command field,
+// pkg/runtime/substrate_template.go) — refuses to start at all instead of
+// serving traffic, and possibly a broker's authenticated requests, from an
+// unverified binary.
+func verifySelfBinaryRootOwned() error {
+	link, err := os.Readlink(rootexec.SelfExe())
+	if err != nil {
+		return fmt.Errorf("resolve running executable: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		return fmt.Errorf("resolve running executable's own symlink chain: %w", err)
+	}
+	f, err := dirfd.OpenNoFollowRootOwnedFile(resolved)
+	if err != nil {
+		return fmt.Errorf("running executable %s is not a trusted, root-owned binary: %w", resolved, err)
+	}
+	_ = f.Close()
+	return nil
+}
+
+// runSelfBinaryIntegrityCheck is runSubstrateServe's own call to
+// verifySelfBinaryRootOwned, as a package var for the same reason as
+// startupRootfsFixup: a test driving runSubstrateServe in-process runs as
+// the `go test` binary itself — owned by whichever uid built it, not root,
+// and never at the path this actor's own Command names — so the real check
+// would fail for a reason that has nothing to do with what the test
+// actually exercises. Gated by the same rootfsFixupSkipped() condition as
+// startupRootfsFixup below, not a separate env var: skipRootfsFixupEnv's
+// own contract ("a real actor never has a reason to set it") applies
+// identically here, and this check is meaningless against a binary that
+// isn't really this actor's own PID-1 image in the first place.
+var runSelfBinaryIntegrityCheck = verifySelfBinaryRootOwned
+
 // startupRootfsFixup is call site 1's own call, as a package var — the same
 // reason as startReaper: a test driving runSubstrateServe needs to observe
 // (and assert the ordering of) this call without it resolving the real
@@ -427,6 +477,16 @@ func runSubstrateServe(addr string) int {
 	// controls directly.
 	if !rootfsFixupSkipped() {
 		startupRootfsFixup("/")
+
+		// Self-binary integrity check: before /healthz can ever report
+		// ready, verify PID 1's own running image is a trusted, root-owned
+		// binary. See verifySelfBinaryRootOwned's own doc comment for what
+		// this catches and why it fails closed rather than starting the
+		// HTTP server at all.
+		if err := runSelfBinaryIntegrityCheck(); err != nil {
+			log.Error("substrate-serve: self-binary integrity check failed: %v", err)
+			return 1
+		}
 	}
 
 	srv := newSubstrateServeServer(RunInit)
