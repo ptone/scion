@@ -15,6 +15,7 @@
 package substrate
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/substrateenv"
 )
 
@@ -35,21 +37,47 @@ func withExecCandidateEnv(t *testing.T, env []string) {
 	t.Cleanup(func() { execCandidateEnv = orig })
 }
 
-// TestExecAsUserCmd_PlainEnvIsByteIdentical: with none of the CA-bundle
-// vars set, execAsUserCmd must produce the exact script and argv it always
-// has, pinned as a literal, so an accidental unconditional "-w" is caught
-// immediately on the plain-install path.
-func TestExecAsUserCmd_PlainEnvIsByteIdentical(t *testing.T) {
-	withExecCandidateEnv(t, []string{"PATH=/usr/bin", "HOME=/home/scion"})
+// resolvedTrio resolves "whoami", "sh", and "su" the same way execAsUserCmd
+// itself does (via the real rootexec.Resolve, not a test stand-in), so a
+// test can build its expected script text without hardcoding an
+// image-specific absolute path (e.g. "/usr/bin/dash" vs "/bin/dash") that
+// would make the test fragile across runtimes.
+func resolvedTrio(t *testing.T) (whoamiPath, shPath, suPath string) {
+	t.Helper()
+	var err error
+	if whoamiPath, err = rootexec.Resolve("whoami"); err != nil {
+		t.Fatalf("resolve whoami: %v", err)
+	}
+	if shPath, err = rootexec.Resolve("sh"); err != nil {
+		t.Fatalf("resolve sh: %v", err)
+	}
+	if suPath, err = rootexec.Resolve("su"); err != nil {
+		t.Fatalf("resolve su: %v", err)
+	}
+	return whoamiPath, shPath, suPath
+}
 
-	got := execAsUserCmd("scion", "true")
+// TestExecAsUserCmd_PlainEnvHasResolvedAbsolutePaths: with none of the
+// CA-bundle vars set, execAsUserCmd must produce a script built entirely
+// from execResolve's (rootexec.Resolve's) own answers for "whoami", "sh",
+// and "su" — never a bare name a shell would go on to look up on its own
+// PATH — so an accidental reversion to a bare name is caught immediately on
+// the plain-install path.
+func TestExecAsUserCmd_PlainEnvHasResolvedAbsolutePaths(t *testing.T) {
+	withExecCandidateEnv(t, []string{"PATH=/usr/bin", "HOME=/home/scion"})
+	whoamiPath, shPath, suPath := resolvedTrio(t)
+
+	got, err := execAsUserCmd("scion", "true")
+	if err != nil {
+		t.Fatalf("execAsUserCmd: %v", err)
+	}
 	want := []string{
-		"sh", "-c",
-		`if [ "$(/usr/bin/whoami)" = "$1" ]; then exec sh -c "$2"; else exec su - "$1" -c "$2"; fi`,
+		shPath, "-c",
+		fmt.Sprintf(`if [ "$(%s)" = "$1" ]; then exec %s -c "$2"; else exec %s - "$1" -c "$2"; fi`, whoamiPath, shPath, suPath),
 		"exec-as-user", "scion", "true",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("execAsUserCmd() = %#v, want %#v (byte-identical to the pre-fix wrapper)", got, want)
+		t.Errorf("execAsUserCmd() = %#v, want %#v", got, want)
 	}
 }
 
@@ -63,9 +91,14 @@ func TestExecAsUserCmd_AllCAVarsSet(t *testing.T) {
 		"CURL_CA_BUNDLE=/run/ate/trust-bundle.pem",
 		"SSL_CERT_DIR=/run/ate",
 	})
+	whoamiPath, shPath, suPath := resolvedTrio(t)
 
-	got := execAsUserCmd("scion", "true")
-	wantScript := `if [ "$(/usr/bin/whoami)" = "$1" ]; then exec sh -c "$2"; else exec su -w NODE_EXTRA_CA_CERTS,GIT_SSL_CAINFO,SSL_CERT_FILE,CURL_CA_BUNDLE,SSL_CERT_DIR - "$1" -c "$2"; fi`
+	got, err := execAsUserCmd("scion", "true")
+	if err != nil {
+		t.Fatalf("execAsUserCmd: %v", err)
+	}
+	wantScript := fmt.Sprintf(`if [ "$(%s)" = "$1" ]; then exec %s -c "$2"; else exec %s -w NODE_EXTRA_CA_CERTS,GIT_SSL_CAINFO,SSL_CERT_FILE,CURL_CA_BUNDLE,SSL_CERT_DIR - "$1" -c "$2"; fi`,
+		whoamiPath, shPath, suPath)
 	if got[2] != wantScript {
 		t.Errorf("script = %q, want %q", got[2], wantScript)
 	}
@@ -79,9 +112,14 @@ func TestExecAsUserCmd_SubsetOfCAVarsSet(t *testing.T) {
 		"SSL_CERT_FILE=/run/ate/trust-bundle.pem",
 		"NODE_EXTRA_CA_CERTS=/run/ate/trust-bundle.pem",
 	})
+	whoamiPath, shPath, suPath := resolvedTrio(t)
 
-	got := execAsUserCmd("scion", "true")
-	wantScript := `if [ "$(/usr/bin/whoami)" = "$1" ]; then exec sh -c "$2"; else exec su -w NODE_EXTRA_CA_CERTS,SSL_CERT_FILE - "$1" -c "$2"; fi`
+	got, err := execAsUserCmd("scion", "true")
+	if err != nil {
+		t.Fatalf("execAsUserCmd: %v", err)
+	}
+	wantScript := fmt.Sprintf(`if [ "$(%s)" = "$1" ]; then exec %s -c "$2"; else exec %s -w NODE_EXTRA_CA_CERTS,SSL_CERT_FILE - "$1" -c "$2"; fi`,
+		whoamiPath, shPath, suPath)
 	if got[2] != wantScript {
 		t.Errorf("script = %q, want %q", got[2], wantScript)
 	}
@@ -95,9 +133,14 @@ func TestExecAsUserCmd_EmptyValueCountsAsUnset(t *testing.T) {
 		"SSL_CERT_FILE=",
 		"NODE_EXTRA_CA_CERTS=/run/ate/trust-bundle.pem",
 	})
+	whoamiPath, shPath, suPath := resolvedTrio(t)
 
-	got := execAsUserCmd("scion", "true")
-	wantScript := `if [ "$(/usr/bin/whoami)" = "$1" ]; then exec sh -c "$2"; else exec su -w NODE_EXTRA_CA_CERTS - "$1" -c "$2"; fi`
+	got, err := execAsUserCmd("scion", "true")
+	if err != nil {
+		t.Fatalf("execAsUserCmd: %v", err)
+	}
+	wantScript := fmt.Sprintf(`if [ "$(%s)" = "$1" ]; then exec %s -c "$2"; else exec %s -w NODE_EXTRA_CA_CERTS - "$1" -c "$2"; fi`,
+		whoamiPath, shPath, suPath)
 	if got[2] != wantScript {
 		t.Errorf("script = %q, want %q (SSL_CERT_FILE= must count as unset)", got[2], wantScript)
 	}
@@ -126,20 +169,61 @@ func TestExecAsUserCmd_CandidateNamesMatchTemplateEnvNames(t *testing.T) {
 	}
 }
 
+// TestTrustBundleEnvPairs_MatchesWhitelistNames proves trustBundleEnvPairs
+// (which hands a from-scratch child environment the actual values su -w is
+// about to ask to copy) and trustBundleWhitelist (which decides those same
+// names for the -w flag itself) always agree on which names are present:
+// this is the pairing that makes su -w meaningful again once the child no
+// longer inherits the ambient environment wholesale.
+func TestTrustBundleEnvPairs_MatchesWhitelistNames(t *testing.T) {
+	env := []string{
+		"SSL_CERT_FILE=/run/ate/trust-bundle.pem",
+		"NODE_EXTRA_CA_CERTS=/run/ate/trust-bundle.pem",
+		"UNRELATED=x",
+	}
+	wantNames := trustBundleWhitelist(env)
+	pairs := trustBundleEnvPairs(env)
+
+	gotNames := make([]string, 0, len(pairs))
+	for _, kv := range pairs {
+		name, _, _ := strings.Cut(kv, "=")
+		gotNames = append(gotNames, name)
+	}
+	if strings.Join(gotNames, ",") != wantNames {
+		t.Errorf("trustBundleEnvPairs names = %q, want %q (must match trustBundleWhitelist)", strings.Join(gotNames, ","), wantNames)
+	}
+}
+
+// TestExecAsUserCmd_ResolveFailureIsRefused proves a resolution failure for
+// any of "whoami", "sh", or "su" is returned as an error, never silently
+// papered over with a bare name.
+func TestExecAsUserCmd_ResolveFailureIsRefused(t *testing.T) {
+	orig := execResolve
+	execResolve = func(name string) (string, error) { return "", fmt.Errorf("boom: %s", name) }
+	t.Cleanup(func() { execResolve = orig })
+
+	if _, err := execAsUserCmd("scion", "true"); err == nil {
+		t.Fatal("expected execAsUserCmd to fail when execResolve fails, got nil error")
+	}
+}
+
 // TestExecAsUserCmd_RealShellInvokesSuWithExpectedArgv is a confidence test
 // beyond the minimum required: the candidate list is built in Go (see
 // execAsUserCmd's doc comment for why), and this repository has no existing
 // convention that requires exercising a real shell for a wrapper script
 // whose logic lives entirely in the Go string that generates it. It's
 // cheap and closes the remaining gap between "the Go string looks right"
-// and "a real shell parses it the way we expect": it runs the actual
-// generated script through /bin/sh with a PATH-shimmed `su` recorder and
-// confirms the recorder receives exactly the argv `su` would.
+// and "a real shell parses it the way we expect": it substitutes execResolve
+// so "su" resolves to a recorder script (rootexec.SearchPath is fixed and
+// not test-injectable by design — this is the same seam execResolve exists
+// for), then runs the actual generated script and confirms the recorder
+// receives exactly the argv `su` would.
 func TestExecAsUserCmd_RealShellInvokesSuWithExpectedArgv(t *testing.T) {
 	dir := t.TempDir()
 	recorderPath := filepath.Join(dir, "argv.txt")
 	suScript := "#!/bin/sh\necho \"$@\" > " + recorderPath + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "su"), []byte(suScript), 0o755); err != nil {
+	suRecorder := filepath.Join(dir, "su")
+	if err := os.WriteFile(suRecorder, []byte(suScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -148,13 +232,24 @@ func TestExecAsUserCmd_RealShellInvokesSuWithExpectedArgv(t *testing.T) {
 		"NODE_EXTRA_CA_CERTS=/run/ate/trust-bundle.pem",
 	})
 
+	origResolve := execResolve
+	execResolve = func(name string) (string, error) {
+		if name == "su" {
+			return suRecorder, nil
+		}
+		return origResolve(name)
+	}
+	t.Cleanup(func() { execResolve = origResolve })
+
 	// A user guaranteed to differ from whatever this test process's real
 	// UID resolves to, so the wrapper's whoami check takes the `su` branch
 	// (the `sh -c` branch already inherits the environment unmodified and
 	// isn't the one this fix touches).
-	argv := execAsUserCmd("nonexistent-user-for-test", "true")
+	argv, err := execAsUserCmd("nonexistent-user-for-test", "true")
+	if err != nil {
+		t.Fatalf("execAsUserCmd: %v", err)
+	}
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("running wrapper: %v, output=%s", err, out)
 	}
