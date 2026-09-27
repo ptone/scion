@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
 // openScriptForTest is a small helper that opens path (via the same
@@ -437,6 +438,56 @@ func TestBuildEnforcedCmd_AsRoot(t *testing.T) {
 	}
 	if cmd.Dir != "" {
 		t.Errorf("Dir = %q, want unset at pre-start (the hook keeps init's own cwd, unaffected by the post-workload hardening)", cmd.Dir)
+	}
+}
+
+// TestBuildEnforcedCmd_AsRootPreStartHardensPathAndStripsDangerousVars
+// proves the one thing the pre-start-as-root branch must never simply
+// inherit from this process's own environment, even though (unlike every
+// other root exec in this codebase) it deliberately inherits everything
+// else a project/hub hook needs: PATH. A workload-owned directory sitting
+// ahead of the trusted system directories on this process's own inherited
+// PATH (see the rootexec package doc comment) must never reach a root
+// pre-start hook's own PATH-based lookups, and neither must an
+// LD_PRELOAD/BASH_ENV-style variable.
+func TestBuildEnforcedCmd_AsRootPreStartHardensPathAndStripsDangerousVars(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "30-project-custom")
+	mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
+	f, _ := openScriptForTest(t, script)
+
+	t.Setenv("PATH", "/workload-owned/bin:/usr/bin")
+	t.Setenv("LD_PRELOAD", "/workload-owned/evil.so")
+	t.Setenv("LD_LIBRARY_PATH", "/workload-owned")
+	t.Setenv("BASH_ENV", "/workload-owned/evil.sh")
+	t.Setenv("ENV", "/workload-owned/evil.sh")
+
+	m := &LifecycleManager{EnforcePrivilegeDrop: true, AgentHome: "/home/scion"}
+	cmd, err := m.buildEnforcedCmd(f, script, EventPreStart, true)
+	if err != nil {
+		t.Fatalf("buildEnforcedCmd: %v", err)
+	}
+
+	wantPath := "PATH=" + strings.Join(rootexec.SearchPath, ":")
+	gotPath := ""
+	for _, kv := range cmd.Env {
+		if strings.HasPrefix(kv, "PATH=") {
+			gotPath = kv
+		}
+	}
+	if gotPath != wantPath {
+		t.Errorf("PATH entry = %q, want %q (never the inherited, workload-influenceable value)", gotPath, wantPath)
+	}
+	for _, key := range []string{"LD_PRELOAD", "LD_LIBRARY_PATH", "BASH_ENV", "ENV"} {
+		if got := findEnvVar(cmd.Env, key); got != "" {
+			t.Errorf("%s = %q, want stripped entirely", key, got)
+		}
+	}
+	// HOME must still come through unhardened at pre-start (the workload
+	// doesn't exist yet — see TestBuildEnforcedCmd_AsRoot) — this branch
+	// keeps everything else, only PATH/LD_*/BASH_ENV/ENV/IFS are fixed.
+	if got := findEnvVar(cmd.Env, "HOME"); got != "/home/scion" {
+		t.Errorf("HOME = %q, want /home/scion (still inherited at pre-start)", got)
 	}
 }
 
