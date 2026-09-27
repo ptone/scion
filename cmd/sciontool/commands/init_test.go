@@ -2953,6 +2953,42 @@ func TestConfigureSharedWorkspaceGit_RootlessUsesAmbientTempDirDirectly(t *testi
 	}
 }
 
+// TestConfigureSharedWorkspaceGit_NonEnforcedRefusesWhenBothLocationsUntrusted
+// proves resolvePrivateGitConfigDir's non-enforced, non-rootless branch
+// never falls open: with hooks.PrivateRootTmpDir's self-heal attempt
+// pointed somewhere this process cannot create (a stand-in for "/run" being
+// missing or untrusted) AND the ambient temp directory itself untrusted
+// (world-writable, no sticky bit), no .gitconfig may be installed at all —
+// there is no third, unverified fallback.
+func TestConfigureSharedWorkspaceGit_NonEnforcedRefusesWhenBothLocationsUntrusted(t *testing.T) {
+	orig := hooks.PrivateRootTmpDir
+	// A path this non-root test process cannot create any part of: its
+	// grandparent is root-owned real "/" itself, one level below is a name
+	// that does not exist and this process has no permission to create.
+	hooks.PrivateRootTmpDir = "/run-nonexistent-for-test/scion/tmp"
+	t.Cleanup(func() { hooks.PrivateRootTmpDir = orig })
+
+	untrustedTmp := t.TempDir()
+	if err := os.Chmod(untrustedTmp, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", untrustedTmp)
+
+	agentHome := t.TempDir()
+	configureSharedWorkspaceGit(agentHome, 0, 0, false /* requirePrivilegeDrop */, false /* rootless */)
+
+	if _, err := os.Stat(filepath.Join(agentHome, ".gitconfig")); err == nil {
+		t.Error("expected no .gitconfig to be installed when neither the self-healed nor the ambient location is trusted — must fail closed, never fall open")
+	}
+	entries, err := os.ReadDir(untrustedTmp)
+	if err != nil {
+		t.Fatalf("read untrusted tmp dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected nothing created inside the untrusted ambient temp dir, got %v", entries)
+	}
+}
+
 // TestConfigureSharedWorkspaceGit_AmbientHomeMatchingAgentHomeSymlinkRefused
 // covers the runtime where root's own inherited HOME equals the workload's
 // home directory (root PID-1 init runs this before ever dropping
