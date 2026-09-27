@@ -16,6 +16,9 @@ package substrate
 
 import (
 	"context"
+	"os"
+	"os/user"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -121,6 +124,55 @@ func TestRunExec_StderrCappedIndependently(t *testing.T) {
 	if len(resp.Stdout) != 0 {
 		t.Errorf("stdout length = %d, want 0", len(resp.Stdout))
 	}
+}
+
+// TestRunExec_NeverConsultsPATHForShOrSu is the required regression test
+// for runExec's own wrapper: with $PATH pointed at a directory containing
+// planted "sh" and "su" scripts (the auditor's PoC shape) that each leave a
+// marker file if ever run, the real system sh/su must still be what
+// actually executes — rootexec.Resolve's fixed search list, embedded
+// directly into the generated script by execAsUserCmd, is what decides,
+// never $PATH — so the command still runs normally and the marker is never
+// created.
+func TestRunExec_NeverConsultsPATHForShOrSu(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a real subprocess")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "planted-ran")
+	script := "#!/bin/sh\ntouch " + marker + "\nexit 1\n"
+	for _, name := range []string{"sh", "su"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+
+	// Passing this process's own real user name takes the wrapper's
+	// "already this user, exec sh -c directly" branch (see
+	// execAsUserCmd's own script) — the same real user substrate's own
+	// broker-exec tests already rely on running as.
+	me := currentUsername(t)
+	resp := runExec(context.Background(), me, []string{"true"}, 5*time.Second)
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("runExec executed a planted sh/su from $PATH")
+	}
+	if resp.ExitCode != 0 {
+		t.Errorf("exit_code = %d, want 0 (the real, resolved sh must still have run the command)", resp.ExitCode)
+	}
+}
+
+// currentUsername resolves this test process's own username the same way
+// the wrapper script's "$(whoami)" check will see it (whoami reports the
+// real/effective uid's passwd entry, exactly what user.Current() reads).
+func currentUsername(t *testing.T) string {
+	t.Helper()
+	u, err := user.Current()
+	if err != nil {
+		t.Skipf("could not resolve current username: %v", err)
+	}
+	return u.Username
 }
 
 func TestRunExec_TimeoutKillsProcess(t *testing.T) {
