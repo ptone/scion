@@ -17,15 +17,17 @@ package metadata
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // plantFakeIPTablesOnPATH points $PATH at a directory containing a fake
 // "iptables" that, if ever executed, creates a marker file — then returns a
-// function that reports whether it ran. This is the auditor's PoC shape: an
-// attacker-owned directory placed first on PATH, standing in for
-// substrate's real "/usr/local/share/npm-global/bin", made hermetic by
-// using t.Setenv instead of the real npm-global directory.
+// function that reports whether it ran. This is the attack shape a planted
+// binary first on $PATH would take: an attacker-owned directory placed
+// first on PATH, standing in for substrate's real "/usr/local/share/
+// npm-global/bin", made hermetic by using t.Setenv instead of the real
+// npm-global directory.
 func plantFakeIPTablesOnPATH(t *testing.T) (ran func() bool) {
 	t.Helper()
 	dir := t.TempDir()
@@ -48,7 +50,12 @@ func plantFakeIPTablesOnPATH(t *testing.T) (ran func() bool) {
 // planted "iptables" as the only entry on $PATH, none of them may run it.
 // Each call is still expected to fail in this unprivileged test environment
 // (the real, resolved iptables binary refuses without CAP_NET_ADMIN) — the
-// assertion that matters is that the PLANTED one never ran.
+// assertion that matters is that the PLANTED one never ran. This is
+// necessarily a negative-only assertion (every call here fails for a
+// reason unrelated to the property under test), which is exactly the shape
+// that let a resolution regression hide undetected — see
+// TestIPTablesCmd_RealBinaryDispatchesCorrectly below for the paired
+// positive-path assertion that would have caught it.
 func TestIPTablesCmd_NeverConsultsPATH(t *testing.T) {
 	t.Run("setupIPTablesRedirect", func(t *testing.T) {
 		ran := plantFakeIPTablesOnPATH(t)
@@ -81,6 +88,29 @@ func TestIPTablesCmd_NeverConsultsPATH(t *testing.T) {
 			t.Fatal("cleanupMetadataBlock executed a planted iptables from $PATH")
 		}
 	})
+}
+
+// TestIPTablesCmd_RealBinaryDispatchesCorrectly is
+// TestIPTablesCmd_NeverConsultsPATH's required positive-path pair: it
+// proves the real, resolved iptables binary actually runs and dispatches
+// correctly, not merely that a planted one never runs. On a real Debian
+// image, iptables resolves through a symlink chain to a multi-call binary
+// that refuses to run at all if handed the wrong argv[0] — a regression in
+// that resolution would leave every call in the test above failing for a
+// completely different, no-less-negative-looking reason (this environment
+// also lacks CAP_NET_ADMIN), so nothing there would ever have caught it.
+func TestIPTablesCmd_RealBinaryDispatchesCorrectly(t *testing.T) {
+	cmd, err := iptablesCmd("-V")
+	if err != nil {
+		t.Skipf("iptables not resolvable as a trusted binary in this environment: %v", err)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the real, resolved iptables -V: %v, output=%s", err, out)
+	}
+	if !strings.Contains(string(out), "iptables") {
+		t.Errorf("iptables -V output = %q, want it to mention \"iptables\" (a multi-call dispatch failure prints \"No valid subcommand given\" instead)", out)
+	}
 }
 
 func TestSetupIPTablesRedirect_NoIPTables(t *testing.T) {
