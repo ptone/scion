@@ -83,8 +83,21 @@ func TestRunSubstrateServe_CallsSelfBinaryIntegrityCheckBeforeListening(t *testi
 		t.Fatal(err)
 	}
 
-	if code := runSubstrateServe(addr); code != 1 {
-		t.Fatalf("runSubstrateServe() = %d, want 1 (the self-binary integrity check failed)", code)
+	// Run in a goroutine with a bounded wait, not a direct blocking call: if
+	// the integrity check were ever skipped, the now-free port would let
+	// ListenAndServe actually succeed and block forever, hanging this test
+	// instead of failing it. A timeout turns that into a clear, fast
+	// failure instead.
+	done := make(chan int, 1)
+	go func() { done <- runSubstrateServe(addr) }()
+
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Fatalf("runSubstrateServe() = %d, want 1 (the self-binary integrity check failed)", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runSubstrateServe did not return — the self-binary integrity check was never called (or never refused) before starting the HTTP server")
 	}
 	if !called {
 		t.Error("runSubstrateServe returned without ever calling the self-binary integrity check")
