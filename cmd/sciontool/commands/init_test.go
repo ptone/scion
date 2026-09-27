@@ -2438,6 +2438,44 @@ func gitConfigGet(t *testing.T, path, key string) string {
 // would start seeded with the victim's content) or if the install is
 // reverted to a path-based write (the victim's content or permissions would
 // be modified through the symlink).
+// TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit is the required
+// regression test for the private-directory git invocation: with a planted
+// "git" placed first on $PATH (the auditor's PoC shape, standing in for
+// substrate's real workload-owned npm-global/bin), the real, trusted git
+// must still run — rootexec.Resolve's fixed search list, not $PATH, decides
+// which binary this function execs — so the planted one never runs, and the
+// gitconfig content this function is supposed to produce still appears.
+func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
+	realPath := os.Getenv("PATH")
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "planted-ran")
+	fake := filepath.Join(dir, "git")
+	script := "#!/bin/sh\ntouch " + marker + "\nexit 1\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	agentHome := t.TempDir()
+	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("configureSharedWorkspaceGit executed a planted git from $PATH")
+	}
+
+	// Restore a real PATH before using the test's own git-based verification
+	// helper: gitConfigGet (unlike the production code under test) resolves
+	// "git" the ordinary way, through $PATH — left hijacked, it would run
+	// the very planted binary this test just proved production code never
+	// touches, which is a fact about this test's own assertion tooling, not
+	// about configureSharedWorkspaceGit.
+	t.Setenv("PATH", realPath)
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
+		t.Errorf("user.email = %q, want agent@scion.dev (the real, resolved git must still have run)", got)
+	}
+}
+
 func TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched(t *testing.T) {
 	agentHome := t.TempDir()
 	victim := filepath.Join(t.TempDir(), "victim")
