@@ -638,7 +638,7 @@ func findSetuidRootSudoStatPath(root string) func(string) (fs.FileInfo, error) {
 	}
 }
 
-// TestFindSetuidRootSudo_PassesAfterFixupNeutralizesSymlinkedSudo is FIX G's
+// TestFindSetuidRootSudo_PassesAfterFixupNeutralizesSymlinkedSudo is the
 // required end-to-end pairing: a symlinked sudo whose whole chain is
 // trusted is (a) neutralized by stripSudoSetuidBits and (b) no longer
 // reported by findSetuidRootSudo afterward — the precondition that gated
