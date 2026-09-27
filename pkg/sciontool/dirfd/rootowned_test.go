@@ -354,10 +354,14 @@ func TestAmbientTempDirTrusted_AcceptsStickyRootOwnedDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(base, "tmp-like")
-	if err := os.Mkdir(dir, 0o1777); err != nil {
+	if err := os.Mkdir(dir, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(dir, 0o1777); err != nil {
+	// os.Chmod's mode argument is an os.FileMode, whose special bits
+	// (os.ModeSticky here) are encoded at different bit positions than the
+	// raw octal 0o1000 — passing a bare 0o1777 silently drops the sticky
+	// bit instead of setting it.
+	if err := os.Chmod(dir, os.ModeSticky|0o777); err != nil {
 		t.Fatal(err)
 	}
 
@@ -367,12 +371,16 @@ func TestAmbientTempDirTrusted_AcceptsStickyRootOwnedDir(t *testing.T) {
 }
 
 // TestAmbientTempDirTrusted_RefusesWhenParentIsWorkloadWritable proves the
-// ancestor-chain check actually runs: a sticky, otherwise-acceptable
-// directory whose PARENT is workload-writable must be refused, since the
+// ancestor-chain check actually runs: a directory that would be accepted
+// entirely on its own merits (self-owned, mode 0755 — no sticky bit needed
+// at all) is still refused when its PARENT is workload-writable, since the
 // workload could rename the directory itself out of the way and plant a
-// symlink at the same name before it is ever used — the sticky bit only
-// protects entries already inside it, not its own directory entry in an
-// untrusted parent.
+// symlink at the same name before it is ever used. The leaf is
+// deliberately NOT also independently untrusted (an earlier version of
+// this fixture used a self-owned 0o1777 leaf, which fails the leaf's own
+// chainIsTrusted check regardless of the parent — meaning that fixture
+// would have refused for the wrong reason even with the ancestor-chain
+// check removed entirely).
 func TestAmbientTempDirTrusted_RefusesWhenParentIsWorkloadWritable(t *testing.T) {
 	base := selfOwnedTrustedDir(t)
 	untrustedParent := filepath.Join(base, "untrusted-parent")
@@ -383,15 +391,41 @@ func TestAmbientTempDirTrusted_RefusesWhenParentIsWorkloadWritable(t *testing.T)
 		t.Fatal(err)
 	}
 	dir := filepath.Join(untrustedParent, "tmp-like")
-	if err := os.Mkdir(dir, 0o1777); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o1777); err != nil {
+	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	if AmbientTempDirTrusted(dir) {
-		t.Error("AmbientTempDirTrusted() = true, want false (parent is group/other-writable)")
+		t.Error("AmbientTempDirTrusted() = true, want false (parent is group/other-writable, even though the leaf alone would pass)")
+	}
+}
+
+// TestAmbientTempDirTrusted_RefusesSelfOwnedStickyWorldWritableLeaf proves
+// the sticky-bit exemption is for uid 0 ONLY, never self-owned: a sticky,
+// world-writable directory under a fully trusted parent is refused when it
+// is merely self-owned (this test process's own uid, not literally root) —
+// the exemption exists for real "/tmp" (root-owned, sticky, world-writable)
+// specifically, not as a general "sticky bit means trusted" rule that would
+// let a non-root runtime's own workload-writable, sticky-but-self-owned
+// directory in.
+func TestAmbientTempDirTrusted_RefusesSelfOwnedStickyWorldWritableLeaf(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	dir := filepath.Join(base, "tmp-like")
+	if err := os.Mkdir(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	// See TestAmbientTempDirTrusted_AcceptsStickyRootOwnedDir's comment: a
+	// bare 0o1777 passed to os.Chmod does not set the sticky bit at all
+	// (os.ModeSticky is a different bit position than raw octal 0o1000),
+	// which would make this fixture pass for the wrong reason (plain
+	// world-writable, never reaching the sticky branch under test either
+	// way).
+	if err := os.Chmod(dir, os.ModeSticky|0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	if AmbientTempDirTrusted(dir) {
+		t.Error("AmbientTempDirTrusted() = true, want false (sticky+world-writable but only self-owned, not uid 0)")
 	}
 }
 
@@ -400,10 +434,10 @@ func TestAmbientTempDirTrusted_RefusesWhenParentIsWorkloadWritable(t *testing.T)
 func TestAmbientTempDirTrusted_RefusesSymlinkedLeaf(t *testing.T) {
 	base := selfOwnedTrustedDir(t)
 	real := filepath.Join(base, "real")
-	if err := os.Mkdir(real, 0o1777); err != nil {
+	if err := os.Mkdir(real, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(real, 0o1777); err != nil {
+	if err := os.Chmod(real, os.ModeSticky|0o777); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(base, "link")
