@@ -21,6 +21,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
 const (
@@ -51,7 +53,18 @@ func runExec(ctx context.Context, user string, argv []string, timeout time.Durat
 	for i, a := range argv {
 		quoted[i] = shellQuote(a)
 	}
-	suCmd := execAsUserCmd(user, strings.Join(quoted, " "))
+	suCmd, err := execAsUserCmd(user, strings.Join(quoted, " "))
+	if err != nil {
+		// sh/su/whoami could not be resolved as trusted, root-owned
+		// executables — this should never happen on a real image (they are
+		// the same binaries every other root exec in this codebase depends
+		// on existing), but fail closed rather than falling back to a bare
+		// name. Reported the same way a process that could not even be
+		// started is reported elsewhere in this function: no separate error
+		// field exists on ExecResponse, and the underlying error carries no
+		// operator-controlled content worth leaking into a log line.
+		return ExecResponse{ExitCode: -1}
+	}
 
 	runCtx := ctx
 	var cancel context.CancelFunc
@@ -61,6 +74,16 @@ func runExec(ctx context.Context, user string, argv []string, timeout time.Durat
 	}
 
 	cmd := execCommandContext(runCtx, suCmd[0], suCmd[1:]...)
+	// Built from scratch (rootexec.Env), not inherited from this process's
+	// own environment: PID 1's PATH includes a workload-owned directory
+	// (see the rootexec package doc comment), and this handler runs an
+	// operator-supplied command as root before any privilege drop. The
+	// CA-bundle vars are the one exception, passed through explicitly:
+	// execAsUserCmd's generated script may ask su to copy them across the
+	// login shell's own environment reset (its -w flag), and with a
+	// from-scratch environment su has nothing to copy unless this process
+	// hands the values over here itself.
+	cmd.Env = rootexec.Env(trustBundleEnvPairs(execCandidateEnv())...)
 	stdout := newCappedWriter(maxOutputBytes)
 	stderr := newCappedWriter(maxOutputBytes)
 	cmd.Stdout = stdout
