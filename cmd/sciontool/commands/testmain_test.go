@@ -147,7 +147,30 @@ func disableGoTelemetry(configHome string) error {
 //  6. log.SetLogPath redirects pkg/sciontool/log's own file target to the
 //     same per-binary temp directory, before any log call in this binary
 //     can lazily Init() itself against the real path.
+// selfCheckHelperEnv, when set to any non-empty value, makes this test
+// binary behave as a lightweight standalone helper process instead of
+// running the test suite: it calls verifySelfBinaryRootOwned() directly
+// against its own running location and exits, printing "PASS" or "FAIL: "
+// plus the error. This lets a test copy the compiled test binary itself to
+// a controlled location (a real self-owned trusted chain, or a real
+// world-writable one) and run it as a real subprocess, so
+// verifySelfBinaryRootOwned's accept path can be exercised for real without
+// needing actual root — unlike a fake "root-owned" fixture, whose ownership
+// can't be constructed without CAP_CHOWN, this controls the one thing an
+// unprivileged test process CAN control for itself: which directory chain
+// its own binary sits under.
+const selfCheckHelperEnv = "SUBSTRATE_SELFCHECK_HELPER_TEST"
+
 func TestMain(m *testing.M) {
+	if os.Getenv(selfCheckHelperEnv) != "" {
+		if err := verifySelfBinaryRootOwned(); err != nil {
+			fmt.Printf("FAIL: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("PASS")
+		os.Exit(0)
+	}
+
 	envVarsToClear := append(append([]string{}, hubEnvVars...),
 		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID")
 	for _, v := range envVarsToClear {
