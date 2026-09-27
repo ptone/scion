@@ -5,6 +5,7 @@ Copyright 2026 The Scion Authors.
 package commands
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -184,9 +185,53 @@ func stripSudoSetuidBits(root string) (changed bool) {
 // stripSetuidBitsNoFollow removes.
 const specialModeBits = syscall.S_ISUID | syscall.S_ISGID | syscall.S_ISVTX
 
+// ancestorSymlinkIsRootOwned reports whether path's immediate parent
+// directory entry is itself a symlink owned by root (or, on a runtime with
+// no separate root/workload identity at all, by this process's own uid —
+// the same uid-or-self rule dirfd's own chainIsTrusted applies everywhere
+// else in this trust chain) — the merged-/usr compatibility shape ("/bin"
+// -> "usr/bin", "/sbin" -> "usr/sbin"), which
+// dirfd.VerifyRootOwnedExecutable's O_NOFOLLOW chain walk refuses to
+// traverse as a directory component even though it is entirely
+// root-controlled (the same binary is already reached through its
+// "/usr/*" SearchPath entry). This performs its own, separate os.Lstat —
+// it is used only to choose a log level below, never to make or influence
+// a trust decision: VerifyRootOwnedExecutable's own fail-closed result is
+// what every caller acts on regardless of what this reports.
+func ancestorSymlinkIsRootOwned(path string) bool {
+	info, err := os.Lstat(filepath.Dir(path))
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	selfUID := uint32(os.Geteuid())
+	return st.Uid == 0 || st.Uid == selfUID
+}
+
 func stripSetuidBitsNoFollow(path string) bool {
 	if err := dirfd.VerifyRootOwnedExecutable(path); err != nil {
-		if !os.IsNotExist(err) {
+		// errors.Is, not os.IsNotExist: VerifyRootOwnedExecutable's error is
+		// wrapped with fmt.Errorf (%w) at every hop, and os.IsNotExist only
+		// unwraps the specific *PathError/*LinkError/*SyscallError types,
+		// not an arbitrary %w chain — every candidate that is simply absent
+		// (the common case for every SearchPath entry that doesn't ship
+		// "sudo") was misclassified and logged as an ERROR.
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// Genuinely absent: not worth a log line at any level.
+		case ancestorSymlinkIsRootOwned(path):
+			// The candidate's own parent directory is itself a root-owned
+			// symlink (the merged-/usr compatibility shape, e.g. "/bin" ->
+			// "usr/bin"), which the chain walk refuses to traverse even
+			// though it's root-controlled — the same binary is already
+			// reached through its "/usr/*" SearchPath entry. This check
+			// only decides the log level: VerifyRootOwnedExecutable's
+			// fail-closed result above is acted on either way.
+			log.Debug("fixupRootfsForScion: skipping sudo candidate %s (reached only through a root-owned compatibility symlink): %v", path, err)
+		default:
 			log.Error("fixupRootfsForScion: refusing untrusted sudo candidate %s: %v", path, err)
 		}
 		return false
@@ -203,7 +248,12 @@ func stripSetuidBitsNoFollow(path string) bool {
 	}
 	f, err := dirfd.OpenNoFollowRootOwnedFile(dest)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		// errors.Is, not os.IsNotExist: same wrapped-error reasoning as
+		// above. dest is already the fully symlink-resolved destination
+		// (filepath.EvalSymlinks above), so its own parent chain contains
+		// no symlinks to explain away here — a non-ENOENT error is always
+		// worth an ERROR.
+		if !errors.Is(err, fs.ErrNotExist) {
 			log.Error("fixupRootfsForScion: failed to open %s: %v", dest, err)
 		}
 		return false
