@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -1360,16 +1361,46 @@ func TestSubstrateExecWithStdin_ProbeStopsBeforeRealCommandOnOldServer(t *testin
 	}
 }
 
+// requireScionExecUser skips the calling test unless this process's own
+// user is literally "scion". SubstrateRuntime.ExecUser() is hard-coded to
+// "scion" (every real substrate actor's harness runs as that user, so there
+// is no production seam to make it configurable for a test), and the real
+// control server's own handler only accepts a request naming "scion" or
+// "root" (pkg/sciontool/substrate/server.go's handleExec) — rejecting
+// anything else with its own 400 before the exec-as-user fallback (`su`)
+// ever runs. `su`'s own fallback in turn only succeeds unprivileged when the
+// calling process already *is* the target user; an arbitrary CI user (e.g.
+// GitHub Actions' "runner") is neither "scion" nor able to `su` to it
+// without a password. A real end-to-end test against the real server is
+// therefore only meaningful — and only able to pass — where the process
+// user genuinely is "scion"; everywhere else it is skipped rather than
+// failed, with the reason logged. Mirrors the same user.Current() pattern
+// pkg/runtime/exec_user_test.go already uses for its own environment checks.
+func requireScionExecUser(t *testing.T) {
+	t.Helper()
+	u, err := user.Current()
+	if err != nil {
+		t.Skipf("could not determine current user: %v", err)
+	}
+	if u.Username != "scion" {
+		t.Skipf("skipping: requires running as \"scion\" (the substrate control server's own handler only accepts \"scion\" or \"root\" as the exec user, and su to an arbitrary user needs a password this process doesn't have); current user is %q", u.Username)
+	}
+}
+
 // newRealSubstrateServeHarness starts a real pkg/sciontool/substrate.Server
 // behind httptest, bootstraps it for real over HTTP, and returns a
 // SubstrateRuntime pointed at it plus the agent id to use — no fake stands
-// in for either the client or the server. SetPrivateRootTmpDirForTest
-// redirects the server's private-scratch-directory bootstrap step at a
-// throwaway directory this test process does own (the real default,
-// "/run/scion/tmp", requires root); a missing enforced-hooks directory is
-// already a no-op in production code, so nothing else needs redirecting.
+// in for either the client or the server. Skips (via requireScionExecUser)
+// unless the process user is "scion" — see that function's doc comment for
+// why a real exec against the real server can't run as anyone else.
+// SetPrivateRootTmpDirForTest redirects the server's private-scratch-
+// directory bootstrap step at a throwaway directory this test process does
+// own (the real default, "/run/scion/tmp", requires root); a missing
+// enforced-hooks directory is already a no-op in production code, so
+// nothing else needs redirecting.
 func newRealSubstrateServeHarness(t *testing.T) (*SubstrateRuntime, string) {
 	t.Helper()
+	requireScionExecUser(t)
 
 	restoreTmpDir := sciontoolsubstrate.SetPrivateRootTmpDirForTest(t.TempDir())
 	t.Cleanup(restoreTmpDir)
@@ -1421,6 +1452,7 @@ func newRealSubstrateServeHarness(t *testing.T) (*SubstrateRuntime, string) {
 // back out through that subprocess's real stdout. This is the only test
 // that exercises the probe's happy path (a real "true" invocation) against
 // a real server, not a fake that would accept any argv it was handed.
+// Skipped outside a "scion" process user; see newRealSubstrateServeHarness.
 func TestSubstrateExecWithStdin_EndToEndRealControlServer(t *testing.T) {
 	const secret = "S3CR3T-END-TO-END-REAL-SERVER"
 
@@ -1439,7 +1471,8 @@ func TestSubstrateExecWithStdin_EndToEndRealControlServer(t *testing.T) {
 // exactly maxExecStdinBytes through the real server harness, so the server's
 // own request-body LimitReader — not just the client's own cap check — is
 // what accepts it. Proves the derived cap is not merely internally
-// consistent on the client side but actually usable end to end.
+// consistent on the client side but actually usable end to end. Skipped
+// outside a "scion" process user; see newRealSubstrateServeHarness.
 func TestSubstrateExecWithStdin_ExactCapAcceptedByRealControlServer(t *testing.T) {
 	rt, id := newRealSubstrateServeHarness(t)
 

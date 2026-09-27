@@ -152,3 +152,23 @@ pass unchanged on the rebased tree, and a live run of a standalone hub
 server against a real database confirmed the property those tests guard: an
 access token scoped to one project cannot list or read another project's
 agent.
+
+## Test hermeticity: the real-exec tests only run where they can pass
+
+The tests that drive a real exec through the control server's own handler —
+the client-to-real-server test above and six server-side tests exercising a
+real subprocess — request `"scion"` as the exec user, either explicitly or
+by leaving it unset (the handler's own default). The handler itself only
+accepts `"scion"` or `"root"` as that field; anything else is rejected
+before an exec is even attempted. Separately, the exec-as-user fallback
+(`su`) only succeeds unprivileged when the process already is the target
+user — an arbitrary process identity cannot `su` to `"scion"` without a
+password. Put together, these tests can only pass where the test process's
+own user genuinely is `"scion"`, and fail outright anywhere else, including
+an ordinary CI runner. Each now checks the current user first and skips
+itself, with the reason logged, when it isn't `"scion"` — proven by
+actually running the affected tests as a separate, unprivileged, non-`scion`
+user: all skip cleanly with a logged reason, and the surrounding packages
+still report success. The probe's own version-skew detection and the
+client-side cap enforcement are unaffected — those are proven separately
+against fakes that never depend on which OS user is asking.
