@@ -250,9 +250,19 @@ func TestRunExec_TimeoutKillsProcess(t *testing.T) {
 	}
 	fakeWhoamiAsScion(t)
 	start := time.Now()
-	resp := runExec(context.Background(), "scion", []string{"sleep", "30"}, nil, 300*time.Millisecond)
+	resp := runExec(context.Background(), "scion", []string{"sh", "-c", "echo started; sleep 30"}, nil, 300*time.Millisecond)
 	elapsed := time.Since(start)
 
+	// The marker distinguishes a real timeout kill from a killed, blocked
+	// "su" prompt: with the stand-in, the wrapper's direct branch actually
+	// runs this shell, so "started" prints before the timeout kills the
+	// sleep. Without the stand-in, an unauthenticated "su" never gets past
+	// its own password prompt to reach the shell at all, so nothing ever
+	// prints — the same elapsed time and exit code would otherwise make
+	// that indistinguishable from a genuine timeout kill.
+	if !strings.Contains(resp.Stdout, "started") {
+		t.Errorf("subprocess never ran (stdout=%q stderr=%q) — timeout killed something other than the command", resp.Stdout, resp.Stderr)
+	}
 	if elapsed > 5*time.Second {
 		t.Fatalf("runExec took %v, want it to be killed near the 300ms timeout", elapsed)
 	}

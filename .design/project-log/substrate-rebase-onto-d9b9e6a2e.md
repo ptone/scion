@@ -165,10 +165,16 @@ the `su` branch only succeeds unprivileged when the calling process already
 is the target user, since switching to an arbitrary different user needs a
 password. On an ordinary CI runner — some other, unrelated user — `whoami`
 never matches `"scion"`, so every one of these tests fell into the `su`
-branch and failed there. (The handler also validates the request's `User`
+branch and failed there once `su`'s own password prompt read EOF. (`su`
+does not fail immediately; it blocks at that prompt first, so a test bounded
+by a timeout shorter than the prompt's own failure delay would instead have
+the blocked prompt killed by the timeout — indistinguishable, by elapsed
+time and exit code alone, from a real command that ran and was killed at the
+same deadline. None of the tests in this section carries a timeout that
+short.) The handler also validates the request's `User`
 field against an allowlist of `"scion"` or `"root"`, but that check is not
 what blocks these tests: they already send an allowed value. It only
-matters for a value outside the allowlist, which none of these tests use.)
+matters for a value outside the allowlist, which none of these tests use.
 
 Both the value `whoami` reports and the paths `sh`/`su` resolve to come from
 one package-level indirection, already provided for exactly this kind of
