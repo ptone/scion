@@ -13,7 +13,30 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
+
+// trustedTestRoot creates a fresh directory to stand in for a fixup's
+// filesystem root, anchored under hooks.PrivateRootTmpDir rather than
+// t.TempDir() (which resolves under the real, world-writable "/tmp").
+// stripSudoSetuidBits now verifies the whole ancestor chain of each
+// candidate it strips (dirfd.VerifyRootOwnedExecutable, added for the
+// symlinked-sudo fix), so a fixture rooted under "/tmp" would fail that
+// check before ever reaching the fixture's own planted binary.
+// hooks.PrivateRootTmpDir is itself anchored under this test binary's real,
+// original $HOME by TestMain (captured before $HOME is redirected to a
+// throwaway sandbox for the rest of the suite), so it is genuinely trusted
+// without needing real root to construct.
+func trustedTestRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(hooks.PrivateRootTmpDir, "sudo-fixup-test-*")
+	if err != nil {
+		t.Skipf("cannot create a trusted fixture root under %s: %v", hooks.PrivateRootTmpDir, err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
 
 // TestCanSearchDir_OwnerFirst pins the kernel's own permission-check order
 // that canSearchDir's doc comment claims: once a directory's owning uid
@@ -475,7 +498,7 @@ func plantSetuidSudo(t *testing.T, root, dir string) string {
 // three special bits (not just setuid), and leaves the file's other
 // permission bits and content untouched.
 func TestStripSudoSetuidBits_StripsSetuidSetgidStickyFromEveryCandidateDir(t *testing.T) {
-	root := t.TempDir()
+	root := trustedTestRoot(t)
 	var paths []string
 	for _, dir := range sudoCheckDirs {
 		paths = append(paths, plantSetuidSudo(t, root, dir))
@@ -504,16 +527,31 @@ func TestStripSudoSetuidBits_StripsSetuidSetgidStickyFromEveryCandidateDir(t *te
 	}
 }
 
-// TestStripSudoSetuidBits_RefusesSymlinkedLeaf proves a symlink planted at
-// the "sudo" name itself is refused (O_NOFOLLOW on the leaf), not followed
-// and chmod'd through to whatever it points at.
-func TestStripSudoSetuidBits_RefusesSymlinkedLeaf(t *testing.T) {
-	root := t.TempDir()
+// TestStripSudoSetuidBits_RefusesSymlinkThroughUntrustedDir proves a
+// symlinked "sudo" whose real destination sits behind a workload-writable
+// directory is left untouched: dirfd.VerifyRootOwnedExecutable's ancestor
+// chain check refuses the whole candidate before stripSetuidBitsNoFollow
+// ever opens anything, so a workload that can plant a writable directory
+// somewhere in the chain can't get its own escalation target quietly
+// "fixed" (and thereby have findSetuidRootSudo start trusting it) by this
+// pass.
+func TestStripSudoSetuidBits_RefusesSymlinkThroughUntrustedDir(t *testing.T) {
+	root := trustedTestRoot(t)
 	dir := filepath.Join(root, "usr", "bin")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	victim := filepath.Join(root, "victim")
+	untrustedDir := filepath.Join(root, "untrusted")
+	if err := os.MkdirAll(untrustedDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	// MkdirAll's mode is subject to umask, so explicitly chmod to guarantee
+	// this directory really is other-writable regardless of the process's
+	// umask.
+	if err := os.Chmod(untrustedDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(untrustedDir, "victim-sudo")
 	if err := os.WriteFile(victim, []byte("victim"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +569,106 @@ func TestStripSudoSetuidBits_RefusesSymlinkedLeaf(t *testing.T) {
 		t.Fatal(err)
 	}
 	if info.Mode()&os.ModeSetuid == 0 {
-		t.Error("victim's setuid bit was cleared through a symlink; the leaf open must refuse to follow it")
+		t.Error("victim's setuid bit was cleared through a symlink whose real destination sits behind a workload-writable directory; the whole chain must be verified trusted first")
+	}
+}
+
+// TestStripSudoSetuidBits_NeutralizesFullyTrustedSymlinkedSudo proves the
+// positive-path counterpart above: when every hop of a symlinked "sudo"
+// candidate (e.g. an alternatives-managed sudo implementation) is
+// root/self-owned and free of group/other write, stripSudoSetuidBits
+// follows it and strips the special bits from the REAL destination — not a
+// no-op on the link itself, which would otherwise leave a still-setuid
+// binary that findSetuidRootSudo's own symlink-following check would then
+// refuse to boot past (see TestFindSetuidRootSudo_PassesAfterFixupNeutralizesSymlinkedSudo
+// below for that half of the property).
+func TestStripSudoSetuidBits_NeutralizesFullyTrustedSymlinkedSudo(t *testing.T) {
+	root := trustedTestRoot(t)
+	dir := filepath.Join(root, "usr", "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realDir := filepath.Join(root, "libexec")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(realDir, "sudo-real")
+	if err := os.WriteFile(victim, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(victim, os.ModeSetuid|os.ModeSetgid|os.ModeSticky|0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dir, "sudo")); err != nil {
+		t.Fatal(err)
+	}
+
+	if !stripSudoSetuidBits(root) {
+		t.Fatal("stripSudoSetuidBits() = false, want true (a fully-trusted symlinked sudo should be neutralized)")
+	}
+
+	info, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		t.Errorf("victim's special bits = %v after stripSudoSetuidBits, want all three cleared", info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky))
+	}
+}
+
+// findSetuidRootSudoStatPath builds a statPath for findSetuidRootSudo that
+// reads a candidate's REAL, current mode from the fixture rooted at root
+// (so it reflects whatever stripSudoSetuidBits actually left behind) while
+// reporting a synthetic root ownership (uid 0) for that candidate —
+// findSetuidRootSudo only treats a setuid binary as dangerous when it's
+// root-owned, a property this self-owned test fixture can't reproduce for
+// real without running the whole suite as root.
+func findSetuidRootSudoStatPath(root string) func(string) (fs.FileInfo, error) {
+	return func(candidate string) (fs.FileInfo, error) {
+		info, err := os.Stat(filepath.Join(root, candidate))
+		if err != nil {
+			return nil, err
+		}
+		return fakeFileInfo{mode: info.Mode(), uid: 0, gid: 0}, nil
+	}
+}
+
+// TestFindSetuidRootSudo_PassesAfterFixupNeutralizesSymlinkedSudo is FIX G's
+// required end-to-end pairing: a symlinked sudo whose whole chain is
+// trusted is (a) neutralized by stripSudoSetuidBits and (b) no longer
+// reported by findSetuidRootSudo afterward — the precondition that gated
+// bootstrap on this fixup having worked must actually pass once it has, or
+// a symlinked sudo binary would permanently refuse every future bootstrap.
+func TestFindSetuidRootSudo_PassesAfterFixupNeutralizesSymlinkedSudo(t *testing.T) {
+	root := trustedTestRoot(t)
+	dir := filepath.Join(root, "usr", "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realDir := filepath.Join(root, "libexec")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(realDir, "sudo-real")
+	if err := os.WriteFile(victim, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(victim, os.ModeSetuid|0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dir, "sudo")); err != nil {
+		t.Fatal(err)
+	}
+
+	statPath := findSetuidRootSudoStatPath(root)
+	if found := findSetuidRootSudo(statPath); found == "" {
+		t.Fatal("findSetuidRootSudo found nothing before the fixup ran; test fixture is not set up correctly")
+	}
+
+	stripSudoSetuidBits(root)
+
+	if found := findSetuidRootSudo(statPath); found != "" {
+		t.Errorf("findSetuidRootSudo() = %q after stripSudoSetuidBits ran through a fully-trusted symlink chain, want \"\" (the fixup should have neutralized the real destination)", found)
 	}
 }
 
@@ -585,10 +722,7 @@ func TestRemoveSudoersGrants_RemovesBothNamesLeavesOthersAlone(t *testing.T) {
 // for a persisted rootfs that reverted them between bootstraps, and both
 // calls strip/remove them again.
 func TestFixupRootfsForScion_StripsSudoSetuidAndRemovesSudoersGrantsOnEveryCall(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Chmod(root, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	root := trustedTestRoot(t)
 	home := t.TempDir()
 	sudoersDir := filepath.Join(root, "etc", "sudoers.d")
 
@@ -625,7 +759,7 @@ func TestFixupRootfsForScion_StripsSudoSetuidAndRemovesSudoersGrantsOnEveryCall(
 func TestFixupRootfsForScionUser_RunsSudoFixup(t *testing.T) {
 	origLookup := scionUserLookup
 	t.Cleanup(func() { scionUserLookup = origLookup })
-	root := t.TempDir()
+	root := trustedTestRoot(t)
 	home := filepath.Join(root, "home", "scion")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
