@@ -70,7 +70,7 @@ func TestCheckWorkspaceGit_NonRootRunsTheRealCheck(t *testing.T) {
 }
 
 // TestCheckWorkspaceGit_RootRefusesRatherThanTrustGitconfig is the genuine
-// root-only path for the refusal added in this pass: run as actual root,
+// root-only path for the root refusal: run as actual root,
 // the function must refuse outright (no git subprocess run at all) rather
 // than trust a workload-controlled gitconfig. Skips otherwise — a fake
 // euid can't be injected without a production seam, and this codebase's

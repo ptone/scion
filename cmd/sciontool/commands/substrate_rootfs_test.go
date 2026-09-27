@@ -1062,6 +1062,8 @@ func TestFixupRootfsForScionUser_RunsSudoFixup(t *testing.T) {
 //	checkPrivilegeDropFeasible     <- substrateServePrivilegeDropChecker
 //	substrateServePrivilegeDropChecker <- newSubstrateServeServer (wired into
 //	                                   the Server as its PrivilegeDropChecker)
+//	substrateServeRootfsFixup      <- newSubstrateServeServer (wired into the
+//	                                   Server as its RootfsFixup)
 //
 // A location of the form "var:X" means "the initializer expression of the
 // package-level var declared as X" — pinned to that one specific declaring
@@ -1108,6 +1110,9 @@ var sudoHardeningCallAllowlist = map[string]map[string]bool{
 		"substrateServePrivilegeDropChecker": true,
 	},
 	"substrateServePrivilegeDropChecker": {
+		"newSubstrateServeServer": true,
+	},
+	"substrateServeRootfsFixup": {
 		"newSubstrateServeServer": true,
 	},
 }
