@@ -510,7 +510,7 @@ func TestManager_Start_DropsOnlyTheServiceWithASymlinkedLogPath(t *testing.T) {
 }
 
 // TestOpenLogs_Enforced_RefusesHardlinkedLogPath proves the hard-link guard
-// addendum on every one of openLogs' three call sites: a pre-planted hard
+// on every one of openLogs' three call sites: a pre-planted hard
 // link to an unrelated regular file at a log path is refused when
 // requirePrivilegeDrop is true. Each subtest hard-links exactly ONE of the
 // three paths (the other two are fresh), so each subtest fails if and only
