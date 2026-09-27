@@ -437,6 +437,57 @@ func TestVerifyRootOwnedExecutable_AcceptsPlainTrustedRegularFile(t *testing.T) 
 	}
 }
 
+// TestVerifyRootOwnedExecutable_RefusesGroupWritableLeaf proves the leaf's
+// OWN chainIsTrusted check still runs even once every directory leading to
+// it has already passed: a group-writable regular file — sitting directly
+// in an otherwise fully-trusted directory, no symlink involved at all —
+// must still be refused. Directory-chain trust alone (what
+// OpenParentNoFollowRootOwned's walk verifies) says nothing about whether
+// the workload can overwrite the leaf file's own content.
+func TestVerifyRootOwnedExecutable_RefusesGroupWritableLeaf(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	bin := filepath.Join(base, "tool")
+	mustWriteExecutable(t, bin, "#!/bin/sh\necho ok\n")
+	if err := os.Chmod(bin, 0o775); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := VerifyRootOwnedExecutable(bin); err == nil {
+		t.Error("VerifyRootOwnedExecutable() = nil, want an error (group-writable leaf)")
+	}
+}
+
+// TestVerifyRootOwnedExecutable_RefusesOtherWritableLeaf is the other-write
+// counterpart above.
+func TestVerifyRootOwnedExecutable_RefusesOtherWritableLeaf(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	bin := filepath.Join(base, "tool")
+	mustWriteExecutable(t, bin, "#!/bin/sh\necho ok\n")
+	if err := os.Chmod(bin, 0o757); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := VerifyRootOwnedExecutable(bin); err == nil {
+		t.Error("VerifyRootOwnedExecutable() = nil, want an error (other-writable leaf)")
+	}
+}
+
+// TestVerifyRootOwnedExecutable_RefusesDirectoryLeaf proves the candidate
+// must actually be a regular file: a directory sitting at the candidate's
+// own name — otherwise indistinguishable from a trusted leaf by ownership
+// and mode alone — must still be refused.
+func TestVerifyRootOwnedExecutable_RefusesDirectoryLeaf(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	dir := filepath.Join(base, "tool")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := VerifyRootOwnedExecutable(dir); err == nil {
+		t.Error("VerifyRootOwnedExecutable() = nil, want an error (candidate is a directory, not a regular file)")
+	}
+}
+
 // TestVerifyRootOwnedExecutable_FollowsMultiHopSymlinkChainWhenAllTrusted
 // mirrors Debian's real iptables layout ("iptables" -> "alternatives/
 // iptables" -> "xtables-nft-multi", two hops) entirely under a trusted
