@@ -58,20 +58,23 @@ func GetGitVersion() (string, string, error) {
 	if err != nil {
 		return "", gitPath, err
 	}
-	// Output is usually "git version 2.47.0"
+	// Output is usually "git version 2.48.0"
 	version := strings.TrimPrefix(strings.TrimSpace(string(output)), "git version ")
 	return version, gitPath, nil
 }
 
-// CheckGitVersion returns an error if the git version is less than 2.47.0.
+// CheckGitVersion returns an error if the git version is less than 2.48.0.
+//
+// 2.48 is required: `git worktree add --relative-paths` first shipped in
+// git 2.48; 2.47.x rejects the flag.
 func CheckGitVersion() error {
 	version, gitPath, err := GetGitVersion()
 	if err != nil {
 		return fmt.Errorf("failed to get git version: %w", err)
 	}
 
-	if err := CompareGitVersion(version, 2, 47); err != nil {
-		return fmt.Errorf("git version 2.47.0 or newer is required; scion requires worktree support with relative paths (found %s at %s)", version, gitPath)
+	if err := CompareGitVersion(version, 2, 48); err != nil {
+		return fmt.Errorf("git version 2.48.0 or newer is required; scion requires worktree support with relative paths (found %s at %s)", version, gitPath)
 	}
 
 	return nil

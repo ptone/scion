@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -957,7 +958,41 @@ authDone:
 	// On resume/restart opts.Workspace is empty, so re-derive the explicit intent
 	// from the persisted config to keep the explicit workspace plain-mounted.
 	explicitWorkspace := opts.Workspace != "" || (finalScionCfg != nil && finalScionCfg.ExplicitWorkspace)
-	repoRoot := detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+
+	// A broker-provisioned worktree-per-agent workspace (runtimebroker's
+	// tryProvisionWorktree) already knows its own repo root — resolve it
+	// directly instead of routing through detectRepoRoot, whose
+	// explicit-workspace skip exists for a user's own --workspace override and
+	// must not swallow the broker's own provisioning too. See
+	// api.ContextWithProvisionedWorktreeRepoRoot for the full rationale.
+	//
+	// Priority: a fresh ctx signal (this dispatch just ran
+	// tryProvisionWorktree) beats the value persisted in agentDir's
+	// broker-owned state file (recovered on resume/restart, when the broker
+	// does not re-run tryProvisionWorktree). Neither source is trusted as-is:
+	// provision.ValidateWorktreeForBase re-proves the pair against the real
+	// filesystem — both lexically and after resolving symlinks — before
+	// RunConfig.RepoRoot is allowed to name a host path. A user --workspace
+	// override normally supplies neither; a persisted value is honored only
+	// if it re-validates against that workspace, so it otherwise falls
+	// through to detectRepoRoot and stays "".
+	//
+	// This first pass validates against the pre-workspace-backend
+	// effectiveWorkspace, only because containerWorkspace (computed below)
+	// needs a repoRoot to feed the NFS/cloudrun/gke backend resolution that
+	// can still replace effectiveWorkspace. If that happens, the block after
+	// that resolution re-validates against the value RunConfig will actually
+	// use.
+	ctxRepoRoot := api.ProvisionedWorktreeRepoRootFromContext(ctx)
+	persistedRepoRoot := readProvisionedWorktreeRepoRoot(agentDir)
+	candidateRepoRoot := ctxRepoRoot
+	if candidateRepoRoot == "" {
+		candidateRepoRoot = persistedRepoRoot
+	}
+	repoRoot := validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
+	if repoRoot == "" {
+		repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+	}
 
 	// Telemetry defaults to enabled when not explicitly set to false.
 	telemetryEnabled := finalScionCfg != nil && finalScionCfg.Telemetry != nil &&
@@ -1071,6 +1106,7 @@ authDone:
 	nfsSubPath := ""
 	nfsStorageClass := ""
 
+	preBackendWorkspace := effectiveWorkspace
 	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
 		sharingMode := store.SharingModeWorktreePerAgent
 		if opts.SharedWorkspace || opts.GitClone != nil {
@@ -1117,6 +1153,35 @@ authDone:
 			}
 		}
 	}
+
+	// The workspace backend above (NFS/cloudrun/gke) can replace
+	// effectiveWorkspace with a backend-managed path — real for
+	// worktree-per-agent when server.workspace_storage.backend is
+	// explicitly configured to something other than local. The repoRoot
+	// computed earlier was validated against the PRE-backend path, so if the
+	// backend actually changed it, re-resolve against the value RunConfig
+	// will use — a stale repoRoot from the old path is not just wrong, it is
+	// exactly the lexical mismatch that misroutes common.go into its
+	// full-root fallback mount.
+	if effectiveWorkspace != preBackendWorkspace {
+		repoRoot = validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
+		if repoRoot == "" {
+			repoRoot = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+		}
+	}
+
+	// A fresh ctx signal always wins over whatever is already persisted, but
+	// GetAgent skips ProvisionAgent (and so never gets a chance to persist)
+	// when the agent directory already exists on disk — e.g. a leftover from
+	// a deleted hub agent recreated under the same name. In that case this
+	// dispatch's signal would never be persisted anywhere else, and a later
+	// resume/restart (which has no fresh ctx signal of its own) would fall
+	// back to detectRepoRoot and lose RepoRoot again. ProvisionAgent shares
+	// this same gate for the flow Start never reaches on its own — the hub's
+	// provision-only dispatch, which provisions without starting — so there
+	// is exactly one persistence gate even though there is more than one
+	// caller.
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, effectiveWorkspace)
 
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
@@ -1354,6 +1419,21 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string) string
 		return root
 	}
 	return ""
+}
+
+// validatedWorktreeRepoRoot returns candidateRoot unchanged if
+// provision.ValidateWorktreeForBase confirms it is a genuine worktree base
+// for effectiveWorkspace, or "" otherwise (including when either argument is
+// empty). A thin wrapper so Start's repoRoot resolution reads as a single
+// value lookup rather than an error check at each of its two call sites.
+func validatedWorktreeRepoRoot(candidateRoot, effectiveWorkspace string) string {
+	if candidateRoot == "" || effectiveWorkspace == "" {
+		return ""
+	}
+	if err := provision.ValidateWorktreeForBase(candidateRoot, effectiveWorkspace); err != nil {
+		return ""
+	}
+	return candidateRoot
 }
 
 // extractWorkspaceFromVolumes finds a volume mounted to /workspace and returns its source path.

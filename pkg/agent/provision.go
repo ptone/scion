@@ -1524,6 +1524,19 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if agentImage != "" {
 		info.Image = agentImage
 	}
+	// Persist the broker-provisioned worktree's repo root now, if the ctx
+	// signal validates against workspaceSource: run.go's Start does not
+	// always run after this call returns — the hub's provision-only flow
+	// (Manager.Provision, DispatchAgentProvision) can provision an agent
+	// without starting it in the same dispatch, and a later start/restart
+	// carries no ctx signal of its own. (Reprovision is clone-per-agent only
+	// today, so it never carries this signal; if it gains worktree support,
+	// this call already covers it, since Reprovision also reaches
+	// ProvisionAgent directly.) Start still carries its own call to the same
+	// gate, for the one case this function never runs at all: GetAgent
+	// skipping ProvisionAgent because the agent directory already exists.
+	// See persistProvisionedWorktreeRepoRootIfValid.
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource)
 
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
 	if err != nil {
@@ -1915,6 +1928,88 @@ func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmpPath, path)
+}
+
+// provisionedWorktreeStateFile is the broker-owned file that persists the
+// broker-provisioned worktree's repo root (see
+// api.ContextWithProvisionedWorktreeRepoRoot). It lives directly in agentDir,
+// a sibling of prompt.md and scion-agent.json — never in agentHome or the
+// agent's workspace, which pkg/runtime/common.go bind-mounts read-write into
+// the agent container. agentDir itself is not mounted for hub-native/broker
+// agents. It can fall inside a read-write mount in some local, non-broker
+// configurations (e.g. an explicit --workspace pointed at the project root);
+// provision.ValidateWorktreeForBase is the backstop that applies regardless
+// of where this file lives, so its correctness never depends on the storage
+// location alone.
+const provisionedWorktreeStateFile = "provisioned-worktree.json"
+
+// provisionedWorktreeState is the on-disk shape of provisionedWorktreeStateFile.
+type provisionedWorktreeState struct {
+	RepoRoot string `json:"repoRoot"`
+}
+
+// writeProvisionedWorktreeRepoRoot persists repoRoot to agentDir's
+// broker-owned state file (atomic write via writeAgentInfoFile). A write
+// failure only means a later resume falls back to detectRepoRoot — a
+// functional regression, not a security issue — so callers may log and
+// continue rather than fail the whole dispatch.
+func writeProvisionedWorktreeRepoRoot(agentDir, repoRoot string) error {
+	data, err := json.Marshal(provisionedWorktreeState{RepoRoot: repoRoot})
+	if err != nil {
+		return err
+	}
+	return writeAgentInfoFile(filepath.Join(agentDir, provisionedWorktreeStateFile), data, 0o644)
+}
+
+// readProvisionedWorktreeRepoRoot reads the value written by
+// writeProvisionedWorktreeRepoRoot, or "" if the file is absent or doesn't
+// parse. Never returns an error: a missing or unreadable state file is
+// exactly equivalent to "no broker-provisioned worktree recorded", which is
+// the correct, common state for every agent that isn't one.
+func readProvisionedWorktreeRepoRoot(agentDir string) string {
+	data, err := os.ReadFile(filepath.Join(agentDir, provisionedWorktreeStateFile))
+	if err != nil {
+		return ""
+	}
+	var state provisionedWorktreeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return ""
+	}
+	return state.RepoRoot
+}
+
+// persistProvisionedWorktreeRepoRootIfValid validates ctxRepoRoot against
+// workspace (via validatedWorktreeRepoRoot) and, only if it validates and
+// differs from what is already on disk, persists it to agentDir's
+// broker-owned state file. A no-op when ctxRepoRoot is empty or fails to
+// validate.
+//
+// This is the single persistence gate shared by every call site that can be
+// the first to see a fresh ctx signal for a given dispatch:
+//   - ProvisionAgent, for a fresh create (via GetAgent, for
+//     Manager.Provision/Manager.Start's normal first-provision path) — the
+//     hub's provision-only flow provisions without ever calling Start in the
+//     same dispatch, so this is the only chance to record the value there.
+//     Reprovision is clone-per-agent only today, so it never carries this
+//     signal; if it gains worktree support, the persist in ProvisionAgent
+//     already covers it, since Reprovision also calls ProvisionAgent
+//     directly.
+//   - run.go's Start, for the case ProvisionAgent never runs at all: GetAgent
+//     skips it when the agent directory already exists on disk (e.g. a
+//     leftover from a deleted hub agent recreated under the same name).
+//
+// A write failure only means a later resume falls back to detectRepoRoot;
+// see writeProvisionedWorktreeRepoRoot.
+func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string) {
+	if ctxRepoRoot == "" || validatedWorktreeRepoRoot(ctxRepoRoot, workspace) != ctxRepoRoot {
+		return
+	}
+	if readProvisionedWorktreeRepoRoot(agentDir) == ctxRepoRoot {
+		return
+	}
+	if err := writeProvisionedWorktreeRepoRoot(agentDir, ctxRepoRoot); err != nil {
+		util.Debugf("persistProvisionedWorktreeRepoRootIfValid: failed to persist for %s: %v", agentDir, err)
+	}
 }
 
 func UpdateAgentConfig(agentName string, projectPath string, status string, runtime string, profile string) error {

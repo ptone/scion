@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 func TestExtractWorkspaceFromVolumes(t *testing.T) {
@@ -812,6 +813,405 @@ profiles:
 	}
 	if capturedConfig.Labels["agent_id"] != "agent-456" {
 		t.Fatalf("agent_id label = %q", capturedConfig.Labels["agent_id"])
+	}
+}
+
+// startRepoRootProjectScaffold creates a minimal project under tmpDir that
+// Start can resolve harness/template/settings from (docker profile, a
+// "test-harness" harness-config, and a "default" template), changes the
+// working directory and HOME to tmpDir for the duration of the test, and
+// returns the project's .scion directory (the ProjectPath Start expects).
+// Mirrors pkg/runtimebroker's setupRepoRootProjectScaffold. A caller that
+// needs non-default settings.yaml content (e.g. an NFS-backed
+// workspace_storage config) can overwrite
+// filepath.Join(projectScionDir, "settings.yaml") after calling this.
+func startRepoRootProjectScaffold(t *testing.T, tmpDir string) string {
+	t.Helper()
+
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatalf("failed to create project .scion dir: %v", err)
+	}
+	settingsYAML := `schema_version: "1"
+active_profile: local
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: docker
+`
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
+	if err := os.MkdirAll(hcDir, 0755); err != nil {
+		t.Fatalf("failed to create harness-config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644); err != nil {
+		t.Fatalf("failed to write harness config: %v", err)
+	}
+	tplDir := filepath.Join(projectScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatalf("failed to create template dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644); err != nil {
+		t.Fatalf("failed to write template: %v", err)
+	}
+	return projectScionDir
+}
+
+// TestStartInvalidatesProvisionedRepoRootWhenNFSBackendReplacesWorkspace
+// covers server.workspace_storage.backend == "nfs", which applies to
+// worktree-per-agent mode too (runtime.SelectWorkspaceBackend), and when it
+// fires it replaces effectiveWorkspace with the NFS-backed host path — which
+// can combine with a ctx-provisioned repo root from tryProvisionWorktree's
+// local host-side worktree in the same dispatch. The repo root validated
+// against the pre-backend workspace no longer corresponds to the final
+// workspace RunConfig actually uses, so it must be re-validated (and here,
+// correctly invalidated) rather than left stale.
+func TestStartInvalidatesProvisionedRepoRootWhenNFSBackendReplacesWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	nfsMountRoot := filepath.Join(tmpDir, "nfs")
+	settingsYAML := fmt.Sprintf(`schema_version: "1"
+active_profile: local
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: %s
+      shares:
+        - id: share-1
+          server: 10.0.0.2
+          export: /scion-workspaces
+          pv_name: scion-workspaces-pv
+harness_configs:
+  test-harness:
+    harness: gemini
+    user: scion
+    image: test-image:latest
+profiles:
+  local:
+    runtime: docker
+`, nfsMountRoot)
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	// A REAL local worktree — this is what tryProvisionWorktree would have
+	// provisioned on the host before the NFS backend applies. The ctx signal
+	// below validates successfully against THIS workspace, on purpose: the
+	// point of the test is that the NFS backend then replaces it.
+	sharedBase := filepath.Join(tmpDir, "shared-base")
+	if err := os.MkdirAll(sharedBase, 0755); err != nil {
+		t.Fatalf("failed to create shared base dir: %v", err)
+	}
+	setupGitRepo(t, sharedBase)
+	localWorktree := createRealWorktree(t, sharedBase, "agent-a")
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   localWorktree,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-a",
+			"SCION_PROJECT_ID": "proj-123",
+		},
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Confirm the NFS backend actually fired and replaced the workspace —
+	// otherwise this test would pass vacuously.
+	if capturedConfig.WorkspaceBackendName != "nfs" {
+		t.Fatalf("WorkspaceBackendName = %q, want nfs (test setup broken)", capturedConfig.WorkspaceBackendName)
+	}
+	wantWorkspace := filepath.Join(nfsMountRoot, "share-1", "projects", "proj-123", "workspace")
+	if capturedConfig.Workspace != wantWorkspace {
+		t.Fatalf("Workspace = %q, want %q (test setup broken)", capturedConfig.Workspace, wantWorkspace)
+	}
+
+	// The actual assertion: RepoRoot must NOT be the local sharedBase — that
+	// value was validated against localWorktree, not the NFS path RunConfig
+	// now actually uses. An explicit --workspace-shaped dispatch (opts.Workspace
+	// set) with no valid provisioned root falls through to detectRepoRoot,
+	// which stays "" for an explicit workspace.
+	if capturedConfig.RepoRoot != "" {
+		t.Fatalf("RunConfig.RepoRoot = %q, want \"\" — stale repo root from before the NFS backend replaced the workspace", capturedConfig.RepoRoot)
+	}
+}
+
+// TestStartUserWorkspaceOverrideYieldsEmptyRepoRoot is the required
+// counterpart to the broker-provisioned-worktree RepoRoot stitching fix: a
+// user-supplied --workspace (opts.Workspace set with no
+// api.ContextWithProvisionedWorktreeRepoRoot signal on ctx) must still
+// produce an empty RunConfig.RepoRoot, exactly like before the fix — even
+// when the workspace happens to sit inside a git repo, which is the case
+// #642 added the explicit-workspace skip for in the first place.
+func TestStartUserWorkspaceOverrideYieldsEmptyRepoRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	// The operator's own workspace: a real git repo, so the "explicit
+	// workspace skips git detection" guarantee is actually exercised, not
+	// vacuously true because there was no repo to detect.
+	userWorkspace := filepath.Join(tmpDir, "operators-own-repo")
+	if err := os.MkdirAll(userWorkspace, 0755); err != nil {
+		t.Fatalf("failed to create user workspace dir: %v", err)
+	}
+	setupGitRepo(t, userWorkspace)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+
+	mgr := NewManager(mockRT)
+	// context.Background(): no api.ContextWithProvisionedWorktreeRepoRoot
+	// signal — this is the plain CLI/local dispatch shape for a user
+	// --workspace flag.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   userWorkspace,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-456",
+			"SCION_PROJECT_ID": "proj-123",
+		},
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if capturedConfig.RepoRoot != "" {
+		t.Fatalf("RunConfig.RepoRoot = %q, want \"\" for a user --workspace override", capturedConfig.RepoRoot)
+	}
+	if capturedConfig.Workspace != userWorkspace {
+		t.Fatalf("RunConfig.Workspace = %q, want %q", capturedConfig.Workspace, userWorkspace)
+	}
+}
+
+// TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped
+// covers GetAgent skipping ProvisionAgent entirely once an agent directory
+// already exists on disk (e.g. a leftover from a deleted hub agent recreated
+// under the same name), so a fresh ctx signal on that dispatch would
+// otherwise never be persisted — stranding RepoRoot on the very next resume,
+// which has no ctx signal of its own. Start must persist the fresh value
+// itself whenever it validates and differs from what's already on disk,
+// independent of whether ProvisionAgent ran.
+func TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	// The workspace must be a REAL worktree of sharedBase (not just a plain
+	// directory) — Start only persists a ctx signal that actually validates,
+	// and validation requires a genuine git worktree relationship, not just
+	// a matching directory shape.
+	sharedBase := t.TempDir()
+	setupGitRepo(t, sharedBase)
+	worktreesDir := filepath.Join(sharedBase, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("failed to create worktrees dir: %v", err)
+	}
+	userWorkspace := filepath.Join(worktreesDir, "agent-a")
+	if err := util.CreateWorktree(userWorkspace, "agent-a"); err != nil {
+		t.Fatalf("failed to create real worktree: %v", err)
+	}
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
+
+	// Step 1: create the agent normally as a plain --workspace agent (no ctx
+	// signal) — the exact provisioning shape doesn't matter here, only that
+	// the agent directory now exists on disk with no repo root persisted.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("initial Start failed: %v", err)
+	}
+
+	// Step 2: a later dispatch for the SAME agent name whose ctx carries a
+	// fresh broker-provisioned-worktree signal (the real relationship: user
+	// Workspace is genuinely sharedBase's worktree). Because the agent
+	// directory already exists, GetAgent's "agent dir exists" branch skips
+	// ProvisionAgent entirely — the only way this value can reach disk is the
+	// persistence added to Start for exactly this case.
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), sharedBase)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("second Start failed: %v", err)
+	}
+
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	gotRoot, err := filepath.EvalSymlinks(readProvisionedWorktreeRepoRoot(agentDir))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(persisted repo root): %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(sharedBase)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(sharedBase): %v", err)
+	}
+	if gotRoot != wantRoot {
+		t.Fatalf("persisted repo root = %q, want %q — the fresh ctx signal was not persisted when ProvisionAgent was skipped", gotRoot, wantRoot)
+	}
+}
+
+// TestStartDoesNotPersistUnvalidatedCtxRepoRoot covers the persistence path:
+// it must only ever write a repo root that actually validated (repoRoot ==
+// ctxRepoRoot), never a bare ctx value that the validator rejected and
+// detectRepoRoot then fell back past. Otherwise a bad value could reach disk
+// even though it never reached RunConfig on the dispatch that produced it.
+func TestStartDoesNotPersistUnvalidatedCtxRepoRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	// ctxRoot is a real git repo, but it has no relationship at all to
+	// userWorkspace (a plain, unrelated directory) — the validator must
+	// reject this pairing.
+	ctxRoot := t.TempDir()
+	setupGitRepo(t, ctxRoot)
+	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
+	if err := os.MkdirAll(userWorkspace, 0755); err != nil {
+		t.Fatalf("failed to create user workspace dir: %v", err)
+	}
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), ctxRoot)
+	if _, err := mgr.Start(ctx, api.StartOptions{
+		Name:        "agent-a",
+		ProjectPath: projectScionDir,
+		NoAuth:      true,
+		Workspace:   userWorkspace,
+		Env:         map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"},
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	agentDir := config.GetAgentDir(projectScionDir, "agent-a", false)
+	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
+		t.Fatalf("persisted repo root = %q, want \"\" — an unvalidated ctx value must never be persisted", got)
+	}
+}
+
+// TestStartResumeDoesNotAdoptRepoRootFromAgentInfoFile is a regression test
+// for the storage boundary that keeps the persisted repo root out of
+// container-writable storage: a user --workspace agent on a directory shaped
+// like "<repo>/worktrees/<name>" (not a real git worktree). The first Start
+// correctly yields an empty RepoRoot. agent-info.json is writable at
+// runtime, so this test writes a "provisionedWorktreeRepoRoot" key into it
+// directly to prove run.go must never source RepoRoot from agentHome on
+// resume; the value lives in a broker-owned file under agentDir that is not
+// mounted into the container, and the validator rejects a non-worktree
+// directory regardless.
+func TestStartResumeDoesNotAdoptRepoRootFromAgentInfoFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectScionDir := startRepoRootProjectScaffold(t, tmpDir)
+
+	// Use a REAL git worktree so the isolation is precise: the written value
+	// below would validate successfully if run.go consulted agent-info.json
+	// for it. That isolates "is the container-writable file even consulted"
+	// (this test) from "does the validator reject a fake worktree shape"
+	// (covered separately in pkg/provision's validator tests).
+	t.Setenv("SCION_HOST_UID", "")
+	userRepo := filepath.Join(tmpDir, "userrepo")
+	if err := os.MkdirAll(userRepo, 0755); err != nil {
+		t.Fatalf("failed to create user repo dir: %v", err)
+	}
+	setupGitRepo(t, userRepo)
+	userWorkspace := createRealWorktree(t, userRepo, "foo")
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			capturedConfig = config
+			return "mock-id", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	env := map[string]string{"SCION_AGENT_ID": "agent-a", "SCION_PROJECT_ID": "proj-123"}
+
+	// First Start: plain user --workspace, no ctx signal. Correct baseline:
+	// RepoRoot is empty.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Workspace: userWorkspace, Env: env,
+	}); err != nil {
+		t.Fatalf("initial Start failed: %v", err)
+	}
+	if capturedConfig.RepoRoot != "" {
+		t.Fatalf("baseline RunConfig.RepoRoot = %q, want \"\" before the state file is written", capturedConfig.RepoRoot)
+	}
+
+	// Write a "provisionedWorktreeRepoRoot" key into agent-info.json in
+	// agentHome (bind-mounted read-write into the container); RepoRoot must
+	// never be read from agentHome.
+	agentHome := config.GetAgentHomePath(projectScionDir, "agent-a")
+	containerWritten := []byte(`{"provisionedWorktreeRepoRoot":"` + userRepo + `"}`)
+	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), containerWritten, 0644); err != nil {
+		t.Fatalf("failed to write agent-info.json: %v", err)
+	}
+
+	// Resume: no ctx signal, empty Workspace — the shape that would surface
+	// a container-writable value as a live RepoRoot if it were still consulted.
+	capturedConfig = runtime.RunConfig{}
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "agent-a", ProjectPath: projectScionDir, NoAuth: true, Resume: true, Env: env,
+	}); err != nil {
+		t.Fatalf("resume Start failed: %v", err)
+	}
+
+	if capturedConfig.RepoRoot != "" {
+		t.Fatalf("resume RunConfig.RepoRoot = %q, want \"\" — a container-writable agent-info.json must not be able to set RepoRoot", capturedConfig.RepoRoot)
 	}
 }
 
