@@ -36,6 +36,20 @@ var execCandidateEnv = os.Environ
 // Production code never reassigns it.
 var execResolve = rootexec.Resolve
 
+// SetExecResolveForTest overrides execAsUserCmd's own means of resolving
+// "sh", "su", and "whoami" to absolute paths, for the duration of a test —
+// including a test in another package that drives a real exec through this
+// package's Server via NewServer (e.g. pkg/runtime's own real-control-server
+// tests), which has no other way to reach this package's unexported
+// execResolve var. Mirrors SetPrivateRootTmpDirForTest's shape exactly.
+// Production code never calls this. Returns a cleanup function that
+// restores the previous value.
+func SetExecResolveForTest(resolve func(name string) (string, error)) func() {
+	orig := execResolve
+	execResolve = resolve
+	return func() { execResolve = orig }
+}
+
 // execAsUserCmd is a deliberate, near-verbatim copy of
 // pkg/runtime.ExecAsUserCmd's wrapper script (see that file's doc comment
 // for the full PAM/su rationale — the reasoning is identical here), with

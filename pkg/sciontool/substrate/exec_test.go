@@ -89,6 +89,7 @@ func TestRunExec_OutputCapsAndFlags(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns real subprocesses producing several MB of output")
 	}
+	fakeWhoamiAsScion(t)
 
 	// head -c is fast and available on any Linux test runner; /dev/zero
 	// bytes decode fine as a string for length-only assertions.
@@ -111,6 +112,7 @@ func TestRunExec_StderrCappedIndependently(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns real subprocesses producing several MB of output")
 	}
+	fakeWhoamiAsScion(t)
 
 	over := maxOutputBytes + 1024
 	resp := runExec(context.Background(), "scion",
@@ -165,6 +167,40 @@ func TestRunExec_NeverConsultsPATHForShOrSu(t *testing.T) {
 	}
 }
 
+// fakeWhoamiAsScion stubs execResolve so "whoami" resolves to a stand-in
+// script that always prints "scion", regardless of this test process's own
+// real identity. execAsUserCmd's wrapper embeds whatever execResolve
+// returns directly into the generated script (see execAsUserCmd's own doc
+// comment for why it's a package var rather than a direct rootexec.Resolve
+// call), so with this stub in place the wrapper's own "$(whoami) = $1"
+// check reads "scion" and, for a caller also targeting "scion", takes the
+// direct "exec sh -c" branch — exactly the branch that already runs when
+// the process genuinely is "scion" — without ever invoking su. "sh" and
+// "su" still resolve through the real rootexec.Resolve unchanged, so this
+// substitutes only the identity check's own answer, not the shell that
+// runs the command or su's own resolution; a test needing su itself
+// actually invoked (e.g. TestExecAsUserCmd_RealShellInvokesSuWithExpectedArgv)
+// targets a user "scion" can't be, not this stub. Shared by every test in
+// this package that needs a real exec to run as "scion" no matter which
+// user is actually running the test — restores execResolve in t.Cleanup.
+func fakeWhoamiAsScion(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	whoamiPath := filepath.Join(dir, "whoami")
+	if err := os.WriteFile(whoamiPath, []byte("#!/bin/sh\necho scion\n"), 0o755); err != nil {
+		t.Fatalf("write whoami stand-in: %v", err)
+	}
+
+	orig := execResolve
+	execResolve = func(name string) (string, error) {
+		if name == "whoami" {
+			return whoamiPath, nil
+		}
+		return orig(name)
+	}
+	t.Cleanup(func() { execResolve = orig })
+}
+
 // currentUsername resolves this test process's own username the same way
 // the wrapper script's "$(whoami)" check will see it (whoami reports the
 // real/effective uid's passwd entry, exactly what user.Current() reads).
@@ -212,6 +248,7 @@ func TestRunExec_TimeoutKillsProcess(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits on a real subprocess timeout")
 	}
+	fakeWhoamiAsScion(t)
 	start := time.Now()
 	resp := runExec(context.Background(), "scion", []string{"sleep", "30"}, nil, 300*time.Millisecond)
 	elapsed := time.Since(start)

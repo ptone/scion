@@ -153,22 +153,38 @@ server against a real database confirmed the property those tests guard: an
 access token scoped to one project cannot list or read another project's
 agent.
 
-## Test hermeticity: the real-exec tests only run where they can pass
+## Test hermeticity: the real-exec tests run as any user
 
 The tests that drive a real exec through the control server's own handler —
-the client-to-real-server test above and six server-side tests exercising a
-real subprocess — request `"scion"` as the exec user, either explicitly or
-by leaving it unset (the handler's own default). The handler itself only
-accepts `"scion"` or `"root"` as that field; anything else is rejected
-before an exec is even attempted. Separately, the exec-as-user fallback
-(`su`) only succeeds unprivileged when the process already is the target
-user — an arbitrary process identity cannot `su` to `"scion"` without a
-password. Put together, these tests can only pass where the test process's
-own user genuinely is `"scion"`, and fail outright anywhere else, including
-an ordinary CI runner. Each now checks the current user first and skips
-itself, with the reason logged, when it isn't `"scion"` — proven by
-actually running the affected tests as a separate, unprivileged, non-`scion`
-user: all skip cleanly with a logged reason, and the surrounding packages
-still report success. The probe's own version-skew detection and the
-client-side cap enforcement are unaffected — those are proven separately
-against fakes that never depend on which OS user is asking.
+the client-to-real-server test above and five server-side tests exercising a
+real subprocess with `"scion"` as the exec user, either explicitly or via
+the handler's own default — depend on the exec-as-user wrapper script's own
+identity check: `if [ "$(whoami)" = "$1" ]; then exec sh -c "$2"; else exec
+su - "$1" -c "$2"; fi`. The direct branch runs unconditionally on any user;
+the `su` branch only succeeds unprivileged when the calling process already
+is the target user, since switching to an arbitrary different user needs a
+password. On an ordinary CI runner — some other, unrelated user — `whoami`
+never matches `"scion"`, so every one of these tests fell into the `su`
+branch and failed there. (The handler also validates the request's `User`
+field against an allowlist of `"scion"` or `"root"`, but that check is not
+what blocks these tests: they already send an allowed value. It only
+matters for a value outside the allowlist, which none of these tests use.)
+
+Both the value `whoami` reports and the paths `sh`/`su` resolve to come from
+one package-level indirection, already provided for exactly this kind of
+substitution. Installing a stand-in that reports `"scion"` for `whoami`
+while leaving `sh`/`su` resolution untouched makes the wrapper take its
+direct branch — the same branch that already runs when the process
+genuinely is `"scion"` — regardless of who is actually running the test, so
+these tests now run for real on any user instead of being skipped. The one
+exception is the client-to-real-server test, which lives in a different
+package with no reachable indirection of its own; a new, minimal, exported
+hook was added for exactly that cross-package case, mirroring an existing
+one-purpose test hook already in this codebase, with its own guard proving
+no production code path calls it. Proven by actually running the whole
+affected surface as a separate, unprivileged, no-`sudo` user: every one of
+these tests, plus the client-to-real-server test, passes for real rather
+than being skipped, and the surrounding packages report success. The
+probe's own version-skew detection and the client-side cap enforcement are
+unaffected either way — those are proven separately against fakes that
+never depend on which OS user is asking or spawn a real subprocess at all.

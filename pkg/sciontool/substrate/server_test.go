@@ -24,7 +24,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -86,29 +85,6 @@ func decodeJSON[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 		t.Fatalf("unmarshal response %q: %v", rec.Body.String(), err)
 	}
 	return v
-}
-
-// requireScionExecUser skips the calling test unless this process's own
-// user is literally "scion". handleExec only accepts "scion" or "root" as
-// the request's exec user, and runExec's own exec-as-user fallback (`su`)
-// only succeeds unprivileged when the calling process already *is* the
-// target user — an arbitrary CI user (e.g. GitHub Actions' "runner") is
-// neither "scion" nor able to `su` to it without a password. A test driving
-// a real exec through this handler is therefore only meaningful — and only
-// able to pass — where the process user genuinely is "scion"; everywhere
-// else it is skipped rather than failed, with the reason logged. One shared
-// helper for every test in this file that needs it, rather than repeating
-// the check. Mirrors the same user.Current() pattern pkg/runtime/exec_user_test.go
-// already uses for its own environment checks.
-func requireScionExecUser(t *testing.T) {
-	t.Helper()
-	u, err := user.Current()
-	if err != nil {
-		t.Skipf("could not determine current user: %v", err)
-	}
-	if u.Username != "scion" {
-		t.Skipf("skipping: requires running as \"scion\" (handleExec only accepts \"scion\" or \"root\" as the exec user, and su to an arbitrary user needs a password this process doesn't have); current user is %q", u.Username)
-	}
 }
 
 func TestHealthz_InitiallyAwaitingBootstrap(t *testing.T) {
@@ -1261,7 +1237,7 @@ func TestExec_WrongTokenRejected(t *testing.T) {
 }
 
 func TestExec_SucceedsWithCorrectToken(t *testing.T) {
-	requireScionExecUser(t)
+	fakeWhoamiAsScion(t)
 	srv := NewServer(
 		WithChownOwner(-1, -1),
 		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
@@ -1308,7 +1284,7 @@ func TestExec_RejectsUnknownUser(t *testing.T) {
 }
 
 func TestExec_NonZeroExitCodePropagated(t *testing.T) {
-	requireScionExecUser(t)
+	fakeWhoamiAsScion(t)
 	srv := NewServer(
 		WithChownOwner(-1, -1),
 		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
@@ -1335,7 +1311,7 @@ func TestExec_NonZeroExitCodePropagated(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestExec_StdinRoundTripsThroughRealCommand(t *testing.T) {
-	requireScionExecUser(t)
+	fakeWhoamiAsScion(t)
 	const secret = "S3CR3T-1894-EXEC-STDIN"
 
 	srv := NewServer(
@@ -1367,7 +1343,7 @@ func TestExec_StdinRoundTripsThroughRealCommand(t *testing.T) {
 }
 
 func TestExec_StdinSupportedSetEvenWithoutStdin(t *testing.T) {
-	requireScionExecUser(t)
+	fakeWhoamiAsScion(t)
 	srv := NewServer(
 		WithChownOwner(-1, -1),
 		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
@@ -1395,7 +1371,7 @@ func TestExec_StdinSupportedSetEvenWithoutStdin(t *testing.T) {
 // pins that nothing in runExec's command construction ever folds Stdin into
 // the command line.
 func TestExec_StdinNeverReachesSpawnedArgv(t *testing.T) {
-	requireScionExecUser(t)
+	fakeWhoamiAsScion(t)
 	const secret = "S3CR3T-MUST-NOT-BE-IN-ARGV"
 
 	var captured [][]string
