@@ -383,7 +383,43 @@ func checkPrivilegeDropFeasible(d privilegeDropPreconditionDeps) error {
 		return errPrivilegeDropPrecondition
 	}
 
+	if path := findSetuidRootSudo(d.statPath); path != "" {
+		log.Error("privilege-drop precondition: %s is setuid-root; the rootfs fixup should have stripped this", path)
+		return errPrivilegeDropPrecondition
+	}
+
 	return nil
+}
+
+// findSetuidRootSudo reports the first path (if any) among sudoCheckDirs
+// (see substrate_rootfs.go) whose "sudo" binary is still setuid-root.
+// statPath follows symlinks (the real destination's mode is what matters,
+// the same "resolve, then check the real thing" shape rootexec.Resolve
+// uses), so this catches a setuid binary reached through any legitimate
+// symlink chain, not only a direct regular file.
+//
+// Deliberately does NOT parse /etc/sudoers, /etc/sudoers.d, "#include"
+// directives, or sudo/wheel group membership: after stripSudoSetuidBits
+// runs (both rootfs-fixup call sites, every actor start), no binary here
+// should ever be setuid-root, so this exists purely to catch a stale golden
+// template — or any other path — that skipped that fixup, not to
+// reimplement sudo's own authorization model.
+func findSetuidRootSudo(statPath func(string) (fs.FileInfo, error)) string {
+	for _, dir := range sudoCheckDirs {
+		candidate := filepath.Join("/", dir, "sudo")
+		info, err := statPath(candidate)
+		if err != nil {
+			continue
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			continue
+		}
+		if info.Mode()&os.ModeSetuid != 0 && stat.Uid == 0 {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func init() {

@@ -59,7 +59,7 @@ func TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden(t *tes
 			{
 				Name:    "scion-agent",
 				Image:   image,
-				Command: []string{"sciontool", "substrate-serve"},
+				Command: []string{"/usr/local/bin/sciontool", "substrate-serve"},
 				Env:     nil,
 				VolumeMounts: []*ateapipb.VolumeMount{
 					{Name: "workspace", MountPath: "/workspace"},
@@ -226,7 +226,7 @@ func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
 				SnapshotStorage:   "gs://bucket/prefix/",
 			},
 			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "2", Memory: "4Gi"}},
-			wantUnset: "scion-52ec9dfe17f8",
+			wantUnset: "scion-c31a0b3817b7",
 		},
 		{
 			// Worker selector set, resources nil (so buildActorTemplate's
@@ -242,7 +242,7 @@ func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
 				SnapshotStorage:   "gs://bucket/prefix/",
 			},
 			resources: nil,
-			wantUnset: "scion-3b33f56da495",
+			wantUnset: "scion-780d9b998ec6",
 		},
 	}
 }

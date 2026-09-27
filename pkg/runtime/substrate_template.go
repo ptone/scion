@@ -36,8 +36,13 @@ import (
 // substrateServeEntrypointVersion is folded into the template's
 // content-address (substrate-runtime.md §3) so a change to the
 // `sciontool substrate-serve` protocol forces a new template rather than
-// silently reusing a golden snapshot built against the old one.
-const substrateServeEntrypointVersion = "substrate-serve/v1"
+// silently reusing a golden snapshot built against the old one. Bumped to
+// v2 for the absolute-Command hardening below: Command itself is not part
+// of the hash input list (it's a Go literal, not a value derived from
+// config that could otherwise vary), so this version bump is the only
+// thing that forces existing golden snapshots — built with the old, bare
+// "sciontool" entrypoint baked in — to be rebuilt rather than reused as-is.
+const substrateServeEntrypointVersion = "substrate-serve/v2"
 
 // substrateContainerCapabilitiesAdd lists the Linux capabilities
 // buildActorTemplate grants on top of Substrate's default set. It is
@@ -264,9 +269,21 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: templateName},
 		Containers: []*ateapipb.Container{
 			{
-				Name:    "scion-agent",
-				Image:   imageDigest,
-				Command: []string{"sciontool", "substrate-serve"},
+				Name:  "scion-agent",
+				Image: imageDigest,
+				// Absolute, never a bare name: this is PID 1's own launch
+				// argv, resolved by whatever mechanism starts the
+				// container's entrypoint — not something this codebase's
+				// own rootexec.Resolve (fixed system directories, verified
+				// by fd-walk) has any chance to guard, since it runs before
+				// this binary's own code executes at all. A bare
+				// "sciontool" would be looked up against the container's
+				// PATH, which includes the workload-owned npm-global
+				// directory ahead of any trusted system directory — see
+				// the rootexec package doc comment for the general shape
+				// of that hazard. /usr/local/bin/sciontool is where the
+				// image installs it (image-build/scion-base/Dockerfile).
+				Command: []string{"/usr/local/bin/sciontool", "substrate-serve"},
 				Env:     trustBundleEnv, // no secrets, ever (substrate-runtime.md §3); only fixed CA-bundle paths when egress_trust_bundle is set
 				VolumeMounts: append([]*ateapipb.VolumeMount{
 					{Name: "workspace", MountPath: "/workspace"},
