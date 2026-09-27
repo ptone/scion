@@ -146,3 +146,83 @@ func EnsureDirNoFollowRootOwned(path string, mode os.FileMode) (*os.File, error)
 	}
 	return f, nil
 }
+
+// OpenNoFollowRootOwnedFile opens path as a regular file, applying the same
+// root-owned-or-self-owned, not-group/other-writable check to its entire
+// parent chain (OpenParentNoFollowRootOwned) and to the leaf itself that
+// EnsureDirNoFollowRootOwned applies to a directory.
+//
+// path must already be free of symlink components by the time this is
+// called — e.g. the output of filepath.EvalSymlinks — so this can safely use
+// O_NOFOLLOW at every step without refusing a perfectly ordinary system
+// layout where "/bin" or "/sbin" are themselves symlinks into "/usr" (Debian
+// and most other modern distributions' merged-/usr layout): a caller that
+// wants to allow a legitimate root-installed symlink chain (e.g. Debian's
+// iptables, which resolves through /etc/alternatives) resolves it first,
+// then verifies the real destination with this function — the destination,
+// and every real directory leading to it, is what must be root-owned (or
+// self-owned, on a runtime with no separate root/workload identity to
+// protect against), never the symlink names along the way.
+//
+// This is pkg/sciontool/rootexec's own verification primitive: it is what
+// makes resolving a bare command name against a fixed search path safe even
+// though the resolved binary is often reached through one or more
+// root-installed symlinks.
+func OpenNoFollowRootOwnedFile(path string) (*os.File, error) {
+	dirFd, leaf, err := OpenParentNoFollowRootOwned(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	f, err := OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, fmt.Errorf("dirfd: open %s: %w", path, err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("dirfd: fstat %s: %w", path, err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		_ = f.Close()
+		return nil, fmt.Errorf("dirfd: %s is not a regular file (mode %#o)", path, st.Mode&syscall.S_IFMT)
+	}
+	if verr := fstatRequireTrusted(int(f.Fd()), path, uint32(os.Geteuid())); verr != nil {
+		_ = f.Close()
+		return nil, verr
+	}
+	return f, nil
+}
+
+// AmbientTempDirTrusted reports whether path (typically os.TempDir()) is
+// safe to pass to os.MkdirTemp as an ambient, not individually
+// chain-verified, parent directory: either it carries the sticky bit (so
+// only an entry's own owner — not merely anyone with write access to the
+// directory — can rename or remove it, the property a hardened "/tmp"
+// relies on), or it is owned by uid 0 and carries neither the group- nor
+// other-write bit (chainIsTrusted's own rule, root's exclusive control).
+//
+// path itself is opened with O_DIRECTORY|O_NOFOLLOW, so a symlink planted at
+// path's own name is refused (reported as untrusted) rather than followed,
+// and the result is fstatted rather than trusted from a separate
+// stat-by-path call. Unlike OpenParentNoFollowRootOwned, this does not walk
+// any ancestor: the question this answers is only "can some workload
+// process rename or replace the entry os.MkdirTemp is about to create
+// inside path", which depends solely on path's own mode and sticky bit, not
+// on any parent's.
+func AmbientTempDirTrusted(path string) bool {
+	fd, err := syscall.Open(path, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return false
+	}
+	if st.Mode&syscall.S_ISVTX != 0 {
+		return true
+	}
+	return st.Uid == 0 && uint32(st.Mode)&trustedChainModeBits == 0
+}

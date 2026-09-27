@@ -195,6 +195,103 @@ func TestEnsureDirNoFollowRootOwned_RefusesSymlinkedLeaf(t *testing.T) {
 	}
 }
 
+// TestEnsureDirNoFollowRootOwned_RefusesPreExistingBadModeLeaf proves the
+// leaf's own fstat-and-check — not just the parent chain — is what actually
+// runs: a leaf that already exists, under an entirely trusted chain, but is
+// itself group/other-writable, must still be refused rather than handed
+// back as a usable directory.
+func TestEnsureDirNoFollowRootOwned_RefusesPreExistingBadModeLeaf(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	target := filepath.Join(base, "leaf")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Chmod after creation, not via Mkdir's own (umask-masked) mode
+	// argument, to force the exact world-writable bits this test needs and
+	// to exercise the re-check against an already-existing directory
+	// (the create path's own Mkdirat call gets EEXIST here, tolerated —
+	// this test is about what happens after that).
+	if err := os.Chmod(target, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := EnsureDirNoFollowRootOwned(target, 0o700); err == nil {
+		t.Fatal("expected EnsureDirNoFollowRootOwned to refuse an existing, group/other-writable leaf, got nil error")
+	}
+}
+
+// TestOpenParentNoFollowRootOwned_RefusesSymlinkedAncestor proves an
+// ancestor component that is a symlink — even one that points at an
+// otherwise entirely trusted, self-owned directory — is refused by the
+// O_NOFOLLOW open at that component, never silently followed into the
+// directory it happens to point at.
+func TestOpenParentNoFollowRootOwned_RefusesSymlinkedAncestor(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := OpenParentNoFollowRootOwned(filepath.Join(link, "leaf"))
+	if err == nil {
+		t.Fatal("expected OpenParentNoFollowRootOwned to refuse a symlinked ancestor even when its target is trusted, got nil error")
+	}
+}
+
+// TestOpenNoFollowRootOwnedFile_RejectsSymlinkChainThroughUntrustedDir
+// proves OpenNoFollowRootOwnedFile — which pkg/sciontool/rootexec calls only
+// after already resolving a candidate's own symlinks with
+// filepath.EvalSymlinks, per its own doc comment — still refuses a
+// destination reached through a directory that is not root- or self-owned
+// and free of group/other write. This is the property rootexec.Resolve
+// actually depends on: following a legitimate root-installed symlink chain
+// (e.g. Debian's iptables via /etc/alternatives) must not become a way to
+// smuggle a workload-writable directory into the trusted result merely
+// because a symlink pointed through it first.
+func TestOpenNoFollowRootOwnedFile_RejectsSymlinkChainThroughUntrustedDir(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	untrusted := filepath.Join(base, "untrusted")
+	if err := os.Mkdir(untrusted, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(untrusted, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(untrusted, "binary")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\necho planted\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A caller resolves the full symlink chain (filepath.EvalSymlinks)
+	// before calling this function; simulate that by passing the fully
+	// resolved real path directly, exactly as this function's own doc
+	// comment requires.
+	if _, err := OpenNoFollowRootOwnedFile(target); err == nil {
+		t.Fatal("expected OpenNoFollowRootOwnedFile to refuse a file reached through a group/other-writable directory, got nil error")
+	}
+}
+
+// TestOpenNoFollowRootOwnedFile_AcceptsTrustedRegularFile is the happy path:
+// a regular, executable file under an entirely trusted chain is accepted
+// and returned open.
+func TestOpenNoFollowRootOwnedFile_AcceptsTrustedRegularFile(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	target := filepath.Join(base, "binary")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := OpenNoFollowRootOwnedFile(target)
+	if err != nil {
+		t.Fatalf("OpenNoFollowRootOwnedFile: %v", err)
+	}
+	_ = f.Close()
+}
+
 // TestEnsureDirNoFollowRootOwned_RootOwnedChain is the genuine root-only
 // happy path: with a real root-owned, non-writable ancestor chain (this
 // process's own euid IS 0 in that case, so chainIsTrusted's uid==0 branch is
