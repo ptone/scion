@@ -308,6 +308,7 @@ type fakeActorServer struct {
 	lastBootstrap   *bootstrapRequest
 	execStatus      int
 	execResp        execResponse
+	lastExec        *execRequest
 }
 
 func newFakeActorServer(rec *callRecorder) *fakeActorServer {
@@ -342,7 +343,10 @@ func (s *fakeActorServer) handler() http.Handler {
 	})
 	mux.HandleFunc(substrateExecPath, func(w http.ResponseWriter, r *http.Request) {
 		s.rec.record("exec")
+		var req execRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		s.mu.Lock()
+		s.lastExec = &req
 		code := s.execStatus
 		resp := s.execResp
 		s.mu.Unlock()
@@ -1176,6 +1180,99 @@ func TestSubstrateExec_Success(t *testing.T) {
 	}
 	if out != "hello" {
 		t.Errorf("Exec() = %q, want hello", out)
+	}
+	if len(fa.lastExec.Stdin) != 0 {
+		t.Errorf("plain Exec() sent a non-empty Stdin field: %q, want none (Exec must be unaffected by ExecWithStdin)", fa.lastExec.Stdin)
+	}
+}
+
+// -----------------------------------------------------------------------
+// ExecWithStdin: secret delivered via stdin, never via argv (#1355/#1894)
+// -----------------------------------------------------------------------
+
+func TestSubstrateExecWithStdin_DeliversViaStdinFieldNotArgv(t *testing.T) {
+	const secret = "S3CR3T-1894-STDIN-NOT-ARGV"
+
+	rec := &callRecorder{}
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	id := "scion-proj/agent-a"
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = "tok-123"
+	substrateAgentStateMu.Unlock()
+
+	fa.execResp = execResponse{Stdout: secret, ExitCode: 0, StdinSupported: true}
+
+	out, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, strings.NewReader(secret))
+	if err != nil {
+		t.Fatalf("ExecWithStdin() error = %v", err)
+	}
+	if out != secret {
+		t.Errorf("ExecWithStdin() = %q, want %q (round-tripped through stdin)", out, secret)
+	}
+	if fa.lastExec == nil {
+		t.Fatal("server never received an exec request")
+	}
+	if string(fa.lastExec.Stdin) != secret {
+		t.Errorf("server-side ExecRequest.Stdin = %q, want %q", fa.lastExec.Stdin, secret)
+	}
+	for _, a := range fa.lastExec.Argv {
+		if strings.Contains(a, secret) {
+			t.Errorf("secret leaked into ExecRequest.Argv: %q", fa.lastExec.Argv)
+		}
+	}
+}
+
+func TestSubstrateExecWithStdin_MissingStdinSupportedIsError(t *testing.T) {
+	const secret = "S3CR3T-VERSION-SKEW"
+
+	rec := &callRecorder{}
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	id := "scion-proj/agent-a"
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = "tok-123"
+	substrateAgentStateMu.Unlock()
+
+	// Simulate an older control server: it ran the command and returned a
+	// clean exit, but doesn't know about ExecRequest.Stdin at all, so it
+	// never set StdinSupported. The client must not treat this as success.
+	fa.execResp = execResponse{ExitCode: 0}
+
+	_, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, strings.NewReader(secret))
+	if err == nil {
+		t.Fatal("ExecWithStdin() expected an error when the server doesn't confirm stdin_supported, got nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("ExecWithStdin() error leaked the stdin content: %v", err)
+	}
+}
+
+func TestSubstrateExecWithStdin_OversizeRejectedWithoutEchoing(t *testing.T) {
+	const secret = "S3CR3T-OVERSIZE-MARKER"
+
+	rec := &callRecorder{}
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	id := "scion-proj/agent-a"
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = "tok-123"
+	substrateAgentStateMu.Unlock()
+
+	over := strings.NewReader(secret + strings.Repeat("A", maxExecStdinBytes))
+
+	_, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, over)
+	if err == nil {
+		t.Fatal("ExecWithStdin() expected an error for oversize stdin, got nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("ExecWithStdin() error leaked the oversize stdin content: %v", err)
+	}
+	if fa.lastExec != nil {
+		t.Error("oversize stdin reached the control server; it should have been rejected client-side first")
 	}
 }
 

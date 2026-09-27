@@ -94,7 +94,7 @@ func TestRunExec_OutputCapsAndFlags(t *testing.T) {
 	// bytes decode fine as a string for length-only assertions.
 	over := maxOutputBytes + 1024
 	resp := runExec(context.Background(), "scion",
-		[]string{"sh", "-c", "head -c " + itoa(over) + " /dev/zero"}, 10*time.Second)
+		[]string{"sh", "-c", "head -c " + itoa(over) + " /dev/zero"}, nil, 10*time.Second)
 
 	if resp.ExitCode != 0 {
 		t.Fatalf("exit_code = %d, want 0 (stderr=%q)", resp.ExitCode, resp.Stderr)
@@ -114,7 +114,7 @@ func TestRunExec_StderrCappedIndependently(t *testing.T) {
 
 	over := maxOutputBytes + 1024
 	resp := runExec(context.Background(), "scion",
-		[]string{"sh", "-c", "head -c " + itoa(over) + " /dev/zero 1>&2"}, 10*time.Second)
+		[]string{"sh", "-c", "head -c " + itoa(over) + " /dev/zero 1>&2"}, nil, 10*time.Second)
 
 	if !resp.Truncated {
 		t.Error("truncated = false, want true when stderr alone exceeds the cap")
@@ -155,7 +155,7 @@ func TestRunExec_NeverConsultsPATHForShOrSu(t *testing.T) {
 	// execAsUserCmd's own script) — the same real user substrate's own
 	// broker-exec tests already rely on running as.
 	me := currentUsername(t)
-	resp := runExec(context.Background(), me, []string{"true"}, 5*time.Second)
+	resp := runExec(context.Background(), me, []string{"true"}, nil, 5*time.Second)
 
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("runExec executed a planted sh/su from $PATH")
@@ -198,7 +198,7 @@ func TestRunExec_ChildEnvNeverContainsScionAgentVars(t *testing.T) {
 	t.Setenv("SCION_UNRELATED_VAR", "should-not-leak-either")
 
 	me := currentUsername(t)
-	resp := runExec(context.Background(), me, []string{"env"}, 5*time.Second)
+	resp := runExec(context.Background(), me, []string{"env"}, nil, 5*time.Second)
 
 	if resp.ExitCode != 0 {
 		t.Fatalf("exit_code = %d, want 0 (stderr=%q)", resp.ExitCode, resp.Stderr)
@@ -213,7 +213,7 @@ func TestRunExec_TimeoutKillsProcess(t *testing.T) {
 		t.Skip("waits on a real subprocess timeout")
 	}
 	start := time.Now()
-	resp := runExec(context.Background(), "scion", []string{"sleep", "30"}, 300*time.Millisecond)
+	resp := runExec(context.Background(), "scion", []string{"sleep", "30"}, nil, 300*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if elapsed > 5*time.Second {

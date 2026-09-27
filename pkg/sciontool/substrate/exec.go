@@ -15,6 +15,7 @@
 package substrate
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os/exec"
@@ -48,7 +49,14 @@ var execCommandContext = exec.CommandContext
 // the reference call site pkg/runtime.ExecAsUserCmd this mirrors). Output is
 // captured with a hard cap per stream; exceeding it sets Truncated rather
 // than growing the response without bound.
-func runExec(ctx context.Context, user string, argv []string, timeout time.Duration) ExecResponse {
+//
+// stdin, when non-empty, is piped to the command's standard input instead of
+// being embedded in argv, so a caller delivering a secret (e.g. a
+// reset-auth token) never puts it where it would be readable from this
+// process's own argv via /proc/<pid>/cmdline. stdin is never logged, never
+// echoed into the response, and never written to disk — it flows only from
+// the caller's bytes into the child's stdin fd.
+func runExec(ctx context.Context, user string, argv []string, stdin []byte, timeout time.Duration) ExecResponse {
 	quoted := make([]string, len(argv))
 	for i, a := range argv {
 		quoted[i] = shellQuote(a)
@@ -88,6 +96,9 @@ func runExec(ctx context.Context, user string, argv []string, timeout time.Durat
 	stderr := newCappedWriter(maxOutputBytes)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	if len(stdin) > 0 {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 
 	// runtime.ExecAsUserCmd's wrapper script re-execs into a fresh `sh -c`
 	// (see its doc comment), and that shell does not itself exec-replace

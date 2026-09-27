@@ -16,12 +16,14 @@ package substrate
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -1298,5 +1300,138 @@ func TestExec_NonZeroExitCodePropagated(t *testing.T) {
 	got := decodeJSON[ExecResponse](t, rec)
 	if got.ExitCode != 7 {
 		t.Errorf("exit_code = %d, want 7", got.ExitCode)
+	}
+}
+
+// -----------------------------------------------------------------------
+// Exec stdin (#1355/#1894): a secret travels via ExecRequest.Stdin, never
+// via Argv, through the real handler and a real exec'd command.
+// -----------------------------------------------------------------------
+
+func TestExec_StdinRoundTripsThroughRealCommand(t *testing.T) {
+	const secret = "S3CR3T-1894-EXEC-STDIN"
+
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+	doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd: "true", ControlToken: "tok",
+	})
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/exec", "tok", ExecRequest{
+		Argv:  []string{"cat"},
+		User:  "scion",
+		Stdin: []byte(secret),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	got := decodeJSON[ExecResponse](t, rec)
+	if got.ExitCode != 0 {
+		t.Fatalf("exit_code = %d, want 0 (stderr=%q)", got.ExitCode, got.Stderr)
+	}
+	if got.Stdout != secret {
+		t.Errorf("stdout = %q, want %q (cat should echo stdin verbatim)", got.Stdout, secret)
+	}
+	if !got.StdinSupported {
+		t.Error("stdin_supported = false, want true: the server handled this request")
+	}
+}
+
+func TestExec_StdinSupportedSetEvenWithoutStdin(t *testing.T) {
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+	doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd: "true", ControlToken: "tok",
+	})
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/exec", "tok", ExecRequest{
+		Argv: []string{"echo", "hi"},
+		User: "scion",
+	})
+	got := decodeJSON[ExecResponse](t, rec)
+	if !got.StdinSupported {
+		t.Error("stdin_supported = false, want true on every handled response, including plain Exec with no Stdin field")
+	}
+}
+
+// TestExec_StdinNeverReachesSpawnedArgv spies on the real
+// execCommandContext seam (already used by this package's other tests to
+// avoid depending on a real su/scion user) to inspect exactly what argv the
+// server hands to the OS exec call, while still exercising the real
+// handleExec -> runExec path end to end. The secret is sent only via
+// ExecRequest.Stdin; Argv is fixed and secret-free by construction, and this
+// pins that nothing in runExec's command construction ever folds Stdin into
+// the command line.
+func TestExec_StdinNeverReachesSpawnedArgv(t *testing.T) {
+	const secret = "S3CR3T-MUST-NOT-BE-IN-ARGV"
+
+	var captured [][]string
+	orig := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		all := append([]string{name}, arg...)
+		captured = append(captured, all)
+		return orig(ctx, name, arg...)
+	}
+	t.Cleanup(func() { execCommandContext = orig })
+
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+	doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd: "true", ControlToken: "tok",
+	})
+
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/exec", "tok", ExecRequest{
+		Argv:  []string{"cat"},
+		User:  "scion",
+		Stdin: []byte(secret),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	got := decodeJSON[ExecResponse](t, rec)
+	if got.Stdout != secret {
+		t.Fatalf("stdout = %q, want %q (sanity check that stdin was actually delivered)", got.Stdout, secret)
+	}
+	if len(captured) == 0 {
+		t.Fatal("execCommandContext was never called")
+	}
+	for _, args := range captured {
+		for _, a := range args {
+			if strings.Contains(a, secret) {
+				t.Errorf("secret leaked into the spawned command's argv: %q", args)
+			}
+		}
+	}
+}
+
+func TestExec_OversizeStdinRejectedWithoutEchoing(t *testing.T) {
+	const secret = "S3CR3T-OVERSIZE-MARKER"
+
+	srv := NewServer(
+		WithChownOwner(-1, -1),
+		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
+	)
+	doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/bootstrap", "any-token", BootstrapRequest{
+		StartCmd: "true", ControlToken: "tok",
+	})
+
+	// Comfortably over maxExecBodyBytes once the JSON envelope and stdin's
+	// base64 (4/3) expansion are accounted for.
+	oversize := secret + strings.Repeat("A", maxExecBodyBytes)
+	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/exec", "tok", ExecRequest{
+		Argv:  []string{"cat"},
+		Stdin: []byte(oversize),
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an oversize exec request body", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), secret) {
+		t.Errorf("oversize-stdin rejection echoed the payload back: %q", rec.Body.String())
 	}
 }

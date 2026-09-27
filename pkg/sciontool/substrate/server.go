@@ -654,7 +654,8 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp := runExec(r.Context(), execUser, req.Argv, timeout)
+	resp := runExec(r.Context(), execUser, req.Argv, req.Stdin, timeout)
+	resp.StdinSupported = true
 	writeJSON(w, http.StatusOK, resp)
 }
 

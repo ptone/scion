@@ -105,6 +105,13 @@ type execRequest struct {
 	Argv     []string `json:"argv"`
 	User     string   `json:"user"`
 	TimeoutS int      `json:"timeout_s"`
+	// Stdin, when non-empty, is piped to the command's standard input
+	// instead of being embedded in Argv, so a secret (e.g. a reset-auth
+	// token) never appears in the exec'd command's argv — readable via
+	// /proc/<pid>/cmdline for the process's lifetime — on the control
+	// server host. encoding/json marshals a []byte field as base64
+	// automatically. See doExec and maxExecStdinBytes for the size cap.
+	Stdin []byte `json:"stdin,omitempty"`
 }
 
 // execResponse is the POST /scion/v1/exec body. Truncated flags that stdout
@@ -116,6 +123,12 @@ type execResponse struct {
 	Stderr    string `json:"stderr"`
 	ExitCode  int    `json:"exit_code"`
 	Truncated bool   `json:"truncated"`
+	// StdinSupported is true on a response from a control server new enough
+	// to understand execRequest.Stdin. doExec treats a response missing
+	// this, when Stdin was sent, as a hard error: an older control server
+	// would otherwise silently ignore Stdin and still return exit 0 for a
+	// command that read nothing, which must never look like success.
+	StdinSupported bool `json:"stdin_supported,omitempty"`
 }
 
 // defaultFileMode is applied to every auth and file-type-secret bootstrap
@@ -736,9 +749,41 @@ func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace
 	return fmt.Errorf("substrate: bootstrap %s/%s failed: status %d: %s", atespace, actorName, resp.StatusCode, string(msg))
 }
 
+// maxExecStdinBytes bounds the stdin payload doExec will send, mirroring the
+// control server's own maxExecBodyBytes (pkg/sciontool/substrate/server.go)
+// — the whole exec request (argv, metadata, and stdin together) shares that
+// one limit; stdin gets no separate, additional allowance. Built
+// independently against the same spec as the server's constant (see
+// pkg/sciontool/substrate/types.go's package doc comment); keep the two in
+// sync if either changes.
+const maxExecStdinBytes = 1 * 1024 * 1024
+
+// readExecStdin reads all of stdin into memory, capped at
+// maxExecStdinBytes+1 so an over-limit reader is rejected outright instead
+// of being silently truncated. The returned error never includes any of the
+// content read — stdin exists specifically to carry secrets.
+func readExecStdin(stdin io.Reader) ([]byte, error) {
+	if stdin == nil {
+		return nil, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(stdin, maxExecStdinBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("substrate: read exec stdin: %w", err)
+	}
+	if len(data) > maxExecStdinBytes {
+		return nil, fmt.Errorf("substrate: exec stdin exceeds %d bytes", maxExecStdinBytes)
+	}
+	return data, nil
+}
+
 // doExec sends argv through the router to the actor's control server,
-// authorized with the actor's control_token (substrate-runtime.md §4).
-func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actorName, controlToken string, argv []string, user string, timeout time.Duration) (execResponse, error) {
+// authorized with the actor's control_token (substrate-runtime.md §4). When
+// stdin is non-empty, it is delivered via execRequest.Stdin rather than
+// embedded in argv, and a response that doesn't confirm StdinSupported is
+// treated as a hard failure rather than a silent no-op: see doExec's
+// StdinSupported check below and execResponse's doc comment for why version
+// skew must fail loudly instead of running the command without its input.
+func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actorName, controlToken string, argv []string, stdin []byte, user string, timeout time.Duration) (execResponse, error) {
 	var out execResponse
 
 	// The HTTP round trip needs longer than timeout_s itself: the control
@@ -753,6 +798,7 @@ func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actor
 		Argv:     argv,
 		User:     user,
 		TimeoutS: int(timeout.Seconds()),
+		Stdin:    stdin,
 	})
 	if err != nil {
 		return out, fmt.Errorf("substrate: marshal exec request: %w", err)
@@ -774,6 +820,14 @@ func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actor
 
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return out, fmt.Errorf("substrate: decode exec response from %s/%s: %w", atespace, actorName, err)
+	}
+	if len(stdin) > 0 && !out.StdinSupported {
+		// The control server didn't echo back confirmation that it
+		// understood Stdin — an older sciontool image in the actor would
+		// silently ignore the field and still report a normal exit code,
+		// which must never be mistaken for the command having received its
+		// input. Fail closed rather than trust an ambiguous success.
+		return out, fmt.Errorf("substrate: exec on %s/%s: control server did not confirm stdin support; refusing to treat the result as having received it", atespace, actorName)
 	}
 	if out.ExitCode != 0 {
 		return out, fmt.Errorf("substrate: exec on %s/%s exited %d: %s", atespace, actorName, out.ExitCode, out.Stderr)

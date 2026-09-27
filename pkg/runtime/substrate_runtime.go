@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -988,7 +989,39 @@ func (r *SubstrateRuntime) Exec(ctx context.Context, id string, cmd []string) (s
 		return "", fmt.Errorf("substrate: no control token cached for %s (only the broker process that bootstrapped it holds this in memory; lost on that process's restart, or if a different broker process bootstrapped this actor)", id)
 	}
 
-	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, r.ExecUser(), defaultExecTimeout)
+	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, nil, r.ExecUser(), defaultExecTimeout)
+	if err != nil {
+		return "", err
+	}
+	return res.Stdout, nil
+}
+
+// ExecWithStdin implements the Runtime interface's stdin-piped exec
+// (see interface.go's doc comment, #1355): stdin is delivered via
+// execRequest.Stdin over the same control-server exec path Exec uses,
+// instead of being embedded in cmd's argv, so a caller delivering a secret
+// (e.g. resetAuth's token) never puts it where it would be readable from the
+// control server's own process argv via /proc/<pid>/cmdline. stdin is
+// capped at maxExecStdinBytes and never appears in any returned error.
+func (r *SubstrateRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	atespace, actorName, err := splitSubstrateID(id)
+	if err != nil {
+		return "", err
+	}
+
+	substrateAgentStateMu.Lock()
+	token, ok := substrateControlTokens[id]
+	substrateAgentStateMu.Unlock()
+	if !ok {
+		return "", fmt.Errorf("substrate: no control token cached for %s (only the broker process that bootstrapped it holds this in memory; lost on that process's restart, or if a different broker process bootstrapped this actor)", id)
+	}
+
+	data, err := readExecStdin(stdin)
+	if err != nil {
+		return "", err
+	}
+
+	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, data, r.ExecUser(), defaultExecTimeout)
 	if err != nil {
 		return "", err
 	}

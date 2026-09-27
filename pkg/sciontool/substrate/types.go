@@ -89,6 +89,14 @@ type ExecRequest struct {
 	Argv     []string `json:"argv"`
 	User     string   `json:"user"`
 	TimeoutS int      `json:"timeout_s"`
+	// Stdin, when non-empty, is piped to the command's standard input
+	// instead of being embedded in Argv — the caller uses this to deliver a
+	// secret (e.g. a reset-auth token) without it ever appearing in the
+	// exec'd command's argv, which is readable via /proc/<pid>/cmdline for
+	// the life of the process. encoding/json marshals/unmarshals a []byte
+	// field as base64 automatically. Bounded by the same maxExecBodyBytes
+	// limit as the rest of the request body — no separate cap.
+	Stdin []byte `json:"stdin,omitempty"`
 }
 
 // ExecResponse is the body returned by POST /scion/v1/exec.
@@ -97,4 +105,11 @@ type ExecResponse struct {
 	Stderr    string `json:"stderr"`
 	ExitCode  int    `json:"exit_code"`
 	Truncated bool   `json:"truncated"`
+	// StdinSupported is true on every response from a control server new
+	// enough to understand ExecRequest.Stdin (set unconditionally once a
+	// request is handled). A caller that sent Stdin and gets back a response
+	// without this set is talking to an older control server that silently
+	// ignored Stdin — the caller must treat that as a hard error rather than
+	// proceed as if the input had been delivered.
+	StdinSupported bool `json:"stdin_supported,omitempty"`
 }
