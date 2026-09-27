@@ -114,6 +114,20 @@ func disableGoTelemetry(configHome string) error {
 	return os.WriteFile(filepath.Join(dir, "mode"), []byte("off"), 0o644)
 }
 
+// selfCheckHelperEnv, when set to any non-empty value, makes this test
+// binary behave as a lightweight standalone helper process instead of
+// running the test suite: it calls verifySelfBinaryRootOwned() directly
+// against its own running location and exits, printing "PASS" or "FAIL: "
+// plus the error. This lets a test copy the compiled test binary itself to
+// a controlled location (a real self-owned trusted chain, or a real
+// world-writable one) and run it as a real subprocess, so
+// verifySelfBinaryRootOwned's accept path can be exercised for real without
+// needing actual root — unlike a fake "root-owned" fixture, whose ownership
+// can't be constructed without CAP_CHOWN, this controls the one thing an
+// unprivileged test process CAN control for itself: which directory chain
+// its own binary sits under.
+const selfCheckHelperEnv = "SUBSTRATE_SELFCHECK_HELPER_TEST"
+
 // TestMain makes this package's tests hermetic against the *real* machine
 // they happen to run on, for the whole test binary — not just the tests
 // that remember to sandbox themselves. See
@@ -147,20 +161,6 @@ func disableGoTelemetry(configHome string) error {
 //  6. log.SetLogPath redirects pkg/sciontool/log's own file target to the
 //     same per-binary temp directory, before any log call in this binary
 //     can lazily Init() itself against the real path.
-// selfCheckHelperEnv, when set to any non-empty value, makes this test
-// binary behave as a lightweight standalone helper process instead of
-// running the test suite: it calls verifySelfBinaryRootOwned() directly
-// against its own running location and exits, printing "PASS" or "FAIL: "
-// plus the error. This lets a test copy the compiled test binary itself to
-// a controlled location (a real self-owned trusted chain, or a real
-// world-writable one) and run it as a real subprocess, so
-// verifySelfBinaryRootOwned's accept path can be exercised for real without
-// needing actual root — unlike a fake "root-owned" fixture, whose ownership
-// can't be constructed without CAP_CHOWN, this controls the one thing an
-// unprivileged test process CAN control for itself: which directory chain
-// its own binary sits under.
-const selfCheckHelperEnv = "SUBSTRATE_SELFCHECK_HELPER_TEST"
-
 func TestMain(m *testing.M) {
 	if os.Getenv(selfCheckHelperEnv) != "" {
 		if err := verifySelfBinaryRootOwned(); err != nil {

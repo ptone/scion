@@ -112,10 +112,10 @@ func TestVerifySelfBinaryRootOwned_RealSubprocessAcceptsTrustedChain(t *testing.
 // TestVerifySelfBinaryRootOwned_RealSubprocessRefusesWorldWritableChain is
 // the paired negative, run as a real subprocess for the same reason: unlike
 // the existing refusal test (which happens to work only because the
-// CURRENT test binary's own build path is under /tmp — see gate feedback),
-// this deliberately places the binary under a known-untrusted directory and
-// asserts the refusal is for that reason, by contrasting it directly
-// against the accept case above using the identical binary content.
+// CURRENT test binary's own build path is under /tmp), this deliberately
+// places the binary under a known-untrusted directory and asserts the
+// refusal is for that reason, by contrasting it directly against the
+// accept case above using the identical binary content.
 func TestVerifySelfBinaryRootOwned_RealSubprocessRefusesWorldWritableChain(t *testing.T) {
 	dir := t.TempDir()
 	out, err := runSelfCheckHelper(t, dir)
