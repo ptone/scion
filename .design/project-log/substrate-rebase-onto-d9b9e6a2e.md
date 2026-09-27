@@ -63,14 +63,27 @@ byte field, and `ExecResponse` gained a `StdinSupported` flag the control
 server sets on every request it handles. A non-empty `Stdin` is piped into
 the exec'd command's standard input instead of being interpolated into the
 command line, bounded by the same request-body size limit the rest of the
-request already uses — no new unbounded read. The client caps the amount of
-stdin it will read from the caller at the same limit, and never includes the
-content it read in an error. If a response comes back without
-`StdinSupported` set while stdin was sent, the client treats that as a hard
-failure rather than an ambiguous success — an older control server would
-otherwise silently ignore the field and still report a clean exit for a
-command that never received its input. Plain `Exec` sends no stdin and is
-unaffected.
+request already uses — no new unbounded read; the client's own stdin size
+cap is derived arithmetically from that same server-side limit, exported for
+exactly this purpose, rather than a second, independently-chosen number:
+base64, which is how stdin travels in the JSON body, expands every three raw
+bytes into four encoded ones, so the client reserves a fixed allowance out
+of the server's limit for the rest of the request and caps raw stdin at
+three quarters of what remains. The client never includes the content it
+read in an error.
+
+A control server old enough to predate the `Stdin` field would otherwise
+silently ignore it, run the real command with nothing attached to its
+standard input, and still report a clean exit — which for the reset-auth
+write-then-rename script means an empty file gets renamed on top of a
+working token, a destructive outcome an after-the-fact check on the real
+exec's own response is already too late to prevent. The client therefore
+sends an uncached, no-op probe exec (a single `true` with a one-byte
+payload) before the real command every time, and requires that probe's own
+response to confirm `StdinSupported` — the real command is never sent at
+all if it doesn't. The check on the real exec's own response is kept as a
+second layer regardless. Plain `Exec` sends no stdin and is unaffected by
+either check.
 
 ## Test fallout from the stop-lookup reconciliation
 
@@ -90,14 +103,23 @@ two more points the textual merge could not see:
 ## Verification
 
 Full build passes. The runtime, runtime broker, sciontool, and sciontool
-command packages all pass their existing and updated tests, including new
-tests for the stdin protocol: a non-empty `Stdin` reaches the exec'd
-command's real standard input through the real HTTP handler and a real
-subprocess; the secret never appears in the argv the handler hands the
-process; an oversize payload is rejected without echoing it back; a
-response missing `StdinSupported` while stdin was sent is a client error;
-and plain `Exec` sends no `Stdin` field. The hub package's existing
-project-scoped agent authorization tests pass unchanged on the rebased
-tree, and a live run of a standalone hub server against a real database
-confirmed the property those tests guard: an access token scoped to one
-project cannot list or read another project's agent.
+command packages all pass their existing and updated tests, including tests
+for the stdin protocol: a non-empty `Stdin` reaches the exec'd command's
+real standard input through the real HTTP handler and a real subprocess
+(`pkg/sciontool/substrate`'s `TestExec_StdinRoundTripsThroughRealCommand`);
+the secret never appears in the argv the handler hands the process
+(`TestExec_StdinNeverReachesSpawnedArgv`, which spies on the real exec-boundary
+seam while still running the real handler and a real subprocess); an
+oversize payload is rejected without echoing it back, both server-side and
+client-side; a response missing `StdinSupported` while stdin was sent is a
+client error; and plain `Exec` sends no `Stdin` field. The probe's own
+version-skew behavior is proven two ways: against the package's usual fake
+control server, and separately against a hand-written handler that decodes
+the real, shared `ExecRequest`/`ExecResponse` types the way an
+implementation predating `Stdin` would, confirming that in either case the
+real command is never sent — only the probe's own no-op reaches the
+control server. The hub package's existing project-scoped agent
+authorization tests pass unchanged on the rebased tree, and a live run of a
+standalone hub server against a real database confirmed the property those
+tests guard: an access token scoped to one project cannot list or read
+another project's agent.

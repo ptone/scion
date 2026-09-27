@@ -53,9 +53,22 @@ const (
 	// shrink; this one should stay comfortably above it.
 	maxBootstrapBodyBytes = 64 * 1024 * 1024
 
-	// maxExecBodyBytes bounds the exec request body (argv + metadata; no
-	// large payloads are expected here).
-	maxExecBodyBytes = 1 * 1024 * 1024
+	// MaxExecBodyBytes bounds the exec request body (argv, metadata, and an
+	// optional base64-encoded Stdin payload — no large payloads are expected
+	// here; Stdin exists to carry a short secret like a token, not a bulk
+	// transfer). Exported so pkg/runtime can derive its own Stdin size cap
+	// from this single authoritative limit instead of duplicating the
+	// number — see ExecEnvelopeAllowanceBytes.
+	MaxExecBodyBytes = 1 * 1024 * 1024
+
+	// ExecEnvelopeAllowanceBytes is a conservative upper bound on the
+	// non-Stdin portion of an ExecRequest's JSON encoding (Argv, User,
+	// TimeoutS, and JSON structural overhead), reserved out of
+	// MaxExecBodyBytes so a client can size its own Stdin cap without
+	// knowing the real Argv/User/TimeoutS sizes in advance. A real request's
+	// Argv is a handful of short arguments (e.g. resetAuth's fixed write
+	// script), far under this.
+	ExecEnvelopeAllowanceBytes = 4096
 
 	// defaultFileMode is used when a bootstrap file entry omits mode (0).
 	defaultFileMode = 0o644
@@ -626,7 +639,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ExecRequest
-	dec := json.NewDecoder(io.LimitReader(r.Body, maxExecBodyBytes+1))
+	dec := json.NewDecoder(io.LimitReader(r.Body, MaxExecBodyBytes+1))
 	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return

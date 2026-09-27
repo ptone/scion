@@ -1421,9 +1421,9 @@ func TestExec_OversizeStdinRejectedWithoutEchoing(t *testing.T) {
 		StartCmd: "true", ControlToken: "tok",
 	})
 
-	// Comfortably over maxExecBodyBytes once the JSON envelope and stdin's
+	// Comfortably over MaxExecBodyBytes once the JSON envelope and stdin's
 	// base64 (4/3) expansion are accounted for.
-	oversize := secret + strings.Repeat("A", maxExecBodyBytes)
+	oversize := secret + strings.Repeat("A", MaxExecBodyBytes)
 	rec := doJSON(t, srv.Handler(), http.MethodPost, "/scion/v1/exec", "tok", ExecRequest{
 		Argv:  []string{"cat"},
 		Stdin: []byte(oversize),

@@ -94,7 +94,7 @@ type ExecRequest struct {
 	// secret (e.g. a reset-auth token) without it ever appearing in the
 	// exec'd command's argv, which is readable via /proc/<pid>/cmdline for
 	// the life of the process. encoding/json marshals/unmarshals a []byte
-	// field as base64 automatically. Bounded by the same maxExecBodyBytes
+	// field as base64 automatically. Bounded by the same MaxExecBodyBytes
 	// limit as the rest of the request body — no separate cap.
 	Stdin []byte `json:"stdin,omitempty"`
 }

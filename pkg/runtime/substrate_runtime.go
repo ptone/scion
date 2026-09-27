@@ -996,13 +996,33 @@ func (r *SubstrateRuntime) Exec(ctx context.Context, id string, cmd []string) (s
 	return res.Stdout, nil
 }
 
-// ExecWithStdin implements the Runtime interface's stdin-piped exec
-// (see interface.go's doc comment, #1355): stdin is delivered via
-// execRequest.Stdin over the same control-server exec path Exec uses,
-// instead of being embedded in cmd's argv, so a caller delivering a secret
-// (e.g. resetAuth's token) never puts it where it would be readable from the
-// control server's own process argv via /proc/<pid>/cmdline. stdin is
-// capped at maxExecStdinBytes and never appears in any returned error.
+// execStdinProbeArgv is a no-op command the capability probe below runs: it
+// exists purely to elicit a stdin_supported response, never to do real work,
+// so it is harmless on a control server old enough not to understand Stdin
+// at all (it just runs "true" and ignores whatever it was sent).
+var execStdinProbeArgv = []string{"true"}
+
+// ExecWithStdin implements the Runtime interface's stdin-piped exec (see
+// interface.go's doc comment): stdin is delivered via execRequest.Stdin over
+// the same control-server exec path Exec uses, instead of being embedded in
+// cmd's argv, so a caller delivering a secret (e.g. resetAuth's token) never
+// puts it where it would be readable from the control server's own process
+// argv via /proc/<pid>/cmdline. stdin is capped at maxExecStdinBytes and
+// never appears in any returned error.
+//
+// Before running the real command, this sends an uncached capability probe
+// — a no-op exec with a 1-byte stdin payload — and requires the response to
+// confirm StdinSupported. Without the probe, an old control server that
+// doesn't understand ExecRequest.Stdin at all would silently ignore it and
+// run the real command anyway with nothing attached to its stdin: for
+// resetAuth's write-then-rename script, that means `cat` reads immediate
+// EOF and the rename replaces a working token file with an empty one before
+// doExec's own post-exec StdinSupported check (kept below as defence in
+// depth) ever gets a chance to fail the call. The probe never runs the real
+// command or touches real state, so a version-skew failure here is always
+// side-effect-free. Deliberately uncached: resetAuth is rare enough that the
+// extra round trip doesn't matter, and caching would risk trusting a stale
+// answer across an actor restart or an image upgrade.
 func (r *SubstrateRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 	atespace, actorName, err := splitSubstrateID(id)
 	if err != nil {
@@ -1019,6 +1039,10 @@ func (r *SubstrateRuntime) ExecWithStdin(ctx context.Context, id string, cmd []s
 	data, err := readExecStdin(stdin)
 	if err != nil {
 		return "", err
+	}
+
+	if _, err := doExec(ctx, r.router, atespace, actorName, token, execStdinProbeArgv, []byte("x"), r.ExecUser(), defaultExecTimeout); err != nil {
+		return "", fmt.Errorf("substrate: stdin capability probe failed for %s (control server may be running an image older than the reset-auth stdin change; upgrade the actor's sciontool image): %w", id, err)
 	}
 
 	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, data, r.ExecUser(), defaultExecTimeout)

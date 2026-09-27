@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
+	substrateserve "github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -749,14 +750,14 @@ func postBootstrap(ctx context.Context, router *substrate.RouterClient, atespace
 	return fmt.Errorf("substrate: bootstrap %s/%s failed: status %d: %s", atespace, actorName, resp.StatusCode, string(msg))
 }
 
-// maxExecStdinBytes bounds the stdin payload doExec will send, mirroring the
-// control server's own maxExecBodyBytes (pkg/sciontool/substrate/server.go)
-// — the whole exec request (argv, metadata, and stdin together) shares that
-// one limit; stdin gets no separate, additional allowance. Built
-// independently against the same spec as the server's constant (see
-// pkg/sciontool/substrate/types.go's package doc comment); keep the two in
-// sync if either changes.
-const maxExecStdinBytes = 1 * 1024 * 1024
+// maxExecStdinBytes bounds the raw (pre-base64) stdin payload doExec will
+// send. Derived from the control server's own exported limits
+// (pkg/sciontool/substrate.MaxExecBodyBytes and .ExecEnvelopeAllowanceBytes)
+// rather than a duplicated number: the whole exec request body — argv,
+// metadata, and the base64-encoded Stdin field together — must fit within
+// MaxExecBodyBytes, and base64 expands N raw bytes to (4/3)*N encoded bytes,
+// so the raw byte cap is (MaxExecBodyBytes - ExecEnvelopeAllowanceBytes) * 3/4.
+const maxExecStdinBytes = (substrateserve.MaxExecBodyBytes - substrateserve.ExecEnvelopeAllowanceBytes) * 3 / 4
 
 // readExecStdin reads all of stdin into memory, capped at
 // maxExecStdinBytes+1 so an over-limit reader is rejected outright instead

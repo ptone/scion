@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
+	sciontoolsubstrate "github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
@@ -1204,12 +1205,20 @@ func TestSubstrateExecWithStdin_DeliversViaStdinFieldNotArgv(t *testing.T) {
 
 	fa.execResp = execResponse{Stdout: secret, ExitCode: 0, StdinSupported: true}
 
-	out, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, strings.NewReader(secret))
+	// fakeActorServer's exec handler returns whatever fa.execResp is set to
+	// regardless of what it received, so asserting the returned Stdout
+	// equals secret here would only prove this test's own fixture echoes
+	// back what it was told to — not that stdin was actually delivered. The
+	// real round trip through a real control-server handler and a real
+	// subprocess is proven server-side in
+	// pkg/sciontool/substrate/server_test.go's
+	// TestExec_StdinRoundTripsThroughRealCommand (see the comment further
+	// down this file for why that test can't also run from here). What this
+	// test proves is what the client actually put on the wire, checked
+	// below via fa.lastExec.
+	_, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, strings.NewReader(secret))
 	if err != nil {
 		t.Fatalf("ExecWithStdin() error = %v", err)
-	}
-	if out != secret {
-		t.Errorf("ExecWithStdin() = %q, want %q (round-tripped through stdin)", out, secret)
 	}
 	if fa.lastExec == nil {
 		t.Fatal("server never received an exec request")
@@ -1241,12 +1250,22 @@ func TestSubstrateExecWithStdin_MissingStdinSupportedIsError(t *testing.T) {
 	// never set StdinSupported. The client must not treat this as success.
 	fa.execResp = execResponse{ExitCode: 0}
 
-	_, err := rt.ExecWithStdin(context.Background(), id, []string{"cat"}, strings.NewReader(secret))
+	_, err := rt.ExecWithStdin(context.Background(), id, []string{"sh", "-c", "cat > realfile"}, strings.NewReader(secret))
 	if err == nil {
 		t.Fatal("ExecWithStdin() expected an error when the server doesn't confirm stdin_supported, got nil")
 	}
 	if strings.Contains(err.Error(), secret) {
 		t.Errorf("ExecWithStdin() error leaked the stdin content: %v", err)
+	}
+	// The version-skew rejection happens on the pre-exec capability probe,
+	// before the real command is ever attempted: exactly one exec call
+	// reaches the server, and it is the probe's own no-op argv, never the
+	// caller's real command.
+	if got := len(rec.list()); got != 1 {
+		t.Fatalf("exec calls to the server = %d, want exactly 1 (the probe only, real command must never run)", got)
+	}
+	if fa.lastExec == nil || len(fa.lastExec.Argv) != 1 || fa.lastExec.Argv[0] != "true" {
+		t.Errorf("the one exec call's argv = %v, want the probe's [\"true\"] — the real command must never reach the server", fa.lastExec)
 	}
 }
 
@@ -1275,6 +1294,86 @@ func TestSubstrateExecWithStdin_OversizeRejectedWithoutEchoing(t *testing.T) {
 		t.Error("oversize stdin reached the control server; it should have been rejected client-side first")
 	}
 }
+
+// TestSubstrateExecWithStdin_ProbeStopsBeforeRealCommandOnOldServer simulates
+// a control server old enough to predate ExecRequest.Stdin, using the real
+// wire types (pkg/sciontool/substrate.ExecRequest/ExecResponse) so the
+// decode step this test relies on is the genuine shared contract, not the
+// client's own mirrored copy of it. The handler here stands in for the old
+// server's own (unmodified) code: it decodes an ExecRequest exactly as an
+// old server would (silently keeping the fields it knows and dropping the
+// one it doesn't), runs nothing for real, and never sets StdinSupported —
+// exactly what an old server's response looks like. The point under test is
+// entirely client-side: that the pre-exec probe is what stops here, before
+// the real, destructive command is ever sent.
+func TestSubstrateExecWithStdin_ProbeStopsBeforeRealCommandOnOldServer(t *testing.T) {
+	const secret = "S3CR3T-MUST-NOT-REACH-REAL-COMMAND"
+
+	var mu sync.Mutex
+	var execCalls []sciontoolsubstrate.ExecRequest
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/scion/v1/exec", func(w http.ResponseWriter, r *http.Request) {
+		var req sciontoolsubstrate.ExecRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		execCalls = append(execCalls, req)
+		mu.Unlock()
+		// An old server: understands Argv/User/TimeoutS, has no idea Stdin
+		// exists, runs the command with nothing attached to its stdin, and
+		// its response has no stdin_supported field at all.
+		_ = json.NewEncoder(w).Encode(sciontoolsubstrate.ExecResponse{ExitCode: 0})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resetSubstrateAgentStateForTest(t)
+	rt := NewSubstrateRuntimeForTest(nil, substrate.NewRouterClient(server.URL), nil, config.V1SubstrateConfig{})
+	id := "scion-proj/agent-old-server"
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = "tok-old-server"
+	substrateAgentStateMu.Unlock()
+
+	_, err := rt.ExecWithStdin(context.Background(), id, []string{"sh", "-c", "cat > realfile"}, strings.NewReader(secret))
+	if err == nil {
+		t.Fatal("ExecWithStdin() expected an error against a server that never confirms stdin support, got nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("ExecWithStdin() error leaked the stdin content: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(execCalls) != 1 {
+		t.Fatalf("exec requests reaching the server = %d, want exactly 1 (the probe only)", len(execCalls))
+	}
+	if got := execCalls[0].Argv; len(got) != 1 || got[0] != "true" {
+		t.Errorf("the only request's argv = %v, want the probe's [\"true\"] — the real command must never be sent", got)
+	}
+}
+
+// A real client-to-real-server round trip (this package's SubstrateRuntime
+// against a real pkg/sciontool/substrate.Server, with no fake standing in
+// for either side) was attempted here and is not feasible from this
+// package's tests: a real bootstrap call unconditionally prepares a
+// root-owned private scratch directory and clears a root-owned enforced-
+// hooks directory (pkg/sciontool/substrate/server.go's handleBootstrap),
+// both fail-closed without root — exactly as they should in production —
+// and neither has an exported seam this package's tests can redirect (only
+// that package's own TestMain does, for its own tests). The real round trip
+// — a real ExecRequest decoded by the real handler, piped into a real `cat`
+// subprocess, with the secret coming back out through real stdout — is
+// proven server-side instead, in
+// pkg/sciontool/substrate/server_test.go's TestExec_StdinRoundTripsThroughRealCommand
+// and TestExec_StdinNeverReachesSpawnedArgv. What this package's own tests
+// prove is the client's side of the contract: what it puts on the wire
+// (TestSubstrateExecWithStdin_DeliversViaStdinFieldNotArgv), and how it
+// reacts when the wire's other end doesn't confirm support
+// (TestSubstrateExecWithStdin_MissingStdinSupportedIsError,
+// TestSubstrateExecWithStdin_ProbeStopsBeforeRealCommandOnOldServer, the
+// latter decoding the real ExecRequest/ExecResponse types so the wire
+// contract itself, not just this package's mirrored copy of it, is what the
+// test exercises).
 
 // -----------------------------------------------------------------------
 // Redaction: no secret env values leak into a Run error
