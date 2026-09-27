@@ -383,9 +383,9 @@ func removeDirContents(dir string) error {
 }
 
 // WorktreePath returns the canonical worktree path for a given agent within
-// a shared base checkout: <hostPath>/worktrees/<agentID>.
+// a shared base checkout: <hostPath>/<WorktreesSubdir>/<agentID>.
 func WorktreePath(hostPath, agentID string) string {
-	return filepath.Join(hostPath, "worktrees", agentID)
+	return filepath.Join(hostPath, WorktreesSubdir, agentID)
 }
 
 // ensureWorktree creates or attaches to a per-agent worktree if the mode is
