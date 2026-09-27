@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -51,6 +52,75 @@ func TestVerifySelfBinaryRootOwned_AcceptsRealRootOwnedBinary(t *testing.T) {
 	}
 	if err := verifySelfBinaryRootOwned(); err != nil {
 		t.Errorf("verifySelfBinaryRootOwned() = %v, want nil (running as root)", err)
+	}
+}
+
+// copySelfBinaryTo copies this test binary's own currently-running content
+// (via "/proc/self/exe", the same magic symlink verifySelfBinaryRootOwned
+// itself resolves — not os.Args[0] or os.Executable(), which can each name
+// a path the binary no longer lives at) to dest, made executable.
+func copySelfBinaryTo(t *testing.T, dest string) {
+	t.Helper()
+	src, err := os.Open("/proc/self/exe")
+	if err != nil {
+		t.Skipf("cannot open /proc/self/exe: %v", err)
+	}
+	defer func() { _ = src.Close() }()
+	dst, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dst.Close() }()
+	if _, err := io.Copy(dst, src); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// runSelfCheckHelper copies this test binary into dir and runs the copy as
+// a real subprocess with selfCheckHelperEnv set (see TestMain), returning
+// its combined output and exit error. Because the subprocess is exec'd
+// directly from dir, ITS OWN "/proc/self/exe" genuinely resolves under dir
+// — unlike the parent test process (whose own binary sits wherever `go
+// test` happened to compile it), this lets a test control the one thing
+// verifySelfBinaryRootOwned actually inspects, without needing real root to
+// construct a genuinely root-owned fixture.
+func runSelfCheckHelper(t *testing.T, dir string) (output string, err error) {
+	t.Helper()
+	dest := filepath.Join(dir, "selfcheck-helper")
+	copySelfBinaryTo(t, dest)
+	cmd := exec.Command(dest)
+	cmd.Env = append(os.Environ(), selfCheckHelperEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// TestVerifySelfBinaryRootOwned_RealSubprocessAcceptsTrustedChain is the
+// paired positive this check's existing root-only accept test can't
+// provide in an unprivileged environment (it SKIPs there — see
+// TestVerifySelfBinaryRootOwned_AcceptsRealRootOwnedBinary): run as a real
+// subprocess whose own binary sits under a genuinely trusted, self-owned
+// directory chain, the check must PASS for real, not merely because the
+// test happens to skip.
+func TestVerifySelfBinaryRootOwned_RealSubprocessAcceptsTrustedChain(t *testing.T) {
+	dir := trustedTestRoot(t)
+	out, err := runSelfCheckHelper(t, dir)
+	if err != nil || !strings.Contains(out, "PASS") {
+		t.Errorf("self-check subprocess under a trusted chain: err=%v, output=%q, want a clean PASS exit", err, out)
+	}
+}
+
+// TestVerifySelfBinaryRootOwned_RealSubprocessRefusesWorldWritableChain is
+// the paired negative, run as a real subprocess for the same reason: unlike
+// the existing refusal test (which happens to work only because the
+// CURRENT test binary's own build path is under /tmp — see gate feedback),
+// this deliberately places the binary under a known-untrusted directory and
+// asserts the refusal is for that reason, by contrasting it directly
+// against the accept case above using the identical binary content.
+func TestVerifySelfBinaryRootOwned_RealSubprocessRefusesWorldWritableChain(t *testing.T) {
+	dir := t.TempDir()
+	out, err := runSelfCheckHelper(t, dir)
+	if err == nil || !strings.Contains(out, "FAIL") {
+		t.Errorf("self-check subprocess under a world-writable chain: err=%v, output=%q, want a FAIL exit", err, out)
 	}
 }
 
