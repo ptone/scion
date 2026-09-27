@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
 // trustedTestRoot creates a fresh directory to stand in for a fixup's
@@ -499,6 +501,22 @@ func plantSetuidSudo(t *testing.T, root, dir string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// TestSudoCheckDirs_MatchesRootexecSudoCheckDirs pins sudoCheckDirs to its
+// single source of truth: every other test in this file that loops over
+// sudoCheckDirs to prove the fixup or the precondition reaches "every
+// candidate directory" would still pass even if sudoCheckDirs were
+// hardcoded back to a narrower list (they only ever check that the loop
+// variable itself is covered, not what that list should actually be) — so
+// narrowing sudoCheckDirs back to, say, the historical
+// {"usr/sbin","usr/bin","sbin","bin"} would silently stop checking
+// "usr/local/sbin"/"usr/local/bin" without any of them failing.
+func TestSudoCheckDirs_MatchesRootexecSudoCheckDirs(t *testing.T) {
+	want := rootexec.SudoCheckDirs()
+	if !reflect.DeepEqual(sudoCheckDirs, want) {
+		t.Errorf("sudoCheckDirs = %v, want %v (rootexec.SudoCheckDirs())", sudoCheckDirs, want)
+	}
 }
 
 // TestStripSudoSetuidBits_StripsSetuidSetgidStickyFromEveryCandidateDir
