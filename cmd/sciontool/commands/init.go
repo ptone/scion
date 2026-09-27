@@ -2922,20 +2922,20 @@ const gitconfigMaxBytes = 1 << 20
 //     all treated identically — start from an empty private copy — since
 //     none of those refusals should be able to fail startup.
 //  2. Seed that content into a file inside a fresh os.MkdirTemp directory
-//     created under hooks.PrivateRootTmpDir (/run/scion/tmp), never under
-//     the system temp directory or $TMPDIR: on a runtime where root is a
-//     security boundary, that directory can be world-writable with no
-//     sticky bit, which is enough for the workload to rename the entry
-//     MkdirTemp just created out of the way and plant a symlink at the same
-//     name before root ever uses it — the directory's own 0700 mode and
-//     unpredictable name protect what's INSIDE it, not the entry itself,
-//     which is only as safe as its parent. dirfd.EnsureDirNoFollowRootOwned
-//     verifies every component of hooks.PrivateRootTmpDir's chain — not just
-//     that it's not a symlink, but that each one is genuinely owned by root
-//     (or, with no separate root/workload boundary to protect, by this
-//     process itself) and not writable by anything else — and fails closed,
-//     with no fallback to the system temp directory, the instant any of
-//     that doesn't hold. The three `git config --file <that private file>`
+//     under a private, root-verified parent — never a blind $TMPDIR/system
+//     temp directory: on a runtime where root is a security boundary, that
+//     directory can be world-writable with no sticky bit, which is enough
+//     for the workload to rename the entry MkdirTemp just created out of
+//     the way and plant a symlink at the same name before root ever uses
+//     it — the directory's own 0700 mode and unpredictable name protect
+//     what's INSIDE it, not the entry itself, which is only as safe as its
+//     parent. Exactly where that parent is, and how strictly it fails
+//     closed, is runtime-dependent — see resolvePrivateGitConfigDir's own
+//     doc comment: substrate and the "/run/scion/tmp self-heal" path both
+//     fail closed with no fallback, but a runtime where that location is
+//     unusable falls back to the ambient temp directory, gated on
+//     AmbientTempDirTrusted rather than refused outright. The three
+//     `git config --file <that private file>`
 //     calls that follow it run with GIT_CONFIG_NOSYSTEM=1,
 //     GIT_CONFIG_GLOBAL=/dev/null, HOME and TMPDIR both pointed at the temp
 //     directory (never the real agentHome or the ambient TMPDIR, so root's
