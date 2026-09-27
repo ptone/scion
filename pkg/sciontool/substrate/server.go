@@ -373,10 +373,14 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 			// with an inherited environment, regardless of how the
 			// executable's path was found) — so none of them are ever
 			// allowed to reach PID 1's own environment via this loop,
-			// no matter what the request asks for. The harness child
-			// still receives the workload's real values for these later,
-			// through its own env construction, not through PID 1's own
-			// os.Environ().
+			// no matter what the request asks for. Unlike the rest of
+			// req.Env, an operator-supplied override for one of these keys
+			// does not reach the harness child either: supervisor.Run
+			// builds the child's environment from this process's own
+			// os.Environ() (pkg/sciontool/supervisor/supervisor.go),
+			// which is exactly what this refusal keeps clean. The harness
+			// runs with whatever PATH/LD_*/etc. this image already has,
+			// not a request-supplied override.
 			log.Debug("bootstrap: refusing to set %s on substrate-serve's own PID 1 environment", k)
 			continue
 		}
