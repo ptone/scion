@@ -2517,6 +2517,57 @@ func TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched(t *testing.T) {
 	}
 }
 
+// TestConfigureSharedWorkspaceGit_FollowsSymlinkOwnedByWorkload proves the
+// R9(b) fix: a symlink at $HOME/.gitconfig whose ENTIRE chain — the symlink
+// itself and the file it targets — is owned by the same uid this call is
+// told the workload is (a dotfile manager's normal layout: chezmoi, stow,
+// dotbot, ... symlinking .gitconfig into their own managed store) is
+// followed, so the workload's existing settings seed the private copy
+// instead of the credential helper silently starting from empty. This test
+// cannot fabricate a file genuinely owned by a DIFFERENT uid without root,
+// so TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched (uid 0, meaning
+// "no distinct workload identity") remains this fix's negative case.
+func TestConfigureSharedWorkspaceGit_FollowsSymlinkOwnedByWorkload(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("chowning WriteFileNoFollow's output to an arbitrary uid requires a non-root, non-zero uid for this test's own assertions to mean anything")
+	}
+	agentHome := t.TempDir()
+	store := filepath.Join(t.TempDir(), "dotfiles")
+	if err := os.Mkdir(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(store, "gitconfig")
+	if err := os.WriteFile(real, []byte("[foo]\n\tbar = baz\n"), 0o600); err != nil {
+		t.Fatalf("write real gitconfig: %v", err)
+	}
+	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+	if err := os.Symlink(real, gitconfigPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	configureSharedWorkspaceGit(agentHome, os.Getuid(), os.Getgid(), true, false)
+
+	fi, err := os.Lstat(gitconfigPath)
+	if err != nil {
+		t.Fatalf("lstat gitconfig: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Error("gitconfigPath is still a symlink after configureSharedWorkspaceGit")
+	}
+	// foo.bar has no bearing on credential.helper or user.*: its survival
+	// proves the read actually followed the symlink and seeded the private
+	// copy with the target's content (the same "unrelated key" proof
+	// TestConfigureSharedWorkspaceGit_PreservesExistingUnrelatedKeys uses
+	// for the non-symlink case), rather than starting from empty and
+	// merely not erroring.
+	if got := gitConfigGet(t, gitconfigPath, "foo.bar"); got != "baz" {
+		t.Errorf("foo.bar = %q, want baz (the followed symlink's existing content must survive the rewrite)", got)
+	}
+	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
+		t.Errorf("user.email = %q, want agent@scion.dev", got)
+	}
+}
+
 // TestConfigureSharedWorkspaceGit_FifoDoesNotHang proves a FIFO planted at
 // $HOME/.gitconfig with no writer is refused immediately rather than
 // hanging RunInit forever. This fails if the read is ever reverted to a

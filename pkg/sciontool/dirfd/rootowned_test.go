@@ -5,6 +5,7 @@ Copyright 2026 The Scion Authors.
 package dirfd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -598,5 +599,155 @@ func TestVerifyRootOwnedExecutable_RefusesSymlinkLoop(t *testing.T) {
 
 	if err := VerifyRootOwnedExecutable(a); err == nil {
 		t.Error("VerifyRootOwnedExecutable() = nil, want an error (symlink loop)")
+	}
+}
+
+// ---------------- ReadFileNoFollowOwnedBy ----------------
+
+// TestReadFileNoFollowOwnedBy_PlainFileNoSymlink proves the common case (no
+// symlink at all) still works exactly like ReadFileNoFollow, when the file
+// is owned by the uid the caller asks for.
+func TestReadFileNoFollowOwnedBy_PlainFileNoSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gitconfig")
+	if err := os.WriteFile(path, []byte("[user]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := ReadFileNoFollowOwnedBy(path, uint32(os.Getuid()), 1024)
+	if err != nil {
+		t.Fatalf("ReadFileNoFollowOwnedBy: %v", err)
+	}
+	if string(data) != "[user]\n" {
+		t.Errorf("content = %q", data)
+	}
+}
+
+// TestReadFileNoFollowOwnedBy_FollowsChainOwnedByExpectedUID reproduces a
+// dotfile manager's layout: ~/.gitconfig is a symlink into a managed store,
+// itself owned by the same uid as the symlink and the workspace it lives
+// in. This is the exact case R9(b) exists to unbreak.
+func TestReadFileNoFollowOwnedBy_FollowsChainOwnedByExpectedUID(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "dotfiles")
+	if err := os.Mkdir(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(store, "gitconfig")
+	if err := os.WriteFile(real, []byte("[user]\n\tname = someone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, ".gitconfig")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := ReadFileNoFollowOwnedBy(link, uint32(os.Getuid()), 1024)
+	if err != nil {
+		t.Fatalf("expected a symlink chain owned entirely by the expected uid to resolve, got %v", err)
+	}
+	if string(data) != "[user]\n\tname = someone\n" {
+		t.Errorf("content = %q", data)
+	}
+}
+
+// TestReadFileNoFollowOwnedBy_FollowsMultiHopChain proves more than one
+// symlink hop is followed, as long as every hop stays owned by the expected
+// uid — dotbot and similar tools sometimes symlink through an intermediate
+// alias.
+func TestReadFileNoFollowOwnedBy_FollowsMultiHopChain(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real-gitconfig")
+	if err := os.WriteFile(real, []byte("[user]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hop1 := filepath.Join(dir, "hop1")
+	if err := os.Symlink(real, hop1); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, ".gitconfig")
+	if err := os.Symlink(hop1, link); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := ReadFileNoFollowOwnedBy(link, uint32(os.Getuid()), 1024)
+	if err != nil {
+		t.Fatalf("expected a multi-hop chain owned entirely by the expected uid to resolve, got %v", err)
+	}
+	if string(data) != "[user]\n" {
+		t.Errorf("content = %q", data)
+	}
+}
+
+// TestReadFileNoFollowOwnedBy_RefusesWrongOwnerAtLeaf fails if ownership of
+// the plain, non-symlink case is not actually checked: this process cannot
+// fabricate a file genuinely owned by a different uid, so it instead asks
+// for a uid ONE HIGHER than its own real owner, which — on any system this
+// test runs on — cannot be this process's own uid, proving the mismatch is
+// what triggers the refusal, not something else.
+func TestReadFileNoFollowOwnedBy_RefusesWrongOwnerAtLeaf(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gitconfig")
+	if err := os.WriteFile(path, []byte("[user]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	wantUID := uint32(os.Getuid()) + 1
+	_, err := ReadFileNoFollowOwnedBy(path, wantUID, 1024)
+	if !errors.Is(err, ErrSymlinkChainNotOwnedByUID) {
+		t.Fatalf("expected ErrSymlinkChainNotOwnedByUID, got %v", err)
+	}
+}
+
+// TestReadFileNoFollowOwnedBy_RefusesWrongOwnerAtSymlink proves the
+// symlink's OWN ownership is checked before its target is even read, not
+// just the final destination's.
+func TestReadFileNoFollowOwnedBy_RefusesWrongOwnerAtSymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real-gitconfig")
+	if err := os.WriteFile(real, []byte("[user]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, ".gitconfig")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	wantUID := uint32(os.Getuid()) + 1
+	_, err := ReadFileNoFollowOwnedBy(link, wantUID, 1024)
+	if !errors.Is(err, ErrSymlinkChainNotOwnedByUID) {
+		t.Fatalf("expected ErrSymlinkChainNotOwnedByUID, got %v", err)
+	}
+}
+
+// TestReadFileNoFollowOwnedBy_RefusesSymlinkLoop proves a symlink cycle
+// fails closed instead of looping forever, the same guarantee
+// VerifyRootOwnedExecutable gives for a root-owned chain.
+func TestReadFileNoFollowOwnedBy_RefusesSymlinkLoop(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a")
+	b := filepath.Join(dir, "b")
+	if err := os.Symlink(b, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(a, b); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ReadFileNoFollowOwnedBy(a, uint32(os.Getuid()), 1024)
+	if err == nil {
+		t.Fatal("expected an error for a symlink loop, got nil")
+	}
+}
+
+// TestReadFileNoFollowOwnedBy_MissingFileReportsNotExist matches
+// ReadFileNoFollow's own "absent is not an error condition worth a special
+// path" behaviour at the type level, so callers can still use errors.Is
+// against os.ErrNotExist the same way.
+func TestReadFileNoFollowOwnedBy_MissingFileReportsNotExist(t *testing.T) {
+	dir := t.TempDir()
+	_, err := ReadFileNoFollowOwnedBy(filepath.Join(dir, "missing"), uint32(os.Getuid()), 1024)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected os.ErrNotExist, got %v", err)
 	}
 }

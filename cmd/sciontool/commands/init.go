@@ -2963,7 +2963,35 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 
 	existing, err := dirfd.ReadFileNoFollow(gitconfigPath, gitconfigMaxBytes)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Error("Refusing existing %s: %v; starting from an empty gitconfig", gitconfigPath, err)
+		// A symlink at .gitconfig is not automatically hostile: a dotfile
+		// manager the workload runs for itself (chezmoi, stow, dotbot, ...)
+		// commonly manages ~/.gitconfig this way, symlinking it into its own
+		// managed store. uid > 0 means a distinct workload identity exists
+		// to compare ownership against (see setupHostUser's doc comment —
+		// uid == 0 covers both genuinely running as root with no separate
+		// identity to drop to, and the rootless case where PID 1 already IS
+		// the workload, neither of which this ownership check means
+		// anything for). When every hop of the symlink chain, including the
+		// file it finally lands on, is owned by that same uid, following it
+		// hands root nothing the workload could not already do to its own
+		// files directly — see dirfd.ReadFileNoFollowOwnedBy's doc comment
+		// for the full safety argument. Anything else (owned by a different
+		// uid, a loop, too many hops, not a plain file) is refused and
+		// logged the same as before.
+		if uid > 0 {
+			if owned, oerr := dirfd.ReadFileNoFollowOwnedBy(gitconfigPath, uint32(uid), gitconfigMaxBytes); oerr == nil {
+				log.Info("Following existing %s: a symlink chain entirely owned by the workload (uid %d)", gitconfigPath, uid)
+				existing = owned
+				err = nil
+			}
+		}
+		if err != nil {
+			// Loud and unambiguous, not merely a debug-level line: an
+			// operator relying on this credential helper or git identity
+			// needs to know it started from empty, not silently discover
+			// it later from a failed push.
+			log.Error("Refusing existing %s: %v; starting from an empty gitconfig", gitconfigPath, err)
+		}
 	}
 	// Lstat never follows a symlink, so this can only ever report the mode
 	// of the real entry at gitconfigPath (or nothing, if it's absent or not
