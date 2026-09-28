@@ -126,6 +126,15 @@ func Error(format string, args ...interface{}) {
 	write("ERROR", "", format, args...)
 }
 
+// Warn logs a warning: something an operator should notice and act on, but
+// that does not itself abort whatever operation triggered it (unlike Error,
+// which this codebase's convention reserves for a failure the caller is
+// already handling as one). Always emitted, the same as Error — never
+// gated behind SCION_DEBUG the way Debug is.
+func Warn(format string, args ...interface{}) {
+	write("WARN", "", format, args...)
+}
+
 // Debug logs a debug message if SCION_DEBUG is set.
 func Debug(format string, args ...interface{}) {
 	if !debug {

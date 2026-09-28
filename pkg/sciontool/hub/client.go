@@ -19,8 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1284,110 +1282,28 @@ func WriteGitHubTokenFile(path, token string, uid, gid int) error {
 // workload-writable directory (e.g. cmd/sciontool/commands' scion-env
 // writer), not just the token writers in this package that first needed it.
 //
-// It resolves path's parent directory via dirfd.OpenParentNoFollow, which
-// walks every component from "/" down with O_NOFOLLOW: a workload that
-// owns an intermediate directory (e.g. $HOME, or $HOME/.scion) and swaps
-// it for a symlink gets the walk refused, not silently followed into an
-// attacker-chosen directory. Every remaining step — the pre-check, the
-// temp file's creation, and the final rename — happens via the *at()
-// syscalls relative to that one directory fd, never by path again.
+// This is a thin wrapper over dirfd.WriteFileNoFollowWithChown, passing
+// dirfd.RefuseSymlink: a planted symlink or other non-regular entry at
+// path's leaf is refused outright — no write at all — rather than silently
+// replaced, since every caller of this specific entry point writes a
+// credential or state file (an auth token, a GitHub token's expiry
+// companion, scion-env) where that substitution means tampering worth
+// reporting, not a stale leaf to overwrite quietly. (Compare
+// dirfd.ReplaceLeaf, used for installs into a directory the workload owns
+// outright, e.g. gitconfig or agent-info.json, where the opposite is true.)
+// dirfd itself does the actual parent-directory walk, temp-file creation,
+// write, fsync, and fd-based chmod/chown/rename — see its own doc comment
+// for the full safety argument; this function no longer duplicates any of
+// that.
 //
-// It refuses outright — no write at all — if path's leaf already exists as
-// a symlink or as any non-regular file, so a workload that has planted one
-// there gets an error back instead of root silently operating on whatever
-// that entry points to.
-//
-// Otherwise it creates a randomly named file in the same directory with
-// O_CREAT|O_EXCL|O_NOFOLLOW (so a planted file or symlink at the temp name
-// itself can't be reused or followed either), writes the content, fsyncs,
-// sets the final owner and mode on the open file descriptor — fchown/fchmod,
-// never a path-based chown/chmod that could follow a symlink swapped in
-// after the fact — and only then renames the temp file onto the leaf name.
-// rename(2) replaces the directory entry directly, without dereferencing
-// it, so this is safe even if the leaf changes between the pre-check above
-// and the rename.
-//
-// A process that crashes between creating the temp file and the rename
-// leaks one temp file with the same content the final file would have had;
-// the random name means leaked temp files accumulate rather than being
-// overwritten by the next write, as a fixed ".tmp" name would be. This is
-// accepted rather than swept for the callers in this package: the content
-// is short-lived (a token valid for at most a few hours, or an env file
-// rewritten on every refresh), and every caller passes a mode no wider
-// than its target's own required access. A sweeper would itself need to
-// distinguish a genuine crash leftover from a temp file another write is
-// still in the middle of producing.
-func WriteFileNoFollowChown(path string, data []byte, mode os.FileMode, uid, gid int) (err error) {
-	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
-	if err != nil {
-		return fmt.Errorf("failed to open parent directory of %s: %w", path, err)
-	}
-	defer func() { _ = syscall.Close(dirFd) }()
-
-	if rerr := dirfd.RefuseSymlinkOrNonRegularAt(dirFd, leaf); rerr != nil {
-		return fmt.Errorf("refusing to write %s: %w", path, rerr)
-	}
-
-	tmpName, err := randomTempFileName(leaf)
-	if err != nil {
-		return err
-	}
-
-	f, err := dirfd.CreateExclAt(dirFd, tmpName, mode)
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = dirfd.UnlinkAt(dirFd, tmpName)
-		}
-	}()
-
-	if _, werr := f.Write(data); werr != nil {
-		_ = f.Close()
-		err = fmt.Errorf("failed to write temp file: %w", werr)
-		return err
-	}
-	if serr := f.Sync(); serr != nil {
-		_ = f.Close()
-		err = fmt.Errorf("failed to fsync temp file: %w", serr)
-		return err
-	}
-	if uid > 0 {
-		if cerr := fchownFn(int(f.Fd()), uid, gid); cerr != nil {
-			_ = f.Close()
-			err = fmt.Errorf("failed to chown temp file: %w", cerr)
-			return err
-		}
-	}
-	if cerr := f.Chmod(mode); cerr != nil {
-		_ = f.Close()
-		err = fmt.Errorf("failed to chmod temp file: %w", cerr)
-		return err
-	}
-	if cerr := f.Close(); cerr != nil {
-		err = fmt.Errorf("failed to close temp file: %w", cerr)
-		return err
-	}
-	if rerr := dirfd.RenameAt(dirFd, tmpName, leaf); rerr != nil {
-		err = fmt.Errorf("failed to rename temp file to %s: %w", path, rerr)
-		return err
+// fchownFn is threaded through as the chown callback so this package's own
+// tests can keep intercepting the fd-based chown call, exactly as they did
+// before this became a wrapper.
+func WriteFileNoFollowChown(path string, data []byte, mode os.FileMode, uid, gid int) error {
+	if err := dirfd.WriteFileNoFollowWithChown(path, data, mode, uid, gid, dirfd.RefuseSymlink, fchownFn); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
-}
-
-// randomTempFileName returns a temp file name derived from base, with
-// enough random bits that a workload can't predict or preemptively plant
-// it — the O_EXCL on its creation only helps if the name wasn't guessable
-// in the first place. The name is relative (no directory component): the
-// caller creates it via dirfd.CreateExclAt against an already-resolved
-// directory fd.
-func randomTempFileName(base string) (string, error) {
-	var buf [12]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", fmt.Errorf("failed to generate temp file name: %w", err)
-	}
-	return fmt.Sprintf(".%s.%s.tmp", base, hex.EncodeToString(buf[:])), nil
 }
 
 // ReadGitHubTokenFile reads a GitHub token from the specified path.

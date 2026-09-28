@@ -6,6 +6,7 @@ package dirfd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,7 +161,7 @@ func TestWriteFileNoFollow_NormalWrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 
-	if err := WriteFileNoFollow(path, []byte(`{"a":1}`), 0o644, 0, 0); err != nil {
+	if err := WriteFileNoFollow(path, []byte(`{"a":1}`), 0o644, 0, 0, ReplaceLeaf); err != nil {
 		t.Fatalf("WriteFileNoFollow: %v", err)
 	}
 
@@ -197,7 +198,7 @@ func TestWriteFileNoFollow_ChownsTempFdBeforeRename(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 
-	if err := WriteFileNoFollow(path, []byte("x"), 0o644, os.Getuid(), os.Getgid()); err != nil {
+	if err := WriteFileNoFollow(path, []byte("x"), 0o644, os.Getuid(), os.Getgid(), ReplaceLeaf); err != nil {
 		t.Fatalf("WriteFileNoFollow: %v", err)
 	}
 
@@ -242,7 +243,7 @@ func TestWriteFileNoFollow_ChmodTargetsTempFdNotSwappedPath(t *testing.T) {
 	// The call may succeed or fail depending on what the final rename does
 	// with the swapped-in symlink; either way, the target's permissions
 	// must never change.
-	_ = WriteFileNoFollow(finalPath, []byte(`{"a":1}`), 0o644, 0, 0)
+	_ = WriteFileNoFollow(finalPath, []byte(`{"a":1}`), 0o644, 0, 0, ReplaceLeaf)
 
 	st, err := os.Stat(target)
 	if err != nil {
@@ -266,7 +267,7 @@ func TestWriteFileNoFollow_RemovesTempOnChownFailure(t *testing.T) {
 
 	// uid 1 ("daemon" on most systems) is never the current test uid and a
 	// non-root process cannot chown to it — that's the point.
-	err := WriteFileNoFollow(path, []byte("x"), 0o644, 1, 1)
+	err := WriteFileNoFollow(path, []byte("x"), 0o644, 1, 1, ReplaceLeaf)
 	if err == nil {
 		t.Fatal("expected chown to an unpermitted uid to fail")
 	}
@@ -277,6 +278,137 @@ func TestWriteFileNoFollow_RemovesTempOnChownFailure(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected the temp file to be cleaned up after a failed write, got %v", entries)
+	}
+}
+
+// TestWriteFileNoFollow_InvalidLeafPolicyRejected fails if LeafPolicyUnset
+// (the zero value) is ever treated as usable: every caller must explicitly
+// choose ReplaceLeaf or RefuseSymlink, so the zero value must be refused,
+// not silently behave as either one.
+func TestWriteFileNoFollow_InvalidLeafPolicyRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	if err := WriteFileNoFollow(path, []byte("x"), 0o644, 0, 0, LeafPolicyUnset); err == nil {
+		t.Fatal("expected LeafPolicyUnset to be refused, got nil")
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("expected no file to be written when the policy is invalid")
+	}
+}
+
+// TestWriteFileNoFollow_LeafPolicyMatrix exercises both LeafPolicy values
+// against a symlink leaf, a FIFO leaf, and a pre-existing regular file:
+// ReplaceLeaf must overwrite all three; RefuseSymlink must refuse the first
+// two (leaving them and whatever they point at completely untouched) and
+// still overwrite the third.
+func TestWriteFileNoFollow_LeafPolicyMatrix(t *testing.T) {
+	for _, policy := range []LeafPolicy{ReplaceLeaf, RefuseSymlink} {
+		policy := policy
+		t.Run(fmt.Sprintf("policy=%d", policy), func(t *testing.T) {
+			t.Run("symlink leaf", func(t *testing.T) {
+				dir := t.TempDir()
+				victim := filepath.Join(dir, "victim")
+				if err := os.WriteFile(victim, []byte("do-not-touch"), 0o600); err != nil {
+					t.Fatalf("write victim: %v", err)
+				}
+				path := filepath.Join(dir, "leaf")
+				if err := os.Symlink(victim, path); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+
+				err := WriteFileNoFollow(path, []byte("new"), 0o644, 0, 0, policy)
+
+				victimData, rerr := os.ReadFile(victim)
+				if rerr != nil {
+					t.Fatalf("read victim: %v", rerr)
+				}
+				if string(victimData) != "do-not-touch" {
+					t.Fatalf("victim was modified through the symlink: %q", victimData)
+				}
+
+				fi, lerr := os.Lstat(path)
+				if lerr != nil {
+					t.Fatalf("lstat: %v", lerr)
+				}
+				switch policy {
+				case ReplaceLeaf:
+					if err != nil {
+						t.Fatalf("ReplaceLeaf: expected the symlink leaf to be replaced, got %v", err)
+					}
+					if fi.Mode()&os.ModeSymlink != 0 {
+						t.Error("ReplaceLeaf: leaf is still a symlink after the write")
+					}
+				case RefuseSymlink:
+					if err == nil {
+						t.Fatal("RefuseSymlink: expected the symlink leaf to be refused, got nil")
+					}
+					if fi.Mode()&os.ModeSymlink == 0 {
+						t.Error("RefuseSymlink: leaf is no longer a symlink after a refused write")
+					}
+				}
+			})
+
+			t.Run("FIFO leaf", func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "leaf")
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("mkfifo: %v", err)
+				}
+
+				done := make(chan error, 1)
+				go func() {
+					done <- WriteFileNoFollow(path, []byte("new"), 0o644, 0, 0, policy)
+				}()
+
+				var err error
+				select {
+				case err = <-done:
+				case <-time.After(3 * time.Second):
+					t.Fatal("WriteFileNoFollow blocked on a FIFO leaf with no reader/writer")
+				}
+
+				fi, lerr := os.Lstat(path)
+				if lerr != nil {
+					t.Fatalf("lstat: %v", lerr)
+				}
+				switch policy {
+				case ReplaceLeaf:
+					if err != nil {
+						t.Fatalf("ReplaceLeaf: expected the FIFO leaf to be replaced, got %v", err)
+					}
+					if fi.Mode()&os.ModeNamedPipe != 0 {
+						t.Error("ReplaceLeaf: leaf is still a FIFO after the write")
+					}
+				case RefuseSymlink:
+					if err == nil {
+						t.Fatal("RefuseSymlink: expected the FIFO leaf to be refused, got nil")
+					}
+					if fi.Mode()&os.ModeNamedPipe == 0 {
+						t.Error("RefuseSymlink: leaf is no longer a FIFO after a refused write")
+					}
+				}
+			})
+
+			t.Run("regular file leaf", func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "leaf")
+				if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+
+				if err := WriteFileNoFollow(path, []byte("new"), 0o644, 0, 0, policy); err != nil {
+					t.Fatalf("policy %d: expected a regular-file leaf to be replaced, got %v", policy, err)
+				}
+				data, rerr := os.ReadFile(path)
+				if rerr != nil {
+					t.Fatalf("read back: %v", rerr)
+				}
+				if string(data) != "new" {
+					t.Errorf("content = %q, want %q", data, "new")
+				}
+			})
+		})
 	}
 }
 
@@ -356,12 +488,17 @@ func TestReadUnderRootNoFollow_BoundsOversizedContent(t *testing.T) {
 	}
 }
 
-// TestReadUnderRootNoFollow_RefusesIntermediateSymlinkInsideRoot fails if
-// only the leaf component is checked: an intermediate directory swapped for
-// a symlink must also be refused, even though it never appears to escape
-// root as a path string (the symlink's target might itself be some other
-// directory inside root, or entirely outside it).
-func TestReadUnderRootNoFollow_RefusesIntermediateSymlinkInsideRoot(t *testing.T) {
+// TestReadUnderRootNoFollow_AllowsIntermediateSymlinkInsideRoot proves an
+// intermediate directory that is a symlink is now FOLLOWED, not refused,
+// when its target is itself inside root: the fd-anchored walk resolves
+// "sub" through curFd's own readlink and continues into "attacker" (also
+// directly under root) using the same fd-anchored openat chain, never a
+// path re-lookup. This is the behaviour a Kubernetes projected-secret
+// volume's "..data" symlink needs (see
+// TestReadUnderRootNoFollow_AllowsProjectedSecretStyleSymlinkChain below for
+// the real shape); a blanket refusal of every symlink, regardless of where
+// it points, broke that unconditionally.
+func TestReadUnderRootNoFollow_AllowsIntermediateSymlinkInsideRoot(t *testing.T) {
 	root := t.TempDir()
 	attacker := filepath.Join(root, "attacker")
 	if err := os.Mkdir(attacker, 0o700); err != nil {
@@ -372,13 +509,203 @@ func TestReadUnderRootNoFollow_RefusesIntermediateSymlinkInsideRoot(t *testing.T
 		t.Fatalf("write victim: %v", err)
 	}
 	sub := filepath.Join(root, "sub")
-	if err := os.Symlink(attacker, sub); err != nil {
+	if err := os.Symlink("attacker", sub); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	_, err := ReadUnderRootNoFollow(root, filepath.Join(sub, "victim"), 1024)
-	if err == nil {
-		t.Fatal("expected an error walking through a symlinked intermediate directory inside root, got nil")
+	data, err := ReadUnderRootNoFollow(root, filepath.Join(sub, "victim"), 1024)
+	if err != nil {
+		t.Fatalf("expected a symlinked intermediate directory whose target is also inside root to be followed, got %v", err)
+	}
+	if string(data) != "do-not-touch" {
+		t.Errorf("content = %q, want %q", data, "do-not-touch")
+	}
+}
+
+// TestReadUnderRootNoFollow_AllowsProjectedSecretStyleSymlinkChain
+// reproduces a real Kubernetes projected-secret (and ConfigMap) volume
+// layout: kubelet lays out a timestamped directory holding the actual
+// files, a "..data" symlink to it, and each key as a symlink through
+// "..data" (e.g. "token" -> "..data/token"). Before this fix, the blanket
+// symlink refusal made every from_file read of a projected-secret key fail,
+// which is the very regression this fix exists to close. This is the
+// acceptance-gate test: it must pass.
+func TestReadUnderRootNoFollow_AllowsProjectedSecretStyleSymlinkChain(t *testing.T) {
+	root := t.TempDir()
+	timestamped := "..2026_09_28_12_00_00.123456789"
+	if err := os.Mkdir(filepath.Join(root, timestamped), 0o700); err != nil {
+		t.Fatalf("mkdir timestamped dir: %v", err)
+	}
+	tokenPath := filepath.Join(root, timestamped, "token")
+	if err := os.WriteFile(tokenPath, []byte("sa-token-value\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	if err := os.Symlink(timestamped, filepath.Join(root, "..data")); err != nil {
+		t.Fatalf("symlink ..data: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..data", "token"), filepath.Join(root, "token")); err != nil {
+		t.Fatalf("symlink token: %v", err)
+	}
+
+	data, err := ReadUnderRootNoFollow(root, filepath.Join(root, "token"), 1024)
+	if err != nil {
+		t.Fatalf("expected a projected-secret-style symlink chain to resolve, got %v", err)
+	}
+	if string(data) != "sa-token-value\n" {
+		t.Errorf("content = %q, want %q", data, "sa-token-value\n")
+	}
+}
+
+// TestReadUnderRootNoFollow_RefusesSymlinkTargetEscapingViaDotDot fails if a
+// relative symlink target containing ".." is followed: this walk has no
+// fd-anchored way to prove such a target stays under root (unlike a plain
+// sibling name), so it must be refused rather than guessed at.
+func TestReadUnderRootNoFollow_RefusesSymlinkTargetEscapingViaDotDot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret")
+	if err := os.WriteFile(secret, []byte("leaked"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	link := filepath.Join(root, "link")
+	target := filepath.Join("..", filepath.Base(outside), "secret")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := ReadUnderRootNoFollow(root, link, 1024)
+	if !errors.Is(err, ErrPathEscapesRoot) {
+		t.Fatalf("expected ErrPathEscapesRoot for a relative symlink target containing '..', got %v", err)
+	}
+}
+
+// TestReadUnderRootNoFollow_RefusesAbsoluteSymlinkTarget fails if an
+// absolute symlink target is ever followed, even one that would happen to
+// resolve back inside root: proving that requires trusting the target's own
+// text, which the fd-anchored walk deliberately never does.
+func TestReadUnderRootNoFollow_RefusesAbsoluteSymlinkTarget(t *testing.T) {
+	root := t.TempDir()
+	inRoot := filepath.Join(root, "inside")
+	if err := os.WriteFile(inRoot, []byte("data"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(inRoot, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	_, err := ReadUnderRootNoFollow(root, link, 1024)
+	if !errors.Is(err, ErrPathEscapesRoot) {
+		t.Fatalf("expected ErrPathEscapesRoot for an absolute symlink target, even one numerically inside root, got %v", err)
+	}
+}
+
+// TestReadUnderRootNoFollow_RefusesEscapingSymlinkAtIntermediateComponent
+// covers the same escape shapes as
+// TestReadUnderRootNoFollow_RefusesSymlinkTargetEscapingViaDotDot and
+// TestReadUnderRootNoFollow_RefusesAbsoluteSymlinkTarget, but with the
+// symlink at an INTERMEDIATE path component instead of the leaf: this walk
+// resolves a symlink through a different code path depending on whether it
+// is the last remaining component (ReadAtNoFollow's own O_NOFOLLOW open) or
+// an earlier one (the O_DIRECTORY|O_NOFOLLOW open, which fails ENOTDIR for
+// a symlink rather than ELOOP — see isSymlinkAt's doc comment), so a test
+// that only ever puts the escaping symlink at the leaf never exercises the
+// intermediate branch's own escape checks at all.
+func TestReadUnderRootNoFollow_RefusesEscapingSymlinkAtIntermediateComponent(t *testing.T) {
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret")
+	if err := os.WriteFile(secret, []byte("leaked"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		readRel string // path passed to ReadUnderRootNoFollow, relative to root
+		setup   func(t *testing.T, root string)
+	}{
+		{
+			name:    "absolute target",
+			readRel: filepath.Join("abs", "secret"),
+			setup: func(t *testing.T, root string) {
+				if err := os.Symlink(outside, filepath.Join(root, "abs")); err != nil {
+					t.Fatalf("symlink abs: %v", err)
+				}
+			},
+		},
+		{
+			name:    "relative target with one ..",
+			readRel: filepath.Join("rel", "secret"),
+			setup: func(t *testing.T, root string) {
+				target := filepath.Join("..", filepath.Base(outside))
+				if err := os.Symlink(target, filepath.Join(root, "rel")); err != nil {
+					t.Fatalf("symlink rel: %v", err)
+				}
+			},
+		},
+		{
+			name:    "relative target with .. nested under a real directory",
+			readRel: filepath.Join("d", "up", "secret"),
+			setup: func(t *testing.T, root string) {
+				if err := os.Mkdir(filepath.Join(root, "d"), 0o700); err != nil {
+					t.Fatalf("mkdir d: %v", err)
+				}
+				target := filepath.Join("..", "..", filepath.Base(outside))
+				if err := os.Symlink(target, filepath.Join(root, "d", "up")); err != nil {
+					t.Fatalf("symlink d/up: %v", err)
+				}
+			},
+		},
+		{
+			name:    "chained: safe-looking splice resolves into an escaping symlink",
+			readRel: filepath.Join("chain", "secret"),
+			setup: func(t *testing.T, root string) {
+				if err := os.Mkdir(filepath.Join(root, "d"), 0o700); err != nil {
+					t.Fatalf("mkdir d: %v", err)
+				}
+				target := filepath.Join("..", "..", filepath.Base(outside))
+				if err := os.Symlink(target, filepath.Join(root, "d", "up")); err != nil {
+					t.Fatalf("symlink d/up: %v", err)
+				}
+				// "chain" -> "d/up" does not itself contain ".." or an
+				// absolute component, so it splices cleanly; the escape
+				// only surfaces one hop later, when "up" (now itself an
+				// intermediate component) is resolved in turn.
+				if err := os.Symlink(filepath.Join("d", "up"), filepath.Join(root, "chain")); err != nil {
+					t.Fatalf("symlink chain: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			tc.setup(t, root)
+
+			_, err := ReadUnderRootNoFollow(root, filepath.Join(root, tc.readRel), 1024)
+			if !errors.Is(err, ErrPathEscapesRoot) {
+				t.Fatalf("expected ErrPathEscapesRoot, got %v", err)
+			}
+		})
+	}
+}
+
+// TestReadUnderRootNoFollow_RefusesSymlinkLoop fails if the walk spins
+// forever (or panics) on a symlink loop planted by whatever owns the
+// containing directory.
+func TestReadUnderRootNoFollow_RefusesSymlinkLoop(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Symlink("b", filepath.Join(root, "a")); err != nil {
+		t.Fatalf("symlink a: %v", err)
+	}
+	if err := os.Symlink("a", filepath.Join(root, "b")); err != nil {
+		t.Fatalf("symlink b: %v", err)
+	}
+
+	_, err := ReadUnderRootNoFollow(root, filepath.Join(root, "a"), 1024)
+	if !errors.Is(err, ErrTooManySymlinksUnderRoot) {
+		t.Fatalf("expected ErrTooManySymlinksUnderRoot for a symlink loop, got %v", err)
 	}
 }
 

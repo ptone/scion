@@ -69,6 +69,46 @@ func TestLoadEnvOverlay_FromFileResolves(t *testing.T) {
 	}
 }
 
+// TestLoadEnvOverlay_FromFileProjectedSecretStyleSymlinkResolves reproduces
+// a real Kubernetes projected-secret volume layout mounted as an
+// allowedRoot: a timestamped directory holding the actual key, a "..data"
+// symlink to it, and the requested key itself as a symlink through
+// "..data" (e.g. "token" -> "..data/token"). Before this fix, the from_file
+// resolver refused every symlink unconditionally, so from_file could never
+// read a key out of a volume mounted this way — this is the acceptance-gate
+// regression test for that fix.
+func TestLoadEnvOverlay_FromFileProjectedSecretStyleSymlinkResolves(t *testing.T) {
+	dir := t.TempDir()
+	timestamped := "..2026_09_28_12_00_00.123456789"
+	if err := os.MkdirAll(filepath.Join(dir, timestamped), 0700); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(dir, timestamped, "token")
+	if err := os.WriteFile(tokenPath, []byte("sa-token-value\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(timestamped, filepath.Join(dir, "..data")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..data", "token"), filepath.Join(dir, "token")); err != nil {
+		t.Fatal(err)
+	}
+
+	overlay := filepath.Join(dir, "env.json")
+	body := `{"TOKEN":{"from_file":"` + filepath.Join(dir, "token") + `"}}`
+	if err := os.WriteFile(overlay, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadEnvOverlay(overlay, []string{dir})
+	if err != nil {
+		t.Fatalf("LoadEnvOverlay: %v", err)
+	}
+	if got["TOKEN"] != "sa-token-value" {
+		t.Fatalf("expected the projected-secret token to resolve, got %q", got["TOKEN"])
+	}
+}
+
 // TestLoadEnvOverlay_FromFileSymlinkInsideRootEscapesRejected fails if
 // containment is checked by comparing path strings instead of walking an
 // fd chain anchored at the allowed root: the symlink's own name sits

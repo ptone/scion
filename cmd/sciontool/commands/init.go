@@ -1711,6 +1711,18 @@ func extractChildCommand(args []string) []string {
 // On success this function does not return (the process image is replaced).
 // On failure it returns an error and the caller should continue — the
 // in-process environment is already clean, only /proc exposure remains.
+//
+// There is no separate, skippable symlink-resolution step here for
+// filepath.EvalSymlinks (used by an earlier version of this function) to
+// have stood in for: syscall.Exec passes the literal string
+// "/proc/self/exe", and it is the KERNEL, not this process, that resolves
+// that magic symlink to the running inode at the moment of the execve
+// syscall itself — standard behavior on Linux >= 2.6, true under docker,
+// Apple VZ, and Cloud Run alike, since all three run a real Linux kernel
+// under their respective hypervisor/sandbox layer. Confirmed directly on
+// docker: a manual re-exec with a staged secret set leaves both the
+// child's environment and the parent's own /proc/<pid>/environ clean of it
+// afterward.
 func reExecWithCleanEnv() error {
 	log.Info("Re-execing to clear staged secrets from /proc/%d/environ", os.Getpid())
 	return syscall.Exec(rootexec.SelfExe(), os.Args, os.Environ())
@@ -2801,7 +2813,28 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 
 	existing, err := dirfd.ReadFileNoFollow(gitconfigPath, gitconfigMaxBytes)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Error("Refusing existing %s: %v; starting from an empty gitconfig", gitconfigPath, err)
+		// This never follows the link, even when the target is owned by
+		// the workload: doing so would still mean root opening a
+		// workload-controlled path — a FIFO or device can hang or have
+		// side effects on open, before any ownership check ever runs —
+		// which is exactly the attack class this refusal exists to close.
+		// A symlinked .gitconfig (the layout a dotfile manager such as
+		// chezmoi, stow, or dotbot commonly produces) is refused exactly
+		// like a hostile one, the same as a FIFO, a hardlink, or an
+		// oversized file: this is a visibility change only, not a
+		// behavior change — the private copy still starts empty and
+		// installs with ReplaceLeaf (see below), but an operator now gets
+		// a WARN naming the path and the reason, not just an ERROR line
+		// easy to miss. Paths and reasons only, never file content: err
+		// here is always a dirfd sentinel's own text ("not a single-link
+		// regular file", "too many levels of symbolic links", "content
+		// exceeds size limit", or an I/O error resolving the parent
+		// directory chain), never anything read from the refused file
+		// itself. The message below is deliberately neutral about WHAT
+		// kind of refusal this was — %v carries that — since this branch
+		// covers reasons with no "not a regular file" framing at all
+		// (an oversized regular file, a parent-directory walk failure).
+		log.Warn("Refusing existing %s (%v); its content was NOT merged, and the credential helper and git identity below were applied to an empty gitconfig instead. Replace it with a single-link regular file under %d bytes to have its content picked up.", gitconfigPath, err, gitconfigMaxBytes)
 	}
 	// Lstat never follows a symlink, so this can only ever report the mode
 	// of the real entry at gitconfigPath (or nothing, if it's absent or not
@@ -2889,7 +2922,13 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		log.Error("Failed to read back private gitconfig: %v", err)
 		return
 	}
-	if err := dirfd.WriteFileNoFollow(gitconfigPath, result, mode, uid, gid); err != nil {
+	// ReplaceLeaf, not RefuseSymlink: gitconfigPath lives inside agentHome,
+	// which the workload owns outright, so whatever currently sits at the
+	// leaf (including a symlink the read above just refused to read
+	// through) is a stale entry this install means to overwrite, not
+	// tamper to refuse — the read-side refusal already happened; this
+	// call only installs the result.
+	if err := dirfd.WriteFileNoFollow(gitconfigPath, result, mode, uid, gid, dirfd.ReplaceLeaf); err != nil {
 		log.Error("Failed to install %s: %v", gitconfigPath, err)
 	}
 }

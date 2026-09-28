@@ -260,7 +260,12 @@ func (h *StatusHandler) readAgentInfoMap() map[string]interface{} {
 // rename — never a path-based os.Chmod, which a symlink swapped into the
 // temp file's directory entry between create and chmod (something the
 // workload can always do, since it owns the containing directory) could
-// otherwise redirect onto an arbitrary target's permissions.
+// otherwise redirect onto an arbitrary target's permissions. dirfd.ReplaceLeaf
+// is the right policy here, not dirfd.RefuseSymlink: StatusPath lives inside
+// a directory the workload owns outright, so a symlink already there is a
+// stale leaf to overwrite on this write, exactly like every other write —
+// refusing it would buy nothing, since the read side (readAgentInfoMap,
+// above) already refuses to follow it regardless of what this write does.
 func (h *StatusHandler) writeAgentInfoLocked(info map[string]interface{}) error {
 	data, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
@@ -270,7 +275,7 @@ func (h *StatusHandler) writeAgentInfoLocked(info map[string]interface{}) error 
 	// Widen to 0644 (CreateExclAt's own default is 0600) so the broker
 	// process — which may run as a different uid than the container init —
 	// can read and converge the file after the container exits.
-	if err := dirfd.WriteFileNoFollow(h.StatusPath, data, 0644, 0, 0); err != nil {
+	if err := dirfd.WriteFileNoFollow(h.StatusPath, data, 0644, 0, 0, dirfd.ReplaceLeaf); err != nil {
 		return fmt.Errorf("writing %s: %w", h.StatusPath, err)
 	}
 	return nil

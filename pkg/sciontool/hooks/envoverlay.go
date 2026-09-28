@@ -200,13 +200,26 @@ func resolveEnvValue(raw json.RawMessage, allowedRoots []string) (string, error)
 //
 // If allowedRoots is empty there is no containment policy to enforce —
 // matching pathInAnyRoot's historical "no roots configured" behaviour, used
-// only by tests — and cleaned is read directly. Otherwise cleaned must
-// resolve to inside one of allowedRoots, which dirfd.ReadUnderRootNoFollow
-// verifies by walking an openat(O_NOFOLLOW) fd chain down from that root
-// rather than by comparing path strings, so containment itself becomes
-// symlink-safe. There is deliberately no separate stat anywhere in this
-// path: the file is fstat'd and read exactly once, from the fd the walk
-// verified.
+// only by tests — and cleaned is read directly (dirfd.ReadFileNoFollow,
+// which refuses every symlink outright: with no root there is nothing to
+// prove a target stays inside). Otherwise cleaned must resolve to inside
+// one of allowedRoots, which dirfd.ReadUnderRootNoFollow verifies by
+// walking an openat(O_NOFOLLOW) fd chain down from that root rather than by
+// comparing path strings, so containment itself becomes symlink-safe.
+//
+// A symlink cleaned resolves through — at any component, including
+// cleaned's own leaf — is followed, not refused, as long as
+// ReadUnderRootNoFollow can prove its target stays under that same root
+// through the fd-anchored walk itself. This is required, not optional: a
+// Kubernetes projected-secret volume's key files are exactly this shape
+// ("key" -> "..data/key", "..data" -> a timestamped sibling directory), so
+// refusing every symlink unconditionally broke from_file for every secret
+// mounted that way. A symlink whose name sits under allowedRoots but whose
+// real target does not is still refused; see ReadUnderRootNoFollow's doc
+// comment for exactly what "prove" means here and why a textual containment
+// check is not enough. There is deliberately no separate stat anywhere in
+// this path: the file is fstat'd and read exactly once, from the fd the
+// walk finally verifies.
 //
 // Error messages preserve their pre-existing shapes ("not found", "escapes
 // allowed roots", "exceeds N bytes") so callers and tests that key off
