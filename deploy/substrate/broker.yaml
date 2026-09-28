@@ -195,11 +195,11 @@ data:
       # does not allow listing Kubernetes pods, so both auxiliary runtimes'
       # List calls fail on every request that reaches resolveDeleteTarget,
       # masking the broker-restart identity gap this deployment already
-      # works around (see README.md, "After a broker restart"). Repointing
+      # works around (see OPERATIONS.md, "After a broker restart"). Repointing
       # both profile names at this same substrate-prod runtime is enough:
       # their resolved type then equals the default's, so
       # discoverAuxiliaryRuntimes registers nothing extra and neither
-      # failure mode exists on this broker. See README.md, "After a broker
+      # failure mode exists on this broker. See OPERATIONS.md, "After a broker
       # restart", for the rest of that issue.
       local:
         runtime: substrate-prod

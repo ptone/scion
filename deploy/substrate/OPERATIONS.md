@@ -55,8 +55,14 @@ process — drops both for every actor a *previous* process created. The
 actors themselves, their egress policies, and their workers are untouched on
 the cluster; only this broker's memory of them is gone.
 
-**The invariant: no delete or stop reports success while the actor exists.**
-Concretely:
+**The invariant: no delete or stop reports success while the actor exists**,
+with two exceptions: an actor already in `ACTOR_STATE_DELETING` (see "A
+pre-restart actor stuck in `DELETING`" below — the `DELETING` exclusion has
+nothing to do with a restart by itself, but can combine with one); and a
+pre-restart actor under a second substrate profile on a different `ateapi`
+endpoint, which isn't probed until that profile's first `Run` (see
+"Record-less-actor probe scope" below — not applicable to a deployment with
+only one substrate profile). Otherwise, concretely:
 
 - **Delete/stop of a pre-restart agent by its slug returns HTTP 409**
   (`substrate_agent_identity_unknown`) instead of the ordinary 404/202,
@@ -78,57 +84,224 @@ Concretely:
 
 ### Cleaning up a record-less actor
 
-The 409 response body only proves at least one unidentified actor exists in
-the atespace — it never names one. Identify the actor from the broker's own
-log before acting on anything:
+The 409 response body carries only the atespace and a count, never an actor
+name or a control token — identify the actor from the broker's own log or
+your own records first, not from the response body:
 
 ```sh
-# 1. Find the actor name. The broker logs unidentified-actor names at WARN
-#    on every such 409 (log only, never in the HTTP response). A rolling
-#    update can run more than one broker pod at once, so match the SPECIFIC
-#    pod that logged the line you care about:
+# 0. Identify the actor. The 409 response body only proves at least one
+#    record-less actor exists in this atespace; it does not name it, and it
+#    is never a license to act on every name the broker's log turns up. The
+#    broker logs the record-less actor NAMES at WARN on every such 409 (only
+#    in its own log, never in the HTTP response). Because a rolling update
+#    or `strategy: Recreate` can list more than one broker pod at once, find
+#    the SPECIFIC pod that logged the line you care about, not an arbitrary
+#    one (`kubectl logs deploy/...` picks one pod for you, which may not be
+#    the one that logged this WARN):
 kubectl -n "${BROKER_NAMESPACE}" logs --prefix --tail=-1 -l app=scion-substrate-broker \
   | grep -i "agent identity unknown"
-
-# The actor this delete/stop is for is named "<project-slug>--<agent-slug>".
-# Act ONLY on that one name, and only after confirming both of the following
-# -- the WARN line lists every unidentified actor in the atespace, which
-# routinely includes other agents that are still running and must not be
-# touched here:
-#   (a) its creation time predates the broker CONTAINER's current start in
-#       that pod (not the pod's start time, which does not move on an
-#       in-place container restart):
+#    Each matching line is prefixed "[pod/<pod-name>/scion-substrate-broker]"
+#    -- note that pod name (call it POD below) and read the
+#    "recordless_actors" field on that same line.
+#
+#    The actor THIS delete/stop is for is named "<project-slug>--<agent-slug>"
+#    -- act ONLY on that one name, and only if it appears in POD's WARN line
+#    and passes both checks below. The WARN line lists every record-less
+#    actor in the atespace, which routinely includes OTHER pre-restart
+#    agents in the same project that are still running (and, per the
+#    atespace-prefix note below, possibly another project's actors sharing
+#    the prefix). Those other names are NOT part of this procedure and must
+#    not be deleted here: each is cleaned up through its own agent's
+#    delete/stop, when that request hits this same 409.
+#
+#    For the one name that matches <project-slug>--<agent-slug>:
+#      (i)  confirm its .metadata.createTime predates the broker CONTAINER's
+#           current start in POD -- not POD's .status.startTime, which is
+#           when the POD started and does NOT move when the kubelet restarts
+#           a crashed or OOM-killed container in place (restartPolicy:
+#           Always, the Deployment default). An in-pod container restart is
+#           exactly the kind of "broker restart" this whole mechanism exists
+#           to catch, so the pod's start time is the wrong boundary: use the
+#           container's own state.running.startedAt instead:
 kubectl ate get actor -a <atespace> <actor> -o yaml   # read .metadata.createTime
-kubectl -n "${BROKER_NAMESPACE}" get pod <pod> \
+kubectl -n "${BROKER_NAMESPACE}" get pod "$POD" \
   -o jsonpath='{.status.containerStatuses[?(@.name=="scion-substrate-broker")].state.running.startedAt}'
-#   (b) it matches an agent you actually expect in the hub's own agent list
-#       for that project.
+#           An actor created after that timestamp is not a pre-restart
+#           actor, whatever this 409 says -- do not act on it.
+#      (ii) cross-check it against the hub's own agent list for this
+#           project (its phase/name should match what you expect).
+#    If more than one project could plausibly share this atespace (see the
+#    atespace-prefix note below), confirm ownership with that project's
+#    owner first. Only the one name verified this way -- read from POD's own
+#    WARN log line, confirmed pre-restart against POD's own container start,
+#    and matched against the hub's agent list -- may be acted on below;
+#    never guess from the requested slug alone, and never act on the other
+#    names the same WARN line lists.
 
-# 2. Delete the actor's egress policy FIRST -- order matters, since an
-#    orphaned policy left behind after deleting the actor is invisible to
-#    this whole mechanism. There is no CLI for this; call the ateapi
-#    Control service's DeleteActorEgressPolicy RPC directly (grpcurl or
-#    equivalent), authenticated with a short-lived token, TLS verification
-#    ON. Confirm the policy is actually gone (expect NotFound on a
-#    follow-up Get) before proceeding.
+# 1. Only once the actor is confirmed: delete its egress policy FIRST. This
+#    order is mandatory, not a suggestion — deleting the actor before its
+#    egress policy leaves the policy behind with nothing left to delete it
+#    (the record-less-actor check only ever reports actors, so an orphaned
+#    policy alone is invisible to this whole mechanism). There is no
+#    dedicated CLI for this; call the ateapi Control service's
+#    DeleteActorEgressPolicy RPC directly. Keep TLS verification ON: never
+#    grpcurl -insecure/-plaintext against a real cluster endpoint.
+#
+#    Per deployment, fill in: <atespace> and <actor> (from step 0); the
+#    CA bundle passed to -cacert, which is the CA that signs the
+#    api.${ATE_SYSTEM_NAMESPACE}.svc certificate (cluster-internal, not in a
+#    public trust store; with the settings this deployment uses it is the
+#    ClusterTrustBundle named by substrate.cluster_trust_bundle, or the file
+#    named by substrate.ca_file if you use that instead); and a host to run
+#    grpcurl from that can resolve and reach api.${ATE_SYSTEM_NAMESPACE}.svc:443
+#    directly (inside the cluster network) -- it is a headless,
+#    cluster-internal service name, so it does not resolve from a
+#    workstation (see the workstation form after the in-cluster form below).
+#
+#    The token is held in an exported environment variable, never written to
+#    a file and never put on grpcurl's command line: with -expand-headers,
+#    grpcurl itself replaces ${ATE_TOKEN} in the header with the value of
+#    that environment variable, and the single quotes stop the shell from
+#    expanding it first, so argv only ever contains the literal text
+#    '${ATE_TOKEN}'. The export and both calls run in a subshell, so
+#    ATE_TOKEN is gone as soon as it exits -- whether or not the calls
+#    inside succeed -- with no separate `unset` needed.
+kubectl get clustertrustbundle "${CLUSTER_TRUST_BUNDLE_NAME}" \
+  -o jsonpath='{.spec.trustBundle}' > ate-ca.pem
+(
+  export ATE_TOKEN="$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
+    --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
+  grpcurl -cacert ate-ca.pem -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
+    -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
+    api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/DeleteActorEgressPolicy
 
-# 3. Delete the actor itself, any-state so a non-RUNNING actor isn't
+  #  Verify the policy is actually gone before touching the actor — an
+  #  orphaned policy after this step is invisible to this whole mechanism, so
+  #  this check matters, not just as a courtesy:
+  grpcurl -cacert ate-ca.pem -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
+    -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
+    api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/GetActorEgressPolicy
+)   # ATE_TOKEN is gone as soon as the subshell exits, whatever happened inside
+#    Expect a NotFound gRPC status. Anything else means the policy is still
+#    there; do not proceed to step 2 until it reads NotFound.
+#
+#    From a workstation: the CA bundle is already fetched above by the same
+#    command; port-forward instead of reaching the cluster-internal service
+#    name directly, and keep TLS verification anchored to the in-cluster
+#    name via -authority, which also sets the TLS server name used for
+#    verification. Run the port-forward and both calls in their own
+#    subshell, so ATE_TOKEN stays scoped to it just like the in-cluster form
+#    above; guard the port-forward with a trap right after capturing its
+#    PID, so it is stopped whether the subshell exits normally, is
+#    interrupted, or is terminated. A separate `INT TERM` trap that exits is
+#    required alongside the `EXIT` one: a trap only runs a handler and
+#    resumes the script at the next command, so an `EXIT INT TERM` trap
+#    whose handler is just the cleanup would kill the port-forward on
+#    Ctrl-C and then keep going into `export ATE_TOKEN=...` and the grpcurl
+#    calls below instead of stopping the block — `exit 130` (128+SIGINT) on
+#    `INT TERM` makes the interrupt actually stop the block, and that exit
+#    is what then fires the `EXIT` trap's cleanup. Wait for the
+#    port-forward to actually be listening before the first grpcurl call:
+#      (
+#        kubectl -n "${ATE_SYSTEM_NAMESPACE}" port-forward svc/api 9555:443 &
+#        pf=$!
+#        trap 'kill "$pf" 2>/dev/null' EXIT
+#        trap 'exit 130' INT TERM
+#        sleep 2   # give the port-forward time to start listening
+#        export ATE_TOKEN="$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
+#          --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
+#        grpcurl -cacert ate-ca.pem -authority api.${ATE_SYSTEM_NAMESPACE}.svc \
+#          -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
+#          -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
+#          localhost:9555 ateapi.Control/DeleteActorEgressPolicy
+#        # (same substitution for the GetActorEgressPolicy verification
+#        # call above, run inside this same subshell)
+#      )
+#    Once verification reads NotFound, proceed to step 2.
+
+# 2. Delete the actor itself, any_state so a non-RUNNING actor isn't
 #    rejected:
 kubectl ate delete actor -a <atespace> <actor> --any-state
 
-# 4. Force-delete the hub's own agent record so it stops dispatching to an
-#    actor that no longer exists (the hub has no --force on the client;
-#    call its DELETE .../agents/<id>?force=true endpoint directly, with the
-#    caller's own hub token). Run this LAST -- run it before steps 1-3
-#    finish and the actor, egress policy, and worker are orphaned with no
-#    further signal.
+# 3. Force-delete the hub's own agent record so it doesn't keep dispatching
+#    to an actor that no longer exists. There is no --force on the delete
+#    client -- call the hub API directly, with the access token from
+#    ~/.scion/credentials.json (mode 0600), the same one scion itself uses
+#    to authenticate; do not create or expect any separate "~/.scion/token"
+#    file. Nothing that expands a secret may appear on the command line
+#    (shell history, `ps`, `/proc/<pid>/cmdline`) or be left behind if this
+#    is interrupted: the whole read/write/curl sequence runs in a subshell,
+#    so its EXIT trap fires — removing the header file — as soon as curl
+#    returns, not only when the surrounding interactive shell eventually
+#    exits. A separate `INT TERM` trap that exits is required alongside the
+#    `EXIT` one, the same reasoning as the port-forward subshell above:
+#    without it, an interrupt would remove the header file and then fall
+#    through to the curl call instead of stopping the block.
+(
+  read -rs TOKEN          # paste the hub token; not echoed, not in history
+  HDR=$(mktemp); trap 'rm -f "$HDR"' EXIT; trap 'exit 130' INT TERM
+  printf 'Authorization: Bearer %s\n' "$TOKEN" > "$HDR"; chmod 600 "$HDR"
+  unset TOKEN
+  curl --fail-with-body -X DELETE \
+    "https://<hub-endpoint>/api/v1/agents/<agent-id>?force=true" -H @"$HDR"
+)
 ```
 
-`force=true` still dispatches the delete to the broker exactly as a normal
-delete would; it only changes what happens when that dispatch fails — the
-hub deletes its own agent record regardless of what the broker did or didn't
-manage to clean up. Run it only after the actor and its egress policy are
-confirmed gone.
+`--fail-with-body` makes a 401/403/404 exit non-zero (with the body still
+shown) instead of silently exiting 0, so a rejected request cannot be
+mistaken for a completed step.
+
+`force=true` does not skip the broker: the hub still dispatches the delete
+to the broker exactly as a normal delete would — it only changes what
+happens when that dispatch fails. Without `force`, a broker error
+(including this same 409) fails the hub request and leaves the hub record
+alone; with `force`, the hub logs the broker error and deletes its own
+agent record anyway, regardless of what the broker did or didn't manage to
+clean up. Run it only after steps 0–2 succeed: run it early and the actor,
+egress policy and worker are orphaned with no further signal (the broker
+error that would have surfaced this is now just a log line); run it while
+other record-less actors remain in this atespace and the broker still
+returns 409, so the project's on-broker files for this agent may also be
+left behind.
+
+### Fail-closed consequences worth knowing about, not fixed here
+
+- **(a)** The atespace name derived from a project ID truncates that ID to
+  its first 12 (sanitized) characters. This collision is not just
+  theoretical: project IDs are client-supplied at project creation, so
+  anyone able to create a project who knows another project's ID prefix can
+  deliberately create one that maps to the same atespace. What that allows
+  is a count disclosure (how many record-less actors project X's atespace
+  holds) and the ability to force 409s on project X's genuinely-absent-slug
+  deletes/stops — never a wrong-project action: the probe only ever turns a
+  would-be success into an error, it never selects a delete target across
+  atespace boundaries.
+- **(b)** Once at least one record-less actor exists in a project's
+  atespace, *every* delete or stop of an absent slug in that project returns
+  409 instead of the usual idempotent 404/202, until every record-less actor
+  in that atespace has been cleaned up (above).
+- **(c)** A narrow window between `CreateActor` succeeding and this process
+  recording it (spanning the running-wait, health check, and bootstrap —
+  tens of seconds) makes a new actor look record-less to any concurrent
+  delete/stop of an unrelated absent slug in the same project, or of the
+  in-flight agent itself: both get a spurious 409 rather than a wrong
+  action, since the probe never selects a target. Not hardened further in
+  this phase.
+- **(d)** See "A pre-restart actor stuck in `DELETING`" below — this is the
+  other of the invariant's two stated exceptions.
+
+All are accepted trade-offs of failing closed rather than risking a false
+success.
+
+### Record-less-actor probe scope
+
+The record-less-actor probe only reaches the substrate profiles this broker
+process has already resolved a manager for. Immediately after a restart,
+that is just the default substrate profile — a second substrate profile
+pointed at a *different* `ateapi` endpoint is not probed until this process
+resolves it at least once (its first `Run`), so a pre-restart actor under
+that second profile's atespace gets the ordinary idempotent 404/202 until
+then. A deployment with only one substrate profile doesn't hit this case.
 
 ### A pre-restart actor stuck in `DELETING`
 
@@ -154,7 +327,8 @@ kubectl ate get actors -a <atespace>
 #    ordinary, in-flight delete.
 
 # 3. Only for a confirmed candidate: delete its egress policy exactly as in
-#    step 2 above (tolerate NotFound if it's already gone), then:
+#    "Cleaning up a record-less actor" step 1 above (tolerate NotFound if
+#    it's already gone), then:
 kubectl ate delete actor -a <atespace> <NAME> --any-state
 ```
 
@@ -179,7 +353,7 @@ operation of this broker are:
 - NetworkPolicy enforcement requiring an enforcing CNI with no built-in check
   (SB-F3), and router ingress having no authorization of its own (SB-L11) —
   see `cluster/README.md`, "Enabling NetworkPolicy enforcement", and
-  `README.md`, "Known Phase 1 limitations".
+  `README.md`, "Known limitations".
 - `worker_selector` matching the wrong label silently reporting "no free
   workers" instead of a selector-mismatch error (SB-F6) — see
   `cluster/README.md`, "`worker_selector`".

@@ -74,5 +74,24 @@ no day-2 operations doc, and no standalone settings example.
 - Own diff grepped for project IDs, cluster names, IPs, image digests, and
   secret-shaped strings before committing; none found.
 
-Full command output and the per-manifest applied/new marking are in the
-handoff report accompanying this branch.
+All three manifests validated clean; see `README.md` and `cluster/README.md`
+for the exact `kubeconform`/`envsubst` commands, which are the same ones run
+for this validation.
+
+## Follow-up fixes
+
+An independent review found the first cut of `OPERATIONS.md` had trimmed
+the moved runbook content further than intended — the secret-safe
+`DeleteActorEgressPolicy` grpcurl procedure and the hub force-delete had
+been summarized down to a one-line hand-wave, dropping the token-handling
+safeguards (env-var-only tokens, trap-guarded header files, `-expand-headers`)
+the original text existed to enforce, along with the fail-closed-consequences
+list and the invariant's stated exceptions. Restored all of it into
+`OPERATIONS.md`, substantially verbatim, under the same headings — the
+"preserved, not discarded" claim above is accurate as of this fix. Also
+fixed four cross-references the restructure had left dangling (two pointing
+at "README.md" for content that had moved to `OPERATIONS.md`, one pointing
+at reasoning deleted from `broker.yaml`, one heading rename), quoted two
+previously-unquoted `${VAR}` values in `cluster/workerpool.yaml` that could
+otherwise render as non-strings, and added the missing render/apply commands
+and CRD-validation recipe to `cluster/README.md`.

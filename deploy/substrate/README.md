@@ -333,7 +333,9 @@ kubectl apply --dry-run=server -f /tmp/broker.rendered.yaml   # catches RBAC/CRD
 
 `cluster/workerpool.yaml` uses a Substrate CRD (`WorkerPool`,
 `ate.dev/v1alpha1`) that a generic schema validator has no built-in schema
-for — see `cluster/README.md` for how it was validated.
+for — see `cluster/README.md`, "Validating `workerpool.yaml`", for the
+CRD-schema `kubeconform` recipe (offline) and the `kubectl apply
+--dry-run=server` alternative (once Substrate is installed).
 
 ## Broker API exposure
 

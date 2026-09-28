@@ -49,7 +49,7 @@ metadata:
     # "worker_selector"). Getting this wrong doesn't fail to apply -- it
     # fails at runtime with "no free workers", because zero WorkerPools
     # match the selector.
-    ${WORKER_SELECTOR_KEY}: ${WORKER_SELECTOR_VALUE}
+    ${WORKER_SELECTOR_KEY}: "${WORKER_SELECTOR_VALUE}"
 spec:
   replicas: ${WORKER_POOL_REPLICAS}
   sandboxClass: gvisor
@@ -85,4 +85,4 @@ spec:
     # version's node label (cluster/README.md, "gVisor node pool") -- drop
     # this if your cluster doesn't label nodes by installed version.
     nodeSelector:
-      ${SUBSTRATE_VERSION_LABEL_KEY}: ${SUBSTRATE_VERSION_LABEL_VALUE}
+      ${SUBSTRATE_VERSION_LABEL_KEY}: "${SUBSTRATE_VERSION_LABEL_VALUE}"

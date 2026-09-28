@@ -81,14 +81,71 @@ properties to get right before Substrate is installed at all.
 3. Enable NetworkPolicy enforcement (below) — do this before applying
    `networkpolicy.yaml`; applying a NetworkPolicy object on a cluster with no
    enforcing CNI succeeds and enforces nothing, silently.
-4. `workerpool.yaml` (this directory).
-5. `networkpolicy.yaml` (this directory).
+4. `workerpool.yaml` (this directory) — render and apply:
+   ```sh
+   export SUBSTRATE_WORKER_NAMESPACE=scion-agents
+   export WORKER_SELECTOR_KEY=pool
+   export WORKER_SELECTOR_VALUE=scion-agents
+   export WORKER_POOL_REPLICAS=2
+   export WORKER_IMAGE=...   # the Substrate-provided ateom worker image; see the table below
+   export SUBSTRATE_VERSION_LABEL_KEY=ate.dev/substrate-version
+   export SUBSTRATE_VERSION_LABEL_VALUE=...   # your installed Substrate commit/version; see "Cluster requirements" above
+
+   envsubst < deploy/substrate/cluster/workerpool.yaml | kubectl apply -f -
+   ```
+5. `networkpolicy.yaml` (this directory) — needs `ATE_SYSTEM_NAMESPACE` and
+   `BROKER_NAMESPACE` in addition to `SUBSTRATE_WORKER_NAMESPACE` above
+   (same values `../broker.yaml` uses — see `../README.md`'s placeholder
+   table):
+   ```sh
+   export ATE_SYSTEM_NAMESPACE=ate-system
+   export BROKER_NAMESPACE=scion-substrate-broker
+
+   envsubst < deploy/substrate/cluster/networkpolicy.yaml | kubectl apply -f -
+   ```
 6. `../broker.yaml` — see `../README.md` for the full sequence from there.
+
+## Validating `workerpool.yaml`
+
+`workerpool.yaml`'s `WorkerPool` object (`ate.dev/v1alpha1`) is a Substrate
+CRD, not a builtin Kubernetes type — `kubeconform`'s default schema set has
+no schema for it, so a plain `kubeconform` run treats it as unrecognized
+rather than validated. Two options that actually check it:
+
+```sh
+# Option A: validate against the real upstream CRD, offline, before you
+# have cluster access. Fetch the CRD Substrate itself installs, convert its
+# openAPIV3Schema to a JSON schema kubeconform can use, and validate against
+# that -- this is what was used to validate the manifest committed here.
+curl -sSL -o /tmp/ate.dev_workerpools.yaml \
+  https://raw.githubusercontent.com/agent-substrate/substrate/main/manifests/ate-install/generated/ate.dev_workerpools.yaml
+
+git clone --depth 1 https://github.com/yannh/kubeconform.git /tmp/kubeconform-src
+(cd /tmp/kubeconform-src/openapi2jsonschema-go && go build -o /tmp/openapi2jsonschema .)
+mkdir -p /tmp/crd-schemas && cd /tmp/crd-schemas
+/tmp/openapi2jsonschema /tmp/ate.dev_workerpools.yaml   # writes workerpool_v1alpha1.json
+cp workerpool_v1alpha1.json WorkerPool_v1alpha1.json    # match {{.ResourceKind}}'s case
+
+envsubst < deploy/substrate/cluster/workerpool.yaml > /tmp/workerpool.rendered.yaml
+kubeconform -strict -summary -kubernetes-version 1.31.0 \
+  -schema-location default \
+  -schema-location '/tmp/crd-schemas/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json' \
+  /tmp/workerpool.rendered.yaml
+
+# Option B: once Substrate is installed and you have cluster access, the
+# live CRD is the schema -- no separate fetch/convert needed:
+kubectl apply --dry-run=server -f /tmp/workerpool.rendered.yaml
+```
+
+If your installed Substrate version's CRD has drifted from `main`, prefer
+Option B (or fetch the CRD from the commit you actually installed) — Option
+A validates against upstream `main`, which may not exactly match an older
+pinned commit.
 
 ## Enabling NetworkPolicy enforcement
 
 Router ingress isolation (see `networkpolicy.yaml` and `../README.md`,
-"Known Phase 1 limitations") only works if the cluster actually enforces
+"Known limitations") only works if the cluster actually enforces
 NetworkPolicy objects. **A GKE cluster created without an enforcing CNI
 accepts every `NetworkPolicy` object and enforces none of them** —
 `kubectl apply` succeeds either way. Confirm enforcement is really on,
@@ -153,6 +210,10 @@ of that controller-generated baseline, not replacements for it.
   `../broker.yaml`; it moved here because it's a cluster/`ate-system`
   prerequisite rather than a broker-specific resource — its semantics are
   unchanged. Rollback: `kubectl delete networkpolicy atenet-router-restrict-ingress -n "${ATE_SYSTEM_NAMESPACE}"`.
+  Note: a `kubectl apply --prune` workflow scoped to `../broker.yaml` alone
+  would now delete this object, since `../broker.yaml` no longer contains
+  it — apply (and prune) `networkpolicy.yaml` and `../broker.yaml` together,
+  or scope any prune to both files.
 - **`scion-worker-default-deny-ingress`** (`${SUBSTRATE_WORKER_NAMESPACE}`) —
   a bare default-deny ingress (`podSelector: {}`, `policyTypes: [Ingress]`,
   no rules) covering every pod in the worker namespace. NetworkPolicy

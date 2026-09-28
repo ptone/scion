@@ -20,8 +20,8 @@
 # THIS REQUIRES AN ENFORCING CNI. A GKE cluster created without GKE
 # Dataplane V2 or the Calico add-on silently accepts both objects below and
 # enforces neither of them — `kubectl apply` succeeds either way, with no
-# warning. See ../cluster/README.md, "Enabling NetworkPolicy enforcement",
-# before relying on either policy (feedback SB-F3).
+# warning. See README.md, "Enabling NetworkPolicy enforcement", before
+# relying on either policy (feedback SB-F3).
 #
 # Neither policy here creates the router->actor or bootstrap/exec allow
 # path — that traffic is permitted by NetworkPolicy objects Substrate's own
@@ -114,8 +114,8 @@ spec:
 # already restricts more precisely (podSelector on the specific pool,
 # ingress only from atenet-router pods within ${ATE_SYSTEM_NAMESPACE}, an
 # AND of both selectors on one peer). That would WIDEN access beyond what
-# the controller-generated policy grants — the same reasoning
-# ../broker.yaml documents for why this folder doesn't hand-write a
+# the controller-generated policy grants — the same reasoning ../README.md,
+# "Known limitations", documents for why this folder doesn't hand-write a
 # worker-side allow policy. This object is not that: it is a floor under
 # pods the controller-generated policy doesn't reach, not a wider door.
 #
