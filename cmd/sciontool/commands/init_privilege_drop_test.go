@@ -505,6 +505,9 @@ func TestSubstrateServeInitOptions_RequiresPrivilegeDrop(t *testing.T) {
 	if opts.WorkingDir != "" {
 		t.Errorf("substrateServeInitOptions(true).WorkingDir = %q, want \"\" — resolution is deferred to ResolveWorkingDir", opts.WorkingDir)
 	}
+	if !opts.DisablePortForwarding {
+		t.Error("substrateServeInitOptions(...).DisablePortForwarding = false, want true — Substrate's egress cannot reach the hub port-forward tunnel")
+	}
 	opts2 := substrateServeInitOptions(false)
 	if opts2.ForwardTermSignal {
 		t.Error("substrateServeInitOptions(false).ForwardTermSignal = true, want false (passthrough)")

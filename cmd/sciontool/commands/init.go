@@ -126,6 +126,21 @@ type InitRunOptions struct {
 	// a check of its result.
 	RequirePrivilegeDrop bool
 
+	// DisablePortForwarding skips starting the hub port-forward tunnel
+	// manager and the auto-expose port scanner. `sciontool init` (the CLI
+	// command) always leaves this false — that behaviour is unchanged.
+	//
+	// Set only by `sciontool substrate-serve`'s InitRunner wiring
+	// (cmd/sciontool/commands/substrate_serve.go's substrateServeInitOptions),
+	// never by an environment variable a workload could set itself: the
+	// Substrate runtime's egress is HTTP(S)-only and default-deny, so the
+	// WebSocket hub port-forward tunnel (and autoexpose, which depends on
+	// it) cannot reach the hub there and would just spin retrying against
+	// 403s (substrate-runtime.md §1). This is a Phase 1 limitation, not a
+	// permanent one — an on-demand tunnel design would eventually re-enable
+	// it (substrate-runtime.md §11).
+	DisablePortForwarding bool
+
 	// WorkingDir sets the harness child's working directory (threaded into
 	// supervisor.Config.WorkingDir, which sets exec.Cmd.Dir — see that
 	// field's doc comment). Empty (the zero value) leaves cmd.Dir unset, so
@@ -144,7 +159,9 @@ type InitRunOptions struct {
 	// (cmd/sciontool/commands/substrate_serve.go's substrateServeInitOptions),
 	// never by an environment variable a workload could set itself and never
 	// derived here from SCION_RUNTIME or any other sniffing: RunInit stays a
-	// plain function of this field, exactly like RequirePrivilegeDrop above.
+	// plain function of this field, exactly like RequirePrivilegeDrop and
+	// DisablePortForwarding above (RunInit itself never inspects
+	// SCION_RUNTIME anywhere — see DisablePortForwarding's own doc comment).
 	// Substrate is the one runtime that needs it because its ateapi
 	// Container spec has no workingDir field and ateom does not apply the
 	// image's WorkingDir, so — unlike Docker/Podman/Kubernetes, which all
@@ -1200,15 +1217,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 			})
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
 
-			// The Substrate runtime's egress is HTTP(S)-only and default-deny;
-			// WebSocket egress (the hub port-forward tunnel) is blocked there,
-			// so starting it would just spin retrying against 403s. Autoexpose
-			// depends on the same tunnel. Skip both when running under the
-			// substrate runtime (substrate-runtime.md §1). This is a Phase 1
-			// limitation, not a permanent one — an on-demand tunnel design
-			// would eventually re-enable this (substrate-runtime.md §11).
-			if os.Getenv("SCION_RUNTIME") == "substrate" {
-				log.Info("SCION_RUNTIME=substrate: skipping port-forward tunnel manager and auto-expose (WebSocket egress is not available on Substrate)")
+			// Skip both the port-forward tunnel manager and auto-expose when
+			// the caller sets InitRunOptions.DisablePortForwarding — see that
+			// field's doc comment for why substrate-serve is the one caller
+			// that does.
+			if opts.DisablePortForwarding {
+				log.Info("port forwarding disabled: skipping port-forward tunnel manager and auto-expose")
 			} else {
 				go scionportforward.NewManager(hubClient).Run(ctx)
 				log.Info("Started port-forward tunnel manager")
