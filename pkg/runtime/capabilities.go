@@ -55,3 +55,26 @@ type RecordlessActor struct {
 type RecordlessActorProber interface {
 	RecordlessActors(ctx context.Context, projectID string) (scope string, actors []RecordlessActor, err error)
 }
+
+// PerProfileInstancesRuntime is an optional capability a Runtime may
+// implement to say that its instances are bound to a specific profile's
+// configuration, so a request naming a different profile of the same
+// runtime type needs its own manager rather than the one already built for
+// the default runtime. For most runtimes a matching type means the same
+// backend and the default manager can serve any profile of that type; a
+// runtime whose instance carries profile-specific settings (for example a
+// per-profile egress policy) cannot be shared that way.
+//
+// A runtime that does not implement this interface, or reports false, keeps
+// the type-only behavior: a profile resolving to the default runtime's type
+// is served by the default manager.
+type PerProfileInstancesRuntime interface {
+	PerProfileInstances() bool
+}
+
+// HasPerProfileInstances reports whether rt implements
+// PerProfileInstancesRuntime and reports true.
+func HasPerProfileInstances(rt Runtime) bool {
+	pp, ok := rt.(PerProfileInstancesRuntime)
+	return ok && pp.PerProfileInstances()
+}

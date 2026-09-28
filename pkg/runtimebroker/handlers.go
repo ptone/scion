@@ -3003,15 +3003,19 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 		return s.manager
 	}
 
-	// Every substrate profile shares the type string "substrate" —
-	// including the default one — so unlike every other runtime type, a
-	// type-string match here does not mean "same config": a second
-	// substrate profile can carry its own V1SubstrateConfig (e.g. its own
-	// egress_allow) and needs its own manager, not the default's (see
-	// ptone/scion#1818 for this type-vs-instance short-circuit in
-	// general). Substrate never takes the shortcut below; every other
-	// type's behavior here is unchanged.
-	if runtimeType == s.runtime.Name() && runtimeType != "substrate" {
+	// A profile resolving to the default runtime's type is normally served
+	// by the default manager: for most runtimes, the same type means the
+	// same backend. A runtime whose instances are bound to one profile's
+	// configuration (the optional PerProfileInstancesRuntime capability)
+	// can't be shared that way — a second profile of the same type may
+	// carry its own runtime config — so when the default runtime reports
+	// that capability, the type-only shortcut is skipped and the profile
+	// gets its own manager below (see ptone/scion#1818 for this
+	// type-vs-instance short-circuit in general). The broker does not keep
+	// the default runtime's profile identity, so it cannot tell whether the
+	// requested profile is the one the default runtime was built from; it
+	// relies on the capability instead.
+	if runtimeType == s.runtime.Name() && !scionrt.HasPerProfileInstances(s.runtime) {
 		return s.manager
 	}
 
