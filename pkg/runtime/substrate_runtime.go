@@ -311,6 +311,15 @@ func NewSubstrateRuntimeForTest(client ateapipb.ControlClient, router *substrate
 
 func (r *SubstrateRuntime) Name() string { return "substrate" }
 
+// PerProfileInstances implements PerProfileInstancesRuntime. Every substrate
+// profile shares the runtime type "substrate", but each instance is bound to
+// its own profile's V1SubstrateConfig (for example its own egress_allow), so
+// a request naming a different substrate profile needs its own manager
+// rather than the default runtime's.
+func (r *SubstrateRuntime) PerProfileInstances() bool { return true }
+
+var _ PerProfileInstancesRuntime = (*SubstrateRuntime)(nil)
+
 // ExecUser returns "scion" — the tmux session runs under the scion user
 // after sciontool init sets up the environment, same as every other
 // runtime.

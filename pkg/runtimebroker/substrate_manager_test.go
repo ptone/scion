@@ -341,8 +341,9 @@ func TestResolveManagerForOpts_SubstrateProfilesGetTheirOwnConfig(t *testing.T) 
 	cfg.ForceRuntime = ""
 	srv := New(cfg, defaultMgr, defaultRT)
 
-	// The default profile: resolveManagerForOpts no longer takes the
-	// type-string shortcut for substrate at all — no config-equality
+	// The default profile: SubstrateRuntime reports the
+	// PerProfileInstancesRuntime capability, so resolveManagerForOpts never
+	// takes the type-string shortcut for it — and makes no config-equality
 	// comparison either, since a comparison could itself drift out of sync
 	// with whatever actually determines a distinct instance — so this may
 	// or may not be srv.manager itself; either way it must be bound to
@@ -399,7 +400,8 @@ func containsPattern(patterns []string, want string) bool {
 }
 
 // TestResolveManagerForOpts_NonSubstrateBehaviorUnchanged confirms the fix
-// is scoped to runtimeType=="substrate": a non-substrate profile whose type
+// is scoped to runtimes reporting the PerProfileInstancesRuntime capability
+// (substrate among them): a docker profile whose type
 // matches the default runtime's Name() still returns the default manager
 // directly, exactly as TestResolveManagerForOpts_ProfileWithSameRuntime
 // (handlers_test.go) already covers for the "mock"-named default. This
