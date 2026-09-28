@@ -129,9 +129,10 @@ func isProvisionAgentWorkspaceShape(projectDir, candidate string) bool {
 //
 // This is the single read boundary every consumer of the sharer registry
 // passes through (RegisterSharer, UnregisterSharer, ListSharers,
-// FindBranchForAgent). A marker's WorktreePath is untrusted on-disk state:
-// a peer with write access to the shared .git could set it to anything. If
-// it does not match a scion-created worktree shape (WorktreePathIsScionCreated),
+// FindBranchForAgent). The recorded WorktreePath is not produced solely by
+// scion's own write path and is treated as untrusted input; it must be
+// validated in-tree before use. If it does not match a scion-created
+// worktree shape (WorktreePathIsScionCreated),
 // it must never be used to mount or remove — but the Sharers refcount is
 // preserved, not discarded: ProvisionAgent's legitimate attach-to-an-existing
 // -worktree path also produces a WorktreePath outside both known shapes (see
@@ -197,8 +198,8 @@ func writeMarkerAtomic(path string, m *sharerMarker) error {
 // EvalSymlinks-based or a full worktree-relationship check (ValidateWorktreeForBase
 // is shape-1-only and frozen) — existence of a .git entry is enough to
 // distinguish "something real was created here" from "this was never
-// backed by anything" (a directly-planted or decoy path), which is exactly
-// the distinction this decision needs.
+// backed by anything" (an externally-written or stale value with no
+// worktree behind it), which is exactly the distinction this decision needs.
 func hasRealWorktreeGitfile(path string) bool {
 	if path == "" {
 		return false
@@ -214,8 +215,8 @@ func hasRealWorktreeGitfile(path string) bool {
 // recorded WorktreePath is backed by a real, on-disk worktree
 // (hasRealWorktreeGitfile), later RegisterSharer calls never replace it; they
 // only add/refresh the Sharers entry. A recorded path that is NOT currently
-// backed by a real worktree (empty, or a directly-planted/decoy value with no
-// .git there) is not worth protecting and is replaced normally — this is
+// backed by a real worktree (empty, or an externally-written or stale value
+// with no .git there) is not worth protecting and is replaced normally — this is
 // what lets a legitimate CREATE overwrite a stale or fake registry entry, per
 // the existing JOIN-fallback-to-CREATE behavior in ensureWorktree.
 //

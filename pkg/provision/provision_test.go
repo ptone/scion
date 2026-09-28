@@ -662,8 +662,8 @@ func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 //
 // The out-of-tree marker is written for a branch that has no real git worktree
 // backing it — the registry entry is the only place the (fake) association
-// lives, matching the actual exposure: a peer with RW access to the shared
-// .git can write a marker for a branch it never actually checked out.
+// lives: an in-tree-but-non-worktree (or out-of-tree) recorded path must not
+// redirect a JOINing agent's workspace.
 func TestProvision_WorktreePerAgent_OutOfTreeMarker_CreatesFreshWorktree(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	locker := newTestLocker()
@@ -848,7 +848,7 @@ func TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath(t *tes
 	// Sanity: confirm git itself now reports the external path for this branch.
 	discovered, findErr := findWorktreeForBranch(context.Background(), hostPath, branch)
 	require.NoError(t, findErr)
-	require.Equal(t, external, discovered, "setup: git worktree list should now report the corrupted external path")
+	require.Equal(t, external, discovered, "setup: git worktree list should now report the out-of-tree external path")
 
 	// The joining agent provisions on the same branch. It must NOT be
 	// attached to the git-discovered external path. Because the corrupted
