@@ -125,30 +125,6 @@ type InitRunOptions struct {
 	// a check of its result.
 	RequirePrivilegeDrop bool
 
-	// PrivilegeDropPrecheck, when non-nil, is called once by RunInit
-	// immediately after setupHostUser runs, but only when RequirePrivilegeDrop
-	// is also set: an additional, independent fail-closed gate alongside
-	// requirePrivilegeDropOrFail above, not a replacement for it. The two
-	// check different things — requirePrivilegeDropOrFail looks at
-	// setupHostUser's own result (did the drop actually happen), while a
-	// precheck function verifies the surrounding preconditions a drop
-	// depends on (required capabilities, the "scion" user, a usable home
-	// directory — see checkPrivilegeDropFeasible's doc comment in
-	// substrate_privilege_drop.go for the substrate-supplied one).
-	//
-	// nil is the default and preserves today's behaviour exactly: RunInit
-	// runs requirePrivilegeDropOrFail's check alone, as it always has, for
-	// every caller except substrate-serve. A caller that sets
-	// RequirePrivilegeDrop: true without also supplying a precheck does not
-	// bypass anything — requirePrivilegeDropOrFail's own fail-closed check
-	// still runs unconditionally right after this one.
-	//
-	// Set only by `sciontool substrate-serve`'s InitRunner wiring
-	// (cmd/sciontool/commands/substrate_serve.go's substrateServeInitOptions,
-	// which supplies substrateServePrivilegeDropChecker), never by an
-	// environment variable a workload could set itself.
-	PrivilegeDropPrecheck func() error
-
 	// DisablePortForwarding skips starting the hub port-forward tunnel
 	// manager and the auto-expose port scanner. `sciontool init` (the CLI
 	// command) always leaves this false — that behaviour is unchanged.
@@ -263,10 +239,8 @@ func requirePrivilegeDropOrFail(targetUID, targetGID int, requirePrivilegeDrop b
 }
 
 // exitCodePrivilegeDropRequired is the exit code RunInit returns when
-// requirePrivilegeDropOrFail trips, or when InitRunOptions.PrivilegeDropPrecheck
-// (set only by substrate-serve) is non-nil and returns an error — never
-// returned for any other reason. It stays a distinct value (rather than a
-// plain 1) purely so an operator
+// requirePrivilegeDropOrFail trips — never returned for any other reason.
+// It stays a distinct value (rather than a plain 1) purely so an operator
 // reading substrate-serve's own logged exit code can tell which failure
 // this was. It does not, on its own, cause substrate-serve's process to
 // exit or otherwise change process-level behaviour — see StateInitFailed's
@@ -472,20 +446,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Set up scion user UID/GID to match host user
 	targetUID, targetGID, rootless := runSetupHostUser(opts.RequirePrivilegeDrop)
 	log.Info("setupHostUser result: targetUID=%d, targetGID=%d, rootless=%v (now euid=%d, egid=%d)", targetUID, targetGID, rootless, os.Geteuid(), os.Getegid())
-
-	// A second, independent fail-closed gate (see
-	// InitRunOptions.PrivilegeDropPrecheck's doc comment): runs only when the
-	// caller both requires privilege drop and supplied a precheck function.
-	// nil is the default for every caller except substrate-serve, so this
-	// changes nothing for anyone else — requirePrivilegeDropOrFail below
-	// still runs unconditionally either way.
-	if opts.RequirePrivilegeDrop && opts.PrivilegeDropPrecheck != nil {
-		if err := opts.PrivilegeDropPrecheck(); err != nil {
-			log.Error("%v", err)
-			reportInitFailure(resolveAgentHome(targetUID, rootless), err)
-			return exitCodePrivilegeDropRequired
-		}
-	}
 
 	// Fail closed rather than start the harness as root (see
 	// InitRunOptions.RequirePrivilegeDrop's doc comment). No secrets in this

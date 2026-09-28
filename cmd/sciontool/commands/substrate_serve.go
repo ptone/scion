@@ -95,12 +95,6 @@ func substrateServeInitOptions(forwardTermSignal bool) InitRunOptions {
 		// root," never a legitimate rootless outcome (see
 		// InitRunOptions.RequirePrivilegeDrop).
 		RequirePrivilegeDrop: true,
-		// PrivilegeDropPrecheck: the same feasibility check already wired
-		// into the Server as its synchronous /bootstrap precondition (see
-		// newSubstrateServeServer below) — invoked a second time here, from
-		// inside RunInit itself, as defence in depth (see
-		// InitRunOptions.PrivilegeDropPrecheck's doc comment).
-		PrivilegeDropPrecheck: substrateServePrivilegeDropChecker,
 		// DisablePortForwarding: true — Substrate's egress is HTTP(S)-only
 		// and default-deny (see InitRunOptions.DisablePortForwarding).
 		DisablePortForwarding: true,

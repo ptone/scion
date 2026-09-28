@@ -63,11 +63,10 @@ var defaultPrivilegeDropPreconditionDeps = privilegeDropPreconditionDeps{
 // setuid-root-sudo branch below logs which specific condition failed; every
 // other branch (a missing capability, an unresolvable "scion" user, missing/
 // unparseable SCION_HOST_UID/GID, or a traversability/ownership failure)
-// returns this same sentinel with no accompanying log line at either of its
-// two call sites — the /bootstrap HTTP precondition
-// (substrateServePrivilegeDropChecker) and RunInit's own
-// InitRunOptions.PrivilegeDropPrecheck call (init.go), which both just log
-// this generic error string via their respective log.Error calls.
+// returns this same sentinel with no accompanying log line — the caller,
+// substrateServePrivilegeDropChecker (substrate_serve.go), just logs this
+// generic error string at its one call site, the /bootstrap HTTP
+// precondition.
 var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not met: a required capability, the scion user, or SCION_HOST_UID/GID were not all available")
 
 // checkPrivilegeDropFeasible is substrate-serve's synchronous /bootstrap
@@ -105,9 +104,7 @@ var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not m
 // This does not guarantee setupHostUser's usermod/sed realignment will
 // succeed (e.g. a corrupted /etc/passwd could still fail it) — that residual
 // gap is exactly why requirePrivilegeDropOrFail stays as defence in depth in
-// RunInit itself (init.go), and why RunInit also invokes this check directly
-// through InitRunOptions.PrivilegeDropPrecheck when substrate-serve supplies
-// it (see that field's doc comment).
+// RunInit itself (init.go).
 func checkPrivilegeDropFeasible(d privilegeDropPreconditionDeps) error {
 	for _, c := range substratecaps.Required {
 		if !d.hasCapBit(c.EffBit) {

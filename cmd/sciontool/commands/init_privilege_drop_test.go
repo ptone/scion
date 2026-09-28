@@ -161,9 +161,6 @@ func TestSubstrateServeInitOptions_RequiresPrivilegeDrop(t *testing.T) {
 	if !opts.DisablePortForwarding {
 		t.Error("substrateServeInitOptions(...).DisablePortForwarding = false, want true — Substrate's egress cannot reach the hub port-forward tunnel")
 	}
-	if opts.PrivilegeDropPrecheck == nil {
-		t.Error("substrateServeInitOptions(...).PrivilegeDropPrecheck = nil, want substrateServePrivilegeDropChecker")
-	}
 	opts2 := substrateServeInitOptions(false)
 	if opts2.ForwardTermSignal {
 		t.Error("substrateServeInitOptions(false).ForwardTermSignal = true, want false (passthrough)")
@@ -270,95 +267,6 @@ func TestRunInit_PrivilegeDropFailure_ReturnsSentinel(t *testing.T) {
 	got := RunInit([]string{"true"}, InitRunOptions{ForwardTermSignal: false, RequirePrivilegeDrop: true})
 	if got != exitCodePrivilegeDropRequired {
 		t.Fatalf("RunInit() = %d, want exitCodePrivilegeDropRequired (%d)", got, exitCodePrivilegeDropRequired)
-	}
-}
-
-// TestRunInit_Enforced_NilPrecheck_StillFailsClosed proves the fail-closed
-// requirement directly: InitRunOptions.PrivilegeDropPrecheck left at its
-// zero value (nil) — the default for every caller except substrate-serve —
-// must not weaken RunInit's existing enforced-mode fail-closed behaviour.
-// requirePrivilegeDropOrFail (unchanged by this seam) is what actually
-// catches the failed drop here; this test pins that adding the nil-tolerant
-// precheck call site ahead of it did not accidentally short-circuit that
-// existing check.
-func TestRunInit_Enforced_NilPrecheck_StillFailsClosed(t *testing.T) {
-	scrubHubEnv(t)
-	t.Setenv("HOME", t.TempDir())
-
-	orig := runSetupHostUser
-	// A failed drop (still root): the one outcome requirePrivilegeDropOrFail
-	// must catch regardless of PrivilegeDropPrecheck.
-	runSetupHostUser = func(bool) (int, int, bool) { return 0, 0, false }
-	t.Cleanup(func() { runSetupHostUser = orig })
-
-	got := RunInit([]string{"true"}, InitRunOptions{
-		ForwardTermSignal:     false,
-		RequirePrivilegeDrop:  true,
-		PrivilegeDropPrecheck: nil,
-	})
-	if got != exitCodePrivilegeDropRequired {
-		t.Fatalf("RunInit() = %d, want exitCodePrivilegeDropRequired (%d) — a nil PrivilegeDropPrecheck must not bypass requirePrivilegeDropOrFail's own fail-closed check", got, exitCodePrivilegeDropRequired)
-	}
-}
-
-// TestRunInit_Enforced_PrecheckInvokedWhenPresent proves the other half of
-// the same contract: when InitRunOptions.PrivilegeDropPrecheck is set,
-// RunInit actually calls it and honors an error from it — even when
-// setupHostUser's own result (targetUID/targetGID) would otherwise pass
-// requirePrivilegeDropOrFail cleanly. If RunInit ever stopped calling the
-// precheck, this test would see RunInit proceed past the privilege-drop
-// gate (exit 0, or a later failure) instead of failing closed here, and
-// "called" would stay false.
-func TestRunInit_Enforced_PrecheckInvokedWhenPresent(t *testing.T) {
-	scrubHubEnv(t)
-	t.Setenv("HOME", t.TempDir())
-
-	orig := runSetupHostUser
-	// A drop that succeeded on its own terms: requirePrivilegeDropOrFail
-	// alone would let RunInit through.
-	runSetupHostUser = func(bool) (int, int, bool) { return 1000, 1000, false }
-	t.Cleanup(func() { runSetupHostUser = orig })
-
-	var called bool
-	precheckErr := errors.New("precheck: fake feasibility failure")
-	got := RunInit([]string{"true"}, InitRunOptions{
-		ForwardTermSignal:    false,
-		RequirePrivilegeDrop: true,
-		PrivilegeDropPrecheck: func() error {
-			called = true
-			return precheckErr
-		},
-	})
-	if !called {
-		t.Fatal("RunInit did not call InitRunOptions.PrivilegeDropPrecheck")
-	}
-	if got != exitCodePrivilegeDropRequired {
-		t.Fatalf("RunInit() = %d, want exitCodePrivilegeDropRequired (%d) when PrivilegeDropPrecheck returns an error despite a successful setupHostUser drop", got, exitCodePrivilegeDropRequired)
-	}
-}
-
-// TestRunInit_PrecheckNotCalledWhenPrivilegeDropNotRequired proves the hook
-// is gated on RequirePrivilegeDrop, the same as requirePrivilegeDropOrFail's
-// own check: no caller other than substrate-serve sets RequirePrivilegeDrop
-// today, but a hypothetical caller that leaves it false must not have its
-// precheck invoked either. Uses the same deterministic early-failure trick
-// as TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure below so this
-// stays fast and independent of the real setupHostUser environment.
-func TestRunInit_PrecheckNotCalledWhenPrivilegeDropNotRequired(t *testing.T) {
-	scrubHubEnv(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv(stagedsecrets.EnvVar, "not valid base64 or json!!!")
-
-	var called bool
-	RunInit([]string{"true"}, InitRunOptions{
-		ForwardTermSignal: false,
-		PrivilegeDropPrecheck: func() error {
-			called = true
-			return nil
-		},
-	})
-	if called {
-		t.Error("RunInit called PrivilegeDropPrecheck even though RequirePrivilegeDrop was false")
 	}
 }
 
