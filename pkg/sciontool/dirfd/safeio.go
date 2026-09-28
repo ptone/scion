@@ -467,10 +467,10 @@ func ReadUnderRootNoFollow(root, path string, max int64) ([]byte, error) {
 			// branches above close it.
 		}
 
-		// Both branches above only fall through here via ELOOP: name is a
-		// symlink in the directory curFd is open on. Resolve it through
-		// curFd itself, never by re-parsing path or root as strings and
-		// looking name up again from scratch.
+		// Both branches above only fall through here for a confirmed
+		// symlink: name is a symlink in the directory curFd is open on.
+		// Resolve it through curFd itself, never by re-parsing path or
+		// root as strings and looking name up again from scratch.
 		symlinksLeft--
 		if symlinksLeft < 0 {
 			return nil, fmt.Errorf("dirfd: %s: %w", name, ErrTooManySymlinksUnderRoot)

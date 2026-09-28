@@ -1301,7 +1301,7 @@ func WriteGitHubTokenFile(path, token string, uid, gid int) error {
 // before this became a wrapper.
 func WriteFileNoFollowChown(path string, data []byte, mode os.FileMode, uid, gid int) error {
 	if err := dirfd.WriteFileNoFollowWithChown(path, data, mode, uid, gid, dirfd.RefuseSymlink, fchownFn); err != nil {
-		return fmt.Errorf("refusing to write %s: %w", path, err)
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }

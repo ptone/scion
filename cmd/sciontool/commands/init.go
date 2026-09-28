@@ -1874,41 +1874,17 @@ func extractChildCommand(args []string) []string {
 // On failure it returns an error and the caller should continue — the
 // in-process environment is already clean, only /proc exposure remains.
 //
-// R9(c): this dropped a filepath.EvalSymlinks call an earlier version of
-// this function ran on os.Executable()'s result before exec'ing it. That
-// resolution step has no equivalent here, and needs none:
-// syscall.Exec(rootexec.SelfExe(), ...) hands execve(2) the literal string
+// There is no separate, skippable symlink-resolution step here for
+// filepath.EvalSymlinks (used by an earlier version of this function) to
+// have stood in for: syscall.Exec passes the literal string
 // "/proc/self/exe", and it is the KERNEL, not this process, that resolves
-// that magic symlink to the already-running inode at the moment of the
-// execve syscall itself — the same symlink resolution every execve(2) call
-// performs on any path argument, magic or not. execve of /proc/self/exe is
-// standard behavior on Linux >= 2.6, long predating every runtime this
-// binary targets (docker, Apple VZ, Cloud Run all run kernels far newer
-// than that floor). There is no separate, skippable resolution step in
-// this codepath for EvalSymlinks to have stood in for; removing it deleted
-// a redundant userspace re-resolution of a symlink the kernel was always
-// going to resolve again anyway at exec time, not a safety check.
-// Confirmed on docker: a manual, instrumented run of a freshly built
-// sciontool binary in this exact container (Linux 6.8.0, /.dockerenv
-// present) with SCION_STAGED_SECRETS set shows the log line "Re-execing to
-// clear staged secrets from /proc/<pid>/environ" followed immediately by
-// the SAME pid restarting sciontool init's own startup sequence, and the
-// child process's own environment and /proc/<parent-pid>/environ both come
-// back clean of SCION_STAGED_SECRETS afterward — i.e. the exec succeeded
-// and the kernel's environ snapshot was genuinely replaced. (The repo's
-// existing SCION_INTEGRATION_TEST=1-gated TestReExecIntegration exercises
-// the identical codepath but fails in this sandbox both on this branch and
-// on the unmodified base commit 71ad0ec63 — confirmed via a detached
-// worktree at that SHA — so it is a pre-existing, environment-specific
-// harness issue, not a regression from this branch and not evidence
-// against the exec itself, which the manual reproduction above verifies
-// directly.)
-// For Apple VZ and Cloud Run: both run a real Linux kernel (Apple's
-// Virtualization.framework boots an actual Linux guest kernel; Cloud Run's
-// gVisor/gVisor-less execution environments both implement or pass through
-// the same execve(2)-resolves-/proc/self/exe contract), so this is a kernel
-// guarantee that holds independent of the surrounding hypervisor or
-// sandboxing layer, not something that needs re-verifying per runtime.
+// that magic symlink to the running inode at the moment of the execve
+// syscall itself — standard behavior on Linux >= 2.6, true under docker,
+// Apple VZ, and Cloud Run alike, since all three run a real Linux kernel
+// under their respective hypervisor/sandbox layer. Confirmed directly on
+// docker: a manual re-exec with a staged secret set leaves both the
+// child's environment and the parent's own /proc/<pid>/environ clean of it
+// afterward.
 func reExecWithCleanEnv() error {
 	log.Info("Re-execing to clear staged secrets from /proc/%d/environ", os.Getpid())
 	return syscall.Exec(rootexec.SelfExe(), os.Args, os.Environ())
@@ -2999,24 +2975,28 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 
 	existing, err := dirfd.ReadFileNoFollow(gitconfigPath, gitconfigMaxBytes)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		// RULED (design authority): never follow the link, even when the
-		// target is owned by the workload. Following it would still mean
-		// root opening a workload-controlled path — a FIFO or device can
-		// hang or have side effects on open, before any ownership check
-		// ever runs — which is exactly the attack class this refusal
-		// exists to close. A symlinked .gitconfig (the layout a dotfile
-		// manager such as chezmoi, stow, or dotbot commonly produces) is
-		// refused exactly like a hostile one, the same as a FIFO, a
-		// hardlink, or an oversized file: this is a VISIBILITY change
-		// only, not a behavior change — the private copy still starts
-		// empty and installs with ReplaceLeaf (see below), but an operator
-		// now gets a WARN naming the path and the reason, not just an
-		// ERROR line easy to miss. Paths and reasons only, never file
-		// content: err here is always a dirfd sentinel's own text ("not a
-		// single-link regular file", "too many levels of symbolic links",
-		// "content exceeds size limit"), never anything read from the
-		// refused file itself.
-		log.Warn("Existing %s is not a regular file (%v); its content was NOT merged, and the credential helper and git identity below were applied to an empty gitconfig instead. Replace it with a regular file to have its content picked up.", gitconfigPath, err)
+		// This never follows the link, even when the target is owned by
+		// the workload: doing so would still mean root opening a
+		// workload-controlled path — a FIFO or device can hang or have
+		// side effects on open, before any ownership check ever runs —
+		// which is exactly the attack class this refusal exists to close.
+		// A symlinked .gitconfig (the layout a dotfile manager such as
+		// chezmoi, stow, or dotbot commonly produces) is refused exactly
+		// like a hostile one, the same as a FIFO, a hardlink, or an
+		// oversized file: this is a visibility change only, not a
+		// behavior change — the private copy still starts empty and
+		// installs with ReplaceLeaf (see below), but an operator now gets
+		// a WARN naming the path and the reason, not just an ERROR line
+		// easy to miss. Paths and reasons only, never file content: err
+		// here is always a dirfd sentinel's own text ("not a single-link
+		// regular file", "too many levels of symbolic links", "content
+		// exceeds size limit", or an I/O error resolving the parent
+		// directory chain), never anything read from the refused file
+		// itself. The message below is deliberately neutral about WHAT
+		// kind of refusal this was — %v carries that — since this branch
+		// covers reasons with no "not a regular file" framing at all
+		// (an oversized regular file, a parent-directory walk failure).
+		log.Warn("Refusing existing %s (%v); its content was NOT merged, and the credential helper and git identity below were applied to an empty gitconfig instead. Replace it with a single-link regular file under %d bytes to have its content picked up.", gitconfigPath, err, gitconfigMaxBytes)
 	}
 	// Lstat never follows a symlink, so this can only ever report the mode
 	// of the real entry at gitconfigPath (or nothing, if it's absent or not
@@ -3106,10 +3086,10 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 	}
 	// ReplaceLeaf, not RefuseSymlink: gitconfigPath lives inside agentHome,
 	// which the workload owns outright, so whatever currently sits at the
-	// leaf (including a symlink R9(b) above just refused to read through)
-	// is a stale entry this install means to overwrite, not tamper to
-	// refuse — the read-side refusal already happened; this call only
-	// installs the result.
+	// leaf (including a symlink the read above just refused to read
+	// through) is a stale entry this install means to overwrite, not
+	// tamper to refuse — the read-side refusal already happened; this
+	// call only installs the result.
 	if err := dirfd.WriteFileNoFollow(gitconfigPath, result, mode, uid, gid, dirfd.ReplaceLeaf); err != nil {
 		log.Error("Failed to install %s: %v", gitconfigPath, err)
 	}

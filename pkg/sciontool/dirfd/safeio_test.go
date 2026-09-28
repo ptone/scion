@@ -528,7 +528,7 @@ func TestReadUnderRootNoFollow_AllowsIntermediateSymlinkInsideRoot(t *testing.T)
 // files, a "..data" symlink to it, and each key as a symlink through
 // "..data" (e.g. "token" -> "..data/token"). Before this fix, the blanket
 // symlink refusal made every from_file read of a projected-secret key fail,
-// which is the very regression R9(a) exists to close. This is the
+// which is the very regression this fix exists to close. This is the
 // acceptance-gate test: it must pass.
 func TestReadUnderRootNoFollow_AllowsProjectedSecretStyleSymlinkChain(t *testing.T) {
 	root := t.TempDir()
@@ -598,6 +598,96 @@ func TestReadUnderRootNoFollow_RefusesAbsoluteSymlinkTarget(t *testing.T) {
 	_, err := ReadUnderRootNoFollow(root, link, 1024)
 	if !errors.Is(err, ErrPathEscapesRoot) {
 		t.Fatalf("expected ErrPathEscapesRoot for an absolute symlink target, even one numerically inside root, got %v", err)
+	}
+}
+
+// TestReadUnderRootNoFollow_RefusesEscapingSymlinkAtIntermediateComponent
+// covers the same escape shapes as
+// TestReadUnderRootNoFollow_RefusesSymlinkTargetEscapingViaDotDot and
+// TestReadUnderRootNoFollow_RefusesAbsoluteSymlinkTarget, but with the
+// symlink at an INTERMEDIATE path component instead of the leaf: this walk
+// resolves a symlink through a different code path depending on whether it
+// is the last remaining component (ReadAtNoFollow's own O_NOFOLLOW open) or
+// an earlier one (the O_DIRECTORY|O_NOFOLLOW open, which fails ENOTDIR for
+// a symlink rather than ELOOP — see isSymlinkAt's doc comment), so a test
+// that only ever puts the escaping symlink at the leaf never exercises the
+// intermediate branch's own escape checks at all.
+func TestReadUnderRootNoFollow_RefusesEscapingSymlinkAtIntermediateComponent(t *testing.T) {
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret")
+	if err := os.WriteFile(secret, []byte("leaked"), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		readRel string // path passed to ReadUnderRootNoFollow, relative to root
+		setup   func(t *testing.T, root string)
+	}{
+		{
+			name:    "absolute target",
+			readRel: filepath.Join("abs", "secret"),
+			setup: func(t *testing.T, root string) {
+				if err := os.Symlink(outside, filepath.Join(root, "abs")); err != nil {
+					t.Fatalf("symlink abs: %v", err)
+				}
+			},
+		},
+		{
+			name:    "relative target with one ..",
+			readRel: filepath.Join("rel", "secret"),
+			setup: func(t *testing.T, root string) {
+				target := filepath.Join("..", filepath.Base(outside))
+				if err := os.Symlink(target, filepath.Join(root, "rel")); err != nil {
+					t.Fatalf("symlink rel: %v", err)
+				}
+			},
+		},
+		{
+			name:    "relative target with .. nested under a real directory",
+			readRel: filepath.Join("d", "up", "secret"),
+			setup: func(t *testing.T, root string) {
+				if err := os.Mkdir(filepath.Join(root, "d"), 0o700); err != nil {
+					t.Fatalf("mkdir d: %v", err)
+				}
+				target := filepath.Join("..", "..", filepath.Base(outside))
+				if err := os.Symlink(target, filepath.Join(root, "d", "up")); err != nil {
+					t.Fatalf("symlink d/up: %v", err)
+				}
+			},
+		},
+		{
+			name:    "chained: safe-looking splice resolves into an escaping symlink",
+			readRel: filepath.Join("chain", "secret"),
+			setup: func(t *testing.T, root string) {
+				if err := os.Mkdir(filepath.Join(root, "d"), 0o700); err != nil {
+					t.Fatalf("mkdir d: %v", err)
+				}
+				target := filepath.Join("..", "..", filepath.Base(outside))
+				if err := os.Symlink(target, filepath.Join(root, "d", "up")); err != nil {
+					t.Fatalf("symlink d/up: %v", err)
+				}
+				// "chain" -> "d/up" does not itself contain ".." or an
+				// absolute component, so it splices cleanly; the escape
+				// only surfaces one hop later, when "up" (now itself an
+				// intermediate component) is resolved in turn.
+				if err := os.Symlink(filepath.Join("d", "up"), filepath.Join(root, "chain")); err != nil {
+					t.Fatalf("symlink chain: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			tc.setup(t, root)
+
+			_, err := ReadUnderRootNoFollow(root, filepath.Join(root, tc.readRel), 1024)
+			if !errors.Is(err, ErrPathEscapesRoot) {
+				t.Fatalf("expected ErrPathEscapesRoot, got %v", err)
+			}
+		})
 	}
 }
 

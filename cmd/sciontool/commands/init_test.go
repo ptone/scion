@@ -2518,18 +2518,16 @@ func TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched(t *testing.T) {
 }
 
 // TestConfigureSharedWorkspaceGit_SymlinkProducesWarnAndRegularFile proves
-// the R9(b) ruling: a symlinked $HOME/.gitconfig — the layout a dotfile
-// manager (chezmoi, stow, dotbot, ...) commonly produces — is refused
-// exactly like a hostile one, even when the workload owns every hop of the
-// chain (this test's own process necessarily owns both the symlink and its
-// target). This is a VISIBILITY change only: the design authority ruled
-// against following the link at all, since doing so would still mean root
-// opening a workload-controlled path with follow before any ownership
-// check could run — a FIFO or device open can hang or have side effects
-// before that point — so the only observable difference from the
-// pre-ruling behavior is the WARN this test asserts on, naming the path and
-// the reason (never file content) and ending in a regular file with the
-// credential helper set as usual.
+// a symlinked $HOME/.gitconfig — the layout a dotfile manager (chezmoi,
+// stow, dotbot, ...) commonly produces — is refused exactly like a hostile
+// one, even when the workload owns every hop of the chain (this test's own
+// process necessarily owns both the symlink and its target): the link is
+// never followed, since doing so would still mean root opening a
+// workload-controlled path with follow before any ownership check could
+// run — a FIFO or device open can hang or have side effects before that
+// point. The only observable change from a plain refusal is the WARN this
+// test asserts on, naming the path and the reason (never file content) and
+// ending in a regular file with the credential helper set as usual.
 func TestConfigureSharedWorkspaceGit_SymlinkProducesWarnAndRegularFile(t *testing.T) {
 	agentHome := t.TempDir()
 	store := filepath.Join(t.TempDir(), "dotfiles")
@@ -2555,7 +2553,13 @@ func TestConfigureSharedWorkspaceGit_SymlinkProducesWarnAndRegularFile(t *testin
 	if !strings.Contains(output, gitconfigPath) {
 		t.Errorf("expected the WARN to name %s, got: %s", gitconfigPath, output)
 	}
-	if strings.Contains(output, "do-not-touch") || strings.Contains(output, "baz") {
+	// The reason must be present too, not just the fact of a refusal: a
+	// symlinked leaf is refused with the same ELOOP-derived text
+	// dirfd.ReadFileNoFollow already produces for it.
+	if !strings.Contains(output, "too many levels of symbolic links") && !strings.Contains(output, syscall.ELOOP.Error()) {
+		t.Errorf("expected the WARN to name the reason (a symlink refusal), got: %s", output)
+	}
+	if strings.Contains(output, "baz") {
 		t.Errorf("expected the WARN to carry paths and reasons only, never file content, got: %s", output)
 	}
 
@@ -2573,6 +2577,9 @@ func TestConfigureSharedWorkspaceGit_SymlinkProducesWarnAndRegularFile(t *testin
 	}
 	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
 		t.Errorf("user.email = %q, want agent@scion.dev (the credential helper/identity must still be applied to the regular file)", got)
+	}
+	if got := gitConfigGet(t, gitconfigPath, "credential.helper"); got == "" {
+		t.Error("credential.helper is empty; expected it to still be set on the regular file installed after the refusal")
 	}
 	realData, rerr := os.ReadFile(real)
 	if rerr != nil {
@@ -2594,15 +2601,21 @@ func TestConfigureSharedWorkspaceGit_FifoDoesNotHang(t *testing.T) {
 		t.Fatalf("mkfifo: %v", err)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("configureSharedWorkspaceGit blocked on a FIFO planted at .gitconfig")
+	output := captureStderr(t, func() {
+		done := make(chan struct{})
+		go func() {
+			configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("configureSharedWorkspaceGit blocked on a FIFO planted at .gitconfig")
+		}
+	})
+
+	if !strings.Contains(output, "WARN") {
+		t.Errorf("expected a WARN in the output, got: %s", output)
 	}
 
 	fi, err := os.Lstat(gitconfigPath)
@@ -2677,7 +2690,12 @@ func TestConfigureSharedWorkspaceGit_HardlinkedFileRefused(t *testing.T) {
 		t.Fatalf("hardlink: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
+	output := captureStderr(t, func() {
+		configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
+	})
+	if !strings.Contains(output, "WARN") {
+		t.Errorf("expected a WARN in the output, got: %s", output)
+	}
 
 	if got := gitConfigGet(t, gitconfigPath, "secret.token"); got != "" {
 		t.Errorf("secret.token = %q, want empty (hardlinked content must not have been read)", got)
@@ -2746,7 +2764,15 @@ func TestConfigureSharedWorkspaceGit_OversizeRegularGitconfigStartsEmpty(t *test
 		t.Fatalf("write oversize gitconfig: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
+	output := captureStderr(t, func() {
+		configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
+	})
+	if !strings.Contains(output, "WARN") {
+		t.Errorf("expected a WARN in the output, got: %s", output)
+	}
+	if strings.Contains(output, marker) {
+		t.Errorf("expected the WARN to carry paths and reasons only, never file content, got: %s", output)
+	}
 
 	finalContent, err := os.ReadFile(gitconfigPath)
 	if err != nil {

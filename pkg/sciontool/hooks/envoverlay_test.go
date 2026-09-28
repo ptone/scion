@@ -73,7 +73,7 @@ func TestLoadEnvOverlay_FromFileResolves(t *testing.T) {
 // a real Kubernetes projected-secret volume layout mounted as an
 // allowedRoot: a timestamped directory holding the actual key, a "..data"
 // symlink to it, and the requested key itself as a symlink through
-// "..data" (e.g. "token" -> "..data/token"). Before R9(a), the from_file
+// "..data" (e.g. "token" -> "..data/token"). Before this fix, the from_file
 // resolver refused every symlink unconditionally, so from_file could never
 // read a key out of a volume mounted this way — this is the acceptance-gate
 // regression test for that fix.
