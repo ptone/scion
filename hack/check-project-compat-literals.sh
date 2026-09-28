@@ -213,6 +213,13 @@ allowed_paths=(
   "^pkg/hubclient/templates.go$"
   "^pkg/hubclient/tokens.go$"
   "^pkg/projectcompat/.*\\.go$"
+  # isHubManagedWorktreeBase distinguishes a hub-native worktree-per-agent
+  # base (under ~/.scion/projects/<slug> or the legacy
+  # ~/.scion/groves/<slug>) from a linked project (the user's own checkout),
+  # mirroring config.GrovesDir/ProjectsDir (pkg/config/paths.go, already
+  # allowlisted above) so the read-only admin-dir mount narrowing applies to
+  # both current and pre-migration hub-native project layouts.
+  "^pkg/runtime/common.go$"
   "^pkg/runtimebroker/handlers.go$"
   "^pkg/runtimebroker/server.go$"
   "^pkg/runtimebroker/start_context.go$"
