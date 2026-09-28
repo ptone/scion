@@ -13,10 +13,10 @@
 #      it today -- every test passes --version (see README.md) -- so an
 #      unhandled URL falls through to the real curl below rather than
 #      being silently wrong for a future test that does.
-#   2. The SHA256SUMS checksum preflight (deploy.sh, end of Phase 1,
-#      right before "Phase 2: GCP Resources" -- ptone/scion#2106). Every
-#      test in this suite now depends on this succeeding by default,
-#      since none of them know this file exists.
+#   2. The SHA256SUMS checksum preflight (deploy.sh, end of Phase 1, right
+#      before "Phase 2: GCP Resources"). Every test in this suite now
+#      depends on this succeeding by default, since none of them know this
+#      file exists.
 #
 # Env knobs:
 #   CURL_STUB_LOG              — if set, every invocation is appended to

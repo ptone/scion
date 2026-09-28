@@ -845,7 +845,7 @@ elif [[ "$ALLOW_UNVERIFIED_RELEASE" == "true" ]]; then
   warn "Proceeding WITHOUT checksum verification because ALLOW_UNVERIFIED_RELEASE=true."
 else
   err "Release ${VERSION} does not publish a SHA256SUMS checksums asset, so its downloads cannot be verified."
-  echo "  This applies to any release published before checksum publishing was added (ptone/scion#2106)." >&2
+  echo "  This applies to any release published before checksum publishing was added." >&2
   echo "  Choose a release that publishes SHA256SUMS, or set ALLOW_UNVERIFIED_RELEASE=true to install this" >&2
   echo "  release anyway WITHOUT checksum verification (not recommended)." >&2
   exit 1

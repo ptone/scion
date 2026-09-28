@@ -1217,10 +1217,10 @@ func CheckForReleaseUpdates(ctx context.Context, currentVersion, channel, repo s
 // resolveReleaseAssets queries the GitHub Releases API to find the download
 // URL for the platform-appropriate binary tarball in a given release tag,
 // along with the URL for that release's SHA256SUMS checksums asset (see
-// .github/workflows/build-release.yml, ptone/scion#2106). checksumsURL is
-// returned empty, not as an error, when the release predates checksum
-// publishing -- callers that require a checksum decide how to handle that
-// themselves (BinaryUpdateExecutor.Run fails closed on it).
+// .github/workflows/build-release.yml). checksumsURL is returned empty,
+// not as an error, when the release predates checksum publishing --
+// callers that require a checksum decide how to handle that themselves
+// (BinaryUpdateExecutor.Run fails closed on it).
 func resolveReleaseAssets(ctx context.Context, repo, version string) (downloadURL, checksumsURL string, err error) {
 	// Query the GitHub Releases API for the tag.
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", repo, version)
@@ -1289,11 +1289,11 @@ func deriveChecksumsURL(downloadURL string) string {
 // (potentially large) release tarball itself is downloaded: this backs an
 // unattended updater that re-checks on a recurring schedule, and a release
 // with no checksums asset, or no entry for this asset, should fail
-// immediately rather than after downloading the whole tarball every cycle
-// (ptone/scion#2106). An empty checksumsURL, a download failure, and a
-// missing entry are all treated as equally fatal -- there is no "proceed
-// anyway" path here (see verifyFileChecksum's doc comment for why this
-// differs from deploy.sh's own, operator-driven install-time tooling).
+// immediately rather than after downloading the whole tarball every cycle.
+// An empty checksumsURL, a download failure, and a missing entry are all
+// treated as equally fatal -- there is no "proceed anyway" path here (see
+// verifyFileChecksum's doc comment for why this differs from deploy.sh's
+// own, operator-driven install-time tooling).
 func fetchExpectedChecksum(ctx context.Context, checksumsURL, assetName string, logger io.Writer) (string, error) {
 	if checksumsURL == "" {
 		return "", fmt.Errorf("no checksums URL available for %s", assetName)

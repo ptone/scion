@@ -1,6 +1,6 @@
-# scripts/single-node-vm/tests/test_release_checksum.sh — covers
-# ptone/scion#2106: the SHA256SUMS checksum preflight that runs at the end
-# of deploy.sh's Phase 1 (before any GCP resource is created), and the
+# scripts/single-node-vm/tests/test_release_checksum.sh — covers the
+# SHA256SUMS checksum preflight that runs at the end of deploy.sh's
+# Phase 1 (before any GCP resource is created), and the
 # download+verify-then-extract logic in the scion-binary and chat-plugin
 # install commands in Phase 3. See tests/lib/curl for the stub these
 # tests configure (CURL_STUB_SHA256SUMS_MISSING, CURL_STUB_FIXTURE_DIR).

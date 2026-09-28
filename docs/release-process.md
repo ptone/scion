@@ -224,10 +224,10 @@ plugins are built for Linux on both amd64 and arm64; plugin builds are not publi
 
 ## Checksums
 
-Every release publishes a `SHA256SUMS` asset alongside its binaries and plugin tarballs
-(ptone/scion#2106), covering every other asset in that release. It is generated from the
-final set of build artifacts with `sha256sum -- * | sort -k2`, so it always matches exactly
-what was published, including for nightly and preview builds.
+Every release publishes a `SHA256SUMS` asset alongside its binaries and plugin tarballs,
+covering every other asset in that release. It is generated from the final set of build
+artifacts with `sha256sum -- * | sort -k2`, so it always matches exactly what was
+published, including for nightly and preview builds.
 
 `scripts/single-node-vm/deploy.sh` downloads and verifies this file automatically before
 installing anything (see [Single-Node VM Deployment Guide](deploy/single-node-vm.md#quick-start)),

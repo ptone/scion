@@ -24,8 +24,8 @@ Key properties:
 - **Binary-based** — downloads a pre-built release; no source checkout or
   container build required.
 - **Checksum-verified** — every downloaded binary and chat-plugin tarball is
-  verified against the release's `SHA256SUMS` asset before it is extracted
-  (ptone/scion#2106); see [Quick Start](#quick-start) below.
+  verified against the release's `SHA256SUMS` asset before it is extracted;
+  see [Quick Start](#quick-start) below.
 - **Local storage** — Hub state lives in embedded SQLite on the VM disk; no GCS
   or Cloud SQL.
 - **Local secrets** — secrets are stored on disk (`hub.env`); no Secret Manager.
@@ -69,7 +69,7 @@ To install a specific release version:
 
 Before downloading anything, the script checks that the chosen release
 publishes a `SHA256SUMS` checksums asset, and downloads and verifies every
-binary and chat-plugin tarball against it before installing (ptone/scion#2106).
+binary and chat-plugin tarball against it before installing.
 A release published before checksum publishing existed has no `SHA256SUMS`
 asset; targeting one with `--version` (or letting auto-detect pick a nightly
 that predates it) fails immediately, before any GCP resource is created, with
@@ -242,8 +242,8 @@ Key settings:
   Like the initial install, an `"auto"` update verifies the downloaded binary
   against the target release's `SHA256SUMS` asset and fails the update (with
   no binary swapped in) if that asset or a matching entry is missing, or the
-  hash doesn't match (ptone/scion#2106). Unlike the initial install, there is
-  no override: a release with no checksums simply isn't auto-installed.
+  hash doesn't match. Unlike the initial install, there is no override: a
+  release with no checksums simply isn't auto-installed.
 
 ### hub.env
 
