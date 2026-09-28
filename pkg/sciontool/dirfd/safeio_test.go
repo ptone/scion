@@ -6,6 +6,7 @@ package dirfd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,7 +161,7 @@ func TestWriteFileNoFollow_NormalWrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 
-	if err := WriteFileNoFollow(path, []byte(`{"a":1}`), 0o644, 0, 0); err != nil {
+	if err := WriteFileNoFollow(path, []byte(`{"a":1}`), 0o644, 0, 0, ReplaceLeaf); err != nil {
 		t.Fatalf("WriteFileNoFollow: %v", err)
 	}
 
@@ -197,7 +198,7 @@ func TestWriteFileNoFollow_ChownsTempFdBeforeRename(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 
-	if err := WriteFileNoFollow(path, []byte("x"), 0o644, os.Getuid(), os.Getgid()); err != nil {
+	if err := WriteFileNoFollow(path, []byte("x"), 0o644, os.Getuid(), os.Getgid(), ReplaceLeaf); err != nil {
 		t.Fatalf("WriteFileNoFollow: %v", err)
 	}
 
@@ -242,7 +243,7 @@ func TestWriteFileNoFollow_ChmodTargetsTempFdNotSwappedPath(t *testing.T) {
 	// The call may succeed or fail depending on what the final rename does
 	// with the swapped-in symlink; either way, the target's permissions
 	// must never change.
-	_ = WriteFileNoFollow(finalPath, []byte(`{"a":1}`), 0o644, 0, 0)
+	_ = WriteFileNoFollow(finalPath, []byte(`{"a":1}`), 0o644, 0, 0, ReplaceLeaf)
 
 	st, err := os.Stat(target)
 	if err != nil {
@@ -266,7 +267,7 @@ func TestWriteFileNoFollow_RemovesTempOnChownFailure(t *testing.T) {
 
 	// uid 1 ("daemon" on most systems) is never the current test uid and a
 	// non-root process cannot chown to it — that's the point.
-	err := WriteFileNoFollow(path, []byte("x"), 0o644, 1, 1)
+	err := WriteFileNoFollow(path, []byte("x"), 0o644, 1, 1, ReplaceLeaf)
 	if err == nil {
 		t.Fatal("expected chown to an unpermitted uid to fail")
 	}
@@ -277,6 +278,137 @@ func TestWriteFileNoFollow_RemovesTempOnChownFailure(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected the temp file to be cleaned up after a failed write, got %v", entries)
+	}
+}
+
+// TestWriteFileNoFollow_InvalidLeafPolicyRejected fails if LeafPolicyUnset
+// (the zero value) is ever treated as usable: every caller must explicitly
+// choose ReplaceLeaf or RefuseSymlink, so the zero value must be refused,
+// not silently behave as either one.
+func TestWriteFileNoFollow_InvalidLeafPolicyRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	if err := WriteFileNoFollow(path, []byte("x"), 0o644, 0, 0, LeafPolicyUnset); err == nil {
+		t.Fatal("expected LeafPolicyUnset to be refused, got nil")
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("expected no file to be written when the policy is invalid")
+	}
+}
+
+// TestWriteFileNoFollow_LeafPolicyMatrix exercises both LeafPolicy values
+// against a symlink leaf, a FIFO leaf, and a pre-existing regular file:
+// ReplaceLeaf must overwrite all three; RefuseSymlink must refuse the first
+// two (leaving them and whatever they point at completely untouched) and
+// still overwrite the third.
+func TestWriteFileNoFollow_LeafPolicyMatrix(t *testing.T) {
+	for _, policy := range []LeafPolicy{ReplaceLeaf, RefuseSymlink} {
+		policy := policy
+		t.Run(fmt.Sprintf("policy=%d", policy), func(t *testing.T) {
+			t.Run("symlink leaf", func(t *testing.T) {
+				dir := t.TempDir()
+				victim := filepath.Join(dir, "victim")
+				if err := os.WriteFile(victim, []byte("do-not-touch"), 0o600); err != nil {
+					t.Fatalf("write victim: %v", err)
+				}
+				path := filepath.Join(dir, "leaf")
+				if err := os.Symlink(victim, path); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+
+				err := WriteFileNoFollow(path, []byte("new"), 0o644, 0, 0, policy)
+
+				victimData, rerr := os.ReadFile(victim)
+				if rerr != nil {
+					t.Fatalf("read victim: %v", rerr)
+				}
+				if string(victimData) != "do-not-touch" {
+					t.Fatalf("victim was modified through the symlink: %q", victimData)
+				}
+
+				fi, lerr := os.Lstat(path)
+				if lerr != nil {
+					t.Fatalf("lstat: %v", lerr)
+				}
+				switch policy {
+				case ReplaceLeaf:
+					if err != nil {
+						t.Fatalf("ReplaceLeaf: expected the symlink leaf to be replaced, got %v", err)
+					}
+					if fi.Mode()&os.ModeSymlink != 0 {
+						t.Error("ReplaceLeaf: leaf is still a symlink after the write")
+					}
+				case RefuseSymlink:
+					if err == nil {
+						t.Fatal("RefuseSymlink: expected the symlink leaf to be refused, got nil")
+					}
+					if fi.Mode()&os.ModeSymlink == 0 {
+						t.Error("RefuseSymlink: leaf is no longer a symlink after a refused write")
+					}
+				}
+			})
+
+			t.Run("FIFO leaf", func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "leaf")
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("mkfifo: %v", err)
+				}
+
+				done := make(chan error, 1)
+				go func() {
+					done <- WriteFileNoFollow(path, []byte("new"), 0o644, 0, 0, policy)
+				}()
+
+				var err error
+				select {
+				case err = <-done:
+				case <-time.After(3 * time.Second):
+					t.Fatal("WriteFileNoFollow blocked on a FIFO leaf with no reader/writer")
+				}
+
+				fi, lerr := os.Lstat(path)
+				if lerr != nil {
+					t.Fatalf("lstat: %v", lerr)
+				}
+				switch policy {
+				case ReplaceLeaf:
+					if err != nil {
+						t.Fatalf("ReplaceLeaf: expected the FIFO leaf to be replaced, got %v", err)
+					}
+					if fi.Mode()&os.ModeNamedPipe != 0 {
+						t.Error("ReplaceLeaf: leaf is still a FIFO after the write")
+					}
+				case RefuseSymlink:
+					if err == nil {
+						t.Fatal("RefuseSymlink: expected the FIFO leaf to be refused, got nil")
+					}
+					if fi.Mode()&os.ModeNamedPipe == 0 {
+						t.Error("RefuseSymlink: leaf is no longer a FIFO after a refused write")
+					}
+				}
+			})
+
+			t.Run("regular file leaf", func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "leaf")
+				if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+
+				if err := WriteFileNoFollow(path, []byte("new"), 0o644, 0, 0, policy); err != nil {
+					t.Fatalf("policy %d: expected a regular-file leaf to be replaced, got %v", policy, err)
+				}
+				data, rerr := os.ReadFile(path)
+				if rerr != nil {
+					t.Fatalf("read back: %v", rerr)
+				}
+				if string(data) != "new" {
+					t.Errorf("content = %q, want %q", data, "new")
+				}
+			})
+		})
 	}
 }
 

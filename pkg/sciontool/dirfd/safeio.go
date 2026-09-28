@@ -145,23 +145,98 @@ func ReadFileNoFollow(path string, max int64) ([]byte, error) {
 // as walk.go's chownWalkTestHook family; see its doc comment.
 var writeNoFollowPreChmodTestHook func(tmpName string)
 
+// LeafPolicy controls what WriteFileNoFollow does when path's own leaf
+// entry ALREADY exists as something other than a plain regular file it is
+// about to atomically replace.
+//
+// The zero value, LeafPolicyUnset, is deliberately not a usable choice:
+// WriteFileNoFollow refuses it outright rather than silently behaving as
+// either policy, so every caller must say which one it means. This exists
+// because the two policies protect different things, and picking the wrong
+// one by omission — inheriting whichever happens to be zero — would be a
+// silent security decision, not a default worth having.
+type LeafPolicy int
+
+const (
+	// LeafPolicyUnset is LeafPolicy's zero value. WriteFileNoFollow returns
+	// an error if it is ever passed; it has no meaning of its own.
+	LeafPolicyUnset LeafPolicy = iota
+
+	// ReplaceLeaf renames the new content over path's leaf unconditionally,
+	// whatever currently sits there — a symlink, a FIFO, a regular file, or
+	// nothing. RenameAt (renameat(2)) replaces a directory ENTRY without
+	// ever dereferencing it, so a symlink at the leaf is replaced outright,
+	// never followed or written through, the same guarantee either policy
+	// gives; the two differ only in whether that pre-existing entry is worth
+	// refusing on sight.
+	//
+	// Use this for installing content into a location inside a directory
+	// the WORKLOAD owns outright (e.g. $HOME/.gitconfig, $HOME's
+	// agent-info.json): the workload can always recreate that same
+	// substitution the instant after a refusal would have run anyway, so
+	// refusing buys nothing, and a legitimate stale leaf (yesterday's
+	// gitconfig, yesterday's status file) is exactly what this call means to
+	// overwrite.
+	ReplaceLeaf
+
+	// RefuseSymlink checks path's leaf BEFORE doing any work — via
+	// RefuseSymlinkOrNonRegularAt, against the same already-open parent
+	// dirFd this call holds — and fails closed if it is already a symlink or
+	// any non-regular file (FIFO, device, directory), instead of silently
+	// replacing it.
+	//
+	// Use this for credential and state files whose directory is NOT
+	// necessarily under the same party's control as the content being
+	// written (an auth token, scion-env): a planted link at the destination
+	// there means tampering worth refusing loudly, not a stale leaf to
+	// overwrite quietly.
+	RefuseSymlink
+)
+
 // WriteFileNoFollow atomically replaces path's content the way
 // writeLimitsState does: it resolves path's parent directory once via
-// OpenParentNoFollow, creates a temp file in that directory with
-// CreateExclAt (O_CREAT|O_EXCL|O_NOFOLLOW, so the temp name itself cannot
-// already be a pre-planted symlink), writes data to it, sets its
-// permission bits via Chmod on the open *os.File (fchmod on the fd — never
-// a path-based os.Chmod, which a symlink swapped in at the temp path
-// between create and chmod could redirect to an arbitrary target's
-// permissions) and, when uid > 0, its ownership the same fd-based way
-// before ever renaming it anywhere, then renames it into place with a
-// single fd-relative RenameAt. The temp file is removed on any error path.
-func WriteFileNoFollow(path string, data []byte, mode os.FileMode, uid, gid int) (err error) {
+// OpenParentNoFollow, optionally refuses an existing non-regular leaf (see
+// LeafPolicy), creates a temp file in that directory with CreateExclAt
+// (O_CREAT|O_EXCL|O_NOFOLLOW, so the temp name itself cannot already be a
+// pre-planted symlink), writes data to it, sets its permission bits via
+// Chmod on the open *os.File (fchmod on the fd — never a path-based
+// os.Chmod, which a symlink swapped in at the temp path between create and
+// chmod could redirect to an arbitrary target's permissions) and, when
+// uid > 0, its ownership the same fd-based way, fsyncs it, then renames it
+// into place with a single fd-relative RenameAt. The temp file is removed
+// on any error path.
+//
+// This is the one fd-anchored writer every atomic-install caller in this
+// codebase shares; hub.WriteFileNoFollowChown is a thin wrapper over
+// WriteFileNoFollowWithChown (this function's own core, see its doc
+// comment) rather than a second, independent implementation of the same
+// create-write-chmod-chown-fsync-rename sequence.
+func WriteFileNoFollow(path string, data []byte, mode os.FileMode, uid, gid int, policy LeafPolicy) error {
+	return WriteFileNoFollowWithChown(path, data, mode, uid, gid, policy, syscall.Fchown)
+}
+
+// WriteFileNoFollowWithChown is WriteFileNoFollow's core, parameterized on
+// the fd-based chown call itself. Production code always gets there through
+// WriteFileNoFollow, which passes syscall.Fchown; a caller that needs its
+// own test seam for the chown step — hub.WriteFileNoFollowChown does, so
+// its existing tests can intercept the fchown call without actually needing
+// CAP_CHOWN — calls this directly with its own chown function instead.
+func WriteFileNoFollowWithChown(path string, data []byte, mode os.FileMode, uid, gid int, policy LeafPolicy, chown func(fd, uid, gid int) error) (err error) {
+	if policy != ReplaceLeaf && policy != RefuseSymlink {
+		return fmt.Errorf("dirfd: WriteFileNoFollow %s: invalid LeafPolicy %d (every caller must choose ReplaceLeaf or RefuseSymlink)", path, policy)
+	}
+
 	dirFd, leaf, err := OpenParentNoFollow(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
+
+	if policy == RefuseSymlink {
+		if rerr := RefuseSymlinkOrNonRegularAt(dirFd, leaf); rerr != nil {
+			return fmt.Errorf("dirfd: refusing to write %s: %w", path, rerr)
+		}
+	}
 
 	// PID + nanosecond timestamp is unique enough that CreateExclAt's
 	// O_EXCL is only ever a defense against a pre-planted entry at this
@@ -171,10 +246,10 @@ func WriteFileNoFollow(path string, data []byte, mode os.FileMode, uid, gid int)
 	if err != nil {
 		return fmt.Errorf("dirfd: create temp for %s: %w", path, err)
 	}
-	return writeTempAndRename(dirFd, tmpFile, tmpName, leaf, path, data, mode, uid, gid)
+	return writeTempAndRename(dirFd, tmpFile, tmpName, leaf, path, data, mode, uid, gid, chown)
 }
 
-func writeTempAndRename(dirFd int, tmpFile *os.File, tmpName, leaf, path string, data []byte, mode os.FileMode, uid, gid int) (err error) {
+func writeTempAndRename(dirFd int, tmpFile *os.File, tmpName, leaf, path string, data []byte, mode os.FileMode, uid, gid int, chown func(fd, uid, gid int) error) (err error) {
 	defer func() {
 		if err != nil {
 			_ = UnlinkAt(dirFd, tmpName)
@@ -195,10 +270,19 @@ func writeTempAndRename(dirFd int, tmpFile *os.File, tmpName, leaf, path string,
 		return fmt.Errorf("dirfd: chmod temp for %s: %w", path, cerr)
 	}
 	if uid > 0 {
-		if cerr := tmpFile.Chown(uid, gid); cerr != nil {
+		if cerr := chown(int(tmpFile.Fd()), uid, gid); cerr != nil {
 			_ = tmpFile.Close()
 			return fmt.Errorf("dirfd: chown temp for %s: %w", path, cerr)
 		}
+	}
+	// fsync after every metadata change and before the rename that makes
+	// this content visible at path: a crash between rename and a later
+	// fsync could otherwise leave path pointing at a temp file whose
+	// content, mode, or ownership never made it to disk, even though
+	// renameat(2) itself already completed.
+	if serr := tmpFile.Sync(); serr != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("dirfd: fsync temp for %s: %w", path, serr)
 	}
 	if cerr := tmpFile.Close(); cerr != nil {
 		return fmt.Errorf("dirfd: close temp for %s: %w", path, cerr)

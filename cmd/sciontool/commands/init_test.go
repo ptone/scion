@@ -2517,20 +2517,20 @@ func TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched(t *testing.T) {
 	}
 }
 
-// TestConfigureSharedWorkspaceGit_FollowsSymlinkOwnedByWorkload proves the
-// R9(b) fix: a symlink at $HOME/.gitconfig whose ENTIRE chain — the symlink
-// itself and the file it targets — is owned by the same uid this call is
-// told the workload is (a dotfile manager's normal layout: chezmoi, stow,
-// dotbot, ... symlinking .gitconfig into their own managed store) is
-// followed, so the workload's existing settings seed the private copy
-// instead of the credential helper silently starting from empty. This test
-// cannot fabricate a file genuinely owned by a DIFFERENT uid without root,
-// so TestConfigureSharedWorkspaceGit_SymlinkTargetUntouched (uid 0, meaning
-// "no distinct workload identity") remains this fix's negative case.
-func TestConfigureSharedWorkspaceGit_FollowsSymlinkOwnedByWorkload(t *testing.T) {
-	if os.Getuid() == 0 {
-		t.Skip("chowning WriteFileNoFollow's output to an arbitrary uid requires a non-root, non-zero uid for this test's own assertions to mean anything")
-	}
+// TestConfigureSharedWorkspaceGit_SymlinkProducesWarnAndRegularFile proves
+// the R9(b) ruling: a symlinked $HOME/.gitconfig — the layout a dotfile
+// manager (chezmoi, stow, dotbot, ...) commonly produces — is refused
+// exactly like a hostile one, even when the workload owns every hop of the
+// chain (this test's own process necessarily owns both the symlink and its
+// target). This is a VISIBILITY change only: the design authority ruled
+// against following the link at all, since doing so would still mean root
+// opening a workload-controlled path with follow before any ownership
+// check could run — a FIFO or device open can hang or have side effects
+// before that point — so the only observable difference from the
+// pre-ruling behavior is the WARN this test asserts on, naming the path and
+// the reason (never file content) and ending in a regular file with the
+// credential helper set as usual.
+func TestConfigureSharedWorkspaceGit_SymlinkProducesWarnAndRegularFile(t *testing.T) {
 	agentHome := t.TempDir()
 	store := filepath.Join(t.TempDir(), "dotfiles")
 	if err := os.Mkdir(store, 0o700); err != nil {
@@ -2545,7 +2545,19 @@ func TestConfigureSharedWorkspaceGit_FollowsSymlinkOwnedByWorkload(t *testing.T)
 		t.Fatalf("symlink: %v", err)
 	}
 
-	configureSharedWorkspaceGit(agentHome, os.Getuid(), os.Getgid(), true, false)
+	output := captureStderr(t, func() {
+		configureSharedWorkspaceGit(agentHome, 0, 0, true, false)
+	})
+
+	if !strings.Contains(output, "WARN") {
+		t.Errorf("expected a WARN in the output, got: %s", output)
+	}
+	if !strings.Contains(output, gitconfigPath) {
+		t.Errorf("expected the WARN to name %s, got: %s", gitconfigPath, output)
+	}
+	if strings.Contains(output, "do-not-touch") || strings.Contains(output, "baz") {
+		t.Errorf("expected the WARN to carry paths and reasons only, never file content, got: %s", output)
+	}
 
 	fi, err := os.Lstat(gitconfigPath)
 	if err != nil {
@@ -2554,17 +2566,20 @@ func TestConfigureSharedWorkspaceGit_FollowsSymlinkOwnedByWorkload(t *testing.T)
 	if fi.Mode()&os.ModeSymlink != 0 {
 		t.Error("gitconfigPath is still a symlink after configureSharedWorkspaceGit")
 	}
-	// foo.bar has no bearing on credential.helper or user.*: its survival
-	// proves the read actually followed the symlink and seeded the private
-	// copy with the target's content (the same "unrelated key" proof
-	// TestConfigureSharedWorkspaceGit_PreservesExistingUnrelatedKeys uses
-	// for the non-symlink case), rather than starting from empty and
-	// merely not erroring.
-	if got := gitConfigGet(t, gitconfigPath, "foo.bar"); got != "baz" {
-		t.Errorf("foo.bar = %q, want baz (the followed symlink's existing content must survive the rewrite)", got)
+	// foo.bar must NOT survive: the link was refused, not followed, so the
+	// private copy started empty exactly like before this ruling.
+	if got := gitConfigGet(t, gitconfigPath, "foo.bar"); got != "" {
+		t.Errorf("foo.bar = %q, want empty (the symlink must not have been followed)", got)
 	}
 	if got := gitConfigGet(t, gitconfigPath, "user.email"); got != "agent@scion.dev" {
-		t.Errorf("user.email = %q, want agent@scion.dev", got)
+		t.Errorf("user.email = %q, want agent@scion.dev (the credential helper/identity must still be applied to the regular file)", got)
+	}
+	realData, rerr := os.ReadFile(real)
+	if rerr != nil {
+		t.Fatalf("read real gitconfig: %v", rerr)
+	}
+	if string(realData) != "[foo]\n\tbar = baz\n" {
+		t.Errorf("the symlink target was modified: %q", realData)
 	}
 }
 

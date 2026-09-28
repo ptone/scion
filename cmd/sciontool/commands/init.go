@@ -2963,35 +2963,24 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 
 	existing, err := dirfd.ReadFileNoFollow(gitconfigPath, gitconfigMaxBytes)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		// A symlink at .gitconfig is not automatically hostile: a dotfile
-		// manager the workload runs for itself (chezmoi, stow, dotbot, ...)
-		// commonly manages ~/.gitconfig this way, symlinking it into its own
-		// managed store. uid > 0 means a distinct workload identity exists
-		// to compare ownership against (see setupHostUser's doc comment —
-		// uid == 0 covers both genuinely running as root with no separate
-		// identity to drop to, and the rootless case where PID 1 already IS
-		// the workload, neither of which this ownership check means
-		// anything for). When every hop of the symlink chain, including the
-		// file it finally lands on, is owned by that same uid, following it
-		// hands root nothing the workload could not already do to its own
-		// files directly — see dirfd.ReadFileNoFollowOwnedBy's doc comment
-		// for the full safety argument. Anything else (owned by a different
-		// uid, a loop, too many hops, not a plain file) is refused and
-		// logged the same as before.
-		if uid > 0 {
-			if owned, oerr := dirfd.ReadFileNoFollowOwnedBy(gitconfigPath, uint32(uid), gitconfigMaxBytes); oerr == nil {
-				log.Info("Following existing %s: a symlink chain entirely owned by the workload (uid %d)", gitconfigPath, uid)
-				existing = owned
-				err = nil
-			}
-		}
-		if err != nil {
-			// Loud and unambiguous, not merely a debug-level line: an
-			// operator relying on this credential helper or git identity
-			// needs to know it started from empty, not silently discover
-			// it later from a failed push.
-			log.Error("Refusing existing %s: %v; starting from an empty gitconfig", gitconfigPath, err)
-		}
+		// RULED (design authority): never follow the link, even when the
+		// target is owned by the workload. Following it would still mean
+		// root opening a workload-controlled path — a FIFO or device can
+		// hang or have side effects on open, before any ownership check
+		// ever runs — which is exactly the attack class this refusal
+		// exists to close. A symlinked .gitconfig (the layout a dotfile
+		// manager such as chezmoi, stow, or dotbot commonly produces) is
+		// refused exactly like a hostile one, the same as a FIFO, a
+		// hardlink, or an oversized file: this is a VISIBILITY change
+		// only, not a behavior change — the private copy still starts
+		// empty and installs with ReplaceLeaf (see below), but an operator
+		// now gets a WARN naming the path and the reason, not just an
+		// ERROR line easy to miss. Paths and reasons only, never file
+		// content: err here is always a dirfd sentinel's own text ("not a
+		// single-link regular file", "too many levels of symbolic links",
+		// "content exceeds size limit"), never anything read from the
+		// refused file itself.
+		log.Warn("Existing %s is not a regular file (%v); its content was NOT merged, and the credential helper and git identity below were applied to an empty gitconfig instead. Replace it with a regular file to have its content picked up.", gitconfigPath, err)
 	}
 	// Lstat never follows a symlink, so this can only ever report the mode
 	// of the real entry at gitconfigPath (or nothing, if it's absent or not
@@ -3079,7 +3068,13 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		log.Error("Failed to read back private gitconfig: %v", err)
 		return
 	}
-	if err := dirfd.WriteFileNoFollow(gitconfigPath, result, mode, uid, gid); err != nil {
+	// ReplaceLeaf, not RefuseSymlink: gitconfigPath lives inside agentHome,
+	// which the workload owns outright, so whatever currently sits at the
+	// leaf (including a symlink R9(b) above just refused to read through)
+	// is a stale entry this install means to overwrite, not tamper to
+	// refuse — the read-side refusal already happened; this call only
+	// installs the result.
+	if err := dirfd.WriteFileNoFollow(gitconfigPath, result, mode, uid, gid, dirfd.ReplaceLeaf); err != nil {
 		log.Error("Failed to install %s: %v", gitconfigPath, err)
 	}
 }
