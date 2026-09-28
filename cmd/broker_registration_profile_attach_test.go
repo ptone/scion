@@ -140,3 +140,29 @@ func TestRegisterGlobalProjectAndBroker_ReRegistration_RefreshesAttachFromLiveRu
 	require.NotNil(t, after.Profiles[0].Attach)
 	assert.False(t, *after.Profiles[0].Attach, "re-registration must refresh the default profile's Attach from the live runtime")
 }
+
+// TestBuildStoreBrokerProfiles_AllProfilesFiltered_DefaultAsksLiveRuntime
+// covers the second synthesized-"default" fallback of the embedded broker's
+// registration producer: every configured profile is filtered out (a
+// local-only runtime on a non-local default), so buildStoreBrokerProfiles
+// synthesizes a "default" profile of the default runtime type. That profile
+// is backed by the live default runtime, so it must carry that runtime's
+// real answer (&false for an opted-out runtime), not be left unknown — an
+// unknown here would hand the CLI a nil profile Attach for the only profile
+// the broker advertises.
+func TestBuildStoreBrokerProfiles_AllProfilesFiltered_DefaultAsksLiveRuntime(t *testing.T) {
+	settings := &config.Settings{
+		Profiles: map[string]config.ProfileConfig{
+			"local": {Runtime: "docker"},
+		},
+	}
+	rt := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
+
+	profiles := buildStoreBrokerProfiles(settings, "optout", rt)
+
+	require.Len(t, profiles, 1)
+	require.Equal(t, "default", profiles[0].Name, "precondition: the docker profile must be filtered out on a non-local default")
+	require.Equal(t, "optout", profiles[0].Type)
+	require.NotNil(t, profiles[0].Attach, "synthesized default profile of an opted-out default runtime must carry an explicit Attach")
+	require.False(t, *profiles[0].Attach)
+}

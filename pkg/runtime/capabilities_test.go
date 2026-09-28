@@ -59,3 +59,15 @@ func TestHasAttachSupport_FieldPresentFalse(t *testing.T) {
 		t.Error("HasAttachSupport = true, want false for a runtime reporting SupportsAttach() = false")
 	}
 }
+
+// The substrate runtime has no exec/attach/TTY primitive in this phase and
+// must opt out. Since the CLI's former `agentRuntime == "substrate"` literal
+// was replaced by capability reads, this method is now the sole source of
+// the substrate refusal on every path (broker pre-upgrade gate,
+// control-channel gate, /info, heartbeat, registration); flipping it to true
+// would silently re-enable a post-upgrade failure for substrate agents.
+func TestHasAttachSupport_SubstrateRuntimeOptsOut(t *testing.T) {
+	if HasAttachSupport(&SubstrateRuntime{}) {
+		t.Error("HasAttachSupport(&SubstrateRuntime{}) = true, want false: substrate has no attach primitive in this phase")
+	}
+}
