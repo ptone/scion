@@ -162,9 +162,13 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Name:     s.config.BrokerName,
 		Version:  s.version,
 		Capabilities: &BrokerCapabilities{
-			WebPTY:      false, // TODO: Implement WebSocket PTY
-			Sync:        true,
-			Attach:      true,
+			WebPTY: false, // TODO: Implement WebSocket PTY
+			Sync:   true,
+			// Attach reflects the default runtime's own capability
+			// (scionrt.HasAttachSupport) rather than a blanket true, so a
+			// runtime that opts out via the optional AttachCapableRuntime
+			// interface is reported accurately here too.
+			Attach:      scionrt.HasAttachSupport(s.runtime),
 			Exec:        true,
 			Reprovision: true,
 		},
@@ -197,7 +201,7 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 	vs, _, err := config.LoadEffectiveSettings("")
 	if err != nil || len(vs.Profiles) == 0 {
 		return []BrokerProfile{
-			{Name: "default", Type: defaultRuntimeType, Available: true},
+			{Name: "default", Type: defaultRuntimeType, Available: true, Attach: s.attachSupportedForProfile(defaultRuntimeType, defaultRuntimeType)},
 		}
 	}
 
@@ -221,16 +225,56 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 			Available: true,
 			Context:   rtCfg.Context,
 			Namespace: rtCfg.Namespace,
+			Attach:    s.attachSupportedForProfile(rtType, defaultRuntimeType),
 		})
 	}
 
 	if len(profiles) == 0 {
 		return []BrokerProfile{
-			{Name: "default", Type: defaultRuntimeType, Available: true},
+			{Name: "default", Type: defaultRuntimeType, Available: true, Attach: s.attachSupportedForProfile(defaultRuntimeType, defaultRuntimeType)},
 		}
 	}
 
 	return profiles
+}
+
+// resolveLiveRuntimeInstance returns the already-built Runtime instance
+// backing a profile resolving to rtType, without constructing anything new:
+// s.runtime for the default type, or the auxiliary runtime some prior
+// request already built and cached under that type in s.auxiliaryRuntimes.
+// ok is false when no live instance exists yet for rtType — most commonly
+// an auxiliary runtime type no request has resolved yet — and callers must
+// leave the capability unknown in that case rather than guess from the type
+// string alone (a substrate profile on a docker-default broker is not
+// "probably fine" just because it's not the default type).
+func (s *Server) resolveLiveRuntimeInstance(rtType, defaultRuntimeType string) (rt scionrt.Runtime, ok bool) {
+	if rtType == defaultRuntimeType {
+		if s.runtime == nil {
+			return nil, false
+		}
+		return s.runtime, true
+	}
+	s.auxiliaryRuntimesMu.RLock()
+	aux, found := s.auxiliaryRuntimes[rtType]
+	s.auxiliaryRuntimesMu.RUnlock()
+	if !found || aux.Runtime == nil {
+		return nil, false
+	}
+	return aux.Runtime, true
+}
+
+// attachSupportedForProfile reports whether a profile resolving to rtType
+// supports attach, asking resolveLiveRuntimeInstance for the live instance
+// that actually backs it. nil means unknown (no live instance to ask, per
+// resolveLiveRuntimeInstance) — callers, and every consumer of the
+// resulting BrokerProfile.Attach, must read nil as supported.
+func (s *Server) attachSupportedForProfile(rtType, defaultRuntimeType string) *bool {
+	rt, ok := s.resolveLiveRuntimeInstance(rtType, defaultRuntimeType)
+	if !ok {
+		return nil
+	}
+	v := scionrt.HasAttachSupport(rt)
+	return &v
 }
 
 // resolveInfoProfileRuntime returns the runtime type and runtime config

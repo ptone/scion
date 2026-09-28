@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 func writeHomeSettings(t *testing.T, settingsYAML string) {
@@ -103,6 +105,11 @@ profiles:
 
 	byName := infoProfilesByName((&Server{}).buildInfoProfiles("docker"))
 
+	// s.runtime is nil on this zero-value Server, and the auxiliary-runtime
+	// map is empty, so resolveLiveRuntimeInstance finds no live instance for
+	// any profile here — Attach is unknown (nil) for all of them, not a
+	// guessed true. See TestBuildInfoProfiles_DefaultTypeProfile_AsksLiveInstance
+	// below for the case where a live instance actually answers.
 	want := map[string]BrokerProfile{
 		"local":    {Name: "local", Type: "docker", Available: true},
 		"remote":   {Name: "remote", Type: "kubernetes", Available: true, Context: "kctx", Namespace: "kns"},
@@ -113,5 +120,43 @@ profiles:
 		if got, ok := byName[name]; !ok || got != w {
 			t.Errorf("%s = %+v (present=%v), want %+v", name, got, ok, w)
 		}
+	}
+}
+
+// TestBuildInfoProfiles_DefaultTypeProfile_AsksLiveInstance proves the
+// resolver actually asks a live instance rather than just reporting
+// unknown: a default runtime that opts out of attach makes the matching
+// profile's Attach explicitly &false, while a differently-typed profile —
+// no live instance backs it on this Server — stays nil (unknown, per
+// resolveLiveRuntimeInstance).
+func TestBuildInfoProfiles_DefaultTypeProfile_AsksLiveInstance(t *testing.T) {
+	writeHomeSettings(t, `schema_version: "1"
+active_profile: local
+runtimes:
+  docker:
+    type: docker
+  kubernetes:
+    type: kubernetes
+profiles:
+  local:
+    runtime: docker
+  remote:
+    runtime: kubernetes
+`)
+
+	rt := &attachCapableTestRuntime{
+		MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return "docker" }},
+		supportsAttach: false,
+	}
+	srv := &Server{runtime: rt}
+	byName := infoProfilesByName(srv.buildInfoProfiles("docker"))
+
+	local, ok := byName["local"]
+	if !ok || local.Attach == nil || *local.Attach {
+		t.Errorf("local (default type, opted out) = %+v, want Attach=&false", local)
+	}
+	remote, ok := byName["remote"]
+	if !ok || remote.Attach != nil {
+		t.Errorf("remote (different type, no live instance on this Server) = %+v, want Attach=nil", remote)
 	}
 }
