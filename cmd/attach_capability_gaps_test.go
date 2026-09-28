@@ -164,20 +164,21 @@ func TestAttachViaHub_AgentProfileAttachFalse_ReturnsExplicitError(t *testing.T)
 }
 
 // TestAttachViaHub_StandaloneBrokerNilProfileAttach_BrokerWideFalse_Refuses
-// is the standalone-broker regression this round's C1 fix restores: a
-// remote broker registered via `scion broker register`
-// (buildBrokerProfiles, cmd/broker.go) has no live runtime instance to ask
-// at registration time, so every profile it reports carries Attach=nil —
-// proven here by actually calling buildBrokerProfiles, not by hand-building
-// a profile literal. Once that broker is running, its heartbeat reports the
-// real broker-wide Capabilities.Attach from its own default runtime
-// (HeartbeatService.buildHeartbeat). Before this round's fix,
-// attachSupportedByBroker returned true on the nil-Attach profile match
-// without ever consulting Capabilities.Attach, silently re-opening the
-// exact fail-open base c1cafb0b7's `agentRuntime == "substrate"` literal
-// used to close. The runtime name here is deliberately "substrate" (not a
-// generic stand-in) because this test is pinning that specific historical
-// regression, not just the general mechanism.
+// covers a standalone broker: a remote broker registered via `scion broker
+// register` (buildBrokerProfiles, cmd/broker.go) has no live runtime
+// instance to ask at registration time, so every profile it reports carries
+// Attach=nil — proven here by actually calling buildBrokerProfiles, not by
+// hand-building a profile literal. Once that broker is running, its
+// heartbeat reports the real broker-wide Capabilities.Attach from its own
+// default runtime (HeartbeatService.buildHeartbeat). A profile match with no
+// Attach of its own must fall through to that broker-wide answer rather than
+// defaulting to supported — otherwise a broker whose default runtime has no
+// attach primitive would still let a caller dial in, reproducing the
+// original `agentRuntime == "substrate"` literal's fail-open on the one
+// deployment shape (a remote/standalone broker) that literal used to guard.
+// The runtime name here is deliberately "substrate" (not a generic
+// stand-in), since this is the deployment shape that motivated the guard in
+// the first place.
 func TestAttachViaHub_StandaloneBrokerNilProfileAttach_BrokerWideFalse_Refuses(t *testing.T) {
 	clearAppTokenSources(t)
 	const (

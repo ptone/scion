@@ -152,6 +152,9 @@ func attachUnsupportedErr(ctx context.Context, hubCtx *HubContext, agentRuntime,
 		return fmt.Errorf("attach is not supported for managed agents — use scion message and scion look")
 	}
 	if !attachSupportedByBroker(ctx, hubCtx, runtimeBrokerID, profile) {
+		if agentRuntime == "" {
+			return fmt.Errorf("attach is not supported for this agent's runtime")
+		}
 		return fmt.Errorf("attach is not supported for agents on the %s runtime", agentRuntime)
 	}
 	return nil
