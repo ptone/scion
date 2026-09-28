@@ -420,9 +420,10 @@ func TestSendOutboundMessage_NonOKError(t *testing.T) {
 // TestAgentService_GetLogs_RuntimeLogsUnsupported verifies that the hub's
 // 501/runtime_logs_unsupported response (pkg/hub/handlers_logs.go, the
 // passthrough for a runtime returning pkg/runtime.ErrLogsNotSupported)
-// reaches the CLI's error value intact: same status, same code, same fixed message, no re-wrapping. This
-// is what cmd/logs.go's getHubLogs returns verbatim to the caller in hub
-// mode, so this is also what "scion logs" prints.
+// reaches the CLI's error value intact: same status, same code, same fixed
+// message, no re-wrapping. This is what cmd/logs.go's getHubLogs returns
+// verbatim to the caller in hub mode, so this is also what "scion logs"
+// prints.
 func TestAgentService_GetLogs_RuntimeLogsUnsupported(t *testing.T) {
 	const fixedMessage = "agent logs are not available on this runtime"
 
