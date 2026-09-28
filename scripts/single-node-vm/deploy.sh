@@ -813,10 +813,31 @@ echo "  Authenticated as: ${ACCOUNT}"
 # already exist. ALLOW_UNVERIFIED_RELEASE=true is an explicit, loud opt-out
 # for exactly that transition period; there is no silent fallback.
 RELEASE_URL="https://github.com/GoogleCloudPlatform/scion/releases/download/${VERSION}"
-ALLOW_UNVERIFIED_RELEASE="${ALLOW_UNVERIFIED_RELEASE:-false}"
+# Normalize to exactly "true" or "false": this value is interpolated
+# unquoted into the Phase 3 --command strings below (an operator-controlled
+# env var, not a privilege boundary, but VERSION gets the same strict
+# treatment a few lines up for the same reason -- keep the remote command
+# text predictable regardless of what the caller's environment set).
+if [[ "${ALLOW_UNVERIFIED_RELEASE:-false}" == "true" ]]; then
+  ALLOW_UNVERIFIED_RELEASE=true
+else
+  ALLOW_UNVERIFIED_RELEASE=false
+fi
 info "Checking that release ${VERSION} publishes checksums..."
-if curl -fsSLI -o /dev/null "${RELEASE_URL}/SHA256SUMS"; then
+SHA256SUMS_PREFLIGHT_RC=0
+curl -fsSLI -o /dev/null "${RELEASE_URL}/SHA256SUMS" || SHA256SUMS_PREFLIGHT_RC=$?
+if [[ "$SHA256SUMS_PREFLIGHT_RC" -eq 0 ]]; then
   echo "  SHA256SUMS found for ${VERSION}; downloads will be verified."
+elif [[ "$SHA256SUMS_PREFLIGHT_RC" -ne 22 ]]; then
+  # curl -f maps any HTTP error response to exit 22; anything else (DNS
+  # failure, TLS error, connection refused/timed out, ...) is a
+  # connectivity problem, not evidence the release lacks SHA256SUMS.
+  # Sending an operator to ALLOW_UNVERIFIED_RELEASE for a transient network
+  # blip would be actively wrong, so don't even mention it here.
+  err "Could not reach ${RELEASE_URL}/SHA256SUMS (curl exit ${SHA256SUMS_PREFLIGHT_RC})."
+  echo "  This looks like a network or GitHub-availability problem, not a release that lacks" >&2
+  echo "  checksums. Check connectivity and retry." >&2
+  exit 1
 elif [[ "$ALLOW_UNVERIFIED_RELEASE" == "true" ]]; then
   warn "Release ${VERSION} does not publish a SHA256SUMS checksums asset."
   warn "Proceeding WITHOUT checksum verification because ALLOW_UNVERIFIED_RELEASE=true."

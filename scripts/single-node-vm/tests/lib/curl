@@ -29,12 +29,19 @@
 #                                 404 does under `curl -f` (exit 22),
 #                                 simulating a release published before
 #                                 checksum publishing existed.
+#   CURL_STUB_SHA256SUMS_CONN_ERROR=true — same target, but fails the way
+#                                 curl fails when it never got an HTTP
+#                                 response at all (exit 6, "Couldn't
+#                                 resolve host"), simulating a DNS/network
+#                                 problem rather than a real 404. Takes
+#                                 priority over CURL_STUB_SHA256SUMS_MISSING
+#                                 if both are set.
 #   CURL_STUB_FIXTURE_DIR=DIR  — any `-o DEST` download is served from
 #                                 "DIR/$(basename URL)" when that file
 #                                 exists, regardless of host/scheme. Lets
 #                                 a test run deploy.sh's own generated
 #                                 download+verify command text against
-#                                 local fixtures (good tarball, tampered
+#                                 local fixtures (good tarball, mismatched
 #                                 tarball, a SHA256SUMS with no matching
 #                                 entry, ...) with no real network call.
 #                                 A URL whose basename has no matching
@@ -107,6 +114,11 @@ if [[ -n "${CURL_STUB_FIXTURE_DIR:-}" && -z "$fixture" ]]; then
   # release wouldn't either. Fail the way curl -f does for an HTTP 404.
   echo "curl: (22) The requested URL returned error: 404" >&2
   exit 22
+fi
+
+if [[ "$is_sha256sums" == "true" && "${CURL_STUB_SHA256SUMS_CONN_ERROR:-false}" == "true" ]]; then
+  echo "curl: (6) Could not resolve host: github.com" >&2
+  exit 6
 fi
 
 if [[ "$is_sha256sums" == "true" && "${CURL_STUB_SHA256SUMS_MISSING:-false}" == "true" ]]; then

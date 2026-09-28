@@ -1283,34 +1283,38 @@ func deriveChecksumsURL(downloadURL string) string {
 	return downloadURL[:idx+1] + "SHA256SUMS"
 }
 
-// verifyTarballChecksum downloads the release's SHA256SUMS asset and
-// verifies the already-downloaded tarball at tarballPath against the entry
-// matching assetName -- the tarball's filename *on the release*, not its
-// local path (downloadFile always saves to a fixed local name). Fails
-// closed: an empty checksumsURL, a download failure, a missing entry, and
-// a hash mismatch are all treated as equally fatal -- there is no
-// "proceed anyway" path here (see ptone/scion#2106 and the corresponding
-// deploy.sh preflight/verification, which does have an explicit,
-// operator-driven override for the install-time tooling; this is an
-// unattended background updater, so failing closed with no update applied
-// is the safe default until the release it would install publishes one).
-func verifyTarballChecksum(ctx context.Context, checksumsURL, assetName, tarballPath string, logger io.Writer) error {
+// fetchExpectedChecksum downloads the release's SHA256SUMS asset and
+// returns the expected hash for assetName -- the tarball's filename *on
+// the release*, not any local path. Deliberately callable before the
+// (potentially large) release tarball itself is downloaded: this backs an
+// unattended updater that re-checks on a recurring schedule, and a release
+// with no checksums asset, or no entry for this asset, should fail
+// immediately rather than after downloading the whole tarball every cycle
+// (ptone/scion#2106). An empty checksumsURL, a download failure, and a
+// missing entry are all treated as equally fatal -- there is no "proceed
+// anyway" path here (see verifyFileChecksum's doc comment for why this
+// differs from deploy.sh's own, operator-driven install-time tooling).
+func fetchExpectedChecksum(ctx context.Context, checksumsURL, assetName string, logger io.Writer) (string, error) {
 	if checksumsURL == "" {
-		return fmt.Errorf("no checksums URL available for %s", assetName)
+		return "", fmt.Errorf("no checksums URL available for %s", assetName)
 	}
 
-	sumsPath := filepath.Join(filepath.Dir(tarballPath), "SHA256SUMS")
-	if err := downloadFile(ctx, checksumsURL, sumsPath, logger); err != nil {
-		return fmt.Errorf("download checksums: %w", err)
+	tmpDir, err := os.MkdirTemp("", "scion-update-sums-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp directory for checksums: %w", err)
 	}
-	defer func() { _ = os.Remove(sumsPath) }()
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	sumsPath := filepath.Join(tmpDir, "SHA256SUMS")
+	if err := downloadFile(ctx, checksumsURL, sumsPath, logger); err != nil {
+		return "", fmt.Errorf("download checksums: %w", err)
+	}
 
 	sumsData, err := os.ReadFile(sumsPath)
 	if err != nil {
-		return fmt.Errorf("read checksums file: %w", err)
+		return "", fmt.Errorf("read checksums file: %w", err)
 	}
 
-	var expectedHash string
 	for _, line := range strings.Split(string(sumsData), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -1324,15 +1328,21 @@ func verifyTarballChecksum(ctx context.Context, checksumsURL, assetName, tarball
 		// "name" in text mode (what build-release.yml's `sha256sum --`
 		// produces); accept either.
 		if strings.TrimPrefix(fields[1], "*") == assetName {
-			expectedHash = fields[0]
-			break
+			return fields[0], nil
 		}
 	}
-	if expectedHash == "" {
-		return fmt.Errorf("no checksum entry for %q in SHA256SUMS", assetName)
-	}
 
-	f, err := os.Open(tarballPath)
+	return "", fmt.Errorf("no checksum entry for %q in SHA256SUMS", assetName)
+}
+
+// verifyFileChecksum hashes the file at path and compares it against
+// expectedHash (as returned by fetchExpectedChecksum), failing closed on a
+// mismatch. This is an unattended background updater, not an interactive
+// install, so unlike deploy.sh's own preflight/verification there is no
+// override here: a mismatch always fails the update, with nothing swapped
+// in.
+func verifyFileChecksum(path, assetName, expectedHash string, logger io.Writer) error {
+	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open tarball for checksum: %w", err)
 	}
@@ -1442,6 +1452,24 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 		"download_url", downloadURL,
 		"binary_path", binaryPath)
 
+	// ── Step 1b: FETCH EXPECTED CHECKSUM ─────────────────────────────────
+	// Fetch and parse SHA256SUMS *before* downloading the (potentially
+	// large) release tarball below: this update check runs on a recurring
+	// schedule, and a release with no checksums asset, or no entry for
+	// this asset, should fail immediately rather than after a full
+	// download every cycle (ptone/scion#2106 round-2 review finding 1).
+	// Fails closed the same way the combined check used to — see
+	// fetchExpectedChecksum's doc comment for what's fatal and why there
+	// is no override here.
+
+	_, _ = fmt.Fprintf(logger, "\n==> Fetching expected checksum...\n")
+
+	assetName := path.Base(downloadURL)
+	expectedHash, err := fetchExpectedChecksum(ctx, checksumsURL, assetName, logger)
+	if err != nil {
+		return fmt.Errorf("checksum verification failed: %w", err)
+	}
+
 	// ── Step 2: DOWNLOAD ────────────────────────────────────────────────
 
 	// Create temp directory in the system default temp location (e.g., /tmp).
@@ -1462,17 +1490,10 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 	}
 
 	// ── Step 2b: VERIFY CHECKSUM ─────────────────────────────────────────
-	// Fails closed (ptone/scion#2106): a missing checksums asset, a
-	// missing entry for this asset, or a hash mismatch all abort the
-	// update before extraction ever runs, the same as a corrupt download.
-	// This is an unattended background updater, not an interactive
-	// install, so unlike deploy.sh's own preflight/verification there is
-	// no override here — see verifyTarballChecksum's doc comment.
 
 	_, _ = fmt.Fprintf(logger, "\n==> Verifying checksum...\n")
 
-	assetName := path.Base(downloadURL)
-	if err := verifyTarballChecksum(ctx, checksumsURL, assetName, tarballPath, logger); err != nil {
+	if err := verifyFileChecksum(tarballPath, assetName, expectedHash, logger); err != nil {
 		return fmt.Errorf("checksum verification failed: %w", err)
 	}
 

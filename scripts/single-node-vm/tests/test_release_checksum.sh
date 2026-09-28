@@ -185,6 +185,35 @@ test_release_checksum_preflight_passes_when_checksums_exist() {
     "a release that does publish checksums must not trigger the unverified-install warning"
 }
 
+# A DNS/network failure probing SHA256SUMS is not evidence the release
+# lacks checksums, and must not be reported (or overridable) as if it
+# were. Deliberately does not set ALLOW_UNVERIFIED_RELEASE at all: even
+# the override shouldn't be mentioned for a connectivity problem.
+test_release_checksum_preflight_connectivity_error_is_not_missing_checksums() {
+  fresh_gcloud_state
+  local config_file
+  config_file="$(mktemp)"
+  printf '%s' "$(release_checksum_config_json "$HUB")" > "$config_file"
+
+  CURL_STUB_SHA256SUMS_CONN_ERROR=true run_expect_fail \
+    bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test
+  rm -f "$config_file"
+
+  assert_true "$([[ "$RUN_EXIT_CODE" -ne 0 ]] && echo true || echo false)" \
+    "deploy.sh must exit non-zero when it cannot even reach the checksums endpoint"
+  assert_contains "$RUN_OUTPUT" "Could not reach" \
+    "a connectivity failure must be reported as a connectivity failure"
+  assert_not_contains "$RUN_OUTPUT" "does not publish a SHA256SUMS checksums asset" \
+    "a connectivity failure must not be reported as the release lacking checksums"
+  assert_not_contains "$RUN_OUTPUT" "ALLOW_UNVERIFIED_RELEASE" \
+    "the override must not be suggested for a connectivity problem it cannot fix"
+
+  local log
+  log="$(gcloud_log)"
+  assert_not_contains "$log" "services enable" \
+    "a connectivity failure must also be caught before any GCP resource is created"
+}
+
 # =====================================================================
 # Phase 3 install commands: download, verify, then (and only then) extract
 # =====================================================================
@@ -247,15 +276,30 @@ _extract_binary_install_snippet() {
   ' | sed -E 's/^[[:space:]]+//'
 }
 
-# _run_extracted_snippet SNIPPET — runs SNIPPET (deploy.sh's own
-# generated text) as a real subprocess under `set -euo pipefail`, exactly
-# the flags deploy.sh's own --command string opens with. Its `curl` calls
-# resolve to tests/lib/curl (still first on PATH), so CURL_STUB_* from
-# the caller's environment governs what they see.
+# _run_extracted_snippet WORKDIR SNIPPET — runs SNIPPET (deploy.sh's own
+# generated text) as a real subprocess under `set -euo pipefail`, after
+# rewriting every "/tmp" path reference in it to WORKDIR. deploy.sh's real
+# remote command always operates on the *target VM's* /tmp; on the machine
+# actually running this test suite, that would mean writing to (and
+# `rm -f`-ing) fixed paths like /tmp/scion-linux-amd64.tar.gz on the real
+# host -- clobbering a developer's own /tmp/scion, and racing a second
+# concurrent run of this suite. WORKDIR is a fresh, per-call `mktemp -d`,
+# so neither can happen. Its `curl` calls still resolve to tests/lib/curl
+# (first on PATH), so CURL_STUB_* from the caller's environment governs
+# what they see.
 _run_extracted_snippet() {
-  local snippet="$1"
+  local workdir="$1" snippet="$2" rewritten
+  # A single substitution pass over the *original* snippet: matching the
+  # literal 4 characters "/tmp" (not "/tmp/") covers both "/tmp/NAME" and
+  # the bare "/tmp" in "-C /tmp"/"cd /tmp", leaving the following "/" (or
+  # nothing) exactly where it was. This has to be one pass, not two:
+  # WORKDIR is itself a path under this suite's own TMPDIR, which is
+  # itself under /tmp (see run.sh), so a second pass over the
+  # already-rewritten text would find and mangle /tmp again inside
+  # WORKDIR's own value.
+  rewritten="${snippet//\/tmp/${workdir}}"
   bash -c "set -euo pipefail
-$snippet" 2>&1
+$rewritten" 2>&1
 }
 
 # _make_tarball DIR NAME CONTENT — writes DIR/NAME as a gzip tarball
@@ -276,51 +320,51 @@ test_release_checksum_dry_run_good_tarball_extracts() {
   assert_contains "$snippet" "sha256sum -c -" \
     "sanity: the extracted snippet must actually contain the verification step"
 
-  local fixdir
+  local fixdir work
   fixdir="$(mktemp -d)"
+  work="$(mktemp -d)"
   _make_tarball "$fixdir" "scion-linux-amd64.tar.gz" "real-scion-binary-payload"
   (cd "$fixdir" && sha256sum scion-linux-amd64.tar.gz > SHA256SUMS)
 
-  rm -f /tmp/scion-linux-amd64.tar.gz /tmp/SHA256SUMS /tmp/scion
   local out rc
-  out="$(CURL_STUB_FIXTURE_DIR="$fixdir" _run_extracted_snippet "$snippet")"
+  out="$(CURL_STUB_FIXTURE_DIR="$fixdir" _run_extracted_snippet "$work" "$snippet")"
   rc=$?
   rm -rf "$fixdir"
 
   assert_eq "0" "$rc" "a matching tarball and SHA256SUMS entry must verify and extract cleanly"
   assert_contains "$out" "OK" "sha256sum -c must report OK for a matching tarball"
-  assert_eq "real-scion-binary-payload" "$(cat /tmp/scion 2>/dev/null || echo '<missing>')" \
+  assert_eq "real-scion-binary-payload" "$(cat "${work}/scion" 2>/dev/null || echo '<missing>')" \
     "tar -xzf must actually have extracted the verified tarball's payload"
-  rm -f /tmp/scion-linux-amd64.tar.gz /tmp/SHA256SUMS /tmp/scion
+  rm -rf "$work"
 }
 
-test_release_checksum_dry_run_tampered_tarball_fails_closed() {
+test_release_checksum_dry_run_mismatched_tarball_fails_closed() {
   fresh_gcloud_state
   run_deploy_create_through_phase3 "$(release_checksum_config_json "$HUB")"
   local snippet
   snippet="$(_extract_binary_install_snippet "$(gcloud_log)")"
 
-  local fixdir
+  local fixdir work
   fixdir="$(mktemp -d)"
+  work="$(mktemp -d)"
   # SHA256SUMS matches the ORIGINAL payload; the tarball actually served
-  # under that same filename has different bytes (corrupted/tampered in
+  # under that same filename has different bytes (corrupted or modified in
   # transit).
   _make_tarball "$fixdir" "scion-linux-amd64.tar.gz" "original-payload"
   (cd "$fixdir" && sha256sum scion-linux-amd64.tar.gz > SHA256SUMS)
-  _make_tarball "$fixdir" "scion-linux-amd64.tar.gz" "tampered-payload"
+  _make_tarball "$fixdir" "scion-linux-amd64.tar.gz" "modified-payload"
 
-  rm -f /tmp/scion-linux-amd64.tar.gz /tmp/SHA256SUMS /tmp/scion
   local out rc
-  out="$(CURL_STUB_FIXTURE_DIR="$fixdir" _run_extracted_snippet "$snippet")"
+  out="$(CURL_STUB_FIXTURE_DIR="$fixdir" _run_extracted_snippet "$work" "$snippet")"
   rc=$?
   rm -rf "$fixdir"
 
   assert_true "$([[ "$rc" -ne 0 ]] && echo true || echo false)" \
     "a hash mismatch must fail the install command, not just warn"
-  assert_contains "$out" "FAILED" "sha256sum -c must report FAILED for a tampered tarball"
-  assert_true "$([[ ! -e /tmp/scion ]] && echo true || echo false)" \
+  assert_contains "$out" "FAILED" "sha256sum -c must report FAILED for a mismatched tarball"
+  assert_true "$([[ ! -e "${work}/scion" ]] && echo true || echo false)" \
     "tar -xzf must never have run against a tarball that failed verification"
-  rm -f /tmp/scion-linux-amd64.tar.gz /tmp/SHA256SUMS /tmp/scion
+  rm -rf "$work"
 }
 
 test_release_checksum_dry_run_missing_entry_fails_closed() {
@@ -329,15 +373,15 @@ test_release_checksum_dry_run_missing_entry_fails_closed() {
   local snippet
   snippet="$(_extract_binary_install_snippet "$(gcloud_log)")"
 
-  local fixdir
+  local fixdir work
   fixdir="$(mktemp -d)"
+  work="$(mktemp -d)"
   _make_tarball "$fixdir" "scion-linux-amd64.tar.gz" "real-scion-binary-payload"
   echo "0000000000000000000000000000000000000000000000000000000000000000  some-other-file.tar.gz" \
     > "${fixdir}/SHA256SUMS"
 
-  rm -f /tmp/scion-linux-amd64.tar.gz /tmp/SHA256SUMS /tmp/scion
   local out rc
-  out="$(CURL_STUB_FIXTURE_DIR="$fixdir" _run_extracted_snippet "$snippet")"
+  out="$(CURL_STUB_FIXTURE_DIR="$fixdir" _run_extracted_snippet "$work" "$snippet")"
   rc=$?
   rm -rf "$fixdir"
 
@@ -345,9 +389,9 @@ test_release_checksum_dry_run_missing_entry_fails_closed() {
     "a SHA256SUMS with no matching entry must fail the install command"
   assert_contains "$out" "no checksum entry for scion-linux-amd64.tar.gz" \
     "the failure must name the missing entry explicitly, not just fail sha256sum -c"
-  assert_true "$([[ ! -e /tmp/scion ]] && echo true || echo false)" \
+  assert_true "$([[ ! -e "${work}/scion" ]] && echo true || echo false)" \
     "tar -xzf must never have run when the checksum entry itself was missing"
-  rm -f /tmp/scion-linux-amd64.tar.gz /tmp/SHA256SUMS /tmp/scion
+  rm -rf "$work"
 }
 
 test_release_checksum_dry_run_missing_sums_asset_fails_closed() {
@@ -363,13 +407,13 @@ test_release_checksum_dry_run_missing_sums_asset_fails_closed() {
   # this fixture dir were empty of everything, the *tarball* request
   # (which isn't a SHA256SUMS request) would fall through to a real,
   # unstubbed curl instead of being served -- see tests/lib/curl.
-  local fixdir
+  local fixdir work
   fixdir="$(mktemp -d)"
+  work="$(mktemp -d)"
   _make_tarball "$fixdir" "scion-linux-amd64.tar.gz" "real-scion-binary-payload"
 
-  rm -f /tmp/scion-linux-amd64.tar.gz /tmp/SHA256SUMS /tmp/scion
   local out rc
-  out="$(CURL_STUB_FIXTURE_DIR="$fixdir" _run_extracted_snippet "$snippet")"
+  out="$(CURL_STUB_FIXTURE_DIR="$fixdir" _run_extracted_snippet "$work" "$snippet")"
   rc=$?
   rm -rf "$fixdir"
 
@@ -377,7 +421,78 @@ test_release_checksum_dry_run_missing_sums_asset_fails_closed() {
     "a missing SHA256SUMS asset at install time must fail the install command"
   assert_contains "$out" "could not download SHA256SUMS" \
     "the failure must say the checksums asset itself could not be fetched"
-  assert_true "$([[ ! -e /tmp/scion ]] && echo true || echo false)" \
+  assert_true "$([[ ! -e "${work}/scion" ]] && echo true || echo false)" \
     "tar -xzf must never have run when SHA256SUMS itself could not be downloaded"
-  rm -f /tmp/scion-linux-amd64.tar.gz /tmp/SHA256SUMS /tmp/scion
+  rm -rf "$work"
+}
+
+# --- ALLOW_UNVERIFIED_RELEASE inside the remote install commands ---
+# The two tests above (mismatch, missing SUMS) run with the default
+# `deploy.sh`-generated text, i.e. ALLOW_UNVERIFIED_RELEASE=false baked
+# in. The two tests below exercise the *other* value, generated by
+# exporting ALLOW_UNVERIFIED_RELEASE=true before driving deploy.sh, to
+# cover the two properties the round-2 review flagged as claimed but
+# untested: a hash mismatch is never overridable, and "missing SUMS +
+# override" really does proceed (with a warning), not just "still fails
+# but with different text."
+
+test_release_checksum_dry_run_override_does_not_bypass_mismatch() {
+  fresh_gcloud_state
+  export ALLOW_UNVERIFIED_RELEASE=true
+  run_deploy_create_through_phase3 "$(release_checksum_config_json "$HUB")"
+  unset ALLOW_UNVERIFIED_RELEASE
+  local snippet
+  snippet="$(_extract_binary_install_snippet "$(gcloud_log)")"
+  assert_contains "$snippet" "'true' = 'true'" \
+    "sanity: the extracted snippet must actually carry ALLOW_UNVERIFIED_RELEASE=true"
+
+  local fixdir work
+  fixdir="$(mktemp -d)"
+  work="$(mktemp -d)"
+  _make_tarball "$fixdir" "scion-linux-amd64.tar.gz" "original-payload"
+  (cd "$fixdir" && sha256sum scion-linux-amd64.tar.gz > SHA256SUMS)
+  _make_tarball "$fixdir" "scion-linux-amd64.tar.gz" "modified-payload"
+
+  local out rc
+  out="$(CURL_STUB_FIXTURE_DIR="$fixdir" _run_extracted_snippet "$work" "$snippet")"
+  rc=$?
+  rm -rf "$fixdir"
+
+  assert_true "$([[ "$rc" -ne 0 ]] && echo true || echo false)" \
+    "ALLOW_UNVERIFIED_RELEASE=true must not let a hash mismatch through"
+  assert_contains "$out" "FAILED" \
+    "a mismatch under the override must still report FAILED from sha256sum -c"
+  assert_true "$([[ ! -e "${work}/scion" ]] && echo true || echo false)" \
+    "tar -xzf must never have run: a present-but-wrong checksum is never overridable"
+  rm -rf "$work"
+}
+
+test_release_checksum_dry_run_override_allows_missing_sums() {
+  fresh_gcloud_state
+  export ALLOW_UNVERIFIED_RELEASE=true
+  run_deploy_create_through_phase3 "$(release_checksum_config_json "$HUB")"
+  unset ALLOW_UNVERIFIED_RELEASE
+  local snippet
+  snippet="$(_extract_binary_install_snippet "$(gcloud_log)")"
+
+  # Same fixture shape as the no-override missing-SUMS test above: a
+  # fixture dir with the tarball but no SHA256SUMS file, so the SUMS
+  # request 404s.
+  local fixdir work
+  fixdir="$(mktemp -d)"
+  work="$(mktemp -d)"
+  _make_tarball "$fixdir" "scion-linux-amd64.tar.gz" "real-scion-binary-payload"
+
+  local out rc
+  out="$(CURL_STUB_FIXTURE_DIR="$fixdir" _run_extracted_snippet "$work" "$snippet")"
+  rc=$?
+  rm -rf "$fixdir"
+
+  assert_eq "0" "$rc" \
+    "ALLOW_UNVERIFIED_RELEASE=true must let a missing SHA256SUMS asset proceed to extraction"
+  assert_contains "$out" "installing UNVERIFIED" \
+    "the override path must print its own loud warning, not install silently"
+  assert_eq "real-scion-binary-payload" "$(cat "${work}/scion" 2>/dev/null || echo '<missing>')" \
+    "extraction must actually have happened under the override"
+  rm -rf "$work"
 }
