@@ -455,22 +455,14 @@ func TestSubstrateBroker_StopTransientLookupFailure_ExplicitErrorNot202(t *testi
 	}
 }
 
-// TestNonProberRuntime_StopLookupError_PropagatesAsFailure pins the
-// hasRecordlessProber gate itself: on a broker with no RecordlessActorProber
-// runtime registered, stopAgent takes the non-prober branch and calls
-// projectScopedTarget exactly once — not the stricter, error-preserving
-// projectScopedTargetErr, which applies only when a prober is registered
-// (ptone/scion#1808).
-//
-// Before upstream's ptone/scion#1985 fix, projectScopedTarget had no error
-// return at all, so a lookup failure here was indistinguishable from a
-// genuine not-found and fell through to the idempotent 202 — this test used
-// to pin that (now-incorrect) behavior. projectScopedTarget now surfaces a
-// real listing failure as a real error for every broker, prober or not, and
-// stopAgent's non-prober branch propagates it as a 5xx rather than silently
-// reporting success. See TestNonProberRuntime_StopPrimaryListError_PropagatesAsUpstream
-// in substrate_restart_lookup_edge_test.go for the same invariant pinned
-// from the other direction.
+// TestNonProberRuntime_StopLookupError_PropagatesAsFailure pins that on a
+// broker with no RecordlessActorProber runtime registered, a default-runtime
+// listing failure during the stop-target lookup is a real 5xx, never the
+// idempotent 202 (ptone/scion#1985). Every broker, prober or not, uses the
+// same lookup (lookupAgentTarget); see
+// TestNonProberRuntime_StopPrimaryListError_PropagatesAsUpstream in
+// substrate_restart_lookup_edge_test.go for the same invariant pinned from
+// the other direction.
 func TestNonProberRuntime_StopLookupError_PropagatesAsFailure(t *testing.T) {
 	listCalls := 0
 	rt := &runtime.MockRuntime{

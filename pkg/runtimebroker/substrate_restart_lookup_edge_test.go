@@ -32,9 +32,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
-// Edge coverage for the error-preserving stop lookup used when a
-// RecordlessActorProber runtime is registered (ptone/scion#1808): every
-// "could not determine" branch of projectScopedTargetErr, the deterministic,
+// Edge coverage for the stop lookup on a broker with a RecordlessActorProber
+// runtime registered (ptone/scion#1808): every "could not determine" branch
+// of lookupAgentTarget, the deterministic,
 // keep-scanning auxiliary-runtime iteration, the prober check on auxiliary
 // runtimes, actor-identity dedupe across managers, and project-blind stop
 // parity for other runtimes.
@@ -99,11 +99,11 @@ func addAuxRuntime(t *testing.T, srv *Server, name string, rt runtime.Runtime) {
 	srv.auxiliaryRuntimesMu.Unlock()
 }
 
-// Any List failure while the prober-path lookup runs must come back
-// wrapping ErrAgentListUnavailable, never as ("", nil) "not found" — for a
+// Any List failure while the lookup runs must come back wrapping
+// ErrAgentListUnavailable, never as "not found" — for a
 // present slug (primary call) and an absent one (primary and
 // unlabelled-fallback calls).
-func TestProjectScopedTargetErr_AnyListFailureIsCouldNotDetermine(t *testing.T) {
+func TestLookupAgentTarget_AnyListFailureIsCouldNotDetermine(t *testing.T) {
 	for _, slug := range []string{"dev", "gone"} {
 		for n := 1; n <= 3; n++ {
 			t.Run(fmt.Sprintf("%s/call_%d", slug, n), func(t *testing.T) {
@@ -121,12 +121,12 @@ func TestProjectScopedTargetErr_AnyListFailureIsCouldNotDetermine(t *testing.T) 
 				}
 				fc.mu.Unlock()
 
-				target, _, err := srv.projectScopedTargetErr(context.Background(), slug, gapProjBID)
+				target, _, err := srv.lookupAgentTarget(context.Background(), slug, gapProjBID)
 
 				fc.mu.Lock()
 				defer fc.mu.Unlock()
 				if !injected {
-					if err != nil {
+					if err != nil && !errors.Is(err, ErrAgentNotFound) {
 						t.Errorf("no failure injected, err = %v", err)
 					}
 					return
@@ -162,8 +162,7 @@ func TestProberBroker_StopAmbiguousLookup_ExplicitErrorNot202(t *testing.T) {
 }
 
 // A matched entry with no container ID folds into "not found" on the
-// prober path, exactly as LookupContainerID/projectScopedTarget already
-// treat it on the non-prober path (ptone/scion#1985): nothing is
+// prober path, exactly as on every other broker (ptone/scion#1985): nothing is
 // addressable to stop, so this is the idempotent 202, not a 5xx. With no
 // record-less actors registered, the record-less-actor probe below finds
 // nothing and the stop falls through cleanly.

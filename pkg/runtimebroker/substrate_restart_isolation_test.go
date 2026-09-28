@@ -161,9 +161,9 @@ func TestSubstrateBroker_IdentityUnknownBody_GenericCountOnly(t *testing.T) {
 }
 
 // When two auxiliary runtimes both hold a project-matched entry for the
-// slug, the error-preserving lookup resolves the sorted-first runtime's
+// slug, the lookup resolves the sorted-first runtime's
 // entry every time, never whichever one Go's map iteration visits first.
-func TestProjectScopedTargetErr_TwoAuxMatches_SortedFirstDeterministic(t *testing.T) {
+func TestLookupAgentTarget_TwoAuxMatches_SortedFirstDeterministic(t *testing.T) {
 	matching := func(containerID string) *runtime.MockRuntime {
 		return &runtime.MockRuntime{
 			NameFunc: func() string { return containerID },
@@ -183,12 +183,12 @@ func TestProjectScopedTargetErr_TwoAuxMatches_SortedFirstDeterministic(t *testin
 		addAuxRuntime(t, srv, "aux-b", matching("c-b"))
 		addAuxRuntime(t, srv, "aux-a", matching("c-a"))
 
-		target, mgr, err := srv.projectScopedTargetErr(context.Background(), "dev", gapProjBID)
+		target, mgr, err := srv.lookupAgentTarget(context.Background(), "dev", gapProjBID)
 		if err != nil || target != "c-a" {
-			t.Fatalf("iteration %d: projectScopedTargetErr = (%q, %v), want (\"c-a\", nil)", i, target, err)
+			t.Fatalf("iteration %d: lookupAgentTarget = (%q, %v), want (\"c-a\", nil)", i, target, err)
 		}
 		if want := srv.auxiliaryRuntimes["aux-a"].Manager; mgr != want {
-			t.Fatalf("iteration %d: projectScopedTargetErr manager = %v, want aux-a's manager %v", i, mgr, want)
+			t.Fatalf("iteration %d: lookupAgentTarget manager = %v, want aux-a's manager %v", i, mgr, want)
 		}
 	}
 }

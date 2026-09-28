@@ -1389,9 +1389,9 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 			logArgs := []any{"agent_id", id, "project_id", projectID, "error", err}
 			var idErr *agentIdentityUnknownError
 			if errors.As(err, &idErr) {
-				// The runtime-specific scope (e.g. an atespace) is logged
+				// The prober-supplied, runtime-specific scope is logged
 				// here only; AgentIdentityUnknown's HTTP body never names it.
-				logArgs = append(logArgs, "atespace", idErr.Atespace, "recordless_actors", idErr.Names)
+				logArgs = append(logArgs, logKeyRuntimeScope, idErr.Scope, "recordless_actors", idErr.Names)
 			}
 			s.agentLifecycleLog.Warn("Agent delete: agent identity unknown after a runtime process restart", logArgs...)
 			AgentIdentityUnknown(w, err.Error())
@@ -1728,29 +1728,6 @@ func isContainerStopTolerable(err error) bool {
 		strings.Contains(msg, "exit status 125")
 }
 
-// projectScopedTarget resolves an agent slug to its project-scoped container
-// identifier (container ID for docker/podman, pod name for k8s) via
-// LookupContainerID. When multiple projects on this broker have an agent with
-// the same slug, this ensures single-container operations act on the agent in
-// the requested project rather than whichever the slug matches first.
-//
-// When a projectID is supplied but the agent cannot be resolved, it returns ""
-// — callers must treat that as "not found in this project" rather than falling
-// back to the bare slug, which would risk acting on a same-slug agent in a
-// different project. Only when no projectID is supplied does it degrade to the
-// original id for backward compatibility (solo/CLI mode, unlabeled containers).
-//
-// In the project-scoped case, a lookup failure other than a genuine
-// ErrAgentNotFound (e.g. a runtime listing error, an ambiguous match) is
-// returned to the caller rather than silently treated as "not found" —
-// callers must surface it as a real error instead of reporting a successful
-// stop/restart. ErrAgentNotFound also covers a matching agent record with no
-// resolvable container id (e.g. a malformed or partial runtime entry that
-// carries no container id — nothing addressable to stop): that case is
-// folded into the same "not found in this project" outcome as a genuine
-// no-match. The solo/CLI
-// fallback above predates project scoping and is left unchanged: it already
-// tolerates lookup failures by degrading to the bare id.
 // agentsWithoutProjectLabel returns the subset of agents that carry no project
 // label (neither scion.grove_id nor scion.project_id). The project-scoped
 // lookups fall back to a slug-only search for backward compatibility with
@@ -1768,198 +1745,56 @@ func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 	return filtered
 }
 
-func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) (string, error) {
-	containerID, err := s.LookupContainerID(ctx, id, projectID)
+// projectScopedTarget resolves an agent slug to its project-scoped container
+// identifier (container ID for docker/podman, pod name for k8s) via
+// lookupAgentTarget, together with the agent.Manager whose runtime reported
+// that identifier. When multiple projects on this broker have an agent with
+// the same slug, this ensures single-container operations act on the agent
+// in the requested project rather than whichever the slug matches first,
+// and the returned manager is the one the identifier came from, so the
+// operation is dispatched to that same runtime.
+//
+// When a projectID is supplied but the agent cannot be resolved, it returns
+// "" and a nil manager — callers must treat that as "not found in this
+// project" rather than falling back to the bare slug, which would risk
+// acting on a same-slug agent in a different project. Only when no
+// projectID is supplied does it degrade to the original id (and the
+// manager resolveManagerForAgent picks) for backward compatibility
+// (solo/CLI mode, unlabeled containers).
+//
+// In the project-scoped case, a lookup failure other than a genuine
+// ErrAgentNotFound (a runtime listing error — including an auxiliary
+// runtime's, when no other runtime matched — or an ambiguous match) is
+// returned to the caller rather than silently treated as "not found" —
+// callers must surface it as a real error instead of reporting a successful
+// stop/restart. ErrAgentNotFound also covers a matching agent record with no
+// resolvable container id (e.g. a malformed or partial runtime entry that
+// carries no container id — nothing addressable to stop): that case is
+// folded into the same "not found in this project" outcome as a genuine
+// no-match. The solo/CLI fallback above predates project scoping and is
+// left unchanged: it already tolerates lookup failures by degrading to the
+// bare id.
+func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) (string, agent.Manager, error) {
+	containerID, mgr, err := s.lookupAgentTarget(ctx, id, projectID)
 	if err == nil && containerID != "" {
-		return containerID, nil
-	}
-	if projectID != "" && err != nil && !errors.Is(err, ErrAgentNotFound) {
-		return "", err
+		return containerID, mgr, nil
 	}
 	if projectID != "" {
-		return "", nil
-	}
-	return id, nil
-}
-
-// auxListAgentsSorted queries every currently registered auxiliary runtime
-// with filter, in sorted name order (the same order allManagers() uses), and
-// returns the first non-empty match after filterAgents narrows it, together
-// with the agent.Manager whose List call produced that match — the prober
-// stop path dispatches Stop through that same manager, never a manager
-// re-derived from a later, independent lookup, so the container ID and the
-// manager it is sent to always come from the same runtime (ptone/scion#1808).
-// A match is authoritative: once one auxiliary runtime's List call succeeds
-// and filterAgents leaves at least one entry, the remaining auxiliary
-// runtimes are not consulted at all, regardless of whether an earlier or
-// later one in the sorted order would have failed to list. Only when no
-// auxiliary runtime produces a match does a List error along the way turn
-// into an ErrAgentListUnavailable-wrapped error — an error from a runtime
-// that was never going to match anyway must not block a genuine match found
-// elsewhere, and the fixed iteration order keeps that decision the same
-// from one call to the next instead of depending on Go's randomized map
-// order.
-func (s *Server) auxListAgentsSorted(ctx context.Context, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, error) {
-	s.auxiliaryRuntimesMu.RLock()
-	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
-	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-	for name, aux := range s.auxiliaryRuntimes {
-		auxNames = append(auxNames, name)
-		auxRuntimes[name] = aux
-	}
-	s.auxiliaryRuntimesMu.RUnlock()
-	sort.Strings(auxNames)
-
-	var listErr error
-	for _, rtName := range auxNames {
-		auxAgents, auxErr := auxRuntimes[rtName].Manager.List(ctx, filter)
-		if auxErr != nil {
-			if listErr == nil {
-				listErr = fmt.Errorf("auxiliary runtime %q: %w", rtName, auxErr)
-			}
-			continue
+		if err != nil && !errors.Is(err, ErrAgentNotFound) {
+			return "", nil, err
 		}
-		if matched := filterAgents(auxAgents); len(matched) > 0 {
-			return matched, auxRuntimes[rtName].Manager, nil
-		}
-	}
-	if listErr != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrAgentListUnavailable, listErr)
-	}
-	return nil, nil, nil
-}
-
-// projectScopedTargetErr is projectScopedTarget's stricter twin, used only by
-// stopAgent when hasRecordlessProber reports at least one registered runtime
-// implements RecordlessActorProber (currently just substrate). Since
-// upstream's own fix (ptone/scion#1985), LookupContainerID/projectScopedTarget
-// already surface a real error (wrapping ErrAgentListUnavailable, or an
-// ambiguous-match error) instead of collapsing every non-success outcome into
-// "" — so this is no longer about preserving an error that would otherwise be
-// lost. The remaining, deliberate differences are auxiliary-runtime
-// strictness and manager coherence:
-//
-//   - LookupContainerID silently skips an auxiliary runtime's List error and
-//     moves on to the next one, so a transient failure on the one auxiliary
-//     runtime that actually holds the agent looks exactly like a genuine
-//     not-found. auxListAgentsSorted instead keeps scanning in a fixed order
-//     and only turns a List error into a real failure when no auxiliary
-//     runtime produces a match — a match found elsewhere is authoritative
-//     over an error seen along the way.
-//
-// This is a full, independent re-implementation of LookupContainerID's
-// resolution steps rather than a wrapper around it, specifically so that
-// LookupContainerID/projectScopedTarget stay untouched — and therefore
-// provably byte-identical — for every broker without a registered prober.
-// Errors are typed exactly as LookupContainerID's are (ErrAgentListUnavailable
-// for a listing failure, an unwrapped uniqueAgentEntry error for an ambiguous
-// match, ErrAgentNotFound for a matched record with no container ID — the one
-// exception is the unwrapped "agent manager not available" error returned
-// when s.manager is nil) so callers can use the same errors.Is(err,
-// ErrAgentNotFound) test either function's error satisfies.
-//
-// The rule is: 5xx when the lookup cannot determine the target: a
-// primary-list error, or a stage that ends with no match after any
-// auxiliary list error. The two resolution stages run in order, and an
-// error in the earlier one is decisive: if the project-scoped stage finds no
-// match and its auxiliary scan returns an error, this returns that error
-// (5xx, fail-closed) without running the unscoped fallback stage
-// (scion.name + agentsWithoutProjectLabel), even though that fallback stage
-// might have matched. That errs toward an explicit failure, never toward a
-// false not-found or a wrong target.
-//
-// Besides the target container ID, this also returns the agent.Manager
-// whose List call produced the matching entry — s.manager for a match found
-// on the primary stage or the fallback's own re-list, or the specific
-// auxiliary runtime's manager for a match auxListAgentsSorted found — so the
-// caller can dispatch Stop through that same manager instead of re-deriving
-// one from a second, independent lookup that could resolve to a different
-// runtime (ptone/scion#1808).
-func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID string) (string, agent.Manager, error) {
-	if s.manager == nil {
-		return "", nil, fmt.Errorf("agent manager not available")
-	}
-
-	slug := strings.ToLower(id)
-	filter := scopedNameFilter(slug, projectID)
-	agents, err := s.manager.List(ctx, filter)
-	if err != nil {
-		return "", nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
-	}
-	agents = agentsForProject(agents, projectID)
-	matchManager := s.manager
-
-	if len(agents) == 0 {
-		auxAgents, auxManager, auxErr := s.auxListAgentsSorted(ctx, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
-		if auxErr != nil {
-			return "", nil, auxErr
-		}
-		agents = auxAgents
-		matchManager = auxManager
-	}
-
-	// Backward compatibility: retry without project filter, but only accept
-	// containers that lack a project label — see projectScopedTarget's own
-	// doc comment for why. The unscoped name fallback here should also be
-	// project-scoped for substrate; if that changes, fix it together with
-	// LookupContainerID's matching fallback in server.go, so the two copies
-	// don't drift apart.
-	if len(agents) == 0 && projectID != "" {
-		fallbackFilter := map[string]string{"scion.name": slug}
-		agents, err = s.manager.List(ctx, fallbackFilter)
-		if err != nil {
-			return "", nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
-		}
-		agents = agentsWithoutProjectLabel(agents)
-		matchManager = s.manager
-		if len(agents) == 0 {
-			auxAgents, auxManager, auxErr := s.auxListAgentsSorted(ctx, fallbackFilter, agentsWithoutProjectLabel)
-			if auxErr != nil {
-				return "", nil, auxErr
-			}
-			agents = auxAgents
-			matchManager = auxManager
-		}
-	}
-
-	if len(agents) == 0 {
 		return "", nil, nil
 	}
-
-	entry, err := uniqueAgentEntry(slug, agents)
-	if err != nil {
-		// Ambiguous is pre-existing, generic behaviour elsewhere (an
-		// unscoped query matching more than one project's same-slug agent).
-		// Returned unwrapped, exactly as LookupContainerID returns it: it
-		// isn't ErrAgentNotFound, so the caller surfaces it as a real error
-		// rather than folding it into the idempotent not-found path.
-		return "", nil, err
-	}
-
-	containerID := entry.Labels["scion.container.id"]
-	if containerID == "" {
-		containerID = entry.ContainerID
-	}
-	if containerID == "" {
-		containerID = entry.ID
-	}
-	if containerID == "" {
-		// Matches LookupContainerID's own form: a matched record with no
-		// addressable container ID folds into "not found" rather than a
-		// listing failure.
-		return "", nil, fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
-	}
-	return containerID, matchManager, nil
+	return id, s.resolveManagerForAgent(ctx, id, projectID), nil
 }
 
 // hasRecordlessProber reports whether the default runtime or any currently
-// registered auxiliary runtime implements RecordlessActorProber (currently
-// just substrate). stopAgent uses this, before resolving a target, to
-// decide whether the stricter, error-preserving projectScopedTargetErr is
-// worth calling — unlike allManagers() (built, sorted, and used once a
-// target fails to resolve, for the actual not-found probe below), this
-// doesn't build or sort the full manager list, so a stop that resolves
-// normally never pays for either.
+// registered auxiliary runtime implements the optional RecordlessActorProber
+// capability. stopAgent uses this to decide whether an unresolved target is
+// worth probing for record-less actors at all — unlike allManagers() (built,
+// sorted, and used only once the probe actually runs), this doesn't build or
+// sort the full manager list, so a broker with no prober never pays for
+// either on an unresolved stop.
 func (s *Server) hasRecordlessProber() bool {
 	if am, ok := s.manager.(*agent.AgentManager); ok && am.Runtime != nil {
 		if _, ok := am.Runtime.(scionrt.RecordlessActorProber); ok {
@@ -1998,80 +1833,46 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// the agent isn't present in this project; treat that as an idempotent
 	// no-op rather than stopping a same-slug agent in another project.
 	//
-	// Non-prober brokers get upstream's exact projectScopedTarget handling
-	// (ptone/scion#1985): a lookup error other than ErrAgentNotFound (e.g.
-	// the runtime listing itself failed, or the match was ambiguous) is a
-	// real failure, not a successful stop.
-	//
-	// On a broker with at least one registered RecordlessActorProber runtime
-	// (substrate), use the stricter, error-preserving projectScopedTargetErr
-	// instead: unlike LookupContainerID, it doesn't silently skip an
-	// auxiliary runtime's List error in favor of trying the next one, so a
-	// transient failure on the one auxiliary runtime that actually holds the
-	// agent can't be misread as a genuine not-found. ErrAgentNotFound from
-	// either path still means "not found" — only a different error aborts
-	// here rather than falling through to the record-less-actor probe below.
-	// That same lookup also supplies the manager Stop is dispatched through
-	// below: the manager whose List call actually produced the matched
-	// entry, not one re-resolved by a second, independent lookup that scans
-	// auxiliary runtimes in a different (map) order and so could land on a
-	// different runtime than the one the target container ID came from
-	// (ptone/scion#1808). Every other broker keeps calling
-	// projectScopedTarget/resolveManagerForAgent exactly as before:
-	// hasRecordlessProber is false and this branch is skipped entirely.
-	var (
-		target string
-		mgr    agent.Manager
-	)
-	if projectID != "" && s.hasRecordlessProber() {
-		var lerr error
-		target, mgr, lerr = s.projectScopedTargetErr(ctx, id, projectID)
-		if lerr != nil && !errors.Is(lerr, ErrAgentNotFound) {
-			span.SetStatus(codes.Error, lerr.Error())
-			RuntimeError(w, "Failed to stop agent: "+lerr.Error())
-			return
-		}
-	} else {
-		mgr = s.resolveManagerForAgent(ctx, id, projectID)
-		var err error
-		target, err = s.projectScopedTarget(ctx, id, projectID)
-		if err != nil {
-			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, "Failed to stop agent: "+err.Error())
-			return
-		}
+	// A lookup error other than ErrAgentNotFound (a runtime listing failed
+	// with no match found on any other runtime, or the match was ambiguous)
+	// is a real failure, not a successful stop: a failed List on the one
+	// runtime that may hold the agent must not be misread as "not found".
+	// The same lookup also supplies the manager Stop is dispatched through
+	// below — the manager whose List call actually produced the matched
+	// entry, not one re-resolved by a second, independent lookup that could
+	// land on a different runtime than the one the target came from.
+	target, mgr, err := s.projectScopedTarget(ctx, id, projectID)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		RuntimeError(w, "Failed to stop agent: "+err.Error())
+		return
 	}
 	if target == "" {
 		// Before treating an unresolved target as an idempotent no-op (the
 		// generic behaviour every runtime relies on), check whether a
 		// runtime process restart left at least one record-less actor in
-		// this project's atespace (RecordlessActorProber, substrate-only,
-		// ptone/scion#1808). This type assertion is a no-op for every other
-		// runtime, so their Stop behaviour here is unchanged. Scoped to
-		// projectID != "" for the same reason as resolveDeleteTarget's
-		// equivalent check: a project-blind stop (solo/CLI) is unaffected,
-		// and a genuinely-absent slug in a project with no record-less
-		// actors still falls through to the idempotent 202 below.
+		// the runtime's own scope for this project (the optional
+		// RecordlessActorProber capability). Only runtimes that implement
+		// that capability take part, so every other runtime's Stop
+		// behaviour here is unchanged. Scoped to projectID != "" for the
+		// same reason as resolveDeleteTarget's equivalent check: a
+		// project-blind stop (solo/CLI) is unaffected, and a
+		// genuinely-absent slug in a project with no record-less actors
+		// still falls through to the idempotent 202 below.
 		//
 		// projectID != "" is, today, always true by the time control
 		// reaches here: projectScopedTarget only returns "" for a non-empty
 		// projectID (an empty projectID falls back to returning id itself,
-		// per its own doc comment), and this handler is only ever reached
-		// with a non-empty id. Kept anyway as defence-in-depth against a
-		// future change to projectScopedTarget's contract, with this
-		// comment corrected to say so rather than the previous, inaccurate
-		// claim that it does live, load-bearing work today.
+		// per its own doc comment). Kept anyway as defence-in-depth against
+		// a future change to projectScopedTarget's contract.
 		//
-		// hasRecordlessProber() is also checked here, not just at the target
-		// resolution branch above: without it, a broker with no registered
-		// prober still pays for allManagers() (lock + sort) and
+		// hasRecordlessProber() gates the probe so a broker with no
+		// registered prober doesn't pay for allManagers() (lock + sort) and
 		// recordlessActorProbe's manager loop on every unresolved stop, for
-		// a type-assertion that can never succeed. The two branches of this
-		// handler are then symmetric — a non-prober broker skips both the
-		// error-preserving lookup and this probe, not just one of them.
+		// a type assertion that can never succeed.
 		if projectID != "" && s.hasRecordlessProber() {
 			managers := s.allManagers()
-			atespace, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
+			scope, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
 			if perr != nil {
 				span.SetStatus(codes.Error, perr.Error())
 				RuntimeError(w, "Failed to stop agent: "+perr.Error())
@@ -2079,10 +1880,11 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 			}
 			if len(recordless) > 0 {
 				// bodyMsg is generic and carries no runtime-specific scope;
-				// the atespace is logged below only, never in the HTTP body.
+				// the prober-supplied scope is logged below only, never in
+				// the HTTP body.
 				bodyMsg := fmt.Sprintf("%d actor(s) with no runtime-process record after a runtime restart; agent identity unknown; operator cleanup required", len(recordless))
 				s.agentLifecycleLog.Warn("Agent stop: agent identity unknown after a runtime process restart",
-					"agent_id", id, "project_id", projectID, "atespace", atespace, "recordless_actors", recordless, "error", bodyMsg)
+					"agent_id", id, "project_id", projectID, logKeyRuntimeScope, scope, "recordless_actors", recordless, "error", bodyMsg)
 				AgentIdentityUnknown(w, bodyMsg)
 				return
 			}
@@ -2191,9 +1993,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 
 	// Stop then start — tolerate stop errors since the container may already
 	// be exited and the subsequent start will handle cleanup.
-	// Use resolveManagerForAgent to find the agent on auxiliary runtimes.
-	stopMgr := s.resolveManagerForAgent(ctx, id, projectID)
-	stopTarget, err := s.projectScopedTarget(ctx, id, projectID)
+	// The lookup also returns the manager whose runtime reported the
+	// target, so the stop goes to that same runtime (default or auxiliary).
+	stopTarget, stopMgr, err := s.projectScopedTarget(ctx, id, projectID)
 	if err != nil {
 		// A lookup error other than "not found" must abort the restart
 		// without starting a second container — otherwise a runtime hiccup
@@ -2542,8 +2344,9 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 	if err != nil {
 		if errors.Is(err, scionrt.ErrLogsNotSupported) {
 			// The sentinel's own fixed text, never err.Error(): errors.Is also
-			// matches a wrapped error, and a wrapping fmt.Errorf could carry an
-			// atespace or actor id that must never reach this response body.
+			// matches a wrapped error, and a wrapping fmt.Errorf could carry a
+			// runtime-specific scope or actor id that must never reach this
+			// response body.
 			RuntimeLogsUnsupported(w, scionrt.ErrLogsNotSupported.Error())
 			return
 		}
@@ -3131,8 +2934,8 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID strin
 // resolveDeleteTarget and the stop path's record-less-actor probe
 // (recordlessActorProbe) to search every registered runtime rather than
 // only the one a slug-based lookup happens to resolve to first — a
-// record-less actor never matches a slug-based lookup at all (see
-// SubstrateRuntime.List's doc comment), so it must not be relied on here.
+// record-less actor (see RecordlessActorProber) never matches a slug-based
+// lookup at all, so that lookup must not be relied on here.
 func (s *Server) allManagers() []agent.Manager {
 	managers := []agent.Manager{s.manager}
 	s.auxiliaryRuntimesMu.RLock()
@@ -3169,10 +2972,10 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) agent.Manager {
 	if s.config.ForceRuntime != "" {
 		if s.config.ForceRuntime == s.runtime.Name() {
-			// ForceRuntime == "substrate" returns s.manager here,
-			// bypassing the per-profile substrate config resolution below
-			// entirely — a second substrate profile's config (e.g. its own
-			// egress_allow) is not reachable under ForceRuntime. See
+			// A ForceRuntime naming the default runtime returns s.manager
+			// here, bypassing the per-profile resolution below entirely —
+			// a second profile of the same runtime type with its own
+			// runtime config is not reachable under ForceRuntime. See
 			// ptone/scion#1818.
 			return s.manager
 		}
@@ -3375,14 +3178,21 @@ var errDeleteTargetUnknown = errors.New("could not list agents to resolve delete
 // errAgentIdentityUnknown means a runtime process restart dropped the
 // in-memory record a runtime needs to tell "not found" apart from "exists,
 // but this process can no longer identify which project it belongs to," for
-// at least one actor in the atespace a project maps to (see
+// at least one actor in the runtime's own scope for a project (see
 // RecordlessActorProber). Reporting not-found here would let the hub treat
-// an unresolved delete/stop as an idempotent success and orphan the actor
-// (ptone/scion#1808).
+// an unresolved delete/stop as an idempotent success and orphan the actor.
 var errAgentIdentityUnknown = errors.New("agent identity unknown after a runtime process restart")
 
+// logKeyRuntimeScope is the structured-log key under which the broker
+// records the runtime-specific scope a RecordlessActorProber reports (for
+// example, a namespace) when a delete/stop fails with
+// errAgentIdentityUnknown. The broker only carries this generic key; the
+// value is whatever the prober supplies, and it goes to the broker log
+// only, never into an HTTP response body.
+const logKeyRuntimeScope = "runtime_scope"
+
 // agentIdentityUnknownError carries the record-less actor names and the
-// runtime's own scope for them (e.g. an atespace) alongside
+// runtime's own scope for them (as reported by the prober) alongside
 // errAgentIdentityUnknown, so resolveDeleteTarget's caller (deleteAgent) can
 // log both at WARN in the broker log, without ever putting them in the HTTP
 // response body: Error() deliberately reports only the count, exactly what
@@ -3390,8 +3200,8 @@ var errAgentIdentityUnknown = errors.New("agent identity unknown after a runtime
 // changes what a caller sees from err.Error() or errors.Is(err,
 // errAgentIdentityUnknown).
 type agentIdentityUnknownError struct {
-	Atespace string
-	Names    []string
+	Scope string
+	Names []string
 }
 
 func (e *agentIdentityUnknownError) Error() string {
@@ -3402,35 +3212,35 @@ func (e *agentIdentityUnknownError) Unwrap() error {
 	return errAgentIdentityUnknown
 }
 
-// recordlessActorProbe checks every manager in managers that exposes a
-// RecordlessActorProber (currently just substrate) for record-less actors
-// belonging to projectID. A probe error is returned immediately as an
-// explicit failure — never treated as "no record-less actors" — matching
-// how a runtime listing failure elsewhere on this path is never treated as
+// recordlessActorProbe checks every manager in managers whose runtime
+// implements the optional RecordlessActorProber capability for record-less
+// actors belonging to projectID, and returns the prober-reported scope with
+// the actor names. A probe error is returned immediately as an explicit
+// failure — never treated as "no record-less actors" — matching how a
+// runtime listing failure elsewhere on this path is never treated as
 // not-found either.
 //
 // Results are deduped by actor UID across every manager the probe checks,
-// not by "atespace/name": today's deployed topology registers substrate as
-// the single default runtime, so this never matters in practice, but two
-// substrate managers can both report an actor with the same atespace and
-// name for two different reasons that need different treatment —
-//   - the SAME actor, reached twice (resolveManagerForOpts caching a second
-//     manager for a profile that resolves to the same ateapi endpoint as the
-//     default) — this must be deduped, or the 409 message double-counts it;
-//   - two DIFFERENT actors that merely collide on atespace+name because
-//     substrateAtespaceName is derived only from projectID, so it is the
-//     same string regardless of which ateapi endpoint a profile points
-//     at (see the second-profile note in deploy/substrate/README.md) — this
-//     must NOT be deduped, or the operator is told about, and given the name
-//     of, only one of two actors that both need cleaning up.
+// not by "scope/name", because two managers can both report an actor with
+// the same scope and name for two different reasons that need different
+// treatment —
+//   - the SAME actor, reached twice (e.g. resolveManagerForOpts caching a
+//     second manager for a profile whose runtime points at the same backend
+//     as the default) — this must be deduped, or the 409 message
+//     double-counts it;
+//   - two DIFFERENT actors that merely collide on scope+name, because a
+//     runtime may derive its scope from projectID alone regardless of which
+//     backend a profile points at — this must NOT be deduped, or the
+//     operator is told about only one of two actors that both need
+//     cleaning up.
 //
-// UID (ResourceMetadata.uid) tells these apart where atespace+name cannot: a
-// real duplicate report of the same actor carries the same UID both times,
-// while two distinct actors — even sharing an atespace/name string — do not.
-// A restarted broker also doesn't probe a second substrate profile pointed
-// at a *different* ateapi endpoint until that profile's first Run
-// re-registers it as an auxiliary runtime — see deploy/substrate/README.md.
-func recordlessActorProbe(ctx context.Context, managers []agent.Manager, projectID string) (atespace string, actorNames []string, err error) {
+// The UID (see RecordlessActor) tells these apart where scope+name cannot:
+// a real duplicate report of the same actor carries the same UID both
+// times, while two distinct actors do not. Only currently registered
+// managers are probed: a restarted broker does not probe a non-default
+// profile's backend until that profile is used again and re-registers its
+// runtime as an auxiliary runtime.
+func recordlessActorProbe(ctx context.Context, managers []agent.Manager, projectID string) (scope string, actorNames []string, err error) {
 	seen := make(map[string]bool)
 	for _, mgr := range managers {
 		am, ok := mgr.(*agent.AgentManager)
@@ -3441,27 +3251,27 @@ func recordlessActorProbe(ctx context.Context, managers []agent.Manager, project
 		if !ok {
 			continue
 		}
-		as, found, perr := prober.RecordlessActors(ctx, projectID)
+		probeScope, found, perr := prober.RecordlessActors(ctx, projectID)
 		if perr != nil {
 			return "", nil, perr
 		}
 		for _, a := range found {
 			key := a.UID
 			if key == "" {
-				// Defensive only: a real actor always carries a UID (proto
-				// ResourceMetadata), so this falls back to the collision-
-				// prone atespace/name key rather than dropping the entry.
-				key = as + "/" + a.Name
+				// Defensive only: a UID is expected on every entry, so this
+				// falls back to the collision-prone scope/name key rather
+				// than dropping the entry.
+				key = probeScope + "/" + a.Name
 			}
 			if seen[key] {
 				continue
 			}
 			seen[key] = true
-			atespace = as
+			scope = probeScope
 			actorNames = append(actorNames, a.Name)
 		}
 	}
-	return atespace, actorNames, nil
+	return scope, actorNames, nil
 }
 
 // deleteTarget is the single, project-matched agent a delete acts on.
@@ -3624,23 +3434,24 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 	// Before accepting a file-only target below (which reports success —
 	// files deleted, HTTP 204 — while never touching the runtime), check
 	// whether a runtime process restart left at least one record-less actor
-	// in this project's atespace (RecordlessActorProber, substrate-only,
-	// ptone/scion#1808). This runs on every "no runtime entry matched"
-	// outcome, not only when the file scan also finds nothing: a persisted
-	// project directory (a workstation or a PVC-backed $HOME) can resolve a
-	// file-only target even for an agent whose actor is still running,
-	// record-less, on the cluster — reporting that as success would delete
-	// only the files and orphan the actor, its egress policy, and its
-	// worker. Scoped to projectID != "" so a project-blind delete (solo/CLI)
-	// is unaffected; a runtime with no RecordlessActorProber, or a project
-	// whose atespace holds no record-less actor, falls through unchanged.
+	// in the runtime's own scope for this project (the optional
+	// RecordlessActorProber capability). This runs on every "no runtime
+	// entry matched" outcome, not only when the file scan also finds
+	// nothing: a persisted project directory (a workstation or a
+	// PVC-backed $HOME) can resolve a file-only target even for an agent
+	// whose actor is still running, record-less, on its backend — reporting
+	// that as success would delete only the files and orphan the actor and
+	// whatever the runtime provisioned for it. Scoped to projectID != "" so
+	// a project-blind delete (solo/CLI) is unaffected; a runtime with no
+	// RecordlessActorProber, or a project whose scope holds no record-less
+	// actor, falls through unchanged.
 	if projectID != "" {
-		atespace, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
+		scope, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
 		if perr != nil {
 			return nil, fmt.Errorf("%w: %v", errDeleteTargetUnknown, perr)
 		}
 		if len(recordless) > 0 {
-			return nil, &agentIdentityUnknownError{Atespace: atespace, Names: recordless}
+			return nil, &agentIdentityUnknownError{Scope: scope, Names: recordless}
 		}
 	}
 
