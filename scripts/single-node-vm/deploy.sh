@@ -1487,17 +1487,30 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   " 2>/dev/null || true
 
 # --- Download and install scion binary ---
+# The release also publishes a SHA256SUMS checksums file (see
+# .github/workflows/build-release.yml). Download it alongside the binary and
+# verify with sha256sum -c before extracting -- fail closed (curl -f plus
+# set -e) if either the tarball or the checksums file is missing, and
+# explicitly if the checksums file has no entry for this asset.
 info "Installing scion binary (${VERSION})..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
     set -euo pipefail
     echo 'Downloading scion binary...'
-    curl -fsSL '${RELEASE_URL}/scion-linux-${ARCH_SUFFIX}.tar.gz' -o /tmp/scion.tar.gz
-    tar -xzf /tmp/scion.tar.gz -C /tmp
+    curl -fsSL '${RELEASE_URL}/scion-linux-${ARCH_SUFFIX}.tar.gz' -o /tmp/scion-linux-${ARCH_SUFFIX}.tar.gz
+    echo 'Downloading release checksums...'
+    curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS
+    if ! grep -qF '  scion-linux-${ARCH_SUFFIX}.tar.gz' /tmp/SHA256SUMS; then
+      echo 'ERROR: no checksum entry for scion-linux-${ARCH_SUFFIX}.tar.gz in SHA256SUMS -- refusing to install.' >&2
+      exit 1
+    fi
+    echo 'Verifying checksum...'
+    (cd /tmp && grep -F '  scion-linux-${ARCH_SUFFIX}.tar.gz' SHA256SUMS | sha256sum -c -)
+    tar -xzf /tmp/scion-linux-${ARCH_SUFFIX}.tar.gz -C /tmp
     sudo mv /tmp/scion /usr/local/bin/scion
     sudo chmod +x /usr/local/bin/scion
-    rm -f /tmp/scion.tar.gz
+    rm -f /tmp/scion-linux-${ARCH_SUFFIX}.tar.gz /tmp/SHA256SUMS
     echo \"Installed scion binary (${VERSION})\"
   "
 
@@ -1514,11 +1527,17 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
         set -euo pipefail
         sudo -u scion mkdir -p /home/scion/.scion/plugins/broker
         curl -fsSL '${RELEASE_URL}/${PLUGIN_ARCHIVE}' -o /tmp/${PLUGIN_ARCHIVE}
+        curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS
+        if ! grep -qF '  ${PLUGIN_ARCHIVE}' /tmp/SHA256SUMS; then
+          echo 'ERROR: no checksum entry for ${PLUGIN_ARCHIVE} in SHA256SUMS -- refusing to install.' >&2
+          exit 1
+        fi
+        (cd /tmp && grep -F '  ${PLUGIN_ARCHIVE}' SHA256SUMS | sha256sum -c -)
         tar -xzf /tmp/${PLUGIN_ARCHIVE} -C /tmp
         sudo mv /tmp/${PLUGIN_BINARY} /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
         sudo chown scion:scion /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
         sudo chmod +x /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
-        rm -f /tmp/${PLUGIN_ARCHIVE}
+        rm -f /tmp/${PLUGIN_ARCHIVE} /tmp/SHA256SUMS
         echo 'Installed ${PLUGIN_BINARY}'
       "
   done
