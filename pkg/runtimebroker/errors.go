@@ -69,11 +69,12 @@ const (
 
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses
-	// this for the substrate runtime's ErrLogsNotSupported
-	// (pkg/runtime/substrate_runtime.go): reading a shared worker pod's logs
-	// would expose another tenant's actor output, so the runtime never makes
-	// the underlying call and this code is the client-visible signal that
-	// the feature, not the request, is the reason.
+	// this for pkg/runtime.ErrLogsNotSupported (pkg/runtime/capabilities.go),
+	// which a runtime returns when serving logs at all would be unsafe or
+	// impossible (for example, when reading them would expose another
+	// tenant's output), so the runtime never makes the underlying call and
+	// this code is the client-visible signal that the feature, not the
+	// request, is the reason.
 	ErrCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
 )
 
@@ -138,7 +139,7 @@ func Conflict(w http.ResponseWriter, message string) {
 // AgentIdentityUnknown writes a 409 Conflict response with the stable
 // ErrCodeAgentIdentityUnknown code for a delete/stop that a runtime process
 // restart made impossible to verify as safe. message must stay generic —
-// it must not name any runtime-specific scope (e.g. an atespace) or point
+// it must not name any runtime-specific scope (e.g. a namespace) or point
 // at a runtime-specific document; a caller's own log line carries those
 // details instead (see agentIdentityUnknownError).
 func AgentIdentityUnknown(w http.ResponseWriter, message string) {
@@ -147,8 +148,8 @@ func AgentIdentityUnknown(w http.ResponseWriter, message string) {
 
 // RuntimeLogsUnsupported writes a 501 Not Implemented response with the
 // stable ErrCodeRuntimeLogsUnsupported code for a runtime that declines to
-// serve logs at all (e.g. the substrate runtime's ErrLogsNotSupported).
-// message must not name any atespace, worker, pod, namespace, actor or
+// serve logs at all (pkg/runtime.ErrLogsNotSupported). message must not
+// name any runtime-specific scope, worker, pod, namespace, actor or
 // agent — see pkg/runtime.ErrLogsNotSupported for the fixed text this is
 // meant to carry.
 func RuntimeLogsUnsupported(w http.ResponseWriter, message string) {
