@@ -95,7 +95,10 @@ func substrateServeInitOptions(forwardTermSignal bool) InitRunOptions {
 		// root," never a legitimate rootless outcome (see
 		// InitRunOptions.RequirePrivilegeDrop).
 		RequirePrivilegeDrop: true,
-		ResolveWorkingDir:    substrateResolveHarnessWorkingDir,
+		// DisablePortForwarding: true — Substrate's egress is HTTP(S)-only
+		// and default-deny (see InitRunOptions.DisablePortForwarding).
+		DisablePortForwarding: true,
+		ResolveWorkingDir:     substrateResolveHarnessWorkingDir,
 	}
 }
 
