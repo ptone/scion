@@ -186,6 +186,13 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 
 // buildInfoProfiles enumerates configured profiles from effective settings.
 // Falls back to a single "default" profile when no profiles are configured.
+//
+// Each profile's advertised Type is its resolved runtime type
+// (VersionedSettings.ResolveRuntime: the runtime entry's explicit type,
+// else its runtimes-map key), not the map key itself, so a profile whose
+// runtime entry is keyed differently from its type (e.g. an entry
+// "k8s-staging" of type kubernetes) is advertised, and filtered, as the
+// type it actually runs.
 func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 	vs, _, err := config.LoadEffectiveSettings("")
 	if err != nil || len(vs.Profiles) == 0 {
@@ -202,30 +209,18 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 
 	var profiles []BrokerProfile
 	for _, name := range names {
-		profileCfg := vs.Profiles[name]
-		rtType := profileCfg.Runtime
-		if rtType == "" {
-			rtType = defaultRuntimeType
-		}
+		rtType, rtCfg := resolveInfoProfileRuntime(vs, name, defaultRuntimeType)
 
 		if !isLocalOnlyRuntime(defaultRuntimeType) && isLocalOnlyRuntime(rtType) {
 			continue
-		}
-
-		var ctx, ns string
-		if vs.Runtimes != nil {
-			if rtCfg, ok := vs.Runtimes[rtType]; ok {
-				ctx = rtCfg.Context
-				ns = rtCfg.Namespace
-			}
 		}
 
 		profiles = append(profiles, BrokerProfile{
 			Name:      name,
 			Type:      rtType,
 			Available: true,
-			Context:   ctx,
-			Namespace: ns,
+			Context:   rtCfg.Context,
+			Namespace: rtCfg.Namespace,
 		})
 	}
 
@@ -236,6 +231,26 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 	}
 
 	return profiles
+}
+
+// resolveInfoProfileRuntime returns the runtime type and runtime config
+// buildInfoProfiles advertises for the named profile:
+//
+//   - a profile naming a runtime entry that exists resolves through
+//     VersionedSettings.ResolveRuntime (explicit type, else the map key);
+//   - a profile naming no runtime uses the broker's default runtime type,
+//     with that type's runtimes-map entry if one exists;
+//   - a profile naming a runtime entry that doesn't exist falls back to the
+//     name as given, with no runtime config.
+func resolveInfoProfileRuntime(vs *config.VersionedSettings, name, defaultRuntimeType string) (string, config.V1RuntimeConfig) {
+	key := vs.Profiles[name].Runtime
+	if key == "" {
+		return defaultRuntimeType, vs.Runtimes[defaultRuntimeType]
+	}
+	if rtCfg, rtType, err := vs.ResolveRuntime(name); err == nil {
+		return rtType, rtCfg
+	}
+	return key, config.V1RuntimeConfig{}
 }
 
 // handleHubConnections returns live status of all hub connections.
