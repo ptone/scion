@@ -41,9 +41,9 @@ type RecordlessActor struct {
 
 // RecordlessActorProber is an optional capability a Runtime may implement
 // when it cannot always tell a project-scoped caller "not found" apart from
-// "this process lost the record that would prove it" — the substrate
-// runtime is one example, since its actors carry no labels the broker can
-// query after a restart. RecordlessActors reports the runtime's own scope
+// "this process lost the record that would prove it" — a runtime whose
+// actors carry no labels the broker can query after a restart is one
+// example. RecordlessActors reports the runtime's own scope
 // for projectID (for example, a namespace) and the names of any actor in it
 // with no such record, so a caller can turn a would-be not-found into an
 // explicit, distinguishable error instead of an idempotent success that
@@ -77,4 +77,25 @@ type PerProfileInstancesRuntime interface {
 func HasPerProfileInstances(rt Runtime) bool {
 	pp, ok := rt.(PerProfileInstancesRuntime)
 	return ok && pp.PerProfileInstances()
+}
+
+// AttachCapableRuntime is an optional capability a Runtime may implement to
+// report whether it supports interactive attach — a PTY or exec primitive a
+// caller can dial to reach an actor's running session. Attach has always
+// been available before this capability existed, so a runtime that does not
+// implement this interface is treated as supporting it; only a runtime that
+// explicitly lacks the primitive (for example, one whose broker rejects the
+// PTY stream outright) needs to opt out by implementing this and reporting
+// false.
+type AttachCapableRuntime interface {
+	SupportsAttach() bool
+}
+
+// HasAttachSupport reports whether rt supports interactive attach: true
+// unless rt implements AttachCapableRuntime and reports false. A runtime
+// that doesn't implement the interface — the common case — is supported by
+// default (missing capability ⇒ supported).
+func HasAttachSupport(rt Runtime) bool {
+	ac, ok := rt.(AttachCapableRuntime)
+	return !ok || ac.SupportsAttach()
 }
