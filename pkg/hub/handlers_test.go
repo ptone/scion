@@ -145,10 +145,12 @@ func doRequestRaw(t *testing.T, srv *Server, method, path string, body []byte, c
 
 // grantDevUserRuntimeBrokerAccess creates a custom role with runtime_broker.*
 // permissions and binds it to the dev user. This is needed because the
-// inline authz checks in getRuntimeBroker, handleBrokerHeartbeat, and
-// handleBrokerSecretByKey use Resource{Type: "runtime_broker"} which does not
-// match the canonical "broker.*" permissions in the registry. The dev user's
-// super-admin role only includes registry permissions.
+// inline authz checks in handleBrokerHeartbeat and handleBrokerSecretByKey
+// use Resource{Type: "runtime_broker"} which does not match the canonical
+// "broker.*" permissions in the registry (ptone/scion#2140 tracks aligning
+// these; getRuntimeBroker and getBrokerProjects were already fixed under
+// ptone/scion#2105). The dev user's super-admin role only includes registry
+// permissions.
 func grantDevUserRuntimeBrokerAccess(t *testing.T, s store.Store) {
 	t.Helper()
 	ctx := context.Background()
