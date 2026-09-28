@@ -1061,7 +1061,12 @@ func TestFixupRootfsForScionUser_RunsSudoFixup(t *testing.T) {
 //	                                   own initializer
 //	checkPrivilegeDropFeasible     <- substrateServePrivilegeDropChecker
 //	substrateServePrivilegeDropChecker <- newSubstrateServeServer (wired into
-//	                                   the Server as its PrivilegeDropChecker)
+//	                                   the Server as its PrivilegeDropChecker),
+//	                                   and substrateServeInitOptions (wired
+//	                                   into InitRunOptions.PrivilegeDropPrecheck
+//	                                   as RunInit's own second, independent
+//	                                   defense-in-depth call — see that
+//	                                   field's doc comment, init.go)
 //	substrateServeRootfsFixup      <- newSubstrateServeServer (wired into the
 //	                                   Server as its RootfsFixup)
 //
@@ -1110,7 +1115,8 @@ var sudoHardeningCallAllowlist = map[string]map[string]bool{
 		"substrateServePrivilegeDropChecker": true,
 	},
 	"substrateServePrivilegeDropChecker": {
-		"newSubstrateServeServer": true,
+		"newSubstrateServeServer":   true,
+		"substrateServeInitOptions": true,
 	},
 	"substrateServeRootfsFixup": {
 		"newSubstrateServeServer": true,
