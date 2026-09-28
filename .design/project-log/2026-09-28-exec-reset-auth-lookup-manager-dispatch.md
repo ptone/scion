@@ -4,10 +4,12 @@
 **Branch:** scion/substrate-refactor-exec-lookup (off scion/substrate-refactor @ 9f176b817b52d36afe30b99688ab27e3c9641a73)
 **Author:** dev-refactor-exec-lookup
 
-## Follow-up this closes
+## Background
 
-R11's own project-log entry
-(`2026-09-28-broker-stop-lookup-and-runtime-seam.md`) flagged this
+The project-log entry recording the earlier work that made the stop/restart
+target lookup strict and sorted, and had stop/restart dispatch through the
+manager whose `List` call produced the match
+(`2026-09-28-broker-stop-lookup-and-runtime-seam.md`), flagged this
 explicitly under "Clarification of Broader reach":
 
 > exec and reset-auth resolve their target ID through `LookupContainerID`
@@ -16,8 +18,8 @@ explicitly under "Clarification of Broader reach":
 > (`resolveRuntimeForAgent`). Extending the strict lookup to that half is a
 > separate follow-up and is deliberately not done here.
 
-This unit does that extension, for both `execCommand` and `resetAuth`
-(`pkg/runtimebroker/handlers.go`).
+`execCommand` and `resetAuth` (`pkg/runtimebroker/handlers.go`) get that
+same extension here.
 
 ## What was broken
 
@@ -29,8 +31,9 @@ This unit does that extension, for both `execCommand` and `resetAuth`
   failure: an unlistable auxiliary runtime is silently treated as "no
   match" and the walk falls through to its unconditional final fallback,
   the default runtime.
-- `LookupContainerID` (-> the strict, sorted `lookupAgentTarget` from R11)
-  to resolve the container id to act on.
+- `LookupContainerID` (-> the strict, sorted `lookupAgentTarget` introduced
+  when the stop/restart lookup was unified) to resolve the container id to
+  act on.
 
 Because these are two separate calls, the manager the operation is
 dispatched through and the container id it is given can come from
@@ -67,14 +70,14 @@ Every registered manager (default and auxiliary) is built by
 `hasRecordlessProber`/`recordlessActorProbe`.
 
 `resolveRuntimeForAgent`/`resolveAgentRuntimeTarget` are untouched and
-still used by `getLogs`, which this unit was not scoped to touch.
+still used by `getLogs`, which was out of scope here.
 
 **HTTP status mapping is unchanged.** Both handlers still map any
 `lookupAgentTarget` error (or an empty target) to the existing 404 —
 exactly the "exec and reset-auth already map any lookup error to 404"
-behaviour R11 documented. No change was needed because nothing here alters
-what counts as an error; it only makes the manager come from the same call
-that resolved the target.
+behaviour described in the background entry above. No change was needed
+because nothing here alters what counts as an error; it only makes the
+manager come from the same call that resolved the target.
 
 ## Tests (`pkg/runtimebroker/exec_lookup_test.go`)
 
