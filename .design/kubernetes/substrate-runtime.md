@@ -580,9 +580,10 @@ unaffected either way.
 ## 8. Privilege drop and rootfs
 
 Substrate starts the actor process as **UID 0 with a minimal capability
-set** (`AUDIT_WRITE`, `KILL`, `NET_BIND_SERVICE`). `sciontool init`'s
-privilege-drop and rootfs assumptions were written against Docker's
-defaults, which don't hold here:
+set** (`AUDIT_WRITE`, `KILL`, `NET_BIND_SERVICE`) — the ateapi `Container`
+spec has no `user` field, so there is no way to ask Substrate to start the
+process as anything else. `sciontool init`'s privilege-drop and rootfs
+assumptions were written against Docker's defaults, which don't hold here:
 
 - **`/` is `0700` in the actor** (Substrate `bundle_linux.go`).
   `fixupRootfsForScion` (`cmd/sciontool/commands/substrate_rootfs.go`)

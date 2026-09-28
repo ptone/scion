@@ -42,11 +42,15 @@ const (
 	// from a genuinely running harness — see the cmd layer's
 	// exitCodePrivilegeDropRequired and reportInitFailure (called from
 	// inside RunInit itself) for the direct Hub report, which is the
-	// primary failure signal today. Reported over HTTP as a normal 200 OK
-	// with body {"state":"init-failed"} — healthz's status code always
-	// means "the control server itself is up and answering," never
-	// "everything behind it succeeded"; the state field is where a caller
-	// distinguishes success from this.
+	// primary failure signal today: the substrate broker does not read
+	// agent-info.json out of the actor the way other runtimes' brokers do,
+	// so that direct Hub report — not a local agent-info.json write picked
+	// up by a broker heartbeat — is the only failure signal that reaches
+	// the Hub at all here. Reported over HTTP as a normal 200 OK with body
+	// {"state":"init-failed"} — healthz's status code always means "the
+	// control server itself is up and answering," never "everything behind
+	// it succeeded"; the state field is where a caller distinguishes
+	// success from this.
 	StateInitFailed State = "init-failed"
 )
 

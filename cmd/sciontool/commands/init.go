@@ -160,8 +160,8 @@ type InitRunOptions struct {
 	// this process's cwd" behaviour or to "/".
 	//
 	// See pkg/sciontool/substrate / cmd/sciontool/commands/substrate_serve.go
-	// for why substrate needs all four of the fields above and how it
-	// resolves this one (also .design/kubernetes/substrate-runtime.md §§5.6-5.7).
+	// for why substrate needs all four fields above and how it resolves
+	// this one (also .design/kubernetes/substrate-runtime.md §§1, 5.6-5.7, 8).
 	ResolveWorkingDir func() (string, error)
 }
 
@@ -265,13 +265,13 @@ func resolveAgentHome(targetUID int, rootless bool) string {
 // reads the container's agent-info.json as part of its own status
 // heartbeat, that local write is a second, independent path to the same
 // result if the direct Hub call fails or the Hub isn't configured; for a
-// runtime whose broker has no such fallback (see pkg/sciontool/substrate's
-// StateInitFailed for why substrate is one), the direct Hub call is the
-// only failure signal that reaches the Hub at all. cause's message ends up
-// in the Hub-visible message and possibly a caller's own exposed response,
-// so callers must only pass fixed, secret-free errors (as
-// errPrivilegeDropRequired and every caller below do) — never one built
-// from raw command output or file contents.
+// runtime whose broker has no such fallback, the direct Hub call is the
+// only failure signal that reaches the Hub at all — see
+// pkg/sciontool/substrate's StateInitFailed doc comment for why substrate
+// is one. cause's message ends up in the Hub-visible message and possibly
+// a caller's own exposed response, so callers must only pass fixed,
+// secret-free errors (as errPrivilegeDropRequired and every caller below
+// do) — never one built from raw command output or file contents.
 //
 // Shared by every RunInit failure path that needs to report before
 // returning, rather than each constructing its own StatusHandler: this is
