@@ -660,7 +660,7 @@ func (m *LifecycleManager) hardenedRootHookEnv() []string {
 	env = append(env, "PYTHONDONTWRITEBYTECODE=1")
 	env = setEnvVar(env, "HOME", "/root")
 	env = setEnvVar(env, "PYTHONNOUSERSITE", "1")
-	env = setEnvVar(env, "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+	env = setEnvVar(env, "PATH", strings.Join(rootexec.SearchPath, ":"))
 	return env
 }
 
