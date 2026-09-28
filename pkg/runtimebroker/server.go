@@ -381,6 +381,7 @@ func (s *Server) SwapRuntime(rt scionrt.Runtime) {
 		conn.mu.RUnlock()
 		if hb != nil {
 			hb.SwapManager(newMgr)
+			hb.SetDefaultRuntime(rt)
 		}
 	}
 	s.hubMu.RUnlock()
