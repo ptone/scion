@@ -396,3 +396,6 @@ conflict. The targeted `TestLoadVersionedSettings_DefaultsOnly` and
 and `CODEX_HOME` were also removed from the test process environment. This does
 not establish that all broad-suite failures share those causes. No application
 code or fixtures were changed to make these checks pass.
+
+The standalone `go build -buildvcs=false ./...` completed successfully. The
+design-only diff also passed `git diff --check`.
