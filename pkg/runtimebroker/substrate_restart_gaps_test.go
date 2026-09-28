@@ -99,13 +99,13 @@ func TestSubstrateBroker_RealRestart_PreRestartAgentIs409_NewAgentDeletes(t *tes
 
 	w := httptest.NewRecorder()
 	srv.deleteAgent(w, httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil), "dev", gapProjBID)
-	if w.Code != http.StatusConflict || decodeBrokerAPIError(t, w) != ErrCodeSubstrateAgentIdentityUnknown {
-		t.Fatalf("delete of pre-restart agent: status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeSubstrateAgentIdentityUnknown)
+	if w.Code != http.StatusConflict || decodeBrokerAPIError(t, w) != ErrCodeAgentIdentityUnknown {
+		t.Fatalf("delete of pre-restart agent: status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeAgentIdentityUnknown)
 	}
 	w = httptest.NewRecorder()
 	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)
-	if w.Code != http.StatusConflict || decodeBrokerAPIError(t, w) != ErrCodeSubstrateAgentIdentityUnknown {
-		t.Fatalf("stop of pre-restart agent: status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeSubstrateAgentIdentityUnknown)
+	if w.Code != http.StatusConflict || decodeBrokerAPIError(t, w) != ErrCodeAgentIdentityUnknown {
+		t.Fatalf("stop of pre-restart agent: status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeAgentIdentityUnknown)
 	}
 	fc.mu.Lock()
 	if n := len(fc.deleteActorCalls); n != 0 {
@@ -242,8 +242,8 @@ func TestSubstrateBroker_DeleteFileScanHitWithRecordlessActor_NotSuccess(t *test
 	rec := doDelete(t, srv, "dev", "projectId="+gapProjBID+"&deleteFiles=true")
 	if rec.Code/100 == 2 || rec.Code == http.StatusNotFound {
 		t.Errorf("delete with file-scan hit and a record-less actor: status=%d body=%s, want 409 (never success while the actor exists)", rec.Code, rec.Body.String())
-	} else if code := decodeBrokerAPIError(t, rec); code != ErrCodeSubstrateAgentIdentityUnknown {
-		t.Errorf("error code = %q, want %q", code, ErrCodeSubstrateAgentIdentityUnknown)
+	} else if code := decodeBrokerAPIError(t, rec); code != ErrCodeAgentIdentityUnknown {
+		t.Errorf("error code = %q, want %q", code, ErrCodeAgentIdentityUnknown)
 	}
 	assertUntouched(t, scionB, "dev", infoB)
 	fc.mu.Lock()
@@ -525,8 +525,8 @@ func TestRecordlessActorProbe_DedupesAcrossManagers(t *testing.T) {
 
 // TestSubstrateBroker_DeleteIdentityUnknown_LogsNamesNotInBody pins that the
 // record-less actor names reach only the broker's own WARN log, never the
-// HTTP response body — the body carries just the atespace and a count
-// (SubstrateAgentIdentityUnknown), which alone can't tell an operator which
+// HTTP response body — the body carries just a generic count
+// (AgentIdentityUnknown), which alone can't tell an operator which
 // actor(s) matched. See deploy/substrate/README.md step 0.
 func TestSubstrateBroker_DeleteIdentityUnknown_LogsNamesNotInBody(t *testing.T) {
 	srv, fc := newTestSubstrateBrokerServer(t)
@@ -541,7 +541,7 @@ func TestSubstrateBroker_DeleteIdentityUnknown_LogsNamesNotInBody(t *testing.T) 
 		t.Fatalf("status = %d body=%s, want 409", w.Code, w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), "projb--ghost") {
-		t.Errorf("HTTP body names the record-less actor, want only the atespace and a count: %s", w.Body.String())
+		t.Errorf("HTTP body names the record-less actor, want only a generic count: %s", w.Body.String())
 	}
 	if !strings.Contains(logBuf.String(), "projb--ghost") {
 		t.Errorf("broker log does not carry the record-less actor name: %s", logBuf.String())
@@ -563,7 +563,7 @@ func TestSubstrateBroker_StopIdentityUnknown_LogsNamesNotInBody(t *testing.T) {
 		t.Fatalf("status = %d body=%s, want 409", w.Code, w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), "projb--ghost") {
-		t.Errorf("HTTP body names the record-less actor, want only the atespace and a count: %s", w.Body.String())
+		t.Errorf("HTTP body names the record-less actor, want only a generic count: %s", w.Body.String())
 	}
 	if !strings.Contains(logBuf.String(), "projb--ghost") {
 		t.Errorf("broker log does not carry the record-less actor name: %s", logBuf.String())

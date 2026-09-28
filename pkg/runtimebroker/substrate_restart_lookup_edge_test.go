@@ -311,8 +311,8 @@ func TestProberAsAuxiliaryRuntime_StopFailsClosed(t *testing.T) {
 		srv := newBroker(t, func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil }, []string{"projb--ghost"})
 		w := httptest.NewRecorder()
 		srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)
-		if w.Code != http.StatusConflict || decodeBrokerAPIError(t, w) != ErrCodeSubstrateAgentIdentityUnknown {
-			t.Errorf("status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeSubstrateAgentIdentityUnknown)
+		if w.Code != http.StatusConflict || decodeBrokerAPIError(t, w) != ErrCodeAgentIdentityUnknown {
+			t.Errorf("status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeAgentIdentityUnknown)
 		}
 	})
 }

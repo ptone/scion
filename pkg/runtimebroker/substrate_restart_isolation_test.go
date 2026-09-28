@@ -111,14 +111,17 @@ func TestProberAsAuxiliaryRuntime_DeleteFailsClosed(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	srv.deleteAgent(w, httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil), "dev", gapProjBID)
-	if w.Code != http.StatusConflict || decodeBrokerAPIError(t, w) != ErrCodeSubstrateAgentIdentityUnknown {
-		t.Errorf("status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeSubstrateAgentIdentityUnknown)
+	if w.Code != http.StatusConflict || decodeBrokerAPIError(t, w) != ErrCodeAgentIdentityUnknown {
+		t.Errorf("status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeAgentIdentityUnknown)
 	}
 }
 
-// The 409 body is what a hub/CLI caller sees: it must name the atespace,
-// the record-less count and the operator remedy, for delete and for stop.
-func TestSubstrateBroker_IdentityUnknownBody_NamesAtespaceCountAndRemedy(t *testing.T) {
+// The 409 body is what a hub/CLI caller sees: it must stay generic across
+// every runtime, so it carries the record-less count but never the
+// runtime's own scope (e.g. an atespace) or a runtime-specific remedy
+// pointer — those go to the broker's own log only. True for both delete and
+// stop.
+func TestSubstrateBroker_IdentityUnknownBody_GenericCountOnly(t *testing.T) {
 	cases := []struct {
 		name string
 		call func(*Server, *httptest.ResponseRecorder)
@@ -145,9 +148,12 @@ func TestSubstrateBroker_IdentityUnknownBody_NamesAtespaceCountAndRemedy(t *test
 			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 				t.Fatalf("body is not an ErrorResponse: %v (%s)", err, w.Body.String())
 			}
-			for _, want := range []string{"2 actor(s)", `atespace "` + gapAtespaceB + `"`, "deploy/substrate/README.md"} {
-				if !strings.Contains(resp.Error.Message, want) {
-					t.Errorf("message %q does not contain %q", resp.Error.Message, want)
+			if !strings.Contains(resp.Error.Message, "2 actor(s)") {
+				t.Errorf("message %q does not contain %q", resp.Error.Message, "2 actor(s)")
+			}
+			for _, notWant := range []string{gapAtespaceB, "atespace", "deploy/substrate/README.md"} {
+				if strings.Contains(resp.Error.Message, notWant) {
+					t.Errorf("message %q must stay generic, but contains %q", resp.Error.Message, notWant)
 				}
 			}
 		})

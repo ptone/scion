@@ -69,7 +69,7 @@ func TestSubstrateGetLogs_FixedMessage_NoTenantIdentifiers(t *testing.T) {
 		SandboxConfigName: "gvisor-default",
 	})
 
-	const wantMessage = "agent logs are not available on the substrate runtime; operators can read an actor's output with kubectl, filtered by the actor's uid"
+	wantMessage := ErrLogsNotSupported.Error()
 
 	_, err := rt.GetLogs(context.Background(), "scion-deadbeef0000/some-other-actor")
 	if err == nil || err.Error() != wantMessage {

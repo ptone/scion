@@ -1389,10 +1389,12 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 			logArgs := []any{"agent_id", id, "project_id", projectID, "error", err}
 			var idErr *agentIdentityUnknownError
 			if errors.As(err, &idErr) {
-				logArgs = append(logArgs, "recordless_actors", idErr.Names)
+				// The runtime-specific scope (e.g. an atespace) is logged
+				// here only; AgentIdentityUnknown's HTTP body never names it.
+				logArgs = append(logArgs, "atespace", idErr.Atespace, "recordless_actors", idErr.Names)
 			}
 			s.agentLifecycleLog.Warn("Agent delete: agent identity unknown after a runtime process restart", logArgs...)
-			SubstrateAgentIdentityUnknown(w, err.Error())
+			AgentIdentityUnknown(w, err.Error())
 			return
 		}
 		Conflict(w, "Failed to delete agent: "+err.Error())
@@ -1960,7 +1962,7 @@ func (s *Server) projectScopedTargetErr(ctx context.Context, id, projectID strin
 // normally never pays for either.
 func (s *Server) hasRecordlessProber() bool {
 	if am, ok := s.manager.(*agent.AgentManager); ok && am.Runtime != nil {
-		if _, ok := am.Runtime.(RecordlessActorProber); ok {
+		if _, ok := am.Runtime.(scionrt.RecordlessActorProber); ok {
 			return true
 		}
 	}
@@ -1974,7 +1976,7 @@ func (s *Server) hasRecordlessProber() bool {
 		if !ok || am.Runtime == nil {
 			continue
 		}
-		if _, ok := am.Runtime.(RecordlessActorProber); ok {
+		if _, ok := am.Runtime.(scionrt.RecordlessActorProber); ok {
 			return true
 		}
 	}
@@ -2076,10 +2078,12 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 				return
 			}
 			if len(recordless) > 0 {
-				msg := fmt.Sprintf("%d actor(s) with no runtime-process record in atespace %q; broker restarted; agent identity unknown; operator cleanup required, see deploy/substrate/README.md", len(recordless), atespace)
+				// bodyMsg is generic and carries no runtime-specific scope;
+				// the atespace is logged below only, never in the HTTP body.
+				bodyMsg := fmt.Sprintf("%d actor(s) with no runtime-process record after a runtime restart; agent identity unknown; operator cleanup required", len(recordless))
 				s.agentLifecycleLog.Warn("Agent stop: agent identity unknown after a runtime process restart",
-					"agent_id", id, "project_id", projectID, "recordless_actors", recordless, "error", msg)
-				SubstrateAgentIdentityUnknown(w, msg)
+					"agent_id", id, "project_id", projectID, "atespace", atespace, "recordless_actors", recordless, "error", bodyMsg)
+				AgentIdentityUnknown(w, bodyMsg)
 				return
 			}
 		}
@@ -3377,37 +3381,25 @@ var errDeleteTargetUnknown = errors.New("could not list agents to resolve delete
 // (ptone/scion#1808).
 var errAgentIdentityUnknown = errors.New("agent identity unknown after a runtime process restart")
 
-// agentIdentityUnknownError carries the record-less actor names alongside
-// errAgentIdentityUnknown so resolveDeleteTarget's caller (deleteAgent) can
-// log them at WARN in the broker log, without ever putting them in the HTTP
-// response body: Error() deliberately reports only the count and atespace,
-// exactly what SubstrateAgentIdentityUnknown's body already carries, so
-// nothing about this type changes what a caller sees from err.Error() or
-// errors.Is(err, errAgentIdentityUnknown).
+// agentIdentityUnknownError carries the record-less actor names and the
+// runtime's own scope for them (e.g. an atespace) alongside
+// errAgentIdentityUnknown, so resolveDeleteTarget's caller (deleteAgent) can
+// log both at WARN in the broker log, without ever putting them in the HTTP
+// response body: Error() deliberately reports only the count, exactly what
+// AgentIdentityUnknown's body already carries, so nothing about this type
+// changes what a caller sees from err.Error() or errors.Is(err,
+// errAgentIdentityUnknown).
 type agentIdentityUnknownError struct {
 	Atespace string
 	Names    []string
 }
 
 func (e *agentIdentityUnknownError) Error() string {
-	return fmt.Sprintf("%d actor(s) with no runtime-process record in atespace %q; broker restarted; agent identity unknown; operator cleanup required, see deploy/substrate/README.md", len(e.Names), e.Atespace)
+	return fmt.Sprintf("%d actor(s) with no runtime-process record after a runtime restart; agent identity unknown; operator cleanup required", len(e.Names))
 }
 
 func (e *agentIdentityUnknownError) Unwrap() error {
 	return errAgentIdentityUnknown
-}
-
-// RecordlessActorProber is an optional, runtime-specific capability
-// (type-asserted from agent.Manager.Runtime, never added to the generic
-// runtime.Runtime interface) for a runtime whose List cannot always tell a
-// project-scoped caller "not found" apart from "this process lost the
-// record that would prove it": RecordlessActors reports the atespace
-// projectID maps to and the names of any actor in it with no such record.
-// resolveDeleteTarget and the stop path use this to turn a would-be
-// not-found into an explicit, distinguishable error instead of the normal
-// idempotent 404/202 (ptone/scion#1808).
-type RecordlessActorProber interface {
-	RecordlessActors(ctx context.Context, projectID string) (atespace string, actors []scionrt.RecordlessActor, err error)
 }
 
 // recordlessActorProbe checks every manager in managers that exposes a
@@ -3445,7 +3437,7 @@ func recordlessActorProbe(ctx context.Context, managers []agent.Manager, project
 		if !ok || am.Runtime == nil {
 			continue
 		}
-		prober, ok := am.Runtime.(RecordlessActorProber)
+		prober, ok := am.Runtime.(scionrt.RecordlessActorProber)
 		if !ok {
 			continue
 		}

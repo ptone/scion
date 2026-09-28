@@ -50,13 +50,6 @@ const (
 	defaultExecTimeout         = 60 * time.Second
 )
 
-// ErrLogsNotSupported is returned by GetLogs instead of reading worker pod
-// logs. Worker pods are shared across atespaces and users, so a pod-level
-// log read would return other tenants' actor output — and any worker-level
-// lines naming other atespaces — alongside the caller's own; see
-// .design/kubernetes/substrate-runtime.md §4. Match with errors.Is.
-var ErrLogsNotSupported = errors.New("agent logs are not available on the substrate runtime; operators can read an actor's output with kubectl, filtered by the actor's uid")
-
 // substrateAgentRecord holds the fields List needs that ListActors cannot
 // return (Substrate actors carry no labels — substrate-runtime.md §4), synthesised
 // from the broker's own record of what it passed to Run. Phase 1 accepts
@@ -895,19 +888,6 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 		actors = append(actors, RecordlessActor{Name: actor.GetMetadata().GetName(), UID: actor.GetMetadata().GetUid()})
 	}
 	return atespace, actors, nil
-}
-
-// RecordlessActor identifies one actor RecordlessActors found with no
-// in-memory record. UID is the actor's ResourceMetadata.uid: globally unique
-// across atespaces and, in practice, across ateapi backends too (standard
-// UUID-style generation), which is what lets a caller checking more than one
-// substrate manager (recordlessActorProbe, pkg/runtimebroker) dedupe by
-// actor identity rather than by "atespace/name" — a key that collides
-// whenever two different ateapi endpoints happen to hold a same-named actor
-// in an atespace name derived the same way from the same projectID.
-type RecordlessActor struct {
-	Name string
-	UID  string
 }
 
 // maxRecordlessActorListPages bounds RecordlessActors' ListActors paging

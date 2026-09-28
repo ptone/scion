@@ -476,7 +476,7 @@ func decodeBrokerAPIError(t *testing.T, w *httptest.ResponseRecorder) string {
 // SubstrateRuntime.List's doc comment) must not be reported as the ordinary
 // idempotent not-found (which the hub treats as a completed delete),
 // because the actor might be the very thing the caller meant. It must
-// return 409 substrate_agent_identity_unknown instead, and DeleteActor must
+// return 409 agent_identity_unknown instead, and DeleteActor must
 // never be called.
 func TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOwnAtespace_IdentityUnknown(t *testing.T) {
 	const (
@@ -500,8 +500,8 @@ func TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOwnAtespace_Identit
 	if w.Code != http.StatusConflict {
 		t.Errorf(`deleteAgent("dev", projB) status = %d, want %d (a record-less actor exists in projB's own atespace)`, w.Code, http.StatusConflict)
 	}
-	if code := decodeBrokerAPIError(t, w); code != ErrCodeSubstrateAgentIdentityUnknown {
-		t.Errorf("deleteAgent(...) error code = %q, want %q", code, ErrCodeSubstrateAgentIdentityUnknown)
+	if code := decodeBrokerAPIError(t, w); code != ErrCodeAgentIdentityUnknown {
+		t.Errorf("deleteAgent(...) error code = %q, want %q", code, ErrCodeAgentIdentityUnknown)
 	}
 
 	fc.mu.Lock()
@@ -517,7 +517,7 @@ func TestSubstrateBroker_DeleteAbsentSlugInProject_RecordlessOwnAtespace_Identit
 // TestSubstrateBroker_StopAbsentSlugInProject_RecordlessOwnAtespace_IdentityUnknown
 // is stopAgent's counterpart to the delete test above: a stop that would
 // otherwise report the generic idempotent 202 must instead return 409
-// substrate_agent_identity_unknown when the target project's own atespace
+// agent_identity_unknown when the target project's own atespace
 // holds a record-less actor, and must never call Stop/DeleteActor.
 func TestSubstrateBroker_StopAbsentSlugInProject_RecordlessOwnAtespace_IdentityUnknown(t *testing.T) {
 	const (
@@ -536,8 +536,8 @@ func TestSubstrateBroker_StopAbsentSlugInProject_RecordlessOwnAtespace_IdentityU
 	if w.Code != http.StatusConflict {
 		t.Errorf(`stopAgent("dev", projB) status = %d, want %d, not 202 — a record-less actor exists in projB's own atespace`, w.Code, http.StatusConflict)
 	}
-	if code := decodeBrokerAPIError(t, w); code != ErrCodeSubstrateAgentIdentityUnknown {
-		t.Errorf("stopAgent(...) error code = %q, want %q", code, ErrCodeSubstrateAgentIdentityUnknown)
+	if code := decodeBrokerAPIError(t, w); code != ErrCodeAgentIdentityUnknown {
+		t.Errorf("stopAgent(...) error code = %q, want %q", code, ErrCodeAgentIdentityUnknown)
 	}
 
 	fc.mu.Lock()
@@ -630,8 +630,8 @@ func TestSubstrateBroker_MixedAtespace_RecordedDeletesRecordlessTriggersIdentity
 		if w.Code != http.StatusConflict {
 			t.Errorf(`deleteAgent(nonexistent-slug) status = %d, want %d`, w.Code, http.StatusConflict)
 		}
-		if code := decodeBrokerAPIError(t, w); code != ErrCodeSubstrateAgentIdentityUnknown {
-			t.Errorf("deleteAgent(...) error code = %q, want %q", code, ErrCodeSubstrateAgentIdentityUnknown)
+		if code := decodeBrokerAPIError(t, w); code != ErrCodeAgentIdentityUnknown {
+			t.Errorf("deleteAgent(...) error code = %q, want %q", code, ErrCodeAgentIdentityUnknown)
 		}
 		fc.mu.Lock()
 		defer fc.mu.Unlock()
