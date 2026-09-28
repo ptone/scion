@@ -183,12 +183,15 @@ func TestLookupAgentTarget_TwoAuxMatches_SortedFirstDeterministic(t *testing.T) 
 		addAuxRuntime(t, srv, "aux-b", matching("c-b"))
 		addAuxRuntime(t, srv, "aux-a", matching("c-a"))
 
-		target, mgr, err := srv.lookupAgentTarget(context.Background(), "dev", gapProjBID)
+		target, mgr, rt, err := srv.lookupAgentTarget(context.Background(), "dev", gapProjBID)
 		if err != nil || target != "c-a" {
 			t.Fatalf("iteration %d: lookupAgentTarget = (%q, %v), want (\"c-a\", nil)", i, target, err)
 		}
 		if want := srv.auxiliaryRuntimes["aux-a"].Manager; mgr != want {
 			t.Fatalf("iteration %d: lookupAgentTarget manager = %v, want aux-a's manager %v", i, mgr, want)
+		}
+		if want := srv.auxiliaryRuntimes["aux-a"].Runtime; rt != want {
+			t.Fatalf("iteration %d: lookupAgentTarget runtime = %v, want aux-a's runtime %v", i, rt, want)
 		}
 	}
 }

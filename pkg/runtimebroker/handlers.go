@@ -1834,7 +1834,7 @@ func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 // left unchanged: it already tolerates lookup failures by degrading to the
 // bare id.
 func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) (string, agent.Manager, error) {
-	containerID, mgr, err := s.lookupAgentTarget(ctx, id, projectID)
+	containerID, mgr, _, err := s.lookupAgentTarget(ctx, id, projectID)
 	if err == nil && containerID != "" {
 		return containerID, mgr, nil
 	}
@@ -2237,26 +2237,36 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 	}
 
 	// Resolve the project-scoped container identifier (container ID for
-	// docker/podman, pod name for k8s) and the manager whose List call
-	// produced it, and exec against that manager's runtime rather than a
-	// separately (and non-deterministically) resolved one. Without this,
-	// rt.Exec resolves the slug to a container across all projects and can
-	// target the wrong agent — e.g. "scion look coordinator" in project A
-	// showing project B's terminal — or, when the target and the runtime it
-	// executes against are resolved by two independent lookups, dispatch a
-	// correct container ID to the wrong runtime entirely. Mirrors the
-	// project-scoped lookup used by the PTY attach handler and the
-	// single-lookup manager dispatch already applied to stop/restart.
-	// lookupAgentTarget can return an empty identifier without an error (e.g.
-	// a matching agent record with no resolvable container), so guard against
-	// both — execing an empty target would fall back to slug resolution inside
-	// the runtime and reintroduce the cross-project collision.
-	target, mgr, err := s.lookupAgentTarget(ctx, id, projectID)
+	// docker/podman, pod name for k8s) and exec against the runtime whose
+	// List call produced it, rather than a separately (and
+	// non-deterministically) resolved one. Without this, rt.Exec resolves
+	// the slug to a container across all projects and can target the wrong
+	// agent — e.g. "scion look coordinator" in project A showing project
+	// B's terminal — or, when the target and the runtime it executes
+	// against are resolved by two independent lookups, dispatch a correct
+	// container ID to the wrong runtime entirely. lookupAgentTarget pairs
+	// the manager and runtime at the stage that produced the match, so
+	// there is no independent runtime resolution to disagree with the
+	// target. Mirrors the project-scoped lookup used by the PTY attach
+	// handler and the single-lookup manager dispatch already applied to
+	// stop/restart. lookupAgentTarget can return an empty identifier
+	// without an error (e.g. a matching agent record with no resolvable
+	// container), so guard against both — execing an empty target would
+	// fall back to slug resolution inside the runtime and reintroduce the
+	// cross-project collision.
+	target, _, rt, err := s.lookupAgentTarget(ctx, id, projectID)
 	if err != nil || target == "" {
 		NotFound(w, "Agent")
 		return
 	}
-	rt := s.runtimeForManager(mgr)
+	if rt == nil {
+		// Defensive only: lookupAgentTarget pairs a runtime with every
+		// successful match, so this should be unreachable. Fail closed
+		// rather than fall back to a default runtime that could differ
+		// from the one the target actually came from.
+		RuntimeUnavailable(w, "Agent runtime unavailable")
+		return
+	}
 
 	output, err := rt.Exec(ctx, target, req.Command)
 	if err != nil {
@@ -2298,17 +2308,21 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 		return
 	}
 
-	// The manager whose List call produced the container ID is also the one
-	// its runtime is derived from, so the token write and the PID 1 signal
-	// below dispatch to the same backend the target came from rather than a
-	// separately (and non-deterministically) resolved one — see execCommand's
-	// matching comment for why that matters.
-	target, mgr, err := s.lookupAgentTarget(ctx, id, projectID)
+	// The runtime whose List call produced the container ID is paired with
+	// it by lookupAgentTarget itself, so the token write and the PID 1
+	// signal below dispatch to the same backend the target came from
+	// rather than a separately (and non-deterministically) resolved one —
+	// see execCommand's matching comment for why that matters.
+	target, _, rt, err := s.lookupAgentTarget(ctx, id, projectID)
 	if err != nil || target == "" {
 		NotFound(w, "Agent")
 		return
 	}
-	rt := s.runtimeForManager(mgr)
+	if rt == nil {
+		// Defensive only: see execCommand's matching guard.
+		RuntimeUnavailable(w, "Agent runtime unavailable")
+		return
+	}
 
 	// Write the token to the canonical file atomically via temp+rename.
 	// The token is delivered over the exec's stdin rather than embedded in
@@ -3015,22 +3029,6 @@ func (s *Server) allManagers() []agent.Manager {
 	}
 	s.auxiliaryRuntimesMu.RUnlock()
 	return managers
-}
-
-// runtimeForManager returns the scionrt.Runtime backing mgr, so a caller
-// that already has both a container id and the agent.Manager it came from
-// (e.g. from lookupAgentTarget) can dispatch a direct runtime operation
-// (Exec, ExecWithStdin) to that exact runtime instead of resolving a
-// manager/runtime pair with a second, independent lookup that could name a
-// different backend than the one the container id actually came from.
-// Every registered manager (default and auxiliary) is a *agent.AgentManager
-// wrapping its runtime, so the type assertion always succeeds in practice;
-// falling back to s.runtime is defensive only.
-func (s *Server) runtimeForManager(mgr agent.Manager) scionrt.Runtime {
-	if am, ok := mgr.(*agent.AgentManager); ok && am.Runtime != nil {
-		return am.Runtime
-	}
-	return s.runtime
 }
 
 // resolveRuntimeForAgent returns the runtime for direct operations such as

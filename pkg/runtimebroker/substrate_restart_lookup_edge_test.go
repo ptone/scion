@@ -121,7 +121,7 @@ func TestLookupAgentTarget_AnyListFailureIsCouldNotDetermine(t *testing.T) {
 				}
 				fc.mu.Unlock()
 
-				target, _, err := srv.lookupAgentTarget(context.Background(), slug, gapProjBID)
+				target, _, _, err := srv.lookupAgentTarget(context.Background(), slug, gapProjBID)
 
 				fc.mu.Lock()
 				defer fc.mu.Unlock()

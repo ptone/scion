@@ -1166,16 +1166,21 @@ func (e *agentNotFoundError) Is(target error) bool {
 // projectID scopes the lookup to prevent cross-project collision.
 // See lookupAgentTarget for the resolution rules and error types.
 func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) (string, error) {
-	containerID, _, err := s.lookupAgentTarget(ctx, slug, projectID)
+	containerID, _, _, err := s.lookupAgentTarget(ctx, slug, projectID)
 	return containerID, err
 }
 
 // lookupAgentTarget resolves an agent slug to its container identifier
 // (container ID for docker/podman, pod name for k8s, or whatever a runtime
-// reports) and also returns the agent.Manager whose List call produced the
-// match, so a caller that goes on to act on the target (e.g. Stop) sends
-// the operation to the same runtime the identifier came from rather than
-// to a manager re-derived by a second, independent lookup.
+// reports) and also returns the agent.Manager and scionrt.Runtime pair
+// whose List call produced the match, so a caller that goes on to act on
+// the target (e.g. Stop, Exec) sends the operation to the same runtime the
+// identifier came from rather than to a manager or runtime re-derived by a
+// second, independent lookup. The manager and runtime are paired at the
+// stage that produced the match — the default runtime's own manager and
+// runtime together when the default stage matches, or the single
+// auxiliaryRuntime entry auxListAgentsSorted matched against — so there is
+// no point at which one is resolved independently of the other.
 //
 // Resolution runs in two stages, each consulting the default runtime first
 // and then every auxiliary runtime in sorted name order (auxListAgentsSorted):
@@ -1201,9 +1206,9 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 //
 // Every error errs toward an explicit failure, never toward a false
 // not-found or a wrong target.
-func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) (string, agent.Manager, error) {
+func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) (string, agent.Manager, scionrt.Runtime, error) {
 	if s.manager == nil {
-		return "", nil, fmt.Errorf("agent manager not available")
+		return "", nil, nil, fmt.Errorf("agent manager not available")
 	}
 
 	slug = strings.ToLower(slug)
@@ -1211,19 +1216,21 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 	filter := scopedNameFilter(slug, projectID)
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		return "", nil, nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 	}
 	agents = agentsForProject(agents, projectID)
 	matchManager := s.manager
+	matchRuntime := s.runtime
 
 	// Fall back to auxiliary runtimes (e.g. kubernetes when default is docker)
 	if len(agents) == 0 {
-		auxAgents, auxManager, auxErr := s.auxListAgentsSorted(ctx, slug, false, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
+		auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, false, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
 		if auxErr != nil {
-			return "", nil, auxErr
+			return "", nil, nil, auxErr
 		}
 		agents = auxAgents
 		matchManager = auxManager
+		matchRuntime = auxRuntime
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
@@ -1234,27 +1241,29 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
 		if err != nil {
-			return "", nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+			return "", nil, nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
 		agents = agentsWithoutProjectLabel(agents)
 		matchManager = s.manager
+		matchRuntime = s.runtime
 		if len(agents) == 0 {
-			auxAgents, auxManager, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
+			auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
 			if auxErr != nil {
-				return "", nil, auxErr
+				return "", nil, nil, auxErr
 			}
 			agents = auxAgents
 			matchManager = auxManager
+			matchRuntime = auxRuntime
 		}
 	}
 
 	if len(agents) == 0 {
-		return "", nil, &agentNotFoundError{slug: slug}
+		return "", nil, nil, &agentNotFoundError{slug: slug}
 	}
 
 	entry, err := uniqueAgentEntry(slug, agents)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	// Get container ID - prefer label, then ContainerID from runtime, then ID
@@ -1266,10 +1275,10 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 		containerID = entry.ID
 	}
 	if containerID == "" {
-		return "", nil, fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
+		return "", nil, nil, fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
 	}
 
-	return containerID, matchManager, nil
+	return containerID, matchManager, matchRuntime, nil
 }
 
 // auxListAgentsSorted queries every currently registered auxiliary runtime
@@ -1290,7 +1299,13 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 // randomized map order.
 //
 // slug and fallback are used only for the debug line logged on a match.
-func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback bool, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, error) {
+//
+// The returned agent.Manager and scionrt.Runtime are always the pair
+// registered together for the same auxiliary runtime name (auxiliaryRuntime
+// stores them together), so a caller never has to re-derive one from the
+// other: they are paired at the moment the match is found, not looked up
+// again afterward.
+func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback bool, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, scionrt.Runtime, error) {
 	s.auxiliaryRuntimesMu.RLock()
 	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
 	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
@@ -1316,13 +1331,13 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback 
 				msg += " (fallback)"
 			}
 			slog.Debug(msg, "slug", slug, "runtime", rtName)
-			return matched, auxRuntimes[rtName].Manager, nil
+			return matched, auxRuntimes[rtName].Manager, auxRuntimes[rtName].Runtime, nil
 		}
 	}
 	if listErr != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrAgentListUnavailable, listErr)
+		return nil, nil, nil, fmt.Errorf("%w: %v", ErrAgentListUnavailable, listErr)
 	}
-	return nil, nil, nil
+	return nil, nil, nil, nil
 }
 
 // LookupAgent implements AgentLookup interface.
