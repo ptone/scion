@@ -33,13 +33,12 @@ import (
 // same way scripts/single-node-vm/deploy.sh does for its own install
 // path. Verification is split into two steps so Run() can fetch the
 // expected checksum *before* downloading the (potentially large) tarball:
-// fetchExpectedChecksum (its checksumsURL parameter is a plain URL,
-// unlike resolveReleaseAssets'
-// hardcoded api.github.com endpoint, so it's fully exercisable against a
-// local httptest server) and verifyFileChecksum. These tests cover both
-// directly, deriveChecksumsURL, and then confirm the wiring — including
-// the fetch-before-download ordering — through BinaryUpdateExecutor.Run
-// itself.
+// fetchExpectedChecksum (its checksumsURL parameter is a plain URL, unlike
+// resolveReleaseAssets' hardcoded api.github.com endpoint, so it's fully
+// exercisable against a local httptest server) and verifyFileChecksum.
+// These tests cover both directly, deriveChecksumsURL, and then confirm
+// the wiring — including the fetch-before-download ordering — through
+// BinaryUpdateExecutor.Run itself.
 
 func TestFetchExpectedChecksum(t *testing.T) {
 	const assetName = "scion-linux-amd64.tar.gz"
