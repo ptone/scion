@@ -8,8 +8,9 @@
 # ssh --command=...` string, which this suite's gcloud stub logs but
 # never actually executes -- see tests/lib/gcloud's "compute ssh" case):
 #
-#   1. The GitHub Releases API auto-detect (deploy.sh ~:745/:748), used
-#      only when --version is omitted. No test in this suite exercises
+#   1. The GitHub Releases API auto-detect (deploy.sh's "Release version"
+#      section, the `if [[ -z "$VERSION" ]]` block), used only when
+#      --version is omitted. No test in this suite exercises
 #      it today -- every test passes --version (see README.md) -- so an
 #      unhandled URL falls through to the real curl below rather than
 #      being silently wrong for a future test that does.
