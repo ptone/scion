@@ -211,3 +211,51 @@ This leaves no `SCION_*` variables.
 | `make ci-full` | fmt-check, web, web-typecheck, lint and check-custom pass. web-test fails nondeterministically: run 1 had 4 failing files (hook timeouts, terminal-transport); run 2 had 3 different ones (agent-create-projects, role-binding, terminal-transport). The branch has no diff under web/. golangci-lint reports 19 findings, all in files untouched by this branch or on lines from base (the handlers.go:1111 HydrateWithHash deprecation is blamed to d2316f10c). test-fast and build are covered by `make ci`. |
 | R11 mutation | red → reverted → green |
 | R6 seam mutation | red → reverted → green |
+
+## Addendum: restart coverage and two small fixes
+
+Review found that the restart consequences of the unified lookup were
+correct but untested: reverting them left the suite green. Three restart
+tests were supplied, landed as `pkg/runtimebroker/restart_target_lookup_test.go`
+(16bc5ee5b). The header and names were made generic, and the cases are
+unchanged:
+- `TestRestart_AuxListErrorWithNoMatch_AbortsWithoutStart`: an auxiliary
+  List error with no match → 5xx, no Start and no Stop.
+- `TestRestart_FallbackStageListError_AbortsWithoutStart`: a default List
+  failure in the unlabelled fallback stage → 5xx, no Start.
+- `TestRestart_TwoAuxMatches_StopTargetAndManagerAgree`: over 30
+  iterations, only aux-a's manager stops, and it stops `c-a`.
+
+Verification (all run under the `env -i` wrapper):
+
+| Check | Result |
+|---|---|
+| On the branch | all 3 pass |
+| On base d2316f10c (detached worktree) | all 3 fail; on base, aux-b stopped `c-b` in the two-match case |
+| Mutation: restart lets `ErrAgentListUnavailable` through | both abort tests red; reverted |
+| Mutation: restart's Stop through `resolveManagerForAgent` instead of the lookup's manager | two-match test red (aux-b told to stop `c-a`); reverted |
+
+Other fixes:
+- d8e7f5ce8: `auxListAgentsSorted` takes the slug and stage again. Its
+  debug line is once more `"Agent found via auxiliary runtime"` /
+  `"... (fallback)"` with the `slug` and `runtime` attributes, as on base.
+- de67bfe70: reflowed the ~105-column doc comment in
+  `pkg/hubclient/agents_test.go`.
+
+Clarification of "Broader reach" above:
+- exec and reset-auth resolve their target ID through `LookupContainerID`
+  (now strict; any error → 404).
+- The runtime/manager they act on still comes from the separate, unsorted
+  `resolveAgentRuntimeTarget` (`resolveRuntimeForAgent`).
+- Extending the strict lookup to that half is a separate follow-up and is
+  deliberately not done here.
+
+Gates (`env -i` wrapper as above; no `SCION_*` set):
+
+| Gate | Result |
+|---|---|
+| `go build -buildvcs=false ./...` | OK |
+| `gofmt -l` on touched files | empty |
+| `go vet` on runtimebroker and hubclient | OK |
+| `go test -count=1` on ./pkg/runtimebroker/..., ./pkg/hubclient/..., ./pkg/runtime/... | ok |
+| `make ci` | CI passed |
