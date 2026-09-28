@@ -34,7 +34,7 @@ type privilegeDropPreconditionDeps struct {
 
 	// statPath reads a path's mode, owning uid and owning gid, without
 	// following through to any deeper access check (see canSearchDir/
-	// homeOwnedAndWritable, both in substrate_serve.go). Injectable so the
+	// homeOwnedAndWritable, both in substrate_rootfs.go). Injectable so the
 	// traversability checks below can be driven against a fake rootfs in
 	// tests instead of the real '/' and $HOME.
 	statPath func(string) (fs.FileInfo, error)
@@ -63,10 +63,11 @@ var defaultPrivilegeDropPreconditionDeps = privilegeDropPreconditionDeps{
 // setuid-root-sudo branch below logs which specific condition failed; every
 // other branch (a missing capability, an unresolvable "scion" user, missing/
 // unparseable SCION_HOST_UID/GID, or a traversability/ownership failure)
-// returns this same sentinel with no accompanying log line — the caller,
-// substrateServePrivilegeDropChecker (substrate_serve.go), just logs this
-// generic error string at its one call site, the /bootstrap HTTP
-// precondition.
+// returns this same sentinel with no accompanying log line. Reached through
+// substrateServePrivilegeDropChecker (substrate_serve.go), which just
+// returns this error unchanged — it is handleBootstrap
+// (pkg/sciontool/substrate/server.go) that actually logs this generic
+// string, at its one call site, the /bootstrap HTTP precondition.
 var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not met: a required capability, the scion user, or SCION_HOST_UID/GID were not all available")
 
 // checkPrivilegeDropFeasible is substrate-serve's synchronous /bootstrap
@@ -99,7 +100,7 @@ var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not m
 //     went through that startup path, or a rootfs oddity fixupRootfsForScion
 //     doesn't yet cover). Traversability is computed from each directory's
 //     mode/uid/gid, never by actually attempting to switch to the scion
-//     user — see canSearchDir (substrate_serve.go).
+//     user — see canSearchDir (substrate_rootfs.go).
 //
 // This does not guarantee setupHostUser's usermod/sed realignment will
 // succeed (e.g. a corrupted /etc/passwd could still fail it) — that residual
