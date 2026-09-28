@@ -320,6 +320,19 @@ func (r *SubstrateRuntime) PerProfileInstances() bool { return true }
 
 var _ PerProfileInstancesRuntime = (*SubstrateRuntime)(nil)
 
+// SupportsAttach implements AttachCapableRuntime. Substrate has no
+// exec/attach/TTY primitive to dial in this phase: its broker-side PTY path
+// would only reject the stream after a caller's WebSocket upgrade already
+// succeeded, so callers report this up front instead of after the fact —
+// the broker's direct-connect and control-channel PTY handlers ask
+// HasAttachSupport on the live instance they already resolved
+// (pkg/runtimebroker), and the CLI reads the same answer secondhand from
+// the broker's own advertised metadata (cmd/attach.go's
+// attachSupportedByBroker), not from a compiled runtime-type table.
+func (r *SubstrateRuntime) SupportsAttach() bool { return false }
+
+var _ AttachCapableRuntime = (*SubstrateRuntime)(nil)
+
 // ExecUser returns "scion" — the tmux session runs under the scion user
 // after sciontool init sets up the environment, same as every other
 // runtime.
