@@ -68,7 +68,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	}
 
 	// Build profiles from settings, falling back to a default profile if none defined
-	profiles := buildStoreBrokerProfiles(settings, runtimeType)
+	profiles := buildStoreBrokerProfiles(settings, runtimeType, rt)
 
 	broker, err := s.GetRuntimeBroker(ctx, brokerID)
 	if err != nil && err != store.ErrNotFound {
@@ -123,7 +123,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			Capabilities: &store.BrokerCapabilities{
 				WebPTY:      false,
 				Sync:        true,
-				Attach:      true,
+				Attach:      runtime.HasAttachSupport(rt),
 				Reprovision: true,
 			},
 			Profiles: profiles,
@@ -162,7 +162,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		broker.Capabilities = &store.BrokerCapabilities{
 			WebPTY:      false,
 			Sync:        true,
-			Attach:      true,
+			Attach:      runtime.HasAttachSupport(rt),
 			Reprovision: true,
 		}
 		// Ensure deployment-type labels are set on re-registration
@@ -277,11 +277,26 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 // When the detected default runtime is not local-only (e.g. cloudrun, kubernetes),
 // profiles referencing local-only runtimes (docker, podman, container) are
 // filtered out because no local daemon is available in those environments.
-func buildStoreBrokerProfiles(settings *config.Settings, defaultRuntimeType string) []store.BrokerProfile {
+//
+// defaultRuntime is the live instance this process already constructed for
+// defaultRuntimeType — the embedded broker always has one, since it's about
+// to serve agents with it. A profile resolving to that same type gets its
+// real runtime.HasAttachSupport answer; any other profile gets nil
+// (unknown, read as supported), since this function never constructs a
+// runtime just to answer that field.
+func buildStoreBrokerProfiles(settings *config.Settings, defaultRuntimeType string, defaultRuntime runtime.Runtime) []store.BrokerProfile {
+	attachForType := func(rtType string) *bool {
+		if rtType != defaultRuntimeType || defaultRuntime == nil {
+			return nil
+		}
+		v := runtime.HasAttachSupport(defaultRuntime)
+		return &v
+	}
+
 	// If no settings or no profiles defined, return a default profile
 	if settings == nil || len(settings.Profiles) == 0 {
 		return []store.BrokerProfile{
-			{Name: "default", Type: defaultRuntimeType, Available: true},
+			{Name: "default", Type: defaultRuntimeType, Available: true, Attach: attachForType(defaultRuntimeType)},
 		}
 	}
 
@@ -312,12 +327,13 @@ func buildStoreBrokerProfiles(settings *config.Settings, defaultRuntimeType stri
 			Available: true,
 			Context:   context,
 			Namespace: namespace,
+			Attach:    attachForType(runtimeType),
 		})
 	}
 
 	if len(profiles) == 0 {
 		profiles = []store.BrokerProfile{
-			{Name: "default", Type: defaultRuntimeType, Available: true},
+			{Name: "default", Type: defaultRuntimeType, Available: true, Attach: attachForType(defaultRuntimeType)},
 		}
 	}
 
