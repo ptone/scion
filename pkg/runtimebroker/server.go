@@ -1217,7 +1217,7 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 
 	// Fall back to auxiliary runtimes (e.g. kubernetes when default is docker)
 	if len(agents) == 0 {
-		auxAgents, auxManager, auxErr := s.auxListAgentsSorted(ctx, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
+		auxAgents, auxManager, auxErr := s.auxListAgentsSorted(ctx, slug, false, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
 		if auxErr != nil {
 			return "", nil, auxErr
 		}
@@ -1238,7 +1238,7 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 		agents = agentsWithoutProjectLabel(agents)
 		matchManager = s.manager
 		if len(agents) == 0 {
-			auxAgents, auxManager, auxErr := s.auxListAgentsSorted(ctx, fallbackFilter, agentsWithoutProjectLabel)
+			auxAgents, auxManager, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
 			if auxErr != nil {
 				return "", nil, auxErr
 			}
@@ -1287,7 +1287,9 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 // misread as "not found" either. The fixed iteration order keeps the
 // outcome the same from one call to the next instead of depending on Go's
 // randomized map order.
-func (s *Server) auxListAgentsSorted(ctx context.Context, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, error) {
+//
+// slug and fallback are used only for the debug line logged on a match.
+func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback bool, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, error) {
 	s.auxiliaryRuntimesMu.RLock()
 	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
 	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
@@ -1308,7 +1310,11 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, filter map[string]stri
 			continue
 		}
 		if matched := filterAgents(auxAgents); len(matched) > 0 {
-			slog.Debug("Agent found via auxiliary runtime", "runtime", rtName)
+			msg := "Agent found via auxiliary runtime"
+			if fallback {
+				msg += " (fallback)"
+			}
+			slog.Debug(msg, "slug", slug, "runtime", rtName)
 			return matched, auxRuntimes[rtName].Manager, nil
 		}
 	}
