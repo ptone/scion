@@ -1,0 +1,228 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// newBrokerGetHub serves GET /api/v1/runtime-brokers/{brokerID} with the
+// given raw JSON body and status.
+func newBrokerGetHub(t *testing.T, brokerID string, status int, body string) *HubContext {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime-brokers/"+brokerID {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	return &HubContext{Client: client, Endpoint: srv.URL}
+}
+
+// TestAttachSupportedByBroker_Branches covers the attachSupportedByBroker
+// branches not covered elsewhere in this package. Every body is raw JSON
+// (the wire shape a real Hub returns), so the *bool decode is exercised
+// too.
+func TestAttachSupportedByBroker_Branches(t *testing.T) {
+	const id = "b1"
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		profile string
+		want    bool
+	}{
+		{
+			// A live broker instance always resolves its own default-type
+			// profile's Attach explicitly (pkg/runtimebroker's resolver), so
+			// the profile's own answer wins over the broker-wide fallback
+			// when both are present.
+			name:    "profile attach true wins over broker-wide false",
+			status:  http.StatusOK,
+			body:    `{"id":"b1","profiles":[{"name":"p","type":"docker","attach":true}],"capabilities":{"attach":false}}`,
+			profile: "p",
+			want:    true,
+		},
+		{
+			name:    "profile not in list falls back to broker-wide false",
+			status:  http.StatusOK,
+			body:    `{"id":"b1","profiles":[{"name":"other","type":"docker","attach":true}],"capabilities":{"attach":false}}`,
+			profile: "missing",
+			want:    false,
+		},
+		{
+			name:    "no profile falls back to broker-wide true",
+			status:  http.StatusOK,
+			body:    `{"id":"b1","capabilities":{"attach":true}}`,
+			profile: "",
+			want:    true,
+		},
+		{
+			name:    "no profile match and no capabilities defaults true",
+			status:  http.StatusOK,
+			body:    `{"id":"b1","profiles":[{"name":"other","type":"docker","attach":false}]}`,
+			profile: "missing",
+			want:    true,
+		},
+		{
+			// nil profile Attach means "this profile said nothing" and
+			// falls through to the broker-wide answer, which is final: an
+			// explicit broker-wide false is real information (e.g. the
+			// broker's registration producer had no live instance to ask
+			// for this specific profile, but its default runtime, reported
+			// via Capabilities.Attach, does not support attach), so it is
+			// not overridden back to "supported" just because this one
+			// profile had nothing to say for itself.
+			name:    "profile present with attach key absent falls through to broker-wide false",
+			status:  http.StatusOK,
+			body:    `{"id":"b1","profiles":[{"name":"p","type":"docker"}],"capabilities":{"attach":false}}`,
+			profile: "p",
+			want:    false,
+		},
+		{
+			name:    "hub error reading broker defaults true",
+			status:  http.StatusForbidden,
+			body:    `{"error":{"code":"forbidden","message":"no"}}`,
+			profile: "p",
+			want:    true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hubCtx := newBrokerGetHub(t, id, tc.status, tc.body)
+			got := attachSupportedByBroker(context.Background(), hubCtx, id, tc.profile)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestAttachViaHub_AgentProfileAttachFalse_ReturnsExplicitError pins the
+// end-to-end per-profile wiring: the agent record's AppliedConfig.Profile
+// (agentProfileName) must select the broker profile whose Attach=false,
+// even though the broker-wide capability says attach is supported.
+func TestAttachViaHub_AgentProfileAttachFalse_ReturnsExplicitError(t *testing.T) {
+	clearAppTokenSources(t)
+	const (
+		projectID = "proj-prof"
+		agentName = "prof-agent"
+		brokerID  = "broker-prof"
+	)
+	falseVal := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/projects/" + projectID + "/agents/" + agentName:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{
+				ID: "a1", Name: agentName, Phase: "running", Runtime: "optout",
+				RuntimeBrokerID: brokerID,
+				AppliedConfig:   &hubclient.AgentConfig{Profile: "optout-prof"},
+			})
+		case "/api/v1/runtime-brokers/" + brokerID:
+			_ = json.NewEncoder(w).Encode(hubclient.RuntimeBroker{
+				ID:           brokerID,
+				Profiles:     []hubclient.BrokerProfile{{Name: "optout-prof", Type: "optout", Attach: &falseVal}},
+				Capabilities: &hubclient.BrokerCapabilities{Attach: true},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	err = attachViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}, agentName)
+	require.Error(t, err)
+	assert.Equal(t, "attach is not supported for agents on the optout runtime", err.Error())
+}
+
+// TestAttachViaHub_StandaloneBrokerNilProfileAttach_BrokerWideFalse_Refuses
+// is the standalone-broker regression this round's C1 fix restores: a
+// remote broker registered via `scion broker register`
+// (buildBrokerProfiles, cmd/broker.go) has no live runtime instance to ask
+// at registration time, so every profile it reports carries Attach=nil —
+// proven here by actually calling buildBrokerProfiles, not by hand-building
+// a profile literal. Once that broker is running, its heartbeat reports the
+// real broker-wide Capabilities.Attach from its own default runtime
+// (HeartbeatService.buildHeartbeat). Before this round's fix,
+// attachSupportedByBroker returned true on the nil-Attach profile match
+// without ever consulting Capabilities.Attach, silently re-opening the
+// exact fail-open base c1cafb0b7's `agentRuntime == "substrate"` literal
+// used to close. The runtime name here is deliberately "substrate" (not a
+// generic stand-in) because this test is pinning that specific historical
+// regression, not just the general mechanism.
+func TestAttachViaHub_StandaloneBrokerNilProfileAttach_BrokerWideFalse_Refuses(t *testing.T) {
+	clearAppTokenSources(t)
+	const (
+		projectID = "proj-standalone"
+		agentName = "substrate-agent"
+		brokerID  = "standalone-broker"
+		profile   = "substrate"
+	)
+
+	settings := &config.Settings{
+		Profiles: map[string]config.ProfileConfig{
+			profile: {Runtime: "substrate"},
+		},
+	}
+	profiles := buildBrokerProfiles(settings)
+	require.Len(t, profiles, 1)
+	require.Nil(t, profiles[0].Attach, "a standalone broker's registration producer has no live instance to set this")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/projects/" + projectID + "/agents/" + agentName:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{
+				ID: "a1", Name: agentName, Phase: "running", Runtime: "substrate",
+				RuntimeBrokerID: brokerID,
+				AppliedConfig:   &hubclient.AgentConfig{Profile: profile},
+			})
+		case "/api/v1/runtime-brokers/" + brokerID:
+			_ = json.NewEncoder(w).Encode(hubclient.RuntimeBroker{
+				ID:       brokerID,
+				Profiles: profiles,
+				// What a real heartbeat reports once this broker is
+				// running with substrate as its default runtime (see
+				// HeartbeatService.buildHeartbeat).
+				Capabilities: &hubclient.BrokerCapabilities{Attach: false},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	err = attachViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}, agentName)
+	require.Error(t, err)
+	assert.Equal(t, "attach is not supported for agents on the substrate runtime", err.Error())
+}

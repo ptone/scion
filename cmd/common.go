@@ -1101,7 +1101,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 					if !attach {
 						return nil
 					}
-					if err := attachUnsupportedErr(agent.Runtime); err != nil {
+					if err := attachUnsupportedErr(pollCtx, hubCtx, agent.Runtime, agent.RuntimeBrokerID, agentProfileName(agent)); err != nil {
 						return err
 					}
 					// Fall through to attach logic below
@@ -1172,6 +1172,8 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	// Attach mode: wait for agent to be running, then attach via WebSocket
 	agentID := ""
 	agentRuntime := ""
+	agentBrokerID := ""
+	agentProfile := ""
 	if resp.Agent != nil {
 		agentID = resp.Agent.ID
 	}
@@ -1204,11 +1206,14 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 				if agent.ID != "" {
 					agentID = agent.ID
 				}
-				// agentRuntime always takes this fetch's value, even if empty:
-				// unlike agentID there is no better fallback to protect, and
-				// "" is itself a meaningful attach-is-supported value to
+				// agentRuntime, agentBrokerID and agentProfile always take
+				// this fetch's value, even if empty: unlike agentID there is
+				// no better fallback to protect, and "" is itself a
+				// meaningful attach-is-supported value to
 				// attachUnsupportedErr below.
 				agentRuntime = agent.Runtime
+				agentBrokerID = agent.RuntimeBrokerID
+				agentProfile = agentProfileName(agent)
 				goto ready
 			}
 			if agentPhase == string(state.PhaseError) || agentPhase == string(state.PhaseStopped) {
@@ -1222,7 +1227,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	}
 
 ready:
-	if err := attachUnsupportedErr(agentRuntime); err != nil {
+	if err := attachUnsupportedErr(pollCtx, hubCtx, agentRuntime, agentBrokerID, agentProfile); err != nil {
 		return err
 	}
 

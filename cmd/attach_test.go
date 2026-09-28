@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -71,13 +72,36 @@ func clearAppTokenSources(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 }
 
+// mockAttachBrokerID is the fixed runtime broker ID the mock Hub servers in
+// this file put on agent records, and the ID they serve a matching
+// GET /api/v1/runtime-brokers/{id} response under — exercising the CLI's
+// broker-metadata attach check (attachSupportedByBroker) the same way a real
+// Hub round-trip would, rather than a name-based shortcut.
+const mockAttachBrokerID = "test-broker-1"
+
+// mockAttachBroker returns a minimal hubclient.RuntimeBroker whose
+// broker-wide Capabilities.Attach reflects whether runtimeType supports
+// attach. These fixtures set no agent profile, so attachSupportedByBroker
+// falls back to this broker-wide value rather than a per-profile one. Only
+// "substrate" is unsupported today.
+func mockAttachBroker(runtimeType string) hubclient.RuntimeBroker {
+	return hubclient.RuntimeBroker{
+		ID: mockAttachBrokerID,
+		Capabilities: &hubclient.BrokerCapabilities{
+			Attach: runtimeType != "substrate",
+		},
+	}
+}
+
 // newAttachMockHubServer creates a mock Hub server that handles the agent GET
-// request needed by attachViaHub(). The agent is returned in the "running" phase
+// request needed by attachViaHub(), plus the runtime-broker GET that backs
+// its attach-capability check. The agent is returned in the "running" phase
 // with the given runtime string (use "" for a normal non-managed agent).
 func newAttachMockHubServer(t *testing.T, projectID, agentName, agentID, runtime string) *httptest.Server {
 	t.Helper()
 
 	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
+	brokerPath := "/api/v1/runtime-brokers/" + mockAttachBrokerID
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -86,18 +110,92 @@ func newAttachMockHubServer(t *testing.T, projectID, agentName, agentID, runtime
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			agent := hubclient.Agent{
-				ID:      agentID,
-				Name:    agentName,
-				Phase:   "running",
-				Runtime: runtime,
+				ID:              agentID,
+				Name:            agentName,
+				Phase:           "running",
+				Runtime:         runtime,
+				RuntimeBrokerID: mockAttachBrokerID,
 			}
 			_ = json.NewEncoder(w).Encode(agent)
+		case r.Method == http.MethodGet && r.URL.Path == brokerPath:
+			_ = json.NewEncoder(w).Encode(mockAttachBroker(runtime))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// TestAttachSupportedByBroker_ProfileAttachFalse_ReturnsFalse verifies that
+// attachSupportedByBroker honors a named profile's own Attach=false, even
+// though the broker-wide Capabilities.Attach on this fixture is true — a
+// false result here can only come from the profile-level match, not the
+// broker-wide fallback.
+func TestAttachSupportedByBroker_ProfileAttachFalse_ReturnsFalse(t *testing.T) {
+	falseVal := false
+	const brokerID = "broker-profile-false"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime-brokers/"+brokerID {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(hubclient.RuntimeBroker{
+			ID: brokerID,
+			Profiles: []hubclient.BrokerProfile{
+				{Name: "substrate-prof", Type: "substrate", Attach: &falseVal},
+			},
+			Capabilities: &hubclient.BrokerCapabilities{Attach: true},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
+
+	if attachSupportedByBroker(context.Background(), hubCtx, brokerID, "substrate-prof") {
+		t.Error("attachSupportedByBroker = true, want false for a profile with Attach=false")
+	}
+}
+
+// TestAttachSupportedByBroker_ProfileFieldAbsent_ReturnsTrue verifies the
+// missing-field-⇒-supported default at the profile level: a profile entry
+// present in the broker's list, but whose JSON carries no "attach" key at
+// all (an older broker's exact wire shape), is treated as supported. The
+// response body here is raw JSON rather than a hubclient.BrokerProfile{}
+// literal, so this proves the *bool json:"attach,omitempty" decode itself
+// leaves Attach nil, not just that a Go zero value happens to be nil.
+func TestAttachSupportedByBroker_ProfileFieldAbsent_ReturnsTrue(t *testing.T) {
+	const brokerID = "broker-profile-absent"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime-brokers/"+brokerID {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":%q,"profiles":[{"name":"old-prof","type":"docker","available":true}]}`, brokerID)
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
+
+	if !attachSupportedByBroker(context.Background(), hubCtx, brokerID, "old-prof") {
+		t.Error(`attachSupportedByBroker = false, want true for a profile whose JSON omits "attach" entirely`)
+	}
+}
+
+// TestAttachSupportedByBroker_NoBrokerID_ReturnsTrueWithoutCallingHub proves
+// the missing-broker-ID default fires without making any Hub call:
+// hubCtx.Client is nil here, so calling it would panic.
+func TestAttachSupportedByBroker_NoBrokerID_ReturnsTrueWithoutCallingHub(t *testing.T) {
+	hubCtx := &HubContext{Client: nil}
+	if !attachSupportedByBroker(context.Background(), hubCtx, "", "any-profile") {
+		t.Error("attachSupportedByBroker = false, want true when runtimeBrokerID is empty")
+	}
 }
 
 // TestResolveAttachTransport_PlainMode verifies that resolveAttachTransport returns
@@ -239,6 +337,7 @@ func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID, age
 	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
 	agentsPath := "/api/v1/projects/" + projectID + "/agents"
 	projectGetPath := "/api/v1/projects/" + projectID
+	brokerPath := "/api/v1/runtime-brokers/" + mockAttachBrokerID
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -250,13 +349,17 @@ func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID, age
 			// Git-remote display: return a project with no GitRemote to suppress output.
 			_ = json.NewEncoder(w).Encode(hubclient.Project{ID: projectID, Name: "test"})
 
+		case r.Method == http.MethodGet && r.URL.Path == brokerPath:
+			_ = json.NewEncoder(w).Encode(mockAttachBroker(agentRuntime))
+
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			// Suspend check (pre-create) and polling (post-create): return running.
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{
-				ID:      agentID,
-				Name:    agentName,
-				Phase:   "running",
-				Runtime: agentRuntime,
+				ID:              agentID,
+				Name:            agentName,
+				Phase:           "running",
+				Runtime:         agentRuntime,
+				RuntimeBrokerID: mockAttachBrokerID,
 			})
 
 		case r.Method == http.MethodPost && r.URL.Path == agentsPath:
@@ -395,7 +498,7 @@ func TestStartAgentViaHub_Site2_SubstrateAgent_ReturnsExplicitError(t *testing.T
 	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
 
 	require.Error(t, err)
-	const wantMsg = "attach is not supported for agents on the substrate runtime in this phase"
+	const wantMsg = "attach is not supported for agents on the substrate runtime"
 	assert.Equal(t, wantMsg, err.Error(), "substrate start -a must fail with the fixed message, got: %v", err)
 }
 
@@ -444,6 +547,7 @@ func TestStartAgentViaHub_Site1_SubstrateAgent_ReturnsExplicitError(t *testing.T
 	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
 	agentsPath := "/api/v1/projects/" + projectID + "/agents"
 	projectGetPath := "/api/v1/projects/" + projectID
+	brokerPath := "/api/v1/runtime-brokers/" + mockAttachBrokerID
 	// startAgentViaHub finalizes against resp.Agent.Slug, falling back to
 	// agentName when Slug is unset — the mock Create response below leaves
 	// Slug unset, so the finalize call lands on agentName.
@@ -472,15 +576,19 @@ func TestStartAgentViaHub_Site1_SubstrateAgent_ReturnsExplicitError(t *testing.T
 		case r.Method == http.MethodPost && r.URL.Path == finalizePath:
 			_ = json.NewEncoder(w).Encode(hubclient.SyncToFinalizeResponse{Applied: true, FilesApplied: 1})
 
+		case r.Method == http.MethodGet && r.URL.Path == brokerPath:
+			_ = json.NewEncoder(w).Encode(mockAttachBroker("substrate"))
+
 		case r.Method == http.MethodGet && r.URL.Path == agentPath:
 			// Suspend check (pre-create) and post-finalize polling both hit
 			// this path; report running with a substrate runtime so the
 			// polling loop's running-phase branch is exercised.
 			_ = json.NewEncoder(w).Encode(hubclient.Agent{
-				ID:      agentID,
-				Name:    agentName,
-				Phase:   "running",
-				Runtime: "substrate",
+				ID:              agentID,
+				Name:            agentName,
+				Phase:           "running",
+				Runtime:         "substrate",
+				RuntimeBrokerID: mockAttachBrokerID,
 			})
 
 		default:
@@ -502,7 +610,7 @@ func TestStartAgentViaHub_Site1_SubstrateAgent_ReturnsExplicitError(t *testing.T
 	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
 
 	require.Error(t, err)
-	const wantMsg = "attach is not supported for agents on the substrate runtime in this phase"
+	const wantMsg = "attach is not supported for agents on the substrate runtime"
 	assert.Equal(t, wantMsg, err.Error(), "substrate start -a via the workspace-upload path must fail with the fixed message, got: %v", err)
 }
 
@@ -533,7 +641,7 @@ func TestAttachViaHub_SubstrateAgent_ReturnsExplicitError(t *testing.T) {
 	err = attachViaHub(hubCtx, agentName)
 
 	require.Error(t, err)
-	const wantMsg = "attach is not supported for agents on the substrate runtime in this phase"
+	const wantMsg = "attach is not supported for agents on the substrate runtime"
 	assert.Equal(t, wantMsg, err.Error(), "substrate attach must fail with the fixed message, got: %v", err)
 
 	// No infra-specific details (namespaces, atespaces, actor names, node/pod
