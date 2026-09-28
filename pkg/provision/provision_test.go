@@ -622,7 +622,7 @@ func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 	require.DirExists(t, wtA)
 
 	// Verify sharers=[A].
-	sharers, wtPath, err := ListSharers(hostPath, "shared-branch")
+	sharers, wtPath, err := ListSharers(hostPath, "", "shared-branch")
 	require.NoError(t, err)
 	assert.Equal(t, wtA, wtPath)
 	assert.Equal(t, []string{"agent-a"}, sharers)
@@ -645,7 +645,7 @@ func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "JOIN should NOT create a second worktree at %s", wtB)
 
 	// Verify sharers=[A,B] and B's registered path == A's path.
-	sharers, wtPath, err = ListSharers(hostPath, "shared-branch")
+	sharers, wtPath, err = ListSharers(hostPath, "", "shared-branch")
 	require.NoError(t, err)
 	assert.Equal(t, wtA, wtPath, "B's resolved worktree path should equal A's")
 	assert.Len(t, sharers, 2)
@@ -691,14 +691,16 @@ func TestProvision_WorktreePerAgent_OutOfTreeMarker_CreatesFreshWorktree(t *test
 	// worktree, pointing WorktreePath at a host directory outside the base
 	// worktree tree.
 	outside := t.TempDir()
-	require.NoError(t, RegisterSharer(hostPath, branch, outside, "agent-c"))
+	require.NoError(t, RegisterSharer(hostPath, "", branch, outside, "agent-c"))
 
-	// Sanity: the marker with an out-of-tree path is unreadable through the
-	// registry API — the whole marker (including its sharer entry) is discarded.
-	sharers, wtPath, err := ListSharers(hostPath, branch)
+	// Sanity: the out-of-tree path is never surfaced through the registry
+	// API, but the sharer refcount is preserved (degrade, not discard — see
+	// pkg/provision/sharers.go's readMarker; discarding it was a real
+	// data-loss regression for the ProvisionAgent layout).
+	sharers, wtPath, err := ListSharers(hostPath, "", branch)
 	require.NoError(t, err)
 	assert.Empty(t, wtPath, "marker with an out-of-tree worktreePath must not surface it")
-	assert.Empty(t, sharers, "marker with an out-of-tree worktreePath must be discarded wholesale, not just its path")
+	assert.Equal(t, []string{"agent-c"}, sharers, "the sharer refcount must survive an out-of-tree worktreePath")
 
 	// The second (joining) agent provisions on the same branch. It must NOT be
 	// redirected to the out-of-tree external directory; it must get a fresh
@@ -717,7 +719,7 @@ func TestProvision_WorktreePerAgent_OutOfTreeMarker_CreatesFreshWorktree(t *test
 	wtB := WorktreePath(hostPath, "agent-b")
 	require.DirExists(t, wtB, "provisioning must create a fresh in-tree worktree when the marker's path is out-of-tree")
 
-	_, wtPath, err = ListSharers(hostPath, branch)
+	_, wtPath, err = ListSharers(hostPath, "", branch)
 	require.NoError(t, err)
 	assert.Equal(t, wtB, wtPath, "registry must record the fresh in-tree worktree, not the out-of-tree path")
 	assert.NotEqual(t, outside, wtPath)
@@ -760,13 +762,13 @@ func TestProvision_WorktreePerAgent_RegistryDecoy_CreatesFreshWorktree(t *testin
 	decoy := WorktreePath(hostPath, "decoy")
 	require.NoError(t, os.MkdirAll(decoy, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(decoy, "README.md"), []byte("not a worktree"), 0o644))
-	require.NoError(t, RegisterSharer(hostPath, branch, decoy, "agent-c"))
+	require.NoError(t, RegisterSharer(hostPath, "", branch, decoy, "agent-c"))
 
 	// Sanity: the decoy passes the Phase 1 lexical read boundary (it IS
 	// in-tree), so it is visible via ListSharers — the point of this test is
 	// that ensureWorktree's full relationship check catches what the lexical
 	// check alone does not.
-	_, wtPath, err := ListSharers(hostPath, branch)
+	_, wtPath, err := ListSharers(hostPath, "", branch)
 	require.NoError(t, err)
 	require.Equal(t, decoy, wtPath, "setup: decoy should pass the lexical read boundary")
 
@@ -786,7 +788,7 @@ func TestProvision_WorktreePerAgent_RegistryDecoy_CreatesFreshWorktree(t *testin
 	wtB := WorktreePath(hostPath, "agent-b")
 	require.FileExists(t, filepath.Join(wtB, ".git"), "provisioning must create a fresh, genuine worktree when the registry points at a decoy")
 
-	_, wtPath, err = ListSharers(hostPath, branch)
+	_, wtPath, err = ListSharers(hostPath, "", branch)
 	require.NoError(t, err)
 	assert.Equal(t, wtB, wtPath, "registry must record the fresh genuine worktree, not the decoy")
 }
@@ -826,9 +828,9 @@ func TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath(t *tes
 	// Clear the registry so ensureWorktree's JOIN check falls through to the
 	// git-worktree-list discovery path (findWorktreeForBranch) rather than
 	// short-circuiting on the marker.
-	_, _, err = UnregisterSharer(hostPath, branch, "agent-a")
+	_, _, err = UnregisterSharer(hostPath, "", branch, "agent-a")
 	require.NoError(t, err)
-	sharers, _, err := ListSharers(hostPath, branch)
+	sharers, _, err := ListSharers(hostPath, "", branch)
 	require.NoError(t, err)
 	require.Empty(t, sharers, "setup: registry must be empty so JOIN falls through to git discovery")
 
@@ -873,7 +875,7 @@ func TestProvision_WorktreePerAgent_FakeBackLink_RejectsGitDiscoveredPath(t *tes
 	require.Len(t, entries, 1, "external dir must contain only its original unrelated .git file")
 	assert.Equal(t, ".git", entries[0].Name())
 
-	_, wtPath, err := ListSharers(hostPath, branch)
+	_, wtPath, err := ListSharers(hostPath, "", branch)
 	require.NoError(t, err)
 	assert.NotEqual(t, external, wtPath, "registry must never record the git-discovered external path")
 }
@@ -918,12 +920,12 @@ func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
 	assert.NotEqual(t, wtA, wtB)
 
 	// Each is sole sharer of its own branch.
-	sharersA, pathA, err := ListSharers(hostPath, "agent-alpha")
+	sharersA, pathA, err := ListSharers(hostPath, "", "agent-alpha")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"agent-a"}, sharersA)
 	assert.Equal(t, wtA, pathA)
 
-	sharersB, pathB, err := ListSharers(hostPath, "agent-beta")
+	sharersB, pathB, err := ListSharers(hostPath, "", "agent-beta")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"agent-b"}, sharersB)
 	assert.Equal(t, wtB, pathB)
@@ -962,7 +964,7 @@ func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T
 	require.NoError(t, err)
 
 	// Should still have exactly one sharer.
-	sharers, _, err := ListSharers(hostPath, "idem-branch")
+	sharers, _, err := ListSharers(hostPath, "", "idem-branch")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"agent-a"}, sharers)
 }

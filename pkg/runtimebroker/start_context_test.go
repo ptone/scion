@@ -1638,7 +1638,7 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 	}
 
 	// Both agents registered as sharers.
-	sharers, wtPath, err := provision.ListSharers(base, "agent-a")
+	sharers, wtPath, err := provision.ListSharers(base, "", "agent-a")
 	if err != nil {
 		t.Fatalf("ListSharers: %v", err)
 	}
@@ -1655,6 +1655,45 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 	}
 	if _, err := os.Stat(agentAWt); err != nil {
 		t.Errorf("agent-a worktree was destroyed: %v", err)
+	}
+}
+
+// TestResolveActualWorkspace_RejectsPathFailingRelationshipValidation covers
+// acceptance criterion 2 (hub read path): resolveActualWorkspace — the
+// helper tryProvisionWorktree calls to pick the mounted workspace after
+// ProvisionShared has already run — must not take the registry's recorded
+// path at face value. A registered path that is lexically in-tree-shaped
+// (passes the Phase 1 read boundary) but is not a genuine worktree (an
+// in-tree decoy directory, no real git admin metadata) must be rejected by
+// the full relationship check, falling back to the agent's own freshly-
+// provisioned path instead.
+func TestResolveActualWorkspace_RejectsPathFailingRelationshipValidation(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	branch := "shared-branch"
+
+	// Register a decoy directly: lexically in-tree (base/worktrees/decoy,
+	// passing the Phase 1 read-boundary shape check) but backed by nothing —
+	// no real git worktree was ever created there. A brand-new branch with no
+	// prior registration is used so RegisterSharer's write-side immutability
+	// (see its doc comment) doesn't apply here; that protection is exercised
+	// elsewhere (pkg/provision's registry tests) and isn't what this test is about.
+	decoy := provision.WorktreePath(base, "decoy")
+	if err := provision.RegisterSharer(base, "", branch, decoy, "agent-c"); err != nil {
+		t.Fatalf("RegisterSharer: %v", err)
+	}
+
+	fallback := provision.WorktreePath(base, "agent-x")
+	got := resolveActualWorkspace(base, branch, fallback, "agent-x")
+	if got != fallback {
+		t.Errorf("resolveActualWorkspace = %q, want fallback %q (decoy must be rejected)", got, fallback)
+	}
+	if got == decoy {
+		t.Error("resolveActualWorkspace must never return the unvalidated decoy path")
 	}
 }
 
