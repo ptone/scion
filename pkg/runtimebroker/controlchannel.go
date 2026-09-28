@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel"
@@ -95,6 +96,13 @@ type AgentLookupResult struct {
 	RuntimeName string // Runtime that owns the agent (e.g., "docker", "kubernetes")
 	ExecUser    string // Container user for exec/attach (e.g., "scion" or "root" for rootless Podman)
 	Namespace   string // Kubernetes namespace (empty for non-k8s runtimes)
+
+	// Runtime is the live instance that actually produced this match — the
+	// default runtime, or the matched auxiliary runtime — so a caller can
+	// ask it capability questions (e.g. scionrt.HasAttachSupport) instead of
+	// branching on RuntimeName's type-name string. Set on every match path
+	// in Server.LookupAgent.
+	Runtime scionrt.Runtime
 
 	// K8sConfig and K8sClientset are set for kubernetes agents so that
 	// PTY handlers can use the Go client (remotecommand) instead of
@@ -854,6 +862,20 @@ func (c *ControlChannelClient) handlePTYStream(handler *StreamHandler, cols, row
 	runtimeCmd := result.RuntimeName
 	if runtimeCmd == "" {
 		runtimeCmd = c.agentLookup.RuntimeCommand()
+	}
+
+	// Reject before starting the tmux exec when the matched runtime has no
+	// exec/attach/TTY primitive at all (scionrt.HasAttachSupport, asked of
+	// the live instance the lookup above actually matched) — the same
+	// pre-upgrade rejection handleAgentAttach applies to the direct-connect
+	// path, applied here before the control-channel stream does any
+	// runtime-specific work. Without this, an opted-out runtime only fails
+	// once StreamPTYHandler.Run() actually tries to start it, at a point
+	// where the Hub has already told its own client the stream is open.
+	if !scionrt.HasAttachSupport(result.Runtime) {
+		c.log.Info("PTY stream: runtime does not support attach", "slug", handler.slug, "runtime", runtimeCmd)
+		_ = c.CloseStream(handler.streamID, wsprotocol.CloseReasonSessionNotReady, wsprotocol.ClosePTYUpstreamUnavailable)
+		return
 	}
 
 	// Start the actual PTY session. handlePTYStreamWithAgent classifies why

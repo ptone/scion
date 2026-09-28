@@ -76,6 +76,15 @@ const (
 	// this code is the client-visible signal that the feature, not the
 	// request, is the reason.
 	ErrCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
+
+	// ErrCodeRuntimeAttachUnsupported marks an attach request rejected
+	// before the WebSocket upgrade because the target runtime declines
+	// interactive attach outright (pkg/runtime.AttachCapableRuntime,
+	// pkg/runtime/capabilities.go), rather than one that failed. Rejecting
+	// here — instead of upgrading and only failing once the runtime's own
+	// PTY dial rejects the stream — gives the caller a clean, pre-upgrade
+	// error instead of an abnormal WebSocket close.
+	ErrCodeRuntimeAttachUnsupported = "runtime_attach_unsupported"
 )
 
 // writeError writes a JSON error response.
@@ -154,6 +163,15 @@ func AgentIdentityUnknown(w http.ResponseWriter, message string) {
 // meant to carry.
 func RuntimeLogsUnsupported(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeLogsUnsupported, message, nil)
+}
+
+// RuntimeAttachUnsupported writes a 501 Not Implemented response with the
+// stable ErrCodeRuntimeAttachUnsupported code for a runtime that declines
+// interactive attach at all (pkg/runtime.AttachCapableRuntime). message must
+// not name any runtime-specific scope, worker, pod, namespace, actor or
+// agent, mirroring RuntimeLogsUnsupported.
+func RuntimeAttachUnsupported(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeAttachUnsupported, message, nil)
 }
 
 // InternalError writes a 500 Internal Server Error response.

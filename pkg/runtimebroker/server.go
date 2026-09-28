@@ -1443,10 +1443,23 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		execUser = s.runtime.ExecUser()
 	}
 
+	// resolvedRuntime is the live instance that actually produced this
+	// match: matchedRuntime is set on every auxiliary-runtime match path
+	// above (including the no-project-label fallback stage), and stays nil
+	// only when the match came from the default manager, in which case it's
+	// s.runtime. Callers use this to ask capability questions (e.g.
+	// scionrt.HasAttachSupport) about the runtime that actually owns the
+	// agent, not assume it is the broker's default.
+	resolvedRuntime := matchedRuntime
+	if resolvedRuntime == nil {
+		resolvedRuntime = s.runtime
+	}
+
 	result := &AgentLookupResult{
 		ContainerID: containerID,
 		RuntimeName: runtimeName,
 		ExecUser:    execUser,
+		Runtime:     resolvedRuntime,
 	}
 
 	// Include K8s metadata if available
@@ -1457,10 +1470,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// For kubernetes agents, include the Go K8s client for direct API access
 	// (avoids needing kubectl in PATH and reuses the broker's auth)
 	if runtimeName == "kubernetes" || runtimeName == "k8s" {
-		if matchedRuntime == nil {
-			matchedRuntime = s.runtime
-		}
-		if k8sRT, ok := matchedRuntime.(*scionrt.KubernetesRuntime); ok && k8sRT.Client != nil {
+		if k8sRT, ok := resolvedRuntime.(*scionrt.KubernetesRuntime); ok && k8sRT.Client != nil {
 			result.K8sConfig = k8sRT.Client.Config
 			result.K8sClientset = k8sRT.Client.Clientset
 		}

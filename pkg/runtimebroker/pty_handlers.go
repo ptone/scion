@@ -623,6 +623,17 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 
 	containerID := result.ContainerID
 
+	// Reject before the WebSocket upgrade when the resolved runtime doesn't
+	// support interactive attach at all (runtime.HasAttachSupport, asked of
+	// the live instance LookupAgent actually matched) — otherwise the
+	// caller only learns this after the upgrade, from an abnormal close
+	// instead of a clean HTTP error.
+	if !runtime.HasAttachSupport(result.Runtime) {
+		slog.Info("PTY attach: runtime does not support attach", "agent_id", agentID, "runtime", result.RuntimeName)
+		RuntimeAttachUnsupported(w, "attach is not supported for agents on this runtime")
+		return
+	}
+
 	// Upgrade to WebSocket
 	conn, err := ptyUpgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -776,7 +787,6 @@ func (s *LocalPTYSession) Run() error {
 
 	isK8s := (s.runtimeCmd == "kubernetes" || s.runtimeCmd == "k8s") && s.k8sConfig != nil && s.k8sClientset != nil
 	isCloudRunSandbox := s.runtimeCmd == "cloudrun-sandbox"
-	isSubstrate := s.runtimeCmd == "substrate"
 
 	if isCloudRunSandbox {
 		if err := s.startCloudRunSandboxExec(); err != nil {
@@ -791,12 +801,13 @@ func (s *LocalPTYSession) Run() error {
 		// Fall through to the same read/write/resize loop as Docker.
 	} else if isK8s {
 		return s.runK8sExec()
-	} else if isSubstrate {
-		// Substrate has no exec/attach/TTY primitive in Phase 1 (substrate-runtime.md
-		// §4); return a clean error instead of falling
-		// through to docker exec, which would fail confusingly.
-		return fmt.Errorf("attach not yet supported on substrate")
 	} else {
+		// A runtime with no exec/attach/TTY primitive at all is rejected
+		// before this point, in handleAgentAttach — the only caller that
+		// constructs a LocalPTYSession — via runtime.HasAttachSupport on the
+		// live instance LookupAgent matched. Every session reaching here has
+		// already cleared that gate.
+		//
 		// Activate set-titles for existing sessions that predate the template change.
 		// Best-effort — failure doesn't block attach.
 		if isDockerCompatibleRuntime(s.runtimeCmd) {
@@ -1327,7 +1338,6 @@ func (h *StreamPTYHandler) Run() error {
 	}
 	isK8s := (runtimeCmd == "kubernetes" || runtimeCmd == "k8s") && h.k8sConfig != nil && h.k8sClientset != nil
 	isCloudRunSandbox := runtimeCmd == "cloudrun-sandbox"
-	isSubstrate := runtimeCmd == "substrate"
 
 	if isCloudRunSandbox {
 		if err := h.startCloudRunSandboxExec(); err != nil {
@@ -1341,12 +1351,14 @@ func (h *StreamPTYHandler) Run() error {
 		// Fall through to the same read/write/resize loop as Docker.
 	} else if isK8s {
 		return h.runK8sExec()
-	} else if isSubstrate {
-		// Substrate has no exec/attach/TTY primitive in Phase 1 (substrate-runtime.md
-		// §4); return a clean error instead of falling
-		// through to docker exec, which would fail confusingly.
-		return fmt.Errorf("attach not yet supported on substrate")
 	} else {
+		// A runtime with no exec/attach/TTY primitive at all is rejected
+		// before this point, in handlePTYStream (controlchannel.go) — the
+		// only path that constructs a StreamPTYHandler — via
+		// runtime.HasAttachSupport on the live instance LookupAgent
+		// matched. Every stream reaching here has already cleared that
+		// gate.
+		//
 		// Activate set-titles for existing sessions that predate the template change.
 		// Best-effort — failure doesn't block attach.
 		if isDockerCompatibleRuntime(runtimeCmd) {
