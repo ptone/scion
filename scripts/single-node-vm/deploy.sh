@@ -1538,8 +1538,9 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 # --- Download and install scion binary ---
 # The release also publishes a SHA256SUMS checksums file (see
 # .github/workflows/build-release.yml). Download it alongside the binary and
-# verify with sha256sum -c before extracting. Fails closed on a missing
-# tarball, a missing checksums file, or a missing/mismatched entry, unless
+# verify with sha256sum -c before extracting. A missing tarball or a hash
+# mismatch always aborts, with no override. A missing checksums file or a
+# missing entry for this asset also aborts by default, unless
 # ALLOW_UNVERIFIED_RELEASE=true (set and warned about by the Phase 1
 # preflight) explicitly opts out for a release published before checksums
 # existed. The match is anchored and the archive name's dots are escaped so

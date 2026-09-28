@@ -186,13 +186,16 @@ func TestDeriveChecksumsURL(t *testing.T) {
 }
 
 // TestBinaryUpdateExecutor_ChecksumVerificationWiring confirms Run() itself
-// calls into checksum verification (not just verifyTarballChecksum in
-// isolation) and fails closed before extraction when it fails. It supplies
-// target_version, download_url, and checksums_url directly so Run() skips
-// CheckForReleaseUpdates entirely (which hits the real, hardcoded GitHub
-// API and can't be pointed at a test server) -- see resolveReleaseAssets'
-// own doc comment. Every case here fails at or before the checksum step,
-// so none of them reach the sudo-based install Run() would attempt next,
+// calls into checksum verification (not just fetchExpectedChecksum /
+// verifyFileChecksum in isolation) and fails closed before extraction when
+// it fails. It supplies target_version, download_url, and checksums_url
+// directly so Run() skips CheckForReleaseUpdates entirely (which hits the
+// real, hardcoded GitHub API and can't be pointed at a test server) --
+// see resolveReleaseAssets' own doc comment. Every case here either fails
+// at or before the checksum step, or (the "derives it from download_url"
+// case) passes the checksum step and then fails at extraction, because
+// its fixture is a plain string, not a real gzip tarball. Either way,
+// none of them reach the sudo-based install Run() would attempt next,
 // which this test environment cannot support (see TestRestoreBackup).
 func TestBinaryUpdateExecutor_ChecksumVerificationWiring(t *testing.T) {
 	tarballContent := []byte("fake scion release tarball bytes")
@@ -306,16 +309,20 @@ func TestBinaryUpdateExecutor_ChecksumVerificationWiring(t *testing.T) {
 		}
 		err := executor.Run(context.Background(), &logBuf, params)
 		// This case has a *matching* checksum, so it proceeds past
-		// verification into extraction and then the sudo install step,
-		// which fails in this test environment (no root) -- see
-		// TestRestoreBackup's own note about that. The point of this case
-		// is that it gets that far at all, proving the derived
-		// checksums_url found and matched the real entry.
+		// verification into extraction, which then fails because
+		// tarballContent (above) is a plain string, not a real gzip
+		// tarball -- not because of anything environment-dependent like a
+		// missing sudo. Reaching extraction at all is exactly the point:
+		// it proves the derived checksums_url was fetched and matched the
+		// real entry.
 		if err == nil {
-			t.Fatal("expected an error from the later sudo install step in this test environment, got nil")
+			t.Fatal("expected an error from the later extraction step, got nil")
 		}
 		if strings.Contains(err.Error(), "checksum verification failed") {
 			t.Errorf("checksum verification should have succeeded with a derived, matching checksums_url, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "extraction failed") {
+			t.Errorf("expected the error to come from extraction (proving verification passed), got: %v", err)
 		}
 		if !strings.Contains(logBuf.String(), "Checksum verified") {
 			t.Errorf("expected log output to show the derived checksums_url was verified, got: %q", logBuf.String())
