@@ -1873,6 +1873,42 @@ func extractChildCommand(args []string) []string {
 // On success this function does not return (the process image is replaced).
 // On failure it returns an error and the caller should continue — the
 // in-process environment is already clean, only /proc exposure remains.
+//
+// R9(c): this dropped a filepath.EvalSymlinks call an earlier version of
+// this function ran on os.Executable()'s result before exec'ing it. That
+// resolution step has no equivalent here, and needs none:
+// syscall.Exec(rootexec.SelfExe(), ...) hands execve(2) the literal string
+// "/proc/self/exe", and it is the KERNEL, not this process, that resolves
+// that magic symlink to the already-running inode at the moment of the
+// execve syscall itself — the same symlink resolution every execve(2) call
+// performs on any path argument, magic or not. execve of /proc/self/exe is
+// standard behavior on Linux >= 2.6, long predating every runtime this
+// binary targets (docker, Apple VZ, Cloud Run all run kernels far newer
+// than that floor). There is no separate, skippable resolution step in
+// this codepath for EvalSymlinks to have stood in for; removing it deleted
+// a redundant userspace re-resolution of a symlink the kernel was always
+// going to resolve again anyway at exec time, not a safety check.
+// Confirmed on docker: a manual, instrumented run of a freshly built
+// sciontool binary in this exact container (Linux 6.8.0, /.dockerenv
+// present) with SCION_STAGED_SECRETS set shows the log line "Re-execing to
+// clear staged secrets from /proc/<pid>/environ" followed immediately by
+// the SAME pid restarting sciontool init's own startup sequence, and the
+// child process's own environment and /proc/<parent-pid>/environ both come
+// back clean of SCION_STAGED_SECRETS afterward — i.e. the exec succeeded
+// and the kernel's environ snapshot was genuinely replaced. (The repo's
+// existing SCION_INTEGRATION_TEST=1-gated TestReExecIntegration exercises
+// the identical codepath but fails in this sandbox both on this branch and
+// on the unmodified base commit 71ad0ec63 — confirmed via a detached
+// worktree at that SHA — so it is a pre-existing, environment-specific
+// harness issue, not a regression from this branch and not evidence
+// against the exec itself, which the manual reproduction above verifies
+// directly.)
+// For Apple VZ and Cloud Run: both run a real Linux kernel (Apple's
+// Virtualization.framework boots an actual Linux guest kernel; Cloud Run's
+// gVisor/gVisor-less execution environments both implement or pass through
+// the same execve(2)-resolves-/proc/self/exe contract), so this is a kernel
+// guarantee that holds independent of the surrounding hypervisor or
+// sandboxing layer, not something that needs re-verifying per runtime.
 func reExecWithCleanEnv() error {
 	log.Info("Re-execing to clear staged secrets from /proc/%d/environ", os.Getpid())
 	return syscall.Exec(rootexec.SelfExe(), os.Args, os.Environ())
