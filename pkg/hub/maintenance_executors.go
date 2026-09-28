@@ -1457,10 +1457,9 @@ func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params
 	// large) release tarball below: this update check runs on a recurring
 	// schedule, and a release with no checksums asset, or no entry for
 	// this asset, should fail immediately rather than after a full
-	// download every cycle (ptone/scion#2106 round-2 review finding 1).
-	// Fails closed the same way the combined check used to — see
-	// fetchExpectedChecksum's doc comment for what's fatal and why there
-	// is no override here.
+	// download every cycle. Fails closed the same way the combined check
+	// used to — see fetchExpectedChecksum's doc comment for what's fatal
+	// and why there is no override here.
 
 	_, _ = fmt.Fprintf(logger, "\n==> Fetching expected checksum...\n")
 

@@ -813,11 +813,13 @@ echo "  Authenticated as: ${ACCOUNT}"
 # already exist. ALLOW_UNVERIFIED_RELEASE=true is an explicit, loud opt-out
 # for exactly that transition period; there is no silent fallback.
 RELEASE_URL="https://github.com/GoogleCloudPlatform/scion/releases/download/${VERSION}"
-# Normalize to exactly "true" or "false": this value is interpolated
-# unquoted into the Phase 3 --command strings below (an operator-controlled
-# env var, not a privilege boundary, but VERSION gets the same strict
+# Normalize to exactly "true" or "false": this value is interpolated into
+# single-quoted tests in the Phase 3 --command strings below (e.g.
+# [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]), so a value containing a
+# single quote would alter the remote command text. Operator-controlled
+# either way, not a privilege boundary, but VERSION gets the same strict
 # treatment a few lines up for the same reason -- keep the remote command
-# text predictable regardless of what the caller's environment set).
+# text predictable regardless of what the caller's environment set.
 if [[ "${ALLOW_UNVERIFIED_RELEASE:-false}" == "true" ]]; then
   ALLOW_UNVERIFIED_RELEASE=true
 else

@@ -33,8 +33,8 @@ import (
 // extracting it, the same way scripts/single-node-vm/deploy.sh does for
 // its own install path. Verification is split into two steps so Run() can
 // fetch the expected checksum *before* downloading the (potentially
-// large) tarball (round-2 review finding 1): fetchExpectedChecksum (its
-// checksumsURL parameter is a plain URL, unlike resolveReleaseAssets'
+// large) tarball: fetchExpectedChecksum (its checksumsURL parameter is a
+// plain URL, unlike resolveReleaseAssets'
 // hardcoded api.github.com endpoint, so it's fully exercisable against a
 // local httptest server) and verifyFileChecksum. These tests cover both
 // directly, deriveChecksumsURL, and then confirm the wiring — including
@@ -203,9 +203,8 @@ func TestBinaryUpdateExecutor_ChecksumVerificationWiring(t *testing.T) {
 
 	// tarballHits, when non-nil, counts requests to the asset endpoint —
 	// used to prove Run() fetches SHA256SUMS *before* downloading the
-	// tarball (round-2 review finding 1: an unattended, recurring update
-	// check should not pull a full release tarball only to then discover
-	// checksums are missing).
+	// tarball: an unattended, recurring update check should not pull a
+	// full release tarball only to then discover checksums are missing.
 	newAssetServer := func(t *testing.T, sha256sumsBody string, tarballHits *int) *httptest.Server {
 		t.Helper()
 		mux := http.NewServeMux()
