@@ -77,12 +77,11 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 	ensureHubMembership(ctx, s, admin.ID)
 
 	// Note: GET /api/v1/runtime-brokers/:id and its /projects sub-route now
-	// authorize against the canonical "broker" resource type (ptone/scion#2105),
-	// which the hub-member role's broker.read already covers via
-	// ensureHubMembership above — no extra grant needed here. The compat
-	// grant (grantUserRuntimeBrokerAccess) remains only for endpoints that
-	// still check resource type "runtime_broker" (broker env/secrets,
-	// heartbeat — see ptone/scion#2140).
+	// authorize against the canonical "broker" resource type, which the
+	// hub-member role's broker.read already covers via ensureHubMembership
+	// above — no extra grant needed here. The compat grant
+	// (grantUserRuntimeBrokerAccess) remains only for endpoints that still
+	// check resource type "runtime_broker" (broker env/secrets, heartbeat).
 
 	// Create a project owned by alice
 	project = &store.Project{

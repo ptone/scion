@@ -397,8 +397,8 @@ func TestBrokerHeartbeat_ProjectEntryGroveIdFieldIgnored(t *testing.T) {
 }
 
 // ============================================================================
-// ptone/scion#2105 — `scion runtime-broker status` provider list shows
-// "(none)" right after a successful --auto-provide registration.
+// `scion runtime-broker status` provider list shows "(none)" right after a
+// successful --auto-provide registration.
 //
 // Root cause: getRuntimeBroker, handleBrokerHeartbeat, and getBrokerProjects
 // authorized user requests against Resource{Type: "runtime_broker", ...},
@@ -501,7 +501,7 @@ func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *te
 // links it to a new, owner-created project via the two-phase register flow
 // (mirroring the CLI's `register --auto-provide` + project-link step). It
 // returns the broker ID and the created project (with its real name and git
-// remote, for the round-1 review's cross-project-disclosure checks).
+// remote, for cross-project-disclosure checks).
 func autoProvideBrokerWithProject(t *testing.T, srv *Server, owner *store.User, brokerName, projectName, gitRemote string) (brokerID string, project *store.Project) {
 	t.Helper()
 
@@ -534,15 +534,14 @@ func autoProvideBrokerWithProject(t *testing.T, srv *Server, owner *store.User, 
 	return createResp.BrokerID, registerResp.Project
 }
 
-// TestBrokerAuthz_GetBrokerProjects_HidesUnreadableProjects is the round-1
-// review's blocking finding 1 (lead decision D6): broker.read must not
-// double as project.read for every project an auto-provide broker happens to
-// serve. A hub member with no access to "SecretProj" must not learn its
-// name, slug, or git remote through GET /runtime-brokers/{id}/projects, even
-// though they can read the broker record itself (this is the reviewer's
-// probe, turned into a regression test). The owner, who created both the
-// broker and the project, must still see it — this is the #2105 scenario
-// itself and must keep working under the filter.
+// TestBrokerAuthz_GetBrokerProjects_HidesUnreadableProjects proves that
+// broker.read must not double as project.read for every project an
+// auto-provide broker happens to serve. A hub member with no access to
+// "SecretProj" must not learn its name, slug, or git remote through GET
+// /runtime-brokers/{id}/projects, even though they can read the broker
+// record itself. The owner, who created both the broker and the project,
+// must still see it — that immediate-visibility behavior must keep working
+// under the filter.
 func TestBrokerAuthz_GetBrokerProjects_HidesUnreadableProjects(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -572,8 +571,8 @@ func TestBrokerAuthz_GetBrokerProjects_HidesUnreadableProjects(t *testing.T) {
 	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
 		"second-broker-2105r1", "SecretProj", "https://github.com/acme/private-repo.git")
 
-	// The owner must still see their own auto-provided project (the original
-	// #2105 scenario) — the filter must not regress this.
+	// The owner must still see their own auto-provided project immediately
+	// after registration — the filter must not regress that.
 	ownerRec := doRequestAsUser(t, srv, owner, http.MethodGet,
 		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
 	require.Equal(t, http.StatusOK, ownerRec.Code, ownerRec.Body.String())

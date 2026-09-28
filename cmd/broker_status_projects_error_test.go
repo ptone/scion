@@ -23,10 +23,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRunRemoteBrokerStatus_ProjectsErrorSurfaced covers review finding 5 on
-// ptone/scion#2105 round 1: a failed provider-list fetch must be shown as an
-// error, not silently rendered the same as a confirmed-empty list ("(none)"
-// plus the misleading "run runtime-broker provide" hint).
+// TestRunRemoteBrokerStatus_ProjectsErrorSurfaced verifies that a failed
+// provider-list fetch is shown as an error, not silently rendered the same
+// as a confirmed-empty list ("(none)" plus the misleading "run
+// runtime-broker provide" hint).
 func TestRunRemoteBrokerStatus_ProjectsErrorSurfaced(t *testing.T) {
 	const brokerID = "11111111-1111-1111-1111-111111111111"
 
@@ -40,9 +40,9 @@ func TestRunRemoteBrokerStatus_ProjectsErrorSurfaced(t *testing.T) {
 				"status": "online",
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime-brokers/"+brokerID+"/projects":
-			// Simulate the ptone/scion#2105 authz gate failing (or any other
-			// transient Hub error) on the provider-list call specifically,
-			// while the broker record itself is readable.
+			// Simulate an authz gate (or any other transient Hub error)
+			// failing on the provider-list call specifically, while the
+			// broker record itself is readable.
 			w.WriteHeader(http.StatusForbidden)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"error": map[string]interface{}{

@@ -272,8 +272,8 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	ctx := r.Context()
 
 	// Resource type must be permissions.ResourceBroker, not "runtime_broker"
-	// (ptone/scion#2105) — the latter has no registry entry, so it silently
-	// denied every user identity.
+	// — the latter has no registry entry, so it silently denied every user
+	// identity.
 	//
 	// No-identity and non-user/non-broker-self callers are rejected before
 	// touching the store: that decision doesn't depend on whether the broker
@@ -957,7 +957,7 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 	ctx := r.Context()
 
 	// Resource type must be permissions.ResourceBroker, not "runtime_broker"
-	// (ptone/scion#2105) — see getRuntimeBroker for the full explanation.
+	// — see getRuntimeBroker for the full explanation.
 	brokerSelf := false
 	var identity Identity
 	var userIdent UserIdentity
@@ -1011,10 +1011,10 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 		}
 	}
 
-	// Cross-project disclosure guard (ptone/scion#2105 review round 1,
-	// finding 1): broker.read authorizes reading the BROKER record, but must
-	// not double as project.read for every project the broker happens to
-	// serve — an auto-provide broker can serve every project on the hub, so
+	// Cross-project disclosure guard: broker.read authorizes reading the
+	// BROKER record, but must not double as project.read for every project
+	// the broker happens to serve — an auto-provide broker can serve every
+	// project on the hub, so
 	// without this filter any hub member could recover the whole hub's
 	// project catalogue (names, git remotes) through this endpoint. Filter
 	// the provider list down to projects the caller can actually read,
