@@ -273,7 +273,7 @@ func TestRunInit_PrivilegeDropFailure_ReturnsSentinel(t *testing.T) {
 	}
 }
 
-// TestRunInit_Enforced_NilPrecheck_StillFailsClosed proves R4's fail-closed
+// TestRunInit_Enforced_NilPrecheck_StillFailsClosed proves the fail-closed
 // requirement directly: InitRunOptions.PrivilegeDropPrecheck left at its
 // zero value (nil) — the default for every caller except substrate-serve —
 // must not weaken RunInit's existing enforced-mode fail-closed behaviour.

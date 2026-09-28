@@ -59,9 +59,15 @@ var defaultPrivilegeDropPreconditionDeps = privilegeDropPreconditionDeps{
 // errPrivilegeDropPrecondition is checkPrivilegeDropFeasible's only error:
 // deliberately generic and secret-free, since it crosses into
 // pkg/sciontool/substrate's HTTP response body (see PrivilegeDropChecker's
-// doc comment) rather than staying in a local log line. The precondition
-// check that actually failed is logged separately, server-side, by the
-// caller.
+// doc comment) rather than staying in a local log line. Only the
+// setuid-root-sudo branch below logs which specific condition failed; every
+// other branch (a missing capability, an unresolvable "scion" user, missing/
+// unparseable SCION_HOST_UID/GID, or a traversability/ownership failure)
+// returns this same sentinel with no accompanying log line at either of its
+// two call sites — the /bootstrap HTTP precondition
+// (substrateServePrivilegeDropChecker) and RunInit's own
+// InitRunOptions.PrivilegeDropPrecheck call (init.go), which both just log
+// this generic error string via their respective log.Error calls.
 var errPrivilegeDropPrecondition = errors.New("privilege drop precondition not met: a required capability, the scion user, or SCION_HOST_UID/GID were not all available")
 
 // checkPrivilegeDropFeasible is substrate-serve's synchronous /bootstrap
