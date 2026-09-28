@@ -397,30 +397,10 @@ func TestBrokerHeartbeat_ProjectEntryGroveIdFieldIgnored(t *testing.T) {
 }
 
 // ============================================================================
-// `scion runtime-broker status` provider list shows "(none)" right after a
-// successful --auto-provide registration.
-//
-// Root cause: getRuntimeBroker, handleBrokerHeartbeat, and getBrokerProjects
-// authorized user requests against Resource{Type: "runtime_broker", ...},
-// but pkg/hub/permissions.Registry only defines the canonical resource type
-// "broker" (see brokerResource() in capabilities.go, used by every other
-// broker authz check). derivePermissionID silently fell back to the literal
-// permission ID "runtime_broker.read", which no built-in role — including
-// hub-member and super-admin — ever grants. So a normal hub member,
-// including the very user who just registered and auto-provided the broker,
-// was always denied when reading it back through the user-authenticated
-// path the CLI's `runtime-broker status` uses (getHubClient never
-// authenticates as the broker itself). The write path (project registration)
-// succeeds because it doesn't re-read the broker through this gate, so the
-// provider row really is there — status just couldn't see it, at any point
-// in time, not only "right after" registration.
-//
-// This test reproduces the full flow end to end: register a broker with
-// auto-provide as a plain hub member, link it to a project (mirroring the
-// CLI's "Broker added as provider to project 'X'" step), then immediately
-// read the provider list back as that same member. Before the fix this GET
-// returns 403 and the project list comes back empty; after the fix it
-// returns 200 with the just-linked project present.
+// A plain hub member who registers and auto-provides a broker must be able
+// to read the broker record and its provider list back immediately, through
+// the same user-authenticated path `scion runtime-broker status` uses.
+// ============================================================================
 func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -429,8 +409,8 @@ func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *te
 	// standing in for the operator who ran `scion runtime-broker register
 	// --auto-provide` and then `scion runtime-broker status`.
 	operator := &store.User{
-		ID:          tid("user-2105-operator"),
-		Email:       "operator-2105@test.com",
+		ID:          tid("user-status-operator"),
+		Email:       "status-operator@test.com",
 		DisplayName: "Operator",
 		Role:        store.UserRoleMember,
 		Status:      "active",
@@ -444,7 +424,7 @@ func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *te
 	// --auto-provide` does.
 	createRec := doRequestAsUser(t, srv, operator, http.MethodPost, "/api/v1/brokers",
 		CreateBrokerRegistrationRequest{
-			Name:        "second-broker-2105",
+			Name:        "status-broker",
 			AutoProvide: true,
 		})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
@@ -459,7 +439,7 @@ func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *te
 		BrokerJoinRequest{
 			BrokerID:  createResp.BrokerID,
 			JoinToken: createResp.JoinToken,
-			Hostname:  "second-broker-2105",
+			Hostname:  "status-broker",
 			Version:   "0.1.0",
 		})
 	require.Equal(t, http.StatusOK, joinRec.Code, joinRec.Body.String())
@@ -547,8 +527,8 @@ func TestBrokerAuthz_GetBrokerProjects_HidesUnreadableProjects(t *testing.T) {
 	ctx := context.Background()
 
 	owner := &store.User{
-		ID:          tid("user-2105r1-owner"),
-		Email:       "owner-2105r1@test.com",
+		ID:          tid("user-provider-filter-owner"),
+		Email:       "provider-filter-owner@test.com",
 		DisplayName: "Owner",
 		Role:        store.UserRoleMember,
 		Status:      "active",
@@ -558,8 +538,8 @@ func TestBrokerAuthz_GetBrokerProjects_HidesUnreadableProjects(t *testing.T) {
 	ensureHubMembership(ctx, s, owner.ID)
 
 	outsider := &store.User{
-		ID:          tid("user-2105r1-outsider"),
-		Email:       "outsider-2105r1@test.com",
+		ID:          tid("user-provider-filter-outsider"),
+		Email:       "provider-filter-outsider@test.com",
 		DisplayName: "Outsider",
 		Role:        store.UserRoleMember,
 		Status:      "active",
@@ -569,7 +549,7 @@ func TestBrokerAuthz_GetBrokerProjects_HidesUnreadableProjects(t *testing.T) {
 	ensureHubMembership(ctx, s, outsider.ID) // hub member, but not a project member
 
 	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
-		"second-broker-2105r1", "SecretProj", "https://github.com/acme/private-repo.git")
+		"provider-filter-broker", "SecretProj", "https://github.com/acme/private-repo.git")
 
 	// The owner must still see their own auto-provided project immediately
 	// after registration — the filter must not regress that.
@@ -597,17 +577,18 @@ func TestBrokerAuthz_GetBrokerProjects_HidesUnreadableProjects(t *testing.T) {
 	assert.Empty(t, outsiderResp.Projects, "an outsider must not see a project they cannot read")
 }
 
-// TestBrokerAuthz_GetBrokerProjects_AdminSeesAll confirms the lead's
-// instruction that filtering to project.read must go through the normal
-// authz path "so admins keep their usual bypass" — a super-admin must still
-// see every project a broker serves, including ones they never joined.
+// TestBrokerAuthz_GetBrokerProjects_AdminSeesAll checks that the
+// project-read filter goes through the normal authz path: a super-admin
+// sees every project a broker serves through the ordinary project.read
+// grant, including projects it never joined, the same way it would through
+// any other project listing.
 func TestBrokerAuthz_GetBrokerProjects_AdminSeesAll(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
 	owner := &store.User{
-		ID:          tid("user-2105r1-owner2"),
-		Email:       "owner-2105r1-2@test.com",
+		ID:          tid("user-provider-filter-admin-owner"),
+		Email:       "provider-filter-admin-owner@test.com",
 		DisplayName: "Owner",
 		Role:        store.UserRoleMember,
 		Status:      "active",
@@ -616,14 +597,14 @@ func TestBrokerAuthz_GetBrokerProjects_AdminSeesAll(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, owner))
 	ensureHubMembership(ctx, s, owner.ID)
 
-	adminID := tid("user-2105r1-admin")
-	createTestUserWithRole(t, s, adminID, "admin-2105r1@test.com", "admin", store.SystemRoleSuperAdmin)
+	adminID := tid("user-provider-filter-admin")
+	createTestUserWithRole(t, s, adminID, "provider-filter-admin@test.com", "admin", store.SystemRoleSuperAdmin)
 	admin, err := s.GetUser(ctx, adminID)
 	require.NoError(t, err)
 	ensureHubMembership(ctx, s, admin.ID)
 
 	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
-		"second-broker-2105r1-admin", "AdminVisibleProj", "https://github.com/acme/admin-repo.git")
+		"provider-filter-admin-broker", "AdminVisibleProj", "https://github.com/acme/admin-repo.git")
 
 	adminRec := doRequestAsUser(t, srv, admin, http.MethodGet,
 		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)

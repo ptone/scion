@@ -176,39 +176,6 @@ func grantDevUserRuntimeBrokerAccess(t *testing.T, s store.Store) {
 	require.NoError(t, err)
 }
 
-// grantUserRuntimeBrokerAccess creates a custom role with runtime_broker.*
-// permissions and binds it to the specified user.
-func grantUserRuntimeBrokerAccess(t *testing.T, s store.Store, userID string) {
-	t.Helper()
-	ctx := context.Background()
-	// Re-use existing definition if already created in this store instance.
-	rd, err := s.GetRoleDefinitionByName(ctx, "runtime-broker-compat", store.RoleScopeSystem)
-	if err != nil {
-		rd, err = s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-			Name:      "runtime-broker-compat",
-			ScopeType: store.RoleScopeSystem,
-			Permissions: []string{
-				"runtime_broker.read",
-				"runtime_broker.update",
-				"runtime_broker.delete",
-				"runtime_broker.list",
-			},
-		})
-		require.NoError(t, err)
-	}
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		ScopeID:          "",
-		CreatedBy:        "test",
-	})
-	if err != nil && err != store.ErrAlreadyExists {
-		t.Fatalf("failed to create runtime-broker-compat role binding: %v", err)
-	}
-}
-
 // grantSuperAdminRole binds the seeded super-admin role definition to the
 // given user. Under the CO1 authorization cutover the AK1 kernel only
 // evaluates role bindings, so User.Role = "admin" alone is insufficient.
