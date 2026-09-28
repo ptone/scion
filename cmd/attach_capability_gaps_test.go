@@ -163,6 +163,48 @@ func TestAttachViaHub_AgentProfileAttachFalse_ReturnsExplicitError(t *testing.T)
 	assert.Equal(t, "attach is not supported for agents on the optout runtime", err.Error())
 }
 
+// TestAttachViaHub_EmptyAgentRuntime_ProfileAttachFalse_ReturnsRuntimeAgnosticMessage
+// covers an agent record whose Runtime field is empty (a real value along
+// the scion start -a / scion resume -a polling path before the Hub has
+// reported one — see attachUnsupportedErr's own comment). With nothing to
+// name, the rejection message must stand on its own rather than templating
+// an empty runtime name into the wording used when one is known.
+func TestAttachViaHub_EmptyAgentRuntime_ProfileAttachFalse_ReturnsRuntimeAgnosticMessage(t *testing.T) {
+	clearAppTokenSources(t)
+	const (
+		projectID = "proj-empty-runtime"
+		agentName = "empty-runtime-agent"
+		brokerID  = "broker-empty-runtime"
+	)
+	falseVal := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/projects/" + projectID + "/agents/" + agentName:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{
+				ID: "a1", Name: agentName, Phase: "running", Runtime: "",
+				RuntimeBrokerID: brokerID,
+				AppliedConfig:   &hubclient.AgentConfig{Profile: "empty-runtime-prof"},
+			})
+		case "/api/v1/runtime-brokers/" + brokerID:
+			_ = json.NewEncoder(w).Encode(hubclient.RuntimeBroker{
+				ID:           brokerID,
+				Profiles:     []hubclient.BrokerProfile{{Name: "empty-runtime-prof", Type: "optout", Attach: &falseVal}},
+				Capabilities: &hubclient.BrokerCapabilities{Attach: true},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	err = attachViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}, agentName)
+	require.Error(t, err)
+	assert.Equal(t, "attach is not supported for this agent's runtime", err.Error())
+}
+
 // TestAttachViaHub_StandaloneBrokerNilProfileAttach_BrokerWideFalse_Refuses
 // covers a standalone broker: a remote broker registered via `scion broker
 // register` (buildBrokerProfiles, cmd/broker.go) has no live runtime
