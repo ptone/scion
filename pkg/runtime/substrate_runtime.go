@@ -174,7 +174,7 @@ func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error
 	if sc.RouterEndpoint == "" {
 		return nil, fmt.Errorf("substrate: runtimes.<name>.substrate.router_endpoint is required")
 	}
-	if err := sc.Validate(); err != nil {
+	if err := substrate.Validate(sc); err != nil {
 		return nil, err
 	}
 
@@ -325,7 +325,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	// construction time; this is a defensive re-check in case a
 	// SubstrateRuntime was ever built by another path (e.g. tests) that
 	// skipped it.
-	if err := r.cfg.Validate(); err != nil {
+	if err := substrate.Validate(&r.cfg); err != nil {
 		return "", err
 	}
 

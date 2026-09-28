@@ -1171,9 +1171,9 @@ type V1SubstrateConfig struct {
 	// top-level domain is a real, ICANN-delegated one, with at least one
 	// label beneath its actual matched suffix (which may be a private
 	// multi-tenant-platform suffix like "googleapis.com"/"github.io", not
-	// only an ICANN one). See ValidateEgressAllow's doc comment for the
-	// exact rule set, which changes more often than this comment would
-	// otherwise be kept in sync with.
+	// only an ICANN one). See pkg/runtime/substrate.ValidateEgressAllow's
+	// doc comment for the exact rule set, which changes more often than
+	// this comment would otherwise be kept in sync with.
 	//
 	// Residual risk this does not close: a validly-public hostname can
 	// still be made to resolve to a private or in-cluster address (DNS
@@ -1181,7 +1181,7 @@ type V1SubstrateConfig struct {
 	// Only a check by the egress proxy itself, after DNS resolution,
 	// against the address actually connected to, can close that gap.
 	//
-	// Validated by V1SubstrateConfig.Validate, which NewSubstrateRuntime
+	// Validated by pkg/runtime/substrate.Validate, which NewSubstrateRuntime
 	// calls when the runtime is constructed, and Run calls again once at
 	// its start — not at settings-load time or by `scion config validate`
 	// (there is no generic settings-validation hook for this yet), and not
@@ -1205,11 +1205,11 @@ type V1SubstrateConfig struct {
 	// no way to validate. Setting this on a plain (non-sdsmint) install
 	// breaks every actor instead: nothing backs the named
 	// ClusterTrustBundle, so the actor fails to start (see
-	// V1SubstrateConfig.Validate and buildActorTemplate's doc comment).
+	// pkg/runtime/substrate.Validate and buildActorTemplate's doc comment).
 	//
 	// Empty (the default) is off, and off is byte-identical to today: no
 	// system-info volume, no mount, no env. Validated by
-	// V1SubstrateConfig.Validate: when non-empty it must be exactly
+	// pkg/runtime/substrate.Validate: when non-empty it must be exactly
 	// "egress-mitm.ate.dev", the only trust bundle name Substrate d277088b
 	// supports. Kept as a string validated against a one-name allowlist,
 	// not a bool, deliberately: it mirrors Substrate's own

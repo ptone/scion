@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package config
+package substrate
 
 import (
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 func TestValidateEgressAllow_AcceptsPublicHostnames(t *testing.T) {
@@ -173,18 +175,18 @@ func TestValidateEgressAllow_NamesTheOffendingEntryAmongValidOnes(t *testing.T) 
 }
 
 func TestV1SubstrateConfig_Validate(t *testing.T) {
-	var nilCfg *V1SubstrateConfig
-	if err := nilCfg.Validate(); err != nil {
-		t.Errorf("(*V1SubstrateConfig)(nil).Validate() = %v, want nil", err)
+	var nilCfg *config.V1SubstrateConfig
+	if err := Validate(nilCfg); err != nil {
+		t.Errorf("Validate((*V1SubstrateConfig)(nil)) = %v, want nil", err)
 	}
 
-	ok := &V1SubstrateConfig{EgressAllow: []string{"api.example.com"}}
-	if err := ok.Validate(); err != nil {
+	ok := &config.V1SubstrateConfig{EgressAllow: []string{"api.example.com"}}
+	if err := Validate(ok); err != nil {
 		t.Errorf("Validate() with a clean egress_allow = %v, want nil", err)
 	}
 
-	bad := &V1SubstrateConfig{EgressAllow: []string{"all"}}
-	err := bad.Validate()
+	bad := &config.V1SubstrateConfig{EgressAllow: []string{"all"}}
+	err := Validate(bad)
 	if err == nil {
 		t.Fatal("Validate() with egress_allow: [all] = nil, want an error")
 	}
@@ -217,22 +219,21 @@ func TestValidateEgressTrustBundle(t *testing.T) {
 }
 
 // TestV1SubstrateConfig_Validate_EgressTrustBundle exercises the field
-// through V1SubstrateConfig.Validate (not just the standalone validator
-// function), the same way TestV1SubstrateConfig_Validate does for
-// egress_allow above.
+// through Validate (not just the standalone validator function), the same
+// way TestV1SubstrateConfig_Validate does for egress_allow above.
 func TestV1SubstrateConfig_Validate_EgressTrustBundle(t *testing.T) {
-	empty := &V1SubstrateConfig{}
-	if err := empty.Validate(); err != nil {
+	empty := &config.V1SubstrateConfig{}
+	if err := Validate(empty); err != nil {
 		t.Errorf("Validate() with EgressTrustBundle unset = %v, want nil", err)
 	}
 
-	ok := &V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"}
-	if err := ok.Validate(); err != nil {
+	ok := &config.V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"}
+	if err := Validate(ok); err != nil {
 		t.Errorf("Validate() with EgressTrustBundle = %q, want nil, got %v", ok.EgressTrustBundle, err)
 	}
 
-	bad := &V1SubstrateConfig{EgressTrustBundle: "not-the-real-bundle"}
-	err := bad.Validate()
+	bad := &config.V1SubstrateConfig{EgressTrustBundle: "not-the-real-bundle"}
+	err := Validate(bad)
 	if err == nil {
 		t.Fatal("Validate() with an unsupported EgressTrustBundle = nil, want an error")
 	}

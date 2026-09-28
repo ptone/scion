@@ -103,7 +103,7 @@ func TestSubstrateEgressHostnames_SendsNormalizedEgressAllowEntries(t *testing.T
 
 // TestSubstrateEgressHostnames_RejectsIPShapedEgressAllow confirms no IP or
 // CIDR egress_allow entry ever reaches substrateEgressHostnames' output,
-// because config.NormalizeEgressAllowEntry (called for every
+// because substrate.NormalizeEgressAllowEntry (called for every
 // sc.EgressAllow entry) rejects all of them outright. See
 // TestBuildEgressPolicy_PatternsMatchInputVerbatim for the other half —
 // that buildEgressPolicy sends exactly this list, unmodified, so nothing

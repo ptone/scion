@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package config
+package substrate
 
 import (
 	"fmt"
@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"golang.org/x/net/idna"
 	"golang.org/x/net/publicsuffix"
 )
@@ -115,7 +116,11 @@ var egressAllowSpecialUseTLDs = map[string]string{
 // from being able to reach the router (and thereby bootstrap or exec
 // against *other* actors) or other in-cluster services via its own egress,
 // regardless of what an operator puts in egress_allow.
-func (s *V1SubstrateConfig) Validate() error {
+//
+// s is the substrate-specific config block (config.V1SubstrateConfig); the
+// type itself stays in pkg/config (config parsing stays in config), but the
+// substrate-specific validation rules live here with the runtime they gate.
+func Validate(s *config.V1SubstrateConfig) error {
 	if s == nil {
 		return nil
 	}

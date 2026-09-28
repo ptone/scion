@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
@@ -101,13 +102,13 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 		// API if sent merely trimmed rather than fully normalized, since
 		// HostnameRule requires a lowercase name with no trailing dot.
 		//
-		// The error is ignored here, not silently: r.cfg.Validate() (called
-		// at the top of Run, before this is ever reached) already ran every
-		// sc.EgressAllow entry through this exact function, so an error
-		// here would mean Run's own guard was bypassed. Skip rather than
-		// panic or fail Run a second time for something that should be
+		// The error is ignored here, not silently: substrate.Validate(r.cfg)
+		// (called at the top of Run, before this is ever reached) already
+		// ran every sc.EgressAllow entry through this exact function, so an
+		// error here would mean Run's own guard was bypassed. Skip rather
+		// than panic or fail Run a second time for something that should be
 		// unreachable.
-		if normalized, err := config.NormalizeEgressAllowEntry(h); err == nil {
+		if normalized, err := substrate.NormalizeEgressAllowEntry(h); err == nil {
 			add(normalized)
 		}
 	}
