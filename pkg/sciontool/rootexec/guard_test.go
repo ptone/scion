@@ -50,27 +50,27 @@ var execSiteAllowlist = map[string]string{
 	// Runs before RunInit populates any workload-owned directory, so no
 	// workload-influenceable PATH entry exists yet: realigning the "scion"
 	// system account's uid/gid.
-	"cmd/sciontool/commands/init.go:2127": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2132": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2234": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2243": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2069": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2074": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2176": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2185": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
 
 	// gitCloneWorkspace's clone-path git calls: configureGitCommand sets a
 	// Credential to (uid, gid) whenever uid > 0, which requirePrivilegeDropOrFail
 	// (RunInit, before this ever runs) guarantees on substrate. These always
 	// run dropped there.
-	"cmd/sciontool/commands/init.go:2425": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
-	"cmd/sciontool/commands/init.go:2443": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
-	"cmd/sciontool/commands/init.go:2458": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
-	"cmd/sciontool/commands/init.go:2514": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
-	"cmd/sciontool/commands/init.go:2528": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
-	"cmd/sciontool/commands/init.go:2539": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
-	"cmd/sciontool/commands/init.go:2558": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
-	"cmd/sciontool/commands/init.go:2577": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
-	"cmd/sciontool/commands/init.go:2585": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
-	"cmd/sciontool/commands/init.go:2589": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
-	"cmd/sciontool/commands/init.go:2599": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
-	"cmd/sciontool/commands/init.go:3064": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:2367": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:2385": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:2400": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:2456": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:2470": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:2481": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:2500": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:2519": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:2527": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:2531": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:2541": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
+	"cmd/sciontool/commands/init.go:3006": "dropped: configureGitCommand sets Credential when uid>0, guaranteed on substrate",
 
 	// The harness-provision subcommand's own subprocess: by the time this
 	// code runs, the OS process is already the dropped workload uid/gid

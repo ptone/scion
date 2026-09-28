@@ -1233,20 +1233,18 @@ var fchownFn = syscall.Fchown
 // enforceTokenFileOwnerChecks gates the extra "owner is root or the
 // containing directory's owner" check that ReadTokenFile and
 // ChownTokenFile apply on top of their always-on regular-file/Nlink==1
-// checks. Left at its default (false) for every runtime except substrate,
-// where EnforceTokenFileOwnerChecks(true) is called once, early, with the
-// same value as InitRunOptions.RequirePrivilegeDrop.
-//
-// substrate is the one runtime that requires privilege drop and therefore
-// always has an actual, less-privileged workload user to defend the token
-// file against; every other runtime (docker, podman, k8s, local
-// `sciontool init`) can legitimately hand the container a host-written
-// token file whose owner isn't provably root or the target uid (see
-// ReadTokenFile's doc comment), so enforcing the check there risked
-// treating a valid token as absent. Gating it here, rather than trying to
-// prove byte-identical behaviour across every non-substrate runtime's
-// token-provisioning path, makes the non-substrate case provably unchanged:
-// the check simply never runs unless this is called with true.
+// checks. Left at its default (false) for a caller that can legitimately
+// hand the container a host-written token file whose owner isn't provably
+// root or the target uid (see ReadTokenFile's doc comment) — enforcing the
+// check there risks treating a valid token as absent. A caller that
+// enforces InitRunOptions.RequirePrivilegeDrop always has an actual,
+// less-privileged workload user to defend the token file against, and
+// calls EnforceTokenFileOwnerChecks(true) once, early, with that same
+// value; substrate is the current example (see
+// InitRunOptions.RequirePrivilegeDrop). Gating it here, rather than
+// proving byte-identical behaviour across every other token-provisioning
+// path, makes the default case provably unchanged: the check simply never
+// runs unless this is called with true.
 var enforceTokenFileOwnerChecks atomic.Bool
 
 // EnforceTokenFileOwnerChecks enables or disables the owner check described

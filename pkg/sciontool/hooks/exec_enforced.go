@@ -15,14 +15,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// EnforcedHooksDir is the dedicated, root-owned directory substrate-serve's
-// bootstrap handler redirects broker-delivered $HOME/.scion/hooks/ content
-// into, in privilege-drop-enforced mode. Kept as a single named identifier —
-// not derived from anything else — so switching it later (e.g. if the
-// live rootfs stat of "/run" ever changes) is a one-line change shared by
-// both the writer (pkg/sciontool/substrate's writeBootstrapFile) and the
-// reader (this package's LifecycleManager registration in
-// cmd/sciontool/commands/init.go).
+// EnforcedHooksDir is the dedicated, root-owned directory a
+// privilege-drop-enforcing caller's bootstrap handler redirects
+// broker-delivered $HOME/.scion/hooks/ content into, instead of chowning it
+// to the workload (see pkg/sciontool/substrate's writeBootstrapFile for the
+// current example). Kept as a single named identifier — not derived from
+// anything else — so switching it later is a one-line change shared by
+// both the writer and the reader (this package's LifecycleManager
+// registration in cmd/sciontool/commands/init.go).
 //
 // Deliberately separate from /etc/scion/hooks (LifecycleManager's own
 // system-default fallback): that directory's contents come from the image,

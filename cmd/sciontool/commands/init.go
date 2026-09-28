@@ -92,82 +92,45 @@ Examples:
 
 // InitRunOptions configures a single invocation of RunInit. The zero value
 // matches `sciontool init`'s historical CLI behaviour except where noted.
+// These fields exist as a seam for an in-process caller that embeds RunInit
+// instead of going through the `sciontool init` CLI path; substrate-serve
+// (pkg/sciontool/substrate, cmd/sciontool/commands/substrate_serve.go) is
+// the current example of such a caller and the only one that sets any of
+// them today.
 type InitRunOptions struct {
 	// ForwardTermSignal controls whether RunInit installs its own SIGTERM/
 	// SIGINT handler that runs pre-stop hooks and gracefully shuts down the
 	// child process. `sciontool init` (the CLI command) always sets this to
-	// true — that behaviour is unchanged.
-	//
-	// It must be false when RunInit is invoked in-process by
-	// `sciontool substrate-serve` (pkg/sciontool/substrate). substrate-serve
-	// is itself PID 1 there and owns SIGTERM handling: Phase 1 requires it
-	// to log SIGTERM without forwarding it (see substrate-runtime.md §5.6 —
-	// full eviction handling is Phase 2). If RunInit also
-	// installed a SIGTERM handler in that mode, the two handlers would race
-	// on the same process signal and the harness could be killed anyway.
+	// true — that behaviour is unchanged. A caller that is itself PID 1 and
+	// owns SIGTERM handling for the whole process sets this to false so the
+	// two handlers don't race on the same signal.
 	ForwardTermSignal bool
 
 	// RequirePrivilegeDrop fails RunInit closed — refusing to start the
 	// harness — when setupHostUser could not actually drop from root to
 	// the scion user (e.g. the container's capability set lacks
-	// CAP_SETUID/CAP_SETGID). Substrate always starts the actor process as
-	// UID 0 (agent-substrate/substrate's ContainerSpec has no user field),
-	// so unlike a container runtime where staying at UID 0 can legitimately
-	// mean "already unprivileged" (rootless Podman/keep-id — see
-	// setupHostUser), on substrate it can only mean the drop never
-	// happened, and scion never runs the harness or exec as root.
-	//
-	// This is set only by `sciontool substrate-serve`'s InitRunner
-	// (cmd/sciontool/commands/substrate_serve.go), never by an environment
-	// variable a workload could set itself, and it does not change
-	// setupHostUser's own rootless fallback for any other runtime — that
-	// fallback (rootless Podman relies on it) is unchanged; this only adds
-	// a check of its result.
+	// CAP_SETUID/CAP_SETGID). It does not change setupHostUser's own
+	// rootless fallback for any other caller; it only adds a check of that
+	// fallback's result, for a caller whose runtime has no legitimate
+	// "still UID 0" outcome.
 	RequirePrivilegeDrop bool
 
 	// DisablePortForwarding skips starting the hub port-forward tunnel
 	// manager and the auto-expose port scanner. `sciontool init` (the CLI
-	// command) always leaves this false — that behaviour is unchanged.
-	//
-	// Set only by `sciontool substrate-serve`'s InitRunner wiring
-	// (cmd/sciontool/commands/substrate_serve.go's substrateServeInitOptions),
-	// never by an environment variable a workload could set itself: the
-	// Substrate runtime's egress is HTTP(S)-only and default-deny, so the
-	// WebSocket hub port-forward tunnel (and autoexpose, which depends on
-	// it) cannot reach the hub there and would just spin retrying against
-	// 403s (substrate-runtime.md §1). This is a Phase 1 limitation, not a
-	// permanent one — an on-demand tunnel design would eventually re-enable
-	// it (substrate-runtime.md §11).
+	// command) always leaves this false — that behaviour is unchanged. A
+	// caller whose network path can't route that traffic sets this to true.
 	DisablePortForwarding bool
 
 	// WorkingDir sets the harness child's working directory (threaded into
 	// supervisor.Config.WorkingDir, which sets exec.Cmd.Dir — see that
 	// field's doc comment). Empty (the zero value) leaves cmd.Dir unset, so
 	// the child inherits this process's own current working directory —
-	// RunInit's historical behaviour, unconditionally, for `sciontool init`
-	// and every runtime other than substrate.
+	// RunInit's historical, unconditional behaviour for `sciontool init`.
 	//
 	// Superseded outright by ResolveWorkingDir below when both are set: its
 	// result is what reaches the harness, and this field is ignored. No
-	// caller sets both today — substrate-serve's InitRunner sets only
-	// ResolveWorkingDir, and every other caller sets only WorkingDir, if
-	// anything — so this precedence is a documented default for a future
-	// caller rather than a path any current one exercises.
-	//
-	// Set only by `sciontool substrate-serve`'s InitRunner wiring
-	// (cmd/sciontool/commands/substrate_serve.go's substrateServeInitOptions),
-	// never by an environment variable a workload could set itself and never
-	// derived here from SCION_RUNTIME or any other sniffing: RunInit stays a
-	// plain function of this field, exactly like RequirePrivilegeDrop and
-	// DisablePortForwarding above (RunInit itself never inspects
-	// SCION_RUNTIME anywhere — see DisablePortForwarding's own doc comment).
-	// Substrate is the one runtime that needs it because its ateapi
-	// Container spec has no workingDir field and ateom does not apply the
-	// image's WorkingDir, so — unlike Docker/Podman/Kubernetes, which all
-	// get the correct cwd from the image's WORKDIR for free — this
-	// process's own cwd is not already correct by the time RunInit runs
-	// (see substrateServeInitOptions's doc comment for how the value is
-	// resolved, including the $HOME fallback).
+	// caller sets both today, so this precedence is a documented default for
+	// a future caller rather than a path any current one exercises.
 	WorkingDir string
 
 	// ResolveWorkingDir, when non-nil, is called once by RunInit — directly
@@ -182,27 +145,23 @@ type InitRunOptions struct {
 	// whether a directory is actually usable (searchable by the scion
 	// uid/gid) has to run after every step that can change that, and before
 	// any step whose work would be wasted (and, on the fail-closed exit
-	// path, left running) if the resolver then errors. gitCloneWorkspace's
-	// ensureWorkspaceOwnership chowns the workspace to the scion uid (or
-	// creates it via git init in the first place); the ownership fixup that
-	// follows pre-start hooks chowns any root-owned files a provisioner left
-	// behind. Those are the two steps a resolver's usability check depends
-	// on; nothing after them changes it. A resolver called before both has
-	// seen the workspace in whatever state the broker's bind mount left it
-	// in: for a fresh git-clone agent, root-owned and not yet searchable by
-	// the scion uid, which resolves to the wrong directory.
+	// path, left running) if the resolver then errors. A resolver called
+	// before both has seen the workspace in whatever state the broker's
+	// bind mount left it in, which can resolve to the wrong directory.
 	//
-	// nil (the zero value) for every caller except substrate-serve's
-	// InitRunner wiring (substrateServeInitOptions): RunInit's behaviour is
-	// then exactly WorkingDir's own zero-value contract above, unchanged.
+	// nil (the zero value) for every caller that doesn't need dynamic
+	// resolution: RunInit's behaviour is then exactly WorkingDir's own
+	// zero-value contract above, unchanged.
 	//
 	// An error from ResolveWorkingDir fails RunInit closed with
 	// exitCodeNoUsableHarnessCwd: the harness is never started, sidecar
 	// services/the metadata server/the hub secret fetch never start either,
 	// and RunInit never falls back to WorkingDir's own zero-value "inherit
-	// this process's cwd" behaviour or to "/" — see
-	// resolveSubstrateHarnessCwd's doc comment (substrate_serve.go) for why
-	// "/" specifically must never be used.
+	// this process's cwd" behaviour or to "/".
+	//
+	// See pkg/sciontool/substrate / cmd/sciontool/commands/substrate_serve.go
+	// for why substrate needs all four of the fields above and how it
+	// resolves this one (also .design/kubernetes/substrate-runtime.md §§5.6-5.7).
 	ResolveWorkingDir func() (string, error)
 }
 
@@ -241,33 +200,21 @@ func requirePrivilegeDropOrFail(targetUID, targetGID int, requirePrivilegeDrop b
 // exitCodePrivilegeDropRequired is the exit code RunInit returns when
 // requirePrivilegeDropOrFail trips — never returned for any other reason.
 // It stays a distinct value (rather than a plain 1) purely so an operator
-// reading substrate-serve's own logged exit code can tell which failure
-// this was. It does not, on its own, cause substrate-serve's process to
-// exit or otherwise change process-level behaviour — see StateInitFailed's
-// doc comment (pkg/sciontool/substrate) for why: Substrate does not treat
-// an actor's PID 1 exiting as a failure signal at all, so exiting here
-// would only lose the control server for no compensating benefit. The
-// synchronous bootstrap precondition (pkg/sciontool/substrate.
-// PrivilegeDropChecker) is expected to catch a missing privilege drop
-// before /bootstrap ever responds 200, which is what actually makes Run()
-// itself return an error and the broker delete the actor — reaching this
-// sentinel at all is already defence in depth for when that precondition
-// somehow doesn't. Either way, RunInit reports PhaseError to the Hub and
-// to the local agent-info state (below) before returning it, the same way
-// the git-clone failure path does — see reportInitFailure's doc comment
-// for why that direct Hub report, not a broker heartbeat fallback, is the
-// only thing that makes this failure visible on substrate.
+// reading a caller's own logged exit code can tell which failure this was.
+// RunInit reports PhaseError to the Hub and to the local agent-info state
+// before returning it, the same way the git-clone failure path does — see
+// reportInitFailure's doc comment. See pkg/sciontool/substrate's
+// StateInitFailed for why a caller embedding RunInit in a process that
+// doesn't exit on failure needs this signal at all.
 const exitCodePrivilegeDropRequired = 17
 
 // exitCodeNoUsableHarnessCwd is the exit code RunInit returns when
 // InitRunOptions.ResolveWorkingDir is set and returns an error — never for
 // any other reason. It stays a distinct value, the same reasoning as
-// exitCodePrivilegeDropRequired above: so an operator reading
-// substrate-serve's own logged exit code can tell which failure this was.
-// RunInit reports PhaseError the same way — via reportInitFailure — before
-// returning it; see ResolveWorkingDir's doc comment for the fail-closed
-// contract this enforces (never starts the harness, never falls back to
-// WorkingDir's zero-value behaviour or to "/").
+// exitCodePrivilegeDropRequired above. RunInit reports PhaseError the same
+// way — via reportInitFailure — before returning it; see
+// ResolveWorkingDir's doc comment for the fail-closed contract this
+// enforces.
 const exitCodeNoUsableHarnessCwd = 18
 
 func init() {
@@ -316,17 +263,15 @@ func resolveAgentHome(targetUID int, rootless bool) string {
 // failure path pioneered: local agent-info state to PhaseError with a
 // message, plus a best-effort direct Hub report. For runtimes whose broker
 // reads the container's agent-info.json as part of its own status
-// heartbeat (e.g. Docker), that local write is a second, independent path
-// to the same result if the direct Hub call fails or the Hub isn't
-// configured. Substrate has no such fallback: its broker does not read
-// agent-info.json out of the actor, so on substrate the direct Hub call
-// above is the only failure signal that reaches the Hub at all — see
-// StateInitFailed's doc comment (pkg/sciontool/substrate) for the other
-// half of what substrate-serve does about this. cause's message ends up in
-// the response substrate-serve's control server may expose and in the
-// Hub-visible message, so callers must only pass fixed, secret-free errors
-// (as errPrivilegeDropRequired and every caller below do) — never one
-// built from raw command output or file contents.
+// heartbeat, that local write is a second, independent path to the same
+// result if the direct Hub call fails or the Hub isn't configured; for a
+// runtime whose broker has no such fallback (see pkg/sciontool/substrate's
+// StateInitFailed for why substrate is one), the direct Hub call is the
+// only failure signal that reaches the Hub at all. cause's message ends up
+// in the Hub-visible message and possibly a caller's own exposed response,
+// so callers must only pass fixed, secret-free errors (as
+// errPrivilegeDropRequired and every caller below do) — never one built
+// from raw command output or file contents.
 //
 // Shared by every RunInit failure path that needs to report before
 // returning, rather than each constructing its own StatusHandler: this is
@@ -362,13 +307,11 @@ func reportInitFailure(agentHome string, cause error) {
 // far in a test environment lacking a real CAP_SETUID/CAP_SETGID privilege
 // drop — see requirePrivilegeDropOrFail).
 //
-// In privilege-drop-enforced mode, substrate-serve's bootstrap handler
-// redirects everything under $HOME/.scion/hooks/ to the root-owned
-// hooks.EnforcedHooksDir instead of chowning it to the workload like the
-// rest of the composed home (pkg/sciontool/substrate's writeBootstrapFile) —
-// see the LifecycleManager registration a few lines above this function's
-// call site — so the staged file, if any, lives there instead of under
-// agentHome.
+// In privilege-drop-enforced mode, a broker-delivered $HOME/.scion/hooks/
+// tree is redirected to the root-owned hooks.EnforcedHooksDir instead of
+// being chowned to the workload like the rest of the composed home — see
+// EnforcedHooksDir's own doc comment (pkg/sciontool/hooks) — so the staged
+// file, if any, lives there instead of under agentHome.
 func resolveProjectHookPath(agentHome string, requirePrivilegeDrop bool) string {
 	dir := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d")
 	if requirePrivilegeDrop {
@@ -562,10 +505,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	lifecycleManager.WorkloadGID = targetGID
 	lifecycleManager.WorkloadUsername = "scion"
 	if opts.RequirePrivilegeDrop {
-		// The dedicated, root-owned directory substrate-serve's bootstrap
-		// handler redirects broker-delivered $HOME/.scion/hooks/ content
-		// into (pkg/sciontool/substrate's writeBootstrapFile), instead of
-		// chowning it to the workload like the rest of the composed home.
+		// The dedicated, root-owned directory broker-delivered hook content
+		// is redirected into instead of being chowned to the workload — see
+		// EnforcedHooksDir's own doc comment (pkg/sciontool/hooks).
 		// Registered before $HOME/.scion/hooks below so trusted,
 		// broker-delivered content still runs before anything staged
 		// per-agent, matching the system-then-per-agent ordering
