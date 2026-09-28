@@ -538,6 +538,7 @@ func TestSubstrateBroker_DeleteIdentityUnknown_LogsNamesNotInBody(t *testing.T) 
 	if !strings.Contains(logBuf.String(), "projb--ghost") {
 		t.Errorf("broker log does not carry the record-less actor name: %s", logBuf.String())
 	}
+	assertRuntimeScopeLogged(t, logBuf.String(), gapAtespaceB)
 }
 
 // TestSubstrateBroker_StopIdentityUnknown_LogsNamesNotInBody is the stop-path
@@ -559,5 +560,15 @@ func TestSubstrateBroker_StopIdentityUnknown_LogsNamesNotInBody(t *testing.T) {
 	}
 	if !strings.Contains(logBuf.String(), "projb--ghost") {
 		t.Errorf("broker log does not carry the record-less actor name: %s", logBuf.String())
+	}
+	assertRuntimeScopeLogged(t, logBuf.String(), gapAtespaceB)
+}
+
+// assertRuntimeScopeLogged checks that the prober-supplied scope is logged
+// under the broker's generic runtime_scope key.
+func assertRuntimeScopeLogged(t *testing.T, log, scope string) {
+	t.Helper()
+	if want := `"runtime_scope":"` + scope + `"`; !strings.Contains(log, want) {
+		t.Errorf("broker log does not carry %s: %s", want, log)
 	}
 }
