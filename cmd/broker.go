@@ -1447,7 +1447,11 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 					// Get projects this broker provides for (only if still registered)
 					if status.Registered {
 						projectsResp, err := client.RuntimeBrokers().ListProjects(ctx, status.BrokerID)
-						if err == nil && projectsResp != nil {
+						if err != nil {
+							// Record the failure instead of silently treating
+							// it the same as a confirmed-empty provider list.
+							status.ProjectsError = err.Error()
+						} else if projectsResp != nil {
 							for _, g := range projectsResp.Projects {
 								status.Projects = append(status.Projects, brokerProjectStatus{
 									ID:   g.ProjectID,
@@ -1575,6 +1579,13 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 		for _, g := range status.Projects {
 			fmt.Printf("  - %s (ID: %s)\n", g.Name, g.ID)
 		}
+	} else if status.ProjectsError != "" {
+		// Distinguish a failed lookup from a confirmed-empty list: printing
+		// "(none)" here would tell the operator to re-provide a project that
+		// may already be provisioned correctly (ptone/scion#2105).
+		fmt.Println("Projects (Provider)")
+		fmt.Println("-----------------")
+		fmt.Printf("  (unknown - failed to fetch provider list: %s)\n", status.ProjectsError)
 	} else if status.Registered {
 		fmt.Println("Projects (Provider)")
 		fmt.Println("-----------------")
@@ -1688,7 +1699,9 @@ func runRemoteBrokerStatus(brokerID string) error {
 
 	// Get projects this broker provides for
 	projectsResp, err := client.RuntimeBrokers().ListProjects(ctx, brokerID)
-	if err == nil && projectsResp != nil {
+	if err != nil {
+		status.ProjectsError = err.Error()
+	} else if projectsResp != nil {
 		for _, g := range projectsResp.Projects {
 			status.Projects = append(status.Projects, brokerProjectStatus{
 				ID:   g.ProjectID,
@@ -1728,6 +1741,10 @@ func runRemoteBrokerStatus(brokerID string) error {
 		for _, g := range status.Projects {
 			fmt.Printf("  - %s (ID: %s)\n", g.Name, g.ID)
 		}
+	} else if status.ProjectsError != "" {
+		fmt.Println("Projects (Provider)")
+		fmt.Println("-----------------")
+		fmt.Printf("  (unknown - failed to fetch provider list: %s)\n", status.ProjectsError)
 	} else {
 		fmt.Println("Projects (Provider)")
 		fmt.Println("-----------------")
@@ -1772,6 +1789,10 @@ type brokerStatusInfo struct {
 
 	// Projects
 	Projects []brokerProjectStatus `json:"projects,omitempty"`
+	// ProjectsError records why the provider list could not be fetched, so a
+	// failed lookup (e.g. a transient Hub error) is never displayed the same
+	// way as a confirmed-empty list (ptone/scion#2105).
+	ProjectsError string `json:"projectsError,omitempty"`
 }
 
 // brokerHubConnectionStatus holds status for a single hub connection.

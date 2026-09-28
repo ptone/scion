@@ -270,26 +270,34 @@ func (s *Server) handleRuntimeBrokerByIDInternal(w http.ResponseWriter, r *http.
 func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	// Authorize: broker self-access or user with CheckAccess
+	// Authorize: broker self-access or user with CheckAccess.
+	//
+	// The resource type here MUST be the canonical "broker" (matching
+	// brokerResource() and the permissions registry's ResourceBroker), not
+	// "runtime_broker". "runtime_broker" has no entry in
+	// pkg/hub/permissions.Registry, so derivePermissionID falls back to the
+	// literal permission ID "runtime_broker.read" — a permission no built-in
+	// role (including super-admin's allPermissionIDs()) ever grants. Using
+	// the mismatched type silently denied every user identity (ptone/scion#2105).
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
 		// Broker accessing its own record — allowed
 	} else {
 		identity := GetIdentityFromContext(ctx)
 		if identity == nil {
-			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: id}, ActionRead, "no identity")
+			logAuthzDenial(r, nil, Resource{Type: "broker", ID: id}, ActionRead, "no identity")
 			Unauthorized(w)
 			return
 		}
 		if userIdent, ok := identity.(UserIdentity); ok {
 			decision := s.authzService.CheckAccess(ctx, userIdent,
-				Resource{Type: "runtime_broker", ID: id}, ActionRead)
+				Resource{Type: "broker", ID: id}, ActionRead)
 			if !decision.Allowed {
-				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: id}, ActionRead, decision.Reason)
+				logAuthzDenial(r, userIdent, Resource{Type: "broker", ID: id}, ActionRead, decision.Reason)
 				Forbidden(w)
 				return
 			}
 		} else {
-			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: id}, ActionRead, "non-user non-broker identity")
+			logAuthzDenial(r, identity, Resource{Type: "broker", ID: id}, ActionRead, "non-user non-broker identity")
 			Forbidden(w)
 			return
 		}
@@ -597,25 +605,27 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 
 	// Authorize: broker self-access or user with CheckAccess (ActionUpdate —
 	// heartbeats modify agent state and broker liveness).
+	// See the matching comment in getRuntimeBroker: the resource type must be
+	// the canonical "broker", not "runtime_broker" (ptone/scion#2105).
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
 		// Broker sending its own heartbeat — allowed
 	} else {
 		identity := GetIdentityFromContext(ctx)
 		if identity == nil {
-			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, "no identity")
+			logAuthzDenial(r, nil, Resource{Type: "broker", ID: id}, ActionUpdate, "no identity")
 			Unauthorized(w)
 			return
 		}
 		if userIdent, ok := identity.(UserIdentity); ok {
 			decision := s.authzService.CheckAccess(ctx, userIdent,
-				Resource{Type: "runtime_broker", ID: id}, ActionUpdate)
+				Resource{Type: "broker", ID: id}, ActionUpdate)
 			if !decision.Allowed {
-				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, decision.Reason)
+				logAuthzDenial(r, userIdent, Resource{Type: "broker", ID: id}, ActionUpdate, decision.Reason)
 				Forbidden(w)
 				return
 			}
 		} else {
-			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, "non-user non-broker identity")
+			logAuthzDenial(r, identity, Resource{Type: "broker", ID: id}, ActionUpdate, "non-user non-broker identity")
 			Forbidden(w)
 			return
 		}
@@ -940,26 +950,33 @@ type ListBrokerProjectsResponse struct {
 func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, brokerID string) {
 	ctx := r.Context()
 
-	// Authorize: broker self-access or user with CheckAccess
+	// Authorize: broker self-access or user with CheckAccess.
+	// See the matching comment in getRuntimeBroker: the resource type must be
+	// the canonical "broker", not "runtime_broker" (ptone/scion#2105) — the
+	// mismatch made this endpoint 403 for every user identity, which is why
+	// `scion runtime-broker status` always showed the provider list as
+	// "(none)" even right after a successful --auto-provide registration:
+	// the CLI's ListProjects() call silently failed and the error was
+	// swallowed (see runBrokerStatus in cmd/broker.go).
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == brokerID {
 		// Broker accessing its own project list — allowed
 	} else {
 		identity := GetIdentityFromContext(ctx)
 		if identity == nil {
-			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, "no identity")
+			logAuthzDenial(r, nil, Resource{Type: "broker", ID: brokerID}, ActionRead, "no identity")
 			Unauthorized(w)
 			return
 		}
 		if userIdent, ok := identity.(UserIdentity); ok {
 			decision := s.authzService.CheckAccess(ctx, userIdent,
-				Resource{Type: "runtime_broker", ID: brokerID}, ActionRead)
+				Resource{Type: "broker", ID: brokerID}, ActionRead)
 			if !decision.Allowed {
-				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, decision.Reason)
+				logAuthzDenial(r, userIdent, Resource{Type: "broker", ID: brokerID}, ActionRead, decision.Reason)
 				Forbidden(w)
 				return
 			}
 		} else {
-			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: brokerID}, ActionRead, "non-user non-broker identity")
+			logAuthzDenial(r, identity, Resource{Type: "broker", ID: brokerID}, ActionRead, "non-user non-broker identity")
 			Forbidden(w)
 			return
 		}

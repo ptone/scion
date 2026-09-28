@@ -395,3 +395,104 @@ func TestBrokerHeartbeat_ProjectEntryGroveIdFieldIgnored(t *testing.T) {
 	assert.Equal(t, before.Phase, after.Phase, "a project entry keyed by the removed groveId name must not change agent phase")
 	assert.Equal(t, before.Activity, after.Activity, "a project entry keyed by the removed groveId name must not change agent activity")
 }
+
+// ============================================================================
+// ptone/scion#2105 — `scion runtime-broker status` provider list shows
+// "(none)" right after a successful --auto-provide registration.
+//
+// Root cause: getRuntimeBroker, handleBrokerHeartbeat, and getBrokerProjects
+// authorized user requests against Resource{Type: "runtime_broker", ...},
+// but pkg/hub/permissions.Registry only defines the canonical resource type
+// "broker" (see brokerResource() in capabilities.go, used by every other
+// broker authz check). derivePermissionID silently fell back to the literal
+// permission ID "runtime_broker.read", which no built-in role — including
+// hub-member and super-admin — ever grants. So a normal hub member,
+// including the very user who just registered and auto-provided the broker,
+// was always denied when reading it back through the user-authenticated
+// path the CLI's `runtime-broker status` uses (getHubClient never
+// authenticates as the broker itself). The write path (project registration)
+// succeeds because it doesn't re-read the broker through this gate, so the
+// provider row really is there — status just couldn't see it, at any point
+// in time, not only "right after" registration.
+//
+// This test reproduces the full flow end to end: register a broker with
+// auto-provide as a plain hub member, link it to a project (mirroring the
+// CLI's "Broker added as provider to project 'X'" step), then immediately
+// read the provider list back as that same member. Before the fix this GET
+// returns 403 and the project list comes back empty; after the fix it
+// returns 200 with the just-linked project present.
+func TestBrokerAuthz_AutoProvideRegistration_StatusSeesProviderImmediately(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// A plain hub member — not a super-admin, not the broker's HMAC self —
+	// standing in for the operator who ran `scion runtime-broker register
+	// --auto-provide` and then `scion runtime-broker status`.
+	operator := &store.User{
+		ID:          tid("user-2105-operator"),
+		Email:       "operator-2105@test.com",
+		DisplayName: "Operator",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, operator))
+	ensureHubMembership(ctx, s, operator.ID)
+
+	// Phase 1: POST /api/v1/brokers — create the broker registration with
+	// auto-provide enabled, exactly as `scion runtime-broker register
+	// --auto-provide` does.
+	createRec := doRequestAsUser(t, srv, operator, http.MethodPost, "/api/v1/brokers",
+		CreateBrokerRegistrationRequest{
+			Name:        "second-broker-2105",
+			AutoProvide: true,
+		})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var createResp CreateBrokerRegistrationResponse
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&createResp))
+	require.NotEmpty(t, createResp.BrokerID)
+	require.NotEmpty(t, createResp.JoinToken)
+
+	// Phase 2: POST /api/v1/brokers/join — unauthenticated, the join token is
+	// the credential.
+	joinRec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers/join",
+		BrokerJoinRequest{
+			BrokerID:  createResp.BrokerID,
+			JoinToken: createResp.JoinToken,
+			Hostname:  "second-broker-2105",
+			Version:   "0.1.0",
+		})
+	require.Equal(t, http.StatusOK, joinRec.Code, joinRec.Body.String())
+
+	// Link the broker to a project, mirroring the CLI's "If project is
+	// linked, offer to add this broker as a provider" step that prints
+	// "Broker added as provider to project 'X'".
+	registerRec := doRequestAsUser(t, srv, operator, http.MethodPost, "/api/v1/projects/register",
+		RegisterProjectRequest{
+			Name:     "Global",
+			BrokerID: createResp.BrokerID,
+		})
+	require.Equal(t, http.StatusOK, registerRec.Code, registerRec.Body.String())
+	var registerResp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(registerRec.Body).Decode(&registerResp))
+	require.NotNil(t, registerResp.Project)
+
+	// Read path: the same operator immediately runs `scion runtime-broker
+	// status`, which fetches the broker record and its provider list as a
+	// user (never as the broker's own HMAC identity).
+	getRec := doRequestAsUser(t, srv, operator, http.MethodGet,
+		"/api/v1/runtime-brokers/"+createResp.BrokerID, nil)
+	assert.Equal(t, http.StatusOK, getRec.Code,
+		"the broker's own registering user must be able to read it back; got: %s", getRec.Body.String())
+
+	projectsRec := doRequestAsUser(t, srv, operator, http.MethodGet,
+		"/api/v1/runtime-brokers/"+createResp.BrokerID+"/projects", nil)
+	require.Equal(t, http.StatusOK, projectsRec.Code,
+		"the broker's own registering user must be able to list its providers; got: %s", projectsRec.Body.String())
+
+	var projectsResp ListBrokerProjectsResponse
+	require.NoError(t, json.NewDecoder(projectsRec.Body).Decode(&projectsResp))
+	require.Len(t, projectsResp.Projects, 1,
+		"the just-linked project must show up immediately, not '(none)'")
+	assert.Equal(t, registerResp.Project.ID, projectsResp.Projects[0].ProjectID)
+}
