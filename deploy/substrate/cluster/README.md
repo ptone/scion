@@ -122,10 +122,14 @@ curl -sSL -o /tmp/ate.dev_workerpools.yaml \
 
 git clone --depth 1 https://github.com/yannh/kubeconform.git /tmp/kubeconform-src
 (cd /tmp/kubeconform-src/openapi2jsonschema-go && go build -o /tmp/openapi2jsonschema .)
-mkdir -p /tmp/crd-schemas && cd /tmp/crd-schemas
-/tmp/openapi2jsonschema /tmp/ate.dev_workerpools.yaml   # writes workerpool_v1alpha1.json
-cp workerpool_v1alpha1.json WorkerPool_v1alpha1.json    # match {{.ResourceKind}}'s case
+mkdir -p /tmp/crd-schemas
+(
+  cd /tmp/crd-schemas
+  /tmp/openapi2jsonschema /tmp/ate.dev_workerpools.yaml   # writes workerpool_v1alpha1.json
+  cp workerpool_v1alpha1.json WorkerPool_v1alpha1.json    # match {{.ResourceKind}}'s case
+)
 
+# Run this from the repo root, so the relative manifest path below resolves:
 envsubst < deploy/substrate/cluster/workerpool.yaml > /tmp/workerpool.rendered.yaml
 kubeconform -strict -summary -kubernetes-version 1.31.0 \
   -schema-location default \

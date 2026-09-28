@@ -80,8 +80,8 @@ for this validation.
 
 ## Follow-up fixes
 
-An independent review found the first cut of `OPERATIONS.md` had trimmed
-the moved runbook content further than intended — the secret-safe
+The first cut of `OPERATIONS.md` had trimmed the moved runbook content
+further than intended — the secret-safe
 `DeleteActorEgressPolicy` grpcurl procedure and the hub force-delete had
 been summarized down to a one-line hand-wave, dropping the token-handling
 safeguards (env-var-only tokens, trap-guarded header files, `-expand-headers`)
