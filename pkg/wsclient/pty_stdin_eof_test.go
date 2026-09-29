@@ -27,33 +27,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPTYClient_Run_NonTTYStdinEOF_SendsNormalCloseAndExitsZero is the
-// deterministic root-cause reproduction for the attempt-#2 1000 close
-// (see the attach-surfacing-fix spec, item 3): when stdin is not a
-// terminal and is already at EOF (a non-interactive CLI invocation),
-// readFromStdin's io.EOF branch returns nil (not an error), so it is the
-// first — and, here, only — sender on errCh. Run() then sends a
-// CloseNormalClosure (1000) frame to the server and returns nil, all before
-// any server-side (or broker-side) rejection could ever arrive. This is not
-// a race: with the write end of stdin's pipe closed before Connect even
-// runs, the EOF is immediate and unconditional, so the ordering is
-// reproduced every time, not just "usually".
-//
-// This is the CLI closing normally on its own initiative, not the Hub
-// choosing 1000 for a session the client did not close — so no Hub change
-// follows from this finding (see the report for the full root-cause
-// writeup and change 1's effect on reachability).
+// TestPTYClient_Run_NonTTYStdinEOF_SendsNormalCloseAndExitsZero pins the
+// behavior of a non-interactive CLI invocation: when stdin is not a
+// terminal and is already at EOF, readFromStdin's io.EOF branch returns nil
+// (not an error), so it is the first — and, here, only — sender on errCh.
+// Run() then sends a CloseNormalClosure (1000) frame to the server and
+// returns nil, all before any server-side rejection could ever arrive. This
+// is not a race: with the write end of stdin's pipe closed before Connect
+// even runs, the EOF is immediate and unconditional, so the ordering is
+// reproduced every time, not just "usually". This is the CLI closing
+// normally on its own initiative — a broker that separately refuses the
+// same session never gets to decide the code the CLI already sent.
 func TestPTYClient_Run_NonTTYStdinEOF_SendsNormalCloseAndExitsZero(t *testing.T) {
 	// A pipe whose write end is closed before Run() ever starts: the first
-	// os.Stdin.Read done by readFromStdin's inner reader goroutine returns
-	// (0, io.EOF) immediately, deterministically, not depending on timing.
+	// read done by readFromStdin's inner reader goroutine returns (0, io.EOF)
+	// immediately, deterministically, not depending on timing. Given to the
+	// client directly (never the shared os.Stdin package variable), so the
+	// leaked inner reader goroutine never races anything once the test ends.
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 	t.Cleanup(func() { _ = r.Close() })
-	origStdin := os.Stdin
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = origStdin })
 
 	type closeInfo struct {
 		code int
@@ -92,6 +86,7 @@ func TestPTYClient_Run_NonTTYStdinEOF_SendsNormalCloseAndExitsZero(t *testing.T)
 		Token:    "scion-user-token",
 		Slug:     "non-tty-agent",
 	})
+	client.stdin = r
 	require.NoError(t, client.Connect(context.Background()))
 
 	runErr := client.Run()
@@ -100,7 +95,7 @@ func TestPTYClient_Run_NonTTYStdinEOF_SendsNormalCloseAndExitsZero(t *testing.T)
 	select {
 	case ci := <-closeCh:
 		assert.Equal(t, websocket.CloseNormalClosure, ci.code,
-			"the CLI's own stdin-EOF close must be reported as 1000, not left to a later broker rejection")
+			"the CLI's own stdin-EOF close must arrive as 1000, not left to a later broker rejection")
 	case <-time.After(5 * time.Second):
 		t.Fatal("server never observed a close frame from the client")
 	}

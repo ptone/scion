@@ -72,6 +72,15 @@ type PTYClient struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	receivedData bool // tracks whether we've received any data
+
+	// stdin is read once here and never re-read from the os.Stdin package
+	// variable elsewhere, so a test can inject its own reader without ever
+	// mutating the (process-wide, shared) global: readFromStdin's inner
+	// reader goroutine can outlive both Run() and the test that started it
+	// (it only returns once its blocking Read call itself returns), so
+	// swapping os.Stdin back out from under it would be a data race, not
+	// just a functional risk.
+	stdin io.Reader
 }
 
 // NewPTYClient creates a new PTY client.
@@ -79,6 +88,7 @@ func NewPTYClient(config PTYClientConfig) *PTYClient {
 	return &PTYClient{
 		config: config,
 		oldFd:  int(os.Stdin.Fd()),
+		stdin:  os.Stdin,
 	}
 }
 
@@ -365,7 +375,7 @@ func (c *PTYClient) readFromStdin() error {
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			n, err := os.Stdin.Read(buf)
+			n, err := c.stdin.Read(buf)
 			if err != nil {
 				slog.Debug("PTY stdin inner reader got error", "error", err)
 				readCh <- readResult{nil, err}

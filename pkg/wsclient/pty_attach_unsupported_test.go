@@ -38,15 +38,15 @@ import (
 // caller would otherwise see — and Run() must return a non-nil error so the
 // CLI exits non-zero.
 func TestReadFromWebSocket_AttachUnsupportedCloseCode_MapsToExplicitError(t *testing.T) {
-	// Redirect stdin to an open, never-closed pipe so readFromStdin blocks
-	// instead of racing the WebSocket goroutine with an EOF of its own; the
-	// websocket close below must be what decides Run()'s error.
+	// Give the client its own, never-closed pipe as stdin (never the shared
+	// os.Stdin package variable) so readFromStdin blocks instead of racing
+	// the WebSocket goroutine with an EOF of its own; the websocket close
+	// below must be what decides Run()'s error. The read end is left open
+	// for the test's duration; the leaked inner reader goroutine (blocked on
+	// a read syscall against a file only this test holds) is harmless.
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
-	origStdin := os.Stdin
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = origStdin })
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,6 +66,7 @@ func TestReadFromWebSocket_AttachUnsupportedCloseCode_MapsToExplicitError(t *tes
 		Token:    "scion-user-token",
 		Slug:     "unsupported-agent",
 	})
+	client.stdin = r
 	require.NoError(t, client.Connect(context.Background()))
 
 	err = client.Run()
