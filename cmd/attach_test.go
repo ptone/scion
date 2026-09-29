@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,9 +214,10 @@ func TestAttachSupportedByBroker_NoBrokerID_ReturnsTrueWithoutCallingHub(t *test
 // newAttachGateFallbackServer builds a mock Hub server for exercising the
 // CLI's point-GET-then-LIST-fallback attach gate end to end through
 // attachViaHub: the agent GET matches newAttachMockHubServer's shape, the
-// runtime-broker point-GET always answers 403 (the hub-member authz gap
-// noted in the spec — LIST is deliberately left with its own, wider read
-// scope rather than this test widening anything), and the LIST response is
+// runtime-broker point-GET always answers 403 (a hub-member principal can be
+// denied the point-GET yet still see the broker on LIST — LIST is
+// deliberately left with its own, wider read scope rather than this test
+// widening anything), and the LIST response is
 // either listBrokers or a 403 when listFails is set. The returned *bool
 // flips true if the PTY WebSocket path is ever requested, so callers can
 // prove attachViaHub refused before dialing.
@@ -260,11 +262,13 @@ func newAttachGateFallbackServer(t *testing.T, projectID, agentName, agentID, br
 }
 
 // TestAttachViaHub_PointGETForbidden_ListShowsAttachFalse_RefusesPreDial
-// covers the primary case from the live incident: the point-GET returns
+// covers a hub-member principal: the point-GET returns
 // 403, the LIST fallback succeeds and shows the broker with attach=false,
 // and attachViaHub must refuse before ever dialing the PTY WebSocket.
 func TestAttachViaHub_PointGETForbidden_ListShowsAttachFalse_RefusesPreDial(t *testing.T) {
 	clearAppTokenSources(t)
+	attachTransportFakeAllowsDial(t)
+
 	const (
 		projectID = "proj-gate-1"
 		agentName = "gate-agent-1"
@@ -291,6 +295,8 @@ func TestAttachViaHub_PointGETForbidden_ListShowsAttachFalse_RefusesPreDial(t *t
 // raw 403 server text.
 func TestAttachViaHub_PointGETForbidden_ListAlsoFails_RefusesWithFixedMessage(t *testing.T) {
 	clearAppTokenSources(t)
+	attachTransportFakeAllowsDial(t)
+
 	const (
 		projectID = "proj-gate-2"
 		agentName = "gate-agent-2"
@@ -317,11 +323,7 @@ func TestAttachViaHub_PointGETForbidden_ListAlsoFails_RefusesWithFixedMessage(t 
 // upgrades) — that failure mode is what proves the gate was cleared.
 func TestAttachViaHub_PointGETForbidden_ListShowsAttachTrue_PassesGate(t *testing.T) {
 	clearAppTokenSources(t)
-	orig := resolveAttachTransportFn
-	resolveAttachTransportFn = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
-		return &fakeTransportSource{token: "fake-oidc-token", expiry: time.Now().Add(time.Hour)}, transportauth.HeaderProxyAuthorization, nil
-	}
-	defer func() { resolveAttachTransportFn = orig }()
+	attachTransportFakeAllowsDial(t)
 
 	const (
 		projectID = "proj-gate-3"
@@ -341,6 +343,161 @@ func TestAttachViaHub_PointGETForbidden_ListShowsAttachTrue_PassesGate(t *testin
 	assert.NotContains(t, err.Error(), "attach is not supported")
 	assert.NotContains(t, err.Error(), "cannot determine whether this agent's runtime supports attach")
 	assert.True(t, *dialed, "the PTY WebSocket should have been dialed once the gate passed")
+}
+
+// attachTransportFakeAllowsDial installs the fake resolveAttachTransportFn
+// every test in this file that needs to reach the WebSocket dial stage
+// uses, and returns a func to restore the original. Without it, a broken
+// gate would fail at the token gate instead of ever reaching a dial,
+// leaving any "no dial happened" assertion true regardless of whether the
+// gate under test actually fired.
+func attachTransportFakeAllowsDial(t *testing.T) {
+	t.Helper()
+	orig := resolveAttachTransportFn
+	resolveAttachTransportFn = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
+		return &fakeTransportSource{token: "fake-oidc-token", expiry: time.Now().Add(time.Hour)}, transportauth.HeaderProxyAuthorization, nil
+	}
+	t.Cleanup(func() { resolveAttachTransportFn = orig })
+}
+
+// TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_MatchesByID pins
+// that the LIST fallback matches the target broker by ID rather than, say,
+// taking the first entry in the response: the decoy broker listed FIRST
+// shows attach=true, and the real target — listed second, matching
+// agent.RuntimeBrokerID — shows attach=false. A match that ignored ID (or
+// simply returned the first broker) would read the decoy's attach=true and
+// proceed to dial; the correct match reads the target's attach=false and
+// refuses before ever dialing.
+func TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_MatchesByID(t *testing.T) {
+	clearAppTokenSources(t)
+	attachTransportFakeAllowsDial(t)
+
+	const (
+		projectID = "proj-gate-multi-1"
+		agentName = "gate-agent-multi-1"
+		agentID   = "agent-uuid-gate-multi-1"
+		brokerID  = "gate-broker-multi-1-target"
+		decoyID   = "gate-broker-multi-1-decoy"
+	)
+	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID,
+		[]hubclient.RuntimeBroker{
+			{ID: decoyID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}},
+			{ID: brokerID, Capabilities: &hubclient.BrokerCapabilities{Attach: false}},
+		}, false)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+
+	err = attachViaHub(hubCtx, agentName)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attach is not supported")
+	assert.False(t, *dialed, "a decoy broker listed before the target must not be mistaken for it")
+}
+
+// TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_TargetTrueAmongFalseDecoys
+// is the mirror case: a decoy showing attach=false is listed first, and
+// the target — matching agent.RuntimeBrokerID — shows attach=true. A
+// match that ignored ID (or returned the first broker) would read the
+// decoy's attach=false and refuse; the correct match reads the target's
+// attach=true and proceeds to dial.
+func TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_TargetTrueAmongFalseDecoys(t *testing.T) {
+	clearAppTokenSources(t)
+	attachTransportFakeAllowsDial(t)
+
+	const (
+		projectID = "proj-gate-multi-2"
+		agentName = "gate-agent-multi-2"
+		agentID   = "agent-uuid-gate-multi-2"
+		brokerID  = "gate-broker-multi-2-target"
+		decoyID   = "gate-broker-multi-2-decoy"
+	)
+	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID,
+		[]hubclient.RuntimeBroker{
+			{ID: decoyID, Capabilities: &hubclient.BrokerCapabilities{Attach: false}},
+			{ID: brokerID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}},
+		}, false)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+
+	err = attachViaHub(hubCtx, agentName)
+	require.Error(t, err, "expected a WS dial error — the gate should have been cleared")
+	assert.NotContains(t, err.Error(), "attach is not supported")
+	assert.True(t, *dialed, "the target's own attach=true must win over a false decoy")
+}
+
+// TestFindRuntimeBrokerByIDViaList_PagesToSecondPage_SendsCursor pins that
+// the LIST fallback actually follows pagination: the target broker isn't on
+// the first page, so a second request must be made, and it must carry the
+// cursor the first page returned rather than an empty one.
+func TestFindRuntimeBrokerByIDViaList_PagesToSecondPage_SendsCursor(t *testing.T) {
+	const (
+		brokerID = "paged-broker-target"
+		decoyID  = "paged-broker-decoy"
+	)
+	var requests []url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/runtime-brokers" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		requests = append(requests, r.URL.Query())
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("cursor") == "" {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"brokers":    []hubclient.RuntimeBroker{{ID: decoyID}},
+				"nextCursor": "page-2-cursor",
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"brokers": []hubclient.RuntimeBroker{{ID: brokerID, Capabilities: &hubclient.BrokerCapabilities{Attach: false}}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
+
+	broker, err := findRuntimeBrokerByIDViaList(context.Background(), hubCtx, brokerID)
+	require.NoError(t, err)
+	require.NotNil(t, broker)
+	assert.Equal(t, brokerID, broker.ID)
+
+	require.Len(t, requests, 2, "expected exactly two LIST requests: one per page")
+	assert.Empty(t, requests[0].Get("cursor"), "the first request must not carry a cursor")
+	assert.Equal(t, "page-2-cursor", requests[1].Get("cursor"),
+		"the second request must carry the first page's nextCursor")
+}
+
+// TestFindRuntimeBrokerByIDViaList_SendsProjectID pins that the LIST
+// fallback scopes its request to hubCtx.ProjectID when known, rather than
+// listing every broker the caller can see.
+func TestFindRuntimeBrokerByIDViaList_SendsProjectID(t *testing.T) {
+	const (
+		brokerID  = "scoped-broker"
+		projectID = "proj-scoped-1"
+	)
+	var gotProjectID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotProjectID = r.URL.Query().Get("projectId")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"brokers": []hubclient.RuntimeBroker{{ID: brokerID}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+
+	_, err = findRuntimeBrokerByIDViaList(context.Background(), hubCtx, brokerID)
+	require.NoError(t, err)
+	assert.Equal(t, projectID, gotProjectID)
 }
 
 // TestResolveAttachTransport_PlainMode verifies that resolveAttachTransport returns
