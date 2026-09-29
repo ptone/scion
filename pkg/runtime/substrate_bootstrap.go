@@ -182,6 +182,10 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 		}
 	}
 
+	if credPath := findGCPTelemetryCredentialPath(cfg.ResolvedSecrets, util.GetHomeDir(cfg.UnixUsername)); credPath != "" {
+		env[telemetryGCPCredentialsEnvVar] = credPath
+	}
+
 	// SCION_RUNTIME=substrate lets sciontool disable autoexpose/port-forward
 	// (blocked by Substrate's default-deny, no-WebSocket-egress posture —
 	// substrate-runtime.md §1) so it does not spin retrying a tunnel that can
