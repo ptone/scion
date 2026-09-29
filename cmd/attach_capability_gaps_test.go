@@ -110,10 +110,10 @@ func TestAttachSupportedByBroker_Branches(t *testing.T) {
 		{
 			// The point-GET fails and this fixture serves no LIST endpoint at
 			// all (a 404 default), so the LIST fallback also can't produce
-			// the record: this is the "record unreadable" case (change 1),
-			// which refuses rather than the old fail-open default of true.
-			// The LIST-succeeds-as-fallback and LIST-also-fails cases against
-			// a live attachViaHub call are covered in attach_test.go's
+			// the record: this is the "record unreadable" case, which
+			// refuses rather than the old fail-open default of true. The
+			// LIST-succeeds-as-fallback and LIST-also-fails cases against a
+			// live attachViaHub call are covered in attach_test.go's
 			// TestAttachViaHub_PointGETForbidden_* tests.
 			name:           "hub error reading broker and list fallback unreadable refuses",
 			status:         http.StatusForbidden,
