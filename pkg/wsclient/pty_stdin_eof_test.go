@@ -30,7 +30,7 @@ import (
 // TestPTYClient_Run_NonTTYStdinEOF_SendsNormalCloseAndExitsZero is the
 // deterministic root-cause reproduction for the attempt-#2 1000 close
 // (see the attach-surfacing-fix spec, item 3): when stdin is not a
-// terminal and is already at EOF (the ii2 non-interactive CLI invocation),
+// terminal and is already at EOF (a non-interactive CLI invocation),
 // readFromStdin's io.EOF branch returns nil (not an error), so it is the
 // first — and, here, only — sender on errCh. Run() then sends a
 // CloseNormalClosure (1000) frame to the server and returns nil, all before
