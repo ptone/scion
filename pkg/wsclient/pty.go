@@ -429,6 +429,9 @@ func (c *PTYClient) readFromWebSocket() error {
 				slog.Debug("PTY websocket reader: clean close")
 				return nil
 			}
+			if websocket.IsCloseError(err, wsprotocol.ClosePTYAttachUnsupported) {
+				return fmt.Errorf("attach is not supported for this agent's runtime")
+			}
 			// Check if this is a timeout on initial data
 			if !c.receivedData {
 				if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
