@@ -65,8 +65,11 @@ endpoint, which isn't probed until that profile's first `Run` (see
 only one substrate profile). Otherwise, concretely:
 
 - **Delete/stop of a pre-restart agent by its slug returns HTTP 409**
-  (`substrate_agent_identity_unknown`) instead of the ordinary 404/202,
-  naming the atespace and how many unidentified actors it holds. This is
+  (`agent_identity_unknown`) instead of the ordinary 404/202, with a generic
+  body reporting only how many unidentified actors it holds — the
+  runtime-specific scope (for example, the atespace) is not in the body;
+  operators read it from the broker WARN log under the `runtime_scope` key.
+  This is
   intentional: a 404 is treated as an idempotent completed delete, and a 202
   as a completed stop — either would let the actor, its egress policy, and
   its worker leak with no further signal. An explicit conflict, requiring an

@@ -860,8 +860,10 @@ every runtime — not a substrate-specific mechanism:
   resolve a file-only delete for an agent whose actor is still running,
   record-less, on the cluster, deleting only the files and orphaning the
   rest. At least one record-less actor turns the answer into `HTTP 409
-  substrate_agent_identity_unknown` (naming the atespace and the count)
-  instead; none present leaves the ordinary idempotent 404/202 unchanged; the
+  agent_identity_unknown` (a generic body carrying only the count; the
+  runtime-specific scope, such as the atespace, goes to the broker WARN log
+  under `runtime_scope`) instead; none present leaves the ordinary idempotent
+  404/202 unchanged; the
   probe itself erroring is an explicit failure, never treated as either
   outcome. See `deploy/substrate/README.md`, "After a broker restart", for
   the operator-facing behavior and cleanup steps, including the fail-closed
@@ -965,7 +967,7 @@ every runtime — not a substrate-specific mechanism:
   an operator must re-identify it by other means until its record is
   restored. A project-scoped delete/stop targeting it (or any absent slug in
   the same atespace) fails closed with `409
-  substrate_agent_identity_unknown` instead of silently reporting the usual
+  agent_identity_unknown` instead of silently reporting the usual
   idempotent success — including a delete resolved only from a persisted
   project directory (file-only target), and a stop whose own container
   lookup errored rather than a genuine not-found, both of which fail
