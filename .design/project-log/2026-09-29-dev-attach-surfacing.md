@@ -52,6 +52,13 @@
   position) across a multi-broker response, that it actually follows a
   second page and carries the right cursor, and that it scopes its request
   to the known project ID.
+- Added tests pinning the LIST fallback's fail-closed exits directly: a
+  target absent from an otherwise successful, single-page LIST (with an
+  attach-capable decoy present) still refuses through `attachViaHub`
+  end to end; a repeating cursor stops the loop after exactly one retry;
+  and a cursor that keeps advancing without ever repeating stops at the
+  page cap. All three assert no broker record is produced and no dial
+  happens.
 
 ## Why
 
