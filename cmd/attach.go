@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,10 +180,10 @@ func attachUnsupportedErr(ctx context.Context, hubCtx *HubContext, agentRuntime,
 // falls back to the same broker's entry in the LIST response — a hub-member
 // principal can be denied the point-GET yet still see the broker on LIST,
 // since LIST applies its own, already-authorized, read-scope boundary
-// rather than widening anything here (see cmd/attach.go item 4 / the fork
-// issue LIST's authorization inconsistency with GET is tracked under).
+// rather than widening anything here; the GET-vs-LIST authorization
+// difference is a separate hub concern.
 //
-// The named profile's own Attach wins when the broker reported one (from
+// The named profile's own Attach wins when the broker gave one (from
 // whichever read produced the record). When it didn't — an older broker, or
 // one whose registration producer has no live runtime instance to ask for a
 // non-default profile (see buildBrokerProfiles) — this falls through to the
@@ -201,9 +202,9 @@ func attachUnsupportedErr(ctx context.Context, hubCtx *HubContext, agentRuntime,
 //
 // No broker ID on the agent record defaults to supported: there is nothing
 // to read in that case, unlike a broker that answered but had nothing to
-// say about this specific profile, and the server-side gate stays the
+// say about that particular profile, and the server-side gate stays the
 // authoritative check regardless. But a broker ID that neither the
-// point-GET nor the LIST fallback could resolve to a record is reported as
+// point-GET nor the LIST fallback could resolve to a record comes back as
 // unreadable — the caller (attachUnsupportedErr) refuses instead of
 // defaulting to supported, because there is no longer a "nothing to read"
 // excuse once a broker ID is present: something should have answered.
@@ -213,8 +214,13 @@ func attachSupportedByBroker(ctx context.Context, hubCtx *HubContext, runtimeBro
 	}
 	broker, err := hubCtx.Client.RuntimeBrokers().Get(ctx, runtimeBrokerID)
 	if err != nil || broker == nil {
+		// The point-GET error itself never reaches the user-facing message
+		// (attachUnsupportedErr's fixed wording carries no raw server text);
+		// log it at debug level only, for diagnosability.
+		slog.Debug("attach gate: runtime broker point-GET unreadable, falling back to LIST", "broker_id", runtimeBrokerID, "error", err)
 		broker, err = findRuntimeBrokerByIDViaList(ctx, hubCtx, runtimeBrokerID)
 		if err != nil || broker == nil {
+			slog.Debug("attach gate: runtime broker unreadable via LIST fallback too", "broker_id", runtimeBrokerID, "error", err)
 			return false, true
 		}
 	}
@@ -243,15 +249,23 @@ func attachSupportedFromBrokerRecord(broker *hubclient.RuntimeBroker, profile st
 	return true
 }
 
+// findRuntimeBrokerListMaxPages bounds how many pages
+// findRuntimeBrokerByIDViaList will follow before giving up, so a
+// misbehaving Hub response (a cursor that never ends, or cycles back on
+// itself) can't turn one CLI attach call into an unbounded loop.
+const findRuntimeBrokerListMaxPages = 50
+
 // findRuntimeBrokerByIDViaList looks up runtimeBrokerID by paging through
 // RuntimeBrokers().List — the fallback attachSupportedByBroker uses when the
 // point-GET can't be read — scoped to hubCtx.ProjectID when known. It
-// returns (nil, nil) when the list pages are exhausted without a match,
-// which the caller treats the same as an error: either way, the record
-// could not be found.
+// returns (nil, nil) when the list pages are exhausted without a match, the
+// page cap is hit, or a cursor repeats; the caller treats all three the
+// same as an error: either way, the record could not be found, so it stays
+// fail-closed rather than guessing.
 func findRuntimeBrokerByIDViaList(ctx context.Context, hubCtx *HubContext, runtimeBrokerID string) (*hubclient.RuntimeBroker, error) {
 	opts := &hubclient.ListBrokersOptions{ProjectID: hubCtx.ProjectID}
-	for {
+	seenCursors := map[string]bool{}
+	for page := 0; page < findRuntimeBrokerListMaxPages; page++ {
 		resp, err := hubCtx.Client.RuntimeBrokers().List(ctx, opts)
 		if err != nil {
 			return nil, err
@@ -264,8 +278,13 @@ func findRuntimeBrokerByIDViaList(ctx context.Context, hubCtx *HubContext, runti
 		if !resp.Page.HasMore() {
 			return nil, nil
 		}
+		if seenCursors[resp.Page.NextCursor] {
+			return nil, nil
+		}
+		seenCursors[resp.Page.NextCursor] = true
 		opts.Page.Cursor = resp.Page.NextCursor
 	}
+	return nil, nil
 }
 
 // agentProfileName returns the settings profile an agent was created with,
