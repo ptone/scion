@@ -155,8 +155,12 @@ func TestAttachSupportedByBroker_ProfileAttachFalse_ReturnsFalse(t *testing.T) {
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
 
-	if attachSupportedByBroker(context.Background(), hubCtx, brokerID, "substrate-prof") {
-		t.Error("attachSupportedByBroker = true, want false for a profile with Attach=false")
+	supported, unreadable := attachSupportedByBroker(context.Background(), hubCtx, brokerID, "substrate-prof")
+	if supported {
+		t.Error("attachSupportedByBroker supported = true, want false for a profile with Attach=false")
+	}
+	if unreadable {
+		t.Error("attachSupportedByBroker unreadable = true, want false: the record was read successfully")
 	}
 }
 
@@ -183,8 +187,12 @@ func TestAttachSupportedByBroker_ProfileFieldAbsent_ReturnsTrue(t *testing.T) {
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
 
-	if !attachSupportedByBroker(context.Background(), hubCtx, brokerID, "old-prof") {
-		t.Error(`attachSupportedByBroker = false, want true for a profile whose JSON omits "attach" entirely`)
+	supported, unreadable := attachSupportedByBroker(context.Background(), hubCtx, brokerID, "old-prof")
+	if !supported {
+		t.Error(`attachSupportedByBroker supported = false, want true for a profile whose JSON omits "attach" entirely`)
+	}
+	if unreadable {
+		t.Error("attachSupportedByBroker unreadable = true, want false: the record was read successfully")
 	}
 }
 
@@ -193,9 +201,146 @@ func TestAttachSupportedByBroker_ProfileFieldAbsent_ReturnsTrue(t *testing.T) {
 // hubCtx.Client is nil here, so calling it would panic.
 func TestAttachSupportedByBroker_NoBrokerID_ReturnsTrueWithoutCallingHub(t *testing.T) {
 	hubCtx := &HubContext{Client: nil}
-	if !attachSupportedByBroker(context.Background(), hubCtx, "", "any-profile") {
-		t.Error("attachSupportedByBroker = false, want true when runtimeBrokerID is empty")
+	supported, unreadable := attachSupportedByBroker(context.Background(), hubCtx, "", "any-profile")
+	if !supported {
+		t.Error("attachSupportedByBroker supported = false, want true when runtimeBrokerID is empty")
 	}
+	if unreadable {
+		t.Error("attachSupportedByBroker unreadable = true, want false when there is nothing to read")
+	}
+}
+
+// newAttachGateFallbackServer builds a mock Hub server for exercising the
+// CLI's point-GET-then-LIST-fallback attach gate end to end through
+// attachViaHub: the agent GET matches newAttachMockHubServer's shape, the
+// runtime-broker point-GET always answers 403 (the hub-member authz gap
+// noted in the spec — LIST is deliberately left with its own, wider read
+// scope rather than this test widening anything), and the LIST response is
+// either listBrokers or a 403 when listFails is set. The returned *bool
+// flips true if the PTY WebSocket path is ever requested, so callers can
+// prove attachViaHub refused before dialing.
+func newAttachGateFallbackServer(t *testing.T, projectID, agentName, agentID, brokerID string, listBrokers []hubclient.RuntimeBroker, listFails bool) (*httptest.Server, *bool) {
+	t.Helper()
+	dialed := false
+	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
+	brokerPath := "/api/v1/runtime-brokers/" + brokerID
+	ptyPath := "/api/v1/agents/" + agentID + "/pty"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/healthz":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodGet && r.URL.Path == agentPath:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{
+				ID:              agentID,
+				Name:            agentName,
+				Phase:           "running",
+				RuntimeBrokerID: brokerID,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == brokerPath:
+			w.WriteHeader(http.StatusForbidden)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime-brokers":
+			if listFails {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"brokers": listBrokers})
+		case r.URL.Path == ptyPath:
+			dialed = true
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &dialed
+}
+
+// TestAttachViaHub_PointGETForbidden_ListShowsAttachFalse_RefusesPreDial
+// covers the primary case from the live incident: the point-GET returns
+// 403, the LIST fallback succeeds and shows the broker with attach=false,
+// and attachViaHub must refuse before ever dialing the PTY WebSocket.
+func TestAttachViaHub_PointGETForbidden_ListShowsAttachFalse_RefusesPreDial(t *testing.T) {
+	clearAppTokenSources(t)
+	const (
+		projectID = "proj-gate-1"
+		agentName = "gate-agent-1"
+		agentID   = "agent-uuid-gate-1"
+		brokerID  = "gate-broker-1"
+	)
+	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID,
+		[]hubclient.RuntimeBroker{{ID: brokerID, Capabilities: &hubclient.BrokerCapabilities{Attach: false}}}, false)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+
+	err = attachViaHub(hubCtx, agentName)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attach is not supported")
+	assert.False(t, *dialed, "the PTY WebSocket must never be dialed when the gate refuses")
+}
+
+// TestAttachViaHub_PointGETForbidden_ListAlsoFails_RefusesWithFixedMessage
+// covers the "record unreadable" case: neither the point-GET nor the LIST
+// fallback can produce the broker record, so attachViaHub must refuse with
+// the fixed message and never dial — and that message must not leak the
+// raw 403 server text.
+func TestAttachViaHub_PointGETForbidden_ListAlsoFails_RefusesWithFixedMessage(t *testing.T) {
+	clearAppTokenSources(t)
+	const (
+		projectID = "proj-gate-2"
+		agentName = "gate-agent-2"
+		agentID   = "agent-uuid-gate-2"
+		brokerID  = "gate-broker-2"
+	)
+	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID, nil, true)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+
+	err = attachViaHub(hubCtx, agentName)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot determine whether this agent's runtime supports attach")
+	assert.NotContains(t, err.Error(), "403", "the fixed message must not leak raw server error text")
+	assert.False(t, *dialed, "the PTY WebSocket must never be dialed when the broker record is unreadable")
+}
+
+// TestAttachViaHub_PointGETForbidden_ListShowsAttachTrue_PassesGate covers
+// the case where the LIST fallback shows the broker as attach-capable:
+// attachViaHub must proceed past the gate and reach the WebSocket dial
+// stage (which then fails because the mock server doesn't handle WebSocket
+// upgrades) — that failure mode is what proves the gate was cleared.
+func TestAttachViaHub_PointGETForbidden_ListShowsAttachTrue_PassesGate(t *testing.T) {
+	clearAppTokenSources(t)
+	orig := resolveAttachTransportFn
+	resolveAttachTransportFn = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
+		return &fakeTransportSource{token: "fake-oidc-token", expiry: time.Now().Add(time.Hour)}, transportauth.HeaderProxyAuthorization, nil
+	}
+	defer func() { resolveAttachTransportFn = orig }()
+
+	const (
+		projectID = "proj-gate-3"
+		agentName = "gate-agent-3"
+		agentID   = "agent-uuid-gate-3"
+		brokerID  = "gate-broker-3"
+	)
+	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID,
+		[]hubclient.RuntimeBroker{{ID: brokerID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}}}, false)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+
+	err = attachViaHub(hubCtx, agentName)
+	require.Error(t, err, "expected a WS dial error — the gate should have been cleared")
+	assert.NotContains(t, err.Error(), "attach is not supported")
+	assert.NotContains(t, err.Error(), "cannot determine whether this agent's runtime supports attach")
+	assert.True(t, *dialed, "the PTY WebSocket should have been dialed once the gate passed")
 }
 
 // TestResolveAttachTransport_PlainMode verifies that resolveAttachTransport returns

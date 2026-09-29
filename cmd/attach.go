@@ -151,7 +151,16 @@ func attachUnsupportedErr(ctx context.Context, hubCtx *HubContext, agentRuntime,
 	if strings.HasPrefix(agentRuntime, "managed:") {
 		return fmt.Errorf("attach is not supported for managed agents — use scion message and scion look")
 	}
-	if !attachSupportedByBroker(ctx, hubCtx, runtimeBrokerID, profile) {
+	supported, unreadable := attachSupportedByBroker(ctx, hubCtx, runtimeBrokerID, profile)
+	if unreadable {
+		// The broker record could not be read at all (point-GET and the LIST
+		// fallback both failed): this is not "the broker said no", it is "we
+		// could not find out", and defaulting to supported here would be
+		// exactly the fail-open this replaces. No raw server error text goes
+		// into this message.
+		return fmt.Errorf("cannot determine whether this agent's runtime supports attach (broker record unavailable)")
+	}
+	if !supported {
 		if agentRuntime == "" {
 			return fmt.Errorf("attach is not supported for this agent's runtime")
 		}
@@ -166,13 +175,19 @@ func attachUnsupportedErr(ctx context.Context, hubCtx *HubContext, agentRuntime,
 // mirrored into store.RuntimeBroker at registration and served back by
 // hubclient.RuntimeBrokers().Get — the same broker/provider read other CLI
 // commands already use (e.g. printAutoResolvedBroker), not a new endpoint.
+// When the point-GET can't be read (a 403, a 404, or anything else), it
+// falls back to the same broker's entry in the LIST response — a hub-member
+// principal can be denied the point-GET yet still see the broker on LIST,
+// since LIST applies its own, already-authorized, read-scope boundary
+// rather than widening anything here (see cmd/attach.go item 4 / the fork
+// issue LIST's authorization inconsistency with GET is tracked under).
 //
-// The named profile's own Attach wins when the broker reported one. When it
-// didn't — an older broker, or one whose registration producer has no live
-// runtime instance to ask for a non-default profile (see
-// buildBrokerProfiles) — this falls through to the broker-wide
-// Capabilities.Attach, and THAT answer is final: true (or the whole
-// Capabilities record being absent, an older broker's shape) means
+// The named profile's own Attach wins when the broker reported one (from
+// whichever read produced the record). When it didn't — an older broker, or
+// one whose registration producer has no live runtime instance to ask for a
+// non-default profile (see buildBrokerProfiles) — this falls through to the
+// broker-wide Capabilities.Attach, and THAT answer is final: true (or the
+// whole Capabilities record being absent, an older broker's shape) means
 // supported, but an explicit broker-wide false means not, even though the
 // specific profile itself said nothing. A profile carrying no signal is not
 // itself information; the broker saying "my default runtime doesn't
@@ -184,18 +199,33 @@ func attachUnsupportedErr(ctx context.Context, hubCtx *HubContext, agentRuntime,
 // pkg/runtimebroker's resolver and its own equivalent unknown-profile
 // cases), rather than silently repeating the fail-open this replaces.
 //
-// No broker ID on the agent record, or a broker record the Hub couldn't
-// return at all, still defaults to supported — there is nothing to read in
-// that case, unlike a broker that answered but had nothing to say about
-// this specific profile.
-func attachSupportedByBroker(ctx context.Context, hubCtx *HubContext, runtimeBrokerID, profile string) bool {
+// No broker ID on the agent record defaults to supported: there is nothing
+// to read in that case, unlike a broker that answered but had nothing to
+// say about this specific profile, and the server-side gate stays the
+// authoritative check regardless. But a broker ID that neither the
+// point-GET nor the LIST fallback could resolve to a record is reported as
+// unreadable — the caller (attachUnsupportedErr) refuses instead of
+// defaulting to supported, because there is no longer a "nothing to read"
+// excuse once a broker ID is present: something should have answered.
+func attachSupportedByBroker(ctx context.Context, hubCtx *HubContext, runtimeBrokerID, profile string) (supported bool, unreadable bool) {
 	if hubCtx == nil || hubCtx.Client == nil || runtimeBrokerID == "" {
-		return true
+		return true, false
 	}
 	broker, err := hubCtx.Client.RuntimeBrokers().Get(ctx, runtimeBrokerID)
 	if err != nil || broker == nil {
-		return true
+		broker, err = findRuntimeBrokerByIDViaList(ctx, hubCtx, runtimeBrokerID)
+		if err != nil || broker == nil {
+			return false, true
+		}
 	}
+	return attachSupportedFromBrokerRecord(broker, profile), false
+}
+
+// attachSupportedFromBrokerRecord applies the profile-then-broker-wide
+// attach ruling documented on attachSupportedByBroker to a broker record
+// that was successfully read, regardless of whether it came from the
+// point-GET or the LIST fallback.
+func attachSupportedFromBrokerRecord(broker *hubclient.RuntimeBroker, profile string) bool {
 	if profile != "" {
 		for _, p := range broker.Profiles {
 			if p.Name != profile {
@@ -211,6 +241,31 @@ func attachSupportedByBroker(ctx context.Context, hubCtx *HubContext, runtimeBro
 		return broker.Capabilities.Attach
 	}
 	return true
+}
+
+// findRuntimeBrokerByIDViaList looks up runtimeBrokerID by paging through
+// RuntimeBrokers().List — the fallback attachSupportedByBroker uses when the
+// point-GET can't be read — scoped to hubCtx.ProjectID when known. It
+// returns (nil, nil) when the list pages are exhausted without a match,
+// which the caller treats the same as an error: either way, the record
+// could not be found.
+func findRuntimeBrokerByIDViaList(ctx context.Context, hubCtx *HubContext, runtimeBrokerID string) (*hubclient.RuntimeBroker, error) {
+	opts := &hubclient.ListBrokersOptions{ProjectID: hubCtx.ProjectID}
+	for {
+		resp, err := hubCtx.Client.RuntimeBrokers().List(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		for i := range resp.Brokers {
+			if resp.Brokers[i].ID == runtimeBrokerID {
+				return &resp.Brokers[i], nil
+			}
+		}
+		if !resp.Page.HasMore() {
+			return nil, nil
+		}
+		opts.Page.Cursor = resp.Page.NextCursor
+	}
 }
 
 // agentProfileName returns the settings profile an agent was created with,
