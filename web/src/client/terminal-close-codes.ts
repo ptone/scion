@@ -39,14 +39,14 @@ export const PTY_CLOSE = {
   TRY_AGAIN_LATER: 1013,
   /** Credentials no longer valid. Reserved. Terminal. */
   AUTH_REQUIRED: 4401,
-  /** The matched runtime has no exec/attach/TTY primitive at all. Terminal. */
-  ATTACH_UNSUPPORTED: 4501,
   /** Attach permission revoked. Reserved. Terminal. */
   FORBIDDEN: 4403,
   /** Broker cannot find the agent or its container. Terminal. */
   AGENT_NOT_FOUND: 4404,
   /** tmux session no longer exists. Terminal. */
   SESSION_GONE: 4410,
+  /** The matched runtime has no exec/attach/TTY primitive at all. Terminal. */
+  ATTACH_UNSUPPORTED: 4501,
   /** The hop behind the Hub is temporarily unavailable. Retry. */
   UPSTREAM_UNAVAILABLE: 4503,
   /** Broker produced no first output in time. Reserved. Retry. */
@@ -62,7 +62,8 @@ export function classifyPtyClose(code: number): PtyCloseDisposition {
     code === PTY_CLOSE.AUTH_REQUIRED ||
     code === PTY_CLOSE.FORBIDDEN ||
     code === PTY_CLOSE.AGENT_NOT_FOUND ||
-    code === PTY_CLOSE.SESSION_GONE
+    code === PTY_CLOSE.SESSION_GONE ||
+    code === PTY_CLOSE.ATTACH_UNSUPPORTED
   )
     return 'terminal';
   if (code === PTY_CLOSE.UPSTREAM_UNAVAILABLE || code === PTY_CLOSE.UPSTREAM_TIMEOUT)

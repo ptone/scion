@@ -65,6 +65,12 @@ const (
 	// ClosePTYSessionGone (4410): the tmux session no longer exists (agent
 	// exited, container stopped or removed). Terminal.
 	ClosePTYSessionGone = 4410
+	// ClosePTYAttachUnsupported (4501): the matched runtime has no
+	// exec/attach/TTY primitive at all. Distinct from ClosePTYUpstreamUnavailable
+	// so a definitive "this runtime will never support attach" is never
+	// confused with a transient readiness failure that is worth retrying.
+	// Terminal.
+	ClosePTYAttachUnsupported = 4501
 	// ClosePTYUpstreamUnavailable (4503): the hop behind this one is
 	// temporarily gone (Hub <-> broker control channel dropped, stream open
 	// failed, tmux session not ready yet). Retry.
@@ -72,12 +78,6 @@ const (
 	// ClosePTYUpstreamTimeout (4504): the broker did not produce first output
 	// within the open deadline. Reserved. Retry.
 	ClosePTYUpstreamTimeout = 4504
-	// ClosePTYAttachUnsupported (4501): the matched runtime has no
-	// exec/attach/TTY primitive at all. Distinct from ClosePTYUpstreamUnavailable
-	// so a definitive "this runtime will never support attach" is never
-	// confused with a transient readiness failure that is worth retrying.
-	// Terminal.
-	ClosePTYAttachUnsupported = 4501
 )
 
 // Close reasons emitted by the Hub.
@@ -126,8 +126,8 @@ const (
 )
 
 // Close reason emitted by the broker's attach-support pre-check, before any
-// runtime-specific work starts (both the control-channel gate and the
-// direct-connect pre-upgrade path apply this same policy).
+// work against the matched runtime starts (both the control-channel gate
+// and the direct-connect pre-upgrade path apply this same policy).
 const (
 	// CloseReasonAttachUnsupported (4501): the matched runtime has no
 	// exec/attach/TTY primitive at all.
@@ -173,7 +173,8 @@ func ClassifyPTYClose(code int) CloseDisposition {
 	case code == ClosePTYNormal:
 		return DispositionDetached
 	case code == ClosePTYAuthRequired, code == ClosePTYForbidden,
-		code == ClosePTYAgentNotFound, code == ClosePTYSessionGone:
+		code == ClosePTYAgentNotFound, code == ClosePTYSessionGone,
+		code == ClosePTYAttachUnsupported:
 		return DispositionTerminal
 	case code == ClosePTYUpstreamUnavailable, code == ClosePTYUpstreamTimeout:
 		return DispositionRetry
