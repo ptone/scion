@@ -91,3 +91,37 @@ func TestBuildBootstrapEnv_GCPTelemetryCredentials_AbsentWhenNoSecret(t *testing
 		t.Errorf("env[%q] = %q, want the key absent entirely", telemetryGCPCredentialsEnvVar, v)
 	}
 }
+
+// TestBuildBootstrapEnv_GCPTelemetryCredentials_ResolvedPathWinsOverCallerEnv
+// proves the resolved secret path takes precedence over any conflicting
+// SCION_OTEL_GCP_CREDENTIALS value supplied via cfg.Env, ResolvedAuth.EnvVars
+// or an environment-type secret — matching the Docker/Podman/Apple
+// (prepareContainerSecretEnv appends last) and Kubernetes (appended after the
+// user env) runtimes, where the resolved path is the last, winning, entry.
+func TestBuildBootstrapEnv_GCPTelemetryCredentials_ResolvedPathWinsOverCallerEnv(t *testing.T) {
+	const stale = "/stale/host/path/should-be-overridden.json"
+	fileSecret := api.ResolvedSecret{Name: "scion-telemetry-gcp-credentials", Type: "file", Target: "~/.config/gcp/sa.json", Value: "key-data"}
+
+	tests := []struct {
+		name string
+		cfg  RunConfig
+	}{
+		{"cfg.Env", RunConfig{Env: []string{telemetryGCPCredentialsEnvVar + "=" + stale}}},
+		{"ResolvedAuth.EnvVars", RunConfig{ResolvedAuth: &api.ResolvedAuth{EnvVars: map[string]string{telemetryGCPCredentialsEnvVar: stale}}}},
+		{"environment secret", RunConfig{ResolvedSecrets: []api.ResolvedSecret{{Name: "user-otel", Type: "environment", Target: telemetryGCPCredentialsEnvVar, Value: stale}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			cfg.UnixUsername = "scion"
+			cfg.ResolvedSecrets = append(cfg.ResolvedSecrets, fileSecret)
+			want := util.GetHomeDir(cfg.UnixUsername) + "/.config/gcp/sa.json"
+
+			env := buildBootstrapEnv(cfg)
+
+			if got := env[telemetryGCPCredentialsEnvVar]; got != want {
+				t.Errorf("env[%q] = %q, want resolved path %q to override the %s value", telemetryGCPCredentialsEnvVar, got, want, tt.name)
+			}
+		})
+	}
+}
