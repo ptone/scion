@@ -29,13 +29,29 @@
   actually routed to via OpenStream) as its own field, distinct from the
   process-wide `broker_id` attr a combo-mode server attaches to every log
   line (which names the locally co-located broker instead).
-- Investigated the second-attempt 1000 close reported live: the CLI's own
+- Looked into a 1000 close observed on a live run: the CLI's own
   `readFromStdin` treats a non-TTY stdin already at EOF as a clean detach
   (nil, not an error), so it sends its own normal-closure frame and exits 0
   before any broker rejection can arrive. This is the client genuinely
   closing, not a hub defect, so no hub change follows from it. Added a
   deterministic reproduction in `pkg/wsclient` and left the CLI
   refuse-when-stdin-not-a-TTY idea as a proposal, not an implementation.
+
+## Hardening
+
+- `pkg/wsclient/pty.go`: `PTYClient` reads stdin through an injected field,
+  captured once at construction, instead of the shared `os.Stdin` package
+  variable — a leaked reader goroutine touching that global under test
+  raced a later reassignment.
+- `cmd/attach.go`: the LIST fallback's pagination now has a page cap and
+  stops on a repeated cursor, so a misbehaving Hub response can't turn one
+  attach call into an unbounded loop; either case stays fail-closed. The
+  point-GET and LIST errors it discards from the user-facing message are
+  now debug-logged for diagnosability.
+- Added tests pinning that the LIST fallback matches by broker ID (not
+  position) across a multi-broker response, that it actually follows a
+  second page and carries the right cursor, and that it scopes its request
+  to the known project ID.
 
 ## Why
 
@@ -52,6 +68,6 @@ signal instead of three ways of looking like "it just didn't work".
 Env-scrubbed `go build ./...`, `go vet ./...`, and `gofmt -l` are clean.
 `go test -count=1` is green on `cmd`, `pkg/runtimebroker`, `pkg/hub` (and
 its subpackages), `pkg/wsprotocol`, and `pkg/wsclient`. Scoped
-`golangci-lint run --new-from-rev` reports 0 issues. Full detail, including
-the root-cause writeup for the 1000-close investigation, is in
-`attach-surfacing-report.md`.
+`golangci-lint run --new-from-rev` shows 0 issues. The full root-cause
+writeup for the 1000-close investigation lives with the durable delivery
+artifacts outside this checkout, not in this file.
