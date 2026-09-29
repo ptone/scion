@@ -39,6 +39,8 @@ export const PTY_CLOSE = {
   TRY_AGAIN_LATER: 1013,
   /** Credentials no longer valid. Reserved. Terminal. */
   AUTH_REQUIRED: 4401,
+  /** The matched runtime has no exec/attach/TTY primitive at all. Terminal. */
+  ATTACH_UNSUPPORTED: 4501,
   /** Attach permission revoked. Reserved. Terminal. */
   FORBIDDEN: 4403,
   /** Broker cannot find the agent or its container. Terminal. */

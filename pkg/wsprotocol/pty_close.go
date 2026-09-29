@@ -72,6 +72,12 @@ const (
 	// ClosePTYUpstreamTimeout (4504): the broker did not produce first output
 	// within the open deadline. Reserved. Retry.
 	ClosePTYUpstreamTimeout = 4504
+	// ClosePTYAttachUnsupported (4501): the matched runtime has no
+	// exec/attach/TTY primitive at all. Distinct from ClosePTYUpstreamUnavailable
+	// so a definitive "this runtime will never support attach" is never
+	// confused with a transient readiness failure that is worth retrying.
+	// Terminal.
+	ClosePTYAttachUnsupported = 4501
 )
 
 // Close reasons emitted by the Hub.
@@ -117,6 +123,15 @@ const (
 	// failed (the container runtime could not be listed) at stream-open
 	// time. Retry.
 	CloseReasonRuntimeUnavailable = "runtime_unavailable"
+)
+
+// Close reason emitted by the broker's attach-support pre-check, before any
+// runtime-specific work starts (both the control-channel gate and the
+// direct-connect pre-upgrade path apply this same policy).
+const (
+	// CloseReasonAttachUnsupported (4501): the matched runtime has no
+	// exec/attach/TTY primitive at all.
+	CloseReasonAttachUnsupported = "attach_unsupported"
 )
 
 // MaxCloseReasonBytes is the largest reason RFC 6455 allows in a close frame
