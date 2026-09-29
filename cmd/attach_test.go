@@ -347,10 +347,10 @@ func TestAttachViaHub_PointGETForbidden_ListShowsAttachTrue_PassesGate(t *testin
 
 // attachTransportFakeAllowsDial installs the fake resolveAttachTransportFn
 // every test in this file that needs to reach the WebSocket dial stage
-// uses, and returns a func to restore the original. Without it, a broken
-// gate would fail at the token gate instead of ever reaching a dial,
-// leaving any "no dial happened" assertion true regardless of whether the
-// gate under test actually fired.
+// uses, restoring the original via t.Cleanup. Without it, a broken gate
+// would fail at the token gate instead of ever reaching a dial, leaving any
+// "no dial happened" assertion true regardless of whether the gate under
+// test actually fired.
 func attachTransportFakeAllowsDial(t *testing.T) {
 	t.Helper()
 	orig := resolveAttachTransportFn
@@ -362,27 +362,29 @@ func attachTransportFakeAllowsDial(t *testing.T) {
 
 // TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_MatchesByID pins
 // that the LIST fallback matches the target broker by ID rather than, say,
-// taking the first entry in the response: the decoy broker listed FIRST
-// shows attach=true, and the real target — listed second, matching
-// agent.RuntimeBrokerID — shows attach=false. A match that ignored ID (or
-// simply returned the first broker) would read the decoy's attach=true and
-// proceed to dial; the correct match reads the target's attach=false and
+// taking the first or last entry in the response: the target sits in the
+// MIDDLE of the list, with a decoy showing attach=true on each side. A
+// match that ignored ID and returned the first broker, or one that
+// returned the last, would both read a decoy's attach=true and proceed to
+// dial; only the correct by-ID match reads the target's attach=false and
 // refuses before ever dialing.
 func TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_MatchesByID(t *testing.T) {
 	clearAppTokenSources(t)
 	attachTransportFakeAllowsDial(t)
 
 	const (
-		projectID = "proj-gate-multi-1"
-		agentName = "gate-agent-multi-1"
-		agentID   = "agent-uuid-gate-multi-1"
-		brokerID  = "gate-broker-multi-1-target"
-		decoyID   = "gate-broker-multi-1-decoy"
+		projectID     = "proj-gate-multi-1"
+		agentName     = "gate-agent-multi-1"
+		agentID       = "agent-uuid-gate-multi-1"
+		brokerID      = "gate-broker-multi-1-target"
+		decoyBeforeID = "gate-broker-multi-1-decoy-before"
+		decoyAfterID  = "gate-broker-multi-1-decoy-after"
 	)
 	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID,
 		[]hubclient.RuntimeBroker{
-			{ID: decoyID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}},
+			{ID: decoyBeforeID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}},
 			{ID: brokerID, Capabilities: &hubclient.BrokerCapabilities{Attach: false}},
+			{ID: decoyAfterID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}},
 		}, false)
 
 	client, err := hubclient.New(srv.URL)
@@ -392,7 +394,7 @@ func TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_MatchesByID(t *te
 	err = attachViaHub(hubCtx, agentName)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "attach is not supported")
-	assert.False(t, *dialed, "a decoy broker listed before the target must not be mistaken for it")
+	assert.False(t, *dialed, "a decoy broker listed before or after the target must not be mistaken for it")
 }
 
 // TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_TargetTrueAmongFalseDecoys
@@ -426,6 +428,45 @@ func TestAttachViaHub_PointGETForbidden_ListHasMultipleBrokers_TargetTrueAmongFa
 	require.Error(t, err, "expected a WS dial error — the gate should have been cleared")
 	assert.NotContains(t, err.Error(), "attach is not supported")
 	assert.True(t, *dialed, "the target's own attach=true must win over a false decoy")
+}
+
+// TestAttachViaHub_PointGETForbidden_ListSucceedsWithoutTarget_RefusesWithFixedMessage
+// covers a successful LIST response that simply never includes the target
+// broker at all — a decoy with attach=true is present, so a match that
+// ignored ID entirely (or matched the first/only entry) would read it as
+// supported and proceed to dial. attachViaHub must still refuse before
+// dialing, with the same fixed "record unavailable" message a wholly
+// failed LIST produces, not the named-runtime message a broker record
+// that was actually read would produce. Reaching this path through
+// attachViaHub (rather than calling findRuntimeBrokerByIDViaList directly)
+// is what pins the caller's own broker == nil check in
+// attachSupportedByBroker: without it, attachSupportedFromBrokerRecord
+// would be called with a nil broker and panic.
+func TestAttachViaHub_PointGETForbidden_ListSucceedsWithoutTarget_RefusesWithFixedMessage(t *testing.T) {
+	clearAppTokenSources(t)
+	attachTransportFakeAllowsDial(t)
+
+	const (
+		projectID = "proj-gate-absent"
+		agentName = "gate-agent-absent"
+		agentID   = "agent-uuid-gate-absent"
+		brokerID  = "gate-broker-absent-target"
+		decoyID   = "gate-broker-absent-decoy"
+	)
+	srv, dialed := newAttachGateFallbackServer(t, projectID, agentName, agentID, brokerID,
+		[]hubclient.RuntimeBroker{
+			{ID: decoyID, Capabilities: &hubclient.BrokerCapabilities{Attach: true}},
+		}, false)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+
+	err = attachViaHub(hubCtx, agentName)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot determine whether this agent's runtime supports attach")
+	assert.NotContains(t, err.Error(), "403", "the fixed message must not leak raw server error text")
+	assert.False(t, *dialed, "the PTY WebSocket must never be dialed when the target is absent from a successful LIST")
 }
 
 // TestFindRuntimeBrokerByIDViaList_PagesToSecondPage_SendsCursor pins that
@@ -498,6 +539,64 @@ func TestFindRuntimeBrokerByIDViaList_SendsProjectID(t *testing.T) {
 	_, err = findRuntimeBrokerByIDViaList(context.Background(), hubCtx, brokerID)
 	require.NoError(t, err)
 	assert.Equal(t, projectID, gotProjectID)
+}
+
+// TestFindRuntimeBrokerByIDViaList_RepeatedCursor_StopsAfterTwoRequests pins
+// the repeated-cursor guard directly: every page carries the same
+// nextCursor and never contains the target. The first request has no
+// cursor at all; the second carries the repeated cursor and is where the
+// guard must fire, stopping the loop rather than requesting a third page
+// forever.
+func TestFindRuntimeBrokerByIDViaList_RepeatedCursor_StopsAfterTwoRequests(t *testing.T) {
+	const brokerID = "cursor-loop-target"
+	var requestCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"brokers":    []hubclient.RuntimeBroker{{ID: "cursor-loop-decoy"}},
+			"nextCursor": "same",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
+
+	broker, err := findRuntimeBrokerByIDViaList(context.Background(), hubCtx, brokerID)
+	require.NoError(t, err)
+	assert.Nil(t, broker)
+	assert.Equal(t, 2, requestCount, "must stop once a cursor repeats rather than requesting forever")
+}
+
+// TestFindRuntimeBrokerByIDViaList_FreshCursorEveryPage_StopsAtPageCap pins
+// the page-count cap directly: the server hands out a distinct, never-seen
+// cursor on every page (so the repeated-cursor guard never fires) and never
+// contains the target. The loop must still stop, at exactly
+// findRuntimeBrokerListMaxPages requests, rather than following the
+// endlessly-advancing cursor forever.
+func TestFindRuntimeBrokerByIDViaList_FreshCursorEveryPage_StopsAtPageCap(t *testing.T) {
+	const brokerID = "cursor-advance-target"
+	var requestCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"brokers":    []hubclient.RuntimeBroker{{ID: "cursor-advance-decoy"}},
+			"nextCursor": fmt.Sprintf("cursor-%d", requestCount),
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
+
+	broker, err := findRuntimeBrokerByIDViaList(context.Background(), hubCtx, brokerID)
+	require.NoError(t, err)
+	assert.Nil(t, broker)
+	assert.Equal(t, findRuntimeBrokerListMaxPages, requestCount, "must stop at the page cap rather than following an endlessly-advancing cursor")
 }
 
 // TestResolveAttachTransport_PlainMode verifies that resolveAttachTransport returns
