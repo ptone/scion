@@ -640,9 +640,12 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// reason above), not rejected.
 		{"quota.update", "/api/v1/admin/limits/{id}"}: {"name": "li-limit-ud-updated", "resourceType": "agent", "unit": "count", "defaultValue": 10},
 		// handleAgentExec (handlers_agents_core.go) 400s "command is
-		// required" on the generic empty body before it ever calls
-		// s.store.GetAgent — a real command lets the positive check reach
-		// GetDispatcher()'s nil check (503) instead.
+		// required" on the generic empty body before its own dispatcher
+		// check; a real command is needed for the positive check to reach
+		// GetDispatcher()'s nil check (503) instead. handleAgentAction (the
+		// caller) already resolves the agent earlier in its own authz
+		// block, so this override is about the body check, not the agent
+		// lookup.
 		{"agent.lifecycle.exec", "/api/v1/agents/{id}/exec"}:                      {"command": []interface{}{"echo", "li-inventory-probe"}},
 		{"agent.lifecycle.exec", "/api/v1/projects/{projectId}/agents/{id}/exec"}: {"command": []interface{}{"echo", "li-inventory-probe"}},
 		// submitAgentEnv (handlers_agents_core.go) 400s "env map is required"
