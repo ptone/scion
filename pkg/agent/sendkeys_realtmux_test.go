@@ -38,7 +38,7 @@ import (
 // requirements"; see minTmuxMajor/minTmuxMinor in manager.go): below that
 // floor, "tmux source-file -" cannot read a script from stdin at all, so a
 // real-tmux test would otherwise fail for a reason unrelated to what it is
-// actually checking (review round 4, finding #1).
+// actually checking.
 func requireTmuxVersionFloor(t *testing.T, tmuxPath string) {
 	t.Helper()
 	out, err := exec.Command(tmuxPath, "-V").CombinedOutput()
@@ -199,8 +199,8 @@ func TestRealTmuxSendKeys(t *testing.T) {
 	// this test depends on, failing loudly rather than silently.
 	literal(`"; kill-server; #`)
 
-	// "Up Up Enter" is the contract's own §2.3 whole-argument case (review
-	// round 4, finding #2c): as one string containing spaces, it does not
+	// "Up Up Enter" is the contract's own §2.3 whole-argument case: as one
+	// string containing spaces, it does not
 	// match any single named key exactly, so it must be typed as 11 literal
 	// characters, never interpreted as three separate keypresses.
 	literal("Up Up Enter")
@@ -218,15 +218,15 @@ func TestRealTmuxSendKeys(t *testing.T) {
 	want.WriteString("\x1b")
 
 	// "Up" is a recognized arrow-key name — checked as its actual escape
-	// sequence (review round 4, finding #2c), not just that *something* was
+	// sequence, not just that *something* was
 	// sent. In the pane's default (non-application) cursor-key mode this is
 	// the ANSI CSI sequence ESC '[' 'A', confirmed by hand against this
 	// tmux binary.
 	send("Up")
 	want.WriteString("\x1b[A")
 
-	// "Tab" is a recognized named key producing a single control byte
-	// (review round 4, finding #2c), confirmed by hand against this tmux
+	// "Tab" is a recognized named key producing a single control byte,
+	// confirmed by hand against this tmux
 	// binary to arrive as a bare horizontal tab, not the three literal
 	// characters "Tab".
 	send("Tab")
@@ -265,8 +265,8 @@ func TestRealTmuxSendKeys(t *testing.T) {
 	}
 }
 
-// TestRealTmuxSendKeys_NoSessionIsTerminalNotReady covers review round 4
-// finding #2a: against a real tmux server that has no "scion" session at
+// TestRealTmuxSendKeys_NoSessionIsTerminalNotReady covers the case where,
+// against a real tmux server that has no "scion" session at
 // all, the readiness probe's "has-session" must genuinely fail, and SendKeys
 // must report that truthfully as ErrTerminalNotReady, with no "source-file"
 // delivery call ever attempted.
@@ -342,8 +342,8 @@ func TestRealTmuxSendKeys_NoSessionIsTerminalNotReady(t *testing.T) {
 	}
 }
 
-// TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous covers review
-// round 4 finding #2b: once a real tmux readiness probe has genuinely
+// TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous covers the
+// case where, once a real tmux readiness probe has genuinely
 // succeeded, a real delivery-time failure — here, the target session is
 // removed between the probe and the delivery call — must reach SendKeys as
 // a plain error matching none of the proven-before-execution sentinels.
@@ -378,7 +378,7 @@ func TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous(t *testing.T) {
 		t.Fatalf("starting tmux server: %v", err)
 	}
 	// A second, unrelated session so the server stays alive once "scion" is
-	// killed below (review round 5, finding #4): without it, killing the
+	// killed below: without it, killing the
 	// only session also exits the server, and the delivery call would fail
 	// because no server is reachable at all, rather than because the
 	// target session is missing — a different failure than the one this
@@ -435,7 +435,7 @@ func TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous(t *testing.T) {
 		t.Fatalf("a real delivery-time failure must never be reported as one of the proven-before-execution sentinels, got: %v", err)
 	}
 	// Confirms this is genuinely the missing-target failure the correction
-	// names, not merely "no server reachable" (review round 5, finding #4):
+	// names, not merely "no server reachable":
 	// the "other" session above keeps the server alive after "scion" is
 	// killed, so tmux's own real error text for a missing session must
 	// survive into SendKeys's returned error.

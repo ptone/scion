@@ -132,7 +132,7 @@ func TestSendKeys_HTTP_OutcomeMapping(t *testing.T) {
 		{"agent_not_running", agentkeys.ErrAgentNotRunning, http.StatusConflict, agentkeys.OutcomeAgentNotRunning, ""},
 		{"terminal_not_ready", agentkeys.ErrTerminalNotReady, http.StatusConflict, agentkeys.OutcomeTerminalNotReady, ""},
 		{"unsupported_backend", agent.ErrKeysUnsupported, http.StatusUnprocessableEntity, agentkeys.OutcomeKeysUnsupported, ""},
-		// Review round 6, finding #2: this is the contract §4.3 row "error
+		// This is the contract §4.3 row "error
 		// wrapping agent.ErrKeysNotStarted -> BrokerResult{Outcome:
 		// OutcomeKeysUnavailable}, HTTP 503" — the mapping a reviewer found
 		// untested (disabling the handler's ErrKeysNotStarted case left
@@ -174,8 +174,8 @@ func TestSendKeys_HTTP_OutcomeMapping(t *testing.T) {
 	}
 }
 
-// TestSendKeys_HTTP_PostExecCtxErrorIsAmbiguousNot503 is review round 2
-// finding #1's broker-level regression test: a Manager.SendKeys failure that
+// TestSendKeys_HTTP_PostExecCtxErrorIsAmbiguousNot503 is the broker-level
+// regression test for a Manager.SendKeys failure that
 // wraps a context error (e.g. a backend's Exec observing cancellation after
 // it had genuinely started) must classify as the generic, non-BrokerResult
 // envelope (which the Hub reads as keys_outcome_unknown) — never 503
@@ -413,7 +413,7 @@ func TestSendKeys_HTTP_NoLeakOfDistinctiveSecret(t *testing.T) {
 		agentkeys.ErrAgentNotRunning,
 		agentkeys.ErrTerminalNotReady,
 		agent.ErrKeysUnsupported,
-		fmt.Errorf("%w: %v", agent.ErrKeysNotStarted, context.DeadlineExceeded), // review round 3 finding #5
+		fmt.Errorf("%w: %v", agent.ErrKeysNotStarted, context.DeadlineExceeded), // proven not started, wrapping a context error
 		errors.New("tmux: failed on " + secret),                                 // a buggy manager that leaked the secret into its error
 	}
 
@@ -438,7 +438,7 @@ func TestSendKeys_HTTP_NoLeakOfDistinctiveSecret(t *testing.T) {
 		assertNoLeak(fmt.Sprintf("outcome case %d", i), w)
 	}
 
-	// review round 3 finding #5: the ValidateKeys rejection path (and its
+	// The ValidateKeys rejection path (and its
 	// audit line) is not exercised by the loop above, since every case
 	// there reaches Manager.SendKeys — a NUL byte makes the keys value
 	// itself invalid, rejected before SendKeys is ever called.
@@ -462,7 +462,7 @@ func TestSendKeys_HTTP_NoLeakOfDistinctiveSecret(t *testing.T) {
 	})
 }
 
-// TestSendKeys_HTTP_UnsupportedBackend covers review finding #2: a manager
+// TestSendKeys_HTTP_UnsupportedBackend covers the case where a manager
 // whose SendKeys reports the backend does not support keys delivery must
 // produce 422 keys_unsupported, with the response message stating only that
 // fact.
@@ -494,7 +494,7 @@ func TestSendKeys_HTTP_UnsupportedBackend(t *testing.T) {
 	}
 }
 
-// TestSendKeys_HTTP_BodyTooLarge covers review finding #3: a request body
+// TestSendKeys_HTTP_BodyTooLarge covers the case where a request body
 // larger than agentkeys.MaxHTTPBodyBytes must be rejected by the
 // transport-level read, at 413, before Manager.SendKeys is ever called.
 func TestSendKeys_HTTP_BodyTooLarge(t *testing.T) {
@@ -570,7 +570,7 @@ func TestSendKeys_HTTP_MalformedBodyRejected(t *testing.T) {
 	}
 }
 
-// TestSendKeys_HTTP_InvalidKeysShape covers review finding #4: the AC
+// TestSendKeys_HTTP_InvalidKeysShape covers that the AC
 // "empty/NUL/oversize/invalid shapes never execute" applies at this
 // execution point, not only at the Hub. Each case must be rejected by
 // agentkeys.ValidateKeys before Manager.SendKeys is ever called, at the
@@ -629,7 +629,7 @@ func TestSendKeys_HTTP_InvalidKeysShape(t *testing.T) {
 	}
 }
 
-// TestSendKeys_HTTP_UnscopedOrMismatchedTarget covers review finding #5:
+// TestSendKeys_HTTP_UnscopedOrMismatchedTarget covers
 // #2193's "reject unscoped target fallback" and the requirement that the
 // query projectId and body project_id agree. Every case must be rejected
 // with no execution.
@@ -684,9 +684,9 @@ func TestSendKeys_HTTP_UnscopedOrMismatchedTarget(t *testing.T) {
 	}
 }
 
-// TestSendKeys_HTTP_ValidationAndScopeRejectionsAreAudited covers review
-// round 2 finding #6: ptone/scion#2184's execution order requires
-// content-free audit on denial/validation paths too, wherever actor/target
+// TestSendKeys_HTTP_ValidationAndScopeRejectionsAreAudited covers
+// ptone/scion#2184's execution-order requirement: content-free audit on
+// denial/validation paths too, wherever actor/target
 // can already be established — not only on post-admission outcomes. Both
 // the key-shape validation rejection and the scope (unscoped/mismatched
 // project) rejection must emit an audit line through logKeysOutcome.
@@ -739,8 +739,8 @@ func TestSendKeys_HTTP_ValidationAndScopeRejectionsAreAudited(t *testing.T) {
 	}
 }
 
-// TestSendKeys_HTTP_ExecuteBeforeCappedAtAdmissionWindow covers review
-// finding #6: #2193's "Cap admission at 30 seconds/request deadline". A
+// TestSendKeys_HTTP_ExecuteBeforeCappedAtAdmissionWindow covers
+// #2193's "Cap admission at 30 seconds/request deadline". A
 // far-future ExecuteBefore must not reach Manager.SendKeys unmodified — the
 // ctx deadline SendKeys observes must be capped at
 // agentkeys.DefaultAdmissionWindow from admission, not the Hub-supplied

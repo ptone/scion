@@ -2460,9 +2460,7 @@ func (r *KubernetesRuntime) ExecWithStdin(ctx context.Context, id string, cmd []
 // a real failing exec stream through remotecommand.NewSPDYExecutor needs a
 // server speaking the Kubernetes exec subprotocol, not just a fake
 // clientset, and that scaffolding was judged not worth adding for one call
-// site that does nothing but forward to this already-tested helper (review
-// round 6, finding #5 — declined with this note, disposition recorded in
-// the PR).
+// site that does nothing but forward to this already-tested helper.
 func wrapExecStreamError(ctx context.Context, err error, stderr string) error {
 	if IsSensitiveExec(ctx) {
 		return fmt.Errorf("exec failed: %w", err)

@@ -894,11 +894,21 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	// Re-verify target identity (a correctness hardening): re-resolve with
 	// the same (projectID, agentSlug, expectedAgentID) and require the
 	// result still identifies the same target as the original resolution
-	// (sameTargetInstance). Anything that no longer matches, including a
-	// resolveKeysTarget failure of its own, fails closed to
-	// ErrTargetNotFound rather than delivering.
+	// (sameTargetInstance). Nothing here ever delivers to a target other
+	// than the one originally resolved: a second resolveKeysTarget failure
+	// returns its own sentinel or error unchanged (never reclassified), and
+	// only an identity mismatch between the two resolutions itself produces
+	// ErrTargetNotFound.
 	revalidated, err := m.resolveKeysTarget(ctx, projectID, agentSlug, expectedAgentID)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Nothing has been sent at this point: an expiry discovered via
+			// this failure is exactly as "proven not to have started" as
+			// one discovered directly, so it is worth the same honest
+			// wrapNotStarted classification rather than whatever error
+			// resolveKeysTarget's own List call happened to produce.
+			return wrapNotStarted(ctxErr)
+		}
 		return err
 	}
 	if !sameTargetInstance(target, revalidated) {
@@ -991,17 +1001,31 @@ func (m *AgentManager) resolveKeysTarget(ctx context.Context, projectID, agentSl
 // sameTargetInstance reports whether b, from SendKeys's pre-delivery
 // re-verification (see SendKeys's doc comment), still identifies the same
 // target a's original resolution proved: ContainerID must match, and so
-// must AgentInfo.Kubernetes.UID when both sides report one — the most
-// specific per-instance identifier available checks against it, with
-// ContainerID alone as the fallback for a backend that does not expose one.
+// must the per-instance identifier (currently only
+// AgentInfo.Kubernetes.UID) whenever either side reports one. Comparing
+// unconditionally on "either", not just "both", matters: a backend that
+// reports a UID for one resolution and not the other is exactly the
+// asymmetry an identity check must not treat as permissive, even though
+// both calls resolving through the same List path makes that asymmetry
+// unreachable today. ContainerID alone decides the comparison only when
+// neither side reports a per-instance identifier at all.
 func sameTargetInstance(a, b api.AgentInfo) bool {
 	if a.ContainerID != b.ContainerID {
 		return false
 	}
-	if a.Kubernetes != nil && b.Kubernetes != nil && a.Kubernetes.UID != "" {
-		return a.Kubernetes.UID == b.Kubernetes.UID
+	auid, buid := kubernetesUID(a), kubernetesUID(b)
+	if auid != "" || buid != "" {
+		return auid == buid
 	}
 	return true
+}
+
+// kubernetesUID returns a's Kubernetes pod UID, or "" if a reports none.
+func kubernetesUID(a api.AgentInfo) string {
+	if a.Kubernetes == nil {
+		return ""
+	}
+	return a.Kubernetes.UID
 }
 
 // deliveryStepKind identifies how deliverImmediate must run a deliveryStep,

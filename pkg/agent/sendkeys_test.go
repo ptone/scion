@@ -133,10 +133,9 @@ func TestSendKeys_ArgvExactness(t *testing.T) {
 			// No step must add a trailing Enter (unlike deliverImmediate's
 			// message path), and the payload — raw or in any reversible
 			// encoding of it — must never appear as a process argument, on
-			// any recorded call including the readiness probe (review round
-			// 4, finding #5): the transport requirement is "no payload, and
-			// no reversible encoding of it, in argv," not merely "no raw
-			// payload."
+			// any recorded call including the readiness probe: the transport
+			// requirement is "no payload, and no reversible encoding of it, in
+			// argv," not merely "no raw payload."
 			encoded := tmuxOctalEscape(tc.keys)
 			script := sendKeysScript(keysTarget, tc.keys)
 			for _, c := range captured {
@@ -159,7 +158,7 @@ func TestSendKeys_ArgvExactness(t *testing.T) {
 
 // TestSendKeys_InvalidKeysShapeNeverExecutes covers the AC "empty/NUL/
 // oversize/invalid shapes never execute" at the primitive level itself
-// (review round 2, finding #4; renamed in round 3, finding #6, from
+// (renamed from
 // TestSendKeys_EmptyKeysPassedThroughVerbatim, which asserted the opposite
 // of what the test now does): SendKeys calls agentkeys.ValidateKeys before
 // any resolution or Exec attempt, so a local-mode caller invoking this
@@ -439,7 +438,7 @@ func TestSendKeys_StdinTransportFailureIsAmbiguous(t *testing.T) {
 }
 
 // TestSendKeys_PostExecFailureWrappingCtxErrorIsNotErrKeysNotStarted is
-// review round 2 finding #1's core regression test: a send-keys Exec
+// the core regression test for this behavior: a send-keys Exec
 // failure that itself wraps a context error (e.g. a Kubernetes exec stream
 // cancelled mid-call, or os/exec's Wait returning ctx.Err() after a
 // successful cancel) must not be classified as "proven not to have
@@ -505,9 +504,9 @@ func TestSendKeys_PostExecFailureWrappingCtxErrorIsNotErrKeysNotStarted(t *testi
 	}
 }
 
-// TestSendKeys_ProbeFailureDuringExpiredDeadlineIsNotStarted covers review
-// round 2 finding #3: if the admission deadline fires during the terminal-
-// readiness probe itself, the outcome must be "proven not to have started"
+// TestSendKeys_ProbeFailureDuringExpiredDeadlineIsNotStarted covers the
+// case where the admission deadline fires during the terminal-readiness
+// probe itself: the outcome must be "proven not to have started"
 // (ErrKeysNotStarted), not ErrTerminalNotReady — the session's actual
 // readiness was never established either way, but only one of these two
 // outcomes is honest about why the probe failed.
@@ -679,16 +678,16 @@ func TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave(t *testing.T) {
 	}
 }
 
-// TestMessageRaw_ConcurrentWithSendKeys_NoInterleave covers review round 2
-// finding #5: MessageRaw (the legacy raw-keys primitive, pending Phase 4
+// TestMessageRaw_ConcurrentWithSendKeys_NoInterleave covers a gap where
+// MessageRaw (the legacy raw-keys primitive, pending Phase 4
 // removal) previously did not take injectionLock at all, so raw keys
 // delivered through it could interleave with a concurrent SendKeys call (or
 // a buffered/interrupt message) for the same target. Same
 // sequence-contiguity technique as
 // TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave.
 // TestMessageRaw_ConcurrentWithSendKeys_NoInterleave deterministically
-// forces the race the injection lock exists to prevent (review round 3,
-// finding #2: the previous version of this test passed 30/30 runs with the
+// forces the race the injection lock exists to prevent (an earlier version
+// of this test passed 30/30 runs with the
 // lock removed from MessageRaw, because MessageRaw's single Exec call
 // happened to always run to completion before SendKeys's two calls in
 // practice, never actually landing between them).
@@ -907,7 +906,7 @@ func TestSendKeys_UnscopedAgentIDRejected(t *testing.T) {
 	}
 }
 
-// TestSendKeys_UnsupportedBackend covers review finding #2: a manager whose
+// TestSendKeys_UnsupportedBackend covers the case where a manager whose
 // runtime backend does not support keys delivery must fail with
 // ErrKeysUnsupported before any resolution or Exec attempt.
 func TestSendKeys_UnsupportedBackend(t *testing.T) {
@@ -930,7 +929,7 @@ func TestSendKeys_UnsupportedBackend(t *testing.T) {
 	}
 }
 
-// TestSendKeys_MarksExecCallsSensitive covers review finding #7's
+// TestSendKeys_MarksExecCallsSensitive covers the
 // SendKeys-level redaction check, adapted to what SendKeys itself is
 // responsible for: it performs no logging of its own (there is nothing to
 // capture here), and it cannot scrub arbitrary content out of a real
@@ -1021,8 +1020,8 @@ func TestTmuxVersionAtLeast(t *testing.T) {
 		wantMajor, wantMinor int
 		want                 bool
 	}{
-		// Exercised against the production constants directly (review round
-		// 5, finding #1's "optionally" bullet), not just arbitrary literals,
+		// Exercised against the production constants directly, not just
+		// arbitrary literals,
 		// so a change to the floor itself is reflected here automatically.
 		{minTmuxMajor, minTmuxMinor, minTmuxMajor, minTmuxMinor, true},          // exactly the floor
 		{minTmuxMajor, minTmuxMinor + 2, minTmuxMajor, minTmuxMinor, true},      // newer minor, same major
@@ -1039,7 +1038,7 @@ func TestTmuxVersionAtLeast(t *testing.T) {
 }
 
 // TestSendKeys_TmuxVersionGate is the table-driven pin for the version
-// gate's exact floor (review round 5, finding #1 — round 4's version was a
+// gate's exact floor (an earlier version of this test had only a
 // single below-floor case that did not pin the floor itself: a mutation
 // lowering minTmuxMinor to 0 survived because tmux 3.0a was never tried).
 // tmux 3.0a is the release that has octal escapes (added in 3.0) but cannot
@@ -1107,8 +1106,8 @@ func TestSendKeys_TmuxVersionGate(t *testing.T) {
 	}
 }
 
-// TestSendKeys_TmuxVersionGate_BelowFloorNeverCached covers review round 5
-// finding #1's second surviving mutation: moving the cache Store above the
+// TestSendKeys_TmuxVersionGate_BelowFloorNeverCached exists because
+// moving the cache Store above the
 // floor comparison would let a below-floor result be cached as supported,
 // so a second call on the same container would skip the gate entirely and
 // reach delivery instead of failing closed again. Two SendKeys calls on the
@@ -1143,8 +1142,8 @@ func TestSendKeys_TmuxVersionGate_BelowFloorNeverCached(t *testing.T) {
 	}
 }
 
-// TestSendKeys_TmuxVersionGate_InconclusiveNeverCached covers review round 5
-// finding #1's third required case: a version check that cannot be
+// TestSendKeys_TmuxVersionGate_InconclusiveNeverCached covers the case
+// where a version check that cannot be
 // determined (here, the first "tmux -V" call fails) must not be cached
 // either way, so a later call for the same container queries again rather
 // than reusing the earlier, inconclusive result.
@@ -1239,8 +1238,8 @@ func TestSendKeys_TmuxVersionCheckCachedPerContainer(t *testing.T) {
 	}
 }
 
-// TestSendKeys_TmuxVersionCache_NotReusedAcrossRecreatedContainerName covers
-// review round 5, finding #2: ContainerID is not always a fresh identifier
+// TestSendKeys_TmuxVersionCache_NotReusedAcrossRecreatedContainerName exists
+// because ContainerID is not always a fresh identifier
 // per container instance — on at least one backend it is a stable, reusable
 // name (a Kubernetes pod name) that a later, differently-imaged container
 // recreated under that same name would otherwise inherit a cached
@@ -1297,13 +1296,12 @@ func TestSendKeys_TmuxVersionCache_NotReusedAcrossRecreatedContainerName(t *test
 }
 
 // TestSendKeys_CtxExpiresDuringProbe_RecheckBeforeDeliveryCatchesIt covers
-// review round 6, finding #1: a ctx that expires during the readiness
-// probe, where the probe's own Exec call nonetheless returns success (a
-// backend whose Exec does not itself observe the cancellation), must still
-// be caught by SendKeys's own recheck immediately before delivery — the
-// probe succeeding must never be treated as license to proceed regardless
-// of ctx. Confirmed (during review response) to fail once that recheck is
-// removed.
+// a ctx that expires during the readiness probe, where the probe's own
+// Exec call nonetheless returns success (a backend whose Exec does not
+// itself observe the cancellation): that case must still be caught by
+// SendKeys's own recheck immediately before delivery — the probe
+// succeeding must never be treated as license to proceed regardless of
+// ctx. Confirmed to fail once that recheck is removed.
 func TestSendKeys_CtxExpiresDuringProbe_RecheckBeforeDeliveryCatchesIt(t *testing.T) {
 	agent := runningAgent()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1338,7 +1336,7 @@ func TestSendKeys_CtxExpiresDuringProbe_RecheckBeforeDeliveryCatchesIt(t *testin
 
 // TestSendKeys_CtxExpiresDuringVersionCheck_RecheckBeforeDeliveryCatchesIt
 // is TestSendKeys_CtxExpiresDuringProbe_RecheckBeforeDeliveryCatchesIt's
-// counterpart for the tmux version query (review round 6, finding #1): the
+// counterpart for the tmux version query: the
 // "tmux -V" call itself expires the ctx and returns an inconclusive result
 // (so checkTmuxVersionSupported proceeds, by design), and the mocked
 // readiness probe afterward succeeds regardless of ctx — delivery must
@@ -1378,13 +1376,13 @@ func TestSendKeys_CtxExpiresDuringVersionCheck_RecheckBeforeDeliveryCatchesIt(t 
 }
 
 // TestSendKeys_CtxAlreadyExpired_PostLockRecheckRunsBeforeAnyExec covers the
-// post-lock recheck specifically (review round 6, finding #1 noted that
-// removing either of SendKeys's two ctx.Err() checks — the post-lock
-// recheck or the one immediately before delivery — survived the existing
-// suite on its own). injectionMutex.Lock's uncontended fast path succeeds
-// even when ctx is already done (a deliberate property fixed during review
-// round 1: a free lock must not be spuriously refused just because ctx
-// happens to already be expired), so passing an already-expired ctx to
+// post-lock recheck specifically (removing either of SendKeys's two
+// ctx.Err() checks — the post-lock recheck or the one immediately before
+// delivery — independently survived the existing suite on its own).
+// injectionMutex.Lock's uncontended fast path succeeds even when ctx is
+// already done (a deliberate property: a free lock must not be spuriously
+// refused just because ctx happens to already be expired), so passing an
+// already-expired ctx to
 // SendKeys, with nothing else holding its target's lock, isolates the
 // post-lock recheck: if it did not exist, the version query would be the
 // very next thing to run despite ctx already being done.
@@ -1458,6 +1456,54 @@ func TestSendKeys_TargetRevalidationFailsClosed(t *testing.T) {
 	}
 }
 
+// TestSendKeys_TargetRevalidation_DifferentAgentIDSameContainerFailsClosed
+// covers the case where the second resolution returns the very same
+// ContainerID as the first, but a different "agent_id" label and no
+// Kubernetes block: resolveKeysTarget's own identity check (matching
+// against the caller's original expectedAgentID) must reject this on the
+// second call exactly as it would on the first, so SendKeys fails closed to
+// ErrTargetNotFound with zero delivery calls — this must hold even for an
+// implementation that resolves the re-verification's target identity by
+// some means other than a full, independent resolveKeysTarget call.
+func TestSendKeys_TargetRevalidation_DifferentAgentIDSameContainerFailsClosed(t *testing.T) {
+	first := runningAgent()
+	second := first
+	second.Labels = map[string]string{
+		"scion.name": "test-agent",
+		"agent_id":   "agent-other",
+	}
+
+	calls := 0
+	var capturedCmd []string
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			calls++
+			if calls == 1 {
+				return []api.AgentInfo{first}, nil
+			}
+			return []api.AgentInfo{second}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			capturedCmd = append(capturedCmd, strings.Join(cmd, " "))
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, agentkeys.ErrTargetNotFound) {
+		t.Fatalf("SendKeys error = %v, want agentkeys.ErrTargetNotFound", err)
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 List calls (the original resolution and the pre-delivery re-verification), got %d", calls)
+	}
+	for _, c := range capturedCmd {
+		if strings.Contains(c, "source-file") {
+			t.Fatalf("delivery must not run once the pre-delivery re-verification finds a different agent_id for the same ContainerID, got: %v", capturedCmd)
+		}
+	}
+}
+
 // TestSendKeys_TargetRevalidation_SameKubernetesUIDPasses is
 // TestSendKeys_TargetRevalidationFailsClosed's positive counterpart for the
 // per-instance identifier comparison: the same ContainerID and the same
@@ -1524,6 +1570,41 @@ func TestSendKeys_TargetRevalidation_DifferentKubernetesUIDFailsClosed(t *testin
 	}
 }
 
+// TestSendKeys_TargetRevalidationCtxExpiredIsNotStarted covers the case
+// where the pre-delivery re-verification's own List call fails while ctx
+// has already expired: nothing has been sent at that point, so the outcome
+// must be the honest wrapNotStarted classification (matching
+// ErrKeysNotStarted), not whatever plain, wrapped error resolveKeysTarget's
+// own List call happened to produce for an expired ctx.
+func TestSendKeys_TargetRevalidationCtxExpiredIsNotStarted(t *testing.T) {
+	agent := runningAgent()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	calls := 0
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			calls++
+			if calls == 1 {
+				return []api.AgentInfo{agent}, nil
+			}
+			cancel()
+			return nil, errors.New("transient listing failure")
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(ctx, "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("SendKeys error = %v, want an error wrapping ErrKeysNotStarted", err)
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 List calls, got %d", calls)
+	}
+}
+
 // TestSameTargetInstance covers sameTargetInstance's comparison directly:
 // ContainerID must always match; the Kubernetes UID, when both sides report
 // one, must also match; a backend that reports no UID on either or both
@@ -1550,10 +1631,20 @@ func TestSameTargetInstance(t *testing.T) {
 			false,
 		},
 		{
-			"one_side_missing_k8s_info",
+			// Fails closed rather than falling back to ContainerID alone:
+			// an identity check must not become permissive just because the
+			// data is asymmetric, even though both calls resolving through
+			// the same List path makes this case unreachable today.
+			"one_side_missing_k8s_info_a_has_uid",
 			api.AgentInfo{ContainerID: "c1", Kubernetes: &api.AgentK8sMetadata{UID: "u1"}},
 			api.AgentInfo{ContainerID: "c1"},
-			true, // falls back to ContainerID alone
+			false,
+		},
+		{
+			"one_side_missing_k8s_info_b_has_uid",
+			api.AgentInfo{ContainerID: "c1"},
+			api.AgentInfo{ContainerID: "c1", Kubernetes: &api.AgentK8sMetadata{UID: "u1"}},
+			false,
 		},
 	}
 	for _, tc := range cases {
