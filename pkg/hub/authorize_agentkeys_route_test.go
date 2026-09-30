@@ -32,6 +32,7 @@ package hub
 // across both route shapes.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -251,6 +252,82 @@ func TestAgentActionKeysRoute_ProjectScoped_CrossProjectNoLookup(t *testing.T) {
 	}
 }
 
+// TestAgentActionKeysRoute_ProjectScoped_ProjectResolutionGate is round-3
+// review finding 1: the contract §3 clarification says 2.1 implements
+// invariant 1 (authentication precedes everything; on the project-scoped
+// route, so does the shared project-resolution 404) "on both route shapes
+// with real route/store-spy tests" -- but nothing previously drove a keys
+// request through that gate on P with an unresolvable {project} (AK-21e: a
+// nonexistent UUID; AK-21f: a bare slug, which never resolves). This test
+// closes that gap for both caller kinds, asserting the shared gate's
+// ordinary "Project not found" 404 (identical across callers, no
+// operation_id, and decided before any keys-specific code -- including the
+// cross-project pre-check -- ever runs, per AK-21e/AK-21f).
+func TestAgentActionKeysRoute_ProjectScoped_ProjectResolutionGate(t *testing.T) {
+	f := newAgentKeysRouteFixture(t)
+	agentCallerToken := f.agentToken(t, tid("agentkeys-route-caller-projgate"), f.projectA.ID, ScopeAgentLifecycle)
+
+	spy := &agentKeysLookupSpyStore{Store: f.store}
+	f.srv.store = spy
+
+	unresolvableProjectSegments := map[string]string{
+		"AK-21e: nonexistent project UUID": tid("agentkeys-route-nonexistent-project"),
+		"AK-21f: bare project slug":        "agentkeys-route-bare-slug",
+	}
+
+	var bodies []string
+	for name, projectSegment := range unresolvableProjectSegments {
+		t.Run(name+"/agent caller", func(t *testing.T) {
+			rec := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+				"/api/v1/projects/"+projectSegment+"/agents/"+f.agentInA.Slug+"/keys", nil, agentCallerToken)
+			assertProjectResolutionGate404(t, rec)
+			bodies = append(bodies, rec.Body.String())
+		})
+
+		t.Run(name+"/user caller", func(t *testing.T) {
+			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
+				"/api/v1/projects/"+projectSegment+"/agents/"+f.agentInA.Slug+"/keys", nil)
+			assertProjectResolutionGate404(t, rec)
+			bodies = append(bodies, rec.Body.String())
+		})
+	}
+
+	// Identical across every combination of unresolvable project segment and
+	// caller kind: this 404 comes from the shared, caller-agnostic project
+	// resolver (handleProjectAgents), not from any keys-specific code.
+	for i := 1; i < len(bodies); i++ {
+		if bodies[i] != bodies[0] {
+			t.Fatalf("expected identical bodies across all unresolvable-project cases; body[0]=%s body[%d]=%s", bodies[0], i, bodies[i])
+		}
+	}
+
+	if got := spy.lookupCount(); got != 0 {
+		t.Fatalf("expected zero agent lookups when the project itself never resolves, got %d", got)
+	}
+}
+
+// assertProjectResolutionGate404 asserts the shared project resolver's
+// ordinary 404 (contract AK-21e/AK-21f): code not_found, message "Project
+// not found" (NotFound(w, "Project")'s exact text, distinct from the keys
+// gate's own "Agent not found"/"Action not found" messages), and no
+// operation_id in the body.
+func assertProjectResolutionGate404(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	code, message := errorEnvelope(t, rec.Body.Bytes())
+	if code != "not_found" {
+		t.Errorf("code = %q, want not_found", code)
+	}
+	if message != "Project not found" {
+		t.Errorf("message = %q, want %q", message, "Project not found")
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("operation_id")) {
+		t.Errorf("body must not carry an operation_id (decided before any keys-specific code runs): %s", rec.Body.String())
+	}
+}
+
 // TestAgentActionKeysRoute_ProjectScoped_SameProjectMissingAgent pins that a
 // same-project resolution miss reports the keys contract's own "not_found"
 // code, not the route's other resolver's "agent_not_found" shape (contract
@@ -291,6 +368,13 @@ func TestAgentActionKeysRoute_ProjectScoped_StoreErrorIsNotA404(t *testing.T) {
 	}
 	if rec.Code < 500 {
 		t.Fatalf("status = %d, want a 5xx for a store failure: %s", rec.Code, rec.Body.String())
+	}
+	// Round-3 review (finding 2): pin that the 5xx actually comes from the
+	// keys branch's own agent-resolution attempt, not from some earlier
+	// failure that happens to also route through the spied store (a 500
+	// from anywhere else would otherwise satisfy the two checks above too).
+	if got := spy.lookupCount(); got == 0 {
+		t.Fatalf("expected the resolution attempt to reach the spied store (lookupCount=0)")
 	}
 }
 
@@ -454,9 +538,9 @@ func TestAgentActionKeysRoute_ExpectedDivergence_AgentMissingScopeCrossProject(t
 // TestAuthorizeAgentKeys_MissingAndInvalidCredentials covers directly at
 // the function level. An expired JWT (as opposed to a revoked credential
 // record) fails signature/claims validation in the same shared middleware,
-// even earlier, for the same reason; it is not given its own case here
-// because that failure mode is already exercised for agent tokens in
-// general (agenttoken_test.go) and is not specific to the keys route.
+// even earlier, for the same reason; see
+// TestAgentActionKeysRoute_ExpiredAgentToken_NeverReachesTheGate below for
+// that case against a real keys request.
 func TestAgentActionKeysRoute_RevokedAgentCredential_NeverReachesTheGate(t *testing.T) {
 	srv, s, user, project := setupCredentialTestServer(t)
 	ctx := context.Background()
@@ -514,15 +598,40 @@ func TestAgentActionKeysRoute_ExpiredAgentToken_NeverReachesTheGate(t *testing.T
 	callerID := tid("agentkeys-route-expired-caller")
 	createCredTestAgent(t, s, callerID, project.ID, user.ID)
 
+	// Positive control (round-3 review finding 2): the same setup, minted
+	// with the normal (non-expired) duration, must reach the gate and be
+	// allowed -- proving the 401 asserted below comes from expiry
+	// specifically, not from some unrelated misconfiguration in this
+	// fixture that would 401 regardless of TokenDuration.
+	validToken, err := srv.GenerateAgentToken(callerID, project.ID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+	before := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", nil, validToken)
+	if before.Code != http.StatusNotFound {
+		t.Fatalf("control: a non-expired token should authenticate and be allowed, got %d: %s", before.Code, before.Body.String())
+	}
+	if _, message := errorEnvelope(t, before.Body.Bytes()); message != unimplementedActionNotFoundMessage {
+		t.Fatalf("control: expected the unimplemented-action message, got %q: %s", message, before.Body.String())
+	}
+
 	origDuration := srv.agentTokenService.config.TokenDuration
 	srv.agentTokenService.config.TokenDuration = -1 * time.Hour // already expired at mint time
-	token, err := srv.GenerateAgentToken(callerID, project.ID, nil, AgentRoleFull, nil)
+	expiredToken, err := srv.GenerateAgentToken(callerID, project.ID, nil, AgentRoleFull, nil)
 	srv.agentTokenService.config.TokenDuration = origDuration
 	require.NoError(t, err)
 
-	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", nil, token)
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", nil, expiredToken)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for an expired token (never reaching authorizeAgentKeys), got %d: %s",
 			rec.Code, rec.Body.String())
+	}
+
+	// Round-3 review (finding 1): the same expired token on the
+	// project-scoped route shape must also 401 before reaching either the
+	// cross-project pre-check or authorizeAgentKeys.
+	recP := doRequestWithAgentToken(t, srv, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/agents/"+targetID+"/keys", nil, expiredToken)
+	if recP.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for an expired token on the project-scoped route, got %d: %s",
+			recP.Code, recP.Body.String())
 	}
 }

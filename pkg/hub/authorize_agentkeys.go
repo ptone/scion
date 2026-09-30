@@ -88,14 +88,18 @@ type KeysAuthzDecision struct {
 // dependency on store.Agent.MessageMode at all — it is not merely untested,
 // it is structurally absent from the evaluation.
 //
-// target must already be resolved: the caller (2.2's route dispatch, or
-// 2.3's bridge) is responsible for resolving the specific agent before
-// calling this function, exactly as every other attach-gated action already
-// does. The project-scoped route's agent-credential cross-project refusal
-// must be decided *before* that resolution happens at all (contract §3.1
-// invariant 4, AK-21c) — see authorizeAgentKeysCrossProject below for the
-// pre-resolution building block that lets 2.2 satisfy that ordering without
-// this function needing to support a partially-known target.
+// target must already be resolved: the caller (this file's own T/P
+// action-dispatch branches for now — see handlers_agents_core.go's
+// handleAgentAction and handlers_projects_core.go's handleProjectAgentAction
+// — and 2.2's ExecuteAgentKeys or 2.3's bridge once they replace that seam)
+// is responsible for resolving the specific agent before calling this
+// function, exactly as every other attach-gated action already does. The
+// project-scoped route's agent-credential cross-project refusal must be
+// decided *before* that resolution happens at all (contract §3.1 invariant
+// 4, AK-21c) — see authorizeAgentKeysCrossProject below, which
+// handleProjectAgentAction already calls ahead of resolution today; 2.2
+// must preserve that ordering when it replaces the seam, not merely
+// reproduce it as an option.
 func (s *Server) authorizeAgentKeys(r *http.Request, target *store.Agent) KeysAuthzDecision {
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {

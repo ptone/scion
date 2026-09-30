@@ -39,12 +39,17 @@ package hub
 //   - TestAuthorizeAgentKeys_MessageModeIrrelevant: closed/open message
 //     modes.
 //   - TestAuthorizeAgentKeysCrossProject: the project-scoped route's
-//     pre-resolution boundary check (contract §3.1 invariant 4, AK-21c).
-//   - TestAgentActionKeys_RouteMetadataCoversBothRouteShapes and
-//     TestAgentActionKeys_CapabilityProjectionConsistentAcrossRouteShapes:
-//     route/capability metadata agreement across both route shapes.
+//     pre-resolution boundary check (contract §3.1 invariant 4, AK-21c),
+//     including the federated/broker pre-check regression cases.
 //   - TestAgentAttachRegistry_EnforcementListsAuthorizeAgentKeys: the
 //     registry stays an accurate index of what enforces agent.attach.
+//
+// Route/capability metadata agreement across both route shapes is covered
+// separately, end-to-end through the real mux, by
+// authorize_agentkeys_route_test.go's TestAgentActionKeysRoute_BothShapesAgree
+// (the two tests originally listed here for that purpose were replaced in
+// round 1 of review because they passed even with this PR's production code
+// deleted — see that file's doc comment for the full history).
 
 import (
 	"net/http"
