@@ -7,6 +7,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/url"
@@ -39,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -1859,31 +1861,59 @@ func gitCloneWorkspace(uid, gid int, agentHome string) (retErr error) {
 
 // chownTreeRootOwned recursively chowns files owned by root (UID 0) to
 // the specified uid:gid. Files already owned by the target user are
-// skipped for efficiency. This is called after pre-start hooks to fix up
-// files created by provisioners running as root, which would otherwise be
-// undeletable by the non-root broker.
+// skipped. This is called after pre-start hooks to fix up files created by
+// provisioners running as root, which would otherwise be undeletable by the
+// non-root broker.
+//
+// Input validation (fsutil.CheckRoot, applied inside the chown call below)
+// refuses to walk root at all if it is a known critical system path or looks
+// like a filesystem root by content, and the walk never crosses filesystem
+// (mount) boundaries. fsutil.CheckMountSource additionally refuses root when
+// it is itself a mount point whose bind source names a critical system
+// directory — see that function's doc comment for exactly what it does and
+// does not detect.
+//
+// A missing root is treated as nothing to fix up, not an error: root is one
+// of SCION_WORKSPACE_PATH or the agent home, and not every harness image
+// creates /workspace (only some do), so a caller running an otherwise
+// unaffected image must not see a chown failure logged for a path it never
+// created.
+//
+// That decision is made by stat-ing root itself, before calling fsutil, not
+// by inspecting fsutil's returned error afterward: fsutil aggregates every
+// per-entry failure into one joined error, and errors.Is on a joined error
+// is true if *any* member matches, not all of them. A single unrelated
+// entry vanishing mid-walk (an ordinary race — a lock file, a temp file, a
+// log rotation) would satisfy errors.Is(err, fs.ErrNotExist) and, if that
+// were checked against fsutil's result, would discard every other real
+// failure the walk hit, unlogged. Deciding from root's own Lstat first,
+// then propagating whatever fsutil returns unfiltered, avoids that.
 func chownTreeRootOwned(root string, uid, gid int) error {
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// Skip permission errors on walk (e.g., lost+found).
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			return nil
-		}
-		if stat.Uid == 0 {
-			if chErr := os.Lchown(path, uid, gid); chErr != nil {
-				log.Error("chownTreeRootOwned: failed to chown %s: %v", path, chErr)
-			}
-		}
+	if _, err := os.Lstat(root); errors.Is(err, fs.ErrNotExist) {
 		return nil
-	})
+	}
+	if err := checkMountSource(root); err != nil {
+		return err
+	}
+	if err := chownTreeOwnedByUID(context.Background(), root, 0, uid, gid); err != nil {
+		return fmt.Errorf("chown %s to %d:%d: %w", root, uid, gid, err)
+	}
+	return nil
 }
+
+// chownTreeOwnedByUID is fsutil.ChownTreeOwnedByUID, held behind a package
+// variable so a test can stub its result (to prove the missing-root
+// pre-check above is the only thing deciding "nothing to fix up", and that
+// any other error from the chown itself always propagates) without needing
+// a real per-entry failure to construct. The production value is fixed;
+// only tests reassign it, and always restore it afterward.
+var chownTreeOwnedByUID = fsutil.ChownTreeOwnedByUID
+
+// checkMountSource is fsutil.CheckMountSource, held behind a package
+// variable so a test can stub it (to prove chownTreeRootOwned actually
+// calls it) without needing a real mount to exercise. The production value
+// is fixed; only tests reassign it, and always restore it afterward.
+var checkMountSource = fsutil.CheckMountSource
 
 func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, chown func(string, int, int) error) {
 	// Only root can successfully chown a mounted workspace. In restricted

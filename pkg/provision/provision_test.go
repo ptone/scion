@@ -16,6 +16,7 @@ package provision
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -468,6 +470,95 @@ func TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged(t *testing
 	if int(linkStat.Uid) != os.Getuid() || int(linkStat.Gid) != os.Getgid() {
 		t.Errorf("link itself not chowned: uid=%d gid=%d, want %d:%d",
 			linkStat.Uid, linkStat.Gid, os.Getuid(), os.Getgid())
+	}
+}
+
+// TestChownProjectTree_DoesNotFollowDanglingSymlink is a deterministic
+// no-follow guard for chownProjectTree, independent of the ctime-based check
+// in TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged above:
+// a symlink to a path that does not exist anywhere. Re-owning the link
+// itself (Lchown) succeeds; resolving it (Chown) would fail with ENOENT,
+// which chownProjectTree would then report. This needs no ctime comparison
+// or timing, and it passes the same way whether the process is privileged
+// or not.
+func TestChownProjectTree_DoesNotFollowDanglingSymlink(t *testing.T) {
+	treeRoot := t.TempDir()
+	target := filepath.Join(treeRoot, "does-not-exist")
+	linkPath := filepath.Join(treeRoot, "dangling-link")
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if err := chownProjectTree(context.Background(), treeRoot, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("chownProjectTree(%q) = %v, want nil: a dangling symlink must be re-owned itself, not resolved", treeRoot, err)
+	}
+}
+
+// --- chownProjectTree input validation ---
+//
+// The full table of rejected critical-system-path names, the device-boundary
+// walk behavior, and error-aggregation policy are all tested directly
+// against pkg/util/fsutil (TestCheckRoot_*, TestChownTree_*), which is what
+// chownProjectTree delegates to. Tests here only cover this call site's own
+// wiring, and never invoke the recursive chown on anything other than a
+// t.TempDir() tree.
+
+// TestChownProjectTree_RefusesHostRootLookalike proves the guard is actually
+// wired into chownProjectTree (not just defined and unused): given a
+// workspace root laid out like a filesystem root, no chown must be
+// attempted at all.
+func TestChownProjectTree_RefusesHostRootLookalike(t *testing.T) {
+	dir := t.TempDir()
+	mustMkdirAll(t, filepath.Join(dir, "etc"))
+	mustWriteFile(t, filepath.Join(dir, "etc", "passwd"), "root:x:0:0:root:/root:/bin/sh\n")
+	mustMkdirAll(t, filepath.Join(dir, "usr", "bin"))
+	mustMkdirAll(t, filepath.Join(dir, "proc"))
+
+	before, err := os.Lstat(filepath.Join(dir, "etc", "passwd"))
+	if err != nil {
+		t.Fatalf("lstat before: %v", err)
+	}
+	beforeStat := before.Sys().(*syscall.Stat_t)
+
+	err = chownProjectTree(context.Background(), dir, os.Getuid()+1, os.Getgid()+1)
+	if !errors.Is(err, fsutil.ErrHostRootLookalike) {
+		t.Fatalf("chownProjectTree(%q) = %v, want it to wrap ErrHostRootLookalike", dir, err)
+	}
+
+	after, err := os.Lstat(filepath.Join(dir, "etc", "passwd"))
+	if err != nil {
+		t.Fatalf("lstat after: %v", err)
+	}
+	afterStat := after.Sys().(*syscall.Stat_t)
+	if afterStat.Uid != beforeStat.Uid || afterStat.Gid != beforeStat.Gid {
+		t.Errorf("ownership changed despite refusal: before uid=%d gid=%d, after uid=%d gid=%d",
+			beforeStat.Uid, beforeStat.Gid, afterStat.Uid, afterStat.Gid)
+	}
+}
+
+// TestChownProjectTree_AllowsOrdinaryWorkspace is a smoke test on the public
+// entry point using a real, ordinary temp-dir tree.
+func TestChownProjectTree_AllowsOrdinaryWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	mustMkdirAll(t, filepath.Join(dir, "src"))
+	mustWriteFile(t, filepath.Join(dir, "README.md"), "hello\n")
+
+	if err := chownProjectTree(context.Background(), dir, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("chownProjectTree(%q) = %v, want nil", dir, err)
+	}
+}
+
+func mustMkdirAll(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+}
+
+func mustWriteFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
 

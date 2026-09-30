@@ -14,9 +14,9 @@
 
 // Package provision implements Tier-1 universal workspace provisioning.
 // It is a config-free leaf package that depends only on stdlib, pkg/api,
-// and pkg/store — deliberately avoiding pkg/config so that lean binaries
-// (e.g. sciontool) can invoke provisioning without pulling in
-// filesystem-based project path resolution.
+// pkg/store, and pkg/util/fsutil (itself stdlib-only) — deliberately
+// avoiding pkg/config so that lean binaries (e.g. sciontool) can invoke
+// provisioning without pulling in filesystem-based project path resolution.
 package provision
 
 import (
@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
 // ProvisionSentinelFile is the name of the sentinel file written atomically
@@ -791,37 +792,41 @@ func chownTarget(hostPath string) string {
 	return parent
 }
 
-// chownProjectTree sets ownership of the project root and its contents to the
-// given UID/GID. This is a ONE-TIME operation done under the advisory lock
-// during first provisioning (design §9.1). Per-start chown is NOT done for
-// NFS (slow/racy over the network).
+// chownProjectTree sets ownership of the project root and its contents to
+// the given UID/GID. This is a ONE-TIME operation done under the advisory
+// lock during first provisioning (design §9.1). Per-start chown is NOT done
+// for NFS (slow/racy over the network).
 //
-// -h (--no-dereference), not plain -R (F-111 review, tf-lead): GNU chown's
-// non-recursive default is to dereference a symlink argument, and this now
-// runs as root with CAP_DAC_OVERRIDE in the k8s init container — without -h,
-// a symlink inside a cloned (possibly untrusted) repo pointing outside the
-// chowned tree (elsewhere in the init container's own filesystem view, or
-// another mounted shared dir) risks having its REFERENT re-owned instead of
-// just the link itself. -h makes chown re-own the link and never follow it.
-// Confirmed the chown binary in scion-base supports -h: its runtime layer is
-// node:24-trixie-slim (Debian, GNU coreutils, not BusyBox), and GNU chown
-// --help lists "-h, --no-dereference"; BusyBox chown also supports -h.
+// Input validation (fsutil.CheckRoot, applied inside fsutil.ChownTree)
+// refuses to operate at all if projectRoot is a known critical system path
+// or looks like a filesystem root by content — defence in depth against a
+// resolution bug elsewhere computing an unintended chown root; this is
+// independent of chownTarget's own narrower "/" handling, and also stands in
+// front of the shared-dir chown calls, which bypass chownTarget entirely.
+// The walk never crosses a filesystem (mount) boundary, and every entry is
+// Lchown'd, not Chown'd: this now runs as root with CAP_DAC_OVERRIDE in the
+// k8s init container, so a symlink inside a cloned (possibly untrusted) repo
+// pointing outside the chowned tree must have only the link itself re-owned,
+// never its target.
 //
-// TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged exercises
-// this with a same-uid chown (this sandbox has no CAP_CHOWN, so it cannot
-// chown to a different uid at all) and checks the outside target's ctime is
-// untouched. That is evidence -h behaves as documented here, not proof that
-// the real scenario (root, a different target uid, CAP_DAC_OVERRIDE) is
-// safe — it cannot exercise that scenario in this environment. Treat it as
-// a regression guard on -h's own behavior, not as a substitute for
-// verifying the real k8s init container against a live cluster.
-
+// TestChownProjectTree_DoesNotFollowDanglingSymlink is the regression guard
+// on no-dereference: a symlink to a path that exists nowhere, so re-owning
+// the link itself (Lchown) succeeds while resolving it (Chown) would fail
+// with ENOENT. It needs no timing assumptions and fails deterministically if
+// the walk ever starts dereferencing.
+//
+// TestChownProjectTree_SymlinkOutsideTree_TargetOwnershipUnchanged is a
+// second, older check that chowns to the file's own uid:gid (this sandbox
+// has no CAP_CHOWN, so it cannot chown to a different uid at all) and looks
+// for a ctime change on a target outside the tree. On this in-process,
+// same-tick walk, that comparison can no longer fail even if the link were
+// dereferenced, so it is kept as a secondary check, not as a substitute for
+// the dangling-symlink test above. Neither test exercises the real scenario
+// this guards (root, a different target uid, CAP_DAC_OVERRIDE in the k8s
+// init container) — that would need verification against a live cluster.
 func chownProjectTree(ctx context.Context, projectRoot string, uid, gid int) error {
-	// Use chown -R -h for recursive ownership change without following symlinks.
-	cmd := exec.CommandContext(ctx, "chown", "-R", "-h", fmt.Sprintf("%d:%d", uid, gid), projectRoot)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("chown -R -h %d:%d %s: %s", uid, gid, projectRoot, strings.TrimSpace(string(output)))
+	if err := fsutil.ChownTree(ctx, projectRoot, uid, gid); err != nil {
+		return fmt.Errorf("recursive chown %s to %d:%d: %w", projectRoot, uid, gid, err)
 	}
 	return nil
 }

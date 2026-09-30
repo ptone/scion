@@ -12,13 +12,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
 // ErrNoCommand is returned when no command is specified for the supervisor to run.
@@ -410,11 +410,23 @@ func indexByte(s string, c byte) int {
 }
 
 // chownRecursive changes ownership of a directory and all its contents.
+//
+// Input validation (fsutil.CheckRoot, applied inside fsutil.ChownTree)
+// refuses to walk root at all if it is a known critical system path or looks
+// like a filesystem root by content, and the walk never crosses filesystem
+// (mount) boundaries. fsutil.CheckMountSource additionally refuses root when
+// it is itself a mount point whose bind source names a critical system
+// directory — see that function's doc comment for exactly what it does and
+// does not detect.
 func chownRecursive(root string, uid, gid int) error {
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		return os.Lchown(path, uid, gid)
-	})
+	if err := checkMountSource(root); err != nil {
+		return err
+	}
+	return fsutil.ChownTree(context.Background(), root, uid, gid)
 }
+
+// checkMountSource is fsutil.CheckMountSource, held behind a package
+// variable so a test can stub it (to prove chownRecursive actually calls
+// it) without needing a real mount to exercise. The production value is
+// fixed; only tests reassign it, and always restore it afterward.
+var checkMountSource = fsutil.CheckMountSource
