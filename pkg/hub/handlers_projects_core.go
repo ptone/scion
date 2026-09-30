@@ -2427,23 +2427,20 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	// same-slug agent that might exist in the URL's project. Only once that
 	// passes do we resolve the target, using the same canonical
 	// resolveProjectAgent the logs/cloud-logs/message-logs branches above
-	// already use (round-2 review finding 4: an earlier version of this
-	// branch duplicated that resolution and collapsed every error --
-	// including a store failure -- into a 404, which would misreport a
-	// store outage as "agent does not exist"). A store.ErrNotFound miss is
-	// reported as keys' own "not_found" (invariant 3), not the shared
-	// resolution block's agent_not_found/{agent_slug,project_id} shape a few
-	// lines below, which is specific to every other (non-keys) action on
-	// this route; any other error is a generic 5xx via writeErrorFromErr,
-	// not a 404.
+	// already use, so a store failure surfaces as a generic 5xx via
+	// writeErrorFromErr rather than being collapsed into a misleading
+	// "agent does not exist" 404. A store.ErrNotFound miss is reported as
+	// keys' own "not_found" (invariant 3), not the shared resolution
+	// block's agent_not_found/{agent_slug,project_id} shape a few lines
+	// below, which is specific to every other (non-keys) action on this
+	// route.
 	//
 	// No separate nil-identity guard: authorizeAgentKeys already fails
 	// closed (keys_denied) on a nil identity, and the shared auth
 	// middleware answers an unauthenticated request with 401 before this
-	// handler ever runs (round-2 finding 10) -- an extra guard here would
-	// either be dead code or, placed after resolution as it previously was,
-	// let an (unreachable) unauthenticated caller learn whether the agent
-	// exists before being refused.
+	// handler ever runs -- an extra guard here would either be dead code
+	// or, placed after resolution, let an (unreachable) unauthenticated
+	// caller learn whether the agent exists before being refused.
 	if action == api.AgentActionKeys {
 		if denial := s.authorizeAgentKeysCrossProject(r, projectID); denial != nil {
 			writeAgentKeysAuthzDenial(w, *denial)

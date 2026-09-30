@@ -320,22 +320,22 @@ Key points, restated because they are easy to get backwards:
      required by this comparison** (AK-21c).
   5. `authorizeAgentKeys` runs only after 1-4 pass.
 
-  **Phase-boundary clarification (design-owner ruling, recorded on ptone/scion#2195):** 2.1 owns
-  and implements now, on
-  both route shapes with real route/store-spy tests: invariant 1 (authentication precedes
-  everything), invariant 4 (the project-boundary refusal decided before any target-agent lookup on
-  the project-scoped route), invariant 5 (`authorizeAgentKeys` runs only after 1/4 pass), and
-  invariant 3's *non-operation-ID* half — a resolution miss must use keys' own `not_found` shape,
-  not the other resolver's. 2.1 does **not** implement invariant 2 (`ValidateBody`) and does not
-  read the request body at all; invariant 3's *operation-ID* half presupposes that validation having
-  already run, so 2.1's routing seam may emit its temporary, sanitized denials (`keys_denied`,
-  `cross_project_keys_unsupported`, keys-shaped `not_found`) **without** an operation ID — never a
-  synthesized placeholder or an ID minted ahead of validation. The success path stays non-executing
-  (no dispatch case exists yet, so it falls through to the existing generic "unknown action" 404).
-  2.2 (ptone/scion#2196) must replace this seam wholesale, not layer on top of it: `ValidateBody` →
-  mint one real operation ID → 2.1's already-established ordering/resolution behavior →
-  `authorizeAgentKeys` → remaining admission/dispatch, so every outcome from validation onward
-  carries the real ID, matching invariant 3 in full.
+  **Phase-boundary clarification (design-owner ruling, recorded on ptone/scion#2195):** 2.1 owns and
+  implements now, on both route shapes with real route/store-spy tests: invariant 1 (authentication
+  precedes everything), invariant 4 (the project-boundary refusal decided before any target-agent
+  lookup on the project-scoped route), invariant 5 (`authorizeAgentKeys` runs only after invariants
+  1 and 4 pass — 2 and 3 are 2.2's), and invariant 3's *non-operation-ID* half — a resolution miss
+  must use keys' own `not_found` shape, not the other resolver's. 2.1 does **not** implement
+  invariant 2 (`ValidateBody`) and does not read the request body at all; invariant 3's
+  *operation-ID* half presupposes that validation having already run, so 2.1's routing seam may
+  emit its temporary, sanitized denials (`keys_denied`, `cross_project_keys_unsupported`,
+  keys-shaped `not_found`) **without** an operation ID — never a synthesized placeholder or an ID
+  minted ahead of validation. The success path stays non-executing (no dispatch case exists yet, so
+  it falls through to the existing generic "unknown action" 404). 2.2 (ptone/scion#2196) must
+  replace this seam wholesale, not layer on top of it: `ValidateBody` → mint one real operation ID →
+  2.1's already-established ordering/resolution behavior → `authorizeAgentKeys` → remaining
+  admission/dispatch, so every outcome from validation onward carries the real ID, matching
+  invariant 3 in full.
 
   **Top-level route (T), verified consistent with these invariants today:**
   `handlers_agents_core.go`'s `set_message_mode`/`reincarnate`/`message` special cases (`:2936`,

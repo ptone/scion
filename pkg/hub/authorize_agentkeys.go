@@ -240,11 +240,11 @@ func (s *Server) denyAgentKeysCrossProject(r *http.Request, resource Resource, r
 // (agentkeys.ValidateBody) that does not exist until task 2.2 adds the real
 // keys handler (ExecuteAgentKeys). This routing seam (handleAgentAction's
 // and handleProjectAgentAction's early api.AgentActionKeys branches) only
-// owns the authorization decision, per the scope ruling recorded in the
-// disposition on ptone/scion#2195 for this task's round-1 review; 2.2 is
-// expected to replace this function's call sites with its own envelope
-// once validation and operation-ID minting exist, rather than retrofit an
-// operation_id here.
+// owns the authorization decision, per the design-owner ruling recorded on
+// ptone/scion#2195 (see also contract §3's phase-boundary clarification);
+// 2.2 is expected to replace this function's call sites with its own
+// envelope once validation and operation-ID minting exist, rather than
+// retrofit an operation_id here.
 func writeAgentKeysAuthzDenial(w http.ResponseWriter, decision KeysAuthzDecision) {
 	status, ok := agentkeys.HTTPStatus(decision.Outcome)
 	if !ok {

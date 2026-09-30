@@ -3014,8 +3014,7 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 	// No separate nil-identity guard: authorizeAgentKeys already fails
 	// closed (keys_denied) on a nil identity, and the shared auth
 	// middleware answers an unauthenticated request with 401 before this
-	// handler ever runs (round-2 review finding 10) — an extra guard here
-	// would be dead code.
+	// handler ever runs — an extra guard here would be dead code.
 	if action == api.AgentActionKeys {
 		targetAgent, err := s.store.GetAgent(r.Context(), id)
 		if err != nil {

@@ -127,13 +127,6 @@ func errorEnvelope(t *testing.T, body []byte) (code, message string) {
 	return env.Error.Code, env.Error.Message
 }
 
-// errorCode extracts error.code from a Hub error envelope response body.
-func errorCode(t *testing.T, body []byte) string {
-	t.Helper()
-	code, _ := errorEnvelope(t, body)
-	return code
-}
-
 // unimplementedActionNotFoundMessage is NotFound(w, "Action")'s exact
 // message -- what an *authorized* keys call currently produces (no
 // dispatch case exists yet; contract §10's phase-boundary note). It is
@@ -187,12 +180,7 @@ func TestAgentActionKeysRoute_TopLevel_CrossProjectAndMissing(t *testing.T) {
 
 	t.Run("AK-21: existing target in a foreign project -> 422", func(t *testing.T) {
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentInB.ID+"/keys", nil, token)
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
-		}
-		if code := errorCode(t, rec.Body.Bytes()); code != "cross_project_keys_unsupported" {
-			t.Errorf("code = %q, want cross_project_keys_unsupported", code)
-		}
+		assertKeysRouteOutcome(t, "top-level", rec, http.StatusUnprocessableEntity, "cross_project_keys_unsupported")
 	})
 
 	t.Run("AK-21b: nonexistent target ID -> 404 not_found", func(t *testing.T) {
@@ -243,21 +231,19 @@ func TestAgentActionKeysRoute_ProjectScoped_CrossProjectNoLookup(t *testing.T) {
 		"existing slug": existing, "nonexistent slug": nonexistent, "hosted {uuid}__{slug} project form": hostedForm,
 	}
 	for name, rec := range cases {
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("%s: status = %d, want 422: %s", name, rec.Code, rec.Body.String())
-		}
-		if code := errorCode(t, rec.Body.Bytes()); code != "cross_project_keys_unsupported" {
-			t.Errorf("%s: code = %q, want cross_project_keys_unsupported", name, code)
-		}
+		assertKeysRouteOutcome(t, name, rec, http.StatusUnprocessableEntity, "cross_project_keys_unsupported")
 	}
 
-	if existing.Code != nonexistent.Code || errorCode(t, existing.Body.Bytes()) != errorCode(t, nonexistent.Body.Bytes()) {
-		t.Fatalf("existing and nonexistent slug responses differ: %d %s vs %d %s",
-			existing.Code, existing.Body.String(), nonexistent.Code, nonexistent.Body.String())
+	// Byte-for-byte, not just status/code (round-5 review finding 2): a
+	// message or details difference that reveals whether the slug exists
+	// would pass a status/code-only comparison.
+	if !bytes.Equal(existing.Body.Bytes(), nonexistent.Body.Bytes()) {
+		t.Fatalf("existing and nonexistent slug response bodies differ:\n%s\nvs\n%s",
+			existing.Body.String(), nonexistent.Body.String())
 	}
-	if existing.Code != hostedForm.Code || errorCode(t, existing.Body.Bytes()) != errorCode(t, hostedForm.Body.Bytes()) {
-		t.Fatalf("canonical-UUID and hosted-form responses differ: %d %s vs %d %s",
-			existing.Code, existing.Body.String(), hostedForm.Code, hostedForm.Body.String())
+	if !bytes.Equal(existing.Body.Bytes(), hostedForm.Body.Bytes()) {
+		t.Fatalf("canonical-UUID and hosted-form response bodies differ:\n%s\nvs\n%s",
+			existing.Body.String(), hostedForm.Body.String())
 	}
 
 	if got := spy.lookupCount(); got != 0 {
@@ -398,12 +384,25 @@ func TestAgentActionKeysRoute_ProjectScoped_StoreErrorIsNotA404(t *testing.T) {
 	}
 }
 
-// assertKeysRouteOutcome asserts rec matches (wantStatus, wantCode) and, for
-// an "allowed" outcome (wantStatus == 404, wantCode == "not_found"), that
-// the message is exactly the unimplemented-action one -- distinguishing
-// "authorized, no handler yet" from a target-resolution miss, which answers
-// the identical status/code with a different message (round-2 review
-// finding 3).
+// keysDenialFixedMessage is writeAgentKeysAuthzDenial's fixed, sanitized
+// message for each denial outcome it produces (authorize_agentkeys.go).
+var keysDenialFixedMessage = map[string]string{
+	"keys_denied":                    "Insufficient permissions",
+	"cross_project_keys_unsupported": "Cross-project keys access is not supported for agent callers",
+}
+
+// assertKeysRouteOutcome asserts rec matches (wantStatus, wantCode) and,
+// depending on the outcome, the exact body shape the seam promises:
+//
+//   - 404 not_found (authorized, unimplemented): the message is exactly the
+//     unimplemented-action one -- distinguishing "authorized, no handler
+//     yet" from a target-resolution miss, which answers the identical
+//     status/code with a different message (round-2 review finding 3).
+//   - 403 keys_denied / 422 cross_project_keys_unsupported (a denial from
+//     writeAgentKeysAuthzDenial): the body is sanitized -- see
+//     assertSanitizedDenialBody. This is the test the KeysAuthzDecision doc
+//     comment asks for and the design ruling's omit-operation_id condition
+//     depends on (round-5 review finding 1; ruling on ptone/scion#2195).
 func assertKeysRouteOutcome(t *testing.T, label string, rec *httptest.ResponseRecorder, wantStatus int, wantCode string) {
 	t.Helper()
 	if rec.Code != wantStatus {
@@ -413,9 +412,40 @@ func assertKeysRouteOutcome(t *testing.T, label string, rec *httptest.ResponseRe
 	if code != wantCode {
 		t.Errorf("%s: code = %q, want %q", label, code, wantCode)
 	}
-	if wantStatus == http.StatusNotFound && wantCode == "not_found" && message != unimplementedActionNotFoundMessage {
-		t.Errorf("%s: message = %q, want %q (an authorized-but-unimplemented call, not a resolution miss)",
-			label, message, unimplementedActionNotFoundMessage)
+	if wantStatus == http.StatusNotFound && wantCode == "not_found" {
+		if message != unimplementedActionNotFoundMessage {
+			t.Errorf("%s: message = %q, want %q (an authorized-but-unimplemented call, not a resolution miss)",
+				label, message, unimplementedActionNotFoundMessage)
+		}
+		return
+	}
+	if fixedMessage, ok := keysDenialFixedMessage[wantCode]; ok {
+		assertSanitizedDenialBody(t, label, rec, fixedMessage)
+	}
+}
+
+// assertSanitizedDenialBody pins the design ruling's condition for a seam
+// denial omitting operation_id (contract §3's phase-boundary clarification,
+// ptone/scion#2195): the response must carry the exact, fixed message for
+// its outcome, no operation_id, no details, and none of
+// KeysAuthzDecision.Reason (tagged "keys: " for audit logs -- see
+// authorize_agentkeys.go's denyAgentKeys/denyAgentKeysCrossProject -- but
+// never meant to reach an HTTP body).
+func assertSanitizedDenialBody(t *testing.T, label string, rec *httptest.ResponseRecorder, wantMessage string) {
+	t.Helper()
+	body := rec.Body.Bytes()
+	_, message := errorEnvelope(t, body)
+	if message != wantMessage {
+		t.Errorf("%s: message = %q, want exactly %q", label, message, wantMessage)
+	}
+	if bytes.Contains(body, []byte("operation_id")) {
+		t.Errorf("%s: body must not carry an operation_id: %s", label, string(body))
+	}
+	if bytes.Contains(body, []byte(`"details"`)) {
+		t.Errorf("%s: body must not carry a details field: %s", label, string(body))
+	}
+	if bytes.Contains(body, []byte("keys: ")) {
+		t.Errorf("%s: body must not leak the internal audit reason prefix: %s", label, string(body))
 	}
 }
 
