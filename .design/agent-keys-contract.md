@@ -281,8 +281,8 @@ Key points, restated because they are easy to get backwards:
   `AgentScopes`); granting one never grants the other. `agent.attach`'s `Enforcement` list
   currently reads `["pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go"]`;
   task 2.1 must append `"pkg/hub/authorize_agentkeys.go:authorizeAgentKeys"` to that list when it
-  lands (the file `authorizeAgentKeys` is actually defined in, per round-1 review finding 1), so
-  the registry stays an accurate index of what enforces each permission.
+  lands (the file `authorizeAgentKeys` is actually defined in), so the registry stays an accurate
+  index of what enforces each permission.
 - CLI-side project resolution must honor the selected project: resolve a unique target within it,
   never pass an empty scope that could select a same-named agent from a different project.
   Projects without a Hub ID use the existing local project identity/filter; ambiguous resolution
@@ -320,8 +320,8 @@ Key points, restated because they are easy to get backwards:
      required by this comparison** (AK-21c).
   5. `authorizeAgentKeys` runs only after 1-4 pass.
 
-  **Phase-boundary clarification (added during task 2.1's round-1/round-2 review, ptone/scion#2298;
-  ruled on by the design owner, recorded on ptone/scion#2195):** 2.1 owns and implements now, on
+  **Phase-boundary clarification (design-owner ruling, recorded on ptone/scion#2195):** 2.1 owns
+  and implements now, on
   both route shapes with real route/store-spy tests: invariant 1 (authentication precedes
   everything), invariant 4 (the project-boundary refusal decided before any target-agent lookup on
   the project-scoped route), invariant 5 (`authorizeAgentKeys` runs only after 1/4 pass), and

@@ -231,8 +231,18 @@ func TestAgentActionKeysRoute_ProjectScoped_CrossProjectNoLookup(t *testing.T) {
 		"/api/v1/projects/"+f.projectB.ID+"/agents/"+f.agentInB.Slug+"/keys", nil, token)
 	nonexistent := doRequestWithAgentToken(t, f.srv, http.MethodPost,
 		"/api/v1/projects/"+f.projectB.ID+"/agents/does-not-exist/keys", nil, token)
+	// AK-21c names both {project} forms the route accepts: the canonical
+	// UUID (exercised above) and the hosted {uuid}__{slug} form (contract
+	// §2.1). resolveProjectID extracts the UUID from either before this
+	// branch ever compares project.ID, so both must behave identically
+	// (round-4 review finding 3).
+	hostedForm := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+		"/api/v1/projects/"+f.projectB.ID+"__"+f.projectB.Slug+"/agents/"+f.agentInB.Slug+"/keys", nil, token)
 
-	for name, rec := range map[string]*httptest.ResponseRecorder{"existing slug": existing, "nonexistent slug": nonexistent} {
+	cases := map[string]*httptest.ResponseRecorder{
+		"existing slug": existing, "nonexistent slug": nonexistent, "hosted {uuid}__{slug} project form": hostedForm,
+	}
+	for name, rec := range cases {
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("%s: status = %d, want 422: %s", name, rec.Code, rec.Body.String())
 		}
@@ -244,6 +254,10 @@ func TestAgentActionKeysRoute_ProjectScoped_CrossProjectNoLookup(t *testing.T) {
 	if existing.Code != nonexistent.Code || errorCode(t, existing.Body.Bytes()) != errorCode(t, nonexistent.Body.Bytes()) {
 		t.Fatalf("existing and nonexistent slug responses differ: %d %s vs %d %s",
 			existing.Code, existing.Body.String(), nonexistent.Code, nonexistent.Body.String())
+	}
+	if existing.Code != hostedForm.Code || errorCode(t, existing.Body.Bytes()) != errorCode(t, hostedForm.Body.Bytes()) {
+		t.Fatalf("canonical-UUID and hosted-form responses differ: %d %s vs %d %s",
+			existing.Code, existing.Body.String(), hostedForm.Code, hostedForm.Body.String())
 	}
 
 	if got := spy.lookupCount(); got != 0 {
@@ -272,7 +286,13 @@ func TestAgentActionKeysRoute_ProjectScoped_ProjectResolutionGate(t *testing.T) 
 
 	unresolvableProjectSegments := map[string]string{
 		"AK-21e: nonexistent project UUID": tid("agentkeys-route-nonexistent-project"),
-		"AK-21f: bare project slug":        "agentkeys-route-bare-slug",
+		// AK-21f: a *real* project's bare slug (not a made-up string) still
+		// never resolves -- {project} only accepts a canonical UUID or the
+		// hosted {uuid}__{slug} form (contract §2.1); this pins that the
+		// resolver rejects a bare slug even when it names a project that
+		// genuinely exists, not merely an arbitrary unresolvable value
+		// (round-4 review finding 1).
+		"AK-21f: bare project slug": f.projectA.Slug,
 	}
 
 	var bodies []string
