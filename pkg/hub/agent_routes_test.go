@@ -52,6 +52,7 @@ func agentRouteCases() []agentRouteCase {
 		byID(get, "", AgentRouteRoot, opAgentRead, none),
 		byID(get, "/", AgentRouteRoot, opAgentRead, none),
 		byID(http.MethodPatch, "", AgentRouteRoot, opAgentUpdate, none),
+		byID(http.MethodPatch, "/", AgentRouteRoot, opAgentUpdate, none),
 		byID(http.MethodDelete, "", AgentRouteRoot, opAgentDelete, none),
 		byID(http.MethodPut, "", AgentRouteRoot, "", none),
 		byID(get, "/pty", AgentRoutePTY, opAgentAttach, none),
@@ -68,6 +69,7 @@ func agentRouteCases() []agentRouteCase {
 		byID(http.MethodPut, "/ports/3000/proxy/", AgentRoutePortProxy, opAgentPortAccess, AgentSubRouteSuffix{Param: "3000", Opaque: "/"}),
 		byID(get, "/ports/3000/proxy/a/b%2Fc", AgentRoutePortProxy, opAgentPortAccess, AgentSubRouteSuffix{Param: "3000", Opaque: "/a/b%2Fc"}),
 		byID(get, "/logs", AgentRouteLogs, "", none),
+		byID(http.MethodPatch, "/logs", AgentRouteLogs, "", none),
 		byID(get, "/cloud-logs", AgentRouteCloudLogs, "", none),
 		byID(get, "/cloud-logs/stream", AgentRouteCloudLogsStream, "", none),
 		byID(get, "/message-logs", AgentRouteMessageLogs, "", none),
@@ -92,6 +94,8 @@ func agentRouteCases() []agentRouteCase {
 		byID(post, "/outbound-message", AgentRouteActionOutbound, "", none),
 		byID(post, "/metrics", AgentRouteActionMetrics, "", none),
 		byID(post, "/set_message_mode", AgentRouteActionMessageMode, opAgentSetMessageMode, none),
+		byID(get, "/set_message_mode", AgentRouteActionMessageMode, "", none),
+		byID(http.MethodPut, "/set_message_mode", AgentRouteActionMessageMode, "", none),
 		byID(post, "/reincarnate", AgentRouteActionReincarnate, opAgentReincarnate, none),
 		byID(post, "/reset-auth", AgentRouteActionResetAuth, opAgentResetAuth, none),
 
@@ -116,6 +120,8 @@ func agentRouteCases() []agentRouteCase {
 		proj(post, "/env", ProjectAgentRouteActionEnv, opAgentEnv),
 		proj(post, "/outbound-message", ProjectAgentRouteActionOutbound, ""),
 		proj(post, "/set_message_mode", ProjectAgentRouteActionMessageMode, opAgentSetMessageMode),
+		proj(get, "/set_message_mode", ProjectAgentRouteActionMessageMode, ""),
+		proj(http.MethodPut, "/set_message_mode", ProjectAgentRouteActionMessageMode, ""),
 		proj(post, "/reincarnate", ProjectAgentRouteActionReincarnate, opAgentReincarnate),
 		proj(post, "/reset-auth", ProjectAgentRouteActionResetAuth, opAgentResetAuth),
 	}
