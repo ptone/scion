@@ -237,8 +237,9 @@ func TestDEF158_SurfaceFallback_NoAffinity_ChannelDerivedFromSurface(t *testing.
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	// Serialize writes (see def158BrokerSetup) — this handle is also hit
-	// concurrently by the broker's dispatch goroutine.
+	// Pin to one connection so every query hits the same :memory: DB (see
+	// def158BrokerSetup); the broker's dispatch goroutine also uses this
+	// handle.
 	db.SetMaxOpenConns(1)
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
@@ -592,8 +593,9 @@ func TestDEF159_Fixed_NormalPathBackfillsChannelAndThreadID(t *testing.T) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	// Serialize writes (see def158BrokerSetup) — this handle is also hit
-	// concurrently by the broker's dispatch goroutine.
+	// Pin to one connection so every query hits the same :memory: DB (see
+	// def158BrokerSetup); the broker's dispatch goroutine also uses this
+	// handle.
 	db.SetMaxOpenConns(1)
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
