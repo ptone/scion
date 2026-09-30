@@ -280,7 +280,8 @@ Key points, restated because they are easy to get backwards:
   registry entry from `agent.message` (`registry.go:133`, `CapabilityKind: CapabilityScope`, no
   `AgentScopes`); granting one never grants the other. `agent.attach`'s `Enforcement` list
   currently reads `["pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go"]`;
-  task 2.1 must append `"pkg/hub/authorize.go:authorizeAgentKeys"` to that list when it lands, so
+  task 2.1 must append `"pkg/hub/authorize_agentkeys.go:authorizeAgentKeys"` to that list when it
+  lands (the file `authorizeAgentKeys` is actually defined in, per round-1 review finding 1), so
   the registry stays an accurate index of what enforces each permission.
 - CLI-side project resolution must honor the selected project: resolve a unique target within it,
   never pass an empty scope that could select a same-named agent from a different project.
@@ -319,33 +320,22 @@ Key points, restated because they are easy to get backwards:
      required by this comparison** (AK-21c).
   5. `authorizeAgentKeys` runs only after 1-4 pass.
 
-  **Phase-boundary clarification (added during task 2.1's round-1 review, ptone/scion#2298; ruled
-  on by the design owner, recorded on ptone/scion#2195):** invariants 1, 2, 4 and 5 above are policy
-  and ordering requirements task 2.1 owns and implements now, including on both route shapes, with
-  real route/store-spy tests (no target-agent lookup for a foreign-project agent caller, identical
-  responses for an existing vs. nonexistent slug in that case, and a same-project resolution miss
-  reported as `not_found` rather than the resolver's other shape). Invariant 3's *operation-ID*
-  requirement, however, presupposes `ValidateBody` having already run — task 2.2's addition, not
-  2.1's — so 2.1's routing seam (the early branch in each action-dispatch function, calling
-  `authorizeAgentKeys`/`authorizeAgentKeysCrossProject` directly) may emit its temporary, sanitized
-  denial responses (`keys_denied`, `cross_project_keys_unsupported`, and a keys-shaped `not_found`)
-  **without** an operation ID, and must not synthesize a placeholder one or mint an ID ahead of
-  validation merely to satisfy this section's response shape. This is a narrow staging clarification
-  about *when* the operation-ID floor becomes enforceable, not a relaxation of invariant 3 itself
-  and not an approval of 2.1's interim responses as the finished keys API: an authorized request
-  reaching this seam must still be non-executing (there is no dispatch yet — it falls through to the
-  existing generic "unknown action" 404 every not-yet-wired action already produces), and 2.1 must
-  not claim the complete ordering/envelope contract is satisfied by this routing alone. Task 2.2
-  (ptone/scion#2196) is required to replace every temporary response 2.1's seam writes — not layer
-  on top of it — with the full sequence: `ValidateBody` → mint one real operation ID → the same
-  project-crossing-before-target-lookup and target-resolution behavior 2.1 already established →
-  `authorizeAgentKeys` → remaining admission/dispatch, preserving invariant 1's shared
-  authentication/project-resolution exceptions unchanged. From that point on, every outcome
-  (`not_found`, `keys_denied`, both 422s, both 409s, 429, 503, 502/504, 200) carries the real
-  operation ID, exactly as invariant 3 already required; 2.2 must add tests covering both route
-  shapes, validation-before-resolution/authorization precedence, the no-lookup-on-foreign-project
-  behavior surviving the integration, and the continued absence of an operation ID on
-  pre-validation errors (400/413, and 401/404 from shared gates preceding any keys-specific code).
+  **Phase-boundary clarification (added during task 2.1's round-1/round-2 review, ptone/scion#2298;
+  ruled on by the design owner, recorded on ptone/scion#2195):** 2.1 owns and implements now, on
+  both route shapes with real route/store-spy tests: invariant 1 (authentication precedes
+  everything), invariant 4 (the project-boundary refusal decided before any target-agent lookup on
+  the project-scoped route), invariant 5 (`authorizeAgentKeys` runs only after 1/4 pass), and
+  invariant 3's *non-operation-ID* half — a resolution miss must use keys' own `not_found` shape,
+  not the other resolver's. 2.1 does **not** implement invariant 2 (`ValidateBody`) and does not
+  read the request body at all; invariant 3's *operation-ID* half presupposes that validation having
+  already run, so 2.1's routing seam may emit its temporary, sanitized denials (`keys_denied`,
+  `cross_project_keys_unsupported`, keys-shaped `not_found`) **without** an operation ID — never a
+  synthesized placeholder or an ID minted ahead of validation. The success path stays non-executing
+  (no dispatch case exists yet, so it falls through to the existing generic "unknown action" 404).
+  2.2 (ptone/scion#2196) must replace this seam wholesale, not layer on top of it: `ValidateBody` →
+  mint one real operation ID → 2.1's already-established ordering/resolution behavior →
+  `authorizeAgentKeys` → remaining admission/dispatch, so every outcome from validation onward
+  carries the real ID, matching invariant 3 in full.
 
   **Top-level route (T), verified consistent with these invariants today:**
   `handlers_agents_core.go`'s `set_message_mode`/`reincarnate`/`message` special cases (`:2936`,
@@ -1397,29 +1387,9 @@ Dispatcher`); 2.3 follows 2.2 and 0.2 (owns the message-handler cutover using th
 from §2.3); docs/inventory owner → 3.2. Phase 5 (relationship-authorization integration) stays
 explicitly deferred pending #2119/#2120.
 
-**Phase boundary between 2.1 and 2.2, clarified during 2.1's round-1 review (ptone/scion#2298,
-recorded on ptone/scion#2195; see §3's matching note for the exact invariant text):** 2.1 owns and
-implements now, on both route shapes, with real tests: the `AgentActionKeys` early branch in each
-action-dispatch function, `authorizeAgentKeys`/`authorizeAgentKeysCrossProject` themselves, and
-every ordering/disclosure invariant in §3 that does not depend on request-body validation having
-already run (no target-agent lookup before an agent-credential's cross-project refusal on the
-project-scoped route; a same-project resolution miss reported as keys' own `not_found`, not the
-route's other resolver's shape). 2.1 does not implement `ValidateBody`, operation-ID minting, rate
-limiting, admission, or dispatch, and its temporary denial responses (`keys_denied`,
-`cross_project_keys_unsupported`, `not_found`) are sanitized but carry no operation ID — §2.5's
-operation-ID floor is not enforceable until validation exists to anchor "as soon as validation
-succeeds," so this is a staging gap, not a violation of it. An authorized request reaching 2.1's
-seam is still non-executing: no dispatch case exists yet, so it falls through to the same generic
-"unknown action" 404 every other not-yet-wired action on these routes already produces. 2.1's
-routing must not be read as, or advertised as, the finished keys API. Task 2.2 must replace every
-response 2.1's seam writes (not layer new logic on top of it) with the full sequence `ValidateBody`
-→ mint one real operation ID → the same project-crossing-before-target-lookup and target-resolution
-behavior 2.1 established → `authorizeAgentKeys` → remaining admission/dispatch, so that every
-outcome from validation onward (including keys' own 404/403/422) carries that ID, matching §3
-invariant 3 and §2.5 exactly. 2.2 must test both route shapes, validation-before-authorization
-precedence, the no-lookup-on-foreign-project behavior surviving integration, and the continued
-absence of an operation ID on pre-validation errors (400/413) and on the shared gates that precede
-any keys-specific code (401, and the project-scoped route's own project-resolution 404).
+**Phase boundary between 2.1 and 2.2:** see §3's "Phase-boundary clarification" paragraph for the
+normative text (what 2.1 implements now vs. what 2.2 must add) and ptone/scion#2196 for 2.2's
+integration obligation in full. Kept in one place to avoid the two copies drifting.
 
 ## 11. Retirement gate and master-body decision record (AC4)
 

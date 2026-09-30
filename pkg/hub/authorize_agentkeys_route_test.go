@@ -34,10 +34,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -53,6 +55,8 @@ type agentKeysRouteFixture struct {
 	projectB *store.Project
 	agentInA *store.Agent // target agent in project A
 	agentInB *store.Agent // target agent in project B
+	owner    *store.User  // owns agentInA and agentInB
+	nonOwner *store.User  // a hub user with no ownership/role on either agent
 }
 
 func newAgentKeysRouteFixture(t *testing.T) *agentKeysRouteFixture {
@@ -65,6 +69,12 @@ func newAgentKeysRouteFixture(t *testing.T) *agentKeysRouteFixture {
 		DisplayName: "Owner", Role: store.UserRoleMember, Status: "active",
 	}
 	require.NoError(t, s.CreateUser(ctx, owner))
+
+	nonOwner := &store.User{
+		ID: tid("agentkeys-route-nonowner"), Email: "agentkeys-route-nonowner@test.com",
+		DisplayName: "Non-Owner", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, nonOwner))
 
 	projA := &store.Project{ID: tid("agentkeys-route-proj-a"), Name: "Route A", Slug: "agentkeys-route-proj-a", OwnerID: owner.ID}
 	require.NoError(t, s.CreateProject(ctx, projA))
@@ -82,7 +92,10 @@ func newAgentKeysRouteFixture(t *testing.T) *agentKeysRouteFixture {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agentB))
 
-	return &agentKeysRouteFixture{srv: srv, store: s, projectA: projA, projectB: projB, agentInA: agentA, agentInB: agentB}
+	return &agentKeysRouteFixture{
+		srv: srv, store: s, projectA: projA, projectB: projB,
+		agentInA: agentA, agentInB: agentB, owner: owner, nonOwner: nonOwner,
+	}
 }
 
 // agentToken mints a real, signed agent JWT for a synthetic caller "agent"
@@ -100,34 +113,63 @@ func (f *agentKeysRouteFixture) agentToken(t *testing.T, callerAgentID, callerPr
 	return tok
 }
 
-// errorCode extracts error.code from a Hub error envelope response body.
-func errorCode(t *testing.T, body []byte) string {
+// errorEnvelope decodes a Hub error envelope response body.
+func errorEnvelope(t *testing.T, body []byte) (code, message string) {
 	t.Helper()
 	var env struct {
 		Error struct {
-			Code string `json:"code"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
 		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(body, &env), "response body: %s", string(body))
-	return env.Error.Code
+	return env.Error.Code, env.Error.Message
 }
+
+// errorCode extracts error.code from a Hub error envelope response body.
+func errorCode(t *testing.T, body []byte) string {
+	t.Helper()
+	code, _ := errorEnvelope(t, body)
+	return code
+}
+
+// unimplementedActionNotFoundMessage is NotFound(w, "Action")'s exact
+// message -- what an *authorized* keys call currently produces (no
+// dispatch case exists yet; contract §10's phase-boundary note). It is
+// deliberately distinct from a target-resolution miss's message on either
+// route shape (writeErrorFromErr's "Resource not found" on T,
+// NotFound(w, "Agent")'s "Agent not found" on P), so tests can tell
+// "authorized, no handler yet" apart from "target not found" even though
+// both currently answer 404 not_found.
+const unimplementedActionNotFoundMessage = "Action not found"
 
 // agentKeysLookupSpyStore wraps a store.Store and counts calls to the two
 // agent-resolution methods, so a test can prove no agent lookup ran before
-// a denial (contract §3.1 invariant 4 / AK-21c).
+// a denial (contract §3.1 invariant 4 / AK-21c). When failLookups is set,
+// both methods return a generic (non-ErrNotFound) error instead of
+// delegating, simulating a store outage (round-2 review finding 4).
 type agentKeysLookupSpyStore struct {
 	store.Store
 	getAgentCalls       int32
 	getAgentBySlugCalls int32
+	failLookups         bool
 }
+
+var errAgentKeysSpyStoreFailure = errors.New("agentKeysLookupSpyStore: simulated store failure")
 
 func (s *agentKeysLookupSpyStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
 	atomic.AddInt32(&s.getAgentCalls, 1)
+	if s.failLookups {
+		return nil, errAgentKeysSpyStoreFailure
+	}
 	return s.Store.GetAgent(ctx, id)
 }
 
 func (s *agentKeysLookupSpyStore) GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error) {
 	atomic.AddInt32(&s.getAgentBySlugCalls, 1)
+	if s.failLookups {
+		return nil, errAgentKeysSpyStoreFailure
+	}
 	return s.Store.GetAgentBySlug(ctx, projectID, slug)
 }
 
@@ -157,8 +199,17 @@ func TestAgentActionKeysRoute_TopLevel_CrossProjectAndMissing(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 		}
-		if code := errorCode(t, rec.Body.Bytes()); code != "not_found" {
+		code, message := errorEnvelope(t, rec.Body.Bytes())
+		if code != "not_found" {
 			t.Errorf("code = %q, want not_found (not agent_not_found)", code)
+		}
+		// A genuine resolution miss must not read as "authorized, no
+		// handler yet" (round-2 review finding 3): both currently answer
+		// 404 not_found, but this one's message must differ from the
+		// unimplemented-action message so a regression that always misses
+		// resolution cannot masquerade as a successful authorization.
+		if message == unimplementedActionNotFoundMessage {
+			t.Errorf("message = %q, want a resolution-miss message distinct from the unimplemented-action one", message)
 		}
 	})
 }
@@ -213,8 +264,54 @@ func TestAgentActionKeysRoute_ProjectScoped_SameProjectMissingAgent(t *testing.T
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 	}
-	if code := errorCode(t, rec.Body.Bytes()); code != "not_found" {
+	code, message := errorEnvelope(t, rec.Body.Bytes())
+	if code != "not_found" {
 		t.Errorf("code = %q, want not_found (not agent_not_found)", code)
+	}
+	if message == unimplementedActionNotFoundMessage {
+		t.Errorf("message = %q, want a resolution-miss message distinct from the unimplemented-action one", message)
+	}
+}
+
+// TestAgentActionKeysRoute_ProjectScoped_StoreErrorIsNotA404 pins round-2
+// review finding 4: a store failure during target resolution must surface
+// as a generic 5xx (writeErrorFromErr), never as a 404 that would tell an
+// operator "agent does not exist" during a store outage.
+func TestAgentActionKeysRoute_ProjectScoped_StoreErrorIsNotA404(t *testing.T) {
+	f := newAgentKeysRouteFixture(t)
+	token := f.agentToken(t, tid("agentkeys-route-caller-p3"), f.projectA.ID, ScopeAgentLifecycle)
+
+	spy := &agentKeysLookupSpyStore{Store: f.store, failLookups: true}
+	f.srv.store = spy
+
+	rec := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+		"/api/v1/projects/"+f.projectA.ID+"/agents/"+f.agentInA.Slug+"/keys", nil, token)
+	if rec.Code == http.StatusNotFound {
+		t.Fatalf("a store failure must not surface as 404: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec.Code < 500 {
+		t.Fatalf("status = %d, want a 5xx for a store failure: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// assertKeysRouteOutcome asserts rec matches (wantStatus, wantCode) and, for
+// an "allowed" outcome (wantStatus == 404, wantCode == "not_found"), that
+// the message is exactly the unimplemented-action one -- distinguishing
+// "authorized, no handler yet" from a target-resolution miss, which answers
+// the identical status/code with a different message (round-2 review
+// finding 3).
+func assertKeysRouteOutcome(t *testing.T, label string, rec *httptest.ResponseRecorder, wantStatus int, wantCode string) {
+	t.Helper()
+	if rec.Code != wantStatus {
+		t.Fatalf("%s: status = %d, want %d: %s", label, rec.Code, wantStatus, rec.Body.String())
+	}
+	code, message := errorEnvelope(t, rec.Body.Bytes())
+	if code != wantCode {
+		t.Errorf("%s: code = %q, want %q", label, code, wantCode)
+	}
+	if wantStatus == http.StatusNotFound && wantCode == "not_found" && message != unimplementedActionNotFoundMessage {
+		t.Errorf("%s: message = %q, want %q (an authorized-but-unimplemented call, not a resolution miss)",
+			label, message, unimplementedActionNotFoundMessage)
 	}
 }
 
@@ -225,69 +322,124 @@ func TestAgentActionKeysRoute_ProjectScoped_SameProjectMissingAgent(t *testing.T
 // finding 3): it drives both route shapes through the real mux for the same
 // identity/target pair and asserts they reach the same outcome, and that
 // the attach capability ComputeCapabilities projects for the caller agrees
-// with the keys route's own allow/deny decision.
+// with the keys route's own allow/deny decision. Round-2 review finding 8
+// added the user-session cases: the P route's cross-project pre-check
+// returning nil for a human caller (no blanket ban) was previously covered
+// only at the function level (TestAuthorizeAgentKeysCrossProject), not
+// end-to-end through the real mux.
 func TestAgentActionKeysRoute_BothShapesAgree(t *testing.T) {
 	f := newAgentKeysRouteFixture(t)
 
-	allowedCallerID := tid("agentkeys-route-agree-allowed")
-	deniedCallerID := tid("agentkeys-route-agree-denied")
-	allowedToken := f.agentToken(t, allowedCallerID, f.projectA.ID, ScopeAgentLifecycle)
-	deniedToken := f.agentToken(t, deniedCallerID, f.projectA.ID, ScopeAgentCreate) // no lifecycle scope
+	t.Run("agent credential", func(t *testing.T) {
+		allowedCallerID := tid("agentkeys-route-agree-allowed")
+		deniedCallerID := tid("agentkeys-route-agree-denied")
+		allowedToken := f.agentToken(t, allowedCallerID, f.projectA.ID, ScopeAgentLifecycle)
+		deniedToken := f.agentToken(t, deniedCallerID, f.projectA.ID, ScopeAgentCreate) // no lifecycle scope
 
-	cases := []struct {
-		name       string
-		token      string
-		callerID   string
-		wantStatus int
-		wantCode   string
-		wantAttach bool
-	}{
-		{
-			name: "authorized agent, same project (unimplemented handler, not a denial)",
-			token: allowedToken, callerID: allowedCallerID,
-			wantStatus: http.StatusNotFound, wantCode: "not_found", wantAttach: true,
-		},
-		{
-			name: "agent missing lifecycle scope",
-			token: deniedToken, callerID: deniedCallerID,
-			wantStatus: http.StatusForbidden, wantCode: "keys_denied", wantAttach: false,
-		},
-	}
+		cases := []struct {
+			name           string
+			token          string
+			callerIdentity Identity
+			wantStatus     int
+			wantCode       string
+			wantAttach     bool
+		}{
+			{
+				name:  "authorized agent, same project (unimplemented handler, not a denial)",
+				token: allowedToken, callerIdentity: authzHelperAgent(f.projectA.ID, ScopeAgentLifecycle),
+				wantStatus: http.StatusNotFound, wantCode: "not_found", wantAttach: true,
+			},
+			{
+				name:  "agent missing lifecycle scope",
+				token: deniedToken, callerIdentity: authzHelperAgent(f.projectA.ID, ScopeAgentCreate),
+				wantStatus: http.StatusForbidden, wantCode: "keys_denied", wantAttach: false,
+			},
+		}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			topLevel := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentInA.ID+"/keys", nil, tc.token)
-			projectScoped := doRequestWithAgentToken(t, f.srv, http.MethodPost,
-				"/api/v1/projects/"+f.projectA.ID+"/agents/"+f.agentInA.Slug+"/keys", nil, tc.token)
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				topLevel := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentInA.ID+"/keys", nil, tc.token)
+				projectScoped := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+					"/api/v1/projects/"+f.projectA.ID+"/agents/"+f.agentInA.Slug+"/keys", nil, tc.token)
 
-			if topLevel.Code != tc.wantStatus {
-				t.Fatalf("top-level status = %d, want %d: %s", topLevel.Code, tc.wantStatus, topLevel.Body.String())
-			}
-			if projectScoped.Code != tc.wantStatus {
-				t.Fatalf("project-scoped status = %d, want %d: %s", projectScoped.Code, tc.wantStatus, projectScoped.Body.String())
-			}
-			if got := errorCode(t, topLevel.Body.Bytes()); got != tc.wantCode {
-				t.Errorf("top-level code = %q, want %q", got, tc.wantCode)
-			}
-			if got := errorCode(t, projectScoped.Body.Bytes()); got != tc.wantCode {
-				t.Errorf("project-scoped code = %q, want %q", got, tc.wantCode)
-			}
+				assertKeysRouteOutcome(t, "top-level", topLevel, tc.wantStatus, tc.wantCode)
+				assertKeysRouteOutcome(t, "project-scoped", projectScoped, tc.wantStatus, tc.wantCode)
 
-			// Capability projection must agree with the route decision: the
-			// same identity/resource pair, evaluated independently through
-			// ComputeCapabilities, must include ActionAttach exactly when
-			// the keys route allowed the call.
-			callerIdentity := authzHelperAgent(f.projectA.ID, ScopeAgentLifecycle)
-			if tc.callerID == deniedCallerID {
-				callerIdentity = authzHelperAgent(f.projectA.ID, ScopeAgentCreate)
-			}
-			caps := f.srv.GetAuthzService().ComputeCapabilities(context.Background(), callerIdentity, agentResource(f.agentInA))
-			hasAttach := capabilityAllows(caps, ActionAttach)
-			if hasAttach != tc.wantAttach {
-				t.Errorf("capability projection attach=%v, want %v (route decision disagrees with capability projection)", hasAttach, tc.wantAttach)
-			}
-		})
-	}
+				// Capability projection must agree with the route decision:
+				// the same identity/resource pair, evaluated independently
+				// through ComputeCapabilities, must include ActionAttach
+				// exactly when the keys route allowed the call.
+				caps := f.srv.GetAuthzService().ComputeCapabilities(context.Background(), tc.callerIdentity, agentResource(f.agentInA))
+				hasAttach := capabilityAllows(caps, ActionAttach)
+				if hasAttach != tc.wantAttach {
+					t.Errorf("capability projection attach=%v, want %v (route decision disagrees with capability projection)", hasAttach, tc.wantAttach)
+				}
+			})
+		}
+	})
+
+	t.Run("user session", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			user       *store.User
+			wantStatus int
+			wantCode   string
+			wantAttach bool
+		}{
+			{
+				name: "owner attaches to own agent (unimplemented handler, not a denial)",
+				user: f.owner, wantStatus: http.StatusNotFound, wantCode: "not_found", wantAttach: true,
+			},
+			{
+				name: "non-owner denied",
+				user: f.nonOwner, wantStatus: http.StatusForbidden, wantCode: "keys_denied", wantAttach: false,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				topLevel := doRequestAsUser(t, f.srv, tc.user, http.MethodPost, "/api/v1/agents/"+f.agentInA.ID+"/keys", nil)
+				projectScoped := doRequestAsUser(t, f.srv, tc.user, http.MethodPost,
+					"/api/v1/projects/"+f.projectA.ID+"/agents/"+f.agentInA.Slug+"/keys", nil)
+
+				assertKeysRouteOutcome(t, "top-level", topLevel, tc.wantStatus, tc.wantCode)
+				assertKeysRouteOutcome(t, "project-scoped", projectScoped, tc.wantStatus, tc.wantCode)
+
+				identity := NewAuthenticatedUser(tc.user.ID, tc.user.Email, tc.user.DisplayName, tc.user.Role, "api")
+				caps := f.srv.GetAuthzService().ComputeCapabilities(context.Background(), identity, agentResource(f.agentInA))
+				hasAttach := capabilityAllows(caps, ActionAttach)
+				if hasAttach != tc.wantAttach {
+					t.Errorf("capability projection attach=%v, want %v (route decision disagrees with capability projection)", hasAttach, tc.wantAttach)
+				}
+			})
+		}
+	})
+}
+
+// TestAgentActionKeysRoute_ExpectedDivergence_AgentMissingScopeCrossProject
+// is round-2 review finding 8: for an agent credential that lacks
+// ScopeAgentLifecycle AND targets a foreign-project agent, the two route
+// shapes legitimately disagree, by contract construction (§3 invariants
+// 4-5): P decides the project-boundary refusal before ever checking scope
+// (422 cross_project_keys_unsupported), while T's single authorizeAgentKeys
+// call checks scope first (403 keys_denied) since the top-level route
+// resolves its target -- and therefore the caller's cross-project status --
+// before authorizeAgentKeys runs at all, and that function checks scope
+// ahead of the project comparison internally. This is not a bug: it is
+// pinned here, explicitly, so a future change that reorders either path
+// gets a failing test instead of silent disagreement, and so
+// TestAgentActionKeysRoute_BothShapesAgree's name is not misread as "always
+// identical".
+func TestAgentActionKeysRoute_ExpectedDivergence_AgentMissingScopeCrossProject(t *testing.T) {
+	f := newAgentKeysRouteFixture(t)
+	token := f.agentToken(t, tid("agentkeys-route-divergence-caller"), f.projectA.ID, ScopeAgentCreate) // no lifecycle scope
+
+	topLevel := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentInB.ID+"/keys", nil, token)
+	assertKeysRouteOutcome(t, "top-level", topLevel, http.StatusForbidden, "keys_denied")
+
+	projectScoped := doRequestWithAgentToken(t, f.srv, http.MethodPost,
+		"/api/v1/projects/"+f.projectB.ID+"/agents/"+f.agentInB.Slug+"/keys", nil, token)
+	assertKeysRouteOutcome(t, "project-scoped", projectScoped, http.StatusUnprocessableEntity, "cross_project_keys_unsupported")
 }
 
 // TestAgentActionKeysRoute_RevokedAgentCredential_NeverReachesTheGate
@@ -326,11 +478,17 @@ func TestAgentActionKeysRoute_RevokedAgentCredential_NeverReachesTheGate(t *test
 	// Before revocation: the token authenticates and reaches the keys gate
 	// (proves the setup is valid, so the post-revocation 401 below is
 	// meaningful). The caller has full-role lifecycle scope on its own
-	// project's agent, so this is expected to be an authorization "allowed"
-	// (404 "Action", unimplemented handler), not itself a denial.
+	// project's agent, so this must be an authorization "allowed" (404
+	// "Action", unimplemented handler) -- asserted by exact message
+	// (round-2 review finding 3), not merely "not 401", so this sanity
+	// check cannot pass on an unrelated failure that also happens to avoid
+	// 401.
 	before := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", nil, token)
-	if before.Code == http.StatusUnauthorized {
-		t.Fatalf("token should authenticate before revocation, got 401: %s", before.Body.String())
+	if before.Code != http.StatusNotFound {
+		t.Fatalf("token should authenticate and be allowed before revocation, got %d: %s", before.Code, before.Body.String())
+	}
+	if _, message := errorEnvelope(t, before.Body.Bytes()); message != unimplementedActionNotFoundMessage {
+		t.Fatalf("expected the unimplemented-action message before revocation, got %q: %s", message, before.Body.String())
 	}
 
 	require.NoError(t, s.RevokeAgentCredential(ctx, cred.ID, "test", "explicit"))
@@ -339,5 +497,32 @@ func TestAgentActionKeysRoute_RevokedAgentCredential_NeverReachesTheGate(t *test
 	if after.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 after revocation (never reaching authorizeAgentKeys), got %d: %s",
 			after.Code, after.Body.String())
+	}
+}
+
+// TestAgentActionKeysRoute_ExpiredAgentToken_NeverReachesTheGate is round-2
+// review finding 6: an expired JWT (as opposed to a revoked credential
+// record) must also be rejected by the shared auth middleware before any
+// handler runs, on a request shaped like the keys route -- not merely
+// proven in the abstract by agenttoken_test.go's token-service-level
+// coverage.
+func TestAgentActionKeysRoute_ExpiredAgentToken_NeverReachesTheGate(t *testing.T) {
+	srv, s, user, project := setupCredentialTestServer(t)
+
+	targetID := tid("agentkeys-route-expired-target")
+	createCredTestAgent(t, s, targetID, project.ID, user.ID)
+	callerID := tid("agentkeys-route-expired-caller")
+	createCredTestAgent(t, s, callerID, project.ID, user.ID)
+
+	origDuration := srv.agentTokenService.config.TokenDuration
+	srv.agentTokenService.config.TokenDuration = -1 * time.Hour // already expired at mint time
+	token, err := srv.GenerateAgentToken(callerID, project.ID, nil, AgentRoleFull, nil)
+	srv.agentTokenService.config.TokenDuration = origDuration
+	require.NoError(t, err)
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents/"+targetID+"/keys", nil, token)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for an expired token (never reaching authorizeAgentKeys), got %d: %s",
+			rec.Code, rec.Body.String())
 	}
 }

@@ -3010,12 +3010,13 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 	// `default: NotFound(w, "Action")` answers an authorized call exactly
 	// like any other not-yet-implemented action — not because it was
 	// denied.
+	//
+	// No separate nil-identity guard: authorizeAgentKeys already fails
+	// closed (keys_denied) on a nil identity, and the shared auth
+	// middleware answers an unauthenticated request with 401 before this
+	// handler ever runs (round-2 review finding 10) — an extra guard here
+	// would be dead code.
 	if action == api.AgentActionKeys {
-		identity := GetIdentityFromContext(r.Context())
-		if identity == nil {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "This action requires user or agent authentication", nil)
-			return
-		}
 		targetAgent, err := s.store.GetAgent(r.Context(), id)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
