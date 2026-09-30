@@ -443,7 +443,7 @@ func TestSendKeys_StdinTransportFailureIsAmbiguous(t *testing.T) {
 // cancelled mid-call, or os/exec's Wait returning ctx.Err() after a
 // successful cancel) must not be classified as "proven not to have
 // started" — only SendKeys's own pre-Exec checks may produce that
-// classification. Reproduces the exact repro the reviewer used: the mock
+// classification. Reproduces the exact repro shape that surfaces the bug: the mock
 // records that send-keys ran, then returns an error wrapping
 // context.DeadlineExceeded.
 func TestSendKeys_PostExecFailureWrappingCtxErrorIsNotErrKeysNotStarted(t *testing.T) {
@@ -479,7 +479,7 @@ func TestSendKeys_PostExecFailureWrappingCtxErrorIsNotErrKeysNotStarted(t *testi
 	if errors.Is(err, ErrKeysNotStarted) {
 		t.Fatalf("a post-Exec failure that wraps a context error must never match ErrKeysNotStarted (it is not proven to have failed before Exec began), got: %v", err)
 	}
-	// Finding #1 part (a): SendKeys must not join the send-keys Exec error
+	// SendKeys must not join the send-keys Exec error
 	// with %w, so the mock's own context.DeadlineExceeded is not reachable
 	// via errors.Is on SendKeys's returned value either — the handler must
 	// be unable to reach this by accident even if it (incorrectly) checked
@@ -493,7 +493,7 @@ func TestSendKeys_PostExecFailureWrappingCtxErrorIsNotErrKeysNotStarted(t *testi
 	// context.DeadlineExceeded) is correctly false on the returned error
 	// itself; that is the fix, not a gap. What must still hold is that the
 	// mock's own crafted error really did wrap context.DeadlineExceeded
-	// (confirming this test reproduces the reviewer's repro shape) and that
+	// (confirming this test reproduces the intended repro shape) and that
 	// its text survives into SendKeys's returned error for diagnostics.
 	mockErr := fmt.Errorf("exec stream: %w", context.DeadlineExceeded)
 	if !errors.Is(mockErr, context.DeadlineExceeded) {
@@ -613,7 +613,7 @@ func TestSendKeys_DeadlineExpiredWhileWaitingForLock(t *testing.T) {
 // sequence (all of one caller's Execs, then all of the other's, in either
 // order) — this test asserts exactly that, and was confirmed to fail 3/3
 // runs with injectionLock's Lock call removed from SendKeys and
-// deliverImmediate during review.
+// deliverImmediate.
 func TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave(t *testing.T) {
 	agent := runningAgent()
 
@@ -701,9 +701,9 @@ func TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave(t *testing.T) {
 // (send-keys) call. With the lock, MessageRaw's Lock call cannot succeed
 // until SendKeys's Unlock — after both of its calls — so the sequence must
 // be keys, keys, raw. Without it, MessageRaw's unblocked Exec call lands
-// inside that window, producing keys, raw, keys instead. Confirmed (during
-// review) to fail with the lock removed from MessageRaw, and confirmed
-// again here via a temporary revert-and-retest before restoring the fix.
+// inside that window, producing keys, raw, keys instead. Confirmed to fail
+// with the lock removed from MessageRaw, and confirmed again here via a
+// temporary revert-and-retest before restoring the fix.
 func TestMessageRaw_ConcurrentWithSendKeys_NoInterleave(t *testing.T) {
 	agent := runningAgent()
 
@@ -1606,9 +1606,11 @@ func TestSendKeys_TargetRevalidationCtxExpiredIsNotStarted(t *testing.T) {
 }
 
 // TestSameTargetInstance covers sameTargetInstance's comparison directly:
-// ContainerID must always match; the Kubernetes UID, when both sides report
-// one, must also match; a backend that reports no UID on either or both
-// sides is judged on ContainerID alone.
+// ContainerID must always match; the Kubernetes UID must also match
+// whenever either side reports one — an asymmetric result (one side
+// reporting a UID, the other not) fails the comparison rather than falling
+// back to ContainerID alone. ContainerID alone decides the comparison only
+// when neither side reports a UID.
 func TestSameTargetInstance(t *testing.T) {
 	base := api.AgentInfo{ContainerID: "c1"}
 	cases := []struct {

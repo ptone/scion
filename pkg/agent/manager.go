@@ -602,8 +602,10 @@ var ErrKeysUnsupported = errors.New("agent: this backend does not support keys d
 // strictly *before* delivery began: SendKeys wraps this (via %w, together
 // with the ctx error that caused it) at each of its pre-delivery
 // checkpoints — the lock wait, the post-lock recheck, a readiness probe
-// failure that coincides with ctx expiry, and the pre-send recheck — and
-// nowhere else. "Before delivery began" is not the same as "before any
+// failure that coincides with ctx expiry, a ctx expiry discovered when the
+// pre-delivery target re-verification's own resolution fails, and the
+// pre-send recheck — and nowhere else. "Before delivery began" is not the
+// same as "before any
 // Exec": the readiness probe is itself an Exec call, and a probe failure
 // only produces this sentinel when it coincides with ctx expiry, never on
 // its own (a genuinely unready terminal is ErrTerminalNotReady instead).
@@ -803,9 +805,11 @@ func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, target api
 // for the lock (the "control-channel semaphore/target-lock wait" the
 // contract's execute-before enforcement names) — so a deadline lost during
 // that wait can never still result in execution afterward. A readiness-probe
-// failure that itself coincides with ctx expiry is still reported as
-// ErrKeysNotStarted (see the probe's own comment), even though neither
-// recheck is directly adjacent to the probe.
+// failure that itself coincides with ctx expiry, and a ctx expiry
+// discovered when the target re-verification's own resolution fails, are
+// each still reported as ErrKeysNotStarted (see the probe's own comment,
+// and the re-verification's), even though neither recheck above is
+// directly adjacent to either of those two points.
 // Callers arrange for ctx's deadline to reflect the Hub-issued
 // execute-before timestamp (agentkeys.CapExecuteBefore) before calling
 // SendKeys.

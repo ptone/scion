@@ -2354,10 +2354,12 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 		// SendKeys wraps agent.ErrKeysNotStarted (by identity, via %w) only
 		// at its own pre-delivery checkpoints — the lock wait, the post-lock
 		// recheck, a readiness-probe failure that coincides with ctx expiry,
-		// and the recheck immediately before delivery — proven not to have
-		// started. (The tmux version gate and the target re-verification
-		// return ErrKeysUnsupported or agentkeys.ErrTargetNotFound, handled
-		// by their own cases above, never ErrKeysNotStarted.) Matching by
+		// a ctx expiry discovered when the target re-verification's own
+		// resolution fails, and the recheck immediately before delivery —
+		// proven not to have started. (The tmux version gate, and a target
+		// re-verification that resolves cleanly but finds a mismatch,
+		// return ErrKeysUnsupported or agentkeys.ErrTargetNotFound instead,
+		// handled by their own cases above.) Matching by
 		// this sentinel's identity, rather than by
 		// errors.Is(err, context.DeadlineExceeded/Canceled), is required:
 		// the delivery-call failure path below deliberately

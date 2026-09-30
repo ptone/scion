@@ -134,9 +134,9 @@ func TestSendKeys_HTTP_OutcomeMapping(t *testing.T) {
 		{"unsupported_backend", agent.ErrKeysUnsupported, http.StatusUnprocessableEntity, agentkeys.OutcomeKeysUnsupported, ""},
 		// This is the contract §4.3 row "error
 		// wrapping agent.ErrKeysNotStarted -> BrokerResult{Outcome:
-		// OutcomeKeysUnavailable}, HTTP 503" — the mapping a reviewer found
-		// untested (disabling the handler's ErrKeysNotStarted case left
-		// every other keys-route test green).
+		// OutcomeKeysUnavailable}, HTTP 503": disabling the handler's
+		// ErrKeysNotStarted case leaves every other keys-route test green,
+		// so this mapping needs its own row.
 		{"keys_not_started", fmt.Errorf("%w: %v", agent.ErrKeysNotStarted, context.DeadlineExceeded), http.StatusServiceUnavailable, agentkeys.OutcomeKeysUnavailable, "admission deadline expired before dispatch"},
 	}
 
@@ -524,9 +524,9 @@ func TestSendKeys_HTTP_BodyTooLarge(t *testing.T) {
 	}
 }
 
-// TestSendKeys_HTTP_MalformedBodyRejected covers the rest of review finding
-// #3: readKeysRequest must reject unknown fields and trailing content that
-// the bare readJSON it replaced would have accepted.
+// TestSendKeys_HTTP_MalformedBodyRejected covers the rest of the malformed-
+// body requirement: readKeysRequest must reject unknown fields and trailing
+// content that the bare readJSON it replaced would have accepted.
 func TestSendKeys_HTTP_MalformedBodyRejected(t *testing.T) {
 	validExecuteBefore := `"2099-01-01T00:00:00Z"`
 	cases := []struct {
