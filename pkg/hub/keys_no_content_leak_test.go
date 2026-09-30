@@ -86,6 +86,20 @@ func assertReachedBrokerDo(t *testing.T, log *bytes.Buffer) {
 	}
 }
 
+// assertNoLogOutput fails the test if the captured log buffer is non-empty.
+// Used on ControlChannelBrokerClient.ExecuteKeys, which emits no log lines
+// today: this turns "the log capture found nothing" from an unstated
+// assumption into an enforced property, so a future log line added to this
+// path is caught here (and, if it ever echoed key content, by
+// assertNoSentinelLeak) rather than silently changing what "no leak" means
+// for this transport.
+func assertNoLogOutput(t *testing.T, log *bytes.Buffer) {
+	t.Helper()
+	if log.Len() != 0 {
+		t.Fatalf("expected no log output from the control-channel adapter, got:\n%s", log.String())
+	}
+}
+
 func sentinelKeysRequest() agentkeys.BrokerRequest {
 	return agentkeys.BrokerRequest{
 		OperationID:   "op-1",
@@ -204,8 +218,8 @@ func TestExecuteKeys_NoContentLeak_HTTP(t *testing.T) {
 // TestExecuteKeys_NoContentLeak_ControlChannel drives every control-channel
 // error path with a distinctive keys value and asserts the returned error
 // does not contain it. ControlChannelBrokerClient.ExecuteKeys itself emits no
-// log lines (verified by reading it, and confirmed here since the log buffer
-// stays empty in every sub-test below), and this test replaces
+// log lines (verified by reading it, and enforced here via assertNoLogOutput
+// on every sub-test below), and this test replaces
 // ControlChannelManager/BrokerConnection with mockControlChannelTunnel, so no
 // real control-channel transport logging runs either way. The log capture is
 // still installed and checked so a future log line added to this path — the
@@ -218,6 +232,7 @@ func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 		client := &ControlChannelBrokerClient{manager: tunnel, signer: failingControlChannelSigner{}}
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", sentinelKeysRequest())
 		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysUnavailable)
+		assertNoLogOutput(t, log)
 		if tunnel.calls != 0 {
 			t.Fatalf("expected zero tunnel calls for a signer failure, got %d", tunnel.calls)
 		}
@@ -229,6 +244,7 @@ func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 		client := &ControlChannelBrokerClient{manager: tunnel}
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", sentinelKeysRequest())
 		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysOutcomeUnknown)
+		assertNoLogOutput(t, log)
 		if tunnel.calls != 1 {
 			t.Fatalf("expected exactly one tunnel call, got %d", tunnel.calls)
 		}
@@ -244,6 +260,7 @@ func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 		client := &ControlChannelBrokerClient{manager: tunnel}
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", sentinelKeysRequest())
 		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysOutcomeUnknown)
+		assertNoLogOutput(t, log)
 		if tunnel.calls != 1 {
 			t.Fatalf("expected exactly one tunnel call, got %d", tunnel.calls)
 		}
@@ -259,6 +276,7 @@ func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 		client := &ControlChannelBrokerClient{manager: tunnel}
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", sentinelKeysRequest())
 		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysUnsupported)
+		assertNoLogOutput(t, log)
 		if tunnel.calls != 1 {
 			t.Fatalf("expected exactly one tunnel call, got %d", tunnel.calls)
 		}
@@ -271,6 +289,7 @@ func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 		client := &ControlChannelBrokerClient{manager: tunnel}
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", sentinelKeysRequest())
 		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysOutcomeUnknown)
+		assertNoLogOutput(t, log)
 		if tunnel.calls != 1 {
 			t.Fatalf("expected exactly one tunnel call, got %d", tunnel.calls)
 		}
@@ -284,6 +303,7 @@ func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 		req.Keys = keysContentSentinel + strings.Repeat("a", maxControlChannelBodySize)
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", req)
 		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysUnavailable)
+		assertNoLogOutput(t, log)
 		if tunnel.calls != 0 {
 			t.Fatalf("expected zero tunnel calls for an oversized payload, got %d", tunnel.calls)
 		}
