@@ -188,30 +188,53 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_ClientWithoutKeysSupport(t *testi
 }
 
 // TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnBadDeadline proves a
-// zero or already-past executeBefore, or an empty operationID, is rejected as
-// agentkeys.ErrNotDispatched before any client call. BrokerRequest.
-// ExecuteBefore's doc requires failing closed on a missing/invalid deadline,
-// and there is no reason to spend a network round trip on a request the
-// broker is contractually required to reject anyway. An empty operationID
-// gets the same treatment because decodeBrokerKeysResponse's success-path
-// echo check ("OperationID == expectedOperationID") would otherwise be
-// vacuous for it: an empty echo would satisfy an empty expectation.
+// zero or already-past executeBefore, an empty operationID, or an empty
+// Target identity field is rejected as agentkeys.ErrNotDispatched before any
+// client call. BrokerRequest.ExecuteBefore's doc requires failing closed on a
+// missing/invalid deadline, and there is no reason to spend a network round
+// trip on a request the broker is contractually required to reject anyway.
+// An empty operationID gets the same treatment because
+// decodeBrokerKeysResponse's success-path echo check ("OperationID ==
+// expectedOperationID") would otherwise be vacuous for it: an empty echo
+// would satisfy an empty expectation. An empty AgentSlug/AgentID/ProjectID
+// gets the same treatment because these are caller bugs (task 2.2 always
+// passes them from an already-resolved *store.Agent), and an empty AgentSlug
+// in particular would build a self-redirecting broker path this adapter's
+// redirect-refusing client would then report as an uncertain "may have run"
+// outcome for a request that never reached a handler.
 func TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnBadDeadline(t *testing.T) {
 	dispatcher, mockClient, target := newKeysDispatcherFixture(t)
 
 	cases := []struct {
-		name        string
-		operationID string
-		deadline    time.Time
+		name         string
+		operationID  string
+		deadline     time.Time
+		mutateTarget func(agentkeys.Target) agentkeys.Target
 	}{
-		{"zero deadline", "op-1", time.Time{}},
-		{"already past", "op-1", time.Now().Add(-time.Second)},
-		{"empty operation ID", "", time.Now().Add(time.Minute)},
+		{"zero deadline", "op-1", time.Time{}, nil},
+		{"already past", "op-1", time.Now().Add(-time.Second), nil},
+		{"empty operation ID", "", time.Now().Add(time.Minute), nil},
+		{"empty agent slug", "op-1", time.Now().Add(time.Minute), func(tg agentkeys.Target) agentkeys.Target {
+			tg.AgentSlug = ""
+			return tg
+		}},
+		{"empty agent ID", "op-1", time.Now().Add(time.Minute), func(tg agentkeys.Target) agentkeys.Target {
+			tg.AgentID = ""
+			return tg
+		}},
+		{"empty project ID", "op-1", time.Now().Add(time.Minute), func(tg agentkeys.Target) agentkeys.Target {
+			tg.ProjectID = ""
+			return tg
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			mockClient.calls = 0
-			_, err := dispatcher.DispatchAgentKeys(context.Background(), target, tc.operationID, tc.deadline, "C-c")
+			tg := target
+			if tc.mutateTarget != nil {
+				tg = tc.mutateTarget(tg)
+			}
+			_, err := dispatcher.DispatchAgentKeys(context.Background(), tg, tc.operationID, tc.deadline, "C-c")
 			if !errors.Is(err, agentkeys.ErrNotDispatched) {
 				t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
 			}

@@ -180,7 +180,10 @@ func TestHTTPRuntimeBrokerClient_ExecuteKeys_BrokerDecision(t *testing.T) {
 
 // TestHTTPRuntimeBrokerClient_ExecuteKeys_UnknownOutcomes proves malformed or
 // disagreeing responses classify as outcome_unknown rather than being
-// guessed at — never a false "definitely didn't happen" or "delivered".
+// guessed at — never a false "definitely didn't happen" or "delivered" — and,
+// per ptone/scion#2194 AC3, that exactly one application dispatch attempt is
+// made even for a 5xx: a hit counter on the handler proves nothing in this
+// adapter retries on a server error.
 func TestHTTPRuntimeBrokerClient_ExecuteKeys_UnknownOutcomes(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -189,12 +192,19 @@ func TestHTTPRuntimeBrokerClient_ExecuteKeys_UnknownOutcomes(t *testing.T) {
 	}{
 		{"2xx with wrong outcome", http.StatusOK, `{"operation_id":"op-1","outcome":"agent_not_running"}`},
 		{"status/outcome mismatch", http.StatusNotFound, `{"operation_id":"op-1","outcome":"agent_not_running"}`},
-		{"generic 5xx", http.StatusBadGateway, `{"error":{"code":"internal","message":"boom"}}`},
+		{"generic 5xx (502)", http.StatusBadGateway, `{"error":{"code":"internal","message":"boom"}}`},
+		// 503 with a non-BrokerResult body is the status a retrying HTTP
+		// client is most likely to retry (it is the conventional
+		// "temporarily unavailable, try again" code) — the case most worth
+		// proving isn't silently retried here.
+		{"generic 5xx (503, non-BrokerResult body)", http.StatusServiceUnavailable, `{"error":{"code":"unavailable","message":"try again later"}}`},
 		{"unparseable 200", http.StatusOK, "not json"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			var hits int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt32(&hits, 1)
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
 			}))
@@ -208,14 +218,21 @@ func TestHTTPRuntimeBrokerClient_ExecuteKeys_UnknownOutcomes(t *testing.T) {
 			if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysOutcomeUnknown {
 				t.Fatalf("ClassifyDispatchError = %q, want %q (err=%v)", got, agentkeys.OutcomeKeysOutcomeUnknown, err)
 			}
+			if got := atomic.LoadInt32(&hits); got != 1 {
+				t.Fatalf("expected exactly one dispatch attempt, got %d", got)
+			}
 		})
 	}
 }
 
 // TestHTTPRuntimeBrokerClient_ExecuteKeys_ConnectionRefused proves a dial
 // failure — provably no bytes ever reached the broker — classifies as
-// agentkeys.ErrNotDispatched / OutcomeKeysUnavailable, and that exactly one
-// attempt is made (no retry).
+// agentkeys.ErrNotDispatched / OutcomeKeysUnavailable. (This test asserts
+// classification only; it does not count dial attempts. A repeated dial to a
+// refused port is not an application-level dispatch attempt in the sense
+// ptone/scion#2194's AC3 cares about — see the hit-counter tests above and in
+// controlchannel_client_keys_test.go for that proof at the application
+// layer.)
 func TestHTTPRuntimeBrokerClient_ExecuteKeys_ConnectionRefused(t *testing.T) {
 	// Bind and immediately close a listener to obtain an address nothing is
 	// listening on, guaranteeing a dial failure rather than a flaky "might

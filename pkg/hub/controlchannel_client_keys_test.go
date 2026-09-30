@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -71,8 +72,19 @@ func TestControlChannelBrokerClient_ExecuteKeys_Dispatched(t *testing.T) {
 	if tunnel.lastRequest.Path != "/api/v1/agents/test-agent/keys" {
 		t.Errorf("path = %s, want /api/v1/agents/test-agent/keys", tunnel.lastRequest.Path)
 	}
-	if !strings.Contains(tunnel.lastRequest.Query, "projectId=project-1") {
-		t.Errorf("query = %s, want it to contain projectId=project-1", tunnel.lastRequest.Query)
+	// Parse and assert exactly, not by substring: a substring match would
+	// still pass on a duplicated or extra query parameter (e.g.
+	// "projectId=project-1&projectId=other"), which matters because the
+	// broker's Query().Get takes only the first value.
+	gotQuery, err := url.ParseQuery(tunnel.lastRequest.Query)
+	if err != nil {
+		t.Fatalf("failed to parse tunneled query %q: %v", tunnel.lastRequest.Query, err)
+	}
+	if len(gotQuery) != 1 {
+		t.Fatalf("query = %q, want exactly one parameter", tunnel.lastRequest.Query)
+	}
+	if got := gotQuery.Get(agentkeys.BrokerProjectIDQueryParam); got != "project-1" {
+		t.Errorf("query %s = %q, want %q", agentkeys.BrokerProjectIDQueryParam, got, "project-1")
 	}
 	var wire agentkeys.BrokerRequest
 	if err := json.Unmarshal(tunnel.lastRequest.Body, &wire); err != nil {
@@ -186,6 +198,43 @@ func TestControlChannelBrokerClient_ExecuteKeys_OldBrokerUnsupported(t *testing.
 	}
 	if tunnel.calls != 1 {
 		t.Fatalf("expected exactly one tunnel attempt, got %d", tunnel.calls)
+	}
+}
+
+// TestControlChannelBrokerClient_ExecuteKeys_ServerError proves a 5xx-style
+// response over the control channel (a non-BrokerResult error envelope, the
+// same shape the runtime broker's generic error handler would produce)
+// classifies as outcome_unknown and is single-attempt — per ptone/scion#2194
+// AC3, the same proof TestHTTPRuntimeBrokerClient_ExecuteKeys_UnknownOutcomes
+// gives for the HTTP transport.
+func TestControlChannelBrokerClient_ExecuteKeys_ServerError(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"502", http.StatusBadGateway},
+		{"503", http.StatusServiceUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tunnel := &mockControlChannelTunnel{
+				connected: true,
+				status:    tc.status,
+				body:      []byte(`{"error":{"code":"internal","message":"boom"}}`),
+			}
+			client := &ControlChannelBrokerClient{manager: tunnel}
+
+			_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysOutcomeUnknown {
+				t.Fatalf("ClassifyDispatchError = %q, want %q (err=%v)", got, agentkeys.OutcomeKeysOutcomeUnknown, err)
+			}
+			if tunnel.calls != 1 {
+				t.Fatalf("expected exactly one tunnel attempt, got %d", tunnel.calls)
+			}
+		})
 	}
 }
 

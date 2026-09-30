@@ -2779,6 +2779,21 @@ func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agen
 	if operationID == "" {
 		return agentkeys.BrokerResult{}, fmt.Errorf("%w: operation ID is required", agentkeys.ErrNotDispatched)
 	}
+	// An empty AgentSlug builds a path like "/api/v1/agents//keys": the
+	// broker's mux would answer with a path-clean redirect, which keysClient
+	// correctly does not follow, so this would otherwise surface as an
+	// uncertain "may have run" outcome for a request that never reached a
+	// handler. An empty AgentID or ProjectID are caller bugs too — task 2.2
+	// always passes these three fields from an already-resolved *store.Agent
+	// — and are proven-empty before any request is built, the same standard
+	// as the deadline and operation-ID guards above. (An empty
+	// RuntimeBrokerID already fails at getBrokerEndpoint below.) This is an
+	// input-shape check, not re-resolution or re-authorization of target, so
+	// it does not conflict with the "Dispatcher does not re-resolve" rule in
+	// contract §4.4.
+	if target.AgentSlug == "" || target.AgentID == "" || target.ProjectID == "" {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: target agent slug, agent ID and project ID are all required", agentkeys.ErrNotDispatched)
+	}
 
 	keysClient, ok := d.client.(agentkeys.BrokerClient)
 	if !ok {
