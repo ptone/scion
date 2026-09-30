@@ -188,18 +188,21 @@ func TestAgentActionKeysRoute_TopLevel_CrossProjectAndMissing(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 		}
-		code, message := errorEnvelope(t, rec.Body.Bytes())
-		if code != "not_found" {
+		if code, _ := errorEnvelope(t, rec.Body.Bytes()); code != "not_found" {
 			t.Errorf("code = %q, want not_found (not agent_not_found)", code)
 		}
-		// A genuine resolution miss must not read as "authorized, no
-		// handler yet" (round-2 review finding 3): both currently answer
-		// 404 not_found, but this one's message must differ from the
-		// unimplemented-action message so a regression that always misses
-		// resolution cannot masquerade as a successful authorization.
-		if message == unimplementedActionNotFoundMessage {
-			t.Errorf("message = %q, want a resolution-miss message distinct from the unimplemented-action one", message)
-		}
+		// Round-6 review finding 1: pin the keys-shaped not_found as
+		// sanitized too (contract §3 invariant 3's non-operation-ID half
+		// names "keys-shaped not_found" alongside keys_denied and
+		// cross_project_keys_unsupported), not just "code == not_found and
+		// message != the unimplemented-action one". writeErrorFromErr's
+		// message for a store.ErrNotFound is the fixed "Resource not
+		// found" on this route; assertSanitizedDenialBody's generic checks
+		// (no operation_id, no details, no leaked "keys: " reason) apply
+		// here exactly as they do to a 403/422 denial, even though this
+		// 404 comes from writeErrorFromErr rather than
+		// writeAgentKeysAuthzDenial.
+		assertSanitizedDenialBody(t, "top-level", rec, "Resource not found")
 	})
 }
 
@@ -347,13 +350,16 @@ func TestAgentActionKeysRoute_ProjectScoped_SameProjectMissingAgent(t *testing.T
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 	}
-	code, message := errorEnvelope(t, rec.Body.Bytes())
-	if code != "not_found" {
+	if code, _ := errorEnvelope(t, rec.Body.Bytes()); code != "not_found" {
 		t.Errorf("code = %q, want not_found (not agent_not_found)", code)
 	}
-	if message == unimplementedActionNotFoundMessage {
-		t.Errorf("message = %q, want a resolution-miss message distinct from the unimplemented-action one", message)
-	}
+	// Round-6 review finding 1: pin the keys-shaped not_found as sanitized
+	// too, the same way 403/422 denials already are. NotFound(w, "Agent")'s
+	// fixed message is "Agent not found"; a regression that kept the
+	// not_found code but carried the other resolver's
+	// agent_not_found-style details (or an operation_id) would otherwise
+	// pass this test.
+	assertSanitizedDenialBody(t, "project-scoped", rec, "Agent not found")
 }
 
 // TestAgentActionKeysRoute_ProjectScoped_StoreErrorIsNotA404 pins round-2
