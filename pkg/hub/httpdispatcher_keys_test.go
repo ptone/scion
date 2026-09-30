@@ -187,7 +187,7 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_ClientWithoutKeysSupport(t *testi
 	}
 }
 
-// TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnBadDeadline proves a
+// TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnInvalidInput proves a
 // zero or already-past executeBefore, an empty operationID, or an empty
 // Target identity field is rejected as agentkeys.ErrNotDispatched before any
 // client call. BrokerRequest.ExecuteBefore's doc requires failing closed on a
@@ -202,7 +202,7 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_ClientWithoutKeysSupport(t *testi
 // in particular would build a self-redirecting broker path this adapter's
 // redirect-refusing client would then report as an uncertain "may have run"
 // outcome for a request that never reached a handler.
-func TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnBadDeadline(t *testing.T) {
+func TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnInvalidInput(t *testing.T) {
 	dispatcher, mockClient, target := newKeysDispatcherFixture(t)
 
 	cases := []struct {

@@ -312,36 +312,55 @@ func TestHTTPRuntimeBrokerClient_ExecuteKeys_ResponseLoss(t *testing.T) {
 // dispatch never follows an HTTP redirect: a 3xx response is treated as the
 // final (malformed) response, not a cue to resend the request body to the
 // Location URL. Both endpoints are spied on so a regression that starts
-// following redirects is caught even if it would have "succeeded".
+// following redirects is caught even if it would have "succeeded". 307 and
+// 308 are the status codes AK-34's replay concern is actually about — unlike
+// 302/303, they preserve the method and body on a followed redirect, so a
+// client that did follow them would transparently resend the keys POST to a
+// new URL; a followed 302 would instead become a bodyless GET, which is a
+// different (still wrong, but less on-point) failure mode. Both are guarded
+// the same way: CheckRedirect refuses to follow, and GetBody == nil would
+// prevent the resend even if something did follow.
 func TestHTTPRuntimeBrokerClient_ExecuteKeys_NoRedirectReplay(t *testing.T) {
-	var targetCalls int32
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&targetCalls, 1)
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(agentkeys.BrokerResult{OperationID: "op-1", Outcome: agentkeys.OutcomeDispatched})
-	}))
-	defer target.Close()
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"302 Found", http.StatusFound},
+		{"307 Temporary Redirect (preserves method/body)", http.StatusTemporaryRedirect},
+		{"308 Permanent Redirect (preserves method/body)", http.StatusPermanentRedirect},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var targetCalls int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt32(&targetCalls, 1)
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(agentkeys.BrokerResult{OperationID: "op-1", Outcome: agentkeys.OutcomeDispatched})
+			}))
+			defer target.Close()
 
-	var redirectCalls int32
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&redirectCalls, 1)
-		http.Redirect(w, r, target.URL+r.URL.Path+"?"+r.URL.RawQuery, http.StatusFound)
-	}))
-	defer redirector.Close()
+			var redirectCalls int32
+			redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt32(&redirectCalls, 1)
+				http.Redirect(w, r, target.URL+r.URL.Path+"?"+r.URL.RawQuery, tc.status)
+			}))
+			defer redirector.Close()
 
-	client := NewHTTPRuntimeBrokerClient()
-	_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), redirector.URL, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
-	if err == nil {
-		t.Fatal("expected an error: a bare 3xx is not a valid BrokerResult")
-	}
-	if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysOutcomeUnknown {
-		t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysOutcomeUnknown)
-	}
-	if got := atomic.LoadInt32(&redirectCalls); got != 1 {
-		t.Fatalf("expected exactly one call to the redirector, got %d", got)
-	}
-	if got := atomic.LoadInt32(&targetCalls); got != 0 {
-		t.Fatalf("expected the redirect target to never be called (no replay), got %d calls", got)
+			client := NewHTTPRuntimeBrokerClient()
+			_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), redirector.URL, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+			if err == nil {
+				t.Fatal("expected an error: a bare 3xx is not a valid BrokerResult")
+			}
+			if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysOutcomeUnknown {
+				t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysOutcomeUnknown)
+			}
+			if got := atomic.LoadInt32(&redirectCalls); got != 1 {
+				t.Fatalf("expected exactly one call to the redirector, got %d", got)
+			}
+			if got := atomic.LoadInt32(&targetCalls); got != 0 {
+				t.Fatalf("expected the redirect target to never be called (no replay), got %d calls", got)
+			}
+		})
 	}
 }
 
@@ -413,17 +432,36 @@ func TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBody(t *testing.T) {
 	}
 }
 
+// getBodyRepopulatingSigner simulates a future signer that rebuilds the
+// request body (e.g. via http.NewRequest) and, in doing so, repopulates
+// GetBody. Unlike mockBrokerSigner — which only sets headers and never
+// touches GetBody, so it cannot tell whether the clear runs before or after
+// Sign — this signer makes the ordering observable: if ExecuteKeys ever
+// clears GetBody *before* calling Sign instead of after, this signer's
+// repopulation would survive to the outgoing request and the regression test
+// below would (correctly) fail.
+type getBodyRepopulatingSigner struct {
+	called bool
+}
+
+func (s *getBodyRepopulatingSigner) Sign(_ context.Context, req *http.Request, _ string) error {
+	s.called = true
+	req.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
+	return nil
+}
+
 // TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBodyOnSignedPath is the signed
 // counterpart to TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBody: it proves
-// GetBody is still nil on the request that is actually sent when a signer is
-// configured (production always configures one — AuthenticatedBrokerClient).
-// This matters because GetBody is now cleared after Sign runs, specifically
-// so a future signer that rebuilds the request (e.g. via http.NewRequest) or
-// otherwise repopulates GetBody cannot silently reopen the HTTP/2 resend
-// hazard without this test catching it.
+// GetBody is still nil on the request that is actually sent even when the
+// signer itself repopulates it, which only holds because ExecuteKeys clears
+// GetBody *after* Sign runs, not before. A signer that only sets headers
+// (like mockBrokerSigner) cannot distinguish the two orderings — this test
+// uses getBodyRepopulatingSigner specifically so a future accidental
+// reordering (clearing GetBody before Sign) is caught here, not left for a
+// future signer implementation to rediscover in production.
 func TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBodyOnSignedPath(t *testing.T) {
 	spy := &spyRoundTripper{}
-	signer := &mockBrokerSigner{}
+	signer := &getBodyRepopulatingSigner{}
 	transport := &brokerHTTPTransport{
 		client:     &http.Client{Transport: spy},
 		keysClient: &http.Client{Transport: spy},
@@ -441,7 +479,7 @@ func TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBodyOnSignedPath(t *testing.T)
 		t.Fatalf("expected exactly one RoundTrip call, got %d", spy.calls)
 	}
 	if !spy.sawGetBodyNil {
-		t.Fatal("expected the outgoing request's GetBody to be nil on the signed path too")
+		t.Fatal("expected the outgoing request's GetBody to be nil even though the signer repopulated it — GetBody must be cleared after Sign runs, not before")
 	}
 }
 
