@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -115,31 +116,42 @@ func TestSendKeys_ArgvExactness(t *testing.T) {
 	}
 }
 
-// TestSendKeys_EmptyKeysPassedThroughVerbatim documents a primitive-level
-// invariant: SendKeys itself applies no "empty becomes Enter" special case —
-// unlike deliverImmediate's message path — and never re-trims, re-splits, or
-// otherwise transforms Keys before the single tmux call. This is necessary
-// but not sufficient for the AC "empty/NUL/oversize/invalid shapes never
-// execute": that end-to-end guarantee is enforced one layer up, by the
-// runtimebroker's dedicated keys handler calling agentkeys.ValidateKeys
-// before ever calling SendKeys (see handlers_keys_test.go's
-// TestSendKeys_HTTP_InvalidKeysShape table) — SendKeys itself has no
-// opinion on shape and trusts its caller, matching the frozen contract's
-// "Keys is the exact byte-for-byte string to inject, already validated"
-// (agentkeys.BrokerRequest.Keys's doc comment).
+// TestSendKeys_EmptyKeysPassedThroughVerbatim covers the AC "empty/NUL/
+// oversize/invalid shapes never execute" at the primitive level itself
+// (review round 2, finding #4): SendKeys calls agentkeys.ValidateKeys before
+// any resolution or Exec attempt, so a local-mode caller invoking this
+// primitive directly — without going through the runtimebroker's own
+// ValidateKeys enforcement (handlers_keys_test.go's
+// TestSendKeys_HTTP_InvalidKeysShape table) — still gets the same
+// guarantee, never a silent "empty becomes Enter" (contrast
+// deliverImmediate's message path, which does have that special case for
+// its own, unrelated reasons).
 func TestSendKeys_EmptyKeysPassedThroughVerbatim(t *testing.T) {
-	var capturedCmd []string
-	mock := newSendKeysMock([]api.AgentInfo{runningAgent()}, &capturedCmd, nil)
-	mgr := &AgentManager{Runtime: mock}
-
-	if err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", ""); err != nil {
-		t.Fatalf("SendKeys failed: %v", err)
+	cases := []struct {
+		name string
+		keys string
+	}{
+		{"empty", ""},
+		{"nul_byte", "abc\x00def"},
+		{"oversize", strings.Repeat("a", agentkeys.MaxBytes+1)},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedCmd []string
+			mock := newSendKeysMock([]api.AgentInfo{runningAgent()}, &capturedCmd, nil)
+			mgr := &AgentManager{Runtime: mock}
 
-	want := "tmux send-keys -t scion:0 --"
-	got := capturedCmd[len(capturedCmd)-1]
-	if strings.TrimRight(got, " ") != want {
-		t.Errorf("send-keys argv = %q, want an empty final element (%q)", got, want)
+			err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", tc.keys)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if _, ok := agentkeys.AsValidationError(err); !ok {
+				t.Errorf("SendKeys error = %v, want an *agentkeys.ValidationError", err)
+			}
+			if len(capturedCmd) != 0 {
+				t.Errorf("expected zero Exec calls for invalid keys shape %q, got %v", tc.name, capturedCmd)
+			}
+		})
 	}
 }
 
@@ -325,11 +337,121 @@ func TestSendKeys_PlainErrorOnAmbiguousExecFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	if errors.Is(err, agentkeys.ErrTargetNotFound) || errors.Is(err, agentkeys.ErrAgentNotRunning) || errors.Is(err, agentkeys.ErrTerminalNotReady) {
-		t.Fatalf("an ambiguous Exec failure must never be reported as one of the three proven-before-execution sentinels, got: %v", err)
+	if errors.Is(err, agentkeys.ErrTargetNotFound) || errors.Is(err, agentkeys.ErrAgentNotRunning) || errors.Is(err, agentkeys.ErrTerminalNotReady) || errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("an ambiguous Exec failure must never be reported as one of the proven-before-execution sentinels, got: %v", err)
 	}
-	if !errors.Is(err, execErr) {
-		t.Fatalf("expected the underlying Exec error to be wrapped, got: %v", err)
+	// The underlying error's *text* must still be discoverable (for
+	// diagnostics), but not via errors.Is/errors.As — see
+	// TestSendKeys_PostExecFailureWrappingCtxErrorIsNotErrKeysNotStarted for
+	// why the chain is deliberately broken.
+	if !strings.Contains(err.Error(), execErr.Error()) {
+		t.Fatalf("expected the underlying Exec error's text to be present, got: %v", err)
+	}
+	if errors.Is(err, execErr) {
+		t.Fatalf("the underlying Exec error must not be reachable via errors.Is (chain must be broken), got: %v", err)
+	}
+}
+
+// TestSendKeys_PostExecFailureWrappingCtxErrorIsNotErrKeysNotStarted is
+// review round 2 finding #1's core regression test: a send-keys Exec
+// failure that itself wraps a context error (e.g. a Kubernetes exec stream
+// cancelled mid-call, or os/exec's Wait returning ctx.Err() after a
+// successful cancel) must not be classified as "proven not to have
+// started" — only SendKeys's own pre-Exec checks may produce that
+// classification. Reproduces the exact repro the reviewer used: the mock
+// records that send-keys ran, then returns an error wrapping
+// context.DeadlineExceeded.
+func TestSendKeys_PostExecFailureWrappingCtxErrorIsNotErrKeysNotStarted(t *testing.T) {
+	agent := runningAgent()
+	sendKeysRan := false
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			if len(cmd) >= 2 && cmd[1] == "has-session" {
+				return "", nil
+			}
+			sendKeysRan = true
+			// Simulates a backend whose Exec observed the call's own
+			// context expiring *during* a genuinely-started call, and
+			// wrapped that into its returned error — this must not be
+			// mistaken for SendKeys's own pre-Exec expiry signal.
+			return "", fmt.Errorf("exec stream: %w", context.DeadlineExceeded)
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+
+	if !sendKeysRan {
+		t.Fatal("test setup error: send-keys Exec never ran")
+	}
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("a post-Exec failure that wraps a context error must never match ErrKeysNotStarted (it is not proven to have failed before Exec began), got: %v", err)
+	}
+	// Finding #1 part (a): SendKeys must not join the send-keys Exec error
+	// with %w, so the mock's own context.DeadlineExceeded is not reachable
+	// via errors.Is on SendKeys's returned value either — the handler must
+	// be unable to reach this by accident even if it (incorrectly) checked
+	// for context.DeadlineExceeded/Canceled directly instead of matching
+	// ErrKeysNotStarted's identity.
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("SendKeys's returned error must not wrap context.DeadlineExceeded via errors.Is, got: %v", err)
+	}
+	// SendKeys deliberately breaks the error chain here (%v, not %w — see
+	// ErrKeysNotStarted's doc comment), so errors.Is(err,
+	// context.DeadlineExceeded) is correctly false on the returned error
+	// itself; that is the fix, not a gap. What must still hold is that the
+	// mock's own crafted error really did wrap context.DeadlineExceeded
+	// (confirming this test reproduces the reviewer's repro shape) and that
+	// its text survives into SendKeys's returned error for diagnostics.
+	mockErr := fmt.Errorf("exec stream: %w", context.DeadlineExceeded)
+	if !errors.Is(mockErr, context.DeadlineExceeded) {
+		t.Fatal("test setup error: mock's own error does not wrap context.DeadlineExceeded")
+	}
+	if !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("expected the underlying error's text to survive for diagnostics, got: %v", err)
+	}
+}
+
+// TestSendKeys_ProbeFailureDuringExpiredDeadlineIsNotStarted covers review
+// round 2 finding #3: if the admission deadline fires during the terminal-
+// readiness probe itself, the outcome must be "proven not to have started"
+// (ErrKeysNotStarted), not ErrTerminalNotReady — the session's actual
+// readiness was never established either way, but only one of these two
+// outcomes is honest about why the probe failed.
+func TestSendKeys_ProbeFailureDuringExpiredDeadlineIsNotStarted(t *testing.T) {
+	agent := runningAgent()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(execCtx context.Context, id string, cmd []string) (string, error) {
+			if len(cmd) >= 2 && cmd[1] == "has-session" {
+				// Simulates the deadline firing while the probe itself was
+				// in flight: cancel the caller's ctx before the probe
+				// returns its own (unrelated) failure.
+				cancel()
+				return "", errors.New("no such session")
+			}
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(ctx, "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("SendKeys error = %v, want an error wrapping ErrKeysNotStarted", err)
+	}
+	if errors.Is(err, agentkeys.ErrTerminalNotReady) {
+		t.Fatalf("a probe failure coinciding with ctx expiry must not be reported as ErrTerminalNotReady, got: %v", err)
 	}
 }
 
@@ -379,8 +501,8 @@ func TestSendKeys_DeadlineExpiredWhileWaitingForLock(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected SendKeys to fail once its deadline expired while waiting for the lock")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("SendKeys error = %v, want context.DeadlineExceeded", err)
+	if !errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("SendKeys error = %v, want an error wrapping ErrKeysNotStarted", err)
 	}
 
 	mu.Lock()
@@ -468,6 +590,71 @@ func TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave(t *testing.T) {
 	}
 	if transitions != 1 {
 		t.Fatalf("SendKeys and an interrupt message interleaved their tmux Exec calls for the same target: sequence = %v (want exactly one transition between callers, got %d)", sequence, transitions)
+	}
+}
+
+// TestMessageRaw_ConcurrentWithSendKeys_NoInterleave covers review round 2
+// finding #5: MessageRaw (the legacy raw-keys primitive, pending Phase 4
+// removal) previously did not take injectionLock at all, so raw keys
+// delivered through it could interleave with a concurrent SendKeys call (or
+// a buffered/interrupt message) for the same target. Same
+// sequence-contiguity technique as
+// TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave.
+func TestMessageRaw_ConcurrentWithSendKeys_NoInterleave(t *testing.T) {
+	agent := runningAgent()
+
+	var mu sync.Mutex
+	var sequence []string
+	record := func(who string) {
+		mu.Lock()
+		sequence = append(sequence, who)
+		mu.Unlock()
+	}
+	leaveDelay := 3 * time.Millisecond
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			record(currentCaller(ctx))
+			time.Sleep(leaveDelay)
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ctx := withCaller(context.Background(), "keys")
+		if err := mgr.SendKeys(ctx, "proj-1", "test-agent", "agent-abc", "C-c"); err != nil {
+			t.Errorf("SendKeys failed: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		ctx := withCaller(context.Background(), "raw")
+		if err := mgr.MessageRaw(ctx, "test-agent", "", "Escape"); err != nil {
+			t.Errorf("MessageRaw failed: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sequence) < 2 {
+		t.Fatalf("expected at least 2 recorded Exec calls (one per caller), got %v", sequence)
+	}
+	transitions := 0
+	for i := 1; i < len(sequence); i++ {
+		if sequence[i] != sequence[i-1] {
+			transitions++
+		}
+	}
+	if transitions != 1 {
+		t.Fatalf("SendKeys and MessageRaw interleaved their tmux Exec calls for the same target: sequence = %v (want exactly one transition between callers, got %d)", sequence, transitions)
 	}
 }
 

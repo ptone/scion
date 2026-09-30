@@ -163,6 +163,41 @@ func TestSendKeys_HTTP_OutcomeMapping(t *testing.T) {
 	}
 }
 
+// TestSendKeys_HTTP_PostExecCtxErrorIsAmbiguousNot503 is review round 2
+// finding #1's broker-level regression test: a Manager.SendKeys failure that
+// wraps a context error (e.g. a backend's Exec observing cancellation after
+// it had genuinely started) must classify as the generic, non-BrokerResult
+// envelope (which the Hub reads as keys_outcome_unknown) — never 503
+// keys_unavailable, which would tell a caller it is safe to retry a
+// dispatch that may have already reached the terminal.
+func TestSendKeys_HTTP_PostExecCtxErrorIsAmbiguousNot503(t *testing.T) {
+	mgr := &mockManager{
+		sendKeysFunc: func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+			return fmt.Errorf("exec stream: %w", context.DeadlineExceeded)
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	w := postKeys(t, srv, "test-agent", "proj-1", agentkeys.BrokerRequest{
+		ProjectID:     "proj-1",
+		AgentID:       "agent-abc",
+		OperationID:   "op-1",
+		ExecuteBefore: time.Now().UTC().Add(10 * time.Second),
+		Keys:          "Enter",
+	})
+
+	if w.Code == http.StatusServiceUnavailable {
+		t.Fatalf("a post-Exec failure wrapping a context error must not be reported as 503 keys_unavailable; body = %s", w.Body.String())
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (the generic non-BrokerResult envelope); body = %s", w.Code, w.Body.String())
+	}
+	var result agentkeys.BrokerResult
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err == nil && result.Outcome != "" {
+		t.Errorf("must not decode as a well-formed BrokerResult with a non-empty Outcome, got %+v", result)
+	}
+}
+
 // TestSendKeys_HTTP_ExpiredDeadlineAtAdmission covers "at broker admission":
 // an already-past ExecuteBefore must be rejected before Manager.SendKeys is
 // ever called, with 503 keys_unavailable.
@@ -602,6 +637,61 @@ func TestSendKeys_HTTP_UnscopedOrMismatchedTarget(t *testing.T) {
 			}
 			if called {
 				t.Errorf("Manager.SendKeys must not be called for %s", tc.name)
+			}
+		})
+	}
+}
+
+// TestSendKeys_HTTP_ValidationAndScopeRejectionsAreAudited covers review
+// round 2 finding #6: ptone/scion#2184's execution order requires
+// content-free audit on denial/validation paths too, wherever actor/target
+// can already be established — not only on post-admission outcomes. Both
+// the key-shape validation rejection and the scope (unscoped/mismatched
+// project) rejection must emit an audit line through logKeysOutcome.
+func TestSendKeys_HTTP_ValidationAndScopeRejectionsAreAudited(t *testing.T) {
+	var buf bytes.Buffer
+	origWriter := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(origWriter)
+		log.SetFlags(origFlags)
+	})
+
+	cases := []struct {
+		name           string
+		projectIDQuery string
+		req            agentkeys.BrokerRequest
+	}{
+		{
+			"invalid_keys_shape",
+			"proj-1",
+			agentkeys.BrokerRequest{ProjectID: "proj-1", AgentID: "agent-abc", OperationID: "op-audit-1", ExecuteBefore: time.Now().UTC().Add(10 * time.Second), Keys: ""},
+		},
+		{
+			"scope_rejection",
+			"proj-1",
+			agentkeys.BrokerRequest{ProjectID: "proj-2", AgentID: "agent-abc", OperationID: "op-audit-2", ExecuteBefore: time.Now().UTC().Add(10 * time.Second), Keys: "Enter"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServerWithManager(t, &mockManager{})
+
+			buf.Reset()
+			w := postKeys(t, srv, "test-agent", tc.projectIDQuery, tc.req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+			}
+			logOutput := buf.String()
+			if !strings.Contains(logOutput, "keys dispatch") {
+				t.Errorf("expected a content-free audit line for %s, got log: %s", tc.name, logOutput)
+			}
+			if !strings.Contains(logOutput, tc.req.OperationID) {
+				t.Errorf("expected the audit line to carry operation_id %q, got log: %s", tc.req.OperationID, logOutput)
 			}
 		})
 	}

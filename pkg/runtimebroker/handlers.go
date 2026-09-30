@@ -2254,6 +2254,13 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 		return
 	}
 
+	// admittedAt anchors every subsequent audit line's duration, including
+	// the validation/scope rejections below — ptone/scion#2184's execution
+	// order requires content-free audit on denial/validation paths too,
+	// wherever actor/target can already be established, not only on
+	// post-admission outcomes.
+	admittedAt := time.Now().UTC()
+
 	// Reject malformed/oversized/empty key content before any resolution or
 	// dispatch — the AC's "empty/NUL/oversize/invalid shapes never execute".
 	// A plain (non-BrokerResult) envelope, at the status the contract's
@@ -2264,13 +2271,16 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	// rejection the public route also performs, just re-checked here because
 	// this handler is itself an execution point, not merely a relay.
 	if verr := agentkeys.ValidateKeys(req.Keys); verr != nil {
+		outcome := agentkeys.OutcomeInvalidRequest
 		status := http.StatusBadRequest
 		if ve, ok := agentkeys.AsValidationError(verr); ok {
+			outcome = ve.Outcome
 			if st, ok := agentkeys.HTTPStatus(ve.Outcome); ok {
 				status = st
 			}
 		}
 		span.SetStatus(codes.Error, "invalid keys value")
+		s.logKeysOutcome(req, outcome, time.Since(admittedAt))
 		writeError(w, status, ErrCodeInvalidRequest, "Invalid keys value", nil)
 		return
 	}
@@ -2289,6 +2299,7 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	// would default to no binding at all.
 	if projectID == "" || req.ProjectID == "" || req.AgentID == "" || projectID != req.ProjectID {
 		span.SetStatus(codes.Error, "invalid keys target scope")
+		s.logKeysOutcome(req, agentkeys.OutcomeInvalidRequest, time.Since(admittedAt))
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid keys target scope", nil)
 		return
 	}
@@ -2299,10 +2310,9 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	// any further work — contract §4.2's first enforcement point ("at
 	// broker admission"). The broker only ever shrinks this deadline, never
 	// extends it (CapExecuteBefore's own contract).
-	admittedAt := time.Now().UTC()
 	deadline, capErr := agentkeys.CapExecuteBefore(admittedAt, req.ExecuteBefore, agentkeys.DefaultAdmissionWindow)
 	if capErr != nil || !admittedAt.Before(deadline) {
-		s.logKeysOutcome(req, agentkeys.OutcomeKeysUnavailable, 0)
+		s.logKeysOutcome(req, agentkeys.OutcomeKeysUnavailable, time.Since(admittedAt))
 		writeKeysResult(w, req.OperationID, agentkeys.OutcomeKeysUnavailable, "admission deadline already passed")
 		return
 	}
@@ -2339,12 +2349,18 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	case errors.Is(err, agent.ErrKeysUnsupported):
 		// This backend does not support keys delivery.
 		outcome = agentkeys.OutcomeKeysUnsupported
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
-		// SendKeys only returns ctx.Err() bare, before any Exec attempt (see
-		// its doc comment) — a cancellation observed mid-Exec is wrapped
-		// into a plain error instead and falls to the default case below.
-		// Proven not to have executed, so this is the broker's own
-		// "admission deadline expired" case, not an uncertain outcome.
+	case errors.Is(err, agent.ErrKeysNotStarted):
+		// SendKeys wraps agent.ErrKeysNotStarted (by identity, via %w) only
+		// at its own pre-Exec checkpoints — the lock wait, the post-lock
+		// recheck, a readiness-probe failure that coincides with ctx
+		// expiry, and the pre-send recheck — proven not to have started.
+		// Matching by this sentinel's identity, rather than by
+		// errors.Is(err, context.DeadlineExceeded/Canceled), is required:
+		// the send-keys Exec failure path below deliberately does not wrap
+		// its underlying error with %w, so a backend error that happens to
+		// wrap a context error *after* that Exec call began (e.g. a stream
+		// cancelled mid-call) can never match this case by accident and be
+		// misreported as "definitely did not start."
 		outcome = agentkeys.OutcomeKeysUnavailable
 	default:
 		// An unclassified failure — including one where the tmux call may
@@ -2380,6 +2396,24 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 // authority does not warrant being lenient about. Writes the response itself
 // and returns ok=false on any failure; callers must not do any further work
 // in that case.
+//
+// This still relies on encoding/json's own (lenient) string/field decoding
+// rather than agentkeys.ValidateBody's stricter token-stream approach — a
+// duplicate "keys" field keeps the last occurrence, and "KEYS" matches
+// case-insensitively. Contract §2.2/§5(b) forbid that leniency for the
+// public request body; it is deliberately not extended to BrokerRequest
+// here, for two reasons: first, this body is Hub-generated, not directly
+// client-supplied, so this decode is a second, defense-in-depth check on an
+// already-authorized, already-validated internal contract, not the
+// authoritative validation boundary (the Hub already ran the strict check
+// once); second, ValidateBody's decoder is shaped for the public
+// single-string-field {"keys":...} envelope specifically, and BrokerRequest
+// carries four additional fields including a time.Time, so reusing it
+// as-is is not a direct fit. A key/agent/project-ID/operation-ID field is
+// exceedingly unlikely to ever legitimately arrive twice or case-varied
+// from the Hub's own encoder; the value-level checks below (ValidateKeys,
+// the project/agent-ID presence and agreement check) still hold whatever
+// this decode step produces.
 func readKeysRequest(w http.ResponseWriter, r *http.Request) (agentkeys.BrokerRequest, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, agentkeys.MaxHTTPBodyBytes)
 	dec := json.NewDecoder(r.Body)

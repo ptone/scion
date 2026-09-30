@@ -428,6 +428,19 @@ func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string
 		return fmt.Errorf("agent '%s' not found or not running", agentID)
 	}
 
+	// Serialize against a concurrent SendKeys call (or a concurrent
+	// deliverImmediate call) for the same resolved container, so their tmux
+	// byte sequences cannot interleave — see injectionLock's doc comment.
+	// MessageRaw is the legacy raw-message primitive (pending Phase 4
+	// removal per .design/agent-keys-contract.md); it did not take this
+	// lock previously, so raw keys delivered through it could interleave
+	// with a buffered paste or interrupt for the same agent.
+	lock := m.injectionLock(agent.ContainerID)
+	if err := lock.Lock(ctx); err != nil {
+		return fmt.Errorf("failed to acquire injection lock for agent '%s': %w", agent.Name, err)
+	}
+	defer lock.Unlock()
+
 	cmd := []string{"tmux", "send-keys", "-t", "scion:0", "--", keys}
 	if _, err := m.Runtime.Exec(ctx, agent.ContainerID, cmd); err != nil {
 		return fmt.Errorf("failed to send raw keys to agent '%s': %w", agent.Name, err)
@@ -538,9 +551,9 @@ func (m *AgentManager) injectionLock(containerID string) *injectionMutex {
 	return actual.(*injectionMutex)
 }
 
-// runtimeNamesWithoutKeysSupport lists Runtime.Name() values for backends
-// for which this backend does not support keys delivery. Checked in
-// SendKeys before any resolution or Exec attempt.
+// runtimeNamesWithoutKeysSupport lists Runtime.Name() values of backends
+// that do not support keys delivery. Checked in SendKeys before any
+// resolution or Exec attempt.
 var runtimeNamesWithoutKeysSupport = map[string]bool{
 	"cloudrun": true,
 }
@@ -550,6 +563,40 @@ var runtimeNamesWithoutKeysSupport = map[string]bool{
 // attempt. The runtimebroker's dedicated keys handler translates this into
 // OutcomeKeysUnsupported (422).
 var ErrKeysUnsupported = errors.New("agent: this backend does not support keys delivery")
+
+// ErrKeysNotStarted signals that a keys dispatch is proven to have failed
+// strictly *before* the send-keys Exec call itself began: SendKeys wraps
+// this (via %w, together with the ctx error that caused it) at each of its
+// pre-Exec checkpoints — the lock wait, the post-lock recheck, a readiness
+// probe failure that coincides with ctx expiry, and the pre-send recheck —
+// and nowhere else.
+//
+// This is a package-local sentinel, deliberately distinct from
+// context.DeadlineExceeded/context.Canceled themselves, so that a caller
+// (the runtimebroker handler) can recognize "proven not to have started" by
+// identity (errors.Is(err, ErrKeysNotStarted)) without also matching a
+// failure that happens to occur *after* the send-keys Exec call began and
+// merely wraps a context error of its own — e.g. a backend's Exec
+// implementation observing the same cancellation while genuinely running,
+// which must classify as ambiguous (keys_outcome_unknown), never as
+// "definitely did not start" (keys_unavailable): reporting that case as
+// keys_unavailable would tell a caller it is safe to retry a dispatch that
+// may have already reached the terminal, inviting a double injection. This
+// is why the send-keys Exec error below is joined with %v, not %w: nothing
+// that error wraps must ever be reachable via errors.Is from SendKeys's
+// return value, regardless of what the underlying backend's error happens
+// to wrap.
+var ErrKeysNotStarted = errors.New("agent: keys dispatch did not start")
+
+// wrapNotStarted builds the error SendKeys returns for a pre-Exec ctx
+// failure: wraps ErrKeysNotStarted (so errors.Is(result, ErrKeysNotStarted)
+// is true) together with ctxErr's text for diagnostics, without wrapping
+// ctxErr itself (so errors.Is(result, context.DeadlineExceeded) is false —
+// callers must match by ErrKeysNotStarted's identity only, never by
+// inspecting the underlying context error).
+func wrapNotStarted(ctxErr error) error {
+	return fmt.Errorf("%w: %v", ErrKeysNotStarted, ctxErr)
+}
 
 // escapeTrailingSemicolon returns keys transformed so that, once passed as
 // tmux's "send-keys ... -- <keys>" final argument, tmux's own parser
@@ -604,8 +651,8 @@ func escapeTrailingSemicolon(keys string) string {
 // critical section for the same resolved container (see injectionLock), so
 // a keys call cannot interleave its tmux byte sequence with a concurrent
 // buffered flush or interrupt delivery. Lock acquisition respects ctx's
-// deadline: SendKeys returns ctx.Err() (never one of the three sentinels
-// below, and never wrapped) without executing anything if ctx is done
+// deadline: SendKeys returns an ErrKeysNotStarted-wrapped error (never one
+// of the other sentinels below) without executing anything if ctx is done
 // before the lock is acquired, and rechecks ctx immediately before both the
 // readiness probe and the send-keys Exec call — covering a deadline that
 // expires while waiting for the lock (the "control-channel semaphore/
@@ -616,14 +663,28 @@ func escapeTrailingSemicolon(keys string) string {
 // SendKeys.
 //
 // It returns one of three agentkeys sentinels — ErrTargetNotFound,
-// ErrAgentNotRunning, ErrTerminalNotReady — or the package-local
-// ErrKeysUnsupported, and only when it can prove the corresponding
-// condition before any Exec attempt; any other failure (including one where
-// the tmux send-keys call itself may have partially run) is a plain,
-// unwrapped error, which callers must not attempt to reclassify as one of
-// those sentinels — see agentkeys.BrokerRequest's doc comment and
+// ErrAgentNotRunning, ErrTerminalNotReady — the package-local
+// ErrKeysUnsupported, or an error wrapping the package-local
+// ErrKeysNotStarted (see that sentinel's doc comment for exactly which
+// pre-Exec checks produce it), and only when it can prove the corresponding
+// condition before any Exec attempt. Any other failure — including one
+// where the tmux send-keys call itself may have partially run, and
+// including one that happens to wrap a context error of its own — is a
+// plain error that must never be mistaken for ErrKeysNotStarted; callers
+// must not attempt to reclassify it as one of these sentinels by inspecting
+// its wrapped errors — see ErrKeysNotStarted's doc comment,
+// agentkeys.BrokerRequest's doc comment, and
 // .design/agent-keys-contract.md §4.3.
 func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+	// Reject malformed/oversized/empty keys before any resolution or Exec
+	// attempt — contract §2.3 ("an empty string is rejected before
+	// dispatch and never silently becomes Enter"). The runtimebroker
+	// handler already enforces this before calling SendKeys, but SendKeys
+	// does not trust that: a local-mode caller may invoke this primitive
+	// directly under its own deadline, without going through that handler.
+	if err := agentkeys.ValidateKeys(keys); err != nil {
+		return err
+	}
 	if runtimeNamesWithoutKeysSupport[m.Runtime.Name()] {
 		return ErrKeysUnsupported
 	}
@@ -638,7 +699,7 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 
 	lock := m.injectionLock(target.ContainerID)
 	if err := lock.Lock(ctx); err != nil {
-		return err
+		return wrapNotStarted(err)
 	}
 	defer lock.Unlock()
 
@@ -647,7 +708,7 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	// "enforce expiration ... after control-channel semaphore/target-lock
 	// waits").
 	if err := ctx.Err(); err != nil {
-		return err
+		return wrapNotStarted(err)
 	}
 
 	// Terminal readiness probe: a running container may not yet (or no
@@ -660,6 +721,14 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	// original resolution proved, not a fresh lookup.
 	probeCtx := runtime.WithSensitiveExec(ctx)
 	if _, err := m.Runtime.Exec(probeCtx, target.ContainerID, []string{"tmux", "has-session", "-t", keysTarget}); err != nil {
+		// The admission deadline may have fired during the probe itself,
+		// rather than the session genuinely being unready — that is a
+		// pre-Exec expiry (contract §2.5: "expired admission" →
+		// keys_unavailable), not a proven-not-ready readiness verdict, so
+		// it must not be reported as ErrTerminalNotReady.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return wrapNotStarted(ctxErr)
+		}
 		return agentkeys.ErrTerminalNotReady
 	}
 
@@ -667,16 +736,21 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	// enforcement point, "immediately before runtime execution"). Checked
 	// here rather than relying on Exec's own ctx handling, so an expiry
 	// detected at this instant is reported as "proven not to have executed"
-	// (bare ctx.Err()) rather than folded into whatever error Exec itself
-	// would produce if it observed the same cancellation mid-call.
+	// rather than folded into whatever error Exec itself would produce if
+	// it observed the same cancellation mid-call.
 	if err := ctx.Err(); err != nil {
-		return err
+		return wrapNotStarted(err)
 	}
 
 	sendCtx := runtime.WithSensitiveExec(ctx)
 	cmd := []string{"tmux", "send-keys", "-t", keysTarget, "--", escapeTrailingSemicolon(keys)}
 	if _, err := m.Runtime.Exec(sendCtx, target.ContainerID, cmd); err != nil {
-		return fmt.Errorf("failed to send keys to agent '%s': %w", target.Name, err)
+		// %v, not %w: once this Exec call has been made, a failure is
+		// ambiguous (the tmux call may have partially run), never "proven
+		// not to have started" — see ErrKeysNotStarted's doc comment for
+		// why nothing this error wraps may be reachable via errors.Is from
+		// this return value, however the underlying backend built it.
+		return fmt.Errorf("failed to send keys to agent '%s': %v", target.Name, err)
 	}
 
 	return nil
