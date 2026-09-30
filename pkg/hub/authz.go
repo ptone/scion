@@ -555,7 +555,8 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	var resolutionErrors []string
 
 	// ── Step 2: Resolve principal closure ─────────────────────────────
-	principals, err := a.authorizationPrincipals(ctx, principal.Identity)
+	authzIn := a.inputsFor(ctx, principal.Identity)
+	principals, err := authzIn.Principals()
 	if err != nil {
 		a.logger.Warn("failed to resolve authorization principals",
 			"principal_id", principal.ID, "error", err)
@@ -598,7 +599,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// ── Step 3: Load active role bindings (batched) ───────────────────
-	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	bindings, err := authzIn.Bindings()
 	if err != nil {
 		a.logger.Warn("failed to load role bindings",
 			"principal_id", principal.ID, "error", err)
@@ -622,8 +623,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// ── Step 4: Load role definitions ─────────────────────────────────
-	roleDefIDs := collectRoleDefinitionIDs(bindings)
-	roleDefs, err := a.loadRoleDefinitions(ctx, roleDefIDs)
+	roleDefs, err := authzIn.RoleDefs()
 	if err != nil {
 		a.logger.Warn("failed to load role definitions",
 			"principal_id", principal.ID, "error", err)
@@ -786,7 +786,15 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				ctx = contextWithDelegationCeilingCache(ctx)
 			}
 			var ceilingCause DenyCause
-			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(ctx, request, agent.ID(), nil, &ceilingCause)
+			// The ceiling runs on a masked ctx: every callee it reaches
+			// (checkUserHoldsPermission, IsSystemAdmin/hasActiveSystemRole,
+			// both getEffectivePermissions calls and their constraint
+			// loads, GetUser, handleOrphanedDelegation) sees no principal/
+			// constraint memo, so the delegator side is genuinely
+			// unaffected by this design (see authz_request_inputs.go,
+			// maskAuthzInputs). Only delegation edges are still shared,
+			// through the untouched edges key.
+			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(maskAuthzInputs(ctx), request, agent.ID(), nil, &ceilingCause)
 			if ceilingErr != nil {
 				if !isReadOnlyOperation(request.Action) {
 					decision.Allowed = false
@@ -1439,6 +1447,44 @@ func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.A
 		cache.mu.Unlock()
 		return all, err
 	}
+
+	// Within an install phase (see authz_request_inputs.go), the constraint
+	// slot is consumed only by decide's own step 7c and by
+	// ResolveListScopes: the delegation ceiling runs on a masked ctx (see
+	// checkDelegationCeiling's call site above), so getEffectivePermissions
+	// never sees this memo, and no other production consumer is reachable
+	// from the batch/handler install sites. Adding a new consumer inside a
+	// phase requires updating this comment and the design's parity matrix.
+	//
+	// On a done ctx the memo is bypassed entirely (design 4.1 rule 2,
+	// v3.2): today's uncached call is made with today's ctx and its result
+	// returned verbatim, and nothing is stored, so post-cancellation
+	// behaviour is today's by construction.
+	if m := authzInputMemoFromContext(ctx); m != nil && ctx.Err() == nil {
+		m.mu.Lock()
+		if m.constraints != nil {
+			all := *m.constraints
+			m.mu.Unlock()
+			return all, nil
+		}
+		m.mu.Unlock()
+
+		all, err := a.loadAllAccessConstraintsUncached(ctx)
+		if err != nil {
+			// Errors are never memoized (fail-closed, retried by the next
+			// decision) — see G3/section 6 of the design.
+			return nil, err
+		}
+
+		m.mu.Lock()
+		if m.constraints == nil {
+			m.constraints = &all
+		}
+		stored := *m.constraints
+		m.mu.Unlock()
+		return stored, nil
+	}
+
 	return a.loadAllAccessConstraintsUncached(ctx)
 }
 
