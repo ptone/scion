@@ -126,10 +126,18 @@ func TestSendKeys_HTTP_OutcomeMapping(t *testing.T) {
 		sendErr    error
 		wantStatus int
 		wantOut    agentkeys.Outcome
+		wantMsg    string // empty means "don't check"
 	}{
-		{"not_found", agentkeys.ErrTargetNotFound, http.StatusNotFound, agentkeys.OutcomeNotFound},
-		{"agent_not_running", agentkeys.ErrAgentNotRunning, http.StatusConflict, agentkeys.OutcomeAgentNotRunning},
-		{"terminal_not_ready", agentkeys.ErrTerminalNotReady, http.StatusConflict, agentkeys.OutcomeTerminalNotReady},
+		{"not_found", agentkeys.ErrTargetNotFound, http.StatusNotFound, agentkeys.OutcomeNotFound, ""},
+		{"agent_not_running", agentkeys.ErrAgentNotRunning, http.StatusConflict, agentkeys.OutcomeAgentNotRunning, ""},
+		{"terminal_not_ready", agentkeys.ErrTerminalNotReady, http.StatusConflict, agentkeys.OutcomeTerminalNotReady, ""},
+		{"unsupported_backend", agent.ErrKeysUnsupported, http.StatusUnprocessableEntity, agentkeys.OutcomeKeysUnsupported, ""},
+		// Review round 6, finding #2: this is the contract §4.3 row "error
+		// wrapping agent.ErrKeysNotStarted -> BrokerResult{Outcome:
+		// OutcomeKeysUnavailable}, HTTP 503" — the mapping a reviewer found
+		// untested (disabling the handler's ErrKeysNotStarted case left
+		// every other keys-route test green).
+		{"keys_not_started", fmt.Errorf("%w: %v", agent.ErrKeysNotStarted, context.DeadlineExceeded), http.StatusServiceUnavailable, agentkeys.OutcomeKeysUnavailable, "admission deadline expired before dispatch"},
 	}
 
 	for _, tc := range cases {
@@ -158,6 +166,9 @@ func TestSendKeys_HTTP_OutcomeMapping(t *testing.T) {
 			}
 			if result.OperationID != "op-1" {
 				t.Errorf("OperationID = %q, want %q", result.OperationID, "op-1")
+			}
+			if tc.wantMsg != "" && result.Message != tc.wantMsg {
+				t.Errorf("Message = %q, want %q", result.Message, tc.wantMsg)
 			}
 		})
 	}

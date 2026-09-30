@@ -1295,3 +1295,272 @@ func TestSendKeys_TmuxVersionCache_NotReusedAcrossRecreatedContainerName(t *test
 		}
 	}
 }
+
+// TestSendKeys_CtxExpiresDuringProbe_RecheckBeforeDeliveryCatchesIt covers
+// review round 6, finding #1: a ctx that expires during the readiness
+// probe, where the probe's own Exec call nonetheless returns success (a
+// backend whose Exec does not itself observe the cancellation), must still
+// be caught by SendKeys's own recheck immediately before delivery — the
+// probe succeeding must never be treated as license to proceed regardless
+// of ctx. Confirmed (during review response) to fail once that recheck is
+// removed.
+func TestSendKeys_CtxExpiresDuringProbe_RecheckBeforeDeliveryCatchesIt(t *testing.T) {
+	agent := runningAgent()
+	ctx, cancel := context.WithCancel(context.Background())
+	var capturedCmd []string
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(execCtx context.Context, id string, cmd []string) (string, error) {
+			capturedCmd = append(capturedCmd, strings.Join(cmd, " "))
+			if len(cmd) >= 2 && cmd[1] == "has-session" {
+				// The probe itself succeeds, but the caller's ctx has
+				// expired by the time it returns.
+				cancel()
+			}
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(ctx, "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("SendKeys error = %v, want an error wrapping ErrKeysNotStarted", err)
+	}
+	for _, c := range capturedCmd {
+		if strings.Contains(c, "source-file") {
+			t.Fatalf("delivery must not run once ctx expired, even though the probe succeeded, got: %v", capturedCmd)
+		}
+	}
+}
+
+// TestSendKeys_CtxExpiresDuringVersionCheck_RecheckBeforeDeliveryCatchesIt
+// is TestSendKeys_CtxExpiresDuringProbe_RecheckBeforeDeliveryCatchesIt's
+// counterpart for the tmux version query (review round 6, finding #1): the
+// "tmux -V" call itself expires the ctx and returns an inconclusive result
+// (so checkTmuxVersionSupported proceeds, by design), and the mocked
+// readiness probe afterward succeeds regardless of ctx — delivery must
+// still never run once the recheck immediately before it observes the
+// expired ctx.
+func TestSendKeys_CtxExpiresDuringVersionCheck_RecheckBeforeDeliveryCatchesIt(t *testing.T) {
+	agent := runningAgent()
+	ctx, cancel := context.WithCancel(context.Background())
+	var capturedCmd []string
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(execCtx context.Context, id string, cmd []string) (string, error) {
+			capturedCmd = append(capturedCmd, strings.Join(cmd, " "))
+			if len(cmd) >= 2 && cmd[1] == "-V" {
+				cancel()
+				// An inconclusive result (unparseable), by design not
+				// itself grounds to fail closed to ErrKeysUnsupported.
+				return "not a tmux version string", nil
+			}
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(ctx, "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("SendKeys error = %v, want an error wrapping ErrKeysNotStarted", err)
+	}
+	for _, c := range capturedCmd {
+		if strings.Contains(c, "source-file") {
+			t.Fatalf("delivery must not run once ctx expired during the version query, got: %v", capturedCmd)
+		}
+	}
+}
+
+// TestSendKeys_CtxAlreadyExpired_PostLockRecheckRunsBeforeAnyExec covers the
+// post-lock recheck specifically (review round 6, finding #1 noted that
+// removing either of SendKeys's two ctx.Err() checks — the post-lock
+// recheck or the one immediately before delivery — survived the existing
+// suite on its own). injectionMutex.Lock's uncontended fast path succeeds
+// even when ctx is already done (a deliberate property fixed during review
+// round 1: a free lock must not be spuriously refused just because ctx
+// happens to already be expired), so passing an already-expired ctx to
+// SendKeys, with nothing else holding its target's lock, isolates the
+// post-lock recheck: if it did not exist, the version query would be the
+// very next thing to run despite ctx already being done.
+func TestSendKeys_CtxAlreadyExpired_PostLockRecheckRunsBeforeAnyExec(t *testing.T) {
+	agent := runningAgent()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already expired before SendKeys is ever called
+
+	var capturedCmd []string
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(execCtx context.Context, id string, cmd []string) (string, error) {
+			capturedCmd = append(capturedCmd, strings.Join(cmd, " "))
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(ctx, "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("SendKeys error = %v, want an error wrapping ErrKeysNotStarted", err)
+	}
+	if len(capturedCmd) != 0 {
+		t.Fatalf("expected zero Exec calls (including the version query) for an already-expired ctx, got: %v", capturedCmd)
+	}
+}
+
+// TestSendKeys_TargetRevalidationFailsClosed covers the pre-delivery target
+// re-verification (a correctness hardening): if a second resolution
+// immediately before delivery no longer matches the original one — here, a
+// different resolved ContainerID for the same (projectID, agentSlug,
+// expectedAgentID) — SendKeys must fail closed to ErrTargetNotFound and
+// never attempt delivery, even though the original resolution, lock,
+// version check and readiness probe all succeeded against the first
+// container.
+func TestSendKeys_TargetRevalidationFailsClosed(t *testing.T) {
+	first := runningAgent()
+	second := first
+	second.ContainerID = "container-2"
+
+	calls := 0
+	var capturedCmd []string
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			calls++
+			if calls == 1 {
+				return []api.AgentInfo{first}, nil
+			}
+			return []api.AgentInfo{second}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			capturedCmd = append(capturedCmd, strings.Join(cmd, " "))
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, agentkeys.ErrTargetNotFound) {
+		t.Fatalf("SendKeys error = %v, want agentkeys.ErrTargetNotFound", err)
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 List calls (the original resolution and the pre-delivery re-verification), got %d", calls)
+	}
+	for _, c := range capturedCmd {
+		if strings.Contains(c, "source-file") {
+			t.Fatalf("delivery must not run once the pre-delivery re-verification finds a different target, got: %v", capturedCmd)
+		}
+	}
+}
+
+// TestSendKeys_TargetRevalidation_SameKubernetesUIDPasses is
+// TestSendKeys_TargetRevalidationFailsClosed's positive counterpart for the
+// per-instance identifier comparison: the same ContainerID and the same
+// Kubernetes pod UID on both resolutions must pass re-verification and
+// proceed to delivery.
+func TestSendKeys_TargetRevalidation_SameKubernetesUIDPasses(t *testing.T) {
+	agent := runningAgent()
+	agent.Kubernetes = &api.AgentK8sMetadata{PodName: agent.ContainerID, UID: "uid-abc-123"}
+
+	var captured []execRecord
+	mock := newSendKeysMock([]api.AgentInfo{agent}, &captured, nil)
+	mgr := &AgentManager{Runtime: mock}
+
+	if err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c"); err != nil {
+		t.Fatalf("SendKeys failed: %v", err)
+	}
+	var sawDelivery bool
+	for _, c := range captured {
+		if c.argv == "tmux source-file -" {
+			sawDelivery = true
+		}
+	}
+	if !sawDelivery {
+		t.Fatalf("expected delivery to proceed when re-verification finds a matching Kubernetes UID, got: %v", captured)
+	}
+}
+
+// TestSendKeys_TargetRevalidation_DifferentKubernetesUIDFailsClosed covers
+// the per-instance identifier comparison's negative case: the same
+// ContainerID but a different Kubernetes pod UID on the second resolution
+// must fail closed to ErrTargetNotFound, even though ContainerID alone
+// still matches.
+func TestSendKeys_TargetRevalidation_DifferentKubernetesUIDFailsClosed(t *testing.T) {
+	first := runningAgent()
+	first.Kubernetes = &api.AgentK8sMetadata{PodName: first.ContainerID, UID: "uid-original"}
+	second := first
+	second.Kubernetes = &api.AgentK8sMetadata{PodName: first.ContainerID, UID: "uid-recreated"}
+
+	calls := 0
+	var capturedCmd []string
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			calls++
+			if calls == 1 {
+				return []api.AgentInfo{first}, nil
+			}
+			return []api.AgentInfo{second}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			capturedCmd = append(capturedCmd, strings.Join(cmd, " "))
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, agentkeys.ErrTargetNotFound) {
+		t.Fatalf("SendKeys error = %v, want agentkeys.ErrTargetNotFound", err)
+	}
+	for _, c := range capturedCmd {
+		if strings.Contains(c, "source-file") {
+			t.Fatalf("delivery must not run once the pre-delivery re-verification finds a different Kubernetes UID for the same ContainerID, got: %v", capturedCmd)
+		}
+	}
+}
+
+// TestSameTargetInstance covers sameTargetInstance's comparison directly:
+// ContainerID must always match; the Kubernetes UID, when both sides report
+// one, must also match; a backend that reports no UID on either or both
+// sides is judged on ContainerID alone.
+func TestSameTargetInstance(t *testing.T) {
+	base := api.AgentInfo{ContainerID: "c1"}
+	cases := []struct {
+		name string
+		a, b api.AgentInfo
+		want bool
+	}{
+		{"identical_no_k8s", base, base, true},
+		{"different_container_id", base, api.AgentInfo{ContainerID: "c2"}, false},
+		{
+			"same_uid",
+			api.AgentInfo{ContainerID: "c1", Kubernetes: &api.AgentK8sMetadata{UID: "u1"}},
+			api.AgentInfo{ContainerID: "c1", Kubernetes: &api.AgentK8sMetadata{UID: "u1"}},
+			true,
+		},
+		{
+			"different_uid",
+			api.AgentInfo{ContainerID: "c1", Kubernetes: &api.AgentK8sMetadata{UID: "u1"}},
+			api.AgentInfo{ContainerID: "c1", Kubernetes: &api.AgentK8sMetadata{UID: "u2"}},
+			false,
+		},
+		{
+			"one_side_missing_k8s_info",
+			api.AgentInfo{ContainerID: "c1", Kubernetes: &api.AgentK8sMetadata{UID: "u1"}},
+			api.AgentInfo{ContainerID: "c1"},
+			true, // falls back to ContainerID alone
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameTargetInstance(tc.a, tc.b); got != tc.want {
+				t.Errorf("sameTargetInstance(%+v, %+v) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}

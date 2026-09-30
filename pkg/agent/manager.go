@@ -701,16 +701,24 @@ func tmuxVersionAtLeast(major, minor, wantMajor, wantMinor int) bool {
 }
 
 // tmuxVersionCacheKey identifies one checkTmuxVersionSupported cache entry.
-// Pairing ContainerID with Image (rather than keying on ContainerID alone)
-// matters because ContainerID is not always a fresh identifier assigned per
-// container instance: on at least one backend it is a stable, reusable name
-// (a Kubernetes pod name, pkg/runtime/k8s_runtime.go's AgentInfo.ContainerID
-// assignment) that a later, differently-imaged container recreated under
-// that same name would otherwise inherit an earlier, unrelated container's
-// cached result from.
+// Pairing ContainerID with Image and the "agent_id" label (rather than
+// keying on ContainerID alone) matters because ContainerID is not always a
+// fresh identifier assigned per container instance: on at least one backend
+// it is a stable, reusable name (a Kubernetes pod name,
+// pkg/runtime/k8s_runtime.go's AgentInfo.ContainerID assignment). Image
+// covers a later container recreated under that same name with a different
+// image; "agent_id" additionally covers a delete-and-recreate of an agent
+// under the same slug and image (see resolveKeysTarget's identity check).
+// This does not cover every case a reused ContainerID could produce — a
+// same-slug, same-image, same-agent_id recreation with an unchanged (but
+// now different) tmux binary is not distinguished by any of these fields —
+// but that remaining case fails safe: an unrecognized too-old tmux simply
+// fails at the delivery call itself, reported as an ordinary ambiguous
+// error, never as a proven-before-delivery class and never replayed.
 type tmuxVersionCacheKey struct {
 	containerID string
 	image       string
+	agentID     string
 }
 
 // checkTmuxVersionSupported queries target's tmux version via "tmux -V" and
@@ -732,7 +740,7 @@ type tmuxVersionCacheKey struct {
 // transient Exec failure, or a genuinely too-old container, gets a fresh
 // check on every call.
 func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, target api.AgentInfo) error {
-	key := tmuxVersionCacheKey{containerID: target.ContainerID, image: target.Image}
+	key := tmuxVersionCacheKey{containerID: target.ContainerID, image: target.Image, agentID: target.Labels["agent_id"]}
 	if v, ok := m.tmuxVersionOK.Load(key); ok && v.(bool) {
 		return nil
 	}
@@ -767,13 +775,13 @@ func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, target api
 // one container (resolveKeysTarget), that container's own "agent_id" label
 // is checked against expectedAgentID as part of that same resolution, and
 // every subsequent step — acquiring the injection lock, the version check,
-// the readiness probe, and the delivery call itself — acts on that same
-// resolved container's ID, with no second, independently resolving List
-// call in between. A caller must never check the label itself and then
-// invoke a different, re-resolving primitive: that would reopen the exact
-// recreate-inside-the-window race this binding exists to close, because
-// nothing would guarantee a second resolution finds the container the first
-// one checked.
+// and the readiness probe — acts on that same resolved container's ID.
+// Immediately before delivery, SendKeys re-verifies target identity by
+// resolving again and requiring the result still identifies the same target
+// (sameTargetInstance) — a correctness hardening, not a relaxation of the
+// binding above: a caller must still never check the label itself and then
+// invoke a different, re-resolving primitive expecting SendKeys's own
+// resolution to have been reused.
 //
 // projectID and expectedAgentID must both be non-empty: SendKeys fails
 // closed to ErrTargetNotFound rather than falling back to an unscoped
@@ -789,15 +797,15 @@ func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, target api
 // deadline: SendKeys returns an ErrKeysNotStarted-wrapped error (never one
 // of the other sentinels below) without executing anything if ctx is done
 // before the lock is acquired, and rechecks ctx again once the lock is held
-// — before the version check and readiness probe run — and a third time
-// immediately before the delivery call — covering a deadline that expires
-// while waiting for the lock (the "control-channel semaphore/target-lock
-// wait" the contract's execute-before enforcement names) — so a deadline
-// lost during that wait can never still result in execution afterward. A
-// readiness-probe failure that itself coincides with ctx expiry is still
-// reported as ErrKeysNotStarted (see the probe's own comment), even though
-// the recheck immediately preceding it is one step earlier than the probe
-// now, not directly before it.
+// — before the version check, readiness probe and target re-verification
+// run — and a second time immediately before the delivery call itself,
+// after all three of those — covering a deadline that expires while waiting
+// for the lock (the "control-channel semaphore/target-lock wait" the
+// contract's execute-before enforcement names) — so a deadline lost during
+// that wait can never still result in execution afterward. A readiness-probe
+// failure that itself coincides with ctx expiry is still reported as
+// ErrKeysNotStarted (see the probe's own comment), even though neither
+// recheck is directly adjacent to the probe.
 // Callers arrange for ctx's deadline to reflect the Hub-issued
 // execute-before timestamp (agentkeys.CapExecuteBefore) before calling
 // SendKeys.
@@ -883,12 +891,28 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 		return agentkeys.ErrTerminalNotReady
 	}
 
+	// Re-verify target identity (a correctness hardening): re-resolve with
+	// the same (projectID, agentSlug, expectedAgentID) and require the
+	// result still identifies the same target as the original resolution
+	// (sameTargetInstance). Anything that no longer matches, including a
+	// resolveKeysTarget failure of its own, fails closed to
+	// ErrTargetNotFound rather than delivering.
+	revalidated, err := m.resolveKeysTarget(ctx, projectID, agentSlug, expectedAgentID)
+	if err != nil {
+		return err
+	}
+	if !sameTargetInstance(target, revalidated) {
+		return agentkeys.ErrTargetNotFound
+	}
+
 	// Final check immediately before the delivery call (contract §4.2's
 	// third enforcement point, "immediately before runtime execution").
-	// Checked here rather than relying on Exec's own ctx handling, so an
-	// expiry detected at this instant is reported as "proven not to have
-	// executed" rather than folded into whatever error the delivery call
-	// itself would produce if it observed the same cancellation mid-call.
+	// Checked here, after the version check, readiness probe and
+	// re-verification above, rather than relying on Exec's own ctx
+	// handling, so an expiry detected at this instant is reported as
+	// "proven not to have executed" rather than folded into whatever error
+	// the delivery call itself would produce if it observed the same
+	// cancellation mid-call.
 	if err := ctx.Err(); err != nil {
 		return wrapNotStarted(err)
 	}
@@ -962,6 +986,22 @@ func (m *AgentManager) resolveKeysTarget(ctx context.Context, projectID, agentSl
 	}
 
 	return target, nil
+}
+
+// sameTargetInstance reports whether b, from SendKeys's pre-delivery
+// re-verification (see SendKeys's doc comment), still identifies the same
+// target a's original resolution proved: ContainerID must match, and so
+// must AgentInfo.Kubernetes.UID when both sides report one — the most
+// specific per-instance identifier available checks against it, with
+// ContainerID alone as the fallback for a backend that does not expose one.
+func sameTargetInstance(a, b api.AgentInfo) bool {
+	if a.ContainerID != b.ContainerID {
+		return false
+	}
+	if a.Kubernetes != nil && b.Kubernetes != nil && a.Kubernetes.UID != "" {
+		return a.Kubernetes.UID == b.Kubernetes.UID
+	}
+	return true
 }
 
 // deliveryStepKind identifies how deliverImmediate must run a deliveryStep,
