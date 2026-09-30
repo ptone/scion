@@ -74,10 +74,12 @@ terraform -chdir=deploy/terraform/configurations/shared-infra init \
 terraform -chdir=deploy/terraform/configurations/shared-infra apply \
   -var-file=terraform.tfvars
 
-# 2. Build and push hub_image using the repo shared-infra just created
-#    (out of scope for this Terraform — see the agent runbook's step 5,
-#    "Build and Push Images": immutable tags only, :latest moves only on
-#    explicit ack, and the hub image is built for linux/amd64).
+# 2. Build and push hub_image, and the agent harness images (Cloud Build,
+#    three ordered stages under the same immutable tag), using the repo
+#    shared-infra just created (out of scope for this Terraform — see
+#    docs/deploy/agent-runbook-terraform-ha.md step 5, "Build and Push
+#    Images": immutable tags only, :latest moves only on explicit ack, and
+#    the hub image is built for linux/amd64).
 
 # 3. One hub.
 terraform -chdir=deploy/terraform/configurations/hub init \
@@ -166,9 +168,11 @@ writing, `claude`, `codex`, `copilot`, `gemini-cli`, `opencode`,
 The image pipeline (`image-build/`) must publish an image for every one of
 those harnesses into whatever registry `image_registry` points at — at
 minimum `core-base`, `scion-base`, and each `scion-<harness>` (e.g.
-`scion-claude`). A harness that exists in the catalog and is selectable in
-the UI but has no published image builds an agent record fine and then
-fails at pod start: the `workspace-provision` init container hits an
+`scion-claude`) — built as in the agent runbook's step 5 (immutable tag,
+three ordered stages), never by moving `:latest` implicitly. A harness
+that exists in the catalog and is selectable in the UI but has no
+published image builds an agent record fine and then fails at pod start:
+the `workspace-provision` init container hits an
 image-pull `NotFound` for that harness's image. `muse-code` is an example
 of the gap today — it has a `harnesses/muse-code/config.yaml` and is listed
 in `KNOWN_HARNESS_NAMES`, but `image-build/cloudbuild-harnesses.yaml` does
@@ -562,7 +566,13 @@ prevent (see hub-identity's IAM scope rule comment).
   agents" above.
 - **An agent's pod fails to start with an image-pull `NotFound` on
   `workspace-provision`** — the harness image isn't published to the
-  registry `image_registry` points at. See "Harness images" above.
+  registry `image_registry` points at. **Stop and ask the user.** Publishing
+  means the agent runbook's step 5 three-stage build under a new immutable
+  tag, followed by an acked `tags add` to `:latest` for that image — never
+  an implicit `:latest` move. If the missing harness is `muse-code`,
+  `cloudbuild-harnesses.yaml` doesn't build it at all (verified against the
+  file's build steps); pick a different harness instead. See "Harness
+  images" above.
 - **Agent create returns a 503 even though the agent goes on to start** —
   likely a cold Autopilot node exceeding the hub's upstream client timeout,
   not a real failure. See "Cold start" above.

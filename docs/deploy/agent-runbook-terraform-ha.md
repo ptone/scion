@@ -266,6 +266,22 @@ image produced by `image-build/scripts/build-images.sh --target hub` (and
 pulled in by `--target common`/`--target all`); it runs as root and is the
 wrong hub image for this Cloud Run pattern.
 
+Push the hub image under a **new immutable tag or digest** (never
+`:latest`) and set `hub_image` to that reference — this never moves a tag
+anything else resolves against, so it needs no `:latest` ack. Apply the
+same kind of tag pre-check used for the harness images below to
+`<registry>/hub` **before pushing** — i.e. before running the `buildx`
+command further down:
+```bash
+gcloud artifacts docker tags list <registry>/hub \
+  --filter='tag:<immutable-tag>'
+```
+If this prints anything, the tag already exists: pick a different
+immutable tag and re-run the pre-check against the new one. Never push
+over an existing `<registry>/hub` tag — that re-points what every other
+hub's `hub_image` tfvar may already reference, which is exactly the
+cross-hub change §10 requires an ack for.
+
 **Build it for `linux/amd64` explicitly.** `scripts/cloudrun/Dockerfile`
 cross-compiles the Go binary with `GOARCH=amd64` (Stage 2), but its base
 images (`node:20-slim`, `golang:1.26`, `debian:bookworm-slim`) are all
@@ -273,7 +289,8 @@ unpinned, multi-arch images — a plain `docker build` picks whatever
 architecture the build host is. On an arm64 build host (Apple Silicon, for
 example — the same case "Why Cloud Build only" cites below for harness
 images), that produces an arm64 runtime layer wrapping an amd64-only
-binary, which Cloud Run rejects at hub apply. Use:
+binary, which Cloud Run rejects at hub apply. Once the pre-check above is
+clean, use:
 ```bash
 docker buildx build --platform linux/amd64 \
   -f scripts/cloudrun/Dockerfile \
@@ -296,16 +313,6 @@ defaults to `${SCION_PROJECT:-deploy-demo-test}`, which inside a Scion
 agent container is typically set to the *Scion* project, not necessarily
 `<project>` — another reason not to treat it as "already scripted" for this
 flow.
-
-Push the hub image under a **new immutable tag or digest** (never
-`:latest`) and set `hub_image` to that reference — this never moves a tag
-anything else resolves against, so it needs no `:latest` ack. Apply the
-same kind of tag pre-check used for the harness images below to
-`<registry>/hub` before pushing:
-```bash
-gcloud artifacts docker tags list <registry>/hub \
-  --filter='tag:<immutable-tag>'
-```
 
 **Agent harness images — Cloud Build only.** This runbook documents a
 single supported build path: `--builder cloud-build`, one stage at a time,
@@ -402,7 +409,9 @@ GCLOUD_PROJECT=<project> image-build/scripts/build-images.sh --builder cloud-bui
   --target harnesses --registry <registry> --tag <immutable-tag> \
   2>&1 | tee /tmp/stage-harnesses.log
 ```
-Wait for `SUCCESS` before moving on to step 6/7. **Set `GCLOUD_PROJECT=<project>`
+Wait for `SUCCESS`, then resolve the `:latest` outcome ("If the user
+declines moving `:latest`" / "If the user acks moving `:latest`" below)
+before moving on to step 6/7. **Set `GCLOUD_PROJECT=<project>`
 explicitly on every one of the three commands above** — see below for why.
 (`--target` maps to
 `cloudbuild-core-base.yaml`, `cloudbuild-scion-base.yaml`, and
@@ -432,11 +441,13 @@ it up, since it depends on the project's age:
 ```bash
 gcloud builds get-default-service-account --project=<project>
 ```
-This prints the service account email directly. On projects that predate
-the 2024 Cloud Build default-service-account change it's the legacy
-`<project_number>@cloudbuild.gserviceaccount.com`; on newer projects it's
-`<project_number>-compute@developer.gserviceaccount.com` (the Compute Engine
-default SA) instead. Grant `roles/artifactregistry.writer` on
+This prints the service account email directly, or nothing at all if no
+service account will be used by default — **if the lookup prints nothing,
+stop and ask** rather than guessing at an account to grant. Otherwise, on
+projects that predate the 2024 Cloud Build default-service-account change
+it's the legacy `<project_number>@cloudbuild.gserviceaccount.com`; on newer
+projects it's `<project_number>-compute@developer.gserviceaccount.com` (the
+Compute Engine default SA) instead. Grant `roles/artifactregistry.writer` on
 `<name_prefix>-scion` (the repo `modules/artifact-registry/main.tf` creates)
 to *whichever account the lookup above printed* —
 `cloudbuild.googleapis.com` itself is already enabled by
@@ -452,8 +463,11 @@ convenience, give it every flag explicitly: `--project <project> --location
 <region> --repo <name_prefix>-scion` (`verify-registry.sh` itself prints
 these exact values on failure). **Never suggest running it bare:** with no
 arguments it falls back to `--repo scion --location us-central1` in
-whatever project the ambient `gcloud config` names, and it **creates** an
-Artifact Registry repo there — a stray repo outside Terraform, not the one
+whichever project `$GCLOUD_PROJECT` names, or — only if that's unset — the
+ambient `gcloud config` (verified: `setup-cloud-build.sh` reads
+`$GCLOUD_PROJECT` first and only falls back to `gcloud config get-value
+project` if that's empty), and it **creates** an Artifact Registry repo
+there — a stray repo outside Terraform, not the one
 this module set uses. It also only grants the legacy
 `<project_number>@cloudbuild.gserviceaccount.com`, not necessarily the
 account `get-default-service-account` named above, and it separately
@@ -504,7 +518,7 @@ running the loop:
 # core-base: MAX_WAIT=11400 ; scion-base: MAX_WAIT=2400 ; harnesses: MAX_WAIT=3000
 MAX_WAIT=<stage timeout + 600>
 STATUS=""
-for i in $(seq 1 $((MAX_WAIT / 30))); do
+for _ in $(seq 1 $((MAX_WAIT / 30))); do
   STATUS=$(gcloud builds describe "${BUILD_ID}" --project=<project> \
     --format='value(status)')
   case "${STATUS}" in
@@ -652,6 +666,9 @@ OAuth client — nothing to create before the first hub apply. Two cases:
 ---
 
 ## 7. Apply a Hub
+
+Do not start until step 5's `:latest` decision is recorded; for an empty
+registry, the stop-and-ask gate must be resolved first.
 
 ```bash
 terraform -chdir=deploy/terraform/configurations/hub init \
@@ -911,7 +928,7 @@ Read this section before touching an existing (not brand-new) deployment.
 |---|---|---|
 | `403` on `scion-hub-<hash>-...` shortly after a hub's first apply | IAM condition propagation delay | Re-apply. Do not widen the condition. |
 | Agent starts but can't reach Vertex despite Workload Identity being wired | GCP identity is still Block | Set Passthrough — see step 9. |
-| Agent pod fails with image-pull `NotFound` on `workspace-provision` | Harness image not published to `image_registry` | Publish the image, or pick a different harness. See the README's "Harness images" section. |
+| Agent pod fails with image-pull `NotFound` on `workspace-provision` | Harness image not published to `image_registry` | **Stop and ask the user.** Publishing means step 5's three-stage build under a new immutable tag, followed by an acked `tags add` to `:latest` for that image — never an implicit `:latest` move. `scion-muse-code` isn't built by `cloudbuild-harnesses.yaml` at all (verified: it builds only 8 harnesses — antigravity, claude, codex, copilot, gemini-cli, grok-build, hermes, opencode); if that's the missing harness, it's out of this runbook's scope — stop and ask the user to pick a different harness. See the README's "Harness images" section. |
 | Agent create returns `503` but the agent goes on to start | Cold Autopilot node exceeding the hub's client timeout to the runtime broker | Not necessarily a failure. Confirm whether the agent started (step 8.4) before retrying the *create* — a blind retry on an agent that did start risks creating a duplicate. |
 | Creating a user or project secret fails with a hint to grant `roles/secretmanager.admin` | Hub image predates hub-prefixed secret names | Do not follow the hint in a shared project (see "Operational traps"). Roll a hub image with hub-prefixed secret support instead. |
 | Second plan on any root is not clean | Real drift, or a genuinely intended config change not yet applied everywhere | Read the diff. Don't assume it's benign; only refresh-only notes with no planned action are. |
