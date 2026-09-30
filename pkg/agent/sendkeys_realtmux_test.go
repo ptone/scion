@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,9 +27,34 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
+
+// requireTmuxVersionFloor skips the calling real-tmux test, rather than
+// merely logging a version, if the tmux binary at tmuxPath does not meet
+// SendKeys's delivery mechanism minimum (contract §2.3's "Transport
+// requirements"; see minTmuxMajor/minTmuxMinor in manager.go): below that
+// floor, "tmux source-file -" cannot read a script from stdin at all, so a
+// real-tmux test would otherwise fail for a reason unrelated to what it is
+// actually checking (review round 4, finding #1).
+func requireTmuxVersionFloor(t *testing.T, tmuxPath string) {
+	t.Helper()
+	out, err := exec.Command(tmuxPath, "-V").CombinedOutput()
+	if err != nil {
+		t.Fatalf("tmux -V failed: %v (%s)", err, out)
+	}
+	version := strings.TrimSpace(string(out))
+	t.Logf("running against %s", version)
+	major, minor, perr := parseTmuxVersion(version)
+	if perr != nil {
+		t.Fatalf("could not parse tmux version from %q: %v", version, perr)
+	}
+	if !tmuxVersionAtLeast(major, minor, minTmuxMajor, minTmuxMinor) {
+		t.Skipf("tmux %s is below the minimum version %d.%d the delivery mechanism requires", version, minTmuxMajor, minTmuxMinor)
+	}
+}
 
 // TestRealTmuxSendKeys drives AgentManager.SendKeys's actual delivery
 // mechanism against a private, disposable tmux server — never an active
@@ -54,9 +80,7 @@ func TestRealTmuxSendKeys(t *testing.T) {
 	if err != nil {
 		t.Skip("tmux not installed; skipping real-tmux integration test")
 	}
-	if out, err := exec.Command(tmuxPath, "-V").CombinedOutput(); err == nil {
-		t.Logf("running against %s", strings.TrimSpace(string(out)))
-	}
+	requireTmuxVersionFloor(t, tmuxPath)
 
 	dir, err := os.MkdirTemp("", "tmxk")
 	if err != nil {
@@ -175,6 +199,12 @@ func TestRealTmuxSendKeys(t *testing.T) {
 	// this test depends on, failing loudly rather than silently.
 	literal(`"; kill-server; #`)
 
+	// "Up Up Enter" is the contract's own §2.3 whole-argument case (review
+	// round 4, finding #2c): as one string containing spaces, it does not
+	// match any single named key exactly, so it must be typed as 11 literal
+	// characters, never interpreted as three separate keypresses.
+	literal("Up Up Enter")
+
 	// "Enter" is a recognized tmux key name and must be interpreted as an
 	// actual keypress (arriving as a bare LF via the pty's ICRNL
 	// translation), not typed as the five literal characters "Enter".
@@ -186,6 +216,21 @@ func TestRealTmuxSendKeys(t *testing.T) {
 	// byte through, not the six literal characters "Escape".
 	send("Escape")
 	want.WriteString("\x1b")
+
+	// "Up" is a recognized arrow-key name — checked as its actual escape
+	// sequence (review round 4, finding #2c), not just that *something* was
+	// sent. In the pane's default (non-application) cursor-key mode this is
+	// the ANSI CSI sequence ESC '[' 'A', confirmed by hand against this
+	// tmux binary.
+	send("Up")
+	want.WriteString("\x1b[A")
+
+	// "Tab" is a recognized named key producing a single control byte
+	// (review round 4, finding #2c), confirmed by hand against this tmux
+	// binary to arrive as a bare horizontal tab, not the three literal
+	// characters "Tab".
+	send("Tab")
+	want.WriteString("\t")
 
 	mustTmux("send-keys", "-t", "scion:0", "C-d")
 
@@ -217,5 +262,164 @@ func TestRealTmuxSendKeys(t *testing.T) {
 
 	if string(got) != want.String() {
 		t.Fatalf("pane output = %q, want %q", got, want.String())
+	}
+}
+
+// TestRealTmuxSendKeys_NoSessionIsTerminalNotReady covers review round 4
+// finding #2a: against a real tmux server that has no "scion" session at
+// all, the readiness probe's "has-session" must genuinely fail, and SendKeys
+// must report that truthfully as ErrTerminalNotReady, with no "source-file"
+// delivery call ever attempted.
+func TestRealTmuxSendKeys_NoSessionIsTerminalNotReady(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-tmux integration test in short mode")
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not installed; skipping real-tmux integration test")
+	}
+	requireTmuxVersionFloor(t, tmuxPath)
+
+	dir, err := os.MkdirTemp("", "tmxk-nosession")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "sock")
+
+	runTmux := func(args ...string) (string, error) {
+		cmd := exec.Command(tmuxPath, append([]string{"-S", sock}, args...)...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return string(out), fmt.Errorf("tmux %v failed: %w (%s)", args, err, out)
+		}
+		return string(out), nil
+	}
+	t.Cleanup(func() { _, _ = runTmux("kill-server") })
+
+	// Start the server with an unrelated session so it genuinely exists,
+	// but never create a "scion" session — has-session must fail
+	// truthfully, not because the server itself is unreachable.
+	if _, err := runTmux("-f", "/dev/null", "new-session", "-d", "-s", "other"); err != nil {
+		t.Fatalf("starting tmux server: %v", err)
+	}
+
+	var sourceFileCalled bool
+	shim := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{{
+				ContainerID: "local",
+				Name:        "test-agent",
+				Phase:       string(state.PhaseRunning),
+				Labels: map[string]string{
+					"scion.name": "test-agent",
+					"agent_id":   "agent-abc",
+				},
+			}}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			return runTmux(cmd[1:]...)
+		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			sourceFileCalled = true
+			c := exec.Command(tmuxPath, append([]string{"-S", sock}, cmd[1:]...)...)
+			c.Stdin = stdin
+			out, err := c.CombinedOutput()
+			if err != nil {
+				return string(out), fmt.Errorf("tmux %v failed: %w (%s)", cmd[1:], err, out)
+			}
+			return string(out), nil
+		},
+	}
+	mgr := &AgentManager{Runtime: shim}
+
+	err = mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, agentkeys.ErrTerminalNotReady) {
+		t.Fatalf("SendKeys error = %v, want agentkeys.ErrTerminalNotReady", err)
+	}
+	if sourceFileCalled {
+		t.Fatal("SendKeys must not attempt delivery ('source-file') once the readiness probe genuinely fails")
+	}
+}
+
+// TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous covers review
+// round 4 finding #2b: once a real tmux readiness probe has genuinely
+// succeeded, a real delivery-time failure — here, the target session is
+// removed between the probe and the delivery call — must reach SendKeys as
+// a plain error matching none of the proven-before-execution sentinels.
+func TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-tmux integration test in short mode")
+	}
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux not installed; skipping real-tmux integration test")
+	}
+	requireTmuxVersionFloor(t, tmuxPath)
+
+	dir, err := os.MkdirTemp("", "tmxk-killrace")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "sock")
+
+	runTmux := func(args ...string) (string, error) {
+		cmd := exec.Command(tmuxPath, append([]string{"-S", sock}, args...)...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return string(out), fmt.Errorf("tmux %v failed: %w (%s)", args, err, out)
+		}
+		return string(out), nil
+	}
+	t.Cleanup(func() { _, _ = runTmux("kill-server") })
+
+	if _, err := runTmux("-f", "/dev/null", "new-session", "-d", "-s", "scion"); err != nil {
+		t.Fatalf("starting tmux server: %v", err)
+	}
+
+	shim := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{{
+				ContainerID: "local",
+				Name:        "test-agent",
+				Phase:       string(state.PhaseRunning),
+				Labels: map[string]string{
+					"scion.name": "test-agent",
+					"agent_id":   "agent-abc",
+				},
+			}}, nil
+		},
+		// The readiness probe runs while the "scion" session still exists,
+		// so it genuinely succeeds.
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			return runTmux(cmd[1:]...)
+		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			// Remove the target session between the successful probe and
+			// the actual delivery, so the real tmux binary's send-keys
+			// command (run inside "source-file -") genuinely fails against
+			// a target that no longer exists — a real, not simulated,
+			// delivery-time failure.
+			if _, err := runTmux("kill-session", "-t", "scion"); err != nil {
+				t.Fatalf("killing session ahead of delivery: %v", err)
+			}
+			c := exec.Command(tmuxPath, append([]string{"-S", sock}, cmd[1:]...)...)
+			c.Stdin = stdin
+			out, err := c.CombinedOutput()
+			if err != nil {
+				return string(out), fmt.Errorf("tmux %v failed: %w (%s)", cmd[1:], err, out)
+			}
+			return string(out), nil
+		},
+	}
+	mgr := &AgentManager{Runtime: shim}
+
+	err = mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+	if err == nil {
+		t.Fatal("expected a genuine delivery-time failure once the session was removed after the probe")
+	}
+	if errors.Is(err, agentkeys.ErrTargetNotFound) || errors.Is(err, agentkeys.ErrAgentNotRunning) || errors.Is(err, agentkeys.ErrTerminalNotReady) || errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("a real delivery-time failure must never be reported as one of the proven-before-execution sentinels, got: %v", err)
 	}
 }

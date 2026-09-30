@@ -127,6 +127,16 @@ This is the single most important thing every dependent task must implement iden
 > argument, a named key is recognized only on an exact whole-argument match, no shell evaluation,
 > no whitespace tokenization, no arbitrary tmux flags — is unchanged from a direct invocation.
 >
+> **Transport requirements**, binding on this route and on any local-mode equivalent:
+>
+> - No payload, and no reversible encoding of it, in a host or guest process's arguments,
+>   environment variables, temporary files, or a command-bearing URL.
+> - No load-buffer/paste-buffer substitution.
+> - No helper that reads the stdin payload and then rebuilds a payload-bearing command line.
+> - stderr and tracing of the delivery call suppressed at the source.
+> - tmux at or above version 3.1.
+> - A backend unable to meet these requirements returns `keys_unsupported` before any injection.
+>
 > **Deviation from #2184 recorded here:** `cmd/keys.go`'s help text says `scion keys my-agent
 > "Up Up Enter"` and calls it usable for "interactive TUI applications", implying three key
 > presses. On current `main` this is **not true**: `cmd/keys.go:60` joins CLI args with `" "`

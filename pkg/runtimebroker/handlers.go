@@ -2357,7 +2357,7 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 		// expiry, and the pre-send recheck — proven not to have started.
 		// Matching by this sentinel's identity, rather than by
 		// errors.Is(err, context.DeadlineExceeded/Canceled), is required:
-		// the send-keys Exec failure path below deliberately does not wrap
+		// the delivery-call failure path below deliberately does not wrap
 		// its underlying error with %w, so a backend error that happens to
 		// wrap a context error *after* that Exec call began (e.g. a stream
 		// cancelled mid-call) can never match this case by accident and be

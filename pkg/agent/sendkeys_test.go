@@ -131,14 +131,26 @@ func TestSendKeys_ArgvExactness(t *testing.T) {
 				t.Errorf("stdin = %q, want %q", last.stdin, wantStdin)
 			}
 			// No step must add a trailing Enter (unlike deliverImmediate's
-			// message path), and the payload must never appear as a process
-			// argument.
+			// message path), and the payload — raw or in any reversible
+			// encoding of it — must never appear as a process argument, on
+			// any recorded call including the readiness probe (review round
+			// 4, finding #5): the transport requirement is "no payload, and
+			// no reversible encoding of it, in argv," not merely "no raw
+			// payload."
+			encoded := tmuxOctalEscape(tc.keys)
+			script := sendKeysScript(keysTarget, tc.keys)
 			for _, c := range captured {
 				if c.argv == "tmux send-keys -t scion:0 Enter" {
 					t.Errorf("SendKeys must never send an implicit Enter, but got: %v", captured)
 				}
 				if strings.Contains(c.argv, tc.keys) && tc.keys != "" {
 					t.Errorf("payload must not appear in argv, got: %q", c.argv)
+				}
+				if strings.Contains(c.argv, encoded) && encoded != "" {
+					t.Errorf("octal-escaped payload must not appear in argv, got: %q", c.argv)
+				}
+				if strings.Contains(c.argv, script) && script != "" {
+					t.Errorf("generated tmux command must not appear in argv, got: %q", c.argv)
 				}
 			}
 		})
@@ -757,10 +769,10 @@ func TestMessageRaw_ConcurrentWithSendKeys_NoInterleave(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(sequence) != 3 {
-		t.Fatalf("expected exactly 3 recorded Exec calls (2 from SendKeys, 1 from MessageRaw), got %v", sequence)
+	if len(sequence) != 4 {
+		t.Fatalf("expected exactly 4 recorded Exec calls (3 from SendKeys — version check, probe, send — and 1 from MessageRaw), got %v", sequence)
 	}
-	want := []string{"keys", "keys", "raw"}
+	want := []string{"keys", "keys", "keys", "raw"}
 	for i := range want {
 		if sequence[i] != want[i] {
 			t.Fatalf("SendKeys and MessageRaw interleaved their tmux Exec calls for the same target: sequence = %v, want %v", sequence, want)
@@ -929,9 +941,10 @@ func TestSendKeys_UnsupportedBackend(t *testing.T) {
 // (pkg/runtime/common.go's debug logging, the Kubernetes backend's
 // stderr-embedding error — see TestRunSimpleCommand_SensitiveExec_
 // SuppressesOutputInDebugLog and TestWrapExecStreamError_SensitiveOmitsStderr
-// in pkg/runtime) depends on, is marking every Exec call — the readiness
-// probe and the send-keys call itself — via runtime.WithSensitiveExec. This
-// test proves that marking happens for both calls.
+// in pkg/runtime) depends on, is marking every Exec call — the version
+// check, the readiness probe, and the delivery call itself — via
+// runtime.WithSensitiveExec. This test proves that marking happens for all
+// three.
 func TestSendKeys_MarksExecCallsSensitive(t *testing.T) {
 	agent := runningAgent()
 	var sawSensitive []bool
@@ -951,12 +964,166 @@ func TestSendKeys_MarksExecCallsSensitive(t *testing.T) {
 		t.Fatalf("SendKeys failed: %v", err)
 	}
 
-	if len(sawSensitive) < 2 {
-		t.Fatalf("expected at least 2 Exec calls (readiness probe + send-keys), got %d", len(sawSensitive))
+	if len(sawSensitive) < 3 {
+		t.Fatalf("expected at least 3 Exec calls (version check + readiness probe + delivery), got %d", len(sawSensitive))
 	}
 	for i, sensitive := range sawSensitive {
 		if !sensitive {
 			t.Errorf("Exec call %d was not marked sensitive via runtime.WithSensitiveExec", i)
 		}
+	}
+}
+
+// TestParseTmuxVersion covers the numeric major/minor extraction from
+// tmux -V's own output format, including the trailing-letter suffix tmux
+// itself appends to some releases (e.g. "3.3a").
+func TestParseTmuxVersion(t *testing.T) {
+	cases := []struct {
+		in        string
+		wantMajor int
+		wantMinor int
+		wantErr   bool
+	}{
+		{"tmux 3.3a", 3, 3, false},
+		{"tmux 3.1", 3, 1, false},
+		{"tmux 3.0a", 3, 0, false},
+		{"tmux 2.9a", 2, 9, false},
+		{"tmux 10.2", 10, 2, false},
+		{"tmux 3.3a\n", 3, 3, false}, // trailing newline, as CombinedOutput yields
+		{"", 0, 0, true},
+		{"not tmux at all", 0, 0, true},
+		{"tmux next-3.4", 0, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			major, minor, err := parseTmuxVersion(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseTmuxVersion(%q) = (%d, %d, nil), want an error", tc.in, major, minor)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseTmuxVersion(%q) failed: %v", tc.in, err)
+			}
+			if major != tc.wantMajor || minor != tc.wantMinor {
+				t.Fatalf("parseTmuxVersion(%q) = (%d, %d), want (%d, %d)", tc.in, major, minor, tc.wantMajor, tc.wantMinor)
+			}
+		})
+	}
+}
+
+// TestTmuxVersionAtLeast covers the major/minor comparison
+// checkTmuxVersionSupported uses against the delivery mechanism's floor.
+func TestTmuxVersionAtLeast(t *testing.T) {
+	cases := []struct {
+		major, minor         int
+		wantMajor, wantMinor int
+		want                 bool
+	}{
+		{3, 1, 3, 1, true},  // exactly the floor
+		{3, 3, 3, 1, true},  // newer minor, same major
+		{4, 0, 3, 1, true},  // newer major, older minor number
+		{3, 0, 3, 1, false}, // older minor, same major
+		{2, 9, 3, 1, false}, // older major
+	}
+	for _, tc := range cases {
+		got := tmuxVersionAtLeast(tc.major, tc.minor, tc.wantMajor, tc.wantMinor)
+		if got != tc.want {
+			t.Errorf("tmuxVersionAtLeast(%d, %d, %d, %d) = %v, want %v", tc.major, tc.minor, tc.wantMajor, tc.wantMinor, got, tc.want)
+		}
+	}
+}
+
+// TestSendKeys_TmuxBelowVersionFloorIsUnsupported covers review round 4
+// finding #1: a resolved container whose tmux -V reports a version below
+// the delivery mechanism's floor (tmux 3.1, see minTmuxMajor/minTmuxMinor)
+// must fail with ErrKeysUnsupported, and neither the readiness probe nor the
+// delivery call may ever run — the version gate gets there first.
+func TestSendKeys_TmuxBelowVersionFloorIsUnsupported(t *testing.T) {
+	agent := runningAgent()
+	var capturedCmd []string
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			capturedCmd = append(capturedCmd, strings.Join(cmd, " "))
+			if len(cmd) >= 2 && cmd[1] == "-V" {
+				return "tmux 2.9a\n", nil
+			}
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, ErrKeysUnsupported) {
+		t.Fatalf("SendKeys error = %v, want ErrKeysUnsupported", err)
+	}
+	for _, c := range capturedCmd {
+		if strings.Contains(c, "has-session") || strings.Contains(c, "source-file") {
+			t.Fatalf("neither the readiness probe nor delivery must run below the tmux version floor, got: %v", capturedCmd)
+		}
+	}
+}
+
+// TestSendKeys_TmuxVersionUnparseableProceeds covers the deliberate other
+// half of the version gate's behavior (see checkTmuxVersionSupported's doc
+// comment): a tmux -V call that cannot be run, or whose output cannot be
+// parsed, is inconclusive rather than a proof of incompatibility, so
+// SendKeys must still proceed to the readiness probe and delivery rather
+// than failing closed to ErrKeysUnsupported on every backend that merely
+// doesn't answer "tmux -V" the way a real tmux binary would (e.g. this
+// package's own mocks, none of which implement it).
+func TestSendKeys_TmuxVersionUnparseableProceeds(t *testing.T) {
+	var captured []execRecord
+	mock := newSendKeysMock([]api.AgentInfo{runningAgent()}, &captured, nil)
+	mgr := &AgentManager{Runtime: mock}
+
+	if err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c"); err != nil {
+		t.Fatalf("SendKeys failed: %v", err)
+	}
+	var sawDelivery bool
+	for _, c := range captured {
+		if c.argv == "tmux source-file -" {
+			sawDelivery = true
+		}
+	}
+	if !sawDelivery {
+		t.Fatalf("expected delivery to proceed when the tmux version cannot be determined, got: %v", captured)
+	}
+}
+
+// TestSendKeys_TmuxVersionCheckCachedPerContainer covers
+// checkTmuxVersionSupported's caching: once a container's tmux is
+// determined to meet the floor, a second SendKeys call for the same
+// container must not repeat the "tmux -V" query.
+func TestSendKeys_TmuxVersionCheckCachedPerContainer(t *testing.T) {
+	agent := runningAgent()
+	var versionQueries int
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			if len(cmd) >= 2 && cmd[1] == "-V" {
+				versionQueries++
+				return "tmux 3.3a\n", nil
+			}
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	for i := 0; i < 2; i++ {
+		if err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c"); err != nil {
+			t.Fatalf("SendKeys call %d failed: %v", i, err)
+		}
+	}
+	if versionQueries != 1 {
+		t.Fatalf("expected exactly 1 tmux -V query across 2 SendKeys calls for the same container, got %d", versionQueries)
 	}
 }

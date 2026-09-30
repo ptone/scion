@@ -26,9 +26,9 @@ type sensitiveExecKey struct{}
 // including it as they normally do for diagnostics.
 //
 // This exists for the agent-keys dedicated terminal-injection path
-// (agent.Manager.SendKeys): its "tmux send-keys -- <keys>" argv, and any
-// stdout/stderr a failing runtime backend produces from it, can contain the
-// exact bytes a caller asked to inject into a terminal. Broker-level
+// (agent.Manager.SendKeys): the generated tmux command it delivers on stdin,
+// and any stdout/stderr a failing runtime backend produces from it, can
+// contain the exact bytes a caller asked to inject into a terminal. Broker-level
 // redaction alone is not sufficient — pkg/runtime's own command-execution
 // helpers already log CombinedOutput on failure (runSimpleCommand /
 // runSimpleCommandWithStdin, common.go) and the Kubernetes backend embeds

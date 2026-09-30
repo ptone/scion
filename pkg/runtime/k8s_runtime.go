@@ -2448,12 +2448,12 @@ func (r *KubernetesRuntime) ExecWithStdin(ctx context.Context, id string, cmd []
 
 // wrapExecStreamError builds the error execWithOptionalStdin returns for a
 // failed exec stream. It normally embeds stderr for diagnostics, but when
-// ctx is marked via WithSensitiveExec it omits stderr entirely: the injected
-// command's argv (built from a caller-supplied string, e.g. SendKeys's tmux
-// invocation) or the target process's stderr can carry that caller-supplied
-// content, and embedding it here would defeat suppression done anywhere
-// else in the stack. Factored out from execWithOptionalStdin so it can be
-// unit-tested without a real Kubernetes API server.
+// ctx is marked via WithSensitiveExec it omits stderr entirely: the target
+// process's stderr, or (for a stdin-delivered call such as SendKeys's tmux
+// invocation) its stdin, can carry caller-supplied content, and embedding it
+// here would defeat suppression done anywhere else in the stack. Factored
+// out from execWithOptionalStdin so it can be unit-tested without a real
+// Kubernetes API server.
 func wrapExecStreamError(ctx context.Context, err error, stderr string) error {
 	if IsSensitiveExec(ctx) {
 		return fmt.Errorf("exec failed: %w", err)
