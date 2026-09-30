@@ -396,6 +396,38 @@ func TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBody(t *testing.T) {
 	}
 }
 
+// TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBodyOnSignedPath is the signed
+// counterpart to TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBody: it proves
+// GetBody is still nil on the request that is actually sent when a signer is
+// configured (production always configures one — AuthenticatedBrokerClient).
+// This matters because GetBody is now cleared after Sign runs, specifically
+// so a future signer that rebuilds the request (e.g. via http.NewRequest) or
+// otherwise repopulates GetBody cannot silently reopen the HTTP/2 resend
+// hazard without this test catching it.
+func TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBodyOnSignedPath(t *testing.T) {
+	spy := &spyRoundTripper{}
+	signer := &mockBrokerSigner{}
+	transport := &brokerHTTPTransport{
+		client:     &http.Client{Transport: spy},
+		keysClient: &http.Client{Transport: spy},
+		signer:     signer,
+	}
+
+	_, err := transport.ExecuteKeys(context.Background(), "broker-1", "http://example.invalid", "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("ExecuteKeys failed: %v", err)
+	}
+	if !signer.called {
+		t.Fatal("expected the signer to be invoked")
+	}
+	if spy.calls != 1 {
+		t.Fatalf("expected exactly one RoundTrip call, got %d", spy.calls)
+	}
+	if !spy.sawGetBodyNil {
+		t.Fatal("expected the outgoing request's GetBody to be nil on the signed path too")
+	}
+}
+
 // failingSigner always fails, for testing that a signing failure — proven to
 // occur before anything is sent — classifies as agentkeys.ErrNotDispatched.
 type failingSigner struct{}

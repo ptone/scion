@@ -22,6 +22,26 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 )
 
+// Compile-time interface assertions for every agentkeys.BrokerClient/
+// Dispatcher implementation this task ships. Production only reaches these
+// adapters through a runtime type assertion (d.client.(agentkeys.BrokerClient),
+// c.httpClient.(agentkeys.BrokerClient)) rather than a static interface-typed
+// field, because BrokerClient/Dispatcher are deliberately new, standalone
+// interfaces and not new methods on the existing, widely-implemented
+// RuntimeBrokerClient/AgentDispatcher (contract §4.4). Without these
+// assertions, a signature drift on any one adapter's ExecuteKeys/
+// DispatchAgentKeys would still compile and pass every test that calls the
+// concrete method directly or uses a fake — it would only surface in
+// production as every keys request silently failing "wiring defect" ->
+// ErrNotDispatched -> keys_unavailable, with no build-time signal.
+var (
+	_ agentkeys.BrokerClient = (*HTTPRuntimeBrokerClient)(nil)
+	_ agentkeys.BrokerClient = (*AuthenticatedBrokerClient)(nil)
+	_ agentkeys.BrokerClient = (*ControlChannelBrokerClient)(nil)
+	_ agentkeys.BrokerClient = (*HybridBrokerClient)(nil)
+	_ agentkeys.Dispatcher   = (*HTTPAgentDispatcher)(nil)
+)
+
 // decodeBrokerKeysResponse turns a raw HTTP-shaped response (status code and
 // body) from a runtime broker's dedicated keys route into an
 // (agentkeys.BrokerResult, error) pair, per the frozen classification rule in

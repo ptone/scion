@@ -415,6 +415,18 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 	if err != nil {
 		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to create request: %v", agentkeys.ErrNotDispatched, err)
 	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if t.signer != nil {
+		if err := t.signer.Sign(ctx, httpReq, brokerID); err != nil {
+			if t.debug {
+				slog.Warn("Failed to sign keys request", "brokerID", brokerID, "error", err)
+			}
+			// A signing failure (e.g. missing/expired broker secret) never
+			// puts a byte on the wire.
+			return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to sign request: %v", agentkeys.ErrNotDispatched, err)
+		}
+	}
+
 	// http.NewRequestWithContext populates GetBody for a []byte-backed
 	// reader so the net/http machinery can re-read the body for a transparent
 	// resend. Over HTTP/2, http2shouldRetryRequest resends the request on a
@@ -428,18 +440,13 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 	// honest answer per contract §4.3. Do not "fix" this by adding an
 	// idempotency header instead: that would make HTTP/1.1 treat the request
 	// as safely replayable too, which is the opposite of what this needs.
+	//
+	// This is set last, immediately before Do, after every other request
+	// mutation (including signing): today's HMAC signer only reads and
+	// restores Body and never touches GetBody, but setting this earlier would
+	// silently stop protecting against a future signer that rebuilds the
+	// request (e.g. via http.NewRequest) or otherwise repopulates GetBody.
 	httpReq.GetBody = nil
-	httpReq.Header.Set("Content-Type", "application/json")
-	if t.signer != nil {
-		if err := t.signer.Sign(ctx, httpReq, brokerID); err != nil {
-			if t.debug {
-				slog.Warn("Failed to sign keys request", "brokerID", brokerID, "error", err)
-			}
-			// A signing failure (e.g. missing/expired broker secret) never
-			// puts a byte on the wire.
-			return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to sign request: %v", agentkeys.ErrNotDispatched, err)
-		}
-	}
 
 	if t.debug {
 		slog.Debug("Outgoing keys request to broker", "method", agentkeys.BrokerRouteMethod, "endpoint", endpoint)

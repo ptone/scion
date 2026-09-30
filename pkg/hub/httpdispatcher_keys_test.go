@@ -188,25 +188,30 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_ClientWithoutKeysSupport(t *testi
 }
 
 // TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnBadDeadline proves a
-// zero or already-past executeBefore is rejected as agentkeys.ErrNotDispatched
-// before any client call — BrokerRequest.ExecuteBefore's doc requires failing
-// closed on a missing/invalid deadline, and there is no reason to spend a
-// network round trip on a request the broker is contractually required to
-// reject anyway.
+// zero or already-past executeBefore, or an empty operationID, is rejected as
+// agentkeys.ErrNotDispatched before any client call. BrokerRequest.
+// ExecuteBefore's doc requires failing closed on a missing/invalid deadline,
+// and there is no reason to spend a network round trip on a request the
+// broker is contractually required to reject anyway. An empty operationID
+// gets the same treatment because decodeBrokerKeysResponse's success-path
+// echo check ("OperationID == expectedOperationID") would otherwise be
+// vacuous for it: an empty echo would satisfy an empty expectation.
 func TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnBadDeadline(t *testing.T) {
 	dispatcher, mockClient, target := newKeysDispatcherFixture(t)
 
 	cases := []struct {
-		name     string
-		deadline time.Time
+		name        string
+		operationID string
+		deadline    time.Time
 	}{
-		{"zero deadline", time.Time{}},
-		{"already past", time.Now().Add(-time.Second)},
+		{"zero deadline", "op-1", time.Time{}},
+		{"already past", "op-1", time.Now().Add(-time.Second)},
+		{"empty operation ID", "", time.Now().Add(time.Minute)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			mockClient.calls = 0
-			_, err := dispatcher.DispatchAgentKeys(context.Background(), target, "op-1", tc.deadline, "C-c")
+			_, err := dispatcher.DispatchAgentKeys(context.Background(), target, tc.operationID, tc.deadline, "C-c")
 			if !errors.Is(err, agentkeys.ErrNotDispatched) {
 				t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
 			}

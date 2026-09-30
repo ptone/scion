@@ -190,8 +190,10 @@ func TestHybridBrokerClient_ExecuteKeys_RouteForwardAndUndeliverable(t *testing.
 }
 
 // TestHybridBrokerClient_ExecuteKeys_HTTPClientMissingSupport proves a
-// non-keys-aware httpClient (implementing only RuntimeBrokerClient) produces
-// a plain error rather than a panic or a false success.
+// non-keys-aware httpClient (implementing only RuntimeBrokerClient) fails as
+// agentkeys.ErrNotDispatched — a wiring defect proven before any request
+// could be built, consistent with HTTPAgentDispatcher's handling of the same
+// defect — rather than panicking or reporting a false success.
 func TestHybridBrokerClient_ExecuteKeys_HTTPClientMissingSupport(t *testing.T) {
 	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
 	c := NewHybridBrokerClient(mgr, &mockRuntimeBrokerClient{}, nil, false)

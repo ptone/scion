@@ -2769,6 +2769,16 @@ func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agen
 	if executeBefore.IsZero() || !time.Now().Before(executeBefore) {
 		return agentkeys.BrokerResult{}, fmt.Errorf("%w: execute-before deadline is zero or already past", agentkeys.ErrNotDispatched)
 	}
+	// An empty operationID would make decodeBrokerKeysResponse's success-path
+	// echo check ("OperationID == expectedOperationID") vacuous — an empty
+	// echo would satisfy an empty expectation, silently discarding the audit
+	// correlation the echo check exists to enforce. The operation ID is a
+	// mandatory body field per contract §4.1; a caller (task 2.2) always
+	// mints one before calling this method, so an empty value here is a
+	// caller bug, proven before any request could be built.
+	if operationID == "" {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: operation ID is required", agentkeys.ErrNotDispatched)
+	}
 
 	keysClient, ok := d.client.(agentkeys.BrokerClient)
 	if !ok {

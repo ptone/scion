@@ -302,14 +302,18 @@ func (c *ControlChannelBrokerClient) MessageAgent(ctx context.Context, brokerID,
 // keys route via the control channel. It implements agentkeys.BrokerClient
 // and is single-attempt: no reconnect resend on a mid-flight failure.
 //
-// Two pre-send checks — the connection check and the tunnel body-size limit
-// — are proven before anything is transmitted, so their failure is reported
-// as agentkeys.ErrNotDispatched (there is no HTTP fallback or durable queue
-// for keys, unlike MessageAgent's ErrMessageDeferred). Any failure from the
-// tunnel round-trip itself (c.doRequestRaw) does not prove the broker never
-// received or began acting on the request, so it is returned as a plain,
-// unclassified error instead — agentkeys.ClassifyDispatchError maps that to
-// OutcomeKeysOutcomeUnknown, the honest "may have run" outcome required by
+// Three pre-send failure classes — the connection check, the marshal/tunnel
+// body-size checks, and building+signing the request envelope
+// (c.buildRequestHeaders) — are all proven before anything is transmitted, so
+// each is reported as agentkeys.ErrNotDispatched (there is no HTTP fallback
+// or durable queue for keys, unlike MessageAgent's ErrMessageDeferred). This
+// method deliberately does not go through c.doRequestRaw, which folds
+// signing into the same call as the tunnel round trip and would make a
+// signing failure indistinguishable from a genuinely uncertain one: only the
+// c.manager.TunnelRequest call itself, below, does not prove the broker never
+// received or began acting on the request, so only its failure is returned
+// as a plain, unclassified error — agentkeys.ClassifyDispatchError maps that
+// to OutcomeKeysOutcomeUnknown, the honest "may have run" outcome required by
 // .design/agent-keys-contract.md §2.5/§4.3.
 func (c *ControlChannelBrokerClient) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
 	_ = brokerEndpoint
