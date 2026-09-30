@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite
-
 package hub
 
 import (
@@ -53,14 +51,38 @@ func installSentinelLogCapture(t *testing.T) *bytes.Buffer {
 }
 
 // assertNoSentinelLeak fails the test if err's message or the captured log
-// buffer contains keysContentSentinel.
-func assertNoSentinelLeak(t *testing.T, err error, log *bytes.Buffer) {
+// buffer contains keysContentSentinel. It also asserts wantOutcome, so a
+// sub-test that stopped reaching its intended error path (e.g. the redirect
+// case began succeeding, or the signer case failed earlier at the endpoint
+// check) fails here instead of silently passing on an empty error/log — a
+// "no leak" assertion alone cannot distinguish "reached the path cleanly"
+// from "never got there."
+func assertNoSentinelLeak(t *testing.T, err error, log *bytes.Buffer, wantOutcome agentkeys.Outcome) {
 	t.Helper()
-	if err != nil && strings.Contains(err.Error(), keysContentSentinel) {
+	if err == nil {
+		t.Fatal("expected an error (a nil error would make this leak check vacuous)")
+	}
+	if got := agentkeys.ClassifyDispatchError(err); got != wantOutcome {
+		t.Fatalf("ClassifyDispatchError = %q, want %q (err=%v) — this sub-test may not have reached its intended path", got, wantOutcome, err)
+	}
+	if strings.Contains(err.Error(), keysContentSentinel) {
 		t.Errorf("error message leaked key content: %v", err)
 	}
 	if strings.Contains(log.String(), keysContentSentinel) {
 		t.Errorf("captured log leaked key content:\n%s", log.String())
+	}
+}
+
+// assertReachedBrokerDo fails the test if the captured log does not contain
+// the "Outgoing keys request to broker" debug line brokerHTTPTransport.
+// ExecuteKeys emits right before keysClient.Do. Sub-tests that expect to
+// reach that call use this to prove the log capture is actually live and
+// scoped correctly, rather than trusting an empty buffer as proof of "no
+// leak" when it could equally mean "captured nothing at all."
+func assertReachedBrokerDo(t *testing.T, log *bytes.Buffer) {
+	t.Helper()
+	if !strings.Contains(log.String(), "Outgoing keys request to broker") {
+		t.Fatalf("expected the captured log to contain the pre-send debug line, proving the log capture is live; got:\n%s", log.String())
 	}
 }
 
@@ -87,7 +109,12 @@ func TestExecuteKeys_NoContentLeak_HTTP(t *testing.T) {
 			debug:      true,
 		}}
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "http://example.invalid", "test-agent", sentinelKeysRequest())
-		assertNoSentinelLeak(t, err, log)
+		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysUnavailable)
+		// A signing failure is proven pre-send: the request never reaches
+		// keysClient.Do, so the pre-send debug line must NOT appear either.
+		if strings.Contains(log.String(), "Outgoing keys request to broker") {
+			t.Fatal("a signer failure must be reported before the pre-send debug line, not after it")
+		}
 	})
 
 	t.Run("5xx", func(t *testing.T) {
@@ -99,7 +126,8 @@ func TestExecuteKeys_NoContentLeak_HTTP(t *testing.T) {
 		defer server.Close()
 		client := &HTTPRuntimeBrokerClient{transport: newBrokerHTTPTransport(true, nil)}
 		_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), server.URL, "test-agent", sentinelKeysRequest())
-		assertNoSentinelLeak(t, err, log)
+		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysOutcomeUnknown)
+		assertReachedBrokerDo(t, log)
 	})
 
 	t.Run("response loss", func(t *testing.T) {
@@ -122,7 +150,8 @@ func TestExecuteKeys_NoContentLeak_HTTP(t *testing.T) {
 		client := &HTTPRuntimeBrokerClient{transport: newBrokerHTTPTransport(true, nil)}
 		_, dispatchErr := client.ExecuteKeys(context.Background(), tid("broker-1"), "http://"+ln.Addr().String(), "test-agent", sentinelKeysRequest())
 		<-done
-		assertNoSentinelLeak(t, dispatchErr, log)
+		assertNoSentinelLeak(t, dispatchErr, log, agentkeys.OutcomeKeysOutcomeUnknown)
+		assertReachedBrokerDo(t, log)
 	})
 
 	t.Run("redirect", func(t *testing.T) {
@@ -139,7 +168,8 @@ func TestExecuteKeys_NoContentLeak_HTTP(t *testing.T) {
 
 		client := &HTTPRuntimeBrokerClient{transport: newBrokerHTTPTransport(true, nil)}
 		_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), redirector.URL, "test-agent", sentinelKeysRequest())
-		assertNoSentinelLeak(t, err, log)
+		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysOutcomeUnknown)
+		assertReachedBrokerDo(t, log)
 	})
 
 	t.Run("old broker 404", func(t *testing.T) {
@@ -152,7 +182,8 @@ func TestExecuteKeys_NoContentLeak_HTTP(t *testing.T) {
 
 		client := &HTTPRuntimeBrokerClient{transport: newBrokerHTTPTransport(true, nil)}
 		_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), server.URL, "test-agent", sentinelKeysRequest())
-		assertNoSentinelLeak(t, err, log)
+		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysUnsupported)
+		assertReachedBrokerDo(t, log)
 	})
 
 	t.Run("mismatched operation-ID echo", func(t *testing.T) {
@@ -165,20 +196,31 @@ func TestExecuteKeys_NoContentLeak_HTTP(t *testing.T) {
 
 		client := &HTTPRuntimeBrokerClient{transport: newBrokerHTTPTransport(true, nil)}
 		_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), server.URL, "test-agent", sentinelKeysRequest())
-		assertNoSentinelLeak(t, err, log)
+		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysOutcomeUnknown)
+		assertReachedBrokerDo(t, log)
 	})
 }
 
 // TestExecuteKeys_NoContentLeak_ControlChannel drives every control-channel
-// error path with a distinctive keys value and asserts neither the returned
-// error nor the (always-on, for this transport) log contains it.
+// error path with a distinctive keys value and asserts the returned error
+// does not contain it. ControlChannelBrokerClient.ExecuteKeys itself emits no
+// log lines (verified by reading it, and confirmed here since the log buffer
+// stays empty in every sub-test below), and this test replaces
+// ControlChannelManager/BrokerConnection with mockControlChannelTunnel, so no
+// real control-channel transport logging runs either way. The log capture is
+// still installed and checked so a future log line added to this path — the
+// regression this test exists to catch — cannot leak key content without
+// being caught immediately.
 func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 	t.Run("signer failure", func(t *testing.T) {
 		log := installSentinelLogCapture(t)
 		tunnel := &mockControlChannelTunnel{connected: true}
 		client := &ControlChannelBrokerClient{manager: tunnel, signer: failingControlChannelSigner{}}
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", sentinelKeysRequest())
-		assertNoSentinelLeak(t, err, log)
+		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysUnavailable)
+		if tunnel.calls != 0 {
+			t.Fatalf("expected zero tunnel calls for a signer failure, got %d", tunnel.calls)
+		}
 	})
 
 	t.Run("mid-flight failure", func(t *testing.T) {
@@ -186,7 +228,10 @@ func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 		tunnel := &mockControlChannelTunnel{connected: true, err: fmt.Errorf("tunnel closed: broker reconnecting")}
 		client := &ControlChannelBrokerClient{manager: tunnel}
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", sentinelKeysRequest())
-		assertNoSentinelLeak(t, err, log)
+		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysOutcomeUnknown)
+		if tunnel.calls != 1 {
+			t.Fatalf("expected exactly one tunnel call, got %d", tunnel.calls)
+		}
 	})
 
 	t.Run("5xx", func(t *testing.T) {
@@ -198,7 +243,10 @@ func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 		}
 		client := &ControlChannelBrokerClient{manager: tunnel}
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", sentinelKeysRequest())
-		assertNoSentinelLeak(t, err, log)
+		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysOutcomeUnknown)
+		if tunnel.calls != 1 {
+			t.Fatalf("expected exactly one tunnel call, got %d", tunnel.calls)
+		}
 	})
 
 	t.Run("old broker 404", func(t *testing.T) {
@@ -210,7 +258,10 @@ func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 		}
 		client := &ControlChannelBrokerClient{manager: tunnel}
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", sentinelKeysRequest())
-		assertNoSentinelLeak(t, err, log)
+		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysUnsupported)
+		if tunnel.calls != 1 {
+			t.Fatalf("expected exactly one tunnel call, got %d", tunnel.calls)
+		}
 	})
 
 	t.Run("mismatched operation-ID echo", func(t *testing.T) {
@@ -219,7 +270,10 @@ func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 		tunnel := &mockControlChannelTunnel{connected: true, status: http.StatusOK, body: body}
 		client := &ControlChannelBrokerClient{manager: tunnel}
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", sentinelKeysRequest())
-		assertNoSentinelLeak(t, err, log)
+		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysOutcomeUnknown)
+		if tunnel.calls != 1 {
+			t.Fatalf("expected exactly one tunnel call, got %d", tunnel.calls)
+		}
 	})
 
 	t.Run("oversized tunnel body", func(t *testing.T) {
@@ -229,7 +283,7 @@ func TestExecuteKeys_NoContentLeak_ControlChannel(t *testing.T) {
 		req := sentinelKeysRequest()
 		req.Keys = keysContentSentinel + strings.Repeat("a", maxControlChannelBodySize)
 		_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", req)
-		assertNoSentinelLeak(t, err, log)
+		assertNoSentinelLeak(t, err, log, agentkeys.OutcomeKeysUnavailable)
 		if tunnel.calls != 0 {
 			t.Fatalf("expected zero tunnel calls for an oversized payload, got %d", tunnel.calls)
 		}
