@@ -2149,17 +2149,21 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		}
 	}
 
+	dbFetchDone := StartPhase(ctx, "db_fetch")
 	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
 		Limit:  limit,
 		Cursor: query.Get("cursor"),
 	})
+	dbFetchDone()
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
 	// Enrich agents with project and broker names
+	enrichDone := StartPhase(ctx, "enrich")
 	s.enrichAgents(ctx, result.Items)
+	enrichDone()
 
 	// Compute per-item and scope capabilities
 	identity := GetIdentityFromContext(ctx)
@@ -2174,7 +2178,9 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		for i := range result.Items {
 			resources[i] = agentResource(&result.Items[i])
 		}
+		capBatchDone := StartPhase(ctx, "capabilities_batch")
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
+		capBatchDone()
 		for i := range result.Items {
 			item := result.Items[i]
 			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(caps[i], ActionAttach))
@@ -2190,7 +2196,9 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		for i := range result.Items {
 			resources[i] = agentResource(&result.Items[i])
 		}
+		capBatchDone := StartPhase(ctx, "capabilities_batch")
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
+		capBatchDone()
 		for i := range result.Items {
 			if !capabilityAllows(caps[i], ActionRead) {
 				continue
@@ -2205,9 +2213,13 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 
 	var scopeCap *Capabilities
 	if identity != nil {
+		scopeCapDone := StartPhase(ctx, "capabilities_scope")
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "project", projectID, "agent")
+		scopeCapDone()
 	}
 
+	serializeDone := StartPhase(ctx, "serialize")
+	writePerfTraceHeaders(w, r)
 	writeJSON(w, http.StatusOK, ListAgentsResponse{
 		Agents:       agents,
 		NextCursor:   result.NextCursor,
@@ -2215,6 +2227,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		ServerTime:   time.Now().UTC(),
 		Capabilities: scopeCap,
 	})
+	serializeDone()
 }
 
 // createProjectAgent creates an agent within a specific project

@@ -396,9 +396,18 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 // return path inside decide can skip the audit, because decide itself never
 // emits — only this wrapper does, once, after decide returns.
 func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
+	// ptone/scion#2392: every authorization decision passes through here
+	// exactly once, so this is the single choke point for a per-request
+	// "decisions evaluated" count and cumulative kernel-evaluation time --
+	// see PerfTrace and RecordDecision (perftrace.go). A no-op when tracing
+	// is disabled (the default) or the context carries no trace.
+	decideStart := time.Now()
 	decision := a.decide(ctx, request)
+	RecordDecision(ctx, time.Since(decideStart))
 	if a.decisionAuditEmitter != nil {
+		auditDone := StartPhase(ctx, "audit_emit_dispatch")
 		a.emitDecisionAudit(ctx, request, decision)
+		auditDone()
 	}
 	return decision
 }

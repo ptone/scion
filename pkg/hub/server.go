@@ -1101,6 +1101,11 @@ type Server struct {
 	templateLog       *slog.Logger
 	workspaceLog      *slog.Logger
 	agentMetricsLog   *slog.Logger
+	// perfTraceLog is the destination for perfTraceMiddleware's per-request
+	// structured log line (ptone/scion#2392). Never nil (New() always sets
+	// it), but perfTraceMiddleware checks it anyway since it is cheap and
+	// avoids a hard dependency on initialization order.
+	perfTraceLog *slog.Logger
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
@@ -1250,6 +1255,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		projectsLog:       logging.Subsystem("hub.projects"),
 		resourceLog:       logging.Subsystem("hub.resources"),
 		templateLog:       logging.Subsystem("hub.templates"),
+		perfTraceLog:      logging.Subsystem("hub.perf-trace"),
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
@@ -1508,8 +1514,19 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	})
 	slog.Info("Control channel manager initialized")
 
-	// Initialize authorization service
-	srv.authzService = NewAuthzService(s, logging.Subsystem("hub.auth"))
+	// Initialize authorization service.
+	//
+	// ptone/scion#2392: AuthzService gets a store wrapped with call counters
+	// for the six authorization-hot-path methods, when
+	// SCION_HUB_PERF_TRACE=1 -- a no-op (WrapStoreForPerfTrace returns s
+	// unchanged) when tracing is disabled. Deliberately scoped to only the
+	// store AuthzService holds (not srv.store, used everywhere else in this
+	// function and beyond): the counting wrapper only re-exposes the plain
+	// store.Store interface, not any concrete store's extra methods (e.g.
+	// entadapter.CompositeStore.DB()) that other code -- such as
+	// runMembershipMigration's D4 index installation, a few lines below --
+	// type-asserts for. Wrapping srv.store itself broke exactly that.
+	srv.authzService = NewAuthzService(WrapStoreForPerfTrace(s), logging.Subsystem("hub.auth"))
 
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
@@ -5126,6 +5143,14 @@ func (s *Server) registerRoutes() {
 // applyMiddleware wraps the handler with middleware.
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
+
+	// ptone/scion#2392: innermost of all -- installs the request's
+	// *PerfTrace (when SCION_HUB_PERF_TRACE=1) before anything else runs, so
+	// it is present all the way down through the route handler, the
+	// authorization kernel, and the (possibly wrapped) store. A no-op
+	// pass-through when tracing is disabled.
+	h = s.perfTraceMiddleware(h)
+
 	h = s.recoveryMiddleware(h)
 
 	// Apply broker auth middleware (checks X-Scion-Broker-ID header for HMAC auth)

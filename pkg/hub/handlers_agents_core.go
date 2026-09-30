@@ -296,7 +296,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	// RS2: Resolve authorization scope FIRST — before building filter or cursor
 	// binding. This is the single authoritative scope decision for the request.
+	scopeResolveDone := StartPhase(ctx, "authz_scope_resolve")
 	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
+	scopeResolveDone()
 	if err != nil {
 		slog.WarnContext(ctx, "listAgents: authorization scope resolution failed (fail-closed)",
 			"error", err)
@@ -421,7 +423,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	dbFetchDone := StartPhase(ctx, "db_fetch")
 	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+	dbFetchDone()
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -429,7 +433,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
 
 	// RS2: Enrichment runs only after the authorized store result is obtained.
+	enrichDone := StartPhase(ctx, "enrich")
 	s.enrichAgents(ctx, items)
+	enrichDone()
 
 	// Compute per-item and scope capabilities for authorized items.
 	agents := make([]AgentWithCapabilities, 0, len(items))
@@ -437,20 +443,29 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	for i := range items {
 		resources[i] = agentResource(&items[i])
 	}
-	for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent") {
+	capBatchDone := StartPhase(ctx, "capabilities_batch")
+	batchCaps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
+	capBatchDone()
+	for i, cap := range batchCaps {
 		item := items[i]
 		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, capabilityAllows(cap, ActionAttach))
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: cap})
 	}
 
 	// Compute messageability for each agent relative to the viewer.
+	messageabilityDone := StartPhase(ctx, "messageability")
 	for i := range agents {
 		agents[i].Messageability = s.ComputeMessageability(ctx, identity, &agents[i].Agent)
 	}
+	messageabilityDone()
 
+	scopeCapDone := StartPhase(ctx, "capabilities_scope")
 	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
+	scopeCapDone()
 	s.addAgentCreateIfAnyProjectAllows(ctx, identity, scopeCap)
 
+	serializeDone := StartPhase(ctx, "serialize")
+	writePerfTraceHeaders(w, r)
 	writeJSON(w, http.StatusOK, ListAgentsResponse{
 		Agents:       agents,
 		NextCursor:   nextCursor,
@@ -458,6 +473,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		ServerTime:   time.Now().UTC(),
 		Capabilities: scopeCap,
 	})
+	serializeDone()
 }
 
 // addAgentCreateIfAnyProjectAllows adds "create" to the agents list's
