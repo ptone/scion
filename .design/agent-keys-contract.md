@@ -514,19 +514,23 @@ immediately before runtime execution. Hub/broker clocks are assumed reasonably s
 What a non-nil `error` means is the entire honest-outcome and no-replay property — without one
 frozen rule, each 1.2 adapter would classify differently. Frozen now, in `pkg/agentkeys/broker.go`:
 
-- **Four sentinel errors, split by which layer proves the condition.** One is Hub-side-only:
+- **Sentinel errors, split by which layer proves the condition.** One is Hub-side-only:
   `ErrNotDispatched` (the call is proven to have failed before it reached, or before any broker
   handler began runtime execution on, the target — network refused, no synchronous route to the
   broker at all, or the Hub's own pre-send check found `ExecuteBefore` already past; maps to
   `OutcomeKeysUnavailable`, 503). Task 1.2's `Dispatcher`/`BrokerClient` implementations return this
-  one directly, with no broker response to translate. The other three —
-  `ErrTargetNotFound`/`ErrAgentNotRunning`/`ErrTerminalNotReady` — are manager-level, returned by
-  `SendKeys` (broker-side, task 1.1) and translated by the broker's own dedicated keys handler into
-  the matching `BrokerResult`/`BrokerOutcomeError` before any HTTP response leaves the broker
-  process (see §4.3's "Frozen manager signature" bullet below); task 1.2's Hub-side code never sees
-  or wraps these three directly. These do **not** cover "the broker responded" in any wire-visible
-  form on the Hub side — see `BrokerOutcomeError` next, which is what a 1.2 adapter actually
-  constructs after decoding the broker's already-translated response.
+  one directly, with no broker response to translate. The remaining manager-level return classes —
+  `ErrTargetNotFound`/`ErrAgentNotRunning`/`ErrTerminalNotReady`, `ErrKeysUnsupported`, and an error
+  wrapping `ErrKeysNotStarted` (task 1.1's implementation; see the full return-class table in §4.3's
+  "Frozen manager signature" bullet below for exactly which of `SendKeys`'s return values these are
+  and how each is translated) — are returned by `SendKeys` (broker-side, task 1.1) and translated by
+  the broker's own dedicated keys handler into the matching `BrokerResult`/`BrokerOutcomeError`
+  before any HTTP response leaves the broker process; task 1.2's Hub-side code never sees or wraps
+  these directly. These do **not** cover "the broker responded" in any wire-visible form on the Hub
+  side — see `BrokerOutcomeError` next, which is what a 1.2 adapter actually constructs after
+  decoding the broker's already-translated response. This split is about which Go process proves and
+  returns each error, not about a separate Hub-transport sentinel set: every manager-level class
+  below is broker-process-internal and reaches the Hub only as an already-translated HTTP response.
 - **One error type for what the broker decides about itself and reports back**:
   `agentkeys.BrokerOutcomeError{Outcome, Message}`, constructed by an adapter only when the broker's
   response is a well-formed, allow-listed decision — see `ValidBrokerOutcome` and
@@ -554,10 +558,13 @@ frozen rule, each 1.2 adapter would classify differently. Frozen now, in `pkg/ag
   (`errors.Is`, mapping to `OutcomeKeysUnavailable`). Everything else defaults to
   `OutcomeKeysOutcomeUnknown` — `nil` (a caller bug — success has no error to classify), a
   `BrokerOutcomeError` asserting an outcome outside the allowlist (a transport bug, not a decision
-  to trust), an ordinary unrecognized error, **and, deliberately, the three manager-level sentinels
-  themselves** (`ErrTargetNotFound`/`ErrAgentNotRunning`/`ErrTerminalNotReady`) if one ever reached
-  this function unwrapped. `ClassifyDispatchError` does not special-case those three: a correct
-  task 1.1/1.2 implementation always translates them into a `BrokerOutcomeError` before this
+  to trust), an ordinary unrecognized error, **and, deliberately, any manager-level return value
+  from `SendKeys`'s own return-class table** (§4.3's "Frozen manager signature" bullet below —
+  `ErrTargetNotFound`/`ErrAgentNotRunning`/`ErrTerminalNotReady`, `ErrKeysUnsupported`, an error
+  wrapping `ErrKeysNotStarted`, or a `*agentkeys.ValidationError`) if one ever reached this function
+  unwrapped. `ClassifyDispatchError` does not special-case any of those: a correct task 1.1/1.2
+  implementation always translates each into a `BrokerOutcomeError` (or, for `ValidationError`, into
+  the handler's own pre-existing plain-envelope rejection — see the table below) before this
   function ever sees them (per the bullet above), so the fail-safe for a bug that forwards one
   verbatim is the same as for any other unrecognized error — never a guess that the forwarding was
   reliable.
@@ -573,7 +580,7 @@ frozen rule, each 1.2 adapter would classify differently. Frozen now, in `pkg/ag
   routing fallback after an uncertain send. An adapter that retries internally has already violated
   no-replay before `ClassifyDispatchError` is ever reached.
 - **Frozen manager signature, with identity binding carried atomically** (task 1.1,
-  `pkg/agent.Manager`/`AgentManager`, not implemented by this task):
+  `pkg/agent.Manager`/`AgentManager`):
   `SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error`,
   replacing today's `MessageRaw(ctx, agentID, projectID, keys string) error`
   (`pkg/agent/manager.go:76`,`377`). The identity check must not be split across two steps — a
@@ -581,22 +588,59 @@ frozen rule, each 1.2 adapter would classify differently. Frozen now, in `pkg/ag
   re-resolves by slug alone (the way `MessageRaw` does today) and executes, reopens the
   recreate-inside-the-window race the binding exists to close, because nothing guarantees the second
   resolution finds the same container the first one checked. `SendKeys` closes that gap by doing
-  resolution, the `"agent_id"`-label check against `expectedAgentID`, and the `Exec` in one call, on
+  resolution, the `"agent_id"`-label check against `expectedAgentID`, and delivery, in one call, on
   one resolved container: the handler passes `BrokerRequest.AgentID` straight through as
-  `expectedAgentID` and does no resolution or label check of its own (see §4.1).
-  `SendKeys` returns one of three sentinels — `ErrTargetNotFound` (no matching container, or its
-  `"agent_id"` label is missing/empty/mismatched — proven before any `Exec` attempt),
-  `ErrAgentNotRunning`, or `ErrTerminalNotReady` (both requiring the identity check to have already
-  passed) — and only when it can prove the corresponding condition before execution; any other
-  failure, including one where the tmux send-keys call may have partially run, must be a plain
-  error. These three sentinels are broker-process-internal: the runtime broker's dedicated keys
-  handler (also task 1.1) translates whichever one `SendKeys` returns into the matching
-  `BrokerResult`/`BrokerOutcomeError` (`ErrTargetNotFound` → `OutcomeNotFound`,
-  `ErrAgentNotRunning` → `OutcomeAgentNotRunning`, `ErrTerminalNotReady` →
-  `OutcomeTerminalNotReady`) before the HTTP response leaves the broker process — task 1.2's Hub-side
-  code never sees or wraps them directly, only the already-translated `BrokerOutcomeError` after
-  decoding that response. A plain (untranslated) `SendKeys` failure becomes an ambiguous response
-  that reaches the Hub side as `OutcomeKeysOutcomeUnknown`, never a false "definitely no effect."
+  `expectedAgentID` and does no resolution or label check of its own (see §4.1). The Go signature
+  above and the public wire contract are unchanged by everything below; this table documents task
+  1.1's implementation of what this signature always promised — an honest return value — not a
+  new interface.
+
+  **Return classes.** The signature was originally frozen naming three sentinels and omitting a
+  fourth (`ErrKeysUnsupported`) that this contract already requires elsewhere (§2.5/AK-28); this
+  table is the corrected, complete, and authoritative enumeration. Every row below is a
+  manager/broker-process return value — internal to this one process boundary, translated to an
+  HTTP response before it ever leaves the broker — and is a **different, broker-internal taxonomy**
+  from §4.3's own `BrokerOutcomeError`/`ErrNotDispatched` taxonomy above, which is what task 1.2's
+  Hub-side adapters actually see on the wire and which this table does not change:
+
+  | `SendKeys` return value | Proven before delivery began? | Broker handler's translation |
+  | --- | --- | --- |
+  | `nil` | — (success) | `BrokerResult{Outcome: OutcomeDispatched}`, HTTP 200 |
+  | `agentkeys.ErrTargetNotFound` | Yes | `BrokerResult{Outcome: OutcomeNotFound}`, HTTP 404 |
+  | `agentkeys.ErrAgentNotRunning` | Yes | `BrokerResult{Outcome: OutcomeAgentNotRunning}`, HTTP 409 |
+  | `agentkeys.ErrTerminalNotReady` | Yes | `BrokerResult{Outcome: OutcomeTerminalNotReady}`, HTTP 409 |
+  | `agent.ErrKeysUnsupported` | Yes | `BrokerResult{Outcome: OutcomeKeysUnsupported}`, HTTP 422 |
+  | error wrapping `agent.ErrKeysNotStarted` (checked via `errors.Is` on that sentinel only) | Yes | `BrokerResult{Outcome: OutcomeKeysUnavailable}`, HTTP 503 |
+  | `*agentkeys.ValidationError` | Yes — checked before any resolution | Not a `BrokerOutcomeError` case — see below |
+  | any other error | No | the ordinary non-`BrokerResult` error envelope; a Hub-side adapter classifies this `OutcomeKeysOutcomeUnknown` |
+
+  "Proven before delivery began" means proven before the tmux delivery call itself began — **not**
+  "before any `Exec`": `SendKeys`'s own terminal-readiness probe is itself an `Exec` call and may
+  already have run (and succeeded) before one of the first six rows is returned. Once delivery may
+  have begun, ctx cancellation or an expired deadline alone never proves non-execution on their own
+  — that ambiguity is exactly the "any other error" row, never one of the proven rows above.
+
+  `agent.ErrKeysNotStarted` is matched by `errors.Is` on that sentinel's own identity, never by
+  inspecting a wrapped context error's identity or type: the actual delivery call's own failure path
+  deliberately does not join its error with `%w`, so a backend error that happens to wrap a context
+  error *after* delivery began can never be mistaken for this row by an implementation that
+  (incorrectly) checked for a context error directly instead of this sentinel's identity.
+
+  `*agentkeys.ValidationError` is **not** added to `ValidBrokerOutcome`'s allowlist, and
+  `ClassifyDispatchError` is **not** extended to recognize it — it does not become an additional
+  broker-assertable outcome alongside the five already listed in §4.1's "Outcome channel"
+  paragraph. In the ordinary flow the runtime broker's dedicated keys handler
+  validates keys shape itself, before ever calling `SendKeys`, and responds directly with the
+  existing plain (non-`BrokerResult`) 400/413 envelope already described in §2.4a/§2.5 — a separate,
+  pre-existing rejection path, not a translation of a value `SendKeys` returned. `SendKeys` performs
+  the identical check defensively, for a caller (e.g. local mode) that invokes it directly without
+  going through that handler; a correct implementation never lets this value reach the handler's
+  `BrokerResult` translation switch at all.
+
+  Any other, untranslated manager return value that somehow reaches the Hub side (a task 1.1/1.2
+  implementation bug) falls through `ClassifyDispatchError`'s existing default case to
+  `OutcomeKeysOutcomeUnknown`, the same fail-safe as any other unrecognized error — never a guess
+  that some proven-safe classification applies.
 
 ### 4.4 Dispatcher/broker-client interfaces
 
