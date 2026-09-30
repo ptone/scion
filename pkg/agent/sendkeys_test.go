@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -44,19 +45,38 @@ func runningAgent() api.AgentInfo {
 	}
 }
 
+// execRecord captures one call into a mock Runtime, whichever method made
+// it: argv is always populated (joined by spaces); stdin is only non-empty
+// for an ExecWithStdin call.
+type execRecord struct {
+	argv  string
+	stdin string
+}
+
 // newSendKeysMock builds a MockRuntime that answers List with agents and
-// records every Exec call's argv (joined by spaces) into capturedCmd,
-// succeeding every Exec call unless execErr is non-nil.
-func newSendKeysMock(agents []api.AgentInfo, capturedCmd *[]string, execErr error) *runtime.MockRuntime {
+// records every Exec/ExecWithStdin call into captured, succeeding every call
+// unless execErr is non-nil.
+func newSendKeysMock(agents []api.AgentInfo, captured *[]execRecord, execErr error) *runtime.MockRuntime {
 	var mu sync.Mutex
+	record := func(cmd []string, stdin string) {
+		mu.Lock()
+		*captured = append(*captured, execRecord{argv: strings.Join(cmd, " "), stdin: stdin})
+		mu.Unlock()
+	}
 	return &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 			return agents, nil
 		},
 		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
-			mu.Lock()
-			*capturedCmd = append(*capturedCmd, strings.Join(cmd, " "))
-			mu.Unlock()
+			record(cmd, "")
+			if execErr != nil {
+				return "", execErr
+			}
+			return "", nil
+		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			data, _ := io.ReadAll(stdin)
+			record(cmd, string(data))
 			if execErr != nil {
 				return "", execErr
 			}
@@ -66,12 +86,13 @@ func newSendKeysMock(agents []api.AgentInfo, capturedCmd *[]string, execErr erro
 }
 
 // TestSendKeys_ArgvExactness covers AC "Enter, Escape, C-c, Unicode, spaces
-// and literal @text reach the exact expected argv with no added Enter":
-// SendKeys must call exactly "tmux has-session -t scion:0" (the readiness
-// probe) followed by "tmux send-keys -t scion:0 -- <keys>" with keys as a
-// single, untouched argv element — never trimmed, split, tokenized, or
-// followed by an implicit Enter (contrast deliverImmediate's message path,
-// which does add one).
+// and literal @text reach the exact expected argv with no added Enter", and
+// the adapter argv/stdin spy for the stdin-based delivery mechanism: SendKeys
+// must call "tmux has-session -t scion:0" (the readiness probe, a plain
+// Exec) followed by ExecWithStdin with the fixed argv "tmux source-file -"
+// and a stdin payload built by sendKeysScript — never trimmed, split,
+// tokenized, or followed by an implicit Enter (contrast deliverImmediate's
+// message path, which does add one).
 func TestSendKeys_ArgvExactness(t *testing.T) {
 	cases := []struct {
 		name string
@@ -88,8 +109,8 @@ func TestSendKeys_ArgvExactness(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var capturedCmd []string
-			mock := newSendKeysMock([]api.AgentInfo{runningAgent()}, &capturedCmd, nil)
+			var captured []execRecord
+			mock := newSendKeysMock([]api.AgentInfo{runningAgent()}, &captured, nil)
 			mgr := &AgentManager{Runtime: mock}
 
 			err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", tc.keys)
@@ -97,36 +118,49 @@ func TestSendKeys_ArgvExactness(t *testing.T) {
 				t.Fatalf("SendKeys failed: %v", err)
 			}
 
-			wantLast := "tmux send-keys -t scion:0 -- " + tc.keys
-			if len(capturedCmd) == 0 {
-				t.Fatalf("expected at least one Exec call, got none")
+			if len(captured) == 0 {
+				t.Fatalf("expected at least one call, got none")
 			}
-			got := capturedCmd[len(capturedCmd)-1]
-			if got != wantLast {
-				t.Errorf("send-keys argv = %q, want %q", got, wantLast)
+			last := captured[len(captured)-1]
+			wantArgv := "tmux source-file -"
+			if last.argv != wantArgv {
+				t.Errorf("argv = %q, want %q", last.argv, wantArgv)
+			}
+			wantStdin := sendKeysScript(keysTarget, tc.keys)
+			if last.stdin != wantStdin {
+				t.Errorf("stdin = %q, want %q", last.stdin, wantStdin)
 			}
 			// No step must add a trailing Enter (unlike deliverImmediate's
-			// message path).
-			for _, c := range capturedCmd {
-				if c == "tmux send-keys -t scion:0 Enter" {
-					t.Errorf("SendKeys must never send an implicit Enter, but got: %v", capturedCmd)
+			// message path), and the payload must never appear as a process
+			// argument.
+			for _, c := range captured {
+				if c.argv == "tmux send-keys -t scion:0 Enter" {
+					t.Errorf("SendKeys must never send an implicit Enter, but got: %v", captured)
+				}
+				if strings.Contains(c.argv, tc.keys) && tc.keys != "" {
+					t.Errorf("payload must not appear in argv, got: %q", c.argv)
 				}
 			}
 		})
 	}
 }
 
-// TestSendKeys_EmptyKeysPassedThroughVerbatim covers the AC "empty/NUL/
+// TestSendKeys_InvalidKeysShapeNeverExecutes covers the AC "empty/NUL/
 // oversize/invalid shapes never execute" at the primitive level itself
-// (review round 2, finding #4): SendKeys calls agentkeys.ValidateKeys before
+// (review round 2, finding #4; renamed in round 3, finding #6, from
+// TestSendKeys_EmptyKeysPassedThroughVerbatim, which asserted the opposite
+// of what the test now does): SendKeys calls agentkeys.ValidateKeys before
 // any resolution or Exec attempt, so a local-mode caller invoking this
 // primitive directly — without going through the runtimebroker's own
 // ValidateKeys enforcement (handlers_keys_test.go's
 // TestSendKeys_HTTP_InvalidKeysShape table) — still gets the same
 // guarantee, never a silent "empty becomes Enter" (contrast
 // deliverImmediate's message path, which does have that special case for
-// its own, unrelated reasons).
-func TestSendKeys_EmptyKeysPassedThroughVerbatim(t *testing.T) {
+// its own, unrelated reasons). Includes an invalid-UTF-8 case that the JSON
+// broker route can never actually reach (encoding/json repairs invalid
+// UTF-8 to U+FFFD on decode — see TestSendKeys_HTTP_InvalidKeysShape's doc
+// comment) but a direct primitive caller can.
+func TestSendKeys_InvalidKeysShapeNeverExecutes(t *testing.T) {
 	cases := []struct {
 		name string
 		keys string
@@ -134,11 +168,12 @@ func TestSendKeys_EmptyKeysPassedThroughVerbatim(t *testing.T) {
 		{"empty", ""},
 		{"nul_byte", "abc\x00def"},
 		{"oversize", strings.Repeat("a", agentkeys.MaxBytes+1)},
+		{"invalid_utf8", "abc\xff"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var capturedCmd []string
-			mock := newSendKeysMock([]api.AgentInfo{runningAgent()}, &capturedCmd, nil)
+			var captured []execRecord
+			mock := newSendKeysMock([]api.AgentInfo{runningAgent()}, &captured, nil)
 			mgr := &AgentManager{Runtime: mock}
 
 			err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", tc.keys)
@@ -148,8 +183,8 @@ func TestSendKeys_EmptyKeysPassedThroughVerbatim(t *testing.T) {
 			if _, ok := agentkeys.AsValidationError(err); !ok {
 				t.Errorf("SendKeys error = %v, want an *agentkeys.ValidationError", err)
 			}
-			if len(capturedCmd) != 0 {
-				t.Errorf("expected zero Exec calls for invalid keys shape %q, got %v", tc.name, capturedCmd)
+			if len(captured) != 0 {
+				t.Errorf("expected zero Exec calls for invalid keys shape %q, got %v", tc.name, captured)
 			}
 		})
 	}
@@ -158,16 +193,16 @@ func TestSendKeys_EmptyKeysPassedThroughVerbatim(t *testing.T) {
 // TestSendKeys_TargetNotFound_NoMatch covers the "missing" case of AK-45/46:
 // no container matches (projectID, agentSlug) at all.
 func TestSendKeys_TargetNotFound_NoMatch(t *testing.T) {
-	var capturedCmd []string
-	mock := newSendKeysMock(nil, &capturedCmd, nil)
+	var captured []execRecord
+	mock := newSendKeysMock(nil, &captured, nil)
 	mgr := &AgentManager{Runtime: mock}
 
 	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
 	if !errors.Is(err, agentkeys.ErrTargetNotFound) {
 		t.Fatalf("SendKeys error = %v, want agentkeys.ErrTargetNotFound", err)
 	}
-	if len(capturedCmd) != 0 {
-		t.Fatalf("expected no Exec calls when target is not found, got %v", capturedCmd)
+	if len(captured) != 0 {
+		t.Fatalf("expected no Exec calls when target is not found, got %v", captured)
 	}
 }
 
@@ -180,16 +215,16 @@ func TestSendKeys_TargetNotFound_AgentIDMismatch(t *testing.T) {
 	agent := runningAgent()
 	agent.Labels["agent_id"] = "some-other-agent"
 
-	var capturedCmd []string
-	mock := newSendKeysMock([]api.AgentInfo{agent}, &capturedCmd, nil)
+	var captured []execRecord
+	mock := newSendKeysMock([]api.AgentInfo{agent}, &captured, nil)
 	mgr := &AgentManager{Runtime: mock}
 
 	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
 	if !errors.Is(err, agentkeys.ErrTargetNotFound) {
 		t.Fatalf("SendKeys error = %v, want agentkeys.ErrTargetNotFound", err)
 	}
-	if len(capturedCmd) != 0 {
-		t.Fatalf("expected no Exec calls on an agent_id mismatch, got %v", capturedCmd)
+	if len(captured) != 0 {
+		t.Fatalf("expected no Exec calls on an agent_id mismatch, got %v", captured)
 	}
 }
 
@@ -201,16 +236,16 @@ func TestSendKeys_TargetNotFound_MissingLabel(t *testing.T) {
 	agent := runningAgent()
 	delete(agent.Labels, "agent_id")
 
-	var capturedCmd []string
-	mock := newSendKeysMock([]api.AgentInfo{agent}, &capturedCmd, nil)
+	var captured []execRecord
+	mock := newSendKeysMock([]api.AgentInfo{agent}, &captured, nil)
 	mgr := &AgentManager{Runtime: mock}
 
 	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
 	if !errors.Is(err, agentkeys.ErrTargetNotFound) {
 		t.Fatalf("SendKeys error = %v, want agentkeys.ErrTargetNotFound", err)
 	}
-	if len(capturedCmd) != 0 {
-		t.Fatalf("expected no Exec calls on a missing agent_id label, got %v", capturedCmd)
+	if len(captured) != 0 {
+		t.Fatalf("expected no Exec calls on a missing agent_id label, got %v", captured)
 	}
 }
 
@@ -265,16 +300,16 @@ func TestSendKeys_AgentNotRunning(t *testing.T) {
 	agent := runningAgent()
 	agent.Phase = string(state.PhaseStopped)
 
-	var capturedCmd []string
-	mock := newSendKeysMock([]api.AgentInfo{agent}, &capturedCmd, nil)
+	var captured []execRecord
+	mock := newSendKeysMock([]api.AgentInfo{agent}, &captured, nil)
 	mgr := &AgentManager{Runtime: mock}
 
 	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
 	if !errors.Is(err, agentkeys.ErrAgentNotRunning) {
 		t.Fatalf("SendKeys error = %v, want agentkeys.ErrAgentNotRunning", err)
 	}
-	if len(capturedCmd) != 0 {
-		t.Fatalf("expected no Exec calls when agent is not running, got %v", capturedCmd)
+	if len(captured) != 0 {
+		t.Fatalf("expected no Exec calls when agent is not running, got %v", captured)
 	}
 }
 
@@ -349,6 +384,45 @@ func TestSendKeys_PlainErrorOnAmbiguousExecFailure(t *testing.T) {
 	}
 	if errors.Is(err, execErr) {
 		t.Fatalf("the underlying Exec error must not be reachable via errors.Is (chain must be broken), got: %v", err)
+	}
+}
+
+// TestSendKeys_StdinTransportFailureIsAmbiguous covers a transport failure
+// on the delivery mechanism itself (ExecWithStdin, not Exec's fallback to
+// it): once the readiness probe has passed, a failure from the stdin-based
+// call must be a plain error — never one of the proven-before-execution
+// sentinels — matching TestSendKeys_PlainErrorOnAmbiguousExecFailure's
+// requirement, exercised against the actual method SendKeys calls for
+// delivery rather than MockRuntime's Exec-fallback behavior.
+func TestSendKeys_StdinTransportFailureIsAmbiguous(t *testing.T) {
+	agent := runningAgent()
+	transportErr := errors.New("transport: connection reset")
+	var gotStdin string
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			return "", nil // the has-session probe
+		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			data, _ := io.ReadAll(stdin)
+			gotStdin = string(data)
+			return "", transportErr
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if errors.Is(err, agentkeys.ErrTargetNotFound) || errors.Is(err, agentkeys.ErrAgentNotRunning) || errors.Is(err, agentkeys.ErrTerminalNotReady) || errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("a stdin-transport failure must never be reported as one of the proven-before-execution sentinels, got: %v", err)
+	}
+	if gotStdin != sendKeysScript(keysTarget, "C-c") {
+		t.Fatalf("ExecWithStdin received stdin %q, want the generated script", gotStdin)
 	}
 }
 
@@ -600,6 +674,25 @@ func TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave(t *testing.T) {
 // a buffered/interrupt message) for the same target. Same
 // sequence-contiguity technique as
 // TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave.
+// TestMessageRaw_ConcurrentWithSendKeys_NoInterleave deterministically
+// forces the race the injection lock exists to prevent (review round 3,
+// finding #2: the previous version of this test passed 30/30 runs with the
+// lock removed from MessageRaw, because MessageRaw's single Exec call
+// happened to always run to completion before SendKeys's two calls in
+// practice, never actually landing between them).
+//
+// SendKeys's mocked Exec blocks on its first call — the "has-session"
+// readiness probe, which the lock must be held across — after signaling
+// that it has entered its critical section. Only once that signal arrives
+// is the MessageRaw goroutine started, and only after giving it a fixed
+// window to reach (and, with the lock present, block on) its own Exec
+// attempt is the probe released to let SendKeys continue to its second
+// (send-keys) call. With the lock, MessageRaw's Lock call cannot succeed
+// until SendKeys's Unlock — after both of its calls — so the sequence must
+// be keys, keys, raw. Without it, MessageRaw's unblocked Exec call lands
+// inside that window, producing keys, raw, keys instead. Confirmed (during
+// review) to fail with the lock removed from MessageRaw, and confirmed
+// again here via a temporary revert-and-retest before restoring the fix.
 func TestMessageRaw_ConcurrentWithSendKeys_NoInterleave(t *testing.T) {
 	agent := runningAgent()
 
@@ -610,7 +703,9 @@ func TestMessageRaw_ConcurrentWithSendKeys_NoInterleave(t *testing.T) {
 		sequence = append(sequence, who)
 		mu.Unlock()
 	}
-	leaveDelay := 3 * time.Millisecond
+
+	probeEntered := make(chan struct{})
+	releaseProbe := make(chan struct{})
 
 	mock := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
@@ -618,14 +713,21 @@ func TestMessageRaw_ConcurrentWithSendKeys_NoInterleave(t *testing.T) {
 		},
 		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
 			record(currentCaller(ctx))
-			time.Sleep(leaveDelay)
+			if currentCaller(ctx) == "keys" && len(cmd) >= 2 && cmd[1] == "has-session" {
+				// SendKeys's readiness probe — its first of two Exec calls,
+				// made while (with the lock present) still holding the
+				// injection lock. Signal entry, then hold here until the
+				// test decides MessageRaw has had its chance to race in.
+				close(probeEntered)
+				<-releaseProbe
+			}
 			return "", nil
 		},
 	}
 	mgr := &AgentManager{Runtime: mock}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		ctx := withCaller(context.Background(), "keys")
@@ -633,6 +735,10 @@ func TestMessageRaw_ConcurrentWithSendKeys_NoInterleave(t *testing.T) {
 			t.Errorf("SendKeys failed: %v", err)
 		}
 	}()
+
+	<-probeEntered
+
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		ctx := withCaller(context.Background(), "raw")
@@ -640,21 +746,25 @@ func TestMessageRaw_ConcurrentWithSendKeys_NoInterleave(t *testing.T) {
 			t.Errorf("MessageRaw failed: %v", err)
 		}
 	}()
+
+	// Give MessageRaw time to reach its own Exec attempt — with the lock
+	// present it blocks there; without it, it completes within this window,
+	// landing between SendKeys's two calls.
+	time.Sleep(50 * time.Millisecond)
+	close(releaseProbe)
+
 	wg.Wait()
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(sequence) < 2 {
-		t.Fatalf("expected at least 2 recorded Exec calls (one per caller), got %v", sequence)
+	if len(sequence) != 3 {
+		t.Fatalf("expected exactly 3 recorded Exec calls (2 from SendKeys, 1 from MessageRaw), got %v", sequence)
 	}
-	transitions := 0
-	for i := 1; i < len(sequence); i++ {
-		if sequence[i] != sequence[i-1] {
-			transitions++
+	want := []string{"keys", "keys", "raw"}
+	for i := range want {
+		if sequence[i] != want[i] {
+			t.Fatalf("SendKeys and MessageRaw interleaved their tmux Exec calls for the same target: sequence = %v, want %v", sequence, want)
 		}
-	}
-	if transitions != 1 {
-		t.Fatalf("SendKeys and MessageRaw interleaved their tmux Exec calls for the same target: sequence = %v (want exactly one transition between callers, got %d)", sequence, transitions)
 	}
 }
 
@@ -674,57 +784,68 @@ func currentCaller(ctx context.Context) string {
 	return who
 }
 
-// TestEscapeTrailingSemicolon covers the derived tmux trailing-semicolon
-// escaping rule directly (review round 1, finding #1): regardless of how
-// many backslashes (including zero) already precede a trailing ';',
-// inserting exactly one more makes tmux's own unescaping reproduce the
-// original string. A ';' anywhere else in the string is untouched.
-func TestEscapeTrailingSemicolon(t *testing.T) {
+// TestTmuxOctalEscape covers the byte-for-byte octal-escape encoding used to
+// embed keys inside the generated tmux command: every byte becomes a
+// three-digit octal escape, so no byte — including one that would otherwise
+// need individual handling, such as a quote, a backslash, or a trailing
+// separator character — is ever written unescaped.
+func TestTmuxOctalEscape(t *testing.T) {
 	cases := []struct {
 		in   string
 		want string
 	}{
 		{"", ""},
-		{"abc", "abc"},
-		{"a;b", "a;b"},         // embedded, not trailing: untouched
-		{"a\\;b", "a\\;b"},     // embedded backslash-semicolon: untouched
-		{";", "\\;"},           // 0 backslashes
-		{"a;", "a\\;"},         // 0 backslashes
-		{"a\\;", "a\\\\;"},     // 1 backslash
-		{"a\\\\;", "a\\\\\\;"}, // 2 backslashes
-		{"a;;", "a;\\;"},       // only the final ';' is affected
+		{"A", `\101`},
+		{";", `\073`},
+		{`"`, `\042`},
+		{`\`, `\134`},
+		{"a;b", `\141\073\142`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
-			got := escapeTrailingSemicolon(tc.in)
+			got := tmuxOctalEscape(tc.in)
 			if got != tc.want {
-				t.Errorf("escapeTrailingSemicolon(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("tmuxOctalEscape(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
 }
 
-// TestSendKeys_TrailingSemicolonEscapedInArgv covers review finding #1 at
-// the SendKeys level: the argv actually sent to tmux must be the
-// escapeTrailingSemicolon transform of the caller's Keys, not Keys itself,
-// for any input ending in ';'. TestRealTmuxSendKeys separately proves this
-// transform round-trips correctly against a real tmux server.
-func TestSendKeys_TrailingSemicolonEscapedInArgv(t *testing.T) {
-	cases := []string{";", "abc;", "a\\;", "a;;"}
+// TestSendKeysScript covers the exact generated command line SendKeys
+// supplies on stdin.
+func TestSendKeysScript(t *testing.T) {
+	got := sendKeysScript("scion:0", "Enter")
+	want := "send-keys -t scion:0 -- \"\\105\\156\\164\\145\\162\"\n"
+	if got != want {
+		t.Errorf("sendKeysScript(...) = %q, want %q", got, want)
+	}
+}
+
+// TestSendKeys_StdinScriptForSpecialCharacters is the argv/stdin spy for
+// inputs that would have needed special-casing under a process-argument
+// invocation (a trailing ';') and others that exercise the same encoding
+// path (quotes, backslashes, embedded semicolons, newlines) — now handled
+// uniformly by tmuxOctalEscape. TestRealTmuxSendKeys separately proves the
+// round trip against a real tmux server.
+func TestSendKeys_StdinScriptForSpecialCharacters(t *testing.T) {
+	cases := []string{";", "abc;", `a"b`, `a\b`, "a;b;c", "line1\nline2"}
 	for _, keys := range cases {
 		t.Run(keys, func(t *testing.T) {
-			var capturedCmd []string
-			mock := newSendKeysMock([]api.AgentInfo{runningAgent()}, &capturedCmd, nil)
+			var captured []execRecord
+			mock := newSendKeysMock([]api.AgentInfo{runningAgent()}, &captured, nil)
 			mgr := &AgentManager{Runtime: mock}
 
 			if err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", keys); err != nil {
 				t.Fatalf("SendKeys failed: %v", err)
 			}
 
-			want := "tmux send-keys -t scion:0 -- " + escapeTrailingSemicolon(keys)
-			got := capturedCmd[len(capturedCmd)-1]
-			if got != want {
-				t.Errorf("send-keys argv = %q, want %q", got, want)
+			last := captured[len(captured)-1]
+			if last.argv != "tmux source-file -" {
+				t.Errorf("argv = %q, want the fixed argv carrying no payload", last.argv)
+			}
+			want := sendKeysScript(keysTarget, keys)
+			if last.stdin != want {
+				t.Errorf("stdin = %q, want %q", last.stdin, want)
 			}
 		})
 	}

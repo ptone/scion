@@ -111,3 +111,60 @@ func TestRunSimpleCommand_SensitiveExec_SuppressesOutputInDebugLog(t *testing.T)
 		t.Errorf("returned error should be unaffected by sensitive-exec suppression, got %q", err.Error())
 	}
 }
+
+// TestRunSimpleCommandWithStdin_SensitiveExec_SuppressesOutputInDebugLog is
+// runSimpleCommand's sibling test for the stdin-delivery path a keys call
+// uses (SendKeys pipes its generated command on stdin rather than passing it
+// as a process argument): a failing command's CombinedOutput must not reach
+// the debug log when the call is marked sensitive, whether or not the
+// content that produced the failure arrived via stdin.
+func TestRunSimpleCommandWithStdin_SensitiveExec_SuppressesOutputInDebugLog(t *testing.T) {
+	const secret = "RUNTIME-EXEC-STDIN-SENTINEL-do-not-leak"
+
+	var buf bytes.Buffer
+	origWriter := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(origWriter)
+		log.SetFlags(origFlags)
+	})
+	origLevel := slog.SetLogLoggerLevel(slog.LevelDebug)
+	t.Cleanup(func() { slog.SetLogLoggerLevel(origLevel) })
+
+	// A command that echoes back whatever it reads on stdin, then exits
+	// non-zero — standing in for a failed "tmux source-file -" call whose
+	// combined output would otherwise carry the piped-in command (and the
+	// keys payload octal-escaped inside it).
+	stdin := strings.NewReader(secret)
+	script := "cat; exit 1"
+
+	// --- Non-sensitive: output is logged (existing behavior). ---
+	buf.Reset()
+	_, err := runSimpleCommandWithStdin(context.Background(), stdin, "sh", "-c", script)
+	if err == nil {
+		t.Fatal("expected the script to fail")
+	}
+	if !strings.Contains(buf.String(), secret) {
+		t.Errorf("non-sensitive failing command should log its output for diagnostics; log: %s", buf.String())
+	}
+
+	// --- Sensitive: output must be suppressed. ---
+	buf.Reset()
+	stdin = strings.NewReader(secret)
+	_, err = runSimpleCommandWithStdin(WithSensitiveExec(context.Background()), stdin, "sh", "-c", script)
+	if err == nil {
+		t.Fatal("expected the script to fail")
+	}
+	logOutput := buf.String()
+	if strings.Contains(logOutput, secret) {
+		t.Errorf("SECURITY: sensitive-exec debug log contains the secret piped via stdin\nLog: %s", logOutput)
+	}
+	if !strings.Contains(logOutput, "sh") {
+		t.Errorf("debug log should still contain the command name 'sh'\nLog: %s", logOutput)
+	}
+	if !strings.Contains(err.Error(), "sh failed") {
+		t.Errorf("returned error should be unaffected by sensitive-exec suppression, got %q", err.Error())
+	}
+}

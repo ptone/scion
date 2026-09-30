@@ -111,12 +111,21 @@ This is the single most important thing every dependent task must implement iden
 `cmd/keys.go`'s own help text (`Long`, `keysCmd`, lines 34-48) currently misleads about it:
 
 > **One request string becomes exactly one `tmux send-keys` argument.** The dedicated broker
-> handler (task 1.1) must call `tmux send-keys -t <target> -- <keys>` with the entire `keys`
-> string as a single argv element — the same invocation `agent.Manager.MessageRaw`
-> (`pkg/agent/manager.go:373-402`, renamed `SendKeys` per decision below) already performs. tmux
-> recognizes a small set of named keys (`Enter`, `Escape`, `C-c`, arrow names, etc.) **only when
-> the entire argument matches one name exactly**; any other string — including one containing
-> spaces — is typed as literal text, character by character, including the spaces.
+> handler (task 1.1) delivers `keys` to tmux as a single `send-keys -t <target> -- <keys>`
+> command — see "Correction recorded during task 1.1 implementation" below for the exact delivery
+> mechanism. tmux recognizes a small set of named keys (`Enter`, `Escape`, `C-c`, arrow names, etc.)
+> **only when the entire argument matches one name exactly**; any other string — including one
+> containing spaces — is typed as literal text, character by character, including the spaces.
+>
+> **Correction recorded during task 1.1 implementation:** `keys` is not delivered as a process
+> argument. The broker handler (`agent.Manager.SendKeys`, superseding `MessageRaw` per decision
+> below) supplies tmux with a single generated `send-keys -t <target> -- "<keys>"` command over
+> stdin, via `Runtime.ExecWithStdin` with the fixed argv `tmux source-file -`, with every byte of
+> `keys` encoded as a three-digit octal escape (`\ddd`) inside the double-quoted argument. tmux's
+> own command-argument parser reverses this encoding back to the exact original bytes before
+> evaluating the argument, so the semantic invariant stated above — one string becomes one
+> argument, a named key is recognized only on an exact whole-argument match, no shell evaluation,
+> no whitespace tokenization, no arbitrary tmux flags — is unchanged from a direct invocation.
 >
 > **Deviation from #2184 recorded here:** `cmd/keys.go`'s help text says `scion keys my-agent
 > "Up Up Enter"` and calls it usable for "interactive TUI applications", implying three key
@@ -676,12 +685,13 @@ runtime command arguments.
 This has a real, already-identified source-level leak to close before 2.2/1.1 ship: `pkg/runtime/
 common.go`'s `runSimpleCommand`/`runSimpleCommandWithStdin` (lines ~620-655) log
 `strings.TrimSpace(string(out))` — the combined stdout/stderr of a failed command — on failure.
-`agent.Manager.SendKeys`'s `tmux send-keys -t scion:0 -- <keys>` invocation goes through
-`Runtime.Exec`, and on some runtime backends that path can reach these helpers (or their
-per-backend equivalents); Kubernetes errors in particular can embed stderr. Broker-level
-redaction is not sufficient — task 1.1 must suppress this at the source for the keys call path
-specifically (it must not blanket-disable failure logging for every other caller of these
-helpers, which rely on it for real diagnostics).
+`agent.Manager.SendKeys`'s tmux delivery call (see §2.3's "Correction recorded during task 1.1
+implementation" for the exact mechanism) goes through `Runtime.Exec` (the readiness probe) and
+`Runtime.ExecWithStdin` (the keys delivery itself), and on some runtime backends that path can
+reach these helpers (or their per-backend equivalents); Kubernetes errors in particular can embed
+stderr. Broker-level redaction is not sufficient — task 1.1 must suppress this at the source for
+the keys call path specifically (it must not blanket-disable failure logging for every other
+caller of these helpers, which rely on it for real diagnostics).
 
 ## 6. Acceptance matrix
 

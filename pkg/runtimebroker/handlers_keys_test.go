@@ -366,13 +366,44 @@ func TestSendKeys_HTTP_NoLeakOfDistinctiveSecret(t *testing.T) {
 	otel.SetTracerProvider(tp)
 	t.Cleanup(func() { otel.SetTracerProvider(origTP) })
 
+	// assertNoLeak applies the same log/body/span/positive-control checks
+	// used by every case below.
+	assertNoLeak := func(name string, w *httptest.ResponseRecorder) {
+		t.Helper()
+		logOutput := buf.String()
+		if strings.Contains(logOutput, secret) {
+			t.Errorf("%s: captured log output contains the distinctive secret\nLog: %s", name, logOutput)
+		}
+		// Positive control: the audit line must actually have been written
+		// and captured, so an accidental logger swap elsewhere in the
+		// package can't make this test pass by writing nothing at all.
+		if !strings.Contains(logOutput, "keys dispatch") {
+			t.Errorf("%s: expected the audit log line ('keys dispatch...') to be captured, got: %s", name, logOutput)
+		}
+
+		if strings.Contains(w.Body.String(), secret) {
+			t.Errorf("%s: HTTP response body contains the distinctive secret\nBody: %s", name, w.Body.String())
+		}
+
+		ended := recorder.Ended()
+		if len(ended) == 0 {
+			t.Errorf("%s: expected at least one recorded span", name)
+		}
+		for _, span := range ended {
+			if strings.Contains(spanText(span), secret) {
+				t.Errorf("%s: span %q contains the distinctive secret", name, span.Name())
+			}
+		}
+	}
+
 	outcomes := []error{
 		nil,
 		agentkeys.ErrTargetNotFound,
 		agentkeys.ErrAgentNotRunning,
 		agentkeys.ErrTerminalNotReady,
 		agent.ErrKeysUnsupported,
-		errors.New("tmux: failed on " + secret), // a buggy manager that leaked the secret into its error
+		fmt.Errorf("%w: %v", agent.ErrKeysNotStarted, context.DeadlineExceeded), // review round 3 finding #5
+		errors.New("tmux: failed on " + secret),                                 // a buggy manager that leaked the secret into its error
 	}
 
 	for i, sendErr := range outcomes {
@@ -393,31 +424,31 @@ func TestSendKeys_HTTP_NoLeakOfDistinctiveSecret(t *testing.T) {
 			Keys:          secret,
 		})
 
-		logOutput := buf.String()
-		if strings.Contains(logOutput, secret) {
-			t.Errorf("case %d: captured log output contains the distinctive secret\nLog: %s", i, logOutput)
-		}
-		// Positive control: the audit line must actually have been written
-		// and captured, so an accidental logger swap elsewhere in the
-		// package can't make this test pass by writing nothing at all.
-		if !strings.Contains(logOutput, "keys dispatch") {
-			t.Errorf("case %d: expected the audit log line ('keys dispatch...') to be captured, got: %s", i, logOutput)
-		}
-
-		if strings.Contains(w.Body.String(), secret) {
-			t.Errorf("case %d: HTTP response body contains the distinctive secret\nBody: %s", i, w.Body.String())
-		}
-
-		ended := recorder.Ended()
-		if len(ended) == 0 {
-			t.Errorf("case %d: expected at least one recorded span", i)
-		}
-		for _, span := range ended {
-			if strings.Contains(spanText(span), secret) {
-				t.Errorf("case %d: span %q contains the distinctive secret", i, span.Name())
-			}
-		}
+		assertNoLeak(fmt.Sprintf("outcome case %d", i), w)
 	}
+
+	// review round 3 finding #5: the ValidateKeys rejection path (and its
+	// audit line) is not exercised by the loop above, since every case
+	// there reaches Manager.SendKeys — a NUL byte makes the keys value
+	// itself invalid, rejected before SendKeys is ever called.
+	t.Run("validation_rejection", func(t *testing.T) {
+		srv := newTestServerWithManager(t, &mockManager{})
+
+		buf.Reset()
+		recorder.Reset()
+		w := postKeys(t, srv, "test-agent", "proj-1", agentkeys.BrokerRequest{
+			ProjectID:     "proj-1",
+			AgentID:       "agent-abc",
+			OperationID:   "op-1",
+			ExecuteBefore: time.Now().UTC().Add(10 * time.Second),
+			Keys:          secret + "\x00",
+		})
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+		}
+		assertNoLeak("validation_rejection", w)
+	})
 }
 
 // TestSendKeys_HTTP_UnsupportedBackend covers review finding #2: a manager

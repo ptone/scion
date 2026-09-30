@@ -90,11 +90,19 @@ type Manager interface {
 	// (projectID, agentSlug), verifies the resolved container's "agent_id"
 	// label equals expectedAgentID, and executes on that same resolved
 	// container, all within this one call — see AgentManager.SendKeys's doc
-	// comment for why that atomicity matters. It returns one of
-	// agentkeys.ErrTargetNotFound, agentkeys.ErrAgentNotRunning or
-	// agentkeys.ErrTerminalNotReady when it can prove the corresponding
-	// condition before any Exec attempt; any other failure is a plain,
-	// unwrapped error.
+	// comment for why that atomicity matters.
+	//
+	// Return classes (an extension beyond the frozen contract's three
+	// sentinels — see AgentManager.SendKeys's doc comment for why each
+	// addition exists): agentkeys.ErrTargetNotFound, ErrAgentNotRunning or
+	// ErrTerminalNotReady when it can prove the corresponding condition
+	// before any Exec attempt; a *agentkeys.ValidationError for a
+	// malformed/oversized/empty keys value, checked before anything else;
+	// the package-local ErrKeysUnsupported when the backend does not
+	// support keys delivery; an error wrapping the package-local
+	// ErrKeysNotStarted for a pre-Exec ctx failure; or, for any other
+	// failure (including one that itself wraps a context error), a plain
+	// error that must never be mistaken for one of the above.
 	SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error
 
 	// Watch returns a channel of status updates for an agent
@@ -109,14 +117,14 @@ type AgentManager struct {
 	Runtime   runtime.Runtime
 	msgBuffer *MessageBuffer
 
-	// injectionLocks holds one *injectionMutex per (agentID/agentSlug,
-	// projectID) target, lazily created by injectionLock. It serializes
-	// tmux injection (message paste/interrupt, and SendKeys) for the same
+	// injectionLocks holds one *injectionMutex per resolved container ID,
+	// lazily created by injectionLock. It serializes tmux injection
+	// (message paste/interrupt, MessageRaw, and SendKeys) for the same
 	// target so their byte sequences cannot interleave — see
 	// injectionLock's doc comment. Entries are never removed: each one is a
 	// small, fixed-size mutex, not a store of message content, so retaining
-	// one per target ever seen for the process's lifetime is an acceptable
-	// trade against the complexity of reference-counted eviction.
+	// one per container ID ever seen for the process's lifetime is an
+	// acceptable trade against the complexity of reference-counted eviction.
 	injectionLocks sync.Map
 }
 
@@ -526,10 +534,10 @@ func (im *injectionMutex) Unlock() {
 //
 // Serialization guarantee, stated precisely because it is easy to overstate:
 // this lock only orders concurrent calls into this one AgentManager's
-// deliverImmediate/SendKeys for the same resolved container. It says
-// nothing about, and must not be relied on to order, interactive PTY input
-// (a separate code path entirely, pkg/runtimebroker/pty_handlers.go) or a
-// separate local CLI process's own manager instance (which has its own,
+// deliverImmediate/MessageRaw/SendKeys for the same resolved container. It
+// says nothing about, and must not be relied on to order, interactive PTY
+// input (a separate code path entirely, pkg/runtimebroker/pty_handlers.go)
+// or a separate local CLI process's own manager instance (which has its own,
 // independent injectionLocks map) — see
 // .design/agent-keys-contract.md's "Execution and transport" section
 // ("Interactive PTY input and separate local CLI processes/managers are not
@@ -540,9 +548,12 @@ func (im *injectionMutex) Unlock() {
 // flush can hold a target's lock indefinitely. This is fail-closed, not a
 // deadlock: no other lock is held while a caller waits here, and
 // MessageBuffer releases its own internal mutex before invoking deliverFunc
-// (msgbuffer.go's flush). A keys call contending for the same target simply
-// fails with ErrNotDispatched-mapped "unavailable" at its own (≤30s)
-// deadline rather than blocking forever.
+// (msgbuffer.go's flush) — but that retry loop runs only after deliverFunc
+// itself returns, so it does nothing to bound this wait; a keys call
+// contending for the same target is what stays bounded, failing closed with
+// an ErrKeysNotStarted-wrapped error (translated by the runtimebroker
+// handler to keys_unavailable) at its own (≤30s) deadline rather than
+// blocking forever.
 func (m *AgentManager) injectionLock(containerID string) *injectionMutex {
 	if v, ok := m.injectionLocks.Load(containerID); ok {
 		return v.(*injectionMutex)
@@ -598,33 +609,41 @@ func wrapNotStarted(ctxErr error) error {
 	return fmt.Errorf("%w: %v", ErrKeysNotStarted, ctxErr)
 }
 
-// escapeTrailingSemicolon returns keys transformed so that, once passed as
-// tmux's "send-keys ... -- <keys>" final argument, tmux's own parser
-// delivers the original keys value byte-for-byte, including a trailing ';'.
-//
-// tmux's command-line parser treats a trailing, unescaped ';' as a command
-// separator rather than literal input — even after "--", and even when the
-// ';' arrives as part of a single argv element rather than shell-split —
-// dropping it entirely (or, if one or more backslashes immediately precede
-// it, consuming exactly one of those backslashes and keeping the ';'
-// literal). Only the final character of the whole argument is ever
-// affected: a ';' anywhere else in the string is untouched. Inserting one
-// extra backslash immediately before a trailing ';' is therefore sufficient
-// to make tmux's own unescaping reproduce the original string exactly,
-// regardless of how many backslashes (including zero) already precede that
-// trailing ';' in the input — see TestRealTmuxSendKeys's semicolon cases for
-// the empirical basis of this rule against a real tmux server.
-func escapeTrailingSemicolon(keys string) string {
-	if strings.HasSuffix(keys, ";") {
-		return keys[:len(keys)-1] + `\;`
+// tmuxOctalEscape encodes every byte of s as a three-digit octal escape
+// ("\ddd"), for embedding inside a double-quoted tmux command-argument
+// string. tmux's own command-argument parser reverses this encoding back to
+// the exact original bytes before evaluating the argument, so the encoded
+// form never writes any byte of s unescaped — including bytes that would
+// otherwise need individual handling (quotes, backslashes, a trailing
+// separator character, control bytes).
+func tmuxOctalEscape(s string) string {
+	const octalDigits = "01234567"
+	b := make([]byte, 0, len(s)*4)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		b = append(b, '\\', octalDigits[(c>>6)&07], octalDigits[(c>>3)&07], octalDigits[c&07])
 	}
-	return keys
+	return string(b)
+}
+
+// sendKeysScript builds the single tmux command line SendKeys supplies on
+// stdin to "tmux source-file -": one send-keys command addressing target,
+// with keys embedded as a double-quoted, fully octal-escaped argument (see
+// tmuxOctalEscape). tmux decodes the escapes back to the exact original
+// bytes before send-keys applies its own named-key/literal-text
+// interpretation, so the semantics — one string becomes one argument, a
+// named key is recognized only on an exact whole-argument match, no
+// automatic Enter — are unchanged from a direct send-keys invocation.
+func sendKeysScript(target, keys string) string {
+	return fmt.Sprintf("send-keys -t %s -- \"%s\"\n", target, tmuxOctalEscape(keys))
 }
 
 // SendKeys sends the exact byte-for-byte keys string to an agent's tmux
-// session via a single "tmux send-keys -t scion:0 -- <keys>" call, with no
-// trailing Enter, no paste buffer and no debounce — the frozen primitive for
-// the dedicated broker /keys route (.design/agent-keys-contract.md §4.3).
+// session, with no trailing Enter, no paste buffer and no debounce — the
+// frozen primitive for the dedicated broker /keys route
+// (.design/agent-keys-contract.md §4.3). Delivery is a single tmux command
+// (see sendKeysScript) supplied on stdin to "tmux source-file -", rather
+// than passed as a process argument.
 //
 // Unlike MessageRaw, SendKeys performs the "agent_id" container-label
 // identity check described in agentkeys.BrokerRequest's doc comment
@@ -743,13 +762,14 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	}
 
 	sendCtx := runtime.WithSensitiveExec(ctx)
-	cmd := []string{"tmux", "send-keys", "-t", keysTarget, "--", escapeTrailingSemicolon(keys)}
-	if _, err := m.Runtime.Exec(sendCtx, target.ContainerID, cmd); err != nil {
-		// %v, not %w: once this Exec call has been made, a failure is
-		// ambiguous (the tmux call may have partially run), never "proven
-		// not to have started" — see ErrKeysNotStarted's doc comment for
-		// why nothing this error wraps may be reachable via errors.Is from
-		// this return value, however the underlying backend built it.
+	script := sendKeysScript(keysTarget, keys)
+	cmd := []string{"tmux", "source-file", "-"}
+	if _, err := m.Runtime.ExecWithStdin(sendCtx, target.ContainerID, cmd, strings.NewReader(script)); err != nil {
+		// %v, not %w: once this call has been made, a failure is ambiguous
+		// (the tmux command may have partially run), never "proven not to
+		// have started" — see ErrKeysNotStarted's doc comment for why
+		// nothing this error wraps may be reachable via errors.Is from this
+		// return value, however the underlying backend built it.
 		return fmt.Errorf("failed to send keys to agent '%s': %v", target.Name, err)
 	}
 
@@ -867,8 +887,11 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	// interleave. See injectionLock's doc comment. This uses ctx as given:
 	// interrupt messages carry the caller's own ctx, while buffered flushes
 	// call in with context.Background() (NewManager's deliverFunc), which
-	// never times out here — flush's own bounded retry loop is what keeps
-	// that case from blocking forever on a truly stuck lock.
+	// never times out here — a hung tmux call inside a flush can hold this
+	// lock indefinitely; flush's own bounded retry loop only runs after
+	// deliverFunc (and therefore this whole call) has already returned, so
+	// it does not bound this wait. See injectionLock's own doc comment for
+	// why this is fail-closed rather than a deadlock.
 	lock := m.injectionLock(agent.ContainerID)
 	if err := lock.Lock(ctx); err != nil {
 		return fmt.Errorf("failed to acquire injection lock for agent '%s': %w", agent.Name, err)

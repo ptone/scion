@@ -2312,6 +2312,7 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	// extends it (CapExecuteBefore's own contract).
 	deadline, capErr := agentkeys.CapExecuteBefore(admittedAt, req.ExecuteBefore, agentkeys.DefaultAdmissionWindow)
 	if capErr != nil || !admittedAt.Before(deadline) {
+		span.SetStatus(codes.Error, "admission deadline expired")
 		s.logKeysOutcome(req, agentkeys.OutcomeKeysUnavailable, time.Since(admittedAt))
 		writeKeysResult(w, req.OperationID, agentkeys.OutcomeKeysUnavailable, "admission deadline already passed")
 		return

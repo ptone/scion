@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,19 +30,21 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// TestRealTmuxSendKeys drives AgentManager.SendKeys's actual argv against a
-// private, disposable tmux server — never an active agent terminal, per the
-// campaign's hard constraint — verifying named keys (Enter), Unicode, spaces,
-// literal "@text" and trailing-semicolon content all reach the target
-// exactly, with no automatic Enter added by SendKeys itself.
+// TestRealTmuxSendKeys drives AgentManager.SendKeys's actual delivery
+// mechanism against a private, disposable tmux server — never an active
+// agent terminal, per the campaign's hard constraint — verifying named keys
+// (Enter, Escape), Unicode, spaces, literal "@text", quotes, a backslash, a
+// dollar sign, semicolons (embedded and trailing), a multiline string, and
+// directive-like content resembling a tmux command all reach the target
+// exactly, with no automatic Enter added by SendKeys itself and no
+// content ever interpreted as anything other than literal input or (for the
+// two named keys) the single keypress it names.
 //
-// The trailing-semicolon cases (review round 1, finding #1) exist because
-// tmux's own command-line parser treats an unescaped trailing ';' as a
-// command separator rather than literal input, dropping it, even when it
-// arrives as part of a single argv element after "--". SendKeys's
-// escapeTrailingSemicolon compensates for this before building the argv;
-// these cases prove the round trip against a real tmux server rather than
-// just against escapeTrailingSemicolon's own unit test.
+// Delivery goes through "tmux source-file -" over stdin (see
+// sendKeysScript): the mock's ExecWithStdinFunc pipes the generated command
+// to a real tmux binary exactly as AgentManager.ExecWithStdin does, so this
+// exercises the real encode/decode round trip, not just the encoder's own
+// unit test.
 func TestRealTmuxSendKeys(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real-tmux integration test in short mode")
@@ -50,6 +53,9 @@ func TestRealTmuxSendKeys(t *testing.T) {
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
 		t.Skip("tmux not installed; skipping real-tmux integration test")
+	}
+	if out, err := exec.Command(tmuxPath, "-V").CombinedOutput(); err == nil {
+		t.Logf("running against %s", strings.TrimSpace(string(out)))
 	}
 
 	dir, err := os.MkdirTemp("", "tmxk")
@@ -102,8 +108,19 @@ func TestRealTmuxSendKeys(t *testing.T) {
 		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
 			return runTmux(cmd[1:]...)
 		},
+		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+			c := exec.Command(tmuxPath, append([]string{"-S", sock}, cmd[1:]...)...)
+			c.Stdin = stdin
+			out, err := c.CombinedOutput()
+			if err != nil {
+				return string(out), fmt.Errorf("tmux %v failed: %w (%s)", cmd[1:], err, out)
+			}
+			return string(out), nil
+		},
 	}
 	mgr := &AgentManager{Runtime: shim}
+
+	var want strings.Builder
 
 	send := func(keys string) {
 		t.Helper()
@@ -111,46 +128,64 @@ func TestRealTmuxSendKeys(t *testing.T) {
 			t.Fatalf("SendKeys(%q) failed: %v", keys, err)
 		}
 	}
+	// literal sends keys and records it as literal text in the expected
+	// output — for content that is not a recognized tmux key name.
+	literal := func(keys string) {
+		send(keys)
+		want.WriteString(keys)
+	}
+
+	// cat's stdout is block-buffered here (not a tty), so intermediate
+	// writes are not guaranteed to reach outFile until EOF flushes the
+	// buffer — unlike TestRealTmuxLoadBufferDeliversLargePayload's 200 KB
+	// payload, which exceeds the buffer and can be polled incrementally. So
+	// every send below happens before a single end-of-sequence poll rather
+	// than being checked one at a time.
 
 	// Literal text containing Unicode, spaces and a literal "@name" — must
 	// reach the pane byte-for-byte, never parsed or tokenized.
-	//
-	// cat's stdout is block-buffered here (not a tty), so intermediate
-	// writes below this size are not guaranteed to reach outFile until EOF
-	// flushes the buffer — unlike TestRealTmuxLoadBufferDeliversLargePayload's
-	// 200 KB payload, which exceeds the buffer and can be polled
-	// incrementally. So every send below happens before a single
-	// end-of-sequence poll rather than being checked one at a time.
-	text := "héllo @builder 世界 do the thing"
-	send(text)
+	literal("héllo @builder 世界 do the thing")
+
+	// A trailing ';', content already ending in a literal backslash
+	// followed by ';' (0 and 1 "extra" backslash before the trailing ';'
+	// respectively), and an embedded (non-trailing) ';' — every one of
+	// these must reach the pane as exactly itself.
+	literal(";")
+	literal("a;")
+	literal(`a\;`)
+	literal(`a\\;`)
+	literal("a;b;c")
+
+	// A double quote and a backslash — the two characters the generated
+	// tmux command's own quoting would otherwise need to treat specially —
+	// and a dollar sign, all octal-escaped like every other byte, so none
+	// of them are ever interpreted by tmux's command parser.
+	literal(`quote"inside`)
+	literal(`back\slash`)
+	literal("dollar$sign")
+
+	// A multiline string: newlines inside the payload are just more escaped
+	// bytes, not line breaks in the generated command file.
+	literal("line1\nline2")
+
+	// Directive-like content resembling a tmux command a naive
+	// implementation might accidentally let escape the intended single
+	// argument. If this were ever interpreted as a real command instead of
+	// literal text, "kill-server" would tear down the whole tmux server
+	// this test depends on, failing loudly rather than silently.
+	literal(`"; kill-server; #`)
 
 	// "Enter" is a recognized tmux key name and must be interpreted as an
 	// actual keypress (arriving as a bare LF via the pty's ICRNL
-	// translation), not typed as the four literal characters "Enter".
+	// translation), not typed as the five literal characters "Enter".
 	send("Enter")
+	want.WriteString("\n")
 
 	// "Escape" is also a recognized tmux key name; cat has no ESC-driven
 	// behavior of its own, so it should just pass the literal ESC (0x1b)
 	// byte through, not the six literal characters "Escape".
 	send("Escape")
-
-	// Trailing-semicolon content, each a distinct literal string (raw string
-	// literals below so every backslash is exactly what it looks like, with
-	// no Go string-escape reinterpretation): a bare ';', a semicolon after
-	// other text, and content that itself already ends in a literal
-	// backslash followed by a semicolon (0, 0, and 1 "extra" backslash
-	// before the trailing ';' respectively, exercising distinct cases of the
-	// escapeTrailingSemicolon rule). Each must reach the pane as exactly
-	// itself, not truncated and not with an extra backslash left over.
-	semicolonCases := []string{
-		`;`,
-		`a;`,
-		`a\;`,
-		`a\\;`,
-	}
-	for _, sc := range semicolonCases {
-		send(sc)
-	}
+	want.WriteString("\x1b")
 
 	mustTmux("send-keys", "-t", "scion:0", "C-d")
 
@@ -180,8 +215,7 @@ func TestRealTmuxSendKeys(t *testing.T) {
 		t.Fatalf("reading pane output: %v", err)
 	}
 
-	want := text + "\n" + "\x1b" + strings.Join(semicolonCases, "")
-	if string(got) != want {
-		t.Fatalf("pane output = %q, want %q", got, want)
+	if string(got) != want.String() {
+		t.Fatalf("pane output = %q, want %q", got, want.String())
 	}
 }
