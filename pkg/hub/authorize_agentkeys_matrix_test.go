@@ -298,6 +298,36 @@ func TestAuthorizeAgentKeys_AgentCredential_ProjectBoundary(t *testing.T) {
 			t.Fatalf("expected a same-project scoped agent to be allowed: %s", got.Reason)
 		}
 	})
+
+	// Round-1 review (finding 5): message-only and create-only agent scopes,
+	// alone or combined, must never grant keys -- only ScopeAgentLifecycle
+	// does. Each case below targets a same-project peer, so a failure here
+	// can only be attributed to the scope itself, never a project mismatch.
+	peer := &store.Agent{
+		ID: "scope-peer-agent", Name: "scope-peer", Slug: "scope-peer",
+		ProjectID: authzHelperProjectA, OwnerID: "someone-else",
+	}
+	scopeCases := []struct {
+		name   string
+		scopes []AgentTokenScope
+	}{
+		{"notify scope alone", []AgentTokenScope{ScopeAgentNotify}},
+		{"set_message_mode scope alone", []AgentTokenScope{ScopeAgentSetMessageMode}},
+		{"create scope alone", []AgentTokenScope{ScopeAgentCreate}},
+		{"notify + set_message_mode + create, no lifecycle", []AgentTokenScope{ScopeAgentNotify, ScopeAgentSetMessageMode, ScopeAgentCreate}},
+	}
+	for _, tc := range scopeCases {
+		t.Run("message/manage-only scope denied: "+tc.name, func(t *testing.T) {
+			identity := authzHelperAgent(authzHelperProjectA, tc.scopes...)
+			got := srv.authorizeAgentKeys(authzKeysHelperRequest(identity), peer)
+			if got.Allowed {
+				t.Fatalf("expected scopes %v (no lifecycle) to be denied", tc.scopes)
+			}
+			if got.Outcome != agentkeys.OutcomeKeysDenied {
+				t.Errorf("Outcome = %q, want %q", got.Outcome, agentkeys.OutcomeKeysDenied)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +346,20 @@ func TestAuthorizeAgentKeys_UserAccessTokenCredentialRestrictions(t *testing.T) 
 		got := srv.authorizeAgentKeys(authzKeysHelperRequest(uat), f.agentAlpha)
 		if !got.Allowed {
 			t.Fatalf("expected an agent:attach-scoped UAT to be allowed: %s", got.Reason)
+		}
+	})
+
+	t.Run("manage-only authority (UAT scoped to agent:lifecycle only): denied", func(t *testing.T) {
+		// Round-1 review (finding 5): the Decide path enforces exact UAT
+		// scopes (LegacyUATScopeImplications is documented as NOT honored
+		// here); a lifecycle-only token must not implicitly carry attach.
+		uat := NewScopedUserIdentity(baseOwner, f.projectAlpha.ID, []string{"agent:lifecycle"})
+		got := srv.authorizeAgentKeys(authzKeysHelperRequest(uat), f.agentAlpha)
+		if got.Allowed {
+			t.Fatal("expected a lifecycle(manage)-only-scoped UAT to be denied keys authority")
+		}
+		if got.Outcome != agentkeys.OutcomeKeysDenied {
+			t.Errorf("Outcome = %q, want %q", got.Outcome, agentkeys.OutcomeKeysDenied)
 		}
 	})
 
@@ -523,71 +567,15 @@ func TestAuthorizeAgentKeysCrossProject(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Route and capability metadata agreement across both route shapes
+//
+// Round-1 review (reviews/2.1-r1.md, finding 3) found the original two
+// tests here passed even with this PR's production code deleted, so they
+// could not have caught a route-shape divergence. They have been replaced
+// by authorize_agentkeys_route_test.go's
+// TestAgentActionKeysRoute_BothShapesAgree, which drives both route shapes
+// through the real mux (srv.Handler()) for the same identity/target matrix
+// and asserts the same allow/deny outcome and capability projection.
 // ---------------------------------------------------------------------------
-
-// TestAgentActionKeys_RouteMetadataCoversBothRouteShapes pins that both
-// mux prefixes that will host the /keys route shapes (contract §2.1) already
-// carry RoutePolicy metadata today -- the coarse, pre-dispatch classification
-// every action on either route (including a future "keys" action) passes
-// through before per-action authorization (agentActionPermission,
-// authorizeAgentKeys) refines it further. The two entries' Resource fields
-// intentionally differ (top-level is agent-specific; the project-scoped
-// prefix is shared by every project sub-resource, not just agents), so
-// "agree" here means both routes gate on RoutePolicy -- neither falls back
-// to RoutePublic/RouteAuthenticated, which would skip permission checking
-// entirely -- not that their coarse metadata is byte-identical. Task 2.2
-// adds no new mux pattern for keys (it reuses these existing prefixes, the
-// same way message/pty/exec already do), so this table is already the
-// metadata keys' own route wiring lands under.
-func TestAgentActionKeys_RouteMetadataCoversBothRouteShapes(t *testing.T) {
-	topLevel, ok := routeMetadataTable["/api/v1/agents/"]
-	if !ok {
-		t.Fatal("missing route metadata for /api/v1/agents/ (top-level route shape)")
-	}
-	projectScoped, ok := routeMetadataTable["/api/v1/projects/"]
-	if !ok {
-		t.Fatal("missing route metadata for /api/v1/projects/ (project-scoped route shape)")
-	}
-	if topLevel.Classification != RoutePolicy {
-		t.Errorf("top-level route Classification = %v, want %v", topLevel.Classification, RoutePolicy)
-	}
-	if projectScoped.Classification != RoutePolicy {
-		t.Errorf("project-scoped route Classification = %v, want %v", projectScoped.Classification, RoutePolicy)
-	}
-}
-
-// TestAgentActionKeys_CapabilityProjectionConsistentAcrossRouteShapes proves
-// capability computation for a keys-eligible resource does not depend on
-// which route shape resolved it: agentResource() is a pure function of the
-// already-resolved *store.Agent, called identically by both the top-level
-// and project-scoped dispatch paths, so the same agent always projects the
-// same "attach" capability (the one keys reuses per decision 2) regardless
-// of route shape.
-func TestAgentActionKeys_CapabilityProjectionConsistentAcrossRouteShapes(t *testing.T) {
-	f := newGoldenFixture(t)
-	owner := NewAuthenticatedUser(f.projectOwnerID, "proj-owner@golden.test", "Project Owner", "member", "api")
-
-	// Simulate the two ways an agent record reaches authorization: the
-	// top-level route's GetAgent(id) and the project-scoped route's
-	// GetAgentBySlug/GetAgent -- both ultimately hand agentResource() the
-	// same *store.Agent fields.
-	viaTopLevel := agentResource(f.agentAlpha)
-	agentCopy := *f.agentAlpha
-	viaProjectScoped := agentResource(&agentCopy)
-
-	capTop := f.authz.ComputeCapabilities(t.Context(), owner, viaTopLevel)
-	capProject := f.authz.ComputeCapabilities(t.Context(), owner, viaProjectScoped)
-
-	topHasAttach := capabilityAllows(capTop, ActionAttach)
-	projectHasAttach := capabilityAllows(capProject, ActionAttach)
-	if topHasAttach != projectHasAttach {
-		t.Fatalf("capability projection disagrees across route shapes: top-level attach=%v project-scoped attach=%v",
-			topHasAttach, projectHasAttach)
-	}
-	if !topHasAttach {
-		t.Fatal("expected the agent's owner to have attach capability (and therefore keys eligibility) on their own agent")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Registry bookkeeping
@@ -603,7 +591,7 @@ func TestAgentAttachRegistry_EnforcementListsAuthorizeAgentKeys(t *testing.T) {
 			continue
 		}
 		for _, e := range p.Enforcement {
-			if e == "pkg/hub/authorize.go:authorizeAgentKeys" {
+			if e == "pkg/hub/authorize_agentkeys.go:authorizeAgentKeys" {
 				return
 			}
 		}

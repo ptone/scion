@@ -2995,6 +2995,40 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		goto actionDispatch
 	}
 
+	// --- Keys action: routed through authorizeAgentKeys (contract §3) ---
+	// Terminal-keystroke injection itself is task 2.2's ExecuteAgentKeys;
+	// this branch only owns the authorization decision, so a denial
+	// matches the keys contract's outcome/status table (agentkeys.Outcome)
+	// instead of the generic !selfAccess block's differently-shaped 403
+	// below. Resolve {id} first, then compare projects inside
+	// authorizeAgentKeys (contract §3.1 "Option 1, chosen" for the
+	// top-level route): a foreign existing agent (422) and a nonexistent
+	// one (404, from writeErrorFromErr below) get different outcomes,
+	// matching this route's existing lifecycle-action disclosure. On
+	// success it falls through to actionDispatch: no case exists yet for
+	// api.AgentActionKeys (task 2.2 adds one), so the switch's own
+	// `default: NotFound(w, "Action")` answers an authorized call exactly
+	// like any other not-yet-implemented action — not because it was
+	// denied.
+	if action == api.AgentActionKeys {
+		identity := GetIdentityFromContext(r.Context())
+		if identity == nil {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "This action requires user or agent authentication", nil)
+			return
+		}
+		targetAgent, err := s.store.GetAgent(r.Context(), id)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		decision := s.authorizeAgentKeys(r, targetAgent)
+		if !decision.Allowed {
+			writeAgentKeysAuthzDenial(w, decision)
+			return
+		}
+		goto actionDispatch
+	}
+
 	if !selfAccess {
 		userIdent := GetUserIdentityFromContext(r.Context())
 		agentIdent := GetAgentIdentityFromContext(r.Context())

@@ -2419,6 +2419,46 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 
 	ctx := r.Context()
 
+	// --- Keys action: routed through authorizeAgentKeys (contract §3.1) ---
+	// The agent-credential cross-project refusal must be decided before any
+	// agent-target lookup on this route (invariant 4, AK-21c): compare the
+	// caller's own project against the already-resolved {project} ID first,
+	// so a foreign agent identity never causes (or requires) a lookup for a
+	// same-slug agent that might exist in the URL's project. Only once that
+	// passes do we resolve the target — with our own resolution
+	// (resolveProjectAgentForKeysGate), not the shared block below, because
+	// a miss here must be reported as keys' own "not_found" (invariant 3),
+	// not that block's agent_not_found/{agent_slug,project_id} shape, which
+	// is specific to every other (non-keys) action on this route.
+	if action == api.AgentActionKeys {
+		if denial := s.authorizeAgentKeysCrossProject(r, projectID); denial != nil {
+			writeAgentKeysAuthzDenial(w, *denial)
+			return
+		}
+		agent, ok := s.resolveProjectAgentForKeysGate(ctx, projectID, agentID)
+		if !ok {
+			NotFound(w, "Agent")
+			return
+		}
+		identity := GetIdentityFromContext(r.Context())
+		if identity == nil {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "This action requires user or agent authentication", nil)
+			return
+		}
+		decision := s.authorizeAgentKeys(r, agent)
+		if !decision.Allowed {
+			writeAgentKeysAuthzDenial(w, decision)
+			return
+		}
+		// Task 2.2 adds the real handler; until then, an authorized call
+		// still 404s here, matching the two switches' shared
+		// `default: NotFound(w, "Action")` below for every other
+		// not-yet-implemented action on this route — not because it was
+		// denied.
+		NotFound(w, "Action")
+		return
+	}
+
 	// Resolve agent ID
 	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
 	if err != nil {
@@ -2517,6 +2557,35 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	default:
 		NotFound(w, "Action")
 	}
+}
+
+// resolveProjectAgentForKeysGate resolves the project-scoped route's target
+// agent the same way handleProjectAgentAction's shared resolution block
+// above does (GetAgentBySlug, falling back to GetAgent by canonical ID,
+// then verifying project membership), but reports a miss to the caller as a
+// bool instead of writing an HTTP response itself: the agent-keys gate
+// (authorize_agentkeys.go's authorizeAgentKeys, invoked from this route's
+// api.AgentActionKeys early branch above) must answer a miss with the keys
+// contract's own "not_found" outcome code (contract §3 invariant 3), not
+// this file's other resolution block's "agent_not_found"/
+// {agent_slug,project_id} shape, which is specific to every other
+// (non-keys) action on this route.
+func (s *Server) resolveProjectAgentForKeysGate(ctx context.Context, projectID, agentIDOrSlug string) (*store.Agent, bool) {
+	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentIDOrSlug)
+	if err == nil {
+		return agent, true
+	}
+	if err != store.ErrNotFound {
+		return nil, false
+	}
+	agent, err = s.store.GetAgent(ctx, agentIDOrSlug)
+	if err != nil {
+		return nil, false
+	}
+	if agent.ProjectID != projectID {
+		return nil, false
+	}
+	return agent, true
 }
 
 // resolveProjectID extracts the UUID from a project ID that may be in {uuid}__{slug} format

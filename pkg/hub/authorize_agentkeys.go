@@ -39,10 +39,16 @@ import (
 // value ("") when Allowed is true, since a caller of this function decides
 // the eventual agentkeys.OutcomeDispatched (or a later failure outcome)
 // after admission steps this function does not gate. Reason is a short,
-// content-free string for audit logging; it is never returned to an HTTP
-// caller verbatim (both 2.2 and 2.3's error envelopes carry only the
-// sanitized, fixed messages their own outcome tables define — see contract
-// §2.4a).
+// content-free string intended for audit logging (it is also passed to
+// logAuthzDenial internally, so it is already in the structured "authz
+// denial" log line by the time a caller sees it here). It is exported so
+// 2.2/2.3 can fold it into their own content-free audit records without a
+// second lookup, but it is policy-internal detail, not response content:
+// callers MUST NOT copy it into an HTTP error body verbatim. Both 2.2 and
+// 2.3's error envelopes must carry only the sanitized, fixed messages their
+// own outcome tables define (contract §2.4a) — enforce this with a test at
+// whichever call site renders the HTTP response, not by relying on this
+// comment alone.
 type KeysAuthzDecision struct {
 	Allowed bool
 	Outcome agentkeys.Outcome
@@ -163,8 +169,25 @@ func (s *Server) authorizeAgentKeys(r *http.Request, target *store.Agent) KeysAu
 // agentkeys.OutcomeCrossProjectKeysUnsupported) exactly when the caller is
 // an authenticated agent identity whose own project differs from
 // targetProjectID.
+//
+// Gated on identity.Type() == "agent", not merely on the identity
+// implementing the AgentIdentity interface: FederatedAgentIdentity also
+// implements AgentIdentity (Type() == "federated_agent", ProjectID() ==
+// "") but is not one of the two caller kinds contract §3's table gives a
+// project-boundary rule to. Gating on the interface alone would give a
+// federated caller 422 cross_project_keys_unsupported here while the main
+// authorizeAgentKeys gate's default branch denies that same caller with
+// generic keys_denied on the top-level route (which never calls this
+// pre-check and instead folds the equivalent comparison into one call) —
+// two route shapes disagreeing on the outcome for an identical caller and
+// target (AC4). Every principal kind other than "agent" returns nil here,
+// so the caller falls through to the full authorizeAgentKeys gate, whose
+// default branch is the single place that denies them.
 func (s *Server) authorizeAgentKeysCrossProject(r *http.Request, targetProjectID string) *KeysAuthzDecision {
 	identity := GetIdentityFromContext(r.Context())
+	if identity == nil || identity.Type() != "agent" {
+		return nil
+	}
 	agentIdent, ok := identity.(AgentIdentity)
 	if !ok {
 		return nil
@@ -179,8 +202,12 @@ func (s *Server) authorizeAgentKeysCrossProject(r *http.Request, targetProjectID
 
 // denyAgentKeys logs the structured authorization-denial record every other
 // denial path in this package produces (logAuthzDenial, #591) and returns
-// the generic keys_denied decision.
+// the generic keys_denied decision. The "keys: " reason prefix (content-free
+// — it tags the operation, not the request) lets an operator distinguish a
+// keys denial from a PTY attach denial in shared audit logs, since both
+// currently log under the same ActionAttach action.
 func (s *Server) denyAgentKeys(r *http.Request, resource Resource, reason string) KeysAuthzDecision {
+	reason = "keys: " + reason
 	logAuthzDenial(r, GetIdentityFromContext(r.Context()), resource, ActionAttach, reason)
 	return KeysAuthzDecision{Allowed: false, Outcome: agentkeys.OutcomeKeysDenied, Reason: reason}
 }
@@ -190,6 +217,41 @@ func (s *Server) denyAgentKeys(r *http.Request, resource Resource, reason string
 // (agentkeys.OutcomeCrossProjectKeysUnsupported, 422) rather than the
 // generic agentkeys.OutcomeKeysDenied (403).
 func (s *Server) denyAgentKeysCrossProject(r *http.Request, resource Resource, reason string) KeysAuthzDecision {
+	reason = "keys: " + reason
 	logAuthzDenial(r, GetIdentityFromContext(r.Context()), resource, ActionAttach, reason)
 	return KeysAuthzDecision{Allowed: false, Outcome: agentkeys.OutcomeCrossProjectKeysUnsupported, Reason: reason}
+}
+
+// writeAgentKeysAuthzDenial writes decision (which must have Allowed ==
+// false — authorizeAgentKeys/authorizeAgentKeysCrossProject never produce
+// any other outcome for a denial) as an HTTP response, using the agent-keys
+// wire contract's outcome code and HTTP status (contract §2.4a/§2.5) via
+// the existing, already-universal Hub error envelope
+// (pkg/hub.ErrorResponse/APIError, written by writeError). It never writes
+// decision.Reason into the response body — only the fixed, sanitized
+// message below, matching contract §2.4a's "message is human-readable and
+// non-normative" rule.
+//
+// It writes no operation_id: minting one requires request-body validation
+// (agentkeys.ValidateBody) that does not exist until task 2.2 adds the real
+// keys handler (ExecuteAgentKeys). This routing seam (handleAgentAction's
+// and handleProjectAgentAction's early api.AgentActionKeys branches) only
+// owns the authorization decision, per the scope ruling recorded in the
+// disposition on ptone/scion#2195 for this task's round-1 review; 2.2 is
+// expected to replace this function's call sites with its own envelope
+// once validation and operation-ID minting exist, rather than retrofit an
+// operation_id here.
+func writeAgentKeysAuthzDenial(w http.ResponseWriter, decision KeysAuthzDecision) {
+	status, ok := agentkeys.HTTPStatus(decision.Outcome)
+	if !ok {
+		// Defensive: authorizeAgentKeys/authorizeAgentKeysCrossProject only
+		// ever produce the two outcomes agentkeys.HTTPStatus recognizes.
+		status = http.StatusForbidden
+		decision.Outcome = agentkeys.OutcomeKeysDenied
+	}
+	message := "Insufficient permissions"
+	if decision.Outcome == agentkeys.OutcomeCrossProjectKeysUnsupported {
+		message = "Cross-project keys access is not supported for agent callers"
+	}
+	writeError(w, status, string(decision.Outcome), message, nil)
 }
