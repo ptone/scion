@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
@@ -1555,6 +1556,8 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 		s.restartAgent(w, r, id, projectID)
 	case api.AgentActionMessage:
 		s.sendMessage(w, r, id, projectID)
+	case api.AgentActionKeys:
+		s.sendKeys(w, r, id, projectID)
 	case api.AgentActionExec:
 		s.execCommand(w, r, id, projectID)
 	case api.AgentActionResetAuth:
@@ -2220,6 +2223,158 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// sendKeys is the dedicated broker handler for the agent-keys terminal-
+// injection route (POST /api/v1/agents/{id}/keys), frozen by
+// .design/agent-keys-contract.md §4. Per decision 1 (Option B), it shares no
+// code with sendMessage above: it never constructs or logs a
+// StructuredMessage, never calls mgr.Message/mgr.MessageRaw, and its
+// delivery never goes through the message debounce buffer — only the
+// dedicated mgr.SendKeys primitive.
+//
+// id is the agent slug (BrokerRoutePath's "{id}" path segment, resolved the
+// same way every other broker route resolves it); projectID is the
+// "projectId" query parameter. Both are also carried, redundantly, inside
+// the decoded agentkeys.BrokerRequest body (ProjectID) — matching the
+// existing MessageAgent convention of duplicating project_id into the body —
+// but resolution uses the path/query values, exactly like every other
+// broker route, not the body's copy.
+func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	ctx := r.Context()
+
+	ctx, span := tracer.Start(ctx, "broker.keys.inject")
+	defer span.End()
+	span.SetAttributes(attribute.String("scion.agent.slug", id))
+
+	var req agentkeys.BrokerRequest
+	if err := readJSON(r, &req); err != nil {
+		// Never echo the decode error verbatim here: on this route it could
+		// in principle quote a fragment of the request body, which may
+		// carry the "keys" content itself (contract §5's redaction rule
+		// covers "request JSON" explicitly). A malformed body from an
+		// authenticated Hub is itself an anomaly worth a generic 400.
+		span.SetStatus(codes.Error, "invalid keys request body")
+		BadRequest(w, "Invalid keys request body")
+		return
+	}
+
+	// Admission check: reject an already-expired (or missing/invalid)
+	// execute-before deadline before doing any further work — contract
+	// §4.2's first enforcement point ("at broker admission"). A zero
+	// ExecuteBefore is always treated as already-expired: the broker never
+	// invents its own fallback deadline.
+	admittedAt := time.Now().UTC()
+	if req.ExecuteBefore.IsZero() || !admittedAt.Before(req.ExecuteBefore) {
+		s.logKeysOutcome(req, agentkeys.OutcomeKeysUnavailable, 0)
+		writeKeysResult(w, req.OperationID, agentkeys.OutcomeKeysUnavailable, "admission deadline already passed")
+		return
+	}
+
+	// Bind ctx to the Hub-issued deadline so SendKeys's own internal checks
+	// (after its target-lock wait, and immediately before Exec — contract
+	// §4.2's remaining two enforcement points) observe it. The broker never
+	// extends this deadline.
+	execCtx, cancel := context.WithDeadline(ctx, req.ExecuteBefore)
+	defer cancel()
+
+	mgr := s.resolveManagerForAgent(ctx, id, projectID)
+
+	err := mgr.SendKeys(execCtx, req.ProjectID, id, req.AgentID, req.Keys)
+	duration := time.Since(admittedAt)
+
+	outcome := agentkeys.OutcomeDispatched
+	switch {
+	case err == nil:
+		// success — outcome already set above.
+	case errors.Is(err, agentkeys.ErrTargetNotFound):
+		outcome = agentkeys.OutcomeNotFound
+	case errors.Is(err, agentkeys.ErrAgentNotRunning):
+		outcome = agentkeys.OutcomeAgentNotRunning
+	case errors.Is(err, agentkeys.ErrTerminalNotReady):
+		outcome = agentkeys.OutcomeTerminalNotReady
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		// SendKeys only returns ctx.Err() bare, before any Exec attempt (see
+		// its doc comment) — a cancellation observed mid-Exec is wrapped
+		// into a plain error instead and falls to the default case below.
+		// Proven not to have executed, so this is the broker's own
+		// "admission deadline expired" case, not an uncertain outcome.
+		outcome = agentkeys.OutcomeKeysUnavailable
+	default:
+		// An unclassified failure — including one where the tmux call may
+		// have partially run. Never echo err.Error() into a log or
+		// response: runtime stderr/argv can carry the injected keys
+		// (contract §5). Respond with the ordinary (non-BrokerResult) error
+		// envelope so a Hub-side adapter's "any other malformed/disagreeing
+		// response" rule (agentkeys.BrokerOutcomeError's doc) classifies
+		// this as keys_outcome_unknown, rather than the broker asserting an
+		// outcome it is not positioned to decide.
+		span.SetStatus(codes.Error, "keys dispatch failed")
+		s.logKeysOutcome(req, "", duration)
+		RuntimeError(w, "Failed to send keys")
+		return
+	}
+
+	s.logKeysOutcome(req, outcome, duration)
+
+	message := ""
+	if outcome == agentkeys.OutcomeKeysUnavailable && err != nil {
+		message = "admission deadline expired before dispatch"
+	}
+	writeKeysResult(w, req.OperationID, outcome, message)
+}
+
+// logKeysOutcome writes a content-free audit line for a keys dispatch
+// admission or outcome decision, following .design/agent-keys-contract.md
+// §5's audit field list: never the keys payload, argv, runtime output, or
+// any other input-bearing value. The broker-internal request carries no
+// caller identity (agentkeys.BrokerRequest's doc comment — "strictly less
+// than the public Request"), so actor kind/ID and credential ID/kind, which
+// the full field list also calls for, are logged at the Hub layer (task
+// 2.2) instead; this line covers exactly what is available on the broker
+// side of the boundary.
+//
+// outcome == "" logs a generic warning for an unclassified failure the
+// broker is not positioned to assert a contract Outcome for (see sendKeys's
+// default case) rather than inventing one.
+func (s *Server) logKeysOutcome(req agentkeys.BrokerRequest, outcome agentkeys.Outcome, duration time.Duration) {
+	attrs := []any{
+		"agent_id", req.AgentID,
+		"project_id", req.ProjectID,
+		"operation_id", req.OperationID,
+		"route", "keys",
+		"input_bytes", len(req.Keys),
+		"duration", duration,
+	}
+	if outcome == "" {
+		s.agentLifecycleLog.Warn("keys dispatch failed", attrs...)
+		return
+	}
+	attrs = append(attrs, "outcome", string(outcome))
+	s.agentLifecycleLog.Info("keys dispatch outcome", attrs...)
+}
+
+// writeKeysResult writes the frozen agentkeys.BrokerResult wire shape at the
+// HTTP status the contract assigns to outcome (agentkeys.HTTPStatus).
+// outcome must be OutcomeDispatched or one of the five broker-assertable
+// failure outcomes (agentkeys.ValidBrokerOutcome) — see the contract §4.1
+// "Outcome channel" paragraph. message must never contain key content,
+// runtime argv, or runtime stdout/stderr (BrokerResult.Message's doc
+// comment).
+func writeKeysResult(w http.ResponseWriter, operationID string, outcome agentkeys.Outcome, message string) {
+	status, ok := agentkeys.HTTPStatus(outcome)
+	if !ok {
+		// OutcomeDispatched has no HTTPStatus table entry (success has its
+		// own 200 rather than an error status) — handle it explicitly
+		// rather than trusting the table for the one value it deliberately
+		// omits.
+		status = http.StatusOK
+	}
+	writeJSON(w, status, agentkeys.BrokerResult{
+		OperationID: operationID,
+		Outcome:     outcome,
+		Message:     message,
+	})
 }
 
 func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, projectID string) {

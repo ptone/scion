@@ -27,6 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -73,7 +75,26 @@ type Manager interface {
 	// with no trailing Enter keypresses, allowing control sequences like
 	// arrow keys and Escape to be used directly.
 	// projectID scopes delivery to a specific project.
+	//
+	// Deprecated: MessageRaw is the primitive behind the legacy message-raw
+	// path (pending Phase 4 removal per .design/agent-keys-contract.md). It
+	// performs no "agent_id" identity binding. New callers must use SendKeys.
 	MessageRaw(ctx context.Context, agentID, projectID string, keys string) error
+
+	// SendKeys sends the exact byte-for-byte keys string to an agent's tmux
+	// session via a single "tmux send-keys ... -- <keys>" call — the frozen
+	// primitive for the dedicated broker /keys route
+	// (.design/agent-keys-contract.md §4.3). Unlike MessageRaw, it binds to
+	// the resolved container's "agent_id" label: it resolves the target by
+	// (projectID, agentSlug), verifies the resolved container's "agent_id"
+	// label equals expectedAgentID, and executes on that same resolved
+	// container, all within this one call — see AgentManager.SendKeys's doc
+	// comment for why that atomicity matters. It returns one of
+	// agentkeys.ErrTargetNotFound, agentkeys.ErrAgentNotRunning or
+	// agentkeys.ErrTerminalNotReady when it can prove the corresponding
+	// condition before any Exec attempt; any other failure is a plain,
+	// unwrapped error.
+	SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error
 
 	// Watch returns a channel of status updates for an agent
 	Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error)
@@ -86,6 +107,16 @@ type Manager interface {
 type AgentManager struct {
 	Runtime   runtime.Runtime
 	msgBuffer *MessageBuffer
+
+	// injectionLocks holds one *injectionMutex per (agentID/agentSlug,
+	// projectID) target, lazily created by injectionLock. It serializes
+	// tmux injection (message paste/interrupt, and SendKeys) for the same
+	// target so their byte sequences cannot interleave — see
+	// injectionLock's doc comment. Entries are never removed: each one is a
+	// small, fixed-size mutex, not a store of message content, so retaining
+	// one per target ever seen for the process's lifetime is an acceptable
+	// trade against the complexity of reference-counted eviction.
+	injectionLocks sync.Map
 }
 
 // defaultBufferDelay is the debounce window for message delivery.
@@ -404,6 +435,227 @@ func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string
 	return nil
 }
 
+// keysTarget is the tmux target every injection primitive in this file
+// addresses — the single window every agent harness runs in.
+const keysTarget = "scion:0"
+
+// injectionMutex is a per-target mutex whose Lock respects a context's
+// deadline/cancellation, so a caller waiting for a target whose injection
+// critical section is already held (a concurrent SendKeys, interrupt, or
+// buffered flush for the same agent) does not block past its own admission
+// deadline. Acquired via AgentManager.injectionLock; see that method's doc
+// comment for what it serializes and why.
+//
+// Implemented as a 1-buffered channel holding a single token: Lock takes the
+// token (or gives up when ctx is done first) and Unlock returns it. This
+// avoids the need for a separate "acquired" flag or a busy-poll loop around
+// sync.Mutex.TryLock, neither of which composes as directly with select on
+// ctx.Done().
+type injectionMutex struct {
+	ch chan struct{}
+}
+
+func newInjectionMutex() *injectionMutex {
+	im := &injectionMutex{ch: make(chan struct{}, 1)}
+	im.ch <- struct{}{}
+	return im
+}
+
+// Lock blocks until the mutex is free or ctx is done, whichever comes
+// first. On the ctx-done path it returns ctx.Err() and acquires nothing —
+// callers must not call Unlock in that case.
+func (im *injectionMutex) Lock(ctx context.Context) error {
+	select {
+	case <-im.ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Unlock releases the mutex. Must only be called after a successful Lock.
+func (im *injectionMutex) Unlock() {
+	im.ch <- struct{}{}
+}
+
+// injectionLockKey identifies the per-target critical section shared by
+// every tmux injection primitive (message paste, interrupt, and SendKeys)
+// for one agent. It matches on the same scope MessageRaw/deliverImmediate
+// already resolve their target within — a case-insensitive agent
+// slug/name plus projectID — so two callers naming the same target the same
+// way both wait on the same lock, whichever primitive they use.
+func injectionLockKey(agentID, projectID string) string {
+	return strings.ToLower(agentID) + "\x00" + projectID
+}
+
+// injectionLock returns the per-target injectionMutex for (agentID,
+// projectID), creating it on first use. It never removes an entry: see
+// AgentManager.injectionLocks's doc comment for why that is an acceptable
+// trade for this type.
+//
+// Serialization guarantee, stated precisely because it is easy to overstate:
+// this lock only orders concurrent calls into this one AgentManager's
+// deliverImmediate/SendKeys for the same target. It says nothing about, and
+// must not be relied on to order, interactive PTY input (a separate code
+// path entirely, pkg/runtimebroker/pty_handlers.go) or a separate local CLI
+// process's own manager instance (which has its own, independent
+// injectionLocks map) — see .design/agent-keys-contract.md's "Execution and
+// transport" section ("Interactive PTY input and separate local CLI
+// processes/managers are not covered by this lock").
+func (m *AgentManager) injectionLock(agentID, projectID string) *injectionMutex {
+	key := injectionLockKey(agentID, projectID)
+	if v, ok := m.injectionLocks.Load(key); ok {
+		return v.(*injectionMutex)
+	}
+	actual, _ := m.injectionLocks.LoadOrStore(key, newInjectionMutex())
+	return actual.(*injectionMutex)
+}
+
+// SendKeys sends the exact byte-for-byte keys string to an agent's tmux
+// session via a single "tmux send-keys -t scion:0 -- <keys>" call, with no
+// trailing Enter, no paste buffer and no debounce — the frozen primitive for
+// the dedicated broker /keys route (.design/agent-keys-contract.md §4.3).
+//
+// Unlike MessageRaw, SendKeys performs the "agent_id" container-label
+// identity check described in agentkeys.BrokerRequest's doc comment
+// atomically with resolution and execution: exactly one
+// List-then-match resolves exactly one container (resolveKeysTarget), that
+// container's own "agent_id" label is checked against expectedAgentID as
+// part of that same resolution, and Exec runs on that same resolved
+// container — all within this one call, with no second, independently
+// resolving step in between. A caller must never check the label itself and
+// then invoke a different, re-resolving primitive: that would reopen the
+// exact recreate-inside-the-window race this binding exists to close,
+// because nothing would guarantee the second resolution finds the container
+// the first one checked.
+//
+// It serializes against the manager's existing message/interrupt injection
+// critical section for the same (projectID, agentSlug) target (see
+// injectionLock), so a keys call cannot interleave its tmux byte sequence
+// with a concurrent buffered flush or interrupt delivery. Lock acquisition
+// respects ctx's deadline: SendKeys returns ctx.Err() (never one of the
+// three sentinels below, and never wrapped) without executing anything if
+// ctx is done before the lock is acquired, and rechecks ctx immediately
+// before the send-keys Exec call — covering a deadline that expires while
+// waiting for the lock (the "control-channel semaphore/target-lock wait"
+// the contract's execute-before enforcement names) — so a deadline lost
+// during that wait can never still result in execution afterward. Callers
+// arrange for ctx's deadline to reflect the Hub-issued execute-before
+// timestamp (agentkeys.CapExecuteBefore) before calling SendKeys.
+//
+// It returns one of three agentkeys sentinels — ErrTargetNotFound,
+// ErrAgentNotRunning, ErrTerminalNotReady — and only when it can prove the
+// corresponding condition before any Exec attempt; any other failure
+// (including one where the tmux send-keys call itself may have partially
+// run) is a plain, unwrapped error, which callers must not attempt to
+// reclassify as one of those three sentinels — see agentkeys.BrokerRequest's
+// doc comment and .design/agent-keys-contract.md §4.3.
+func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+	lock := m.injectionLock(agentSlug, projectID)
+	if err := lock.Lock(ctx); err != nil {
+		return err
+	}
+	defer lock.Unlock()
+
+	// The lock wait above may have consumed the entire remaining admission
+	// window: recheck before doing any further work (contract §4.2,
+	// "enforce expiration ... after control-channel semaphore/target-lock
+	// waits").
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	target, err := m.resolveKeysTarget(ctx, projectID, agentSlug, expectedAgentID)
+	if err != nil {
+		return err
+	}
+
+	// Final check immediately before Exec (contract §4.2's third
+	// enforcement point, "immediately before runtime execution"). Checked
+	// here rather than relying on Exec's own ctx handling, so an expiry
+	// detected at this instant is reported as "proven not to have executed"
+	// (bare ctx.Err()) rather than folded into whatever error Exec itself
+	// would produce if it observed the same cancellation mid-call.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	sendCtx := runtime.WithSensitiveExec(ctx)
+	cmd := []string{"tmux", "send-keys", "-t", keysTarget, "--", keys}
+	if _, err := m.Runtime.Exec(sendCtx, target.ContainerID, cmd); err != nil {
+		return fmt.Errorf("failed to send keys to agent '%s': %w", target.Name, err)
+	}
+
+	return nil
+}
+
+// resolveKeysTarget resolves the single container SendKeys must act on and
+// proves, before returning it, that: (a) it is the one and only container
+// matching (projectID, agentSlug); (b) its "agent_id" label equals
+// expectedAgentID; and (c) it is running with a ready tmux session. Any
+// failure to prove one of these returns the matching agentkeys sentinel
+// (never a slug-only fallback), fully resolved before this function returns
+// — see SendKeys's doc comment for why no caller may split this resolution
+// across two separate steps.
+func (m *AgentManager) resolveKeysTarget(ctx context.Context, projectID, agentSlug, expectedAgentID string) (api.AgentInfo, error) {
+	filter := map[string]string{"scion.name": strings.ToLower(agentSlug)}
+	if projectID != "" {
+		filter["scion.project_id"] = projectID
+	}
+	agents, err := m.List(ctx, filter)
+	if err != nil {
+		return api.AgentInfo{}, fmt.Errorf("agentkeys: listing agents for %q: %w", agentSlug, err)
+	}
+
+	var matches []api.AgentInfo
+	for _, a := range agents {
+		if matchesAgentID(a, agentSlug) {
+			matches = append(matches, a)
+		}
+	}
+	matches = dedupeByContainerID(matches)
+
+	if len(matches) != 1 {
+		// Zero matches, or more than one distinct container matching the
+		// same (slug, project) scope: fail closed rather than guess which
+		// one to bind to (mirrors selectAgentTarget's ambiguity handling for
+		// Stop/Delete). This also covers "wrong project": when projectID is
+		// set, the filter above already excludes containers labeled for a
+		// different project, so a same-slug agent in another project never
+		// appears in agents at all.
+		return api.AgentInfo{}, agentkeys.ErrTargetNotFound
+	}
+
+	target := matches[0]
+	gotID := target.Labels["agent_id"]
+	if gotID == "" || gotID != expectedAgentID {
+		// Fail closed on a missing/empty label (a container started outside
+		// the Hub's own dispatch path, or before SCION_AGENT_ID injection
+		// existed) or a mismatch (a same-slug agent recreated inside the
+		// execute-before window) — never a slug-only match. See
+		// agentkeys.BrokerRequest.AgentID's doc comment.
+		return api.AgentInfo{}, agentkeys.ErrTargetNotFound
+	}
+
+	if target.Phase != string(state.PhaseRunning) {
+		return api.AgentInfo{}, agentkeys.ErrAgentNotRunning
+	}
+
+	// Terminal readiness probe: a running container may not yet (or no
+	// longer) have a live "scion" tmux session — e.g. between container
+	// start and harness tmux initialization, or a session that exited. This
+	// proves readiness before send-keys runs, rather than after the fact:
+	// send-keys itself would fail the same way, but as a plain, ambiguous
+	// error rather than the proven-before-execution ErrTerminalNotReady the
+	// contract requires.
+	probeCtx := runtime.WithSensitiveExec(ctx)
+	if _, err := m.Runtime.Exec(probeCtx, target.ContainerID, []string{"tmux", "has-session", "-t", keysTarget}); err != nil {
+		return api.AgentInfo{}, agentkeys.ErrTerminalNotReady
+	}
+
+	return target, nil
+}
+
 // deliveryStepKind identifies how deliverImmediate must run a deliveryStep,
 // replacing dispatch on a step's argv contents (e.g. cmd[1] == "load-buffer")
 // with an explicit tag set once when the step is built.
@@ -452,6 +704,20 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	if agent == nil {
 		return fmt.Errorf("agent '%s' not found or not running", agentID)
 	}
+
+	// Serialize against a concurrent SendKeys call (or another concurrent
+	// deliverImmediate call — an interrupt racing a buffered flush) for the
+	// same target, so their tmux byte sequences cannot interleave. See
+	// injectionLock's doc comment. This uses ctx as given: interrupt
+	// messages carry the caller's own ctx, while buffered flushes call in
+	// with context.Background() (NewManager's deliverFunc), which never
+	// times out here — flush's own bounded retry loop is what keeps that
+	// case from blocking forever on a truly stuck lock.
+	lock := m.injectionLock(agentID, projectID)
+	if err := lock.Lock(ctx); err != nil {
+		return fmt.Errorf("failed to acquire injection lock for agent '%s': %w", agent.Name, err)
+	}
+	defer lock.Unlock()
 
 	// 2. Resolve harness — probe both layouts (worktree vs shared-workspace
 	// per .design/hub-shared-workspace-isolation.md) since the mode isn't
