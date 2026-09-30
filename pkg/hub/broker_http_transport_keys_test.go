@@ -1,0 +1,333 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
+)
+
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_Dispatched proves the HTTP
+// transport hits the frozen route/query/body shape (.design/
+// agent-keys-contract.md §4.1) and that a normal 200 dispatch round-trips.
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_Dispatched(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	var gotBody agentkeys.BrokerRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("failed to decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(agentkeys.BrokerResult{
+			OperationID: gotBody.OperationID,
+			Outcome:     agentkeys.OutcomeDispatched,
+		})
+	}))
+	defer server.Close()
+
+	client := NewHTTPRuntimeBrokerClient()
+	deadline := time.Now().Add(30 * time.Second)
+	req := agentkeys.BrokerRequest{
+		ProjectID:     tid("project-1"),
+		AgentID:       tid("agent-1"),
+		OperationID:   "op-123",
+		ExecuteBefore: deadline,
+		Keys:          "C-c",
+	}
+
+	result, err := client.ExecuteKeys(context.Background(), tid("broker-1"), server.URL, "test-agent", req)
+	if err != nil {
+		t.Fatalf("ExecuteKeys failed: %v", err)
+	}
+	if result.Outcome != agentkeys.OutcomeDispatched {
+		t.Fatalf("expected dispatched outcome, got %q", result.Outcome)
+	}
+
+	if gotMethod != agentkeys.BrokerRouteMethod {
+		t.Errorf("method = %s, want %s", gotMethod, agentkeys.BrokerRouteMethod)
+	}
+	if gotPath != "/api/v1/agents/test-agent/keys" {
+		t.Errorf("path = %s, want /api/v1/agents/test-agent/keys", gotPath)
+	}
+	q, _ := url.ParseQuery(gotQuery)
+	if got := q.Get(agentkeys.BrokerProjectIDQueryParam); got != req.ProjectID {
+		t.Errorf("query %s = %s, want %s", agentkeys.BrokerProjectIDQueryParam, got, req.ProjectID)
+	}
+	if gotBody.AgentID != req.AgentID {
+		t.Errorf("body.AgentID = %s, want %s", gotBody.AgentID, req.AgentID)
+	}
+	if gotBody.ProjectID != req.ProjectID {
+		t.Errorf("body.ProjectID = %s, want %s", gotBody.ProjectID, req.ProjectID)
+	}
+	if gotBody.Keys != "C-c" {
+		t.Errorf("body.Keys = %q, want %q", gotBody.Keys, "C-c")
+	}
+	if !gotBody.ExecuteBefore.Equal(deadline) {
+		t.Errorf("body.ExecuteBefore = %v, want %v", gotBody.ExecuteBefore, deadline)
+	}
+	if gotBody.ExecuteBefore.Location() != time.UTC {
+		t.Errorf("body.ExecuteBefore must be marshaled in UTC, got location %v", gotBody.ExecuteBefore.Location())
+	}
+}
+
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_OldBrokerIsUnsupported pins the one
+// specified 404 exception in .design/agent-keys-contract.md §4.3: an old
+// broker's generic unrecognized-action handler answers 404 with no top-level
+// "outcome" field, which must classify as keys_unsupported, not unknown.
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_OldBrokerIsUnsupported(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Action not found"}}`))
+	}))
+	defer server.Close()
+
+	client := NewHTTPRuntimeBrokerClient()
+	_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), server.URL, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var boe *agentkeys.BrokerOutcomeError
+	if !errors.As(err, &boe) {
+		t.Fatalf("expected a *BrokerOutcomeError, got %v", err)
+	}
+	if boe.Outcome != agentkeys.OutcomeKeysUnsupported {
+		t.Fatalf("outcome = %q, want %q", boe.Outcome, agentkeys.OutcomeKeysUnsupported)
+	}
+	if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysUnsupported {
+		t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysUnsupported)
+	}
+}
+
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_BrokerDecision pins the broker's own
+// well-formed allow-listed decisions (agent not running, terminal not ready)
+// round-tripping through ExecuteKeys.
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_BrokerDecision(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		outcome agentkeys.Outcome
+	}{
+		{"agent not running", http.StatusConflict, agentkeys.OutcomeAgentNotRunning},
+		{"terminal not ready", http.StatusConflict, agentkeys.OutcomeTerminalNotReady},
+		{"keys unsupported (managed backend)", http.StatusUnprocessableEntity, agentkeys.OutcomeKeysUnsupported},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(agentkeys.BrokerResult{OperationID: "op-1", Outcome: tc.outcome})
+			}))
+			defer server.Close()
+
+			client := NewHTTPRuntimeBrokerClient()
+			_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), server.URL, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+			var boe *agentkeys.BrokerOutcomeError
+			if !errors.As(err, &boe) {
+				t.Fatalf("expected a *BrokerOutcomeError, got %v", err)
+			}
+			if boe.Outcome != tc.outcome {
+				t.Fatalf("outcome = %q, want %q", boe.Outcome, tc.outcome)
+			}
+		})
+	}
+}
+
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_UnknownOutcomes proves malformed or
+// disagreeing responses classify as outcome_unknown rather than being
+// guessed at — never a false "definitely didn't happen" or "delivered".
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_UnknownOutcomes(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"2xx with wrong outcome", http.StatusOK, `{"operation_id":"op-1","outcome":"agent_not_running"}`},
+		{"status/outcome mismatch", http.StatusNotFound, `{"operation_id":"op-1","outcome":"agent_not_running"}`},
+		{"generic 5xx", http.StatusBadGateway, `{"error":{"code":"internal","message":"boom"}}`},
+		{"unparseable 200", http.StatusOK, "not json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			client := NewHTTPRuntimeBrokerClient()
+			_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), server.URL, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysOutcomeUnknown {
+				t.Fatalf("ClassifyDispatchError = %q, want %q (err=%v)", got, agentkeys.OutcomeKeysOutcomeUnknown, err)
+			}
+		})
+	}
+}
+
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_ConnectionRefused proves a dial
+// failure — provably no bytes ever reached the broker — classifies as
+// agentkeys.ErrNotDispatched / OutcomeKeysUnavailable, and that exactly one
+// attempt is made (no retry).
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_ConnectionRefused(t *testing.T) {
+	// Bind and immediately close a listener to obtain an address nothing is
+	// listening on, guaranteeing a dial failure rather than a flaky "might
+	// still be free" port guess.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to allocate a test port: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("failed to close listener: %v", err)
+	}
+
+	client := NewHTTPRuntimeBrokerClient()
+	_, err = client.ExecuteKeys(context.Background(), tid("broker-1"), "http://"+addr, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, agentkeys.ErrNotDispatched) {
+		t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+	}
+	if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysUnavailable {
+		t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysUnavailable)
+	}
+}
+
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_ResponseLoss simulates a broker
+// that accepts the connection, reads the request, then closes the connection
+// without writing any response — "sent, response lost". This must NOT
+// classify as ErrNotDispatched (the request was provably transmitted), and
+// exactly one connection must be accepted (no reconnect/retry).
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_ResponseLoss(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	var acceptCount int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			atomic.AddInt32(&acceptCount, 1)
+			// Read (part of) the request, then close without responding.
+			reader := bufio.NewReader(conn)
+			_, _ = reader.ReadString('\n')
+			_ = conn.Close()
+		}
+	}()
+
+	client := NewHTTPRuntimeBrokerClient()
+	_, err = client.ExecuteKeys(context.Background(), tid("broker-1"), "http://"+ln.Addr().String(), "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+	if err == nil {
+		t.Fatal("expected an error (response lost)")
+	}
+	if errors.Is(err, agentkeys.ErrNotDispatched) {
+		t.Fatalf("response loss after the request was sent must not be reported as ErrNotDispatched, got %v", err)
+	}
+	if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysOutcomeUnknown {
+		t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysOutcomeUnknown)
+	}
+
+	_ = ln.Close()
+	<-done
+
+	if got := atomic.LoadInt32(&acceptCount); got != 1 {
+		t.Fatalf("expected exactly one connection attempt (no retry), got %d", got)
+	}
+}
+
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_NoRedirectReplay proves a keys
+// dispatch never follows an HTTP redirect: a 3xx response is treated as the
+// final (malformed) response, not a cue to resend the request body to the
+// Location URL. Both endpoints are spied on so a regression that starts
+// following redirects is caught even if it would have "succeeded".
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_NoRedirectReplay(t *testing.T) {
+	var targetCalls int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&targetCalls, 1)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(agentkeys.BrokerResult{OperationID: "op-1", Outcome: agentkeys.OutcomeDispatched})
+	}))
+	defer target.Close()
+
+	var redirectCalls int32
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&redirectCalls, 1)
+		http.Redirect(w, r, target.URL+r.URL.Path+"?"+r.URL.RawQuery, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	client := NewHTTPRuntimeBrokerClient()
+	_, err := client.ExecuteKeys(context.Background(), tid("broker-1"), redirector.URL, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+	if err == nil {
+		t.Fatal("expected an error: a bare 3xx is not a valid BrokerResult")
+	}
+	if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysOutcomeUnknown {
+		t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysOutcomeUnknown)
+	}
+	if got := atomic.LoadInt32(&redirectCalls); got != 1 {
+		t.Fatalf("expected exactly one call to the redirector, got %d", got)
+	}
+	if got := atomic.LoadInt32(&targetCalls); got != 0 {
+		t.Fatalf("expected the redirect target to never be called (no replay), got %d calls", got)
+	}
+}
+
+// TestAuthenticatedBrokerClient_ExecuteKeys_Signs proves the authenticated
+// wrapper signs the outgoing keys request the same way it signs every other
+// broker call, reusing the mockBrokerSigner spy defined in
+// controlchannel_client_test.go.
+func TestAuthenticatedBrokerClient_ExecuteKeys_Signs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(agentkeys.BrokerResult{OperationID: "op-1", Outcome: agentkeys.OutcomeDispatched})
+	}))
+	defer server.Close()
+
+	signer := &mockBrokerSigner{}
+	client := &AuthenticatedBrokerClient{transport: newBrokerHTTPTransport(false, signer)}
+	_, err := client.ExecuteKeys(context.Background(), "broker-1", server.URL, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("ExecuteKeys failed: %v", err)
+	}
+	if !signer.called {
+		t.Fatal("expected the signer to be invoked for a keys dispatch")
+	}
+}

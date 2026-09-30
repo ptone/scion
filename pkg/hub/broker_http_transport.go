@@ -18,14 +18,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -64,15 +67,30 @@ func (s *hmacBrokerSigner) Sign(ctx context.Context, req *http.Request, brokerID
 // Optional signing is injected through brokerRequestSigner.
 type brokerHTTPTransport struct {
 	client *http.Client
-	debug  bool
-	signer brokerRequestSigner
+	// keysClient is a redirect-refusing variant of client, sharing the same
+	// connection pool. Keys dispatch must never follow an HTTP redirect
+	// replay (.design/agent-keys-contract.md §4.3, agentkeys.
+	// ClassifyDispatchError's "no automatic replay" rule): a 3xx response is
+	// treated as the final response, not a cue to resend the request body to
+	// a different URL.
+	keysClient *http.Client
+	debug      bool
+	signer     brokerRequestSigner
 }
 
 func newBrokerHTTPTransport(debug bool, signer brokerRequestSigner) *brokerHTTPTransport {
+	transport := otelhttp.NewTransport(http.DefaultTransport)
 	return &brokerHTTPTransport{
 		client: &http.Client{
-			Transport: otelhttp.NewTransport(http.DefaultTransport),
+			Transport: transport,
 			Timeout:   120 * time.Second,
+		},
+		keysClient: &http.Client{
+			Transport: transport,
+			Timeout:   120 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		debug:  debug,
 		signer: signer,
@@ -367,6 +385,79 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 		return brokerHTTPError(resp)
 	}
 	return nil
+}
+
+// ExecuteKeys dispatches a typed keys request to a runtime broker's dedicated
+// keys route directly over HTTP. It is single-attempt (no retry, no redirect
+// following via keysClient) and returns agentkeys.ErrNotDispatched only for
+// failures proven to have occurred before any bytes reached the broker; see
+// classifyKeysSendError.
+func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
+	if brokerEndpoint == "" || !strings.Contains(brokerEndpoint, "://") {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: runtime broker %q has no HTTP endpoint configured (control channel may be required)", agentkeys.ErrNotDispatched, brokerID)
+	}
+
+	// The broker compares ExecuteBefore against its own UTC clock; a caller
+	// that marshaled a non-UTC time.Time would encode its local zone offset
+	// instead, per BrokerRequest.ExecuteBefore's doc comment.
+	req.ExecuteBefore = req.ExecuteBefore.UTC()
+	body, err := json.Marshal(req)
+	if err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("failed to marshal keys request: %w", err)
+	}
+
+	path := strings.ReplaceAll(agentkeys.BrokerRoutePath, "{id}", url.PathEscape(agentSlug))
+	endpoint := fmt.Sprintf("%s%s?%s=%s", strings.TrimSuffix(brokerEndpoint, "/"), path,
+		agentkeys.BrokerProjectIDQueryParam, url.QueryEscape(req.ProjectID))
+
+	httpReq, err := http.NewRequestWithContext(ctx, agentkeys.BrokerRouteMethod, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if t.signer != nil {
+		if err := t.signer.Sign(ctx, httpReq, brokerID); err != nil {
+			if t.debug {
+				slog.Warn("Failed to sign keys request", "brokerID", brokerID, "error", err)
+			}
+			return agentkeys.BrokerResult{}, fmt.Errorf("failed to sign request: %w", err)
+		}
+	}
+
+	if t.debug {
+		slog.Debug("Outgoing keys request to broker", "method", agentkeys.BrokerRouteMethod, "endpoint", endpoint)
+	}
+
+	resp, err := t.keysClient.Do(httpReq)
+	if err != nil {
+		return agentkeys.BrokerResult{}, classifyKeysSendError(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("keys: failed to read broker response: %w", err)
+	}
+	return decodeBrokerKeysResponse(resp.StatusCode, respBody)
+}
+
+// classifyKeysSendError turns a transport-level send failure into
+// agentkeys.ErrNotDispatched only when the failure provably occurred before
+// any bytes reached the broker — a dial failure, where no connection was ever
+// established. Any other transport error (a timeout waiting for a response, a
+// connection reset while reading one, a TLS failure after the handshake
+// completed) does not prove the broker never received or began acting on the
+// request, so it must not be reported as a definite non-dispatch: it is
+// returned as a plain, unclassified error instead, which
+// agentkeys.ClassifyDispatchError maps to OutcomeKeysOutcomeUnknown — the
+// honest "may have run" outcome required by
+// .design/agent-keys-contract.md §2.5/§4.3.
+func classifyKeysSendError(err error) error {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return fmt.Errorf("%w: %v", agentkeys.ErrNotDispatched, err)
+	}
+	return fmt.Errorf("keys: uncertain dispatch outcome: %w", err)
 }
 
 func (t *brokerHTTPTransport) CheckAgentPrompt(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) (bool, error) {

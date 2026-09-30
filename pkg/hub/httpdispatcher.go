@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -91,6 +92,13 @@ func (c *HTTPRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, bro
 
 func (c *HTTPRuntimeBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	return c.transport.MessageAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, message, interrupt, structuredMsg)
+}
+
+// ExecuteKeys dispatches a typed keys request to a runtime broker's dedicated
+// keys route directly over HTTP (no HMAC signing). It implements
+// agentkeys.BrokerClient.
+func (c *HTTPRuntimeBrokerClient) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
+	return c.transport.ExecuteKeys(ctx, brokerID, brokerEndpoint, agentSlug, req)
 }
 
 // HasPromptResponse is the response from the has-prompt action.
@@ -2734,6 +2742,42 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 	}
 
 	return d.client.MessageAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, message, interrupt, structuredMsg)
+}
+
+// DispatchAgentKeys implements agentkeys.Dispatcher: it looks up the target
+// broker's endpoint (the same store lookup DispatchAgentMessage already
+// performs via getBrokerEndpoint — the only store access this method
+// performs), builds the internal agentkeys.BrokerRequest from target plus
+// this call's own operationID/executeBefore/keys arguments, and hands it to
+// the configured broker client's agentkeys.BrokerClient implementation. It
+// does not re-resolve or re-authorize target: the caller (task 2.2's
+// ExecuteAgentKeys) passes the already-resolved, already-authorized facts it
+// gathered, per .design/agent-keys-contract.md §4.4.
+//
+// If the configured client does not implement agentkeys.BrokerClient (a
+// wiring defect, not a runtime condition — every production client this task
+// ships does), or the broker endpoint lookup itself fails, this is reported
+// as agentkeys.ErrNotDispatched: both failures are proven, Hub-side, before
+// any request could have reached a broker.
+func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agentkeys.Target, operationID string, executeBefore time.Time, keys string) (agentkeys.BrokerResult, error) {
+	keysClient, ok := d.client.(agentkeys.BrokerClient)
+	if !ok {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: configured broker client does not support keys dispatch", agentkeys.ErrNotDispatched)
+	}
+
+	endpoint, err := d.getBrokerEndpoint(ctx, target.RuntimeBrokerID)
+	if err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %v", agentkeys.ErrNotDispatched, err)
+	}
+
+	req := agentkeys.BrokerRequest{
+		ProjectID:     target.ProjectID,
+		AgentID:       target.AgentID,
+		OperationID:   operationID,
+		ExecuteBefore: executeBefore.UTC(),
+		Keys:          keys,
+	}
+	return keysClient.ExecuteKeys(ctx, target.RuntimeBrokerID, endpoint, target.AgentSlug, req)
 }
 
 // DispatchAgentLogs retrieves agent.log content from the runtime broker.

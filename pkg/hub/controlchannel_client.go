@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -295,6 +296,48 @@ func (c *ControlChannelBrokerClient) MessageAgent(ctx context.Context, brokerID,
 
 	_, err = c.doRequest(ctx, brokerID, "POST", path, query, body)
 	return err
+}
+
+// ExecuteKeys dispatches a typed keys request to a runtime broker's dedicated
+// keys route via the control channel. It implements agentkeys.BrokerClient
+// and is single-attempt: no reconnect resend on a mid-flight failure.
+//
+// Two pre-send checks — the connection check and the tunnel body-size limit
+// — are proven before anything is transmitted, so their failure is reported
+// as agentkeys.ErrNotDispatched (there is no HTTP fallback or durable queue
+// for keys, unlike MessageAgent's ErrMessageDeferred). Any failure from the
+// tunnel round-trip itself (c.doRequestRaw) does not prove the broker never
+// received or began acting on the request, so it is returned as a plain,
+// unclassified error instead — agentkeys.ClassifyDispatchError maps that to
+// OutcomeKeysOutcomeUnknown, the honest "may have run" outcome required by
+// .design/agent-keys-contract.md §2.5/§4.3.
+func (c *ControlChannelBrokerClient) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
+	_ = brokerEndpoint
+	if !c.manager.IsConnected(brokerID) {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: broker %s not connected via control channel", agentkeys.ErrNotDispatched, brokerID)
+	}
+
+	req.ExecuteBefore = req.ExecuteBefore.UTC()
+	body, err := json.Marshal(req)
+	if err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("failed to marshal keys request: %w", err)
+	}
+
+	path := strings.ReplaceAll(agentkeys.BrokerRoutePath, "{id}", url.PathEscape(agentSlug))
+	query := agentkeys.BrokerProjectIDQueryParam + "=" + url.QueryEscape(req.ProjectID)
+
+	if err := checkBodySize(agentkeys.BrokerRouteMethod, path, body); err != nil {
+		// Too large to tunnel safely: a Hub-side, pre-send capability limit,
+		// not a broker decision, and keys has no HTTP-fallback path to retry
+		// through (unlike MessageAgent/HybridBrokerClient).
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %v", agentkeys.ErrNotDispatched, err)
+	}
+
+	resp, err := c.doRequestRaw(ctx, brokerID, agentkeys.BrokerRouteMethod, path, query, body)
+	if err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("keys: control channel dispatch failed: %w", err)
+	}
+	return decodeBrokerKeysResponse(resp.StatusCode, resp.Body)
 }
 
 // CheckAgentPrompt checks if an agent has a non-empty prompt.md file via control channel.
@@ -750,6 +793,30 @@ func (c *HybridBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerE
 		return c.httpClient.MessageAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, message, interrupt, structuredMsg)
 	default:
 		return ErrMessageDeferred
+	}
+}
+
+// ExecuteKeys dispatches a typed keys request, using route() to decide the
+// delivery path. routeLocal tunnels through the control channel, routeHTTP
+// falls back to the broker's direct HTTP endpoint. Unlike every lifecycle and
+// message method above, routeForward and routeUndeliverable do not defer:
+// keys has no durable queue or cross-node forwarding to defer to
+// (.design/agent-keys-contract.md §4.1's "no immediate route" rule), so both
+// return agentkeys.ErrNotDispatched directly — never ErrLifecycleDeferred or
+// ErrMessageDeferred, which would imply a retry/durable-delivery path that
+// does not exist for keys.
+func (c *HybridBrokerClient) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
+	switch c.route(ctx, brokerID, brokerEndpoint) {
+	case routeLocal:
+		return c.controlChannel.ExecuteKeys(ctx, brokerID, brokerEndpoint, agentSlug, req)
+	case routeHTTP:
+		keysHTTP, ok := c.httpClient.(agentkeys.BrokerClient)
+		if !ok {
+			return agentkeys.BrokerResult{}, fmt.Errorf("keys: HTTP client does not support keys dispatch")
+		}
+		return keysHTTP.ExecuteKeys(ctx, brokerID, brokerEndpoint, agentSlug, req)
+	default:
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: no immediate route to broker %s (routeForward/undeliverable)", agentkeys.ErrNotDispatched, brokerID)
 	}
 }
 
