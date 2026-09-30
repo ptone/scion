@@ -239,19 +239,23 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentDel, Slug: "li-agent-del", Name: "LI Agent Del", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
 	require.NoError(t, s.UpdateAgentExposedPorts(ctx, f.agent, []store.ExposedPort{{Port: 18080, Host: "127.0.0.1", Label: "li", Mode: "rw", ExposedAt: now, ExposedBy: "agent"}}))
 
-	// agent.lifecycle.control (B.2) dispatches start/stop/suspend/restart
-	// through handleAgentLifecycle, which persists a real phase change to the
-	// store (checkBrokerAvailability lets an agent with no RuntimeBrokerID
+	// agent.lifecycle.control dispatches start/stop/suspend/restart through
+	// handleAgentLifecycle, which persists a real phase change to the store
+	// (checkBrokerAvailability lets an agent with no RuntimeBrokerID
 	// through, and GetDispatcher() is nil in testServer, so start/stop/
-	// restart never reach a broker and always 200; suspend additionally
-	// requires phase=running, so whichever of the four runs after a prior
-	// stop in this shared fixture's sequence safely 400s instead). A
-	// dedicated fixture, not f.agent, keeps that phase churn off the agent
-	// every other family's checks (e.g. agent.portaccess's proxy entries)
-	// still depend on.
+	// restart never reach a broker). A dedicated fixture, not f.agent, keeps
+	// that phase churn (and stop's port clearing) off the agent every other
+	// family's checks (e.g. agent.portaccess's proxy entries) still depend
+	// on.
+	//
+	// Expected per-form sequence (start, stop, suspend, restart, in catalog
+	// declaration order): start/stop/restart each 200. suspend runs third,
+	// after stop already set phase=stopped, so its own phase=running guard
+	// 400s before it would reach suspendAgent — still a real, non-404/405
+	// result read from the seeded row, not a placeholder artifact.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentLifecycle, Slug: "li-agent-lifecycle", Name: "LI Agent Lifecycle", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
 
-	// agent.lifecycle.restore (B.2) requires the target to already be
+	// agent.lifecycle.restore requires the target to already be
 	// soft-deleted (restoreAgent 400s "Agent is not in deleted state"
 	// otherwise); seeded pre-deleted here so the positive check exercises a
 	// genuine restore (200) rather than that guard. Two separate instances,
@@ -261,7 +265,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentRestore, Slug: "li-agent-restore", Name: "LI Agent Restore", ProjectID: f.project, Phase: string(state.PhaseStopped), DeletedAt: now.Add(-time.Hour)}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentRestoreProject, Slug: "li-agent-restore-project", Name: "LI Agent Restore Project", ProjectID: f.project, Phase: string(state.PhaseStopped), DeletedAt: now.Add(-time.Hour)}))
 
-	// agent.lifecycle.env (B.2) 409s unless the agent is phase=provisioning
+	// agent.lifecycle.env 409s unless the agent is phase=provisioning
 	// or phase=created (submitAgentEnv); shared by both path forms since
 	// GetDispatcher() is nil in testServer, so submitAgentEnv always 400s
 	// "no runtime broker available" before persisting anything, for either
@@ -486,7 +490,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/set_message_mode":                      {"id": f.agent},
 		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode": {"projectId": f.project, "id": f.agent},
 
-		// --- agent lifecycle family (B.2) ---
+		// --- agent lifecycle family ---
 		"/api/v1/agents/{id}/start":                            {"id": f.agentLifecycle},
 		"/api/v1/agents/{id}/stop":                             {"id": f.agentLifecycle},
 		"/api/v1/agents/{id}/suspend":                          {"id": f.agentLifecycle},
