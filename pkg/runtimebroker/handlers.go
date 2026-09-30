@@ -2352,16 +2352,16 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 		outcome = agentkeys.OutcomeKeysUnsupported
 	case errors.Is(err, agent.ErrKeysNotStarted):
 		// SendKeys wraps agent.ErrKeysNotStarted (by identity, via %w) only
-		// at its own pre-Exec checkpoints — the lock wait, the post-lock
-		// recheck, a readiness-probe failure that coincides with ctx
-		// expiry, and the pre-send recheck — proven not to have started.
-		// Matching by this sentinel's identity, rather than by
-		// errors.Is(err, context.DeadlineExceeded/Canceled), is required:
-		// the delivery-call failure path below deliberately does not wrap
-		// its underlying error with %w, so a backend error that happens to
-		// wrap a context error *after* that Exec call began (e.g. a stream
-		// cancelled mid-call) can never match this case by accident and be
-		// misreported as "definitely did not start."
+		// at its own pre-delivery checkpoints — the lock wait, the post-lock
+		// recheck, the tmux version gate, a readiness-probe failure that
+		// coincides with ctx expiry, and the pre-delivery recheck — proven
+		// not to have started. Matching by this sentinel's identity, rather
+		// than by errors.Is(err, context.DeadlineExceeded/Canceled), is
+		// required: the delivery-call failure path below deliberately does
+		// not wrap its underlying error with %w, so a backend error that
+		// happens to wrap a context error *after* the delivery call began
+		// (e.g. a stream cancelled mid-call) can never match this case by
+		// accident and be misreported as "definitely did not start."
 		outcome = agentkeys.OutcomeKeysUnavailable
 	default:
 		// An unclassified failure — including one where the tmux call may

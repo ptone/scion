@@ -1021,11 +1021,14 @@ func TestTmuxVersionAtLeast(t *testing.T) {
 		wantMajor, wantMinor int
 		want                 bool
 	}{
-		{3, 1, 3, 1, true},  // exactly the floor
-		{3, 3, 3, 1, true},  // newer minor, same major
-		{4, 0, 3, 1, true},  // newer major, older minor number
-		{3, 0, 3, 1, false}, // older minor, same major
-		{2, 9, 3, 1, false}, // older major
+		// Exercised against the production constants directly (review round
+		// 5, finding #1's "optionally" bullet), not just arbitrary literals,
+		// so a change to the floor itself is reflected here automatically.
+		{minTmuxMajor, minTmuxMinor, minTmuxMajor, minTmuxMinor, true},          // exactly the floor
+		{minTmuxMajor, minTmuxMinor + 2, minTmuxMajor, minTmuxMinor, true},      // newer minor, same major
+		{minTmuxMajor + 1, 0, minTmuxMajor, minTmuxMinor, true},                 // newer major, older minor number
+		{minTmuxMajor, minTmuxMinor - 1, minTmuxMajor, minTmuxMinor, false},     // older minor, same major
+		{minTmuxMajor - 1, minTmuxMinor + 8, minTmuxMajor, minTmuxMinor, false}, // older major
 	}
 	for _, tc := range cases {
 		got := tmuxVersionAtLeast(tc.major, tc.minor, tc.wantMajor, tc.wantMinor)
@@ -1035,22 +1038,93 @@ func TestTmuxVersionAtLeast(t *testing.T) {
 	}
 }
 
-// TestSendKeys_TmuxBelowVersionFloorIsUnsupported covers review round 4
-// finding #1: a resolved container whose tmux -V reports a version below
-// the delivery mechanism's floor (tmux 3.1, see minTmuxMajor/minTmuxMinor)
-// must fail with ErrKeysUnsupported, and neither the readiness probe nor the
-// delivery call may ever run — the version gate gets there first.
-func TestSendKeys_TmuxBelowVersionFloorIsUnsupported(t *testing.T) {
+// TestSendKeys_TmuxVersionGate is the table-driven pin for the version
+// gate's exact floor (review round 5, finding #1 — round 4's version was a
+// single below-floor case that did not pin the floor itself: a mutation
+// lowering minTmuxMinor to 0 survived because tmux 3.0a was never tried).
+// tmux 3.0a is the release that has octal escapes (added in 3.0) but cannot
+// read "source-file -" from stdin (added in 3.1) — exactly the version the
+// gate exists to catch — so it gets its own case rather than relying on
+// 2.9a alone. A version at or above the floor must let the readiness probe
+// and delivery run; a version below it must never reach either.
+func TestSendKeys_TmuxVersionGate(t *testing.T) {
+	cases := []struct {
+		name          string
+		versionOutput string
+		wantSupported bool
+	}{
+		{"2.9a_below_floor", "tmux 2.9a\n", false},
+		{"3.0a_below_floor_has_octal_escapes_only", "tmux 3.0a\n", false},
+		{"3.1_at_floor", "tmux 3.1\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := runningAgent()
+			var capturedCmd []string
+
+			mock := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{agent}, nil
+				},
+				ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+					capturedCmd = append(capturedCmd, strings.Join(cmd, " "))
+					if len(cmd) >= 2 && cmd[1] == "-V" {
+						return tc.versionOutput, nil
+					}
+					return "", nil
+				},
+			}
+			mgr := &AgentManager{Runtime: mock}
+
+			err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+			if !tc.wantSupported {
+				if !errors.Is(err, ErrKeysUnsupported) {
+					t.Fatalf("SendKeys error = %v, want ErrKeysUnsupported for %q", err, tc.versionOutput)
+				}
+				for _, c := range capturedCmd {
+					if strings.Contains(c, "has-session") || strings.Contains(c, "source-file") {
+						t.Fatalf("neither the readiness probe nor delivery must run below the tmux version floor, got: %v", capturedCmd)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SendKeys failed for a supported tmux version %q: %v", tc.versionOutput, err)
+			}
+			var sawProbe, sawDelivery bool
+			for _, c := range capturedCmd {
+				if strings.Contains(c, "has-session") {
+					sawProbe = true
+				}
+				if c == "tmux source-file -" {
+					sawDelivery = true
+				}
+			}
+			if !sawProbe || !sawDelivery {
+				t.Fatalf("expected the readiness probe and delivery to run for a supported tmux version, got: %v", capturedCmd)
+			}
+		})
+	}
+}
+
+// TestSendKeys_TmuxVersionGate_BelowFloorNeverCached covers review round 5
+// finding #1's second surviving mutation: moving the cache Store above the
+// floor comparison would let a below-floor result be cached as supported,
+// so a second call on the same container would skip the gate entirely and
+// reach delivery instead of failing closed again. Two SendKeys calls on the
+// same below-floor container must both return ErrKeysUnsupported, and
+// "tmux -V" must be queried on both.
+func TestSendKeys_TmuxVersionGate_BelowFloorNeverCached(t *testing.T) {
 	agent := runningAgent()
-	var capturedCmd []string
+	var versionQueries int
 
 	mock := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{agent}, nil
 		},
 		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
-			capturedCmd = append(capturedCmd, strings.Join(cmd, " "))
 			if len(cmd) >= 2 && cmd[1] == "-V" {
+				versionQueries++
 				return "tmux 2.9a\n", nil
 			}
 			return "", nil
@@ -1058,14 +1132,51 @@ func TestSendKeys_TmuxBelowVersionFloorIsUnsupported(t *testing.T) {
 	}
 	mgr := &AgentManager{Runtime: mock}
 
-	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
-	if !errors.Is(err, ErrKeysUnsupported) {
-		t.Fatalf("SendKeys error = %v, want ErrKeysUnsupported", err)
-	}
-	for _, c := range capturedCmd {
-		if strings.Contains(c, "has-session") || strings.Contains(c, "source-file") {
-			t.Fatalf("neither the readiness probe nor delivery must run below the tmux version floor, got: %v", capturedCmd)
+	for i := 0; i < 2; i++ {
+		err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+		if !errors.Is(err, ErrKeysUnsupported) {
+			t.Fatalf("SendKeys call %d error = %v, want ErrKeysUnsupported", i, err)
 		}
+	}
+	if versionQueries != 2 {
+		t.Fatalf("expected tmux -V to be queried on both calls (a below-floor result must never be cached), got %d queries", versionQueries)
+	}
+}
+
+// TestSendKeys_TmuxVersionGate_InconclusiveNeverCached covers review round 5
+// finding #1's third required case: a version check that cannot be
+// determined (here, the first "tmux -V" call fails) must not be cached
+// either way, so a later call for the same container queries again rather
+// than reusing the earlier, inconclusive result.
+func TestSendKeys_TmuxVersionGate_InconclusiveNeverCached(t *testing.T) {
+	agent := runningAgent()
+	versionQueries := 0
+	firstQueryErr := errors.New("exec: could not reach tmux")
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			if len(cmd) >= 2 && cmd[1] == "-V" {
+				versionQueries++
+				if versionQueries == 1 {
+					return "", firstQueryErr
+				}
+				return "tmux 3.3a\n", nil
+			}
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	for i := 0; i < 2; i++ {
+		if err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c"); err != nil {
+			t.Fatalf("SendKeys call %d failed: %v", i, err)
+		}
+	}
+	if versionQueries != 2 {
+		t.Fatalf("expected tmux -V to be queried on both calls (an inconclusive result must never be cached), got %d queries", versionQueries)
 	}
 }
 
@@ -1125,5 +1236,62 @@ func TestSendKeys_TmuxVersionCheckCachedPerContainer(t *testing.T) {
 	}
 	if versionQueries != 1 {
 		t.Fatalf("expected exactly 1 tmux -V query across 2 SendKeys calls for the same container, got %d", versionQueries)
+	}
+}
+
+// TestSendKeys_TmuxVersionCache_NotReusedAcrossRecreatedContainerName covers
+// review round 5, finding #2: ContainerID is not always a fresh identifier
+// per container instance — on at least one backend it is a stable, reusable
+// name (a Kubernetes pod name) that a later, differently-imaged container
+// recreated under that same name would otherwise inherit a cached
+// "supported" result from. The cache key pairs ContainerID with Image, so a
+// second container sharing a ContainerID but reporting a different Image
+// and a too-old tmux must still be gated, not waved through on the first
+// container's cached result.
+func TestSendKeys_TmuxVersionCache_NotReusedAcrossRecreatedContainerName(t *testing.T) {
+	const sharedContainerID = "pod-scion-test-agent"
+	first := runningAgent()
+	first.ContainerID = sharedContainerID
+	first.Image = "agent-image:v1"
+
+	var currentAgent api.AgentInfo = first
+	var versionOutput = "tmux 3.3a\n"
+	var capturedCmd []string
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{currentAgent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			capturedCmd = append(capturedCmd, strings.Join(cmd, " "))
+			if len(cmd) >= 2 && cmd[1] == "-V" {
+				return versionOutput, nil
+			}
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	if err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c"); err != nil {
+		t.Fatalf("first SendKeys call (supported tmux) failed: %v", err)
+	}
+
+	// A second, unrelated container recreated under the same ContainerID
+	// (matching the Kubernetes pod-name-as-ContainerID case), with a
+	// different image and a too-old tmux.
+	second := first
+	second.Image = "agent-image:v2"
+	currentAgent = second
+	versionOutput = "tmux 2.9a\n"
+	capturedCmd = nil
+
+	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, ErrKeysUnsupported) {
+		t.Fatalf("SendKeys error = %v, want ErrKeysUnsupported for the recreated container's too-old tmux (must not reuse the first container's cached result)", err)
+	}
+	for _, c := range capturedCmd {
+		if strings.Contains(c, "has-session") || strings.Contains(c, "source-file") {
+			t.Fatalf("neither the readiness probe nor delivery must run for the recreated, below-floor container, got: %v", capturedCmd)
+		}
 	}
 }

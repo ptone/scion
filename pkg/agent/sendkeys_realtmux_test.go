@@ -377,6 +377,15 @@ func TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous(t *testing.T) {
 	if _, err := runTmux("-f", "/dev/null", "new-session", "-d", "-s", "scion"); err != nil {
 		t.Fatalf("starting tmux server: %v", err)
 	}
+	// A second, unrelated session so the server stays alive once "scion" is
+	// killed below (review round 5, finding #4): without it, killing the
+	// only session also exits the server, and the delivery call would fail
+	// because no server is reachable at all, rather than because the
+	// target session is missing — a different failure than the one this
+	// test means to exercise.
+	if _, err := runTmux("-f", "/dev/null", "new-session", "-d", "-s", "other"); err != nil {
+		t.Fatalf("starting the unrelated keep-alive session: %v", err)
+	}
 
 	shim := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
@@ -396,11 +405,14 @@ func TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous(t *testing.T) {
 			return runTmux(cmd[1:]...)
 		},
 		ExecWithStdinFunc: func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
-			// Remove the target session between the successful probe and
-			// the actual delivery, so the real tmux binary's send-keys
-			// command (run inside "source-file -") genuinely fails against
-			// a target that no longer exists — a real, not simulated,
-			// delivery-time failure.
+			// Remove the target session (but not the server, which the
+			// unrelated "other" session above keeps alive) between the
+			// successful probe and the actual delivery, so the real tmux
+			// binary's send-keys command (run inside "source-file -")
+			// genuinely fails with "can't find session: scion" against a
+			// target that no longer exists — a real, not simulated,
+			// missing-target delivery-time failure, not merely "no server
+			// reachable."
 			if _, err := runTmux("kill-session", "-t", "scion"); err != nil {
 				t.Fatalf("killing session ahead of delivery: %v", err)
 			}
@@ -421,5 +433,13 @@ func TestRealTmuxSendKeys_DeliveryFailureAfterProbeIsAmbiguous(t *testing.T) {
 	}
 	if errors.Is(err, agentkeys.ErrTargetNotFound) || errors.Is(err, agentkeys.ErrAgentNotRunning) || errors.Is(err, agentkeys.ErrTerminalNotReady) || errors.Is(err, ErrKeysNotStarted) {
 		t.Fatalf("a real delivery-time failure must never be reported as one of the proven-before-execution sentinels, got: %v", err)
+	}
+	// Confirms this is genuinely the missing-target failure the correction
+	// names, not merely "no server reachable" (review round 5, finding #4):
+	// the "other" session above keeps the server alive after "scion" is
+	// killed, so tmux's own real error text for a missing session must
+	// survive into SendKeys's returned error.
+	if !strings.Contains(err.Error(), "can't find session") {
+		t.Fatalf("expected tmux's real missing-session error text to survive, got: %v", err)
 	}
 }

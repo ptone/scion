@@ -131,10 +131,12 @@ type AgentManager struct {
 	// acceptable trade against the complexity of reference-counted eviction.
 	injectionLocks sync.Map
 
-	// tmuxVersionOK caches, per resolved container ID, that
+	// tmuxVersionOK caches, per tmuxVersionCacheKey, that
 	// checkTmuxVersionSupported has already determined that container's tmux
 	// meets SendKeys's minimum version — see that method's doc comment for
-	// why only a positive, successfully-parsed result is ever cached.
+	// why only a positive, successfully-parsed result is ever cached, and
+	// tmuxVersionCacheKey's doc comment for why the key is not ContainerID
+	// alone.
 	tmuxVersionOK sync.Map
 }
 
@@ -535,12 +537,19 @@ func (im *injectionMutex) Unlock() {
 // Keyed by the resolved container ID rather than a caller-supplied
 // agentID/slug string: both SendKeys and deliverImmediate already resolve
 // exactly one container before injecting into it, so locking on that
-// resolved identity (stable and never reused across a container's
-// lifetime) makes the serialization guarantee independent of which spelling
-// a caller used to name the target — a bare slug, a container ID, or a
-// "/"-prefixed name all resolve to the same container and therefore the
-// same lock, where two different string spellings previously could have
-// raced with each other by accident.
+// resolved identity makes the serialization guarantee independent of which
+// spelling a caller used to name the target — a bare slug, a container ID,
+// or a "/"-prefixed name all resolve to the same container and therefore
+// the same lock, where two different string spellings previously could have
+// raced with each other by accident. This ID is stable for a given running
+// container, but on at least one backend it is a reusable name rather than
+// a fresh identifier per instance (a Kubernetes pod name,
+// pkg/runtime/k8s_runtime.go's AgentInfo.ContainerID assignment) — a later,
+// different container recreated under that same name shares this lock with
+// the one before it. That is harmless here (a mutex has no notion of which
+// container it belongs to, only whether it is held), unlike
+// checkTmuxVersionSupported's cache, which cannot use ContainerID alone for
+// exactly this reason — see tmuxVersionCacheKey's doc comment.
 //
 // Serialization guarantee, stated precisely because it is easy to overstate:
 // this lock only orders concurrent calls into this one AgentManager's
@@ -580,8 +589,12 @@ var runtimeNamesWithoutKeysSupport = map[string]bool{
 }
 
 // ErrKeysUnsupported means the manager's underlying runtime backend does not
-// support keys delivery. SendKeys checks this before any resolution or Exec
-// attempt. The runtimebroker's dedicated keys handler translates this into
+// support keys delivery — either because it is named in
+// runtimeNamesWithoutKeysSupport (checked before any resolution or Exec
+// attempt), or because the resolved target's tmux is below the version
+// floor checkTmuxVersionSupported enforces (checked after resolution, the
+// lock and one Exec call, but always before delivery began). The
+// runtimebroker's dedicated keys handler translates this into
 // OutcomeKeysUnsupported (422).
 var ErrKeysUnsupported = errors.New("agent: this backend does not support keys delivery")
 
@@ -687,10 +700,23 @@ func tmuxVersionAtLeast(major, minor, wantMajor, wantMinor int) bool {
 	return minor >= wantMinor
 }
 
-// checkTmuxVersionSupported queries the resolved container's tmux version
-// via "tmux -V" and reports whether it meets the delivery mechanism's
-// minimum (minTmuxMajor/minTmuxMinor), returning ErrKeysUnsupported when it
-// does not.
+// tmuxVersionCacheKey identifies one checkTmuxVersionSupported cache entry.
+// Pairing ContainerID with Image (rather than keying on ContainerID alone)
+// matters because ContainerID is not always a fresh identifier assigned per
+// container instance: on at least one backend it is a stable, reusable name
+// (a Kubernetes pod name, pkg/runtime/k8s_runtime.go's AgentInfo.ContainerID
+// assignment) that a later, differently-imaged container recreated under
+// that same name would otherwise inherit an earlier, unrelated container's
+// cached result from.
+type tmuxVersionCacheKey struct {
+	containerID string
+	image       string
+}
+
+// checkTmuxVersionSupported queries target's tmux version via "tmux -V" and
+// reports whether it meets the delivery mechanism's minimum
+// (minTmuxMajor/minTmuxMinor), returning ErrKeysUnsupported when it does
+// not.
 //
 // It fails closed only on a version it can actually parse and determine to
 // be below the floor. A query it cannot run, or output it cannot parse — a
@@ -699,14 +725,18 @@ func tmuxVersionAtLeast(major, minor, wantMajor, wantMinor int) bool {
 // as "cannot determine, do not block" rather than ErrKeysUnsupported: the
 // readiness probe and the delivery call that follow remain the backstop for
 // a genuinely incompatible or broken backend. A determined-supported result
-// is cached by container ID, since a running container's tmux binary does
-// not change during its lifetime; an inconclusive result is never cached, so
-// a transient Exec failure gets a fresh check on the next call.
-func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, containerID string) error {
-	if v, ok := m.tmuxVersionOK.Load(containerID); ok && v.(bool) {
+// is cached by tmuxVersionCacheKey (see its doc comment for why ContainerID
+// alone is not a safe key), since a given container instance's tmux binary
+// does not change during its own lifetime; anything else — an inconclusive
+// result, or a version proven below the floor — is never cached, so a
+// transient Exec failure, or a genuinely too-old container, gets a fresh
+// check on every call.
+func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, target api.AgentInfo) error {
+	key := tmuxVersionCacheKey{containerID: target.ContainerID, image: target.Image}
+	if v, ok := m.tmuxVersionOK.Load(key); ok && v.(bool) {
 		return nil
 	}
-	out, err := m.Runtime.Exec(runtime.WithSensitiveExec(ctx), containerID, []string{"tmux", "-V"})
+	out, err := m.Runtime.Exec(runtime.WithSensitiveExec(ctx), target.ContainerID, []string{"tmux", "-V"})
 	if err != nil {
 		return nil
 	}
@@ -717,7 +747,7 @@ func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, containerI
 	if !tmuxVersionAtLeast(major, minor, minTmuxMajor, minTmuxMinor) {
 		return ErrKeysUnsupported
 	}
-	m.tmuxVersionOK.Store(containerID, true)
+	m.tmuxVersionOK.Store(key, true)
 	return nil
 }
 
@@ -758,11 +788,16 @@ func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, containerI
 // buffered flush or interrupt delivery. Lock acquisition respects ctx's
 // deadline: SendKeys returns an ErrKeysNotStarted-wrapped error (never one
 // of the other sentinels below) without executing anything if ctx is done
-// before the lock is acquired, and rechecks ctx immediately before both the
-// readiness probe and the delivery call — covering a deadline that expires
+// before the lock is acquired, and rechecks ctx again once the lock is held
+// — before the version check and readiness probe run — and a third time
+// immediately before the delivery call — covering a deadline that expires
 // while waiting for the lock (the "control-channel semaphore/target-lock
 // wait" the contract's execute-before enforcement names) — so a deadline
-// lost during that wait can never still result in execution afterward.
+// lost during that wait can never still result in execution afterward. A
+// readiness-probe failure that itself coincides with ctx expiry is still
+// reported as ErrKeysNotStarted (see the probe's own comment), even though
+// the recheck immediately preceding it is one step earlier than the probe
+// now, not directly before it.
 // Callers arrange for ctx's deadline to reflect the Hub-issued
 // execute-before timestamp (agentkeys.CapExecuteBefore) before calling
 // SendKeys.
@@ -823,7 +858,7 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	// which — being a genuine delivery attempt — cannot be reported as
 	// anything but ambiguous. Checking first lets a provably-too-old tmux
 	// fail closed as ErrKeysUnsupported instead.
-	if err := m.checkTmuxVersionSupported(ctx, target.ContainerID); err != nil {
+	if err := m.checkTmuxVersionSupported(ctx, target); err != nil {
 		return err
 	}
 
