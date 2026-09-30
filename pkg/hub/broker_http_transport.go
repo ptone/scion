@@ -403,7 +403,8 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 	req.ExecuteBefore = req.ExecuteBefore.UTC()
 	body, err := json.Marshal(req)
 	if err != nil {
-		return agentkeys.BrokerResult{}, fmt.Errorf("failed to marshal keys request: %w", err)
+		// Proven before anything was sent: no request was ever constructed.
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to marshal keys request: %v", agentkeys.ErrNotDispatched, err)
 	}
 
 	path := strings.ReplaceAll(agentkeys.BrokerRoutePath, "{id}", url.PathEscape(agentSlug))
@@ -412,15 +413,31 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 
 	httpReq, err := http.NewRequestWithContext(ctx, agentkeys.BrokerRouteMethod, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return agentkeys.BrokerResult{}, fmt.Errorf("failed to create request: %w", err)
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to create request: %v", agentkeys.ErrNotDispatched, err)
 	}
+	// http.NewRequestWithContext populates GetBody for a []byte-backed
+	// reader so the net/http machinery can re-read the body for a transparent
+	// resend. Over HTTP/2, http2shouldRetryRequest resends the request on a
+	// new stream after a RST_STREAM(PROTOCOL_ERROR) whenever GetBody != nil
+	// (golang/go#47635) — a replay the broker may already have started
+	// executing, underneath this adapter's own single-attempt logic. Clearing
+	// GetBody removes that retry path: HTTP/2 then only retries on
+	// errClientConnUnusable, which is itself proven pre-send (the connection
+	// was never usable), and the graceful-GOAWAY-then-resend case is instead
+	// surfaced as an uncertain (keys_outcome_unknown) send error, which is the
+	// honest answer per contract §4.3. Do not "fix" this by adding an
+	// idempotency header instead: that would make HTTP/1.1 treat the request
+	// as safely replayable too, which is the opposite of what this needs.
+	httpReq.GetBody = nil
 	httpReq.Header.Set("Content-Type", "application/json")
 	if t.signer != nil {
 		if err := t.signer.Sign(ctx, httpReq, brokerID); err != nil {
 			if t.debug {
 				slog.Warn("Failed to sign keys request", "brokerID", brokerID, "error", err)
 			}
-			return agentkeys.BrokerResult{}, fmt.Errorf("failed to sign request: %w", err)
+			// A signing failure (e.g. missing/expired broker secret) never
+			// puts a byte on the wire.
+			return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to sign request: %v", agentkeys.ErrNotDispatched, err)
 		}
 	}
 
@@ -438,7 +455,7 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 	if err != nil {
 		return agentkeys.BrokerResult{}, fmt.Errorf("keys: failed to read broker response: %w", err)
 	}
-	return decodeBrokerKeysResponse(resp.StatusCode, respBody)
+	return decodeBrokerKeysResponse(resp.StatusCode, respBody, req.OperationID)
 }
 
 // classifyKeysSendError turns a transport-level send failure into

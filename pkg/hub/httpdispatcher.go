@@ -2760,6 +2760,16 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 // as agentkeys.ErrNotDispatched: both failures are proven, Hub-side, before
 // any request could have reached a broker.
 func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agentkeys.Target, operationID string, executeBefore time.Time, keys string) (agentkeys.BrokerResult, error) {
+	// Fail closed on a missing or already-past deadline before spending a
+	// network round trip on it: BrokerRequest.ExecuteBefore's doc requires a
+	// zero value to fail closed, and contract §4.3 lists "the Hub's own
+	// pre-send check found ExecuteBefore already past" as an ErrNotDispatched
+	// source. The broker enforces this independently at admission (task
+	// 1.1) — this is a cheap, redundant guard, not a substitute for that.
+	if executeBefore.IsZero() || !time.Now().Before(executeBefore) {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: execute-before deadline is zero or already past", agentkeys.ErrNotDispatched)
+	}
+
 	keysClient, ok := d.client.(agentkeys.BrokerClient)
 	if !ok {
 		return agentkeys.BrokerResult{}, fmt.Errorf("%w: configured broker client does not support keys dispatch", agentkeys.ErrNotDispatched)

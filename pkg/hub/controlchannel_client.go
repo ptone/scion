@@ -320,7 +320,8 @@ func (c *ControlChannelBrokerClient) ExecuteKeys(ctx context.Context, brokerID, 
 	req.ExecuteBefore = req.ExecuteBefore.UTC()
 	body, err := json.Marshal(req)
 	if err != nil {
-		return agentkeys.BrokerResult{}, fmt.Errorf("failed to marshal keys request: %w", err)
+		// Proven before anything was sent: no envelope was ever built.
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to marshal keys request: %v", agentkeys.ErrNotDispatched, err)
 	}
 
 	path := strings.ReplaceAll(agentkeys.BrokerRoutePath, "{id}", url.PathEscape(agentSlug))
@@ -333,11 +334,27 @@ func (c *ControlChannelBrokerClient) ExecuteKeys(ctx context.Context, brokerID, 
 		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %v", agentkeys.ErrNotDispatched, err)
 	}
 
-	resp, err := c.doRequestRaw(ctx, brokerID, agentkeys.BrokerRouteMethod, path, query, body)
+	// Build and sign the envelope directly here rather than going through
+	// doRequestRaw, which repeats the connected/size checks above and folds
+	// header-building (signing) in with the tunnel round trip itself. Signing
+	// failure (e.g. a missing/expired broker secret) is proven pre-send, the
+	// same as the checks above — only the c.manager.TunnelRequest call below
+	// can fail after the envelope may have reached the broker, so that is the
+	// one call whose error is genuinely uncertain rather than ErrNotDispatched.
+	headers, err := c.buildRequestHeaders(ctx, brokerID, agentkeys.BrokerRouteMethod, path, query, body)
 	if err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: failed to sign request: %v", agentkeys.ErrNotDispatched, err)
+	}
+
+	envelope := wsprotocol.NewRequestEnvelope(uuid.New().String(), agentkeys.BrokerRouteMethod, path, query, headers, body)
+	resp, err := c.manager.TunnelRequest(ctx, brokerID, envelope)
+	if err != nil {
+		// The tunnel round trip is the one step that may have reached the
+		// broker before failing (a reconnect, a lost response, ...): its
+		// error is honestly uncertain, not a proven non-dispatch.
 		return agentkeys.BrokerResult{}, fmt.Errorf("keys: control channel dispatch failed: %w", err)
 	}
-	return decodeBrokerKeysResponse(resp.StatusCode, resp.Body)
+	return decodeBrokerKeysResponse(resp.StatusCode, resp.Body, req.OperationID)
 }
 
 // CheckAgentPrompt checks if an agent has a non-empty prompt.md file via control channel.
@@ -804,7 +821,11 @@ func (c *HybridBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerE
 // (.design/agent-keys-contract.md §4.1's "no immediate route" rule), so both
 // return agentkeys.ErrNotDispatched directly — never ErrLifecycleDeferred or
 // ErrMessageDeferred, which would imply a retry/durable-delivery path that
-// does not exist for keys.
+// does not exist for keys. This is also the deployment limit #2184 asks to
+// document: in a multi-Hub deployment, a keys request that lands on a Hub
+// which does not hold the target broker's control-channel socket returns
+// keys_unavailable (503) even when some other Hub is connected to it — there
+// is no transparent cross-Hub forwarding for keys (contract AK-29).
 func (c *HybridBrokerClient) ExecuteKeys(ctx context.Context, brokerID, brokerEndpoint, agentSlug string, req agentkeys.BrokerRequest) (agentkeys.BrokerResult, error) {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
@@ -812,7 +833,12 @@ func (c *HybridBrokerClient) ExecuteKeys(ctx context.Context, brokerID, brokerEn
 	case routeHTTP:
 		keysHTTP, ok := c.httpClient.(agentkeys.BrokerClient)
 		if !ok {
-			return agentkeys.BrokerResult{}, fmt.Errorf("keys: HTTP client does not support keys dispatch")
+			// A wiring defect (the configured HTTP client doesn't implement
+			// agentkeys.BrokerClient), not a runtime condition — proven
+			// before any request could have been built, so this is
+			// consistent with HTTPAgentDispatcher.DispatchAgentKeys treating
+			// the same defect as ErrNotDispatched.
+			return agentkeys.BrokerResult{}, fmt.Errorf("%w: HTTP client does not support keys dispatch", agentkeys.ErrNotDispatched)
 		}
 		return keysHTTP.ExecuteKeys(ctx, brokerID, brokerEndpoint, agentSlug, req)
 	default:

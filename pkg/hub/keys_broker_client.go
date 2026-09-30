@@ -31,7 +31,14 @@ import (
 // decision is made in exactly one place, not re-derived per transport.
 //
 // Success is HTTP 200 with a body whose Outcome is agentkeys.OutcomeDispatched
-// — the only success shape. Every other combination returns a non-nil error:
+// AND whose OperationID echoes expectedOperationID — the only success shape.
+// A 200 that decodes but echoes back a different (or empty) operation ID is a
+// broker contract violation, and the Hub cannot safely correlate it with its
+// own audit record for this call, so it is treated the same as any other
+// malformed 200: a plain, unclassified error (never a false success, and
+// never a false "definitely didn't happen" either, since the broker may still
+// have run some request's keys). Every other combination also returns a
+// non-nil error:
 //
 //   - HTTP 404 whose body does not decode as a BrokerResult with a
 //     agentkeys.ValidBrokerOutcome value is the one specified exception (an
@@ -50,13 +57,16 @@ import (
 //     unrecognized error to OutcomeKeysOutcomeUnknown, which is exactly right
 //     here: none of these shapes rule out that a real handler began executing
 //     before producing a malformed response.
-func decodeBrokerKeysResponse(statusCode int, body []byte) (agentkeys.BrokerResult, error) {
+func decodeBrokerKeysResponse(statusCode int, body []byte, expectedOperationID string) (agentkeys.BrokerResult, error) {
 	var result agentkeys.BrokerResult
 	decodeErr := json.Unmarshal(body, &result)
 	validBody := decodeErr == nil && result.Outcome != ""
 
 	if statusCode == http.StatusOK {
 		if validBody && result.Outcome == agentkeys.OutcomeDispatched {
+			if result.OperationID != expectedOperationID {
+				return agentkeys.BrokerResult{}, fmt.Errorf("keys: broker echoed operation_id %q, want %q", result.OperationID, expectedOperationID)
+			}
 			return result, nil
 		}
 		return agentkeys.BrokerResult{}, fmt.Errorf("keys: broker returned HTTP 200 with an unexpected body")

@@ -37,7 +37,10 @@ func TestControlChannelBrokerClient_ExecuteKeys_Dispatched(t *testing.T) {
 	signer := &mockBrokerSigner{}
 	client := &ControlChannelBrokerClient{manager: tunnel, signer: signer}
 
-	deadline := time.Now().Add(30 * time.Second)
+	// A non-UTC zone makes the UTC-normalization assertion below
+	// non-vacuous: time.Now() alone would often already be UTC in CI, so a
+	// bug that skipped .UTC() before marshaling could pass unnoticed.
+	deadline := time.Now().In(time.FixedZone("UTC+1", 3600)).Add(30 * time.Second)
 	req := agentkeys.BrokerRequest{
 		ProjectID:     "project-1",
 		AgentID:       "agent-1",
@@ -77,6 +80,26 @@ func TestControlChannelBrokerClient_ExecuteKeys_Dispatched(t *testing.T) {
 	}
 	if wire.Keys != "Enter" || wire.AgentID != "agent-1" || wire.OperationID != "op-1" {
 		t.Errorf("unexpected tunneled body: %+v", wire)
+	}
+	if wire.ProjectID != "project-1" {
+		t.Errorf("body.ProjectID = %q, want %q", wire.ProjectID, "project-1")
+	}
+	if !wire.ExecuteBefore.Equal(deadline) {
+		t.Errorf("body.ExecuteBefore = %v, want %v", wire.ExecuteBefore, deadline)
+	}
+	// The raw wire value must be UTC-normalized (RFC 3339 "Z" suffix), not
+	// carrying the non-UTC zone offset the caller constructed it with — the
+	// broker compares this deadline against its own UTC clock.
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal(tunnel.lastRequest.Body, &rawFields); err != nil {
+		t.Fatalf("failed to decode tunneled body as a raw map: %v", err)
+	}
+	var rawExecuteBefore string
+	if err := json.Unmarshal(rawFields["execute_before"], &rawExecuteBefore); err != nil {
+		t.Fatalf("failed to decode raw execute_before: %v", err)
+	}
+	if !strings.HasSuffix(rawExecuteBefore, "Z") {
+		t.Errorf("execute_before on the wire = %q, want a UTC (Z-suffixed) timestamp", rawExecuteBefore)
 	}
 }
 
@@ -163,5 +186,30 @@ func TestControlChannelBrokerClient_ExecuteKeys_OldBrokerUnsupported(t *testing.
 	}
 	if tunnel.calls != 1 {
 		t.Fatalf("expected exactly one tunnel attempt, got %d", tunnel.calls)
+	}
+}
+
+// failingControlChannelSigner always fails, for testing that a signing
+// failure — proven to occur before the tunnel is ever used — classifies as
+// agentkeys.ErrNotDispatched rather than an uncertain outcome.
+type failingControlChannelSigner struct{}
+
+func (failingControlChannelSigner) Sign(context.Context, *http.Request, string) error {
+	return errors.New("boom: no broker secret")
+}
+
+// TestControlChannelBrokerClient_ExecuteKeys_SignerFailureIsNotDispatched
+// proves a signing failure is reported as agentkeys.ErrNotDispatched, and
+// that the tunnel is never used when signing fails.
+func TestControlChannelBrokerClient_ExecuteKeys_SignerFailureIsNotDispatched(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true}
+	client := &ControlChannelBrokerClient{manager: tunnel, signer: failingControlChannelSigner{}}
+
+	_, err := client.ExecuteKeys(context.Background(), "broker-1", "unused", "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+	if !errors.Is(err, agentkeys.ErrNotDispatched) {
+		t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+	}
+	if tunnel.calls != 0 {
+		t.Fatalf("expected zero tunnel attempts when signing fails, got %d", tunnel.calls)
 	}
 }

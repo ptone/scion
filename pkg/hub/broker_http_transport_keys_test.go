@@ -18,13 +18,16 @@ package hub
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,12 +41,21 @@ import (
 func TestHTTPRuntimeBrokerClient_ExecuteKeys_Dispatched(t *testing.T) {
 	var gotMethod, gotPath, gotQuery string
 	var gotBody agentkeys.BrokerRequest
+	var gotRawExecuteBefore string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotQuery = r.URL.RawQuery
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+		rawBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("failed to read request body: %v", err)
+		}
+		if err := json.Unmarshal(rawBody, &gotBody); err != nil {
 			t.Errorf("failed to decode request body: %v", err)
+		}
+		var rawFields map[string]json.RawMessage
+		if err := json.Unmarshal(rawBody, &rawFields); err == nil {
+			_ = json.Unmarshal(rawFields["execute_before"], &gotRawExecuteBefore)
 		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(agentkeys.BrokerResult{
@@ -54,7 +66,10 @@ func TestHTTPRuntimeBrokerClient_ExecuteKeys_Dispatched(t *testing.T) {
 	defer server.Close()
 
 	client := NewHTTPRuntimeBrokerClient()
-	deadline := time.Now().Add(30 * time.Second)
+	// A non-UTC zone makes the UTC-normalization assertion below
+	// non-vacuous: time.Now() alone is frequently already UTC in CI (offset
+	// zero), which would let a missing/broken .UTC() call pass unnoticed.
+	deadline := time.Now().In(time.FixedZone("UTC+1", 3600)).Add(30 * time.Second)
 	req := agentkeys.BrokerRequest{
 		ProjectID:     tid("project-1"),
 		AgentID:       tid("agent-1"),
@@ -95,6 +110,9 @@ func TestHTTPRuntimeBrokerClient_ExecuteKeys_Dispatched(t *testing.T) {
 	}
 	if gotBody.ExecuteBefore.Location() != time.UTC {
 		t.Errorf("body.ExecuteBefore must be marshaled in UTC, got location %v", gotBody.ExecuteBefore.Location())
+	}
+	if !strings.HasSuffix(gotRawExecuteBefore, "Z") {
+		t.Errorf("execute_before on the wire = %q, want a UTC (Z-suffixed) timestamp", gotRawExecuteBefore)
 	}
 }
 
@@ -323,11 +341,86 @@ func TestAuthenticatedBrokerClient_ExecuteKeys_Signs(t *testing.T) {
 
 	signer := &mockBrokerSigner{}
 	client := &AuthenticatedBrokerClient{transport: newBrokerHTTPTransport(false, signer)}
-	_, err := client.ExecuteKeys(context.Background(), "broker-1", server.URL, "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+	_, err := client.ExecuteKeys(context.Background(), "broker-1", server.URL, "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatalf("ExecuteKeys failed: %v", err)
 	}
 	if !signer.called {
 		t.Fatal("expected the signer to be invoked for a keys dispatch")
+	}
+}
+
+// spyRoundTripper records whether the outgoing request had a non-nil GetBody
+// and returns a canned successful keys response.
+type spyRoundTripper struct {
+	calls         int
+	sawGetBodyNil bool
+}
+
+func (s *spyRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.calls++
+	s.sawGetBodyNil = req.GetBody == nil
+	body, _ := json.Marshal(agentkeys.BrokerResult{OperationID: "op-1", Outcome: agentkeys.OutcomeDispatched})
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Body:       io.NopCloser(bytes.NewReader(body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+// TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBody is a regression test for
+// a Go HTTP/2 transparent-resend hazard: http.NewRequestWithContext
+// populates Request.GetBody for a []byte-backed reader, and net/http's HTTP/2
+// transport resends a request with a non-nil GetBody on certain stream
+// errors (golang/go#47635) even though the peer may already have started
+// handling it — a replay this adapter's single-attempt contract must not
+// allow. ExecuteKeys must clear GetBody before sending.
+func TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBody(t *testing.T) {
+	spy := &spyRoundTripper{}
+	transport := &brokerHTTPTransport{
+		client:     &http.Client{Transport: spy},
+		keysClient: &http.Client{Transport: spy},
+	}
+
+	_, err := transport.ExecuteKeys(context.Background(), "broker-1", "http://example.invalid", "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("ExecuteKeys failed: %v", err)
+	}
+	if spy.calls != 1 {
+		t.Fatalf("expected exactly one RoundTrip call, got %d", spy.calls)
+	}
+	if !spy.sawGetBodyNil {
+		t.Fatal("expected the outgoing request's GetBody to be nil, to prevent an HTTP/2 transparent resend after a possible send (golang/go#47635)")
+	}
+}
+
+// failingSigner always fails, for testing that a signing failure — proven to
+// occur before anything is sent — classifies as agentkeys.ErrNotDispatched.
+type failingSigner struct{}
+
+func (failingSigner) Sign(context.Context, *http.Request, string) error {
+	return errors.New("boom: no broker secret")
+}
+
+// TestBrokerHTTPTransport_ExecuteKeys_SignerFailureIsNotDispatched proves a
+// signing failure (e.g. a missing/expired broker secret) is reported as
+// agentkeys.ErrNotDispatched, and that the transport never attempts to send
+// when signing fails.
+func TestBrokerHTTPTransport_ExecuteKeys_SignerFailureIsNotDispatched(t *testing.T) {
+	spy := &spyRoundTripper{}
+	transport := &brokerHTTPTransport{
+		client:     &http.Client{Transport: spy},
+		keysClient: &http.Client{Transport: spy},
+		signer:     failingSigner{},
+	}
+
+	_, err := transport.ExecuteKeys(context.Background(), "broker-1", "http://example.invalid", "test-agent", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+	if !errors.Is(err, agentkeys.ErrNotDispatched) {
+		t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+	}
+	if spy.calls != 0 {
+		t.Fatalf("expected zero HTTP calls when signing fails, got %d", spy.calls)
 	}
 }

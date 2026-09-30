@@ -92,7 +92,9 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_Success(t *testing.T) {
 	dispatcher, mockClient, target := newKeysDispatcherFixture(t)
 	mockClient.result = agentkeys.BrokerResult{OperationID: "op-1", Outcome: agentkeys.OutcomeDispatched}
 
-	deadline := time.Now().Add(20 * time.Second)
+	// A non-UTC zone makes the UTC-normalization assertion below
+	// non-vacuous: time.Now() alone is frequently already UTC in CI.
+	deadline := time.Now().In(time.FixedZone("UTC+1", 3600)).Add(20 * time.Second)
 	result, err := dispatcher.DispatchAgentKeys(context.Background(), target, "op-1", deadline, "C-c")
 	if err != nil {
 		t.Fatalf("DispatchAgentKeys failed: %v", err)
@@ -126,6 +128,9 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_Success(t *testing.T) {
 	}
 	if !mockClient.lastReq.ExecuteBefore.Equal(deadline) {
 		t.Errorf("req.ExecuteBefore = %v, want %v", mockClient.lastReq.ExecuteBefore, deadline)
+	}
+	if mockClient.lastReq.ExecuteBefore.Location() != time.UTC {
+		t.Errorf("req.ExecuteBefore must be normalized to UTC before dispatch, got location %v", mockClient.lastReq.ExecuteBefore.Location())
 	}
 }
 
@@ -179,5 +184,35 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_ClientWithoutKeysSupport(t *testi
 	_, err := dispatcher.DispatchAgentKeys(ctx, target, "op-1", time.Now().Add(time.Minute), "C-c")
 	if !errors.Is(err, agentkeys.ErrNotDispatched) {
 		t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnBadDeadline proves a
+// zero or already-past executeBefore is rejected as agentkeys.ErrNotDispatched
+// before any client call — BrokerRequest.ExecuteBefore's doc requires failing
+// closed on a missing/invalid deadline, and there is no reason to spend a
+// network round trip on a request the broker is contractually required to
+// reject anyway.
+func TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnBadDeadline(t *testing.T) {
+	dispatcher, mockClient, target := newKeysDispatcherFixture(t)
+
+	cases := []struct {
+		name     string
+		deadline time.Time
+	}{
+		{"zero deadline", time.Time{}},
+		{"already past", time.Now().Add(-time.Second)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockClient.calls = 0
+			_, err := dispatcher.DispatchAgentKeys(context.Background(), target, "op-1", tc.deadline, "C-c")
+			if !errors.Is(err, agentkeys.ErrNotDispatched) {
+				t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+			}
+			if mockClient.calls != 0 {
+				t.Fatalf("expected zero ExecuteKeys calls for a %s, got %d", tc.name, mockClient.calls)
+			}
+		})
 	}
 }

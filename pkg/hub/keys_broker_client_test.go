@@ -43,6 +43,7 @@ func TestDecodeBrokerKeysResponse(t *testing.T) {
 		name                 string
 		statusCode           int
 		body                 []byte
+		expectOperationID    string // defaults to "op-N" matching the fixture body below if empty
 		wantSuccess          bool
 		wantOutcome          agentkeys.Outcome // meaningful only when !wantSuccess and the error is a *BrokerOutcomeError
 		wantBrokerOutcomeErr bool
@@ -52,6 +53,18 @@ func TestDecodeBrokerKeysResponse(t *testing.T) {
 			statusCode:  http.StatusOK,
 			body:        marshal(agentkeys.BrokerResult{OperationID: "op-1", Outcome: agentkeys.OutcomeDispatched}),
 			wantSuccess: true,
+		},
+		{
+			name:              "200 dispatched with a mismatched operation_id echo is unknown, not success",
+			statusCode:        http.StatusOK,
+			body:              marshal(agentkeys.BrokerResult{OperationID: "op-1", Outcome: agentkeys.OutcomeDispatched}),
+			expectOperationID: "op-999",
+		},
+		{
+			name:              "200 dispatched with an empty operation_id echo is unknown, not success",
+			statusCode:        http.StatusOK,
+			body:              marshal(agentkeys.BrokerResult{OperationID: "", Outcome: agentkeys.OutcomeDispatched}),
+			expectOperationID: "op-1",
 		},
 		{
 			name:                 "old broker 404 with no outcome field is keys_unsupported",
@@ -127,7 +140,17 @@ func TestDecodeBrokerKeysResponse(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := decodeBrokerKeysResponse(tc.statusCode, tc.body)
+			expectOperationID := tc.expectOperationID
+			if expectOperationID == "" {
+				// Default to whatever operation_id the fixture body already
+				// carries, so cases that aren't specifically testing the
+				// echo check don't have to repeat it. Cases testing a
+				// mismatch set expectOperationID explicitly above.
+				var probe agentkeys.BrokerResult
+				_ = json.Unmarshal(tc.body, &probe)
+				expectOperationID = probe.OperationID
+			}
+			result, err := decodeBrokerKeysResponse(tc.statusCode, tc.body, expectOperationID)
 
 			if tc.wantSuccess {
 				if err != nil {

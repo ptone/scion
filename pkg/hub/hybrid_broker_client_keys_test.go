@@ -18,8 +18,11 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
@@ -47,27 +50,77 @@ func (f *fakeKeysHTTPClient) ExecuteKeys(ctx context.Context, brokerID, brokerEn
 }
 
 // TestHybridBrokerClient_ExecuteKeys_RouteLocal proves a locally connected
-// broker is dispatched via the control channel, never HTTP.
+// broker is actually dispatched via the control channel tunnel, never HTTP —
+// by calling ExecuteKeys itself (not just checking route()'s decision), with
+// a fake tunnel wired directly behind c.controlChannel so the call has
+// somewhere real to go.
 func TestHybridBrokerClient_ExecuteKeys_RouteLocal(t *testing.T) {
-	const localBroker = "broker-local"
-	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
-	mgr.mu.Lock()
-	mgr.connections[localBroker] = &BrokerConnection{brokerID: localBroker, sessionID: "s1"}
-	mgr.mu.Unlock()
+	tunnel := &mockControlChannelTunnel{connected: true, status: http.StatusOK}
+	tunnel.body = mustMarshalBrokerResult(t, agentkeys.BrokerResult{OperationID: "op-1", Outcome: agentkeys.OutcomeDispatched})
 
 	httpClient := &fakeKeysHTTPClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
-	c := NewHybridBrokerClient(mgr, httpClient, nil, false)
-
-	got := c.route(context.Background(), localBroker, "")
-	if got != routeLocal {
-		t.Fatalf("route = %v, want routeLocal", got)
+	c := &HybridBrokerClient{
+		controlChannel: &ControlChannelBrokerClient{manager: tunnel},
+		httpClient:     httpClient,
 	}
-	// The control channel's tunnel has no real transport wired in this test;
-	// what matters here is that the HTTP client is never reached for a
-	// locally connected broker.
+
+	result, err := c.ExecuteKeys(context.Background(), "broker-local", "", "agent-1", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("ExecuteKeys failed: %v", err)
+	}
+	if result.Outcome != agentkeys.OutcomeDispatched {
+		t.Fatalf("outcome = %q, want dispatched", result.Outcome)
+	}
+	if tunnel.calls != 1 {
+		t.Fatalf("expected exactly one tunnel call, got %d", tunnel.calls)
+	}
+	if tunnel.lastRequest == nil || tunnel.lastRequest.Path != "/api/v1/agents/agent-1/keys" {
+		t.Fatalf("expected the tunneled request to hit the keys route, got %+v", tunnel.lastRequest)
+	}
 	if httpClient.calls != 0 {
 		t.Fatalf("HTTP client must not be called when routeLocal, got %d calls", httpClient.calls)
 	}
+}
+
+// TestHybridBrokerClient_ExecuteKeys_RouteLocalMidFlightFailure proves a
+// tunnel failure after the connection check passed (e.g. a broker reconnect)
+// classifies as uncertain — never a false success, never ErrNotDispatched —
+// and is single-attempt with no fallback to HTTP after the possible send.
+func TestHybridBrokerClient_ExecuteKeys_RouteLocalMidFlightFailure(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true, err: fmt.Errorf("tunnel closed: broker reconnecting")}
+	httpClient := &fakeKeysHTTPClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
+	c := &HybridBrokerClient{
+		controlChannel: &ControlChannelBrokerClient{manager: tunnel},
+		httpClient:     httpClient,
+	}
+
+	_, err := c.ExecuteKeys(context.Background(), "broker-local", "", "agent-1", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if errors.Is(err, agentkeys.ErrNotDispatched) {
+		t.Fatalf("a mid-flight tunnel failure must not be reported as ErrNotDispatched, got %v", err)
+	}
+	if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysOutcomeUnknown {
+		t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysOutcomeUnknown)
+	}
+	if tunnel.calls != 1 {
+		t.Fatalf("expected exactly one tunnel attempt (no retry), got %d", tunnel.calls)
+	}
+	if httpClient.calls != 0 {
+		t.Fatalf("must not fall back to HTTP after an uncertain send, got %d HTTP calls", httpClient.calls)
+	}
+}
+
+// mustMarshalBrokerResult is a small test helper shared by the keys hybrid
+// tests below.
+func mustMarshalBrokerResult(t *testing.T, r agentkeys.BrokerResult) []byte {
+	t.Helper()
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("failed to marshal BrokerResult fixture: %v", err)
+	}
+	return b
 }
 
 // TestHybridBrokerClient_ExecuteKeys_RouteHTTP proves a broker with no local
@@ -107,7 +160,11 @@ func TestHybridBrokerClient_ExecuteKeys_RouteForwardAndUndeliverable(t *testing.
 	t.Run("routeForward", func(t *testing.T) {
 		httpClient.calls = 0
 		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hubA", true })
-		_, err := c.ExecuteKeys(context.Background(), "broker-remote", "", "agent-1", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
+		// A non-empty direct endpoint is the case that matters: route()
+		// still picks routeForward (a live affinity owner wins over a direct
+		// endpoint — see broker_routing.go's route()), and keys must not
+		// fall back to that endpoint over HTTP just because one exists.
+		_, err := c.ExecuteKeys(context.Background(), "broker-remote", "http://endpoint", "agent-1", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
 		if !errors.Is(err, agentkeys.ErrNotDispatched) {
 			t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
 		}
@@ -115,7 +172,7 @@ func TestHybridBrokerClient_ExecuteKeys_RouteForwardAndUndeliverable(t *testing.
 			t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysUnavailable)
 		}
 		if httpClient.calls != 0 {
-			t.Fatalf("HTTP client must not be called for routeForward, got %d calls", httpClient.calls)
+			t.Fatalf("HTTP client must not be called for routeForward even though a direct endpoint exists, got %d calls", httpClient.calls)
 		}
 	})
 
@@ -141,7 +198,7 @@ func TestHybridBrokerClient_ExecuteKeys_HTTPClientMissingSupport(t *testing.T) {
 	c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
 
 	_, err := c.ExecuteKeys(context.Background(), "broker-remote", "http://endpoint", "agent-1", agentkeys.BrokerRequest{ExecuteBefore: time.Now().Add(time.Minute)})
-	if err == nil {
-		t.Fatal("expected an error when the HTTP client does not support keys dispatch")
+	if !errors.Is(err, agentkeys.ErrNotDispatched) {
+		t.Fatalf("expected agentkeys.ErrNotDispatched (a wiring defect proven before any request could be built), got %v", err)
 	}
 }
