@@ -121,7 +121,7 @@ with open(sys.argv[1]) as f:
 names = set()
 mismatched = []
 prefix = 'harnesses/'
-steps = doc.get('steps') or [] if isinstance(doc, dict) else []
+steps = (doc.get('steps') or []) if isinstance(doc, dict) else []
 for step in steps:
     if not isinstance(step, dict):
         continue
