@@ -51,7 +51,7 @@ func agentRouteCases() []agentRouteCase {
 		{post, "/api/v1/agents/stop-all", AgentSubRoute{RouteID: AgentRouteStopAll, OperationID: opAgentStopAll, Method: post}},
 		byID(get, "", AgentRouteRoot, opAgentRead, none),
 		byID(get, "/", AgentRouteRoot, opAgentRead, none),
-		byID(http.MethodPatch, "", AgentRouteRoot, "", none),
+		byID(http.MethodPatch, "", AgentRouteRoot, opAgentUpdate, none),
 		byID(http.MethodDelete, "", AgentRouteRoot, opAgentDelete, none),
 		byID(http.MethodPut, "", AgentRouteRoot, "", none),
 		byID(get, "/pty", AgentRoutePTY, opAgentAttach, none),
@@ -91,7 +91,7 @@ func agentRouteCases() []agentRouteCase {
 		byID(post, "/refresh-token", AgentRouteActionRefreshToken, "", none),
 		byID(post, "/outbound-message", AgentRouteActionOutbound, "", none),
 		byID(post, "/metrics", AgentRouteActionMetrics, "", none),
-		byID(post, "/set_message_mode", AgentRouteActionMessageMode, "", none),
+		byID(post, "/set_message_mode", AgentRouteActionMessageMode, opAgentSetMessageMode, none),
 		byID(post, "/reincarnate", AgentRouteActionReincarnate, opAgentReincarnate, none),
 		byID(post, "/reset-auth", AgentRouteActionResetAuth, opAgentResetAuth, none),
 
@@ -115,7 +115,7 @@ func agentRouteCases() []agentRouteCase {
 		proj(post, "/restore", ProjectAgentRouteActionRestore, opAgentLifecycleRestore),
 		proj(post, "/env", ProjectAgentRouteActionEnv, opAgentEnv),
 		proj(post, "/outbound-message", ProjectAgentRouteActionOutbound, ""),
-		proj(post, "/set_message_mode", ProjectAgentRouteActionMessageMode, ""),
+		proj(post, "/set_message_mode", ProjectAgentRouteActionMessageMode, opAgentSetMessageMode),
 		proj(post, "/reincarnate", ProjectAgentRouteActionReincarnate, opAgentReincarnate),
 		proj(post, "/reset-auth", ProjectAgentRouteActionResetAuth, opAgentResetAuth),
 	}
@@ -348,9 +348,9 @@ func TestAgentSubRoute_CatalogDrift(t *testing.T) {
 	}
 	require.NotEmpty(t, discovered)
 	for _, op := range []authzop.OperationID{
-		opAgentRead, opAgentDelete, opAgentAttach, opAgentPortAccess, opAgentStopAll,
+		opAgentRead, opAgentUpdate, opAgentDelete, opAgentAttach, opAgentPortAccess, opAgentStopAll,
 		opAgentLifecycleControl, opAgentLifecycleRestore, opAgentExec, opAgentEnv,
-		opAgentResetAuth, opAgentReincarnate,
+		opAgentResetAuth, opAgentReincarnate, opAgentSetMessageMode,
 	} {
 		assert.NotEmpty(t, discovered[op], "operation %s has no resolver entry point", op)
 	}
