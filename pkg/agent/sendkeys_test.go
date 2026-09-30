@@ -115,13 +115,18 @@ func TestSendKeys_ArgvExactness(t *testing.T) {
 	}
 }
 
-// TestSendKeys_EmptyKeysPassedThroughVerbatim documents that SendKeys itself
-// applies no "empty becomes Enter" special case — unlike deliverImmediate's
-// message path. Rejecting an empty keys value is the Hub-level validation's
-// job (agentkeys.ValidateBody, before a BrokerRequest is ever built); by the
-// time SendKeys is called, per the frozen contract, Keys is "already
-// validated" and must be passed through byte-for-byte with no
-// reinterpretation at this layer.
+// TestSendKeys_EmptyKeysPassedThroughVerbatim documents a primitive-level
+// invariant: SendKeys itself applies no "empty becomes Enter" special case —
+// unlike deliverImmediate's message path — and never re-trims, re-splits, or
+// otherwise transforms Keys before the single tmux call. This is necessary
+// but not sufficient for the AC "empty/NUL/oversize/invalid shapes never
+// execute": that end-to-end guarantee is enforced one layer up, by the
+// runtimebroker's dedicated keys handler calling agentkeys.ValidateKeys
+// before ever calling SendKeys (see handlers_keys_test.go's
+// TestSendKeys_HTTP_InvalidKeysShape table) — SendKeys itself has no
+// opinion on shape and trusts its caller, matching the frozen contract's
+// "Keys is the exact byte-for-byte string to inject, already validated"
+// (agentkeys.BrokerRequest.Keys's doc comment).
 func TestSendKeys_EmptyKeysPassedThroughVerbatim(t *testing.T) {
 	var capturedCmd []string
 	mock := newSendKeysMock([]api.AgentInfo{runningAgent()}, &capturedCmd, nil)
@@ -353,8 +358,10 @@ func TestSendKeys_DeadlineExpiredWhileWaitingForLock(t *testing.T) {
 
 	// Hold the injection lock for this target for longer than the deadline
 	// SendKeys will be given below, simulating a saturated critical section
-	// (e.g. a slow concurrent message delivery).
-	lock := mgr.injectionLock("test-agent", "proj-1")
+	// (e.g. a slow concurrent message delivery). Keyed by the resolved
+	// container ID (see injectionLock's doc comment), matching what
+	// SendKeys itself will look up once it resolves the fixture above.
+	lock := mgr.injectionLock(agent.ContainerID)
 	if err := lock.Lock(context.Background()); err != nil {
 		t.Fatalf("failed to seed the lock: %v", err)
 	}
@@ -389,19 +396,26 @@ func TestSendKeys_DeadlineExpiredWhileWaitingForLock(t *testing.T) {
 // launched concurrently, must never have their tmux Exec calls interleaved —
 // one call's full sequence of Exec invocations must complete before the
 // other's begins.
+//
+// This is checked by recording the ordered sequence of caller tags across
+// every Exec call (not just whether two calls were ever simultaneously
+// "active"): a lock-free A,B,A ordering with no time overlap at all would
+// pass an overlap-only check but still prove the two callers' Exec sequences
+// were not each contiguous, which is what the AC actually requires. A
+// correctly serialized run produces exactly one transition in the recorded
+// sequence (all of one caller's Execs, then all of the other's, in either
+// order) — this test asserts exactly that, and was confirmed to fail 3/3
+// runs with injectionLock's Lock call removed from SendKeys and
+// deliverImmediate during review.
 func TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave(t *testing.T) {
 	agent := runningAgent()
 
 	var mu sync.Mutex
-	var active string // "" when nobody is mid-injection
-	var violated bool
-	enter := func(who string) {
+	var sequence []string
+	record := func(who string) {
 		mu.Lock()
-		defer mu.Unlock()
-		if active != "" && active != who {
-			violated = true
-		}
-		active = who
+		sequence = append(sequence, who)
+		mu.Unlock()
 	}
 	leaveDelay := 3 * time.Millisecond
 
@@ -411,13 +425,10 @@ func TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave(t *testing.T) {
 		},
 		// Tags which logical call (SendKeys vs. the interrupt message) is
 		// currently inside an Exec invocation via a ctx value set by each
-		// goroutine below, and fails the test if the two ever overlap.
+		// goroutine below, recording the tag on every call.
 		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
-			enter(currentCaller(ctx))
+			record(currentCaller(ctx))
 			time.Sleep(leaveDelay)
-			mu.Lock()
-			active = ""
-			mu.Unlock()
 			return "", nil
 		},
 	}
@@ -435,10 +446,9 @@ func TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		ctx := withCaller(context.Background(), "interrupt")
-		// Same projectID as the SendKeys call above ("proj-1") so both calls
-		// contend on the same injectionLock key — a different projectID
-		// would silently prove nothing, since the two calls would never
-		// share a lock at all.
+		// projectID is irrelevant to which lock the two calls share now
+		// (injectionLock keys on the resolved container ID, not caller
+		// strings), but both resolve the same fixture regardless.
 		if err := mgr.deliverImmediate(ctx, "test-agent", "proj-1", "", true); err != nil {
 			t.Errorf("deliverImmediate failed: %v", err)
 		}
@@ -447,8 +457,17 @@ func TestSendKeys_ConcurrentWithInterruptMessage_NoInterleave(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if violated {
-		t.Fatal("SendKeys and an interrupt message interleaved their tmux Exec calls for the same target")
+	if len(sequence) < 2 {
+		t.Fatalf("expected at least 2 recorded Exec calls (one per caller), got %v", sequence)
+	}
+	transitions := 0
+	for i := 1; i < len(sequence); i++ {
+		if sequence[i] != sequence[i-1] {
+			transitions++
+		}
+	}
+	if transitions != 1 {
+		t.Fatalf("SendKeys and an interrupt message interleaved their tmux Exec calls for the same target: sequence = %v (want exactly one transition between callers, got %d)", sequence, transitions)
 	}
 }
 
@@ -466,4 +485,170 @@ func withCaller(ctx context.Context, who string) context.Context {
 func currentCaller(ctx context.Context) string {
 	who, _ := ctx.Value(callerCtxKey{}).(string)
 	return who
+}
+
+// TestEscapeTrailingSemicolon covers the derived tmux trailing-semicolon
+// escaping rule directly (review round 1, finding #1): regardless of how
+// many backslashes (including zero) already precede a trailing ';',
+// inserting exactly one more makes tmux's own unescaping reproduce the
+// original string. A ';' anywhere else in the string is untouched.
+func TestEscapeTrailingSemicolon(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", ""},
+		{"abc", "abc"},
+		{"a;b", "a;b"},         // embedded, not trailing: untouched
+		{"a\\;b", "a\\;b"},     // embedded backslash-semicolon: untouched
+		{";", "\\;"},           // 0 backslashes
+		{"a;", "a\\;"},         // 0 backslashes
+		{"a\\;", "a\\\\;"},     // 1 backslash
+		{"a\\\\;", "a\\\\\\;"}, // 2 backslashes
+		{"a;;", "a;\\;"},       // only the final ';' is affected
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := escapeTrailingSemicolon(tc.in)
+			if got != tc.want {
+				t.Errorf("escapeTrailingSemicolon(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSendKeys_TrailingSemicolonEscapedInArgv covers review finding #1 at
+// the SendKeys level: the argv actually sent to tmux must be the
+// escapeTrailingSemicolon transform of the caller's Keys, not Keys itself,
+// for any input ending in ';'. TestRealTmuxSendKeys separately proves this
+// transform round-trips correctly against a real tmux server.
+func TestSendKeys_TrailingSemicolonEscapedInArgv(t *testing.T) {
+	cases := []string{";", "abc;", "a\\;", "a;;"}
+	for _, keys := range cases {
+		t.Run(keys, func(t *testing.T) {
+			var capturedCmd []string
+			mock := newSendKeysMock([]api.AgentInfo{runningAgent()}, &capturedCmd, nil)
+			mgr := &AgentManager{Runtime: mock}
+
+			if err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", keys); err != nil {
+				t.Fatalf("SendKeys failed: %v", err)
+			}
+
+			want := "tmux send-keys -t scion:0 -- " + escapeTrailingSemicolon(keys)
+			got := capturedCmd[len(capturedCmd)-1]
+			if got != want {
+				t.Errorf("send-keys argv = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestSendKeys_UnscopedProjectRejected covers #2193's "reject unscoped
+// target fallback": SendKeys must fail closed on an empty projectID rather
+// than listing across every project.
+func TestSendKeys_UnscopedProjectRejected(t *testing.T) {
+	var listCalled bool
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			listCalled = true
+			return []api.AgentInfo{runningAgent()}, nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(context.Background(), "", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, agentkeys.ErrTargetNotFound) {
+		t.Fatalf("SendKeys error = %v, want agentkeys.ErrTargetNotFound", err)
+	}
+	if listCalled {
+		t.Error("SendKeys must not list agents at all for an empty (unscoped) projectID")
+	}
+}
+
+// TestSendKeys_UnscopedAgentIDRejected is TestSendKeys_UnscopedProjectRejected's
+// counterpart for an empty expectedAgentID: SendKeys must fail closed rather
+// than binding to whatever container happens to match the slug/project.
+func TestSendKeys_UnscopedAgentIDRejected(t *testing.T) {
+	var listCalled bool
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			listCalled = true
+			return []api.AgentInfo{runningAgent()}, nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "", "C-c")
+	if !errors.Is(err, agentkeys.ErrTargetNotFound) {
+		t.Fatalf("SendKeys error = %v, want agentkeys.ErrTargetNotFound", err)
+	}
+	if listCalled {
+		t.Error("SendKeys must not list agents at all for an empty expectedAgentID")
+	}
+}
+
+// TestSendKeys_UnsupportedBackend covers review finding #2: a manager whose
+// runtime backend does not support keys delivery must fail with
+// ErrKeysUnsupported before any resolution or Exec attempt.
+func TestSendKeys_UnsupportedBackend(t *testing.T) {
+	var listCalled bool
+	mock := &runtime.MockRuntime{
+		NameFunc: func() string { return "cloudrun" },
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			listCalled = true
+			return []api.AgentInfo{runningAgent()}, nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c")
+	if !errors.Is(err, ErrKeysUnsupported) {
+		t.Fatalf("SendKeys error = %v, want ErrKeysUnsupported", err)
+	}
+	if listCalled {
+		t.Error("SendKeys must not resolve a target at all for a backend that does not support keys delivery")
+	}
+}
+
+// TestSendKeys_MarksExecCallsSensitive covers review finding #7's
+// SendKeys-level redaction check, adapted to what SendKeys itself is
+// responsible for: it performs no logging of its own (there is nothing to
+// capture here), and it cannot scrub arbitrary content out of a real
+// backend's Exec error without violating "any other failure ... must be a
+// plain error" (contract §4.3) — generic string-scrubbing at this layer
+// would fight that requirement rather than serve it. What SendKeys does
+// control, and what the actual source-level suppression
+// (pkg/runtime/common.go's debug logging, the Kubernetes backend's
+// stderr-embedding error — see TestRunSimpleCommand_SensitiveExec_
+// SuppressesOutputInDebugLog and TestWrapExecStreamError_SensitiveOmitsStderr
+// in pkg/runtime) depends on, is marking every Exec call — the readiness
+// probe and the send-keys call itself — via runtime.WithSensitiveExec. This
+// test proves that marking happens for both calls.
+func TestSendKeys_MarksExecCallsSensitive(t *testing.T) {
+	agent := runningAgent()
+	var sawSensitive []bool
+
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			sawSensitive = append(sawSensitive, runtime.IsSensitiveExec(ctx))
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	if err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", "C-c"); err != nil {
+		t.Fatalf("SendKeys failed: %v", err)
+	}
+
+	if len(sawSensitive) < 2 {
+		t.Fatalf("expected at least 2 Exec calls (readiness probe + send-keys), got %d", len(sawSensitive))
+	}
+	for i, sensitive := range sawSensitive {
+		if !sensitive {
+			t.Errorf("Exec call %d was not marked sensitive via runtime.WithSensitiveExec", i)
+		}
+	}
 }

@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,9 +31,17 @@ import (
 
 // TestRealTmuxSendKeys drives AgentManager.SendKeys's actual argv against a
 // private, disposable tmux server — never an active agent terminal, per the
-// campaign's hard constraint — verifying named keys (Enter), Unicode, spaces
-// and literal "@text" reach the target exactly, with no automatic Enter
-// added by SendKeys itself.
+// campaign's hard constraint — verifying named keys (Enter), Unicode, spaces,
+// literal "@text" and trailing-semicolon content all reach the target
+// exactly, with no automatic Enter added by SendKeys itself.
+//
+// The trailing-semicolon cases (review round 1, finding #1) exist because
+// tmux's own command-line parser treats an unescaped trailing ';' as a
+// command separator rather than literal input, dropping it, even when it
+// arrives as part of a single argv element after "--". SendKeys's
+// escapeTrailingSemicolon compensates for this before building the argv;
+// these cases prove the round trip against a real tmux server rather than
+// just against escapeTrailingSemicolon's own unit test.
 func TestRealTmuxSendKeys(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real-tmux integration test in short mode")
@@ -98,7 +107,7 @@ func TestRealTmuxSendKeys(t *testing.T) {
 
 	send := func(keys string) {
 		t.Helper()
-		if err := mgr.SendKeys(context.Background(), "", "test-agent", "agent-abc", keys); err != nil {
+		if err := mgr.SendKeys(context.Background(), "proj-1", "test-agent", "agent-abc", keys); err != nil {
 			t.Fatalf("SendKeys(%q) failed: %v", keys, err)
 		}
 	}
@@ -124,6 +133,24 @@ func TestRealTmuxSendKeys(t *testing.T) {
 	// behavior of its own, so it should just pass the literal ESC (0x1b)
 	// byte through, not the six literal characters "Escape".
 	send("Escape")
+
+	// Trailing-semicolon content, each a distinct literal string (raw string
+	// literals below so every backslash is exactly what it looks like, with
+	// no Go string-escape reinterpretation): a bare ';', a semicolon after
+	// other text, and content that itself already ends in a literal
+	// backslash followed by a semicolon (0, 0, and 1 "extra" backslash
+	// before the trailing ';' respectively, exercising distinct cases of the
+	// escapeTrailingSemicolon rule). Each must reach the pane as exactly
+	// itself, not truncated and not with an extra backslash left over.
+	semicolonCases := []string{
+		`;`,
+		`a;`,
+		`a\;`,
+		`a\\;`,
+	}
+	for _, sc := range semicolonCases {
+		send(sc)
+	}
 
 	mustTmux("send-keys", "-t", "scion:0", "C-d")
 
@@ -153,7 +180,7 @@ func TestRealTmuxSendKeys(t *testing.T) {
 		t.Fatalf("reading pane output: %v", err)
 	}
 
-	want := text + "\n" + "\x1b"
+	want := text + "\n" + "\x1b" + strings.Join(semicolonCases, "")
 	if string(got) != want {
 		t.Fatalf("pane output = %q, want %q", got, want)
 	}

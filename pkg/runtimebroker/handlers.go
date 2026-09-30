@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -2247,40 +2248,82 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	defer span.End()
 	span.SetAttributes(attribute.String("scion.agent.slug", id))
 
-	var req agentkeys.BrokerRequest
-	if err := readJSON(r, &req); err != nil {
-		// Never echo the decode error verbatim here: on this route it could
-		// in principle quote a fragment of the request body, which may
-		// carry the "keys" content itself (contract §5's redaction rule
-		// covers "request JSON" explicitly). A malformed body from an
-		// authenticated Hub is itself an anomaly worth a generic 400.
+	req, ok := readKeysRequest(w, r)
+	if !ok {
 		span.SetStatus(codes.Error, "invalid keys request body")
-		BadRequest(w, "Invalid keys request body")
 		return
 	}
 
-	// Admission check: reject an already-expired (or missing/invalid)
-	// execute-before deadline before doing any further work — contract
-	// §4.2's first enforcement point ("at broker admission"). A zero
-	// ExecuteBefore is always treated as already-expired: the broker never
-	// invents its own fallback deadline.
+	// Reject malformed/oversized/empty key content before any resolution or
+	// dispatch — the AC's "empty/NUL/oversize/invalid shapes never execute".
+	// A plain (non-BrokerResult) envelope, at the status the contract's
+	// Outcome table assigns the validation failure: neither
+	// OutcomeInvalidRequest nor OutcomePayloadTooLarge is broker-assertable
+	// (agentkeys.ValidBrokerOutcome), so this is not the broker deciding a
+	// keys Outcome — it is the same kind of pre-admission validation
+	// rejection the public route also performs, just re-checked here because
+	// this handler is itself an execution point, not merely a relay.
+	if verr := agentkeys.ValidateKeys(req.Keys); verr != nil {
+		status := http.StatusBadRequest
+		if ve, ok := agentkeys.AsValidationError(verr); ok {
+			if st, ok := agentkeys.HTTPStatus(ve.Outcome); ok {
+				status = st
+			}
+		}
+		span.SetStatus(codes.Error, "invalid keys value")
+		writeError(w, status, ErrCodeInvalidRequest, "Invalid keys value", nil)
+		return
+	}
+
+	// Require authoritative project and agent identity; reject unscoped
+	// target fallback (#2193 scope). The query "projectId" is the value
+	// every other broker route resolves against (matchesAgent's
+	// project-label/field match); the body's project_id must agree with it
+	// rather than silently winning on its own — a disagreement here would
+	// mean the Hub's routing decision and its own dispatch payload disagree
+	// about which project owns the target, which is exactly the ambiguity
+	// "reject unscoped target fallback" exists to close, not something to
+	// resolve by picking one side. AgentID must also be present: it is the
+	// hard identity-binding input SendKeys requires (see
+	// agentkeys.BrokerRequest.AgentID's doc comment) and an empty value
+	// would default to no binding at all.
+	if projectID == "" || req.ProjectID == "" || req.AgentID == "" || projectID != req.ProjectID {
+		span.SetStatus(codes.Error, "invalid keys target scope")
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid keys target scope", nil)
+		return
+	}
+
+	// Admission check: cap the Hub-issued deadline at the frozen admission
+	// window (#2193 scope, "Cap admission at 30 seconds/request deadline")
+	// and reject an already-expired (or missing/invalid) result before doing
+	// any further work — contract §4.2's first enforcement point ("at
+	// broker admission"). The broker only ever shrinks this deadline, never
+	// extends it (CapExecuteBefore's own contract).
 	admittedAt := time.Now().UTC()
-	if req.ExecuteBefore.IsZero() || !admittedAt.Before(req.ExecuteBefore) {
+	deadline, capErr := agentkeys.CapExecuteBefore(admittedAt, req.ExecuteBefore, agentkeys.DefaultAdmissionWindow)
+	if capErr != nil || !admittedAt.Before(deadline) {
 		s.logKeysOutcome(req, agentkeys.OutcomeKeysUnavailable, 0)
 		writeKeysResult(w, req.OperationID, agentkeys.OutcomeKeysUnavailable, "admission deadline already passed")
 		return
 	}
 
-	// Bind ctx to the Hub-issued deadline so SendKeys's own internal checks
+	// Bind ctx to the capped deadline so SendKeys's own internal checks
 	// (after its target-lock wait, and immediately before Exec — contract
-	// §4.2's remaining two enforcement points) observe it. The broker never
-	// extends this deadline.
-	execCtx, cancel := context.WithDeadline(ctx, req.ExecuteBefore)
+	// §4.2's remaining two enforcement points) observe it.
+	execCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
 	mgr := s.resolveManagerForAgent(ctx, id, projectID)
 
-	err := mgr.SendKeys(execCtx, req.ProjectID, id, req.AgentID, req.Keys)
+	// projectID (the query value, already reconciled against req.ProjectID
+	// above) is passed through, not req.ProjectID: SendKeys's own doc
+	// comment requires resolution to use the path/query values like every
+	// other broker route, and this is also the value the existing
+	// message/interrupt injection path resolves its own injection-lock
+	// scope against — passing the body's copy here even when the two agree
+	// in value would still be the wrong field to depend on if that
+	// reconciliation check above is ever weakened later.
+	err := mgr.SendKeys(execCtx, projectID, id, req.AgentID, req.Keys)
 	duration := time.Since(admittedAt)
 
 	outcome := agentkeys.OutcomeDispatched
@@ -2293,6 +2336,9 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 		outcome = agentkeys.OutcomeAgentNotRunning
 	case errors.Is(err, agentkeys.ErrTerminalNotReady):
 		outcome = agentkeys.OutcomeTerminalNotReady
+	case errors.Is(err, agent.ErrKeysUnsupported):
+		// This backend does not support keys delivery.
+		outcome = agentkeys.OutcomeKeysUnsupported
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		// SendKeys only returns ctx.Err() bare, before any Exec attempt (see
 		// its doc comment) — a cancellation observed mid-Exec is wrapped
@@ -2318,10 +2364,49 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	s.logKeysOutcome(req, outcome, duration)
 
 	message := ""
-	if outcome == agentkeys.OutcomeKeysUnavailable && err != nil {
+	switch {
+	case outcome == agentkeys.OutcomeKeysUnavailable && err != nil:
 		message = "admission deadline expired before dispatch"
+	case outcome == agentkeys.OutcomeKeysUnsupported:
+		message = "this backend does not support keys delivery"
 	}
 	writeKeysResult(w, req.OperationID, outcome, message)
+}
+
+// readKeysRequest decodes a POST .../keys body into an agentkeys.BrokerRequest,
+// bounding the read at agentkeys.MaxHTTPBodyBytes (#2193 scope, "Validate
+// body/input limits") and rejecting unknown fields and trailing content —
+// readJSON's bare json.Decode accepts both, which this route's execution
+// authority does not warrant being lenient about. Writes the response itself
+// and returns ok=false on any failure; callers must not do any further work
+// in that case.
+func readKeysRequest(w http.ResponseWriter, r *http.Request) (agentkeys.BrokerRequest, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, agentkeys.MaxHTTPBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	var req agentkeys.BrokerRequest
+	if err := dec.Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, ErrCodeInvalidRequest, "Keys request body too large", nil)
+			return agentkeys.BrokerRequest{}, false
+		}
+		// Never echo the decode error verbatim: on this route it could in
+		// principle quote a fragment of the request body, which may carry
+		// the "keys" content itself (contract §5's redaction rule covers
+		// "request JSON" explicitly).
+		BadRequest(w, "Invalid keys request body")
+		return agentkeys.BrokerRequest{}, false
+	}
+	// Reject trailing content after the single top-level JSON value: decode
+	// again into a throwaway value and require io.EOF, the standard
+	// encoding/json idiom for detecting extra bytes on a Decoder.
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		BadRequest(w, "Invalid keys request body")
+		return agentkeys.BrokerRequest{}, false
+	}
+	return req, true
 }
 
 // logKeysOutcome writes a content-free audit line for a keys dispatch

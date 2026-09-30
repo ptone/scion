@@ -643,7 +643,10 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 // must live here rather than only at the broker layer.
 func logCommandFailure(ctx context.Context, command string, argc int, elapsed time.Duration, out []byte) {
 	if IsSensitiveExec(ctx) {
-		runtimeLog.Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed, "output", "[redacted]")
+		// No "output" key at all — matches this function's doc comment
+		// ("omitted"), not a placeholder value that would still need its own
+		// audit for leaking anything.
+		runtimeLog.Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed)
 		return
 	}
 	runtimeLog.Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed, "output", strings.TrimSpace(string(out)))

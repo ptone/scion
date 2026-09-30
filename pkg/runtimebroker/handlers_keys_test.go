@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -27,7 +28,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // postKeys builds and sends a POST /api/v1/agents/{slug}/keys request against
@@ -43,6 +48,21 @@ func postKeys(t *testing.T, srv *Server, slug, projectIDQuery string, body agent
 		url += "?projectId=" + projectIDQuery
 	}
 	req := httptest.NewRequest(http.MethodPost, url, bytes.NewReader(b))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+// postKeysRaw is postKeys for callers that need to control the exact raw
+// request body bytes (oversize, unknown fields, trailing data) rather than
+// marshaling a well-formed agentkeys.BrokerRequest.
+func postKeysRaw(t *testing.T, srv *Server, slug, projectIDQuery string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	url := "/api/v1/agents/" + slug + "/keys"
+	if projectIDQuery != "" {
+		url += "?projectId=" + projectIDQuery
+	}
+	req := httptest.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	return w
@@ -253,11 +273,38 @@ func TestSendKeys_HTTP_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+// spanText concatenates every string an OTel span exposes that could carry
+// free-form content: its name, every attribute key/value (on the span and on
+// each event), every event name, and the status description. Used to search
+// for a distinctive secret across the whole span rather than guessing which
+// field a leak would land in.
+func spanText(s sdktrace.ReadOnlySpan) string {
+	var b strings.Builder
+	b.WriteString(s.Name())
+	for _, kv := range s.Attributes() {
+		b.WriteString(string(kv.Key))
+		b.WriteString(kv.Value.Emit())
+	}
+	for _, ev := range s.Events() {
+		b.WriteString(ev.Name)
+		for _, kv := range ev.Attributes {
+			b.WriteString(string(kv.Key))
+			b.WriteString(kv.Value.Emit())
+		}
+	}
+	b.WriteString(s.Status().Description)
+	return b.String()
+}
+
 // TestSendKeys_HTTP_NoLeakOfDistinctiveSecret is the log-capture test: it
 // sends a distinctive secret as the keys payload and asserts it appears
-// nowhere in the captured debug/info/warn log output across every outcome
-// path (success, each sentinel, and an ambiguous failure whose error text
-// might otherwise be logged).
+// nowhere in the captured debug/info/warn log output, the HTTP response
+// body, or any recorded OTel span, across every outcome path (success, each
+// sentinel, keys_unsupported, and an ambiguous failure whose error text
+// might otherwise be logged). A positive control (asserting the capture
+// mechanism actually saw content at all) guards against the test passing
+// vacuously if some other change silently stopped logging or tracing
+// anything.
 func TestSendKeys_HTTP_NoLeakOfDistinctiveSecret(t *testing.T) {
 	const secret = "AK-SENTINEL-do-not-leak-8f3c1e9b"
 
@@ -273,11 +320,23 @@ func TestSendKeys_HTTP_NoLeakOfDistinctiveSecret(t *testing.T) {
 	origLevel := slog.SetLogLoggerLevel(slog.LevelDebug)
 	t.Cleanup(func() { slog.SetLogLoggerLevel(origLevel) })
 
+	// Record every span broker.keys.inject produces during this test. The
+	// package's "tracer" var (otel.Tracer("scion-broker")) resolves against
+	// whatever TracerProvider is current *at span-start time*, not the one
+	// current when the var was created, so swapping the global provider here
+	// takes effect for spans started after this point.
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	origTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() { otel.SetTracerProvider(origTP) })
+
 	outcomes := []error{
 		nil,
 		agentkeys.ErrTargetNotFound,
 		agentkeys.ErrAgentNotRunning,
 		agentkeys.ErrTerminalNotReady,
+		agent.ErrKeysUnsupported,
 		errors.New("tmux: failed on " + secret), // a buggy manager that leaked the secret into its error
 	}
 
@@ -290,7 +349,8 @@ func TestSendKeys_HTTP_NoLeakOfDistinctiveSecret(t *testing.T) {
 		srv := newTestServerWithManager(t, mgr)
 
 		buf.Reset()
-		postKeys(t, srv, "test-agent", "proj-1", agentkeys.BrokerRequest{
+		recorder.Reset()
+		w := postKeys(t, srv, "test-agent", "proj-1", agentkeys.BrokerRequest{
 			ProjectID:     "proj-1",
 			AgentID:       "agent-abc",
 			OperationID:   "op-1",
@@ -298,8 +358,293 @@ func TestSendKeys_HTTP_NoLeakOfDistinctiveSecret(t *testing.T) {
 			Keys:          secret,
 		})
 
-		if strings.Contains(buf.String(), secret) {
-			t.Errorf("case %d: captured log output contains the distinctive secret\nLog: %s", i, buf.String())
+		logOutput := buf.String()
+		if strings.Contains(logOutput, secret) {
+			t.Errorf("case %d: captured log output contains the distinctive secret\nLog: %s", i, logOutput)
 		}
+		// Positive control: the audit line must actually have been written
+		// and captured, so an accidental logger swap elsewhere in the
+		// package can't make this test pass by writing nothing at all.
+		if !strings.Contains(logOutput, "keys dispatch") {
+			t.Errorf("case %d: expected the audit log line ('keys dispatch...') to be captured, got: %s", i, logOutput)
+		}
+
+		if strings.Contains(w.Body.String(), secret) {
+			t.Errorf("case %d: HTTP response body contains the distinctive secret\nBody: %s", i, w.Body.String())
+		}
+
+		ended := recorder.Ended()
+		if len(ended) == 0 {
+			t.Errorf("case %d: expected at least one recorded span", i)
+		}
+		for _, span := range ended {
+			if strings.Contains(spanText(span), secret) {
+				t.Errorf("case %d: span %q contains the distinctive secret", i, span.Name())
+			}
+		}
+	}
+}
+
+// TestSendKeys_HTTP_UnsupportedBackend covers review finding #2: a manager
+// whose SendKeys reports the backend does not support keys delivery must
+// produce 422 keys_unsupported, with the response message stating only that
+// fact.
+func TestSendKeys_HTTP_UnsupportedBackend(t *testing.T) {
+	mgr := &mockManager{
+		sendKeysFunc: func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+			return agent.ErrKeysUnsupported
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	w := postKeys(t, srv, "test-agent", "proj-1", agentkeys.BrokerRequest{
+		ProjectID:     "proj-1",
+		AgentID:       "agent-abc",
+		OperationID:   "op-1",
+		ExecuteBefore: time.Now().UTC().Add(10 * time.Second),
+		Keys:          "Enter",
+	})
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body = %s", w.Code, w.Body.String())
+	}
+	result := decodeBrokerResult(t, w)
+	if result.Outcome != agentkeys.OutcomeKeysUnsupported {
+		t.Errorf("Outcome = %q, want %q", result.Outcome, agentkeys.OutcomeKeysUnsupported)
+	}
+	if result.Message != "this backend does not support keys delivery" {
+		t.Errorf("Message = %q, want the fixed, mechanism-free string", result.Message)
+	}
+}
+
+// TestSendKeys_HTTP_BodyTooLarge covers review finding #3: a request body
+// larger than agentkeys.MaxHTTPBodyBytes must be rejected by the
+// transport-level read, at 413, before Manager.SendKeys is ever called.
+func TestSendKeys_HTTP_BodyTooLarge(t *testing.T) {
+	called := false
+	mgr := &mockManager{
+		sendKeysFunc: func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+			called = true
+			return nil
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	// A "keys" value comfortably within agentkeys.MaxBytes, padded with an
+	// oversized unknown field so the overall body exceeds MaxHTTPBodyBytes.
+	// The oversize check must fire from the bounded read itself, before JSON
+	// decoding ever inspects field names.
+	pad := strings.Repeat("x", agentkeys.MaxHTTPBodyBytes+1024)
+	body := fmt.Sprintf(`{"project_id":"proj-1","agent_id":"agent-abc","operation_id":"op-1","execute_before":"2099-01-01T00:00:00Z","keys":"C-c","padding":"%s"}`, pad)
+
+	w := postKeysRaw(t, srv, "test-agent", "proj-1", []byte(body))
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body = %s", w.Code, w.Body.String())
+	}
+	if called {
+		t.Error("Manager.SendKeys must not be called for an oversize request body")
+	}
+}
+
+// TestSendKeys_HTTP_MalformedBodyRejected covers the rest of review finding
+// #3: readKeysRequest must reject unknown fields and trailing content that
+// the bare readJSON it replaced would have accepted.
+func TestSendKeys_HTTP_MalformedBodyRejected(t *testing.T) {
+	validExecuteBefore := `"2099-01-01T00:00:00Z"`
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			"unknown_field",
+			`{"project_id":"proj-1","agent_id":"agent-abc","operation_id":"op-1","execute_before":` + validExecuteBefore + `,"keys":"C-c","unexpected_field":true}`,
+		},
+		{
+			"trailing_data",
+			`{"project_id":"proj-1","agent_id":"agent-abc","operation_id":"op-1","execute_before":` + validExecuteBefore + `,"keys":"C-c"}{"trailing":"object"}`,
+		},
+		{
+			"trailing_garbage",
+			`{"project_id":"proj-1","agent_id":"agent-abc","operation_id":"op-1","execute_before":` + validExecuteBefore + `,"keys":"C-c"} not json`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			mgr := &mockManager{
+				sendKeysFunc: func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+					called = true
+					return nil
+				},
+			}
+			srv := newTestServerWithManager(t, mgr)
+
+			w := postKeysRaw(t, srv, "test-agent", "proj-1", []byte(tc.body))
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+			}
+			if called {
+				t.Error("Manager.SendKeys must not be called for a malformed request body")
+			}
+		})
+	}
+}
+
+// TestSendKeys_HTTP_InvalidKeysShape covers review finding #4: the AC
+// "empty/NUL/oversize/invalid shapes never execute" applies at this
+// execution point, not only at the Hub. Each case must be rejected by
+// agentkeys.ValidateKeys before Manager.SendKeys is ever called, at the
+// status the contract's Outcome table assigns the validation failure.
+//
+// No invalid-UTF-8 case: postKeys round-trips agentkeys.BrokerRequest
+// through encoding/json.Marshal/Decode, and Go's encoding/json silently
+// replaces invalid UTF-8 byte sequences with U+FFFD on decode (verified:
+// json.Unmarshal(`{"keys":"abc\xff\xfe"}`, ...) succeeds with a valid-UTF-8
+// result) — so req.Keys can never actually be invalid UTF-8 by the time
+// ValidateKeys sees it via this decode path, regardless of the wire bytes.
+// ValidateKeys's utf8.ValidString check is still correct defensive code for
+// any other caller with a differently-sourced string; there is just no way
+// to exercise it through this handler's ordinary JSON decode.
+func TestSendKeys_HTTP_InvalidKeysShape(t *testing.T) {
+	cases := []struct {
+		name       string
+		keys       string
+		wantStatus int
+	}{
+		{"empty", "", http.StatusBadRequest},
+		{"nul_byte", "abc\x00def", http.StatusBadRequest},
+		{"oversize", strings.Repeat("a", agentkeys.MaxBytes+1), http.StatusRequestEntityTooLarge},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			mgr := &mockManager{
+				sendKeysFunc: func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+					called = true
+					return nil
+				},
+			}
+			srv := newTestServerWithManager(t, mgr)
+
+			w := postKeys(t, srv, "test-agent", "proj-1", agentkeys.BrokerRequest{
+				ProjectID:     "proj-1",
+				AgentID:       "agent-abc",
+				OperationID:   "op-1",
+				ExecuteBefore: time.Now().UTC().Add(10 * time.Second),
+				Keys:          tc.keys,
+			})
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", w.Code, tc.wantStatus, w.Body.String())
+			}
+			var result agentkeys.BrokerResult
+			if err := json.Unmarshal(w.Body.Bytes(), &result); err == nil && result.Outcome != "" {
+				t.Errorf("invalid keys shape must not decode as a well-formed BrokerResult, got %+v", result)
+			}
+			if called {
+				t.Errorf("Manager.SendKeys must not be called for invalid keys shape %q", tc.name)
+			}
+		})
+	}
+}
+
+// TestSendKeys_HTTP_UnscopedOrMismatchedTarget covers review finding #5:
+// #2193's "reject unscoped target fallback" and the requirement that the
+// query projectId and body project_id agree. Every case must be rejected
+// with no execution.
+func TestSendKeys_HTTP_UnscopedOrMismatchedTarget(t *testing.T) {
+	cases := []struct {
+		name           string
+		projectIDQuery string
+		req            agentkeys.BrokerRequest
+	}{
+		{
+			"missing_query_project",
+			"",
+			agentkeys.BrokerRequest{ProjectID: "proj-1", AgentID: "agent-abc", OperationID: "op-1", ExecuteBefore: time.Now().UTC().Add(10 * time.Second), Keys: "C-c"},
+		},
+		{
+			"missing_body_project",
+			"proj-1",
+			agentkeys.BrokerRequest{ProjectID: "", AgentID: "agent-abc", OperationID: "op-1", ExecuteBefore: time.Now().UTC().Add(10 * time.Second), Keys: "C-c"},
+		},
+		{
+			"missing_agent_id",
+			"proj-1",
+			agentkeys.BrokerRequest{ProjectID: "proj-1", AgentID: "", OperationID: "op-1", ExecuteBefore: time.Now().UTC().Add(10 * time.Second), Keys: "C-c"},
+		},
+		{
+			"query_body_project_mismatch",
+			"proj-1",
+			agentkeys.BrokerRequest{ProjectID: "proj-2", AgentID: "agent-abc", OperationID: "op-1", ExecuteBefore: time.Now().UTC().Add(10 * time.Second), Keys: "C-c"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			mgr := &mockManager{
+				sendKeysFunc: func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+					called = true
+					return nil
+				},
+			}
+			srv := newTestServerWithManager(t, mgr)
+
+			w := postKeys(t, srv, "test-agent", tc.projectIDQuery, tc.req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+			}
+			if called {
+				t.Errorf("Manager.SendKeys must not be called for %s", tc.name)
+			}
+		})
+	}
+}
+
+// TestSendKeys_HTTP_ExecuteBeforeCappedAtAdmissionWindow covers review
+// finding #6: #2193's "Cap admission at 30 seconds/request deadline". A
+// far-future ExecuteBefore must not reach Manager.SendKeys unmodified — the
+// ctx deadline SendKeys observes must be capped at
+// agentkeys.DefaultAdmissionWindow from admission, not the Hub-supplied
+// value.
+func TestSendKeys_HTTP_ExecuteBeforeCappedAtAdmissionWindow(t *testing.T) {
+	var gotDeadline time.Time
+	var hasDeadline bool
+	mgr := &mockManager{
+		sendKeysFunc: func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+			gotDeadline, hasDeadline = ctx.Deadline()
+			return nil
+		},
+	}
+	srv := newTestServerWithManager(t, mgr)
+
+	before := time.Now().UTC()
+	w := postKeys(t, srv, "test-agent", "proj-1", agentkeys.BrokerRequest{
+		ProjectID:     "proj-1",
+		AgentID:       "agent-abc",
+		OperationID:   "op-1",
+		ExecuteBefore: before.Add(time.Hour), // far beyond the 30s admission window
+		Keys:          "C-c",
+	})
+	after := time.Now().UTC()
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if !hasDeadline {
+		t.Fatal("expected SendKeys to receive a ctx with a deadline")
+	}
+	maxAllowed := after.Add(agentkeys.DefaultAdmissionWindow)
+	if gotDeadline.After(maxAllowed) {
+		t.Errorf("ctx deadline %v exceeds admission window cap (now %v + %v = %v)", gotDeadline, after, agentkeys.DefaultAdmissionWindow, maxAllowed)
+	}
+	if !gotDeadline.Before(before.Add(time.Hour)) {
+		t.Errorf("ctx deadline %v was not capped below the Hub-supplied execute_before (%v)", gotDeadline, before.Add(time.Hour))
 	}
 }
