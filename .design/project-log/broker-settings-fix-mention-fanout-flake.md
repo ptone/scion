@@ -156,3 +156,44 @@ and confirmed all gates green. One Required finding blocked APPROVE; everything 
   leak from F1/round-1, not a regression of this fix. With `GOOGLE_CLOUD_PROJECT` unset (CI-like,
   matching `.github/workflows/*.yml`), delta was **0** over 100 servers, confirming the fix still
   eliminates the 5-goroutine leak this PR targets.
+
+## GoogleCloudPlatform/scion#2184 Gemini comment (upstream mirror of ptone/scion#2434)
+
+Gemini, at `handlers_test.go:107`: `srv.Shutdown()` returns early when `srv.httpServer` is nil, so
+`srv.ctxCancel` is never called in unit tests either; suggested calling it first in
+`closeTestServerBackground`.
+
+**Judged valid and safe, and applied.** `srv.ctx` (the Server-lifetime context `New()` builds via
+`context.WithCancel`) is read in production by exactly two `*Server` methods —
+`handleSystemImagesPull` and `handleSystemImagesBuild` — each only inside a goroutine spawned when
+that specific HTTP handler is invoked. No test in `pkg/hub` calls either handler, so nothing in the
+current suite is ever bound to `srv.ctx` by the time a test's cleanup runs. `context.CancelFunc` is
+documented idempotent, so a double call (on the rare path where `Shutdown()` already called it) is
+safe, and nothing in `closeTestServerBackground`'s own Close/Stop calls or the later `s.Close()` (the
+test's own store) depends on `srv.ctx` remaining valid. Added `srv.ctxCancel()`, nil-guarded, as the
+first step, with a one-line doc update.
+
+**Measured impact: none currently, confirmed by direct A/B comparison.** The leak probe (50x
+`testServer` + 50x `testServerWithBrokerAuth`, `GOOGLE_CLOUD_PROJECT` unset) showed delta=0 both with
+and without the `srv.ctxCancel()` call — exactly as the code-path analysis predicted, since nothing
+exercised in the suite ever starts a goroutine keyed on `srv.ctx`. The change is still correct to keep:
+it closes the same class of gap this PR already works around (Shutdown's `httpServer == nil` guard
+skipping cleanup) for one more field, and it's a hedge against a future test exercising
+`handleSystemImagesPull`/`Build` or any future code that binds a background goroutine to `srv.ctx`.
+
+**Relationship to ptone/scion#2433:** this extends the same test-side workaround ptone/scion#2434
+already applies to ptone/scion#2433's production gap (Shutdown's `httpServer`-nil guard) — previously
+for the five Close/Stop calls, now also for `ctxCancel`. Not posted to ptone/scion#2433 directly per
+instruction; noted here and in the report to the EM for them to relay if useful. No production code
+was touched.
+
+### Gates run
+
+- `go vet ./pkg/hub/`: clean.
+- `golangci-lint run --new-from-rev=upstream-main --concurrency=1 ./pkg/hub/...`: 0 issues.
+- `gofmt -l pkg/hub/handlers_test.go`: clean.
+- `go test -race -run 'TestMentionFanout|TestProcessMentions' -count=1 ./pkg/hub/`: PASS, 58/58,
+  0 FAIL, no DATA RACE (358.3s).
+- `go test -race -run 'TestHandleAgent' -count=1 ./pkg/hub/`: PASS, 0 FAIL (552.8s).
+- Leak probe, `GOOGLE_CLOUD_PROJECT` unset: delta=0 with the fix, delta=0 without it (direct A/B,
+  temporary uncommitted toggle) — confirms no regression and no currently-measurable improvement.
