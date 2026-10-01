@@ -335,8 +335,9 @@ func assertDecisionsEqual(t *testing.T, ref, cand Decision, msgAndArgs ...interf
 // **non-admin** user delegator who holds an **in-scope active project
 // binding** (ProjectRoleAdmin, not a system role) — required so that
 // IsSystemAdmin does not short-circuit (authz_delegation_ceiling.go:635) and
-// getEffectivePermissions loads constraints (authz.go:1889 at 73ebd02,
-// :1918 at ba762d56), which A7/A7'/X7 all depend on.
+// getEffectivePermissions loads constraints (match by name, not line
+// number — the call site has moved across rebases), which A7/A7'/X7 all
+// depend on.
 type a1Fixture struct {
 	authz       *AuthzService
 	store       store.Store
@@ -509,6 +510,21 @@ func agentResourceTuples(res Resource) []rawTuple {
 	return out
 }
 
+// repeatedActionTuples builds n identical (res, action) tuples. Used where a
+// row needs every decision in the sequence to ask the SAME allow-or-deny
+// question — isolating a pure store-call-count effect (e.g. "the method's
+// k-th call fails") from any permission difference between actions, which
+// would otherwise confound whether a later decision's result changed
+// because of the fault or because that action was never grantable to begin
+// with (round-2 F2).
+func repeatedActionTuples(res Resource, action Action, n int) []rawTuple {
+	out := make([]rawTuple, n)
+	for i := range out {
+		out[i] = rawTuple{res, action}
+	}
+	return out
+}
+
 // runParity is the full parity harness for fault-free rows (design section
 // 8's "Paths" paragraph): it runs the reference once (CheckAccess, plain
 // ctx, fresh service), then the candidate THREE times on three fresh
@@ -518,7 +534,13 @@ func agentResourceTuples(res Resource) []rawTuple {
 // (it never memoizes). It also runs a ComputeCapabilitiesBatch leg (R2)
 // whenever the tuples form one or more complete "one resource x all
 // ResourceActions[type]" blocks (agentResourceTuples' shape), and asserts
-// gate 6 (exactly one audit record per Decide call) on every leg.
+// gate 6 (exactly one audit record per Decide call) on every leg, INCLUDING
+// a full audit-record comparison against the reference on every leg (N-1,
+// round 2) — not just the forward run. The reverse/shuffled runs' emitted
+// records are in CALL order, which differs by construction from the
+// reference's canonical tuple order, so they are reordered back to
+// canonical tuple-index order before the comparison; see the reorder step
+// inside the loop below.
 //
 // The returned candDecisions/candStore are the FORWARD run's, for
 // callers that need a representative candidate store for count assertions
@@ -573,11 +595,23 @@ func runParity(t *testing.T, s store.Store, identity Identity, tuples []rawTuple
 		for i := range refDecisions {
 			assertDecisionsEqual(t, refDecisions[i], got[i], "%s order, tuple %d: %s %s", run.name, i, tuples[i].resource.Type, tuples[i].action)
 		}
+		// N-1 (round 2): compare the audit records on EVERY run, not just
+		// forward. The records themselves are emitted in CALL order
+		// (run.order), which legitimately differs across the three legs —
+		// that's the whole point of exercising reverse/shuffled order — so
+		// a raw positional comparison against the reference (which always
+		// runs in canonical tuple order) would be comparing unrelated
+		// decisions to each other. Reorder the candidate's emitted records
+		// back to canonical tuple-index order first (run.order[pos] is the
+		// tuple index the pos'th call was FOR), then compare keyed by tuple
+		// identity exactly like the decisions above.
+		emitted := cEmit.snapshot()
+		byTupleIndex := make([]*store.DecisionAuditRecord, n)
+		for pos, idx := range run.order {
+			byTupleIndex[idx] = emitted[pos]
+		}
+		assertAuditSequenceEqual(t, refEmit.snapshot(), byTupleIndex, "%s order, reordered to tuple identity", run.name)
 		if run.name == "forward" {
-			// The audit SEQUENCE (not just its per-record content) is only
-			// meaningful to compare when the candidate's evaluation order
-			// matches the reference's.
-			assertAuditSequenceEqual(t, refEmit.snapshot(), cEmit.snapshot())
 			candDecisions = got
 			candStore = cStore
 		}
@@ -592,7 +626,10 @@ func runParity(t *testing.T, s store.Store, identity Identity, tuples []rawTuple
 // batch path): when tuples form one or more complete "one resource x all
 // ResourceActions[resource.Type]" blocks, it runs ComputeCapabilitiesBatch
 // over those resources on both a plain ctx (reference) and a memo ctx
-// (candidate), and asserts the candidate's capability list equals the
+// (candidate), asserts gate 6 (exactly one audit record per decision — N-2,
+// round 2: this used to discard both emitters, so nothing here ever checked
+// it, despite runParity's doc comment claiming otherwise) plus a full audit
+// comparison, and asserts the candidate's capability list equals the
 // reference's, and that the reference batch result agrees with the raw-loop
 // reference decisions already proven above. It is a silent no-op for any
 // other tuple shape (scope-action tuples, mixed resource types, a single
@@ -651,13 +688,24 @@ func runBatchLegIfApplicable(t *testing.T, s store.Store, identity Identity, tup
 
 	ctx := context.Background()
 	refStore := newMemoTestStore(s)
-	refAuthz, _ := newRecordingAuthz(refStore)
+	refAuthz, refEmit := newRecordingAuthz(refStore)
 	refCaps := refAuthz.ComputeCapabilitiesBatch(ctx, identity, resources, resourceType)
 
 	candStore := newMemoTestStore(s)
-	candAuthz, _ := newRecordingAuthz(candStore)
+	candAuthz, candEmit := newRecordingAuthz(candStore)
 	mctx := withAuthzInputMemo(ctx)
 	candCaps := candAuthz.ComputeCapabilitiesBatch(mctx, identity, resources, resourceType)
+
+	// N-2 (round 2): the doc comment above claims gate 6 is asserted "on
+	// every leg," but until now this leg discarded both emitters, so
+	// nothing here ever checked it. ComputeCapabilitiesBatch evaluates one
+	// decision per (resource, action) pair internally, so the expected
+	// count is len(resources) * len(actions) (no raw-loop "+1" here, unlike
+	// runBatchParity, since this leg does not also call AuthorizeReadBatch).
+	wantDecisions := len(resources) * len(actions)
+	require.Len(t, refEmit.snapshot(), wantDecisions, "batch leg gate 6: exactly one audit record per decision (reference)")
+	require.Len(t, candEmit.snapshot(), wantDecisions, "batch leg gate 6: exactly one audit record per decision (candidate)")
+	assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot(), "batch leg audit records")
 
 	require.Len(t, refCaps, len(resources), "batch leg: ComputeCapabilitiesBatch result length")
 	require.Len(t, candCaps, len(resources), "batch leg: ComputeCapabilitiesBatch result length")
@@ -840,8 +888,11 @@ func TestParity_P1_OrdinaryMemberViaGroup(t *testing.T) {
 func TestParity_P4_ProjectAdmin(t *testing.T) {
 	_, s := authzTestSetup(t)
 	f := newProjectPrincipalFixture(t, s, "p4", store.ProjectRoleAdmin)
-	refStore := newMemoTestStore(s)
-	refDecisions, _, _, _ := runParityWithStores(t, refStore, newMemoTestStore(s), f.user, agentResourceTuples(f.agentRes))
+	// N-3 (round 2): P4 injects no fault, so it should use runParity (which
+	// also exercises the reverse, shuffled and batch legs), not
+	// runParityWithStores (forward-order only, reserved for fault-injecting
+	// rows where H1 order-sensitivity matters).
+	refDecisions, _, refStore, _ := runParity(t, s, f.user, agentResourceTuples(f.agentRes))
 	var sawAllow, sawDeny bool
 	for _, d := range refDecisions {
 		if d.Allowed {
@@ -1140,19 +1191,49 @@ func TestParity_E5_EachLoaderFailsOnFirstCallOnly(t *testing.T) {
 	}
 }
 
+// e5bExpectedFaultReason maps each E5b-served loader to the EXACT Reason its
+// fail-closed deny produces (authz.go steps 2/3/4's resolution-error denies,
+// and step 7c's access-constraint-load deny-all restriction, whose Kind
+// "access_constraint_error" has a nil Check and so always gets the generic
+// "restriction has no check function (fail closed)" detail from the kernel —
+// see TestParity_A7Prime_FirstAttemptTransientPlusDeterministicFault's O4
+// assertion for the same exact string). Round-2 F2: pinning this (rather
+// than just asserting !Allowed) is what proves the REFERENCE decision
+// actually took the faulted method's error path, not some unrelated deny.
+var e5bExpectedFaultReason = map[string]string{
+	"GetEffectiveGroups":            "principal resolution error (fail-closed)",
+	"ListRoleBindingsForPrincipals": "binding resolution error (fail-closed)",
+	"GetRoleDefinitionsByIDs":       "role resolution error (fail-closed)",
+	"ListAccessConstraints":         "restriction removed permission: access_constraint_error - restriction has no check function (fail closed)",
+}
+
 // TestParity_E5b_DocumentedDivergenceOnLaterTransient is design row E5b: for
 // each served loader and k in {2, 5}, a fault on that method's call #k
 // denies decision k in the reference but is never observed by the candidate
 // (the memo already holds a success after decision 1). The candidate's
 // every decision equals a no-fault baseline; the reference equals the
 // baseline everywhere except decision k.
+//
+// Round-2 F2: the tuples are n identical ActionRead decisions against the
+// SAME resource, not agentResourceTuples' mixed read/update/delete/attach/
+// lifecycle set. P1's project-member role only grants agent.read — update,
+// delete, attach and lifecycle are ALREADY denied with no fault at all, so
+// a fault landing on decision index 1 (k=2) or 4 (k=5) of the mixed set
+// changes nothing observable: the reference was already a deny for an
+// unrelated reason (no active binding grants permission), and
+// ListAccessConstraints's deny-all restriction can't be distinguished from
+// that pre-existing deny by Reason OR by Allowed. Repeating the one action
+// that IS allowed at baseline (read) isolates the fault's effect: decision
+// k-1 flips from a genuine allow to a genuine, specifically-reasoned
+// fail-closed deny, which is the only way this row can prove the fault was
+// observed (and not simply irrelevant) in the reference.
 func TestParity_E5b_DocumentedDivergenceOnLaterTransient(t *testing.T) {
 	for _, method := range []string{"GetEffectiveGroups", "ListRoleBindingsForPrincipals", "GetRoleDefinitionsByIDs", "ListAccessConstraints"} {
 		for _, k := range []int{2, 5} {
 			t.Run(fmt.Sprintf("%s/k=%d", method, k), func(t *testing.T) {
 				_, s := authzTestSetup(t)
 				f := newP1Fixture(t, s, fmt.Sprintf("e5b-%s-%d", method, k))
-				tuples := agentResourceTuples(f.agentRes)
+				tuples := repeatedActionTuples(f.agentRes, ActionRead, 6)
 				require.GreaterOrEqual(t, len(tuples), k)
 				ctx := context.Background()
 
@@ -1163,6 +1244,12 @@ func TestParity_E5b_DocumentedDivergenceOnLaterTransient(t *testing.T) {
 				for _, tp := range tuples {
 					baseline = append(baseline, baselineAuthz.CheckAccess(mctxBase, f.user, tp.resource, tp.action))
 				}
+				// H2 precondition (F2): decision k-1 must be a genuine allow
+				// with no fault at all, or a fault landing on it cannot be
+				// shown to have CAUSED a deny — it could just as easily be a
+				// pre-existing, unrelated deny that the fault never touches.
+				require.True(t, baseline[k-1].Allowed,
+					"F2 H2 precondition: baseline decision %d (the one call #%d's fault lands on) must be an allow", k, k)
 
 				refStore := newMemoTestStore(s)
 				refStore.fault = callNFault(method, k)
@@ -1189,6 +1276,12 @@ func TestParity_E5b_DocumentedDivergenceOnLaterTransient(t *testing.T) {
 				for i := range ref {
 					if i == k-1 {
 						assert.False(t, ref[i].Allowed, "reference decision %d (call #%d) must deny", i+1, k)
+						// F2: pin the EXACT Reason, not just !Allowed — this
+						// is what proves the fault (not some unrelated
+						// cause) produced the deny, since baseline[k-1] was
+						// just proven to be an allow above.
+						assert.Equal(t, e5bExpectedFaultReason[method], ref[i].Reason,
+							"F2: reference decision %d's exact fail-closed reason for the %s fault", i+1, method)
 						continue
 					}
 					assertDecisionsEqual(t, baseline[i], ref[i], "reference tuple %d vs no-fault baseline", i)
@@ -1207,8 +1300,8 @@ func TestParity_E5b_DocumentedDivergenceOnLaterTransient(t *testing.T) {
 // loop), the ctx is cancelled between tuple j and j+1, under both H4 store
 // variants. Every decision after cancellation must deep-equal the reference,
 // including Reason, because the memo bypasses entirely on a done ctx and
-// issues today's store call (rule 2, v3.2). AuthorizeReadBatch, called with
-// an already-cancelled ctx, must return ctx.Err() in both runs.
+// issues today's store call (design 4.1 rule 2). AuthorizeReadBatch, called
+// with an already-cancelled ctx, must return ctx.Err() in both runs.
 func TestParity_E6_CancellationBothVariants(t *testing.T) {
 	for _, honour := range []bool{true, false} {
 		variant := "ignores-cancellation"
@@ -1650,7 +1743,7 @@ func TestParity_A6_DelegatorRoleDefinitionFails(t *testing.T) {
 			candStore := newMemoTestStore(s)
 			candStore.fault = fault
 
-			runParityWithStores(t, refStore, candStore, f.agent, tuples)
+			refDecisions, candDecisions, _, _ := runParityWithStores(t, refStore, candStore, f.agent, tuples)
 			assert.GreaterOrEqual(t, refStore.countOf("GetRoleDefinition"), 1, "H2: the fault must actually be reachable in the reference")
 
 			// R4(a): confirm a read tuple (project.read, index 0 per
@@ -1658,6 +1751,23 @@ func TestParity_A6_DelegatorRoleDefinitionFails(t *testing.T) {
 			// skip where the reference has none" is a claim about a tuple
 			// that really exists in this row, not a vacuous one.
 			require.True(t, isReadOnlyOperation(tuples[0].action), "H2: tuple 0 must be the read action")
+
+			// N-4 (round 2): tuples[0] (project.read) is a read action the
+			// delegator's own project-admin binding DOES hold, so without
+			// the fault it passes the ceiling. GetRoleDefinition is an
+			// UNMEMOIZED, direct call on the delegator's own permission
+			// resolution path (getEffectivePermissions), issued fresh on
+			// every decide call regardless of the request-local memo — so
+			// decision 0's call is always call #1 for both the fault-free
+			// and "call1" variants, and every call for "always." This pins
+			// the row's actual effect (the delegator's role-definition load
+			// failing flips a previously-allowed read to a SPECIFIC ceiling
+			// deny), not merely a count and a static fact about the tuple
+			// list, which proved nothing about what the fault actually did.
+			assert.Equal(t, DenyCauseCeilingDelegatorLacksPermission, refDecisions[0].DenyCause,
+				"N-4: reference decision 0 (project.read) must deny via the delegator's role-definition resolution failing, not some other cause")
+			assert.Equal(t, DenyCauseCeilingDelegatorLacksPermission, candDecisions[0].DenyCause,
+				"N-4: candidate decision 0 (project.read) must show the identical ceiling deny — the memo must not mask the delegator-side fault")
 		})
 	}
 }
@@ -2508,6 +2618,25 @@ func TestParity_X3_Immutability(t *testing.T) {
 	ctx := withAuthzInputMemo(context.Background())
 	authz, _ := newRecordingAuthz(newMemoTestStore(s))
 
+	// Round-2 F1: give the agent a REAL, non-synthetic role binding so
+	// entry.roleDefs is genuinely non-empty, independent of the step
+	// 5b/5b2 synthetic roles decide adds to its OWN local copy below.
+	// Without this, every mutation-detection check on an EMPTY map is
+	// vacuous: before==after==0 whether or not RoleDefs() actually clones,
+	// which is exactly how the cef95c29 rewrite of this test stopped
+	// catching mutant M2 (maps.Clone dropped from both RoleDefs() return
+	// paths).
+	x3RD := createTestRoleDefinition(t, s, "x3-real-role", store.RoleScopeProject, []string{"project.read"})
+	_, err := s.CreateRoleBinding(context.Background(), &store.RoleBinding{
+		RoleDefinitionID: x3RD.ID,
+		PrincipalType:    store.RoleBindingPrincipalAgent,
+		PrincipalID:      f.agentID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
 	// H2 precondition: the agent's own-project resource must show the
 	// SPECIFIC step-5b synthetic-role grant (MatchedGrant ==
 	// "agent-jwt-scope", authz.go:1143-1168's RoleName), and the global
@@ -2539,7 +2668,7 @@ func TestParity_X3_Immutability(t *testing.T) {
 	// Decision 1 (agent resource): a miss handle. Capture ITS OWN RoleDefs()
 	// return value too (R6: the miss path was previously unchecked).
 	in0 := authz.inputsFor(ctx, f.agent)
-	_, err := in0.Principals()
+	_, err = in0.Principals()
 	require.NoError(t, err)
 	_, err = in0.Bindings()
 	require.NoError(t, err)
@@ -2551,6 +2680,15 @@ func TestParity_X3_Immutability(t *testing.T) {
 	key := principalKey{normType: "agent", id: f.agentID}
 	entry := memo.entryFor(key)
 	require.True(t, entry.roleDefsOK)
+	require.NotEmpty(t, entry.roleDefs, "F1: the fixture must produce a non-empty stored roleDefs map (via x3-real-role above), or the mutation checks below are vacuous on an empty map")
+
+	// F1: map-IDENTITY check. Unlike "delete a key, compare lengths," this
+	// works even on an EMPTY map, because it compares the map header's
+	// pointer value directly: under mutant M2 (maps.Clone dropped from
+	// BOTH RoleDefs() return paths), rd0 IS entry.roleDefs — the exact
+	// same backing map, same pointer — regardless of how many keys it has.
+	assert.NotEqual(t, reflect.ValueOf(entry.roleDefs).Pointer(), reflect.ValueOf(rd0).Pointer(),
+		"F1: the MISS path's RoleDefs() must return a DIFFERENT map (a clone), not the stored map itself")
 
 	before0 := len(entry.roleDefs)
 	for id := range rd0 {
@@ -2568,6 +2706,11 @@ func TestParity_X3_Immutability(t *testing.T) {
 	rd1, err := in1.RoleDefs() // HIT
 	require.NoError(t, err)
 
+	assert.NotEqual(t, reflect.ValueOf(entry.roleDefs).Pointer(), reflect.ValueOf(rd1).Pointer(),
+		"F1: the HIT path's RoleDefs() must return a DIFFERENT map (a clone), not the stored map itself")
+	assert.NotEqual(t, reflect.ValueOf(rd0).Pointer(), reflect.ValueOf(rd1).Pointer(),
+		"F1: two separate RoleDefs() calls must return two SEPARATE clones, not the same map handed out twice")
+
 	before1 := len(entry.roleDefs)
 	for id := range rd1 {
 		delete(rd1, id)
@@ -2575,11 +2718,14 @@ func TestParity_X3_Immutability(t *testing.T) {
 	}
 	assert.Equal(t, before1, len(entry.roleDefs), "the HIT path's RoleDefs() must also return a clone; mutating it must not affect the stored map")
 
-	// The synthetic roles (step 5b and 5b2) must not have leaked into the
-	// stored map: decide/the hub-wide skill path only ever writes them into
-	// their own local clone.
+	// F1: snapshot the stored roleDefs BEFORE any decide call runs. The
+	// "no synthetic role leaked in" check used to run here, before decide
+	// was ever called on the memo ctx — which made it vacuous (round-2 F1
+	// point 2). It is asserted after the three decide() calls below
+	// instead, alongside a full deep-equal against this snapshot.
+	roleDefsBeforeDecide := make(map[string]*RolePermissions, len(entry.roleDefs))
 	for id, rp := range entry.roleDefs {
-		assert.NotContains(t, id, "synthetic", "stored roleDefs must not contain a synthetic role id %q: %+v", id, rp)
+		roleDefsBeforeDecide[id] = rp
 	}
 
 	// R6: snapshot the stored refs, bindings, edges and constraint rows
@@ -2588,10 +2734,22 @@ func TestParity_X3_Immutability(t *testing.T) {
 	// different synthetic-role path), then reconfirm every snapshot is
 	// still deep-equal — nothing downstream (kernel evaluation, hub-wide
 	// filters, the ceiling) mutates a memoized input in place.
+	//
 	// append(nil, emptySlice...) collapses a non-nil-but-empty slice back to
 	// nil (nothing to append), which would make an "unchanged" comparison
 	// pass or fail on nilness alone rather than content — copy explicitly
 	// so nil-vs-non-nil-empty is preserved faithfully either way.
+	//
+	// N-5 (round 2): copying the POINTER SLICE is not enough for bindings,
+	// edges and constraints — store.PrincipalRef has no pointer fields, so
+	// a shallow element copy of refs IS a deep copy, but *store.RoleBinding,
+	// *store.DelegationEdge and *store.AccessConstraint are pointers to
+	// mutable structs. A shallow copy means entry.bindings[i] and
+	// bindingsSnapshot[i] are the SAME object; an in-place field mutation
+	// on the stored binding (e.g. someone writes rb.ScopeID = x in place)
+	// would silently also "mutate" the snapshot, and assert.Equal below
+	// would never be able to catch it. Dereference and copy the POINTEE so
+	// the snapshot is a true, independent copy.
 	copyRefs := func(in []store.PrincipalRef) []store.PrincipalRef {
 		if in == nil {
 			return nil
@@ -2600,39 +2758,75 @@ func TestParity_X3_Immutability(t *testing.T) {
 		copy(out, in)
 		return out
 	}
-	copyBindings := func(in []*store.RoleBinding) []*store.RoleBinding {
+	deepCopyBindings := func(in []*store.RoleBinding) []*store.RoleBinding {
 		if in == nil {
 			return nil
 		}
 		out := make([]*store.RoleBinding, len(in))
-		copy(out, in)
+		for i, b := range in {
+			if b != nil {
+				cp := *b
+				out[i] = &cp
+			}
+		}
+		return out
+	}
+	deepCopyEdges := func(in []*store.DelegationEdge) []*store.DelegationEdge {
+		if in == nil {
+			return nil
+		}
+		out := make([]*store.DelegationEdge, len(in))
+		for i, e := range in {
+			if e != nil {
+				cp := *e
+				out[i] = &cp
+			}
+		}
+		return out
+	}
+	deepCopyConstraints := func(in []*store.AccessConstraint) []*store.AccessConstraint {
+		if in == nil {
+			return nil
+		}
+		out := make([]*store.AccessConstraint, len(in))
+		for i, c := range in {
+			if c != nil {
+				cp := *c
+				out[i] = &cp
+			}
+		}
 		return out
 	}
 	refsSnapshot := copyRefs(entry.refs)
-	bindingsSnapshot := copyBindings(entry.bindings)
+	bindingsSnapshot := deepCopyBindings(entry.bindings)
 	memo.mu.Lock()
 	edgesSnapshot := make(map[string][]*store.DelegationEdge, len(memo.edges))
 	for k, v := range memo.edges {
-		if v == nil {
-			edgesSnapshot[k] = nil
-		} else {
-			cp := make([]*store.DelegationEdge, len(v))
-			copy(cp, v)
-			edgesSnapshot[k] = cp
-		}
+		edgesSnapshot[k] = deepCopyEdges(v)
 	}
 	var constraintsSnapshot []*store.AccessConstraint
 	constraintsWereLoaded := memo.constraints != nil
 	if constraintsWereLoaded {
-		rows := *memo.constraints
-		constraintsSnapshot = make([]*store.AccessConstraint, len(rows))
-		copy(constraintsSnapshot, rows)
+		constraintsSnapshot = deepCopyConstraints(*memo.constraints)
 	}
 	memo.mu.Unlock()
 
 	authz.CheckAccess(ctx, f.agent, f.resource, ActionDelete)
 	authz.CheckAccess(ctx, f.agent, f.resource, ActionLifecycle)
 	authz.CheckAccess(ctx, f.agent, skillRes, ActionRead)
+
+	// F1: the synthetic roles decide writes into its OWN local clone (step
+	// 5b/5b2) must NOT have leaked into the stored map. Checked AFTER the
+	// three decide() calls above, not before (round-2 F1 point 2 — the
+	// pre-decide placement could never have observed a leak). The deep
+	// equal against the before-decide snapshot is the stronger of the two
+	// checks (it also catches any OTHER stored-map mutation, not just a
+	// "synthetic" substring), but both are kept: the substring check gives
+	// a readable failure naming the exact leaked key.
+	for id, rp := range entry.roleDefs {
+		assert.NotContains(t, id, "synthetic", "stored roleDefs must not contain a synthetic role id %q: %+v", id, rp)
+	}
+	assert.Equal(t, roleDefsBeforeDecide, entry.roleDefs, "F1: stored roleDefs must be unchanged after three further decisions (including one on the skill resource, which exercises the 5b2 synthetic-role path) — if this fails, decide's synthetic-role write escaped its own local clone into the memo's stored map")
 
 	assert.Equal(t, refsSnapshot, entry.refs, "R6: stored refs must be unchanged after further decisions")
 	assert.Equal(t, bindingsSnapshot, entry.bindings, "R6: stored bindings must be unchanged after further decisions")

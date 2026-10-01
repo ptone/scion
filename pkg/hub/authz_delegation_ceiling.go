@@ -598,7 +598,7 @@ func (a *AuthzService) getCachedDelegationEdges(ctx context.Context, delegateTyp
 	}
 
 	// Phase-wide edges memo: bypassed entirely on a done ctx (design 4.1
-	// rule 2, v3.2), so a cancelled request falls straight through to the
+	// rule 2), so a cancelled request falls straight through to the
 	// store call below exactly as it does with no memo installed. Success
 	// only — an edge-load error is returned directly and never stored, so
 	// it can never manufacture an error the store did not itself produce.

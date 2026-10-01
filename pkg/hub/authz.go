@@ -1456,8 +1456,8 @@ func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.A
 	// from the batch/handler install sites. Adding a new consumer inside a
 	// phase requires updating this comment and the design's parity matrix.
 	//
-	// On a done ctx the memo is bypassed entirely (design 4.1 rule 2,
-	// v3.2): today's uncached call is made with today's ctx and its result
+	// On a done ctx the memo is bypassed entirely (design 4.1 rule 2):
+	// today's uncached call is made with today's ctx and its result
 	// returned verbatim, and nothing is stored, so post-cancellation
 	// behaviour is today's by construction.
 	if m := authzInputMemoFromContext(ctx); m != nil && ctx.Err() == nil {

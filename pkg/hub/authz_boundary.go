@@ -1505,7 +1505,7 @@ func (a *AuthzService) CanMintSelector(ctx context.Context, principal PrincipalC
 	// Defensive: hide any authzInputMemo (and its edges slot) an outer
 	// caller may have installed, and make the mask sticky so nothing
 	// reached from here can re-enable one. No production install site is
-	// reachable from CanMintSelector at 73ebd02, but this keeps the two
+	// reachable from CanMintSelector today, but this keeps the two
 	// caches' semantics from ever being able to interact.
 	ctx = maskAllAuthzMemo(ctx)
 

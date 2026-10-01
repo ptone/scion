@@ -50,10 +50,11 @@ var errAuthzInputsOutOfOrder = errors.New("authz input handle: dependency not lo
 // principalKey identifies one principal's memo entry: the normalized
 // principal type (NormalizePrincipalType(identity.Type())) and its ID. This
 // is exactly the pair authorizationPrincipals uses to key its group lookup
-// (authz.go:761-771), so two references to the same principal — the
-// decision's own principal, a messageability target, a delegator reached
-// through a different path — always land in the same entry, and different
-// principals never collide.
+// (authz.go:862-886 at the current base; the call site moves as unrelated
+// code lands above it, so match by name, not line number), so two
+// references to the same principal — the decision's own principal, a
+// messageability target, a delegator reached through a different path —
+// always land in the same entry, and different principals never collide.
 type principalKey struct{ normType, id string }
 
 // memoEntry holds one principal's memoized, UNFILTERED authorization inputs:
@@ -248,9 +249,10 @@ func (a *AuthzService) inputsFor(ctx context.Context, identity Identity) *princi
 // memoEligible reports whether this handle's principal type is one that
 // authorizationPrincipals actually resolves groups for. Every other type
 // (e.g. "group", "system", "broker") makes no store call today
-// (authz.go:772-773), so the handle passes it straight through unmemoized
-// rather than paying for entry bookkeeping that would never be read twice
-// (design 4.1 rule 4, R3-Nit1).
+// (authz.go:876-877 at the current base; match by name, not line number),
+// so the handle passes it straight through unmemoized rather than paying
+// for entry bookkeeping that would never be read twice (design 4.1 rule 4,
+// R3-Nit1).
 func (h *principalInputs) memoEligible() bool {
 	return h.key.normType == "user" || h.key.normType == "agent"
 }
@@ -375,8 +377,9 @@ func (h *principalInputs) Bindings() ([]*store.RoleBinding, error) {
 // reference. Calling it before Bindings is a programming error and fails
 // closed. The returned map is always a fresh maps.Clone when served from the
 // memo, because decide writes synthetic roles into its own copy
-// (authz.go:580, 596) and the memo's stored map must stay pristine for every
-// other decision that reads it.
+// (authz.go:673, 689 at the current base; match by name, not line number)
+// and the memo's stored map must stay pristine for every other decision
+// that reads it.
 func (h *principalInputs) RoleDefs() (map[string]*RolePermissions, error) {
 	if !h.bindingsLoaded {
 		return nil, errAuthzInputsOutOfOrder
