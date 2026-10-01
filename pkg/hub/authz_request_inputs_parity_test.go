@@ -850,7 +850,11 @@ func TestParity_StoreCallCounts_ComputeCapabilitiesBatch(t *testing.T) {
 			assert.Equal(t, 1, memoStore.countOf("ListRoleBindingsForPrincipals"), "ListRoleBindingsForPrincipals under the memo")
 			assert.Equal(t, 1, memoStore.countOf("GetRoleDefinitionsByIDs"), "GetRoleDefinitionsByIDs under the memo: the fixture has bindings, so this must be loaded exactly once, not skipped (N1)")
 			pages := memoStore.countOf("ListAccessConstraints")
-			assert.GreaterOrEqual(t, pages, 1, "at least one constraint page")
+			// N3-1 (round 3): the fixture has far fewer than 500 constraints
+			// (the ListAccessConstraints page size), so there is exactly one
+			// page, not merely "at least one" — assert the design's 1/1/1/P
+			// claim directly (C3 separately pins P=2 for a 501-row fixture).
+			assert.Equal(t, 1, pages, "N3-1: exactly one constraint page for a fixture with far fewer than 500 rows")
 
 			plainStore := newMemoTestStore(s)
 			plainAuthz, _ := newRecordingAuthz(plainStore)
@@ -1731,6 +1735,17 @@ func TestParity_A6_DelegatorRoleDefinitionFails(t *testing.T) {
 			// which agent.read/agent.list on an agent-typed resource never
 			// do (no AgentScopes entry at all — see agentGrantableTuples).
 			tuples := agentGrantableTuples(f)
+
+			// N3-2 (round 3): an in-test no-fault control proving tuples[0]
+			// (project.read) is a genuine allow absent the fault. The N-4
+			// DenyCause pin below is only meaningful if this holds — without
+			// it, a future fixture change that made tuples[0] a ceiling deny
+			// even fault-free would make the pin vacuous (the same failure
+			// mode as round-2 F2's missing baseline-allow precondition).
+			controlStore := newMemoTestStore(s)
+			controlAuthz, _ := newRecordingAuthz(controlStore)
+			controlDecision := controlAuthz.CheckAccess(context.Background(), f.agent, tuples[0].resource, tuples[0].action)
+			require.True(t, controlDecision.Allowed, "N3-2 H2: tuples[0] (project.read) must be allowed with no fault, or the DenyCause pin below proves nothing")
 
 			var fault func(string, int, context.Context) error
 			if tc.n == 0 {
@@ -2637,6 +2652,25 @@ func TestParity_X3_Immutability(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Round-3 F3: an INERT access constraint — its MaximumPermissions
+	// allowlist covers every permission this test ever decides on, for
+	// every principal it matters to (the agent's own evaluation AND the
+	// delegator's getEffectivePermissions resolution inside the ceiling,
+	// which applies the SAME ConstraintSubjectAllPrincipals restriction).
+	// This exists purely to make loadAllAccessConstraints's result
+	// non-empty, so the constraint-immutability check below has something
+	// to snapshot; a constraint missing a used permission ID would turn
+	// this agent's own-project lifecycle grant, or the delegator's held
+	// lifecycle permission, into an unintended deny.
+	_, err = s.CreateAccessConstraint(context.Background(), &store.AccessConstraint{
+		Name:               "x3-inert-constraint",
+		SubjectKind:        store.ConstraintSubjectAllPrincipals,
+		ScopeType:          ScopeTypeSystem,
+		MaximumPermissions: []string{"agent.read", "agent.list", "agent.create", "agent.delete", "agent.attach", "agent.lifecycle", "agent.update", "agent.port_access", "agent.set_message_mode", "agent.stop_all", "agent.message", "project.read", "skill.read", "skill.list"},
+		CreatedBy:          "test",
+	})
+	require.NoError(t, err)
+
 	// H2 precondition: the agent's own-project resource must show the
 	// SPECIFIC step-5b synthetic-role grant (MatchedGrant ==
 	// "agent-jwt-scope", authz.go:1143-1168's RoleName), and the global
@@ -2718,23 +2752,38 @@ func TestParity_X3_Immutability(t *testing.T) {
 	}
 	assert.Equal(t, before1, len(entry.roleDefs), "the HIT path's RoleDefs() must also return a clone; mutating it must not affect the stored map")
 
-	// F1: snapshot the stored roleDefs BEFORE any decide call runs. The
-	// "no synthetic role leaked in" check used to run here, before decide
-	// was ever called on the memo ctx — which made it vacuous (round-2 F1
-	// point 2). It is asserted after the three decide() calls below
-	// instead, alongside a full deep-equal against this snapshot.
-	roleDefsBeforeDecide := make(map[string]*RolePermissions, len(entry.roleDefs))
-	for id, rp := range entry.roleDefs {
-		roleDefsBeforeDecide[id] = rp
+	// N3-3 (round 3): deep-copy the *RolePermissions POINTEE and its
+	// Permissions map, not just the pointer — the same class of hazard
+	// round-2 N-5 fixed for bindings/edges/constraints. A shallow
+	// `roleDefsBeforeDecide[id] = rp` snapshot shares the exact same
+	// *RolePermissions object (and the exact same Permissions map inside
+	// it) with entry.roleDefs; an in-place write to either would silently
+	// "mutate" the snapshot too, and the deep-equal below would never catch
+	// it. F1: snapshot BEFORE any decide call runs — the "no synthetic role
+	// leaked in" check used to run here, before decide was ever called on
+	// the memo ctx, which made it vacuous (round-2 F1 point 2). It is
+	// asserted after the decide() calls below instead, alongside a full
+	// deep-equal against this snapshot.
+	deepCopyRoleDefs := func(in map[string]*RolePermissions) map[string]*RolePermissions {
+		out := make(map[string]*RolePermissions, len(in))
+		for id, rp := range in {
+			if rp == nil {
+				out[id] = nil
+				continue
+			}
+			cp := *rp
+			if rp.Permissions != nil {
+				cp.Permissions = make(map[string]struct{}, len(rp.Permissions))
+				for p := range rp.Permissions {
+					cp.Permissions[p] = struct{}{}
+				}
+			}
+			out[id] = &cp
+		}
+		return out
 	}
+	roleDefsBeforeDecide := deepCopyRoleDefs(entry.roleDefs)
 
-	// R6: snapshot the stored refs, bindings, edges and constraint rows
-	// right after they are first populated, run several MORE decisions on
-	// the same memo (including the skill resource, which exercises a
-	// different synthetic-role path), then reconfirm every snapshot is
-	// still deep-equal — nothing downstream (kernel evaluation, hub-wide
-	// filters, the ceiling) mutates a memoized input in place.
-	//
 	// append(nil, emptySlice...) collapses a non-nil-but-empty slice back to
 	// nil (nothing to append), which would make an "unchanged" comparison
 	// pass or fail on nilness alone rather than content — copy explicitly
@@ -2797,6 +2846,26 @@ func TestParity_X3_Immutability(t *testing.T) {
 		}
 		return out
 	}
+
+	// Round-3 F3: run ONE decision on the memo ctx BEFORE taking the
+	// refs/bindings/edges/constraint snapshots, so that edges (step 10,
+	// via getCachedDelegationEdges) and the constraint slot (step 7c, via
+	// loadAllAccessConstraints) are actually populated when the snapshot is
+	// taken. Previously the snapshot was taken before any memo-ctx decision
+	// ever ran, so memo.edges was empty and memo.constraints was nil — the
+	// "stored edges/constraints unchanged" checks below iterated zero times
+	// or were skipped entirely, and two mutants (append to the stored
+	// constraint slot on a hit; mutate a stored *DelegationEdge in place)
+	// survived the whole suite undetected.
+	popDecision := authz.CheckAccess(ctx, f.agent, f.resource, ActionLifecycle)
+	require.True(t, popDecision.Allowed, "F3 H2: the populating decision must be allowed via the 5b synthetic grant (and the inert constraint must not have removed it) — reason=%q", popDecision.Reason)
+	// N3-4 (round 3): assert Allowed/MatchedGrant on this memo-ctx decision
+	// itself, not only on the context.Background() explain calls above —
+	// proving the leak checks below follow a decision that actually ran
+	// through THIS memo and wrote a synthetic role somewhere reachable from
+	// it, not an unrelated one.
+	assert.Equal(t, "agent-jwt-scope", popDecision.MatchedGrant, "N3-4: the populating memo-ctx decision's MatchedGrant must be the 5b synthetic grant, exactly like the context.Background() explain call above")
+
 	refsSnapshot := copyRefs(entry.refs)
 	bindingsSnapshot := deepCopyBindings(entry.bindings)
 	memo.mu.Lock()
@@ -2811,33 +2880,56 @@ func TestParity_X3_Immutability(t *testing.T) {
 	}
 	memo.mu.Unlock()
 
-	authz.CheckAccess(ctx, f.agent, f.resource, ActionDelete)
-	authz.CheckAccess(ctx, f.agent, f.resource, ActionLifecycle)
-	authz.CheckAccess(ctx, f.agent, skillRes, ActionRead)
+	// F3: the snapshots above must be non-empty, or the "unchanged after
+	// further decisions" checks at the end of this test are vacuous —
+	// exactly the gap round 3 found. The x3-inert-constraint fixture row
+	// (added above) guarantees constraintsWereLoaded; the A1 fixture's
+	// single delegation edge guarantees edgesSnapshot.
+	require.NotEmpty(t, edgesSnapshot, "F3: the edges snapshot must be non-empty after the populating decision, or the 'edges unchanged' check below is vacuous")
+	require.True(t, constraintsWereLoaded, "F3: the constraint slot must have been loaded by the populating decision")
+	require.NotEmpty(t, constraintsSnapshot, "F3: the constraint snapshot must be non-empty (the x3-inert-constraint fixture row), or the 'constraints unchanged' check below is vacuous")
+
+	// R6: run several MORE decisions on the same memo (including the skill
+	// resource, which exercises a different synthetic-role path), then
+	// reconfirm every snapshot taken above is still deep-equal — nothing
+	// downstream (kernel evaluation, hub-wide filters, the ceiling)
+	// mutates a memoized input in place.
+	delDecision := authz.CheckAccess(ctx, f.agent, f.resource, ActionDelete)
+	_ = delDecision // outcome not asserted: the A1 delegator may or may not hold agent.delete; this call exists only to exercise more memo reads before the immutability check below, like popDecision and skillDecision.
+	lifecycleDecision2 := authz.CheckAccess(ctx, f.agent, f.resource, ActionLifecycle)
+	skillDecision := authz.CheckAccess(ctx, f.agent, skillRes, ActionRead)
+
+	// N3-4: same assertion as popDecision above, on two more memo-ctx
+	// decisions — proves the final leak/immutability check below follows
+	// decisions that genuinely exercised both the 5b (agent) and 5b2
+	// (skill) synthetic-role paths on this memo, not just the
+	// context.Background() explain calls at the top of this test.
+	require.True(t, lifecycleDecision2.Allowed, "N3-4 H2: the second agent-resource memo-ctx decision must also be allowed via the 5b synthetic grant")
+	assert.Equal(t, "agent-jwt-scope", lifecycleDecision2.MatchedGrant, "N3-4: second agent-resource memo-ctx decision's MatchedGrant")
+	require.True(t, skillDecision.Allowed, "N3-4 H2: the skill-resource memo-ctx decision must be allowed via the 5b2 synthetic catalog grant — reason=%q", skillDecision.Reason)
+	assert.Equal(t, "agent-skill-catalog", skillDecision.MatchedGrant, "N3-4: skill-resource memo-ctx decision's MatchedGrant")
 
 	// F1: the synthetic roles decide writes into its OWN local clone (step
-	// 5b/5b2) must NOT have leaked into the stored map. Checked AFTER the
-	// three decide() calls above, not before (round-2 F1 point 2 — the
-	// pre-decide placement could never have observed a leak). The deep
-	// equal against the before-decide snapshot is the stronger of the two
-	// checks (it also catches any OTHER stored-map mutation, not just a
-	// "synthetic" substring), but both are kept: the substring check gives
-	// a readable failure naming the exact leaked key.
+	// 5b/5b2) must NOT have leaked into the stored map. Checked AFTER every
+	// decide() call above, not before (round-2 F1 point 2 — the pre-decide
+	// placement could never have observed a leak). The deep equal against
+	// the before-decide snapshot is the stronger of the two checks (it also
+	// catches any OTHER stored-map mutation, not just a "synthetic"
+	// substring), but both are kept: the substring check gives a readable
+	// failure naming the exact leaked key.
 	for id, rp := range entry.roleDefs {
 		assert.NotContains(t, id, "synthetic", "stored roleDefs must not contain a synthetic role id %q: %+v", id, rp)
 	}
-	assert.Equal(t, roleDefsBeforeDecide, entry.roleDefs, "F1: stored roleDefs must be unchanged after three further decisions (including one on the skill resource, which exercises the 5b2 synthetic-role path) — if this fails, decide's synthetic-role write escaped its own local clone into the memo's stored map")
+	assert.Equal(t, roleDefsBeforeDecide, entry.roleDefs, "F1: stored roleDefs must be unchanged after the memo-ctx decisions above (including one on the skill resource, which exercises the 5b2 synthetic-role path) — if this fails, decide's synthetic-role write escaped its own local clone into the memo's stored map")
 
 	assert.Equal(t, refsSnapshot, entry.refs, "R6: stored refs must be unchanged after further decisions")
 	assert.Equal(t, bindingsSnapshot, entry.bindings, "R6: stored bindings must be unchanged after further decisions")
 	memo.mu.Lock()
 	for k, v := range edgesSnapshot {
-		assert.Equal(t, v, memo.edges[k], "R6: stored edges for %q must be unchanged after further decisions", k)
+		assert.Equal(t, v, memo.edges[k], "F3/R6: stored edges for %q must be unchanged after further decisions", k)
 	}
-	if constraintsWereLoaded {
-		require.NotNil(t, memo.constraints)
-		assert.Equal(t, constraintsSnapshot, *memo.constraints, "R6: stored constraint rows must be unchanged after further decisions")
-	}
+	require.NotNil(t, memo.constraints)
+	assert.Equal(t, constraintsSnapshot, *memo.constraints, "F3/R6: stored constraint rows must be unchanged after further decisions")
 	memo.mu.Unlock()
 }
 
@@ -3590,6 +3682,16 @@ func runBatchParity(t *testing.T, s store.Store, identity Identity, resourceType
 	require.Len(t, candCaps, 1)
 	assert.Equal(t, refCaps[0].Actions, candCaps[0].Actions, "ComputeCapabilitiesBatch actions for %s %s", resourceType, res.ID)
 	assert.Equal(t, refAllowed, candAllowed, "AuthorizeReadBatch for %s %s", resourceType, res.ID)
+	// F4 (round 3): the batch APIs above return only capability lists and
+	// bools, never Reason/DenyCause/MatchedGrant — the audit records are the
+	// ONLY place T2/T3/T6/T7 (this helper's callers) can observe parity on
+	// anything beyond Allowed. Without this, a candidate that agreed on
+	// every Actions list and every AuthorizeReadBatch bool, but reached
+	// those results through a different Reason (e.g. a leaked grant versus
+	// the intended one), would pass silently. Emission order is
+	// deterministic and identical on both sides, since both call the same
+	// ComputeCapabilitiesBatch then AuthorizeReadBatch in the same order.
+	assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot(), "runBatchParity audit records for %s %s", resourceType, res.ID)
 	return refCaps[0].Actions, refAllowed
 }
 
