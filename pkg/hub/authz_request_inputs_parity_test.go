@@ -2292,3 +2292,559 @@ func TestParity_X5_BatchLevelInstallIsPerCall(t *testing.T) {
 	caps2 := authz.ComputeCapabilities(withAuthzInputMemo(context.Background()), f.user, f.agentRes)
 	assert.Contains(t, caps2.Actions, string(ActionDelete), "the second call's own fresh memo must see the new admin binding")
 }
+
+// =============================================================================
+// Remaining P/U/C/R/T rows (completing the section 8 matrix for branch 1)
+// =============================================================================
+
+// TestParity_P2_DirectBindingMember is design row P2 ("direct-binding
+// member | deep-equal"): a direct (non-group) role binding, the shape
+// newProjectPrincipalFixture already builds.
+func TestParity_P2_DirectBindingMember(t *testing.T) {
+	_, s := authzTestSetup(t)
+	f := newProjectPrincipalFixture(t, s, "p2", store.ProjectRoleMember)
+	_, _, _, candStore := runParity(t, s, f.user, agentResourceTuples(f.agentRes))
+	assert.Equal(t, 1, candStore.countOf("GetEffectiveGroups"), "groups loaded once under the memo")
+}
+
+// TestParity_P3_ProjectOwnerWithOwnedAgent is design row P3 ("project owner
+// (binding + OwnerID on some agents) | deep-equal, including the owner
+// relationship candidate"): the owner has both a role binding AND is the
+// OwnerID of one of the two agent resources tested, so both the
+// binding-granted path and the owner-relationship path are exercised.
+func TestParity_P3_ProjectOwnerWithOwnedAgent(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	projectID := tid("p3-project")
+	ownerID := tid("p3-owner")
+	otherOwnerID := tid("p3-other-owner")
+	ownedAgentID := tid("p3-owned-agent")
+	otherAgentID := tid("p3-other-agent")
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Slug: "p3-proj", Name: "p3", OwnerID: ownerID}))
+	createDCUser(t, s, ownerID, "p3-owner@test.com", projectID, store.ProjectRoleOwner)
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: ownedAgentID, Slug: "p3-owned", Name: "p3-owned", ProjectID: projectID, Phase: "running", OwnerID: ownerID, Ancestry: []string{ownerID}}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: otherAgentID, Slug: "p3-other", Name: "p3-other", ProjectID: projectID, Phase: "running", OwnerID: otherOwnerID, Ancestry: []string{otherOwnerID}}))
+
+	owner := NewAuthenticatedUser(ownerID, "p3-owner@test.com", "p3", "member", "api")
+	ownedRes := Resource{Type: "agent", ID: ownedAgentID, ParentType: "project", ParentID: projectID, OwnerID: ownerID}
+	otherRes := Resource{Type: "agent", ID: otherAgentID, ParentType: "project", ParentID: projectID, OwnerID: otherOwnerID}
+
+	tuples := append(agentResourceTuples(ownedRes), agentResourceTuples(otherRes)...)
+	refDecisions, _, _, _ := runParity(t, s, owner, tuples)
+	var sawOwnerGrant bool
+	for _, d := range refDecisions {
+		if d.Allowed && d.Reason == "relationship grant: resource owner" {
+			sawOwnerGrant = true
+		}
+	}
+	assert.True(t, sawOwnerGrant, "H2: the owner-relationship candidate must actually be exercised on the owned agent")
+}
+
+// TestParity_P5_HubAdmin is design row P5 ("hub-admin | deep-equal").
+func TestParity_P5_HubAdmin(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("p5-hubadmin")
+	createTestUserWithRole(t, s, userID, "p5@test.com", "admin", store.SystemRoleHubAdmin)
+	admin := NewAuthenticatedUser(userID, "p5@test.com", "p5", "admin", "api")
+
+	projectID := tid("p5-project")
+	ownerID := tid("p5-owner")
+	agentID := tid("p5-agent")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Slug: "p5-proj", Name: "p5", OwnerID: ownerID}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "p5-agent", Name: "p5-agent", ProjectID: projectID, Phase: "running", OwnerID: ownerID, Ancestry: []string{ownerID}}))
+	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, OwnerID: ownerID}
+
+	runParity(t, s, admin, agentResourceTuples(res))
+}
+
+// TestParity_P6_SuperAdmin is design row P6 ("super-admin | deep-equal").
+func TestParity_P6_SuperAdmin(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("p6-superadmin")
+	createTestUserWithRole(t, s, userID, "p6@test.com", "admin", store.SystemRoleSuperAdmin)
+	admin := NewAuthenticatedUser(userID, "p6@test.com", "p6", "admin", "api")
+
+	projectID := tid("p6-project")
+	ownerID := tid("p6-owner")
+	agentID := tid("p6-agent")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Slug: "p6-proj", Name: "p6", OwnerID: ownerID}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "p6-agent", Name: "p6-agent", ProjectID: projectID, Phase: "running", OwnerID: ownerID, Ancestry: []string{ownerID}}))
+	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, OwnerID: ownerID}
+
+	refDecisions, _, _, _ := runParity(t, s, admin, agentResourceTuples(res))
+	for i, d := range refDecisions {
+		assert.True(t, d.Allowed, "super-admin must be allowed on tuple %d", i)
+	}
+}
+
+// TestParity_P7_NonMemberHubUser is design row P7 ("non-member hub user |
+// deep-equal denies"): a hub member with no binding on this project at all.
+func TestParity_P7_NonMemberHubUser(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	userID := tid("p7-nonmember")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "p7@test.com", DisplayName: "p7", Role: "member", Status: "active"}))
+	user := NewAuthenticatedUser(userID, "p7@test.com", "p7", "member", "api")
+
+	projectID := tid("p7-project")
+	ownerID := tid("p7-owner")
+	agentID := tid("p7-agent")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Slug: "p7-proj", Name: "p7", OwnerID: ownerID}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "p7-agent", Name: "p7-agent", ProjectID: projectID, Phase: "running", OwnerID: ownerID, Ancestry: []string{ownerID}}))
+	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, OwnerID: ownerID}
+
+	refDecisions, _, _, _ := runParity(t, s, user, agentResourceTuples(res))
+	for i, d := range refDecisions {
+		assert.False(t, d.Allowed, "non-member must be denied on tuple %d", i)
+	}
+}
+
+// TestParity_U2_ScopedAndUnscopedSameUserNoLeakage is design row U2 ("scoped
+// UAT and unscoped session for the same user in one ctx | no credential
+// leakage either way"). A ScopedUserIdentity wrapping a UserIdentity has the
+// SAME principalKey as the unscoped identity (Type()/ID() are promoted
+// through the embedded field), so both share one memo entry by
+// construction. This row proves that sharing is safe: each decision still
+// applies its OWN credential restriction (7a) independently, so the
+// broader unscoped grant never leaks into the scoped identity's decisions,
+// and vice versa.
+func TestParity_U2_ScopedAndUnscopedSameUserNoLeakage(t *testing.T) {
+	_, s := authzTestSetup(t)
+	f := newP1Fixture(t, s, "u2")
+	ceiling, ok := permissions.BuildCeilingFromSelectors([]string{"agent:read"})
+	require.True(t, ok)
+	scoped := NewScopedUserIdentityWithCeiling(f.user, f.projectID, []string{"agent:read"}, "u2-uat", ceiling)
+
+	// References: each identity evaluated alone, no memo, no interleaving.
+	refUnscoped, _, _, _ := runParity(t, s, f.user, agentResourceTuples(f.agentRes))
+	refScoped, _, _, _ := runParity(t, s, scoped, agentResourceTuples(f.agentRes))
+
+	// Candidate: BOTH identities interleaved in ONE memo ctx.
+	candStore := newMemoTestStore(s)
+	candAuthz, _ := newRecordingAuthz(candStore)
+	mctx := withAuthzInputMemo(context.Background())
+	actions := ResourceActions["agent"]
+	var candUnscoped, candScoped []Decision
+	for _, a := range actions {
+		candUnscoped = append(candUnscoped, candAuthz.CheckAccess(mctx, f.user, f.agentRes, a))
+		candScoped = append(candScoped, candAuthz.CheckAccess(mctx, scoped, f.agentRes, a))
+	}
+
+	for i := range actions {
+		assertDecisionsEqual(t, refUnscoped[i], candUnscoped[i], "unscoped tuple %d: the scoped identity sharing the memo entry must not narrow it", i)
+		assertDecisionsEqual(t, refScoped[i], candScoped[i], "scoped tuple %d: the unscoped identity sharing the memo entry must not widen it", i)
+	}
+	assert.Equal(t, 1, candStore.countOf("GetEffectiveGroups"), "both identities share one memo entry (same principalKey)")
+
+	var sawScopedDeny, sawUnscopedAllow bool
+	for i := range actions {
+		if !candScoped[i].Allowed {
+			sawScopedDeny = true
+		}
+		if candUnscoped[i].Allowed {
+			sawUnscopedAllow = true
+		}
+	}
+	assert.True(t, sawScopedDeny, "H2: the scoped identity must actually be restricted by its own ceiling")
+	assert.True(t, sawUnscopedAllow, "H2: the unscoped identity must actually retain its full access")
+}
+
+// TestParity_U3_ScopedUATAnotherProject is design row U3 ("scoped UAT for
+// another project | deep-equal step-1 denies; zero closure loads"). The
+// ceiling may be real (R6-Nit4: U3 does not depend on the ceiling), but the
+// resource's project differs from the UAT's scoped project, so
+// enforceUATConstraints denies at step 1, before step 2 ever runs.
+func TestParity_U3_ScopedUATAnotherProject(t *testing.T) {
+	_, s := authzTestSetup(t)
+	f := newP1Fixture(t, s, "u3")
+	otherProjectID := tid("u3-other-project")
+	ctx := context.Background()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: otherProjectID, Slug: "u3-other-proj", Name: "u3-other"}))
+	otherAgentID := tid("u3-other-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: otherAgentID, Slug: "u3-other-agent", Name: "u3-other-agent", ProjectID: otherProjectID, Phase: "running"}))
+	otherRes := Resource{Type: "agent", ID: otherAgentID, ParentType: "project", ParentID: otherProjectID}
+
+	ceiling, ok := permissions.BuildCeilingFromSelectors([]string{"agent:read"})
+	require.True(t, ok)
+	scoped := NewScopedUserIdentityWithCeiling(f.user, f.projectID, []string{"agent:read"}, "u3-uat", ceiling)
+
+	refDecisions, _, refStore, candStore := runParity(t, s, scoped, agentResourceTuples(otherRes))
+	for i, d := range refDecisions {
+		assert.False(t, d.Allowed, "tuple %d must deny at step 1 (wrong project)", i)
+		assert.Equal(t, "token not scoped for this project", d.Reason, "tuple %d", i)
+	}
+	assert.Equal(t, 0, refStore.countOf("GetEffectiveGroups"), "reference: zero closure loads")
+	assert.Equal(t, 0, candStore.countOf("GetEffectiveGroups"), "candidate: zero closure loads")
+}
+
+// TestParity_C2_ConstraintTimeWindow is design row C2 ("constraint time
+// window inactive / active | deep-equal").
+func TestParity_C2_ConstraintTimeWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		active bool
+	}{
+		{"inactive_not_yet", false},
+		{"active", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, s := authzTestSetup(t)
+			ctx := context.Background()
+			f := newP1Fixture(t, s, "c2-"+tc.name)
+
+			notBefore := time.Now().Add(-time.Hour)
+			if !tc.active {
+				notBefore = time.Now().Add(time.Hour) // not active yet
+			}
+			_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+				Name:               "c2-" + tc.name,
+				SubjectKind:        store.ConstraintSubjectGroupClosure,
+				SubjectGroupID:     &f.groupID,
+				ScopeType:          ScopeTypeProject,
+				ScopeID:            f.projectID,
+				MaximumPermissions: []string{},
+				NotBefore:          &notBefore,
+				CreatedBy:          "test",
+			})
+			require.NoError(t, err)
+
+			refDecisions, _, _, _ := runParity(t, s, f.user, agentResourceTuples(f.agentRes))
+			var sawAllow bool
+			for _, d := range refDecisions {
+				if d.Allowed {
+					sawAllow = true
+				}
+			}
+			if tc.active {
+				assert.False(t, sawAllow, "H2: an active empty-allowlist constraint must deny everything")
+			} else {
+				assert.True(t, sawAllow, "H2: an inactive (not-yet) constraint must not restrict anything")
+			}
+		})
+	}
+}
+
+// TestParity_C4_SystemVsProjectScopedConstraint is design row C4
+// ("system-scoped vs project-scoped constraint | deep-equal").
+func TestParity_C4_SystemVsProjectScopedConstraint(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		scopeType string
+	}{
+		{"system", ScopeTypeSystem},
+		{"project", ScopeTypeProject},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, s := authzTestSetup(t)
+			ctx := context.Background()
+			f := newP1Fixture(t, s, "c4-"+tc.name)
+
+			scopeID := ""
+			if tc.scopeType == ScopeTypeProject {
+				scopeID = f.projectID
+			}
+			_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+				Name:               "c4-" + tc.name,
+				SubjectKind:        store.ConstraintSubjectGroupClosure,
+				SubjectGroupID:     &f.groupID,
+				ScopeType:          tc.scopeType,
+				ScopeID:            scopeID,
+				MaximumPermissions: []string{},
+				CreatedBy:          "test",
+			})
+			require.NoError(t, err)
+
+			refDecisions, _, _, _ := runParity(t, s, f.user, agentResourceTuples(f.agentRes))
+			for i, d := range refDecisions {
+				assert.False(t, d.Allowed, "tuple %d must be denied by the %s-scoped constraint", i, tc.scopeType)
+			}
+		})
+	}
+}
+
+// TestParity_R2_AncestorOnly is design row R2 ("ancestor only | deep-equal").
+func TestParity_R2_AncestorOnly(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	ancestorID := tid("r2-ancestor")
+	outsiderID := tid("r2-outsider")
+	projectID := tid("r2-project")
+	agentID := tid("r2-agent")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: ancestorID, Email: "r2-ancestor@test.com", DisplayName: "r2a", Role: "member", Status: "active"}))
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: outsiderID, Email: "r2-outsider@test.com", DisplayName: "r2o", Role: "member", Status: "active"}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Slug: "r2-proj", Name: "r2"}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "r2-agent", Name: "r2-agent", ProjectID: projectID, Phase: "running", Ancestry: []string{ancestorID}}))
+	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, Ancestry: []string{ancestorID}}
+
+	ancestor := NewAuthenticatedUser(ancestorID, "r2-ancestor@test.com", "r2a", "member", "api")
+	refDecisions, _, _, _ := runParity(t, s, ancestor, agentResourceTuples(res))
+	var sawAncestorGrant bool
+	for _, d := range refDecisions {
+		if d.Allowed && d.Reason == "relationship grant: ancestor access" {
+			sawAncestorGrant = true
+		}
+	}
+	assert.True(t, sawAncestorGrant, "H2: the ancestor relationship must actually be exercised")
+
+	outsider := NewAuthenticatedUser(outsiderID, "r2-outsider@test.com", "r2o", "member", "api")
+	outsiderDecisions, _, _, _ := runParity(t, s, outsider, agentResourceTuples(res))
+	for i, d := range outsiderDecisions {
+		assert.False(t, d.Allowed, "outsider tuple %d must deny", i)
+	}
+}
+
+// TestParity_R3_RelationshipGrantRestrictedByUATScope is design row R3
+// ("relationship grant restricted by UAT scope | deep-equal 'relationship
+// grant restricted by ...'"). The UAT owner's ceiling does not cover
+// agent.delete, so the owner relationship would grant it but the 7a
+// restriction blocks it, producing the "relationship grant restricted by"
+// Reason prefix (decide step 9).
+func TestParity_R3_RelationshipGrantRestrictedByUATScope(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	ownerID := tid("r3-owner")
+	projectID := tid("r3-project")
+	agentID := tid("r3-agent")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: ownerID, Email: "r3-owner@test.com", DisplayName: "r3", Role: "member", Status: "active"}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Slug: "r3-proj", Name: "r3", OwnerID: ownerID}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "r3-agent", Name: "r3-agent", ProjectID: projectID, Phase: "running", OwnerID: ownerID, Ancestry: []string{ownerID}}))
+	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, OwnerID: ownerID}
+
+	owner := NewAuthenticatedUser(ownerID, "r3-owner@test.com", "r3", "member", "api")
+	ceiling, ok := permissions.BuildCeilingFromSelectors([]string{"agent:read"}) // deliberately NOT agent:delete
+	require.True(t, ok)
+	scoped := NewScopedUserIdentityWithCeiling(owner, projectID, []string{"agent:read"}, "r3-uat", ceiling)
+
+	refDecisions, _, _, _ := runParity(t, s, scoped, []rawTuple{{res, ActionDelete}})
+	require.Len(t, refDecisions, 1)
+	assert.False(t, refDecisions[0].Allowed)
+	assert.Contains(t, refDecisions[0].Reason, "relationship grant restricted by", "H2: must hit the restricted-relationship-grant branch, not a plain deny")
+}
+
+// =============================================================================
+// Remaining T rows (resource-type coverage, B7): batch + AuthorizeReadBatch
+// =============================================================================
+
+// runBatchParity proves deep-equal for one resource through both
+// ComputeCapabilitiesBatch and AuthorizeReadBatch — the two paths design
+// section 8's B7 note specifies for resource-type coverage — reference (no
+// memo) vs candidate (one memo installed for both batch calls). It returns
+// the reference capability actions and AuthorizeReadBatch result for
+// row-specific H2 assertions.
+func runBatchParity(t *testing.T, s store.Store, identity Identity, resourceType string, res Resource) (refActions []string, refAllowed []bool) {
+	t.Helper()
+	ctx := context.Background()
+
+	refStore := newMemoTestStore(s)
+	refAuthz, _ := newRecordingAuthz(refStore)
+	refCaps := refAuthz.ComputeCapabilitiesBatch(ctx, identity, []Resource{res}, resourceType)
+	refAllowed, refErr := refAuthz.AuthorizeReadBatch(ctx, identity, []Resource{res})
+	require.NoError(t, refErr)
+
+	candStore := newMemoTestStore(s)
+	candAuthz, _ := newRecordingAuthz(candStore)
+	mctx := withAuthzInputMemo(ctx)
+	candCaps := candAuthz.ComputeCapabilitiesBatch(mctx, identity, []Resource{res}, resourceType)
+	candAllowed, candErr := candAuthz.AuthorizeReadBatch(mctx, identity, []Resource{res})
+	require.NoError(t, candErr)
+
+	require.Len(t, refCaps, 1)
+	require.Len(t, candCaps, 1)
+	assert.Equal(t, refCaps[0].Actions, candCaps[0].Actions, "ComputeCapabilitiesBatch actions for %s %s", resourceType, res.ID)
+	assert.Equal(t, refAllowed, candAllowed, "AuthorizeReadBatch for %s %s", resourceType, res.ID)
+	return refCaps[0].Actions, refAllowed
+}
+
+// TestParity_T2_TemplateGlobalAndProjectScoped is design row T2 ("template,
+// global + project-scoped | batch + AuthorizeReadBatch | hub-wide filter
+// reads roleDefs (authz_template_scope.go:72)").
+func TestParity_T2_TemplateGlobalAndProjectScoped(t *testing.T) {
+	_, s := authzTestSetup(t)
+	f := newP1Fixture(t, s, "t2")
+	ctx := context.Background()
+	globalTplID := tid("t2-global-tpl")
+	projectTplID := tid("t2-project-tpl")
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: globalTplID, Name: "t2g", Slug: "t2g", Harness: "claude", Image: "img", Scope: store.TemplateScopeGlobal}))
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: projectTplID, Name: "t2p", Slug: "t2p", Harness: "claude", Image: "img", Scope: store.TemplateScopeProject, ScopeID: f.projectID}))
+
+	t.Run("global", func(t *testing.T) {
+		runBatchParity(t, s, f.user, "template", templateResource(&store.Template{ID: globalTplID, Scope: store.TemplateScopeGlobal}))
+	})
+	t.Run("project", func(t *testing.T) {
+		runBatchParity(t, s, f.user, "template", templateResource(&store.Template{ID: projectTplID, Scope: store.TemplateScopeProject, ScopeID: f.projectID}))
+	})
+}
+
+// TestParity_T3_HarnessConfigGlobalAndProjectScoped is design row T3
+// ("harness_config, global + project-scoped | batch + AuthorizeReadBatch |
+// hub-wide filter (authz_harness_config_scope.go:72)").
+func TestParity_T3_HarnessConfigGlobalAndProjectScoped(t *testing.T) {
+	_, s := authzTestSetup(t)
+	f := newP1Fixture(t, s, "t3")
+	ctx := context.Background()
+	globalHCID := tid("t3-global-hc")
+	projectHCID := tid("t3-project-hc")
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: globalHCID, Name: "t3g", Slug: "t3g", Harness: "claude", Scope: store.HarnessConfigScopeGlobal}))
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: projectHCID, Name: "t3p", Slug: "t3p", Harness: "claude", Scope: store.HarnessConfigScopeProject, ScopeID: f.projectID}))
+
+	t.Run("global", func(t *testing.T) {
+		runBatchParity(t, s, f.user, "harness_config", harnessConfigResource(&store.HarnessConfig{ID: globalHCID, Scope: store.HarnessConfigScopeGlobal}))
+	})
+	t.Run("project", func(t *testing.T) {
+		runBatchParity(t, s, f.user, "harness_config", harnessConfigResource(&store.HarnessConfig{ID: projectHCID, Scope: store.HarnessConfigScopeProject, ScopeID: f.projectID}))
+	})
+}
+
+// TestParity_T6_GCPServiceAccountHubScopedAssign is design row T6
+// ("gcp_service_account, hub-scoped, assign | batch | hub-member fact
+// (:176-194)"): a current hub member (group membership, not just a role
+// binding) may assign a hub-scoped service account they did not create,
+// through the hub_member_sa_assign relationship.
+func TestParity_T6_GCPServiceAccountHubScopedAssign(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	memberID := tid("t6-member")
+	creatorID := tid("t6-creator")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: memberID, Email: "t6@test.com", DisplayName: "t6", Role: "member", Status: "active"}))
+	hubGroup, err := s.GetGroupBySlug(ctx, "hub-members")
+	require.NoError(t, err)
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: hubGroup.ID, MemberID: memberID, MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleMember}))
+	member := NewAuthenticatedUser(memberID, "t6@test.com", "t6", "member", "api")
+
+	hubSA := gcpServiceAccountResource(&store.GCPServiceAccount{ID: tid("t6-sa"), CreatedBy: creatorID, Scope: store.ScopeHub, ScopeID: "hub"})
+	actions, _ := runBatchParity(t, s, member, "gcp_service_account", hubSA)
+	assert.Contains(t, actions, "assign", "H2: the hub-member fact must actually grant assign on a hub-scoped SA the member did not create")
+}
+
+// TestParity_T7_ParentlessDenyBaselineForAgent is design row T7 ("broker,
+// group, user for the agent principal | batch + AuthorizeReadBatch |
+// parentless deny baseline").
+func TestParity_T7_ParentlessDenyBaselineForAgent(t *testing.T) {
+	_, s := authzTestSetup(t)
+	f := newA1Fixture(t, s, "t7")
+	ctx := context.Background()
+	brokerID := tid("t7-broker")
+	groupID := tid("t7-group")
+	userID := tid("t7-user")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{ID: brokerID, Name: "t7-broker", Slug: "t7-broker"}))
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: groupID, Name: "t7-group", Slug: "t7-group", GroupType: store.GroupTypeExplicit}))
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "t7@test.com", DisplayName: "t7", Role: "member", Status: "active"}))
+
+	for _, res := range []Resource{
+		brokerResource(&store.RuntimeBroker{ID: brokerID}),
+		groupResource(&store.Group{ID: groupID}),
+		userResource(&store.User{ID: userID}),
+	} {
+		t.Run(res.Type, func(t *testing.T) {
+			actions, allowed := runBatchParity(t, s, f.agent, res.Type, res)
+			assert.Empty(t, actions, "H2: the agent must get an empty capability set (parentless deny baseline) for %s", res.Type)
+			for _, a := range allowed {
+				assert.False(t, a, "H2: AuthorizeReadBatch must deny %s", res.Type)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// #2155 check: identity re-classification adds no new decide path or
+// principal type the memo must handle
+// =============================================================================
+
+// TestParity_BrokerOnBehalfOf_SharesMemoEntryWithPlainUser confirms the
+// slow-list-lead's #2155 question directly rather than by analysis alone:
+// ptone/scion#2155 (d79b358) rewrote decide's early classification into a
+// type-assertion switch (principalContextForIdentity) plus a new
+// suppliedCredentialCompatible/brokerOnBehalfOfAuthorizes gate, entirely
+// upstream of step 2 (a.inputsFor). It does not add a new PrincipalKind
+// (principalContextForIdentity's switch still produces only the kinds the
+// const block already named) and does not touch NormalizePrincipalType or
+// authorizationPrincipals, which principalKey is keyed from. A
+// broker-on-behalf-of request for a local user is still, from step 2
+// onward, exactly a request from that *AuthenticatedUser — only
+// Credential.Kind differs, and credential data is never a memoized input
+// (design 4.1 rule 4). This test proves it: the broker-on-behalf-of
+// decision and a plain interactive decision for the SAME user, run in one
+// memo phase, are deep-equal apart from the credential-identifying fields,
+// and share exactly one memo entry (one GetEffectiveGroups call for both).
+func TestParity_BrokerOnBehalfOf_SharesMemoEntryWithPlainUser(t *testing.T) {
+	_, s := authzTestSetup(t)
+	f := newP1Fixture(t, s, "obo")
+	brokerID := tid("obo-broker")
+	broker := NewBrokerIdentity(brokerID)
+
+	// Build the ctx BrokerAuthMiddleware would install after HMAC
+	// verification and a successful on-behalf-of resolution: the broker
+	// identity marker, the dedicated BrokerOnBehalfOf marker naming this
+	// principal, and the effective identity set to the local user.
+	oboCtx := contextWithBrokerIdentity(context.Background(), broker)
+	oboCtx = contextWithBrokerOnBehalfOf(oboCtx, BrokerOnBehalfOf{Broker: broker, BrokerID: brokerID})
+	oboCtx = contextWithIdentity(oboCtx, f.user)
+
+	oboRequest := func(ctx context.Context, action Action) AuthzRequest {
+		return AuthzRequest{
+			Principal:  PrincipalContext{Identity: f.user},
+			Credential: CredentialContext{Kind: CredentialKindBroker, ID: brokerID, Type: "broker"},
+			Resource:   f.agentRes,
+			Action:     action,
+		}
+	}
+
+	actions := ResourceActions["agent"]
+
+	refStore := newMemoTestStore(s)
+	refAuthz, _ := newRecordingAuthz(refStore)
+	var refPlain, refObo []Decision
+	for _, a := range actions {
+		refPlain = append(refPlain, refAuthz.CheckAccess(context.Background(), f.user, f.agentRes, a))
+		refObo = append(refObo, refAuthz.Decide(oboCtx, oboRequest(oboCtx, a)))
+	}
+
+	candStore := newMemoTestStore(s)
+	candAuthz, _ := newRecordingAuthz(candStore)
+	mctx := withAuthzInputMemo(context.Background())
+	moboCtx := withAuthzInputMemo(oboCtx)
+	var candPlain, candObo []Decision
+	for _, a := range actions {
+		candPlain = append(candPlain, candAuthz.CheckAccess(mctx, f.user, f.agentRes, a))
+		candObo = append(candObo, candAuthz.Decide(moboCtx, oboRequest(moboCtx, a)))
+	}
+
+	for i := range actions {
+		assertDecisionsEqual(t, refPlain[i], candPlain[i], "plain tuple %d", i)
+
+		// The on-behalf-of decision differs from plain only in the
+		// credential-identifying fields; zero those before comparing, since
+		// they are expected to differ (broker credential vs interactive).
+		refObo[i].CredentialKind, candObo[i].CredentialKind = "", ""
+		refObo[i].CredentialID, candObo[i].CredentialID = "", ""
+		refObo[i].CredentialType, candObo[i].CredentialType = "", ""
+		assertDecisionsEqual(t, refObo[i], candObo[i], "on-behalf-of tuple %d", i)
+
+		// And the on-behalf-of decision's AUTHORIZATION outcome (Allowed,
+		// Reason, DenyCause — not the credential metadata) must match the
+		// plain user's, since the principal and its memoized inputs are
+		// identical; only the credential bookkeeping differs.
+		assert.Equal(t, refPlain[i].Allowed, refObo[i].Allowed, "tuple %d: on-behalf-of must authorize exactly like the plain user", i)
+		assert.Equal(t, refPlain[i].Reason, refObo[i].Reason, "tuple %d", i)
+	}
+
+	// mctx and moboCtx are two SEPARATE memo installs in this test (one per
+	// withAuthzInputMemo call), which is deliberate: it proves plain vs
+	// on-behalf-of parity independent of memo sharing. The count assertion
+	// below uses one shared memo to prove the sharing claim itself.
+	sharedStore := newMemoTestStore(s)
+	sharedAuthz, _ := newRecordingAuthz(sharedStore)
+	sharedCtx := withAuthzInputMemo(context.Background())
+	sharedAuthz.CheckAccess(sharedCtx, f.user, f.agentRes, ActionRead)
+	// Reuse the SAME installed memo ctx for the on-behalf-of call by
+	// deriving it from sharedCtx (which already carries the memo), not from
+	// a fresh background ctx, so both calls land in the same entry.
+	sharedOboOnSameMemo := contextWithBrokerIdentity(sharedCtx, broker)
+	sharedOboOnSameMemo = contextWithBrokerOnBehalfOf(sharedOboOnSameMemo, BrokerOnBehalfOf{Broker: broker, BrokerID: brokerID})
+	sharedOboOnSameMemo = contextWithIdentity(sharedOboOnSameMemo, f.user)
+	sharedAuthz.Decide(sharedOboOnSameMemo, oboRequest(sharedOboOnSameMemo, ActionRead))
+	assert.Equal(t, 1, sharedStore.countOf("GetEffectiveGroups"), "plain and on-behalf-of decisions for the same user must share one memo entry (same principalKey, credential-independent)")
+}
