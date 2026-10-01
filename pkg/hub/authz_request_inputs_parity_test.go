@@ -444,6 +444,19 @@ func newP1Fixture(t *testing.T, s store.Store, name string) *p1Fixture {
 	}
 }
 
+// addToHubMembersGroup adds userID to the seeded "hub-members" group, which
+// carries a system-scoped hub-member role binding (template/harness_config
+// read+list, among others). This is the ONLY way a plain project-scoped
+// principal reaches the global/core catalog the hub-wide filter guards —
+// a project-scoped binding alone grants nothing at system scope.
+func addToHubMembersGroup(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	hubGroup, err := s.GetGroupBySlug(ctx, "hub-members")
+	require.NoError(t, err)
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: hubGroup.ID, MemberID: userID, MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleMember}))
+}
+
 // projectPrincipalFixture is a project-scoped principal reached through a
 // direct (non-group) role binding, for P2 (member), P4 (admin) and similar
 // rows that don't need the group-closure shape P1 exercises.
@@ -1413,26 +1426,25 @@ func TestParity_A3_AgentCrossProject(t *testing.T) {
 	// a cross-project denial (rather than short-circuiting earlier), i.e.
 	// some decision must actually deny for a reason distinct from 7b.
 	var sawNonScopeDeny bool
-	var crossProjectReason string
 	for _, d := range refDecisions {
 		if !d.Allowed && d.Reason != "" {
 			sawNonScopeDeny = true
-			crossProjectReason = d.Reason
 		}
 	}
 	assert.True(t, sawNonScopeDeny, "H2: cross-project fixture must reach a real denial")
 
-	// O3: pin that the cross-project denial is the SAME reason on every
-	// such tuple (the kernel's scope-mismatch deny, not some per-action
-	// text), as design 4.4's "scope switch" is a single mechanism, not
-	// action-dependent. A hardcoded literal is deliberately avoided here:
-	// the kernel's exact deny-reason string is an internal implementation
-	// detail (authz_kernel.go), not part of this design's contract, so this
-	// pins the property that matters (one consistent scope-mismatch reason)
-	// without coupling the test to kernel wording.
+	// O3: pin the specific cross-project deny mechanism: the kernel's
+	// buildDenyReasons produces "no active binding grants permission
+	// \"<id>\"" because the synthetic binding exists (so len(rejected)>0)
+	// but its scope (the agent's OWN project) does not match the
+	// cross-project resource, so it grants nothing. The permission ID
+	// itself is per-action by construction (the kernel interpolates it
+	// into the string), so the assertion pins the stable PREFIX, not full
+	// equality across tuples — a hardcoded full literal would be wrong
+	// here, not just brittle.
 	for i, d := range refDecisions {
 		if !d.Allowed && d.Reason != "" {
-			assert.Equal(t, crossProjectReason, d.Reason, "tuple %d: every cross-project denial must share the same reason", i)
+			assert.Contains(t, d.Reason, "no active binding grants permission", "tuple %d: the cross-project denial must be the kernel's scope-mismatch deny, not some other mechanism", i)
 		}
 	}
 }
@@ -1569,14 +1581,23 @@ func TestParity_D1_FilteredBindings(t *testing.T) {
 		for _, b := range bindings {
 			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
 		}
-		// A binding whose RoleDefinitionID names no real row: loadRoleDefinitions
-		// silently omits unresolvable IDs (authz_list.go), so the binding
-		// contributes no permissions.
+		// CreateRoleBinding validates that RoleDefinitionID resolves at
+		// creation time (role_store.go's "binding guard"), so a bogus ID
+		// cannot be used directly. Instead: create a real, throwaway role
+		// definition, bind to it successfully, then delete the role
+		// definition out from under the binding — loadRoleDefinitions then
+		// silently omits the now-unresolvable ID (authz_list.go), so the
+		// binding contributes no permissions.
+		rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+			Name: "d1-throwaway-role-" + f.userID, ScopeType: store.RoleScopeProject, Permissions: []string{"agent.read"},
+		})
+		require.NoError(t, err)
 		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-			RoleDefinitionID: tid("d1-nonexistent-role"), PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userID,
+			RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userID,
 			ScopeType: store.RoleScopeProject, ScopeID: f.projectID, CreatedBy: "test",
 		})
 		require.NoError(t, err)
+		require.NoError(t, s.DeleteRoleDefinition(ctx, rd.ID))
 
 		refDecisions, _, _, _ := runParity(t, s, f.user, agentResourceTuples(f.agentRes))
 		for i, d := range refDecisions {
@@ -1927,7 +1948,9 @@ func TestParity_A8_DelegationEdgesFail(t *testing.T) {
 		secretRes := Resource{Type: "secret", ID: secretID}
 		usePerm := permissions.Permission{ID: "secret.use", Action: string(ActionUse)}
 
-		useAgentID := tid("a8-call2-use-agent")
+		// Distinct from newA1Fixture's own agentID (tid(name+"-agent")) —
+		// using the same name suffix here previously collided with it.
+		useAgentID := tid("a8-call2-use-use-agent")
 		createDCAgent(t, s, useAgentID, f.projectID, f.delegatorID, AgentRoleFull)
 		createDCEdge(t, s, store.DelegationPrincipalUser, f.delegatorID, store.DelegationPrincipalAgent, useAgentID, store.RoleScopeProject, f.projectID, string(AgentRoleFull))
 		useAgent := &agentIdentityWrapper{&AgentTokenClaims{
@@ -2493,9 +2516,9 @@ func TestParity_X3_Immutability(t *testing.T) {
 	}
 	// agent.read has no AgentScopes entry at all (an agent can never pass
 	// the kernel for it via JWT scope — see agentGrantableTuples), so
-	// ActionDelete (AgentScopes: ["project:agent:lifecycle"], which
+	// ActionLifecycle (AgentScopes: ["project:agent:lifecycle"], which
 	// AgentRoleFull holds) is used to actually exercise step 5b.
-	agentExplain := explain(f.resource, ActionDelete)
+	agentExplain := explain(f.resource, ActionLifecycle)
 	require.True(t, agentExplain.Allowed, "reason=%q", agentExplain.Reason)
 	assert.Equal(t, "agent-jwt-scope", agentExplain.MatchedGrant, "H2: step 5b's SPECIFIC synthetic role must be the matched grant")
 
@@ -3344,6 +3367,10 @@ func TestParity_T2_TemplateGlobalAndProjectScoped(t *testing.T) {
 	_, s := authzTestSetup(t)
 	f := newP1Fixture(t, s, "t2")
 	ctx := context.Background()
+	// The global catalog is reachable only through the curated hub-member
+	// system-scoped role (the hub-wide filter's whole purpose); P1's plain
+	// project-member binding alone grants nothing at system scope.
+	addToHubMembersGroup(t, s, f.userID)
 	globalTplID := tid("t2-global-tpl")
 	projectTplID := tid("t2-project-tpl")
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: globalTplID, Name: "t2g", Slug: "t2g", Harness: "claude", Image: "img", Scope: store.TemplateScopeGlobal}))
@@ -3366,6 +3393,7 @@ func TestParity_T3_HarnessConfigGlobalAndProjectScoped(t *testing.T) {
 	_, s := authzTestSetup(t)
 	f := newP1Fixture(t, s, "t3")
 	ctx := context.Background()
+	addToHubMembersGroup(t, s, f.userID) // see T2: required for global-catalog access
 	globalHCID := tid("t3-global-hc")
 	projectHCID := tid("t3-project-hc")
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: globalHCID, Name: "t3g", Slug: "t3g", Harness: "claude", Scope: store.HarnessConfigScopeGlobal}))
@@ -3392,9 +3420,7 @@ func TestParity_T6_GCPServiceAccountHubScopedAssign(t *testing.T) {
 	memberID := tid("t6-member")
 	creatorID := tid("t6-creator")
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: memberID, Email: "t6@test.com", DisplayName: "t6", Role: "member", Status: "active"}))
-	hubGroup, err := s.GetGroupBySlug(ctx, "hub-members")
-	require.NoError(t, err)
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: hubGroup.ID, MemberID: memberID, MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleMember}))
+	addToHubMembersGroup(t, s, memberID)
 	member := NewAuthenticatedUser(memberID, "t6@test.com", "t6", "member", "api")
 
 	hubSA := gcpServiceAccountResource(&store.GCPServiceAccount{ID: tid("t6-sa"), CreatedBy: creatorID, Scope: store.ScopeHub, ScopeID: "hub"})
