@@ -2614,9 +2614,14 @@ func TestParity_R3_RelationshipGrantRestrictedByUATScope(t *testing.T) {
 	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, OwnerID: ownerID}
 
 	owner := NewAuthenticatedUser(ownerID, "r3-owner@test.com", "r3", "member", "api")
+	// Step 1 (enforceUATConstraints) checks the identity's legacy scopes
+	// list independently of the 7a ceiling restriction: the legacy list
+	// must name agent:delete so the request reaches the kernel/relationship
+	// stage at all, while the ceiling deliberately omits it so 7a is what
+	// actually blocks the owner-relationship grant.
 	ceiling, ok := permissions.BuildCeilingFromSelectors([]string{"agent:read"}) // deliberately NOT agent:delete
 	require.True(t, ok)
-	scoped := NewScopedUserIdentityWithCeiling(owner, projectID, []string{"agent:read"}, "r3-uat", ceiling)
+	scoped := NewScopedUserIdentityWithCeiling(owner, projectID, []string{"agent:delete"}, "r3-uat", ceiling)
 
 	refDecisions, _, _, _ := runParity(t, s, scoped, []rawTuple{{res, ActionDelete}})
 	require.Len(t, refDecisions, 1)
