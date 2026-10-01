@@ -1147,7 +1147,7 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(agent *store.Agent, resp *Remo
 }
 
 // DispatchAgentCreate creates and starts an agent on the runtime broker.
-func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
+func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (err error) {
 	ctx, span := tracer.Start(ctx, "hub.dispatch.create")
 	defer span.End()
 	span.SetAttributes(
@@ -1171,6 +1171,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
+	// buildCreateRequest mints (and best-effort persists) a fresh agent
+	// credential before returning. Any failure from here on must revoke it —
+	// see revokeAgentCredentialsBestEffort's doc comment.
+	defer func() {
+		if err != nil {
+			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
+		}
+	}()
 
 	resp, err := d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
 	if isHashMismatchError(err) {
@@ -1217,7 +1225,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agen
 // and DispatchAgentReprovision: build a provision-only create request, dispatch
 // it with the GatherEnv two-pass mechanism, and merge any resolved storage env
 // back into AppliedConfig.
-func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool) error {
+func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool) (err error) {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -1231,6 +1239,15 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	if err != nil {
 		return err
 	}
+	// See DispatchAgentCreate's identical defer: buildCreateRequest already
+	// minted a credential by this point, so every error return below —
+	// including the reprovision-specific hard-fail checks further down —
+	// must revoke it.
+	defer func() {
+		if err != nil {
+			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
+		}
+	}()
 	req.ProvisionOnly = true
 	req.Reprovision = reprovision
 	req.GatherEnv = true
@@ -1364,7 +1381,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 // DispatchAgentCreateWithGather creates an agent with env-gather support.
 // If the broker returns 202 with env requirements, it returns the requirements
 // as the first value instead of an error.
-func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (_ *RemoteEnvRequirementsResponse, err error) {
 	dispatchStart := time.Now()
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return nil, err
@@ -1379,6 +1396,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+	// buildCreateRequest already minted a credential. A nil error here can
+	// still mean failure from the caller's point of view (envReqs.Needs
+	// non-empty on the non-gather path) — that case does not go through this
+	// defer because it is not an error return; the caller revokes explicitly
+	// instead (handlers_agents_core.go). Every actual error return below,
+	// including through the cross-node deferredCreateWithGather fallback,
+	// does go through this defer.
+	defer func() {
+		if err != nil {
+			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
+		}
+	}()
 	req.GatherEnv = true
 
 	// Track which scope provided each key
@@ -1461,7 +1490,7 @@ func (e *ErrEnvStillMissing) Error() string {
 // at highest precedence, instead of calling the broker's stateful finalize-env
 // action. This makes the finalize HA-safe: the replay can land on any broker
 // replica because it carries the complete request state.
-func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
+func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (err error) {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -1475,6 +1504,15 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 	if err != nil {
 		return err
 	}
+	// See DispatchAgentCreate's identical defer: buildCreateRequest already
+	// minted a credential by this point, including ErrEnvStillMissing below,
+	// which is a real error return on this path (unlike
+	// DispatchAgentCreateWithGather's non-error needs-still-missing case).
+	defer func() {
+		if err != nil {
+			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
+		}
+	}()
 	req.GatherEnv = true
 
 	if req.ResolvedEnv == nil {
@@ -2154,7 +2192,7 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 // --continue) instead of starting a fresh conversation. The hub is the source
 // of truth for resume: callers compute it from the agent's stored phase
 // (suspended → resume).
-func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) (err error) {
 	ctx, span := tracer.Start(ctx, "hub.dispatch.start")
 	defer span.End()
 	span.SetAttributes(
@@ -2357,6 +2395,20 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 			// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
 			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 		}
+	}
+	// A failure from here on must revoke the credential just minted above —
+	// unless agent.LaunchError says the Hub declared the prior launch dead on
+	// silence rather than on broker confirmation (isUnconfirmedLaunchError):
+	// DispatchAgentStart is only ever dispatched at a non-running agent, but
+	// "non-running" per the Hub's record is not the same as "broker-confirmed
+	// gone" for that one case, and the container (with its own still-valid
+	// credential) may still be up. See isUnconfirmedLaunchError's doc comment.
+	if !isUnconfirmedLaunchError(agent.LaunchError) {
+		defer func() {
+			if err != nil {
+				revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonStartFailed)
+			}
+		}()
 	}
 
 	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
