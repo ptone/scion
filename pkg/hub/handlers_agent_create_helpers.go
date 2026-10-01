@@ -1189,10 +1189,11 @@ func (s *Server) handleExistingAgent(
 		}
 		// This hard-deletes existingAgent the same way the main delete handler
 		// does, just reached via env-gather re-provisioning rather than an
-		// explicit DELETE — so it must revoke the same way too (ptone/scion#1956),
-		// before the row is gone and before the fall-through create below mints
-		// a credential for the new agent row's own (distinct) ID.
-		revokeAgentCredentialsBestEffort(ctx, s.store, existingAgent.ID, agentCredentialRevokeReasonCreateFailed)
+		// explicit DELETE — so it must revoke with the same reason too
+		// (ptone/scion#1956), before the row is gone and before the
+		// fall-through create below mints a credential for the new agent
+		// row's own (distinct) ID.
+		revokeAgentCredentialsBestEffort(ctx, s.store, existingAgent.ID, agentCredentialRevokeReasonDeleted)
 		if err := s.store.DeleteAgent(ctx, existingAgent.ID); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored

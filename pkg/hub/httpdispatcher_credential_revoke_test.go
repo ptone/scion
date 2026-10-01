@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -72,6 +73,39 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_RevokesCredentialOnFailure(t *t
 	require.NotNil(t, cred.RevokedAt, "credential must be revoked after a create failure")
 	require.NotNil(t, cred.RevokeReason)
 	assert.Equal(t, agentCredentialRevokeReasonCreateFailed, *cred.RevokeReason)
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentCreate_NoTokenGeneratedSkipsRevoke
+// covers the create path: buildCreateRequest tolerates a
+// GenerateAgentToken failure and carries on without a token, so this call
+// issued no credential. A later create failure must not revoke-by-agent —
+// a credential seeded before this dispatch (e.g. still active from an
+// earlier successful create/start) must survive.
+func TestHTTPAgentDispatcher_DispatchAgentCreate_NoTokenGeneratedSkipsRevoke(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	broker := newTestBrokerForRevoke(t, memStore, "revoke-create-notoken-host")
+
+	mockClient := &mockRuntimeBrokerClient{returnErr: errors.New("broker boom")}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	gen := &fakeMintingTokenGenerator{store: memStore, failWith: errors.New("mint failed")}
+	dispatcher.SetTokenGenerator(gen)
+
+	agent := &store.Agent{
+		ID:              tid("revoke-create-notoken-agent"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("revoke-create-notoken-project"),
+		RuntimeBrokerID: broker.ID,
+	}
+	insertTestAgentCredential(t, memStore, agent.ID, agent.ProjectID, "revoke-create-notoken-preexisting-jti")
+
+	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	require.Error(t, err)
+	assert.Empty(t, gen.jtis, "the generator failed, so no credential should have been minted")
+
+	cred := getTestAgentCredential(t, memStore, "revoke-create-notoken-preexisting-jti")
+	assert.Nil(t, cred.RevokedAt, "a create that minted no credential must not revoke the agent's pre-existing one on failure")
 }
 
 func TestHTTPAgentDispatcher_DispatchAgentCreate_SuccessDoesNotRevokeCredential(t *testing.T) {
@@ -310,11 +344,12 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_SuccessDoesNotRevokeCredential(t
 }
 
 // TestHTTPAgentDispatcher_DispatchAgentStart_UnconfirmedLaunchErrorSkipsRevoke
-// covers the unconfirmed-launch case: a resume dispatched at an agent
-// whose last launch ended on the Hub's own silence timeout (LaunchErrorLaunchTimeout
-// / LaunchErrorBrokerLost) must not revoke-by-agent on a subsequent start
-// failure, because the broker never confirmed that agent's prior container —
-// and its still-valid credential — is actually gone.
+// covers the unconfirmed-launch case: a resume dispatched at an agent whose
+// last launch ended with a value the Hub declared without broker
+// confirmation (LaunchErrorLaunchTimeout / LaunchErrorBrokerLost) must not
+// revoke-by-agent on a subsequent start failure, because the broker never
+// confirmed that agent's prior container — and its still-valid credential —
+// is actually gone.
 func TestHTTPAgentDispatcher_DispatchAgentStart_UnconfirmedLaunchErrorSkipsRevoke(t *testing.T) {
 	for _, launchError := range []string{store.LaunchErrorLaunchTimeout, store.LaunchErrorBrokerLost} {
 		t.Run(launchError, func(t *testing.T) {
@@ -375,4 +410,118 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfirmedLaunchErrorStillRevokes
 	cred := getTestAgentCredential(t, memStore, gen.lastJTI())
 	require.NotNil(t, cred.RevokedAt, "a broker-confirmed prior failure must still revoke on a start failure")
 	assert.Equal(t, agentCredentialRevokeReasonStartFailed, *cred.RevokeReason)
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentStart_RunningPhaseSkipsRevoke covers
+// the user-facing lifecycle Restart action (stop-then-start, tolerating a
+// failed stop) and the lifecycle Start action dispatched again against an
+// agent whose phase is already running (resume-in-place). In both cases
+// agent.Phase as loaded by the caller is "running" by the time
+// DispatchAgentStart is entered, and the container that phase describes may
+// genuinely still be up. A start failure here must not revoke by agent.
+func TestHTTPAgentDispatcher_DispatchAgentStart_RunningPhaseSkipsRevoke(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	broker := newTestBrokerForRevoke(t, memStore, "revoke-start-running-host")
+
+	mockClient := &mockRuntimeBrokerClient{returnErr: errors.New("start rejected")}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	gen := &fakeMintingTokenGenerator{store: memStore}
+	dispatcher.SetTokenGenerator(gen)
+
+	agent := &store.Agent{
+		ID:              tid("revoke-start-running-agent"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("revoke-start-running-project"),
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseRunning),
+	}
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "start rejected")
+
+	require.Len(t, gen.jtis, 1, "this call still mints its own credential even though the revoke must not arm")
+	cred := getTestAgentCredential(t, memStore, gen.lastJTI())
+	assert.Nil(t, cred.RevokedAt, "a start dispatched against a phase=running agent must not revoke on failure — the container may still be up")
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentStart_NoTokenGeneratedSkipsRevoke
+// covers the case where buildStartEnv's GenerateAgentToken call fails (or no
+// generator is configured), this call issued no credential, so a later
+// start failure must not revoke by agent — a credential seeded before this
+// dispatch (standing in for one still active from an earlier successful
+// start) must survive.
+func TestHTTPAgentDispatcher_DispatchAgentStart_NoTokenGeneratedSkipsRevoke(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	broker := newTestBrokerForRevoke(t, memStore, "revoke-start-notoken-host")
+
+	mockClient := &mockRuntimeBrokerClient{returnErr: errors.New("start rejected")}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	gen := &fakeMintingTokenGenerator{store: memStore, failWith: errors.New("mint failed")}
+	dispatcher.SetTokenGenerator(gen)
+
+	agent := &store.Agent{
+		ID:              tid("revoke-start-notoken-agent"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("revoke-start-notoken-project"),
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseStopped),
+	}
+	insertTestAgentCredential(t, memStore, agent.ID, agent.ProjectID, "revoke-start-notoken-preexisting-jti")
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", true)
+	require.Error(t, err)
+	assert.Empty(t, gen.jtis, "the generator failed, so no credential should have been minted")
+
+	cred := getTestAgentCredential(t, memStore, "revoke-start-notoken-preexisting-jti")
+	assert.Nil(t, cred.RevokedAt, "a start that minted no credential must not revoke the agent's pre-existing one on failure")
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentStart_CrossNodeDeferDisarmsOriginatorRevoke
+// covers the cross-node hand-off: when client.StartAgent reports that the
+// broker lives on another node (ErrLifecycleDeferred), this node hands off via
+// deferredStart, which never carries the credential this node's
+// buildStartEnv minted — the owning node mints and revokes its own on its
+// own DispatchAgentStart. This node's own revoke must be disarmed before
+// the hand-off, regardless of how the subsequent cross-node wait concludes
+// (here, it fails immediately because no event bus/command bus is wired up
+// in this test, standing in for every other way that wait can end
+// ambiguously — a rolling timeout or a closed event channel — without
+// telling this node whether the owning node's own start, and its own
+// credential, actually succeeded).
+func TestHTTPAgentDispatcher_DispatchAgentStart_CrossNodeDeferDisarmsOriginatorRevoke(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	broker := newTestBrokerForRevoke(t, memStore, "revoke-start-crossnode-host")
+
+	mockClient := &mockRuntimeBrokerClient{returnErr: ErrLifecycleDeferred}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	gen := &fakeMintingTokenGenerator{store: memStore}
+	dispatcher.SetTokenGenerator(gen)
+
+	agent := &store.Agent{
+		ID:              tid("revoke-start-crossnode-agent"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("revoke-start-crossnode-project"),
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseStopped),
+	}
+	// Stands in for the credential the owning node mints for its own start
+	// attempt. It must never be touched by this node.
+	insertTestAgentCredential(t, memStore, agent.ID, agent.ProjectID, "revoke-start-crossnode-owner-jti")
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", true)
+	require.Error(t, err, "the cross-node wait failure must still surface as an error")
+
+	require.Len(t, gen.jtis, 1, "this node's buildStartEnv must still mint its own credential before handing off")
+	originatorCred := getTestAgentCredential(t, memStore, gen.lastJTI())
+	assert.Nil(t, originatorCred.RevokedAt, "the originator must not revoke the credential it minted once it hands off to the owning node")
+
+	ownerCred := getTestAgentCredential(t, memStore, "revoke-start-crossnode-owner-jti")
+	assert.Nil(t, ownerCred.RevokedAt, "the originator must never revoke a credential it did not mint, including the owning node's")
 }

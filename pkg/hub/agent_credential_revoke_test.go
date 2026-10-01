@@ -58,7 +58,7 @@ func getTestAgentCredential(t *testing.T, s store.AgentCredentialStore, jti stri
 }
 
 // fakeMintingTokenGenerator implements AgentTokenGenerator for dispatcher
-// tests. Each call mints a fake token and records a credential to the store
+// tests. Each call mints a fake credential and records it to the store
 // exactly as production's AgentTokenService + storeCredentialRecorder do on
 // a real GenerateAgentToken call, and remembers every jti it issued (in
 // call order) so a test can look up what it minted afterward.
@@ -85,7 +85,7 @@ func (f *fakeMintingTokenGenerator) GenerateAgentToken(agentID, projectID string
 	if err := f.store.CreateAgentCredential(context.Background(), cred); err != nil {
 		return "", err
 	}
-	return "faketoken-" + jti, nil
+	return "fake-agent-jwt-" + jti, nil
 }
 
 // lastJTI returns the most recently minted jti, for a test that only expects
@@ -105,4 +105,34 @@ type revokeFailingCredentialStore struct {
 
 func (s *revokeFailingCredentialStore) RevokeAgentCredentialsByAgent(ctx context.Context, agentID, revokedBy, reason string) (int, error) {
 	return 0, s.failWith
+}
+
+// TestRevokeAgentCredentialsBestEffort_CancelledParentContextStillRevokes
+// covers M13: revokeAgentCredentialsBestEffort must detach from the
+// caller's context before calling the store, because a dispatch or handler
+// failure path may already have an expired or cancelled context by the time
+// it decides to revoke. A cancelled parent must not prevent the revoke.
+func TestRevokeAgentCredentialsBestEffort_CancelledParentContextStillRevokes(t *testing.T) {
+	s := createTestStore(t)
+
+	project := &store.Project{ID: tid("revoke-besteffort-cancelled-project"), Slug: "revoke-besteffort-cancelled-project", Name: "Revoke Cancelled Ctx Project"}
+	if err := s.CreateProject(context.Background(), project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	jti := "revoke-besteffort-cancelled-jti"
+	insertTestAgentCredential(t, s, tid("revoke-besteffort-cancelled-agent"), project.ID, jti)
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	revokeAgentCredentialsBestEffort(cancelledCtx, s, tid("revoke-besteffort-cancelled-agent"), agentCredentialRevokeReasonStartFailed)
+
+	cred := getTestAgentCredential(t, s, jti)
+	if cred.RevokedAt == nil {
+		t.Fatal("expected the credential to be revoked even though the caller's context was already cancelled")
+	}
+	if cred.RevokeReason == nil || *cred.RevokeReason != agentCredentialRevokeReasonStartFailed {
+		t.Fatalf("expected revoke reason %q, got %v", agentCredentialRevokeReasonStartFailed, cred.RevokeReason)
+	}
 }

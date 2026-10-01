@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -1172,10 +1173,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		return err
 	}
 	// buildCreateRequest mints (and best-effort persists) a fresh agent
-	// credential before returning. Any failure from here on must revoke it —
-	// see revokeAgentCredentialsBestEffort's doc comment.
+	// credential before returning — but only when a token generator is
+	// configured and GenerateAgentToken succeeds; it otherwise tolerates the
+	// absence and carries on without one. Any failure from here on must
+	// revoke it, but only if this call actually minted one — see
+	// revokeAgentCredentialsBestEffort's doc comment.
+	issued := req.AgentToken != ""
 	defer func() {
-		if err != nil {
+		if err != nil && issued {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -1239,12 +1244,13 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	if err != nil {
 		return err
 	}
-	// See DispatchAgentCreate's identical defer: buildCreateRequest already
-	// minted a credential by this point, so every error return below —
-	// including the reprovision-specific hard-fail checks further down —
-	// must revoke it.
+	// See DispatchAgentCreate's identical defer (gated on issued, below):
+	// buildCreateRequest already minted a credential by this point if
+	// issued is true, so every error return below — including the
+	// reprovision-specific hard-fail checks further down — must revoke it.
+	issued := req.AgentToken != ""
 	defer func() {
-		if err != nil {
+		if err != nil && issued {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -1396,15 +1402,16 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	// buildCreateRequest already minted a credential. A nil error here can
-	// still mean failure from the caller's point of view (envReqs.Needs
-	// non-empty on the non-gather path) — that case does not go through this
-	// defer because it is not an error return; the caller revokes explicitly
-	// instead (handlers_agents_core.go). Every actual error return below,
-	// including through the cross-node deferredCreateWithGather fallback,
-	// does go through this defer.
+	// buildCreateRequest already minted a credential if issued is true. A
+	// nil error here can still mean failure from the caller's point of view
+	// (envReqs.Needs non-empty on the non-gather path) — that case does not
+	// go through this defer because it is not an error return; the caller
+	// revokes explicitly instead (handlers_agents_core.go). Every actual
+	// error return below, including through the cross-node
+	// deferredCreateWithGather fallback, does go through this defer.
+	issued := req.AgentToken != ""
 	defer func() {
-		if err != nil {
+		if err != nil && issued {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -1504,12 +1511,14 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 	if err != nil {
 		return err
 	}
-	// See DispatchAgentCreate's identical defer: buildCreateRequest already
-	// minted a credential by this point, including ErrEnvStillMissing below,
-	// which is a real error return on this path (unlike
-	// DispatchAgentCreateWithGather's non-error needs-still-missing case).
+	// See DispatchAgentCreate's identical defer (gated on issued, below):
+	// buildCreateRequest already minted a credential by this point if
+	// issued is true, including ErrEnvStillMissing below, which is a real
+	// error return on this path (unlike DispatchAgentCreateWithGather's
+	// non-error needs-still-missing case).
+	issued := req.AgentToken != ""
 	defer func() {
-		if err != nil {
+		if err != nil && issued {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -2200,6 +2209,12 @@ type startEnvResult struct {
 	storageEnvCount int
 	projectInfo     projectDispatchInfo
 	workspace       WorkspaceDispatchSpec
+	// tokenIssued reports whether this call actually minted a fresh Hub auth
+	// token (d.tokenGenerator succeeded and returned a non-empty token), as
+	// opposed to tolerating a nil generator or a GenerateAgentToken error and
+	// carrying on without one. DispatchAgentStart's revoke-on-failure defer
+	// must only arm when this call issued a credential to revoke.
+	tokenIssued bool
 }
 
 // buildStartEnv assembles the full resolved environment used to start or
@@ -2382,6 +2397,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	}
 
 	// Generate a fresh agent token for Hub authentication.
+	tokenIssued := false
 	if d.tokenGenerator != nil {
 		agentRole, additionalScopes := agentRoleAndScopes(agent)
 		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
@@ -2391,6 +2407,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			}
 		} else if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
+			tokenIssued = true
 			// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
 			// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
 			classifyEnv(&envClassifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
@@ -2429,6 +2446,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		storageEnvCount: len(envFromStorage),
 		projectInfo:     projectInfo,
 		workspace:       wsSpec,
+		tokenIssued:     tokenIssued,
 	}
 }
 
@@ -2456,6 +2474,19 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		return err
 	}
 
+	// Capture the phase and launch-error this dispatch found the agent in,
+	// before buildStartEnv/applyBrokerResponse can change either. The
+	// revoke-arming decision below must reflect this call's starting point:
+	// the lifecycle Start action also dispatches here for an
+	// already-running agent (resume-in-place, and a start called again on a
+	// running agent per the handler's own comment), and the user-facing
+	// Restart action is stop-then-start and tolerates a failed stop, so by
+	// the time this start leg runs the container may still be up even
+	// though Restart never changed agent.Phase away from "running" before
+	// calling in.
+	priorPhase := agent.Phase
+	priorLaunchError := agent.LaunchError
+
 	// If no explicit task provided, fall back to the agent's applied config
 	// task. Skip this on a pure resume (no new message): the harness should
 	// just continue its prior session rather than be re-handed the original
@@ -2474,20 +2505,30 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	projectPath := projectInfo.projectPath
 	projectSlug := projectInfo.projectSlug
 
-	// A failure from here on must revoke the credential just minted above —
-	// unless agent.LaunchError says the Hub declared the prior launch dead on
-	// silence rather than on broker confirmation (isUnconfirmedLaunchError):
-	// DispatchAgentStart is only ever dispatched at a non-running agent, but
-	// "non-running" per the Hub's record is not the same as "broker-confirmed
-	// gone" for that one case, and the container (with its own still-valid
-	// credential) may still be up. See isUnconfirmedLaunchError's doc comment.
-	if !isUnconfirmedLaunchError(agent.LaunchError) {
-		defer func() {
-			if err != nil {
-				revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonStartFailed)
-			}
-		}()
-	}
+	// A failure from here on must revoke the credential buildStartEnv just
+	// minted above, but only when it actually minted one — buildStartEnv
+	// tolerates a nil tokenGenerator or a GenerateAgentToken error and
+	// carries on without a token. Arm the revoke only when all of these hold:
+	//  - priorPhase (captured above, before buildStartEnv/applyBrokerResponse
+	//    could change it) is not "running". The lifecycle Start action is
+	//    also dispatched against an already-running agent (resume-in-place,
+	//    and a start called again on a running agent), and the user-facing
+	//    Restart action is stop-then-start and tolerates a failed stop — in
+	//    both cases the container this start leg targets may, in fact,
+	//    still be up, and revoking by agent would take down the live
+	//    container's own credential over a dispatch failure that says
+	//    nothing about that container's health.
+	//  - priorLaunchError is not one the Hub declared on silence rather than
+	//    on broker confirmation (isUnconfirmedLaunchError): the same risk
+	//    applies there, since the prior credential may still be in use by a
+	//    container the Hub has simply lost contact with. See that
+	//    function's doc comment.
+	revokeArmed := priorPhase != string(state.PhaseRunning) && !isUnconfirmedLaunchError(priorLaunchError) && startEnv.tokenIssued
+	defer func() {
+		if err != nil && revokeArmed {
+			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonStartFailed)
+		}
+	}()
 
 	if d.debug {
 		configEnvCount := 0
@@ -2561,6 +2602,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		}
 	}
 	if errors.Is(err, ErrLifecycleDeferred) {
+		// Cross-node hand-off: the owning node dispatches its own
+		// DispatchAgentStart, which mints its own credential and carries its
+		// own revoke-on-failure defer above. deferredStart only carries
+		// Task/Resume, never the credential minted by this node's
+		// buildStartEnv call, so that credential is never the one the
+		// eventually-started container uses. Disarm this node's defer before
+		// waiting on the cross-node result: a timeout or a closed event
+		// channel here says nothing about whether the owner's own start (and
+		// its own credential) succeeded, and this node revoking by agent on
+		// that ambiguity can only take down a credential the owner is
+		// actively relying on.
+		revokeArmed = false
 		return d.deferredStart(ctx, agent, &StartDispatchArgs{
 			Task:   task,
 			Resume: resume,

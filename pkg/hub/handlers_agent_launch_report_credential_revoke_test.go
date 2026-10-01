@@ -130,5 +130,47 @@ func TestAgentLaunchReport_FailedDuringStopDoesNotRevokeCredential(t *testing.T)
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 
 	cred := getTestAgentCredential(t, s, "lr-stopped-jti")
-	assert.Nil(t, cred.RevokedAt, "a failed report racing a stop must not revoke — the stop/suspend path owns that")
+	assert.Nil(t, cred.RevokedAt, "a failed report arriving during a stop must not revoke — the stop/suspend path owns that")
+}
+
+// TestAgentLaunchReport_FailedAfterRunningDoesNotRevokeCredential covers the
+// applyLaunchReportEnded LaunchEndReasonSucceeded branch: once a launch has
+// already ended successfully (the agent reached running), any further
+// report — including a stray `failed` one arriving late from the broker —
+// is answered Result=Completed with no row change. The handler's revoke
+// condition (State==failed && HTTPStatus==0 && Result==Applied) must not
+// fire here: the agent did start, and its credential is in active use.
+func TestAgentLaunchReport_FailedAfterRunningDoesNotRevokeCredential(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("lr-afterrun-project"), Slug: "lr-afterrun-project", Name: "LR After-Run Project", Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("lr-afterrun-agent"), Slug: "lr-afterrun-agent", Name: "LR After-Run Agent", ProjectID: project.ID,
+		Phase: string(state.PhaseCreated), RuntimeBrokerID: "broker-1", StateVersion: 1,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	launchID, err := s.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute)
+	require.NoError(t, err)
+
+	insertTestAgentCredential(t, s, agent.ID, project.ID, "lr-afterrun-jti")
+
+	// The launch succeeds: phase moves to running and the launch ends with
+	// reason succeeded.
+	rec := postLaunchReport(t, srv, "broker-1", agent.ID, "broker-1", AgentLaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: "succeeded",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// A late, stray failed report for the same (now-ended) launch arrives
+	// afterward.
+	rec = postLaunchReport(t, srv, "broker-1", agent.ID, "broker-1", AgentLaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: "failed", ErrorCode: "boom",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	cred := getTestAgentCredential(t, s, "lr-afterrun-jti")
+	assert.Nil(t, cred.RevokedAt, "a failed report once the agent already reached running must not revoke — the agent did start")
 }

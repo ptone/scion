@@ -2927,7 +2927,7 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	}
 
 	// Revoke all credentials for the deleted agent (best-effort, Phase 1H)
-	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agent.ID, "system", "agent_deleted"); err != nil {
+	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agent.ID, "system", agentCredentialRevokeReasonDeleted); err != nil {
 		slog.Warn("Failed to revoke agent credentials on delete", "agent_id", agent.ID, "error", err)
 	}
 

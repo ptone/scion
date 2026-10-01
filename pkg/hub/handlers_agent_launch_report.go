@@ -151,9 +151,9 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// condition is deliberately narrower than "State==failed": a stray
 	// failed report once the agent is already Running returns
 	// Result=Completed (the agent did start; nothing to revoke), and a
-	// failed report racing a stop/suspend returns a Conflict HTTPStatus — in
-	// both of those cases the agent may still be relying on its current
-	// credential.
+	// failed report arriving during a stop/suspend returns a Conflict
+	// HTTPStatus — in both of those cases the agent may still be relying on
+	// its current credential.
 	if sr.State == store.LaunchReportStateFailed && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
 		revokeAgentCredentialsBestEffort(ctx, s.store, agentID, agentCredentialRevokeReasonCreateFailed)
 	}

@@ -41,6 +41,13 @@ const (
 	// running container is actively using over a dispatch failure that says
 	// nothing about that container's health.
 	agentCredentialRevokeReasonStartFailed = "start_failed"
+
+	// agentCredentialRevokeReasonDeleted covers an agent row's removal: the
+	// main delete handler, and any other path that hard-deletes an agent
+	// row outright (e.g. tearing down a stale provisioning row immediately
+	// before recreating it) rather than ending a create/start attempt in
+	// place.
+	agentCredentialRevokeReasonDeleted = "agent_deleted"
 )
 
 // agentCredentialRevokeTimeout bounds the best-effort revoke call so it

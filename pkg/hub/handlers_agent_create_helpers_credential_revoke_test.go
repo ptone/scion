@@ -101,7 +101,7 @@ func TestCreateAgent_EnvGatherRecreate_RevokesOldCredentialOnly(t *testing.T) {
 	oldCred := getTestAgentCredential(t, st, oldJTI)
 	require.NotNil(t, oldCred.RevokedAt, "the old provisioning agent's credential must be revoked on teardown-before-recreate")
 	require.NotNil(t, oldCred.RevokeReason)
-	assert.Equal(t, agentCredentialRevokeReasonCreateFailed, *oldCred.RevokeReason)
+	assert.Equal(t, agentCredentialRevokeReasonDeleted, *oldCred.RevokeReason, "teardown-before-recreate hard-deletes the old row exactly like the main delete handler, so it must record the same reason")
 
 	newCred := getTestAgentCredential(t, st, newJTI)
 	assert.Nil(t, newCred.RevokedAt, "the recreated agent's own fresh credential must stay active — it must not be swept up by the old agent's revoke")
