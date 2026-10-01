@@ -82,7 +82,7 @@ const spaceEmojiAnnotationKey = "scion.dev/emoji"
 // and sort prefs.
 func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -226,6 +226,7 @@ func (s *Server) handleChatSpaceRoutes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Request) {
 	// Parse: /api/v1/chat/conversations/{key}/messages
 	//        /api/v1/chat/conversations/{key}/read
+	//        /api/v1/chat/conversations/{key}/unread
 	//        /api/v1/chat/conversations/{key}/typing
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/")
 	parts := strings.SplitN(path, "/", 2)
@@ -255,7 +256,7 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 		case http.MethodDelete:
 			s.handleMessageDelete(w, r, key, messageID)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPut, http.MethodDelete)
 		}
 		return
 	}
@@ -264,6 +265,8 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 		s.handleConversationMessages(w, r, key)
 	case "read":
 		s.handleConversationRead(w, r, key)
+	case "unread":
+		s.handleConversationMarkUnread(w, r, key)
 	case "typing":
 		s.handleConversationTyping(w, r, key)
 	case "interagent":
@@ -299,7 +302,7 @@ func (s *Server) handleChatTopicRoutes(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.handleTopicDelete(w, r, topicID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -315,7 +318,7 @@ func (s *Server) handleSpaceThreads(w http.ResponseWriter, r *http.Request, proj
 	case http.MethodPost:
 		s.handleCreateThread(w, r, projectID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -788,7 +791,7 @@ func (s *Server) handleConversationMessages(w http.ResponseWriter, r *http.Reque
 	case http.MethodPost:
 		s.handleConversationSend(w, r, key)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -1355,6 +1358,12 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		}
 	}
 
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys before render/dispatch. Defence in depth —
+	// allowedClientMetadataKeys above already excludes body_* — so this
+	// covers any future site that copies richer client metadata through.
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+
 	// Phase 3 msg-authz: Check message authorization on the primary agent.
 	// Replaces the ActionAttach check — chat v2 is purely messaging, not PTY/attach.
 	// Authorization runs BEFORE validation (B-2): authorizeAgentMessage depends
@@ -1619,6 +1628,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 			// W7: Copy attachment paths and metadata to mention messages.
 			mentionMsg.Attachments = msg.Attachments
 			mentionMsg.Metadata = msg.Metadata
+			// #2257 P2: strip on this copy too (U5(a) row). msg.Metadata was
+			// already stripped above, so this is a defence-in-depth no-op
+			// today, not a load-bearing second strip.
+			mentionMsg.Metadata = messaging.StripReservedMetadata(mentionMsg.Metadata)
 
 			// Migration gate (design agent-reincarnate §3.7, F2 p2a-r2
 			// review): a mentioned (secondary) agent is a recipient in its
@@ -2603,7 +2616,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 // optionally scoped to a time range. Only valid for agent DMs.
 func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Request, key string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -2780,7 +2793,7 @@ type chatReadStateResponse struct {
 // watermark; GET reports the caller's watermark and, for DMs, the peer's.
 func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, key string) {
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost, http.MethodGet)
 		return
 	}
 
@@ -2914,6 +2927,142 @@ func (s *Server) writeConversationReadState(
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// conversationRecentMessages returns up to limit of a conversation's most
+// recent messages, newest first — the (created_at, id) DESC order
+// ListMessages uses by default, the same order handleConversationRead's
+// monotonic guard reasons in. It resolves the same filter
+// handleConversationHistory and nativeDMLastMessage use, honouring the
+// ConversationEnvelopeSwitch when it is on so mark-unread sees the same
+// message set the history view and the DM list's "last message" do.
+//
+// That equivalence is exact for DMs: an unresolved conversation under the
+// switch returns (nil, nil) here, the same empty result history's DM branch
+// returns. For topics it is not quite exact — an unresolved topic falls back
+// to a ThreadID filter here, where history instead returns a 409 — but that
+// is harmless: an unresolved topic has nothing a ThreadID filter would match
+// either, so both paths agree there is nothing to show or act on.
+func (s *Server) conversationRecentMessages(
+	ctx context.Context, key string, isDM bool, wcs WebChatStore, limit int,
+) ([]store.Message, error) {
+	var filter store.MessageFilter
+	if isDM {
+		// Mention fan-out copies are excluded, matching nativeDMLastMessage —
+		// chat-thread does not display them, so they must not count as the
+		// "latest message" mark-unread reasons about.
+		filter = store.MessageFilter{Channel: "web", ThreadID: key, ExcludeType: messages.TypeMention}
+		if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
+			parts := strings.Split(key, ":")
+			if len(parts) != 5 {
+				return nil, fmt.Errorf("invalid DM key: %q", key)
+			}
+			conv, err := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
+			if err != nil {
+				return nil, err
+			}
+			if conv == nil {
+				// Never-used DM: matches nativeDMLastMessage's prior
+				// behaviour exactly (nil, nil) rather than falling back to
+				// a ThreadID filter, which would show unrelated legacy rows
+				// once envelope mode is the source of truth.
+				return nil, nil
+			}
+			filter.ThreadID = ""
+			filter.ConversationID = conv.ConversationID
+		}
+	} else {
+		filter = store.MessageFilter{Channel: "web", ThreadID: key}
+		if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() && wcs != nil {
+			if topic, err := wcs.GetTopic(ctx, key); err == nil && topic != nil {
+				if convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID,
+					messaging.WithReadTopicLookup(wcs)); convResult != nil {
+					filter.ThreadID = ""
+					filter.ConversationID = convResult.ConversationID
+				}
+			}
+		}
+	}
+
+	result, err := s.store.ListMessages(ctx, filter, store.ListOptions{Limit: limit, SkipTotalCount: true})
+	if err != nil {
+		return nil, err
+	}
+	return result.Items, nil
+}
+
+// handleConversationMarkUnread handles POST
+// /api/v1/chat/conversations/{key}/unread. It is a dedicated, explicit
+// action distinct from /read: it sets the caller's own read watermark
+// backwards, on purpose, to the message immediately before the
+// conversation's latest by (created_at, id) — the same order
+// handleConversationRead's monotonic guard uses — or clears it entirely when
+// there is only one message. It never touches anyone else's watermark, and
+// it must never let /read's forward-only guard regress; a later POST to
+// /read still only moves the watermark forward from wherever mark-unread
+// left it.
+//
+// Authorization is identical to /read (authorizeConversationAccess): a
+// conversation the caller cannot read cannot be marked unread either.
+func (s *Server) handleConversationMarkUnread(w http.ResponseWriter, r *http.Request, key string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil {
+		Forbidden(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+
+	if wcs == nil {
+		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+		return
+	}
+
+	isDM := strings.HasPrefix(key, "dm:")
+	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
+		return
+	}
+
+	recent, err := s.conversationRecentMessages(ctx, key, isDM, wcs, 2)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up messages", nil)
+		return
+	}
+	if len(recent) == 0 {
+		ValidationError(w, "conversation has no messages", nil)
+		return
+	}
+
+	// recent[0] is the latest message; recent[1] (if present) is the one
+	// immediately before it. A single-message conversation has no
+	// predecessor, so the watermark clears entirely — "never read".
+	predecessor := ""
+	if len(recent) > 1 {
+		predecessor = recent[1].ID
+	}
+
+	if err := wcs.SetReadState(ctx, user.ID(), key, predecessor); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to update read state", nil)
+		return
+	}
+
+	// Multi-tab: the caller's other open tabs learn their own watermark moved
+	// the same way a DM peer learns theirs did on /read — over the
+	// ChatReadStateEvent, just fanned to the caller's own subject instead of
+	// the other participant's. Same event type, same subject convention,
+	// different recipient: not a new SSE event.
+	s.events.PublishChatOwnReadStateEvent(ctx, key, user.ID(), predecessor)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "lastReadMessageId": predecessor})
+}
+
 // authorizeConversationAccess authorizes the caller for a conversation key: a
 // DM is reachable by its participants, a topic by anyone with read access to
 // its project. It writes the error response itself and returns false when
@@ -2974,7 +3123,7 @@ func (s *Server) handleConversationFlag(
 	set conversationFlagSetter,
 ) {
 	if r.Method != http.MethodPut {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPut)
 		return
 	}
 
@@ -3034,7 +3183,7 @@ type promoteResponse struct {
 // all message history in place.
 func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Request, key string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -3266,7 +3415,7 @@ func titleCase(slug string) string {
 // handleSpaceRead handles POST /api/v1/chat/spaces/{projectId}/read.
 func (s *Server) handleSpaceRead(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -3320,7 +3469,7 @@ func (s *Server) handleSpaceRead(w http.ResponseWriter, r *http.Request, project
 // project's annotations map under the key "scion.dev/emoji".
 func (s *Server) handleSpaceEmoji(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPut {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPut)
 		return
 	}
 
@@ -3378,34 +3527,28 @@ func (s *Server) handleSpaceEmoji(w http.ResponseWriter, r *http.Request, projec
 // message, a deleted message, or one moved into a promoted thread, none of
 // which can be acknowledged by viewing this DM. Mention fan-out copies are
 // also excluded because chat-thread does not display them.
+//
+// Delegates to conversationRecentMessages (limit 1) rather than keeping a
+// second copy of this filter: the two are used together — this to know
+// "unread compared to what", mark-unread's predecessor lookup to know
+// "unread from what" — and a mention-exclusion (or envelope-switch) fix
+// applied to only one would silently reintroduce a mention row masking
+// mark-unread's effect.
 func (s *Server) nativeDMLastMessage(ctx context.Context, key string) (*store.Message, error) {
-	filter := store.MessageFilter{Channel: "web", ThreadID: key, ExcludeType: messages.TypeMention}
-	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
-		parts := strings.Split(key, ":")
-		if len(parts) != 5 {
-			return nil, fmt.Errorf("invalid DM key: %q", key)
-		}
-		conv, err := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
-		if err != nil || conv == nil {
-			return nil, err
-		}
-		filter.ThreadID = ""
-		filter.ConversationID = conv.ConversationID
-	}
-	result, err := s.store.ListMessages(ctx, filter, store.ListOptions{Limit: 1, SkipTotalCount: true})
+	recent, err := s.conversationRecentMessages(ctx, key, true, nil, 1)
 	if err != nil {
 		return nil, err
 	}
-	if len(result.Items) == 0 {
+	if len(recent) == 0 {
 		return nil, nil
 	}
-	return &result.Items[0], nil
+	return &recent[0], nil
 }
 
 // handleChatDMs handles GET /api/v1/chat/dms.
 func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -3490,7 +3633,7 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 // handleSpaceMembers handles GET /api/v1/chat/spaces/{projectId}/members.
 func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -3686,7 +3829,7 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, prefs)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 	}
 }
 
@@ -3699,7 +3842,7 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 // and applying server-side throttling (one event per 4s per user per conversation).
 func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request, key string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -3796,7 +3939,7 @@ func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request
 // and publishing state transitions via SSE. Design §4.5.
 func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -3846,7 +3989,7 @@ func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 //   - cursor: keyset pagination cursor (optional)
 func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -4568,7 +4711,7 @@ func (s *Server) handleChatAttachments(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleAttachmentUpload(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 	}
 }
 
@@ -4586,7 +4729,7 @@ func (s *Server) handleChatAttachmentByID(w http.ResponseWriter, r *http.Request
 	case http.MethodGet:
 		s.handleAttachmentDownload(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 

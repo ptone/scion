@@ -401,6 +401,14 @@ func Spec() []TableFixture {
 				"create_time": baseTime, "update_time": baseTime,
 			},
 		}},
+		{Table: "broker_settings", Rows: []row{
+			{ // exercises the non-NULL updated_by path; hub_settings above
+				// already covers the NULL case for this same document shape.
+				"id": "b5000000-0000-0000-0000-000000000001", "broker_id": brokerID,
+				"value": `{"maxAgents":5}`, "revision": int64(1), "updated_by": userID,
+				"create_time": baseTime, "update_time": baseTime,
+			},
+		}},
 		{Table: "launch_reaper_states", Rows: []row{
 			{ // the single row the launch reaper reads/writes (id is fixed:
 				// launchReaperStateID in pkg/store/entadapter/launch_reaper.go);
@@ -615,6 +623,24 @@ func Spec() []TableFixture {
 				"limit_definition_id": limitDefID,
 				"subject_id":          projectID, "scope_type": "project", "scope_id": projectID,
 				"resource_id": agentID, "reserved": 1, "created_at": baseTime,
+			},
+		}},
+
+		// ---- Agent identity keys ----
+		{Table: "agent_identity_keys", Rows: []row{
+			{
+				"id": "a1d00000-0000-0000-0000-000000000001", "project_id": projectID,
+				"key": "worker", "agent_id": agentID,
+			},
+		}},
+
+		// ---- External identities ----
+		{Table: "external_identities", Rows: []row{
+			{ // NULL email exercises the optional/informational field
+				"id":       "e1d00000-0000-0000-0000-000000000001",
+				"provider": "fixture-provider", "issuer": "https://issuer.fixture.example",
+				"subject": "fixture-subject-001", "user_id": userID,
+				"created_at": baseTime, "updated_at": baseTime,
 			},
 		}},
 	}

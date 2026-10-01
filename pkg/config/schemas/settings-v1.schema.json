@@ -261,6 +261,32 @@
       "description": "Service account used when default_gcp_identity_mode is \"assign\".",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "quotas": {
+      "type": "object",
+      "description": "Hub-level quota enforcement settings. Global-only.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "enforce_broker_quotas": {
+          "type": "boolean",
+          "description": "Whether the per-broker agent quota cap (max_agents_per_broker) is enforced on create. Default true (enforced) when absent; when false, agent creates beyond the cap succeed but usage is still counted."
+        }
+      },
+      "additionalProperties": false
+    },
+    "agent_secrets": {
+      "type": "object",
+      "description": "Hub-level policy for secrets written by agents. Global-only.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "user_scope_only": {
+          "type": "boolean",
+          "description": "When true, agents may only write user (profile) scope secrets. The hub rejects agent writes at project scope, including harness auth capture. User-originated writes are unaffected. Default false."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,

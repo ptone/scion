@@ -199,6 +199,9 @@ type Store interface {
 	// HubSetting operations (Two-Tier Settings Architecture)
 	HubSettingStore
 
+	// BrokerSetting operations (ptone/scion#2061 P2, ptone/scion#2177)
+	BrokerSettingStore
+
 	// SkillInjection operations (Injected-Skills List)
 	SkillInjectionStore
 
@@ -424,6 +427,78 @@ type AgentFilter struct {
 	// scoped constraints that block the list permission for specific projects.
 	// An empty or nil slice means no exclusions.
 	ExcludedProjectIDs []string
+
+	// RequestedOwnerID, when non-empty, restricts results to agents whose
+	// owner_id matches this value. Unlike OwnerID (which participates in the
+	// OR-based Mine/Shared classification via MemberOrOwnerProjectIDs), this
+	// field is always combined with every other filter using AND. It exists
+	// so an explicit caller-supplied owner filter (e.g. CLI `--owner`, hub
+	// query param `ownerId`) can never be folded into the classification OR
+	// clause and widen results beyond "agents owned by exactly this
+	// principal" (ptone/scion#2146).
+	RequestedOwnerID string
+
+	// HarnessConfig, when non-empty, restricts results to agents whose
+	// resolved AppliedConfig.HarnessConfig equals this value. The Ent
+	// adapter backs this with a dedicated, plain-equality column
+	// (harness_config, pkg/ent/schema/agent.go) kept in sync with
+	// AppliedConfig.HarnessConfig on every write, rather than parsing or
+	// pattern-matching AppliedConfig's JSON at query time (ptone/scion#2146).
+	HarnessConfig string
+
+	// IDs, when non-nil, restricts results to agents whose ID is in this set.
+	// Always combined with every other filter (including AuthorizedProjectIDs)
+	// using AND — it narrows, it never substitutes for authorization. A nil
+	// value means no restriction. An empty non-nil slice means no agents
+	// match (fail closed, mirroring AuthorizedProjectIDs).
+	//
+	// This backs relationship queries such as CLI `--ancestors`, where the
+	// caller supplies a set of IDs found in another agent's Ancestry chain.
+	// Some of those IDs may name users rather than agents (Ancestry mixes
+	// both); those simply match no row here, which is how "skip entries that
+	// are users" falls out without extra bookkeeping. It is deliberately NOT
+	// implemented by fetching each ID individually — doing so would bypass
+	// whatever authorization predicate (AuthorizedProjectIDs, etc.) the
+	// caller composed this filter with, and future relationship-based
+	// visibility (ptone/scion#2128) needs a single choke point to widen.
+	IDs []string
+
+	// LineageRootID, when non-empty, restricts results to the agent whose ID
+	// equals this value OR whose Ancestry chain contains it — i.e. the root
+	// principal plus every agent descended from it, at any depth. It is an
+	// internal OR of two sub-conditions, but that OR is itself ANDed with
+	// every other filter (including AuthorizedProjectIDs), the same
+	// composition pattern already used for MemberOrOwnerProjectIDs above:
+	// the OR only decides which rows count as "in the root's lineage", it
+	// never widens past the authorization predicate. A root the caller is
+	// not authorized to see simply yields no matches, not an error or a
+	// disclosure.
+	//
+	// Backs CLI `--lineage`, which is a CREATION-TREE query, not a
+	// messaging-permission query — it says nothing about who the reference
+	// agent may message under any message mode (scion set-message-mode),
+	// which can be a different, smaller set. The root ID this field is set
+	// to is computed client-side (see resolveLineageRootID in cmd/list.go):
+	// the reference's direct parent, or the reference itself when it has no
+	// parent at all (an empty Ancestry), when its parent is a user rather
+	// than an agent, or when its only recorded parent is an agent the
+	// caller cannot list. The latter two both root at self because the
+	// caller cannot tell them apart; a length-1 parent the caller *can* list
+	// roots at that parent.
+	//
+	// "Parent is a user" cannot be decided from len(Ancestry) alone: a
+	// child can inherit a length-1, agent-only Ancestry from a creator
+	// whose own Ancestry was itself empty (see resolveLineageRootID's doc
+	// for exactly when this happens). Determining "is the parent a user"
+	// therefore requires resolving a length-1 Ancestry entry through the
+	// caller's authorized list (never a bare per-ID fetch) rather than a
+	// purely local length check; an Ancestry of two or more entries never
+	// needs this, since its last entry is always an agent ID by
+	// construction. The root ID handed to this field may therefore be a
+	// USER principal ID, not only an agent ID — the OR predicate treats
+	// either the same way, since IDEQ simply never matches a user ID and
+	// ancestryContains still finds that user's descendants.
+	LineageRootID string
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the
@@ -973,6 +1048,22 @@ type SecretStore interface {
 	// Increments the version automatically.
 	// Returns ErrNotFound if the secret doesn't exist.
 	UpdateSecret(ctx context.Context, secret *Secret) error
+
+	// UpdateSecretRefIfMatches conditionally updates only the SecretRef column,
+	// applying the change and incrementing Version only if the row's current
+	// SecretRef equals expectedRef AND its current Version equals
+	// expectedVersion. Returns applied=false (no error) if the row doesn't
+	// exist or either check fails — e.g. a concurrent Set() raced ahead and
+	// updated the value and the ref, or an old binary rewrote the value
+	// through a ref string that happens to read back unchanged (Version
+	// still increments on every write, so the version check catches that
+	// same-ref case the ref check alone would miss — ptone/scion#2152
+	// round-4 review finding 1). Every other column is left untouched, so
+	// callers that only need to repoint the ref (such as GCP SM
+	// name-migration tooling) never clobber a concurrent metadata edit the
+	// way a GetSecret-then-UpdateSecret read-modify-write would
+	// (ptone/scion#2152 round-2 review finding 11).
+	UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID, expectedRef string, expectedVersion int, newRef string) (applied bool, err error)
 
 	// UpsertSecret creates or updates a secret.
 	// Uses key+scope+scopeId as the unique identifier.
@@ -1856,6 +1947,28 @@ type HubSettingStore interface {
 	// the origin field. Rows with updated_by="seed" get origin="seeded";
 	// all other non-_meta rows get origin="managed". Idempotent.
 	BackfillOrigin(ctx context.Context) error
+}
+
+// BrokerSettingStore defines persistence operations for general per-broker
+// settings (ptone/scion#2061 P2, ptone/scion#2177). One row per broker holds
+// a BrokerSettings document; see pkg/hub/brokersettings for the key
+// registry that validates and authorizes writes to individual keys.
+type BrokerSettingStore interface {
+	// GetBrokerSettings retrieves brokerID's settings document.
+	// Returns ErrNotFound if the broker has no settings row.
+	GetBrokerSettings(ctx context.Context, brokerID string) (*BrokerSettingsRecord, error)
+
+	// PutBrokerSettings replaces brokerID's settings document with CAS
+	// semantics.
+	//   expectedRevision == 0: create-only; returns ErrRevisionConflict if a row already exists.
+	//   expectedRevision > 0:  CAS update; returns ErrRevisionConflict if the current revision differs.
+	PutBrokerSettings(ctx context.Context, brokerID string, settings BrokerSettings,
+		expectedRevision int64, updatedBy string) (*BrokerSettingsRecord, error)
+
+	// DeleteBrokerSettings removes brokerID's settings row, if any. It is a
+	// no-op (not an error) when no row exists, so it is safe to call
+	// unconditionally from DeleteRuntimeBroker.
+	DeleteBrokerSettings(ctx context.Context, brokerID string) error
 }
 
 // =============================================================================

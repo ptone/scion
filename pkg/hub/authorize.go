@@ -494,6 +494,24 @@ func agentActionPermission(action string) Action {
 	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend,
 		api.AgentActionRestart, api.AgentActionRestore:
 		return ActionLifecycle
+	case api.AgentActionKeys:
+		// Explicit, not a fallthrough to default: the agent-keys contract
+		// (.design/agent-keys-contract.md, decision 2 / ptone/scion#2191)
+		// requires that api.AgentActionKeys map to the existing attach
+		// permission and its credential ceilings by a visible, auditable
+		// registration rather than by accidentally landing in this
+		// function's default branch. The route action itself is not a new
+		// independently granted permission. Task 2.1 (ptone/scion#2195) gave
+		// this action its own early branch on both action-dispatch
+		// functions (handlers_agents_core.go's handleAgentAction,
+		// handlers_projects_core.go's handleProjectAgentAction), calling
+		// authorizeAgentKeys directly — so this case is no longer reached by
+		// any live HTTP request; TestAgentActionPermission_KeysMapsToAttach
+		// pins the mapped value directly instead. Neither switch has a
+		// dispatch case that calls a real keys handler yet (task 2.2 adds
+		// one), so an authorized call still 404s via each switch's own
+		// default branch, not because it was denied.
+		return ActionAttach
 	default:
 		return ActionAttach
 	}

@@ -1063,6 +1063,363 @@ func TestExtractKoanfKeys_AllFieldCategories(t *testing.T) {
 	}
 }
 
+func TestExtractKoanfKeys_Quotas(t *testing.T) {
+	enforced := false
+	req := &ServerConfigUpdateRequest{
+		Quotas: &config.QuotaSettings{EnforceBrokerQuotas: &enforced},
+	}
+	keys := extractKoanfKeysFromRequest(req)
+	found := false
+	for _, k := range keys {
+		if k == "quotas.enforce_broker_quotas" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected quotas.enforce_broker_quotas in keys, got %v", keys)
+	}
+}
+
+func TestExtractKoanfKeys_AgentSecrets(t *testing.T) {
+	on := true
+	req := &ServerConfigUpdateRequest{
+		AgentSecrets: &config.AgentSecretsSettings{UserScopeOnly: &on},
+	}
+	keys := extractKoanfKeysFromRequest(req)
+	found := false
+	for _, k := range keys {
+		if k == "agent_secrets.user_scope_only" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected agent_secrets.user_scope_only in keys, got %v", keys)
+	}
+}
+
+// Test 1/2/3 (design 4.7 P1b), DB-mode: PUT of the quotas section persists
+// it and the snapshot reflects the new value immediately (no restart).
+func TestPutServerConfigDB_Quotas_WriteAndReflectInSnapshot(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	// Wire ops server for self-apply (F4): without this, Update()'s
+	// self-apply is a no-op and srv.brokerQuotasEnforced() is never
+	// exercised in DB mode.
+	ops.server = srv
+
+	if !srv.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=true before any PUT (fail-safe default)")
+	}
+
+	body := `{"quotas": {"enforce_broker_quotas": false}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected 'quotas' section in store after PUT")
+	}
+	if row.Revision == 0 {
+		t.Error("expected revision > 0")
+	}
+
+	snap := ops.Snapshot()
+	if snap.EnforceBrokerQuotas == nil || *snap.EnforceBrokerQuotas != false {
+		t.Errorf("EnforceBrokerQuotas: want false, got %v", snap.EnforceBrokerQuotas)
+	}
+
+	// The self-apply on the writing node must take effect live, without a
+	// restart — this is the actual guarantee the switch provides.
+	if srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=false immediately after the DB-mode PUT self-apply")
+	}
+
+	// GET must reflect it too.
+	getReq := adminRequest(http.MethodGet, "/api/v1/admin/server-config", "")
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(getRR, getReq, ops)
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(getRR.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if resp.Quotas == nil || resp.Quotas.EnforceBrokerQuotas == nil || *resp.Quotas.EnforceBrokerQuotas != false {
+		t.Errorf("GET quotas: want enforce_broker_quotas=false, got %+v", resp.Quotas)
+	}
+}
+
+// Test AC5 (design 4.8), simulated cross-replica: a second OperationalSettings
+// instance sharing the same store (standing in for a second Hub replica in
+// postgres mode) picks up the change via refreshAndApply — the same call the
+// LISTEN/NOTIFY subscription and the 60s poll backstop both make — without
+// going through its own PUT. No live Postgres is available in this sandbox
+// (per review F4); this exercises the same propagation code path
+// (`Refresh` -> `ApplySnapshot`) against a shared fake store instead of a
+// second real connection.
+func TestPutServerConfigDB_Quotas_CrossReplicaPropagation(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	opsA := NewOperationalSettings(fakeStore, fileK, envK)
+	srvA := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	opsA.server = srvA
+
+	opsB := NewOperationalSettings(fakeStore, fileK, envK)
+	srvB := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	// opsB.server is deliberately left unset: replica B applies only through
+	// refreshAndApply, exactly like a poll-backstop or NOTIFY tick would.
+
+	if !srvB.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=true on replica B before any propagation")
+	}
+
+	// Replica A writes the section (simulates the admin PUT landing on A).
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {"enforce_broker_quotas": false}}`)
+	rr := httptest.NewRecorder()
+	srvA.handlePutServerConfigDB(rr, req, opsA)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on replica A, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if srvA.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=false on replica A immediately after its own PUT")
+	}
+
+	// Replica B has not refreshed yet — still stale/enforced.
+	if !srvB.brokerQuotasEnforced() {
+		t.Fatal("replica B should not see the change before refreshAndApply runs")
+	}
+
+	// Simulate B's poll backstop (or a NOTIFY wakeup) picking up the change.
+	opsB.refreshAndApply(context.Background(), srvB)
+
+	if srvB.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=false on replica B after refreshAndApply propagated the change")
+	}
+}
+
+// Review finding N3 (ptone/scion#2270 round 2): an explicit end-to-end test
+// that PUT {"quotas":{}} in DB mode — not just DELETE /sections/quotas —
+// resets the live brokerQuotasEnforced() value back to enforced. The section
+// row remains (unlike a DELETE), but its document is now {}, so the next
+// Snapshot() sees no quotas.enforce_broker_quotas key, which is exactly the
+// "unset -> enforced" case F3 fixed.
+func TestPutServerConfigDB_Quotas_EmptyPutResetsEnforcementToTrue(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	// First, turn enforcement off.
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {"enforce_broker_quotas": false}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the first PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("test setup: expected brokerQuotasEnforced()=false after the first PUT")
+	}
+
+	// PUT the section back to {} (no explicit value) — this is what the
+	// generic server-config PUT produces for a quotas object with no
+	// enforce_broker_quotas field, distinct from deleting the section
+	// entirely via the "reset to bootstrap" endpoint.
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the clearing PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected the quotas row to still exist after PUT {} (replace, not delete)")
+	}
+	if string(row.Value) != "{}" {
+		t.Errorf("expected the stored quotas doc to be {}, got %s", row.Value)
+	}
+
+	if !srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=true immediately after PUT {\"quotas\":{}} (fail-safe default), not fail-open")
+	}
+}
+
+// Test 7 (design 4.7 P1b): a non-boolean enforce_broker_quotas is rejected.
+func TestPutServerConfigDB_Quotas_NonBooleanRejected(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{"quotas": {"enforce_broker_quotas": "yes"}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-boolean quotas.enforce_broker_quotas, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_WriteAndReflectInSnapshot mirrors
+// TestPutServerConfigDB_Quotas_WriteAndReflectInSnapshot (design ptone/scion#2291 §10 test 3).
+func TestPutServerConfigDB_AgentSecrets_WriteAndReflectInSnapshot(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	// Wire ops server for self-apply: without this, Update()'s self-apply
+	// is a no-op and srv.agentSecretsUserScopeOnly() is never exercised in
+	// DB mode.
+	ops.server = srv
+
+	if srv.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=false before any PUT (permissive default)")
+	}
+
+	body := `{"agent_secrets": {"user_scope_only": true}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["agent_secrets"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected 'agent_secrets' section in store after PUT")
+	}
+	if row.Revision == 0 {
+		t.Error("expected revision > 0")
+	}
+
+	snap := ops.Snapshot()
+	if snap.AgentSecretsUserScopeOnly == nil || *snap.AgentSecretsUserScopeOnly != true {
+		t.Errorf("AgentSecretsUserScopeOnly: want true, got %v", snap.AgentSecretsUserScopeOnly)
+	}
+
+	// The self-apply on the writing node must take effect live, without a
+	// restart — this is the actual guarantee the switch provides.
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=true immediately after the DB-mode PUT self-apply")
+	}
+
+	// GET must reflect it too.
+	getReq := adminRequest(http.MethodGet, "/api/v1/admin/server-config", "")
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(getRR, getReq, ops)
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(getRR.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if resp.AgentSecrets == nil || resp.AgentSecrets.UserScopeOnly == nil || *resp.AgentSecrets.UserScopeOnly != true {
+		t.Errorf("GET agent_secrets: want user_scope_only=true, got %+v", resp.AgentSecrets)
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_CrossReplicaPropagation mirrors
+// TestPutServerConfigDB_Quotas_CrossReplicaPropagation. No live Postgres is
+// available in this sandbox; this exercises the same propagation code path
+// (Refresh -> ApplySnapshot) against a shared fake store instead of a
+// second real connection.
+func TestPutServerConfigDB_AgentSecrets_CrossReplicaPropagation(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	opsA := NewOperationalSettings(fakeStore, fileK, envK)
+	srvA := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	opsA.server = srvA
+
+	opsB := NewOperationalSettings(fakeStore, fileK, envK)
+	srvB := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	// opsB.server is deliberately left unset: replica B applies only through
+	// refreshAndApply, exactly like a poll-backstop or NOTIFY tick would.
+
+	if srvB.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=false on replica B before any propagation")
+	}
+
+	// Replica A writes the section (simulates the admin PUT landing on A).
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {"user_scope_only": true}}`)
+	rr := httptest.NewRecorder()
+	srvA.handlePutServerConfigDB(rr, req, opsA)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on replica A, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !srvA.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=true on replica A immediately after its own PUT")
+	}
+
+	// Replica B has not refreshed yet — still stale/permissive.
+	if srvB.agentSecretsUserScopeOnly() {
+		t.Fatal("replica B should not see the change before refreshAndApply runs")
+	}
+
+	// Simulate B's poll backstop (or a NOTIFY wakeup) picking up the change.
+	opsB.refreshAndApply(context.Background(), srvB)
+
+	if !srvB.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=true on replica B after refreshAndApply propagated the change")
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_EmptyPutResetsToPermissive mirrors
+// TestPutServerConfigDB_Quotas_EmptyPutResetsEnforcementToTrue: PUT
+// {"agent_secrets":{}} — not just DELETE /sections/agent_secrets — resets
+// the live agentSecretsUserScopeOnly() value back to permissive.
+func TestPutServerConfigDB_AgentSecrets_EmptyPutResetsToPermissive(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	// First, turn the restriction on.
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {"user_scope_only": true}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the first PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Fatal("test setup: expected agentSecretsUserScopeOnly()=true after the first PUT")
+	}
+
+	// PUT the section back to {} (no explicit value) — replace, not delete.
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the clearing PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["agent_secrets"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected the agent_secrets row to still exist after PUT {} (replace, not delete)")
+	}
+	if string(row.Value) != "{}" {
+		t.Errorf("expected the stored agent_secrets doc to be {}, got %s", row.Value)
+	}
+
+	if srv.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=false immediately after PUT {\"agent_secrets\":{}} (permissive default), not left on")
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_NonBooleanRejected mirrors
+// TestPutServerConfigDB_Quotas_NonBooleanRejected.
+func TestPutServerConfigDB_AgentSecrets_NonBooleanRejected(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{"agent_secrets": {"user_scope_only": "yes"}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-boolean agent_secrets.user_scope_only, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
 // ---- buildSingleSectionDoc tests ----
 
 func TestBuildSingleSectionDoc_Access(t *testing.T) {
@@ -2038,6 +2395,12 @@ func TestIsZeroStruct(t *testing.T) {
 	if !isZeroStruct(&config.V1MessageBrokerConfig{}) {
 		t.Error("expected zero V1MessageBrokerConfig")
 	}
+	if !isZeroStruct(&config.QuotaSettings{}) {
+		t.Error("expected zero QuotaSettings")
+	}
+	if !isZeroStruct(&config.AutoExposePortsSettings{}) {
+		t.Error("expected zero AutoExposePortsSettings")
+	}
 
 	// Non-zero structs.
 	if isZeroStruct(&config.V1DatabaseConfig{Driver: "postgres"}) {
@@ -2051,6 +2414,14 @@ func TestIsZeroStruct(t *testing.T) {
 	}
 	if isZeroStruct(&config.V1MessageBrokerConfig{Enabled: true}) {
 		t.Error("V1MessageBrokerConfig with enabled=true should not be zero")
+	}
+	enforced := false
+	if isZeroStruct(&config.QuotaSettings{EnforceBrokerQuotas: &enforced}) {
+		t.Error("QuotaSettings with EnforceBrokerQuotas set should not be zero")
+	}
+	autoExposeEnabled := true
+	if isZeroStruct(&config.AutoExposePortsSettings{Enabled: &autoExposeEnabled}) {
+		t.Error("AutoExposePortsSettings with Enabled set should not be zero")
 	}
 
 	// Nil.
@@ -2427,6 +2798,75 @@ func TestResetSection_DeletesManagedSection(t *testing.T) {
 	fakeStore.mu.Unlock()
 	if exists {
 		t.Error("expected access row to be deleted after reset")
+	}
+}
+
+// Regression test for review finding F3 (ptone/scion#2270 round 1): DELETE
+// on the quotas section ("Reset to bootstrap") self-applies a snapshot with
+// EnforceBrokerQuotas==nil. That must flip a previously-set false back to
+// enforced live, on the node that issued the DELETE — not leave the old
+// false in place while GET/the UI both report "enforced" (fail-open).
+func TestResetSection_QuotasDeleteResetsEnforcementToTrue(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	fakeStore.seedWithOrigin("quotas", json.RawMessage(`{"enforce_broker_quotas":false}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+	// Self-apply the initial state, the same way Update()'s self-apply would
+	// after the PUT that produced this row.
+	ApplySnapshot(srv, ops.Snapshot())
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("test setup: expected brokerQuotasEnforced()=false before the reset")
+	}
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/quotas", ""))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	_, exists := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if exists {
+		t.Error("expected quotas row to be deleted after reset")
+	}
+
+	if !srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=true immediately after DELETE-ing the quotas section (fail-safe default), not fail-open")
+	}
+}
+
+// TestResetSection_AgentSecretsDeleteResetsToPermissive mirrors
+// TestResetSection_QuotasDeleteResetsEnforcementToTrue.
+func TestResetSection_AgentSecretsDeleteResetsToPermissive(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	fakeStore.seedWithOrigin("agent_secrets", json.RawMessage(`{"user_scope_only":true}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+	// Self-apply the initial state, the same way Update()'s self-apply would
+	// after the PUT that produced this row.
+	ApplySnapshot(srv, ops.Snapshot())
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Fatal("test setup: expected agentSecretsUserScopeOnly()=true before the reset")
+	}
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/agent_secrets", ""))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	_, exists := fakeStore.settings["agent_secrets"]
+	fakeStore.mu.Unlock()
+	if exists {
+		t.Error("expected agent_secrets row to be deleted after reset")
+	}
+
+	if srv.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=false immediately after DELETE-ing the agent_secrets section (permissive default), not left on")
 	}
 }
 

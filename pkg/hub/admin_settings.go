@@ -90,6 +90,12 @@ type ServerConfigResponse struct {
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *config.AutoExposePortsSettings `json:"auto_expose_ports,omitempty"`
 
+	// Quotas controls hub-level quota enforcement toggles.
+	Quotas *config.QuotaSettings `json:"quotas,omitempty"`
+
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *config.AgentSecretsSettings `json:"agent_secrets,omitempty"`
+
 	// Federation holds the federation authentication config for the admin API.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
 
@@ -146,6 +152,12 @@ type ServerConfigUpdateRequest struct {
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *config.AutoExposePortsSettings `json:"auto_expose_ports,omitempty"`
 
+	// Quotas controls hub-level quota enforcement toggles.
+	Quotas *config.QuotaSettings `json:"quotas,omitempty"`
+
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *config.AgentSecretsSettings `json:"agent_secrets,omitempty"`
+
 	// Federation holds the federation authentication config update.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
 }
@@ -182,7 +194,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 			}
 			s.handlePutServerConfigDB(w, r, ops)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 		}
 		return
 	}
@@ -211,7 +223,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 		}
 		s.handlePutServerConfig(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 	}
 }
 
@@ -223,7 +235,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	user := GetUserIdentityFromContext(r.Context())
 
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 		return
 	}
 
@@ -238,6 +250,18 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	if sectionName == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"Section name is required", nil)
+		return
+	}
+
+	// The "experiments" section has its own compare-and-set reset with a
+	// per-name audit log (DELETE /api/v1/admin/experiments), gated on
+	// hub.experiments.update. This generic route has no compare-and-set and
+	// is gated on hub.config.update, so it must not be a second way to clear
+	// every experiment override (ptone/scion#2217). Rejected before any
+	// store call.
+	if sectionName == "experiments" {
+		writeError(w, http.StatusBadRequest, "validation_failed",
+			"use DELETE /api/v1/admin/experiments", nil)
 		return
 	}
 
@@ -333,6 +357,8 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		DefaultTimezone:      vs.DefaultTimezone,
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
 		AutoExposePorts:      vs.AutoExposePorts,
+		Quotas:               vs.Quotas,
+		AgentSecrets:         vs.AgentSecrets,
 
 		DefaultGCPIdentityMode:             vs.DefaultGCPIdentityMode,
 		DefaultGCPIdentityServiceAccountID: vs.DefaultGCPIdentityServiceAccountID,
@@ -647,10 +673,32 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 		}
 	}
 	if req.AutoExposePorts != nil {
-		if req.AutoExposePorts.Enabled != nil {
+		// Section-generic zero check; see the Quotas block below.
+		if !isZeroStruct(req.AutoExposePorts) {
 			raw["auto_expose_ports"] = marshalToMap(req.AutoExposePorts)
 		} else {
 			delete(raw, "auto_expose_ports")
+		}
+	}
+	if req.Quotas != nil {
+		// Section-generic zero check (matches isZeroStruct's use elsewhere,
+		// admin_settings_db.go): checking a single named field (e.g.
+		// EnforceBrokerQuotas != nil) would silently stop deleting empty
+		// documents the moment QuotaSettings gains a second field, since a
+		// request with only the new field set would then wrongly delete the
+		// whole section. Delete only when every field is nil/zero.
+		if !isZeroStruct(req.Quotas) {
+			raw["quotas"] = marshalToMap(req.Quotas)
+		} else {
+			delete(raw, "quotas")
+		}
+	}
+	if req.AgentSecrets != nil {
+		// Section-generic zero check; see the Quotas block above.
+		if !isZeroStruct(req.AgentSecrets) {
+			raw["agent_secrets"] = marshalToMap(req.AgentSecrets)
+		} else {
+			delete(raw, "agent_secrets")
 		}
 	}
 	if req.Federation != nil {

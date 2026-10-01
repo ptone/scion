@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
@@ -101,6 +102,7 @@ const (
 	TypeBrokerDispatch           = "BrokerDispatch"
 	TypeBrokerJoinToken          = "BrokerJoinToken"
 	TypeBrokerSecret             = "BrokerSecret"
+	TypeBrokerSetting            = "BrokerSetting"
 	TypeChatLinkCode             = "ChatLinkCode"
 	TypeConversation             = "Conversation"
 	TypeConversationParticipant  = "ConversationParticipant"
@@ -3074,6 +3076,7 @@ type AgentMutation struct {
 	task_summary             *string
 	message                  *string
 	applied_config           *string
+	harness_config           *string
 	ancestry                 *[]string
 	appendancestry           []string
 	created                  *time.Time
@@ -4684,6 +4687,55 @@ func (m *AgentMutation) ResetAppliedConfig() {
 	delete(m.clearedFields, agent.FieldAppliedConfig)
 }
 
+// SetHarnessConfig sets the "harness_config" field.
+func (m *AgentMutation) SetHarnessConfig(s string) {
+	m.harness_config = &s
+}
+
+// HarnessConfig returns the value of the "harness_config" field in the mutation.
+func (m *AgentMutation) HarnessConfig() (r string, exists bool) {
+	v := m.harness_config
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHarnessConfig returns the old "harness_config" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldHarnessConfig(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHarnessConfig is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHarnessConfig requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHarnessConfig: %w", err)
+	}
+	return oldValue.HarnessConfig, nil
+}
+
+// ClearHarnessConfig clears the value of the "harness_config" field.
+func (m *AgentMutation) ClearHarnessConfig() {
+	m.harness_config = nil
+	m.clearedFields[agent.FieldHarnessConfig] = struct{}{}
+}
+
+// HarnessConfigCleared returns if the "harness_config" field was cleared in this mutation.
+func (m *AgentMutation) HarnessConfigCleared() bool {
+	_, ok := m.clearedFields[agent.FieldHarnessConfig]
+	return ok
+}
+
+// ResetHarnessConfig resets all changes to the "harness_config" field.
+func (m *AgentMutation) ResetHarnessConfig() {
+	m.harness_config = nil
+	delete(m.clearedFields, agent.FieldHarnessConfig)
+}
+
 // SetAncestry sets the "ancestry" field.
 func (m *AgentMutation) SetAncestry(s []string) {
 	m.ancestry = &s
@@ -5929,7 +5981,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 53)
+	fields := make([]string, 0, 54)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -6022,6 +6074,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.applied_config != nil {
 		fields = append(fields, agent.FieldAppliedConfig)
+	}
+	if m.harness_config != nil {
+		fields = append(fields, agent.FieldHarnessConfig)
 	}
 	if m.ancestry != nil {
 		fields = append(fields, agent.FieldAncestry)
@@ -6159,6 +6214,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.Message()
 	case agent.FieldAppliedConfig:
 		return m.AppliedConfig()
+	case agent.FieldHarnessConfig:
+		return m.HarnessConfig()
 	case agent.FieldAncestry:
 		return m.Ancestry()
 	case agent.FieldCreated:
@@ -6274,6 +6331,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldMessage(ctx)
 	case agent.FieldAppliedConfig:
 		return m.OldAppliedConfig(ctx)
+	case agent.FieldHarnessConfig:
+		return m.OldHarnessConfig(ctx)
 	case agent.FieldAncestry:
 		return m.OldAncestry(ctx)
 	case agent.FieldCreated:
@@ -6543,6 +6602,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAppliedConfig(v)
+		return nil
+	case agent.FieldHarnessConfig:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHarnessConfig(v)
 		return nil
 	case agent.FieldAncestry:
 		v, ok := value.([]string)
@@ -6866,6 +6932,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldAppliedConfig) {
 		fields = append(fields, agent.FieldAppliedConfig)
 	}
+	if m.FieldCleared(agent.FieldHarnessConfig) {
+		fields = append(fields, agent.FieldHarnessConfig)
+	}
 	if m.FieldCleared(agent.FieldAncestry) {
 		fields = append(fields, agent.FieldAncestry)
 	}
@@ -6990,6 +7059,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldAppliedConfig:
 		m.ClearAppliedConfig()
+		return nil
+	case agent.FieldHarnessConfig:
+		m.ClearHarnessConfig()
 		return nil
 	case agent.FieldAncestry:
 		m.ClearAncestry()
@@ -7139,6 +7211,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldAppliedConfig:
 		m.ResetAppliedConfig()
+		return nil
+	case agent.FieldHarnessConfig:
+		m.ResetHarnessConfig()
 		return nil
 	case agent.FieldAncestry:
 		m.ResetAncestry()
@@ -15361,6 +15436,682 @@ func (m *BrokerSecretMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *BrokerSecretMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown BrokerSecret edge %s", name)
+}
+
+// BrokerSettingMutation represents an operation that mutates the BrokerSetting nodes in the graph.
+type BrokerSettingMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	broker_id     *string
+	value         *json.RawMessage
+	appendvalue   json.RawMessage
+	revision      *int64
+	addrevision   *int64
+	updated_by    *string
+	create_time   *time.Time
+	update_time   *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*BrokerSetting, error)
+	predicates    []predicate.BrokerSetting
+}
+
+var _ ent.Mutation = (*BrokerSettingMutation)(nil)
+
+// brokersettingOption allows management of the mutation configuration using functional options.
+type brokersettingOption func(*BrokerSettingMutation)
+
+// newBrokerSettingMutation creates new mutation for the BrokerSetting entity.
+func newBrokerSettingMutation(c config, op Op, opts ...brokersettingOption) *BrokerSettingMutation {
+	m := &BrokerSettingMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeBrokerSetting,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withBrokerSettingID sets the ID field of the mutation.
+func withBrokerSettingID(id uuid.UUID) brokersettingOption {
+	return func(m *BrokerSettingMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *BrokerSetting
+		)
+		m.oldValue = func(ctx context.Context) (*BrokerSetting, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().BrokerSetting.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withBrokerSetting sets the old BrokerSetting of the mutation.
+func withBrokerSetting(node *BrokerSetting) brokersettingOption {
+	return func(m *BrokerSettingMutation) {
+		m.oldValue = func(context.Context) (*BrokerSetting, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m BrokerSettingMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m BrokerSettingMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of BrokerSetting entities.
+func (m *BrokerSettingMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *BrokerSettingMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *BrokerSettingMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().BrokerSetting.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (m *BrokerSettingMutation) SetBrokerID(s string) {
+	m.broker_id = &s
+}
+
+// BrokerID returns the value of the "broker_id" field in the mutation.
+func (m *BrokerSettingMutation) BrokerID() (r string, exists bool) {
+	v := m.broker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBrokerID returns the old "broker_id" field's value of the BrokerSetting entity.
+// If the BrokerSetting object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerSettingMutation) OldBrokerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBrokerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBrokerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBrokerID: %w", err)
+	}
+	return oldValue.BrokerID, nil
+}
+
+// ResetBrokerID resets all changes to the "broker_id" field.
+func (m *BrokerSettingMutation) ResetBrokerID() {
+	m.broker_id = nil
+}
+
+// SetValue sets the "value" field.
+func (m *BrokerSettingMutation) SetValue(jm json.RawMessage) {
+	m.value = &jm
+	m.appendvalue = nil
+}
+
+// Value returns the value of the "value" field in the mutation.
+func (m *BrokerSettingMutation) Value() (r json.RawMessage, exists bool) {
+	v := m.value
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldValue returns the old "value" field's value of the BrokerSetting entity.
+// If the BrokerSetting object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerSettingMutation) OldValue(ctx context.Context) (v json.RawMessage, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldValue is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldValue requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldValue: %w", err)
+	}
+	return oldValue.Value, nil
+}
+
+// AppendValue adds jm to the "value" field.
+func (m *BrokerSettingMutation) AppendValue(jm json.RawMessage) {
+	m.appendvalue = append(m.appendvalue, jm...)
+}
+
+// AppendedValue returns the list of values that were appended to the "value" field in this mutation.
+func (m *BrokerSettingMutation) AppendedValue() (json.RawMessage, bool) {
+	if len(m.appendvalue) == 0 {
+		return nil, false
+	}
+	return m.appendvalue, true
+}
+
+// ResetValue resets all changes to the "value" field.
+func (m *BrokerSettingMutation) ResetValue() {
+	m.value = nil
+	m.appendvalue = nil
+}
+
+// SetRevision sets the "revision" field.
+func (m *BrokerSettingMutation) SetRevision(i int64) {
+	m.revision = &i
+	m.addrevision = nil
+}
+
+// Revision returns the value of the "revision" field in the mutation.
+func (m *BrokerSettingMutation) Revision() (r int64, exists bool) {
+	v := m.revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevision returns the old "revision" field's value of the BrokerSetting entity.
+// If the BrokerSetting object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerSettingMutation) OldRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevision: %w", err)
+	}
+	return oldValue.Revision, nil
+}
+
+// AddRevision adds i to the "revision" field.
+func (m *BrokerSettingMutation) AddRevision(i int64) {
+	if m.addrevision != nil {
+		*m.addrevision += i
+	} else {
+		m.addrevision = &i
+	}
+}
+
+// AddedRevision returns the value that was added to the "revision" field in this mutation.
+func (m *BrokerSettingMutation) AddedRevision() (r int64, exists bool) {
+	v := m.addrevision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRevision resets all changes to the "revision" field.
+func (m *BrokerSettingMutation) ResetRevision() {
+	m.revision = nil
+	m.addrevision = nil
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (m *BrokerSettingMutation) SetUpdatedBy(s string) {
+	m.updated_by = &s
+}
+
+// UpdatedBy returns the value of the "updated_by" field in the mutation.
+func (m *BrokerSettingMutation) UpdatedBy() (r string, exists bool) {
+	v := m.updated_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedBy returns the old "updated_by" field's value of the BrokerSetting entity.
+// If the BrokerSetting object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerSettingMutation) OldUpdatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedBy: %w", err)
+	}
+	return oldValue.UpdatedBy, nil
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (m *BrokerSettingMutation) ClearUpdatedBy() {
+	m.updated_by = nil
+	m.clearedFields[brokersetting.FieldUpdatedBy] = struct{}{}
+}
+
+// UpdatedByCleared returns if the "updated_by" field was cleared in this mutation.
+func (m *BrokerSettingMutation) UpdatedByCleared() bool {
+	_, ok := m.clearedFields[brokersetting.FieldUpdatedBy]
+	return ok
+}
+
+// ResetUpdatedBy resets all changes to the "updated_by" field.
+func (m *BrokerSettingMutation) ResetUpdatedBy() {
+	m.updated_by = nil
+	delete(m.clearedFields, brokersetting.FieldUpdatedBy)
+}
+
+// SetCreateTime sets the "create_time" field.
+func (m *BrokerSettingMutation) SetCreateTime(t time.Time) {
+	m.create_time = &t
+}
+
+// CreateTime returns the value of the "create_time" field in the mutation.
+func (m *BrokerSettingMutation) CreateTime() (r time.Time, exists bool) {
+	v := m.create_time
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreateTime returns the old "create_time" field's value of the BrokerSetting entity.
+// If the BrokerSetting object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerSettingMutation) OldCreateTime(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreateTime is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreateTime requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreateTime: %w", err)
+	}
+	return oldValue.CreateTime, nil
+}
+
+// ResetCreateTime resets all changes to the "create_time" field.
+func (m *BrokerSettingMutation) ResetCreateTime() {
+	m.create_time = nil
+}
+
+// SetUpdateTime sets the "update_time" field.
+func (m *BrokerSettingMutation) SetUpdateTime(t time.Time) {
+	m.update_time = &t
+}
+
+// UpdateTime returns the value of the "update_time" field in the mutation.
+func (m *BrokerSettingMutation) UpdateTime() (r time.Time, exists bool) {
+	v := m.update_time
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdateTime returns the old "update_time" field's value of the BrokerSetting entity.
+// If the BrokerSetting object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerSettingMutation) OldUpdateTime(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdateTime is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdateTime requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdateTime: %w", err)
+	}
+	return oldValue.UpdateTime, nil
+}
+
+// ResetUpdateTime resets all changes to the "update_time" field.
+func (m *BrokerSettingMutation) ResetUpdateTime() {
+	m.update_time = nil
+}
+
+// Where appends a list predicates to the BrokerSettingMutation builder.
+func (m *BrokerSettingMutation) Where(ps ...predicate.BrokerSetting) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the BrokerSettingMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *BrokerSettingMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.BrokerSetting, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *BrokerSettingMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *BrokerSettingMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (BrokerSetting).
+func (m *BrokerSettingMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *BrokerSettingMutation) Fields() []string {
+	fields := make([]string, 0, 6)
+	if m.broker_id != nil {
+		fields = append(fields, brokersetting.FieldBrokerID)
+	}
+	if m.value != nil {
+		fields = append(fields, brokersetting.FieldValue)
+	}
+	if m.revision != nil {
+		fields = append(fields, brokersetting.FieldRevision)
+	}
+	if m.updated_by != nil {
+		fields = append(fields, brokersetting.FieldUpdatedBy)
+	}
+	if m.create_time != nil {
+		fields = append(fields, brokersetting.FieldCreateTime)
+	}
+	if m.update_time != nil {
+		fields = append(fields, brokersetting.FieldUpdateTime)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *BrokerSettingMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case brokersetting.FieldBrokerID:
+		return m.BrokerID()
+	case brokersetting.FieldValue:
+		return m.Value()
+	case brokersetting.FieldRevision:
+		return m.Revision()
+	case brokersetting.FieldUpdatedBy:
+		return m.UpdatedBy()
+	case brokersetting.FieldCreateTime:
+		return m.CreateTime()
+	case brokersetting.FieldUpdateTime:
+		return m.UpdateTime()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *BrokerSettingMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case brokersetting.FieldBrokerID:
+		return m.OldBrokerID(ctx)
+	case brokersetting.FieldValue:
+		return m.OldValue(ctx)
+	case brokersetting.FieldRevision:
+		return m.OldRevision(ctx)
+	case brokersetting.FieldUpdatedBy:
+		return m.OldUpdatedBy(ctx)
+	case brokersetting.FieldCreateTime:
+		return m.OldCreateTime(ctx)
+	case brokersetting.FieldUpdateTime:
+		return m.OldUpdateTime(ctx)
+	}
+	return nil, fmt.Errorf("unknown BrokerSetting field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BrokerSettingMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case brokersetting.FieldBrokerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBrokerID(v)
+		return nil
+	case brokersetting.FieldValue:
+		v, ok := value.(json.RawMessage)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetValue(v)
+		return nil
+	case brokersetting.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevision(v)
+		return nil
+	case brokersetting.FieldUpdatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedBy(v)
+		return nil
+	case brokersetting.FieldCreateTime:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreateTime(v)
+		return nil
+	case brokersetting.FieldUpdateTime:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdateTime(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BrokerSetting field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *BrokerSettingMutation) AddedFields() []string {
+	var fields []string
+	if m.addrevision != nil {
+		fields = append(fields, brokersetting.FieldRevision)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *BrokerSettingMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case brokersetting.FieldRevision:
+		return m.AddedRevision()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BrokerSettingMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case brokersetting.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRevision(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BrokerSetting numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *BrokerSettingMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(brokersetting.FieldUpdatedBy) {
+		fields = append(fields, brokersetting.FieldUpdatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *BrokerSettingMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *BrokerSettingMutation) ClearField(name string) error {
+	switch name {
+	case brokersetting.FieldUpdatedBy:
+		m.ClearUpdatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown BrokerSetting nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *BrokerSettingMutation) ResetField(name string) error {
+	switch name {
+	case brokersetting.FieldBrokerID:
+		m.ResetBrokerID()
+		return nil
+	case brokersetting.FieldValue:
+		m.ResetValue()
+		return nil
+	case brokersetting.FieldRevision:
+		m.ResetRevision()
+		return nil
+	case brokersetting.FieldUpdatedBy:
+		m.ResetUpdatedBy()
+		return nil
+	case brokersetting.FieldCreateTime:
+		m.ResetCreateTime()
+		return nil
+	case brokersetting.FieldUpdateTime:
+		m.ResetUpdateTime()
+		return nil
+	}
+	return fmt.Errorf("unknown BrokerSetting field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *BrokerSettingMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *BrokerSettingMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *BrokerSettingMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *BrokerSettingMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *BrokerSettingMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *BrokerSettingMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *BrokerSettingMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown BrokerSetting unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *BrokerSettingMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown BrokerSetting edge %s", name)
 }
 
 // ChatLinkCodeMutation represents an operation that mutates the ChatLinkCode nodes in the graph.
@@ -49495,6 +50246,7 @@ type RuntimeBrokerMutation struct {
 	supported_harnesses            *string
 	resources                      *string
 	runtimes                       *string
+	default_profile                *string
 	labels                         *map[string]string
 	annotations                    *map[string]string
 	endpoint                       *string
@@ -50147,6 +50899,55 @@ func (m *RuntimeBrokerMutation) ResetRuntimes() {
 	delete(m.clearedFields, runtimebroker.FieldRuntimes)
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (m *RuntimeBrokerMutation) SetDefaultProfile(s string) {
+	m.default_profile = &s
+}
+
+// DefaultProfile returns the value of the "default_profile" field in the mutation.
+func (m *RuntimeBrokerMutation) DefaultProfile() (r string, exists bool) {
+	v := m.default_profile
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDefaultProfile returns the old "default_profile" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldDefaultProfile(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDefaultProfile is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDefaultProfile requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDefaultProfile: %w", err)
+	}
+	return oldValue.DefaultProfile, nil
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (m *RuntimeBrokerMutation) ClearDefaultProfile() {
+	m.default_profile = nil
+	m.clearedFields[runtimebroker.FieldDefaultProfile] = struct{}{}
+}
+
+// DefaultProfileCleared returns if the "default_profile" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) DefaultProfileCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldDefaultProfile]
+	return ok
+}
+
+// ResetDefaultProfile resets all changes to the "default_profile" field.
+func (m *RuntimeBrokerMutation) ResetDefaultProfile() {
+	m.default_profile = nil
+	delete(m.clearedFields, runtimebroker.FieldDefaultProfile)
+}
+
 // SetLabels sets the "labels" field.
 func (m *RuntimeBrokerMutation) SetLabels(value map[string]string) {
 	m.labels = &value
@@ -50730,7 +51531,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -50766,6 +51567,9 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	}
 	if m.runtimes != nil {
 		fields = append(fields, runtimebroker.FieldRuntimes)
+	}
+	if m.default_profile != nil {
+		fields = append(fields, runtimebroker.FieldDefaultProfile)
 	}
 	if m.labels != nil {
 		fields = append(fields, runtimebroker.FieldLabels)
@@ -50835,6 +51639,8 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.Resources()
 	case runtimebroker.FieldRuntimes:
 		return m.Runtimes()
+	case runtimebroker.FieldDefaultProfile:
+		return m.DefaultProfile()
 	case runtimebroker.FieldLabels:
 		return m.Labels()
 	case runtimebroker.FieldAnnotations:
@@ -50892,6 +51698,8 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldResources(ctx)
 	case runtimebroker.FieldRuntimes:
 		return m.OldRuntimes(ctx)
+	case runtimebroker.FieldDefaultProfile:
+		return m.OldDefaultProfile(ctx)
 	case runtimebroker.FieldLabels:
 		return m.OldLabels(ctx)
 	case runtimebroker.FieldAnnotations:
@@ -51008,6 +51816,13 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetRuntimes(v)
+		return nil
+	case runtimebroker.FieldDefaultProfile:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDefaultProfile(v)
 		return nil
 	case runtimebroker.FieldLabels:
 		v, ok := value.(map[string]string)
@@ -51156,6 +51971,9 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldRuntimes) {
 		fields = append(fields, runtimebroker.FieldRuntimes)
 	}
+	if m.FieldCleared(runtimebroker.FieldDefaultProfile) {
+		fields = append(fields, runtimebroker.FieldDefaultProfile)
+	}
 	if m.FieldCleared(runtimebroker.FieldLabels) {
 		fields = append(fields, runtimebroker.FieldLabels)
 	}
@@ -51214,6 +52032,9 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldRuntimes:
 		m.ClearRuntimes()
+		return nil
+	case runtimebroker.FieldDefaultProfile:
+		m.ClearDefaultProfile()
 		return nil
 	case runtimebroker.FieldLabels:
 		m.ClearLabels()
@@ -51285,6 +52106,9 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldRuntimes:
 		m.ResetRuntimes()
+		return nil
+	case runtimebroker.FieldDefaultProfile:
+		m.ResetDefaultProfile()
 		return nil
 	case runtimebroker.FieldLabels:
 		m.ResetLabels()
@@ -64704,25 +65528,28 @@ func (m *UserMutation) ResetEdge(name string) error {
 // UserAccessTokenMutation represents an operation that mutates the UserAccessToken nodes in the graph.
 type UserAccessTokenMutation struct {
 	config
-	op            Op
-	typ           string
-	id            *uuid.UUID
-	user_id       *uuid.UUID
-	name          *string
-	prefix        *string
-	key_hash      *string
-	project_id    *uuid.UUID
-	scopes        *string
-	revoked       *bool
-	expires_at    *time.Time
-	last_used     *time.Time
-	created       *time.Time
-	purpose       *string
-	labels        *string
-	clearedFields map[string]struct{}
-	done          bool
-	oldValue      func(context.Context) (*UserAccessToken, error)
-	predicates    []predicate.UserAccessToken
+	op                     Op
+	typ                    string
+	id                     *uuid.UUID
+	user_id                *uuid.UUID
+	name                   *string
+	prefix                 *string
+	key_hash               *string
+	project_id             *uuid.UUID
+	scopes                 *string
+	ceiling_version        *int32
+	addceiling_version     *int32
+	ceiling_permission_ids *string
+	revoked                *bool
+	expires_at             *time.Time
+	last_used              *time.Time
+	created                *time.Time
+	purpose                *string
+	labels                 *string
+	clearedFields          map[string]struct{}
+	done                   bool
+	oldValue               func(context.Context) (*UserAccessToken, error)
+	predicates             []predicate.UserAccessToken
 }
 
 var _ ent.Mutation = (*UserAccessTokenMutation)(nil)
@@ -65045,6 +65872,111 @@ func (m *UserAccessTokenMutation) ResetScopes() {
 	m.scopes = nil
 }
 
+// SetCeilingVersion sets the "ceiling_version" field.
+func (m *UserAccessTokenMutation) SetCeilingVersion(i int32) {
+	m.ceiling_version = &i
+	m.addceiling_version = nil
+}
+
+// CeilingVersion returns the value of the "ceiling_version" field in the mutation.
+func (m *UserAccessTokenMutation) CeilingVersion() (r int32, exists bool) {
+	v := m.ceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingVersion returns the old "ceiling_version" field's value of the UserAccessToken entity.
+// If the UserAccessToken object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccessTokenMutation) OldCeilingVersion(ctx context.Context) (v int32, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingVersion: %w", err)
+	}
+	return oldValue.CeilingVersion, nil
+}
+
+// AddCeilingVersion adds i to the "ceiling_version" field.
+func (m *UserAccessTokenMutation) AddCeilingVersion(i int32) {
+	if m.addceiling_version != nil {
+		*m.addceiling_version += i
+	} else {
+		m.addceiling_version = &i
+	}
+}
+
+// AddedCeilingVersion returns the value that was added to the "ceiling_version" field in this mutation.
+func (m *UserAccessTokenMutation) AddedCeilingVersion() (r int32, exists bool) {
+	v := m.addceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCeilingVersion resets all changes to the "ceiling_version" field.
+func (m *UserAccessTokenMutation) ResetCeilingVersion() {
+	m.ceiling_version = nil
+	m.addceiling_version = nil
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (m *UserAccessTokenMutation) SetCeilingPermissionIds(s string) {
+	m.ceiling_permission_ids = &s
+}
+
+// CeilingPermissionIds returns the value of the "ceiling_permission_ids" field in the mutation.
+func (m *UserAccessTokenMutation) CeilingPermissionIds() (r string, exists bool) {
+	v := m.ceiling_permission_ids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingPermissionIds returns the old "ceiling_permission_ids" field's value of the UserAccessToken entity.
+// If the UserAccessToken object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccessTokenMutation) OldCeilingPermissionIds(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingPermissionIds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingPermissionIds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingPermissionIds: %w", err)
+	}
+	return oldValue.CeilingPermissionIds, nil
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (m *UserAccessTokenMutation) ClearCeilingPermissionIds() {
+	m.ceiling_permission_ids = nil
+	m.clearedFields[useraccesstoken.FieldCeilingPermissionIds] = struct{}{}
+}
+
+// CeilingPermissionIdsCleared returns if the "ceiling_permission_ids" field was cleared in this mutation.
+func (m *UserAccessTokenMutation) CeilingPermissionIdsCleared() bool {
+	_, ok := m.clearedFields[useraccesstoken.FieldCeilingPermissionIds]
+	return ok
+}
+
+// ResetCeilingPermissionIds resets all changes to the "ceiling_permission_ids" field.
+func (m *UserAccessTokenMutation) ResetCeilingPermissionIds() {
+	m.ceiling_permission_ids = nil
+	delete(m.clearedFields, useraccesstoken.FieldCeilingPermissionIds)
+}
+
 // SetRevoked sets the "revoked" field.
 func (m *UserAccessTokenMutation) SetRevoked(b bool) {
 	m.revoked = &b
@@ -65347,7 +66279,7 @@ func (m *UserAccessTokenMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UserAccessTokenMutation) Fields() []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 14)
 	if m.user_id != nil {
 		fields = append(fields, useraccesstoken.FieldUserID)
 	}
@@ -65365,6 +66297,12 @@ func (m *UserAccessTokenMutation) Fields() []string {
 	}
 	if m.scopes != nil {
 		fields = append(fields, useraccesstoken.FieldScopes)
+	}
+	if m.ceiling_version != nil {
+		fields = append(fields, useraccesstoken.FieldCeilingVersion)
+	}
+	if m.ceiling_permission_ids != nil {
+		fields = append(fields, useraccesstoken.FieldCeilingPermissionIds)
 	}
 	if m.revoked != nil {
 		fields = append(fields, useraccesstoken.FieldRevoked)
@@ -65404,6 +66342,10 @@ func (m *UserAccessTokenMutation) Field(name string) (ent.Value, bool) {
 		return m.ProjectID()
 	case useraccesstoken.FieldScopes:
 		return m.Scopes()
+	case useraccesstoken.FieldCeilingVersion:
+		return m.CeilingVersion()
+	case useraccesstoken.FieldCeilingPermissionIds:
+		return m.CeilingPermissionIds()
 	case useraccesstoken.FieldRevoked:
 		return m.Revoked()
 	case useraccesstoken.FieldExpiresAt:
@@ -65437,6 +66379,10 @@ func (m *UserAccessTokenMutation) OldField(ctx context.Context, name string) (en
 		return m.OldProjectID(ctx)
 	case useraccesstoken.FieldScopes:
 		return m.OldScopes(ctx)
+	case useraccesstoken.FieldCeilingVersion:
+		return m.OldCeilingVersion(ctx)
+	case useraccesstoken.FieldCeilingPermissionIds:
+		return m.OldCeilingPermissionIds(ctx)
 	case useraccesstoken.FieldRevoked:
 		return m.OldRevoked(ctx)
 	case useraccesstoken.FieldExpiresAt:
@@ -65500,6 +66446,20 @@ func (m *UserAccessTokenMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetScopes(v)
 		return nil
+	case useraccesstoken.FieldCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingVersion(v)
+		return nil
+	case useraccesstoken.FieldCeilingPermissionIds:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingPermissionIds(v)
+		return nil
 	case useraccesstoken.FieldRevoked:
 		v, ok := value.(bool)
 		if !ok {
@@ -65549,13 +66509,21 @@ func (m *UserAccessTokenMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *UserAccessTokenMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addceiling_version != nil {
+		fields = append(fields, useraccesstoken.FieldCeilingVersion)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *UserAccessTokenMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case useraccesstoken.FieldCeilingVersion:
+		return m.AddedCeilingVersion()
+	}
 	return nil, false
 }
 
@@ -65564,6 +66532,13 @@ func (m *UserAccessTokenMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *UserAccessTokenMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case useraccesstoken.FieldCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCeilingVersion(v)
+		return nil
 	}
 	return fmt.Errorf("unknown UserAccessToken numeric field %s", name)
 }
@@ -65572,6 +66547,9 @@ func (m *UserAccessTokenMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *UserAccessTokenMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(useraccesstoken.FieldCeilingPermissionIds) {
+		fields = append(fields, useraccesstoken.FieldCeilingPermissionIds)
+	}
 	if m.FieldCleared(useraccesstoken.FieldExpiresAt) {
 		fields = append(fields, useraccesstoken.FieldExpiresAt)
 	}
@@ -65598,6 +66576,9 @@ func (m *UserAccessTokenMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *UserAccessTokenMutation) ClearField(name string) error {
 	switch name {
+	case useraccesstoken.FieldCeilingPermissionIds:
+		m.ClearCeilingPermissionIds()
+		return nil
 	case useraccesstoken.FieldExpiresAt:
 		m.ClearExpiresAt()
 		return nil
@@ -65635,6 +66616,12 @@ func (m *UserAccessTokenMutation) ResetField(name string) error {
 		return nil
 	case useraccesstoken.FieldScopes:
 		m.ResetScopes()
+		return nil
+	case useraccesstoken.FieldCeilingVersion:
+		m.ResetCeilingVersion()
+		return nil
+	case useraccesstoken.FieldCeilingPermissionIds:
+		m.ResetCeilingPermissionIds()
 		return nil
 	case useraccesstoken.FieldRevoked:
 		m.ResetRevoked()

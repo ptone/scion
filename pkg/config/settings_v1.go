@@ -319,11 +319,33 @@ type VersionedSettings struct {
 
 	// ProjectDefaults controls hub-level defaults applied at project creation time.
 	ProjectDefaults *ProjectDefaultsSettings `json:"project_defaults,omitempty" yaml:"project_defaults,omitempty" koanf:"project_defaults"`
+
+	// Quotas controls hub-level quota enforcement toggles.
+	Quotas *QuotaSettings `json:"quotas,omitempty" yaml:"quotas,omitempty" koanf:"quotas"`
+
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty" yaml:"agent_secrets,omitempty" koanf:"agent_secrets"`
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
 type AutoExposePortsSettings struct {
 	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+}
+
+// QuotaSettings holds the quota enforcement configuration in settings.yaml.
+type QuotaSettings struct {
+	// EnforceBrokerQuotas controls whether max_agents_per_broker is enforced
+	// on create. Default true (fail-safe) when absent.
+	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" yaml:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
+}
+
+// AgentSecretsSettings holds the hub-level policy for secrets written by
+// agents in settings.yaml.
+type AgentSecretsSettings struct {
+	// UserScopeOnly, when true, restricts agents to writing user (profile)
+	// scope secrets only. Default false (nil is false): agents may write
+	// project scope as they do today.
+	UserScopeOnly *bool `json:"user_scope_only,omitempty" yaml:"user_scope_only,omitempty" koanf:"user_scope_only"`
 }
 
 // ProjectDefaultsSettings holds project creation defaults in settings.yaml.

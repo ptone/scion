@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -726,6 +727,7 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	unmarshalRawJSON(b.Capabilities, &sb.Capabilities)
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
+	sb.DefaultProfile = b.DefaultProfile
 	sb.Labels = b.Labels
 	if sb.Labels == nil {
 		sb.Labels = make(map[string]string)
@@ -752,6 +754,7 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetAutoProvide(b.AutoProvide).
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
 		SetRuntimes(marshalRawJSON(b.Profiles)).
+		SetDefaultProfile(b.DefaultProfile).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
 
@@ -852,6 +855,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetLastHeartbeat(b.LastHeartbeat).
 			SetCapabilities(marshalRawJSON(b.Capabilities)).
 			SetRuntimes(marshalRawJSON(b.Profiles)).
+			SetDefaultProfile(b.DefaultProfile).
 			SetLabels(b.Labels).
 			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
@@ -928,14 +932,37 @@ func (s *ProjectStore) SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id,
 	return affected == 1, nil
 }
 
-// DeleteRuntimeBroker removes a runtime broker by ID.
+// DeleteRuntimeBroker removes a runtime broker by ID. runtime_brokers has no
+// edge to broker_settings (design.md §5.1), so the settings row, if any, is
+// deleted explicitly rather than relying on an FK cascade
+// (ptone/scion#2061 P2, AC-P2-4). Both deletes run in one transaction so a
+// failure partway through never orphans a settings row for an ID that no
+// longer has a broker (ptone/scion#2061 P2 review round 1, F10).
 func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	if err := s.client.RuntimeBroker.DeleteOneID(uid).Exec(ctx); err != nil {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("delete runtime broker: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := tx.RuntimeBroker.DeleteOneID(uid).Exec(ctx); err != nil {
 		return mapError(err)
+	}
+	// Key off uid.String() (the canonical form), not the raw id parameter:
+	// PutBrokerSettings/GetBrokerSettings always store/read under the
+	// canonical broker ID (pkg/hub/broker_settings_handlers.go), so
+	// deleting by the raw, possibly non-canonical id here would silently
+	// miss the row for any caller that used an uppercase/braced/urn UUID
+	// form (AC-P2-4, ptone/scion#2061 P2 review round 2, R3).
+	if _, err := tx.BrokerSetting.Delete().Where(brokersetting.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete broker settings: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete runtime broker: commit: %w", err)
 	}
 	return nil
 }

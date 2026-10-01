@@ -130,6 +130,7 @@ var (
 		{Name: "task_summary", Type: field.TypeString, Nullable: true},
 		{Name: "message", Type: field.TypeString, Nullable: true},
 		{Name: "applied_config", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "harness_config", Type: field.TypeString, Nullable: true},
 		{Name: "ancestry", Type: field.TypeJSON, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
@@ -162,7 +163,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[53]},
+				Columns:    []*schema.Column{AgentsColumns[54]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -171,12 +172,12 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[53]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[54]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[47]},
+				Columns: []*schema.Column{AgentsColumns[48]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -184,7 +185,15 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[43]},
+				Columns: []*schema.Column{AgentsColumns[44]},
+			},
+			{
+				Name:    "agent_harness_config_reconcile_pending",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "harness_config IS NULL AND applied_config IS NOT NULL",
+				},
 			},
 		},
 	}
@@ -455,6 +464,29 @@ var (
 		Name:       "broker_secrets",
 		Columns:    BrokerSecretsColumns,
 		PrimaryKey: []*schema.Column{BrokerSecretsColumns[0]},
+	}
+	// BrokerSettingsColumns holds the columns for the "broker_settings" table.
+	BrokerSettingsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "broker_id", Type: field.TypeString},
+		{Name: "value", Type: field.TypeJSON},
+		{Name: "revision", Type: field.TypeInt64, Default: 1},
+		{Name: "updated_by", Type: field.TypeString, Nullable: true},
+		{Name: "create_time", Type: field.TypeTime},
+		{Name: "update_time", Type: field.TypeTime},
+	}
+	// BrokerSettingsTable holds the schema information for the "broker_settings" table.
+	BrokerSettingsTable = &schema.Table{
+		Name:       "broker_settings",
+		Columns:    BrokerSettingsColumns,
+		PrimaryKey: []*schema.Column{BrokerSettingsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "brokersetting_broker_id",
+				Unique:  true,
+				Columns: []*schema.Column{BrokerSettingsColumns[1]},
+			},
+		},
 	}
 	// ChatLinkCodesColumns holds the columns for the "chat_link_codes" table.
 	ChatLinkCodesColumns = []*schema.Column{
@@ -1730,6 +1762,7 @@ var (
 		{Name: "supported_harnesses", Type: field.TypeString, Nullable: true},
 		{Name: "resources", Type: field.TypeString, Nullable: true},
 		{Name: "runtimes", Type: field.TypeString, Nullable: true},
+		{Name: "default_profile", Type: field.TypeString, Nullable: true},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "endpoint", Type: field.TypeString, Nullable: true},
@@ -2185,6 +2218,8 @@ var (
 		{Name: "key_hash", Type: field.TypeString, Unique: true},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "scopes", Type: field.TypeString},
+		{Name: "ceiling_version", Type: field.TypeInt32, Default: 0},
+		{Name: "ceiling_permission_ids", Type: field.TypeString, Nullable: true},
 		{Name: "revoked", Type: field.TypeBool, Default: false},
 		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_used", Type: field.TypeTime, Nullable: true},
@@ -2249,6 +2284,7 @@ var (
 		BrokerDispatchTable,
 		BrokerJoinTokensTable,
 		BrokerSecretsTable,
+		BrokerSettingsTable,
 		ChatLinkCodesTable,
 		ConversationsTable,
 		ConversationParticipantsTable,
@@ -2322,6 +2358,9 @@ func init() {
 	}
 	BrokerSecretsTable.Annotation = &entsql.Annotation{
 		Table: "broker_secrets",
+	}
+	BrokerSettingsTable.Annotation = &entsql.Annotation{
+		Table: "broker_settings",
 	}
 	ChatLinkCodesTable.Annotation = &entsql.Annotation{
 		Table: "chat_link_codes",

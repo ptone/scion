@@ -17,6 +17,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
@@ -179,61 +180,61 @@ func init() {
 	// agent.DefaultWebPtyEnabled holds the default value on creation for the web_pty_enabled field.
 	agent.DefaultWebPtyEnabled = agentDescWebPtyEnabled.Default.(bool)
 	// agentDescCreated is the schema descriptor for created field.
-	agentDescCreated := agentFields[33].Descriptor()
+	agentDescCreated := agentFields[34].Descriptor()
 	// agent.DefaultCreated holds the default value on creation for the created field.
 	agent.DefaultCreated = agentDescCreated.Default.(func() time.Time)
 	// agentDescUpdated is the schema descriptor for updated field.
-	agentDescUpdated := agentFields[34].Descriptor()
+	agentDescUpdated := agentFields[35].Descriptor()
 	// agent.DefaultUpdated holds the default value on creation for the updated field.
 	agent.DefaultUpdated = agentDescUpdated.Default.(func() time.Time)
 	// agent.UpdateDefaultUpdated holds the default value on update for the updated field.
 	agent.UpdateDefaultUpdated = agentDescUpdated.UpdateDefault.(func() time.Time)
 	// agentDescStateVersion is the schema descriptor for state_version field.
-	agentDescStateVersion := agentFields[39].Descriptor()
+	agentDescStateVersion := agentFields[40].Descriptor()
 	// agent.DefaultStateVersion holds the default value on creation for the state_version field.
 	agent.DefaultStateVersion = agentDescStateVersion.Default.(int64)
 	// agentDescGeneration is the schema descriptor for generation field.
-	agentDescGeneration := agentFields[40].Descriptor()
+	agentDescGeneration := agentFields[41].Descriptor()
 	// agent.DefaultGeneration holds the default value on creation for the generation field.
 	agent.DefaultGeneration = agentDescGeneration.Default.(int)
 	// agentDescReincarnationState is the schema descriptor for reincarnation_state field.
-	agentDescReincarnationState := agentFields[41].Descriptor()
+	agentDescReincarnationState := agentFields[42].Descriptor()
 	// agent.DefaultReincarnationState holds the default value on creation for the reincarnation_state field.
 	agent.DefaultReincarnationState = agentDescReincarnationState.Default.(string)
 	// agentDescLaunchAsyncOptIn is the schema descriptor for launch_async_opt_in field.
-	agentDescLaunchAsyncOptIn := agentFields[43].Descriptor()
+	agentDescLaunchAsyncOptIn := agentFields[44].Descriptor()
 	// agent.DefaultLaunchAsyncOptIn holds the default value on creation for the launch_async_opt_in field.
 	agent.DefaultLaunchAsyncOptIn = agentDescLaunchAsyncOptIn.Default.(bool)
 	// agentDescLaunchID is the schema descriptor for launch_id field.
-	agentDescLaunchID := agentFields[44].Descriptor()
+	agentDescLaunchID := agentFields[45].Descriptor()
 	// agent.DefaultLaunchID holds the default value on creation for the launch_id field.
 	agent.DefaultLaunchID = agentDescLaunchID.Default.(string)
 	// agentDescLaunchState is the schema descriptor for launch_state field.
-	agentDescLaunchState := agentFields[45].Descriptor()
+	agentDescLaunchState := agentFields[46].Descriptor()
 	// agent.DefaultLaunchState holds the default value on creation for the launch_state field.
 	agent.DefaultLaunchState = agentDescLaunchState.Default.(string)
 	// agentDescLaunchEndReason is the schema descriptor for launch_end_reason field.
-	agentDescLaunchEndReason := agentFields[46].Descriptor()
+	agentDescLaunchEndReason := agentFields[47].Descriptor()
 	// agent.DefaultLaunchEndReason holds the default value on creation for the launch_end_reason field.
 	agent.DefaultLaunchEndReason = agentDescLaunchEndReason.Default.(string)
 	// agentDescLaunchKind is the schema descriptor for launch_kind field.
-	agentDescLaunchKind := agentFields[47].Descriptor()
+	agentDescLaunchKind := agentFields[48].Descriptor()
 	// agent.DefaultLaunchKind holds the default value on creation for the launch_kind field.
 	agent.DefaultLaunchKind = agentDescLaunchKind.Default.(string)
 	// agentDescLaunchOwner is the schema descriptor for launch_owner field.
-	agentDescLaunchOwner := agentFields[50].Descriptor()
+	agentDescLaunchOwner := agentFields[51].Descriptor()
 	// agent.DefaultLaunchOwner holds the default value on creation for the launch_owner field.
 	agent.DefaultLaunchOwner = agentDescLaunchOwner.Default.(string)
 	// agentDescLaunchSeq is the schema descriptor for launch_seq field.
-	agentDescLaunchSeq := agentFields[51].Descriptor()
+	agentDescLaunchSeq := agentFields[52].Descriptor()
 	// agent.DefaultLaunchSeq holds the default value on creation for the launch_seq field.
 	agent.DefaultLaunchSeq = agentDescLaunchSeq.Default.(int64)
 	// agentDescLaunchStep is the schema descriptor for launch_step field.
-	agentDescLaunchStep := agentFields[52].Descriptor()
+	agentDescLaunchStep := agentFields[53].Descriptor()
 	// agent.DefaultLaunchStep holds the default value on creation for the launch_step field.
 	agent.DefaultLaunchStep = agentDescLaunchStep.Default.(string)
 	// agentDescLaunchError is the schema descriptor for launch_error field.
-	agentDescLaunchError := agentFields[53].Descriptor()
+	agentDescLaunchError := agentFields[54].Descriptor()
 	// agent.DefaultLaunchError holds the default value on creation for the launch_error field.
 	agent.DefaultLaunchError = agentDescLaunchError.Default.(string)
 	// agentDescID is the schema descriptor for id field.
@@ -434,6 +435,30 @@ func init() {
 	brokersecretDescCreated := brokersecretFields[6].Descriptor()
 	// brokersecret.DefaultCreated holds the default value on creation for the created field.
 	brokersecret.DefaultCreated = brokersecretDescCreated.Default.(func() time.Time)
+	brokersettingFields := schema.BrokerSetting{}.Fields()
+	_ = brokersettingFields
+	// brokersettingDescBrokerID is the schema descriptor for broker_id field.
+	brokersettingDescBrokerID := brokersettingFields[1].Descriptor()
+	// brokersetting.BrokerIDValidator is a validator for the "broker_id" field. It is called by the builders before save.
+	brokersetting.BrokerIDValidator = brokersettingDescBrokerID.Validators[0].(func(string) error)
+	// brokersettingDescRevision is the schema descriptor for revision field.
+	brokersettingDescRevision := brokersettingFields[3].Descriptor()
+	// brokersetting.DefaultRevision holds the default value on creation for the revision field.
+	brokersetting.DefaultRevision = brokersettingDescRevision.Default.(int64)
+	// brokersettingDescCreateTime is the schema descriptor for create_time field.
+	brokersettingDescCreateTime := brokersettingFields[5].Descriptor()
+	// brokersetting.DefaultCreateTime holds the default value on creation for the create_time field.
+	brokersetting.DefaultCreateTime = brokersettingDescCreateTime.Default.(func() time.Time)
+	// brokersettingDescUpdateTime is the schema descriptor for update_time field.
+	brokersettingDescUpdateTime := brokersettingFields[6].Descriptor()
+	// brokersetting.DefaultUpdateTime holds the default value on creation for the update_time field.
+	brokersetting.DefaultUpdateTime = brokersettingDescUpdateTime.Default.(func() time.Time)
+	// brokersetting.UpdateDefaultUpdateTime holds the default value on update for the update_time field.
+	brokersetting.UpdateDefaultUpdateTime = brokersettingDescUpdateTime.UpdateDefault.(func() time.Time)
+	// brokersettingDescID is the schema descriptor for id field.
+	brokersettingDescID := brokersettingFields[0].Descriptor()
+	// brokersetting.DefaultID holds the default value on creation for the id field.
+	brokersetting.DefaultID = brokersettingDescID.Default.(func() uuid.UUID)
 	chatlinkcodeFields := schema.ChatLinkCode{}.Fields()
 	_ = chatlinkcodeFields
 	// chatlinkcodeDescCodeHash is the schema descriptor for code_hash field.
@@ -1437,15 +1462,15 @@ func init() {
 	// runtimebroker.DefaultConnectionState holds the default value on creation for the connection_state field.
 	runtimebroker.DefaultConnectionState = runtimebrokerDescConnectionState.Default.(string)
 	// runtimebrokerDescAutoProvide is the schema descriptor for auto_provide field.
-	runtimebrokerDescAutoProvide := runtimebrokerFields[17].Descriptor()
+	runtimebrokerDescAutoProvide := runtimebrokerFields[18].Descriptor()
 	// runtimebroker.DefaultAutoProvide holds the default value on creation for the auto_provide field.
 	runtimebroker.DefaultAutoProvide = runtimebrokerDescAutoProvide.Default.(bool)
 	// runtimebrokerDescCreated is the schema descriptor for created field.
-	runtimebrokerDescCreated := runtimebrokerFields[23].Descriptor()
+	runtimebrokerDescCreated := runtimebrokerFields[24].Descriptor()
 	// runtimebroker.DefaultCreated holds the default value on creation for the created field.
 	runtimebroker.DefaultCreated = runtimebrokerDescCreated.Default.(func() time.Time)
 	// runtimebrokerDescUpdated is the schema descriptor for updated field.
-	runtimebrokerDescUpdated := runtimebrokerFields[24].Descriptor()
+	runtimebrokerDescUpdated := runtimebrokerFields[25].Descriptor()
 	// runtimebroker.DefaultUpdated holds the default value on creation for the updated field.
 	runtimebroker.DefaultUpdated = runtimebrokerDescUpdated.Default.(func() time.Time)
 	// runtimebroker.UpdateDefaultUpdated holds the default value on update for the updated field.
@@ -1768,12 +1793,16 @@ func init() {
 	useraccesstokenDescScopes := useraccesstokenFields[6].Descriptor()
 	// useraccesstoken.ScopesValidator is a validator for the "scopes" field. It is called by the builders before save.
 	useraccesstoken.ScopesValidator = useraccesstokenDescScopes.Validators[0].(func(string) error)
+	// useraccesstokenDescCeilingVersion is the schema descriptor for ceiling_version field.
+	useraccesstokenDescCeilingVersion := useraccesstokenFields[7].Descriptor()
+	// useraccesstoken.DefaultCeilingVersion holds the default value on creation for the ceiling_version field.
+	useraccesstoken.DefaultCeilingVersion = useraccesstokenDescCeilingVersion.Default.(int32)
 	// useraccesstokenDescRevoked is the schema descriptor for revoked field.
-	useraccesstokenDescRevoked := useraccesstokenFields[7].Descriptor()
+	useraccesstokenDescRevoked := useraccesstokenFields[9].Descriptor()
 	// useraccesstoken.DefaultRevoked holds the default value on creation for the revoked field.
 	useraccesstoken.DefaultRevoked = useraccesstokenDescRevoked.Default.(bool)
 	// useraccesstokenDescCreated is the schema descriptor for created field.
-	useraccesstokenDescCreated := useraccesstokenFields[10].Descriptor()
+	useraccesstokenDescCreated := useraccesstokenFields[12].Descriptor()
 	// useraccesstoken.DefaultCreated holds the default value on creation for the created field.
 	useraccesstoken.DefaultCreated = useraccesstokenDescCreated.Default.(func() time.Time)
 	// useraccesstokenDescID is the schema descriptor for id field.

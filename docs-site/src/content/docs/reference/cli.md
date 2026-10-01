@@ -284,6 +284,15 @@ Lists all agents and their status.
 - **Flags:**
     - `-a, --all`: Show all agents (including stopped ones).
     - `-r, --running`: Filter for active (running) agents.
+    - `--phase <phase>`, `--activity <activity>`, `--template <name>`, `--label <key=value>` (repeatable): Filter by attribute. Combine with each other using AND.
+    - `--owner <user>` (Hub mode only): Filter by owner — a user ID, name, email, or the reserved value `me` (a user whose display name is literally "me" cannot be matched by name; use their ID or email). Owner is the direct creator (`createdBy`), which for an agent-created agent is another **agent**, not the human at the root of the tree — `--owner alice` does not include agents created by alice's agents, and `--owner me` when authenticated with an agent token means "agents I directly created."
+    - `--broker <name|id>` (Hub mode only): Filter by runtime broker name or ID.
+    - `--harness <harness-config name>` (Hub mode only): Filter by harness-config name.
+    - `--descendants[=<agent>]` (Hub mode only): List every agent descended from the reference. With no value, the reference is the calling agent in agent mode, or the calling user otherwise (a user's ID is recorded as the creator in its directly-created agents' ancestry, so this still works).
+    - `--ancestors[=<agent>]` (Hub mode only): List the agents named in the reference's ancestry chain (entries that name a user rather than an agent are skipped). Same reference-resolution rule as `--descendants`. A user reference has no ancestry, so this returns an empty list when the reference defaults to the calling user.
+    - `--lineage[=<agent>]` (Hub mode only): List the reference's **creation-tree neighborhood** — the reference's direct parent agent, plus everything created (at any depth) from that parent — bounded to the reference's own project. The exact root rule: it roots at itself when it was created directly by a user, has no recorded parent at all, **or its only recorded parent is an agent you cannot list** (without `--all`, that includes a parent that is merely in a different project — the lookup for a length-one ancestry goes through the current project's endpoint, not the global one). For a deeper ancestry (two or more recorded ancestors), the direct parent is always used as the root even if you cannot see it yourself, so its other children (your siblings) that you *can* see are still listed — this is safe because the ancestry length alone already proves that entry is an agent, not a user. Same reference-resolution rule as `--descendants`. For a user reference (e.g. bare `--lineage` in human/assistant mode with no agent to infer), there is no project to bound to, so the result is identical to `--descendants` for that user: every agent they've created, at any depth, across whatever project scope is already in effect. **This is a creation-tree query, not a messaging-permission query** — it does not reflect who the reference agent is allowed to message under its message mode (`scion set-message-mode`), which can be a different and smaller set.
+    - `--descendants`, `--ancestors`, and `--lineage` are mutually exclusive with each other. All of the above combine with `--phase`/`--activity`/`--template`/`--label` using AND.
+    - Without `--all`, every Hub-mode filter above (including `--descendants`/`--ancestors`/`--lineage`) is scoped to the **current project** — a reference agent's ancestors/descendants/lineage in a different project will not appear. From a human or assistant shell, `--all` searches across every project you can see. **When authenticated with an agent token, `--all` cannot be combined with `--descendants`/`--ancestors`/`--lineage`**: an agent token can only list agents in its own project, so the command fails with a clear error instead of silently returning nothing. This is keyed on the credential actually in use, not on CLI mode — running inside an agent container while authenticated as a user (OAuth login, or dev auth against a localhost Hub) is not affected.
 
 ### `scion delete` (or `rm`)
 
@@ -324,6 +333,10 @@ is a Hub-built preamble plus the handoff you provide. Requires a Hub connection.
 
 The Hub accepts the request with `202 Accepted` and completes the migration in the background. If
 the new generation cannot be provisioned, the Hub restores the previous generation's configuration.
+
+While the migration is in progress, messages to the agent are saved to its history rather than
+delivered or dropped (the send returns `202` with status `deferred`); scheduled messages fail
+instead. The new generation's preamble tells it to catch up with `scion conversation catch-up`.
 
 Run it with no argument inside an agent container to migrate the agent itself (self-migration).
 Self-migration requires `--handoff-file`, because there is no one else to describe the work in
@@ -566,6 +579,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub link`: Link the current local project to the Hub.
 - `scion hub unlink`: Unlink the current project from the Hub locally.
 - `scion hub projects`: List all projects registered on the Hub.
+    - `info [project-name]`: Show details for a project, including its providers. Each provider shows its broker's capacity as `(agents: count/limit)`, or `(agents: count)` when the broker has no limit.
 - `scion hub brokers`: List all runtime brokers registered on the Hub.
 - `scion hub secret`: Manage write-only secrets on the Hub.
     - `set <key> <value>`: Set a secret (supports `--allow-progeny` for user-scoped secrets).
@@ -618,17 +632,20 @@ Manages notifications and notification subscriptions. Requires Hub mode.
 
 ## Infrastructure
 
-### `scion broker`
+### `scion runtime-broker`
 
-Manages the local host as a Runtime Broker.
+Manages the local host as a Runtime Broker. The old name `scion broker` still works as a deprecated alias.
 
-- `scion broker status`: Show status of the local broker server.
-- `scion broker start`: Start the broker server as a background daemon.
-- `scion broker stop`: Stop the broker daemon.
-- `scion broker register`: Register this host as a Runtime Broker with the Hub.
-- `scion broker deregister`: Remove this broker's registration from the Hub.
-- `scion broker provide`: Add this broker as a provider for a project.
-- `scion broker withdraw`: Remove this broker as a provider from a project.
+- `scion runtime-broker status`: Show status of the local broker server, including the projects it provides for. Providers added with `--auto-provide` are listed right away.
+- `scion runtime-broker start`: Start the broker server as a background daemon.
+    - `--foreground`: Run in the current process instead of daemonizing. Use this as the `ExecStart` of a systemd `Type=simple` unit.
+    - `--port <port>`: Listen on a custom port.
+    - `--auto-provide`: Automatically add this broker as a provider for new projects.
+- `scion runtime-broker stop`: Stop the broker daemon.
+- `scion runtime-broker register`: Register this host as a Runtime Broker with the Hub. Requires the `broker.create` permission (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)).
+- `scion runtime-broker deregister`: Remove this broker's registration from the Hub.
+- `scion runtime-broker provide`: Add this broker as a provider for a project.
+- `scion runtime-broker withdraw`: Remove this broker as a provider from a project.
 
 ### `scion server`
 
