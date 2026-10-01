@@ -1572,38 +1572,48 @@ func TestParity_D1_FilteredBindings(t *testing.T) {
 	})
 
 	t.Run("missing_role_definition", func(t *testing.T) {
-		_, s := authzTestSetup(t)
+		_, baseStore := authzTestSetup(t)
 		ctx := context.Background()
-		f := newProjectPrincipalFixture(t, s, "d1-norole", store.ProjectRoleMember)
-		bindings, err := s.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: "user", ID: f.userID}}, nil, nil)
+		f := newProjectPrincipalFixture(t, baseStore, "d1-norole", store.ProjectRoleMember)
+		bindings, err := baseStore.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: "user", ID: f.userID}}, nil, nil)
 		require.NoError(t, err)
 		require.NotEmpty(t, bindings)
-		for _, b := range bindings {
-			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
-		}
-		// CreateRoleBinding validates that RoleDefinitionID resolves at
-		// creation time (role_store.go's "binding guard"), so a bogus ID
-		// cannot be used directly. Instead: create a real, throwaway role
-		// definition, bind to it successfully, then delete the role
-		// definition out from under the binding — loadRoleDefinitions then
-		// silently omits the now-unresolvable ID (authz_list.go), so the
-		// binding contributes no permissions.
-		rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-			Name: "d1-throwaway-role-" + f.userID, ScopeType: store.RoleScopeProject, Permissions: []string{"agent.read"},
-		})
-		require.NoError(t, err)
-		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-			RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userID,
-			ScopeType: store.RoleScopeProject, ScopeID: f.projectID, CreatedBy: "test",
-		})
-		require.NoError(t, err)
-		require.NoError(t, s.DeleteRoleDefinition(ctx, rd.ID))
+		roleDefID := bindings[0].RoleDefinitionID
+
+		// Both CreateRoleBinding (creation-time "binding guard") and
+		// DeleteRoleDefinition (refuses deletion while bindings reference
+		// it, "role has N active binding(s)") prevent orphaning a binding
+		// through the store API. Simulate "missing" the way
+		// loadRoleDefinitions actually observes it instead: a store wrapper
+		// that filters the real role definition out of
+		// GetRoleDefinitionsByIDs' result, so the binding resolves and is
+		// active, but contributes no permissions — exactly D1's scenario.
+		s := &missingRoleDefStore{Store: baseStore, missingID: roleDefID}
 
 		refDecisions, _, _, _ := runParity(t, s, f.user, agentResourceTuples(f.agentRes))
 		for i, d := range refDecisions {
 			assert.False(t, d.Allowed, "H2: a binding with a missing role definition must grant nothing: tuple %d", i)
 		}
 	})
+}
+
+// missingRoleDefStore wraps a store.Store and removes missingID from every
+// GetRoleDefinitionsByIDs result, simulating a role definition that no
+// longer resolves even though a binding still references it — a state the
+// store API itself refuses to create (DeleteRoleDefinition rejects deletion
+// while any binding references the role).
+type missingRoleDefStore struct {
+	store.Store
+	missingID string
+}
+
+func (m *missingRoleDefStore) GetRoleDefinitionsByIDs(ctx context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
+	defs, err := m.Store.GetRoleDefinitionsByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	delete(defs, m.missingID)
+	return defs, nil
 }
 
 // TestParity_A6_DelegatorRoleDefinitionFails is design row A6: the
@@ -2578,16 +2588,45 @@ func TestParity_X3_Immutability(t *testing.T) {
 	// different synthetic-role path), then reconfirm every snapshot is
 	// still deep-equal — nothing downstream (kernel evaluation, hub-wide
 	// filters, the ceiling) mutates a memoized input in place.
-	refsSnapshot := append([]store.PrincipalRef(nil), entry.refs...)
-	bindingsSnapshot := append([]*store.RoleBinding(nil), entry.bindings...)
+	// append(nil, emptySlice...) collapses a non-nil-but-empty slice back to
+	// nil (nothing to append), which would make an "unchanged" comparison
+	// pass or fail on nilness alone rather than content — copy explicitly
+	// so nil-vs-non-nil-empty is preserved faithfully either way.
+	copyRefs := func(in []store.PrincipalRef) []store.PrincipalRef {
+		if in == nil {
+			return nil
+		}
+		out := make([]store.PrincipalRef, len(in))
+		copy(out, in)
+		return out
+	}
+	copyBindings := func(in []*store.RoleBinding) []*store.RoleBinding {
+		if in == nil {
+			return nil
+		}
+		out := make([]*store.RoleBinding, len(in))
+		copy(out, in)
+		return out
+	}
+	refsSnapshot := copyRefs(entry.refs)
+	bindingsSnapshot := copyBindings(entry.bindings)
 	memo.mu.Lock()
 	edgesSnapshot := make(map[string][]*store.DelegationEdge, len(memo.edges))
 	for k, v := range memo.edges {
-		edgesSnapshot[k] = append([]*store.DelegationEdge(nil), v...)
+		if v == nil {
+			edgesSnapshot[k] = nil
+		} else {
+			cp := make([]*store.DelegationEdge, len(v))
+			copy(cp, v)
+			edgesSnapshot[k] = cp
+		}
 	}
 	var constraintsSnapshot []*store.AccessConstraint
-	if memo.constraints != nil {
-		constraintsSnapshot = append([]*store.AccessConstraint(nil), (*memo.constraints)...)
+	constraintsWereLoaded := memo.constraints != nil
+	if constraintsWereLoaded {
+		rows := *memo.constraints
+		constraintsSnapshot = make([]*store.AccessConstraint, len(rows))
+		copy(constraintsSnapshot, rows)
 	}
 	memo.mu.Unlock()
 
@@ -2601,7 +2640,7 @@ func TestParity_X3_Immutability(t *testing.T) {
 	for k, v := range edgesSnapshot {
 		assert.Equal(t, v, memo.edges[k], "R6: stored edges for %q must be unchanged after further decisions", k)
 	}
-	if constraintsSnapshot != nil {
+	if constraintsWereLoaded {
 		require.NotNil(t, memo.constraints)
 		assert.Equal(t, constraintsSnapshot, *memo.constraints, "R6: stored constraint rows must be unchanged after further decisions")
 	}
