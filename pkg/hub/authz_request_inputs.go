@@ -17,7 +17,7 @@ package hub
 // Request-local authorization input reuse (ptone/scion#2376/#2377).
 //
 // This file implements the design at
-// gs://scion-xproject-exchange/slow-list/design/authz-reuse.md (v3.2). It
+// gs://scion-xproject-exchange/slow-list/design/authz-reuse.md (v3.5, final). It
 // memoizes principal-bound authorization INPUTS — never decisions — for one
 // bounded, read-only evaluation phase of one request, so that
 // ComputeCapabilitiesBatch and the list handlers do not reload the same
@@ -164,7 +164,9 @@ func delegationEdgesMemoFromContext(ctx context.Context) *authzInputMemo {
 // maskAuthzInputs hides the principal/constraint memo (inputsKey) from
 // everything reached from the returned ctx, without touching the edges key.
 // decide calls this exactly once, wrapping the ctx passed into
-// checkDelegationCeiling (authz.go:693), so the whole delegation-ceiling
+// checkDelegationCeiling (authz.go:797 at the current base; the call site
+// moves as unrelated code lands above it in decide, so match by name, not
+// line number), so the whole delegation-ceiling
 // subtree — including both getEffectivePermissions calls and their
 // constraint loads, IsSystemAdmin, GetUser and handleOrphanedDelegation —
 // sees no input memo. Only delegation edges remain shared for that subtree.
@@ -174,7 +176,7 @@ func maskAuthzInputs(ctx context.Context) context.Context {
 
 // maskAllAuthzMemo hides both the principal/constraint memo and the edges
 // memo. CanMintSelector calls this at entry, defensively: it has no
-// production caller at 73ebd02, only tests, but never installing
+// production caller today, only tests, but never installing
 // authzInputMemo inside CanMintSelector or its callees is an invariant, and
 // this makes it true even if a caller is added later or an outer memo is
 // already present in the ctx. The mask is sticky (withAuthzInputMemo is a
@@ -214,7 +216,7 @@ type principalInputs struct {
 	ctx      context.Context
 	identity Identity
 	a        *AuthzService
-	memo     *authzInputMemo // nil: no memo in ctx, or ctx already done at construction time is NOT checked here — checked per call.
+	memo     *authzInputMemo // nil when no memo is in ctx. ctx doneness is checked per call, not at construction.
 	key      principalKey
 
 	principalsLoaded bool
@@ -261,7 +263,7 @@ func (h *principalInputs) Principals() ([]store.PrincipalRef, error) {
 	}
 	h.principalsLoaded = true
 
-	// Done-ctx bypass (rule 2, v3.2): on a cancelled/expired ctx, the memo is
+	// Done-ctx bypass (design 4.1 rule 2): on a cancelled/expired ctx, the memo is
 	// bypassed entirely. Today's store call is made with today's ctx and its
 	// result is returned verbatim; nothing is stored. This is what makes
 	// post-cancellation behaviour identical to today's by construction,

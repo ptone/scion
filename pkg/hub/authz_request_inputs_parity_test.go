@@ -18,7 +18,7 @@ package hub
 
 // Parity test matrix for the request-local authorization input memo
 // (ptone/scion#2376/#2377), per
-// gs://scion-xproject-exchange/slow-list/design/authz-reuse.md (v3.4),
+// gs://scion-xproject-exchange/slow-list/design/authz-reuse.md (v3.5, final),
 // section 8. Row IDs in test/comment names (P1, A7, X7, ...) match the
 // design's table exactly.
 //
@@ -41,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"reflect"
 	"sync"
 	"testing"
@@ -145,6 +146,19 @@ func (m *memoTestStore) countOf(method string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.counts[method]
+}
+
+// snapshotCounts returns a point-in-time copy of every method's call count,
+// for callers that need to diff counts across two points in a test (e.g.
+// E6's post-cancellation per-method call-count comparison).
+func (m *memoTestStore) snapshotCounts() map[string]int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]int, len(m.counts))
+	for k, v := range m.counts {
+		out[k] = v
+	}
+	return out
 }
 
 func (m *memoTestStore) recordedCalls() []storeCallRecord {
@@ -482,21 +496,180 @@ func agentResourceTuples(res Resource) []rawTuple {
 	return out
 }
 
-// runParity runs tuples through the reference path (CheckAccess, plain ctx,
-// fresh service) and the candidate path (CheckAccess raw loop under one
-// withAuthzInputMemo ctx, fresh service — H3), and asserts deep-equal
-// Decisions and audit sequences (N3) for every tuple. Both stores are
-// returned for row-specific extra assertions (call counts, fault
-// non-vacuity, etc). Rows that need fault injection build refStore/candStore
-// themselves (via memoTestStore.fault) and call runParityWithStores instead.
+// runParity is the full parity harness for fault-free rows (design section
+// 8's "Paths" paragraph): it runs the reference once (CheckAccess, plain
+// ctx, fresh service), then the candidate THREE times on three fresh
+// memo ctxs/services — forward, reverse, and shuffled-with-a-logged-seed
+// order (R2) — comparing every run against the reference keyed by tuple
+// identity (not position), since the reference is itself order-independent
+// (it never memoizes). It also runs a ComputeCapabilitiesBatch leg (R2)
+// whenever the tuples form one or more complete "one resource x all
+// ResourceActions[type]" blocks (agentResourceTuples' shape), and asserts
+// gate 6 (exactly one audit record per Decide call) on every leg.
+//
+// The returned candDecisions/candStore are the FORWARD run's, for
+// callers that need a representative candidate store for count assertions
+// (e.g. "groups loaded once") — those counts are identical across all three
+// orderings by construction, since the memo does not care about call order,
+// only about which input is requested first.
+//
+// Rows that need fault injection build refStore/candStore themselves (via
+// memoTestStore.fault, which is inherently order-sensitive — see H1) and
+// call runParityWithStores instead, which runs forward order only.
 func runParity(t *testing.T, s store.Store, identity Identity, tuples []rawTuple) (refDecisions, candDecisions []Decision, refStore, candStore *memoTestStore) {
 	t.Helper()
-	return runParityWithStores(t, newMemoTestStore(s), newMemoTestStore(s), identity, tuples)
+	ctx := context.Background()
+
+	refStore = newMemoTestStore(s)
+	refAuthz, refEmit := newRecordingAuthz(refStore)
+	refDecisions = make([]Decision, len(tuples))
+	for i, tp := range tuples {
+		refDecisions[i] = refAuthz.CheckAccess(ctx, identity, tp.resource, tp.action)
+	}
+	require.Len(t, refEmit.snapshot(), len(tuples), "gate 6: exactly one audit record per decision (reference)")
+
+	n := len(tuples)
+	forwardOrder := make([]int, n)
+	reverseOrder := make([]int, n)
+	for i := 0; i < n; i++ {
+		forwardOrder[i] = i
+		reverseOrder[i] = n - 1 - i
+	}
+	seed := time.Now().UnixNano()
+	shuffledOrder := append([]int(nil), forwardOrder...)
+	rng := rand.New(rand.NewSource(seed))
+	rng.Shuffle(n, func(i, j int) { shuffledOrder[i], shuffledOrder[j] = shuffledOrder[j], shuffledOrder[i] })
+	t.Logf("runParity: shuffle seed %d, order %v", seed, shuffledOrder)
+
+	for _, run := range []struct {
+		name  string
+		order []int
+	}{
+		{"forward", forwardOrder},
+		{"reverse", reverseOrder},
+		{"shuffled", shuffledOrder},
+	} {
+		cStore := newMemoTestStore(s)
+		cAuthz, cEmit := newRecordingAuthz(cStore)
+		mctx := withAuthzInputMemo(context.Background())
+		got := make([]Decision, n)
+		for _, idx := range run.order {
+			got[idx] = cAuthz.CheckAccess(mctx, identity, tuples[idx].resource, tuples[idx].action)
+		}
+		require.Len(t, cEmit.snapshot(), n, "gate 6: exactly one audit record per decision (candidate, %s order)", run.name)
+		for i := range refDecisions {
+			assertDecisionsEqual(t, refDecisions[i], got[i], "%s order, tuple %d: %s %s", run.name, i, tuples[i].resource.Type, tuples[i].action)
+		}
+		if run.name == "forward" {
+			// The audit SEQUENCE (not just its per-record content) is only
+			// meaningful to compare when the candidate's evaluation order
+			// matches the reference's.
+			assertAuditSequenceEqual(t, refEmit.snapshot(), cEmit.snapshot())
+			candDecisions = got
+			candStore = cStore
+		}
+	}
+
+	runBatchLegIfApplicable(t, s, identity, tuples, refDecisions)
+
+	return refDecisions, candDecisions, refStore, candStore
 }
 
-// runParityWithStores is runParity, but the caller supplies (possibly
-// fault-injecting) stores, already wrapping the same underlying data. The
-// two AuthzServices built here are always fresh (H3).
+// runBatchLegIfApplicable is runParity's batch leg (R2, design section 8's
+// batch path): when tuples form one or more complete "one resource x all
+// ResourceActions[resource.Type]" blocks, it runs ComputeCapabilitiesBatch
+// over those resources on both a plain ctx (reference) and a memo ctx
+// (candidate), and asserts the candidate's capability list equals the
+// reference's, and that the reference batch result agrees with the raw-loop
+// reference decisions already proven above. It is a silent no-op for any
+// other tuple shape (scope-action tuples, mixed resource types, a single
+// explicit-permission tuple, etc.) — those rows are exercised by the raw
+// loop only, which design section 8 also allows ("Rows that need
+// per-decision attribution ... use the raw loop").
+func runBatchLegIfApplicable(t *testing.T, s store.Store, identity Identity, tuples []rawTuple, refDecisions []Decision) {
+	t.Helper()
+	if len(tuples) == 0 {
+		return
+	}
+	resourceType := tuples[0].resource.Type
+	actions, ok := ResourceActions[resourceType]
+	if !ok {
+		return
+	}
+	full := make(map[Action]bool, len(actions))
+	for _, a := range actions {
+		full[a] = true
+	}
+
+	type block struct {
+		resource Resource
+		allowed  map[Action]bool
+		seen     map[Action]bool
+	}
+	var order []string
+	blocks := map[string]*block{}
+	for i, tp := range tuples {
+		if tp.resource.Type != resourceType || !full[tp.action] {
+			return // not a uniform "resource x ResourceActions[type]" shape
+		}
+		key := tp.resource.Type + ":" + tp.resource.ID + ":" + tp.resource.ParentID + ":" + tp.resource.OwnerID
+		b, ok := blocks[key]
+		if !ok {
+			b = &block{resource: tp.resource, allowed: map[Action]bool{}, seen: map[Action]bool{}}
+			blocks[key] = b
+			order = append(order, key)
+		}
+		if b.seen[tp.action] {
+			return // a repeated (resource, action) pair: not this shape
+		}
+		b.seen[tp.action] = true
+		b.allowed[tp.action] = refDecisions[i].Allowed
+	}
+	for _, key := range order {
+		if len(blocks[key].seen) != len(actions) {
+			return // an incomplete block: not this shape
+		}
+	}
+
+	resources := make([]Resource, len(order))
+	for i, key := range order {
+		resources[i] = blocks[key].resource
+	}
+
+	ctx := context.Background()
+	refStore := newMemoTestStore(s)
+	refAuthz, _ := newRecordingAuthz(refStore)
+	refCaps := refAuthz.ComputeCapabilitiesBatch(ctx, identity, resources, resourceType)
+
+	candStore := newMemoTestStore(s)
+	candAuthz, _ := newRecordingAuthz(candStore)
+	mctx := withAuthzInputMemo(ctx)
+	candCaps := candAuthz.ComputeCapabilitiesBatch(mctx, identity, resources, resourceType)
+
+	require.Len(t, refCaps, len(resources), "batch leg: ComputeCapabilitiesBatch result length")
+	require.Len(t, candCaps, len(resources), "batch leg: ComputeCapabilitiesBatch result length")
+	for i, key := range order {
+		b := blocks[key]
+		var want []string
+		for _, a := range actions {
+			if b.allowed[a] {
+				want = append(want, string(a))
+			}
+		}
+		assert.ElementsMatch(t, want, refCaps[i].Actions, "batch leg: reference ComputeCapabilitiesBatch must agree with the raw-loop reference for resource %s", b.resource.ID)
+		assert.Equal(t, refCaps[i].Actions, candCaps[i].Actions, "batch leg: candidate ComputeCapabilitiesBatch for resource %s", b.resource.ID)
+	}
+}
+
+// runParityWithStores is runParity's single-order primitive: the caller
+// supplies (possibly fault-injecting) stores, already wrapping the same
+// underlying data, and both runs evaluate tuples forward only, since a
+// call-count-based fault (H1) is inherently order-sensitive — reordering
+// tuples would change which decision's load lands on the faulted call
+// number, corrupting the row's intended semantics. Fault-free callers
+// should use runParity instead, which also runs reverse and shuffled
+// orders and a batch leg. The two AuthzServices built here are always
+// fresh (H3).
 func runParityWithStores(t *testing.T, refStore, candStore *memoTestStore, identity Identity, tuples []rawTuple) (refDecisions, candDecisions []Decision, retRefStore, retCandStore *memoTestStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -505,12 +678,14 @@ func runParityWithStores(t *testing.T, refStore, candStore *memoTestStore, ident
 	for _, tp := range tuples {
 		refDecisions = append(refDecisions, refAuthz.CheckAccess(ctx, identity, tp.resource, tp.action))
 	}
+	require.Len(t, refEmit.snapshot(), len(tuples), "gate 6: exactly one audit record per decision (reference)")
 
 	candAuthz, candEmit := newRecordingAuthz(candStore)
 	mctx := withAuthzInputMemo(ctx)
 	for _, tp := range tuples {
 		candDecisions = append(candDecisions, candAuthz.CheckAccess(mctx, identity, tp.resource, tp.action))
 	}
+	require.Len(t, candEmit.snapshot(), len(tuples), "gate 6: exactly one audit record per decision (candidate)")
 
 	require.Equal(t, len(refDecisions), len(candDecisions))
 	for i := range refDecisions {
@@ -518,6 +693,65 @@ func runParityWithStores(t *testing.T, refStore, candStore *memoTestStore, ident
 	}
 	assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot())
 	return refDecisions, candDecisions, refStore, candStore
+}
+
+// TestParity_Gate6_ExactlyOneAuditRecordPerDecision is design section 14's
+// gate 6 pinned directly (R9): N decisions on ONE memo ctx produce exactly N
+// audit records, in the same order as the decisions, each naming the
+// (ResourceID, Permission) pair it was for — proving the memo does not
+// collapse, skip, or duplicate any audit emission even when every memoized
+// slot is served from a shared entry across many decisions.
+func TestParity_Gate6_ExactlyOneAuditRecordPerDecision(t *testing.T) {
+	t.Run("user_principal", func(t *testing.T) {
+		// P1 exercises closure, bindings, role defs and constraints (the
+		// group binding resolves to a real role definition).
+		_, s := authzTestSetup(t)
+		f := newP1Fixture(t, s, "gate6-user")
+		tuples := agentResourceTuples(f.agentRes)
+
+		mstore := newMemoTestStore(s)
+		authz, emit := newRecordingAuthz(mstore)
+		mctx := withAuthzInputMemo(context.Background())
+		for _, tp := range tuples {
+			authz.CheckAccess(mctx, f.user, tp.resource, tp.action)
+		}
+
+		records := emit.snapshot()
+		require.Len(t, records, len(tuples), "gate 6: exactly one audit record per decision")
+		for i, tp := range tuples {
+			assert.Equal(t, tp.resource.ID, records[i].ResourceID, "record %d resource ID (in-order)", i)
+			assert.Equal(t, string(tp.action), records[i].Permission, "record %d action (in-order)", i)
+		}
+		assert.GreaterOrEqual(t, mstore.countOf("GetEffectiveGroups"), 1, "H2: closure slot exercised")
+		assert.GreaterOrEqual(t, mstore.countOf("ListRoleBindingsForPrincipals"), 1, "H2: bindings slot exercised")
+		assert.GreaterOrEqual(t, mstore.countOf("GetRoleDefinitionsByIDs"), 1, "H2: role-defs slot exercised")
+		assert.GreaterOrEqual(t, mstore.countOf("ListAccessConstraints"), 1, "H2: constraints slot exercised")
+	})
+
+	t.Run("agent_principal_with_edge", func(t *testing.T) {
+		// A1 additionally exercises the edges slot (the fifth memoized
+		// input), which no user-principal fixture ever reaches.
+		_, s := authzTestSetup(t)
+		f := newA1Fixture(t, s, "gate6-agent")
+		tuples := agentGrantableTuples(f)
+
+		mstore := newMemoTestStore(s)
+		authz, emit := newRecordingAuthz(mstore)
+		mctx := withAuthzInputMemo(context.Background())
+		for _, tp := range tuples {
+			authz.CheckAccess(mctx, f.agent, tp.resource, tp.action)
+		}
+
+		records := emit.snapshot()
+		require.Len(t, records, len(tuples), "gate 6: exactly one audit record per decision")
+		for i, tp := range tuples {
+			assert.Equal(t, tp.resource.ID, records[i].ResourceID, "record %d resource ID (in-order)", i)
+			assert.Equal(t, string(tp.action), records[i].Permission, "record %d action (in-order)", i)
+		}
+		assert.GreaterOrEqual(t, mstore.countOf("GetEffectiveGroupsForAgent"), 1, "H2: closure slot exercised")
+		assert.GreaterOrEqual(t, mstore.countOf("ListAccessConstraints"), 1, "H2: constraints slot exercised")
+		assert.GreaterOrEqual(t, mstore.countOf("GetDelegationEdgesForDelegate"), 1, "H2: edges slot exercised")
+	})
 }
 
 // =============================================================================
@@ -553,7 +787,7 @@ func TestParity_StoreCallCounts_ComputeCapabilitiesBatch(t *testing.T) {
 			memoAuthz.ComputeCapabilitiesBatch(withAuthzInputMemo(ctx), f.user, resources, "agent")
 			assert.Equal(t, 1, memoStore.countOf("GetEffectiveGroups"), "GetEffectiveGroups under the memo")
 			assert.Equal(t, 1, memoStore.countOf("ListRoleBindingsForPrincipals"), "ListRoleBindingsForPrincipals under the memo")
-			assert.LessOrEqual(t, memoStore.countOf("GetRoleDefinitionsByIDs"), 1, "GetRoleDefinitionsByIDs under the memo")
+			assert.Equal(t, 1, memoStore.countOf("GetRoleDefinitionsByIDs"), "GetRoleDefinitionsByIDs under the memo: the fixture has bindings, so this must be loaded exactly once, not skipped (N1)")
 			pages := memoStore.countOf("ListAccessConstraints")
 			assert.GreaterOrEqual(t, pages, 1, "at least one constraint page")
 
@@ -876,6 +1110,19 @@ func TestParity_E5_EachLoaderFailsOnFirstCallOnly(t *testing.T) {
 			assert.False(t, refDecisions[0].Allowed, "decision 1 must deny in both runs")
 			assert.GreaterOrEqual(t, refS.countOf(method), 1, "H2: the fault must fire in the reference")
 			assert.GreaterOrEqual(t, candS.countOf(method), 1, "H2: the fault must fire in the candidate too (it's decision 1, nothing is memoized yet)")
+
+			// O2: pin the exact "fails on first call only, not memoized"
+			// shape: call #1 fails, call #2 (decision 2's retry) succeeds
+			// and is memoized, so the method is never called again for
+			// decisions 3-8 — exactly 2 calls total in the candidate.
+			assert.Equal(t, 2, candS.countOf(method), "O2: the candidate must call %s exactly twice: the failed call #1 and the successful, memoized call #2", method)
+			if reason, ok := map[string]string{
+				"GetEffectiveGroups":            "principal resolution error (fail-closed)",
+				"ListRoleBindingsForPrincipals": "binding resolution error (fail-closed)",
+				"GetRoleDefinitionsByIDs":       "role resolution error (fail-closed)",
+			}[method]; ok {
+				assert.Equal(t, reason, refDecisions[0].Reason, "O2: decision 1's exact deny reason")
+			}
 		})
 	}
 }
@@ -990,9 +1237,11 @@ func TestParity_E6_CancellationBothVariants(t *testing.T) {
 					refCtx, refCancel := context.WithCancel(context.Background())
 					defer refCancel()
 					var refDecisions []Decision
+					var refCountsAtCancel map[string]int
 					for i, tp := range ident.tuples {
 						if i == jj {
 							refCancel()
+							refCountsAtCancel = refSt.snapshotCounts()
 						}
 						refDecisions = append(refDecisions, refAuthz.CheckAccess(refCtx, ident.identity, tp.resource, tp.action))
 					}
@@ -1002,9 +1251,11 @@ func TestParity_E6_CancellationBothVariants(t *testing.T) {
 					candCtx, candCancel := context.WithCancel(withAuthzInputMemo(context.Background()))
 					defer candCancel()
 					var candDecisions []Decision
+					var candCountsAtCancel map[string]int
 					for i, tp := range ident.tuples {
 						if i == jj {
 							candCancel()
+							candCountsAtCancel = candSt.snapshotCounts()
 						}
 						candDecisions = append(candDecisions, candAuthz.CheckAccess(candCtx, ident.identity, tp.resource, tp.action))
 					}
@@ -1013,8 +1264,40 @@ func TestParity_E6_CancellationBothVariants(t *testing.T) {
 						assertDecisionsEqual(t, refDecisions[i], candDecisions[i], "post-cancel tuple %d", i)
 					}
 
-					// AuthorizeReadBatch with an already-cancelled ctx
-					// returns ctx.Err() in both runs.
+					// R3: the decision-equality assertion above cannot by
+					// itself catch a memo that silently served post-cancel
+					// decisions from a stale cache instead of bypassing to
+					// the store (M3 in the review's mutation testing showed
+					// exactly this gap). Assert directly that the candidate
+					// issues the SAME per-method store calls after
+					// cancellation as the reference: a working done-ctx
+					// bypass makes every post-cancel decision reach the
+					// store exactly like the reference does, so the
+					// post-cancel call-count DELTA must be equal per method.
+					refCountsAfter := refSt.snapshotCounts()
+					candCountsAfter := candSt.snapshotCounts()
+					for _, method := range []string{"GetEffectiveGroups", "GetEffectiveGroupsForAgent", "ListRoleBindingsForPrincipals", "GetRoleDefinitionsByIDs", "ListAccessConstraints", "GetDelegationEdgesForDelegate"} {
+						refDelta := refCountsAfter[method] - refCountsAtCancel[method]
+						candDelta := candCountsAfter[method] - candCountsAtCancel[method]
+						assert.Equal(t, refDelta, candDelta, "R3: post-cancellation %s call count must match the reference (done-ctx bypass)", method)
+					}
+					// Non-vacuity: the fixture must actually have decisions
+					// left to run after cancellation, so the delta above is
+					// not trivially 0 == 0.
+					require.Greater(t, len(ident.tuples)-jj, 0, "H2: there must be post-cancel decisions")
+
+					// AuthorizeReadBatch with an ALREADY-cancelled ctx
+					// returns ctx.Err() at its own entry check
+					// (authz.go:741) before any decision or memo access is
+					// even attempted — by construction, this sub-assertion
+					// cannot discriminate a working done-ctx bypass from a
+					// memo that leaks post-cancel reads, because no store
+					// call happens in either run. It exists only to pin
+					// AuthorizeReadBatch's own early-return contract, not as
+					// evidence about the memo; the memo's done-ctx bypass is
+					// what the per-method count-delta assertion above
+					// tests, via the raw CheckAccess loop that cancels
+					// MID-sequence (R3).
 					doneCtx, doneCancel := context.WithCancel(context.Background())
 					doneCancel()
 					_, refErr := refAuthz.AuthorizeReadBatch(doneCtx, ident.identity, []Resource{ident.tuples[0].resource})
@@ -1130,12 +1413,28 @@ func TestParity_A3_AgentCrossProject(t *testing.T) {
 	// a cross-project denial (rather than short-circuiting earlier), i.e.
 	// some decision must actually deny for a reason distinct from 7b.
 	var sawNonScopeDeny bool
+	var crossProjectReason string
 	for _, d := range refDecisions {
 		if !d.Allowed && d.Reason != "" {
 			sawNonScopeDeny = true
+			crossProjectReason = d.Reason
 		}
 	}
 	assert.True(t, sawNonScopeDeny, "H2: cross-project fixture must reach a real denial")
+
+	// O3: pin that the cross-project denial is the SAME reason on every
+	// such tuple (the kernel's scope-mismatch deny, not some per-action
+	// text), as design 4.4's "scope switch" is a single mechanism, not
+	// action-dependent. A hardcoded literal is deliberately avoided here:
+	// the kernel's exact deny-reason string is an internal implementation
+	// detail (authz_kernel.go), not part of this design's contract, so this
+	// pins the property that matters (one consistent scope-mismatch reason)
+	// without coupling the test to kernel wording.
+	for i, d := range refDecisions {
+		if !d.Allowed && d.Reason != "" {
+			assert.Equal(t, crossProjectReason, d.Reason, "tuple %d: every cross-project denial must share the same reason", i)
+		}
+	}
 }
 
 // TestParity_A4_DelegatorLostPermission is design row A4: the delegator no
@@ -1169,6 +1468,123 @@ func TestParity_A4_DelegatorLostPermission(t *testing.T) {
 	assert.True(t, sawCeilingDeny, "H2: fixture must reach DenyCauseCeilingDelegatorLacksPermission")
 }
 
+// TestParity_A5_AgentInAncestryOfTarget is design row A5 (R1): an agent
+// principal appearing in the target's Ancestry chain, granted through the
+// ancestor relationship. None of the 8 ResourceActions["agent"] that the
+// ancestor relationship admits for an agent principal (agent.delete,
+// agent.attach, agent.lifecycle, agent.set_message_mode — see
+// relationshipCharacterizedAllowlist{"ancestor","agent","agent"}) is
+// exclusive to the relationship: AgentRoleFull's own JWT scope already
+// grants all four in the agent's own project, which would make the row
+// deep-equal without the ancestor grant ever mattering. To isolate the
+// relationship, the target is in a DIFFERENT project than the agent's own,
+// so the JWT-scope synthetic binding does not apply (a scope mismatch, the
+// same kernel-deny mechanism A3 exercises) and only the ancestor relationship
+// can grant it.
+func TestParity_A5_AgentInAncestryOfTarget(t *testing.T) {
+	_, s := authzTestSetup(t)
+	ctx := context.Background()
+	f := newA1Fixture(t, s, "a5")
+	otherTargetID := tid("a5-other-target")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: otherTargetID, Slug: "a5-other-target", Name: "a5-other-target",
+		ProjectID: f.otherProjID, Phase: "running", OwnerID: f.delegatorID,
+		Ancestry: []string{f.delegatorID, f.agentID},
+	}))
+	res := Resource{Type: "agent", ID: otherTargetID, ParentType: "project", ParentID: f.otherProjID, OwnerID: f.delegatorID, Ancestry: []string{f.delegatorID, f.agentID}}
+
+	refDecisions, _, _, _ := runParity(t, s, f.agent, []rawTuple{{res, ActionDelete}})
+	require.Len(t, refDecisions, 1)
+	assert.True(t, refDecisions[0].Allowed, "H2: the agent must be granted access through the ancestor relationship: reason=%q", refDecisions[0].Reason)
+	assert.Equal(t, "relationship grant: ancestor access", refDecisions[0].Reason)
+}
+
+// TestParity_D1_FilteredBindings is design row D1 ("expired binding,
+// NotBefore in the future, missing role def | deep-equal"), as three
+// sub-cases (R1): each binding is filtered out or degrades to no
+// permissions downstream of the memo, which stores bindings and roleDefs
+// unfiltered — expiry, NotBefore and missing-role-def handling run fresh on
+// every decision against KernelRequest.Now, exactly where a stale cached
+// filter result could diverge if the memo ever started caching post-filter
+// state instead of raw inputs.
+func TestParity_D1_FilteredBindings(t *testing.T) {
+	t.Run("expired_binding", func(t *testing.T) {
+		_, s := authzTestSetup(t)
+		ctx := context.Background()
+		f := newProjectPrincipalFixture(t, s, "d1-expired", store.ProjectRoleMember)
+		// Replace the fresh binding with an expired one for the same role.
+		bindings, err := s.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: "user", ID: f.userID}}, nil, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, bindings)
+		for _, b := range bindings {
+			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+		}
+		rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+		require.NoError(t, err)
+		expired := time.Now().Add(-time.Hour)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userID,
+			ScopeType: store.RoleScopeProject, ScopeID: f.projectID, ExpiresAt: &expired, CreatedBy: "test",
+		})
+		require.NoError(t, err)
+
+		refDecisions, _, _, _ := runParity(t, s, f.user, agentResourceTuples(f.agentRes))
+		for i, d := range refDecisions {
+			assert.False(t, d.Allowed, "H2: an expired binding must grant nothing: tuple %d", i)
+		}
+	})
+
+	t.Run("not_yet_active_binding", func(t *testing.T) {
+		_, s := authzTestSetup(t)
+		ctx := context.Background()
+		f := newProjectPrincipalFixture(t, s, "d1-notbefore", store.ProjectRoleMember)
+		bindings, err := s.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: "user", ID: f.userID}}, nil, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, bindings)
+		for _, b := range bindings {
+			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+		}
+		rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+		require.NoError(t, err)
+		future := time.Now().Add(time.Hour)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userID,
+			ScopeType: store.RoleScopeProject, ScopeID: f.projectID, NotBefore: &future, CreatedBy: "test",
+		})
+		require.NoError(t, err)
+
+		refDecisions, _, _, _ := runParity(t, s, f.user, agentResourceTuples(f.agentRes))
+		for i, d := range refDecisions {
+			assert.False(t, d.Allowed, "H2: a not-yet-active binding must grant nothing: tuple %d", i)
+		}
+	})
+
+	t.Run("missing_role_definition", func(t *testing.T) {
+		_, s := authzTestSetup(t)
+		ctx := context.Background()
+		f := newProjectPrincipalFixture(t, s, "d1-norole", store.ProjectRoleMember)
+		bindings, err := s.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: "user", ID: f.userID}}, nil, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, bindings)
+		for _, b := range bindings {
+			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+		}
+		// A binding whose RoleDefinitionID names no real row: loadRoleDefinitions
+		// silently omits unresolvable IDs (authz_list.go), so the binding
+		// contributes no permissions.
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: tid("d1-nonexistent-role"), PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userID,
+			ScopeType: store.RoleScopeProject, ScopeID: f.projectID, CreatedBy: "test",
+		})
+		require.NoError(t, err)
+
+		refDecisions, _, _, _ := runParity(t, s, f.user, agentResourceTuples(f.agentRes))
+		for i, d := range refDecisions {
+			assert.False(t, d.Allowed, "H2: a binding with a missing role definition must grant nothing: tuple %d", i)
+		}
+	})
+}
+
 // TestParity_A6_DelegatorRoleDefinitionFails is design row A6: the
 // delegator's GetRoleDefinition (not memo-served) fails (a) always, (b) on
 // call #1 only. Deep-equal for every decision in both variants; no
@@ -1185,7 +1601,12 @@ func TestParity_A6_DelegatorRoleDefinitionFails(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, s := authzTestSetup(t)
 			f := newA1Fixture(t, s, "a6-"+tc.name)
-			tuples := agentAllTuples(f.resource, f.projectID)
+			// R4(a): agentGrantableTuples, not agentAllTuples — a read
+			// action (project.read) must actually reach the ceiling so the
+			// read-only-skip interaction (:188-192/:314-318) is exercised,
+			// which agent.read/agent.list on an agent-typed resource never
+			// do (no AgentScopes entry at all — see agentGrantableTuples).
+			tuples := agentGrantableTuples(f)
 
 			var fault func(string, int, context.Context) error
 			if tc.n == 0 {
@@ -1200,6 +1621,12 @@ func TestParity_A6_DelegatorRoleDefinitionFails(t *testing.T) {
 
 			runParityWithStores(t, refStore, candStore, f.agent, tuples)
 			assert.GreaterOrEqual(t, refStore.countOf("GetRoleDefinition"), 1, "H2: the fault must actually be reachable in the reference")
+
+			// R4(a): confirm a read tuple (project.read, index 0 per
+			// agentGrantableTuples) is actually present, so "no read-only
+			// skip where the reference has none" is a claim about a tuple
+			// that really exists in this row, not a vacuous one.
+			require.True(t, isReadOnlyOperation(tuples[0].action), "H2: tuple 0 must be the read action")
 		})
 	}
 }
@@ -1214,7 +1641,7 @@ func TestParity_A6_DelegatorRoleDefinitionFails(t *testing.T) {
 func TestParity_A7_ExactParityDelegatorConstraintFailure(t *testing.T) {
 	_, s := authzTestSetup(t)
 	f := newA1Fixture(t, s, "a7")
-	tuples := agentAllTuples(f.resource, f.projectID)
+	tuples := agentGrantableTuples(f) // R4(a): a read tuple must also reach the ceiling
 
 	predicateFault := func(method string, _ int, ctx context.Context) error {
 		if method != "ListAccessConstraints" {
@@ -1227,22 +1654,47 @@ func TestParity_A7_ExactParityDelegatorConstraintFailure(t *testing.T) {
 	}
 	refStore := newMemoTestStore(s)
 	refStore.fault = predicateFault
+	refStore.recordCalls = true
 	candStore := newMemoTestStore(s)
 	candStore.fault = predicateFault
+	candStore.recordCalls = true
 
 	refDecisions, _, refStoreOut, candStoreOut := runParityWithStores(t, refStore, candStore, f.agent, tuples)
-	var sawAllowInReference bool
+	var sawCeilingDeny bool
 	for i, d := range refDecisions {
 		assert.False(t, d.Allowed, "tuple %d must deny (delegator constraint load fails, deny-all filters permissions to empty)", i)
 		if d.DenyCause == DenyCauseCeilingDelegatorLacksPermission {
-			sawAllowInReference = true
+			sawCeilingDeny = true
 		}
 	}
-	assert.True(t, sawAllowInReference, "H2: at least one tuple must reach DenyCauseCeilingDelegatorLacksPermission, proving the kernel/relationship stage allowed before the ceiling denied")
-	// decide's own 7c constraint calls (predicate false): 1 in the
-	// candidate (memoized) vs one per decision in the reference.
-	require.NotZero(t, refStoreOut.countOf("ListAccessConstraints"))
-	require.NotZero(t, candStoreOut.countOf("ListAccessConstraints"))
+	assert.True(t, sawCeilingDeny, "H2: at least one tuple must reach DenyCauseCeilingDelegatorLacksPermission, proving the kernel/relationship stage allowed before the ceiling denied")
+
+	// R4(b): the actual count clause, not just NotZero. decide's own
+	// (predicate-false) 7c calls: exactly one per decision in the
+	// reference (every decision reaches 7c unconditionally), versus
+	// exactly 1 in the candidate (memoized after the first). The
+	// delegator's (predicate-true) calls: equal between the two runs,
+	// since the delegator path is never memoized in either.
+	countPredicate := func(records []storeCallRecord, wantTrue bool) int {
+		n := 0
+		for _, r := range records {
+			if r.method == "ListAccessConstraints" && r.ceilingActive == wantTrue {
+				n++
+			}
+		}
+		return n
+	}
+	refRecords := refStoreOut.recordedCalls()
+	candRecords := candStoreOut.recordedCalls()
+	refPredicateFalse := countPredicate(refRecords, false)
+	candPredicateFalse := countPredicate(candRecords, false)
+	refPredicateTrue := countPredicate(refRecords, true)
+	candPredicateTrue := countPredicate(candRecords, true)
+
+	assert.Equal(t, len(tuples), refPredicateFalse, "R4(b): the reference's own decide-side constraint calls, one per decision")
+	assert.Equal(t, 1, candPredicateFalse, "R4(b): the candidate's decide-side constraint calls, memoized to exactly 1")
+	assert.Equal(t, refPredicateTrue, candPredicateTrue, "R4(b): the delegator's constraint calls must be equal between runs — a leak here is exactly what this row exists to catch")
+	assert.Greater(t, refPredicateTrue, 0, "H2: the delegator's predicate-true calls must actually occur")
 }
 
 // TestParity_A7Prime_FirstAttemptTransientPlusDeterministicDelegatorFault is
@@ -1301,6 +1753,12 @@ func TestParity_A7Prime_FirstAttemptTransientPlusDeterministicFault(t *testing.T
 
 	refDecisions, candDecisions, _, _ := runParityWithStores(t, refStore, candStore, f.agent, tuples)
 	assert.False(t, refDecisions[0].Allowed, "decision 1 must deny at 7c (deny-all)")
+	// O4: pin the exact 7c deny-all reason. The first tuple (project.read)
+	// is granted by the agent's JWT scope before restrictions, so the
+	// nil-Check access_constraint_error restriction removes a permission
+	// that WAS granted (authz_kernel.go's "restriction has no check
+	// function (fail closed)" detail), not "never granted".
+	assert.Equal(t, "restriction removed permission: access_constraint_error - restriction has no check function (fail closed)", refDecisions[0].Reason, "O4: decision 1's exact 7c deny-all reason")
 	assertDecisionsEqual(t, refDecisions[0], candDecisions[0], "decision 1")
 	for i := 1; i < len(refDecisions); i++ {
 		assert.False(t, refDecisions[i].Allowed, "decision %d must be a ceiling deny", i+1)
@@ -1352,80 +1810,191 @@ func TestParity_A8_DelegationEdgesFail(t *testing.T) {
 		assert.GreaterOrEqual(t, refStore.countOf("GetDelegationEdgesForDelegate"), 1)
 	})
 
-	t.Run("call2_divergence", func(t *testing.T) {
+	// call2Divergence runs tp0 (always allowed, primes the edges memo with a
+	// successful call #1) then tp1 (whose edge lookup is call #2, the one
+	// that fails in the reference), against a FRESH fixture each time, and
+	// asserts: (1) H2 non-vacuity — the fault actually fired on call #2 in
+	// both the reference and candidate runs' first attempt (the candidate's
+	// own would-be call #2 never happens, which IS the divergence); (2) the
+	// reference's decision 2 matches wantRefAllowed/wantRefDenyCause
+	// exactly, proving the denial (or skip-allow) is caused by the EDGE
+	// fault specifically, not a pre-existing delegator-lacks-permission
+	// deny (R5: the old version's write case picked agent.delete, which the
+	// project-admin delegator never held, so it denied regardless of any
+	// fault); (3) the candidate's decision 2 deep-equals a no-fault
+	// baseline's decision 2 (the documented 6.2 divergence).
+	// actionResource returns the correct resource for action under f: the
+	// shared project resource for ActionRead (project.read, since
+	// agent.read has no AgentScopes entry at all — see
+	// agentGrantableTuples), or f's agent resource for any other action.
+	actionResource := func(f *a1Fixture, action Action) Resource {
+		if action == ActionRead {
+			return Resource{Type: "project", ID: f.projectID, OwnerID: f.delegatorID}
+		}
+		return f.resource
+	}
+
+	call2Divergence := func(t *testing.T, name string, action0, action1 Action, wantRefAllowed bool, wantRefDenyCause DenyCause) {
+		t.Helper()
 		_, s := authzTestSetup(t)
-		f := newA1Fixture(t, s, "a8-call2")
-		tuples := agentGrantableTuples(f)
+		f := newA1Fixture(t, s, "a8-call2-"+name)
+		tuples := []rawTuple{
+			{actionResource(f, action0), action0},
+			{actionResource(f, action1), action1},
+		}
 		ctx := context.Background()
 
-		// No-fault baseline, on a PLAIN ctx (unmemoized, like the reference
-		// path), identifies which tuple indices actually reach step 10: the
-		// kernel grants delete/attach/lifecycle from the AGENT's own JWT
-		// scope regardless of what the delegator (a project-admin, which
-		// lacks delete/attach — seed.go's projectAdminPermissionIDs) holds,
-		// so step 10 (and its edge lookup) runs for every one of them; only
-		// the ceiling's FINAL verdict differs per delegator permission. So
-		// "reached step 10" must be measured by an actual increase in the
-		// edge-lookup call count, never inferred from final Allowed.
 		baselineStore := newMemoTestStore(s)
 		baselineAuthz, _ := newRecordingAuthz(baselineStore)
 		var baseline []Decision
-		var step10Indices []int
-		prevEdgeCount := 0
-		for i, tp := range tuples {
-			d := baselineAuthz.CheckAccess(ctx, f.agent, tp.resource, tp.action)
-			baseline = append(baseline, d)
-			if n := baselineStore.countOf("GetDelegationEdgesForDelegate"); n > prevEdgeCount {
-				step10Indices = append(step10Indices, i)
-				prevEdgeCount = n
-			}
+		for _, tp := range tuples {
+			baseline = append(baseline, baselineAuthz.CheckAccess(ctx, f.agent, tp.resource, tp.action))
 		}
-		require.GreaterOrEqual(t, len(step10Indices), 2, "fixture must reach step 10 on at least 2 decisions")
-		k := step10Indices[1] // the SECOND decision to reach step 10 (0-indexed)
+		require.Equal(t, 2, baselineStore.countOf("GetDelegationEdgesForDelegate"), "H2: both decisions must reach step 10 unmemoized (fixture sanity)")
 
-		refStore := newMemoTestStore(s)
-		reached := 0
-		refStore.fault = func(method string, _ int, _ context.Context) error {
-			if method != "GetDelegationEdgesForDelegate" {
+		edgeFaultOnCall2 := func(reached *int) func(string, int, context.Context) error {
+			return func(method string, _ int, _ context.Context) error {
+				if method != "GetDelegationEdgesForDelegate" {
+					return nil
+				}
+				*reached++
+				if *reached == 2 {
+					return fmt.Errorf("injected edge fault on call #2: %w", errInjected)
+				}
 				return nil
 			}
-			reached++
-			if reached == 2 {
-				return fmt.Errorf("injected edge fault on the 2nd step-10 decision: %w", errInjected)
-			}
-			return nil
 		}
+
+		refReached := 0
+		refStore := newMemoTestStore(s)
+		refStore.fault = edgeFaultOnCall2(&refReached)
 		refAuthz, _ := newRecordingAuthz(refStore)
 		var ref []Decision
 		for _, tp := range tuples {
 			ref = append(ref, refAuthz.CheckAccess(ctx, f.agent, tp.resource, tp.action))
 		}
-		assert.Equal(t, isReadOnlyOperation(tuples[k].action), ref[k].Allowed, "H2 sanity at index %d: read hits the skip (allow), write fails closed (deny)", k)
+		require.Equal(t, 2, refReached, "H2: the fault predicate must see exactly 2 edge calls in the reference")
+		assert.Equal(t, wantRefAllowed, ref[1].Allowed, "reference decision 2 (%s): the edge fault's own outcome", name)
+		assert.Equal(t, wantRefDenyCause, ref[1].DenyCause, "reference decision 2 (%s): DenyCause must show the edge-failure path, not a pre-existing delegator-lacks deny", name)
 
+		candReached := 0
 		candStore := newMemoTestStore(s)
-		reachedCand := 0
-		candStore.fault = func(method string, _ int, _ context.Context) error {
-			if method != "GetDelegationEdgesForDelegate" {
-				return nil
-			}
-			reachedCand++
-			if reachedCand == 2 {
-				return fmt.Errorf("injected edge fault on the 2nd step-10 decision: %w", errInjected)
-			}
-			return nil
-		}
+		candStore.fault = edgeFaultOnCall2(&candReached)
 		candAuthz, _ := newRecordingAuthz(candStore)
 		mctx := withAuthzInputMemo(ctx)
 		var cand []Decision
 		for _, tp := range tuples {
 			cand = append(cand, candAuthz.CheckAccess(mctx, f.agent, tp.resource, tp.action))
 		}
+		assert.Equal(t, 1, candReached, "H2: the candidate's edges call happens once; call #2 never occurs (memo hit)")
+		assert.Equal(t, 1, candStore.countOf("GetDelegationEdgesForDelegate"))
+		assertDecisionsEqual(t, baseline[1], cand[1], "candidate decision 2 (%s) vs no-fault baseline", name)
+	}
 
-		// The candidate never observes the fault: edges are memoized after
-		// the first step-10 decision, so its second step-10 decision is a
-		// memo hit, not a store call.
-		assert.Equal(t, 1, candStore.countOf("GetDelegationEdgesForDelegate"), "H2: candidate never reaches call #2 (memo hit)")
-		assertDecisionsEqual(t, baseline[k], cand[k], "candidate decision %d vs no-fault baseline", k)
+	t.Run("call2_divergence_read", func(t *testing.T) {
+		// project.read: the delegator (project-admin) holds project.read,
+		// so the reference's skip-allow and the kernel/JWT grant agree —
+		// Allowed stays true, no DenyCause. agent.lifecycle primes call #1
+		// (the delegator holds it too, so decision 1 is an ordinary allow).
+		call2Divergence(t, "read", ActionLifecycle, ActionRead, true, "")
+	})
+
+	t.Run("call2_divergence_write", func(t *testing.T) {
+		// agent.lifecycle: the delegator DOES hold it (unlike agent.delete
+		// in the old version), so with no fault the ceiling allows it
+		// normally. Under the reference's edge fault it fails closed
+		// (DenyCauseCeilingError); the candidate, serving the memoized
+		// edges from decision 1, evaluates the ceiling normally and
+		// allows — the real 6.2 divergence, write direction.
+		call2Divergence(t, "write", ActionRead, ActionLifecycle, false, DenyCauseCeilingError)
+	})
+
+	// R5: the design also lists a use-action (T8 fixture) variant for A8,
+	// since use is not read-only, so an edge error on it fails closed
+	// exactly like a write. secret.use has no CapabilityKind/AgentScopes
+	// entry, so it is reached only through the progeny relationship grant
+	// (not the JWT-scope kernel path), which requires a dedicated agent
+	// whose Ancestry includes the secret's owner. That agent also needs its
+	// OWN delegation edge (to the same admin delegator) for the ceiling to
+	// have anything to look up at all.
+	t.Run("call2_divergence_use", func(t *testing.T) {
+		_, s := authzTestSetup(t)
+		f := newA1Fixture(t, s, "a8-call2-use")
+		secretID := tid("a8-call2-use-secret")
+		require.NoError(t, s.CreateSecret(context.Background(), &store.Secret{
+			ID: secretID, Key: "a8-use-secret", Scope: "user", ScopeID: f.delegatorID, AllowProgeny: true, CreatedBy: f.delegatorID,
+		}))
+		secretRes := Resource{Type: "secret", ID: secretID}
+		usePerm := permissions.Permission{ID: "secret.use", Action: string(ActionUse)}
+
+		useAgentID := tid("a8-call2-use-agent")
+		createDCAgent(t, s, useAgentID, f.projectID, f.delegatorID, AgentRoleFull)
+		createDCEdge(t, s, store.DelegationPrincipalUser, f.delegatorID, store.DelegationPrincipalAgent, useAgentID, store.RoleScopeProject, f.projectID, string(AgentRoleFull))
+		useAgent := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: useAgentID},
+			ProjectID: f.projectID,
+			Ancestry:  []string{f.delegatorID},
+			Scopes:    allRegisteredAgentScopes(),
+		}}
+
+		ctx := context.Background()
+		decide := func(authz *AuthzService, c context.Context) Decision {
+			return authz.Decide(c, AuthzRequest{
+				Principal:  principalContextForIdentity(useAgent),
+				Credential: credentialContextForIdentity(useAgent),
+				Resource:   secretRes,
+				Action:     ActionUse,
+				Permission: usePerm.ID,
+			})
+		}
+		// agent.lifecycle on the agent's own resource primes edge call #1;
+		// secret.use is edge call #2.
+		priming := rawTuple{f.resource, ActionLifecycle}
+
+		baselineStore := newMemoTestStore(s)
+		baselineAuthz, _ := newRecordingAuthz(baselineStore)
+		baseline0 := baselineAuthz.CheckAccess(ctx, useAgent, priming.resource, priming.action)
+		baseline1 := decide(baselineAuthz, ctx)
+		require.True(t, baseline0.Allowed, "H2 sanity: priming decision must be allowed")
+		require.Equal(t, 2, baselineStore.countOf("GetDelegationEdgesForDelegate"))
+
+		refReached := 0
+		refStore := newMemoTestStore(s)
+		refStore.fault = func(method string, _ int, _ context.Context) error {
+			if method != "GetDelegationEdgesForDelegate" {
+				return nil
+			}
+			refReached++
+			if refReached == 2 {
+				return fmt.Errorf("injected edge fault on call #2: %w", errInjected)
+			}
+			return nil
+		}
+		refAuthz, _ := newRecordingAuthz(refStore)
+		refAuthz.CheckAccess(ctx, useAgent, priming.resource, priming.action)
+		refUse := decide(refAuthz, ctx)
+		require.Equal(t, 2, refReached, "H2: the fault predicate must see exactly 2 edge calls")
+		assert.False(t, refUse.Allowed, "reference secret.use must fail closed on the edge error (use is not read-only)")
+		assert.Equal(t, DenyCauseCeilingError, refUse.DenyCause)
+
+		candReached := 0
+		candStore := newMemoTestStore(s)
+		candStore.fault = func(method string, _ int, _ context.Context) error {
+			if method != "GetDelegationEdgesForDelegate" {
+				return nil
+			}
+			candReached++
+			if candReached == 2 {
+				return fmt.Errorf("injected edge fault on call #2: %w", errInjected)
+			}
+			return nil
+		}
+		candAuthz, _ := newRecordingAuthz(candStore)
+		mctx := withAuthzInputMemo(ctx)
+		candAuthz.CheckAccess(mctx, useAgent, priming.resource, priming.action)
+		candUse := decide(candAuthz, mctx)
+		assert.Equal(t, 1, candReached, "H2: the candidate's edges call happens once; call #2 never occurs (memo hit)")
+		assertDecisionsEqual(t, baseline1, candUse, "candidate secret.use decision vs no-fault baseline")
 	})
 }
 
@@ -1741,6 +2310,23 @@ func TestParity_X7_CeilingSeesNoMemoExceptEdges(t *testing.T) {
 	assert.True(t, sawGetUser, "H2: the direct user-delegator branch must be reached")
 	assert.True(t, sawGetAgent, "H2: the agent-to-agent chain branch must be reached")
 	assert.True(t, sawGetHubSetting, "H2: the no-edge/backfill branch must be reached")
+
+	// O1: also pin non-vacuity for the memo-SERVED loads themselves
+	// (GetEffectiveGroups[ForAgent], ListRoleBindingsForPrincipals,
+	// ListAccessConstraints) — count-equality between ref and cand for
+	// these is clause (a)'s whole point, and it is vacuous if the reference
+	// never issues them in the first place.
+	var sawPredicateTrueConstraints, sawClosureLoad bool
+	for _, c := range refCounts {
+		if c["ListAccessConstraints"] > 0 {
+			sawPredicateTrueConstraints = true
+		}
+		if c["GetEffectiveGroups"] > 0 || c["GetEffectiveGroupsForAgent"] > 0 {
+			sawClosureLoad = true
+		}
+	}
+	assert.True(t, sawPredicateTrueConstraints, "H2: clause (a)'s ListAccessConstraints comparison must not be vacuous")
+	assert.True(t, sawClosureLoad, "H2: clause (a)'s closure-load comparison must not be vacuous")
 }
 
 // =============================================================================
@@ -1873,38 +2459,58 @@ func TestParity_R1_OwnerOnlyNoBinding(t *testing.T) {
 	assert.True(t, sawOwnerGrant, "H2: at least one action must be granted through the owner relationship")
 }
 
-// TestParity_X3_Immutability is design row X3: pinned to the A1 agent
-// principal over its own agent resource (step 5b synthetic role) and a skill
-// resource (step 5b2 synthetic catalog role). The stored roleDefs must lack
-// synthetic roles, and the map handed back to decide is never the stored
-// map (checked on both a miss handle, decision 1, and a hit handle,
-// decision 2, per R4-N2/R5-N2).
+// TestParity_X3_Immutability is design row X3 (R6): pinned to the A1 agent
+// principal over its own agent resource (step 5b synthetic role) AND a
+// global skill resource (step 5b2 synthetic catalog role). The stored
+// roleDefs must lack synthetic roles; the map handed back to decide is
+// never the stored map, checked on BOTH a miss handle (decision 1) and a
+// hit handle (decision 2); the H2 precondition confirms a synthetic grant
+// specifically (not just a non-empty grant list); and the stored refs,
+// bindings, edges and constraint rows are snapshotted and reconfirmed
+// unchanged after running more decisions.
 func TestParity_X3_Immutability(t *testing.T) {
 	_, s := authzTestSetup(t)
 	f := newA1Fixture(t, s, "x3")
+	skillRes := Resource{Type: "skill", ID: tid("x3-skill"), ScopeKind: store.SkillScopeGlobal}
 	ctx := withAuthzInputMemo(context.Background())
 	authz, _ := newRecordingAuthz(newMemoTestStore(s))
 
-	// H2 precondition: the agent's own-project resource must show a
-	// synthetic-role grant (step 5b) with Explain on, before the immutability
-	// assertions below (which run without Explain, matching production).
-	explainDecision := authz.Decide(context.Background(), AuthzRequest{
-		Principal:  PrincipalContext{Identity: f.agent},
-		Credential: credentialContextForIdentity(f.agent),
-		Resource:   f.resource,
-		Action:     ActionRead,
-		Explain:    true,
-	})
-	require.NotNil(t, explainDecision.Provenance)
-	require.NotEmpty(t, explainDecision.Provenance.Grants, "H2: step 5b's synthetic role must appear as a grant in the reference provenance")
+	// H2 precondition: the agent's own-project resource must show the
+	// SPECIFIC step-5b synthetic-role grant (MatchedGrant ==
+	// "agent-jwt-scope", authz.go:1143-1168's RoleName), and the global
+	// skill resource must show the SPECIFIC step-5b2 synthetic catalog-role
+	// grant (MatchedGrant == "agent-skill-catalog",
+	// authz_skill_scope.go's agentSkillCatalogRoleName) — not merely a
+	// non-empty grant list, which could pass via an unrelated grant path.
+	explain := func(res Resource, action Action) Decision {
+		return authz.Decide(context.Background(), AuthzRequest{
+			Principal:  PrincipalContext{Identity: f.agent},
+			Credential: credentialContextForIdentity(f.agent),
+			Resource:   res,
+			Action:     action,
+			Explain:    true,
+		})
+	}
+	// agent.read has no AgentScopes entry at all (an agent can never pass
+	// the kernel for it via JWT scope — see agentGrantableTuples), so
+	// ActionDelete (AgentScopes: ["project:agent:lifecycle"], which
+	// AgentRoleFull holds) is used to actually exercise step 5b.
+	agentExplain := explain(f.resource, ActionDelete)
+	require.True(t, agentExplain.Allowed, "reason=%q", agentExplain.Reason)
+	assert.Equal(t, "agent-jwt-scope", agentExplain.MatchedGrant, "H2: step 5b's SPECIFIC synthetic role must be the matched grant")
 
-	// Decision 1: a miss handle stores roleDefs. Decision 2: a hit handle
-	// reads them. Both must clone rather than hand back the stored map.
-	authz.CheckAccess(ctx, f.agent, f.resource, ActionRead) // decision 1: miss
-	in := authz.inputsFor(ctx, f.agent)
-	_, _ = in.Principals()
-	_, _ = in.Bindings()
-	rd1, err := in.RoleDefs() // decision 2 (conceptually): hit
+	skillExplain := explain(skillRes, ActionRead)
+	require.True(t, skillExplain.Allowed, "H2: the global skill catalog read must be allowed: reason=%q", skillExplain.Reason)
+	assert.Equal(t, "agent-skill-catalog", skillExplain.MatchedGrant, "H2: step 5b2's SPECIFIC synthetic catalog role must be the matched grant")
+
+	// Decision 1 (agent resource): a miss handle. Capture ITS OWN RoleDefs()
+	// return value too (R6: the miss path was previously unchecked).
+	in0 := authz.inputsFor(ctx, f.agent)
+	_, err := in0.Principals()
+	require.NoError(t, err)
+	_, err = in0.Bindings()
+	require.NoError(t, err)
+	rd0, err := in0.RoleDefs() // MISS: this stores the entry's roleDefs
 	require.NoError(t, err)
 
 	memo := authzInputMemoFromContext(ctx)
@@ -1913,20 +2519,70 @@ func TestParity_X3_Immutability(t *testing.T) {
 	entry := memo.entryFor(key)
 	require.True(t, entry.roleDefsOK)
 
-	// The handle must never hand back the stored map itself: mutating the
-	// returned copy must not affect the stored entry.
-	before := len(entry.roleDefs)
+	before0 := len(entry.roleDefs)
+	for id := range rd0 {
+		delete(rd0, id)
+		break
+	}
+	assert.Equal(t, before0, len(entry.roleDefs), "R6: the MISS path's RoleDefs() must also return a clone; mutating it must not affect the stored map")
+
+	// Decision 2 (conceptually): a hit handle reads the same entry.
+	in1 := authz.inputsFor(ctx, f.agent)
+	_, err = in1.Principals()
+	require.NoError(t, err)
+	_, err = in1.Bindings()
+	require.NoError(t, err)
+	rd1, err := in1.RoleDefs() // HIT
+	require.NoError(t, err)
+
+	before1 := len(entry.roleDefs)
 	for id := range rd1 {
 		delete(rd1, id)
 		break
 	}
-	assert.Equal(t, before, len(entry.roleDefs), "RoleDefs() must return a clone; mutating it must not affect the stored map")
+	assert.Equal(t, before1, len(entry.roleDefs), "the HIT path's RoleDefs() must also return a clone; mutating it must not affect the stored map")
 
-	// The synthetic role (step 5b) must not have leaked into the stored map:
-	// decide only writes it into its own local clone.
+	// The synthetic roles (step 5b and 5b2) must not have leaked into the
+	// stored map: decide/the hub-wide skill path only ever writes them into
+	// their own local clone.
 	for id, rp := range entry.roleDefs {
 		assert.NotContains(t, id, "synthetic", "stored roleDefs must not contain a synthetic role id %q: %+v", id, rp)
 	}
+
+	// R6: snapshot the stored refs, bindings, edges and constraint rows
+	// right after they are first populated, run several MORE decisions on
+	// the same memo (including the skill resource, which exercises a
+	// different synthetic-role path), then reconfirm every snapshot is
+	// still deep-equal — nothing downstream (kernel evaluation, hub-wide
+	// filters, the ceiling) mutates a memoized input in place.
+	refsSnapshot := append([]store.PrincipalRef(nil), entry.refs...)
+	bindingsSnapshot := append([]*store.RoleBinding(nil), entry.bindings...)
+	memo.mu.Lock()
+	edgesSnapshot := make(map[string][]*store.DelegationEdge, len(memo.edges))
+	for k, v := range memo.edges {
+		edgesSnapshot[k] = append([]*store.DelegationEdge(nil), v...)
+	}
+	var constraintsSnapshot []*store.AccessConstraint
+	if memo.constraints != nil {
+		constraintsSnapshot = append([]*store.AccessConstraint(nil), (*memo.constraints)...)
+	}
+	memo.mu.Unlock()
+
+	authz.CheckAccess(ctx, f.agent, f.resource, ActionDelete)
+	authz.CheckAccess(ctx, f.agent, f.resource, ActionLifecycle)
+	authz.CheckAccess(ctx, f.agent, skillRes, ActionRead)
+
+	assert.Equal(t, refsSnapshot, entry.refs, "R6: stored refs must be unchanged after further decisions")
+	assert.Equal(t, bindingsSnapshot, entry.bindings, "R6: stored bindings must be unchanged after further decisions")
+	memo.mu.Lock()
+	for k, v := range edgesSnapshot {
+		assert.Equal(t, v, memo.edges[k], "R6: stored edges for %q must be unchanged after further decisions", k)
+	}
+	if constraintsSnapshot != nil {
+		require.NotNil(t, memo.constraints)
+		assert.Equal(t, constraintsSnapshot, *memo.constraints, "R6: stored constraint rows must be unchanged after further decisions")
+	}
+	memo.mu.Unlock()
 }
 
 // =============================================================================
@@ -2040,11 +2696,12 @@ func TestParity_T8_SecretUseRuntimeRow(t *testing.T) {
 
 	ctx := context.Background()
 	refStore := newMemoTestStore(s)
-	refAuthz, _ := newRecordingAuthz(refStore)
+	refAuthz, refEmit := newRecordingAuthz(refStore)
 	refDecision := decideExplicit(t, refAuthz, useAgent, secretRes, p)
+	require.Len(t, refEmit.snapshot(), 1, "gate 6: exactly one audit record per decision (reference)")
 
 	candStore := newMemoTestStore(s)
-	candAuthz, _ := newRecordingAuthz(candStore)
+	candAuthz, candEmit := newRecordingAuthz(candStore)
 	mctx := withAuthzInputMemo(ctx)
 	candDecision := candAuthz.Decide(mctx, AuthzRequest{
 		Principal:  principalContextForIdentity(useAgent),
@@ -2053,6 +2710,16 @@ func TestParity_T8_SecretUseRuntimeRow(t *testing.T) {
 		Action:     ActionUse,
 		Permission: p.ID,
 	})
+	require.Len(t, candEmit.snapshot(), 1, "gate 6: exactly one audit record per decision (candidate)")
+
+	// R8 H2: the progeny grant must actually be what allowed secret.use,
+	// not some other path (e.g. a vacuously-passing deny on both sides).
+	require.True(t, refDecision.Allowed, "reference secret.use must be allowed via the progeny grant: reason=%q", refDecision.Reason)
+	assert.Contains(t, refDecision.Reason, "progeny", "R8 H2: the reference Reason must show the progeny grant")
+	assert.Contains(t, refDecision.Reason, "relationship grant", "R8 H2: the reference Reason must show a relationship grant, not a role binding")
+
+	// R8: compare the audit sequence, not just the Decision.
+	assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot())
 
 	assertDecisionsEqual(t, refDecision, candDecision)
 }
@@ -2203,13 +2870,17 @@ func TestParity_X2c_DeterministicLostRace(t *testing.T) {
 				defer close(hBDone)
 				<-blocked // wait until hB's GetEffectiveGroups call has parked
 				// hA proceeds and stores closure A while hB is still blocked.
+				// N5: require.* calls FailNow, which is unsupported from a
+				// non-test goroutine (the testing package panics/corrupts
+				// state) — use assert.* here and let the main goroutine's
+				// own assertions below catch any resulting inconsistency.
 				_, err := hA.Principals()
-				require.NoError(t, err)
+				assert.NoError(t, err)
 				if order == "o2_attached_first" {
 					_, err = hA.Bindings()
-					require.NoError(t, err)
+					assert.NoError(t, err)
 					_, err = hA.RoleDefs()
-					require.NoError(t, err)
+					assert.NoError(t, err)
 				}
 				close(release) // release hB with closure B
 			}()
@@ -2642,19 +3313,22 @@ func TestParity_R3_RelationshipGrantRestrictedByUATScope(t *testing.T) {
 func runBatchParity(t *testing.T, s store.Store, identity Identity, resourceType string, res Resource) (refActions []string, refAllowed []bool) {
 	t.Helper()
 	ctx := context.Background()
+	wantDecisions := len(ResourceActions[resourceType]) + 1 // the batch, plus AuthorizeReadBatch's one read decision
 
 	refStore := newMemoTestStore(s)
-	refAuthz, _ := newRecordingAuthz(refStore)
+	refAuthz, refEmit := newRecordingAuthz(refStore)
 	refCaps := refAuthz.ComputeCapabilitiesBatch(ctx, identity, []Resource{res}, resourceType)
 	refAllowed, refErr := refAuthz.AuthorizeReadBatch(ctx, identity, []Resource{res})
 	require.NoError(t, refErr)
+	require.Len(t, refEmit.snapshot(), wantDecisions, "gate 6: exactly one audit record per decision (reference)")
 
 	candStore := newMemoTestStore(s)
-	candAuthz, _ := newRecordingAuthz(candStore)
+	candAuthz, candEmit := newRecordingAuthz(candStore)
 	mctx := withAuthzInputMemo(ctx)
 	candCaps := candAuthz.ComputeCapabilitiesBatch(mctx, identity, []Resource{res}, resourceType)
 	candAllowed, candErr := candAuthz.AuthorizeReadBatch(mctx, identity, []Resource{res})
 	require.NoError(t, candErr)
+	require.Len(t, candEmit.snapshot(), wantDecisions, "gate 6: exactly one audit record per decision (candidate)")
 
 	require.Len(t, refCaps, 1)
 	require.Len(t, candCaps, 1)
@@ -2676,10 +3350,12 @@ func TestParity_T2_TemplateGlobalAndProjectScoped(t *testing.T) {
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: projectTplID, Name: "t2p", Slug: "t2p", Harness: "claude", Image: "img", Scope: store.TemplateScopeProject, ScopeID: f.projectID}))
 
 	t.Run("global", func(t *testing.T) {
-		runBatchParity(t, s, f.user, "template", templateResource(&store.Template{ID: globalTplID, Scope: store.TemplateScopeGlobal}))
+		actions, _ := runBatchParity(t, s, f.user, "template", templateResource(&store.Template{ID: globalTplID, Scope: store.TemplateScopeGlobal}))
+		assert.Contains(t, actions, "read", "R7 H2: the hub-wide filter must actually grant read on the global template, not just produce an empty (vacuously passing) set")
 	})
 	t.Run("project", func(t *testing.T) {
-		runBatchParity(t, s, f.user, "template", templateResource(&store.Template{ID: projectTplID, Scope: store.TemplateScopeProject, ScopeID: f.projectID}))
+		actions, _ := runBatchParity(t, s, f.user, "template", templateResource(&store.Template{ID: projectTplID, Scope: store.TemplateScopeProject, ScopeID: f.projectID}))
+		assert.Contains(t, actions, "read", "R7 H2: the project-scoped template must actually grant read, not just produce an empty (vacuously passing) set")
 	})
 }
 
@@ -2696,10 +3372,12 @@ func TestParity_T3_HarnessConfigGlobalAndProjectScoped(t *testing.T) {
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: projectHCID, Name: "t3p", Slug: "t3p", Harness: "claude", Scope: store.HarnessConfigScopeProject, ScopeID: f.projectID}))
 
 	t.Run("global", func(t *testing.T) {
-		runBatchParity(t, s, f.user, "harness_config", harnessConfigResource(&store.HarnessConfig{ID: globalHCID, Scope: store.HarnessConfigScopeGlobal}))
+		actions, _ := runBatchParity(t, s, f.user, "harness_config", harnessConfigResource(&store.HarnessConfig{ID: globalHCID, Scope: store.HarnessConfigScopeGlobal}))
+		assert.Contains(t, actions, "read", "R7 H2: the hub-wide filter must actually grant read on the global harness config, not just produce an empty (vacuously passing) set")
 	})
 	t.Run("project", func(t *testing.T) {
-		runBatchParity(t, s, f.user, "harness_config", harnessConfigResource(&store.HarnessConfig{ID: projectHCID, Scope: store.HarnessConfigScopeProject, ScopeID: f.projectID}))
+		actions, _ := runBatchParity(t, s, f.user, "harness_config", harnessConfigResource(&store.HarnessConfig{ID: projectHCID, Scope: store.HarnessConfigScopeProject, ScopeID: f.projectID}))
+		assert.Contains(t, actions, "read", "R7 H2: the project-scoped harness config must actually grant read, not just produce an empty (vacuously passing) set")
 	})
 }
 

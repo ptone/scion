@@ -872,10 +872,11 @@ type mintEligibilityCache struct {
 
 // Invariant (shared with authzInputMemo, see authz_request_inputs.go): never
 // install authzInputMemo inside CanMintSelector or its callees. The two
-// caches interact only at loadAllAccessConstraints/getCachedDelegationEdges,
-// where the mint cache always wins when both are present; CanMintSelector
-// defensively masks any authzInputMemo at entry so that interaction is never
-// actually reached in production.
+// caches interact only at loadAllAccessConstraints, where the mint cache
+// always wins when both are present; getCachedDelegationEdges never
+// consults the mint cache at all. CanMintSelector defensively masks any
+// authzInputMemo at entry so that the loadAllAccessConstraints interaction
+// is never actually reached in production.
 func withMintEligibilityCache(ctx context.Context, c *mintEligibilityCache) context.Context {
 	return context.WithValue(ctx, mintEligibilityCacheKey{}, c)
 }
