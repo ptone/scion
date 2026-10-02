@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -174,7 +175,7 @@ func (s *Server) projectReadDecision(ctx context.Context, ident AgentIdentity, f
 		if s.authzService == nil {
 			cache.err = errors.New("authz service unavailable")
 			cache.computed = true
-			return Decision{}, cache.err
+			return Decision{AuditReason: auditevent.ReasonCheckUnavailable}, cache.err
 		}
 		cache.decision = s.authzService.Decide(ctx, AuthzRequest{
 			Principal:  principalContextForIdentity(ident),

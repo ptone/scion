@@ -40,6 +40,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -153,6 +154,7 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 			decision: Decision{
 				Allowed:      true,
 				Reason:       "relationship grant: ancestor access",
+				AuditReason:  auditevent.ReasonInherited,
 				Scope:        ScopeTypeRelationship,
 				MatchedGrant: "ancestor",
 			},
@@ -168,6 +170,7 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 			decision: Decision{
 				Allowed:      true,
 				Reason:       "relationship grant: resource owner",
+				AuditReason:  auditevent.ReasonInherited,
 				Scope:        ScopeTypeRelationship,
 				MatchedGrant: "owner",
 			},
@@ -189,6 +192,7 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 			decision: Decision{
 				Allowed:      true,
 				Reason:       "relationship grant: hub member hub-scoped assign",
+				AuditReason:  auditevent.ReasonInherited,
 				Scope:        "hub",
 				MatchedGrant: "hub-member-assign",
 			},
@@ -243,6 +247,7 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 						decision: Decision{
 							Allowed:      true,
 							Reason:       "relationship grant: " + string(relType),
+							AuditReason:  auditevent.ReasonInherited,
 							Scope:        ScopeTypeRelationship,
 							MatchedGrant: granted.Provenance.RoleName,
 							BindingID:    granted.Provenance.BindingID,

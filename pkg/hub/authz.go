@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -188,6 +190,10 @@ type CredentialContext struct {
 
 // AuthzRequest carries both the acting principal and the credential caveats.
 type AuthzRequest struct {
+	// OperationID is the canonical operation selected by the caller. It is
+	// audit metadata only and never contributes to authorization evaluation.
+	OperationID authzop.OperationID `json:"-"`
+
 	Principal  PrincipalContext
 	Credential CredentialContext
 	Resource   Resource
@@ -245,13 +251,14 @@ type DecisionStep struct {
 
 // Decision represents the result of an authorization check.
 type Decision struct {
-	Allowed        bool   // Whether access is allowed
-	Reason         string // Human-readable explanation
-	BindingID      string // ID of the matched role binding (if any)
-	RoleName       string // Name of the matched role (if any)
-	Scope          string // Scope level that decided (hub, project, resource)
-	MatchedGrant   string // Audit-ready matched grant identifier
-	MatchedPolicy  string // Audit-ready matched policy identifier
+	Allowed        bool                  // Whether access is allowed
+	Reason         string                // Human-readable explanation
+	AuditReason    auditevent.ReasonCode `json:"-"` // Closed structural audit explanation
+	BindingID      string                // ID of the matched role binding (if any)
+	RoleName       string                // Name of the matched role (if any)
+	Scope          string                // Scope level that decided (hub, project, resource)
+	MatchedGrant   string                // Audit-ready matched grant identifier
+	MatchedPolicy  string                // Audit-ready matched policy identifier
 	PrincipalKind  PrincipalKind
 	PrincipalID    string
 	CredentialID   string
@@ -534,7 +541,11 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		denyReason = "credential kind does not match identity"
 	}
 	if denyReason != "" {
-		return decorateDecision(Decision{Allowed: false, Reason: denyReason}, request, derivedPrincipal, derivedCredential, auditPermissionID(request))
+		reason := auditevent.ReasonInvalidRequest
+		if isNilIdentity(request.Principal.Identity) {
+			reason = auditevent.ReasonNotAuthenticated
+		}
+		return decorateDecision(Decision{Allowed: false, Reason: denyReason, AuditReason: reason}, request, derivedPrincipal, derivedCredential, auditPermissionID(request))
 	}
 
 	principal := request.Principal
@@ -565,9 +576,9 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// Unsupported principal kinds — fail closed.
 	switch principal.Kind {
 	case PrincipalKindFederatedService:
-		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported"}, request, principal, credential, auditPermissionID(request))
+		return decorateDecision(Decision{Allowed: false, Reason: "federated service identities are not supported", AuditReason: auditevent.ReasonInvalidRequest}, request, principal, credential, auditPermissionID(request))
 	case PrincipalKindBroker:
-		return decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization"}, request, principal, credential, auditPermissionID(request))
+		return decorateDecision(Decision{Allowed: false, Reason: "broker identities are not supported by authorization", AuditReason: auditevent.ReasonInvalidRequest}, request, principal, credential, auditPermissionID(request))
 	}
 
 	// Resolve permission ID. When the caller provides an explicit permission,
@@ -579,7 +590,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if err != nil {
 			a.logger.Warn("authorization request has no resolvable permission",
 				"resource_type", request.Resource.Type, "action", string(request.Action), "error", err)
-			d := Decision{Allowed: false, Reason: unresolvablePermissionReason}
+			d := Decision{Allowed: false, Reason: unresolvablePermissionReason, AuditReason: auditevent.ReasonInvalidRequest}
 			if request.Explain {
 				d.Provenance = &DecisionProvenance{
 					Errors:          []string{err.Error()},
@@ -603,7 +614,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// sufficient: see authz_delivery_gate.go for the contract a delivery
 	// credential kind must meet before it joins the set.
 	if !deliveryCredentialAdmitted(permissionID, request.Action, credential.Kind) {
-		d := Decision{Allowed: false, Reason: deliveryGateReason}
+		d := Decision{Allowed: false, Reason: deliveryGateReason, AuditReason: auditevent.ReasonNotAuthorized}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
 				Permission:      permissionID,
@@ -685,7 +696,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
 		}
-		d := Decision{Allowed: false, Reason: "principal resolution error (fail-closed)", DenyCause: DenyCauseResolutionError}
+		d := Decision{Allowed: false, Reason: "principal resolution error (fail-closed)", AuditReason: auditevent.ReasonDependencyUnavailable, DenyCause: DenyCauseResolutionError}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
 				Permission:      permissionID,
@@ -728,7 +739,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
 		}
-		d := Decision{Allowed: false, Reason: "binding resolution error (fail-closed)", DenyCause: DenyCauseResolutionError}
+		d := Decision{Allowed: false, Reason: "binding resolution error (fail-closed)", AuditReason: auditevent.ReasonDependencyUnavailable, DenyCause: DenyCauseResolutionError}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
 				Permission:      permissionID,
@@ -752,7 +763,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		if request.Explain {
 			resolutionErrors = append(resolutionErrors, errMsg)
 		}
-		d := Decision{Allowed: false, Reason: "role resolution error (fail-closed)", DenyCause: DenyCauseResolutionError}
+		d := Decision{Allowed: false, Reason: "role resolution error (fail-closed)", AuditReason: auditevent.ReasonDependencyUnavailable, DenyCause: DenyCauseResolutionError}
 		if request.Explain {
 			d.Provenance = &DecisionProvenance{
 				Permission:      permissionID,
@@ -952,6 +963,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				}
 			} else if rel.restrictedBy != "" {
 				decision.Reason = "relationship grant restricted by " + rel.restrictedBy
+				decision.AuditReason = auditevent.ReasonPolicyDenied
 				if decision.Provenance != nil {
 					decision.Provenance.DenyReasons = append([]string{decision.Reason}, decision.Provenance.DenyReasons...)
 				}
@@ -1013,11 +1025,13 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 			if ceilingErr != nil {
 				decision.Allowed = false
 				decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()
+				decision.AuditReason = auditevent.ReasonCheckUnavailable
 				decision.DeniedBy = DeniedByDelegationCeiling
 				decision.DenyCause = DenyCauseCeilingError
 			} else if !ceilingAllowed {
 				decision.Allowed = false
 				decision.Reason = ceilingReason
+				decision.AuditReason = auditevent.ReasonPolicyDenied
 				decision.DeniedBy = DeniedByDelegationCeiling
 				decision.DenyCause = ceilingCause
 			}
@@ -1249,9 +1263,11 @@ func bfsGroupPath(directGroups map[string]bool, target string, childToParents ma
 // kernelDecisionToDecision converts a KernelDecision to the external Decision type.
 func kernelDecisionToDecision(kd KernelDecision, permissionID string) Decision {
 	d := Decision{
-		Allowed: kd.Allowed,
+		Allowed:     kd.Allowed,
+		AuditReason: auditevent.ReasonPermissionMissing,
 	}
 	if kd.Allowed {
+		d.AuditReason = auditevent.ReasonAllowed
 		// R-4 fix: select a granting binding whose role actually contains
 		// the requested permission (ContainsRequested==true). Previously,
 		// GrantingBindings[0] was used unconditionally, which could name a
@@ -1274,6 +1290,12 @@ func kernelDecisionToDecision(kd KernelDecision, permissionID string) Decision {
 			d.Reason = "kernel allow"
 		}
 	} else {
+		for _, restriction := range kd.Provenance.Restrictions {
+			if restriction.Applied {
+				d.AuditReason = auditevent.ReasonPolicyDenied
+				break
+			}
+		}
 		if len(kd.Provenance.DenyReasons) > 0 {
 			d.Reason = kd.Provenance.DenyReasons[0]
 		} else {
@@ -2176,20 +2198,20 @@ func (a *AuthzService) enforceUATConstraints(scoped *ScopedUserIdentity, resourc
 	projectID := scoped.ScopedProjectID()
 	if resource.Type == "project" {
 		if resource.ID != projectID {
-			return &Decision{Allowed: false, Reason: "token not scoped for this project"}
+			return &Decision{Allowed: false, Reason: "token not scoped for this project", AuditReason: auditevent.ReasonPolicyDenied}
 		}
 	} else if resource.ParentType == "project" && resource.ParentID != projectID {
-		return &Decision{Allowed: false, Reason: "token not scoped for this project"}
+		return &Decision{Allowed: false, Reason: "token not scoped for this project", AuditReason: auditevent.ReasonPolicyDenied}
 	} else if resource.Type != "" && resource.Type != "project" && resource.ParentType != "project" {
 		// Resource has no project association (hub-level).
 		// UATs are project-scoped and must not access hub-level resources.
-		return &Decision{Allowed: false, Reason: "token not scoped for hub-level resources"}
+		return &Decision{Allowed: false, Reason: "token not scoped for hub-level resources", AuditReason: auditevent.ReasonPolicyDenied}
 	}
 
 	// Enforce scope constraint: the resource:action must be in the token's scopes.
 	scope := resource.Type + ":" + string(action)
 	if !scoped.HasScope(scope) {
-		return &Decision{Allowed: false, Reason: "token does not have scope: " + scope}
+		return &Decision{Allowed: false, Reason: "token does not have scope: " + scope, AuditReason: auditevent.ReasonPolicyDenied}
 	}
 
 	return nil
