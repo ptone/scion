@@ -165,6 +165,77 @@ type Payload interface {
 	auditPayloadLeaves() map[string]any
 }
 
+// PermissionName is a typed canonical permission ID. The closed value set
+// remains owned by permissions.Registry rather than duplicated here.
+type PermissionName string
+
+// PurposeLabel is bounded server-derived authorization purpose metadata.
+type PurposeLabel string
+
+// ReasonCode is the closed, value-free explanation vocabulary shared by v1
+// audit family payloads.
+type ReasonCode string
+
+const (
+	ReasonAllowed               ReasonCode = "allowed"
+	ReasonPolicyDenied          ReasonCode = "policy_denied"
+	ReasonPermissionMissing     ReasonCode = "permission_missing"
+	ReasonInvalidRequest        ReasonCode = "invalid_request"
+	ReasonNotAuthenticated      ReasonCode = "not_authenticated"
+	ReasonNotAuthorized         ReasonCode = "not_authorized"
+	ReasonNotFound              ReasonCode = "not_found"
+	ReasonConflict              ReasonCode = "conflict"
+	ReasonRateLimited           ReasonCode = "rate_limited"
+	ReasonDependencyUnavailable ReasonCode = "dependency_unavailable"
+	ReasonAttachmentRejected    ReasonCode = "attachment_rejected"
+	ReasonCheckDisabled         ReasonCode = "check_disabled"
+	ReasonCheckUnavailable      ReasonCode = "check_unavailable"
+	ReasonInherited             ReasonCode = "inherited"
+	ReasonUnspecified           ReasonCode = "unspecified"
+)
+
+func reasonCodeStrings() []string {
+	return []string{
+		string(ReasonAllowed),
+		string(ReasonPolicyDenied),
+		string(ReasonPermissionMissing),
+		string(ReasonInvalidRequest),
+		string(ReasonNotAuthenticated),
+		string(ReasonNotAuthorized),
+		string(ReasonNotFound),
+		string(ReasonConflict),
+		string(ReasonRateLimited),
+		string(ReasonDependencyUnavailable),
+		string(ReasonAttachmentRejected),
+		string(ReasonCheckDisabled),
+		string(ReasonCheckUnavailable),
+		string(ReasonInherited),
+		string(ReasonUnspecified),
+	}
+}
+
+// AuthorizationPayload is the exact v1 authorization decision payload.
+type AuthorizationPayload struct {
+	Permission PermissionName
+	ReasonCode ReasonCode
+	Purpose    PurposeLabel
+	CacheHit   *bool
+}
+
+func (p AuthorizationPayload) auditPayloadLeaves() map[string]any {
+	leaves := map[string]any{
+		"permission":  string(p.Permission),
+		"reason_code": string(p.ReasonCode),
+	}
+	if p.Purpose != "" {
+		leaves["purpose"] = string(p.Purpose)
+	}
+	if p.CacheHit != nil {
+		leaves["cache_hit"] = *p.CacheHit
+	}
+	return leaves
+}
+
 // AccessBoundaryPayload is the exact v1 payload for access-boundary create,
 // update, and recovery events.
 type AccessBoundaryPayload struct {

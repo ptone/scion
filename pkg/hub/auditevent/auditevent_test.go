@@ -104,12 +104,16 @@ func TestCatalogRejectsEveryUndeclaredPhaseOutcomePair(t *testing.T) {
 
 	for _, entry := range Catalog() {
 		entry := entry
-		t.Run(entry.Family+"/"+entry.Action, func(t *testing.T) {
+		action := entry.Action
+		if len(entry.AllowedActions) > 0 {
+			action = entry.AllowedActions[0]
+		}
+		t.Run(entry.Family+"/"+action, func(t *testing.T) {
 			for _, phase := range phases {
 				for _, outcome := range outcomes {
-					event := validCreateEvent(t)
+					event := validCatalogEvent(t, entry)
 					event.Family = entry.Family
-					event.Action = entry.Action
+					event.Action = action
 					event.Phase = phase
 					event.Outcome = outcome
 					event.Severity = severityForOutcome(outcome)
@@ -129,6 +133,14 @@ func TestCatalogRejectsEveryUndeclaredPhaseOutcomePair(t *testing.T) {
 			}
 		})
 	}
+}
+
+func validCatalogEvent(t *testing.T, entry CatalogEntry) EnvelopeV1 {
+	t.Helper()
+	if entry.Family == "authorization" {
+		return validAuthorizationEvent(t)
+	}
+	return validCreateEvent(t)
 }
 
 func TestAccessBoundaryCreateBuildRenderAndCapture(t *testing.T) {
@@ -693,11 +705,14 @@ func TestRenderIsRaceSafeAgainstMutationOfBuilderInputAliases(t *testing.T) {
 func TestCatalogSnapshotAccessBoundaryCreate(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, []CatalogEntry{{
+	entries := Catalog()
+	require.Len(t, entries, 2)
+	assert.Equal(t, CatalogEntry{
 		Family:                 "access_boundary",
 		Action:                 "create",
 		AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
 		ResourceKind:           "access_constraint",
+		ResourceKindRule:       ResourceKindExact,
 		RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
 		ResourceScopes: []ResourceScopeSchema{
 			{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
@@ -718,7 +733,7 @@ func TestCatalogSnapshotAccessBoundaryCreate(t *testing.T) {
 			{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
 		},
 		Destinations: []Destination{DestinationStructuredLog, DestinationHistory},
-	}}, Catalog())
+	}, entries[0])
 }
 
 func TestRenderIsStableAndOmitsUnknownOptionalFields(t *testing.T) {

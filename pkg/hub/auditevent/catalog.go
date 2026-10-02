@@ -14,6 +14,12 @@
 
 package auditevent
 
+import (
+	"sort"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+)
+
 // PhaseOutcome is one exact phase/result pair declared by the catalog.
 type PhaseOutcome struct {
 	Phase   Phase
@@ -39,6 +45,7 @@ const (
 	PayloadHexString    PayloadValueType = "hex_string"
 	PayloadImpactCounts PayloadValueType = "impact_counts"
 	PayloadStringArray  PayloadValueType = "string_array"
+	PayloadBool         PayloadValueType = "bool"
 )
 
 // PayloadLeafSchema is the complete machine-readable contract for one
@@ -67,12 +74,23 @@ type ResourceScopeSchema struct {
 	ProjectID ResourceProjectIDRule
 }
 
+// ResourceKindRule declares whether an entry requires one literal kind or any
+// bounded canonical code supplied by the authorization resource resolver.
+type ResourceKindRule string
+
+const (
+	ResourceKindExact ResourceKindRule = "exact"
+	ResourceKindCode  ResourceKindRule = "code"
+)
+
 // CatalogEntry is the machine-readable schema for one action.
 type CatalogEntry struct {
 	Family                 string
 	Action                 string
+	AllowedActions         []string
 	AllowedPairs           []PhaseOutcome
 	ResourceKind           string
+	ResourceKindRule       ResourceKindRule
 	RequiredEnvelopeLeaves []string
 	ResourceScopes         []ResourceScopeSchema
 	RequiredPayloadLeaves  []PayloadLeafSchema
@@ -85,6 +103,7 @@ var catalog = []CatalogEntry{{
 	Action:                 "create",
 	AllowedPairs:           []PhaseOutcome{{Phase: PhaseCommit, Outcome: OutcomeSucceeded}},
 	ResourceKind:           "access_constraint",
+	ResourceKindRule:       ResourceKindExact,
 	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
 	ResourceScopes: []ResourceScopeSchema{
 		{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
@@ -105,7 +124,39 @@ var catalog = []CatalogEntry{{
 		{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
 	},
 	Destinations: []Destination{DestinationStructuredLog, DestinationHistory},
-}}
+}, authorizationCatalogEntry()}
+
+func authorizationCatalogEntry() CatalogEntry {
+	return CatalogEntry{
+		Family:                 "authorization",
+		AllowedActions:         declaredAuthorizationOperationStrings(),
+		AllowedPairs:           []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeAllow}, {Phase: PhaseDecision, Outcome: OutcomeDeny}},
+		ResourceKindRule:       ResourceKindCode,
+		RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+		ResourceScopes: []ResourceScopeSchema{
+			{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted},
+			{Scope: ResourceScopeProject, ProjectID: ResourceProjectIDRequired},
+		},
+		RequiredPayloadLeaves: []PayloadLeafSchema{
+			{Name: "permission", Type: PayloadString, MaxBytes: 64, AllowedValues: canonicalPermissionNames()},
+			{Name: "reason_code", Type: PayloadString, MaxBytes: 22, AllowedValues: reasonCodeStrings()},
+		},
+		OptionalPayloadLeaves: []PayloadLeafSchema{
+			{Name: "purpose", Type: PayloadString, MaxBytes: 128},
+			{Name: "cache_hit", Type: PayloadBool},
+		},
+		Destinations: []Destination{DestinationStructuredLog},
+	}
+}
+
+func canonicalPermissionNames() []string {
+	names := make([]string, 0, len(permissions.Registry))
+	for _, permission := range permissions.Registry {
+		names = append(names, permission.ID)
+	}
+	sort.Strings(names)
+	return names
+}
 
 // Catalog returns a defensive snapshot of the schemas implemented in this
 // milestone. Later family adapters add literal entries here.
@@ -113,6 +164,7 @@ func Catalog() []CatalogEntry {
 	result := make([]CatalogEntry, len(catalog))
 	for i, entry := range catalog {
 		result[i] = entry
+		result[i].AllowedActions = append([]string(nil), entry.AllowedActions...)
 		result[i].AllowedPairs = append([]PhaseOutcome(nil), entry.AllowedPairs...)
 		result[i].RequiredEnvelopeLeaves = append([]string(nil), entry.RequiredEnvelopeLeaves...)
 		result[i].ResourceScopes = append([]ResourceScopeSchema(nil), entry.ResourceScopes...)
@@ -134,9 +186,18 @@ func clonePayloadLeafSchemas(schemas []PayloadLeafSchema) []PayloadLeafSchema {
 
 func catalogEntry(family, action string) (CatalogEntry, bool) {
 	for _, entry := range catalog {
-		if entry.Family == family && entry.Action == action {
+		if entry.Family == family && (entry.Action == action || containsString(entry.AllowedActions, action)) {
 			return entry, true
 		}
 	}
 	return CatalogEntry{}, false
+}
+
+func containsString(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
 }

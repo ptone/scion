@@ -141,8 +141,17 @@ func validateSnapshot(event EnvelopeV1, payload map[string]any, hasPayload bool)
 	if event.Resource == nil {
 		return invalid("resource", "is required by the catalog")
 	}
-	if event.Resource.Kind != entry.ResourceKind {
-		return invalid("resource.kind", "must match the catalog entry")
+	switch entry.ResourceKindRule {
+	case ResourceKindExact:
+		if event.Resource.Kind != entry.ResourceKind {
+			return invalid("resource.kind", "must match the catalog entry")
+		}
+	case ResourceKindCode:
+		if err := validateBoundedString("resource.kind", event.Resource.Kind, 64); err != nil {
+			return err
+		}
+	default:
+		return invalid("resource.kind", "has an undeclared catalog rule")
 	}
 	if err := validateBoundedString("resource.id", event.Resource.ID, 128); err != nil {
 		return err
@@ -284,6 +293,10 @@ func validatePayloadLeaf(schema PayloadLeafSchema, value any) error {
 			if err := validateBoundedString(fmt.Sprintf("%s[%d]", name, i), item, schema.ItemMaxBytes); err != nil {
 				return err
 			}
+		}
+	case PayloadBool:
+		if _, ok := value.(bool); !ok {
+			return invalid(name, "must be bool")
 		}
 	default:
 		return invalid(name, "has an undeclared catalog type")

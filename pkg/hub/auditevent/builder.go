@@ -18,8 +18,82 @@ import (
 	"context"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/google/uuid"
 )
+
+// AuthorizationDecisionInput contains the exact identity, target, and payload
+// facts for one enforced authorization decision.
+type AuthorizationDecisionInput struct {
+	Operation   authzop.OperationID
+	Allowed     bool
+	Request     *RequestRef
+	Initiator   *IdentityRef
+	Principal   IdentityRef
+	Executor    *IdentityRef
+	Credential  *CredentialRef
+	CausationID string
+	Resource    ResourceRef
+	Permission  PermissionName
+	ReasonCode  ReasonCode
+	Purpose     PurposeLabel
+	CacheHit    *bool
+}
+
+// BuildAuthorizationDecision builds one immutable decision event. The caller
+// dispatches the returned envelope through the configured audit sink.
+func BuildAuthorizationDecision(ctx context.Context, input AuthorizationDecisionInput) (EnvelopeV1, error) {
+	operation, err := requireOperation(ctx)
+	if err != nil {
+		return EnvelopeV1{}, err
+	}
+	return buildAuthorizationDecision(operation, input, uuid.NewString(), time.Now().UTC())
+}
+
+func buildAuthorizationDecision(operation AuditOperationContext, input AuthorizationDecisionInput, eventID string, occurredAt time.Time) (EnvelopeV1, error) {
+	outcome := OutcomeDeny
+	severity := SeverityWarning
+	if input.Allowed {
+		outcome = OutcomeAllow
+		severity = SeverityInfo
+	}
+	event := EnvelopeV1{
+		SchemaVersion: SchemaVersion,
+		EventID:       eventID,
+		OccurredAt:    occurredAt,
+		Family:        "authorization",
+		Action:        string(input.Operation),
+		Phase:         PhaseDecision,
+		Outcome:       outcome,
+		Severity:      severity,
+		CorrelationID: operation.CorrelationID,
+		CausationID:   input.CausationID,
+		Request:       cloneRequest(input.Request),
+		Initiator:     cloneIdentity(input.Initiator),
+		Principal:     cloneIdentity(&input.Principal),
+		Executor:      cloneIdentity(input.Executor),
+		Credential:    cloneCredential(input.Credential),
+		Resource:      cloneResource(&input.Resource),
+		Payload: AuthorizationPayload{
+			Permission: input.Permission,
+			ReasonCode: input.ReasonCode,
+			Purpose:    input.Purpose,
+			CacheHit:   cloneBool(input.CacheHit),
+		},
+	}
+	if err := Validate(event); err != nil {
+		return EnvelopeV1{}, err
+	}
+	return event, nil
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
 
 // AccessBoundaryCreateInput contains the approved identity, resource, and
 // payload leaves for a committed access-boundary creation.
