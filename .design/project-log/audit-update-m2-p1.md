@@ -174,3 +174,43 @@ prohibits them. No required check failed or was inconclusive.
   construction failure without changing the authorization result. It must not
   parse `Decision.Reason`.
 - P2 and emitter cutover remain blocked pending independent P1 approval.
+
+## Review round 2 fixes
+
+Round 2 reviewed exact head
+`49c658b4ff934bc9bad0cf87ce24e7f1a7c9e488` and requested two retained-author
+corrections. The code-and-test checkpoint
+`c17fe535f39a4151450724e8fdf8faf56e99a3d8` was committed and fast-forward
+pushed before the bounded focused checks, as required.
+
+- R3 closed: `excludeKernelGrantForDeliver` still changes the checked kernel
+  allow to the same deny, retains the exact `deliverRoleGrantReason`, clears
+  the same granting-source fields, and preserves provenance/side effects. It
+  now changes the structural reason with the outcome, from `allowed` to
+  `policy_denied`. The existing role-only non-explain behavior test pins the
+  reason. The package-wide AST guard now requires every literal `Allowed`
+  mutation on a Decision to have an outcome-compatible exact `AuditReason`
+  assignment in the same lexical block; mutation regressions cover both a
+  stale allow reason and a missing companion reason.
+- R4 closed: when an access-constraint load failure caused the final deny, the
+  same block that sets `DenyCauseResolutionError` now assigns
+  `dependency_unavailable`. The existing resolution-error regression pins the
+  structural reason while retaining the exact deny, prose, provenance, error
+  behavior, and side effects.
+
+Post-push bounded evidence:
+
+- Focused normal tests for the two behavior regressions, every production
+  Decision guard, and mutation suite: PASS (`1.587s` test runtime).
+- The matching single `-race -p 2` invocation: PASS (`25.638s` test runtime).
+- `timeout 10m go vet -p 2 ./pkg/hub`: PASS.
+- Gofmt on the five changed files and `git diff --check`: PASS.
+- `timeout 10m env GOGC=40 golangci-lint run
+  --new-from-rev=49c658b4ff934bc9bad0cf87ce24e7f1a7c9e488
+  --concurrency=1 ./pkg/hub/...`: PASS, `0 issues`; it was not restarted.
+
+The delta from the reviewed head contains exactly two production files and
+three focused test files. It adds no `AuthzRequest.OperationID` population,
+P2 emitter, sink/store/sampling/transport change, projection/API/UI work, or
+`#2392 audit_emit_dispatch` timing change. P2 and emitter work remain blocked
+pending a clean fresh review round 3/7.
