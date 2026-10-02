@@ -141,7 +141,7 @@ func TestAuthorizationCatalogSnapshot(t *testing.T) {
 	encoded, err := json.Marshal(Catalog())
 	require.NoError(t, err)
 	digest := sha256.Sum256(encoded)
-	assert.Equal(t, "ba97bdbcd6c86bb2537e948405a2935560dfb5f3f852fb8071a151c99e9e8105", hex.EncodeToString(digest[:]))
+	assert.Equal(t, "da1554f8a77935d836531164de3de3987f48101f7a658772ead5e5dab0230cb0", hex.EncodeToString(digest[:]))
 }
 
 func TestAuthorizationRequiredEnvelopeAndPayloadLeaves(t *testing.T) {

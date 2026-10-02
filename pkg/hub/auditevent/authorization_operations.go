@@ -29,7 +29,7 @@ var declaredAuthorizationOperations = []authzop.OperationID{
 	"access.constraint.create", "access.constraint.update", "access.constraint.delete",
 	"credential.token.create", "credential.token.revoke",
 	"gcp.identity.create", "gcp.identity.delete", "gcp.identity.assign", "gcp.identity.mint",
-	"agent.lifecycle.create", "agent.lifecycle.delete", "project.lifecycle.create", "project.lifecycle.delete", "agent.message.send",
+	"agent.lifecycle.create", "agent.lifecycle.delete", "agent.lifecycle.control", "agent.lifecycle.restore", "agent.lifecycle.exec", "agent.lifecycle.env", "agent.lifecycle.resetauth", "agent.lifecycle.reincarnate", "project.lifecycle.create", "project.lifecycle.delete", "agent.message.send",
 	"user.admin.suspend", "secret.read", "secret.write", "user.admin.invite", "user.admin.promote", "user.admin.delete",
 	"hub.authreset", "hub.config.read", "hub.config.update", "hub.messaging.update", "hub.experiments.update", "hub.maintenance.execute", "hub.adminmode.update", "hub.allowlist.update", "hub.health.read", "hub.diagnostics.read", "hub.scheduler.read", "hub.projectdefaults.read", "hub.lifecyclehooks.read", "hub.validate.execute", "hub.integrations.read", "hub.teamsmanifest.read", "hub.metrics.read", "hub.githubapp.read", "hub.githubapp.update",
 	"agent.read", "agent.list", "agent.update", "agent.attach", "agent.portaccess", "agent.stopall", "agent.setmessagemode",

@@ -653,7 +653,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 			}
 		}
 		if reason != "" {
-			d := Decision{Allowed: false, Reason: reason}
+			d := Decision{Allowed: false, Reason: reason, AuditReason: auditevent.ReasonNotAuthorized}
 			if request.Explain {
 				d.Provenance = &DecisionProvenance{
 					Permission:      permissionID,
