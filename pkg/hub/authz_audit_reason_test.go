@@ -142,6 +142,7 @@ func TestAuthorizationContractGuardRejectsMutations(t *testing.T) {
 		"invalid converted reason":    `func f() Decision { return Decision{Allowed: false, AuditReason: auditevent.ReasonCode("bogus")} }`,
 		"incompatible allow reason":   `func f() Decision { return Decision{Allowed: true, AuditReason: auditevent.ReasonPolicyDenied} }`,
 		"nonliteral zero return":      `func f() Decision { var d Decision; return d }`,
+		"unproven variable return":    `func f(input Decision) Decision { return input }`,
 		"metadata read in other file": `func f(d Decision) bool { return d.AuditReason == auditevent.ReasonAllowed }`,
 		"operation ID callsite":       `func f() { _ = AuthzRequest{OperationID: authzop.OperationID("route.op")} }`,
 		"operation ID read":           `func f(request AuthzRequest) bool { return request.OperationID != "" }`,
@@ -394,7 +395,113 @@ func authorizationContractViolations(fset *token.FileSet, file *ast.File) []stri
 		}
 		return true
 	})
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Body == nil || !returnsDecision(function.Type) {
+			continue
+		}
+		checkDecisionReturns(function, report)
+	}
 	return violations
+}
+
+func checkDecisionReturns(function *ast.FuncDecl, report func(ast.Node, string)) {
+	safeOrigins := map[string]bool{}
+	unsafeOrigins := map[string]bool{}
+	_, pointerResult := function.Type.Results.List[0].Type.(*ast.StarExpr)
+	ast.Inspect(function.Body, func(node ast.Node) bool {
+		switch value := node.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range value.Lhs {
+				ident, ok := lhs.(*ast.Ident)
+				if !ok || i >= len(value.Rhs) {
+					continue
+				}
+				if isDecisionOrigin(value.Rhs[i]) {
+					safeOrigins[ident.Name] = true
+				} else if safeOrigins[ident.Name] {
+					unsafeOrigins[ident.Name] = true
+				}
+			}
+		case *ast.DeclStmt:
+			declaration, ok := value.Decl.(*ast.GenDecl)
+			if !ok {
+				return true
+			}
+			for _, spec := range declaration.Specs {
+				values, ok := spec.(*ast.ValueSpec)
+				if !ok || !isDecisionType(values.Type) {
+					continue
+				}
+				for i, name := range values.Names {
+					if i < len(values.Values) && isDecisionOrigin(values.Values[i]) {
+						safeOrigins[name.Name] = true
+					} else {
+						unsafeOrigins[name.Name] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+
+	ast.Inspect(function.Body, func(node ast.Node) bool {
+		statement, ok := node.(*ast.ReturnStmt)
+		if !ok || len(statement.Results) == 0 {
+			return true
+		}
+		expr := statement.Results[0]
+		if isDecisionOrigin(expr) {
+			return true
+		}
+		if ident, ok := expr.(*ast.Ident); ok {
+			if pointerResult && ident.Name == "nil" {
+				return true
+			}
+			if safeOrigins[ident.Name] && !unsafeOrigins[ident.Name] {
+				return true
+			}
+			// decorateDecision is the single audited by-value pass-through: all
+			// of its call sites must themselves supply a checked origin.
+			if function.Name.Name == "decorateDecision" && ident.Name == "decision" {
+				return true
+			}
+		}
+		if address, ok := expr.(*ast.UnaryExpr); ok && pointerResult && address.Op == token.AND {
+			if ident, ok := address.X.(*ast.Ident); ok && safeOrigins[ident.Name] && !unsafeOrigins[ident.Name] {
+				return true
+			}
+		}
+		// projectReadDecision's cache field is assigned only from Decide; its
+		// unavailable branch returns a checked literal directly.
+		if selector, ok := expr.(*ast.SelectorExpr); ok && function.Name.Name == "projectReadDecision" && selector.Sel.Name == "decision" {
+			return true
+		}
+		report(expr, "Decision variable return has no structurally checked origin")
+		return true
+	})
+}
+
+func returnsDecision(function *ast.FuncType) bool {
+	if function.Results == nil || len(function.Results.List) == 0 {
+		return false
+	}
+	return isDecisionType(function.Results.List[0].Type)
+}
+
+func isDecisionOrigin(expr ast.Expr) bool {
+	switch value := expr.(type) {
+	case *ast.CompositeLit:
+		return isDecisionType(value.Type)
+	case *ast.CallExpr:
+		return !isDecisionType(value.Fun)
+	case *ast.StarExpr:
+		return true
+	case *ast.UnaryExpr:
+		return value.Op == token.AND && isDecisionOrigin(value.X)
+	default:
+		return false
+	}
 }
 
 func checkDecisionLiteral(literal *ast.CompositeLit, report func(ast.Node, string)) {

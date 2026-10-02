@@ -66,14 +66,18 @@ human-readable `Decision.Reason` prose.
 Go file in `pkg/hub`. It rejects omitted or zero-value `Decision` origins,
 named zero returns, conversions, `new(Decision)`, dynamic/converted/unknown
 reasons, nonliteral construction outcomes, and statically incompatible
-allow/reason pairs. Exact approved constant assignments are the sole narrow
-post-construction allowance. The same package-wide scan rejects
+allow/reason pairs. Identifier returns must trace to a checked literal or
+producer-call origin. Exact approved constant assignments are the sole narrow
+post-construction allowance; `decorateDecision`'s by-value decoration and
+`projectReadDecision`'s Decide-populated cache are the two documented return
+pass-through allowances. The same package-wide scan rejects
 `Decision.AuditReason` reads and any read, write, or composite-literal
 population of `AuthzRequest.OperationID`; it is not limited to a file list.
 Mutation cases prove rejection of omitted, converted-invalid, incompatible,
-and nonliteral-zero decisions, an audit metadata read in an otherwise unlisted
-file, and both OperationID population and reading. Focused behavior tests cover
-every currently produced A1 reason and enforce outcome compatibility.
+nonliteral-zero, and unproven-variable decisions, an audit metadata read in an
+otherwise unlisted file, and both OperationID population and reading. Focused
+behavior tests cover every currently produced A1 reason and enforce outcome
+compatibility.
 
 For R1, direct-owner and owner/admin resolution now retain a private typed
 three-state status: allowed, healthy denial, or dependency unavailable. The
@@ -145,9 +149,14 @@ following broader checks:
 - `gofmt` on all changed Go files, `git diff --check`, and changed-file/scope
   inspection against the reviewed head — PASS.
 
-The final evidence-only project-log commit follows the implementation
-checkpoint. Its exact SHA is reported in the completion handoff because a
-commit cannot contain its own SHA.
+The final guard/evidence commit follows the implementation checkpoint. Its
+exact SHA is reported in the completion handoff because a commit cannot
+contain its own SHA.
+
+After those gates, a final test-only self-audit strengthened variable-return
+origin tracing and added its explicit mutation. The focused package-scan and
+mutation tests passed. The already-consumed authorized race restart and the
+single lint run were not repeated; no production code changed after them.
 
 `make ci` and `make ci-full` were not run because the restricted brief
 prohibits them. No required check failed or was inconclusive.
