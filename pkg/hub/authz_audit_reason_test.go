@@ -138,16 +138,19 @@ func TestEveryProductionDecisionLiteralAssignsAuditReason(t *testing.T) {
 
 func TestAuthorizationContractGuardRejectsMutations(t *testing.T) {
 	tests := map[string]string{
-		"omitted reason":                       `func f() Decision { return Decision{Allowed: false} }`,
-		"invalid converted reason":             `func f() Decision { return Decision{Allowed: false, AuditReason: auditevent.ReasonCode("bogus")} }`,
-		"incompatible allow reason":            `func f() Decision { return Decision{Allowed: true, AuditReason: auditevent.ReasonPolicyDenied} }`,
-		"allowed mutation without reason":      `func f() Decision { d := Decision{Allowed: true, AuditReason: auditevent.ReasonAllowed}; d.Allowed = false; return d }`,
-		"allowed mutation incompatible reason": `func f(d *Decision) { d.Allowed = false; d.AuditReason = auditevent.ReasonAllowed }`,
-		"nonliteral zero return":               `func f() Decision { var d Decision; return d }`,
-		"unproven variable return":             `func f(input Decision) Decision { return input }`,
-		"metadata read in other file":          `func f(d Decision) bool { return d.AuditReason == auditevent.ReasonAllowed }`,
-		"operation ID callsite":                `func f() { _ = AuthzRequest{OperationID: authzop.OperationID("route.op")} }`,
-		"operation ID read":                    `func f(request AuthzRequest) bool { return request.OperationID != "" }`,
+		"omitted reason":                                `func f() Decision { return Decision{Allowed: false} }`,
+		"invalid converted reason":                      `func f() Decision { return Decision{Allowed: false, AuditReason: auditevent.ReasonCode("bogus")} }`,
+		"incompatible allow reason":                     `func f() Decision { return Decision{Allowed: true, AuditReason: auditevent.ReasonPolicyDenied} }`,
+		"allowed mutation without reason":               `func f() Decision { d := Decision{Allowed: true, AuditReason: auditevent.ReasonAllowed}; d.Allowed = false; return d }`,
+		"allowed mutation incompatible reason":          `func f(d *Decision) { d.Allowed = false; d.AuditReason = auditevent.ReasonAllowed }`,
+		"compatible then incompatible reason overwrite": `func f(d *Decision) { d.Allowed = false; d.AuditReason = auditevent.ReasonPolicyDenied; d.AuditReason = auditevent.ReasonAllowed }`,
+		"compatible reason before allowed mutation":     `func f(d *Decision) { d.AuditReason = auditevent.ReasonPolicyDenied; d.Allowed = false }`,
+		"incompatible reason on one branch":             `func f(d *Decision, inherited bool) { d.Allowed = false; if inherited { d.AuditReason = auditevent.ReasonPolicyDenied } else { d.AuditReason = auditevent.ReasonAllowed } }`,
+		"nonliteral zero return":                        `func f() Decision { var d Decision; return d }`,
+		"unproven variable return":                      `func f(input Decision) Decision { return input }`,
+		"metadata read in other file":                   `func f(d Decision) bool { return d.AuditReason == auditevent.ReasonAllowed }`,
+		"operation ID callsite":                         `func f() { _ = AuthzRequest{OperationID: authzop.OperationID("route.op")} }`,
+		"operation ID read":                             `func f(request AuthzRequest) bool { return request.OperationID != "" }`,
 	}
 	for name, body := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -155,6 +158,23 @@ func TestAuthorizationContractGuardRejectsMutations(t *testing.T) {
 			file, err := parser.ParseFile(fset, "unlisted_production_file.go", "package hub\n"+body, 0)
 			require.NoError(t, err)
 			assert.NotEmpty(t, authorizationContractViolations(fset, file), "mutation must be rejected")
+		})
+	}
+}
+
+func TestAuthorizationContractGuardAcceptsFinalCompatibleMutationState(t *testing.T) {
+	tests := map[string]string{
+		"reason follows allowed mutation":            `func f(d *Decision) { d.Allowed = false; d.AuditReason = auditevent.ReasonPolicyDenied }`,
+		"incompatible reason corrected":              `func f(d *Decision) { d.Allowed = false; d.AuditReason = auditevent.ReasonAllowed; d.AuditReason = auditevent.ReasonPolicyDenied }`,
+		"compatible reason on every branch":          `func f(d *Decision, dependencyFailed bool) { d.Allowed = false; if dependencyFailed { d.AuditReason = auditevent.ReasonDependencyUnavailable } else { d.AuditReason = auditevent.ReasonPolicyDenied } }`,
+		"branch incompatibility corrected afterward": `func f(d *Decision, inherited bool) { d.Allowed = false; if inherited { d.AuditReason = auditevent.ReasonAllowed } else { d.AuditReason = auditevent.ReasonPolicyDenied }; d.AuditReason = auditevent.ReasonPolicyDenied }`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "unlisted_production_file.go", "package hub\n"+body, 0)
+			require.NoError(t, err)
+			assert.Empty(t, authorizationContractViolations(fset, file), "final compatible mutation state must be accepted")
 		})
 	}
 }
@@ -411,9 +431,9 @@ func authorizationContractViolations(fset *token.FileSet, file *ast.File) []stri
 }
 
 // checkDecisionAllowedAssignments requires a structural reason update whenever
-// production mutates a Decision's outcome after construction. The compatible
-// exact reason assignment must be in the same lexical block as the Allowed
-// write, so an unrelated branch cannot make a stale reason appear covered.
+// production mutates a Decision's outcome after construction. Every path from
+// the Allowed write to the next outcome write, return, or lexical-block exit
+// must finish with a subsequent, exact, outcome-compatible reason assignment.
 func checkDecisionAllowedAssignments(function *ast.FuncDecl, report func(ast.Node, string)) {
 	decisionVars := map[string]bool{}
 	if function.Type.Params != nil {
@@ -455,7 +475,7 @@ func checkDecisionAllowedAssignments(function *ast.FuncDecl, report func(ast.Nod
 		if !ok {
 			return true
 		}
-		for _, statement := range block.List {
+		for statementIndex, statement := range block.List {
 			assignment, ok := statement.(*ast.AssignStmt)
 			if !ok {
 				continue
@@ -474,8 +494,8 @@ func checkDecisionAllowedAssignments(function *ast.FuncDecl, report func(ast.Nod
 					report(selector, "Decision Allowed assignment must use a boolean literal")
 					continue
 				}
-				if !blockHasCompatibleReasonAssignment(block, receiver, allowed) {
-					report(selector, "Decision Allowed assignment requires a compatible AuditReason assignment in the same block")
+				if !hasCompatibleFinalReasonOnEveryPath(block.List[statementIndex+1:], receiver, allowed) {
+					report(selector, "Decision Allowed assignment requires a subsequent compatible final AuditReason on every path")
 				}
 			}
 		}
@@ -483,28 +503,117 @@ func checkDecisionAllowedAssignments(function *ast.FuncDecl, report func(ast.Nod
 	})
 }
 
-func blockHasCompatibleReasonAssignment(block *ast.BlockStmt, receiver string, allowed bool) bool {
-	for _, statement := range block.List {
-		assignment, ok := statement.(*ast.AssignStmt)
-		if !ok {
-			continue
+type reasonCompatibility uint8
+
+const (
+	reasonUnassigned reasonCompatibility = iota
+	reasonIncompatible
+	reasonCompatible
+)
+
+func hasCompatibleFinalReasonOnEveryPath(statements []ast.Stmt, receiver string, allowed bool) bool {
+	states, valid := reasonStatesAfterStatements(statements, receiver, allowed, map[reasonCompatibility]bool{reasonUnassigned: true})
+	return valid && allReasonStatesCompatible(states)
+}
+
+func reasonStatesAfterStatements(statements []ast.Stmt, receiver string, allowed bool, states map[reasonCompatibility]bool) (map[reasonCompatibility]bool, bool) {
+	valid := true
+	for _, statement := range statements {
+		if len(states) == 0 {
+			break
 		}
-		for i, lhs := range assignment.Lhs {
-			_, reasonReceiver, ok := decisionFieldSelector(lhs, "AuditReason")
-			if !ok || reasonReceiver != receiver || i >= len(assignment.Rhs) {
+		switch value := statement.(type) {
+		case *ast.AssignStmt:
+			if assignmentWritesDecisionField(value, receiver, "Allowed") {
+				valid = valid && allReasonStatesCompatible(states)
+				states = nil
 				continue
 			}
-			reason, ok := approvedReasonName(assignment.Rhs[i])
-			if !ok {
-				continue
+			if reason, ok := assignedDecisionReason(value, receiver); ok {
+				allowReason := reason == "ReasonAllowed" || reason == "ReasonInherited"
+				if allowed == allowReason {
+					states = map[reasonCompatibility]bool{reasonCompatible: true}
+				} else {
+					states = map[reasonCompatibility]bool{reasonIncompatible: true}
+				}
 			}
-			allowReason := reason == "ReasonAllowed" || reason == "ReasonInherited"
-			if allowed == allowReason {
-				return true
+		case *ast.IfStmt:
+			thenStates, thenValid := reasonStatesAfterStatements(value.Body.List, receiver, allowed, cloneReasonStates(states))
+			elseStates, elseValid := cloneReasonStates(states), true
+			if value.Else != nil {
+				elseStates, elseValid = reasonStatesAfterElse(value.Else, receiver, allowed, elseStates)
 			}
+			states = mergeReasonStates(thenStates, elseStates)
+			valid = valid && thenValid && elseValid
+		case *ast.BlockStmt:
+			var blockValid bool
+			states, blockValid = reasonStatesAfterStatements(value.List, receiver, allowed, states)
+			valid = valid && blockValid
+		case *ast.ReturnStmt:
+			valid = valid && allReasonStatesCompatible(states)
+			states = nil
+		}
+	}
+	return states, valid
+}
+
+func reasonStatesAfterElse(statement ast.Stmt, receiver string, allowed bool, states map[reasonCompatibility]bool) (map[reasonCompatibility]bool, bool) {
+	switch value := statement.(type) {
+	case *ast.BlockStmt:
+		return reasonStatesAfterStatements(value.List, receiver, allowed, states)
+	case *ast.IfStmt:
+		return reasonStatesAfterStatements([]ast.Stmt{value}, receiver, allowed, states)
+	default:
+		return states, true
+	}
+}
+
+func assignmentWritesDecisionField(assignment *ast.AssignStmt, receiver, field string) bool {
+	for _, lhs := range assignment.Lhs {
+		_, fieldReceiver, ok := decisionFieldSelector(lhs, field)
+		if ok && fieldReceiver == receiver {
+			return true
 		}
 	}
 	return false
+}
+
+func assignedDecisionReason(assignment *ast.AssignStmt, receiver string) (string, bool) {
+	for i, lhs := range assignment.Lhs {
+		_, reasonReceiver, ok := decisionFieldSelector(lhs, "AuditReason")
+		if !ok || reasonReceiver != receiver || i >= len(assignment.Rhs) {
+			continue
+		}
+		return approvedReasonName(assignment.Rhs[i])
+	}
+	return "", false
+}
+
+func allReasonStatesCompatible(states map[reasonCompatibility]bool) bool {
+	for state := range states {
+		if state != reasonCompatible {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneReasonStates(states map[reasonCompatibility]bool) map[reasonCompatibility]bool {
+	clone := make(map[reasonCompatibility]bool, len(states))
+	for state := range states {
+		clone[state] = true
+	}
+	return clone
+}
+
+func mergeReasonStates(stateSets ...map[reasonCompatibility]bool) map[reasonCompatibility]bool {
+	merged := map[reasonCompatibility]bool{}
+	for _, states := range stateSets {
+		for state := range states {
+			merged[state] = true
+		}
+	}
+	return merged
 }
 
 func decisionFieldSelector(expr ast.Expr, field string) (*ast.SelectorExpr, string, bool) {
