@@ -114,3 +114,36 @@ Round-1 fix verification: `go test -p 2 ./pkg/hub/auditevent`,
 diff checks passed. The bounded single-concurrency golangci-lint run passed with
 `0 issues`. No gate was inconclusive; `make ci`/`make ci-full` remained
 prohibited.
+
+## Review round 2 test-evidence closure
+
+Production behavior remained unchanged. Commit `8c099c63` adds only exhaustive
+contract tests in `pkg/hub/auditevent/authorization_test.go`:
+
+- `TestAuthorizationOperationPermissionMatrix` derives its cases from the
+  catalog and the canonical permission registry. It exercised all 97 actions
+  against all 131 permissions (12,707 combinations): the 97 exact mappings
+  succeeded and all 12,610 non-mappings failed validation.
+- `TestAuthorizationOutcomeReasonMatrix` derives expected admission solely
+  from catalog `OutcomeReasons`. It exercised the complete two-outcome by
+  15-reason matrix (30 combinations): all 17 catalog-admitted combinations
+  succeeded and all 13 excluded combinations failed validation.
+- `TestAuthorizationCatalogSnapshotIsImmutable` mutates returned
+  `ActionPermissions`, nested `OutcomeReasons[].AllowedReasons`, and
+  `ProducerReasonMappings` data, then verifies a fresh `Catalog()` snapshot is
+  unchanged. Existing action and required-payload snapshot checks remain.
+
+The required post-push bounded checks passed:
+
+- `go test -count=1 -p 2 ./pkg/hub/auditevent` — PASS (`ok`, 0.387s).
+- `go test -count=1 -race -p 2 ./pkg/hub/auditevent` — PASS (`ok`, 2.319s).
+- `gofmt -l pkg/hub/auditevent/*_test.go` — PASS (no output).
+- `git diff --check d848ecfe2f27949865a292df3ee8f6cbdcebfd3b..HEAD`
+  — PASS (no output).
+- The scoped diff from `d848ecfe2f27949865a292df3ee8f6cbdcebfd3b`
+  through the test checkpoint contains only
+  `pkg/hub/auditevent/authorization_test.go`; the corresponding non-test
+  `pkg/hub/auditevent/*.go` diff is empty.
+
+Per the closure brief, no broad build, lint, `make ci`, or `make ci-full` gate
+was run. No required gate failed or was inconclusive.
