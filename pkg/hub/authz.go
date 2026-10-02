@@ -980,6 +980,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// applies to both. Step 10 below only overwrites DenyCause on decisions
 	// that were allowed at this point, so it cannot clobber this tag.
 	if !decision.Allowed && constraintLoadFailed {
+		decision.AuditReason = auditevent.ReasonDependencyUnavailable
 		decision.DenyCause = DenyCauseResolutionError
 	}
 

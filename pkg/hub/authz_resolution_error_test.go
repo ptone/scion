@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -172,6 +173,7 @@ func TestAuthz_IsIndeterminate_AccessConstraintLoadError(t *testing.T) {
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionAttach)
 	assert.False(t, decision.Allowed, "the deny-all restriction from the failed constraint load must reject even the owner relationship candidate")
+	assert.Equal(t, auditevent.ReasonDependencyUnavailable, decision.AuditReason)
 	assert.Equal(t, DenyCauseResolutionError, decision.DenyCause)
 	assert.True(t, decision.IsIndeterminate())
 	// Pins that the owner candidate was specifically rejected by Stage 5 of

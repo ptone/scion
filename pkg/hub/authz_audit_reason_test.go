@@ -138,14 +138,16 @@ func TestEveryProductionDecisionLiteralAssignsAuditReason(t *testing.T) {
 
 func TestAuthorizationContractGuardRejectsMutations(t *testing.T) {
 	tests := map[string]string{
-		"omitted reason":              `func f() Decision { return Decision{Allowed: false} }`,
-		"invalid converted reason":    `func f() Decision { return Decision{Allowed: false, AuditReason: auditevent.ReasonCode("bogus")} }`,
-		"incompatible allow reason":   `func f() Decision { return Decision{Allowed: true, AuditReason: auditevent.ReasonPolicyDenied} }`,
-		"nonliteral zero return":      `func f() Decision { var d Decision; return d }`,
-		"unproven variable return":    `func f(input Decision) Decision { return input }`,
-		"metadata read in other file": `func f(d Decision) bool { return d.AuditReason == auditevent.ReasonAllowed }`,
-		"operation ID callsite":       `func f() { _ = AuthzRequest{OperationID: authzop.OperationID("route.op")} }`,
-		"operation ID read":           `func f(request AuthzRequest) bool { return request.OperationID != "" }`,
+		"omitted reason":                       `func f() Decision { return Decision{Allowed: false} }`,
+		"invalid converted reason":             `func f() Decision { return Decision{Allowed: false, AuditReason: auditevent.ReasonCode("bogus")} }`,
+		"incompatible allow reason":            `func f() Decision { return Decision{Allowed: true, AuditReason: auditevent.ReasonPolicyDenied} }`,
+		"allowed mutation without reason":      `func f() Decision { d := Decision{Allowed: true, AuditReason: auditevent.ReasonAllowed}; d.Allowed = false; return d }`,
+		"allowed mutation incompatible reason": `func f(d *Decision) { d.Allowed = false; d.AuditReason = auditevent.ReasonAllowed }`,
+		"nonliteral zero return":               `func f() Decision { var d Decision; return d }`,
+		"unproven variable return":             `func f(input Decision) Decision { return input }`,
+		"metadata read in other file":          `func f(d Decision) bool { return d.AuditReason == auditevent.ReasonAllowed }`,
+		"operation ID callsite":                `func f() { _ = AuthzRequest{OperationID: authzop.OperationID("route.op")} }`,
+		"operation ID read":                    `func f(request AuthzRequest) bool { return request.OperationID != "" }`,
 	}
 	for name, body := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -397,12 +399,124 @@ func authorizationContractViolations(fset *token.FileSet, file *ast.File) []stri
 	})
 	for _, declaration := range file.Decls {
 		function, ok := declaration.(*ast.FuncDecl)
-		if !ok || function.Body == nil || !returnsDecision(function.Type) {
+		if !ok || function.Body == nil {
 			continue
 		}
-		checkDecisionReturns(function, report)
+		checkDecisionAllowedAssignments(function, report)
+		if returnsDecision(function.Type) {
+			checkDecisionReturns(function, report)
+		}
 	}
 	return violations
+}
+
+// checkDecisionAllowedAssignments requires a structural reason update whenever
+// production mutates a Decision's outcome after construction. The compatible
+// exact reason assignment must be in the same lexical block as the Allowed
+// write, so an unrelated branch cannot make a stale reason appear covered.
+func checkDecisionAllowedAssignments(function *ast.FuncDecl, report func(ast.Node, string)) {
+	decisionVars := map[string]bool{}
+	if function.Type.Params != nil {
+		for _, parameter := range function.Type.Params.List {
+			if !isDecisionType(parameter.Type) {
+				continue
+			}
+			for _, name := range parameter.Names {
+				decisionVars[name.Name] = true
+			}
+		}
+	}
+
+	ast.Inspect(function.Body, func(node ast.Node) bool {
+		switch value := node.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range value.Lhs {
+				ident, ok := lhs.(*ast.Ident)
+				if !ok || i >= len(value.Rhs) {
+					continue
+				}
+				if literal, ok := value.Rhs[i].(*ast.CompositeLit); ok && isDecisionType(literal.Type) {
+					decisionVars[ident.Name] = true
+				}
+			}
+		case *ast.ValueSpec:
+			if isDecisionType(value.Type) {
+				for _, name := range value.Names {
+					decisionVars[name.Name] = true
+				}
+			}
+		}
+		return true
+	})
+
+	checkAllReceivers := returnsDecision(function.Type)
+	ast.Inspect(function.Body, func(node ast.Node) bool {
+		block, ok := node.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		for _, statement := range block.List {
+			assignment, ok := statement.(*ast.AssignStmt)
+			if !ok {
+				continue
+			}
+			for i, lhs := range assignment.Lhs {
+				selector, receiver, ok := decisionFieldSelector(lhs, "Allowed")
+				if !ok || (!checkAllReceivers && !decisionVars[receiver]) {
+					continue
+				}
+				if i >= len(assignment.Rhs) {
+					report(selector, "Decision Allowed assignment must have a value")
+					continue
+				}
+				allowed, literal := boolLiteral(assignment.Rhs[i])
+				if !literal {
+					report(selector, "Decision Allowed assignment must use a boolean literal")
+					continue
+				}
+				if !blockHasCompatibleReasonAssignment(block, receiver, allowed) {
+					report(selector, "Decision Allowed assignment requires a compatible AuditReason assignment in the same block")
+				}
+			}
+		}
+		return true
+	})
+}
+
+func blockHasCompatibleReasonAssignment(block *ast.BlockStmt, receiver string, allowed bool) bool {
+	for _, statement := range block.List {
+		assignment, ok := statement.(*ast.AssignStmt)
+		if !ok {
+			continue
+		}
+		for i, lhs := range assignment.Lhs {
+			_, reasonReceiver, ok := decisionFieldSelector(lhs, "AuditReason")
+			if !ok || reasonReceiver != receiver || i >= len(assignment.Rhs) {
+				continue
+			}
+			reason, ok := approvedReasonName(assignment.Rhs[i])
+			if !ok {
+				continue
+			}
+			allowReason := reason == "ReasonAllowed" || reason == "ReasonInherited"
+			if allowed == allowReason {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func decisionFieldSelector(expr ast.Expr, field string) (*ast.SelectorExpr, string, bool) {
+	selector, ok := expr.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != field {
+		return nil, "", false
+	}
+	receiver, ok := selector.X.(*ast.Ident)
+	if !ok {
+		return nil, "", false
+	}
+	return selector, receiver.Name, true
 }
 
 func checkDecisionReturns(function *ast.FuncDecl, report func(ast.Node, string)) {

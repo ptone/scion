@@ -17,6 +17,7 @@ package hub
 import (
 	"sync"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 )
 
@@ -114,6 +115,7 @@ const deliverRoleGrantReason = "role grants do not satisfy deliver permissions"
 // that would otherwise name it as the granting source is cleared.
 func excludeKernelGrantForDeliver(d *Decision) {
 	d.Allowed = false
+	d.AuditReason = auditevent.ReasonPolicyDenied
 	d.Reason = deliverRoleGrantReason
 	d.MatchedGrant, d.RoleName, d.BindingID, d.Scope = "", "", "", ""
 	if d.Provenance != nil {

@@ -36,6 +36,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -440,6 +441,7 @@ func TestHubDelivery_RoleGrantExcludedNonExplain(t *testing.T) {
 	d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", false)
 	assert.False(t, d.Allowed, "reason %q", d.Reason)
 	assert.Equal(t, deliverRoleGrantReason, d.Reason)
+	assert.Equal(t, auditevent.ReasonPolicyDenied, d.AuditReason)
 	assert.Empty(t, d.MatchedGrant)
 	assert.Empty(t, d.RoleName)
 	assert.Empty(t, d.BindingID)
