@@ -35,6 +35,7 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 - **Settings File**: `~/.gemini/settings.json` (inside the agent container). Scion automatically updates `security.auth.selectedType` in this file to match the resolved auth method.
 - **System Prompt**: `~/.gemini/system_prompt.md` is automatically seeded if `system_prompt` is provided in the agent config. Additionally, Scion injects the system prompt into the `GEMINI_SYSTEM_MD` environment variable to ensure direct pickup by the Gemini CLI tool during initialization.
 - **Model Aliases**: Supports both traditional alias sizes and single-letter model alias mappings (`S` / `M` / `L` for Small / Medium / Large). The `provision.py` script automatically maps and handles fallback alias resolution during startup.
+- **Model selection**: the model is resolved in this order: the agent's model (`--model`, template, or Hub `default_model`, delivered as `SCION_MODEL`), then the harness-config default `model: medium` in `config.yaml`. Tier aliases resolve through the harness's `model_aliases` table, and the result is written to `model.name` in `~/.gemini/settings.json` on every start. The image's `settings.json` pins no model, so to change the default, edit `model` or `model_aliases` in the harness-config.
 
 ### Known Limitations
 - The `gemini` CLI tool must be installed in the container image (included in default images).

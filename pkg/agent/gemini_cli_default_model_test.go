@@ -33,10 +33,6 @@ import (
 // provisions against the real, embedded harnesses/gemini-cli/config.yaml so
 // a future edit that drops the default model or the alias fails here.
 func TestProvisionAgent_GeminiCLIDefaultModel(t *testing.T) {
-	realConfig, err := fs.ReadFile(harnessFS.FS, "gemini-cli/config.yaml")
-	if err != nil {
-		t.Fatalf("read embedded gemini-cli/config.yaml: %v", err)
-	}
 	aliases := harness.DefaultModelAliases("gemini-cli")
 	if aliases["medium"] == "" || aliases["large"] == "" {
 		t.Fatalf("gemini-cli model_aliases missing medium/large: %+v", aliases)
@@ -64,9 +60,7 @@ func TestProvisionAgent_GeminiCLIDefaultModel(t *testing.T) {
 			if err := os.MkdirAll(hcDir, 0755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), realConfig, 0644); err != nil {
-				t.Fatal(err)
-			}
+			stageEmbeddedHarnessBundle(t, "gemini-cli", hcDir)
 			tplDir := filepath.Join(globalScionDir, "templates", "gem-tpl")
 			if err := os.MkdirAll(tplDir, 0755); err != nil {
 				t.Fatal(err)
@@ -93,5 +87,36 @@ func TestProvisionAgent_GeminiCLIDefaultModel(t *testing.T) {
 				t.Errorf("cfg.Model = %q, want %q", cfg.Model, tc.want)
 			}
 		})
+	}
+}
+
+// stageEmbeddedHarnessBundle copies the embedded harnesses/<name> bundle
+// (config.yaml, provision.py, home/, ...) into dst, plus the canonical
+// scion_harness.py when the bundle vendors it via go generate.
+func stageEmbeddedHarnessBundle(t *testing.T, name, dst string) {
+	t.Helper()
+	err := fs.WalkDir(harnessFS.FS, name, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(name, p)
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+		data, err := fs.ReadFile(harnessFS.FS, p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0644)
+	})
+	if err != nil {
+		t.Fatalf("stage embedded %s bundle: %v", name, err)
+	}
+	lib := filepath.Join(dst, "scion_harness.py")
+	if _, err := os.Stat(lib); os.IsNotExist(err) {
+		if err := os.WriteFile(lib, harnessFS.CanonicalHarnessLib, 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
