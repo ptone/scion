@@ -283,12 +283,11 @@ type AgentStore interface {
 	// CountAgents returns the number of agents matching filter, applying the
 	// exact predicate ListAgents does for its total count, but without
 	// loading any rows. Used by the project sorted-mode candidate ceiling
-	// (design lists-graph.md 5.3 step 0) as a cheap pre-check before any
-	// member row is read.
+	// as a cheap pre-check before any member row is read.
 	CountAgents(ctx context.Context, filter AgentFilter) (int, error)
 
 	// ListAgentMembers returns up to max agents matching filter, in the
-	// sorted-mode total order for (sort, dir) (design lists-graph.md 4.2):
+	// sorted-mode total order for (sort, dir):
 	// sort="updated" orders by COALESCE(last_activity_event, updated) dir,
 	// then created DESC, id DESC; sort="created" orders by created dir, then
 	// id DESC. Each row carries exactly the fields agentResource
@@ -568,7 +567,7 @@ type AgentFilter struct {
 }
 
 // AgentMember is the narrow projection ListAgentMembers reads for sorted-mode
-// candidate evaluation (design lists-graph.md 5.1). It carries exactly
+// candidate evaluation. It carries exactly
 // the fields pkg/hub's agentResource(*Agent) reads — ID, OwnerID, ProjectID,
 // Labels, Ancestry — plus Phase, Created, Updated and LastActivityEvent for
 // positioning (pkg/store/agentsort) and stats.

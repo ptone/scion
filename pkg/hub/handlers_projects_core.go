@@ -2162,7 +2162,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 			NotFound(w, "Project")
 			return
 		}
-		// P1b (ptone/scion#2383, design lists-graph.md 5.3 "P1b build"): the
+		// P1b (ptone/scion#2383): the
 		// agent-JWT sorted path ships in P2. Reject before any SQL, so a
 		// sorted request from an agent token can never fall into the user
 		// path's read pass below.

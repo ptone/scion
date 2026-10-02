@@ -167,8 +167,8 @@ type ListAgentsResponse struct {
 	Agents     []AgentWithCapabilities `json:"agents"`
 	NextCursor string                  `json:"nextCursor,omitempty"`
 	TotalCount int                     `json:"totalCount"`
-	// Sort and Dir echo the request's sort mode (design lists-graph.md 4.6).
-	// Both are omitted unless the request supplied "sort" (4.1, 4.6):
+	// Sort and Dir echo the request's sort mode.
+	// Both are omitted unless the request supplied "sort":
 	// legacy-mode responses never set these.
 	Sort string `json:"sort,omitempty"`
 	Dir  string `json:"dir,omitempty"`
@@ -187,8 +187,7 @@ type ListAgentsResponse struct {
 	Capabilities *Capabilities    `json:"_capabilities,omitempty"`
 }
 
-// ListAgentsStats is the sorted-mode "stats" response block (design
-// lists-graph.md 4.6).
+// ListAgentsStats is the sorted-mode "stats" response block.
 type ListAgentsStats struct {
 	// Total is the exact readable, label(k=v)-filtered count, phase NOT
 	// applied (design 4.6).

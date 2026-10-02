@@ -26,8 +26,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 )
 
-// maxSortedLimit is the sorted-mode page size ceiling (design lists-graph.md
-// 4.1: "limit 1..500, Unchanged"). The legacy path gets this for free from
+// maxSortedLimit is the sorted-mode page size ceiling (limit 1..500, the
+// same range as legacy mode). The legacy path gets this for free from
 // the store's own clamp (entadapter/agent_store.go's maxAgentListLimit);
 // sorted mode slices in Go, so it must clamp for itself or an unbounded
 // limit lets a caller multiply the per-page decision cost (7 actions per
@@ -69,21 +69,21 @@ func effectivePagedPageSize(limit, n int) int {
 // P1b (ptone/scion#2383) implements sorted mode on the project agents
 // endpoint only: sort=updated (both directions), fit/complete, stats=1, the
 // candidate-count ceiling, and the v2 cursor. sort=created and the global
-// endpoint's sorted mode are later phases (design lists-graph.md 11 P1b/P2).
+// endpoint's sorted mode are later phases.
 // An agent-JWT caller supplying "sort" gets a 400 here, before any SQL; the
 // agent-JWT sorted path itself ships in P2 (design 5.3 "P1b build").
 
 // errCodeSortedViewUnavailable is the 422 error code for the sorted-mode
-// candidate ceiling refusal (design lists-graph.md 4.6).
+// candidate ceiling refusal.
 const errCodeSortedViewUnavailable = "sorted_view_unavailable"
 
 // agentJWTSortedModeMessage is the exact 400 message a sorted-mode request
-// from an agent JWT gets in P1b (design lists-graph.md 5.3 "P1b build");
+// from an agent JWT gets in P1b;
 // the agent-JWT hard-gate test asserts this exact string.
 const agentJWTSortedModeMessage = "sorted mode is not yet available for agent tokens"
 
 // writeSortedViewUnavailable writes the 422 refusal for the sorted-mode
-// candidate ceiling (design lists-graph.md 4.6): the APIError envelope with
+// candidate ceiling: the APIError envelope with
 // code "sorted_view_unavailable" and details.reason "too_many_candidates".
 func writeSortedViewUnavailable(w http.ResponseWriter) {
 	writeError(w, http.StatusUnprocessableEntity, errCodeSortedViewUnavailable,
@@ -94,9 +94,8 @@ func writeSortedViewUnavailable(w http.ResponseWriter) {
 // sortSuffix extends a cursor-binding endpoint string with the sort mode, so
 // a cursor minted for one sort/dir cannot bind-match a request for another
 // even if DecodeAgentCursor's own sort/dir fields were somehow bypassed
-// (design lists-graph.md 4.4: "Sort and dir enter only through the endpoint
-// string ... sortSuffix(e) = e in legacy mode, and e + "|sort=" + sort +
-// "|dir=" + dir in sorted mode").
+// (sort and dir enter only through the endpoint string: sortSuffix(e) = e
+// in legacy mode, and e + "|sort=" + sort + "|dir=" + dir in sorted mode).
 func sortSuffix(endpoint, sort, dir string) string {
 	if sort == "" {
 		return endpoint
@@ -116,8 +115,8 @@ type sortedProjectListParams struct {
 	cursor string
 }
 
-// parseSortedProjectListParams validates the sort-mode-specific parameters
-// (design lists-graph.md 4.1). filter/limit parsing shared with legacy mode
+// parseSortedProjectListParams validates the sort-mode-specific parameters.
+// filter/limit parsing shared with legacy mode
 // happens in the caller; this only validates sort, dir, fit, stats and the
 // fit/cursor exclusion. It writes the 400 response itself on failure so
 // callers can just check the returned ok.
@@ -176,7 +175,7 @@ func parseSortedProjectListParams(w http.ResponseWriter, query url.Values, limit
 }
 
 // memberResource builds the authorization Resource for a member row via the
-// one construction path design lists-graph.md 5.1/5.3 requires:
+// one construction path the sorted-mode equality gate requires:
 // memberResource(m) = agentResource(m.ToAgent()). Comparing this against
 // agentResource(full) with resourceEqual is the whole basis of the step 5a
 // race check, and the decision-count test suite's non-waivable
@@ -244,8 +243,8 @@ func (s *Server) loadFullRowsForPage(ctx context.Context, ids []string, includeD
 // recheckStillMatchesFilter re-applies memberFilter (the request filter with
 // Phase cleared) to the page's freshly re-read rows by asking the store the
 // same question agentFilterPredicates already answers for the rest of this
-// request, rather than hand-duplicating its logic here (design lists-graph.md
-// 5.3 step 5a: "the same matcher as the store predicate"). A hand-written
+// request, rather than hand-duplicating its logic here (the step 5a
+// recheck must use the same matcher as the store predicate). A hand-written
 // duplicate would drift as store.AgentFilter grows; asking the store
 // directly cannot. memberFilter.ProjectID is already the request project,
 // so a row that moved to another project between the two reads is excluded
@@ -291,7 +290,7 @@ func positionAfterCursor(sortKey, dir string, members []store.AgentMember, cur s
 	return len(members)
 }
 
-// buildAgentStats computes the design lists-graph.md 4.6 "stats" block over
+// buildAgentStats computes the sorted-mode "stats" block over
 // members: total and running counts, plus the full [id,phase] population
 // (never omitted on the project endpoint, which the 2,000 candidate ceiling
 // already bounds).
@@ -323,8 +322,8 @@ func filterMembersByPhase(members []store.AgentMember, phase string) []store.Age
 }
 
 // listProjectAgentsSorted implements the project endpoint's sorted mode
-// (design lists-graph.md 5.3, user path only — the agent-JWT sorted path is
-// P2). The agent.list gate has already run in the caller.
+// (user path only — the agent-JWT sorted path is P2). The agent.list gate
+// has already run in the caller.
 func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request, projectID string, query url.Values, filter store.AgentFilter, p sortedProjectListParams) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
@@ -551,8 +550,8 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// isSortedModeRequest reports whether query requests sorted mode (design
-// lists-graph.md 4.1: "sort ... absent (legacy)").
+// isSortedModeRequest reports whether query requests sorted mode (an
+// absent "sort" parameter means legacy mode).
 func isSortedModeRequest(query url.Values) bool {
 	return query.Get("sort") != ""
 }

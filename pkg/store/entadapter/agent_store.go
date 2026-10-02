@@ -861,9 +861,9 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 
 // CountAgents returns the number of agents matching filter, using the exact
 // predicate ListAgents applies for its own total count (agentFilterPredicates),
-// with no row loaded. It backs the sorted-mode candidate ceiling pre-check
-// (design lists-graph.md 5.3 step 0): a cheap COUNT before any member row is
-// read, so a candidate pool above the ceiling costs no more than one query.
+// with no row loaded. It backs the sorted-mode candidate ceiling pre-check:
+// a cheap COUNT before any member row is read, so a candidate pool above
+// the ceiling costs no more than one query.
 func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) (int, error) {
 	preds, err := agentFilterPredicates(filter)
 	if err != nil {
@@ -881,7 +881,7 @@ func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) 
 // reads (ID, OwnerID, ProjectID, Labels, Ancestry), plus Phase, Created,
 // Updated and LastActivityEvent for positioning (pkg/store/agentsort) and
 // stats. This list, not a separately maintained one, is the projection's
-// definition (design lists-graph.md 5.1): widening agentResource's
+// definition: widening agentResource's
 // inputs without adding the new field here is exactly what the non-waivable
 // equality gate is meant to catch. That gate -- a reflection-filled
 // store.Agent written and read back through the real ListAgentMembers and
@@ -930,8 +930,8 @@ func entAgentToMember(a *ent.Agent) store.AgentMember {
 }
 
 // ListAgentMembers returns up to max agents matching filter, projected down
-// to the narrow AgentMember shape and ordered per the section-4.2 total
-// order for (sort, dir) (design lists-graph.md 5.1, 5.3).
+// to the narrow AgentMember shape and ordered per the sorted-mode total
+// order for (sort, dir) (see pkg/store/agentsort).
 //
 // The SQL SELECT list is exactly agentMemberSelectFields — no wide column
 // (AppliedConfig in particular) is ever read off the wire for a candidate
@@ -946,8 +946,8 @@ func entAgentToMember(a *ent.Agent) store.AgentMember {
 // keeps exactly one implementation of the tie-break rules instead of asking
 // each dialect to reproduce it) and sorts them in Go.
 func (s *AgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
-	// Fail closed on an unrecognized sort or dir (design lists-graph.md 5.1:
-	// "Unknown values return ErrInvalidInput"), rather than letting
+	// Fail closed on an unrecognized sort or dir (unknown values return
+	// ErrInvalidInput), rather than letting
 	// agentsort.KeyFor/Less silently fall back to a default ordering. The
 	// hub handler already validates these before calling in; this is the
 	// store API's own contract, independent of any one caller.
