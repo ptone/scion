@@ -348,6 +348,7 @@ func TestAuthorizationBuilderRenderAndSinksRaceClosure(t *testing.T) {
 	event, err := BuildAuthorizationDecision(ctx, input)
 	require.NoError(t, err)
 	sink := NewCaptureSink()
+	errors := make(chan error, 200)
 
 	var workers sync.WaitGroup
 	workers.Add(2)
@@ -362,11 +363,15 @@ func TestAuthorizationBuilderRenderAndSinksRaceClosure(t *testing.T) {
 		defer workers.Done()
 		for range 100 {
 			_, err := Render(event)
-			require.NoError(t, err)
-			require.NoError(t, sink.Emit(ctx, event))
+			errors <- err
+			errors <- sink.Emit(ctx, event)
 		}
 	}()
 	workers.Wait()
+	close(errors)
+	for err := range errors {
+		assert.NoError(t, err)
+	}
 }
 
 func TestAuthorizationAllowAndDenyRenderRawSlogAndOTelJSONEquivalence(t *testing.T) {
