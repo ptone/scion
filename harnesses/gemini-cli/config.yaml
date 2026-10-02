@@ -31,6 +31,13 @@ interrupt_key: C-c
 instructions_file: .gemini/GEMINI.md
 system_prompt_file: .gemini/system_prompt.md
 system_prompt_mode: native
+# Default model for agents started without an explicit --model. The broker
+# applies it as the harness-config base layer and resolves it through
+# model_aliases (pkg/agent/provision.go) before setting SCION_MODEL;
+# provision.py falls back to it when SCION_MODEL is empty. The image's
+# home/.gemini/settings.json deliberately pins no model.name, so this
+# alias table is the single source of truth (ptone/scion#2674).
+model: medium
 model_aliases:
   small: gemini-3.5-flash-lite
   medium: gemini-3.6-flash
