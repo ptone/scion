@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -104,21 +105,22 @@ func TestAuthorizationEveryDeclaredOperationValidates(t *testing.T) {
 	}
 }
 
-func TestAuthorizationRejectsEveryMismatchedOperationPermission(t *testing.T) {
+func TestAuthorizationOperationPermissionMatrix(t *testing.T) {
 	t.Parallel()
 	pairs := declaredAuthorizationActionPermissions()
 	require.Len(t, pairs, len(declaredAuthorizationOperations))
-	for i, pair := range pairs {
-		event := validAuthorizationEvent(t)
-		event.Action = pair.Action
-		event.Payload = AuthorizationPayload{Permission: PermissionName(pairs[(i+1)%len(pairs)].Permission), ReasonCode: ReasonAllowed}
-		if pairs[(i+1)%len(pairs)].Permission == pair.Permission {
-			event.Payload = AuthorizationPayload{Permission: "agent.read", ReasonCode: ReasonAllowed}
-			if pair.Permission == "agent.read" {
-				event.Payload = AuthorizationPayload{Permission: "secret.write", ReasonCode: ReasonAllowed}
+	for _, pair := range pairs {
+		for _, permission := range permissions.Registry {
+			event := validAuthorizationEvent(t)
+			event.Action = pair.Action
+			event.Payload = AuthorizationPayload{Permission: PermissionName(permission.ID), ReasonCode: ReasonAllowed}
+			err := Validate(event)
+			if permission.ID == pair.Permission {
+				assert.NoError(t, err, "%s/%s", pair.Action, permission.ID)
+			} else {
+				assert.Error(t, err, "%s/%s", pair.Action, permission.ID)
 			}
 		}
-		assert.Error(t, Validate(event), pair.Action)
 	}
 }
 
@@ -358,22 +360,36 @@ func TestAuthorizationProducerMappingContract(t *testing.T) {
 	}
 }
 
-func TestAuthorizationReasonCodeClosedSet(t *testing.T) {
+func TestAuthorizationOutcomeReasonMatrix(t *testing.T) {
 	t.Parallel()
 
 	entry := Catalog()[1]
-	for _, schema := range entry.OutcomeReasons {
-		for _, reason := range schema.AllowedReasons {
+	admitted, rejected := 0, 0
+	for _, outcome := range []Outcome{OutcomeAllow, OutcomeDeny} {
+		for _, reason := range reasonCodeStrings() {
 			event := validAuthorizationEvent(t)
-			event.Outcome = schema.Outcome
+			event.Outcome = outcome
 			event.Severity = SeverityInfo
-			if schema.Outcome == OutcomeDeny {
+			if outcome == OutcomeDeny {
 				event.Severity = SeverityWarning
 			}
 			event.Payload = AuthorizationPayload{Permission: "agent.read", ReasonCode: ReasonCode(reason)}
-			assert.NoError(t, Validate(event), reason)
+			wantValid := false
+			for _, schema := range entry.OutcomeReasons {
+				wantValid = wantValid || schema.Outcome == outcome && containsString(schema.AllowedReasons, reason)
+			}
+			err := Validate(event)
+			if wantValid {
+				admitted++
+				assert.NoError(t, err, "%s/%s", outcome, reason)
+			} else {
+				rejected++
+				assert.Error(t, err, "%s/%s", outcome, reason)
+			}
 		}
 	}
+	assert.Equal(t, 17, admitted)
+	assert.Equal(t, 13, rejected)
 }
 
 func TestAuthorizationRejectsOutcomeIncompatibleReasons(t *testing.T) {
@@ -397,9 +413,15 @@ func TestAuthorizationCatalogSnapshotIsImmutable(t *testing.T) {
 
 	first := Catalog()
 	first[1].AllowedActions[0] = "operation-alias-canary"
+	first[1].ActionPermissions[0].Permission = "action-permission-alias-canary"
+	first[1].OutcomeReasons[0].AllowedReasons[0] = "outcome-reason-alias-canary"
+	first[1].ProducerReasonMappings[0].Reason = "producer-reason-alias-canary"
 	first[1].RequiredPayloadLeaves[0].AllowedValues[0] = "permission-alias-canary"
 	second := Catalog()
 	assert.NotContains(t, second[1].AllowedActions, "operation-alias-canary")
+	assert.NotEqual(t, "action-permission-alias-canary", second[1].ActionPermissions[0].Permission)
+	assert.NotContains(t, second[1].OutcomeReasons[0].AllowedReasons, "outcome-reason-alias-canary")
+	assert.NotEqual(t, ReasonCode("producer-reason-alias-canary"), second[1].ProducerReasonMappings[0].Reason)
 	assert.NotContains(t, second[1].RequiredPayloadLeaves[0].AllowedValues, "permission-alias-canary")
 }
 
