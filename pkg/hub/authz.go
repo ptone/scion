@@ -541,11 +541,10 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		denyReason = "credential kind does not match identity"
 	}
 	if denyReason != "" {
-		reason := auditevent.ReasonInvalidRequest
 		if isNilIdentity(request.Principal.Identity) {
-			reason = auditevent.ReasonNotAuthenticated
+			return decorateDecision(Decision{Allowed: false, Reason: denyReason, AuditReason: auditevent.ReasonNotAuthenticated}, request, derivedPrincipal, derivedCredential, auditPermissionID(request))
 		}
-		return decorateDecision(Decision{Allowed: false, Reason: denyReason, AuditReason: reason}, request, derivedPrincipal, derivedCredential, auditPermissionID(request))
+		return decorateDecision(Decision{Allowed: false, Reason: denyReason, AuditReason: auditevent.ReasonInvalidRequest}, request, derivedPrincipal, derivedCredential, auditPermissionID(request))
 	}
 
 	principal := request.Principal
@@ -1263,11 +1262,11 @@ func bfsGroupPath(directGroups map[string]bool, target string, childToParents ma
 // kernelDecisionToDecision converts a KernelDecision to the external Decision type.
 func kernelDecisionToDecision(kd KernelDecision, permissionID string) Decision {
 	d := Decision{
-		Allowed:     kd.Allowed,
+		Allowed:     false,
 		AuditReason: auditevent.ReasonPermissionMissing,
 	}
 	if kd.Allowed {
-		d.AuditReason = auditevent.ReasonAllowed
+		d = Decision{Allowed: true, AuditReason: auditevent.ReasonAllowed}
 		// R-4 fix: select a granting binding whose role actually contains
 		// the requested permission (ContainsRequested==true). Previously,
 		// GrantingBindings[0] was used unconditionally, which could name a
@@ -2392,21 +2391,38 @@ func storeToHubAccessConstraint(sc *store.AccessConstraint) *AccessConstraint {
 // pre-existing isProjectOwnerOrAdmin allowed admins to manage membership,
 // which the C0 exit gate disallows. Contract decision to relax: Phase 1
 // governance matrix.
+type projectAuthorityLookupStatus uint8
+
+const (
+	projectAuthorityDenied projectAuthorityLookupStatus = iota
+	projectAuthorityAllowed
+	projectAuthorityDependencyUnavailable
+)
+
 func (a *AuthzService) isProjectOwner(ctx context.Context, userID, projectID string) bool {
+	return a.projectOwnerStatus(ctx, userID, projectID) == projectAuthorityAllowed
+}
+
+// projectOwnerStatus preserves isProjectOwner's authorization semantics while
+// exposing dependency incompleteness to structural audit-reason selection.
+func (a *AuthzService) projectOwnerStatus(ctx context.Context, userID, projectID string) projectAuthorityLookupStatus {
 	if userID == "" || projectID == "" {
-		return false
+		return projectAuthorityDenied
 	}
 
 	// Query direct-user-only bindings (no group expansion).
 	bindings, err := a.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
-	if err != nil || len(bindings) == 0 {
-		return false
+	if err != nil {
+		return projectAuthorityDependencyUnavailable
+	}
+	if len(bindings) == 0 {
+		return projectAuthorityDenied
 	}
 
 	// Resolve the project-owner role definition once per call.
 	ownerRoleDef, err := a.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	if err != nil || ownerRoleDef == nil {
-		return false
+		return projectAuthorityDependencyUnavailable
 	}
 
 	now := time.Now()
@@ -2424,31 +2440,47 @@ func (a *AuthzService) isProjectOwner(ctx context.Context, userID, projectID str
 		if rb.ExpiresAt != nil && now.After(*rb.ExpiresAt) {
 			continue
 		}
-		return true
+		return projectAuthorityAllowed
 	}
-	return false
+	return projectAuthorityDenied
 }
 
 // isProjectOwnerOrAdmin reports whether the user has project-owner or
 // project-admin role in the given project. Uses the batched query path.
 func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projectID string) bool {
+	return a.projectOwnerOrAdminStatus(ctx, userID, projectID) == projectAuthorityAllowed
+}
+
+// projectOwnerOrAdminStatus preserves isProjectOwnerOrAdmin's authorization
+// outcome while retaining whether a deny followed an incomplete dependency
+// lookup. Successful evidence still wins over an earlier lookup failure.
+func (a *AuthzService) projectOwnerOrAdminStatus(ctx context.Context, userID, projectID string) projectAuthorityLookupStatus {
 	if userID == "" || projectID == "" {
-		return false
+		return projectAuthorityDenied
 	}
+	dependencyUnavailable := false
 
 	// 1. Direct user membership (existing behavior).
 	membership, err := a.store.GetProjectMembership(ctx, projectID, userID)
 	if err == nil && membership != nil {
 		if membership.Role == store.ProjectRoleOwner || membership.Role == store.ProjectRoleAdmin {
-			return true
+			return projectAuthorityAllowed
 		}
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		dependencyUnavailable = true
 	}
 
 	// 2. Group-expanded: check if any of the user's groups have owner/admin
 	//    role binding on this project.
 	groupIDs, err := a.store.GetEffectiveGroups(ctx, userID)
-	if err != nil || len(groupIDs) == 0 {
-		return false
+	if err != nil {
+		return projectAuthorityDependencyUnavailable
+	}
+	if len(groupIDs) == 0 {
+		if dependencyUnavailable {
+			return projectAuthorityDependencyUnavailable
+		}
+		return projectAuthorityDenied
 	}
 
 	// Build principals for batched query.
@@ -2458,21 +2490,25 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 	}
 	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
 	if err != nil {
-		return false
+		return projectAuthorityDependencyUnavailable
 	}
 	for _, b := range bindings {
 		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
 			continue
 		}
 		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if err != nil {
+		if err != nil || rd == nil {
+			dependencyUnavailable = true
 			continue
 		}
 		if rd.Name == store.ProjectRoleOwner || rd.Name == store.ProjectRoleAdmin {
-			return true
+			return projectAuthorityAllowed
 		}
 	}
-	return false
+	if dependencyUnavailable {
+		return projectAuthorityDependencyUnavailable
+	}
+	return projectAuthorityDenied
 }
 
 // getEffectivePermissions resolves the set of permission IDs granted to a

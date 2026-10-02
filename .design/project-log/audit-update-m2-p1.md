@@ -11,6 +11,11 @@ targeted gates. The final delivery SHA also contains this project log and is
 reported in the completion handoff because a commit cannot contain its own
 SHA.
 
+Review round 1 fixes are based on reviewed head
+`6fd2c6ac321f7024ec4fdc74cc0b65a9bf26e2ef`. They address only R1's
+dependency-aware project-membership reason and R2's closed producer guard;
+P2/emitter work remains excluded.
+
 `AuthzRequest.OperationID` has the exact `authzop.OperationID` type and
 `Decision.AuditReason` has the exact `auditevent.ReasonCode` type. Both use
 `json:"-"`, so this producer-only metadata does not change request or decision
@@ -26,9 +31,9 @@ wire representations. P1 does not populate `OperationID` anywhere.
 | permission denied | deny | `permission_missing` | kernel default deny and missing delegation permission |
 | policy denied | deny | `policy_denied` | applied restrictions, credential scope, relationship restriction, delegation ceiling |
 | unauthenticated | deny | `not_authenticated` | missing authorization principal or delegation actor |
-| unauthorized | deny | `not_authorized` | delivery credential gate and project membership authority failure |
+| unauthorized | deny | `not_authorized` | delivery credential gate and healthy project membership authority denial |
 | invalid request | deny | `invalid_request` | mismatched/unsupported identity, unresolvable permission input, unknown grant, missing project input |
-| dependency unavailable | deny | `dependency_unavailable` | principal, binding, role, group, and effective-permission dependency errors |
+| dependency unavailable | deny | `dependency_unavailable` | principal, membership, binding, role, group/effective-group, and effective-permission dependency errors |
 | check unavailable | deny | `check_unavailable` | delegation ceiling check error and unavailable material authorization service |
 | closed fallback | deny | `unspecified` | reserved closed A1 fallback; no current producer exit requires it |
 
@@ -59,12 +64,26 @@ human-readable `Decision.Reason` prose.
   `check_unavailable`.
 
 `TestEveryProductionDecisionLiteralAssignsAuditReason` parses every production
-Go file in `pkg/hub` and fails on any `Decision` literal without an explicit
-`AuditReason`. Focused behavior tests cover every currently produced A1 reason
-and enforce allow/reason outcome compatibility. Static AST guards prove
-`AuthzRequest.OperationID` and `Decision.AuditReason` are never read by P1
-authorization branching; changing `OperationID` also leaves the observable
-decision unchanged.
+Go file in `pkg/hub`. It rejects omitted or zero-value `Decision` origins,
+named zero returns, conversions, `new(Decision)`, dynamic/converted/unknown
+reasons, nonliteral construction outcomes, and statically incompatible
+allow/reason pairs. Exact approved constant assignments are the sole narrow
+post-construction allowance. The same package-wide scan rejects
+`Decision.AuditReason` reads and any read, write, or composite-literal
+population of `AuthzRequest.OperationID`; it is not limited to a file list.
+Mutation cases prove rejection of omitted, converted-invalid, incompatible,
+and nonliteral-zero decisions, an audit metadata read in an otherwise unlisted
+file, and both OperationID population and reading. Focused behavior tests cover
+every currently produced A1 reason and enforce outcome compatibility.
+
+For R1, direct-owner and owner/admin resolution now retain a private typed
+three-state status: allowed, healthy denial, or dependency unavailable. The
+existing bool helpers remain as compatibility wrappers for other callers.
+`canDelegateProjectMembership` preserves every authorization result and its
+human-readable reason, but selects `dependency_unavailable` when neither path
+can authorize and any direct binding, owner-role, membership, effective-group,
+group-binding, or group-role lookup was incomplete. Successful authority
+evidence still wins over an earlier lookup failure.
 
 ## Verification
 
@@ -73,6 +92,15 @@ The initial RED run on the untouched producer failed as intended:
 - `go test -count=1 -p 2 ./pkg/hub -run 'TestAuthorizationProducerContractFields|TestEveryProductionDecisionLiteralAssignsAuditReason'`
   — FAIL: both pinned fields were missing and 48 production `Decision`
   literals were unassigned.
+
+Review-round RED proof on exact reviewed head `6fd2c6a`:
+
+- `TestProjectMembershipDependencyFailuresRetainDenyAndProse` failed at all
+  six injected lookup stages with actual `not_authorized` instead of expected
+  `dependency_unavailable`; `Allowed=false` and the existing prose matched.
+- The strengthened production scan rejected the reviewed tree's dynamic
+  reason, dynamic outcome, zero `Decision` declaration, and missing `Allowed`
+  assignment that the previous guard accepted.
 
 Post-implementation checks:
 

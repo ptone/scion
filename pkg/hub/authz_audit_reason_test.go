@@ -16,6 +16,8 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -29,9 +31,78 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type projectAuthorityFailureStage string
+
+const (
+	failDirectOwnerBindings projectAuthorityFailureStage = "direct owner binding lookup"
+	failDirectOwnerRole     projectAuthorityFailureStage = "direct owner role resolution"
+	failMembership          projectAuthorityFailureStage = "membership lookup"
+	failEffectiveGroups     projectAuthorityFailureStage = "effective-group lookup"
+	failGroupBindings       projectAuthorityFailureStage = "group binding lookup"
+	failGroupRole           projectAuthorityFailureStage = "group role resolution"
+)
+
+type projectAuthorityFailureStore struct {
+	store.Store
+	stage projectAuthorityFailureStage
+}
+
+func (s *projectAuthorityFailureStore) ListRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) ([]*store.RoleBinding, error) {
+	switch s.stage {
+	case failDirectOwnerBindings:
+		return nil, errors.New("injected direct owner binding failure")
+	case failDirectOwnerRole:
+		return []*store.RoleBinding{{RoleDefinitionID: "owner-role", ScopeType: store.RoleScopeProject, ScopeID: "project-1"}}, nil
+	default:
+		return s.Store.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
+	}
+}
+
+func (s *projectAuthorityFailureStore) GetRoleDefinitionByName(ctx context.Context, name, scopeType string) (*store.RoleDefinition, error) {
+	if s.stage == failDirectOwnerRole {
+		return nil, errors.New("injected direct owner role failure")
+	}
+	return s.Store.GetRoleDefinitionByName(ctx, name, scopeType)
+}
+
+func (s *projectAuthorityFailureStore) GetProjectMembership(ctx context.Context, projectID, userID string) (*store.ProjectMembership, error) {
+	if s.stage == failMembership {
+		return nil, errors.New("injected membership failure")
+	}
+	return s.Store.GetProjectMembership(ctx, projectID, userID)
+}
+
+func (s *projectAuthorityFailureStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
+	if s.stage == failEffectiveGroups {
+		return nil, errors.New("injected effective-group failure")
+	}
+	if s.stage == failGroupBindings || s.stage == failGroupRole {
+		return []string{"group-1"}, nil
+	}
+	return s.Store.GetEffectiveGroups(ctx, userID)
+}
+
+func (s *projectAuthorityFailureStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes, scopeIDs []string) ([]*store.RoleBinding, error) {
+	if s.stage == failGroupBindings {
+		return nil, errors.New("injected group binding failure")
+	}
+	if s.stage == failGroupRole {
+		return []*store.RoleBinding{{RoleDefinitionID: "group-role", ScopeType: store.RoleScopeProject, ScopeID: "project-1"}}, nil
+	}
+	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
+func (s *projectAuthorityFailureStore) GetRoleDefinition(ctx context.Context, id string) (*store.RoleDefinition, error) {
+	if s.stage == failGroupRole {
+		return nil, errors.New("injected group role failure")
+	}
+	return s.Store.GetRoleDefinition(ctx, id)
+}
 
 func TestAuthorizationProducerContractFields(t *testing.T) {
 	requestField, ok := reflect.TypeOf(AuthzRequest{}).FieldByName("OperationID")
@@ -49,7 +120,7 @@ func TestEveryProductionDecisionLiteralAssignsAuditReason(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
 
-	var unassigned []string
+	var violations []string
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
 			continue
@@ -58,28 +129,31 @@ func TestEveryProductionDecisionLiteralAssignsAuditReason(t *testing.T) {
 		fset := token.NewFileSet()
 		file, err := parser.ParseFile(fset, entry.Name(), nil, 0)
 		require.NoError(t, err, entry.Name())
-		ast.Inspect(file, func(node ast.Node) bool {
-			literal, ok := node.(*ast.CompositeLit)
-			if !ok || !isDecisionType(literal.Type) {
-				return true
-			}
-			for _, element := range literal.Elts {
-				field, ok := element.(*ast.KeyValueExpr)
-				if !ok {
-					continue
-				}
-				if ident, ok := field.Key.(*ast.Ident); ok && ident.Name == "AuditReason" {
-					return true
-				}
-			}
-			pos := fset.Position(literal.Pos())
-			unassigned = append(unassigned, filepath.ToSlash(pos.String()))
-			return true
-		})
+		violations = append(violations, authorizationContractViolations(fset, file)...)
 	}
 
-	sort.Strings(unassigned)
-	assert.Empty(t, unassigned, "every production Decision construction must assign AuditReason")
+	sort.Strings(violations)
+	assert.Empty(t, violations, "production authorization metadata contract violations")
+}
+
+func TestAuthorizationContractGuardRejectsMutations(t *testing.T) {
+	tests := map[string]string{
+		"omitted reason":              `func f() Decision { return Decision{Allowed: false} }`,
+		"invalid converted reason":    `func f() Decision { return Decision{Allowed: false, AuditReason: auditevent.ReasonCode("bogus")} }`,
+		"incompatible allow reason":   `func f() Decision { return Decision{Allowed: true, AuditReason: auditevent.ReasonPolicyDenied} }`,
+		"nonliteral zero return":      `func f() Decision { var d Decision; return d }`,
+		"metadata read in other file": `func f(d Decision) bool { return d.AuditReason == auditevent.ReasonAllowed }`,
+		"operation ID callsite":       `func f() { _ = AuthzRequest{OperationID: authzop.OperationID("route.op")} }`,
+		"operation ID read":           `func f(request AuthzRequest) bool { return request.OperationID != "" }`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "unlisted_production_file.go", "package hub\n"+body, 0)
+			require.NoError(t, err)
+			assert.NotEmpty(t, authorizationContractViolations(fset, file), "mutation must be rejected")
+		})
+	}
 }
 
 func TestAuthorizationAuditReasonMappings(t *testing.T) {
@@ -178,6 +252,30 @@ func TestAuthorizationAuditReasonMappings(t *testing.T) {
 	})
 }
 
+func TestProjectMembershipDependencyFailuresRetainDenyAndProse(t *testing.T) {
+	stages := []projectAuthorityFailureStage{
+		failDirectOwnerBindings,
+		failDirectOwnerRole,
+		failMembership,
+		failEffectiveGroups,
+		failGroupBindings,
+		failGroupRole,
+	}
+	for _, stage := range stages {
+		t.Run(string(stage), func(t *testing.T) {
+			_, backingStore := authzTestSetup(t)
+			service := NewAuthzService(&projectAuthorityFailureStore{Store: backingStore, stage: stage}, slog.Default())
+			identity := NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "api")
+
+			decision := service.canDelegateProjectMembership(context.Background(), identity, GrantDescriptor{ProjectID: "project-1"})
+
+			assert.False(t, decision.Allowed)
+			assert.Equal(t, "only project owners and admins can manage project membership", decision.Reason)
+			assert.Equal(t, auditevent.ReasonDependencyUnavailable, decision.AuditReason)
+		})
+	}
+}
+
 func TestAuthorizationAuditMetadataCannotInfluenceBranching(t *testing.T) {
 	service := NewAuthzService(nil, slog.Default())
 	request := AuthzRequest{}
@@ -189,13 +287,6 @@ func TestAuthorizationAuditMetadataCannotInfluenceBranching(t *testing.T) {
 	assert.Equal(t, withoutOperation.Reason, withOperation.Reason)
 	assert.Equal(t, withoutOperation.AuditReason, withOperation.AuditReason)
 
-	assertProductionFieldNeverRead(t, "OperationID", map[string]bool{"authz.go": true})
-	assertProductionFieldNeverRead(t, "AuditReason", map[string]bool{
-		"authz.go":                    true,
-		"authz_candelegate.go":        true,
-		"authz_relationship_rules.go": true,
-		"material_runtime.go":         true,
-	})
 }
 
 func assertDecisionAuditReason(t *testing.T, decision Decision, want auditevent.ReasonCode) {
@@ -208,49 +299,202 @@ func assertDecisionAuditReason(t *testing.T, decision Decision, want auditevent.
 	}
 }
 
-func assertProductionFieldNeverRead(t *testing.T, fieldName string, files map[string]bool) {
-	t.Helper()
-	entries, err := os.ReadDir(".")
-	require.NoError(t, err)
-
-	var reads []string
-	for _, entry := range entries {
-		if entry.IsDir() || !files[entry.Name()] {
-			continue
-		}
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, entry.Name(), nil, 0)
-		require.NoError(t, err, entry.Name())
-
-		assigned := map[token.Pos]bool{}
-		ast.Inspect(file, func(node ast.Node) bool {
-			assignment, ok := node.(*ast.AssignStmt)
-			if !ok {
-				return true
-			}
-			for _, lhs := range assignment.Lhs {
-				if selector, ok := lhs.(*ast.SelectorExpr); ok && selector.Sel.Name == fieldName {
-					assigned[selector.Pos()] = true
-				}
-			}
-			return true
-		})
-		ast.Inspect(file, func(node ast.Node) bool {
-			selector, ok := node.(*ast.SelectorExpr)
-			if ok && selector.Sel.Name == fieldName && !assigned[selector.Pos()] && !isPackageSelector(selector) {
-				reads = append(reads, filepath.ToSlash(fset.Position(selector.Pos()).String()))
-			}
-			return true
-		})
-	}
-
-	sort.Strings(reads)
-	assert.Empty(t, reads, "%s is metadata and must not be read by production authorization code", fieldName)
+var approvedDecisionReasons = map[string]bool{
+	"ReasonAllowed":               true,
+	"ReasonInherited":             true,
+	"ReasonPermissionMissing":     true,
+	"ReasonPolicyDenied":          true,
+	"ReasonNotAuthenticated":      true,
+	"ReasonNotAuthorized":         true,
+	"ReasonInvalidRequest":        true,
+	"ReasonDependencyUnavailable": true,
+	"ReasonCheckUnavailable":      true,
 }
 
-func isPackageSelector(selector *ast.SelectorExpr) bool {
-	ident, ok := selector.X.(*ast.Ident)
-	return ok && (ident.Name == "auditevent" || ident.Name == "authzop")
+// authorizationContractViolations is deliberately package-wide and
+// syntax-closed. Decision literals must use keyed, literal outcomes and exact
+// approved auditevent constants. The only post-construction allowance is an
+// assignment of one of those exact constants; reads remain forbidden.
+func authorizationContractViolations(fset *token.FileSet, file *ast.File) []string {
+	var violations []string
+	report := func(node ast.Node, message string) {
+		violations = append(violations, fmt.Sprintf("%s: %s", filepath.ToSlash(fset.Position(node.Pos()).String()), message))
+	}
+
+	assignedAuditReasons := map[token.Pos]bool{}
+	authzRequestVars := map[string]bool{}
+	ast.Inspect(file, func(node ast.Node) bool {
+		switch value := node.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range value.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok && i < len(value.Rhs) {
+					if literal, ok := value.Rhs[i].(*ast.CompositeLit); ok && isAuthzRequestType(literal.Type) {
+						authzRequestVars[ident.Name] = true
+					}
+				}
+				selector, ok := lhs.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "AuditReason" {
+					continue
+				}
+				assignedAuditReasons[selector.Pos()] = true
+				if i >= len(value.Rhs) || !isApprovedReasonSelector(value.Rhs[i]) {
+					report(selector, "AuditReason assignment must use an exact approved auditevent constant")
+				}
+			}
+		case *ast.ValueSpec:
+			if isAuthzRequestType(value.Type) {
+				for _, name := range value.Names {
+					authzRequestVars[name.Name] = true
+				}
+			}
+			if isDecisionType(value.Type) && len(value.Values) == 0 {
+				report(value, "zero-value Decision declaration is forbidden")
+			}
+		case *ast.Field:
+			if isAuthzRequestType(value.Type) {
+				for _, name := range value.Names {
+					authzRequestVars[name.Name] = true
+				}
+			}
+		}
+		return true
+	})
+
+	ast.Inspect(file, func(node ast.Node) bool {
+		switch value := node.(type) {
+		case *ast.CompositeLit:
+			if isDecisionType(value.Type) {
+				checkDecisionLiteral(value, report)
+			}
+			if isAuthzRequestType(value.Type) && hasKey(value, "OperationID") {
+				report(value, "AuthzRequest.OperationID population is forbidden in P1")
+			}
+		case *ast.CallExpr:
+			if isDecisionType(value.Fun) {
+				report(value, "Decision conversions are forbidden")
+			}
+			if ident, ok := value.Fun.(*ast.Ident); ok && ident.Name == "new" && len(value.Args) == 1 && isDecisionType(value.Args[0]) {
+				report(value, "new(Decision) is forbidden")
+			}
+		case *ast.FuncType:
+			if value.Results != nil {
+				for _, result := range value.Results.List {
+					if isDecisionType(result.Type) && len(result.Names) > 0 {
+						report(result, "named Decision result permits an implicit zero return")
+					}
+				}
+			}
+		case *ast.SelectorExpr:
+			if value.Sel.Name == "AuditReason" && !assignedAuditReasons[value.Pos()] {
+				report(value, "AuditReason is write-only authorization metadata")
+			}
+			if value.Sel.Name == "OperationID" && isAuthzRequestReceiver(value.X, authzRequestVars) {
+				report(value, "AuthzRequest.OperationID may not be read or written in P1")
+			}
+		}
+		return true
+	})
+	return violations
+}
+
+func checkDecisionLiteral(literal *ast.CompositeLit, report func(ast.Node, string)) {
+	allowedExpr, okAllowed := keyedValue(literal, "Allowed")
+	reasonExpr, okReason := keyedValue(literal, "AuditReason")
+	if !okAllowed {
+		report(literal, "Decision literal must explicitly assign Allowed")
+	}
+	if !okReason {
+		report(literal, "Decision literal must explicitly assign AuditReason")
+		return
+	}
+	reason, ok := approvedReasonName(reasonExpr)
+	if !ok {
+		report(reasonExpr, "AuditReason must be an exact approved auditevent constant")
+		return
+	}
+	allowed, literalAllowed := boolLiteral(allowedExpr)
+	if !literalAllowed {
+		report(literal, "Decision Allowed must be a boolean literal at construction")
+		return
+	}
+	allowReason := reason == "ReasonAllowed" || reason == "ReasonInherited"
+	if allowed != allowReason {
+		report(reasonExpr, "Decision Allowed and AuditReason are incompatible")
+	}
+}
+
+func keyedValue(literal *ast.CompositeLit, name string) (ast.Expr, bool) {
+	for _, element := range literal.Elts {
+		field, ok := element.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if ident, ok := field.Key.(*ast.Ident); ok && ident.Name == name {
+			return field.Value, true
+		}
+	}
+	return nil, false
+}
+
+func hasKey(literal *ast.CompositeLit, name string) bool {
+	_, ok := keyedValue(literal, name)
+	return ok
+}
+
+func boolLiteral(expr ast.Expr) (bool, bool) {
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return false, false
+	}
+	switch ident.Name {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func approvedReasonName(expr ast.Expr) (string, bool) {
+	selector, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	pkg, ok := selector.X.(*ast.Ident)
+	if !ok || pkg.Name != "auditevent" || !approvedDecisionReasons[selector.Sel.Name] {
+		return "", false
+	}
+	return selector.Sel.Name, true
+}
+
+func isApprovedReasonSelector(expr ast.Expr) bool {
+	_, ok := approvedReasonName(expr)
+	return ok
+}
+
+func isAuthzRequestReceiver(expr ast.Expr, vars map[string]bool) bool {
+	switch value := expr.(type) {
+	case *ast.Ident:
+		return vars[value.Name]
+	case *ast.CompositeLit:
+		return isAuthzRequestType(value.Type)
+	case *ast.ParenExpr:
+		return isAuthzRequestReceiver(value.X, vars)
+	default:
+		return false
+	}
+}
+
+func isAuthzRequestType(expr ast.Expr) bool {
+	switch value := expr.(type) {
+	case *ast.Ident:
+		return value.Name == "AuthzRequest"
+	case *ast.StarExpr:
+		return isAuthzRequestType(value.X)
+	default:
+		return false
+	}
 }
 
 func isDecisionType(expr ast.Expr) bool {

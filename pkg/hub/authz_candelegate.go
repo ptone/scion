@@ -75,8 +75,28 @@ func allowDelegation(reason string) Decision {
 	return Decision{Allowed: true, Reason: reason, AuditReason: auditevent.ReasonAllowed}
 }
 
-func denyDelegation(reason string, auditReason auditevent.ReasonCode) Decision {
-	return Decision{Allowed: false, Reason: reason, AuditReason: auditReason}
+func denyDelegationNotAuthenticated(reason string) Decision {
+	return Decision{Allowed: false, Reason: reason, AuditReason: auditevent.ReasonNotAuthenticated}
+}
+
+func denyDelegationInvalidRequest(reason string) Decision {
+	return Decision{Allowed: false, Reason: reason, AuditReason: auditevent.ReasonInvalidRequest}
+}
+
+func denyDelegationPolicy(reason string) Decision {
+	return Decision{Allowed: false, Reason: reason, AuditReason: auditevent.ReasonPolicyDenied}
+}
+
+func denyDelegationDependency(reason string) Decision {
+	return Decision{Allowed: false, Reason: reason, AuditReason: auditevent.ReasonDependencyUnavailable}
+}
+
+func denyDelegationNotAuthorized(reason string) Decision {
+	return Decision{Allowed: false, Reason: reason, AuditReason: auditevent.ReasonNotAuthorized}
+}
+
+func denyDelegationPermissionMissing(reason string) Decision {
+	return Decision{Allowed: false, Reason: reason, AuditReason: auditevent.ReasonPermissionMissing}
 }
 
 // CanDelegate checks whether the actor has sufficient authority to create
@@ -88,7 +108,7 @@ func denyDelegation(reason string, auditReason auditevent.ReasonCode) Decision {
 // permissions they hold via their own role bindings.
 func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
 	if actor == nil {
-		return denyDelegation("missing actor", auditevent.ReasonNotAuthenticated)
+		return denyDelegationNotAuthenticated("missing actor")
 	}
 
 	// A delivery credential cannot delegate any permission. The check keys
@@ -124,7 +144,7 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 	case GrantTypeProjectMembership:
 		return a.canDelegateProjectMembership(ctx, actor, grant)
 	default:
-		return denyDelegation("unknown grant type: "+string(grant.Type), auditevent.ReasonInvalidRequest)
+		return denyDelegationInvalidRequest("unknown grant type: " + string(grant.Type))
 	}
 }
 
@@ -134,13 +154,13 @@ func (a *AuthzService) enforceUATDelegation(scoped *ScopedUserIdentity, grant Gr
 	// UAT is project-scoped: delegation must target the same project.
 	if grant.ScopeType == store.RoleScopeProject && grant.ScopeID != "" {
 		if scoped.ScopedProjectID() != grant.ScopeID {
-			decision := denyDelegation("scoped credential cannot delegate outside its project", auditevent.ReasonPolicyDenied)
+			decision := denyDelegationPolicy("scoped credential cannot delegate outside its project")
 			return &decision
 		}
 	}
 	// System-scoped grants are never allowed via UAT.
 	if grant.ScopeType == store.RoleScopeSystem {
-		decision := denyDelegation("scoped credential cannot create system-scoped grants", auditevent.ReasonPolicyDenied)
+		decision := denyDelegationPolicy("scoped credential cannot create system-scoped grants")
 		return &decision
 	}
 	return nil
@@ -154,7 +174,7 @@ func (a *AuthzService) canDelegateRoleBinding(ctx context.Context, actor Identit
 	if len(targetPerms) == 0 && grant.RoleDefinitionID != "" {
 		rd, err := a.store.GetRoleDefinition(ctx, grant.RoleDefinitionID)
 		if err != nil {
-			return denyDelegation("cannot resolve target role definition", auditevent.ReasonDependencyUnavailable)
+			return denyDelegationDependency("cannot resolve target role definition")
 		}
 		targetPerms = rd.Permissions
 	}
@@ -201,7 +221,7 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 	if err != nil {
 		a.logger.Warn("failed to resolve parent groups for delegation check",
 			"group_id", groupID, "error", err)
-		return denyDelegation("cannot resolve parent group closure", auditevent.ReasonDependencyUnavailable)
+		return denyDelegationDependency("cannot resolve parent group closure")
 	}
 	for _, pgID := range parentGroups {
 		groupPrincipals = append(groupPrincipals, store.PrincipalRef{
@@ -215,7 +235,7 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 	if err != nil {
 		a.logger.Warn("failed to list role bindings for group closure",
 			"group_id", groupID, "error", err)
-		return denyDelegation("cannot resolve group role bindings", auditevent.ReasonDependencyUnavailable)
+		return denyDelegationDependency("cannot resolve group role bindings")
 	}
 
 	// If the group (and its ancestors) have no role bindings, no authority
@@ -239,7 +259,7 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 	// allowed to delegate that authority.
 	if scoped, ok := actor.(*ScopedUserIdentity); ok && scoped != nil {
 		if len(systemBindings) > 0 {
-			return denyDelegation("scoped credential cannot delegate system-scoped group authority", auditevent.ReasonPolicyDenied)
+			return denyDelegationPolicy("scoped credential cannot delegate system-scoped group authority")
 		}
 	}
 
@@ -265,12 +285,12 @@ func (a *AuthzService) canDelegateGroupMembership(ctx context.Context, actor Ide
 			if rdErr != nil {
 				a.logger.Warn("failed to resolve role definition for group binding",
 					"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", rdErr)
-				return denyDelegation("cannot resolve role definition for group binding", auditevent.ReasonDependencyUnavailable)
+				return denyDelegationDependency("cannot resolve role definition for group binding")
 			}
 			if rd == nil {
 				a.logger.Warn("role definition not found for group binding",
 					"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID)
-				return denyDelegation("role definition not found for group binding", auditevent.ReasonDependencyUnavailable)
+				return denyDelegationDependency("role definition not found for group binding")
 			}
 			rdCache[b.RoleDefinitionID] = rd
 		}
@@ -362,7 +382,7 @@ func (a *AuthzService) canAgentDelegateToAgent(agentActor AgentIdentity, grant G
 
 	for _, s := range requestedScopes {
 		if !actorScopeSet[s] {
-			return denyDelegation("agent lacks scope for delegation: "+string(s), auditevent.ReasonPolicyDenied)
+			return denyDelegationPolicy("agent lacks scope for delegation: " + string(s))
 		}
 	}
 
@@ -385,16 +405,21 @@ func (a *AuthzService) canDelegateCustomRole(ctx context.Context, actor Identity
 // not here — this gate only checks base membership management authority.
 func (a *AuthzService) canDelegateProjectMembership(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
 	if grant.ProjectID == "" {
-		return denyDelegation("project membership requires a project ID", auditevent.ReasonInvalidRequest)
+		return denyDelegationInvalidRequest("project membership requires a project ID")
 	}
 	userID := actor.ID()
-	if a.isProjectOwner(ctx, userID, grant.ProjectID) {
+	ownerStatus := a.projectOwnerStatus(ctx, userID, grant.ProjectID)
+	if ownerStatus == projectAuthorityAllowed {
 		return allowDelegation("project owner can manage membership")
 	}
-	if a.isProjectOwnerOrAdmin(ctx, userID, grant.ProjectID) {
+	adminStatus := a.projectOwnerOrAdminStatus(ctx, userID, grant.ProjectID)
+	if adminStatus == projectAuthorityAllowed {
 		return allowDelegation("project admin can manage membership (RS1 governance matrix)")
 	}
-	return denyDelegation("only project owners and admins can manage project membership", auditevent.ReasonNotAuthorized)
+	if ownerStatus == projectAuthorityDependencyUnavailable || adminStatus == projectAuthorityDependencyUnavailable {
+		return denyDelegationDependency("only project owners and admins can manage project membership")
+	}
+	return denyDelegationNotAuthorized("only project owners and admins can manage project membership")
 }
 
 // actorHoldsAllPermissions resolves the actor's effective permissions in the
@@ -407,7 +432,7 @@ func (a *AuthzService) actorHoldsAllPermissions(ctx context.Context, actor Ident
 	if err != nil {
 		a.logger.Warn("failed to resolve actor permissions for delegation check",
 			"actor_id", actor.ID(), "error", err)
-		return denyDelegation("failed to resolve actor permissions", auditevent.ReasonDependencyUnavailable)
+		return denyDelegationDependency("failed to resolve actor permissions")
 	}
 
 	// Also include system-scoped permissions (they apply everywhere).
@@ -430,7 +455,7 @@ func (a *AuthzService) actorHoldsAllPermissions(ctx context.Context, actor Ident
 
 	for _, perm := range targetPerms {
 		if !actorPermSet[perm] {
-			return denyDelegation("actor lacks permission for delegation: "+perm, auditevent.ReasonPermissionMissing)
+			return denyDelegationPermissionMissing("actor lacks permission for delegation: " + perm)
 		}
 	}
 

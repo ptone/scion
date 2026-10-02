@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -1049,7 +1050,7 @@ func (s *Server) createAgentInProject(
 
 	// CanDelegate check (Phase 1F): ensure the actor has sufficient authority
 	// to delegate the effective agent role and scopes.
-	var delegateDecision Decision
+	delegateDecision := Decision{Allowed: false, AuditReason: auditevent.ReasonNotAuthenticated}
 	if s.authzService != nil {
 		actorIdentity := GetIdentityFromContext(ctx)
 		if actorIdentity != nil {

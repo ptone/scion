@@ -175,7 +175,7 @@ func (s *Server) projectReadDecision(ctx context.Context, ident AgentIdentity, f
 		if s.authzService == nil {
 			cache.err = errors.New("authz service unavailable")
 			cache.computed = true
-			return Decision{AuditReason: auditevent.ReasonCheckUnavailable}, cache.err
+			return Decision{Allowed: false, AuditReason: auditevent.ReasonCheckUnavailable}, cache.err
 		}
 		cache.decision = s.authzService.Decide(ctx, AuthzRequest{
 			Principal:  principalContextForIdentity(ident),
