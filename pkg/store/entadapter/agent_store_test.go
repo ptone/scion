@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -1749,4 +1750,205 @@ func TestAgentStore_NoWidening_NewFiltersRespectAuthorizedProjectIDs(t *testing.
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []string{visibleDescendant.ID}, ids(result.Items))
 	})
+}
+
+// rawAgentTimeColumn inspects a time column's raw on-disk representation with
+// typeof/quote, as required by the ptone/scion#2466 design constraints:
+// scanning a column into a Go string (rather than reading it raw) can show a
+// misleading RFC3339Nano-looking artifact that does not reflect what is
+// actually stored.
+func rawAgentTimeColumn(t *testing.T, ctx context.Context, s *AgentStore, id, column string) (typ, quoted string) {
+	t.Helper()
+	drv, ok := s.client.Driver().(*entsql.Driver)
+	require.True(t, ok, "expected ent SQL driver")
+	db := drv.DB()
+	query := fmt.Sprintf("SELECT typeof(%s), quote(%s) FROM agents WHERE id = ?", column, column)
+	require.NoError(t, db.QueryRowContext(ctx, query, id).Scan(&typ, &quoted))
+	return typ, quoted
+}
+
+// TestAgentStore_UTCTimestamps_NonUTCLocal reproduces ptone/scion#2466: under
+// a non-UTC time.Local, agent_store.go stamped columns with bare time.Now(),
+// which Ent/SQLite stores as Go's time.Time.String() text (e.g.
+// "2026-10-01 04:00:00.12 +0000 UTC" for a UTC time). A non-UTC offset
+// produces a differently-shaped, zone-named string instead of that canonical
+// form. With the pinned modernc.org/sqlite v1.53.0 driver this round-trips
+// back into a time.Time without a Go-level Scan error, but in the wrong
+// location (not UTC) — and, because ordering/cursor comparisons on this
+// column are plain text comparisons, a row stamped with a non-UTC offset can
+// sort out of true chronological order relative to a UTC-stamped row (see
+// the dedicated misordering case below). The fix normalises every
+// time.Now() call in agent_store.go to UTC; the canonical-format and
+// Location assertions below must fail on unpatched code and pass once that
+// normalization is in place.
+func TestAgentStore_UTCTimestamps_NonUTCLocal(t *testing.T) {
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	require.NoError(t, err)
+	origLocal := time.Local
+	time.Local = tokyo
+	t.Cleanup(func() { time.Local = origLocal })
+
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	// --- CreateAgent -> GetAgent round-trip under non-UTC time.Local. ---
+	a := makeAgent(projectID, "tz-roundtrip")
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	typ, quoted := rawAgentTimeColumn(t, ctx, s, a.ID, "created")
+	t.Logf("created column after CreateAgent under Asia/Tokyo: typeof=%s quote=%s", typ, quoted)
+	assert.Contains(t, quoted, "+0000 UTC",
+		"CreateAgent must stamp 'created' in canonical UTC form even under non-UTC time.Local")
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err, "GetAgent must round-trip a timestamp stamped under non-UTC time.Local")
+	assert.Equal(t, "UTC", got.Created.Location().String(), "stored timestamp must normalise to UTC")
+	assert.WithinDuration(t, time.Now().UTC(), got.Created, time.Minute)
+
+	// UpdateAgent's fast path (phase != "running") also stamps `updated` with
+	// a bare time.Now() on unpatched code (L404); confirm it round-trips too.
+	a.Phase = "completed"
+	require.NoError(t, s.UpdateAgent(ctx, a))
+	gotAfterUpdate, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err, "GetAgent must round-trip 'updated' stamped by UpdateAgent under non-UTC time.Local")
+	assert.Equal(t, "UTC", gotAfterUpdate.Updated.Location().String())
+
+	// UpdateAgentStatus's transactional path (L1100) stamps `updated` and
+	// `last_seen`; confirm both round-trip.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Activity: "thinking"}))
+	gotAfterStatus, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err, "GetAgent must round-trip timestamps stamped by UpdateAgentStatus under non-UTC time.Local")
+	assert.Equal(t, "UTC", gotAfterStatus.Updated.Location().String())
+	assert.Equal(t, "UTC", gotAfterStatus.LastSeen.Location().String())
+
+	// UpdateAgentExposedPorts (L1219) stamps `updated` outside a transaction.
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, a.ID, []store.ExposedPort{{Port: 80}}))
+	gotAfterPorts, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err, "GetAgent must round-trip 'updated' stamped by UpdateAgentExposedPorts under non-UTC time.Local")
+	assert.Equal(t, "UTC", gotAfterPorts.Updated.Location().String())
+
+	// --- Legacy row: simulate a row written before this fix, with a raw
+	// non-UTC offset in `created`. Document whether it still reads and sorts
+	// correctly (it is not expected to parse back as a time.Time — that is
+	// exactly the bug upstream rows may already carry — but it must not take
+	// down reads of any other row, and the fix must not be required to repair
+	// data already on disk).
+	legacyID := uuid.New()
+	legacyCreated := time.Date(2020, 1, 2, 3, 4, 5, 0, tokyo)
+	projectUID, err := uuid.Parse(projectID)
+	require.NoError(t, err)
+	_, err = s.client.Agent.Create().
+		SetID(legacyID).
+		SetSlug("tz-legacy").
+		SetName("legacy").
+		SetProjectID(projectUID).
+		SetCreated(legacyCreated).
+		SetUpdated(legacyCreated).
+		Save(ctx)
+	require.NoError(t, err, "seeding a legacy non-UTC row must succeed at write time")
+
+	legacyTyp, legacyQuoted := rawAgentTimeColumn(t, ctx, s, legacyID.String(), "created")
+	t.Logf("legacy non-UTC row created column: typeof=%s quote=%s", legacyTyp, legacyQuoted)
+
+	if _, err := s.GetAgent(ctx, legacyID.String()); err != nil {
+		t.Logf("RESULT: a pre-existing legacy row with a non-UTC offset does NOT read back after this fix: %v", err)
+	} else {
+		t.Logf("RESULT: a pre-existing legacy row with a non-UTC offset DOES read back after this fix")
+	}
+	// Reading an unrelated, correctly-stamped row must be unaffected by the
+	// legacy row's presence.
+	_, err = s.GetAgent(ctx, a.ID)
+	assert.NoError(t, err, "a legacy non-UTC row must not break reads of other agents")
+
+	// --- Misordering risk when legacy non-UTC rows are mixed with
+	// canonical UTC rows: ORDER BY on this column is a plain text comparison,
+	// which does not agree with real chronological order once two rows'
+	// offset representations differ. This is data-shape behavior of rows
+	// already on disk, not something this store-level fix can repair
+	// retroactively, so it is reported (RESULT: line) rather than asserted
+	// as pass/fail.
+	//
+	// newerUTCID is the chronologically NEWER of the two rows (2026-10-01
+	// 00:00:00 UTC). olderLegacyID is chronologically OLDER (2026-10-01
+	// 02:00:00+09:00 == 2026-09-30 17:00:00 UTC) but, stamped with a non-UTC
+	// offset the way unpatched agent_store.go would have, its text form
+	// ("...02:00:00 +0900 JST") sorts lexicographically *after*
+	// newerUTCID's ("...00:00:00 +0000 UTC").
+	newerUTCID := uuid.New()
+	newerUTC := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	olderLegacyID := uuid.New()
+	olderLegacy := time.Date(2026, 10, 1, 2, 0, 0, 0, tokyo)
+	require.True(t, olderLegacy.UTC().Before(newerUTC.UTC()),
+		"fixture must represent an instant earlier in real UTC time than newerUTC")
+	for _, row := range []struct {
+		id      uuid.UUID
+		slug    string
+		created time.Time
+	}{
+		{newerUTCID, "tz-mix-utc", newerUTC},
+		{olderLegacyID, "tz-mix-legacy", olderLegacy},
+	} {
+		_, err := s.client.Agent.Create().
+			SetID(row.id).
+			SetSlug(row.slug).
+			SetName(row.slug).
+			SetProjectID(projectUID).
+			SetCreated(row.created).
+			SetUpdated(row.created).
+			Save(ctx)
+		require.NoError(t, err)
+	}
+
+	mixResult, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{newerUTCID.String(), olderLegacyID.String()}}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, mixResult.Items, 2)
+	if mixResult.Items[0].ID == newerUTCID.String() {
+		t.Logf("RESULT: ListAgents (newest-first) correctly puts the chronologically newer UTC row ahead of the older legacy-offset row")
+	} else {
+		t.Logf("RESULT: ListAgents (newest-first) INCORRECTLY puts the chronologically OLDER legacy-offset row ahead of the newer UTC row " +
+			"(text comparison on the raw column does not reflect true UTC chronological order across mixed offset formats)")
+	}
+
+	// --- Sorted list order across agents created in the non-UTC zone. ---
+	var createdOrder []*store.Agent
+	for i := 0; i < 5; i++ {
+		ag := makeAgent(projectID, fmt.Sprintf("tz-order-%d", i))
+		require.NoError(t, s.CreateAgent(ctx, ag))
+		createdOrder = append(createdOrder, ag)
+		time.Sleep(5 * time.Millisecond) // ensure the store clock advances measurably
+	}
+
+	listed, err := s.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	var gotOrder []string
+	for _, item := range listed.Items {
+		for _, c := range createdOrder {
+			if item.ID == c.ID {
+				gotOrder = append(gotOrder, item.ID)
+			}
+		}
+	}
+	var wantOrder []string
+	for i := len(createdOrder) - 1; i >= 0; i-- { // ListAgents orders newest-first.
+		wantOrder = append(wantOrder, createdOrder[i].ID)
+	}
+	assert.Equal(t, wantOrder, gotOrder,
+		"agents created under non-UTC time.Local must sort by creation time, newest first")
+
+	// --- Cursor (keyset) pagination across the non-UTC-created agents. ---
+	page1, err := s.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: 3})
+	require.NoError(t, err)
+	require.NotEmpty(t, page1.NextCursor, "more than 3 agents exist; a next cursor must be produced")
+
+	page2, err := s.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: 3, Cursor: page1.NextCursor})
+	require.NoError(t, err, "the agentBeforeCursor keyset predicate must accept a cursor minted under non-UTC time.Local")
+
+	seen := make(map[string]bool, len(page1.Items))
+	for _, it := range page1.Items {
+		seen[it.ID] = true
+	}
+	for _, it := range page2.Items {
+		assert.False(t, seen[it.ID],
+			"cursor pagination must not repeat an agent created under non-UTC time.Local: %s", it.ID)
+	}
 }

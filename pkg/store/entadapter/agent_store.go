@@ -233,7 +233,7 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		return err
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	a.Created = now
 	a.Updated = now
 	a.StateVersion = 1
@@ -410,7 +410,7 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 		return err
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	expectedVersion := a.StateVersion
 	newVersion := expectedVersion + 1
 
@@ -1245,7 +1245,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return mapError(err)
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	upd := tx.Agent.UpdateOneID(uid).
 		SetUpdated(now).
 		SetLastSeen(now)
@@ -1364,7 +1364,7 @@ func (s *AgentStore) UpdateAgentExposedPorts(ctx context.Context, id string, por
 	affected, err := s.client.Agent.Update().
 		Where(agent.IDEQ(uid)).
 		SetExposedPorts(ports).
-		SetUpdated(time.Now()).
+		SetUpdated(time.Now().UTC()).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)
@@ -1401,7 +1401,7 @@ func (s *AgentStore) MarkStaleAgentsOffline(ctx context.Context, threshold time.
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	now := time.Now()
+	now := time.Now().UTC()
 
 	q := tx.Agent.Query().Where(
 		agent.LastSeenNotNil(),
@@ -1452,7 +1452,7 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	now := time.Now()
+	now := time.Now().UTC()
 
 	q := tx.Agent.Query().Where(
 		agent.LastActivityEventNotNil(),
