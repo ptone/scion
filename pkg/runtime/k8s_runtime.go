@@ -70,6 +70,18 @@ type KubernetesRuntime struct {
 	// real exec transport.
 	execProbe execProbeFunc
 
+	// podReadyPollInterval is how often waitForPodReady polls the pod.
+	// Zero (the default from NewKubernetesRuntime) means 2s; tests shorten
+	// it so a fake pod's transition to Ready is seen quickly.
+	podReadyPollInterval time.Duration
+
+	// execHook and syncToPodHook, when set, replace execInPod and syncToPod
+	// respectively. Both are nil in production; tests set them to observe
+	// the post-create steps of Run (home sync, startup-gate touch) without
+	// a real exec transport.
+	execHook      func(ctx context.Context, namespace, podName string, cmd []string) (string, error)
+	syncToPodHook func(ctx context.Context, namespace, podName, sourcePath, destPath string) error
+
 	// PriorityClassName is the runtime-level default spec.priorityClassName
 	// applied to agent pods (settings runtimes.<name>.priority_class_name).
 	// An explicit per-template/agent kubernetes.priorityClassName overrides
@@ -659,9 +671,23 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	runtimeLog.Info("Pod created", "agent", config.Name, "namespace", namespace,
 		"phase", "pod-create", "elapsed_ms", time.Since(podCreateStart).Milliseconds())
 
+	// The pod now exists. Everything from here to the startup-gate touch
+	// (readiness wait, exec-tunnel wait, home and workspace sync, gate
+	// touch) runs on postCtx rather than ctx. When the caller attached a
+	// launch context (see WithLaunchContext; the runtime broker does for a
+	// synchronous create), postCtx is derived from it, so the end of a
+	// short-lived request no longer aborts this phase part-way and leaves
+	// the pod waiting at its startup gate for good: a GKE Autopilot cold
+	// start alone can take minutes. The launch context is still cancelled
+	// by a stop or delete of the agent, and postCtx is bounded by
+	// k8sPostCreateTimeout. Without a launch context, postCtx follows ctx
+	// as before.
+	postCtx, cancelPostCreate := postCreateContext(ctx)
+	defer cancelPostCreate()
+
 	// Wait for Ready
 	runtimeLog.Info("Waiting for pod ready", "agent", config.Name, "namespace", namespace, "phase", "wait-schedule")
-	if err := r.waitForPodReady(ctx, namespace, createdPod.Name); err != nil {
+	if err := r.waitForPodReady(postCtx, namespace, createdPod.Name); err != nil {
 		return createdPod.Name, err
 	}
 
@@ -672,7 +698,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	// stop-then-create — so placing it here once covers all of them. See
 	// waitForExecReady's doc comment for why Running alone is insufficient.
 	runtimeLog.Info("Waiting for pod exec tunnel", "agent", config.Name, "namespace", namespace, "phase", "wait-exec")
-	if err := r.waitForExecReady(ctx, namespace, createdPod.Name, config.Name); err != nil {
+	if err := r.waitForExecReady(postCtx, namespace, createdPod.Name, config.Name); err != nil {
 		return createdPod.Name, fmt.Errorf("pod exec tunnel not ready: %w", err)
 	}
 
@@ -681,8 +707,8 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		runtimeLog.Info("Syncing agent home", "agent", config.Name, "source", config.HomeDir, "dest", destHome, "phase", "home-sync")
 		fmt.Printf("  Syncing agent home (%s -> %s)...\n", config.HomeDir, destHome)
 		homeSyncStart := time.Now()
-		err = r.syncWithRetry(ctx, func() error {
-			return r.syncToPod(ctx, namespace, createdPod.Name, config.HomeDir, destHome)
+		err = r.syncWithRetry(postCtx, func() error {
+			return r.syncToPod(postCtx, namespace, createdPod.Name, config.HomeDir, destHome)
 		})
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync home: %w", err)
@@ -699,7 +725,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		// re-owning every home directory on the node.
 		if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, destHome); !ok {
 			runtimeLog.Warn("Skipping home directory chown: UnixUsername is empty", "agent", config.Name, "destHome", destHome)
-		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, chownArgs); err != nil {
+		} else if _, err := r.execInPod(postCtx, namespace, createdPod.Name, chownArgs); err != nil {
 			runtimeLog.Debug("Failed to chown home directory (non-fatal)", "error", err)
 		}
 		runtimeLog.Info("Home sync complete", "agent", config.Name, "phase", "home-sync",
@@ -725,8 +751,8 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		runtimeLog.Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
 		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
 		workspaceSyncStart := time.Now()
-		err = r.syncWithRetry(ctx, func() error {
-			return r.syncToPod(ctx, namespace, createdPod.Name, config.Workspace, "/workspace")
+		err = r.syncWithRetry(postCtx, func() error {
+			return r.syncToPod(postCtx, namespace, createdPod.Name, config.Workspace, "/workspace")
 		})
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to sync workspace: %w", err)
@@ -738,7 +764,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		// than run chown with no actual target user.
 		if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, "/workspace"); !ok {
 			runtimeLog.Warn("Skipping workspace chown: UnixUsername is empty", "agent", config.Name)
-		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, chownArgs); err != nil {
+		} else if _, err := r.execInPod(postCtx, namespace, createdPod.Name, chownArgs); err != nil {
 			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
 		}
 		runtimeLog.Info("Workspace sync complete", "agent", config.Name, "phase", "workspace-sync",
@@ -753,7 +779,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	// in the pod command polls for this marker file (see buildPod for details).
 	runtimeLog.Info("Signaling startup gate", "agent", config.Name, "phase", "startup-gate")
 	gateStart := time.Now()
-	if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"touch", "/tmp/.scion-home-ready"}); err != nil {
+	if _, err := r.execInPod(postCtx, namespace, createdPod.Name, []string{"touch", "/tmp/.scion-home-ready"}); err != nil {
 		return createdPod.Name, fmt.Errorf("failed to signal startup gate: %w", err)
 	}
 	runtimeLog.Info("Startup gate signaled", "agent", config.Name, "phase", "startup-gate",
@@ -762,6 +788,27 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 	runtimeLog.Info("Agent started successfully", "agent", createdPod.Name, "namespace", namespace, "phase", "complete")
 	fmt.Printf("Agent '%s' started successfully.\n", createdPod.Name)
 	return createdPod.Name, nil
+}
+
+// k8sPodReadyTimeout is waitForPodReady's own budget for a pod to become
+// ready. GKE Autopilot can take minutes to provision a node on a cold start.
+const k8sPodReadyTimeout = 10 * time.Minute
+
+// k8sPostCreateTimeout bounds Run's whole post-create phase (readiness wait,
+// exec-tunnel wait, home and workspace sync, startup-gate touch) when it
+// runs on a launch context rather than the caller's ctx: the readiness
+// budget plus time for the sync and the gate touch.
+const k8sPostCreateTimeout = k8sPodReadyTimeout + 5*time.Minute
+
+// postCreateContext returns the context Run uses once the pod exists. With a
+// launch context attached to ctx (WithLaunchContext) it is that launch
+// context bounded by k8sPostCreateTimeout, so it outlives a cancelled ctx;
+// otherwise it follows ctx.
+func postCreateContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if launchCtx := LaunchContextFrom(ctx); launchCtx != nil {
+		return context.WithTimeout(launchCtx, k8sPostCreateTimeout)
+	}
+	return context.WithCancel(ctx)
 }
 
 // writeK8sRuntimeDebugFile writes a kubectl-style representation of the pod
@@ -2362,10 +2409,14 @@ func logPodLifecycleTimings(namespace, podName string, waitMs int64, t podLifecy
 
 func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podName string) error {
 	waitStart := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute) // GKE Autopilot can be slow
+	ctx, cancel := context.WithTimeout(ctx, k8sPodReadyTimeout) // GKE Autopilot can be slow
 	defer cancel()
 
-	ticker := time.NewTicker(2 * time.Second)
+	pollInterval := r.podReadyPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	lastStatus := ""
@@ -2504,6 +2555,9 @@ func (c *countingReader) Read(p []byte) (int, error) {
 }
 
 func (r *KubernetesRuntime) syncToPod(ctx context.Context, namespace, podName, sourcePath, destPath string) error {
+	if r.syncToPodHook != nil {
+		return r.syncToPodHook(ctx, namespace, podName, sourcePath, destPath)
+	}
 	// Guard against fake/test clientsets where Config is nil (no real API
 	// server), same as execInPod. Also guard Client itself: a KubernetesRuntime
 	// built as a literal rather than via NewKubernetesRuntime has a nil
@@ -3310,6 +3364,9 @@ func (r *KubernetesRuntime) execWithOptionalStdin(ctx context.Context, id string
 // execInPod runs a command in the pod's "agent" container as root (the default
 // K8s exec user). This is used for administrative tasks like chown after syncing files.
 func (r *KubernetesRuntime) execInPod(ctx context.Context, namespace, podName string, cmd []string) (string, error) {
+	if r.execHook != nil {
+		return r.execHook(ctx, namespace, podName, cmd)
+	}
 	execStart := time.Now()
 	// cmdName identifies the exec for logging without ever including its
 	// arguments: call sites pass fixed command verbs (sh, touch) but never

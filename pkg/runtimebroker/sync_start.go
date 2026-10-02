@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -65,7 +66,9 @@ type syncStart struct {
 // marker. It returns a context derived from ctx that is cancelled when the
 // agent is deleted or stopped on this broker, or when a newer start for the
 // same name begins; the caller runs the start under it and must call finish
-// exactly once when the create ends.
+// exactly once when the create ends. The returned context also carries a
+// launch context (scionrt.WithLaunchContext) that is cancelled by the same
+// events but not by ctx itself.
 //
 // If an earlier start of the same name is still running here, it is
 // cancelled and waited for (bounded by ctx and the supersede wait) before
@@ -83,7 +86,21 @@ func (s *Server) beginSyncStart(ctx context.Context, req CreateAgentRequest, opt
 	if !isSingleCleanPathElement(slug) {
 		return nil, nil, errInvalidLaunchSlug
 	}
-	startCtx, cancel := context.WithCancel(ctx)
+	startCtx, cancelStart := context.WithCancel(ctx)
+	// launchCtx keeps ctx's values but not its cancellation, so the part of
+	// the start that runs after the agent's pod exists (for Kubernetes: the
+	// readiness wait, home sync and startup-gate touch) is not abandoned
+	// half-way when the create request ends first, as the hub's
+	// synchronous create request can during a slow cold start. The runtime
+	// reads it via scionrt.WithLaunchContext. It shares the registry
+	// record's cancel with startCtx, so a delete or stop of the agent, a
+	// newer start for the same name, or finish still ends it.
+	launchCtx, cancelLaunch := context.WithCancel(context.WithoutCancel(ctx))
+	cancel := func() {
+		cancelStart()
+		cancelLaunch()
+	}
+	startCtx = scionrt.WithLaunchContext(startCtx, launchCtx)
 	ss := &syncStart{
 		key:             launchKey{ProjectID: req.ProjectID, Slug: slug},
 		owner:           "sync-" + uuid.NewString(),
