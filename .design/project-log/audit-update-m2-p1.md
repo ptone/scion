@@ -35,7 +35,6 @@ wire representations. P1 does not populate `OperationID` anywhere.
 | invalid request | deny | `invalid_request` | mismatched/unsupported identity, unresolvable permission input, unknown grant, missing project input |
 | dependency unavailable | deny | `dependency_unavailable` | principal, membership, binding, role, group/effective-group, and effective-permission dependency errors |
 | check unavailable | deny | `check_unavailable` | delegation ceiling check error and unavailable material authorization service |
-| closed fallback | deny | `unspecified` | reserved closed A1 fallback; no current producer exit requires it |
 
 Per A1, `not_found`, `conflict`, `rate_limited`, `attachment_rejected`, and
 `check_disabled` remain unavailable from the current authorization producer.
@@ -120,8 +119,35 @@ Post-implementation checks:
   restored before the checkpoint.
 - Production diff audit from the required base contains only
   `pkg/hub/authz.go`, `pkg/hub/authz_candelegate.go`,
-  `pkg/hub/authz_relationship_rules.go`, and `pkg/hub/material_runtime.go`,
+  `pkg/hub/authz_relationship_rules.go`, `pkg/hub/handlers_agents_core.go`,
+  and `pkg/hub/material_runtime.go`,
   plus the focused `pkg/hub/authz_audit_reason_test.go` and this required log.
+
+Review-round implementation checkpoint
+`792ceab146420daba8daf63998f819b4901e4337` has subject
+`fix: close authorization producer contract gaps` and sole parent
+`6fd2c6ac321f7024ec4fdc74cc0b65a9bf26e2ef`. It was pushed before the
+following broader checks:
+
+- Focused normal suite covering producer fields, the package scan, mutations,
+  mappings, all six dependency stages, metadata non-influence, project owner
+  and admin compatibility — PASS (`pkg/hub` 5.644s).
+- The first race attempt was explicitly manager-interrupted for remote
+  provenance verification and produced no result; it was neither a timeout,
+  failure, nor pass. The one authorized clean restart of the same focused
+  suite used `timeout 10m`, `-race`, and `-p 2` — PASS (`pkg/hub` 236.879s).
+- `timeout 10m go vet -p 2 ./pkg/hub ./pkg/hub/auditevent` — PASS.
+- `timeout 10m go build -buildvcs=false -p 2 ./pkg/hub ./pkg/hub/auditevent`
+  — PASS; this was the review round's single heavy build.
+- `timeout 10m env GOGC=40 golangci-lint run
+  --new-from-rev=6fd2c6ac321f7024ec4fdc74cc0b65a9bf26e2ef
+  --concurrency=1 ./pkg/hub/...` — PASS, `0 issues`; it was not rerun.
+- `gofmt` on all changed Go files, `git diff --check`, and changed-file/scope
+  inspection against the reviewed head — PASS.
+
+The final evidence-only project-log commit follows the implementation
+checkpoint. Its exact SHA is reported in the completion handoff because a
+commit cannot contain its own SHA.
 
 `make ci` and `make ci-full` were not run because the restricted brief
 prohibits them. No required check failed or was inconclusive.
