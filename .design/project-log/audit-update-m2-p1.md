@@ -214,3 +214,41 @@ three focused test files. It adds no `AuthzRequest.OperationID` population,
 P2 emitter, sink/store/sampling/transport change, projection/API/UI work, or
 `#2392 audit_emit_dispatch` timing change. P2 and emitter work remain blocked
 pending a clean fresh review round 3/7.
+
+## Review round 3 R5 closure
+
+Round 3 reviewed exact head
+`3b64d6bc0c3be2a0f75c882cac74844094054377`. The test-guard checkpoint
+`668650e6af2ebcffe0f9c8dc9ede22114d3335bd` was committed and lease-safe
+pushed before the focused checks. It changes only
+`pkg/hub/authz_audit_reason_test.go`; the production diff is empty.
+
+R5 is closed by evaluating the effective final audit-reason state on every
+path after each literal `Decision.Allowed` write. A reason assignment before
+the outcome write cannot satisfy the contract. Each path must finish with a
+subsequent exact, outcome-compatible reason before the next outcome write,
+return, or lexical-block exit, and a later incompatible overwrite invalidates
+the path. Branch states are analyzed independently and merged, so one bad
+branch cannot be hidden by a compatible sibling. Mutation regressions reject
+compatible-to-incompatible overwrite, reason-before-`Allowed` ordering, and
+an incompatible branch. Positive regressions accept an
+incompatible-to-compatible correction, a compatible reason on every branch,
+and a branch-local incompatibility corrected afterward.
+
+Post-push bounded evidence:
+
+- Focused normal producer scan, rejection mutations, and accepted final-state
+  cases: PASS (`pkg/hub` 1.065s test runtime; single invocation under a 10m
+  bound).
+- The matching single `-race -p 2` invocation: PASS (`pkg/hub` 6.908s test
+  runtime, approximately 6m23s wall time under a 10m bound). It was not
+  restarted.
+- `gofmt -l pkg/hub/authz_audit_reason_test.go`, `git diff --check`, exact
+  changed-path inspection, zero-production-diff proof, accepted-base
+  merge-base, M1 squash ancestry, and old-M1-boundary non-ancestry: PASS.
+
+The accepted base remains
+`64a549c402fe941a9ea7702a453ecf60b0b70d94`. This closure contains no
+production, P2/emitter, `OperationID`, store, sampling, transport, projection,
+API/UI, or `#2392 audit_emit_dispatch` change. P2 and emitter work remain
+blocked pending owner verification of the mechanical closure.
