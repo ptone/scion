@@ -52,3 +52,20 @@ func declaredAuthorizationOperationStrings() []string {
 	sort.Strings(actions)
 	return actions
 }
+
+func declaredAuthorizationActionPermissions() []ActionPermissionSchema {
+	byID := make(map[authzop.OperationID]authzop.OperationSpec, len(authzop.Catalog))
+	for _, operation := range authzop.Catalog {
+		byID[operation.ID] = operation
+	}
+	pairs := make([]ActionPermissionSchema, 0, len(declaredAuthorizationOperations))
+	for _, operationID := range declaredAuthorizationOperations {
+		operation, ok := byID[operationID]
+		if !ok || operation.BasePermission == "" {
+			continue
+		}
+		pairs = append(pairs, ActionPermissionSchema{Action: string(operationID), Permission: operation.BasePermission})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].Action < pairs[j].Action })
+	return pairs
+}

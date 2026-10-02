@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 )
 
 const (
@@ -169,6 +170,19 @@ type Payload interface {
 // remains owned by permissions.Registry rather than duplicated here.
 type PermissionName string
 
+// AuthorizationProducerRequestContract pins the field #2379 must add to
+// hub.AuthzRequest before emitter cutover. It is documentation-as-code only;
+// A1 does not modify the producer.
+type AuthorizationProducerRequestContract struct {
+	OperationID authzop.OperationID
+}
+
+// AuthorizationProducerDecisionContract pins the structured field #2379 must
+// assign on every decision exit without parsing Decision.Reason prose.
+type AuthorizationProducerDecisionContract struct {
+	AuditReason ReasonCode
+}
+
 // PurposeLabel is bounded server-derived authorization purpose metadata.
 type PurposeLabel string
 
@@ -211,6 +225,46 @@ func reasonCodeStrings() []string {
 		string(ReasonCheckUnavailable),
 		string(ReasonInherited),
 		string(ReasonUnspecified),
+	}
+}
+
+const (
+	ProducerReasonAllow                 ProducerReasonCategory = "allow"
+	ProducerReasonInherited             ProducerReasonCategory = "inherited"
+	ProducerReasonCacheHit              ProducerReasonCategory = "cache_hit"
+	ProducerReasonPermissionDenied      ProducerReasonCategory = "permission_denied"
+	ProducerReasonPolicyDenied          ProducerReasonCategory = "policy_denied"
+	ProducerReasonNotAuthenticated      ProducerReasonCategory = "not_authenticated"
+	ProducerReasonNotAuthorized         ProducerReasonCategory = "not_authorized"
+	ProducerReasonInvalidRequest        ProducerReasonCategory = "invalid_request"
+	ProducerReasonDependencyUnavailable ProducerReasonCategory = "dependency_unavailable"
+	ProducerReasonCheckUnavailable      ProducerReasonCategory = "check_unavailable"
+	ProducerReasonClosedFallback        ProducerReasonCategory = "closed_fallback"
+	ProducerReasonNotFound              ProducerReasonCategory = "not_found"
+	ProducerReasonConflict              ProducerReasonCategory = "conflict"
+	ProducerReasonRateLimited           ProducerReasonCategory = "rate_limited"
+	ProducerReasonAttachmentRejected    ProducerReasonCategory = "attachment_rejected"
+	ProducerReasonCheckDisabled         ProducerReasonCategory = "check_disabled"
+)
+
+func authorizationProducerReasonMappings() []ProducerReasonMapping {
+	return []ProducerReasonMapping{
+		{Category: ProducerReasonAllow, Outcome: OutcomeAllow, Reason: ReasonAllowed, Available: true},
+		{Category: ProducerReasonInherited, Outcome: OutcomeAllow, Reason: ReasonInherited, Available: true},
+		{Category: ProducerReasonCacheHit, Outcome: OutcomeAllow, Reason: ReasonAllowed, Available: true},
+		{Category: ProducerReasonPermissionDenied, Outcome: OutcomeDeny, Reason: ReasonPermissionMissing, Available: true},
+		{Category: ProducerReasonPolicyDenied, Outcome: OutcomeDeny, Reason: ReasonPolicyDenied, Available: true},
+		{Category: ProducerReasonNotAuthenticated, Outcome: OutcomeDeny, Reason: ReasonNotAuthenticated, Available: true},
+		{Category: ProducerReasonNotAuthorized, Outcome: OutcomeDeny, Reason: ReasonNotAuthorized, Available: true},
+		{Category: ProducerReasonInvalidRequest, Outcome: OutcomeDeny, Reason: ReasonInvalidRequest, Available: true},
+		{Category: ProducerReasonDependencyUnavailable, Outcome: OutcomeDeny, Reason: ReasonDependencyUnavailable, Available: true},
+		{Category: ProducerReasonCheckUnavailable, Outcome: OutcomeDeny, Reason: ReasonCheckUnavailable, Available: true},
+		{Category: ProducerReasonClosedFallback, Outcome: OutcomeDeny, Reason: ReasonUnspecified, Available: true},
+		{Category: ProducerReasonNotFound, Outcome: OutcomeDeny, Reason: ReasonNotFound, Available: false},
+		{Category: ProducerReasonConflict, Outcome: OutcomeDeny, Reason: ReasonConflict, Available: false},
+		{Category: ProducerReasonRateLimited, Outcome: OutcomeDeny, Reason: ReasonRateLimited, Available: false},
+		{Category: ProducerReasonAttachmentRejected, Outcome: OutcomeDeny, Reason: ReasonAttachmentRejected, Available: false},
+		{Category: ProducerReasonCheckDisabled, Outcome: OutcomeAllow, Reason: ReasonCheckDisabled, Available: false},
 	}
 }
 

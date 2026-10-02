@@ -195,6 +195,8 @@ func payloadSlogValue(payload map[string]any) (slog.Value, error) {
 
 func payloadLeafSlogValue(name string, value any) (slog.Value, error) {
 	switch value := value.(type) {
+	case bool:
+		return slog.BoolValue(value), nil
 	case string:
 		return slog.StringValue(value), nil
 	case int64:

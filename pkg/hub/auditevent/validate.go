@@ -23,6 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
 	"github.com/google/uuid"
 )
 
@@ -147,7 +148,7 @@ func validateSnapshot(event EnvelopeV1, payload map[string]any, hasPayload bool)
 			return invalid("resource.kind", "must match the catalog entry")
 		}
 	case ResourceKindCode:
-		if err := validateBoundedString("resource.kind", event.Resource.Kind, 64); err != nil {
+		if err := validateCode("resource.kind", event.Resource.Kind, 64); err != nil {
 			return err
 		}
 	default:
@@ -184,7 +185,36 @@ func validateSnapshot(event EnvelopeV1, payload map[string]any, hasPayload bool)
 	if !hasPayload {
 		return invalid("payload", "is required")
 	}
-	return validatePayload(entry, payload)
+	if err := validatePayload(entry, payload); err != nil {
+		return err
+	}
+	return validateCatalogRelationships(entry, event.Action, event.Outcome, payload)
+}
+
+func validateCatalogRelationships(entry CatalogEntry, action string, outcome Outcome, payload map[string]any) error {
+	if len(entry.ActionPermissions) > 0 {
+		permission, _ := payload["permission"].(string)
+		matched := false
+		for _, pair := range entry.ActionPermissions {
+			if pair.Action == action && pair.Permission == permission {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return invalid("payload.permission", "must match the catalog action")
+		}
+	}
+	if len(entry.OutcomeReasons) > 0 {
+		reason, _ := payload["reason_code"].(string)
+		for _, schema := range entry.OutcomeReasons {
+			if schema.Outcome == outcome && slices.Contains(schema.AllowedReasons, reason) {
+				return nil
+			}
+		}
+		return invalid("payload.reason_code", "must be compatible with the outcome")
+	}
+	return nil
 }
 
 func validateRequest(request *RequestRef, correlationID string) error {
@@ -265,6 +295,14 @@ func validatePayloadLeaf(schema PayloadLeafSchema, value any) error {
 		if len(schema.AllowedValues) > 0 && !slices.Contains(schema.AllowedValues, text) {
 			return invalid(name, "must be an allowed value")
 		}
+		if schema.Name == "purpose" {
+			if text != strings.TrimSpace(text) {
+				return invalid(name, "must use canonical credential purpose normalization")
+			}
+			if err := credentialmeta.ValidateIssuance("", text, nil); err != nil {
+				return invalid(name, "must satisfy the canonical credential purpose contract")
+			}
+		}
 	case PayloadInt64:
 		if _, ok := value.(int64); !ok {
 			return invalid(name, "must be int64")
@@ -300,6 +338,30 @@ func validatePayloadLeaf(schema PayloadLeafSchema, value any) error {
 		}
 	default:
 		return invalid(name, "has an undeclared catalog type")
+	}
+	return nil
+}
+
+func validateCode(name, value string, maxBytes int) error {
+	if value == "" {
+		return invalid(name, "is required")
+	}
+	if !utf8.ValidString(value) || len(value) > maxBytes {
+		return invalid(name, fmt.Sprintf("must be valid UTF-8 of at most %d bytes", maxBytes))
+	}
+	if credentialmeta.LooksSecret(value) {
+		return invalid(name, "must not resemble credential material")
+	}
+	for i, r := range value {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return invalid(name, "must contain visible safe characters")
+		}
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' && r != '-' && r != '.' {
+			return invalid(name, "must be a canonical lowercase code")
+		}
+		if i == 0 && (r < 'a' || r > 'z') {
+			return invalid(name, "must start with a lowercase letter")
+		}
 	}
 	return nil
 }

@@ -42,9 +42,10 @@ func TestBuildAuthorizationDecisionAllowAndDeny(t *testing.T) {
 		allowed  bool
 		outcome  Outcome
 		severity Severity
+		reason   ReasonCode
 	}{
-		{name: "allow", allowed: true, outcome: OutcomeAllow, severity: SeverityInfo},
-		{name: "deny", allowed: false, outcome: OutcomeDeny, severity: SeverityWarning},
+		{name: "allow", allowed: true, outcome: OutcomeAllow, severity: SeverityInfo, reason: ReasonAllowed},
+		{name: "deny", allowed: false, outcome: OutcomeDeny, severity: SeverityWarning, reason: ReasonPolicyDenied},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -57,7 +58,7 @@ func TestBuildAuthorizationDecisionAllowAndDeny(t *testing.T) {
 				Principal:  IdentityRef{Kind: IdentityUser, ID: "user-1"},
 				Resource:   ResourceRef{Kind: "agent", ID: "agent-1", Scope: ResourceScopeProject, ProjectID: "project-1"},
 				Permission: PermissionName("agent.read"),
-				ReasonCode: ReasonAllowed,
+				ReasonCode: tc.reason,
 				Purpose:    PurposeLabel("interactive read"),
 				CacheHit:   &cacheHit,
 			})
@@ -74,7 +75,7 @@ func TestBuildAuthorizationDecisionAllowAndDeny(t *testing.T) {
 			assert.Equal(t, time.UTC, event.OccurredAt.Location())
 			assert.Equal(t, AuthorizationPayload{
 				Permission: PermissionName("agent.read"),
-				ReasonCode: ReasonAllowed,
+				ReasonCode: tc.reason,
 				Purpose:    PurposeLabel("interactive read"),
 				CacheHit:   &cacheHit,
 			}, event.Payload)
@@ -95,10 +96,29 @@ func TestAuthorizationCatalogRejectsUndeclaredOperation(t *testing.T) {
 func TestAuthorizationEveryDeclaredOperationValidates(t *testing.T) {
 	t.Parallel()
 
-	for _, operation := range declaredAuthorizationOperations {
+	for _, pair := range declaredAuthorizationActionPermissions() {
 		event := validAuthorizationEvent(t)
-		event.Action = string(operation)
-		assert.NoError(t, Validate(event), operation)
+		event.Action = pair.Action
+		event.Payload = AuthorizationPayload{Permission: PermissionName(pair.Permission), ReasonCode: ReasonAllowed}
+		assert.NoError(t, Validate(event), pair.Action)
+	}
+}
+
+func TestAuthorizationRejectsEveryMismatchedOperationPermission(t *testing.T) {
+	t.Parallel()
+	pairs := declaredAuthorizationActionPermissions()
+	require.Len(t, pairs, len(declaredAuthorizationOperations))
+	for i, pair := range pairs {
+		event := validAuthorizationEvent(t)
+		event.Action = pair.Action
+		event.Payload = AuthorizationPayload{Permission: PermissionName(pairs[(i+1)%len(pairs)].Permission), ReasonCode: ReasonAllowed}
+		if pairs[(i+1)%len(pairs)].Permission == pair.Permission {
+			event.Payload = AuthorizationPayload{Permission: "agent.read", ReasonCode: ReasonAllowed}
+			if pair.Permission == "agent.read" {
+				event.Payload = AuthorizationPayload{Permission: "secret.write", ReasonCode: ReasonAllowed}
+			}
+		}
+		assert.Error(t, Validate(event), pair.Action)
 	}
 }
 
@@ -119,7 +139,7 @@ func TestAuthorizationCatalogSnapshot(t *testing.T) {
 	encoded, err := json.Marshal(Catalog())
 	require.NoError(t, err)
 	digest := sha256.Sum256(encoded)
-	assert.Equal(t, "bcebee1b06b534193d705f66e50a57b5ef850d306aa8bb23d7e8d1a9e34e745a", hex.EncodeToString(digest[:]))
+	assert.Equal(t, "ba97bdbcd6c86bb2537e948405a2935560dfb5f3f852fb8071a151c99e9e8105", hex.EncodeToString(digest[:]))
 }
 
 func TestAuthorizationRequiredEnvelopeAndPayloadLeaves(t *testing.T) {
@@ -210,6 +230,9 @@ func TestAuthorizationCatalogOnlyAllowsDecisionAllowOrDeny(t *testing.T) {
 		if pair.Outcome == OutcomeDeny || pair.Outcome == OutcomeFailed {
 			event.Severity = SeverityWarning
 		}
+		if pair.Outcome == OutcomeDeny {
+			event.Payload = AuthorizationPayload{Permission: "agent.read", ReasonCode: ReasonPolicyDenied}
+		}
 		err := Validate(event)
 		if pair.Phase == PhaseDecision && (pair.Outcome == OutcomeAllow || pair.Outcome == OutcomeDeny) {
 			assert.NoError(t, err, pair)
@@ -277,13 +300,95 @@ func TestAuthorizationPayloadClosedValuesAndBounds(t *testing.T) {
 	}
 }
 
+func TestAuthorizationOpenStringsCanonicalSafety(t *testing.T) {
+	t.Parallel()
+	invalidUTF8 := string([]byte{0xff})
+	values := []string{invalidUTF8, strings.Repeat("x", 129), "line\nbreak", "zero\u200bwidth", "Bearer secret-canary", "scion_pat_secret-canary"}
+	for _, value := range values {
+		value := value
+		t.Run("purpose", func(t *testing.T) {
+			event := validAuthorizationEvent(t)
+			event.Payload = AuthorizationPayload{Permission: "agent.read", ReasonCode: ReasonAllowed, Purpose: PurposeLabel(value)}
+			err := Validate(event)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), value)
+		})
+		t.Run("resource_kind", func(t *testing.T) {
+			event := validAuthorizationEvent(t)
+			event.Resource.Kind = value
+			err := Validate(event)
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), value)
+		})
+	}
+
+	event := validAuthorizationEvent(t)
+	event.Payload = AuthorizationPayload{Permission: "agent.read", ReasonCode: ReasonAllowed, Purpose: "  interactive  "}
+	assert.Error(t, Validate(event))
+	built, err := buildAuthorizationDecision(AuditOperationContext{CorrelationID: "request-1"}, AuthorizationDecisionInput{
+		Operation: "agent.read", Allowed: true, Principal: IdentityRef{Kind: IdentityUser, ID: "user-1"},
+		Resource: ResourceRef{Kind: "agent", ID: "agent-1", Scope: ResourceScopeProject, ProjectID: "project-1"}, Permission: "agent.read", ReasonCode: ReasonAllowed, Purpose: "  interactive  ",
+	}, "22222222-2222-4222-8222-222222222222", time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	assert.Equal(t, PurposeLabel("interactive"), built.Payload.(AuthorizationPayload).Purpose)
+}
+
+func TestAuthorizationProducerMappingContract(t *testing.T) {
+	t.Parallel()
+	request := AuthorizationProducerRequestContract{OperationID: authzop.OperationID("agent.read")}
+	decision := AuthorizationProducerDecisionContract{AuditReason: ReasonAllowed}
+	assert.Equal(t, authzop.OperationID("agent.read"), request.OperationID)
+	assert.Equal(t, ReasonAllowed, decision.AuditReason)
+
+	entry := Catalog()[1]
+	require.Len(t, entry.ProducerReasonMappings, 16)
+	seen := map[ProducerReasonCategory]bool{}
+	for _, mapping := range entry.ProducerReasonMappings {
+		assert.False(t, seen[mapping.Category])
+		seen[mapping.Category] = true
+		if mapping.Available {
+			allowed := false
+			for _, schema := range entry.OutcomeReasons {
+				if schema.Outcome == mapping.Outcome && containsString(schema.AllowedReasons, string(mapping.Reason)) {
+					allowed = true
+				}
+			}
+			assert.True(t, allowed, mapping.Category)
+		}
+	}
+}
+
 func TestAuthorizationReasonCodeClosedSet(t *testing.T) {
 	t.Parallel()
 
-	for _, reason := range reasonCodeStrings() {
+	entry := Catalog()[1]
+	for _, schema := range entry.OutcomeReasons {
+		for _, reason := range schema.AllowedReasons {
+			event := validAuthorizationEvent(t)
+			event.Outcome = schema.Outcome
+			event.Severity = SeverityInfo
+			if schema.Outcome == OutcomeDeny {
+				event.Severity = SeverityWarning
+			}
+			event.Payload = AuthorizationPayload{Permission: "agent.read", ReasonCode: ReasonCode(reason)}
+			assert.NoError(t, Validate(event), reason)
+		}
+	}
+}
+
+func TestAuthorizationRejectsOutcomeIncompatibleReasons(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		outcome Outcome
+		reason  ReasonCode
+	}{{OutcomeAllow, ReasonPolicyDenied}, {OutcomeDeny, ReasonAllowed}, {OutcomeDeny, ReasonInherited}} {
 		event := validAuthorizationEvent(t)
-		event.Payload = AuthorizationPayload{Permission: "agent.read", ReasonCode: ReasonCode(reason)}
-		assert.NoError(t, Validate(event), reason)
+		event.Outcome = tc.outcome
+		if tc.outcome == OutcomeDeny {
+			event.Severity = SeverityWarning
+		}
+		event.Payload = AuthorizationPayload{Permission: "agent.read", ReasonCode: tc.reason}
+		assert.Error(t, Validate(event))
 	}
 }
 
@@ -381,11 +486,19 @@ func TestAuthorizationAllowAndDenyRenderRawSlogAndOTelJSONEquivalence(t *testing
 			name = "allow"
 		}
 		t.Run(name, func(t *testing.T) {
-			event := validAuthorizationEvent(t)
-			if !allowed {
-				event.Outcome = OutcomeDeny
-				event.Severity = SeverityWarning
+			cacheHit := allowed
+			credential := mustCredentialRef(t, CredentialRefInput{Kind: CredentialUAT, ID: "credential-1", Name: "deploy", Labels: map[string]string{"purpose": "automation"}})
+			reason := ReasonPolicyDenied
+			if allowed {
+				reason = ReasonAllowed
 			}
+			event, err := buildAuthorizationDecision(AuditOperationContext{CorrelationID: "request-1"}, AuthorizationDecisionInput{
+				Operation: "agent.read", Allowed: allowed,
+				Request:   &RequestRef{ID: "request-1", Method: "GET", Route: "/api/v1/agents/{id}", Surface: "api"},
+				Initiator: &IdentityRef{Kind: IdentityUser, ID: "initiator-1"}, Principal: IdentityRef{Kind: IdentityUser, ID: "user-1"}, Executor: &IdentityRef{Kind: IdentitySystem, ID: "executor-1"}, Credential: &credential,
+				Resource: ResourceRef{Kind: "agent", ID: "agent-1", Scope: ResourceScopeProject, ProjectID: "project-1"}, Permission: "agent.read", ReasonCode: reason, Purpose: "interactive", CacheHit: &cacheHit,
+			}, "22222222-2222-4222-8222-222222222222", time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC))
+			require.NoError(t, err)
 			rendered, err := Render(event)
 			require.NoError(t, err)
 
@@ -404,6 +517,12 @@ func TestAuthorizationAllowAndDenyRenderRawSlogAndOTelJSONEquivalence(t *testing
 			otelJSON, err := json.Marshal(otelRecordMap(exporter.Records()[0]))
 			require.NoError(t, err)
 			assert.JSONEq(t, string(rendered), string(otelJSON))
+			var object map[string]any
+			require.NoError(t, json.Unmarshal(rendered, &object))
+			payload := object["payload"].(map[string]any)
+			assert.IsType(t, false, payload["cache_hit"])
+			resource := object["resource"].(map[string]any)
+			assert.NotContains(t, resource, "scope")
 		})
 	}
 }

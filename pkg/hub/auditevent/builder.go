@@ -16,6 +16,7 @@ package auditevent
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
@@ -51,6 +52,7 @@ func BuildAuthorizationDecision(ctx context.Context, input AuthorizationDecision
 }
 
 func buildAuthorizationDecision(operation AuditOperationContext, input AuthorizationDecisionInput, eventID string, occurredAt time.Time) (EnvelopeV1, error) {
+	input.Purpose = PurposeLabel(strings.TrimSpace(string(input.Purpose)))
 	outcome := OutcomeDeny
 	severity := SeverityWarning
 	if input.Allowed {

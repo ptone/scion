@@ -88,6 +88,9 @@ type CatalogEntry struct {
 	Family                 string
 	Action                 string
 	AllowedActions         []string
+	ActionPermissions      []ActionPermissionSchema
+	OutcomeReasons         []OutcomeReasonSchema
+	ProducerReasonMappings []ProducerReasonMapping
 	AllowedPairs           []PhaseOutcome
 	ResourceKind           string
 	ResourceKindRule       ResourceKindRule
@@ -96,6 +99,25 @@ type CatalogEntry struct {
 	RequiredPayloadLeaves  []PayloadLeafSchema
 	OptionalPayloadLeaves  []PayloadLeafSchema
 	Destinations           []Destination
+}
+
+type ActionPermissionSchema struct {
+	Action     string
+	Permission string
+}
+
+type OutcomeReasonSchema struct {
+	Outcome        Outcome
+	AllowedReasons []string
+}
+
+type ProducerReasonCategory string
+
+type ProducerReasonMapping struct {
+	Category  ProducerReasonCategory
+	Outcome   Outcome
+	Reason    ReasonCode
+	Available bool
 }
 
 var catalog = []CatalogEntry{{
@@ -128,8 +150,14 @@ var catalog = []CatalogEntry{{
 
 func authorizationCatalogEntry() CatalogEntry {
 	return CatalogEntry{
-		Family:                 "authorization",
-		AllowedActions:         declaredAuthorizationOperationStrings(),
+		Family:            "authorization",
+		AllowedActions:    declaredAuthorizationOperationStrings(),
+		ActionPermissions: declaredAuthorizationActionPermissions(),
+		OutcomeReasons: []OutcomeReasonSchema{
+			{Outcome: OutcomeAllow, AllowedReasons: []string{string(ReasonAllowed), string(ReasonInherited), string(ReasonCheckDisabled), string(ReasonCheckUnavailable), string(ReasonUnspecified)}},
+			{Outcome: OutcomeDeny, AllowedReasons: []string{string(ReasonPolicyDenied), string(ReasonPermissionMissing), string(ReasonInvalidRequest), string(ReasonNotAuthenticated), string(ReasonNotAuthorized), string(ReasonNotFound), string(ReasonConflict), string(ReasonRateLimited), string(ReasonDependencyUnavailable), string(ReasonAttachmentRejected), string(ReasonCheckUnavailable), string(ReasonUnspecified)}},
+		},
+		ProducerReasonMappings: authorizationProducerReasonMappings(),
 		AllowedPairs:           []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeAllow}, {Phase: PhaseDecision, Outcome: OutcomeDeny}},
 		ResourceKindRule:       ResourceKindCode,
 		RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
@@ -165,6 +193,9 @@ func Catalog() []CatalogEntry {
 	for i, entry := range catalog {
 		result[i] = entry
 		result[i].AllowedActions = append([]string(nil), entry.AllowedActions...)
+		result[i].ActionPermissions = append([]ActionPermissionSchema(nil), entry.ActionPermissions...)
+		result[i].OutcomeReasons = cloneOutcomeReasons(entry.OutcomeReasons)
+		result[i].ProducerReasonMappings = append([]ProducerReasonMapping(nil), entry.ProducerReasonMappings...)
 		result[i].AllowedPairs = append([]PhaseOutcome(nil), entry.AllowedPairs...)
 		result[i].RequiredEnvelopeLeaves = append([]string(nil), entry.RequiredEnvelopeLeaves...)
 		result[i].ResourceScopes = append([]ResourceScopeSchema(nil), entry.ResourceScopes...)
@@ -173,6 +204,18 @@ func Catalog() []CatalogEntry {
 		result[i].Destinations = append([]Destination(nil), entry.Destinations...)
 	}
 	return result
+}
+
+func cloneOutcomeReasons(schemas []OutcomeReasonSchema) []OutcomeReasonSchema {
+	if schemas == nil {
+		return nil
+	}
+	clones := make([]OutcomeReasonSchema, len(schemas))
+	for i, schema := range schemas {
+		clones[i] = schema
+		clones[i].AllowedReasons = append([]string(nil), schema.AllowedReasons...)
+	}
+	return clones
 }
 
 func clonePayloadLeafSchemas(schemas []PayloadLeafSchema) []PayloadLeafSchema {

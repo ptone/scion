@@ -117,6 +117,11 @@ func TestCatalogRejectsEveryUndeclaredPhaseOutcomePair(t *testing.T) {
 					event.Phase = phase
 					event.Outcome = outcome
 					event.Severity = severityForOutcome(outcome)
+					if entry.Family == "authorization" && outcome == OutcomeDeny {
+						payload := event.Payload.(AuthorizationPayload)
+						payload.ReasonCode = ReasonPolicyDenied
+						event.Payload = payload
+					}
 					wantValid := containsPhaseOutcome(entry.AllowedPairs, phase, outcome)
 					err := Validate(event)
 					if wantValid {
@@ -138,7 +143,15 @@ func TestCatalogRejectsEveryUndeclaredPhaseOutcomePair(t *testing.T) {
 func validCatalogEvent(t *testing.T, entry CatalogEntry) EnvelopeV1 {
 	t.Helper()
 	if entry.Family == "authorization" {
-		return validAuthorizationEvent(t)
+		event := validAuthorizationEvent(t)
+		event.Action = entry.AllowedActions[0]
+		for _, pair := range entry.ActionPermissions {
+			if pair.Action == event.Action {
+				event.Payload = AuthorizationPayload{Permission: PermissionName(pair.Permission), ReasonCode: ReasonAllowed}
+				break
+			}
+		}
+		return event
 	}
 	return validCreateEvent(t)
 }
