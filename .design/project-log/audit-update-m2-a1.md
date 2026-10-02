@@ -74,3 +74,43 @@ It should map the existing human-readable decision explanation to a bounded
 permission ID, pass credential decoration through `NewCredentialRef`, and keep
 the #2392 `audit_emit_dispatch` timing around synchronous sink dispatch. This
 unit intentionally leaves all emitter and persistence changes to #2379.
+
+## Review round 1 dispositions
+
+- **R1:** Closed. The catalog now owns 97 explicit
+  `OperationID -> BasePermission` pairs and outcome-specific reason sets.
+  Validation rejects mismatched operation/permission and outcome/reason facts.
+- **R2:** Closed. Builders trim purpose exactly as issuance does, validation
+  delegates purpose safety to `credentialmeta.ValidateIssuance`, and resource
+  kinds use a strict lowercase code validator. Invalid UTF-8, length, control,
+  format, bearer, and `scion_pat_` canaries are value-free.
+- **R3:** Closed as an A1 contract. `AuthorizationProducerRequestContract`
+  pins the required future `AuthzRequest.OperationID authzop.OperationID` field;
+  `AuthorizationProducerDecisionContract` pins the future
+  `Decision.AuditReason auditevent.ReasonCode` field. The catalog mapping is:
+  allow→allowed, inherited→inherited, cache-hit→allowed,
+  permission-denied→permission_missing, policy-denied→policy_denied,
+  unauthenticated→not_authenticated, unauthorized→not_authorized,
+  invalid-request→invalid_request, dependency-unavailable→dependency_unavailable,
+  check-unavailable→check_unavailable, and closed fallback→unspecified (deny).
+  Not-found, conflict, rate-limited, attachment-rejected, and check-disabled are
+  explicitly marked unavailable from the current authorization producer.
+- **R4:** Closed. Allow/deny parity fixtures now go through the builder with
+  request, initiator, executor, credential, purpose, and cache-hit populated;
+  both boolean values remain booleans through render, raw slog, and OTel JSON.
+  This coverage found and fixed the missing portable bool slog representation.
+
+#2379 must begin with an independently reviewed producer-plumbing checkpoint:
+add the two pinned fields, populate operation only from the canonical
+route/operation owner, assign `AuditReason` structurally at every decision exit,
+and exhaustively test the mapping above. It must never infer operation from
+resource/action/permission or parse `Decision.Reason`. Missing, unknown, or
+mismatched fields make audit construction fail without changing authorization.
+Only after that checkpoint is approved may emitter cutover begin; #2392 timing
+remains unchanged until cutover.
+
+Round-1 fix verification: `go test -p 2 ./pkg/hub/auditevent`,
+`go test -race -p 2 ./pkg/hub/auditevent`, scoped vet and build, gofmt, and
+diff checks passed. The bounded single-concurrency golangci-lint run passed with
+`0 issues`. No gate was inconclusive; `make ci`/`make ci-full` remained
+prohibited.
