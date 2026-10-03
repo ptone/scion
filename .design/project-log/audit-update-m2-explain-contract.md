@@ -339,3 +339,80 @@ upstream push, PR, compare link, or merge-queue notice.
 The catalog/P2 handoff remains: independently review this contract first;
 catalog extension and P2 resume only after that gate. The projection handoff
 remains the single bounded `projection_summary` observation described above.
+
+## Independent review round 4 corrections
+
+Round 4 reviewed immutable head
+`5a8ace9fdeacceecc46792a8ca3fa31dfb897f56` against accepted P1 base
+`fd4f83fb7769af4b08eed1ac06be6d2442de89d7`. The protected review report
+`m2-explain-r4.md` had verified SHA-256
+`e71f870a1d28c1e5b070d25c76a61e292a2ae48b4827992373353a4e7f5556fe`.
+This test-only correction resolves both reported scanner findings:
+
+- the nested module-export command uses `exec.CommandContext` with an
+  eight-minute child deadline, strictly shorter than the 20-minute outer gate,
+  and a two-second `WaitDelay`; deadline, cancellation, execution, and output
+  drain failures are phase-classified without command output or source values;
+- deterministic helper-process regressions exercise deadline, live
+  cancellation, successful bounded export loading, and prove `Output` returned
+  a non-nil `ProcessState` after waiting for the child;
+- every `types.Config.Error` callback and every non-nil `Config.Check` error is
+  rejected before a partial package or incomplete `types.Info` can be used;
+  injected regressions cover callback-only failure and a non-nil check error
+  returned together with a partial package; and
+- all prior interface-dispatch, direct/helper/function-value, request,
+  operation/mapping, emitter/sink mutations, and positive safe-dispatch tests
+  remain in the single required filter.
+
+The exact pre-implementation focused RED attempt was:
+
+```text
+ulimit -v 8000000; start_seconds=$SECONDS; timeout 2m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -count=1 -p 2 ./pkg/hub -run '^(TestEffectivePermissionIntrospectionBoundaryImporterIsBounded|TestEffectivePermissionIntrospectionBoundaryTypeErrorsFailClosed)$'; command_rc=$?; echo COMMAND_EXIT=$command_rc; echo WALL_SECONDS=$((SECONDS-start_seconds)); exit $command_rc
+```
+
+Result: **INCONCLUSIVE**. The captured output contained dependency downloads
+only and did not contain compiler diagnostics, the wrapper exit status, or wall
+time. It was not treated as RED or GREEN and was not retried. The shared cache
+was not cleaned, relocated, replaced, or manually altered.
+
+The code/test durability checkpoint was committed and pushed before the
+post-implementation gates as
+`39c1106327f9145c268d1d243b49e85b60d5382c`.
+
+The exact single mandatory normal command was:
+
+```text
+ulimit -v 8000000; start_seconds=$SECONDS; timeout 20m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -count=1 -p 2 ./pkg/hub -run '^(TestExplainAPI_(RegisteredOperationUsesReviewedBasePermission|OperationValidationFailsClosedWithoutValueEcho|DoesNotInferOperation|EffectivePermissionsUsesNonEmittingIntrospection)|TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations|TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch|TestEffectivePermissionIntrospectionBoundaryImporterIsBounded|TestEffectivePermissionIntrospectionBoundaryTypeErrorsFailClosed|TestAuthzOperationLookupIsClosed)$'; command_rc=$?; echo COMMAND_EXIT=$command_rc; echo WALL_SECONDS=$((SECONDS-start_seconds)); exit $command_rc
+```
+
+Result: **INCONCLUSIVE**. It emitted no test/package diagnostics and no explicit
+`ok github.com/GoogleCloudPlatform/scion/pkg/hub` line, then the original
+wrapper reported exactly:
+
+```text
+COMMAND_EXIT=124
+WALL_SECONDS=1200
+```
+
+A read-only process snapshot at 894 seconds showed the original shell,
+`timeout`, and `go test` processes plus the Go linker; no `hub.test` or nested
+`go list -deps -export` child existed yet. After exit, a second read-only
+process check found no timeout, Go test, Hub test, or nested importer child.
+This proves the outer timeout reaped the command tree, but the required tests
+never started and the importer regressions did not execute in this gate.
+
+Per the round-4 termination contract, the normal command was not retried and
+the race command was not run. Scoped vet was not run after the inconclusive
+required gate; no lint, broad build, full Hub suite, unfiltered package test,
+`make ci`, or `make ci-full` was run. Gofmt and `git diff --check` passed before
+the checkpoint. Final path/scope, zero-production-diff, ancestry, remote
+equality, clean-tree, and evidence hashes are recorded in the protected direct
+handoff because a commit cannot contain its own SHA.
+
+The round-4 correction changes only
+`pkg/hub/authz_explain_operation_contract_test.go` and this project log. There
+is zero production diff. It does not change option-B production behavior,
+catalog ownership, P2 propagation, emitters/slog/sinks, store/schema/history,
+sampling, transport, projection, M1, or `#2392 audit_emit_dispatch` timing.
+Catalog, P2, emitter, compare, and merge actions remain blocked pending a
+conclusive normal and race GREEN plus fresh independent explain review.
