@@ -594,3 +594,87 @@ sampling, transport, projection, M1, and `#2392 audit_emit_dispatch` exclusions
 remain unchanged. The pushed checkpoint is preserved; race and fresh review
 remain blocked pending correction of the newly exposed scanner-closure
 failure.
+
+## Package-local interface-closure correction and gates
+
+The retained author received the complete continuation brief inline in the
+direct private conversation. All BEGIN/BODY/END boundaries and required
+sections were present. Its source SHA-256
+`0b56751595d89a18af5da71b1c432cf839810299e13e989fa0781a481623b0a7`
+is recorded as message provenance, not an independently recomputed file hash.
+The prior authoritative report body remained available in the same direct
+conversation at source SHA-256
+`64ca1d295a1b9c164765fefcc475b22c8cb07b1d948b2276b16e304c253ec496`.
+
+Before work, HEAD, the local branch ref, tracking ref, and independent remote
+ref all equaled pinned continuation head
+`9c45b7ff2d23abdf884f31b390495b191c2fe1cf`; the tree was clean on
+`scion/audit-update-m2`.
+
+Static analysis was conclusive, so the optional diagnostic allowance was not
+used. The failing package-local interface contains a package-private method
+and has zero production implementors; its documented implementors are test
+fakes excluded from the production source set. The resolver enumerated every
+package-local named value and pointer method set but incorrectly equated an
+empty target set with an incomplete target set.
+
+The correction uses a type-system closure proof rather than an allowlist. If
+an interface contains a package-private method owned by the checked package,
+outside packages cannot declare that method. An outside wrapper may only
+promote an existing implementation, whose package-local executable body is
+already included by method-set enumeration. The complete package-local target
+set may therefore be genuinely empty. Interfaces without that proof retain
+the existing incomplete-set failure. Enumeration still covers value and
+pointer receivers, promoted concrete methods, and every package-local
+implementor; no possible executable target is inferred away or dropped.
+
+Deterministic regressions add:
+
+- an empty package-closed target set that is accepted;
+- a package-closed multiple-implementor case whose unsafe pointer-receiver
+  target is still found and rejected; and
+- a package-closed promoted concrete-method case that is completely resolved.
+
+The existing exported-method empty-set rejection, safe `Identity.Type`,
+same/other-file value and pointer implementations, multiple implementations,
+forbidden direct/helper/function-value/request/operation/emitter/sink cases,
+actual-tab importer protocol, bounded child execution and reaping,
+instance-scoped caching, and fail-closed callback/Check ordering remain.
+
+Before validation, `gofmt` and `git diff --check` passed, the sole changed path
+was `pkg/hub/authz_explain_operation_contract_test.go`, and production diff
+was empty. The test checkpoint was committed and pushed as `3ddac9d`.
+
+The exact one-shot normal command was:
+
+```text
+ulimit -v 8000000; start_seconds=$SECONDS; timeout 45m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -timeout 44m -count=1 -p 2 ./pkg/hub -run '^(TestExplainAPI_(RegisteredOperationUsesReviewedBasePermission|OperationValidationFailsClosedWithoutValueEcho|DoesNotInferOperation|EffectivePermissionsUsesNonEmittingIntrospection)|TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations|TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch|TestEffectivePermissionIntrospectionBoundaryImporterIsBounded|TestEffectivePermissionIntrospectionBoundaryTypeErrorsFailClosed|TestAuthzOperationLookupIsClosed)$'; command_rc=$?; echo COMMAND_EXIT=$command_rc; echo WALL_SECONDS=$((SECONDS-start_seconds)); exit $command_rc
+```
+
+Normal result: **GREEN**, explicit
+`ok github.com/GoogleCloudPlatform/scion/pkg/hub`, package time 207.855 seconds,
+`COMMAND_EXIT=0`, `WALL_SECONDS=366`. It was not retried.
+
+The exact one-shot race command added only `-race` to that invocation:
+
+```text
+ulimit -v 8000000; start_seconds=$SECONDS; timeout 45m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -timeout 44m -race -count=1 -p 2 ./pkg/hub -run '^(TestExplainAPI_(RegisteredOperationUsesReviewedBasePermission|OperationValidationFailsClosedWithoutValueEcho|DoesNotInferOperation|EffectivePermissionsUsesNonEmittingIntrospection)|TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations|TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch|TestEffectivePermissionIntrospectionBoundaryImporterIsBounded|TestEffectivePermissionIntrospectionBoundaryTypeErrorsFailClosed|TestAuthzOperationLookupIsClosed)$'; command_rc=$?; echo COMMAND_EXIT=$command_rc; echo WALL_SECONDS=$((SECONDS-start_seconds)); exit $command_rc
+```
+
+Race result: **GREEN**, explicit
+`ok github.com/GoogleCloudPlatform/scion/pkg/hub`, package time 238.732 seconds,
+`COMMAND_EXIT=0`, `WALL_SECONDS=503`, with no race report. It was not retried.
+
+Both commands used Go 1.26.1, no tags, shell `ulimit -v 8000000`,
+`GOMEMLIMIT=4GiB`, immutable shared `GOCACHE=/scion-volumes/gocache`, `-p 2`,
+and the required 44/45-minute limits. They ran sequentially. No other heavy Go
+command, full or unfiltered Hub test, prewarm, retry, lint, heavy build,
+`make ci`, or `make ci-full` ran, and the shared cache was not cleaned, altered,
+relocated, or replaced.
+
+The correction remains limited to this project log and the authorized Go test
+file with zero production diff. Option-B behavior, catalog/P2,
+emitter/slog/sinks, store/schema/history, sampling, transport, projection, M1,
+and `#2392 audit_emit_dispatch` timing are unchanged. Both required gates are
+conclusively GREEN, permitting fresh independent explain review round 6/7;
+compare and merge actions remain out of scope.
