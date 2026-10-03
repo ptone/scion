@@ -194,6 +194,9 @@ func TestEffectivePermissionIntrospectionBoundaryRejectsMutations(t *testing.T) 
 		"interface multiple implementors": addSameFileBoundaryDeclarations(
 			mutateBoundarySource(base, "s.authzService.introspectAuthorization()", "var runner boundaryRunner = boundarySafeRunner{}; runner.Run(); s.authzService.introspectAuthorization()"),
 			"type boundaryRunner interface { Run() }\ntype boundarySafeRunner struct{}\nfunc (boundarySafeRunner) Run() {}\ntype boundaryUnsafeRunner struct{}\nfunc (*boundaryUnsafeRunner) Run() { ordinary.Decide() }"),
+		"package-closed interface multiple implementors": addSameFileBoundaryDeclarations(
+			mutateBoundarySource(base, "s.authzService.introspectAuthorization()", "var runner boundaryRunner = boundarySafeRunner{}; runner.run(); s.authzService.introspectAuthorization()"),
+			"type boundaryRunner interface { run() }\ntype boundarySafeRunner struct{}\nfunc (boundarySafeRunner) run() {}\ntype boundaryUnsafeRunner struct{}\nfunc (*boundaryUnsafeRunner) run() { ordinary.Decide() }"),
 	}
 	for name, sources := range map[string]map[string][]byte{
 		"direct Decide": mutateBoundarySource(base,
@@ -251,6 +254,18 @@ func TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch(t *
 			"type Identity interface { Type() string }\ntype concreteIdentity struct{}\nfunc (*concreteIdentity) Type() string { return \"user\" }")
 		require.NoError(t, validateExplainIntrospectionBoundary(sources))
 		assert.Equal(t, 1, explainBoundaryExportsCache.loadAttempts, "safe dispatch checks must reuse the real importer result")
+	})
+	t.Run("package-closed interface with empty target set", func(t *testing.T) {
+		sources := addSameFileBoundaryDeclarations(
+			mutateBoundarySource(explainBoundaryTestSources(), "s.authzService.introspectAuthorization()", "var runner boundaryRunner; if runner != nil { runner.run() }; s.authzService.introspectAuthorization()"),
+			"type boundaryRunner interface { run() }")
+		require.NoError(t, validateExplainIntrospectionBoundary(sources))
+	})
+	t.Run("package-closed interface promoted concrete method", func(t *testing.T) {
+		sources := addSameFileBoundaryDeclarations(
+			mutateBoundarySource(explainBoundaryTestSources(), "s.authzService.introspectAuthorization()", "var runner boundaryRunner = boundaryPromotedRunner{}; runner.run(); s.authzService.introspectAuthorization()"),
+			"type boundaryRunner interface { run() }\ntype boundarySafeRunner struct{}\nfunc (boundarySafeRunner) run() { safeBoundaryHelper() }\ntype boundaryPromotedRunner struct { boundarySafeRunner }\nfunc safeBoundaryHelper() {}")
+		require.NoError(t, validateExplainIntrospectionBoundary(sources))
 	})
 }
 
@@ -1050,7 +1065,22 @@ func explainBoundaryInterfaceImplementations(method *types.Func, checkedPackage 
 			implementations = append(implementations, wrapped)
 		}
 	}
-	return implementations, len(implementations) > 0
+	return implementations, len(implementations) > 0 || explainBoundaryInterfaceTargetsArePackageClosed(interfaceType, checkedPackage)
+}
+
+func explainBoundaryInterfaceTargetsArePackageClosed(interfaceType *types.Interface, checkedPackage *types.Package) bool {
+	interfaceType.Complete()
+	for index := 0; index < interfaceType.NumMethods(); index++ {
+		method := interfaceType.Method(index)
+		if !method.Exported() && method.Pkg() == checkedPackage {
+			// An outside package cannot declare this package's private method.
+			// External wrappers can only promote an existing implementation,
+			// whose package-local executable body is enumerated above. Thus the
+			// package-local target set is complete even when it is empty.
+			return true
+		}
+	}
+	return false
 }
 
 func explainBoundarySignature(candidate types.Type) *types.Signature {
