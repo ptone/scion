@@ -52,6 +52,10 @@ const (
 	// of pre-#2703 non-git projects whose workspace-mode label now resolves
 	// to empty-per-agent. See cmd/boot_empty_per_agent_report.go.
 	MigrationEmptyPerAgentLegacyReport MigrationName = "empty_per_agent_legacy_report"
+	// MigrationRunIntentBackfill is the one-shot migration that sets
+	// agents.run_intent for rows that predate the column. See
+	// cmd/boot_run_intent_backfill.go.
+	MigrationRunIntentBackfill MigrationName = "run_intent_backfill"
 )
 
 // migrationMarker records the completion state of a single migration.
@@ -203,7 +207,8 @@ func isKnownMigration(name MigrationName) bool {
 	switch name {
 	case MigrationDMKey, MigrationBackfill, MigrationGroupRefRepair, MigrationWorkspaceModeLabel,
 		MigrationBrokerOwnershipBackfill, MigrationNonAgentDispatchStateBackfill,
-		MigrationBrokerQuotaBindingsToSettings, MigrationEmptyPerAgentLegacyReport:
+		MigrationBrokerQuotaBindingsToSettings, MigrationEmptyPerAgentLegacyReport,
+		MigrationRunIntentBackfill:
 		return true
 	default:
 		return false
