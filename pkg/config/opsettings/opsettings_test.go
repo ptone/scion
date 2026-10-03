@@ -243,6 +243,11 @@ func TestValidateValidDoc(t *testing.T) {
 		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://accounts.google.com","issuer_type":"user","expected_audience":"client-id","allowed_domains":["example.com"]}]}`},
 		{"harness_configs", `{"claude":{"harness":"claude","image":"scion-claude:latest","image_pull_policy":"IfNotPresent"}}`},
 		{"profiles", `{"staging":{"runtime":"docker","harness_overrides":{"claude":{"image":"scion-claude:staging","image_pull_policy":"Always"}}}}`},
+		{"profiles", `{"gke":{"runtime":"k8s","shared_dir_storage_backend":"nfs"}}`},
+		{"profiles", `{"local":{"runtime":"docker","shared_dir_storage_backend":"local"}}`},
+		{"runtimes", `{"k8s":{"type":"kubernetes","shared_dir_storage_backend":"nfs"}}`},
+		{"profiles", `{"gke":{"runtime":"k8s","max_agents":5}}`},
+		{"runtimes", `{"k8s":{"type":"kubernetes","max_agents":0}}`},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -275,6 +280,11 @@ func TestValidateInvalidDoc(t *testing.T) {
 		{"federation", `{"unknown_field": true}`, "additional property"},
 		{"harness_configs", `{"claude":{"harness":"claude","image_pull_policy":"always"}}`, "invalid image_pull_policy enum (case-sensitive)"},
 		{"profiles", `{"staging":{"runtime":"docker","harness_overrides":{"claude":{"image_pull_policy":"always"}}}}`, "invalid profile harness_overrides image_pull_policy enum"},
+		{"profiles", `{"gke":{"runtime":"k8s","shared_dir_storage_backend":"ceph"}}`, "invalid profile shared_dir_storage_backend enum"},
+		{"runtimes", `{"k8s":{"type":"kubernetes","shared_dir_storage_backend":"NFS"}}`, "invalid runtime shared_dir_storage_backend enum (case-sensitive)"},
+		{"profiles", `{"gke":{"runtime":"k8s","max_agents":-1}}`, "negative profile max_agents"},
+		{"runtimes", `{"k8s":{"type":"kubernetes","max_agents":-3}}`, "negative runtime max_agents"},
+		{"profiles", `{"gke":{"runtime":"k8s","max_agents":"5"}}`, "string profile max_agents"},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))

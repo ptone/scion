@@ -72,6 +72,7 @@
         "storage": { "$ref": "#/$defs/serverStorage" },
         "workspace_storage": { "$ref": "#/$defs/serverWorkspaceStorage" },
         "secrets": { "$ref": "#/$defs/serverSecrets" },
+        "shared_dir_storage": { "$ref": "#/$defs/serverSharedDirStorage" },
         "log_level": {
           "type": "string",
           "enum": ["debug", "info", "warn", "error"],
@@ -326,6 +327,16 @@
         "shared_dir_size": {
           "type": "string",
           "description": "Kubernetes only. Default size per shared-dir PVC (e.g. 10Gi). A profile value wins over this; a template or agent kubernetes.shared_dir_size wins over both."
+        },
+        "shared_dir_storage_backend": {
+          "type": "string",
+          "enum": ["", "local", "nfs"],
+          "description": "Shared-dir storage backend for agents whose profile uses this runtime entry. Overrides server.shared_dir_storage.backend; a profile value wins over this. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
+        },
+        "max_agents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Hub only. Maximum concurrently live agents per runtime broker for all profiles that use this runtime entry and set no max_agents of their own. Those agents count against this limit instead of max_agents_per_broker. 0 or unset means no own limit. Read from the hub's global settings only."
         }
       },
       "additionalProperties": false
@@ -787,6 +798,16 @@
         "shared_dir_size": {
           "type": "string",
           "description": "Kubernetes only. Default size per shared-dir PVC under this profile (e.g. 10Gi). Wins over the runtime entry's value; a template or agent kubernetes.shared_dir_size wins over this."
+        },
+        "shared_dir_storage_backend": {
+          "type": "string",
+          "enum": ["", "local", "nfs"],
+          "description": "Shared-dir storage backend for agents using this profile. Wins over the runtime entry's value and server.shared_dir_storage.backend. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
+        },
+        "max_agents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Hub only. Maximum concurrently live agents per runtime broker for this profile. Wins over the runtime entry's max_agents. Those agents count against this limit instead of max_agents_per_broker. 0 or unset means no own limit (the runtime entry's limit, if any, still applies). Read from the hub's global settings only."
         }
       },
       "additionalProperties": false
@@ -1145,6 +1166,41 @@
         "gcp_project_id": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPPROJECTID" },
         "gcp_credentials": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPCREDENTIALS" }
       }
+    },
+    "serverSharedDirStorage": {
+      "type": "object",
+      "description": "Storage backend for project shared directories. Global-only, Layer-0 (restart to apply). A runtime entry or profile can override the backend with shared_dir_storage_backend.",
+      "x-since": "1",
+      "properties": {
+        "backend": { "type": "string", "enum": ["", "local", "nfs"], "default": "local" },
+        "nfs": {
+          "type": "object",
+          "description": "NFS export used when the resolved backend is nfs. Shared dirs live at <mount_root>/<shares[0].id>/<subpath_root>/<project id>/shared-dirs/<name>.",
+          "properties": {
+            "mount_root": { "type": "string", "description": "Host directory under which each share is mounted, at <mount_root>/<share id>." },
+            "mount_options": { "type": "string" },
+            "uid": { "type": "integer" },
+            "gid": { "type": "integer" },
+            "storage_class": { "type": "string" },
+            "subpath_root": { "type": "string", "default": "projects" },
+            "shares": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string" },
+                  "server": { "type": "string" },
+                  "export": { "type": "string" },
+                  "pv_name": { "type": "string", "description": "Kubernetes claim mounted by subPath for shared dirs." }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
     "serverScheduler": {
       "type": "object",
