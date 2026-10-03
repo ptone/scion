@@ -18,6 +18,10 @@ I ran the scrubbed `go test` on the tip and on a detached `origin/main` (2220c46
 - **MEDIUM:** the A2 timeout test does not check that grandchildren are killed. It passes only because its 5s threshold equals `execWaitDelay`. With `Cancel` removed and `WaitDelay` set to 2s, the test passes while `sleep 30` grandchildren survive.
 - **LOW:** the reaper regression test does not fail when the fix is reverted. The A5 refuse-to-start call site is untested. There is no broker-level restart test for an agent with no record. Some edge-case rows (Vertex region, inet_aton IP literals) are missing. Supplementary groups are now dropped, which is a behaviour change and untested.
 
+## Supplementary run
+
+I re-ran `pkg/hub` with `-timeout 60m` on both trees. It passes on both (tip: 16,245 passing test events; main: 16,468) with zero failures.
+
 ## Learnings
 
 - Run substrate exec tests as a non-`scion` user, or stub `execUserLookup`, before trusting a green sandbox run. Tests that depend on the identity of the host user pass in Scion containers and fail on GitHub runners.
