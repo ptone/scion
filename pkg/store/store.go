@@ -295,7 +295,7 @@ type AgentStore interface {
 	// LastActivityEvent for positioning and stats — see AgentMember.
 	//
 	// max bounds the read so a candidate pool that grew past the caller's
-	// ceiling check is still detected (design 5.3 step 1): when the true
+	// ceiling check is still detected: when the true
 	// candidate count exceeds max, exactly max rows are returned (the exact
 	// order among untaken rows is unspecified in that case, since the
 	// caller's only use of an over-max result is to refuse the request).
@@ -577,8 +577,9 @@ type AgentFilter struct {
 // construction path a caller must use to build a Resource from a member, so
 // that a future agentResource input agentResource gains but AgentMember lacks
 // is caught by the equality gate described on ToAgent, rather than silently
-// widening what a race can miss (design 5.3 step 5a; the hub-side
-// non-waivable member/full equality test is the gate that exercises this).
+// widening what the hub's member-vs-full-row race check can miss (the
+// hub-side non-waivable member/full equality test is the gate that
+// exercises this).
 type AgentMember struct {
 	ID        string
 	OwnerID   string
@@ -596,8 +597,8 @@ type AgentMember struct {
 // zero. It is the one construction path for building an authorization
 // Resource from a member row: callers must derive it as
 // agentResource(m.ToAgent()), never by hand-listing AgentMember's fields, so
-// that comparing that Resource against agentResource(fullRow) (design 5.3
-// step 5a) actually proves the two rows agree on every input the kernel
+// that comparing that Resource against agentResource(fullRow) (the hub's
+// race check) actually proves the two rows agree on every input the kernel
 // reads, not just the ones some earlier author remembered to copy here.
 func (m AgentMember) ToAgent() *Agent {
 	return &Agent{

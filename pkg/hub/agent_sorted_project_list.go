@@ -71,7 +71,7 @@ func effectivePagedPageSize(limit, n int) int {
 // candidate-count ceiling, and the v2 cursor. sort=created and the global
 // endpoint's sorted mode are later phases.
 // An agent-JWT caller supplying "sort" gets a 400 here, before any SQL; the
-// agent-JWT sorted path itself ships in P2 (design 5.3 "P1b build").
+// agent-JWT sorted path itself ships in P2.
 
 // errCodeSortedViewUnavailable is the 422 error code for the sorted-mode
 // candidate ceiling refusal.
@@ -123,7 +123,7 @@ type sortedProjectListParams struct {
 func parseSortedProjectListParams(w http.ResponseWriter, query url.Values, limit int) (sortedProjectListParams, bool) {
 	// Clamp first, before the fit>=limit check below, so clamping never
 	// turns a request that would have been valid at the clamped value into
-	// a 400 (design 4.1's limit range is unchanged semantics, i.e. a silent
+	// a 400 (the limit range keeps its legacy semantics, i.e. a silent
 	// clamp, not an error, matching the legacy store path).
 	if limit > maxSortedLimit {
 		limit = maxSortedLimit
@@ -140,8 +140,8 @@ func parseSortedProjectListParams(w http.ResponseWriter, query url.Values, limit
 	}
 
 	// P1b implements sort=updated only on the project endpoint; sort=created
-	// is P2 (design 11 P1b/P2). "created" is a valid *value* of the sort
-	// parameter under the final contract (4.1), but P1b has no way to serve
+	// is P2. "created" is a valid *value* of the sort
+	// parameter under the final contract, but P1b has no way to serve
 	// it yet, so it gets the same 400 "invalid sort" an unrecognized value
 	// would, rather than a confusing partial 200. There is no separate "not
 	// yet available" response shape for sort, unlike the agent-JWT 400
@@ -185,11 +185,11 @@ func memberResource(m store.AgentMember) Resource {
 	return agentResource(m.ToAgent())
 }
 
-// resourceEqual is a whole-Resource deep equality (design 5.3 step 5a:
-// "comparing whole Resources rather than a field list tracks any future
-// input automatically"; security sign-off: "5a compares WHOLE Resources not
-// a field list"). It normalizes a nil and an empty Labels map or Ancestry
-// slice as equal first (design 5.3 step 5a): a difference in how the narrow
+// resourceEqual is a whole-Resource deep equality for the step 5a race
+// check: comparing whole Resources rather than a field list tracks any
+// future input automatically, which the security review required. It
+// normalizes a nil and an empty Labels map or Ancestry
+// slice as equal first: a difference in how the narrow
 // member decoder and the full-row decoder represent "no labels" or "no
 // ancestry" must never by itself trigger a re-decision. Deliberately NOT a
 // hand-written field list: a field this function doesn't know about (such
@@ -340,7 +340,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		cur = &decoded
 	}
 
-	// Step 0: candidate ceiling pre-check (design 5.3 step 0). The member
+	// Step 0: candidate ceiling pre-check. The member
 	// filter is the request filter with Phase cleared: the ceiling,
 	// completeness and stats are all decided on the unphased candidate set.
 	memberFilter := filter
@@ -357,7 +357,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Step 1: member read, max = ceiling+1 so a candidate pool that grew
-	// between the COUNT and this read is still caught (design 5.3 step 1).
+	// between the COUNT and this read is still caught.
 	members, err := s.store.ListAgentMembers(ctx, memberFilter, p.sort, p.dir, authorizedListMaxCandidates+1)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -370,11 +370,10 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	n = len(members)
 
 	// Step 2: completeness is decided on the candidate count n, before the
-	// read pass (design 5.3 step 2).
+	// read pass.
 	complete := p.hasFit && n <= p.fit
 
-	// Step 3: the thin ActionRead-only read pass over every candidate
-	// (design 5.3 step 3).
+	// Step 3: the thin ActionRead-only read pass over every candidate.
 	resources := make([]Resource, len(members))
 	for i, m := range members {
 		resources[i] = memberResource(m)
@@ -390,7 +389,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// Step 4: stats, computed from the readable set (design 5.3 step 4).
+	// Step 4: stats, computed from the readable set.
 	var statsResp *ListAgentsStats
 	if p.stats {
 		statsResp = buildAgentStats(readable)
@@ -403,7 +402,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 
 	if complete {
 		// Step 5, complete branch: the whole unphased readable set, in
-		// section-4.2 order (ListAgentMembers already returned it sorted).
+		// sorted-mode order (ListAgentMembers already returned it sorted).
 		page = readable
 		pageReadCaps = readableReadCaps
 		totalCount = len(readable)
@@ -449,7 +448,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Step 5a + step 6: resolve full rows for the page, apply the race rule,
-	// and compute the remaining 7 actions (design 5.3 step 5a/6).
+	// and compute the remaining 7 actions.
 	ids := make([]string, len(page))
 	for i, m := range page {
 		ids[i] = m.ID
@@ -478,10 +477,10 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	for i, m := range page {
 		full, ok := fullRows[m.ID]
 		if !ok {
-			continue // deleted between the two reads: dropped (design 5.3 step 5a)
+			continue // deleted between the two reads: dropped
 		}
 		// An explicit, single-field check kept alongside the store-driven
-		// recheck below as the design's stated belt-and-suspenders -- it
+		// recheck below as deliberate belt-and-suspenders -- it
 		// also still fires if a full row were ever fetched by a path that
 		// does not itself filter by project.
 		if full.ProjectID != projectID {
@@ -498,7 +497,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		if !resourceEqual(fullRes, memberRes) {
 			// Race: authorization inputs changed. Re-run the read decision
 			// and the remaining actions on the full row's Resource,
-			// fail-closed (design 5.3 step 5a).
+			// fail-closed.
 			redecided := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, allAgentActions)[0]
 			if !capabilityAllows(redecided, ActionRead) {
 				continue // no longer readable
@@ -522,11 +521,11 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 
 	// A complete response IS the whole set: a step 5a drop (missing row,
 	// project/filter mismatch, or no-longer-readable race) must be reflected
-	// in totalCount, not just in the item count (design 5.3: "a complete
-	// response simply has fewer items (totalCount = len(page))"). A paged
+	// in totalCount, not just in the item count: a complete response
+	// simply has fewer items (totalCount = len(page)). A paged
 	// response's totalCount is the phase-filtered readable count across the
 	// whole walk, not just this page, so a short page from step 5a drops
-	// does not change it (design: "A short page is valid").
+	// does not change it (a short page is valid).
 	if complete {
 		totalCount = len(agents)
 	}
@@ -557,7 +556,7 @@ func isSortedModeRequest(query url.Values) bool {
 }
 
 // rejectAgentJWTSortedMode writes the P1b 400 for a sorted-mode request from
-// an agent JWT, before any SQL runs (design 5.3 "P1b build"); the agent-JWT
+// an agent JWT, before any SQL runs; the agent-JWT
 // hard-gate test asserts this exact message.
 func rejectAgentJWTSortedMode(w http.ResponseWriter) {
 	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, agentJWTSortedModeMessage, nil)

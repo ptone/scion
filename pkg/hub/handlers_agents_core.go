@@ -174,12 +174,12 @@ type ListAgentsResponse struct {
 	Dir  string `json:"dir,omitempty"`
 	// Complete is set only when the request supplied "fit" (sorted mode): true
 	// iff the unphased candidate set had at most fit members, in which case
-	// Agents is its whole readable subset (design 4.6, 4.1 "fit"). A pointer
+	// Agents is its whole readable subset. A pointer
 	// so "fit not sent" (nil, omitted) is distinguishable from "fit sent,
 	// complete: false".
 	Complete *bool `json:"complete,omitempty"`
-	// Stats is populated only when the request supplied "stats=1" (design
-	// 4.6). It is computed over the request filter with Phase cleared, kept
+	// Stats is populated only when the request supplied "stats=1". It is
+	// computed over the request filter with Phase cleared, kept
 	// label/scope/projectId/broker/includeDeleted, and (project user path)
 	// read-filtered the same way the page is.
 	Stats        *ListAgentsStats `json:"stats,omitempty"`
@@ -190,14 +190,14 @@ type ListAgentsResponse struct {
 // ListAgentsStats is the sorted-mode "stats" response block.
 type ListAgentsStats struct {
 	// Total is the exact readable, label(k=v)-filtered count, phase NOT
-	// applied (design 4.6).
+	// applied.
 	Total int `json:"total"`
 	// Running is the count of phase == "running" among the same population,
 	// always present regardless of the request's own phase filter.
 	Running int `json:"running"`
 	// Agents is exactly the counted population as [id, phase] pairs. The
-	// project endpoint is already bounded by the 2,000 candidate ceiling
-	// (design 5.3), so it is never omitted here — the >2000 omission rule
+	// project endpoint is already bounded by the 2,000 candidate ceiling,
+	// so it is never omitted here — the >2000 omission rule
 	// applies only to the global endpoint (P2 scope).
 	Agents [][2]string `json:"agents"`
 }
