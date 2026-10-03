@@ -14,8 +14,14 @@ The implementation checkpoint is
 `73df83e238506b7160bdfc4a2eb578d94b3edc29`, based directly on required head
 `fd4f83fb7769af4b08eed1ac06be6d2442de89d7`. It was committed and pushed to
 `origin/scion/audit-update-m2` before the broader bounded checks. The final
-delivery commit adds only this project log; its SHA is reported in the direct
-manager handoff because a commit cannot contain its own SHA.
+delivery commits after that checkpoint add only this project log; the final
+SHA is reported in the direct manager handoff because a commit cannot contain
+its own SHA.
+
+The campaign accepted base remains
+`64a549c402fe941a9ea7702a453ecf60b0b70d94`. The restricted blocker recorded
+later upstream drift at `97d02e32d15594e069612eb8aecb77e47fba97b6`;
+this bounded unit intentionally did not fetch, rebase, or integrate that drift.
 
 ## Exact requested-decision contract
 
