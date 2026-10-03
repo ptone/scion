@@ -19,6 +19,10 @@ was also pushed before its post-checkpoint bounded gates. The final SHA is
 reported in the direct manager handoff because a commit cannot contain its own
 SHA.
 
+The round-2 test-only correction checkpoint is
+`21e8885a5e4db4cedf62eaae3a794d0ce01b90c1`; it was pushed before the
+round-2 post-checkpoint bounded gates.
+
 The campaign accepted base remains
 `64a549c402fe941a9ea7702a453ecf60b0b70d94`. The restricted blocker recorded
 later upstream drift at `97d02e32d15594e069612eb8aecb77e47fba97b6`;
@@ -253,6 +257,69 @@ were:
 
 The already-consumed scoped build was not repeated. The earlier broad normal,
 broad race, and lint timeouts remain **INCONCLUSIVE**, and none was restarted.
+
+## Independent review round 2 corrections
+
+Round 2 requested changes at reviewed SHA
+`3eedea41b169041042ed34bf67e76c259ad6f795`. The complete direct fix brief had
+SHA-256 `c26b74c20646f13eb572d4929d14bb8bff7a9db8a8f638cafadc2beea60e62d9`,
+and the complete review report had verified SHA-256
+`1c6f46f38513543f530fcefe31581e4b3e58233018ba1a6bd018cf11ec4eba67`.
+The correction is test-only:
+
+- function-value assignments, dependencies, callable fields, function
+  literals, and callable arguments/parameters are resolved transitively;
+  unsupported dynamic callable dispatch fails closed;
+- ordinary `AuthzRequest` presence is detected by resolved Go type, including
+  pointers and aliases, rather than only direct composite-literal spelling;
+- mutations now cover an indirect other-file function value,
+  `new(AuthzRequest)`, a typed `AuthzRequest` declaration, and aliased
+  construction while preserving every earlier mutation; and
+- the matching legacy-permission response is decoded into a fresh response
+  value before optional provenance assertions.
+
+With only the four new mutations added and scanner logic unchanged, the exact
+RED command was:
+
+```text
+timeout 10m go test -count=1 -p 2 ./pkg/hub -run '^TestEffectivePermissionIntrospectionBoundaryRejectsMutations$'
+```
+
+It failed because all four new cases returned nil instead of the required
+error: `indirect_other-file_function_value`,
+`ordinary_AuthzRequest_allocation`,
+`ordinary_AuthzRequest_typed_declaration`, and
+`ordinary_AuthzRequest_alias_construction` (`pkg/hub` 0.398s).
+
+After correction, the exact pre-checkpoint GREEN command was:
+
+```text
+timeout 10m go test -count=1 -p 2 ./pkg/hub -run '^(TestExplainAPI_RegisteredOperationUsesReviewedBasePermission|TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations)$'
+```
+
+PASS (`pkg/hub` 18.870s). The test-only checkpoint
+`21e8885a5e4db4cedf62eaae3a794d0ce01b90c1` was then committed and pushed.
+
+Post-checkpoint bounded evidence:
+
+- The same exact focused normal command above — PASS (`pkg/hub` 25.953s).
+- Distinct focused race command:
+
+  ```text
+  timeout 10m go test -count=1 -race -p 2 ./pkg/hub -run '^(TestExplainAPI_RegisteredOperationUsesReviewedBasePermission|TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations)$'
+  ```
+
+  PASS (`pkg/hub` 42.387s).
+- `timeout 10m go vet -p 2 ./pkg/hub` — PASS (no output).
+- Gofmt and `git diff --check` — PASS. The checkpoint production-diff proof
+  `git diff --exit-code 3eedea41b169041042ed34bf67e76c259ad6f795 --
+  '*.go' ':!pkg/hub/authz_explain_operation_contract_test.go'` — PASS (no
+  output).
+
+No production file changed in round 2. The already-consumed scoped build was
+not rerun. The earlier broad normal, broad combined race, and scoped lint
+timeouts remain **INCONCLUSIVE**; none was restarted. `make ci` and
+`make ci-full` were not run.
 
 ## Changed scope and exclusions
 
