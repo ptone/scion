@@ -560,8 +560,9 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 			JoinToken:    createResp.JoinToken,
 			Hostname:     brokerName,
 			Version:      version.Version,
-			Capabilities: brokerRegistrationCapabilities(),
-			Profiles:     profiles,
+			Capabilities:     brokerRegistrationCapabilities(),
+			Profiles:         profiles,
+			WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
 		}
 
 		joinResp, err := client.RuntimeBrokers().Join(ctx, joinReq)
