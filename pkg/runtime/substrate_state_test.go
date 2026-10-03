@@ -50,7 +50,7 @@ var secretsGVR = schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
 // stores objects as-is and never checks resourceVersion, so without this
 // the store's compare-and-swap could not be exercised at all.
 func newStateFakeClientset(objects ...k8sruntime.Object) *k8sfake.Clientset {
-	cs := k8sfake.NewSimpleClientset(objects...)
+	cs := k8sfake.NewClientset(objects...)
 	tracker := cs.Tracker()
 	var mu sync.Mutex
 	rv := 1000
