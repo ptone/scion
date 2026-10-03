@@ -678,3 +678,85 @@ emitter/slog/sinks, store/schema/history, sampling, transport, projection, M1,
 and `#2392 audit_emit_dispatch` timing are unchanged. Both required gates are
 conclusively GREEN, permitting fresh independent explain review round 6/7;
 compare and merge actions remain out of scope.
+
+## Round-6 semantic alias and data-flow closure
+
+The fresh round-6 author received the complete restricted brief and review
+inline in direct conversation `2fcb3617-1e7a-464f-b4fd-0392f0f1ea49` before
+repository access. Every BEGIN/BODY/END boundary was present and both bodies
+were read completely. Their SHA-256 values are retained as source provenance,
+not claimed as independent recomputations because raw source files were not
+exposed:
+
+- brief: `d42d32b831aa88859ef6f680a46c71e4f63bfd7d89fd9a90ce1ae6b5c2804ebc`;
+- round-6 review:
+  `09a284585c328e907a835c82e81876309442b00948c1244bbd0d871b6b93e608`.
+
+Restricted content was not sent through GCS or exchange. Before edits, the
+workspace was `clone-per-agent`, the tree was clean, and local HEAD, the local
+branch, tracking ref, and independent fork remote ref all equaled pinned head
+`7d5b3352e81f67d5e16c76eed709698739ddb84e`. Independent fork comparison
+proved accepted base and merge base
+`fd4f83fb7769af4b08eed1ac06be6d2442de89d7`, status ahead, 20 commits ahead,
+zero behind, and exactly the documented 14-path M2 scope. A second independent
+compare from `9c45b7ff2d23abdf884f31b390495b191c2fe1cf` proved the continuation had two
+commits and only the scanner test plus this project log.
+
+The correction replaces authzop source-spelling checks for catalog and lookup
+access with resolved `go/types` identity and declaring-package provenance.
+Every nonlocal function or method declared by the authzop package is a
+forbidden semantic target even after import renaming, function-value aliasing,
+or method-expression capture. Package-scope authzop variables and constants
+are forbidden semantic data origins. Fields are not rejected by spelling;
+they inherit origin provenance through a transitive object-dependency graph.
+
+The graph records value-spec and assignment dependencies, composite/aggregate
+field values, multi-result call values, function return results, formal
+parameters, range variables, fields, indexing, and nested call/search
+expressions. Reachable expressions recursively resolve those dependencies and
+fail closed on any authzop operation/catalog origin. Existing unsupported
+dynamic-call, unresolved literal, incomplete interface, type-error, ordinary
+request, and forbidden authorization/audit failures remain fail closed.
+
+Deterministic malicious mutations cover: renamed-import `Lookup` function
+alias; nonlocal authzop method expression; package catalog alias and range;
+local assignment plus indexing; nested collection/aggregate; function return;
+formal parameter; struct field; `slices.IndexFunc` search; and an authzop
+operation constant alias. The prior direct mapping mutation now uses the real
+renamed authzop package object. A safe negative carries an unrelated
+`strings.Index` alias and ordinary collection data through package variables,
+aggregate fields, return, parameter, assignment, range, and index operations.
+All prior interface, importer, type-check, child-bound/reaping/cache,
+function-value, request-construction, mutation, and safe-positive cases remain.
+
+Before validation, `gofmt` and `git diff --check` passed, the sole changed path
+was `pkg/hub/authz_explain_operation_contract_test.go`, and production diff was
+empty. The test-only checkpoint was committed and pushed as `9e80e6a`.
+
+The exact one-shot normal command was:
+
+```text
+ulimit -v 8000000; start_seconds=$SECONDS; timeout 45m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -timeout 44m -count=1 -p 2 ./pkg/hub -run '^(TestExplainAPI_(RegisteredOperationUsesReviewedBasePermission|OperationValidationFailsClosedWithoutValueEcho|DoesNotInferOperation|EffectivePermissionsUsesNonEmittingIntrospection)|TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations|TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch|TestEffectivePermissionIntrospectionBoundaryImporterIsBounded|TestEffectivePermissionIntrospectionBoundaryTypeErrorsFailClosed|TestAuthzOperationLookupIsClosed)$'; command_rc=$?; echo COMMAND_EXIT=$command_rc; echo WALL_SECONDS=$((SECONDS-start_seconds)); exit $command_rc
+```
+
+Normal result: **INCONCLUSIVE**. The command emitted dependency-download lines
+while populating the immutable shared cache, then no compiler, test, package,
+or failure diagnostic. The outer timeout produced exactly
+`COMMAND_EXIT=124`, `WALL_SECONDS=2700`; there was no explicit package `ok`.
+The command was not retried.
+
+While normal was active, the coordinator and lead issued a superseding
+capacity rule: allow that command to finish untouched, do not start `-race`
+even if normal is green, and complete only static/project-log/report/ref/tree
+durability. Race is therefore **NOT RUN / DEFERRED** pending separate placement
+or explicit coordinator authorization. No other heavy Go command, full or
+unfiltered Hub test, prewarm, retry, lint, vet, build, `make ci`, or
+`make ci-full` ran. The shared cache was not cleaned, altered, relocated, or
+replaced.
+
+The change remains limited to this project log and the authorized Go test file
+with zero production diff. Option-B production behavior, catalog/P2,
+emitter/slog/sinks, store/schema/history, sampling, transport, projection, M1,
+and `#2392 audit_emit_dispatch` timing are unchanged. Fresh round 7/7 is not
+permitted because both gates are not conclusively green. Catalog, P2, emitter,
+compare, and merge work remain blocked.
