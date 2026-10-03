@@ -45,6 +45,8 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, stateManager } from '../../client/main.js';
+import { agentStore } from '../../client/agent-store.js';
+import type { AgentListSnapshot } from '../../client/agent-store.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
@@ -111,8 +113,9 @@ const loadChatSearch = () => import('../shared/chat/chat-search.js');
 const loadQuickPalette = () => import('../shared/palette/quick-palette.js');
 
 /**
- * How long a successfully-loaded palette group stays fresh across a
- * close/reopen before it is refetched.
+ * How long a successfully-loaded People or Threads group stays fresh across
+ * a close/reopen before it is refetched. The Agents group is kept current
+ * by the agent store instead.
  */
 const PALETTE_GROUP_CACHE_MS = 30_000;
 /** Debounce window for refreshing dirty palette groups while the palette is open. */
@@ -648,6 +651,8 @@ export class ScionPageChat extends LitElement {
   @state() private _paletteFilePreviewTarget: PreviewTarget | null = null;
   /** Unsubscribe from `chatRecentFiles`, set once connected — see `_handleRecentFilesSnapshot`. */
   private _paletteDocumentsUnsubscribe: (() => void) | null = null;
+  /** Releases the agent store's hub entry, retained while the page is connected. */
+  private _paletteAgentsRelease: (() => void) | null = null;
   /** Bounded-poll watchdog closing the palette if the route/visibility guards stop passing while it's open (see `_startPaletteVisibilityWatchdog`). */
   private _paletteVisibilityWatchdog: ReturnType<typeof setInterval> | null = null;
   /** Bound handler for `sl-after-hide` bubbling up from the palette's internal sl-dialog. */
@@ -1180,6 +1185,10 @@ export class ScionPageChat extends LitElement {
     this._paletteDocumentsUnsubscribe = chatRecentFiles.subscribe((snapshot) =>
       this._handleRecentFilesSnapshot(snapshot)
     );
+    this._paletteAgentsRelease?.();
+    this._paletteAgentsRelease = agentStore.retain({ scope: 'hub' }, (snapshot) =>
+      this._handlePaletteAgentSnapshot(snapshot)
+    );
     void this.initV2();
   }
 
@@ -1195,6 +1204,8 @@ export class ScionPageChat extends LitElement {
     window.removeEventListener('popstate', this._onPopState);
     this._paletteDocumentsUnsubscribe?.();
     this._paletteDocumentsUnsubscribe = null;
+    this._paletteAgentsRelease?.();
+    this._paletteAgentsRelease = null;
     this._paletteDataController.cancel();
     // Same reasoning as `_closePaletteAndCancelLoad`'s own close-time
     // handling, both parts: the seq bump is the correctness guard (a
@@ -1814,9 +1825,6 @@ export class ScionPageChat extends LitElement {
   }
 
   private _handleAgentsUpdated(): void {
-    // Messageability/capabilities/status can change viability for the
-    // palette's Agents group, so this invalidation marks it stale.
-    this._markPaletteGroupsDirty('agents');
     // Only adopt agents belonging to the current view: the open conversation's
     // project, or every space the user can see in the base view.
     const scopeProjectId = this.v2Conversation?.projectId || '';
@@ -1901,7 +1909,6 @@ export class ScionPageChat extends LitElement {
    * re-creation (or ID reuse) isn't permanently suppressed.
    */
   private _handleAgentCreated(e: Event): void {
-    this._markPaletteGroupsDirty('agents');
     const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
     const agentId = eventData?.agentId as string | undefined;
@@ -2033,11 +2040,13 @@ export class ScionPageChat extends LitElement {
   }
 
   private handleChatMessage(e: Event): void {
-    // A message can move any group's recency ranking — a DM message affects
-    // Agents/People, a thread message affects Threads — and the event detail
+    // A message can move People or Threads recency — a DM message affects
+    // People, a thread message affects Threads — and the event detail
     // doesn't cheaply distinguish which without parsing the full envelope
-    // this handler otherwise ignores, so mark all three stale.
-    this._markPaletteGroupsDirty('agents', 'people', 'threads');
+    // this handler otherwise ignores, so mark both stale. Agents recency is
+    // re-read from the DM list on the next palette open.
+    this._markPaletteGroupsDirty('people', 'threads');
+    this._paletteDataController.markAgentDmsStale();
 
     // The sender is done typing once their message arrives — clear the avatar
     // overlay immediately instead of letting the 6s expiry run out.
@@ -2102,9 +2111,11 @@ export class ScionPageChat extends LitElement {
    * from the switcher cache.
    */
   private handleDMPromoted(e: Event): void {
-    // A promoted DM disappears from Agents/People recency and appears as a
-    // new Threads row, so mark all three groups stale.
-    this._markPaletteGroupsDirty('agents', 'people', 'threads');
+    // A promoted DM disappears from People recency and appears as a new
+    // Threads row, so mark both groups stale, and Agents recency for the
+    // next open.
+    this._markPaletteGroupsDirty('people', 'threads');
+    this._paletteDataController.markAgentDmsStale();
     const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
     const oldConversationKey = eventData?.oldConversationKey as string | undefined;
@@ -3574,14 +3585,34 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * On open, reuse a group's last successful snapshot when it is still
-   * inside the 30s cache window and nothing has invalidated it since. A
-   * group that has never loaded, is stale, or was marked dirty by an SSE
-   * event gets a fresh fetch instead. Documents is not fetched here — see
-   * `_handleRecentFilesSnapshot`.
+   * Keep the open palette's Agents group current with the agent store:
+   * every ready hub snapshot (an SSE change, a revalidation) re-derives the
+   * candidates against the DM recency of the last load, with no request.
+   * Progress snapshots are left to the load that asked for them, and
+   * nothing is published while the palette is closed (the next open
+   * rebuilds the group), while an Agents load is in flight, or before one
+   * succeeded.
+   */
+  private _handlePaletteAgentSnapshot(snapshot: AgentListSnapshot): void {
+    if (!this.v2PaletteOpen) return;
+    if (snapshot.status !== 'ready') return;
+    if (this._paletteGroupLoadToken.agents !== undefined) return;
+    const candidates = this._paletteDataController.deriveAgentCandidates(snapshot);
+    if (!candidates) return;
+    this.v2PaletteGroups = { ...this.v2PaletteGroups, agents: { status: 'ready', candidates } };
+  }
+
+  /**
+   * On open, reuse a People or Threads snapshot when it is still inside the
+   * 30s cache window and nothing has invalidated it since; a group that has
+   * never loaded, is stale, or was marked dirty by an SSE event gets a fresh
+   * fetch instead. Agents always loads: its rows come from the agent store
+   * (from memory once loaded) and its DM recency is fetched only when the
+   * last DM list is stale (see `_loadPaletteAgents`). Documents
+   * is not fetched here — see `_handleRecentFilesSnapshot`.
    */
   private _loadPaletteGroupsOnOpen(): void {
-    if (!this._shouldUseCachedPaletteGroup('agents')) void this._loadPaletteAgents();
+    void this._loadPaletteAgents();
     if (!this._shouldUseCachedPaletteGroup('people')) void this._loadPalettePeople();
     if (!this._shouldUseCachedPaletteGroup('threads')) void this._loadPaletteThreads();
   }
@@ -3664,15 +3695,15 @@ export class ScionPageChat extends LitElement {
   private _refreshDirtyPaletteGroups(): void {
     if (!this.v2PaletteOpen) return;
     let deferred = false;
-    // The three groups with a loader; `documents` is never dirtied.
-    for (const group of ['agents', 'people', 'threads'] as const) {
+    // The groups refreshed on invalidation; Agents follows the agent store
+    // and `documents` is never dirtied.
+    for (const group of ['people', 'threads'] as const) {
       if (!this._paletteGroupDirty[group]) continue;
       if (this._paletteGroupLoadToken[group] !== undefined) {
         deferred = true;
         continue;
       }
-      if (group === 'agents') void this._loadPaletteAgents();
-      else if (group === 'people') void this._loadPalettePeople();
+      if (group === 'people') void this._loadPalettePeople();
       else void this._loadPaletteThreads();
     }
     if (deferred) this._schedulePaletteDebouncedRefresh();
@@ -3738,7 +3769,9 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Load the Agents group from the real paginated agents/DM APIs.
+   * Load the Agents group: the agent store's hub list joined with the DM
+   * list for recency. Between loads the group follows the store through
+   * {@link _handlePaletteAgentSnapshot}.
    *
    * Until a complete snapshot has been published (see
    * {@link _agentsSnapshotComplete}), publishes candidates progressively as
@@ -3770,12 +3803,16 @@ export class ScionPageChat extends LitElement {
   private async _loadPaletteAgents(): Promise<void> {
     const token = {};
     this._paletteGroupLoadToken.agents = token;
+    // With a ready store snapshot and a fresh DM list the group is shown at
+    // once; the load below then only confirms (or revalidates) it.
+    const instant = this._paletteDataController.peekAgentsGroup();
     const previous = this.v2PaletteGroups.agents;
     this.v2PaletteGroups = {
       ...this.v2PaletteGroups,
-      agents: { status: 'loading', candidates: previous?.candidates ?? [] },
+      agents: instant
+        ? { status: 'ready', candidates: instant }
+        : { status: 'loading', candidates: previous?.candidates ?? [] },
     };
-    const epochAtStart = this._beginPaletteGroupLoad('agents');
     try {
       const candidates = await this._paletteDataController.loadAgentsGroup(
         this._agentsSnapshotComplete
@@ -3789,7 +3826,6 @@ export class ScionPageChat extends LitElement {
       );
       this.v2PaletteGroups = { ...this.v2PaletteGroups, agents: { status: 'ready', candidates } };
       this._agentsSnapshotComplete = true;
-      this._finishPaletteGroupLoad('agents', epochAtStart);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       const message = err instanceof PaletteLoadError || err instanceof Error ? err.message : '';
