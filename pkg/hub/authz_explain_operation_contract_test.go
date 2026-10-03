@@ -174,6 +174,7 @@ func TestExplainAPI_EffectivePermissionsUsesNonEmittingIntrospection(t *testing.
 
 func TestEffectivePermissionIntrospectionBoundaryStructure(t *testing.T) {
 	require.NoError(t, validateExplainIntrospectionBoundary(productionHubSources(t)))
+	assert.Equal(t, 1, explainBoundaryExportsCache.loadAttempts, "the real importer result must be cached")
 }
 
 func TestEffectivePermissionIntrospectionBoundaryRejectsMutations(t *testing.T) {
@@ -242,17 +243,24 @@ func TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch(t *
 				"type boundaryRunner interface { Run() }\ntype boundarySafeValueRunner struct{}\nfunc (boundarySafeValueRunner) Run() { safeBoundaryHelper() }"),
 			"runner.go", "package hub\ntype boundarySafePointerRunner struct{}\nfunc (*boundarySafePointerRunner) Run() { safeBoundaryHelper() }\nfunc safeBoundaryHelper() {}")
 		require.NoError(t, validateExplainIntrospectionBoundary(sources))
+		assert.Equal(t, 1, explainBoundaryExportsCache.loadAttempts, "safe dispatch checks must reuse the real importer result")
 	})
 	t.Run("Identity Type concrete dispatch", func(t *testing.T) {
 		sources := addSameFileBoundaryDeclarations(
 			mutateBoundarySource(explainBoundaryTestSources(), "s.authzService.introspectAuthorization()", "var identity Identity = &concreteIdentity{}; _ = identity.Type(); s.authzService.introspectAuthorization()"),
 			"type Identity interface { Type() string }\ntype concreteIdentity struct{}\nfunc (*concreteIdentity) Type() string { return \"user\" }")
 		require.NoError(t, validateExplainIntrospectionBoundary(sources))
+		assert.Equal(t, 1, explainBoundaryExportsCache.loadAttempts, "safe dispatch checks must reuse the real importer result")
 	})
 }
 
 func TestEffectivePermissionIntrospectionBoundaryImporterIsBounded(t *testing.T) {
-	t.Run("deadline reaps child", func(t *testing.T) {
+	t.Run("real deadline fits the bounded gate", func(t *testing.T) {
+		assert.Equal(t, 30*time.Minute, explainBoundaryRealExportListTimeout)
+		assert.Less(t, explainBoundaryRealExportListTimeout, 44*time.Minute)
+	})
+
+	t.Run("deadline is cached fail closed after reaping child", func(t *testing.T) {
 		stdinReader, stdinWriter, err := os.Pipe()
 		require.NoError(t, err)
 		t.Cleanup(func() {
@@ -260,19 +268,47 @@ func TestEffectivePermissionIntrospectionBoundaryImporterIsBounded(t *testing.T)
 			_ = stdinWriter.Close()
 		})
 
+		cache := &explainBoundaryExportCache{}
 		var command *exec.Cmd
-		started := time.Now()
-		_, err = runExplainBoundaryExportCommand(t.Context(), 500*time.Millisecond, func(ctx context.Context) *exec.Cmd {
+		loadAttempts := 0
+		factory := func(ctx context.Context) *exec.Cmd {
+			loadAttempts++
 			command = explainBoundaryHelperCommand(ctx, "block")
 			command.Stdin = stdinReader
 			return command
-		})
+		}
+		started := time.Now()
+		_, err = cache.importer(token.NewFileSet(), t.Context(), 500*time.Millisecond, factory)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, context.DeadlineExceeded)
 		assert.Contains(t, err.Error(), "module export command deadline")
 		assert.Less(t, time.Since(started), 5*time.Second)
 		require.NotNil(t, command)
 		assert.NotNil(t, command.ProcessState, "Output must wait for and reap the child")
+
+		cachedStarted := time.Now()
+		_, cachedErr := cache.importer(token.NewFileSet(), t.Context(), 500*time.Millisecond, factory)
+		require.Error(t, cachedErr)
+		assert.ErrorIs(t, cachedErr, context.DeadlineExceeded)
+		assert.Equal(t, err.Error(), cachedErr.Error())
+		assert.Less(t, time.Since(cachedStarted), time.Second)
+		assert.Equal(t, 1, loadAttempts, "a cached deadline must not launch another child")
+
+		checkCalled := false
+		err = validateExplainIntrospectionBoundaryWithHooks(explainBoundaryTestSources(), explainBoundaryValidationHooks{
+			importer: func(fset *token.FileSet) (types.Importer, error) {
+				return cache.importer(fset, t.Context(), 500*time.Millisecond, factory)
+			},
+			check: func(*types.Config, string, *token.FileSet, []*ast.File, *types.Info) (*types.Package, error) {
+				checkCalled = true
+				return nil, nil
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "load module-aware effective-permissions imports")
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.False(t, checkCalled, "a cached importer failure must fail closed before type checking")
+		assert.Equal(t, 1, loadAttempts, "fail-closed validation must reuse the cached deadline")
 	})
 
 	t.Run("cancellation reaps live child", func(t *testing.T) {
@@ -315,16 +351,35 @@ func TestEffectivePermissionIntrospectionBoundaryImporterIsBounded(t *testing.T)
 		assert.NotNil(t, command.ProcessState, "Output must wait for and reap the child")
 	})
 
-	t.Run("successful bounded command loads exports", func(t *testing.T) {
+	t.Run("successful importer is cached without poisoning scanner checks", func(t *testing.T) {
+		cache := &explainBoundaryExportCache{}
 		var command *exec.Cmd
-		exports, err := loadExplainBoundaryExports(t.Context(), 5*time.Second, func(ctx context.Context) *exec.Cmd {
+		loadAttempts := 0
+		factory := func(ctx context.Context) *exec.Cmd {
+			loadAttempts++
 			command = explainBoundaryHelperCommand(ctx, "success")
 			return command
-		})
+		}
+		_, err := cache.importer(token.NewFileSet(), t.Context(), 5*time.Second, factory)
 		require.NoError(t, err)
-		assert.Equal(t, "/bounded/export.a", exports["example.com/bounded"])
+		assert.Equal(t, "/bounded/export.a", cache.exports["example.com/bounded"])
 		require.NotNil(t, command)
 		assert.NotNil(t, command.ProcessState, "Output must wait for and reap the child")
+
+		hooks := explainBoundaryValidationHooks{
+			importer: func(fset *token.FileSet) (types.Importer, error) {
+				return cache.importer(fset, t.Context(), 5*time.Second, factory)
+			},
+			check: func(config *types.Config, path string, fset *token.FileSet, files []*ast.File, info *types.Info) (*types.Package, error) {
+				return config.Check(path, fset, files, info)
+			},
+		}
+		require.NoError(t, validateExplainIntrospectionBoundaryWithHooks(explainBoundaryTestSources(), hooks))
+		safeDispatch := addSameFileBoundaryDeclarations(
+			mutateBoundarySource(explainBoundaryTestSources(), "s.authzService.introspectAuthorization()", "var identity Identity = &concreteIdentity{}; _ = identity.Type(); s.authzService.introspectAuthorization()"),
+			"type Identity interface { Type() string }\ntype concreteIdentity struct{}\nfunc (*concreteIdentity) Type() string { return \"user\" }")
+		require.NoError(t, validateExplainIntrospectionBoundaryWithHooks(safeDispatch, hooks))
+		assert.Equal(t, 1, loadAttempts, "successful structure and safe-dispatch checks must reuse one importer result")
 	})
 }
 
@@ -497,15 +552,18 @@ type explainBoundaryResolvedFunctionValue struct {
 	literals map[*ast.FuncLit]struct{}
 }
 
-var (
-	explainBoundaryExportsOnce sync.Once
-	explainBoundaryExports     map[string]string
-	explainBoundaryExportsErr  error
-)
+type explainBoundaryExportCache struct {
+	once         sync.Once
+	exports      map[string]string
+	err          error
+	loadAttempts int
+}
+
+var explainBoundaryExportsCache explainBoundaryExportCache
 
 const (
-	explainBoundaryExportListTimeout = 8 * time.Minute
-	explainBoundaryCommandWaitDelay  = 2 * time.Second
+	explainBoundaryRealExportListTimeout = 30 * time.Minute
+	explainBoundaryCommandWaitDelay      = 2 * time.Second
 )
 
 type explainBoundaryCommandFactory func(context.Context) *exec.Cmd
@@ -561,23 +619,28 @@ func loadExplainBoundaryExports(ctx context.Context, timeout time.Duration, fact
 	return exports, nil
 }
 
-func moduleAwareExplainBoundaryImporter(fset *token.FileSet) (types.Importer, error) {
-	explainBoundaryExportsOnce.Do(func() {
-		explainBoundaryExports, explainBoundaryExportsErr = loadExplainBoundaryExports(
-			context.Background(), explainBoundaryExportListTimeout, explainBoundaryExportCommand,
-		)
+func (cache *explainBoundaryExportCache) importer(fset *token.FileSet, ctx context.Context, timeout time.Duration, factory explainBoundaryCommandFactory) (types.Importer, error) {
+	cache.once.Do(func() {
+		cache.loadAttempts++
+		cache.exports, cache.err = loadExplainBoundaryExports(ctx, timeout, factory)
 	})
-	if explainBoundaryExportsErr != nil {
-		return nil, explainBoundaryExportsErr
+	if cache.err != nil {
+		return nil, cache.err
 	}
 	lookup := func(path string) (io.ReadCloser, error) {
-		exportPath := explainBoundaryExports[path]
+		exportPath := cache.exports[path]
 		if exportPath == "" {
 			return nil, fmt.Errorf("module-aware importer has no export for %q", path)
 		}
 		return os.Open(exportPath)
 	}
 	return importer.ForCompiler(fset, "gc", lookup), nil
+}
+
+func moduleAwareExplainBoundaryImporter(fset *token.FileSet) (types.Importer, error) {
+	return explainBoundaryExportsCache.importer(
+		fset, context.Background(), explainBoundaryRealExportListTimeout, explainBoundaryExportCommand,
+	)
 }
 
 func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
