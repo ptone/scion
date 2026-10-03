@@ -64,14 +64,17 @@ provenance, cross-principal redaction, comparison, filtering, and response
 meaning are retained. Supplying `operationId` or `permission` in this mode is
 rejected so the request cannot claim an operation owner.
 
-The structural scanner parses the production functions and rejects a loop or
-boundary that calls `Decide`/the emitter, constructs `AuthzRequest`, touches
-`OperationID`, or uses `CatalogBasePermissions`; mutation cases prove rejection
-of ordinary emission, operation synthesis, and permission mapping. The
-existing package-wide producer scanner now admits exactly the validated
-`contract.OperationID` population inside `handleAuthzExplain` and continues to
-reject every generic or inferred population and every authorization read of
-that audit metadata.
+The structural scanner discovers every build-selected production Go file in
+`pkg/hub`, builds type-resolved package-wide function and method edges, and
+walks transitive reachability from `handleExplainEffectivePermissions` through
+`introspectAuthorization` to `decide`. It rejects reachable ordinary
+`AuthzRequest` construction, `OperationID` synthesis or population,
+permission-to-operation catalog mapping, `Decide`, ordinary decision emitters,
+and audit sinks. Mutations prove direct and indirect same-file/other-file
+violations fail closed. The existing package-wide producer scanner now admits
+exactly the validated `contract.OperationID` population inside
+`handleAuthzExplain` and continues to reject every generic or inferred
+population and every authorization read of that audit metadata.
 
 Capability projection remains separately owned. Its future path emits exactly
 one bounded `projection_summary` observation, never N ordinary authorization
@@ -106,10 +109,14 @@ Result: PASS (`pkg/hub` 9.192s, `pkg/hub/authzop` 0.022s).
   ./pkg/hub/authzop` — **INCONCLUSIVE**. It reached the hard 10-minute bound
   with no diagnostics and no process remaining. Per manager direction it was
   not restarted; the earlier focused normal PASS is preserved.
-- Focused race invocation covering the new API, privacy, non-emission,
-  structural scanner/mutations, and producer guard — **INCONCLUSIVE**. It
-  reached the hard 10-minute bound with no diagnostics and no process
-  remaining; it was not restarted.
+- Broad combined race invocation:
+
+  ```text
+  timeout 10m go test -count=1 -race -p 2 ./pkg/hub -run 'TestExplainAPI_(RegisteredOperationUsesReviewedBasePermission|OperationValidationFailsClosedWithoutValueEcho|DoesNotInferOperation|EffectivePermissionsUsesNonEmittingIntrospection|SuperAdmin|Self|DeniedForOtherPrincipal|MemberWithoutAuditReadCannotExplainForOthers|NoSecretLeakage|CrossPrincipalRedaction)|TestEffectivePermissionIntrospectionBoundary|TestEveryProductionDecisionLiteralAssignsAuditReason|TestAuthorizationContractGuard|TestAuthzOperationLookupIsClosed'
+  ```
+
+  **INCONCLUSIVE**. It reached the hard 10-minute bound with no diagnostics
+  and no process remaining; it was not restarted.
 - `timeout 10m go vet -p 2 ./pkg/hub ./pkg/hub/authzop` — PASS (no output).
 - `timeout 10m go build -buildvcs=false -p 2 ./pkg/hub ./pkg/hub/authzop`
   — PASS (single scoped build, no output).
@@ -184,6 +191,43 @@ These narrowed normal and race passes conclusively cover every changed explain
 contract path and the race-sensitive emitter/introspection and privacy paths;
 they do not change the accurate inconclusive classification of the earlier
 broad attempts.
+
+## Independent review round 1 corrections
+
+Round 1 requested changes at reviewed SHA
+`0d0d9d7bc92117b1757fe0cd92c8ab4d4f2ea2b4`; the complete review artifact was
+read from `m2-explain-r1.md` with SHA-256
+`cf1bae6ece362b58c0b4a9a062c5517cdb2b1fd32359af20f9d4f54ff1defeff`.
+The correction is limited to its three required findings:
+
+- package-wide, transitive, type-resolved structural enforcement and mutations
+  for every requested ordinary authorization/audit escape path;
+- a positive HTTP regression proving a non-empty legacy `permission` exactly
+  matching the selected operation's reviewed `BasePermission` remains accepted
+  and returns that reviewed permission; and
+- the exact timed-out broad race command and consistent **INCONCLUSIVE**
+  classification above. The broad normal, broad race, and lint commands remain
+  disclosed as inconclusive and were not rerun.
+
+The initial scanner mutation RED command was:
+
+```text
+timeout 10m go test -count=1 -p 2 ./pkg/hub -run '^TestEffectivePermissionIntrospectionBoundaryRejectsMutations$'
+```
+
+It failed because the prior file-local scanner accepted the indirect helper
+mutation (`indirect_helper: An error is expected but got nil`). After replacing
+the scanner, the first package-wide implementation correctly exposed an
+over-conservative name-only edge (`Validate`/`New` receiver conflation). The
+scanner was corrected to use Go type-resolved call edges. The distinct
+structural-only correction command then passed:
+
+```text
+timeout 10m go test -count=1 -p 2 ./pkg/hub -run '^(TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations)$'
+```
+
+Result: PASS (`pkg/hub` 13.869s). Post-push round-1 validation is recorded
+below after the checkpoint is made durable.
 
 ## Changed scope and exclusions
 
