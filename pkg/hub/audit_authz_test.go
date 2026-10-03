@@ -285,6 +285,7 @@ func TestExplainAPI_SuperAdmin(t *testing.T) {
 
 	// Super-admin explains for another user
 	body := map[string]interface{}{
+		"operationId": "project.read",
 		"resource": map[string]interface{}{
 			"type":      "project",
 			"id":        project.ID,
@@ -330,6 +331,7 @@ func TestExplainAPI_Self(t *testing.T) {
 
 	// Dev user explains their own access (dev user = admin, explains self)
 	body := map[string]interface{}{
+		"operationId": "project.read",
 		"resource": map[string]interface{}{
 			"type": "project",
 			"id":   project.ID,
@@ -379,6 +381,7 @@ func TestExplainAPI_DeniedForOtherPrincipal(t *testing.T) {
 	// Test the handler directly with a non-admin identity context to verify
 	// that non-admins cannot explain for another principal.
 	body := map[string]interface{}{
+		"operationId": "project.read",
 		"resource": map[string]interface{}{
 			"type": "project",
 			"id":   tid("some-project"),
@@ -414,6 +417,7 @@ func TestExplainAPI_MemberWithoutAuditReadCannotExplainForOthers(t *testing.T) {
 	ensureHubMembership(ctx, s, memberID)
 
 	body := map[string]interface{}{
+		"operationId": "agent.read",
 		"resource":    map[string]interface{}{"type": "agent", "id": tid("some-agent")},
 		"action":      "read",
 		"principalId": tid("another-user"),
@@ -445,6 +449,7 @@ func TestExplainAPI_SuperAdminCanExplainForOthersViaDecide(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	body := map[string]interface{}{
+		"operationId":   "project.read",
 		"resource":      map[string]interface{}{"type": "project", "id": project.ID, "projectId": project.ID},
 		"action":        "read",
 		"principalId":   targetID,
@@ -476,6 +481,7 @@ func TestExplainAPI_NoSecretLeakage(t *testing.T) {
 	}
 
 	body := map[string]interface{}{
+		"operationId": "project.read",
 		"resource": map[string]interface{}{
 			"type": "project",
 			"id":   project.ID,
@@ -519,6 +525,7 @@ func TestExplainAPI_TraceContainsDecidingPolicy(t *testing.T) {
 	}
 
 	body := map[string]interface{}{
+		"operationId": "project.read",
 		"resource": map[string]interface{}{
 			"type": "project",
 			"id":   project.ID,

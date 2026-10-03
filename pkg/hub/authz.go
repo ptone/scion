@@ -220,6 +220,33 @@ type AuthzRequest struct {
 	AlwaysAudit bool
 }
 
+// authorizationEvaluationRequest is the operation-free input to the pure
+// authorization kernel. AuthzRequest remains the ordinary producer/emission
+// contract; introspection cannot populate audit ownership through this type.
+type authorizationEvaluationRequest struct {
+	Principal  PrincipalContext
+	Credential CredentialContext
+	Resource   Resource
+	Action     Action
+	Permission string
+	Explain    bool
+	Actor      *DecisionActor
+	Purpose    string
+}
+
+func authorizationEvaluationFromRequest(request AuthzRequest) authorizationEvaluationRequest {
+	return authorizationEvaluationRequest{
+		Principal:  request.Principal,
+		Credential: request.Credential,
+		Resource:   request.Resource,
+		Action:     request.Action,
+		Permission: request.Permission,
+		Explain:    request.Explain,
+		Actor:      request.Actor,
+		Purpose:    request.Purpose,
+	}
+}
+
 // DecisionActor identifies the initiator of an operation. Audit-only.
 type DecisionActor struct {
 	Kind PrincipalKind `json:"kind,omitempty"`
@@ -471,7 +498,7 @@ func (a *AuthzService) CheckAccess(ctx context.Context, identity Identity, resou
 // return path inside decide can skip the audit, because decide itself never
 // emits — only this wrapper does, once, after decide returns.
 func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decision {
-	decision := a.decide(ctx, request)
+	decision := a.decide(ctx, authorizationEvaluationFromRequest(request))
 	if a.decisionAuditEmitter != nil {
 		a.emitDecisionAudit(ctx, request, decision)
 	}
@@ -481,7 +508,7 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 // decide is Decide's body: the AK1 kernel evaluation itself.
 // All grants are traced to either a RoleBinding or a named relationship grant.
 // All reductions are traced to a named restriction. No undocumented bypasses.
-func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decision {
+func (a *AuthzService) decide(ctx context.Context, request authorizationEvaluationRequest) Decision {
 	derivedPrincipal := principalContextForIdentity(request.Principal.Identity)
 	derivedCredential := credentialContextForIdentity(request.Principal.Identity)
 
@@ -2153,7 +2180,7 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 // recorded on every decision (and on its provenance when present). permID
 // is a value from auditPermissionID(request), never independently derived
 // here.
-func decorateDecision(decision Decision, request AuthzRequest, principal PrincipalContext, credential CredentialContext, permID string) Decision {
+func decorateDecision(decision Decision, request authorizationEvaluationRequest, principal PrincipalContext, credential CredentialContext, permID string) Decision {
 	decision.Actor = request.Actor
 	decision.Purpose = request.Purpose
 	if decision.Provenance != nil {
@@ -2183,7 +2210,7 @@ func decorateDecision(decision Decision, request AuthzRequest, principal Princip
 // certifying an ID that does not exist in the catalog. Empty when the
 // caller supplied no Permission, or supplied one the registry does not
 // recognize.
-func auditPermissionID(request AuthzRequest) string {
+func auditPermissionID(request authorizationEvaluationRequest) string {
 	if request.Permission != "" && isKnownPermission(request.Permission) {
 		return request.Permission
 	}

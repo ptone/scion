@@ -163,7 +163,7 @@ func deliveryCredentialRestriction() Restriction {
 // (authz.go, isReadOnlyOperation) can never apply to a hub_delivery deny.
 func (a *AuthzService) checkHubDeliveryCeiling(
 	ctx context.Context,
-	req AuthzRequest,
+	req authorizationEvaluationRequest,
 	h *hubDeliveryIdentity,
 	permissionID string,
 	agentID string,

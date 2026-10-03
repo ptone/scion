@@ -2327,7 +2327,7 @@ func TestParity_E6b_DoneCtxEdgesBypass_RequiredGate(t *testing.T) {
 
 				var primeCause DenyCause
 				liveCtx := maskAuthzInputs(contextWithDelegationCeilingCache(mctx))
-				_, _, primeErr := authz1.checkDelegationCeiling(liveCtx, req, permissionID, f.agentID, nil, &primeCause)
+				_, _, primeErr := authz1.checkDelegationCeiling(liveCtx, authorizationEvaluationFromRequest(req), permissionID, f.agentID, nil, &primeCause)
 				require.NoError(t, primeErr, "priming call on a live ctx must succeed")
 				require.Equal(t, 1, run1Store.countOf("GetDelegationEdgesForDelegate"), "priming call must populate the edges memo")
 
@@ -2335,7 +2335,7 @@ func TestParity_E6b_DoneCtxEdgesBypass_RequiredGate(t *testing.T) {
 				cancel()
 				var cause1 DenyCause
 				doneCtx := maskAuthzInputs(contextWithDelegationCeilingCache(cctx))
-				allowed1, reason1, err1 := authz1.checkDelegationCeiling(doneCtx, req, permissionID, f.agentID, nil, &cause1)
+				allowed1, reason1, err1 := authz1.checkDelegationCeiling(doneCtx, authorizationEvaluationFromRequest(req), permissionID, f.agentID, nil, &cause1)
 
 				// Non-vacuity, load-bearing: the second call must still
 				// reach the store on the done ctx.
@@ -2349,7 +2349,7 @@ func TestParity_E6b_DoneCtxEdgesBypass_RequiredGate(t *testing.T) {
 				cctx2, cancel2 := context.WithCancel(context.Background())
 				cancel2()
 				var cause2 DenyCause
-				allowed2, reason2, err2 := authz2.checkDelegationCeiling(maskAuthzInputs(contextWithDelegationCeilingCache(cctx2)), req, permissionID, f.agentID, nil, &cause2)
+				allowed2, reason2, err2 := authz2.checkDelegationCeiling(maskAuthzInputs(contextWithDelegationCeilingCache(cctx2)), authorizationEvaluationFromRequest(req), permissionID, f.agentID, nil, &cause2)
 
 				assert.Equal(t, allowed1, allowed2, "Allowed must match")
 				assert.Equal(t, reason1, reason2, "Reason must match")

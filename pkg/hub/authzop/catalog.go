@@ -3207,6 +3207,22 @@ func CatalogOperationIDs() map[OperationID]bool {
 	return ids
 }
 
+// Lookup returns the reviewed catalog specification for id. Callers must use
+// this operation-first lookup when they need the authoritative relationship
+// from an OperationID to its BasePermission; this API intentionally provides
+// no reverse permission-to-operation lookup.
+func Lookup(id OperationID) (OperationSpec, bool) {
+	if id == "" {
+		return OperationSpec{}, false
+	}
+	for _, spec := range Catalog {
+		if spec.ID == id {
+			return spec, true
+		}
+	}
+	return OperationSpec{}, false
+}
+
 // CatalogBasePermissions returns the set of all base permissions referenced
 // by catalog operations.
 func CatalogBasePermissions() map[string][]OperationID {

@@ -49,6 +49,7 @@ func TestExplainAPI_ProvenancePopulated(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	body := map[string]interface{}{
+		"operationId": "project.read",
 		"resource": map[string]interface{}{
 			"type":      "project",
 			"id":        project.ID,
@@ -90,11 +91,12 @@ func TestExplainAPI_DenyHasProvenance(t *testing.T) {
 	ensureHubMembership(ctx, s, memberID)
 
 	body := map[string]interface{}{
+		"operationId": "user.admin.delete",
 		"resource": map[string]interface{}{
-			"type": "settings",
-			"id":   "hub",
+			"type": "user",
+			"id":   tid("denied-user"),
 		},
-		"action": "manage",
+		"action": "delete",
 	}
 
 	bodyBytes, _ := json.Marshal(body)
@@ -108,7 +110,7 @@ func TestExplainAPI_DenyHasProvenance(t *testing.T) {
 	var resp explainResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
-	assert.False(t, resp.Allowed, "member should be denied manage on settings")
+	assert.False(t, resp.Allowed, "member should be denied deleting a user")
 	require.NotNil(t, resp.Provenance, "deny decision must include provenance")
 	assert.NotEmpty(t, resp.Provenance.DenyReasons,
 		"deny provenance must include deny reasons, not empty trace")
@@ -144,6 +146,7 @@ func TestExplainAPI_CrossPrincipalRedaction(t *testing.T) {
 
 	// Super-admin (dev user) explains for another user.
 	body := map[string]interface{}{
+		"operationId": "project.read",
 		"resource": map[string]interface{}{
 			"type":      "project",
 			"id":        project.ID,
@@ -306,6 +309,7 @@ func TestExplainAPI_InactiveGrantsInProvenance(t *testing.T) {
 
 	// Explain the user's access. The dev user (admin) explains for the target.
 	body := map[string]interface{}{
+		"operationId": "agent.read",
 		"resource": map[string]interface{}{
 			"type":      "agent",
 			"id":        tid("some-agent"),
@@ -351,6 +355,7 @@ func TestExplainAPI_ForbiddenIsJSON(t *testing.T) {
 	ensureHubMembership(ctx, s, memberID)
 
 	body := map[string]interface{}{
+		"operationId": "project.read",
 		"resource": map[string]interface{}{
 			"type": "project",
 			"id":   tid("some-project"),

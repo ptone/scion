@@ -336,8 +336,9 @@ var approvedDecisionReasons = map[string]bool{
 
 // authorizationContractViolations is deliberately package-wide and
 // syntax-closed. Decision literals must use keyed, literal outcomes and exact
-// approved auditevent constants. The only post-construction allowance is an
-// assignment of one of those exact constants; reads remain forbidden.
+// approved auditevent constants. OperationID population is restricted to the
+// explicit operation-centric explain producer; authorization metadata reads
+// remain forbidden.
 func authorizationContractViolations(fset *token.FileSet, file *ast.File) []string {
 	var violations []string
 	report := func(node ast.Node, message string) {
@@ -346,6 +347,31 @@ func authorizationContractViolations(fset *token.FileSet, file *ast.File) []stri
 
 	assignedAuditReasons := map[token.Pos]bool{}
 	authzRequestVars := map[string]bool{}
+	approvedOperationPopulations := map[token.Pos]bool{}
+	if filepath.Base(fset.Position(file.Pos()).Filename) == "audit_authz.go" {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != "handleAuthzExplain" {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				literal, ok := node.(*ast.CompositeLit)
+				if !ok || !isAuthzRequestType(literal.Type) {
+					return true
+				}
+				expr, ok := keyedValue(literal, "OperationID")
+				selector, selectorOK := expr.(*ast.SelectorExpr)
+				if !ok || !selectorOK {
+					return true
+				}
+				owner, ownerOK := selector.X.(*ast.Ident)
+				if ownerOK && owner.Name == "contract" && selector.Sel.Name == "OperationID" {
+					approvedOperationPopulations[literal.Pos()] = true
+				}
+				return true
+			})
+		}
+	}
 	ast.Inspect(file, func(node ast.Node) bool {
 		switch value := node.(type) {
 		case *ast.AssignStmt:
@@ -389,8 +415,8 @@ func authorizationContractViolations(fset *token.FileSet, file *ast.File) []stri
 			if isDecisionType(value.Type) {
 				checkDecisionLiteral(value, report)
 			}
-			if isAuthzRequestType(value.Type) && hasKey(value, "OperationID") {
-				report(value, "AuthzRequest.OperationID population is forbidden in P1")
+			if isAuthzRequestType(value.Type) && hasKey(value, "OperationID") && !approvedOperationPopulations[value.Pos()] {
+				report(value, "AuthzRequest.OperationID population is not an approved explicit producer")
 			}
 		case *ast.CallExpr:
 			if isDecisionType(value.Fun) {
@@ -412,7 +438,7 @@ func authorizationContractViolations(fset *token.FileSet, file *ast.File) []stri
 				report(value, "AuditReason is write-only authorization metadata")
 			}
 			if value.Sel.Name == "OperationID" && isAuthzRequestReceiver(value.X, authzRequestVars) {
-				report(value, "AuthzRequest.OperationID may not be read or written in P1")
+				report(value, "AuthzRequest.OperationID may not be read or written by authorization")
 			}
 		}
 		return true

@@ -21,9 +21,9 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
-	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -207,13 +207,17 @@ func (s *Server) emitMutationAudit(ctx context.Context, record *store.MutationAu
 
 // explainRequest is the JSON body for the explain endpoint.
 type explainRequest struct {
-	Resource struct {
+	OperationID authzop.OperationID `json:"operationId,omitempty"`
+	Resource    struct {
 		Type      string `json:"type"`
 		ID        string `json:"id"`
 		ProjectID string `json:"projectId"`
 	} `json:"resource"`
-	Action     string `json:"action"`
-	Permission string `json:"permission,omitempty"` // Canonical permission ID (e.g. "user.read"); when set, bypasses resource.type + action derivation.
+	Action string `json:"action"`
+	// Permission remains accepted for wire compatibility, but requested-
+	// decision mode requires it to equal the selected operation's reviewed
+	// BasePermission. It never selects an operation.
+	Permission string `json:"permission,omitempty"`
 
 	PrincipalID   string `json:"principalId,omitempty"`
 	PrincipalKind string `json:"principalKind,omitempty"`
@@ -284,63 +288,79 @@ type PermissionCompareResult struct {
 	Both []string `json:"both"`
 }
 
-// isKnownPermission returns true if the given ID matches a canonical
-// permission in the permissions registry.
-func isKnownPermission(id string) bool {
+func lookupPermission(id string) (permissions.Permission, bool) {
 	for _, p := range permissions.Registry {
 		if p.ID == id {
-			return true
+			return p, true
 		}
 	}
-	return false
+	return permissions.Permission{}, false
 }
 
-// canonicalizeExplainPermission resolves a canonical permission ID from
-// the (resourceType, action) pair supplied by an explain API caller.
-//
-// Production enforcement uses resolveResourcePermission
-// (authz_permission_resolver.go), which resolves only pairs that name exactly
-// one permission and denies every other pair. The explain API accepts
-// arbitrary client input that may use non-canonical patterns:
-//
-//   - resource.type="hub", action="user.read" → canonical "user.read"
-//   - resource.type="hub.user", action="read" → canonical "user.read"
-//   - resource.type="hub", action="settings.read" → canonical "hub.settings.read"
-//
-// This helper applies three canonicalization passes (constructed-ID lookup,
-// action-as-ID lookup, prefix-strip lookup) before returning the fallback.
-// It is only called from the explain handler.
-func canonicalizeExplainPermission(resourceType string, action string) string {
-	// Primary lookup: exact match by Resource + Action.
-	for _, p := range permissions.Registry {
-		if p.Resource == resourceType && p.Action == action {
-			return p.ID
-		}
+func isKnownPermission(id string) bool {
+	_, ok := lookupPermission(id)
+	return ok
+}
+
+type explainDecisionContract struct {
+	OperationID    authzop.OperationID
+	BasePermission string
+	ResourceType   string
+	Action         Action
+}
+
+// authorizationIntrospectionRequest is deliberately operation-free. It is
+// used only for diagnostic evaluation that must not claim an operation owner
+// or emit an ordinary authorization-decision audit event.
+type authorizationIntrospectionRequest struct {
+	Principal  PrincipalContext
+	Credential CredentialContext
+	Resource   Resource
+	Action     Action
+	Permission string
+	Explain    bool
+}
+
+// introspectAuthorization evaluates the same authorization kernel as Decide
+// but bypasses Decide's audit-emission wrapper. This is the sole boundary for
+// effective-permissions' bare-permission loop; capability projection will
+// later emit one separately owned bounded projection_summary observation.
+func (a *AuthzService) introspectAuthorization(ctx context.Context, request authorizationIntrospectionRequest) Decision {
+	return a.decide(ctx, authorizationEvaluationRequest{
+		Principal:  request.Principal,
+		Credential: request.Credential,
+		Resource:   request.Resource,
+		Action:     request.Action,
+		Permission: request.Permission,
+		Explain:    request.Explain,
+	})
+}
+
+// resolveExplainDecisionContract validates an operation-first explain
+// request. The catalog's reviewed BasePermission is authoritative. Resource,
+// action, and the optional compatibility permission are comparisons only;
+// none may be used to select or synthesize an operation.
+func resolveExplainDecisionContract(req explainRequest) (explainDecisionContract, bool) {
+	spec, ok := authzop.Lookup(req.OperationID)
+	if !ok {
+		return explainDecisionContract{}, false
 	}
-	// Construct the concatenated ID for secondary lookups.
-	constructedID := resourceType + "." + action
-	// Secondary: check if the constructed ID is itself a canonical ID
-	// (e.g. "hub" + "settings.read" → "hub.settings.read").
-	if isKnownPermission(constructedID) {
-		return constructedID
+	permission, ok := lookupPermission(spec.BasePermission)
+	if !ok || req.Resource.Type != permission.Resource || req.Action != permission.Action {
+		return explainDecisionContract{}, false
 	}
-	// Check if the action alone is a canonical permission ID
-	// (e.g. "hub" + "user.read" → "user.read").
-	if isKnownPermission(action) {
-		return action
+	if req.Permission != "" && req.Permission != spec.BasePermission {
+		return explainDecisionContract{}, false
 	}
-	// Prefix-strip: if the constructed ID has 3+ segments, strip the first
-	// and check the remainder (e.g. "hub.user" + "read" → strip "hub." →
-	// "user.read").
-	if idx := strings.Index(constructedID, "."); idx >= 0 {
-		tail := constructedID[idx+1:]
-		if strings.Contains(tail, ".") && isKnownPermission(tail) {
-			return tail
-		}
+	if req.Resource.Type == permissions.ResourceProject && req.Resource.ProjectID != "" && req.Resource.ID != req.Resource.ProjectID {
+		return explainDecisionContract{}, false
 	}
-	// Fallback: return the constructed ID (will not match any granted
-	// permission, producing a truthful "denied" result).
-	return constructedID
+	return explainDecisionContract{
+		OperationID:    spec.ID,
+		BasePermission: spec.BasePermission,
+		ResourceType:   permission.Resource,
+		Action:         Action(permission.Action),
+	}, true
 }
 
 // handleAuthzExplain handles POST /api/v1/authz/explain.
@@ -435,36 +455,29 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	// Handle effective_permissions mode: return full effective permission set
 	// with per-permission provenance.
 	if req.Mode == "effective_permissions" {
+		if req.OperationID != "" || req.Permission != "" {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid effective-permissions introspection request", nil)
+			return
+		}
 		s.handleExplainEffectivePermissions(w, ctx, req, explainIdentity, resource, isCrossPrincipal, isSuperAdmin)
 		return
 	}
 
-	// Resolve the permission ID for the explain request.
-	// When the client provides an explicit permission, validate it against
-	// the registry. When omitted, canonicalize from resource.type + action
-	// using the explain-specific helper (not resolveResourcePermission, which
-	// is reserved for production enforcement).
-	permissionID := req.Permission
-	if permissionID != "" {
-		// Explicit permission: validate against the canonical registry.
-		if !isKnownPermission(permissionID) {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-				fmt.Sprintf("unknown permission %q: must be a canonical permission ID from the registry", permissionID), nil)
-			return
-		}
-	} else {
-		// No explicit permission: canonicalize from resource.type + action.
-		permissionID = canonicalizeExplainPermission(req.Resource.Type, req.Action)
+	contract, ok := resolveExplainDecisionContract(req)
+	if !ok {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid authorization explain contract", nil)
+		return
 	}
 
 	// Build the authz request with Explain enabled.
 	authzReq := AuthzRequest{
-		Principal:  principalContextForIdentity(explainIdentity),
-		Credential: credentialContextForIdentity(explainIdentity),
-		Resource:   resource,
-		Action:     Action(req.Action),
-		Permission: permissionID,
-		Explain:    true,
+		OperationID: contract.OperationID,
+		Principal:   principalContextForIdentity(explainIdentity),
+		Credential:  credentialContextForIdentity(explainIdentity),
+		Resource:    resource,
+		Action:      contract.Action,
+		Permission:  contract.BasePermission,
+		Explain:     true,
 	}
 
 	decision := s.authzService.Decide(ctx, authzReq)
@@ -495,7 +508,7 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 // with per-permission provenance showing which grant sourced each permission
 // and which boundary (if any) capped it.
 //
-// NOTE: Performance — this runs a full Decide() call for each permission in
+// NOTE: Performance — this runs a full kernel introspection for each permission in
 // the effective set. For principals with many permissions (e.g., super-admin
 // with 50+ permissions), this results in N full authz pipeline evaluations.
 // The shared work (principal closure, bindings, roles, restrictions) is
@@ -550,14 +563,15 @@ func (s *Server) handleExplainEffectivePermissions(
 		return
 	}
 
-	// Build per-permission provenance by running a Decide for each
-	// permission in the effective set.
+	// Build per-permission provenance through the explicitly non-emitting
+	// introspection boundary. Bare permissions in this loop have no operation
+	// owner and must never be converted into ordinary audited decisions.
 	var permProvenance []PermissionProvenance
 	effectiveSet := make(map[string]bool, len(effectivePerms))
 	for _, permID := range effectivePerms {
 		effectiveSet[permID] = true
 
-		authzReq := AuthzRequest{
+		introspection := authorizationIntrospectionRequest{
 			Principal:  principalContextForIdentity(explainIdentity),
 			Credential: credentialContextForIdentity(explainIdentity),
 			Resource:   resource,
@@ -565,7 +579,7 @@ func (s *Server) handleExplainEffectivePermissions(
 			Action:     Action(req.Action),
 			Explain:    true,
 		}
-		decision := s.authzService.Decide(ctx, authzReq)
+		decision := s.authzService.introspectAuthorization(ctx, introspection)
 
 		pp := PermissionProvenance{
 			PermissionID: permID,

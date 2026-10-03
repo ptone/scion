@@ -178,12 +178,12 @@ func TestHubDelivery_Step10ArmDeniesWithoutStep0b(t *testing.T) {
 				Permission: "secret.deliver",
 			}
 			var explain []DecisionStep
-			allowed, reason, err := f.authz.checkDelegationCeiling(ctx, req, "secret.deliver", id, &explain, nil)
+			allowed, reason, err := f.authz.checkDelegationCeiling(ctx, authorizationEvaluationFromRequest(req), "secret.deliver", id, &explain, nil)
 			require.NoError(t, err)
 			require.True(t, allowed, "the ordinary proof must allow the control request: %q", reason)
 			require.True(t, hasDecisionStep(explain, "delegation_ceiling_allowed"), "explain: %+v", explain)
 
-			_, _, err = failing.checkDelegationCeiling(ctx, req, "secret.deliver", id, nil, nil)
+			_, _, err = failing.checkDelegationCeiling(ctx, authorizationEvaluationFromRequest(req), "secret.deliver", id, nil, nil)
 			require.Error(t, err, "the failing-store service must surface the ordinary proof's store read")
 		}
 	})
@@ -331,7 +331,7 @@ func TestHubDelivery_Step10ArmDeniesWithoutStep0b(t *testing.T) {
 				}
 				var explain []DecisionStep
 				var cause DenyCause
-				allowed, reason, err := svc.authz.checkDelegationCeiling(ctx, req, tc.permission, agentIDArg, &explain, &cause)
+				allowed, reason, err := svc.authz.checkDelegationCeiling(ctx, authorizationEvaluationFromRequest(req), tc.permission, agentIDArg, &explain, &cause)
 				require.NoError(t, err, "the arm performs no store read and never reaches the ordinary proof")
 				assert.False(t, allowed)
 				assert.Equal(t, tc.wantReason, reason)

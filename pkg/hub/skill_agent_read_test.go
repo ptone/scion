@@ -695,8 +695,9 @@ func TestExplainAPI_SkillResourceMatchesReadDecision(t *testing.T) {
 		{f.v, false},
 	} {
 		body, _ := json.Marshal(map[string]interface{}{
-			"resource": map[string]interface{}{"type": "skill", "id": f.su.ID},
-			"action":   "read",
+			"operationId": "skill.read",
+			"resource":    map[string]interface{}{"type": "skill", "id": f.su.ID},
+			"action":      "read",
 		})
 		req := newRequestWithIdentity(t, http.MethodPost, "/api/v1/authz/explain", body,
 			NewAuthenticatedUser(tc.user.ID, tc.user.Email, tc.user.DisplayName, "member", "api"))

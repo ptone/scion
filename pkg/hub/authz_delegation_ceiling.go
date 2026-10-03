@@ -152,7 +152,7 @@ func ceilingReadAllowance(resource Resource, action Action, permissionID string)
 // allows and denials with no dedicated classification.
 func (a *AuthzService) checkDelegationCeiling(
 	ctx context.Context,
-	req AuthzRequest,
+	req authorizationEvaluationRequest,
 	permissionID string,
 	agentID string,
 	explain *[]DecisionStep,
