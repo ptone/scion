@@ -416,3 +416,101 @@ catalog ownership, P2 propagation, emitters/slog/sinks, store/schema/history,
 sampling, transport, projection, M1, or `#2392 audit_emit_dispatch` timing.
 Catalog, P2, emitter, compare, and merge actions remain blocked pending a
 conclusive normal and race GREEN plus fresh independent explain review.
+
+## Independent review round 5 correction and gate result
+
+Round 5 reviewed immutable head
+`a8f324e313310c3bac00b8108dd60f93e6638f0b` against accepted P1 base
+`fd4f83fb7769af4b08eed1ac06be6d2442de89d7`. Before repository access, the
+protected round-5 report `m2-explain-r5.md` was verified at SHA-256
+`b1a6f0ac17b437e79cfcf824c6f72512716f0d3d6e9b52298efcad49040ea150`,
+and the protected round-4 fix report `m2-explain-r4-fix.md` was verified at
+SHA-256 `23a8f685911e337f280aa9b184f132a8f2ab0ae8ee8b0d12292385139e02da3a`.
+
+The sole round-5 finding was the eight-minute real module-export deadline,
+which expired in the cold review environment. The correction keeps the child
+context-aware and bounded, keeps synchronous `Output` waiting/reaping and
+value-free phase classification, and keeps `sync.Once` success and failure
+caching. It separates the injected short test bounds from a 30-minute real
+`go list -deps -export` default, below the 44-minute Go-test timeout and
+45-minute outer wrapper. Instance-scoped cache regressions prove that a
+successful helper/importer load occurs once and remains usable by subsequent
+structure and safe-interface-dispatch validation, while a reaped deadline
+failure occurs once, is returned from the cache without a second child, and
+fails closed before type checking. The production-cache structure and
+safe-dispatch tests also assert one real load attempt. Existing cancellation,
+success, interface/direct/helper/function-value/request/operation/mapping/
+emitter/sink mutation, positive safe-dispatch, and R2 type-error regressions
+remain selected.
+
+The test-only checkpoint was committed and pushed before the mandatory gate as
+`f93120864b4e96539ba33915df28eafa651a9fac`. It changes only
+`pkg/hub/authz_explain_operation_contract_test.go`.
+
+The single pre-implementation focused RED attempt used the required
+`ulimit -v 8000000`, `GOMEMLIMIT=4GiB`, immutable shared
+`GOCACHE=/scion-volumes/gocache`, and `-p 2` controls:
+
+```text
+timeout 5m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -timeout 4m -count=1 -p 2 ./pkg/hub -run '^TestEffectivePermissionIntrospectionBoundaryImporterIsBounded$'
+```
+
+It emitted dependency-download lines only and no compiler, test, package, or
+wrapper result through the command channel. It is **INCONCLUSIVE** and was not
+retried. The single post-implementation helper-only GREEN attempt used the
+same controls with a ten-minute outer and nine-minute internal timeout. It
+emitted no package diagnostic and surfaced exactly `COMMAND_EXIT=124` and
+`WALL_SECONDS=4294`; it is also **INCONCLUSIVE** and was not retried. These
+helper regressions use injected bounds and helper processes rather than the
+30-minute real default.
+
+The exact single mandatory normal command was:
+
+```text
+ulimit -v 8000000; start_seconds=$SECONDS; timeout 45m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -timeout 44m -count=1 -p 2 ./pkg/hub -run '^(TestExplainAPI_(RegisteredOperationUsesReviewedBasePermission|OperationValidationFailsClosedWithoutValueEcho|DoesNotInferOperation|EffectivePermissionsUsesNonEmittingIntrospection)|TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations|TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch|TestEffectivePermissionIntrospectionBoundaryImporterIsBounded|TestEffectivePermissionIntrospectionBoundaryTypeErrorsFailClosed|TestAuthzOperationLookupIsClosed)$'; command_rc=$?; echo COMMAND_EXIT=$command_rc; echo WALL_SECONDS=$((SECONDS-start_seconds)); exit $command_rc
+```
+
+Result: **FAIL**, with the exact decisive tail:
+
+```text
+--- FAIL: TestEffectivePermissionIntrospectionBoundaryStructure (603.23s)
+    authz_explain_operation_contract_test.go:176:
+        Error: Received unexpected error:
+               effective-permissions boundary type checking reported errors
+FAIL
+FAIL github.com/GoogleCloudPlatform/scion/pkg/hub 608.084s
+FAIL
+COMMAND_EXIT=1
+WALL_SECONDS=1541
+```
+
+A read-only snapshot showed compilation completed and `hub.test` started after
+about 15.5 minutes; the real `go list -deps -export` child then ran beyond the
+previous eight-minute limit and completed without the new 30-minute deadline
+firing. The remaining failure is the preserved value-free R2 fail-closed
+diagnostic for one or more `types.Config.Error` callbacks emitted by
+`types.Config.Check` while checking the build-selected production `pkg/hub`
+source set, after module-aware export loading and before any partial package or
+`types.Info` use. The individual diagnostic class and source location were
+intentionally collapsed by the accepted R2 aggregator and were not captured;
+no narrower attribution is evidence-supported without a prohibited rerun or
+instrumentation change. No other selected test emitted a failure line. The
+failure is conclusive and was not retried.
+
+Race was not run because normal did not exit 0 with an explicit package `ok`.
+Additionally, the coordinator and engineering manager issued a superseding
+broker-01 settlement rule while normal was running: no `-race` or other heavy
+Go command may start on broker-01; race is deferred to scion-community or CI.
+Scoped vet was therefore also not run. No full Hub suite, unfiltered package
+test, prewarm, retry, lint, heavy build, `make ci`, or `make ci-full` was run.
+The shared cache was not cleaned, altered, relocated, or replaced, and `/tmp`
+was not used for GOCACHE.
+
+Post-gate gofmt and `git diff --check` pass. The checkpoint range has zero
+production diff and only the authorized Go test path. R2 remains unchanged:
+every callback error and every non-nil `Check` error is rejected before any
+partial package or `types.Info` use. Option-B production behavior, catalog,
+P2, emitter/slog/sinks, store/schema/history, sampling, transport, projection,
+M1, and `#2392 audit_emit_dispatch` timing are unchanged. Catalog, P2,
+emitter, compare, and merge work remains blocked; round 6/7 is not authorized
+without conclusive normal and deferred race GREEN.
