@@ -173,6 +173,9 @@ func TestEffectivePermissionIntrospectionBoundaryStructure(t *testing.T) {
 func TestEffectivePermissionIntrospectionBoundaryRejectsMutations(t *testing.T) {
 	base := explainBoundaryTestSources()
 	mutations := map[string]map[string][]byte{
+		"interface incomplete receiver set": addSameFileBoundaryDeclarations(
+			mutateBoundarySource(base, "s.authzService.introspectAuthorization()", "var runner boundaryRunner; runner.Run(); s.authzService.introspectAuthorization()"),
+			"type boundaryRunner interface { Run() }"),
 		"interface same-file value receiver": addSameFileBoundaryDeclarations(
 			mutateBoundarySource(base, "s.authzService.introspectAuthorization()", "var runner boundaryRunner = boundaryValueRunner{}; runner.Run(); s.authzService.introspectAuthorization()"),
 			"type boundaryRunner interface { Run() }\ntype boundaryValueRunner struct{}\nfunc (boundaryValueRunner) Run() { ordinary.Decide() }"),
@@ -226,12 +229,20 @@ func TestEffectivePermissionIntrospectionBoundaryRejectsMutations(t *testing.T) 
 }
 
 func TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch(t *testing.T) {
-	sources := addBoundaryFile(
-		addSameFileBoundaryDeclarations(
-			mutateBoundarySource(explainBoundaryTestSources(), "s.authzService.introspectAuthorization()", "var runner boundaryRunner = boundarySafeValueRunner{}; runner.Run(); s.authzService.introspectAuthorization()"),
-			"type boundaryRunner interface { Run() }\ntype boundarySafeValueRunner struct{}\nfunc (boundarySafeValueRunner) Run() { safeBoundaryHelper() }"),
-		"runner.go", "package hub\ntype boundarySafePointerRunner struct{}\nfunc (*boundarySafePointerRunner) Run() { safeBoundaryHelper() }\nfunc safeBoundaryHelper() {}")
-	require.NoError(t, validateExplainIntrospectionBoundary(sources))
+	t.Run("value and pointer receivers", func(t *testing.T) {
+		sources := addBoundaryFile(
+			addSameFileBoundaryDeclarations(
+				mutateBoundarySource(explainBoundaryTestSources(), "s.authzService.introspectAuthorization()", "var runner boundaryRunner = boundarySafeValueRunner{}; runner.Run(); s.authzService.introspectAuthorization()"),
+				"type boundaryRunner interface { Run() }\ntype boundarySafeValueRunner struct{}\nfunc (boundarySafeValueRunner) Run() { safeBoundaryHelper() }"),
+			"runner.go", "package hub\ntype boundarySafePointerRunner struct{}\nfunc (*boundarySafePointerRunner) Run() { safeBoundaryHelper() }\nfunc safeBoundaryHelper() {}")
+		require.NoError(t, validateExplainIntrospectionBoundary(sources))
+	})
+	t.Run("Identity Type concrete dispatch", func(t *testing.T) {
+		sources := addSameFileBoundaryDeclarations(
+			mutateBoundarySource(explainBoundaryTestSources(), "s.authzService.introspectAuthorization()", "var identity Identity = &concreteIdentity{}; _ = identity.Type(); s.authzService.introspectAuthorization()"),
+			"type Identity interface { Type() string }\ntype concreteIdentity struct{}\nfunc (*concreteIdentity) Type() string { return \"user\" }")
+		require.NoError(t, validateExplainIntrospectionBoundary(sources))
+	})
 }
 
 func explainBoundaryTestSources() map[string][]byte {
@@ -690,9 +701,8 @@ func explainBoundaryInterfaceImplementations(method *types.Func, checkedPackage 
 				// interface. It contributes no executable body of its own; every
 				// package-local concrete target is enumerated independently below.
 				// An external interface target cannot be proven complete here.
-				if implementation.Pkg() != checkedPackage {
-					return nil, false
-				}
+				// Only package-local executable bodies are in scope. An
+				// external/promoted interface method contributes no local body.
 				continue
 			}
 			if seen[implementation] {
@@ -700,7 +710,10 @@ func explainBoundaryInterfaceImplementations(method *types.Func, checkedPackage 
 			}
 			wrapped := functions[implementation]
 			if wrapped == nil {
-				return nil, false
+				if implementation.Pkg() == checkedPackage {
+					return nil, false
+				}
+				continue
 			}
 			seen[implementation] = true
 			implementations = append(implementations, wrapped)
