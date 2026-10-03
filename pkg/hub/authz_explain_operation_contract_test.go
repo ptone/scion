@@ -223,11 +223,31 @@ func TestEffectivePermissionIntrospectionBoundaryRejectsMutations(t *testing.T) 
 		"OperationID population": addReachableBoundaryHelper(base,
 			"func forbiddenHelper() { _ = AuthzRequest{OperationID: operation} }"),
 		"permission-to-operation mapping": addReachableBoundaryHelper(base,
-			"func forbiddenHelper() { _ = authzop.CatalogBasePermissions() }"),
+			"import opcatalog \"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop\"\nfunc forbiddenHelper() { _ = opcatalog.CatalogBasePermissions() }"),
 		"ordinary decision emitter": addReachableBoundaryHelper(base,
 			"func forbiddenHelper() { service.emitDecisionAudit() }"),
 		"audit sink": addReachableBoundaryHelper(base,
 			"func forbiddenHelper() { sink.Emit() }"),
+		"nonlocal Lookup function alias": addReachableBoundaryHelper(base,
+			"import opcatalog \"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop\"\nvar lookupOperation = opcatalog.Lookup\nfunc forbiddenHelper() { _, _ = lookupOperation(opcatalog.OperationID(\"user.read\")) }"),
+		"nonlocal method expression alias": addReachableBoundaryHelper(base,
+			"import opcatalog \"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop\"\nvar validateOperation = (*opcatalog.OperationSpec).Validate\nfunc forbiddenHelper() { var spec opcatalog.OperationSpec; _ = validateOperation(&spec) }"),
+		"package catalog alias range": addReachableBoundaryHelper(base,
+			"import opcatalog \"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop\"\nvar operationCatalogAlias = opcatalog.Catalog\nfunc forbiddenHelper() { for range operationCatalogAlias {} }"),
+		"catalog local assignment and index": addReachableBoundaryHelper(base,
+			"import opcatalog \"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop\"\nvar operationCatalogAlias = opcatalog.Catalog\nfunc forbiddenHelper() { catalog := operationCatalogAlias; _ = catalog[0] }"),
+		"catalog aggregate propagation": addReachableBoundaryHelper(base,
+			"import opcatalog \"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop\"\nvar operationCatalogAggregate = [][]opcatalog.OperationSpec{opcatalog.Catalog}\nfunc forbiddenHelper() { _ = operationCatalogAggregate[0] }"),
+		"catalog return propagation": addReachableBoundaryHelper(base,
+			"import opcatalog \"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop\"\nfunc returnedOperationCatalog() []opcatalog.OperationSpec { return opcatalog.Catalog }\nfunc forbiddenHelper() { _ = returnedOperationCatalog() }"),
+		"catalog parameter propagation": addReachableBoundaryHelper(base,
+			"import opcatalog \"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop\"\nvar operationCatalogAlias = opcatalog.Catalog\nfunc inspectOperationCatalog(catalog []opcatalog.OperationSpec) { _ = catalog[0] }\nfunc forbiddenHelper() { inspectOperationCatalog(operationCatalogAlias) }"),
+		"catalog field propagation": addReachableBoundaryHelper(base,
+			"import opcatalog \"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop\"\ntype operationCatalogHolder struct { catalog []opcatalog.OperationSpec }\nvar operationCatalogField = operationCatalogHolder{catalog: opcatalog.Catalog}\nfunc forbiddenHelper() { _ = operationCatalogField.catalog }"),
+		"catalog search propagation": addReachableBoundaryHelper(base,
+			"import (\"slices\"; opcatalog \"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop\")\nvar operationCatalogAlias = opcatalog.Catalog\nfunc forbiddenHelper() { _ = slices.IndexFunc(operationCatalogAlias, func(spec opcatalog.OperationSpec) bool { return spec.ID == \"\" }) }"),
+		"operation constant alias": addReachableBoundaryHelper(base,
+			"import opcatalog \"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop\"\nconst operationEffectAlias = opcatalog.EffectGrantAuthority\nfunc forbiddenHelper() { _ = operationEffectAlias }"),
 	} {
 		mutations[name] = sources
 	}
@@ -265,6 +285,11 @@ func TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch(t *
 		sources := addSameFileBoundaryDeclarations(
 			mutateBoundarySource(explainBoundaryTestSources(), "s.authzService.introspectAuthorization()", "var runner boundaryRunner = boundaryPromotedRunner{}; runner.run(); s.authzService.introspectAuthorization()"),
 			"type boundaryRunner interface { run() }\ntype boundarySafeRunner struct{}\nfunc (boundarySafeRunner) run() { safeBoundaryHelper() }\ntype boundaryPromotedRunner struct { boundarySafeRunner }\nfunc safeBoundaryHelper() {}")
+		require.NoError(t, validateExplainIntrospectionBoundary(sources))
+	})
+	t.Run("unrelated callable and ordinary data propagation", func(t *testing.T) {
+		sources := addReachableBoundaryHelper(explainBoundaryTestSources(),
+			"import \"strings\"\nvar safeIndex = strings.Index\nvar safeCollection = []string{\"safe\"}\ntype safeHolder struct { values []string }\nvar safeField = safeHolder{values: safeCollection}\nfunc safeReturn() []string { return safeField.values }\nfunc safeParameter(values []string) int { return safeIndex(values[0], \"a\") }\nfunc forbiddenHelper() { values := safeReturn(); for index := range values { _ = safeParameter(values); _ = values[index] } }")
 		require.NoError(t, validateExplainIntrospectionBoundary(sources))
 	})
 }
@@ -588,6 +613,8 @@ type explainBoundaryResolvedFunctionValue struct {
 	literals map[*ast.FuncLit]struct{}
 }
 
+type explainBoundaryDataFlow map[types.Object]map[types.Object]struct{}
+
 type explainBoundaryExportCache struct {
 	once         sync.Once
 	exports      map[string]string
@@ -782,6 +809,7 @@ func validateExplainIntrospectionBoundaryWithHooks(sources map[string][]byte, ho
 		return &explainBoundaryError{message: "ordinary AuthzRequest type is missing"}
 	}
 	functionValues := explainBoundaryFunctionValues(files, typeInfo)
+	dataFlow := explainBoundaryDataDependencies(files, typeInfo, functionValues)
 
 	queue := []explainBoundaryVisit{{
 		fn:    functions["handleExplainEffectivePermissions"][0],
@@ -806,6 +834,12 @@ func validateExplainIntrospectionBoundaryWithHooks(sources map[string][]byte, ho
 			if expr, ok := node.(ast.Expr); ok && explainBoundaryHasAuthzRequestType(typeInfo.TypeOf(expr), authzRequestObject.Type()) {
 				violation = "constructs or carries ordinary AuthzRequest"
 				return false
+			}
+			if expr, ok := node.(ast.Expr); ok {
+				if origin := explainBoundaryForbiddenDataOrigin(expr, typeInfo, functionValues, dataFlow); origin != nil {
+					violation = "reaches forbidden authorization operation object " + origin.String()
+					return false
+				}
 			}
 			switch n := node.(type) {
 			case *ast.CompositeLit:
@@ -951,6 +985,9 @@ func explainBoundaryRecordFunctionValue(values map[*types.Var]*explainBoundaryFu
 func explainBoundaryCalledFunctions(expr ast.Expr, info *types.Info, checkedPackage *types.Package, functions map[*types.Func]*explainBoundaryFunction, literals map[*ast.FuncLit]*explainBoundaryFunction, values map[*types.Var]*explainBoundaryFunctionValue) ([]*explainBoundaryFunction, string) {
 	object := explainBoundaryObject(expr, info)
 	if function, ok := object.(*types.Func); ok {
+		if explainBoundaryForbiddenAuthzOperationObject(function) {
+			return nil, "calls forbidden authorization operation object " + function.String()
+		}
 		if called := functions[function]; called != nil {
 			return []*explainBoundaryFunction{called}, ""
 		}
@@ -983,6 +1020,9 @@ func explainBoundaryCalledFunctions(expr ast.Expr, info *types.Info, checkedPack
 	}
 	called := make([]*explainBoundaryFunction, 0, len(resolved.targets)+len(resolved.literals))
 	for target := range resolved.targets {
+		if explainBoundaryForbiddenAuthzOperationObject(target) {
+			return nil, "calls forbidden authorization operation object " + target.String()
+		}
 		if explainBoundaryForbiddenCall(target.Name()) {
 			return nil, "calls forbidden authorization/audit surface " + target.Name()
 		}
@@ -998,6 +1038,229 @@ func explainBoundaryCalledFunctions(expr ast.Expr, info *types.Info, checkedPack
 		}
 	}
 	return called, ""
+}
+
+func explainBoundaryForbiddenAuthzOperationObject(object types.Object) bool {
+	if object == nil || object.Pkg() == nil || object.Pkg().Path() != "github.com/GoogleCloudPlatform/scion/pkg/hub/authzop" {
+		return false
+	}
+	switch object := object.(type) {
+	case *types.Func:
+		// Functions and methods retain their declaring package even when reached
+		// through an import alias, function value, or method expression.
+		return true
+	case *types.Var, *types.Const:
+		// Package-scope data and constants are semantic catalog/operation
+		// origins. Fields are not origins by themselves; they inherit provenance
+		// from the catalog value through the dependency graph.
+		return object.Parent() == object.Pkg().Scope()
+	default:
+		return false
+	}
+}
+
+func explainBoundaryDataDependencies(files []*ast.File, info *types.Info, values map[*types.Var]*explainBoundaryFunctionValue) explainBoundaryDataFlow {
+	flow := make(explainBoundaryDataFlow)
+	add := func(destination types.Object, dependencies map[types.Object]struct{}) {
+		if destination == nil || len(dependencies) == 0 {
+			return
+		}
+		if flow[destination] == nil {
+			flow[destination] = make(map[types.Object]struct{})
+		}
+		for dependency := range dependencies {
+			if dependency != destination {
+				flow[destination][dependency] = struct{}{}
+			}
+		}
+	}
+	addAssignment := func(lhs []ast.Expr, rhs []ast.Expr) {
+		if len(lhs) == len(rhs) {
+			for index := range lhs {
+				add(explainBoundaryAssignedVar(lhs[index], info), explainBoundaryExpressionObjects(rhs[index], info, values))
+			}
+			return
+		}
+		if len(rhs) != 1 {
+			return
+		}
+		results := explainBoundaryCallResults(rhs[0], info, values)
+		for index, destination := range lhs {
+			if index < len(results) {
+				add(explainBoundaryAssignedVar(destination, info), map[types.Object]struct{}{results[index]: {}})
+			}
+		}
+	}
+	for _, file := range files {
+		ast.Inspect(file, func(node ast.Node) bool {
+			switch value := node.(type) {
+			case *ast.AssignStmt:
+				addAssignment(value.Lhs, value.Rhs)
+			case *ast.ValueSpec:
+				lhs := make([]ast.Expr, 0, len(value.Names))
+				for _, name := range value.Names {
+					lhs = append(lhs, name)
+				}
+				addAssignment(lhs, value.Values)
+			case *ast.KeyValueExpr:
+				add(explainBoundaryObject(value.Key, info), explainBoundaryExpressionObjects(value.Value, info, values))
+			case *ast.RangeStmt:
+				dependencies := explainBoundaryExpressionObjects(value.X, info, values)
+				add(explainBoundaryAssignedVar(value.Key, info), dependencies)
+				add(explainBoundaryAssignedVar(value.Value, info), dependencies)
+			case *ast.CallExpr:
+				for _, function := range explainBoundaryResolvedCallees(value.Fun, info, values) {
+					signature := explainBoundarySignature(function.Type())
+					if signature == nil {
+						continue
+					}
+					parameters := signature.Params()
+					for index, argument := range value.Args {
+						parameterIndex := index
+						if parameterIndex >= parameters.Len() {
+							if !signature.Variadic() || parameters.Len() == 0 {
+								break
+							}
+							parameterIndex = parameters.Len() - 1
+						}
+						add(parameters.At(parameterIndex), explainBoundaryExpressionObjects(argument, info, values))
+					}
+				}
+			}
+			return true
+		})
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			object, _ := info.Defs[function.Name].(*types.Func)
+			if object != nil {
+				explainBoundaryRecordReturnDependencies(function.Body, explainBoundarySignature(object.Type()), info, values, add)
+			}
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			literal, ok := node.(*ast.FuncLit)
+			if !ok {
+				return true
+			}
+			explainBoundaryRecordReturnDependencies(literal.Body, explainBoundarySignature(info.TypeOf(literal)), info, values, add)
+			return true
+		})
+	}
+	return flow
+}
+
+func explainBoundaryRecordReturnDependencies(body *ast.BlockStmt, signature *types.Signature, info *types.Info, values map[*types.Var]*explainBoundaryFunctionValue, add func(types.Object, map[types.Object]struct{})) {
+	if body == nil || signature == nil {
+		return
+	}
+	ast.Inspect(body, func(node ast.Node) bool {
+		if literal, ok := node.(*ast.FuncLit); ok && literal.Body != body {
+			return false
+		}
+		statement, ok := node.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		results := signature.Results()
+		if len(statement.Results) == results.Len() {
+			for index, expression := range statement.Results {
+				add(results.At(index), explainBoundaryExpressionObjects(expression, info, values))
+			}
+		} else if len(statement.Results) == 1 {
+			returned := explainBoundaryCallResults(statement.Results[0], info, values)
+			for index := 0; index < results.Len() && index < len(returned); index++ {
+				add(results.At(index), map[types.Object]struct{}{returned[index]: {}})
+			}
+		}
+		return true
+	})
+}
+
+func explainBoundaryExpressionObjects(expr ast.Expr, info *types.Info, values map[*types.Var]*explainBoundaryFunctionValue) map[types.Object]struct{} {
+	objects := make(map[types.Object]struct{})
+	ast.Inspect(expr, func(node ast.Node) bool {
+		switch value := node.(type) {
+		case *ast.Ident:
+			if object := info.Uses[value]; object != nil {
+				objects[object] = struct{}{}
+			}
+		case *ast.SelectorExpr:
+			if object := explainBoundaryObject(value, info); object != nil {
+				objects[object] = struct{}{}
+			}
+		case *ast.CallExpr:
+			for _, result := range explainBoundaryCallResults(value, info, values) {
+				objects[result] = struct{}{}
+			}
+		}
+		return true
+	})
+	return objects
+}
+
+func explainBoundaryResolvedCallees(expr ast.Expr, info *types.Info, values map[*types.Var]*explainBoundaryFunctionValue) []*types.Func {
+	switch object := explainBoundaryObject(expr, info).(type) {
+	case *types.Func:
+		return []*types.Func{object}
+	case *types.Var:
+		resolved, supported := explainBoundaryResolveFunctionValue(object, values, make(map[*types.Var]bool))
+		if !supported {
+			return nil
+		}
+		functions := make([]*types.Func, 0, len(resolved.targets))
+		for function := range resolved.targets {
+			functions = append(functions, function)
+		}
+		return functions
+	default:
+		return nil
+	}
+}
+
+func explainBoundaryCallResults(expr ast.Expr, info *types.Info, values map[*types.Var]*explainBoundaryFunctionValue) []*types.Var {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	var results []*types.Var
+	for _, function := range explainBoundaryResolvedCallees(call.Fun, info, values) {
+		signature := explainBoundarySignature(function.Type())
+		if signature == nil {
+			continue
+		}
+		for index := 0; index < signature.Results().Len(); index++ {
+			results = append(results, signature.Results().At(index))
+		}
+	}
+	return results
+}
+
+func explainBoundaryForbiddenDataOrigin(expr ast.Expr, info *types.Info, values map[*types.Var]*explainBoundaryFunctionValue, flow explainBoundaryDataFlow) types.Object {
+	for object := range explainBoundaryExpressionObjects(expr, info, values) {
+		if origin := explainBoundaryResolveForbiddenDataOrigin(object, flow, make(map[types.Object]bool)); origin != nil {
+			return origin
+		}
+	}
+	return nil
+}
+
+func explainBoundaryResolveForbiddenDataOrigin(object types.Object, flow explainBoundaryDataFlow, visiting map[types.Object]bool) types.Object {
+	if explainBoundaryForbiddenAuthzOperationObject(object) {
+		return object
+	}
+	if object == nil || visiting[object] {
+		return nil
+	}
+	visiting[object] = true
+	defer delete(visiting, object)
+	for dependency := range flow[object] {
+		if origin := explainBoundaryResolveForbiddenDataOrigin(dependency, flow, visiting); origin != nil {
+			return origin
+		}
+	}
+	return nil
 }
 
 func explainBoundaryInterfaceReceiver(method *types.Func) *types.Interface {
@@ -1193,10 +1456,8 @@ func explainBoundaryForbiddenCall(name string) bool {
 
 func explainBoundaryForbiddenSelector(selector *ast.SelectorExpr) bool {
 	switch selector.Sel.Name {
-	case "OperationID", "decisionAuditEmitter", "Catalog", "CatalogBasePermissions", "CatalogOperationIDs", "SlogSink":
+	case "OperationID", "decisionAuditEmitter", "SlogSink":
 		return true
-	case "Lookup":
-		return explainBoundaryExprName(selector.X) == "authzop"
 	default:
 		return false
 	}
