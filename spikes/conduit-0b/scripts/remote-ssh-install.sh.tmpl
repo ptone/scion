@@ -1,0 +1,121 @@
+# VS Code Remote-SSH server install/start script — scripted approximation.
+#
+# Modelled on the script the Remote-SSH extension pipes into `ssh -T <host> bash`
+# (observable in the "Remote - SSH" output channel; open-source equivalent:
+# jeanp413/open-remote-ssh src/serverSetup.ts). Placeholders @@X@@ are filled in
+# by remote-ssh-sim.sh. The script:
+#   1. detects platform/arch,
+#   2. downloads the VS Code Server for the client's commit if absent,
+#   3. starts it (or reuses a running one) with a connection token,
+#   4. prints the listening port/socket between start/end markers,
+#   5. (like the real client) leaves the exec channel open.
+DISTRO_COMMIT="@@COMMIT@@"
+DISTRO_QUALITY="@@QUALITY@@"
+SERVER_LISTEN_FLAG="@@LISTEN_FLAG@@"
+MARKER="@@MARKER@@"
+SERVER_APP_NAME="code-server"
+SERVER_DATA_DIR="$HOME/.vscode-server"
+SERVER_DIR="$SERVER_DATA_DIR/bin/$DISTRO_COMMIT"
+SERVER_SCRIPT="$SERVER_DIR/bin/$SERVER_APP_NAME"
+SERVER_LOGFILE="$SERVER_DATA_DIR/.$DISTRO_COMMIT.log"
+SERVER_PIDFILE="$SERVER_DATA_DIR/.$DISTRO_COMMIT.pid"
+SERVER_TOKENFILE="$SERVER_DATA_DIR/.$DISTRO_COMMIT.token"
+TMP_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+LISTENING_ON=
+OS_RELEASE_ID=
+ARCH=
+PLATFORM=
+SERVER_CONNECTION_TOKEN=
+REUSED=0
+
+print_install_results_and_exit() {
+    echo "$MARKER: start"
+    echo "exitCode==$1=="
+    echo "listeningOn==$LISTENING_ON=="
+    echo "connectionToken==$SERVER_CONNECTION_TOKEN=="
+    echo "logFile==$SERVER_LOGFILE=="
+    echo "osReleaseId==$OS_RELEASE_ID=="
+    echo "arch==$ARCH=="
+    echo "platform==$PLATFORM=="
+    echo "tmpDir==$TMP_DIR=="
+    echo "reused==$REUSED=="
+    echo "$MARKER: end"
+    # The real client keeps this channel open for the lifetime of the
+    # connection (it is how it notices the connection dropping).
+    if [[ "$1" == 0 ]]; then
+        while read -r line; do [[ "$line" == "exit" ]] && break; done
+    fi
+    exit 0
+}
+
+KERNEL="$(uname -s)"
+case $KERNEL in
+    Linux) PLATFORM="linux" ;;
+    *) echo "Error platform not supported: $KERNEL"; print_install_results_and_exit 1 ;;
+esac
+case "$(uname -m)" in
+    x86_64 | amd64) ARCH="x64" ;;
+    armv7l | armv8l) ARCH="armhf" ;;
+    arm64 | aarch64) ARCH="arm64" ;;
+    *) echo "Error architecture not supported: $(uname -m)"; print_install_results_and_exit 1 ;;
+esac
+OS_RELEASE_ID="$(grep -i '^ID=' /etc/os-release 2>/dev/null | sed 's/^ID=//gi' | sed 's/"//g')"
+[[ -z $OS_RELEASE_ID ]] && OS_RELEASE_ID="unknown"
+
+mkdir -p "$SERVER_DIR" || { echo "Error creating server install directory"; print_install_results_and_exit 1; }
+
+SERVER_DOWNLOAD_URL="https://update.code.visualstudio.com/commit:$DISTRO_COMMIT/server-$PLATFORM-$ARCH/$DISTRO_QUALITY"
+
+if [[ ! -f $SERVER_SCRIPT ]]; then
+    pushd "$SERVER_DIR" > /dev/null
+    echo "Downloading VS Code Server $DISTRO_COMMIT ..."
+    if command -v wget >/dev/null 2>&1; then
+        wget --tries=3 --timeout=10 --continue --no-verbose -O vscode-server.tar.gz "$SERVER_DOWNLOAD_URL"
+    elif command -v curl >/dev/null 2>&1; then
+        curl --retry 3 --connect-timeout 10 --location --show-error --silent --output vscode-server.tar.gz "$SERVER_DOWNLOAD_URL"
+    else
+        echo "Error no tool to download server binary"; print_install_results_and_exit 1
+    fi
+    [[ $? -ne 0 ]] && { echo "Error downloading server from $SERVER_DOWNLOAD_URL"; print_install_results_and_exit 1; }
+    tar -xf vscode-server.tar.gz --strip-components 1 || { echo "Error while extracting server contents"; print_install_results_and_exit 1; }
+    [[ ! -f $SERVER_SCRIPT ]] && { echo "Error server contents are corrupted"; print_install_results_and_exit 1; }
+    rm -f vscode-server.tar.gz
+    popd > /dev/null
+else
+    echo "Server script already installed in $SERVER_SCRIPT"
+fi
+
+# Reuse a running server, as the real client does on reconnect.
+if [[ -f $SERVER_PIDFILE ]]; then
+    SERVER_PID="$(cat "$SERVER_PIDFILE")"
+    if [[ -n $SERVER_PID ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+        REUSED=1
+    fi
+fi
+
+if [[ $REUSED == 0 ]]; then
+    rm -f "$SERVER_LOGFILE"
+    SERVER_CONNECTION_TOKEN="$(cat /proc/sys/kernel/random/uuid)"
+    rm -f "$SERVER_TOKENFILE"
+    ( umask 377; echo "$SERVER_CONNECTION_TOKEN" > "$SERVER_TOKENFILE" )
+    # setsid+nohup: the server must outlive this SSH session (reconnect).
+    setsid nohup "$SERVER_SCRIPT" --start-server --host=127.0.0.1 $SERVER_LISTEN_FLAG \
+        --connection-token-file "$SERVER_TOKENFILE" --telemetry-level off \
+        --enable-remote-auto-shutdown --accept-server-license-terms \
+        < /dev/null &> "$SERVER_LOGFILE" &
+    echo $! > "$SERVER_PIDFILE"
+else
+    echo "Server is already running (pid $SERVER_PID)"
+    SERVER_CONNECTION_TOKEN="$(cat "$SERVER_TOKENFILE")"
+fi
+
+for i in $(seq 1 60); do
+    LISTENING_ON="$(grep -E 'Extension host agent listening on .+' "$SERVER_LOGFILE" 2>/dev/null | tail -1 | sed 's/Extension host agent listening on //')"
+    [[ -n $LISTENING_ON ]] && break
+    sleep 0.5
+done
+if [[ -z $LISTENING_ON ]]; then
+    echo "Error server did not start successfully"; tail -20 "$SERVER_LOGFILE"
+    print_install_results_and_exit 1
+fi
+print_install_results_and_exit 0
