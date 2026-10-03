@@ -260,6 +260,27 @@ func TestEffectivePermissionIntrospectionBoundaryImporterIsBounded(t *testing.T)
 		assert.Less(t, explainBoundaryRealExportListTimeout, 44*time.Minute)
 	})
 
+	t.Run("export protocol uses an actual tab separator", func(t *testing.T) {
+		assert.Contains(t, explainBoundaryExportListFormat, "\t")
+		assert.NotContains(t, explainBoundaryExportListFormat, `\t`)
+
+		command := explainBoundaryExportCommand(t.Context())
+		formatIndex := -1
+		for index, argument := range command.Args {
+			if argument == "-f" {
+				formatIndex = index + 1
+				break
+			}
+		}
+		require.NotEqual(t, -1, formatIndex)
+		require.Less(t, formatIndex, len(command.Args))
+		assert.Equal(t, explainBoundaryExportListFormat, command.Args[formatIndex])
+
+		actualSeparator := parseExplainBoundaryExports([]byte("example.com/bounded\t/bounded/export.a\n"))
+		assert.Equal(t, "/bounded/export.a", actualSeparator["example.com/bounded"])
+		assert.Empty(t, parseExplainBoundaryExports([]byte(`example.com/bounded\t/bounded/export.a`)))
+	})
+
 	t.Run("deadline is cached fail closed after reaping child", func(t *testing.T) {
 		stdinReader, stdinWriter, err := os.Pipe()
 		require.NoError(t, err)
@@ -573,8 +594,10 @@ type explainBoundaryValidationHooks struct {
 	check    func(*types.Config, string, *token.FileSet, []*ast.File, *types.Info) (*types.Package, error)
 }
 
+const explainBoundaryExportListFormat = "{{if .Export}}{{.ImportPath}}\t{{.Export}}{{end}}"
+
 func explainBoundaryExportCommand(ctx context.Context) *exec.Cmd {
-	return exec.CommandContext(ctx, "go", "list", "-deps", "-export", "-f", "{{if .Export}}{{.ImportPath}}\\t{{.Export}}{{end}}", ".")
+	return exec.CommandContext(ctx, "go", "list", "-deps", "-export", "-f", explainBoundaryExportListFormat, ".")
 }
 
 func runExplainBoundaryExportCommand(parent context.Context, timeout time.Duration, factory explainBoundaryCommandFactory) ([]byte, error) {
@@ -609,6 +632,10 @@ func loadExplainBoundaryExports(ctx context.Context, timeout time.Duration, fact
 	if err != nil {
 		return nil, err
 	}
+	return parseExplainBoundaryExports(output), nil
+}
+
+func parseExplainBoundaryExports(output []byte) map[string]string {
 	exports := make(map[string]string)
 	for _, line := range strings.Split(string(output), "\n") {
 		fields := strings.SplitN(line, "\t", 2)
@@ -616,7 +643,7 @@ func loadExplainBoundaryExports(ctx context.Context, timeout time.Duration, fact
 			exports[fields[0]] = fields[1]
 		}
 	}
-	return exports, nil
+	return exports
 }
 
 func (cache *explainBoundaryExportCache) importer(fset *token.FileSet, ctx context.Context, timeout time.Duration, factory explainBoundaryCommandFactory) (types.Importer, error) {
