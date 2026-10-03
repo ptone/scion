@@ -48,7 +48,12 @@ module.exports = {
             parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
         },
         {
-            files: ['src/client/paginate-all.test.ts', 'src/client/state.test.ts'],
+            files: [
+                'src/client/agent-store.test.ts',
+                'src/client/agent-store-feed.test.ts',
+                'src/client/paginate-all.test.ts',
+                'src/client/state.test.ts',
+            ],
             parserOptions: { project: './src/client/tsconfig.client-tests.json' },
         },
         // Explicit lists, not globs: only these files are lint-clean against
