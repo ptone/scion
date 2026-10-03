@@ -1231,7 +1231,10 @@ var Catalog = []OperationSpec{
 			BeforeFields:  []string{"target_user_id", "email", "role", "status"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialForbidden},
+		// last_owner: the user is the last active owner of a project.
+		// conflict: last super-admin, self-delete, or the user's role
+		// bindings changed concurrently during the delete.
+		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialConflict},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 
@@ -1413,8 +1416,12 @@ var Catalog = []OperationSpec{
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		// conflict: email already on the list, user not in invited status,
+		// or (DELETE) the user's role bindings changed concurrently.
+		// last_owner: the DELETE entry point applies the same
+		// last-project-owner guard and binding cascade as user.admin.delete.
+		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialConflict},
+		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
 		ID:          "hub.health.read",
