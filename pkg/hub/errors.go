@@ -56,6 +56,12 @@ const (
 	ErrCodeUnavailable          = "unavailable"
 	ErrCodeNoRuntimeBroker      = "no_runtime_broker"
 	ErrCodeRuntimeBrokerUnavail = "runtime_broker_unavailable"
+	// ErrCodeRuntimeBrokerNotFound is returned when a named runtime broker
+	// does not exist. Status 404.
+	ErrCodeRuntimeBrokerNotFound = "runtime_broker_not_found"
+	// ErrCodeNotImplemented is returned for a request the API accepts but
+	// the hub does not carry out yet. Status 501.
+	ErrCodeNotImplemented = "not_implemented"
 
 	ErrCodeMissingEnvVars = "missing_env_vars"
 	ErrCodeCloneFailed    = "clone_failed"
