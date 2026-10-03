@@ -682,8 +682,18 @@ func explainBoundaryInterfaceImplementations(method *types.Func, checkedPackage 
 			}
 			selected, _, _ := types.LookupFieldOrMethod(receiver, true, checkedPackage, method.Name())
 			implementation, ok := selected.(*types.Func)
-			if !ok || implementation == method {
+			if !ok {
 				return nil, false
+			}
+			if explainBoundaryInterfaceReceiver(implementation) != nil {
+				// A concrete wrapper can promote a method from an embedded
+				// interface. It contributes no executable body of its own; every
+				// package-local concrete target is enumerated independently below.
+				// An external interface target cannot be proven complete here.
+				if implementation.Pkg() != checkedPackage {
+					return nil, false
+				}
+				continue
 			}
 			if seen[implementation] {
 				continue
