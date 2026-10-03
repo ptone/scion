@@ -80,9 +80,9 @@ const AUTO_EXPOSE_ENV_KEYS = [
 const AUTO_EXPOSE_ENV_KEYS_SET: ReadonlySet<string> = new Set(AUTO_EXPOSE_ENV_KEYS);
 
 /**
- * Where the loaded auto-expose value comes from: the requester set it
- * (InlineConfig.Env), the hub derived it from the project or template
- * (AppliedConfig.Env only), or neither, so the hub default applies.
+ * Where the loaded auto-expose value comes from: the requester set it (the
+ * explicit record, see explicitEnvOf), the hub derived it from the project or
+ * template (AppliedConfig.Env only), or neither, so the hub default applies.
  */
 export type AutoExposeSource = 'explicit' | 'project/template' | 'hub default';
 
@@ -93,7 +93,7 @@ export type AutoExposeSource = 'explicit' | 'project/template' | 'hub default';
  */
 export function effectiveAutoExposePorts(
   appliedEnv: Record<string, string> | undefined,
-  inlineEnv: Record<string, string> | undefined,
+  explicitEnv: Record<string, string> | undefined,
   hubDefault: boolean
 ): { enabled: boolean; source: AutoExposeSource } {
   const value = appliedEnv?.SCION_AUTO_EXPOSE_PORTS;
@@ -101,8 +101,18 @@ export function effectiveAutoExposePorts(
     return { enabled: hubDefault, source: 'hub default' };
   }
   const source: AutoExposeSource =
-    inlineEnv?.SCION_AUTO_EXPOSE_PORTS !== undefined ? 'explicit' : 'project/template';
+    explicitEnv?.SCION_AUTO_EXPOSE_PORTS !== undefined ? 'explicit' : 'project/template';
   return { enabled: value === 'true', source };
+}
+
+/**
+ * The explicit env record, as the hub reads it: CreateInputs.InlineConfig.Env
+ * when the agent has CreateInputs, else InlineConfig.Env. InlineConfig.Env
+ * alone can still hold a hub-stamped auto-expose value on older agents.
+ */
+function explicitEnvOf(ac: AppliedConfig | undefined): Record<string, string> | undefined {
+  if (ac?.createInputs) return ac.createInputs.inlineConfig?.env;
+  return ac?.inlineConfig?.env;
 }
 
 /** True when both env-keyed maps have exactly the same keys and values. */
@@ -126,6 +136,8 @@ interface AppliedConfig {
     harness_config?: string;
   };
   agentRole?: string;
+  /** The requester's explicit inputs, which reincarnate re-derives from. */
+  createInputs?: { inlineConfig?: { env?: Record<string, string> } };
   /** The runtime profile this agent was dispatched with, if any (api/types.go RunConfig.Profile). */
   profile?: string;
 }
@@ -704,7 +716,7 @@ export class ScionPageAgentConfigure extends LitElement {
     this.telemetryEnabled = ic?.telemetry?.enabled ?? this.globalTelemetryDefault;
     const autoExpose = effectiveAutoExposePorts(
       ac?.env,
-      ic?.env,
+      explicitEnvOf(ac),
       this.globalAutoExposePortsDefault
     );
     this.autoExposePortsEnabled = autoExpose.enabled;
