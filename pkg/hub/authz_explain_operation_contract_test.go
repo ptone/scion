@@ -171,32 +171,21 @@ func TestEffectivePermissionIntrospectionBoundaryStructure(t *testing.T) {
 }
 
 func TestEffectivePermissionIntrospectionBoundaryRejectsMutations(t *testing.T) {
-	base := map[string][]byte{
-		"boundary.go": []byte(`package hub
-		type AuthzService struct{}
-		type Server struct{ authzService *AuthzService }
-		type AuthzRequest struct{ OperationID string }
-		type ordinaryAuthorization struct{}
-		type operationCatalog struct{}
-		type auditService struct{}
-		type auditSink struct{}
-		var ordinary ordinaryAuthorization
-		var authzop operationCatalog
-		var service auditService
-		var sink auditSink
-		var permission string
-		var operation string
-		func (ordinaryAuthorization) Decide() {}
-		func (operationCatalog) OperationID(string) string { return "" }
-		func (operationCatalog) CatalogBasePermissions() []string { return nil }
-		func (auditService) emitDecisionAudit() {}
-		func (auditSink) Emit() {}
-		func (a *AuthzService) Decide() {}
-		func (a *AuthzService) decide() {}
-		func (a *AuthzService) introspectAuthorization() { a.decide() }
-		func (s *Server) handleExplainEffectivePermissions() { s.authzService.introspectAuthorization() }`),
-	}
+	base := explainBoundaryTestSources()
 	mutations := map[string]map[string][]byte{
+		"interface same-file value receiver": addSameFileBoundaryDeclarations(
+			mutateBoundarySource(base, "s.authzService.introspectAuthorization()", "var runner boundaryRunner = boundaryValueRunner{}; runner.Run(); s.authzService.introspectAuthorization()"),
+			"type boundaryRunner interface { Run() }\ntype boundaryValueRunner struct{}\nfunc (boundaryValueRunner) Run() { ordinary.Decide() }"),
+		"interface other-file pointer receiver": addBoundaryFile(
+			addSameFileBoundaryDeclarations(
+				mutateBoundarySource(base, "s.authzService.introspectAuthorization()", "var runner boundaryRunner = &boundaryPointerRunner{}; runner.Run(); s.authzService.introspectAuthorization()"),
+				"type boundaryRunner interface { Run() }"),
+			"runner.go", "package hub\ntype boundaryPointerRunner struct{}\nfunc (*boundaryPointerRunner) Run() { ordinary.Decide() }"),
+		"interface multiple implementors": addSameFileBoundaryDeclarations(
+			mutateBoundarySource(base, "s.authzService.introspectAuthorization()", "var runner boundaryRunner = boundarySafeRunner{}; runner.Run(); s.authzService.introspectAuthorization()"),
+			"type boundaryRunner interface { Run() }\ntype boundarySafeRunner struct{}\nfunc (boundarySafeRunner) Run() {}\ntype boundaryUnsafeRunner struct{}\nfunc (*boundaryUnsafeRunner) Run() { ordinary.Decide() }"),
+	}
+	for name, sources := range map[string]map[string][]byte{
 		"direct Decide": mutateBoundarySource(base,
 			"s.authzService.introspectAuthorization()",
 			"s.authzService.Decide(); s.authzService.introspectAuthorization()"),
@@ -226,11 +215,50 @@ func TestEffectivePermissionIntrospectionBoundaryRejectsMutations(t *testing.T) 
 			"func forbiddenHelper() { service.emitDecisionAudit() }"),
 		"audit sink": addReachableBoundaryHelper(base,
 			"func forbiddenHelper() { sink.Emit() }"),
+	} {
+		mutations[name] = sources
 	}
 	for name, sources := range mutations {
 		t.Run(name, func(t *testing.T) {
 			require.Error(t, validateExplainIntrospectionBoundary(sources))
 		})
+	}
+}
+
+func TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch(t *testing.T) {
+	sources := addBoundaryFile(
+		addSameFileBoundaryDeclarations(
+			mutateBoundarySource(explainBoundaryTestSources(), "s.authzService.introspectAuthorization()", "var runner boundaryRunner = boundarySafeValueRunner{}; runner.Run(); s.authzService.introspectAuthorization()"),
+			"type boundaryRunner interface { Run() }\ntype boundarySafeValueRunner struct{}\nfunc (boundarySafeValueRunner) Run() { safeBoundaryHelper() }"),
+		"runner.go", "package hub\ntype boundarySafePointerRunner struct{}\nfunc (*boundarySafePointerRunner) Run() { safeBoundaryHelper() }\nfunc safeBoundaryHelper() {}")
+	require.NoError(t, validateExplainIntrospectionBoundary(sources))
+}
+
+func explainBoundaryTestSources() map[string][]byte {
+	return map[string][]byte{
+		"boundary.go": []byte(`package hub
+		type AuthzService struct{}
+		type Server struct{ authzService *AuthzService }
+		type AuthzRequest struct{ OperationID string }
+		type ordinaryAuthorization struct{}
+		type operationCatalog struct{}
+		type auditService struct{}
+		type auditSink struct{}
+		var ordinary ordinaryAuthorization
+		var authzop operationCatalog
+		var service auditService
+		var sink auditSink
+		var permission string
+		var operation string
+		func (ordinaryAuthorization) Decide() {}
+		func (operationCatalog) OperationID(string) string { return "" }
+		func (operationCatalog) CatalogBasePermissions() []string { return nil }
+		func (auditService) emitDecisionAudit() {}
+		func (auditSink) Emit() {}
+		func (a *AuthzService) Decide() {}
+		func (a *AuthzService) decide() {}
+		func (a *AuthzService) introspectAuthorization() { a.decide() }
+		func (s *Server) handleExplainEffectivePermissions() { s.authzService.introspectAuthorization() }`),
 	}
 }
 
@@ -272,6 +300,12 @@ func mutateBoundarySource(base map[string][]byte, old, replacement string) map[s
 func addBoundaryFile(base map[string][]byte, name, source string) map[string][]byte {
 	mutated := cloneBoundarySources(base)
 	mutated[name] = []byte(source)
+	return mutated
+}
+
+func addSameFileBoundaryDeclarations(base map[string][]byte, declarations string) map[string][]byte {
+	mutated := cloneBoundarySources(base)
+	mutated["boundary.go"] = append(mutated["boundary.go"], []byte("\n"+declarations)...)
 	return mutated
 }
 
@@ -433,7 +467,7 @@ func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 						violation = "calls forbidden authorization/audit surface " + name
 					}
 				}
-				called, callViolation := explainBoundaryCalledFunctions(n.Fun, typeInfo, functionsByObject, functionLiterals, functionValues)
+				called, callViolation := explainBoundaryCalledFunctions(n.Fun, typeInfo, checkedPackage, functionsByObject, functionLiterals, functionValues)
 				if callViolation != "" {
 					violation = callViolation
 				} else {
@@ -557,11 +591,18 @@ func explainBoundaryRecordFunctionValue(values map[*types.Var]*explainBoundaryFu
 	}
 }
 
-func explainBoundaryCalledFunctions(expr ast.Expr, info *types.Info, functions map[*types.Func]*explainBoundaryFunction, literals map[*ast.FuncLit]*explainBoundaryFunction, values map[*types.Var]*explainBoundaryFunctionValue) ([]*explainBoundaryFunction, string) {
+func explainBoundaryCalledFunctions(expr ast.Expr, info *types.Info, checkedPackage *types.Package, functions map[*types.Func]*explainBoundaryFunction, literals map[*ast.FuncLit]*explainBoundaryFunction, values map[*types.Var]*explainBoundaryFunctionValue) ([]*explainBoundaryFunction, string) {
 	object := explainBoundaryObject(expr, info)
 	if function, ok := object.(*types.Func); ok {
 		if called := functions[function]; called != nil {
 			return []*explainBoundaryFunction{called}, ""
+		}
+		if explainBoundaryInterfaceReceiver(function) != nil && function.Pkg() == checkedPackage {
+			called, complete := explainBoundaryInterfaceImplementations(function, checkedPackage, functions)
+			if !complete {
+				return nil, "cannot resolve complete package-local interface dispatch " + function.FullName()
+			}
+			return called, ""
 		}
 		return nil, ""
 	}
@@ -600,6 +641,62 @@ func explainBoundaryCalledFunctions(expr ast.Expr, info *types.Info, functions m
 		}
 	}
 	return called, ""
+}
+
+func explainBoundaryInterfaceReceiver(method *types.Func) *types.Interface {
+	signature := explainBoundarySignature(method.Type())
+	if signature == nil || signature.Recv() == nil {
+		return nil
+	}
+	receiver := types.Unalias(signature.Recv().Type())
+	interfaceType, _ := receiver.Underlying().(*types.Interface)
+	if interfaceType != nil {
+		interfaceType.Complete()
+	}
+	return interfaceType
+}
+
+func explainBoundaryInterfaceImplementations(method *types.Func, checkedPackage *types.Package, functions map[*types.Func]*explainBoundaryFunction) ([]*explainBoundaryFunction, bool) {
+	interfaceType := explainBoundaryInterfaceReceiver(method)
+	if interfaceType == nil {
+		return nil, false
+	}
+	seen := make(map[*types.Func]bool)
+	var implementations []*explainBoundaryFunction
+	for _, name := range checkedPackage.Scope().Names() {
+		typeName, ok := checkedPackage.Scope().Lookup(name).(*types.TypeName)
+		if !ok {
+			continue
+		}
+		candidate := types.Unalias(typeName.Type())
+		if _, isInterface := candidate.Underlying().(*types.Interface); isInterface {
+			continue
+		}
+		candidates := []types.Type{candidate}
+		if _, isPointer := candidate.(*types.Pointer); !isPointer {
+			candidates = append(candidates, types.NewPointer(candidate))
+		}
+		for _, receiver := range candidates {
+			if !types.Implements(receiver, interfaceType) {
+				continue
+			}
+			selected, _, _ := types.LookupFieldOrMethod(receiver, true, checkedPackage, method.Name())
+			implementation, ok := selected.(*types.Func)
+			if !ok || implementation == method {
+				return nil, false
+			}
+			if seen[implementation] {
+				continue
+			}
+			wrapped := functions[implementation]
+			if wrapped == nil {
+				return nil, false
+			}
+			seen[implementation] = true
+			implementations = append(implementations, wrapped)
+		}
+	}
+	return implementations, len(implementations) > 0
 }
 
 func explainBoundarySignature(candidate types.Type) *types.Signature {
