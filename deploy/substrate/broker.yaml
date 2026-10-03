@@ -70,6 +70,49 @@ roleRef:
   name: scion-substrate-broker-tokenrequest
   apiGroup: rbac.authorization.k8s.io
 ---
+# Durable agent state (pkg/runtime/substrate_state.go): one Opaque Secret per
+# agent — its record, control token and exec-redaction secrets — in a
+# dedicated namespace that holds nothing else, so the broker's access to it
+# grants nothing beyond its own agents' state. Suggested default:
+# STATE_NAMESPACE=${BROKER_NAMESPACE}-state. It must match
+# runtimes.substrate-prod.substrate.state_namespace in the settings below;
+# the broker refuses to start without that setting.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${STATE_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: scion-substrate-broker
+    app.kubernetes.io/part-of: scion-substrate-integration
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scion-substrate-broker-agent-state
+  namespace: ${STATE_NAMESPACE}
+rules:
+  # Exactly the verbs the state store uses: no watch (nothing watches) and
+  # no patch (every write is a full update guarded by resourceVersion).
+  # This Role lives in the state namespace only: the broker still has no
+  # access to Secrets in its own namespace (its hub credentials included).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scion-substrate-broker-agent-state
+  namespace: ${STATE_NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: scion-substrate-broker
+    namespace: ${BROKER_NAMESPACE}
+roleRef:
+  kind: Role
+  name: scion-substrate-broker-agent-state
+  apiGroup: rbac.authorization.k8s.io
+---
 # ClusterTrustBundle is cluster-scoped, so verifying ateapi TLS against one
 # (pkg/runtime/substrate/dialer.go, when substrate.cluster_trust_bundle is
 # set — the router hop is plaintext today and is not covered by this)
@@ -157,6 +200,9 @@ data:
         type: substrate
         substrate:
           api_endpoint: api.${ATE_SYSTEM_NAMESPACE}.svc:443
+          # Namespace of the per-agent state Secrets (the Namespace and Role
+          # above). Required: the broker refuses to start without it.
+          state_namespace: ${STATE_NAMESPACE}
           router_endpoint: http://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc:80
           token_audience: api.${ATE_SYSTEM_NAMESPACE}.svc
           cluster_trust_bundle: ${CLUSTER_TRUST_BUNDLE_NAME}

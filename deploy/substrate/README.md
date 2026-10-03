@@ -132,6 +132,7 @@ every manifest.
 | Placeholder | Meaning |
 |---|---|
 | `BROKER_NAMESPACE` | Namespace the broker Deployment and its RBAC live in. **Also the value the router NetworkPolicy's `namespaceSelector` is pinned to** — see the callout below the table. |
+| `STATE_NAMESPACE` | Dedicated namespace holding one Secret of durable state per agent (suggested: `${BROKER_NAMESPACE}-state`); must equal the settings' `state_namespace` — the broker refuses to start without it |
 | `BROKER_IMAGE` | Branch-built image containing the `scion` binary (see "Building the broker image") |
 | `ATE_SYSTEM_NAMESPACE` | Namespace hosting `ateapi` and `atenet-router` (upstream default: `ate-system`) |
 | `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in. Not read by anything this manifest applies (agent logs are not currently supported on the substrate runtime — see "Known limitations" below); used only for locating Substrate's own controller-generated worker `NetworkPolicy` and for the verification commands below |
@@ -309,6 +310,7 @@ ConfigMap.
 
 # 1. Resolve placeholders (envsubst reads ${VAR} from the environment).
 export BROKER_NAMESPACE=scion-substrate-broker
+export STATE_NAMESPACE="${BROKER_NAMESPACE}-state"
 export BROKER_IMAGE=...
 export ATE_SYSTEM_NAMESPACE=ate-system
 export SUBSTRATE_WORKER_NAMESPACE=scion-agents
