@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"go/ast"
 	"go/build"
-	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
@@ -30,12 +29,14 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 )
 
 func explainOperationRequest(operationID, permission, resourceType, action string) map[string]interface{} {
@@ -361,6 +362,52 @@ type explainBoundaryResolvedFunctionValue struct {
 	literals map[*ast.FuncLit]struct{}
 }
 
+type explainBoundaryPackageImporter map[string]*types.Package
+
+func (i explainBoundaryPackageImporter) Import(path string) (*types.Package, error) {
+	if pkg := i[path]; pkg != nil {
+		return pkg, nil
+	}
+	return nil, fmt.Errorf("module-aware importer has no package %q", path)
+}
+
+var (
+	explainBoundaryImporterOnce sync.Once
+	explainBoundaryImporter     types.Importer
+	explainBoundaryImporterErr  error
+)
+
+func moduleAwareExplainBoundaryImporter() (types.Importer, error) {
+	explainBoundaryImporterOnce.Do(func() {
+		loaded, err := packages.Load(&packages.Config{
+			Mode: packages.NeedName | packages.NeedTypes | packages.NeedImports | packages.NeedDeps,
+			Dir:  ".",
+		}, ".")
+		if err != nil {
+			explainBoundaryImporterErr = err
+			return
+		}
+		if len(loaded) != 1 {
+			explainBoundaryImporterErr = fmt.Errorf("load hub package: got %d roots", len(loaded))
+			return
+		}
+		imports := make(explainBoundaryPackageImporter)
+		var collect func(*packages.Package)
+		collect = func(pkg *packages.Package) {
+			if pkg == nil || pkg.Types == nil || imports[pkg.PkgPath] != nil {
+				return
+			}
+			imports[pkg.PkgPath] = pkg.Types
+			for _, imported := range pkg.Imports {
+				collect(imported)
+			}
+		}
+		collect(loaded[0])
+		explainBoundaryImporter = imports
+	})
+	return explainBoundaryImporter, explainBoundaryImporterErr
+}
+
 func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 	fset := token.NewFileSet()
 	functions := make(map[string][]*explainBoundaryFunction)
@@ -409,12 +456,16 @@ func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 		Types:      make(map[ast.Expr]types.TypeAndValue),
 	}
+	packageImporter, err := moduleAwareExplainBoundaryImporter()
+	if err != nil {
+		return fmt.Errorf("load module-aware effective-permissions imports: %w", err)
+	}
+	// Synthetic mutation packages have no imports. Production uses the exact
+	// module-aware dependency types loaded above so local method sets remain
+	// complete even in worktrees outside GOPATH.
 	typeConfig := types.Config{
-		Importer: importer.Default(),
-		// The standard importer cannot load unexported sibling module packages in
-		// every worktree environment. Local declarations and selections are still
-		// resolved, which is the graph this package-boundary guard traverses.
-		Error: func(error) {},
+		Importer: packageImporter,
+		Error:    func(error) {},
 	}
 	checkedPackage, _ := typeConfig.Check("github.com/GoogleCloudPlatform/scion/pkg/hub", fset, files, typeInfo)
 	functionsByObject := make(map[*types.Func]*explainBoundaryFunction)
