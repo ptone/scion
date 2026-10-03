@@ -13,10 +13,11 @@ non-emitting introspection boundary and claims no operation owner.
 The implementation checkpoint is
 `73df83e238506b7160bdfc4a2eb578d94b3edc29`, based directly on required head
 `fd4f83fb7769af4b08eed1ac06be6d2442de89d7`. It was committed and pushed to
-`origin/scion/audit-update-m2` before the broader bounded checks. The final
-delivery commits after that checkpoint add only this project log; the final
-SHA is reported in the direct manager handoff because a commit cannot contain
-its own SHA.
+`origin/scion/audit-update-m2` before the broader bounded checks. The round-1
+correction checkpoint is `4b29b7f23472eea1add1ae31a9ab3c634baa85e5`; it
+was also pushed before its post-checkpoint bounded gates. The final SHA is
+reported in the direct manager handoff because a commit cannot contain its own
+SHA.
 
 The campaign accepted base remains
 `64a549c402fe941a9ea7702a453ecf60b0b70d94`. The restricted blocker recorded
@@ -226,8 +227,32 @@ structural-only correction command then passed:
 timeout 10m go test -count=1 -p 2 ./pkg/hub -run '^(TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations)$'
 ```
 
-Result: PASS (`pkg/hub` 13.869s). Post-push round-1 validation is recorded
-below after the checkpoint is made durable.
+Result: PASS (`pkg/hub` 13.869s).
+
+After pushing correction checkpoint
+`4b29b7f23472eea1add1ae31a9ab3c634baa85e5`, the proportionate round-1 gates
+were:
+
+- Exact focused normal regression and structural/mutation coverage:
+
+  ```text
+  timeout 10m go test -count=1 -p 2 ./pkg/hub -run '^(TestExplainAPI_RegisteredOperationUsesReviewedBasePermission|TestExplainAPI_OperationValidationFailsClosedWithoutValueEcho|TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations)$'
+  ```
+
+  PASS (`pkg/hub` 13.274s).
+
+- Distinct focused race coverage for those same corrected paths:
+
+  ```text
+  timeout 10m go test -count=1 -race -p 2 ./pkg/hub -run '^(TestExplainAPI_RegisteredOperationUsesReviewedBasePermission|TestExplainAPI_OperationValidationFailsClosedWithoutValueEcho|TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations)$'
+  ```
+
+  PASS (`pkg/hub` 50.834s).
+
+- `timeout 10m go vet -p 2 ./pkg/hub` — PASS (no output).
+
+The already-consumed scoped build was not repeated. The earlier broad normal,
+broad race, and lint timeouts remain **INCONCLUSIVE**, and none was restarted.
 
 ## Changed scope and exclusions
 
