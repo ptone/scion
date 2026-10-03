@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -392,7 +393,10 @@ func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionErro
 // fixes. err need not be a *startContextError at all (any error
 // buildStartContext could return, including ones from other call sites in
 // this package): a plain error still gets the pre-existing generic 500
-// behavior.
+// behavior. The one exception is errSavedProfileUnresolved (a saved profile
+// that no longer resolves), which is checked ahead of every other case and
+// written as the retryable 503 from writeSavedProfileUnresolved; its text is
+// client-safe by construction.
 //
 // Any 4xx Status — not just exactly 400 — is treated as a client-caused
 // validation failure: buildStartContext only ever sets Status to a value it
@@ -413,6 +417,12 @@ func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionErro
 // so the detail reaches the broker's own diagnostics before being redacted
 // out of the response body.
 func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string) int {
+	// errSavedProfileUnresolved's text names only the agent, the profile
+	// and a fixed or ResolveRuntime cause, and is client-safe as is.
+	if errors.Is(err, errSavedProfileUnresolved) {
+		writeSavedProfileUnresolved(w, err)
+		return http.StatusServiceUnavailable
+	}
 	sce, ok := err.(*startContextError)
 	if !ok {
 		s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", err)
