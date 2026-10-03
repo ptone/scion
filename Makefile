@@ -80,10 +80,10 @@ test-fast:
 # Skips four pkg/hub tests with known pre-existing, tracked failures
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
-	@echo "Running pkg/hub + perf/bench/seed tests (SQLite-enabled)..."
+	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit tests (SQLite-enabled)..."
 	@go test -count=1 -timeout 25m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
-		./pkg/hub/... ./perf/bench/seed/...
+		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/...
 
 ## test-launch-store-postgres: Run the T1 async-create launch store/reaper
 # suite against a real Postgres server (design t1-async-create-v11.md §6,
@@ -117,6 +117,12 @@ test-hub-sqlite:
 # TestListActiveZonePrefixedSchedules: its prefix match compiles to LIKE, whose
 # case sensitivity differs between the two backends.
 #
+# It also includes the Conduit registry suite (TestConduitRegistry_*,
+# ptone/scion#2778): design conduit v2.1 §3.4 requires relay_instances,
+# conduit_sessions and conduit_principal_epochs to behave identically on
+# Postgres and SQLite (generation/epoch upsert ... RETURNING, generation-CAS
+# deletes, concurrent epoch allocation), so the same suite runs on both.
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -149,7 +155,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestConduitRegistry_)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
@@ -371,7 +377,7 @@ proto:
 		--proto_path=proto \
 		--go_out=. --go_opt=module=github.com/GoogleCloudPlatform/scion \
 		--go-grpc_out=. --go-grpc_opt=module=github.com/GoogleCloudPlatform/scion \
-		proto/broker/v1/broker.proto
+		proto/broker/v1/broker.proto proto/conduit/v1/conduit.proto
 	@echo "Proto generation done."
 
 ## proto-check: Verify generated protobuf code is up to date
@@ -382,9 +388,10 @@ proto-check:
 		--proto_path=proto \
 		--go_out=$$TMP --go_opt=module=github.com/GoogleCloudPlatform/scion \
 		--go-grpc_out=$$TMP --go-grpc_opt=module=github.com/GoogleCloudPlatform/scion \
-		proto/broker/v1/broker.proto && \
+		proto/broker/v1/broker.proto proto/conduit/v1/conduit.proto && \
 	diff $$TMP/proto/broker/v1/broker.pb.go proto/broker/v1/broker.pb.go && \
 	diff $$TMP/proto/broker/v1/broker_grpc.pb.go proto/broker/v1/broker_grpc.pb.go && \
+	diff $$TMP/proto/conduit/v1/conduit.pb.go proto/conduit/v1/conduit.pb.go && \
 	rm -rf $$TMP && \
 	echo "Proto generated code is up to date." || \
 	(rm -rf $$TMP; echo "Proto generated code is out of date. Run 'make proto' to regenerate."; exit 1)
