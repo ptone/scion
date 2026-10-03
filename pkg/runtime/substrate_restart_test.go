@@ -23,10 +23,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
-// wipeSubstrateAgentStateForRestart clears substrateControlTokens and
-// substrateAgentRecords mid-test, simulating a runtime process restart that
+// wipeSubstrateAgentStateForRestart clears the in-memory agent-state cache
+// (substrateControlTokens, substrateAgentRecords, substrateExecSecrets)
+// mid-test, simulating a runtime process restart that
 // happens after one or more agents were already started through this same
-// process (Run). Unlike resetSubstrateAgentStateForTest (which clears the
+// process (Run). The durable state store is untouched, exactly as a real
+// restart leaves it. Unlike resetSubstrateAgentStateForTest (which clears the
 // maps once at test setup and restores the pre-test contents at cleanup),
 // this is meant to be called after Run has already populated state, so a
 // later Run/RecordlessActors call in the same test observes a process with
@@ -38,6 +40,7 @@ func wipeSubstrateAgentStateForRestart(t *testing.T) {
 	substrateAgentStateMu.Lock()
 	substrateControlTokens = make(map[string]string)
 	substrateAgentRecords = make(map[string]*substrateAgentRecord)
+	substrateExecSecrets = make(map[string]map[string]string)
 	substrateAgentStateMu.Unlock()
 }
 
@@ -79,10 +82,11 @@ func TestSubstrateRestart_RecordlessActors_ReportsOnlyUnrecorded(t *testing.T) {
 	const projectID = "550e8400-e29b-41d4-a716-446655440000"
 	wantAtespace := substrateAtespaceName(projectID)
 
-	if _, err := rt.Run(context.Background(), restartTestRunConfig(projectID, "pre-restart-agent")); err != nil {
-		t.Fatalf("Run(pre-restart-agent) error = %v", err)
-	}
-
+	// The pre-restart actor is a legacy one, created by a broker without
+	// state persistence: it exists only in ListActors below (under a UID
+	// nothing was ever recorded for) and has no state object. (An agent
+	// Run by this broker persists its state and survives the wipe, so it
+	// would no longer stand in for a pre-restart actor.)
 	wipeSubstrateAgentStateForRestart(t)
 
 	if _, err := rt.Run(context.Background(), restartTestRunConfig(projectID, "post-restart-agent")); err != nil {
@@ -263,14 +267,13 @@ func TestSubstrateRestart_RecordlessActors_ExcludesDeletingState(t *testing.T) {
 // on.
 func TestSubstrateRestart_NewAgentAfterWipe_FullyManageable(t *testing.T) {
 	rec := &callRecorder{}
-	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
-	// An agent from "before" the restart, to prove the wipe actually
-	// happened and this test isn't vacuously true.
-	if _, err := rt.Run(context.Background(), restartTestRunConfig("550e8400-e29b-41d4-a716-446655440000", "before-restart")); err != nil {
-		t.Fatalf("Run(before-restart) error = %v", err)
-	}
+	// A legacy actor from "before" the restart (created by a broker
+	// without state persistence, so it has no state object), alongside
+	// the restart wipe itself.
+	seedLegacyActor(fc, "550e8400-e29b-41d4-a716-446655440000", "before-restart", "uid-before-restart")
 	wipeSubstrateAgentStateForRestart(t)
 
 	deleteID, err := rt.Run(context.Background(), restartTestRunConfig("660e8400-e29b-41d4-a716-446655440000", "post-restart-delete"))
@@ -305,30 +308,25 @@ func TestSubstrateRestart_NewAgentAfterWipe_FullyManageable(t *testing.T) {
 }
 
 // TestSubstrateRestart_ExecAfterWipe_ExplicitNoTokenError pins Exec's
-// existing behaviour for a specific agent that HAD a cached control token
-// before a restart: after the wipe, Exec must fail with an explicit error
+// behaviour for a legacy agent whose control token lived only in the memory
+// of a broker without state persistence: after the restart, Exec must fail with an explicit error
 // naming the cause, never silently no-op or succeed with stale
 // credentials — the token cannot be recovered (bootstrap is one-shot), so
 // failing loudly is correct, not a regression to guard against fixing.
 func TestSubstrateRestart_ExecAfterWipe_ExplicitNoTokenError(t *testing.T) {
 	rec := &callRecorder{}
-	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
-	id, err := rt.Run(context.Background(), testSubstrateRunConfig())
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	substrateAgentStateMu.Lock()
-	_, hadToken := substrateControlTokens[id]
-	substrateAgentStateMu.Unlock()
-	if !hadToken {
-		t.Fatal("test setup: Run() did not cache a control token")
-	}
+	// A legacy actor: bootstrapped by a broker without state persistence,
+	// whose token lived only in that broker's memory and has no state
+	// object.
+	cfg := testSubstrateRunConfig()
+	id := seedLegacyActor(fc, cfg.ProjectID, cfg.Name, "legacy-uid")
 
 	wipeSubstrateAgentStateForRestart(t)
 
-	_, err = rt.Exec(context.Background(), id, []string{"true"})
+	_, err := rt.Exec(context.Background(), id, []string{"true"})
 	if err == nil {
 		t.Fatal("Exec() after a restart wipe: error = nil, want an explicit no-token error")
 	}

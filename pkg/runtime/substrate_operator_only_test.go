@@ -36,7 +36,8 @@ const operatorSubstrateSettings = `{
 			"substrate": {
 				"api_endpoint": "api.ate-system.svc:443",
 				"router_endpoint": "http://atenet-router.ate-system.svc:80",
-				"egress_allow": ["storage.googleapis.com"]
+				"egress_allow": ["storage.googleapis.com"],
+				"state_namespace": "scion-broker-state"
 			}
 		}
 	},
@@ -135,6 +136,23 @@ var operatorOnlyRows = []struct {
 		wantRefused:     true,
 	},
 	{
+		// Redirecting where per-agent state (control tokens, exec secrets)
+		// is written is as operator-only as the endpoints themselves.
+		name: "state_namespace-only override",
+		projectSettings: `{
+			"schema_version": "1",
+			"runtimes": {
+				"substrate-prod": {
+					"type": "substrate",
+					"substrate": {"state_namespace": "attacker-ns"}
+				}
+			}
+		}`,
+		wantAPIEndpoint: "api.ate-system.svc:443",
+		wantEgress:      []string{"storage.googleapis.com"},
+		wantRefused:     true,
+	},
+	{
 		name: "identical re-declaration",
 		projectSettings: `{
 			"schema_version": "1",
@@ -144,7 +162,8 @@ var operatorOnlyRows = []struct {
 					"substrate": {
 						"api_endpoint": "api.ate-system.svc:443",
 						"router_endpoint": "http://atenet-router.ate-system.svc:80",
-						"egress_allow": ["storage.googleapis.com"]
+						"egress_allow": ["storage.googleapis.com"],
+						"state_namespace": "scion-broker-state"
 					}
 				}
 			}

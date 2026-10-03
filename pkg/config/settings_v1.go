@@ -1388,6 +1388,16 @@ type V1SubstrateConfig struct {
 	// ActorTemplate to become ready (a Go duration string, e.g. "10m").
 	// Defaults to 10 minutes when empty.
 	TemplateReadyTimeout string `json:"template_ready_timeout,omitempty" yaml:"template_ready_timeout,omitempty" koanf:"template_ready_timeout"`
+	// StateNamespace is the Kubernetes namespace holding the broker's
+	// durable per-agent state: one Secret per agent with its record,
+	// control token and exec-redaction secrets, so a restarted (or
+	// replacement) broker process can still list and delete agents an
+	// earlier process created. Required: the broker refuses to start a
+	// substrate runtime without it rather than silently fall back to
+	// process-memory-only state. Must be a valid namespace name (DNS-1123
+	// label). The namespace and the broker's RBAC in it come from
+	// deploy/substrate/broker.yaml.
+	StateNamespace string `json:"state_namespace,omitempty" yaml:"state_namespace,omitempty" koanf:"state_namespace"`
 }
 
 // V1RuntimeConfig extends RuntimeConfig with a Type field.

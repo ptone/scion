@@ -354,7 +354,8 @@
               "enum": ["", "egress-mitm.ate.dev"],
               "description": "Name of a Substrate trust bundle to project into every actor so it can validate the egress gateway's own TLS certificate. Required iff the cluster runs the sdsmint egress gateway and the actor makes any HTTPS/TLS request; setting it on a plain (non-sdsmint) install breaks every actor. Empty (the default) is off. The only value Substrate currently supports is \"egress-mitm.ate.dev\" (see V1SubstrateConfig.EgressTrustBundle and ValidateEgressTrustBundle)."
             },
-            "template_ready_timeout": { "type": "string", "description": "Go duration string bounding how long Run waits for a new ActorTemplate's golden snapshot. Defaults to 10m." }
+            "template_ready_timeout": { "type": "string", "description": "Go duration string bounding how long Run waits for a new ActorTemplate's golden snapshot. Defaults to 10m." },
+            "state_namespace": { "type": "string", "description": "Required. Kubernetes namespace (DNS-1123 label) holding the broker's per-agent state Secrets (record, control token, exec-redaction secrets), so agents survive a broker restart. The broker refuses to start a substrate runtime without it." }
           },
           "additionalProperties": false
         }

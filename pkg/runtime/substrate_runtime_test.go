@@ -425,9 +425,10 @@ func newTestSubstrateHarness(t *testing.T, rec *callRecorder) (*SubstrateRuntime
 	fc := newFakeControlClient(rec)
 	fa := newFakeActorServer(rec)
 	server := httptest.NewServer(fa.handler())
-	rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, config.V1SubstrateConfig{
+	rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), newStateFakeClientset(), config.V1SubstrateConfig{
 		SnapshotStorage:   "gs://bucket/prefix/",
 		SandboxConfigName: "gvisor-default",
+		StateNamespace:    testStateNamespace,
 	})
 	return rt, fc, fa, server.Close
 }
@@ -443,13 +444,16 @@ func resetSubstrateAgentStateForTest(t *testing.T) {
 	substrateAgentStateMu.Lock()
 	oldTokens := substrateControlTokens
 	oldRecords := substrateAgentRecords
+	oldSecrets := substrateExecSecrets
 	substrateControlTokens = make(map[string]string)
 	substrateAgentRecords = make(map[string]*substrateAgentRecord)
+	substrateExecSecrets = make(map[string]map[string]string)
 	substrateAgentStateMu.Unlock()
 	t.Cleanup(func() {
 		substrateAgentStateMu.Lock()
 		substrateControlTokens = oldTokens
 		substrateAgentRecords = oldRecords
+		substrateExecSecrets = oldSecrets
 		substrateAgentStateMu.Unlock()
 	})
 }
@@ -584,18 +588,22 @@ func TestSubstrateRun_HappyPath(t *testing.T) {
 // policy for an actor that was never actually created.
 func TestSubstrateRun_AlreadyExistsMapsToContainerNameInUse(t *testing.T) {
 	rec := &callRecorder{}
-	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
 	cfg := testSubstrateRunConfig()
-	if _, err := rt.Run(context.Background(), cfg); err != nil {
-		t.Fatalf("first Run() error = %v", err)
-	}
+	// A legacy actor (created by a broker without state persistence, so
+	// no state object claims its id) already holds the name. Run's own
+	// state claim succeeds, and CreateActor is what reports the clash.
+	id := seedLegacyActor(fc, cfg.ProjectID, cfg.Name, "legacy-uid")
 	callsAfterFirstRun := len(rec.list())
 
 	_, err := rt.Run(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("second Run() for the same atespace/actor name: expected an error, got nil")
+	}
+	if _, gerr := rt.state.Get(context.Background(), id); !errors.Is(gerr, errStateNotFound) {
+		t.Errorf("failed Run left its pending state object behind (Get = %v)", gerr)
 	}
 	lowerMsg := strings.ToLower(err.Error())
 	if !strings.Contains(lowerMsg, "container name") || !strings.Contains(lowerMsg, "already in use") {
@@ -2698,16 +2706,20 @@ func TestNewSubstrateRuntime_MemoizedAcrossCalls(t *testing.T) {
 	defer server.Close()
 
 	built := 0
+	// Every instance shares one state store, as every SubstrateRuntime in
+	// one broker process shares one state namespace.
+	stateClient := newStateFakeClientset()
 	origBuilder := substrateRuntimeBuilder
 	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
 		built++
-		return NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg), nil
+		return NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), stateClient, cfg), nil
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
 
 	cfg := &config.V1SubstrateConfig{
 		APIEndpoint:    "api.ate-system.svc:443",
 		RouterEndpoint: server.URL,
+		StateNamespace: testStateNamespace,
 	}
 
 	// Simulates the broker's first `scion start`: GetRuntime resolves a
@@ -2784,8 +2796,8 @@ func TestNewSubstrateRuntime_DifferentConfigsGetDifferentInstances(t *testing.T)
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
 
-	cfgA := &config.V1SubstrateConfig{APIEndpoint: "a.example:443", RouterEndpoint: "http://a"}
-	cfgB := &config.V1SubstrateConfig{APIEndpoint: "b.example:443", RouterEndpoint: "http://b"}
+	cfgA := &config.V1SubstrateConfig{APIEndpoint: "a.example:443", RouterEndpoint: "http://a", StateNamespace: testStateNamespace}
+	cfgB := &config.V1SubstrateConfig{APIEndpoint: "b.example:443", RouterEndpoint: "http://b", StateNamespace: testStateNamespace}
 
 	rtA, err := NewSubstrateRuntime(cfgA)
 	if err != nil {
@@ -2821,6 +2833,9 @@ func TestSubstrateAgentState_SharedAcrossConfigChange(t *testing.T) {
 	server := httptest.NewServer(fa.handler())
 	defer server.Close()
 
+	// Every instance shares one state store, as every SubstrateRuntime in
+	// one broker process shares one state namespace.
+	stateClient := newStateFakeClientset()
 	origBuilder := substrateRuntimeBuilder
 	// Both configs' instances talk to the same underlying fake ateapi/
 	// router, exactly as two SubstrateRuntime instances for the same real
@@ -2829,12 +2844,12 @@ func TestSubstrateAgentState_SharedAcrossConfigChange(t *testing.T) {
 	// NewSubstrateRuntime treat them as separate connection-registry
 	// entries.
 	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
-		return NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg), nil
+		return NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), stateClient, cfg), nil
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
 
-	cfgA := &config.V1SubstrateConfig{APIEndpoint: "api.example:443", RouterEndpoint: server.URL}
-	cfgB := &config.V1SubstrateConfig{APIEndpoint: "api.example:443", RouterEndpoint: server.URL, EgressAllow: []string{"api.example.com"}}
+	cfgA := &config.V1SubstrateConfig{APIEndpoint: "api.example:443", RouterEndpoint: server.URL, StateNamespace: testStateNamespace}
+	cfgB := &config.V1SubstrateConfig{APIEndpoint: "api.example:443", RouterEndpoint: server.URL, EgressAllow: []string{"api.example.com"}, StateNamespace: testStateNamespace}
 
 	rtA, err := NewSubstrateRuntime(cfgA)
 	if err != nil {
@@ -2922,7 +2937,8 @@ func TestGetRuntime_Substrate_SettingsBased_Memoized(t *testing.T) {
 				"type": "substrate",
 				"substrate": {
 					"api_endpoint": "api.ate-system.svc:443",
-					"router_endpoint": "http://atenet-router.ate-system.svc:80"
+					"router_endpoint": "http://atenet-router.ate-system.svc:80",
+					"state_namespace": "scion-broker-state"
 				}
 			}
 		},

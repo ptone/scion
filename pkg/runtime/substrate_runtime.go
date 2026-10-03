@@ -25,10 +25,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -53,17 +55,19 @@ const (
 
 // substrateAgentRecord holds the fields List needs that ListActors cannot
 // return (Substrate actors carry no labels — substrate-runtime.md §4), synthesised
-// from the broker's own record of what it passed to Run. A broker restart
-// loses this for actors it did not create in this process lifetime
-// (substrate-runtime.md §4); a ConfigMap-backed store is future work.
+// from the broker's own record of what it passed to Run.
+//
+// It is persisted as the record.json key of the agent's state object
+// (substrate_state.go), so its JSON field names are part of the stored
+// schema: never rename one, only add new optional fields.
 type substrateAgentRecord struct {
-	Labels        map[string]string
-	Template      string
-	HarnessConfig string
-	Project       string
-	ProjectID     string
-	ProjectPath   string
-	Image         string
+	Labels        map[string]string `json:"labels"`
+	Template      string            `json:"template"`
+	HarnessConfig string            `json:"harness_config"`
+	Project       string            `json:"project"`
+	ProjectID     string            `json:"project_id"`
+	ProjectPath   string            `json:"project_path"`
+	Image         string            `json:"image"`
 }
 
 // SubstrateRuntime implements runtime.Runtime for Agent Substrate.
@@ -72,13 +76,14 @@ type SubstrateRuntime struct {
 	client ateapipb.ControlClient
 	conn   *grpc.ClientConn // non-nil only when this runtime opened it (nil for injected test clients)
 	router *substrate.RouterClient
-	// k8sClient is not read by any runtime method — the dialer receives its
-	// own clientset directly as a Dial parameter (below) and never reads
-	// this field back. Retained anyway so tests can inject a fake clientset
-	// and assert, with a real client-go fake's Actions(), that GetLogs makes
-	// no Kubernetes call — a meaningful regression guard only as long as
-	// this field stays unread by anything else.
-	k8sClient kubernetes.Interface
+	// state is the durable agent state store (substrate_state.go): one
+	// Kubernetes Secret per agent in cfg.StateNamespace, built on the
+	// broker's in-cluster clientset. The process-wide maps below are a
+	// write-through cache over it. Nil only for a runtime built by
+	// NewSubstrateRuntimeForTest without a clientset, in which case Run
+	// refuses to start agents (it never runs without persistence) and
+	// List/Delete/RecordlessActors see no state objects.
+	state AgentStateStore
 
 	now   func() time.Time
 	sleep func(time.Duration)
@@ -201,6 +206,12 @@ func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error
 	if sc.RouterEndpoint == "" {
 		return nil, substrateProfileInvalid(fmt.Errorf("substrate: runtimes.<name>.substrate.router_endpoint is required"))
 	}
+	if sc.StateNamespace == "" {
+		return nil, substrateProfileInvalid(fmt.Errorf("substrate: runtimes.<name>.substrate.state_namespace is required (the namespace holding per-agent state Secrets; see deploy/substrate/broker.yaml)"))
+	}
+	if errs := validation.IsDNS1123Label(sc.StateNamespace); len(errs) > 0 {
+		return nil, substrateProfileInvalid(fmt.Errorf("substrate: runtimes.<name>.substrate.state_namespace %q is not a valid namespace name: %s", sc.StateNamespace, strings.Join(errs, "; ")))
+	}
 	if err := substrate.Validate(sc); err != nil {
 		return nil, substrateProfileInvalid(err)
 	}
@@ -312,7 +323,7 @@ func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRunti
 		client:         substrate.NewControlClient(conn),
 		conn:           conn,
 		router:         substrate.NewRouterClient(sc.RouterEndpoint),
-		k8sClient:      k8sClient.Clientset,
+		state:          newK8sSecretStateStore(k8sClient.Clientset, sc.StateNamespace),
 		now:            time.Now,
 		sleep:          time.Sleep,
 		sleepCtx:       sleepWithContext,
@@ -326,12 +337,23 @@ func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRunti
 // real SubstrateRuntime — List/Delete/Run's actual logic, not a
 // reimplementation of it — through a fake ateapipb.ControlClient and
 // substrate.RouterClient, the same way this package's own tests do.
+//
+// k8sClient backs the durable agent state store (a client-go fake in tests),
+// using cfg.StateNamespace as the state namespace. Two runtimes built over
+// the same k8sClient share one store, the way two broker processes share
+// one cluster. A nil k8sClient builds a runtime with no store: Run then
+// refuses to start agents, and List/Delete/RecordlessActors see only
+// record-less (legacy) actors.
 func NewSubstrateRuntimeForTest(client ateapipb.ControlClient, router *substrate.RouterClient, k8sClient kubernetes.Interface, cfg config.V1SubstrateConfig) *SubstrateRuntime {
+	var state AgentStateStore
+	if k8sClient != nil {
+		state = newK8sSecretStateStore(k8sClient, cfg.StateNamespace)
+	}
 	return &SubstrateRuntime{
 		cfg:            cfg,
 		client:         client,
 		router:         router,
-		k8sClient:      k8sClient,
+		state:          state,
 		now:            time.Now,
 		sleep:          func(time.Duration) {},
 		sleepCtx:       func(context.Context, time.Duration) error { return nil },
@@ -419,6 +441,48 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		return "", r.redact(cfg, err)
 	}
 
+	// Write-ahead (before CreateActor, so a control token is never sent to
+	// an actor before it is durable): generate the token, then claim the
+	// id in the agent state store as "pending" with everything the broker
+	// will need to keep managing this agent from any later process — the
+	// agent record, the token and the exec-redaction secrets. Nothing
+	// exists on the cluster for this actor yet, so any failure here fails
+	// Run with nothing to clean up.
+	if r.state == nil {
+		return "", fmt.Errorf("substrate: agent state store is not configured; refusing to start %s without durable state", id)
+	}
+	controlToken, err := generateControlToken()
+	if err != nil {
+		return "", err
+	}
+	execSecrets := substrateSecretCandidates(cfg)
+	st := &substrateAgentState{
+		ID:           id,
+		Phase:        substrateStatePending,
+		Record:       newSubstrateAgentRecord(cfg),
+		ControlToken: controlToken,
+		ExecSecrets:  execSecrets,
+	}
+	if err := r.state.Create(ctx, st); err != nil {
+		if errors.Is(err, errStateExists) {
+			return "", r.existingStateError(ctx, id, atespace, actorName)
+		}
+		return "", fmt.Errorf("substrate: persist agent state for %s: %w", id, err)
+	}
+
+	// dropState deletes this Run's own state object (best effort, fresh
+	// context) on a failure path where this Run still owns it. It is never
+	// called once a concurrent Delete has taken the object over (a CAS
+	// conflict below): that Delete removes it itself.
+	dropState := func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := r.state.Delete(cleanupCtx, id, st.version); err != nil {
+			runtimeLog.Warn("substrate: could not delete agent state after a failed start",
+				"object", substrateStateObjectName(id), "error", err)
+		}
+	}
+
 	// Step 4: create the actor.
 	actor, err := r.client.CreateActor(ctx, &ateapipb.CreateActorRequest{
 		Actor: &ateapipb.Actor{
@@ -427,6 +491,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		},
 	})
 	if err != nil {
+		dropState()
 		if status.Code(err) == codes.AlreadyExists {
 			// Matches agent.isContainerNameInUseError's pattern-match on
 			// the error text (pkg/agent/run.go), so the existing broker
@@ -441,7 +506,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	// Every step below cleans up the actor + policy on failure (best
 	// effort — a fresh context, since ctx may already be near its
 	// deadline/cancelled).
-	cleanup := func() {
+	deleteActor := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_, _ = r.client.DeleteActorEgressPolicy(cleanupCtx, &ateapipb.DeleteActorEgressPolicyRequest{
@@ -451,6 +516,25 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 			Actor:    &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
 			AnyState: true,
 		})
+	}
+	// cleanup is the failure path while this Run still owns its state
+	// object: delete the actor, then the state.
+	cleanup := func() {
+		deleteActor()
+		dropState()
+	}
+
+	// Record the actor UID (CAS). A conflict or a vanished object means a
+	// concurrent Delete has claimed this id (phase "deleting"): that Delete
+	// owns the state object now, so only the actor is removed here.
+	st.ActorUID = actorUID
+	if err := r.state.Update(ctx, st); err != nil {
+		if errors.Is(err, errStateConflict) || errors.Is(err, errStateNotFound) {
+			deleteActor()
+			return "", fmt.Errorf("substrate: agent %s was deleted while starting", id)
+		}
+		cleanup()
+		return "", fmt.Errorf("substrate: persist actor identity for %s: %w", id, err)
 	}
 
 	// Step 5: egress policy. (r.cfg was already validated at the top of
@@ -496,11 +580,6 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		cleanup()
 		return "", r.redact(cfg, err)
 	}
-	controlToken, err := generateControlToken()
-	if err != nil {
-		cleanup()
-		return "", err
-	}
 	nonce, err := r.bootstrapNonce(ctx, atespace, actorName, actorUID)
 	if err != nil {
 		cleanup()
@@ -544,6 +623,31 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		return "", r.redact(cfg, err)
 	}
 
+	// Commit (CAS). A conflict here means a concurrent Delete won the id
+	// after the bootstrap: honour it, remove the actor, and fail Run.
+	st.Phase = substrateStateCommitted
+	if err := r.state.Update(ctx, st); err != nil {
+		if errors.Is(err, errStateConflict) || errors.Is(err, errStateNotFound) {
+			deleteActor()
+			return "", fmt.Errorf("substrate: agent %s was deleted while starting", id)
+		}
+		cleanup()
+		return "", fmt.Errorf("substrate: commit agent state for %s: %w", id, err)
+	}
+
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = controlToken
+	substrateExecSecrets[id] = execSecrets
+	rec := st.Record
+	substrateAgentRecords[actorUID] = &rec
+	substrateAgentStateMu.Unlock()
+
+	// Step 9.
+	return id, nil
+}
+
+// newSubstrateAgentRecord builds the agent record Run persists for cfg.
+func newSubstrateAgentRecord(cfg RunConfig) substrateAgentRecord {
 	// The project path isn't a RunConfig field of its own (unlike Project/
 	// ProjectID) — pkg/agent/run.go carries it as an annotation
 	// ("scion.project_path", set unconditionally by Start from the
@@ -555,11 +659,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	if projectPath == "" {
 		projectPath = projectkeys.ProjectPathFromLabels(cfg.Labels)
 	}
-
-	substrateAgentStateMu.Lock()
-	substrateControlTokens[id] = controlToken
-	substrateExecSecrets[id] = substrateSecretCandidates(cfg)
-	substrateAgentRecords[actorUID] = &substrateAgentRecord{
+	return substrateAgentRecord{
 		Labels: cfg.Labels,
 		// scion.harness_config is the same label key
 		// CloudRunSandboxRuntime.Run populates HarnessConfig from — see
@@ -571,10 +671,19 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		ProjectPath:   projectPath,
 		Image:         cfg.Image,
 	}
-	substrateAgentStateMu.Unlock()
+}
 
-	// Step 9.
-	return id, nil
+// existingStateError is Run's error when the id is already claimed in the
+// agent state store. A pending or committed object is an existing agent:
+// the error text matches the container-name-in-use shape the broker already
+// maps to agent.ErrContainerNameInUse (see the CreateActor AlreadyExists
+// branch in Run). A deleting object is a Delete in progress.
+func (r *SubstrateRuntime) existingStateError(ctx context.Context, id, atespace, actorName string) error {
+	existing, err := r.state.Get(ctx, id)
+	if err == nil && existing.Phase == substrateStateDeleting {
+		return fmt.Errorf("substrate: agent %s is being deleted; retry", id)
+	}
+	return fmt.Errorf("substrate: container name %q already in use in atespace %q", actorName, atespace)
 }
 
 // bootstrapNonce is the single call site for the bootstrap request's bearer
@@ -596,11 +705,24 @@ func (r *SubstrateRuntime) bootstrapNonce(ctx context.Context, atespace, actorNa
 	return generateControlToken()
 }
 
-// Delete implements substrate-runtime.md §9: DeleteActorEgressPolicy
-// (ignoring NotFound), then DeleteActor(any_state=true), then drop the
-// in-memory control token (and label record, best effort).
+// Delete implements substrate-runtime.md §9 over the durable agent state:
+// mark the agent's state object "deleting" (CAS), then
+// DeleteActorEgressPolicy (ignoring NotFound) and DeleteActor(any_state=true),
+// then delete the state object and drop the in-memory cache entries.
+//
+// The "deleting" mark is what makes a concurrent Run of the same id abort at
+// its next compare-and-swap, and what makes a later Run refuse the id while
+// a failed Delete is still pending a retry: if DeleteActor fails, the state
+// object is left "deleting" and the next Delete resumes from it. An actor
+// with no state object (a record-less actor created by a broker without
+// state persistence) is deleted exactly as before.
 func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
 	atespace, actorName, err := splitSubstrateID(id)
+	if err != nil {
+		return err
+	}
+
+	st, err := r.markDeleting(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -633,6 +755,20 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
 		uid = deletedActor.GetMetadata().GetUid()
 	}
 
+	if st != nil {
+		if err := r.state.Delete(ctx, id, st.version); err != nil {
+			return fmt.Errorf("substrate: delete agent state for %s: %w", id, err)
+		}
+		if st.ActorUID != "" && st.ActorUID != uid {
+			// Also evict the record cached under the UID the state named,
+			// in case the actor GetActor/DeleteActor reported was a
+			// different incarnation.
+			substrateAgentStateMu.Lock()
+			delete(substrateAgentRecords, st.ActorUID)
+			substrateAgentStateMu.Unlock()
+		}
+	}
+
 	substrateAgentStateMu.Lock()
 	delete(substrateControlTokens, id)
 	delete(substrateExecSecrets, id)
@@ -641,6 +777,40 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
 	}
 	substrateAgentStateMu.Unlock()
 	return nil
+}
+
+// markDeleting reads id's state object and moves it to phase "deleting"
+// (compare-and-swap, retried once on a conflict by re-reading). It returns
+// the updated state, or nil with no error when id has no state object (a
+// record-less actor) or this runtime has no store. A store failure fails the
+// Delete before anything on the cluster is touched, so a retry starts clean.
+func (r *SubstrateRuntime) markDeleting(ctx context.Context, id string) (*substrateAgentState, error) {
+	if r.state == nil {
+		return nil, nil
+	}
+	for attempt := 0; ; attempt++ {
+		st, err := r.state.Get(ctx, id)
+		if errors.Is(err, errStateNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("substrate: read agent state for %s: %w", id, err)
+		}
+		if st.Phase == substrateStateDeleting {
+			return st, nil
+		}
+		st.Phase = substrateStateDeleting
+		err = r.state.Update(ctx, st)
+		if err == nil {
+			return st, nil
+		}
+		if errors.Is(err, errStateNotFound) {
+			return nil, nil
+		}
+		if !errors.Is(err, errStateConflict) || attempt >= 1 {
+			return nil, fmt.Errorf("substrate: mark agent state deleting for %s: %w", id, err)
+		}
+	}
 }
 
 // Stop is the same as Delete: nothing here suspends to a DATA
@@ -735,8 +905,10 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 		}
 	}
 
-	substrateAgentStateMu.Lock()
-	defer substrateAgentStateMu.Unlock()
+	idx, err := r.loadRecordIndex(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("substrate: list agents: %w", err)
+	}
 
 	// Ambiguity guard: labelFilter identifies a caller looking for one
 	// specific agent slug ("scion.name") without narrowing to a project (no
@@ -778,7 +950,7 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	slugCounts := make(map[string]int)
 	if hasNameFilter && !hasProjectScope {
 		for _, actor := range actors {
-			rec := substrateAgentRecords[actor.GetMetadata().GetUid()]
+			rec := idx.recordFor(actor)
 			if rec == nil {
 				continue
 			}
@@ -796,7 +968,7 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 
 		actorName := actor.GetMetadata().GetName()
 		atespace := actor.GetMetadata().GetAtespace()
-		rec := substrateAgentRecords[actor.GetMetadata().GetUid()]
+		rec := idx.recordFor(actor)
 
 		// "scion.agent" is always set (pkg/runtimebroker lists all agents
 		// by it), so a record-less actor still appears in an unfiltered
@@ -921,14 +1093,19 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 		}
 	}
 
-	substrateAgentStateMu.Lock()
-	defer substrateAgentStateMu.Unlock()
+	// A pending state object does not make an actor record-ful here: its
+	// Run is still in flight (see the race-window note above), exactly as
+	// before state was persisted.
+	idx, err := r.loadRecordIndex(ctx, atespace, substrateStateCommitted, substrateStateDeleting)
+	if err != nil {
+		return atespace, nil, fmt.Errorf("substrate: list agents in atespace %s: %w", atespace, err)
+	}
 
 	for _, actor := range rawActors {
 		if actor.GetMetadata().GetAtespace() != atespace {
 			continue
 		}
-		if substrateAgentRecords[actor.GetMetadata().GetUid()] != nil {
+		if idx.recordFor(actor) != nil {
 			continue
 		}
 		if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_DELETING {
@@ -978,6 +1155,68 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 		actors = append(actors, RecordlessActor{Name: actor.GetMetadata().GetName(), UID: actor.GetMetadata().GetUid()})
 	}
 	return atespace, actors, nil
+}
+
+// substrateRecordIndex resolves the agent record for each listed actor: the
+// durable state object joined on actor UID (falling back to the id while a
+// state object is still pending, before its UID is recorded), else this
+// process's cached record. An actor neither resolves is a record-less
+// (legacy) actor.
+type substrateRecordIndex struct {
+	byUID map[string]*substrateAgentState
+	byID  map[string]*substrateAgentState
+	cache map[string]*substrateAgentRecord
+}
+
+// loadRecordIndex lists the state objects in atespace ("" = all) once and
+// snapshots the record cache. phases, when non-empty, restricts which state
+// phases join.
+func (r *SubstrateRuntime) loadRecordIndex(ctx context.Context, atespace string, phases ...substrateStatePhase) (*substrateRecordIndex, error) {
+	idx := &substrateRecordIndex{
+		byUID: make(map[string]*substrateAgentState),
+		byID:  make(map[string]*substrateAgentState),
+	}
+	if r.state != nil {
+		states, err := r.state.List(ctx, atespace)
+		if err != nil {
+			return nil, err
+		}
+		for _, st := range states {
+			if len(phases) > 0 && !slices.Contains(phases, st.Phase) {
+				continue
+			}
+			if st.ActorUID != "" {
+				idx.byUID[st.ActorUID] = st
+			} else {
+				idx.byID[st.ID] = st
+			}
+		}
+	}
+	substrateAgentStateMu.Lock()
+	idx.cache = make(map[string]*substrateAgentRecord, len(substrateAgentRecords))
+	for uid, rec := range substrateAgentRecords {
+		idx.cache[uid] = rec
+	}
+	substrateAgentStateMu.Unlock()
+	return idx, nil
+}
+
+// recordFor returns actor's record, or nil for a record-less actor.
+func (idx *substrateRecordIndex) recordFor(actor *ateapipb.Actor) *substrateAgentRecord {
+	uid := actor.GetMetadata().GetUid()
+	if uid != "" {
+		if st := idx.byUID[uid]; st != nil {
+			return &st.Record
+		}
+	}
+	id := actor.GetMetadata().GetAtespace() + "/" + actor.GetMetadata().GetName()
+	if st := idx.byID[id]; st != nil {
+		return &st.Record
+	}
+	if uid == "" {
+		return nil
+	}
+	return idx.cache[uid]
 }
 
 // maxRecordlessActorListPages bounds RecordlessActors' ListActors paging
