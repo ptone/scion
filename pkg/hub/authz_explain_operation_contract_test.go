@@ -17,7 +17,9 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/build"
@@ -34,6 +36,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -248,6 +251,136 @@ func TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch(t *
 	})
 }
 
+func TestEffectivePermissionIntrospectionBoundaryImporterIsBounded(t *testing.T) {
+	t.Run("deadline reaps child", func(t *testing.T) {
+		stdinReader, stdinWriter, err := os.Pipe()
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = stdinReader.Close()
+			_ = stdinWriter.Close()
+		})
+
+		var command *exec.Cmd
+		started := time.Now()
+		_, err = runExplainBoundaryExportCommand(t.Context(), 500*time.Millisecond, func(ctx context.Context) *exec.Cmd {
+			command = explainBoundaryHelperCommand(ctx, "block")
+			command.Stdin = stdinReader
+			return command
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Contains(t, err.Error(), "module export command deadline")
+		assert.Less(t, time.Since(started), 5*time.Second)
+		require.NotNil(t, command)
+		assert.NotNil(t, command.ProcessState, "Output must wait for and reap the child")
+	})
+
+	t.Run("cancellation reaps live child", func(t *testing.T) {
+		stdinReader, stdinWriter, err := os.Pipe()
+		require.NoError(t, err)
+		readyReader, readyWriter, err := os.Pipe()
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_ = stdinReader.Close()
+			_ = stdinWriter.Close()
+			_ = readyReader.Close()
+			_ = readyWriter.Close()
+		})
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		cancelDone := make(chan struct{})
+		go func() {
+			defer close(cancelDone)
+			var ready [1]byte
+			_, _ = readyReader.Read(ready[:])
+			cancel()
+		}()
+
+		var command *exec.Cmd
+		started := time.Now()
+		_, err = runExplainBoundaryExportCommand(ctx, 5*time.Second, func(commandContext context.Context) *exec.Cmd {
+			command = explainBoundaryHelperCommand(commandContext, "block-ready")
+			command.Stdin = stdinReader
+			command.ExtraFiles = []*os.File{readyWriter}
+			return command
+		})
+		_ = readyReader.Close()
+		<-cancelDone
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Contains(t, err.Error(), "module export command cancellation")
+		assert.Less(t, time.Since(started), 5*time.Second)
+		require.NotNil(t, command)
+		assert.NotNil(t, command.ProcessState, "Output must wait for and reap the child")
+	})
+
+	t.Run("successful bounded command loads exports", func(t *testing.T) {
+		var command *exec.Cmd
+		exports, err := loadExplainBoundaryExports(t.Context(), 5*time.Second, func(ctx context.Context) *exec.Cmd {
+			command = explainBoundaryHelperCommand(ctx, "success")
+			return command
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "/bounded/export.a", exports["example.com/bounded"])
+		require.NotNil(t, command)
+		assert.NotNil(t, command.ProcessState, "Output must wait for and reap the child")
+	})
+}
+
+func TestEffectivePermissionIntrospectionBoundaryTypeErrorsFailClosed(t *testing.T) {
+	t.Run("Error callback", func(t *testing.T) {
+		err := validateExplainIntrospectionBoundaryWithHooks(explainBoundaryTestSources(), explainBoundaryValidationHooks{
+			importer: func(*token.FileSet) (types.Importer, error) { return importer.Default(), nil },
+			check: func(config *types.Config, path string, _ *token.FileSet, _ []*ast.File, _ *types.Info) (*types.Package, error) {
+				config.Error(errors.New("callback canary must not be accepted"))
+				return types.NewPackage(path, "hub"), nil
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "type checking reported errors")
+	})
+
+	t.Run("Check error with partial package", func(t *testing.T) {
+		err := validateExplainIntrospectionBoundaryWithHooks(explainBoundaryTestSources(), explainBoundaryValidationHooks{
+			importer: func(*token.FileSet) (types.Importer, error) { return importer.Default(), nil },
+			check: func(_ *types.Config, path string, _ *token.FileSet, _ []*ast.File, _ *types.Info) (*types.Package, error) {
+				return types.NewPackage(path, "hub"), errors.New("partial package canary must not be accepted")
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "type checking failed")
+	})
+}
+
+func TestExplainBoundaryImporterHelperProcess(t *testing.T) {
+	mode := os.Getenv("SCION_EXPLAIN_BOUNDARY_HELPER")
+	if mode == "" {
+		return
+	}
+	switch mode {
+	case "block", "block-ready":
+		if mode == "block-ready" {
+			if ready := os.NewFile(3, "explain-boundary-ready"); ready != nil {
+				_, _ = ready.Write([]byte{1})
+				_ = ready.Close()
+			}
+		}
+		_, _ = io.Copy(io.Discard, os.Stdin)
+	case "success":
+		_, _ = fmt.Fprintln(os.Stdout, "example.com/bounded\t/bounded/export.a")
+	default:
+		os.Exit(2)
+	}
+	os.Exit(0)
+}
+
+func explainBoundaryHelperCommand(ctx context.Context, mode string) *exec.Cmd {
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestExplainBoundaryImporterHelperProcess$")
+	command.Env = append(os.Environ(), "SCION_EXPLAIN_BOUNDARY_HELPER="+mode)
+	return command
+}
+
 func explainBoundaryTestSources() map[string][]byte {
 	return map[string][]byte{
 		"boundary.go": []byte(`package hub
@@ -370,21 +503,69 @@ var (
 	explainBoundaryExportsErr  error
 )
 
+const (
+	explainBoundaryExportListTimeout = 8 * time.Minute
+	explainBoundaryCommandWaitDelay  = 2 * time.Second
+)
+
+type explainBoundaryCommandFactory func(context.Context) *exec.Cmd
+
+type explainBoundaryValidationHooks struct {
+	importer func(*token.FileSet) (types.Importer, error)
+	check    func(*types.Config, string, *token.FileSet, []*ast.File, *types.Info) (*types.Package, error)
+}
+
+func explainBoundaryExportCommand(ctx context.Context) *exec.Cmd {
+	return exec.CommandContext(ctx, "go", "list", "-deps", "-export", "-f", "{{if .Export}}{{.ImportPath}}\\t{{.Export}}{{end}}", ".")
+}
+
+func runExplainBoundaryExportCommand(parent context.Context, timeout time.Duration, factory explainBoundaryCommandFactory) ([]byte, error) {
+	if timeout <= 0 {
+		return nil, errors.New("module export command configuration: non-positive deadline")
+	}
+	commandContext, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	command := factory(commandContext)
+	if command == nil {
+		return nil, errors.New("module export command configuration: no command")
+	}
+	command.WaitDelay = explainBoundaryCommandWaitDelay
+	output, err := command.Output()
+	if err == nil {
+		return output, nil
+	}
+	switch {
+	case errors.Is(commandContext.Err(), context.DeadlineExceeded):
+		return nil, fmt.Errorf("module export command deadline: %w", context.DeadlineExceeded)
+	case errors.Is(commandContext.Err(), context.Canceled):
+		return nil, fmt.Errorf("module export command cancellation: %w", context.Canceled)
+	case errors.Is(err, exec.ErrWaitDelay):
+		return nil, fmt.Errorf("module export command output drain: %w", err)
+	default:
+		return nil, fmt.Errorf("module export command execution: %w", err)
+	}
+}
+
+func loadExplainBoundaryExports(ctx context.Context, timeout time.Duration, factory explainBoundaryCommandFactory) (map[string]string, error) {
+	output, err := runExplainBoundaryExportCommand(ctx, timeout, factory)
+	if err != nil {
+		return nil, err
+	}
+	exports := make(map[string]string)
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) == 2 && fields[0] != "" && fields[1] != "" {
+			exports[fields[0]] = fields[1]
+		}
+	}
+	return exports, nil
+}
+
 func moduleAwareExplainBoundaryImporter(fset *token.FileSet) (types.Importer, error) {
 	explainBoundaryExportsOnce.Do(func() {
-		command := exec.Command("go", "list", "-deps", "-export", "-f", "{{if .Export}}{{.ImportPath}}\\t{{.Export}}{{end}}", ".")
-		output, err := command.Output()
-		if err != nil {
-			explainBoundaryExportsErr = fmt.Errorf("list module exports: %w", err)
-			return
-		}
-		explainBoundaryExports = make(map[string]string)
-		for _, line := range strings.Split(string(output), "\n") {
-			fields := strings.SplitN(line, "\t", 2)
-			if len(fields) == 2 && fields[0] != "" && fields[1] != "" {
-				explainBoundaryExports[fields[0]] = fields[1]
-			}
-		}
+		explainBoundaryExports, explainBoundaryExportsErr = loadExplainBoundaryExports(
+			context.Background(), explainBoundaryExportListTimeout, explainBoundaryExportCommand,
+		)
 	})
 	if explainBoundaryExportsErr != nil {
 		return nil, explainBoundaryExportsErr
@@ -400,6 +581,15 @@ func moduleAwareExplainBoundaryImporter(fset *token.FileSet) (types.Importer, er
 }
 
 func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
+	return validateExplainIntrospectionBoundaryWithHooks(sources, explainBoundaryValidationHooks{
+		importer: moduleAwareExplainBoundaryImporter,
+		check: func(config *types.Config, path string, fset *token.FileSet, files []*ast.File, info *types.Info) (*types.Package, error) {
+			return config.Check(path, fset, files, info)
+		},
+	})
+}
+
+func validateExplainIntrospectionBoundaryWithHooks(sources map[string][]byte, hooks explainBoundaryValidationHooks) error {
 	fset := token.NewFileSet()
 	functions := make(map[string][]*explainBoundaryFunction)
 	functionLiterals := make(map[*ast.FuncLit]*explainBoundaryFunction)
@@ -447,18 +637,27 @@ func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 		Types:      make(map[ast.Expr]types.TypeAndValue),
 	}
-	packageImporter, err := moduleAwareExplainBoundaryImporter(fset)
+	packageImporter, err := hooks.importer(fset)
 	if err != nil {
 		return fmt.Errorf("load module-aware effective-permissions imports: %w", err)
 	}
 	// Synthetic mutation packages have no imports. Production uses the exact
 	// module-aware dependency types loaded above so local method sets remain
 	// complete even in worktrees outside GOPATH.
+	var reportedTypeErrors []error
 	typeConfig := types.Config{
 		Importer: packageImporter,
-		Error:    func(error) {},
+		Error: func(err error) {
+			reportedTypeErrors = append(reportedTypeErrors, err)
+		},
 	}
-	checkedPackage, _ := typeConfig.Check("github.com/GoogleCloudPlatform/scion/pkg/hub", fset, files, typeInfo)
+	checkedPackage, checkErr := hooks.check(&typeConfig, "github.com/GoogleCloudPlatform/scion/pkg/hub", fset, files, typeInfo)
+	if len(reportedTypeErrors) > 0 {
+		return &explainBoundaryError{message: "effective-permissions boundary type checking reported errors"}
+	}
+	if checkErr != nil {
+		return &explainBoundaryError{message: "effective-permissions boundary type checking failed"}
+	}
 	functionsByObject := make(map[*types.Func]*explainBoundaryFunction)
 	for _, namedFunctions := range functions {
 		for _, fn := range namedFunctions {
