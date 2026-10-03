@@ -120,6 +120,11 @@ type SubstrateRuntime struct {
 // a config change): moving this state to the one thing every instance
 // shares, the process, is what keeps it reachable regardless of which
 // config resolved the runtime.
+//
+// These maps are a write-through cache over the durable agent state store
+// (AgentStateStore, substrate_state.go): Run fills them only after its
+// state object is committed, and Delete evicts them after removing it. The
+// store, not this cache, is what survives a broker restart.
 var (
 	substrateAgentStateMu sync.Mutex
 	// substrateControlTokens maps "<atespace>/<actor>" to the control_token
@@ -274,15 +279,17 @@ func SetSubstrateRuntimeBuilderForTest(builder func(config.V1SubstrateConfig) (*
 	}
 }
 
-// WipeSubstrateAgentStateForTest clears the process-wide
-// substrateControlTokens and substrateAgentRecords maps, for tests in other
-// packages (e.g. pkg/runtimebroker) that need to simulate a runtime process
-// restart against a *SubstrateRuntime built over a fake ateapi client. This
+// WipeSubstrateAgentStateForTest clears the process-wide in-memory agent
+// state cache (substrateControlTokens, substrateAgentRecords,
+// substrateExecSecrets), for tests in other packages (e.g.
+// pkg/runtimebroker) that need to simulate a runtime process restart
+// against a *SubstrateRuntime built over a fake ateapi client. The durable
+// agent state store is untouched, exactly as a real restart leaves it. This
 // is test-only support, exported (rather than kept package-private like
 // this package's own equivalent used by substrate_restart_test.go) solely
 // because pkg/runtimebroker cannot reach an unexported symbol here; nothing
 // in production ever calls it — the real analog of "wipe" is simply a new
-// broker process starting with empty maps. Call the returned func (e.g. via
+// broker process starting with an empty cache. Call the returned func (e.g. via
 // t.Cleanup) to restore the previous contents.
 func WipeSubstrateAgentStateForTest() (restore func()) {
 	substrateAgentStateMu.Lock()
@@ -861,9 +868,16 @@ const substrateAtespacePrefix = "scion-"
 // Stop, or lookup fallback becomes a no-op — never a wrong-actor action —
 // in that scenario; a query that does carry a project key is unaffected.
 //
-// Known limitation, by design: a record-less actor (this runtime instance
-// has no in-memory agent record for it — e.g. right after a broker
-// restart) is reported under its actor name, containerName(project, agent)
+// Agent records come from the durable agent state store (committed or
+// deleting state objects, joined by actor UID; a pending object by id) and
+// then from this process's cache, so an agent this broker started is still
+// listed with its slug and project identity after a broker restart. A
+// store failure fails List rather than silently reporting persisted agents
+// as record-less.
+//
+// Known limitation, by design: a record-less actor (one with no agent
+// record anywhere — created by a broker without state persistence) is
+// reported under its actor name, containerName(project, agent)
 // = "<project>--<agent>" (pkg/agent/run.go), not its agent slug, and with
 // no project labels. It therefore never matches a caller-supplied slug or
 // project filter, and Delete/Stop/Exec/Logs for it become a no-op rather
@@ -880,9 +894,9 @@ const substrateAtespacePrefix = "scion-"
 // record-less actor is never resolvable by slug, so a wrong-actor action is
 // structurally impossible, at the cost of requiring an operator to
 // re-identify (or simply restart) a record-less actor by hand. Hardening
-// the generic slug-matching call path in pkg/agent is future work; the
-// durable fix here is persisting agent records so they survive a broker
-// restart in the first place, not reconstructing them from the actor name.
+// the generic slug-matching call path in pkg/agent is future work; agent
+// records are persisted (see above) so they survive a broker restart in the
+// first place, rather than reconstructed from the actor name.
 func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 	var actors []*ateapipb.Actor
 	pageToken := ""
@@ -1035,9 +1049,9 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 // RecordlessActors implements the broker's optional record-less-actor
 // capability (see pkg/runtimebroker's RecordlessActorProber): given
 // projectID, it returns the atespace that project maps to and every
-// actor in it that this runtime process has no in-memory record for
-// (substrateAgentRecords, keyed by actor UID — lost across a
-// process restart for any actor a previous process created) AND that is not
+// actor in it that has no agent record — neither a committed or deleting
+// object in the durable agent state store nor an entry in this process's
+// cache (substrateAgentRecords, keyed by actor UID) — AND that is not
 // already in ACTOR_STATE_DELETING (see the loop below for why: a record-less
 // actor already being deleted needs no further protection, and excluding it
 // is what keeps ordinary same-project stop-then-delete sequences — no
@@ -1047,7 +1061,8 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 // above) and this function's own caller observing the record it writes
 // afterward — spanning waitRunning, healthz and bootstrap, so on the order
 // of tens of seconds. An actor created in that window looks record-less to
-// a concurrent call here, exactly like a genuinely pre-restart actor does.
+// a concurrent call here (its state object is still pending), exactly like
+// a legacy actor created by a broker without state persistence does.
 // This is not hardened further: the caller (resolveDeleteTarget/stopAgent)
 // only ever turns a would-be success into an explicit error on a hit, never
 // selects a delete/stop target from this list, so the failure mode is a

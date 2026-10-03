@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 func TestRequireImageRegistryForBroker_NoRegistry(t *testing.T) {
@@ -273,12 +274,13 @@ func writeOperatorSubstrateSettings(t *testing.T, operatorSettings string) func(
 }
 
 // operatorSubstrateSettings returns operator settings whose default profile
-// is an operator-defined substrate runtime with both required endpoints and
-// the given extra substrate fields (a JSON fragment, may be empty).
+// is an operator-defined substrate runtime with every required field (both
+// endpoints and the state namespace) and the given extra substrate fields (a JSON fragment, may be empty).
 func operatorSubstrateSettings(extraSubstrateFields string) string {
 	return operatorSubstrateSettingsWithBlock(`
 					"api_endpoint": "api.ate-system.svc:443",
-					"router_endpoint": "http://atenet-router.ate-system.svc:80"` + extraSubstrateFields)
+					"router_endpoint": "http://atenet-router.ate-system.svc:80",
+					"state_namespace": "scion-broker-state"` + extraSubstrateFields)
 }
 
 // operatorSubstrateSettingsWithBlock returns operator settings whose default
@@ -305,7 +307,8 @@ func operatorSubstrateSettingsWithBlock(substrateFields string) string {
 // deterministic config validation is a settings problem that no retry can
 // fix, so the broker must still refuse to start. Each row exercises one
 // tagging site: a missing required api_endpoint, a missing required
-// router_endpoint, and substrate.Validate rejecting an unsupported
+// router_endpoint, a missing or invalid required state_namespace, and
+// substrate.Validate rejecting an unsupported
 // egress_trust_bundle. The builder is stubbed to prove validation alone
 // decides this: nothing is ever built or dialed.
 func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStart(t *testing.T) {
@@ -317,14 +320,34 @@ func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStar
 		{
 			name: "missing api_endpoint",
 			settings: operatorSubstrateSettingsWithBlock(`
-					"router_endpoint": "http://atenet-router.ate-system.svc:80"`),
+					"router_endpoint": "http://atenet-router.ate-system.svc:80",
+					"state_namespace": "scion-broker-state"`),
 			wantInErrMsg: "api_endpoint is required",
 		},
 		{
 			name: "missing router_endpoint",
 			settings: operatorSubstrateSettingsWithBlock(`
-					"api_endpoint": "api.ate-system.svc:443"`),
+					"api_endpoint": "api.ate-system.svc:443",
+					"state_namespace": "scion-broker-state"`),
 			wantInErrMsg: "router_endpoint is required",
+		},
+		{
+			// Without a state namespace the broker could not persist agent
+			// state, so every agent would become unmanageable at the next
+			// restart: refuse rather than run memory-only.
+			name: "missing state_namespace",
+			settings: operatorSubstrateSettingsWithBlock(`
+					"api_endpoint": "api.ate-system.svc:443",
+					"router_endpoint": "http://atenet-router.ate-system.svc:80"`),
+			wantInErrMsg: "state_namespace is required",
+		},
+		{
+			name: "invalid state_namespace",
+			settings: operatorSubstrateSettingsWithBlock(`
+					"api_endpoint": "api.ate-system.svc:443",
+					"router_endpoint": "http://atenet-router.ate-system.svc:80",
+					"state_namespace": "Not_A_Namespace"`),
+			wantInErrMsg: "state_namespace \"Not_A_Namespace\" is not a valid namespace name",
 		},
 		{
 			name: "substrate.Validate rejects egress_trust_bundle",
@@ -358,6 +381,36 @@ func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStar
 			assert.Zero(t, built, "config validation must fail before the runtime is built")
 		})
 	}
+}
+
+// TestResolveBrokerDefaultRuntime_ValidSubstrateConfigStarts is the positive
+// control for the refusal rows above: the same operator settings with every
+// required field (state_namespace included) build the substrate runtime,
+// passing the state namespace through, and the broker starts on it.
+func TestResolveBrokerDefaultRuntime_ValidSubstrateConfigStarts(t *testing.T) {
+	var builtWith []config.V1SubstrateConfig
+	restore := scionruntime.SetSubstrateRuntimeBuilderForTest(func(cfg config.V1SubstrateConfig) (*scionruntime.SubstrateRuntime, error) {
+		builtWith = append(builtWith, cfg)
+		return scionruntime.NewSubstrateRuntimeForTest(nil, nil, k8sfake.NewClientset(), cfg), nil
+	})
+	t.Cleanup(restore)
+
+	getRuntime := writeOperatorSubstrateSettings(t, operatorSubstrateSettings(""))
+
+	var logged []string
+	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	rt, err := resolveBrokerDefaultRuntime(getRuntime, logf)
+	if err != nil {
+		t.Fatalf("a valid substrate config must start, got: %v", err)
+	}
+	if _, ok := rt.(*scionruntime.SubstrateRuntime); !ok {
+		t.Fatalf("expected a *SubstrateRuntime, got %T", rt)
+	}
+	if assert.Len(t, builtWith, 1) {
+		assert.Equal(t, "scion-broker-state", builtWith[0].StateNamespace)
+	}
+	assert.Equal(t, []string{"Runtime broker using runtime: substrate"}, logged)
 }
 
 // TestResolveBrokerDefaultRuntime_SubstrateBuildFailureStartsDegraded: a
