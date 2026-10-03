@@ -21,12 +21,15 @@ import (
 	"fmt"
 	"go/ast"
 	"go/build"
+	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -36,7 +39,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/tools/go/packages"
 )
 
 func explainOperationRequest(operationID, permission, resourceType, action string) map[string]interface{} {
@@ -362,50 +364,39 @@ type explainBoundaryResolvedFunctionValue struct {
 	literals map[*ast.FuncLit]struct{}
 }
 
-type explainBoundaryPackageImporter map[string]*types.Package
-
-func (i explainBoundaryPackageImporter) Import(path string) (*types.Package, error) {
-	if pkg := i[path]; pkg != nil {
-		return pkg, nil
-	}
-	return nil, fmt.Errorf("module-aware importer has no package %q", path)
-}
-
 var (
-	explainBoundaryImporterOnce sync.Once
-	explainBoundaryImporter     types.Importer
-	explainBoundaryImporterErr  error
+	explainBoundaryExportsOnce sync.Once
+	explainBoundaryExports     map[string]string
+	explainBoundaryExportsErr  error
 )
 
-func moduleAwareExplainBoundaryImporter() (types.Importer, error) {
-	explainBoundaryImporterOnce.Do(func() {
-		loaded, err := packages.Load(&packages.Config{
-			Mode: packages.NeedName | packages.NeedTypes | packages.NeedImports | packages.NeedDeps,
-			Dir:  ".",
-		}, ".")
+func moduleAwareExplainBoundaryImporter(fset *token.FileSet) (types.Importer, error) {
+	explainBoundaryExportsOnce.Do(func() {
+		command := exec.Command("go", "list", "-deps", "-export", "-f", "{{if .Export}}{{.ImportPath}}\\t{{.Export}}{{end}}", ".")
+		output, err := command.Output()
 		if err != nil {
-			explainBoundaryImporterErr = err
+			explainBoundaryExportsErr = fmt.Errorf("list module exports: %w", err)
 			return
 		}
-		if len(loaded) != 1 {
-			explainBoundaryImporterErr = fmt.Errorf("load hub package: got %d roots", len(loaded))
-			return
-		}
-		imports := make(explainBoundaryPackageImporter)
-		var collect func(*packages.Package)
-		collect = func(pkg *packages.Package) {
-			if pkg == nil || pkg.Types == nil || imports[pkg.PkgPath] != nil {
-				return
-			}
-			imports[pkg.PkgPath] = pkg.Types
-			for _, imported := range pkg.Imports {
-				collect(imported)
+		explainBoundaryExports = make(map[string]string)
+		for _, line := range strings.Split(string(output), "\n") {
+			fields := strings.SplitN(line, "\t", 2)
+			if len(fields) == 2 && fields[0] != "" && fields[1] != "" {
+				explainBoundaryExports[fields[0]] = fields[1]
 			}
 		}
-		collect(loaded[0])
-		explainBoundaryImporter = imports
 	})
-	return explainBoundaryImporter, explainBoundaryImporterErr
+	if explainBoundaryExportsErr != nil {
+		return nil, explainBoundaryExportsErr
+	}
+	lookup := func(path string) (io.ReadCloser, error) {
+		exportPath := explainBoundaryExports[path]
+		if exportPath == "" {
+			return nil, fmt.Errorf("module-aware importer has no export for %q", path)
+		}
+		return os.Open(exportPath)
+	}
+	return importer.ForCompiler(fset, "gc", lookup), nil
 }
 
 func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
@@ -456,7 +447,7 @@ func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 		Types:      make(map[ast.Expr]types.TypeAndValue),
 	}
-	packageImporter, err := moduleAwareExplainBoundaryImporter()
+	packageImporter, err := moduleAwareExplainBoundaryImporter(fset)
 	if err != nil {
 		return fmt.Errorf("load module-aware effective-permissions imports: %w", err)
 	}
