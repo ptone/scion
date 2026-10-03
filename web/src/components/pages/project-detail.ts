@@ -50,7 +50,11 @@ import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
 import { AgentListWindow, projectAgentsFitFor } from '../../client/agent-list-window.js';
-import type { PagedPageParams, PagedPageResult } from '../../client/agent-list-window.js';
+import type {
+  AgentListView,
+  PagedPageParams,
+  PagedPageResult,
+} from '../../client/agent-list-window.js';
 import { mergeChanged, dropTombstoned, dropTombstonedPairs } from '../../client/agent-merge.js';
 import { sortAgents } from '../../shared/agent-sort.js';
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
@@ -97,6 +101,11 @@ interface SortedAgentsResponse {
   dir?: string;
   stats?: { total: number; running: number; agents?: Array<[string, string]> };
   _capabilities?: Capabilities;
+}
+
+/** The window's layout for a page view mode: the `graph` mode is the agent tree. */
+function listViewOf(mode: ViewMode): AgentListView {
+  return mode === 'graph' ? 'tree' : mode;
 }
 
 // User-level (not per-project) sticky preference for the agents section height.
@@ -333,6 +342,7 @@ export class ScionPageProjectDetail extends LitElement {
       sortField: this.sortField,
       sortDir: this.sortDir,
       pageSize: this.pagerPageSize,
+      view: listViewOf(this.viewMode),
     },
     getProjectId: () => this.projectId,
     fetchPage: (params: PagedPageParams) => this.fetchAgentsPage(params),
@@ -1177,6 +1187,7 @@ export class ScionPageProjectDetail extends LitElement {
       sortField: this.sortField,
       sortDir: this.sortDir,
       pageSize: this.pagerPageSize,
+      view: listViewOf(this.viewMode),
     });
 
     void this.loadData();
@@ -2057,6 +2068,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     this.viewMode = e.detail.view;
+    this.agentWindow.setViewState({ view: listViewOf(this.viewMode) });
     void this.syncAgentsForViewState();
   }
 
