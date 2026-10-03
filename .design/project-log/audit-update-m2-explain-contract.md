@@ -514,3 +514,83 @@ P2, emitter/slog/sinks, store/schema/history, sampling, transport, projection,
 M1, and `#2392 audit_emit_dispatch` timing are unchanged. Catalog, P2,
 emitter, compare, and merge work remains blocked; round 6/7 is not authorized
 without conclusive normal and deferred race GREEN.
+
+## Round-5 type-check diagnostic correction and gate result
+
+The replacement author received the brief, round-5 fix report, and round-5
+review as complete authoritative bodies in a direct private conversation
+because the protected source and attachment paths were unavailable in its
+container. All document boundaries were complete. The expected source hashes
+were retained as provenance rather than represented as independently
+recomputed file hashes:
+
+- brief: `ce4d90c18501c9b4e8edddf94ef89b080993c381a8fb0db599d656a5323fac78`;
+- round-5 fix report:
+  `ee911dcc5fddc7ec627276bb5a18a90046cfdeb45b935b631bb67358a47151cb`;
+- round-5 review:
+  `b1a6f0ac17b437e79cfcf824c6f72512716f0d3d6e9b52298efcad49040ea150`.
+
+Before edits, local HEAD, the local branch ref, tracking ref, and independent
+fork remote ref all equaled pinned head
+`b79bd1428a61db765f9bf4ae2dc5248354a5a3d7`; the tree was clean. The accepted
+base was absent from the shallow clone, so no fetch or local ref mutation was
+performed. An independent fork compare proved merge base
+`fd4f83fb7769af4b08eed1ac06be6d2442de89d7`, status ahead, 16 commits ahead,
+zero behind, and exactly the 14 accepted paths. A second independent compare
+from the prior review head to the pinned head showed two commits and only this
+test file plus this project log.
+
+Lightweight, resource-bounded package metadata inspection showed 325 compiler
+Go files, zero cgo files, and no package metadata error. The scanner-selected
+and compiler-selected production filename sets had the same count and the same
+sorted SHA-256. Static inspection found no production build constraints or cgo
+source. This ruled out source-set drift and narrowed the failure to the
+checker/import boundary.
+
+With explicit lead authorization, exactly one diagnostic-only heavy command
+ran against only the production structure test, with shell
+`ulimit -v 8000000`, `GOMEMLIMIT=4GiB`, immutable shared
+`GOCACHE=/scion-volumes/gocache`, `-p 2`, no tags, a 44-minute Go timeout, and
+a 45-minute outer timeout. Temporary uncommitted instrumentation retained only
+bounded categories and counts. It exited 1 after 442 wall seconds with 426
+hard, zero soft, package-local callbacks: 160 import-resolution callbacks, 231
+unresolved-reference cascades, zero declaration, assignability, or operation
+callbacks, and 35 other callbacks. No raw diagnostic text, source value,
+unsafe identifier, or path was retained or copied into durable evidence. The
+command was not retried.
+
+The aggregate evidence exposed a serialization mismatch: the module export
+command's format argument emitted a literal escaped separator while the export
+parser required an actual tab. The resulting empty export map caused import
+resolution failures and downstream unresolved-reference callbacks. The
+test-only correction centralizes the format contract, emits an actual tab,
+extracts the parser into a small pure helper, and adds a deterministic
+regression proving that the command carries the actual-tab format, the parser
+accepts that protocol, and a literal escaped separator is rejected. It does
+not suppress callbacks, accept partial type data, or weaken any fail-closed
+path.
+
+Before checkpoint, a targeted search proved all temporary instrumentation was
+absent. `gofmt` and `git diff --check` passed; the sole changed path was
+`pkg/hub/authz_explain_operation_contract_test.go`; and the production diff
+was empty. The test-only checkpoint was committed and pushed before validation
+as `192cfea`.
+
+The single prescribed full filtered normal gate then ran with the same memory,
+cache, parallelism, tag, and 44/45-minute timeout controls. It exited 1 after
+383 wall seconds with package `FAIL`. The corrected import protocol completed
+and production type checking passed, after which the scanner reached its
+semantic closure and failed closed on an incomplete package-local interface
+dispatch. This is a conclusive new scanner-closure failure, not a timeout or
+inconclusive infrastructure result. The command was not retried. Race was not
+run because normal did not exit 0 with the required explicit package `ok`.
+
+No other heavy Go command, full Hub suite, unfiltered test, prewarm, retry,
+lint, vet, heavy build, `make ci`, or `make ci-full` ran. The shared cache was
+not cleaned, altered, relocated, or replaced. The correction changes only this
+project log and the authorized Go test file, with zero production diff. All
+option-B behavior and the catalog/P2, emitter/slog/sink, store/schema/history,
+sampling, transport, projection, M1, and `#2392 audit_emit_dispatch` exclusions
+remain unchanged. The pushed checkpoint is preserved; race and fresh review
+remain blocked pending correction of the newly exposed scanner-closure
+failure.
