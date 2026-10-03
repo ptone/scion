@@ -203,6 +203,7 @@ interface V1RuntimeConfig {
   list_all_namespaces?: boolean;
   env?: Record<string, string>;
   cloudrun?: V1CloudRunConfig;
+  shared_dir_storage_backend?: string;
 }
 
 interface V1ProfileConfig {
@@ -212,6 +213,7 @@ interface V1ProfileConfig {
   image_registry?: string;
   env?: Record<string, string>;
   resources?: ResourceSpec;
+  shared_dir_storage_backend?: string;
   [key: string]: unknown;
 }
 
@@ -4050,6 +4052,30 @@ export class ScionPageAdminServerConfig extends LitElement {
               }}
             ></sl-input>
           </div>
+          <div class="form-field">
+            <label>Shared Dir Storage</label>
+            <span class="hint"
+              >Backend for shared dirs of agents on this runtime. Empty uses the server setting; a
+              profile's own value wins.</span
+            >
+            <sl-select
+              class="shared-dir-storage-backend"
+              placeholder="Server setting"
+              clearable
+              value=${rt.shared_dir_storage_backend || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateRuntimeField(
+                  name,
+                  'shared_dir_storage_backend',
+                  (e.target as HTMLSelectElement).value
+                );
+              }}
+            >
+              <sl-option value="local">local</sl-option>
+              <sl-option value="nfs">nfs</sl-option>
+            </sl-select>
+          </div>
           ${!isCloudRun
             ? html`
                 <div class="form-field">
@@ -4300,6 +4326,30 @@ export class ScionPageAdminServerConfig extends LitElement {
               }}
             >
               ${runtimeNames.map((rt) => html`<sl-option value=${rt}>${rt}</sl-option>`)}
+            </sl-select>
+          </div>
+          <div class="form-field">
+            <label>Shared Dir Storage</label>
+            <span class="hint"
+              >Backend for this profile's shared dirs. Empty uses the runtime's value, else the
+              server setting.</span
+            >
+            <sl-select
+              class="shared-dir-storage-backend"
+              placeholder="Runtime or server setting"
+              clearable
+              value=${(profile.shared_dir_storage_backend as string) || ''}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                this.updateProfileField(
+                  name,
+                  'shared_dir_storage_backend',
+                  (e.target as HTMLSelectElement).value
+                );
+              }}
+            >
+              <sl-option value="local">local</sl-option>
+              <sl-option value="nfs">nfs</sl-option>
             </sl-select>
           </div>
           <div class="form-field">
