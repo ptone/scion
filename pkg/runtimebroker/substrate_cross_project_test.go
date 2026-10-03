@@ -33,7 +33,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	"k8s.io/client-go/kubernetes"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
+
+// testSubstrateStateNamespace is the state namespace the substrate
+// runtimes built by these tests persist agent state in.
+const testSubstrateStateNamespace = "scion-broker-state"
 
 // putActor directly registers an actor as if some earlier CreateActor call
 // had created it, without going through Run — used to simulate an actor
@@ -64,10 +70,20 @@ func newTestSubstrateBrokerServer(t *testing.T) (*Server, *fakeSubstrateControlC
 	// every test and restore whatever was there before once it ends.
 	t.Cleanup(runtime.WipeSubstrateAgentStateForTest())
 	fc := newFakeSubstrateControlClient(&substrateEgressRecorder{})
+	return newTestSubstrateBrokerServerOver(t, fc, k8sfake.NewClientset()), fc
+}
+
+// newTestSubstrateBrokerServerOver builds a broker *Server (with a fresh
+// *SubstrateRuntime and manager) over an existing fake ateapi cluster and
+// an existing state clientset: what a restarted broker process sees. A
+// fake clientset backs the runtime's durable agent state store, so agents
+// Run here persist exactly as they would on a real cluster.
+func newTestSubstrateBrokerServerOver(t *testing.T, fc *fakeSubstrateControlClient, stateClient kubernetes.Interface) *Server {
+	t.Helper()
 	actorServer := newFakeSubstrateActorServer()
 	t.Cleanup(actorServer.Close)
 
-	rt := runtime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
+	rt := runtime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), stateClient, config.V1SubstrateConfig{StateNamespace: testSubstrateStateNamespace})
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
 
@@ -75,7 +91,7 @@ func newTestSubstrateBrokerServer(t *testing.T) (*Server, *fakeSubstrateControlC
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = ""
-	return New(cfg, mgr, rt), fc
+	return New(cfg, mgr, rt)
 }
 
 // testProjectScionDir creates a real, on-disk project directory named

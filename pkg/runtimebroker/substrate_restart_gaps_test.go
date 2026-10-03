@@ -30,6 +30,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 // Additional broker-level coverage for the record-less-actor delete/stop
@@ -81,37 +83,87 @@ func onlyUnscopedListFails(err error) func(*ateapipb.ListActorsRequest) error {
 	}
 }
 
-// TestSubstrateBroker_RealRestart_PreRestartAgentIs409_NewAgentDeletes is an
-// end-to-end restart: an agent started through this broker, then a restart
-// (records and tokens wiped, actor still in ateapi). Delete and stop of that
-// agent in its own project must be 409 identity-unknown and touch nothing; a
-// NEW agent started after the restart must still delete normally, and a
-// second new agent must still stop normally (stop is delete, so a
-// successful stop here means the underlying actor is gone).
-func TestSubstrateBroker_RealRestart_PreRestartAgentIs409_NewAgentDeletes(t *testing.T) {
-	srv, fc := newTestSubstrateBrokerServer(t)
-	runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
-	fc.mu.Lock()
-	_, created := fc.actors[gapAtespaceB+"/projb--dev"]
-	fc.mu.Unlock()
-	if !created {
-		t.Fatal("setup: Run did not create projb--dev in the fake ateapi")
+// TestSubstrateBroker_RealRestart_PersistedAgentDeletesAndStops is the
+// end-to-end restart contract: agents started through this broker survive a
+// restart (records and tokens wiped from memory, actors still in ateapi,
+// agent state still in the state store) fully manageable — delete returns
+// 204 and stop 202 (not 409 identity-unknown), and both remove the actor.
+// It runs twice: once over the same runtime instance with its cache wiped,
+// and once through a brand-new broker server and runtime over the same
+// cluster and state store, which is what a restarted process builds.
+func TestSubstrateBroker_RealRestart_PersistedAgentDeletesAndStops(t *testing.T) {
+	for _, newProcess := range []bool{false, true} {
+		name := "same runtime, cache wiped"
+		if newProcess {
+			name = "new runtime instance"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(runtime.WipeSubstrateAgentStateForTest())
+			fc := newFakeSubstrateControlClient(&substrateEgressRecorder{})
+			stateClient := k8sfake.NewClientset()
+			srv := newTestSubstrateBrokerServerOver(t, fc, stateClient)
+			runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
+			runSubstrateAgentForProject(t, srv.manager, "dev-stop", "projb", gapProjBID, testProjectScionDir(t, "projb"))
+
+			simulateBrokerRestart(t)
+			if newProcess {
+				srv = newTestSubstrateBrokerServerOver(t, fc, stateClient)
+			}
+
+			w := httptest.NewRecorder()
+			srv.deleteAgent(w, httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil), "dev", gapProjBID)
+			if w.Code != http.StatusNoContent {
+				t.Fatalf("delete of pre-restart agent: status=%d body=%s, want 204", w.Code, w.Body.String())
+			}
+			w = httptest.NewRecorder()
+			srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev-stop/stop", nil), "dev-stop", gapProjBID)
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("stop of pre-restart agent: status=%d body=%s, want 202", w.Code, w.Body.String())
+			}
+
+			fc.mu.Lock()
+			defer fc.mu.Unlock()
+			for _, actor := range []string{"projb--dev", "projb--dev-stop"} {
+				if _, ok := fc.actors[gapAtespaceB+"/"+actor]; ok {
+					t.Errorf("pre-restart actor %s still present after a successful delete/stop", actor)
+				}
+			}
+			secrets, err := stateClient.CoreV1().Secrets(testSubstrateStateNamespace).List(context.Background(), metav1.ListOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := len(secrets.Items); n != 0 {
+				t.Errorf("%d agent state object(s) left after deleting every agent, want 0", n)
+			}
+		})
 	}
+}
+
+// TestSubstrateBroker_LegacyRecordlessAgentIs409_NewAgentDeletes covers an
+// actor created by a broker without state persistence (registered directly
+// in the fake ateapi, with no state object): delete and stop of it in its
+// own project must be 409 identity-unknown and touch nothing; a NEW agent
+// started afterwards must still delete normally, and a second new agent
+// must still stop normally (stop is delete, so a successful stop here means
+// the underlying actor is gone).
+func TestSubstrateBroker_LegacyRecordlessAgentIs409_NewAgentDeletes(t *testing.T) {
+	srv, fc := newTestSubstrateBrokerServer(t)
+	fc.putActor(gapAtespaceB, "projb--dev", "uid-projb-dev-legacy")
 	simulateBrokerRestart(t)
 
 	w := httptest.NewRecorder()
 	srv.deleteAgent(w, httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil), "dev", gapProjBID)
 	if w.Code != http.StatusConflict || decodeBrokerAPIError(t, w) != ErrCodeAgentIdentityUnknown {
-		t.Fatalf("delete of pre-restart agent: status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeAgentIdentityUnknown)
+		t.Fatalf("delete of legacy agent: status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeAgentIdentityUnknown)
 	}
 	w = httptest.NewRecorder()
 	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)
 	if w.Code != http.StatusConflict || decodeBrokerAPIError(t, w) != ErrCodeAgentIdentityUnknown {
-		t.Fatalf("stop of pre-restart agent: status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeAgentIdentityUnknown)
+		t.Fatalf("stop of legacy agent: status=%d body=%s, want 409 %s", w.Code, w.Body.String(), ErrCodeAgentIdentityUnknown)
 	}
 	fc.mu.Lock()
 	if n := len(fc.deleteActorCalls); n != 0 {
-		t.Errorf("DeleteActor called %d time(s) on a pre-restart agent, want 0", n)
+		t.Errorf("DeleteActor called %d time(s) on a legacy agent, want 0", n)
 	}
 	fc.mu.Unlock()
 
@@ -138,7 +190,7 @@ func TestSubstrateBroker_RealRestart_PreRestartAgentIs409_NewAgentDeletes(t *tes
 		t.Error("post-restart agent still present after a successful stop")
 	}
 	if _, ok := fc.actors[gapAtespaceB+"/projb--dev"]; !ok {
-		t.Error("pre-restart actor was removed by acting on a different agent")
+		t.Error("legacy actor was removed by acting on a different agent")
 	}
 }
 

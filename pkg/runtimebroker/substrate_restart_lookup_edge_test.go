@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 // Edge coverage for the stop lookup on a broker with a RecordlessActorProber
@@ -376,7 +377,7 @@ func TestRecordlessActorProbe_DistinctUIDsSameNameAcrossEndpoints_NotCollapsed(t
 	// actor name, but a different backing actor (different UID).
 	fc2 := newFakeSubstrateControlClient(&substrateEgressRecorder{})
 	fc2.putActor(gapAtespaceB, "ghost", "uid-endpoint-2")
-	rt2 := runtime.NewSubstrateRuntimeForTest(fc2, substrate.NewRouterClient(""), nil, config.V1SubstrateConfig{})
+	rt2 := runtime.NewSubstrateRuntimeForTest(fc2, substrate.NewRouterClient(""), k8sfake.NewClientset(), config.V1SubstrateConfig{StateNamespace: testSubstrateStateNamespace})
 	addAuxRuntime(t, srv, "substrate-second-endpoint", rt2)
 
 	atespace, names, err := recordlessActorProbe(context.Background(), srv.allManagers(), gapProjBID)

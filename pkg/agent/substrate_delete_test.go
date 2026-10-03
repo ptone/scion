@@ -32,7 +32,12 @@ import (
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
+
+// testSubstrateStateNamespace is the state namespace of the substrate
+// runtimes built here; a fake clientset backs their agent state store.
+const testSubstrateStateNamespace = "scion-broker-state"
 
 // fakeSubstrateControlClient is a minimal, package-local
 // ateapipb.ControlClient fake covering exactly the calls SubstrateRuntime's
@@ -189,7 +194,8 @@ func TestSubstrateAgentManagerDelete_RecordExists(t *testing.T) {
 	actorServer := newFakeSubstrateActorServer()
 	defer actorServer.Close()
 
-	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{
+	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), k8sfake.NewClientset(), config.V1SubstrateConfig{
+		StateNamespace:    testSubstrateStateNamespace,
 		SnapshotStorage:   "gs://bucket/prefix/",
 		SandboxConfigName: "gvisor-default",
 	})
@@ -255,7 +261,7 @@ func TestSubstrateAgentManagerDelete_NoRecord(t *testing.T) {
 	)
 	fc.putActor(atespace, actorName, "uid-orphan")
 
-	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://unused"), nil, config.V1SubstrateConfig{})
+	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://unused"), k8sfake.NewClientset(), config.V1SubstrateConfig{StateNamespace: testSubstrateStateNamespace})
 
 	mgr := NewManager(rt)
 	defer mgr.Close()
@@ -308,7 +314,7 @@ func TestSubstrateAgentManagerDelete_RecordlessAmbiguousSlugDeletesNothing(t *te
 				fc.putActor(atespaceA, actorA, "uid-a")
 			}
 
-			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://unused"), nil, config.V1SubstrateConfig{})
+			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://unused"), k8sfake.NewClientset(), config.V1SubstrateConfig{StateNamespace: testSubstrateStateNamespace})
 			mgr := NewManager(rt)
 			defer mgr.Close()
 
@@ -358,7 +364,7 @@ func TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug(t *testin
 			actorServer := newFakeSubstrateActorServer()
 			defer actorServer.Close()
 
-			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
+			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), k8sfake.NewClientset(), config.V1SubstrateConfig{StateNamespace: testSubstrateStateNamespace})
 
 			// The record-less other-project actor, injected directly (never
 			// through this runtime's Run, so it genuinely has no record).
@@ -447,7 +453,7 @@ func TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed(t *tes
 			actorServer := newFakeSubstrateActorServer()
 			defer actorServer.Close()
 
-			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
+			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), k8sfake.NewClientset(), config.V1SubstrateConfig{StateNamespace: testSubstrateStateNamespace})
 
 			runProjectAgent := func(projectName, projectID, projectPath string) *ateapipb.Actor {
 				labels := map[string]string{"scion.name": "dev", "scion.agent": "true"}

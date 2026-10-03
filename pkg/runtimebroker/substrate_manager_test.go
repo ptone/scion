@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
 	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 // substrateEgressCall records one CreateActorEgressPolicy request, keyed by
@@ -295,7 +296,8 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 				"substrate": {
 					"api_endpoint": "api.ate-system.svc:443",
 					"router_endpoint": "http://atenet-router.ate-system.svc:80",
-					"egress_allow": []
+					"egress_allow": [],
+					"state_namespace": "scion-broker-state"
 				}
 			},
 			"substrate-nip": {
@@ -303,7 +305,8 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 				"substrate": {
 					"api_endpoint": "api.ate-system.svc:443",
 					"router_endpoint": "http://atenet-router.ate-system.svc:80",
-					"egress_allow": ["*.nip.io"]
+					"egress_allow": ["*.nip.io"],
+					"state_namespace": "scion-broker-state"
 				}
 			}
 		},
@@ -353,10 +356,13 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 	// only work by the test's own construction, not for the reason it
 	// actually works in production.
 	sharedClient := newFakeSubstrateControlClient(recorder)
+	// Likewise one shared state namespace: both profiles' runtimes persist
+	// agent state in the same broker-wide store.
+	sharedState := k8sfake.NewClientset()
 	restore := runtime.SetSubstrateRuntimeBuilderForTest(func(cfg config.V1SubstrateConfig) (*runtime.SubstrateRuntime, error) {
 		actorServer := newFakeSubstrateActorServer()
 		actorServers = append(actorServers, actorServer)
-		return runtime.NewSubstrateRuntimeForTest(sharedClient, substrate.NewRouterClient(actorServer.URL), nil, cfg), nil
+		return runtime.NewSubstrateRuntimeForTest(sharedClient, substrate.NewRouterClient(actorServer.URL), sharedState, cfg), nil
 	})
 	t.Cleanup(restore)
 
@@ -366,6 +372,7 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 		APIEndpoint:    "api.ate-system.svc:443",
 		RouterEndpoint: "http://atenet-router.ate-system.svc:80",
 		EgressAllow:    []string{},
+		StateNamespace: testSubstrateStateNamespace,
 	})
 	if err != nil {
 		t.Fatalf("NewSubstrateRuntime(prod) error = %v", err)
