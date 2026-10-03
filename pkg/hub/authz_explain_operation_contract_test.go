@@ -84,10 +84,11 @@ func TestExplainAPI_RegisteredOperationUsesReviewedBasePermission(t *testing.T) 
 	srv.handleAuthzExplain(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.True(t, resp.Allowed)
-	require.NotNil(t, resp.Provenance)
-	assert.Equal(t, "user.read", resp.Provenance.Permission)
+	var matchingResp explainResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &matchingResp))
+	assert.True(t, matchingResp.Allowed)
+	require.NotNil(t, matchingResp.Provenance)
+	assert.Equal(t, "user.read", matchingResp.Provenance.Permission)
 }
 
 func TestExplainAPI_OperationValidationFailsClosedWithoutValueEcho(t *testing.T) {
@@ -204,8 +205,17 @@ func TestEffectivePermissionIntrospectionBoundaryRejectsMutations(t *testing.T) 
 		"indirect other-file helper": addBoundaryFile(
 			mutateBoundarySource(base, "s.authzService.introspectAuthorization()", "otherFileHelper(); s.authzService.introspectAuthorization()"),
 			"other.go", "package hub\nfunc otherFileHelper() { ordinary.Decide() }"),
+		"indirect other-file function value": addBoundaryFile(
+			mutateBoundarySource(base, "s.authzService.introspectAuthorization()", "next := otherFileHelper; next(); s.authzService.introspectAuthorization()"),
+			"other.go", "package hub\nfunc otherFileHelper() { ordinary.Decide() }"),
 		"ordinary AuthzRequest construction": addReachableBoundaryHelper(base,
 			"func forbiddenHelper() { _ = AuthzRequest{} }"),
+		"ordinary AuthzRequest allocation": addReachableBoundaryHelper(base,
+			"func forbiddenHelper() { _ = new(AuthzRequest) }"),
+		"ordinary AuthzRequest typed declaration": addReachableBoundaryHelper(base,
+			"func forbiddenHelper() { var request AuthzRequest; _ = request }"),
+		"ordinary AuthzRequest alias construction": addReachableBoundaryHelper(base,
+			"type requestAlias = AuthzRequest\nfunc forbiddenHelper() { _ = requestAlias{} }"),
 		"OperationID synthesis": addReachableBoundaryHelper(base,
 			"func forbiddenHelper() { _ = authzop.OperationID(permission) }"),
 		"OperationID population": addReachableBoundaryHelper(base,
@@ -285,6 +295,8 @@ type explainBoundaryFunction struct {
 	name string
 	file string
 	decl *ast.FuncDecl
+	node ast.Node
+	body *ast.BlockStmt
 }
 
 type explainBoundaryVisit struct {
@@ -292,9 +304,22 @@ type explainBoundaryVisit struct {
 	chain []string
 }
 
+type explainBoundaryFunctionValue struct {
+	targets      map[*types.Func]struct{}
+	literals     map[*ast.FuncLit]struct{}
+	dependencies map[*types.Var]struct{}
+	unsupported  bool
+}
+
+type explainBoundaryResolvedFunctionValue struct {
+	targets  map[*types.Func]struct{}
+	literals map[*ast.FuncLit]struct{}
+}
+
 func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 	fset := token.NewFileSet()
 	functions := make(map[string][]*explainBoundaryFunction)
+	functionLiterals := make(map[*ast.FuncLit]*explainBoundaryFunction)
 	var files []*ast.File
 	filenames := make([]string, 0, len(sources))
 	for name := range sources {
@@ -307,6 +332,18 @@ func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 			return err
 		}
 		files = append(files, file)
+		ast.Inspect(file, func(node ast.Node) bool {
+			literal, ok := node.(*ast.FuncLit)
+			if ok {
+				functionLiterals[literal] = &explainBoundaryFunction{
+					name: "function value",
+					file: name,
+					node: literal,
+					body: literal.Body,
+				}
+			}
+			return true
+		})
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
@@ -316,6 +353,8 @@ func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 				name: fn.Name.Name,
 				file: name,
 				decl: fn,
+				node: fn,
+				body: fn.Body,
 			})
 		}
 	}
@@ -323,6 +362,7 @@ func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 		Defs:       make(map[*ast.Ident]types.Object),
 		Uses:       make(map[*ast.Ident]types.Object),
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+		Types:      make(map[ast.Expr]types.TypeAndValue),
 	}
 	typeConfig := types.Config{
 		Importer: importer.Default(),
@@ -331,7 +371,7 @@ func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 		// resolved, which is the graph this package-boundary guard traverses.
 		Error: func(error) {},
 	}
-	_, _ = typeConfig.Check("github.com/GoogleCloudPlatform/scion/pkg/hub", fset, files, typeInfo)
+	checkedPackage, _ := typeConfig.Check("github.com/GoogleCloudPlatform/scion/pkg/hub", fset, files, typeInfo)
 	functionsByObject := make(map[*types.Func]*explainBoundaryFunction)
 	for _, namedFunctions := range functions {
 		for _, fn := range namedFunctions {
@@ -343,32 +383,41 @@ func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 	if len(functions["handleExplainEffectivePermissions"]) != 1 || len(functions["introspectAuthorization"]) != 1 || len(functions["decide"]) != 1 {
 		return &explainBoundaryError{message: "required effective-permissions boundary functions are missing or ambiguous"}
 	}
+	if checkedPackage == nil {
+		return &explainBoundaryError{message: "effective-permissions boundary package could not be resolved"}
+	}
+	authzRequestObject := checkedPackage.Scope().Lookup("AuthzRequest")
+	if authzRequestObject == nil {
+		return &explainBoundaryError{message: "ordinary AuthzRequest type is missing"}
+	}
+	functionValues := explainBoundaryFunctionValues(files, typeInfo)
 
 	queue := []explainBoundaryVisit{{
 		fn:    functions["handleExplainEffectivePermissions"][0],
 		chain: []string{"handleExplainEffectivePermissions"},
 	}}
-	visited := make(map[*ast.FuncDecl]bool)
+	visited := make(map[ast.Node]bool)
 	reached := make(map[string]bool)
 	for len(queue) > 0 {
 		visit := queue[0]
 		queue = queue[1:]
-		if visited[visit.fn.decl] {
+		if visited[visit.fn.node] {
 			continue
 		}
-		visited[visit.fn.decl] = true
+		visited[visit.fn.node] = true
 		reached[visit.fn.name] = true
 		var violation string
 		var callees []*explainBoundaryFunction
-		ast.Inspect(visit.fn.decl.Body, func(node ast.Node) bool {
+		ast.Inspect(visit.fn.body, func(node ast.Node) bool {
 			if violation != "" {
+				return false
+			}
+			if expr, ok := node.(ast.Expr); ok && explainBoundaryHasAuthzRequestType(typeInfo.TypeOf(expr), authzRequestObject.Type()) {
+				violation = "constructs or carries ordinary AuthzRequest"
 				return false
 			}
 			switch n := node.(type) {
 			case *ast.CompositeLit:
-				if explainBoundaryExprName(n.Type) == "AuthzRequest" {
-					violation = "constructs ordinary AuthzRequest"
-				}
 				for _, element := range n.Elts {
 					if kv, ok := element.(*ast.KeyValueExpr); ok && explainBoundaryExprName(kv.Key) == "OperationID" {
 						violation = "populates OperationID"
@@ -384,8 +433,11 @@ func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 						violation = "calls forbidden authorization/audit surface " + name
 					}
 				}
-				if called := explainBoundaryCalledFunction(n.Fun, typeInfo, functionsByObject); called != nil {
-					callees = append(callees, called)
+				called, callViolation := explainBoundaryCalledFunctions(n.Fun, typeInfo, functionsByObject, functionLiterals, functionValues)
+				if callViolation != "" {
+					violation = callViolation
+				} else {
+					callees = append(callees, called...)
 				}
 			}
 			return true
@@ -403,20 +455,226 @@ func validateExplainIntrospectionBoundary(sources map[string][]byte) error {
 	return nil
 }
 
-func explainBoundaryCalledFunction(expr ast.Expr, info *types.Info, functions map[*types.Func]*explainBoundaryFunction) *explainBoundaryFunction {
-	var object types.Object
-	switch value := expr.(type) {
-	case *ast.Ident:
-		object = info.Uses[value]
-	case *ast.SelectorExpr:
-		if selection := info.Selections[value]; selection != nil {
-			object = selection.Obj()
-		} else {
-			object = info.Uses[value.Sel]
+func explainBoundaryFunctionValues(files []*ast.File, info *types.Info) map[*types.Var]*explainBoundaryFunctionValue {
+	values := make(map[*types.Var]*explainBoundaryFunctionValue)
+	for _, file := range files {
+		ast.Inspect(file, func(node ast.Node) bool {
+			switch value := node.(type) {
+			case *ast.AssignStmt:
+				if len(value.Lhs) != len(value.Rhs) {
+					for _, lhs := range value.Lhs {
+						explainBoundaryRecordFunctionValue(values, explainBoundaryAssignedVar(lhs, info), nil, info)
+					}
+					return true
+				}
+				for index := range value.Lhs {
+					explainBoundaryRecordFunctionValue(values, explainBoundaryAssignedVar(value.Lhs[index], info), value.Rhs[index], info)
+				}
+			case *ast.ValueSpec:
+				for index, name := range value.Names {
+					variable, _ := info.Defs[name].(*types.Var)
+					if variable == nil || index >= len(value.Values) {
+						continue
+					}
+					explainBoundaryRecordFunctionValue(values, variable, value.Values[index], info)
+				}
+			case *ast.KeyValueExpr:
+				field, _ := explainBoundaryObject(value.Key, info).(*types.Var)
+				explainBoundaryRecordFunctionValue(values, field, value.Value, info)
+			case *ast.CallExpr:
+				function, _ := explainBoundaryObject(value.Fun, info).(*types.Func)
+				if function == nil {
+					break
+				}
+				signature := explainBoundarySignature(function.Type())
+				if signature == nil {
+					break
+				}
+				parameters := signature.Params()
+				for index, argument := range value.Args {
+					parameterIndex := index
+					if parameterIndex >= parameters.Len() {
+						if !signature.Variadic() {
+							break
+						}
+						parameterIndex = parameters.Len() - 1
+					}
+					if parameterIndex >= 0 {
+						explainBoundaryRecordFunctionValue(values, parameters.At(parameterIndex), argument, info)
+					}
+				}
+			}
+			return true
+		})
+	}
+	return values
+}
+
+func explainBoundaryAssignedVar(expr ast.Expr, info *types.Info) *types.Var {
+	if identifier, ok := expr.(*ast.Ident); ok {
+		object := info.Defs[identifier]
+		if object == nil {
+			object = info.Uses[identifier]
+		}
+		variable, _ := object.(*types.Var)
+		return variable
+	}
+	variable, _ := explainBoundaryObject(expr, info).(*types.Var)
+	return variable
+}
+
+func explainBoundaryRecordFunctionValue(values map[*types.Var]*explainBoundaryFunctionValue, variable *types.Var, expr ast.Expr, info *types.Info) {
+	if variable == nil {
+		return
+	}
+	if explainBoundarySignature(variable.Type()) == nil {
+		return
+	}
+	value := values[variable]
+	if value == nil {
+		value = &explainBoundaryFunctionValue{
+			targets:      make(map[*types.Func]struct{}),
+			literals:     make(map[*ast.FuncLit]struct{}),
+			dependencies: make(map[*types.Var]struct{}),
+		}
+		values[variable] = value
+	}
+	if expr == nil {
+		value.unsupported = true
+		return
+	}
+	if literal, ok := expr.(*ast.FuncLit); ok {
+		value.literals[literal] = struct{}{}
+		return
+	}
+	switch object := explainBoundaryObject(expr, info).(type) {
+	case *types.Func:
+		value.targets[object] = struct{}{}
+	case *types.Var:
+		value.dependencies[object] = struct{}{}
+	default:
+		value.unsupported = true
+	}
+}
+
+func explainBoundaryCalledFunctions(expr ast.Expr, info *types.Info, functions map[*types.Func]*explainBoundaryFunction, literals map[*ast.FuncLit]*explainBoundaryFunction, values map[*types.Var]*explainBoundaryFunctionValue) ([]*explainBoundaryFunction, string) {
+	object := explainBoundaryObject(expr, info)
+	if function, ok := object.(*types.Func); ok {
+		if called := functions[function]; called != nil {
+			return []*explainBoundaryFunction{called}, ""
+		}
+		return nil, ""
+	}
+	if _, builtin := object.(*types.Builtin); builtin {
+		return nil, ""
+	}
+	if _, conversion := object.(*types.TypeName); conversion {
+		return nil, ""
+	}
+	variable, ok := object.(*types.Var)
+	if !ok {
+		exprType := info.TypeOf(expr)
+		if explainBoundarySignature(exprType) != nil {
+			return nil, "calls unsupported dynamic function value"
+		}
+		return nil, ""
+	}
+	resolved, supported := explainBoundaryResolveFunctionValue(variable, values, make(map[*types.Var]bool))
+	if !supported {
+		return nil, "calls unsupported dynamic function value " + variable.Name()
+	}
+	called := make([]*explainBoundaryFunction, 0, len(resolved.targets)+len(resolved.literals))
+	for target := range resolved.targets {
+		if explainBoundaryForbiddenCall(target.Name()) {
+			return nil, "calls forbidden authorization/audit surface " + target.Name()
+		}
+		if fn := functions[target]; fn != nil {
+			called = append(called, fn)
 		}
 	}
-	fn, _ := object.(*types.Func)
-	return functions[fn]
+	for literal := range resolved.literals {
+		if fn := literals[literal]; fn != nil {
+			called = append(called, fn)
+		} else {
+			return nil, "calls unresolved function literal"
+		}
+	}
+	return called, ""
+}
+
+func explainBoundarySignature(candidate types.Type) *types.Signature {
+	if candidate == nil {
+		return nil
+	}
+	signature, _ := types.Unalias(candidate).Underlying().(*types.Signature)
+	return signature
+}
+
+func explainBoundaryResolveFunctionValue(variable *types.Var, values map[*types.Var]*explainBoundaryFunctionValue, visiting map[*types.Var]bool) (explainBoundaryResolvedFunctionValue, bool) {
+	value := values[variable]
+	if value == nil || value.unsupported || visiting[variable] {
+		return explainBoundaryResolvedFunctionValue{}, false
+	}
+	visiting[variable] = true
+	resolved := explainBoundaryResolvedFunctionValue{
+		targets:  make(map[*types.Func]struct{}, len(value.targets)),
+		literals: make(map[*ast.FuncLit]struct{}, len(value.literals)),
+	}
+	for target := range value.targets {
+		resolved.targets[target] = struct{}{}
+	}
+	for literal := range value.literals {
+		resolved.literals[literal] = struct{}{}
+	}
+	for dependency := range value.dependencies {
+		dependencyValue, supported := explainBoundaryResolveFunctionValue(dependency, values, visiting)
+		if !supported {
+			return explainBoundaryResolvedFunctionValue{}, false
+		}
+		for target := range dependencyValue.targets {
+			resolved.targets[target] = struct{}{}
+		}
+		for literal := range dependencyValue.literals {
+			resolved.literals[literal] = struct{}{}
+		}
+	}
+	delete(visiting, variable)
+	return resolved, len(resolved.targets)+len(resolved.literals) > 0
+}
+
+func explainBoundaryObject(expr ast.Expr, info *types.Info) types.Object {
+	switch value := expr.(type) {
+	case *ast.Ident:
+		return info.Uses[value]
+	case *ast.SelectorExpr:
+		if selection := info.Selections[value]; selection != nil {
+			return selection.Obj()
+		}
+		return info.Uses[value.Sel]
+	case *ast.ParenExpr:
+		return explainBoundaryObject(value.X, info)
+	case *ast.IndexExpr:
+		return explainBoundaryObject(value.X, info)
+	case *ast.IndexListExpr:
+		return explainBoundaryObject(value.X, info)
+	default:
+		return nil
+	}
+}
+
+func explainBoundaryHasAuthzRequestType(candidate, authzRequest types.Type) bool {
+	if candidate == nil || authzRequest == nil {
+		return false
+	}
+	candidate = types.Unalias(candidate)
+	for {
+		pointer, ok := candidate.(*types.Pointer)
+		if !ok {
+			break
+		}
+		candidate = types.Unalias(pointer.Elem())
+	}
+	return types.Identical(candidate, types.Unalias(authzRequest))
 }
 
 func explainBoundaryExprName(expr ast.Expr) string {
