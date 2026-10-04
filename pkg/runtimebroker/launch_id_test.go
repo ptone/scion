@@ -2,10 +2,13 @@ package runtimebroker
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // TestLaunchIDRoundTrip covers a launch id on synchronous create, start and
@@ -74,3 +77,44 @@ func TestLaunchIDRoundTrip(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestLaunchOutcomeNotActed: a start or restart error written before any
+// container action carries the not_acted outcome; one written after the
+// broker began acting does not, and neither does a success.
+func TestLaunchOutcomeNotActed(t *testing.T) {
+	paths := map[string]string{
+		"start":   "/api/v1/agents/test-agent-1/start",
+		"restart": "/api/v1/agents/test-agent-1/restart",
+	}
+	cases := []struct {
+		name         string
+		setup        func(*mockManager)
+		wantError    bool
+		wantNotActed bool
+	}{
+		{name: "lookup fails before any action", setup: func(m *mockManager) { m.listErr = errors.New("list failed") }, wantError: true, wantNotActed: true},
+		{name: "start fails", setup: func(m *mockManager) { m.startErr = errors.New("start failed") }, wantError: true},
+		{name: "success", setup: func(*mockManager) {}},
+	}
+	for op, path := range paths {
+		for _, tc := range cases {
+			t.Run(op+"/"+tc.name, func(t *testing.T) {
+				srv := newTestServer(t)
+				tc.setup(srv.manager.(*mockManager))
+
+				req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"launchId":"launch-new"}`))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(w, req)
+
+				if gotError := w.Code >= 400; gotError != tc.wantError {
+					t.Fatalf("status = %d, want error %v: %s", w.Code, tc.wantError, w.Body.String())
+				}
+				got := w.Header().Get(api.HeaderLaunchOutcome)
+				if want := map[bool]string{true: api.LaunchOutcomeNotActed}[tc.wantNotActed]; got != want {
+					t.Errorf("%s = %q, want %q (status %d)", api.HeaderLaunchOutcome, got, want, w.Code)
+				}
+			})
+		}
+	}
+}

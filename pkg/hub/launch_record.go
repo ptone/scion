@@ -34,8 +34,15 @@ import (
 //
 // A dispatch handed to the owning hub instance carries the proposed id in its
 // dispatch args, and the owner sends that same id rather than recording a
-// new one. When the hub gets no answer (an error or a timeout), the row keeps
-// the proposed id; the next start records a fresh one.
+// new one.
+//
+// When a start or restart fails, the row keeps the proposed id unless the
+// failure is confirmed as not acted on (launchNotActed) and this call
+// recorded the id. Then no broker acted on the proposed id and no dispatch
+// row carries it, so the hub sets the row back to the id it held before,
+// again only while the row still holds the proposed id. A failure whose
+// outcome is unknown keeps the proposed id: the broker may have acted on it,
+// and the next start records a fresh one.
 
 // maxRestartResponseBytes bounds how much of a restart response the hub reads.
 const maxRestartResponseBytes = 1 << 20
@@ -56,6 +63,19 @@ func dispatchLaunchIDFromContext(ctx context.Context) string {
 	return id
 }
 
+// errDispatchNotHandedOff marks a cross-node lifecycle op that failed before
+// its dispatch row was written: no hub instance will send it.
+var errDispatchNotHandedOff = errors.New("dispatch not handed off")
+
+// launchProposal is the launch id a start or restart sends. recorded is true
+// when this call recorded id, with previous the id the row held before; it
+// is false for a deferred dispatch reusing the id it was proposed with.
+type launchProposal struct {
+	id       string
+	previous string
+	recorded bool
+}
+
 // proposeLaunchID returns the launch id to send with a start or restart of
 // kind. A deferred dispatch reuses the id it was proposed with; otherwise a
 // new id is recorded on the agent row.
@@ -65,24 +85,24 @@ func dispatchLaunchIDFromContext(ctx context.Context) string {
 // store.ErrLaunchInFlight and the caller makes no broker call. Any other
 // recording failure lets the dispatch go ahead without an id, exactly as
 // before launch ids existed.
-func (d *HTTPAgentDispatcher) proposeLaunchID(ctx context.Context, agent *store.Agent, kind string) (string, error) {
+func (d *HTTPAgentDispatcher) proposeLaunchID(ctx context.Context, agent *store.Agent, kind string) (launchProposal, error) {
 	if id := dispatchLaunchIDFromContext(ctx); id != "" {
-		return id, nil
+		return launchProposal{id: id}, nil
 	}
 	if d.store == nil {
-		return "", nil
+		return launchProposal{}, nil
 	}
-	id, err := d.store.RecordLaunch(ctx, agent.ID, kind)
+	id, previous, err := d.store.RecordLaunch(ctx, agent.ID, kind)
 	if errors.Is(err, store.ErrLaunchInFlight) {
-		return "", err
+		return launchProposal{}, err
 	}
 	if err != nil {
 		d.log.Warn("launch id: record failed; dispatching without one",
 			"agent_id", agent.ID, "kind", kind, "error", err)
-		return "", nil
+		return launchProposal{}, nil
 	}
 	agent.LaunchID = id
-	return id, nil
+	return launchProposal{id: id, previous: previous, recorded: true}, nil
 }
 
 // adoptEffectiveLaunchID records the id the broker reports for the running
@@ -111,14 +131,45 @@ func (d *HTTPAgentDispatcher) adoptEffectiveLaunchID(ctx context.Context, agent 
 	agent.LaunchID = effective
 }
 
-// logUnansweredLaunch notes a start or restart whose outcome the hub does not
-// know. The row keeps the proposed id: the broker may have acted on it.
-func (d *HTTPAgentDispatcher) logUnansweredLaunch(agent *store.Agent, op, proposed string, err error) {
-	if proposed == "" {
+// launchNotActed reports whether a failed start or restart is confirmed as
+// not acted on: the broker marked its error as written before any container
+// action, or the op failed before its dispatch row was written. Every other
+// failure, including timeouts, transport errors and broker errors without
+// the marker, is an unknown outcome.
+func launchNotActed(err error) bool {
+	if errors.Is(err, errDispatchNotHandedOff) {
+		return true
+	}
+	var statusErr *brokerStatusError
+	return errors.As(err, &statusErr) && statusErr.NotActed
+}
+
+// settleFailedLaunch handles the launch id of a failed start or restart. A
+// failure confirmed as not acted on sets the row back to the previous id
+// when this call recorded the proposal and the row still holds it. Every
+// other failure keeps the proposed id: the broker may have acted on it.
+func (d *HTTPAgentDispatcher) settleFailedLaunch(ctx context.Context, agent *store.Agent, op string, p launchProposal, err error) {
+	if p.id == "" {
 		return
 	}
-	d.log.Info("launch id: dispatch failed; keeping the proposed id",
-		"agent_id", agent.ID, "op", op, "launch_id", proposed, "error", err)
+	if !p.recorded || !launchNotActed(err) || d.store == nil {
+		d.log.Info("launch id: dispatch failed; keeping the proposed id",
+			"agent_id", agent.ID, "op", op, "launch_id", p.id, "error", err)
+		return
+	}
+	reverted, adoptErr := d.store.AdoptLaunchID(context.WithoutCancel(ctx), agent.ID, p.id, p.previous)
+	switch {
+	case adoptErr != nil:
+		d.log.Warn("launch id: restoring the previous id failed",
+			"agent_id", agent.ID, "op", op, "launch_id", p.id, "previous", p.previous, "error", adoptErr)
+	case !reverted:
+		d.log.Info("launch id: proposal superseded; previous id not restored",
+			"agent_id", agent.ID, "op", op, "launch_id", p.id, "previous", p.previous)
+	default:
+		agent.LaunchID = p.previous
+		d.log.Info("launch id: dispatch not acted on; previous id restored",
+			"agent_id", agent.ID, "op", op, "launch_id", p.id, "previous", p.previous, "error", err)
+	}
 }
 
 // decodeRestartResponse parses a restart response body. The broker has

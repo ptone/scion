@@ -168,7 +168,7 @@ const maxBrokerErrorBodyBytes = 64 << 10
 
 func brokerHTTPError(resp *http.Response) error {
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBrokerErrorBodyBytes))
-	return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(respBody), RetryAfter: resp.Header.Get("Retry-After")}
+	return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(respBody), RetryAfter: resp.Header.Get("Retry-After"), NotActed: resp.Header.Get(api.HeaderLaunchOutcome) == api.LaunchOutcomeNotActed}
 }
 
 func (t *brokerHTTPTransport) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {

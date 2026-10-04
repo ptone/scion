@@ -1993,6 +1993,9 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
+	// Until the first container action, an error response tells the hub the
+	// request was not acted on (api.HeaderLaunchOutcome).
+	w.Header().Set(api.HeaderLaunchOutcome, api.LaunchOutcomeNotActed)
 
 	// ProjectID reaches filesystem paths further on (the project-marker
 	// block in buildStartContext, and worktree provisioning); an empty
@@ -2247,6 +2250,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
+	w.Header().Del(api.HeaderLaunchOutcome)
 	agentInfo, err := mgr.Start(ctx, opts)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -2582,6 +2586,9 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 
 func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
+	// Until the first container action, an error response tells the hub the
+	// request was not acted on (api.HeaderLaunchOutcome).
+	w.Header().Set(api.HeaderLaunchOutcome, api.LaunchOutcomeNotActed)
 
 	// Read optional resolvedEnv from request body (hub sends fresh auth token)
 	var restartReq struct {
@@ -2693,6 +2700,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		s.writeRuntimeOpError(w, ctx, "restart agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
+	w.Header().Del(api.HeaderLaunchOutcome)
 	// An empty target means the agent isn't present in this project — skip the
 	// stop (don't risk stopping a same-slug agent in another project) and let
 	// the start below create it.

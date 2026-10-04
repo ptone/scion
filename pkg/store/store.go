@@ -479,9 +479,10 @@ type AgentStore interface {
 	// selects it; launch_error is cleared and the phase is not touched. An
 	// active launch that has not reached its deadline is in flight: the row
 	// is left unchanged and ErrLaunchInFlight is returned. Any other previous
-	// launch is superseded. Returns ErrNotFound if the agent doesn't exist.
-	// Does not bump state_version.
-	RecordLaunch(ctx context.Context, agentID, kind string) (launchID string, err error)
+	// launch is superseded. previous is the launch_id the row held before,
+	// read in the same transaction. Returns ErrNotFound if the agent doesn't
+	// exist. Does not bump state_version.
+	RecordLaunch(ctx context.Context, agentID, kind string) (launchID, previous string, err error)
 
 	// AdoptLaunchID sets launch_id to effective if it is still proposed,
 	// and reports whether it did. A runtime broker that reuses an existing

@@ -2935,11 +2935,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 	// Record the launch id last, right before the send, so no earlier
 	// failure leaves an id the broker never saw.
-	launchID, err := d.proposeLaunchID(ctx, agent, store.LaunchKindStart)
+	launch, err := d.proposeLaunchID(ctx, agent, store.LaunchKindStart)
 	if err != nil {
 		return fmt.Errorf("DispatchAgentStart: %w", err)
 	}
-	extras.LaunchID = launchID
+	extras.LaunchID = launch.id
 
 	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, extras)
 	if isHashMismatchError(err) {
@@ -2962,11 +2962,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		// sent is simply left alone — not revoked, not reused — and stays
 		// valid until its own TTL expires.
 		revokeArmed = false
-		return d.deferredStart(ctx, agent, &StartDispatchArgs{
+		err := d.deferredStart(ctx, agent, &StartDispatchArgs{
 			Task:     task,
 			Resume:   resume,
 			LaunchID: extras.LaunchID,
 		})
+		if err != nil {
+			d.settleFailedLaunch(ctx, agent, "start", launch, err)
+		}
+		return err
 	}
 	if err != nil && !isConfirmedStartNotActedOnError(err) {
 		// The failure does not fall into one of the known-safe cases (the
@@ -2981,7 +2985,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		revokeArmed = false
 	}
 	if err != nil {
-		d.logUnansweredLaunch(agent, "start", extras.LaunchID, err)
+		d.settleFailedLaunch(ctx, agent, "start", launch, err)
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
@@ -3060,18 +3064,22 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
-	launchID, err := d.proposeLaunchID(ctx, agent, store.LaunchKindRestart)
+	launch, err := d.proposeLaunchID(ctx, agent, store.LaunchKindRestart)
 	if err != nil {
 		return fmt.Errorf("DispatchAgentRestart: %w", err)
 	}
-	extras.LaunchID = launchID
+	extras.LaunchID = launch.id
 
 	resp, err := d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	if errors.Is(err, ErrLifecycleDeferred) {
-		return d.deferredRestart(ctx, agent, extras.LaunchID)
+		err := d.deferredRestart(ctx, agent, extras.LaunchID)
+		if err != nil {
+			d.settleFailedLaunch(ctx, agent, "restart", launch, err)
+		}
+		return err
 	}
 	if err != nil {
-		d.logUnansweredLaunch(agent, "restart", extras.LaunchID, err)
+		d.settleFailedLaunch(ctx, agent, "restart", launch, err)
 		return err
 	}
 	d.adoptEffectiveLaunchID(ctx, agent, extras.LaunchID, resp)
@@ -3515,7 +3523,7 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	terminal func(string) bool,
 ) error {
 	if d.events == nil || d.commandBus == nil {
-		return fmt.Errorf("cross-node dispatch not available: events or command bus not configured")
+		return fmt.Errorf("cross-node dispatch not available: events or command bus not configured: %w", errDispatchNotHandedOff)
 	}
 
 	// 1. Subscribe BEFORE writing intent so we don't miss events.
@@ -3525,7 +3533,7 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	argsJSON, err := MarshalDispatchArgs(args)
 	if err != nil {
 		unsub()
-		return fmt.Errorf("marshal dispatch args: %w", err)
+		return fmt.Errorf("marshal dispatch args: %w: %w", errDispatchNotHandedOff, err)
 	}
 
 	dispatch := &store.BrokerDispatch{
@@ -3540,7 +3548,7 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	setBrokerDispatchInitiator(ctx, dispatch)
 	if err := d.store.InsertBrokerDispatch(ctx, dispatch); err != nil {
 		unsub()
-		return fmt.Errorf("insert dispatch intent: %w", err)
+		return fmt.Errorf("insert dispatch intent: %w: %w", errDispatchNotHandedOff, err)
 	}
 	if rec := d.dispatchMetrics; rec != nil {
 		rec.IncPublished(ctx, 1, attribute.String("op", op))

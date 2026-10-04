@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -48,6 +49,9 @@ type launchIDClient struct {
 	deferRemote bool
 	resp        func(sent string) *RemoteAgentResponse
 	err         error
+	// beforeAnswer, when set, runs after the send is recorded and before
+	// the answer.
+	beforeAnswer func()
 
 	sent      []string
 	rowAtSend []string
@@ -63,6 +67,9 @@ func (c *launchIDClient) answer(ctx context.Context, brokerID string, extras Sta
 		row = a.LaunchID
 	}
 	c.rowAtSend = append(c.rowAtSend, row)
+	if c.beforeAnswer != nil {
+		c.beforeAnswer()
+	}
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -117,7 +124,7 @@ func TestDispatchLaunchID(t *testing.T) {
 		resp    func(string) *RemoteAgentResponse
 		err     error
 		wantErr bool
-		wantRow string // "proposed" means the id that was sent
+		wantRow string // "proposed" means the id that was sent; "previous" the id the row held before
 	}{
 		{name: "new container", resp: echoEffective, wantRow: "proposed"},
 		{name: "reused labelled container", resp: effective(reusedID), wantRow: reusedID},
@@ -126,6 +133,12 @@ func TestDispatchLaunchID(t *testing.T) {
 		{name: "no response body", wantRow: "proposed"},
 		{name: "dispatch timeout", err: context.DeadlineExceeded, wantErr: true, wantRow: "proposed"},
 		{name: "dispatch refused", err: errors.New("broker unavailable"), wantErr: true, wantRow: "proposed"},
+		{name: "dial error", err: &net.OpError{Op: "dial", Err: errors.New("connection refused")}, wantErr: true, wantRow: "proposed"},
+		{name: "broker 4xx without marker", err: &brokerStatusError{StatusCode: http.StatusConflict}, wantErr: true, wantRow: "proposed"},
+		{name: "broker coded 500 without marker", err: &brokerStatusError{StatusCode: http.StatusInternalServerError, Body: `{"error":{"code":"runtime_error"}}`}, wantErr: true, wantRow: "proposed"},
+		{name: "gateway 502", err: &brokerStatusError{StatusCode: http.StatusBadGateway}, wantErr: true, wantRow: "proposed"},
+		{name: "broker not acted, 4xx", err: &brokerStatusError{StatusCode: http.StatusBadRequest, NotActed: true}, wantErr: true, wantRow: "previous"},
+		{name: "broker not acted, 503", err: &brokerStatusError{StatusCode: http.StatusServiceUnavailable, NotActed: true}, wantErr: true, wantRow: "previous"},
 	}
 	for _, op := range []string{"start", "restart"} {
 		for _, tt := range tests {
@@ -133,10 +146,12 @@ func TestDispatchLaunchID(t *testing.T) {
 				ctx := context.Background()
 				cs := entadapter.NewCompositeStore(enttest.NewClient(t))
 				agent := seedAgentWithBrokerID(t, cs, uuid.NewString())
+				previous, _, err := cs.RecordLaunch(ctx, agent.ID, store.LaunchKindStart)
+				require.NoError(t, err)
 				client := &launchIDClient{store: cs, agentID: agent.ID, resp: tt.resp, err: tt.err}
 				d := NewHTTPAgentDispatcherWithClient(cs, client, false, slog.Default())
 
-				err := dispatchOp(ctx, d, op, agent)
+				err = dispatchOp(ctx, d, op, agent)
 				if tt.wantErr {
 					require.Error(t, err)
 				} else {
@@ -149,9 +164,9 @@ func TestDispatchLaunchID(t *testing.T) {
 				require.NoError(t, perr, "a launch id is sent")
 				assert.Equal(t, proposed, client.rowAtSend[0], "the id is recorded before the send")
 
-				want := tt.wantRow
-				if want == "proposed" {
-					want = proposed
+				want := map[string]string{"proposed": proposed, "previous": previous}[tt.wantRow]
+				if want == "" {
+					want = tt.wantRow
 				}
 				row := launchRow(t, cs, agent.ID)
 				assert.Equal(t, want, row.LaunchID)
@@ -164,6 +179,135 @@ func TestDispatchLaunchID(t *testing.T) {
 				assert.Equal(t, store.LaunchEndReasonRecordOnly, row.LaunchEndReason)
 			})
 		}
+	}
+}
+
+// TestDispatchLaunchIDNotActedSuperseded: restoring the previous id is a CAS
+// on the proposed id, so a launch recorded while the send was out is kept.
+func TestDispatchLaunchIDNotActedSuperseded(t *testing.T) {
+	for _, op := range []string{"start", "restart"} {
+		t.Run(op, func(t *testing.T) {
+			ctx := context.Background()
+			cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+			agent := seedAgentWithBrokerID(t, cs, uuid.NewString())
+			var newer string
+			client := &launchIDClient{
+				store: cs, agentID: agent.ID,
+				err: &brokerStatusError{StatusCode: http.StatusBadRequest, NotActed: true},
+				beforeAnswer: func() {
+					id, _, err := cs.RecordLaunch(ctx, agent.ID, store.LaunchKindStart)
+					require.NoError(t, err)
+					newer = id
+				},
+			}
+			d := NewHTTPAgentDispatcherWithClient(cs, client, false, slog.Default())
+
+			require.Error(t, dispatchOp(ctx, d, op, agent))
+			assert.Equal(t, newer, launchRow(t, cs, agent.ID).LaunchID, "the newer launch is not overwritten")
+		})
+	}
+}
+
+// insertFailStore fails every dispatch row insert.
+type insertFailStore struct{ store.Store }
+
+func (insertFailStore) InsertBrokerDispatch(context.Context, *store.BrokerDispatch) error {
+	return errors.New("insert failed")
+}
+
+// TestDispatchLaunchIDNotHandedOff: a start or restart for a broker owned by
+// another hub instance that fails before its dispatch row is written was
+// never given to anyone, so the previous id is restored. With no row, a
+// later reconcile pass has nothing to send.
+func TestDispatchLaunchIDNotHandedOff(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(cs store.Store, d *HTTPAgentDispatcher) store.Store
+	}{
+		{
+			name:  "cross-node dispatch unavailable",
+			setup: func(cs store.Store, _ *HTTPAgentDispatcher) store.Store { return cs },
+		},
+		{
+			name: "dispatch row insert fails",
+			setup: func(cs store.Store, d *HTTPAgentDispatcher) store.Store {
+				events := NewChannelEventPublisher()
+				t.Cleanup(events.Close)
+				d.SetCrossNodeDeps(events, NoopCommandBus{})
+				return insertFailStore{cs}
+			},
+		},
+	}
+	for _, op := range []string{"start", "restart"} {
+		for _, tt := range tests {
+			t.Run(op+"/"+tt.name, func(t *testing.T) {
+				ctx := context.Background()
+				cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+				agent := seedAgentWithBrokerID(t, cs, uuid.NewString())
+				previous, _, err := cs.RecordLaunch(ctx, agent.ID, store.LaunchKindStart)
+				require.NoError(t, err)
+
+				client := &launchIDClient{store: cs, agentID: agent.ID, deferRemote: true, localBroker: "elsewhere"}
+				d := NewHTTPAgentDispatcherWithClient(cs, client, false, slog.Default())
+				d.store = tt.setup(cs, d)
+
+				err = dispatchOp(ctx, d, op, agent)
+				require.ErrorIs(t, err, errDispatchNotHandedOff)
+				assert.Equal(t, previous, launchRow(t, cs, agent.ID).LaunchID, "the previous id is restored")
+				assert.Equal(t, previous, agent.LaunchID)
+
+				pending, err := cs.ListPendingDispatch(ctx, agent.RuntimeBrokerID)
+				require.NoError(t, err)
+				assert.Empty(t, pending, "no dispatch row carries the proposed id")
+
+				owner := &launchIDClient{store: cs, agentID: agent.ID, resp: echoEffective}
+				srv := &Server{store: cs, instanceID: "hub-owner", agentLifecycleLog: slog.Default()}
+				srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(cs, owner, false, slog.Default()))
+				srv.execDispatch = srv.executeDispatch
+				srv.reconcileBroker(ctx, agent.RuntimeBrokerID)
+				assert.Empty(t, owner.sent, "nothing is replayed after the restore")
+				assert.Equal(t, previous, launchRow(t, cs, agent.ID).LaunchID)
+			})
+		}
+	}
+}
+
+// TestDeferredLaunchIDReplayNotActed: a replayed start or restart did not
+// record its id, so even a confirmed non-action keeps it; the dispatch row
+// fails and is not sent again.
+func TestDeferredLaunchIDReplayNotActed(t *testing.T) {
+	for _, op := range []string{"start", "restart"} {
+		t.Run(op, func(t *testing.T) {
+			ctx := context.Background()
+			cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+			agent := seedAgentWithBrokerID(t, cs, uuid.NewString())
+			events := NewChannelEventPublisher()
+			t.Cleanup(events.Close)
+
+			waitCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			originator := &launchIDClient{store: cs, agentID: agent.ID, deferRemote: true, localBroker: "elsewhere"}
+			od := NewHTTPAgentDispatcherWithClient(cs, originator, false, slog.Default())
+			od.SetCrossNodeDeps(events, cancelOnSignalBus{cancel: cancel})
+			require.Error(t, dispatchOp(waitCtx, od, op, agent))
+			proposed := launchRow(t, cs, agent.ID).LaunchID
+			pending, err := cs.ListPendingDispatch(ctx, agent.RuntimeBrokerID)
+			require.NoError(t, err)
+			require.Len(t, pending, 1)
+
+			owner := &launchIDClient{store: cs, agentID: agent.ID, err: &brokerStatusError{StatusCode: http.StatusBadRequest, NotActed: true}}
+			srv := &Server{store: cs, instanceID: "hub-owner", agentLifecycleLog: slog.Default(), events: events}
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(cs, owner, false, slog.Default()))
+			srv.execDispatch = srv.executeDispatch
+			srv.reconcileBroker(ctx, agent.RuntimeBrokerID)
+			srv.reconcileBroker(ctx, agent.RuntimeBrokerID)
+
+			assert.Equal(t, []string{proposed}, owner.sent, "sent once, not again")
+			assert.Equal(t, proposed, launchRow(t, cs, agent.ID).LaunchID, "a replay keeps the proposed id")
+			row, err := cs.GetBrokerDispatch(ctx, pending[0].ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.DispatchStateFailed, row.State)
+		})
 	}
 }
 
@@ -314,9 +458,9 @@ func TestDeferredLaunchIDReplaySuperseded(t *testing.T) {
 	ctx := context.Background()
 	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
 	agent := seedAgentWithBrokerID(t, cs, uuid.NewString())
-	stale, err := cs.RecordLaunch(ctx, agent.ID, store.LaunchKindStart)
+	stale, _, err := cs.RecordLaunch(ctx, agent.ID, store.LaunchKindStart)
 	require.NoError(t, err)
-	current, err := cs.RecordLaunch(ctx, agent.ID, store.LaunchKindStart)
+	current, _, err := cs.RecordLaunch(ctx, agent.ID, store.LaunchKindStart)
 	require.NoError(t, err)
 
 	client := &launchIDClient{store: cs, agentID: agent.ID, resp: effective("0b7d4a52-0000-4000-8000-00000000000c")}

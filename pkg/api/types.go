@@ -580,6 +580,16 @@ type FileMapping struct {
 // the launch id a container was started with.
 const LabelLaunchID = "scion.launch_id"
 
+// HeaderLaunchOutcome is the runtime broker's response header on a failed
+// start or restart. LaunchOutcomeNotActed means the broker wrote the error
+// before any container action for the request: it did not stop, start or
+// reuse a container. Errors written after that point, and errors from
+// anything in front of the broker, never carry it.
+const (
+	HeaderLaunchOutcome   = "X-Scion-Launch-Outcome"
+	LaunchOutcomeNotActed = "not_acted"
+)
+
 // LaunchIDFromLabels returns the LabelLaunchID value in labels, also
 // accepting the form a runtime that rewrites label keys (Cloud Run: dots to
 // underscores) lists it under.

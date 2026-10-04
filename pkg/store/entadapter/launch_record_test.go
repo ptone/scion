@@ -21,7 +21,7 @@ func recordTestAgent(t *testing.T, ctx context.Context, s *AgentStore, projectID
 	a := makeAgent(projectID, slug)
 	a.Phase = phase
 	require.NoError(t, s.CreateAgent(ctx, a))
-	id, err := s.RecordLaunch(ctx, a.ID, kind)
+	id, _, err := s.RecordLaunch(ctx, a.ID, kind)
 	require.NoError(t, err)
 	return a, id
 }
@@ -57,6 +57,11 @@ func TestRecordLaunch(t *testing.T) {
 			assert.False(t, got.IsInFlight())
 			assert.False(t, got.IsIncompleteCreate())
 			assert.Nil(t, store.ComputeAgentLaunch(got, time.Now()), "a record-only launch is not shown to clients")
+
+			next, previous, err := s.RecordLaunch(ctx, a.ID, tt.kind)
+			require.NoError(t, err)
+			assert.NotEqual(t, id, next)
+			assert.Equal(t, id, previous, "the next record reports the id it replaced")
 		})
 	}
 }
@@ -65,9 +70,9 @@ func TestRecordLaunchRejectsUnknownKind(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	a := createLaunchableAgent(t, ctx, s, projectID, "rec-kind")
-	_, err := s.RecordLaunch(ctx, a.ID, "resume")
+	_, _, err := s.RecordLaunch(ctx, a.ID, "resume")
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
-	_, err = s.RecordLaunch(ctx, uuid.NewString(), store.LaunchKindStart)
+	_, _, err = s.RecordLaunch(ctx, uuid.NewString(), store.LaunchKindStart)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
@@ -113,7 +118,7 @@ func TestRecordLaunchActiveLaunch(t *testing.T) {
 			setAgentLaunchError(t, ctx, s, a.ID, store.LaunchErrorAgentError)
 			tt.deadline(t, ctx, s, a.ID)
 
-			id, err := s.RecordLaunch(ctx, a.ID, store.LaunchKindStart)
+			id, previous, err := s.RecordLaunch(ctx, a.ID, store.LaunchKindStart)
 			got, gerr := s.GetAgent(ctx, a.ID)
 			require.NoError(t, gerr)
 			ans, _, rerr := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
@@ -124,6 +129,7 @@ func TestRecordLaunchActiveLaunch(t *testing.T) {
 			if tt.refused {
 				require.ErrorIs(t, err, store.ErrLaunchInFlight)
 				assert.Empty(t, id)
+				assert.Empty(t, previous)
 				assert.Equal(t, old, got.LaunchID, "the in-flight launch keeps its id")
 				assert.Equal(t, store.LaunchStateActive, got.LaunchState)
 				assert.Equal(t, store.LaunchKindCreate, got.LaunchKind)
@@ -133,6 +139,7 @@ func TestRecordLaunchActiveLaunch(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.NotEqual(t, old, id)
+			assert.Equal(t, old, previous)
 			assert.Equal(t, id, got.LaunchID)
 			assert.Empty(t, got.LaunchError)
 			assert.Equal(t, store.LaunchStateEnded, got.LaunchState)

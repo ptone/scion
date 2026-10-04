@@ -412,7 +412,7 @@ func (c *ControlChannelBrokerClient) CreateAgentWithGather(ctx context.Context, 
 
 	if resp.StatusCode >= 400 {
 		// Keep the broker's status for the hub handler to relay (#2546 R2).
-		return nil, nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
+		return nil, nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"], NotActed: resp.Headers[api.HeaderLaunchOutcome] == api.LaunchOutcomeNotActed}
 	}
 
 	if resp.StatusCode == http.StatusAccepted {
@@ -626,7 +626,7 @@ func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, me
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
+		return nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"], NotActed: resp.Headers[api.HeaderLaunchOutcome] == api.LaunchOutcomeNotActed}
 	}
 
 	return resp, nil
@@ -640,6 +640,9 @@ type brokerStatusError struct {
 	StatusCode int
 	Body       string
 	RetryAfter string
+	// NotActed is set when the broker marked the error as written before
+	// any container action (api.HeaderLaunchOutcome).
+	NotActed bool
 }
 
 func (e *brokerStatusError) Error() string {

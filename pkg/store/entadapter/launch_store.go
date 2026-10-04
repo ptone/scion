@@ -238,17 +238,18 @@ func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, time
 }
 
 // RecordLaunch implements store.AgentStore.RecordLaunch.
-func (s *AgentStore) RecordLaunch(ctx context.Context, agentID, kind string) (string, error) {
+func (s *AgentStore) RecordLaunch(ctx context.Context, agentID, kind string) (string, string, error) {
 	switch kind {
 	case store.LaunchKindCreate, store.LaunchKindStart, store.LaunchKindRestart:
 	default:
-		return "", fmt.Errorf("%w: RecordLaunch kind %q", store.ErrInvalidInput, kind)
+		return "", "", fmt.Errorf("%w: RecordLaunch kind %q", store.ErrInvalidInput, kind)
 	}
 	uid, err := parseUUID(agentID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	newID := uuid.NewString()
+	var previous string
 	err = s.launchWrite(ctx, uid, "RecordLaunch", func(current *ent.Agent, upd *ent.AgentUpdateOne, now time.Time) (bool, error) {
 		// An active launch that has not reached its deadline is still in
 		// flight; recording over it would end it silently. Past its
@@ -258,6 +259,7 @@ func (s *AgentStore) RecordLaunch(ctx context.Context, agentID, kind string) (st
 			(current.LaunchDeadline == nil || now.Before(*current.LaunchDeadline)) {
 			return false, fmt.Errorf("%w: agent %s", store.ErrLaunchInFlight, agentID)
 		}
+		previous = current.LaunchID
 		upd.SetLaunchID(newID).
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonRecordOnly).
@@ -270,9 +272,9 @@ func (s *AgentStore) RecordLaunch(ctx context.Context, agentID, kind string) (st
 		return true, nil
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return newID, nil
+	return newID, previous, nil
 }
 
 // AdoptLaunchID implements store.AgentStore.AdoptLaunchID.
