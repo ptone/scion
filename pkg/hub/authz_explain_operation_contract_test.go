@@ -469,6 +469,110 @@ func TestEffectivePermissionIntrospectionBoundaryTypeErrorsFailClosed(t *testing
 	})
 }
 
+func TestExplainBoundaryForbiddenDataResolverMemoizesSharedDAG(t *testing.T) {
+	flow := make(explainBoundaryDataFlow)
+	previous := []types.Object{
+		explainBoundaryTestDataObject("leafA", nil),
+		explainBoundaryTestDataObject("leafB", nil),
+	}
+	flow[previous[0]] = nil
+	flow[previous[1]] = nil
+	for level := 0; level < 20; level++ {
+		next := []types.Object{
+			explainBoundaryTestDataObject(fmt.Sprintf("left%d", level), nil),
+			explainBoundaryTestDataObject(fmt.Sprintf("right%d", level), nil),
+		}
+		for _, object := range next {
+			flow[object] = map[types.Object]struct{}{previous[0]: {}, previous[1]: {}}
+		}
+		previous = next
+	}
+	roots := []types.Object{
+		explainBoundaryTestDataObject("rootA", nil),
+		explainBoundaryTestDataObject("rootB", nil),
+	}
+	for _, root := range roots {
+		flow[root] = map[types.Object]struct{}{previous[0]: {}, previous[1]: {}}
+	}
+
+	resolver := newExplainBoundaryForbiddenDataResolver(flow)
+	for _, root := range roots {
+		result := resolver.resolve(root)
+		assert.True(t, result.complete)
+		assert.Nil(t, result.origin)
+	}
+	assert.Equal(t, len(flow), resolver.resolveAttempts,
+		"shared nodes must be resolved once, independent of the number of paths and expression roots")
+	assert.Len(t, resolver.resolved, len(flow))
+}
+
+func TestExplainBoundaryForbiddenDataResolverFailsClosed(t *testing.T) {
+	t.Run("dependency cycle", func(t *testing.T) {
+		left := explainBoundaryTestDataObject("left", nil)
+		right := explainBoundaryTestDataObject("right", nil)
+		resolver := newExplainBoundaryForbiddenDataResolver(explainBoundaryDataFlow{
+			left:  {right: {}},
+			right: {left: {}},
+		})
+
+		result := resolver.resolve(left)
+		assert.False(t, result.complete)
+		assert.Nil(t, result.origin)
+		assert.Empty(t, resolver.resolved, "an in-progress cycle must never become a completed cached result")
+	})
+
+	t.Run("forbidden origin through shared DAG", func(t *testing.T) {
+		operationPackage := types.NewPackage("github.com/GoogleCloudPlatform/scion/pkg/hub/authzop", "authzop")
+		origin := explainBoundaryTestDataObject("Catalog", operationPackage)
+		require.Nil(t, operationPackage.Scope().Insert(origin))
+		shared := explainBoundaryTestDataObject("shared", nil)
+		left := explainBoundaryTestDataObject("left", nil)
+		right := explainBoundaryTestDataObject("right", nil)
+		roots := []types.Object{
+			explainBoundaryTestDataObject("rootA", nil),
+			explainBoundaryTestDataObject("rootB", nil),
+		}
+		flow := explainBoundaryDataFlow{
+			origin: nil,
+			shared: {origin: {}},
+			left:   {shared: {}},
+			right:  {shared: {}},
+		}
+		for _, root := range roots {
+			flow[root] = map[types.Object]struct{}{left: {}, right: {}}
+		}
+
+		resolver := newExplainBoundaryForbiddenDataResolver(flow)
+		for _, root := range roots {
+			result := resolver.resolve(root)
+			assert.True(t, result.complete)
+			assert.Same(t, origin, result.origin)
+		}
+		assert.Equal(t, len(flow), resolver.resolveAttempts)
+	})
+
+	t.Run("incomplete dependency is never cached as success", func(t *testing.T) {
+		object := explainBoundaryTestDataObject("incomplete", nil)
+		resolver := newExplainBoundaryForbiddenDataResolver(explainBoundaryDataFlow{
+			object: {nil: {}},
+		})
+
+		first := resolver.resolve(object)
+		second := resolver.resolve(object)
+		assert.False(t, first.complete)
+		assert.False(t, second.complete)
+		assert.Nil(t, first.origin)
+		assert.Nil(t, second.origin)
+		assert.NotContains(t, resolver.resolved, object)
+		assert.Equal(t, 2, resolver.resolveAttempts,
+			"an incomplete result must be retried and must never be read from the completed-result cache")
+	})
+}
+
+func explainBoundaryTestDataObject(name string, pkg *types.Package) *types.Var {
+	return types.NewVar(token.NoPos, pkg, name, types.Typ[types.Int])
+}
+
 func TestExplainBoundaryImporterHelperProcess(t *testing.T) {
 	mode := os.Getenv("SCION_EXPLAIN_BOUNDARY_HELPER")
 	if mode == "" {
@@ -614,6 +718,26 @@ type explainBoundaryResolvedFunctionValue struct {
 }
 
 type explainBoundaryDataFlow map[types.Object]map[types.Object]struct{}
+
+type explainBoundaryForbiddenDataResolution struct {
+	origin   types.Object
+	complete bool
+}
+
+type explainBoundaryForbiddenDataResolver struct {
+	flow            explainBoundaryDataFlow
+	inProgress      map[types.Object]bool
+	resolved        map[types.Object]explainBoundaryForbiddenDataResolution
+	resolveAttempts int
+}
+
+func newExplainBoundaryForbiddenDataResolver(flow explainBoundaryDataFlow) *explainBoundaryForbiddenDataResolver {
+	return &explainBoundaryForbiddenDataResolver{
+		flow:       flow,
+		inProgress: make(map[types.Object]bool),
+		resolved:   make(map[types.Object]explainBoundaryForbiddenDataResolution),
+	}
+}
 
 type explainBoundaryExportCache struct {
 	once         sync.Once
@@ -810,6 +934,7 @@ func validateExplainIntrospectionBoundaryWithHooks(sources map[string][]byte, ho
 	}
 	functionValues := explainBoundaryFunctionValues(files, typeInfo)
 	dataFlow := explainBoundaryDataDependencies(files, typeInfo, functionValues)
+	forbiddenDataResolver := newExplainBoundaryForbiddenDataResolver(dataFlow)
 
 	queue := []explainBoundaryVisit{{
 		fn:    functions["handleExplainEffectivePermissions"][0],
@@ -836,7 +961,12 @@ func validateExplainIntrospectionBoundaryWithHooks(sources map[string][]byte, ho
 				return false
 			}
 			if expr, ok := node.(ast.Expr); ok {
-				if origin := explainBoundaryForbiddenDataOrigin(expr, typeInfo, functionValues, dataFlow); origin != nil {
+				origin, complete := explainBoundaryForbiddenDataOrigin(expr, typeInfo, functionValues, forbiddenDataResolver)
+				if !complete {
+					violation = "cannot completely resolve authorization operation data provenance"
+					return false
+				}
+				if origin != nil {
 					violation = "reaches forbidden authorization operation object " + origin.String()
 					return false
 				}
@@ -1237,30 +1367,54 @@ func explainBoundaryCallResults(expr ast.Expr, info *types.Info, values map[*typ
 	return results
 }
 
-func explainBoundaryForbiddenDataOrigin(expr ast.Expr, info *types.Info, values map[*types.Var]*explainBoundaryFunctionValue, flow explainBoundaryDataFlow) types.Object {
+func explainBoundaryForbiddenDataOrigin(expr ast.Expr, info *types.Info, values map[*types.Var]*explainBoundaryFunctionValue, resolver *explainBoundaryForbiddenDataResolver) (types.Object, bool) {
+	var origin types.Object
+	complete := true
 	for object := range explainBoundaryExpressionObjects(expr, info, values) {
-		if origin := explainBoundaryResolveForbiddenDataOrigin(object, flow, make(map[types.Object]bool)); origin != nil {
-			return origin
+		result := resolver.resolve(object)
+		if !result.complete {
+			complete = false
+		}
+		if origin == nil && result.origin != nil {
+			origin = result.origin
 		}
 	}
-	return nil
+	return origin, complete
 }
 
-func explainBoundaryResolveForbiddenDataOrigin(object types.Object, flow explainBoundaryDataFlow, visiting map[types.Object]bool) types.Object {
+func (resolver *explainBoundaryForbiddenDataResolver) resolve(object types.Object) explainBoundaryForbiddenDataResolution {
+	if object == nil {
+		return explainBoundaryForbiddenDataResolution{}
+	}
+	if result, ok := resolver.resolved[object]; ok {
+		return result
+	}
+	if resolver.inProgress[object] {
+		return explainBoundaryForbiddenDataResolution{}
+	}
+	resolver.resolveAttempts++
 	if explainBoundaryForbiddenAuthzOperationObject(object) {
-		return object
+		result := explainBoundaryForbiddenDataResolution{origin: object, complete: true}
+		resolver.resolved[object] = result
+		return result
 	}
-	if object == nil || visiting[object] {
-		return nil
-	}
-	visiting[object] = true
-	defer delete(visiting, object)
-	for dependency := range flow[object] {
-		if origin := explainBoundaryResolveForbiddenDataOrigin(dependency, flow, visiting); origin != nil {
-			return origin
+
+	resolver.inProgress[object] = true
+	defer delete(resolver.inProgress, object)
+	result := explainBoundaryForbiddenDataResolution{complete: true}
+	for dependency := range resolver.flow[object] {
+		dependencyResult := resolver.resolve(dependency)
+		if !dependencyResult.complete {
+			result.complete = false
+		}
+		if result.origin == nil && dependencyResult.origin != nil {
+			result.origin = dependencyResult.origin
 		}
 	}
-	return nil
+	if result.complete {
+		resolver.resolved[object] = result
+	}
+	return result
 }
 
 func explainBoundaryInterfaceReceiver(method *types.Func) *types.Interface {

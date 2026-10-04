@@ -760,3 +760,62 @@ emitter/slog/sinks, store/schema/history, sampling, transport, projection, M1,
 and `#2392 audit_emit_dispatch` timing are unchanged. Fresh round 7/7 is not
 permitted because both gates are not conclusively green. Catalog, P2, emitter,
 compare, and merge work remain blocked.
+
+## Round-6 forbidden-data resolver performance correction
+
+The retained author received the complete protected performance-fix brief in
+direct conversation `e7685861-d25c-4260-90bf-378e5500f6fd` before repository
+access. The brief SHA-256 was
+`d41391c0bd25eaf0505b3dc4167db5e5109d1e426b5abda97aa98a1da22b5067`.
+The complete validation finding for `m2-explain-r6-validation.md` was received
+with SHA-256
+`1d3e24af2d5ece71e3ef6e407707c2cc41407094884d85090f2b457f217a7681`
+and size 4,879 bytes. Launch used `--harness codex` plus
+`--model gpt-5.6-sol` and displayed GPT-5.6-Sol medium; the lead accepted this
+as equivalent to the late model-only configuration instruction. The required
+`artifact-durability` skill was unavailable; the other three mandated skills
+were read completely in order and the brief authorized continuing with that
+reported non-repository-precondition gap.
+
+Before edits, the workspace was a clean `clone-per-agent` Git clone on
+`scion/audit-update-m2`. Local HEAD, the local branch, tracking ref, and the
+independent fork remote ref all equaled pinned head
+`82ce8b1d3436d4a9f12d59e8a41d79775366d61c`. Accepted P1 base
+`fd4f83fb7769af4b08eed1ac06be6d2442de89d7` was an ancestor, the branch diff
+contained the approved 14 paths, and the exact prior correction commit touched
+only this project log.
+
+The independent validation-only run conclusively failed: the filtered normal
+command ran `TestEffectivePermissionIntrospectionBoundaryStructure` for
+1h28m59s, the package failed at 5340.217 seconds, the command exited 1 after
+5364 wall seconds, and 84 printed recursive frames identified
+`explainBoundaryResolveForbiddenDataOrigin`. One CPU-bound `hub.test` process
+had no children and flat 392544 kB RSS. No package `ok` was emitted and race
+did not run. This supersedes the prior 45-minute infrastructure-inconclusive
+normal result for disposition.
+
+The correction replaces path-count re-walk with a validation-scoped resolver
+keyed only by semantic `types.Object` identity. A distinct in-progress set
+detects cycles. A distinct completed-result cache stores a node only after all
+of its dependencies fully resolve; partial, missing, or in-progress results
+are never cached. Cached results retain both safe completion and any forbidden
+authzop semantic origin. The same completed cache is shared across every
+expression root in one boundary-validation pass. Cycles and incomplete
+dependencies remain fail closed, while forbidden origin truth continues to
+propagate through the existing assignment, return, parameter, aggregate,
+field, index, range, search, callable, and method-expression graph.
+
+Deterministic regressions construct a 20-level shared DAG and prove resolution
+work equals the number of unique semantic nodes across multiple roots; prove a
+dependency cycle terminates without creating a completed cache entry; prove a
+forbidden package-scope authzop origin survives a shared DAG and memoization;
+and prove an incomplete dependency is rejected on every attempt and never read
+as a successful completed result. The existing malicious mutation matrix and
+unrelated callable/data-flow safe negative remain unchanged.
+
+Before the checkpoint, `gofmt` and `git diff --check` passed. The diff was
+limited to the authorized scanner test and this project log, with zero
+production diff. The checkpoint and the prescribed post-push gate results are
+recorded below after they become available. No catalog, P2, emitter/slog/sink,
+store/schema/history, sampling, transport, projection, M1, or
+`#2392 audit_emit_dispatch` behavior is changed.
