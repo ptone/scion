@@ -123,8 +123,10 @@ type SubstrateRuntime struct {
 //
 // These maps are a write-through cache over the durable agent state store
 // (AgentStateStore, substrate_state.go): Run fills them only after its
-// state object is committed, and Delete evicts them after removing it. The
-// store, not this cache, is what survives a broker restart.
+// state object is committed, Exec and ExecWithStdin fill them on a miss by
+// reading a committed object through (controlCredentials), and Delete
+// evicts them after removing it. The store, not this cache, is what
+// survives a broker restart.
 var (
 	substrateAgentStateMu sync.Mutex
 	// substrateControlTokens maps "<atespace>/<actor>" to the control_token
@@ -1321,25 +1323,27 @@ func (r *SubstrateRuntime) GetLogs(ctx context.Context, id string) (string, erro
 }
 
 // Exec implements substrate-runtime.md §4: POST /scion/v1/exec via the
-// router, using the control_token minted at bootstrap.
+// router, using the control_token minted at bootstrap (cached, or read
+// through from the agent's durable state after a broker restart). The
+// returned stdout and any error are redacted against the agent's exec
+// secrets. A 401 from the actor is errControlCredentialRejected, never
+// retried.
 func (r *SubstrateRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
 	atespace, actorName, err := splitSubstrateID(id)
 	if err != nil {
 		return "", err
 	}
 
-	substrateAgentStateMu.Lock()
-	token, ok := substrateControlTokens[id]
-	substrateAgentStateMu.Unlock()
-	if !ok {
-		return "", fmt.Errorf("substrate: no control token cached for %s (only the broker process that bootstrapped it holds this in memory; lost on that process's restart, or if a different broker process bootstrapped this actor)", id)
+	token, secrets, err := r.controlCredentials(ctx, id)
+	if err != nil {
+		return "", err
 	}
 
-	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, nil, r.ExecUser(), defaultExecTimeout, r.execRedactor(id))
+	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, nil, r.ExecUser(), defaultExecTimeout, execRedactor(secrets))
 	if err != nil {
-		return "", r.redactExecErr(id, err)
+		return "", redactExecErr(secrets, err)
 	}
-	return res.Stdout, nil
+	return redactEnvValues(res.Stdout, secrets), nil
 }
 
 // execStdinProbeArgv returns a fresh no-op argv slice for the capability
@@ -1380,11 +1384,9 @@ func (r *SubstrateRuntime) ExecWithStdin(ctx context.Context, id string, cmd []s
 		return "", err
 	}
 
-	substrateAgentStateMu.Lock()
-	token, ok := substrateControlTokens[id]
-	substrateAgentStateMu.Unlock()
-	if !ok {
-		return "", fmt.Errorf("substrate: no control token cached for %s (only the broker process that bootstrapped it holds this in memory; lost on that process's restart, or if a different broker process bootstrapped this actor)", id)
+	token, secrets, err := r.controlCredentials(ctx, id)
+	if err != nil {
+		return "", err
 	}
 
 	data, err := readExecStdin(stdin)
@@ -1392,7 +1394,12 @@ func (r *SubstrateRuntime) ExecWithStdin(ctx context.Context, id string, cmd []s
 		return "", err
 	}
 
-	if _, err := doExec(ctx, r.router, atespace, actorName, token, execStdinProbeArgv(), []byte("x"), r.ExecUser(), defaultExecTimeout, r.execRedactor(id)); err != nil {
+	if _, err := doExec(ctx, r.router, atespace, actorName, token, execStdinProbeArgv(), []byte("x"), r.ExecUser(), defaultExecTimeout, execRedactor(secrets)); err != nil {
+		if errors.Is(err, errControlCredentialRejected) {
+			// Not a capability answer at all: the actor refused the
+			// control token itself. Report exactly that.
+			return "", redactExecErr(secrets, err)
+		}
 		if errors.Is(err, errStdinUnsupported) {
 			// Only this specific failure means what it says: the probe
 			// reached the control server, ran, and the server never
@@ -1400,16 +1407,16 @@ func (r *SubstrateRuntime) ExecWithStdin(ctx context.Context, id string, cmd []s
 			// (a transport error, an auth rejection, "true" missing from
 			// the image) has nothing to do with version skew and must not
 			// be reported as if it did.
-			return "", r.redactExecErr(id, fmt.Errorf("substrate: stdin capability probe failed for %s: control server may be running an image older than the reset-auth stdin change; upgrade the actor's sciontool image: %w", id, err))
+			return "", redactExecErr(secrets, fmt.Errorf("substrate: stdin capability probe failed for %s: control server may be running an image older than the reset-auth stdin change; upgrade the actor's sciontool image: %w", id, err))
 		}
-		return "", r.redactExecErr(id, fmt.Errorf("substrate: stdin capability probe failed for %s: %w", id, err))
+		return "", redactExecErr(secrets, fmt.Errorf("substrate: stdin capability probe failed for %s: %w", id, err))
 	}
 
-	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, data, r.ExecUser(), defaultExecTimeout, r.execRedactor(id))
+	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, data, r.ExecUser(), defaultExecTimeout, execRedactor(secrets))
 	if err != nil {
-		return "", r.redactExecErr(id, err)
+		return "", redactExecErr(secrets, err)
 	}
-	return res.Stdout, nil
+	return redactEnvValues(res.Stdout, secrets), nil
 }
 
 // Attach is not currently supported (substrate-runtime.md §4).
@@ -1500,46 +1507,105 @@ func (r *SubstrateRuntime) redact(cfg RunConfig, err error) error {
 }
 
 // redactExecErr is redact's counterpart for Exec and ExecWithStdin, which
-// have no RunConfig of their own at call time — only id. It looks up the
-// secret candidates substrateExecSecrets cached for id at Run (see that
-// map's own doc comment) and redacts err the same way redact does; if id has
-// no cached entry (its actor was deleted, or never bootstrapped by this
-// process — mirroring the "no control token cached" case the caller already
-// handles separately), err is returned unredacted rather than dropped,
-// since doExec's own error text never includes the one piece of id-less
-// secret material this path guards against going further.
+// have no RunConfig of their own at call time — only id. secrets are the
+// candidates controlCredentials returned for id alongside its control
+// token: the cached copy Run stored at commit, or the copy read through
+// from the agent's durable state object after a broker restart. A nil map
+// (an id with no recorded secrets) returns err unchanged, since doExec's
+// own error text never includes the one piece of id-less secret material
+// this path guards against going further.
 //
 // doExec already redacts the control-server output it embeds, before
 // truncating it (see execRedactor); this pass covers the rest of the
 // message.
-func (r *SubstrateRuntime) redactExecErr(id string, err error) error {
-	if err == nil {
-		return nil
-	}
-	secrets, ok := substrateExecSecretsFor(id)
-	if !ok {
+func redactExecErr(secrets map[string]string, err error) error {
+	if err == nil || len(secrets) == 0 {
 		return err
 	}
-	return errors.New(redactEnvValues(err.Error(), secrets))
+	redacted := &redactedExecError{msg: redactEnvValues(err.Error(), secrets)}
+	for _, kind := range []error{errControlCredentialRejected, errStdinUnsupported} {
+		if errors.Is(err, kind) {
+			redacted.kind = kind
+			break
+		}
+	}
+	return redacted
 }
 
+// redactedExecError is a redacted exec error. It unwraps only to the
+// sentinel that classified the original error (if any), never to the
+// original error itself, whose text is the unredacted message.
+type redactedExecError struct {
+	msg  string
+	kind error
+}
+
+func (e *redactedExecError) Error() string { return e.msg }
+func (e *redactedExecError) Unwrap() error { return e.kind }
+
 // execRedactor returns the redaction doExec applies to control-server output
-// for id before truncating it: the same substrateExecSecrets lookup
-// redactExecErr uses, or no redaction when id has no cached entry.
-func (r *SubstrateRuntime) execRedactor(id string) func(string) string {
-	secrets, ok := substrateExecSecretsFor(id)
-	if !ok {
+// before truncating it: the same secrets redactExecErr uses, or no
+// redaction when there are none.
+func execRedactor(secrets map[string]string) func(string) string {
+	if len(secrets) == 0 {
 		return nil
 	}
 	return func(s string) string { return redactEnvValues(s, secrets) }
 }
 
-// substrateExecSecretsFor returns the secret candidates cached for id at Run.
-func substrateExecSecretsFor(id string) (map[string]string, bool) {
+// errNoControlToken is the error Exec and ExecWithStdin return when id has
+// no usable control token: none cached, and no committed state object to
+// read one from (a legacy actor started by a broker without durable state,
+// or an agent whose start has not committed or that is being deleted).
+func errNoControlToken(id string) error {
+	return fmt.Errorf("substrate: no control token cached for %s (only the broker process that bootstrapped it holds this in memory; lost on that process's restart, or if a different broker process bootstrapped this actor)", id)
+}
+
+// controlCredentials returns id's control token and exec secrets: from the
+// process cache when present, otherwise read through from the durable agent
+// state store, filling the cache on success. Only a committed state object
+// is usable — a pending one has not finished bootstrapping and a deleting
+// one is going away — so both, like a missing object, return
+// errNoControlToken. A store failure returns the store's error, which names
+// only the operation and the hashed object name; the broker logs it and
+// writes a fixed, opaque response body.
+func (r *SubstrateRuntime) controlCredentials(ctx context.Context, id string) (string, map[string]string, error) {
+	substrateAgentStateMu.Lock()
+	token, ok := substrateControlTokens[id]
+	secrets := substrateExecSecrets[id]
+	substrateAgentStateMu.Unlock()
+	if ok {
+		return token, secrets, nil
+	}
+	if r.state == nil {
+		return "", nil, errNoControlToken(id)
+	}
+
+	st, err := r.state.Get(ctx, id)
+	if errors.Is(err, errStateNotFound) {
+		return "", nil, errNoControlToken(id)
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("substrate: read agent state for %s: %w", id, err)
+	}
+	if st.Phase != substrateStateCommitted || st.ControlToken == "" {
+		return "", nil, errNoControlToken(id)
+	}
+
 	substrateAgentStateMu.Lock()
 	defer substrateAgentStateMu.Unlock()
-	secrets, ok := substrateExecSecrets[id]
-	return secrets, ok
+	if cached, ok := substrateControlTokens[id]; ok {
+		// A Run committed (and cached) this id while the store read was
+		// in flight; its entry is at least as new as the one just read.
+		return cached, substrateExecSecrets[id], nil
+	}
+	substrateControlTokens[id] = st.ControlToken
+	substrateExecSecrets[id] = st.ExecSecrets
+	if st.ActorUID != "" {
+		rec := st.Record
+		substrateAgentRecords[st.ActorUID] = &rec
+	}
+	return st.ControlToken, st.ExecSecrets, nil
 }
 
 // isDigestPinned reports whether image is pinned by digest

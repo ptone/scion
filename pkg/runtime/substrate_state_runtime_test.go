@@ -111,6 +111,7 @@ func serveCreatedActors(fc *fakeControlClient) {
 type stateHarness struct {
 	rt     *SubstrateRuntime
 	fc     *fakeControlClient
+	fa     *fakeActorServer
 	rec    *callRecorder
 	cs     *k8sfake.Clientset
 	store  *k8sSecretStateStore
@@ -136,6 +137,7 @@ func newStateHarness(t *testing.T) *stateHarness {
 	return &stateHarness{
 		rt:     NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), cs, cfg),
 		fc:     fc,
+		fa:     fa,
 		rec:    rec,
 		cs:     cs,
 		store:  newK8sSecretStateStore(cs, testStateNamespace),

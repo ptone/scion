@@ -340,6 +340,7 @@ type fakeActorServer struct {
 	execStatus      int
 	execResp        execResponse
 	lastExec        *execRequest
+	lastExecAuth    string // the Authorization header of the last exec
 }
 
 func newFakeActorServer(rec *callRecorder) *fakeActorServer {
@@ -378,6 +379,7 @@ func (s *fakeActorServer) handler() http.Handler {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		s.mu.Lock()
 		s.lastExec = &req
+		s.lastExecAuth = r.Header.Get("Authorization")
 		code := s.execStatus
 		resp := s.execResp
 		s.mu.Unlock()

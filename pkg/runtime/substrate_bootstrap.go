@@ -879,6 +879,14 @@ func readExecStdin(stdin io.Reader) ([]byte, error) {
 // rather than treating every doExec error the same way.
 var errStdinUnsupported = errors.New("control server did not confirm stdin support")
 
+// errControlCredentialRejected marks a doExec failure caused by the control
+// server answering 401: it no longer accepts the agent's control token (for
+// example, an actor that came back up awaiting a fresh bootstrap). The
+// token is the one persisted for a committed agent, so the caller gets this
+// explicit error instead of a retry; the broker's response body for it is
+// the same fixed, opaque text as any other exec failure.
+var errControlCredentialRejected = errors.New("control credential rejected")
+
 // doExec sends argv through the router to the actor's control server,
 // authorized with the actor's control_token (substrate-runtime.md §4). When
 // stdin is non-empty, it is delivered via execRequest.Stdin rather than
@@ -924,6 +932,12 @@ func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actor
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		// The actor refused this token outright. It is the token the
+		// broker persisted at bootstrap, so retrying with it cannot
+		// succeed: fail explicitly, without echoing the response body.
+		return out, fmt.Errorf("substrate: exec on %s/%s: %w (status 401)", atespace, actorName, errControlCredentialRejected)
+	}
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyReadBytes))
 		return out, fmt.Errorf("substrate: exec on %s/%s failed: status %d: %s", atespace, actorName, resp.StatusCode, truncateForError(redact(string(msg))))
