@@ -18,7 +18,7 @@ import "time"
 
 // AgentLaunch is the client-facing view of an agent's current or most recent
 // async launch (design §3.2). Absent (nil) when the agent has never had a
-// launch (LaunchID == "").
+// launch (LaunchID == "") or only a record-only one.
 type AgentLaunch struct {
 	ID        string `json:"id"`
 	State     string `json:"state"` // "active" | "ended"
@@ -35,14 +35,15 @@ type AgentLaunch struct {
 
 // ComputeAgentLaunch builds the client-facing AgentLaunch view from an
 // Agent's launch_* columns, or returns nil when the agent has no launch
-// (LaunchID == ""). now is the clock used to compute RemainingSeconds; pass
+// (LaunchID == "") or only a record-only one (LaunchEndReasonRecordOnly: a
+// synchronous dispatch, which clients have never seen as a launch). now is the clock used to compute RemainingSeconds; pass
 // the answering node's wall clock (design: "now = the answering node's
 // clock"; node-clock skew against the store clock is small and absorbed by
 // client-side slack).
 //
 // RemainingSeconds is max(0, ceil(deadline - now)).
 func ComputeAgentLaunch(a *Agent, now time.Time) *AgentLaunch {
-	if a == nil || a.LaunchID == "" {
+	if a == nil || a.LaunchID == "" || a.LaunchEndReason == LaunchEndReasonRecordOnly {
 		return nil
 	}
 	l := &AgentLaunch{

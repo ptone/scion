@@ -147,9 +147,10 @@ func (s *AgentStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID st
 
 	if current.LaunchState != store.LaunchStateActive {
 		// current.LaunchState == "" (no launch has ever begun on this row).
-		// Since r.LaunchID is rejected above when empty, and BeginLaunch is
-		// the only writer of a non-empty launch_id, current.LaunchID must
-		// also be "" here — meaning step 2 above (r.LaunchID != current.
+		// Since r.LaunchID is rejected above when empty, and BeginLaunch,
+		// RecordLaunch and AdoptLaunchID (which write launch_state too, or
+		// keep it) are the only writers of a non-empty launch_id,
+		// current.LaunchID must also be "" here — meaning step 2 above (r.LaunchID != current.
 		// LaunchID) already rejects every report that reaches this point as
 		// superseded. This is a defensive, explicit check so "not ended" is
 		// never silently assumed to mean "active".

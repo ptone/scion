@@ -237,6 +237,86 @@ func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, time
 	return newID, nil
 }
 
+// RecordLaunch implements store.AgentStore.RecordLaunch.
+func (s *AgentStore) RecordLaunch(ctx context.Context, agentID, kind string) (string, error) {
+	switch kind {
+	case store.LaunchKindCreate, store.LaunchKindStart, store.LaunchKindRestart:
+	default:
+		return "", fmt.Errorf("%w: RecordLaunch kind %q", store.ErrInvalidInput, kind)
+	}
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return "", err
+	}
+	newID := uuid.NewString()
+	err = s.launchWrite(ctx, uid, "RecordLaunch", func(_ *ent.Agent, upd *ent.AgentUpdateOne) (bool, error) {
+		upd.SetLaunchID(newID).
+			SetLaunchState(store.LaunchStateEnded).
+			SetLaunchEndReason(store.LaunchEndReasonRecordOnly).
+			SetLaunchKind(kind).
+			ClearLaunchDeadline().
+			SetLaunchOwner("").
+			SetLaunchSeq(0).
+			SetLaunchStep("").
+			SetLaunchError("")
+		return true, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return newID, nil
+}
+
+// AdoptLaunchID implements store.AgentStore.AdoptLaunchID.
+func (s *AgentStore) AdoptLaunchID(ctx context.Context, agentID, proposed, effective string) (bool, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return false, err
+	}
+	adopted := false
+	err = s.launchWrite(ctx, uid, "AdoptLaunchID", func(current *ent.Agent, upd *ent.AgentUpdateOne) (bool, error) {
+		if current.LaunchID != proposed || proposed == effective {
+			return false, nil
+		}
+		upd.SetLaunchID(effective)
+		adopted = true
+		return true, nil
+	})
+	return adopted && err == nil, err
+}
+
+// launchWrite runs one row-locked launch transaction on agent uid: it reads
+// the row, lets fn decide whether to write, and commits only if fn did.
+func (s *AgentStore) launchWrite(ctx context.Context, uid uuid.UUID, op string, fn func(*ent.Agent, *ent.AgentUpdateOne) (bool, error)) error {
+	ltx, err := s.beginLaunchTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer ltx.cleanup()
+	defer func() { _ = ltx.tx.Rollback() }()
+
+	q := ltx.client.Agent.Query().Where(agent.IDEQ(uid))
+	if s.dialect(ctx) == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	current, err := q.Only(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	upd := ltx.client.Agent.UpdateOneID(uid)
+	write, err := fn(current, upd)
+	if err != nil || !write {
+		return err
+	}
+	if _, err := upd.Save(ctx); err != nil {
+		return mapError(err)
+	}
+	if err := ltx.tx.Commit(); err != nil {
+		return fmt.Errorf("launch store: commit %s: %w", op, err)
+	}
+	return nil
+}
+
 // MarkLaunchAccepted implements store.AgentStore.MarkLaunchAccepted.
 func (s *AgentStore) MarkLaunchAccepted(ctx context.Context, agentID, launchID, owner string) (store.Agent, error) {
 	uid, err := parseUUID(agentID)

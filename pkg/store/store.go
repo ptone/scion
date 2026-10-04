@@ -467,6 +467,23 @@ type AgentStore interface {
 	// dispatcher's not_launched cases (design §3.4).
 	EndLaunch(ctx context.Context, agentID, launchID, reason string) error
 
+	// RecordLaunch records a launch for a synchronous dispatch of kind
+	// (LaunchKindCreate, LaunchKindStart or LaunchKindRestart) and returns
+	// its new launch id. The launch is written already ended, with
+	// LaunchEndReasonRecordOnly and no deadline, so the reaper never
+	// selects it; launch_error is cleared and the phase is not touched. Any
+	// previous launch on the row is superseded. Returns ErrNotFound if the
+	// agent doesn't exist. Does not bump state_version.
+	RecordLaunch(ctx context.Context, agentID, kind string) (launchID string, err error)
+
+	// AdoptLaunchID sets launch_id to effective if it is still proposed,
+	// and reports whether it did. A runtime broker that reuses an existing
+	// container returns that container's launch id, which may differ from
+	// the proposed one or be empty. No-op (false, nil) if launch_id no
+	// longer matches proposed. Returns ErrNotFound if the agent doesn't
+	// exist. Does not bump state_version.
+	AdoptLaunchID(ctx context.Context, agentID, proposed, effective string) (bool, error)
+
 	// ApplyLaunchReport evaluates a broker's launch report against the
 	// current row and applies the resulting state transition, per the
 	// ordered rule list in design §3.7. Bumps state_version only on a

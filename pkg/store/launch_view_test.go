@@ -29,6 +29,15 @@ func TestComputeAgentLaunch_AbsentWhenNoLaunch(t *testing.T) {
 	}
 }
 
+func TestComputeAgentLaunch_AbsentWhenRecordOnly(t *testing.T) {
+	for _, kind := range []string{LaunchKindCreate, LaunchKindStart, LaunchKindRestart} {
+		a := &Agent{LaunchID: "L1", LaunchState: LaunchStateEnded, LaunchKind: kind, LaunchEndReason: LaunchEndReasonRecordOnly}
+		if got := ComputeAgentLaunch(a, time.Now()); got != nil {
+			t.Fatalf("%s: expected nil launch for a record-only launch, got %+v", kind, got)
+		}
+	}
+}
+
 func TestComputeAgentLaunch_ActiveHasDeadlineAndRemaining(t *testing.T) {
 	now := time.Now()
 	a := &Agent{

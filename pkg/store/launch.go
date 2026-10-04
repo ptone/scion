@@ -18,7 +18,8 @@ import "time"
 
 // LaunchKind values for Agent.LaunchKind / BeginLaunch's kind parameter
 // (design t1-async-create-v11.md §3.3). Only LaunchKindCreate is writable by
-// BeginLaunch in P1a; start/restart land in P6 (§3.13).
+// BeginLaunch in P1a; start/restart land in P6 (§3.13). RecordLaunch accepts
+// all three.
 const (
 	LaunchKindCreate  = "create"
 	LaunchKindStart   = "start"
@@ -40,6 +41,10 @@ const (
 	LaunchEndReasonLost            = "lost"
 	LaunchEndReasonNotLaunched     = "not_launched"
 	LaunchEndReasonSuperseded      = "superseded"
+	// LaunchEndReasonRecordOnly marks a launch written by RecordLaunch: a
+	// synchronous dispatch that records the launch id and nothing else. It
+	// is ended when written, so the reaper never selects it.
+	LaunchEndReasonRecordOnly = "record_only"
 )
 
 // Launch error codes for Agent.LaunchError (design §3.3, §3.9).
