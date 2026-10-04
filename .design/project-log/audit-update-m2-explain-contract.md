@@ -815,7 +815,30 @@ unrelated callable/data-flow safe negative remain unchanged.
 
 Before the checkpoint, `gofmt` and `git diff --check` passed. The diff was
 limited to the authorized scanner test and this project log, with zero
-production diff. The checkpoint and the prescribed post-push gate results are
-recorded below after they become available. No catalog, P2, emitter/slog/sink,
+production diff. The scanner-test checkpoint was committed and pushed as
+`929fd44c` before the heavy validation gate.
+
+The exact one-shot normal command was:
+
+```text
+ulimit -v 8000000; start_seconds=$SECONDS; timeout 90m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -timeout 89m -count=1 -p 2 ./pkg/hub -run '^(TestExplainAPI_(RegisteredOperationUsesReviewedBasePermission|OperationValidationFailsClosedWithoutValueEcho|DoesNotInferOperation|EffectivePermissionsUsesNonEmittingIntrospection)|TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations|TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch|TestEffectivePermissionIntrospectionBoundaryImporterIsBounded|TestEffectivePermissionIntrospectionBoundaryTypeErrorsFailClosed|TestAuthzOperationLookupIsClosed)$'; command_rc=$?; echo COMMAND_EXIT=$command_rc; echo WALL_SECONDS=$((SECONDS-start_seconds)); exit $command_rc
+```
+
+Normal result: **INCONCLUSIVE**. The command emitted dependency-download
+lines, then no compiler, test, package, or failure diagnostic. The outer
+timeout produced exactly `COMMAND_EXIT=124`, `WALL_SECONDS=5400`; there was no
+explicit package `ok`. The command was not retried. Race was **NOT RUN /
+DEFERRED** because normal was not conclusively green and no placement message
+explicitly permitted race at this venue.
+
+No other heavy Go command, full or unfiltered Hub test, prewarm, retry, lint,
+vet, build, `make ci`, or `make ci-full` ran. The shared cache was not cleaned,
+altered, relocated, replaced, or deliberately prewarmed. The final commit SHA
+is reported in the protected completion report because a commit cannot contain
+its own SHA.
+
+The correction remains limited to this project log and the authorized Go test
+file with zero production diff. No catalog, P2, emitter/slog/sink,
 store/schema/history, sampling, transport, projection, M1, or
-`#2392 audit_emit_dispatch` behavior is changed.
+`#2392 audit_emit_dispatch` behavior is changed. Fresh round 7/7 remains
+blocked because both required gates are not conclusively green.
