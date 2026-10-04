@@ -24,7 +24,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -194,6 +196,31 @@ func TestDispatchLaunchIDRecordFailure(t *testing.T) {
 	ghost.ID = uuid.NewString() // not in the store: RecordLaunch fails
 	require.NoError(t, d.DispatchAgentStart(ctx, &ghost, "", false))
 	assert.Equal(t, []string{""}, client.sent)
+}
+
+// TestDispatchLaunchIDActiveLaunch: a start or restart issued while an async
+// launch is in flight makes no broker call and leaves that launch in place.
+func TestDispatchLaunchIDActiveLaunch(t *testing.T) {
+	for _, op := range []string{"start", "restart"} {
+		t.Run(op, func(t *testing.T) {
+			ctx := context.Background()
+			cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+			agent := seedAgentWithBrokerID(t, cs, uuid.NewString())
+			agent.Phase = string(state.PhaseProvisioning)
+			require.NoError(t, cs.UpdateAgent(ctx, agent))
+			active, err := cs.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, time.Hour)
+			require.NoError(t, err)
+			client := &launchIDClient{store: cs, resp: echoEffective}
+			d := NewHTTPAgentDispatcherWithClient(cs, client, false, slog.Default())
+
+			err = dispatchOp(ctx, d, op, agent)
+			require.ErrorIs(t, err, store.ErrLaunchInFlight)
+			assert.Empty(t, client.sent, "no broker call")
+			row := launchRow(t, cs, agent.ID)
+			assert.Equal(t, active, row.LaunchID, "the in-flight launch is not replaced")
+			assert.Equal(t, store.LaunchStateActive, row.LaunchState)
+		})
+	}
 }
 
 // cancelOnSignalBus ends the originator's wait as soon as it has handed a

@@ -249,7 +249,15 @@ func (s *AgentStore) RecordLaunch(ctx context.Context, agentID, kind string) (st
 		return "", err
 	}
 	newID := uuid.NewString()
-	err = s.launchWrite(ctx, uid, "RecordLaunch", func(_ *ent.Agent, upd *ent.AgentUpdateOne) (bool, error) {
+	err = s.launchWrite(ctx, uid, "RecordLaunch", func(current *ent.Agent, upd *ent.AgentUpdateOne, now time.Time) (bool, error) {
+		// An active launch that has not reached its deadline is still in
+		// flight; recording over it would end it silently. Past its
+		// deadline it is being reaped, and is superseded as BeginLaunch
+		// supersedes it.
+		if current.LaunchState == store.LaunchStateActive &&
+			(current.LaunchDeadline == nil || now.Before(*current.LaunchDeadline)) {
+			return false, fmt.Errorf("%w: agent %s", store.ErrLaunchInFlight, agentID)
+		}
 		upd.SetLaunchID(newID).
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonRecordOnly).
@@ -274,7 +282,7 @@ func (s *AgentStore) AdoptLaunchID(ctx context.Context, agentID, proposed, effec
 		return false, err
 	}
 	adopted := false
-	err = s.launchWrite(ctx, uid, "AdoptLaunchID", func(current *ent.Agent, upd *ent.AgentUpdateOne) (bool, error) {
+	err = s.launchWrite(ctx, uid, "AdoptLaunchID", func(current *ent.Agent, upd *ent.AgentUpdateOne, _ time.Time) (bool, error) {
 		if current.LaunchID != proposed || proposed == effective {
 			return false, nil
 		}
@@ -286,8 +294,9 @@ func (s *AgentStore) AdoptLaunchID(ctx context.Context, agentID, proposed, effec
 }
 
 // launchWrite runs one row-locked launch transaction on agent uid: it reads
-// the row, lets fn decide whether to write, and commits only if fn did.
-func (s *AgentStore) launchWrite(ctx context.Context, uid uuid.UUID, op string, fn func(*ent.Agent, *ent.AgentUpdateOne) (bool, error)) error {
+// the row, lets fn decide whether to write, and commits only if fn did. fn
+// gets the store clock (storeNow) for any time comparison.
+func (s *AgentStore) launchWrite(ctx context.Context, uid uuid.UUID, op string, fn func(*ent.Agent, *ent.AgentUpdateOne, time.Time) (bool, error)) error {
 	ltx, err := s.beginLaunchTx(ctx)
 	if err != nil {
 		return err
@@ -295,16 +304,21 @@ func (s *AgentStore) launchWrite(ctx context.Context, uid uuid.UUID, op string, 
 	defer ltx.cleanup()
 	defer func() { _ = ltx.tx.Rollback() }()
 
+	isPG := s.dialect(ctx) == dialect.Postgres
 	q := ltx.client.Agent.Query().Where(agent.IDEQ(uid))
-	if s.dialect(ctx) == dialect.Postgres {
+	if isPG {
 		q = q.ForUpdate()
 	}
 	current, err := q.Only(ctx)
 	if err != nil {
 		return mapError(err)
 	}
+	now, err := storeNow(ctx, ltx.tx, isPG)
+	if err != nil {
+		return err
+	}
 	upd := ltx.client.Agent.UpdateOneID(uid)
-	write, err := fn(current, upd)
+	write, err := fn(current, upd, now)
 	if err != nil || !write {
 		return err
 	}

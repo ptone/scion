@@ -2935,7 +2935,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 	// Record the launch id last, right before the send, so no earlier
 	// failure leaves an id the broker never saw.
-	extras.LaunchID = d.proposeLaunchID(ctx, agent, store.LaunchKindStart)
+	launchID, err := d.proposeLaunchID(ctx, agent, store.LaunchKindStart)
+	if err != nil {
+		return fmt.Errorf("DispatchAgentStart: %w", err)
+	}
+	extras.LaunchID = launchID
 
 	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, extras)
 	if isHashMismatchError(err) {
@@ -3056,7 +3060,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
-	extras.LaunchID = d.proposeLaunchID(ctx, agent, store.LaunchKindRestart)
+	launchID, err := d.proposeLaunchID(ctx, agent, store.LaunchKindRestart)
+	if err != nil {
+		return fmt.Errorf("DispatchAgentRestart: %w", err)
+	}
+	extras.LaunchID = launchID
 
 	resp, err := d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	if errors.Is(err, ErrLifecycleDeferred) {

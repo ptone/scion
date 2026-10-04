@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -57,23 +58,31 @@ func dispatchLaunchIDFromContext(ctx context.Context) string {
 
 // proposeLaunchID returns the launch id to send with a start or restart of
 // kind. A deferred dispatch reuses the id it was proposed with; otherwise a
-// new id is recorded on the agent row. When recording fails the dispatch goes
-// ahead without an id, exactly as before launch ids existed.
-func (d *HTTPAgentDispatcher) proposeLaunchID(ctx context.Context, agent *store.Agent, kind string) string {
+// new id is recorded on the agent row.
+//
+// When the agent has a launch in flight, recording is refused and so is the
+// dispatch: proposeLaunchID returns an error wrapping
+// store.ErrLaunchInFlight and the caller makes no broker call. Any other
+// recording failure lets the dispatch go ahead without an id, exactly as
+// before launch ids existed.
+func (d *HTTPAgentDispatcher) proposeLaunchID(ctx context.Context, agent *store.Agent, kind string) (string, error) {
 	if id := dispatchLaunchIDFromContext(ctx); id != "" {
-		return id
+		return id, nil
 	}
 	if d.store == nil {
-		return ""
+		return "", nil
 	}
 	id, err := d.store.RecordLaunch(ctx, agent.ID, kind)
+	if errors.Is(err, store.ErrLaunchInFlight) {
+		return "", err
+	}
 	if err != nil {
 		d.log.Warn("launch id: record failed; dispatching without one",
 			"agent_id", agent.ID, "kind", kind, "error", err)
-		return ""
+		return "", nil
 	}
 	agent.LaunchID = id
-	return id
+	return id, nil
 }
 
 // adoptEffectiveLaunchID records the id the broker reports for the running

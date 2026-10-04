@@ -66,6 +66,11 @@ var (
 	// synchronous send on this error (design §3.4, NB-1); it means a
 	// concurrent write (e.g. a stop) landed first.
 	ErrInvalidPhase = errors.New("agent phase is not eligible for this launch")
+
+	// ErrLaunchInFlight is returned by RecordLaunch when the agent has an
+	// active launch that has not reached its deadline. The row is left
+	// unchanged and the caller must not dispatch.
+	ErrLaunchInFlight = errors.New("agent has a launch in flight")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
@@ -471,9 +476,11 @@ type AgentStore interface {
 	// (LaunchKindCreate, LaunchKindStart or LaunchKindRestart) and returns
 	// its new launch id. The launch is written already ended, with
 	// LaunchEndReasonRecordOnly and no deadline, so the reaper never
-	// selects it; launch_error is cleared and the phase is not touched. Any
-	// previous launch on the row is superseded. Returns ErrNotFound if the
-	// agent doesn't exist. Does not bump state_version.
+	// selects it; launch_error is cleared and the phase is not touched. An
+	// active launch that has not reached its deadline is in flight: the row
+	// is left unchanged and ErrLaunchInFlight is returned. Any other previous
+	// launch is superseded. Returns ErrNotFound if the agent doesn't exist.
+	// Does not bump state_version.
 	RecordLaunch(ctx context.Context, agentID, kind string) (launchID string, err error)
 
 	// AdoptLaunchID sets launch_id to effective if it is still proposed,

@@ -4,6 +4,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -70,29 +71,74 @@ func TestRecordLaunchRejectsUnknownKind(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-func TestRecordLaunchSupersedesActiveLaunch(t *testing.T) {
-	ctx := context.Background()
-	s, projectID := newTestAgentStore(t)
-	a := createLaunchableAgent(t, ctx, s, projectID, "rec-supersede")
-	old, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
-	require.NoError(t, err)
-	setAgentLaunchError(t, ctx, s, a.ID, store.LaunchErrorAgentError)
+// TestRecordLaunchActiveLaunch: an active launch before its deadline is in
+// flight, and RecordLaunch refuses it without touching the row, so the async
+// launch keeps reporting. Past its deadline the launch is superseded.
+func TestRecordLaunchActiveLaunch(t *testing.T) {
+	tests := []struct {
+		name     string
+		deadline func(t *testing.T, ctx context.Context, s *AgentStore, agentID string)
+		refused  bool
+	}{
+		{
+			name:     "before deadline",
+			deadline: func(*testing.T, context.Context, *AgentStore, string) {},
+			refused:  true,
+		},
+		{
+			name: "no deadline",
+			deadline: func(t *testing.T, ctx context.Context, s *AgentStore, agentID string) {
+				uid, err := parseUUID(agentID)
+				require.NoError(t, err)
+				_, err = s.client.Agent.UpdateOneID(uid).ClearLaunchDeadline().Save(ctx)
+				require.NoError(t, err)
+			},
+			refused: true,
+		},
+		{
+			name: "past deadline",
+			deadline: func(t *testing.T, ctx context.Context, s *AgentStore, agentID string) {
+				setAgentLaunchDeadline(t, ctx, s, agentID, time.Now().Add(-time.Minute))
+			},
+			refused: false,
+		},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, projectID := newTestAgentStore(t)
+			a := createLaunchableAgent(t, ctx, s, projectID, fmt.Sprintf("rec-active-%d", i))
+			old, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
+			require.NoError(t, err)
+			setAgentLaunchError(t, ctx, s, a.ID, store.LaunchErrorAgentError)
+			tt.deadline(t, ctx, s, a.ID)
 
-	id, err := s.RecordLaunch(ctx, a.ID, store.LaunchKindCreate)
-	require.NoError(t, err)
-	assert.NotEqual(t, old, id)
+			id, err := s.RecordLaunch(ctx, a.ID, store.LaunchKindStart)
+			got, gerr := s.GetAgent(ctx, a.ID)
+			require.NoError(t, gerr)
+			ans, _, rerr := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+				LaunchID: old, InstanceID: "i1", State: store.LaunchReportStateProgress,
+			})
+			require.NoError(t, rerr)
 
-	got, err := s.GetAgent(ctx, a.ID)
-	require.NoError(t, err)
-	assert.Equal(t, id, got.LaunchID)
-	assert.Empty(t, got.LaunchError)
-	assert.Equal(t, store.LaunchStateEnded, got.LaunchState)
-
-	ans, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
-		LaunchID: old, InstanceID: "i1", State: store.LaunchReportStateProgress,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusConflict, ans.HTTPStatus, "the superseded async launch is refused")
+			if tt.refused {
+				require.ErrorIs(t, err, store.ErrLaunchInFlight)
+				assert.Empty(t, id)
+				assert.Equal(t, old, got.LaunchID, "the in-flight launch keeps its id")
+				assert.Equal(t, store.LaunchStateActive, got.LaunchState)
+				assert.Equal(t, store.LaunchKindCreate, got.LaunchKind)
+				assert.Equal(t, store.LaunchErrorAgentError, got.LaunchError)
+				assert.NotEqual(t, http.StatusConflict, ans.HTTPStatus, "the async launch still reports")
+				return
+			}
+			require.NoError(t, err)
+			assert.NotEqual(t, old, id)
+			assert.Equal(t, id, got.LaunchID)
+			assert.Empty(t, got.LaunchError)
+			assert.Equal(t, store.LaunchStateEnded, got.LaunchState)
+			assert.Equal(t, http.StatusConflict, ans.HTTPStatus, "the expired launch is superseded")
+		})
+	}
 }
 
 // TestRecordLaunchIsNeverReaped: with no launch reports at all, a recorded
