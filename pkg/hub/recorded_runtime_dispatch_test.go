@@ -161,7 +161,7 @@ func TestRecordedRuntime_ControlChannelSendsSignedParam(t *testing.T) {
 			_ = c.StopAgent(ctx, "b", "", "w", "p")
 		},
 		"restart": func(ctx context.Context, c *ControlChannelBrokerClient) {
-			_ = c.RestartAgent(ctx, "b", "", "w", "p", nil, StartExtras{})
+			_, _ = c.RestartAgent(ctx, "b", "", "w", "p", nil, StartExtras{})
 		},
 		"reset-auth": func(ctx context.Context, c *ControlChannelBrokerClient) {
 			_ = c.ResetAuthAgent(ctx, "b", "", "w", "p", "tok", "")
