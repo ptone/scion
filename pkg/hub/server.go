@@ -581,6 +581,9 @@ type WorkspaceDispatchSpec struct {
 // (GoogleCloudPlatform/scion#1931). DispatchAgentStart populates it;
 // DispatchAgentRestart does not send it and leaves it at its zero value.
 //
+// LaunchID is the launch id the hub recorded for this start or restart
+// (see launch_record.go); empty sends none.
+//
 // Zero value is valid and simply carries nothing extra, matching pre-#1960
 // behavior for callers (e.g. local/file-mode dispatch) that have none of this.
 type StartExtras struct {
@@ -589,6 +592,7 @@ type StartExtras struct {
 	ProvisionCredentials map[string]string
 	PreResolvedSkills    *ResolveSkillsResponse
 	Workspace            WorkspaceDispatchSpec
+	LaunchID             string
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -617,6 +621,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.Workspace.WorkspaceMode != "" {
 		payload["workspaceMode"] = extras.Workspace.WorkspaceMode
+	}
+	if extras.LaunchID != "" {
+		payload["launchId"] = extras.LaunchID
 	}
 }
 
@@ -654,7 +661,7 @@ type RuntimeBrokerClient interface {
 	// resolvedEnv carries fresh auth tokens and identity vars so the restarted
 	// container retains Hub connectivity.
 	// extras carries the dispatch metadata described on StartExtras.
-	RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error
+	RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error)
 
 	// ResetAuthAgent injects a fresh auth token into a running agent without restarting it.
 	// brokerID is used for HMAC authentication lookup.
@@ -916,6 +923,11 @@ type RemoteAgentResponse struct {
 	// an old broker has no such field and silently ran a plain Provision
 	// instead, which must not be reported as reincarnate success.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
+
+	// EffectiveLaunchID mirrors runtimebroker.CreateAgentResponse.EffectiveLaunchID:
+	// the launch id the running container carries, present only when the
+	// request sent a launch id. Nil means the broker does not report one.
+	EffectiveLaunchID *string `json:"effectiveLaunchId,omitempty"`
 }
 
 // RemoteEnvRequirementsResponse is returned by the broker when env gather is needed.

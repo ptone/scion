@@ -79,7 +79,7 @@ func (c *HTTPRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, broke
 	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
 }
 
-func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 }
 
@@ -2913,6 +2913,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
+	// Record the launch id last, right before the send, so no earlier
+	// failure leaves an id the broker never saw.
+	extras.LaunchID = d.proposeLaunchID(ctx, agent, store.LaunchKindStart)
 
 	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, extras)
 	if isHashMismatchError(err) {
@@ -2936,8 +2939,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		// valid until its own TTL expires.
 		revokeArmed = false
 		return d.deferredStart(ctx, agent, &StartDispatchArgs{
-			Task:   task,
-			Resume: resume,
+			Task:     task,
+			Resume:   resume,
+			LaunchID: extras.LaunchID,
 		})
 	}
 	if err != nil && !isConfirmedStartNotActedOnError(err) {
@@ -2953,10 +2957,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		revokeArmed = false
 	}
 	if err != nil {
+		d.logUnansweredLaunch(agent, "start", extras.LaunchID, err)
 		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
+	d.adoptEffectiveLaunchID(ctx, agent, extras.LaunchID, resp)
 	if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
 	} else {
@@ -3027,15 +3033,19 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
+	extras.LaunchID = d.proposeLaunchID(ctx, agent, store.LaunchKindRestart)
 
-	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
+	resp, err := d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	if errors.Is(err, ErrLifecycleDeferred) {
-		return d.deferredRestart(ctx, agent)
+		return d.deferredRestart(ctx, agent, extras.LaunchID)
 	}
-	if err == nil {
-		d.forgetRuntimeTarget(ctx, agent)
+	if err != nil {
+		d.logUnansweredLaunch(agent, "restart", extras.LaunchID, err)
+		return err
 	}
-	return err
+	d.adoptEffectiveLaunchID(ctx, agent, extras.LaunchID, resp)
+	d.forgetRuntimeTarget(ctx, agent)
+	return nil
 }
 
 // DispatchAgentResetAuth injects a fresh auth token into a running agent without
@@ -3351,8 +3361,8 @@ func (d *HTTPAgentDispatcher) deferredStop(ctx context.Context, agent *store.Age
 }
 
 // deferredRestart handles a cross-node agent restart.
-func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.Agent) error {
-	return d.deferredLifecycle(ctx, agent, "restart", &RestartDispatchArgs{}, isStartTerminal)
+func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.Agent, launchID string) error {
+	return d.deferredLifecycle(ctx, agent, "restart", &RestartDispatchArgs{LaunchID: launchID}, isStartTerminal)
 }
 
 // deferredDelete handles a cross-node agent delete: subscribe → write intent →

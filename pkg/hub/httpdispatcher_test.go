@@ -92,6 +92,8 @@ type mockRuntimeBrokerClient struct {
 	// failFirstStartWith, and the second (and later) calls succeed.
 	startCallCount     int
 	failFirstStartWith error
+	// restartReturnResp is the restart response returned when set.
+	restartReturnResp *RemoteAgentResponse
 }
 
 func (m *mockRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
@@ -154,14 +156,17 @@ func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, broke
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	m.restartCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
 	m.lastRestartResolvedEnv = resolvedEnv
 	m.lastRestartExtras = extras
-	return m.returnErr
+	if m.returnErr != nil {
+		return nil, m.returnErr
+	}
+	return m.restartReturnResp, nil
 }
 
 func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, token, transportToken string) error {

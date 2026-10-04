@@ -179,6 +179,8 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		}
 		task = args.Task
 		resume = args.Resume
+		// Send the launch id the originating node recorded.
+		ctx = withDispatchLaunchID(ctx, args.LaunchID)
 	}
 	if err := dispatcher.DispatchAgentStart(ctx, agent, task, resume); err != nil {
 		return "", fmt.Errorf("dispatch start: %w", err)
@@ -211,6 +213,14 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
+	}
+	if d.Args != "" {
+		args, err := UnmarshalRestartArgs(d.Args)
+		if err != nil {
+			return "", fmt.Errorf("unmarshal restart args: %w", err)
+		}
+		// Send the launch id the originating node recorded.
+		ctx = withDispatchLaunchID(ctx, args.LaunchID)
 	}
 	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
 		return "", fmt.Errorf("dispatch restart: %w", err)

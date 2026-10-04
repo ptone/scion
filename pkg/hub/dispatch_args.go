@@ -24,15 +24,22 @@ import (
 // included. Env/secret resolution is performed by the OWNER via
 // DispatchAgentStart (all hub instances share the same store + secret
 // backend), so resolved env/secrets are NOT serialized here.
+//
+// LaunchID is the launch id the originating node recorded before handing the
+// start off; the owner sends that same id instead of recording a new one.
 type StartDispatchArgs struct {
-	Task   string `json:"task,omitempty"`
-	Resume bool   `json:"resume,omitempty"`
+	Task     string `json:"task,omitempty"`
+	Resume   bool   `json:"resume,omitempty"`
+	LaunchID string `json:"launchId,omitempty"`
 }
 
-// RestartDispatchArgs is intentionally empty — the owner's
-// DispatchAgentRestart re-resolves auth tokens and identity vars from the
-// shared store on the owning node.
-type RestartDispatchArgs struct{}
+// RestartDispatchArgs carries only the launch id the originating node
+// recorded (see StartDispatchArgs.LaunchID). The owner's DispatchAgentRestart
+// re-resolves auth tokens and identity vars from the shared store on the
+// owning node.
+type RestartDispatchArgs struct {
+	LaunchID string `json:"launchId,omitempty"`
+}
 
 // StopDispatchArgs is intentionally empty — a stop needs no additional params
 // beyond what the dispatch row already carries (agentID, projectID).
@@ -87,6 +94,15 @@ func MarshalDispatchArgs(v interface{}) (string, error) {
 // UnmarshalStartArgs deserializes start dispatch args from the broker_dispatch row.
 func UnmarshalStartArgs(raw string) (*StartDispatchArgs, error) {
 	var a StartDispatchArgs
+	if err := json.Unmarshal([]byte(raw), &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// UnmarshalRestartArgs deserializes restart dispatch args from the broker_dispatch row.
+func UnmarshalRestartArgs(raw string) (*RestartDispatchArgs, error) {
+	var a RestartDispatchArgs
 	if err := json.Unmarshal([]byte(raw), &a); err != nil {
 		return nil, err
 	}
