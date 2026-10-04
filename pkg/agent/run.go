@@ -135,6 +135,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// below is unaffected and keeps its existing settings.Hub.ProjectID
 	// fallback for labels, RunConfig.ProjectID, etc.
 	hubDispatchedProjectID := projectID
+	// The launch id is broker-owned (buildStartContext sets or removes
+	// SCION_LAUNCH_ID), so it can be read before any env merging too.
+	launchID := opts.Env["SCION_LAUNCH_ID"]
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
@@ -155,6 +158,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 						a.Detached = *opts.Detached
 					}
 					a.Phase = "running"
+					a.LaunchID = api.LaunchIDFromLabels(a.Labels)
 					return &a, nil
 				}
 			}
@@ -1737,6 +1741,9 @@ authDone:
 				"scion.harness_auth":   opts.HarnessAuth,
 				"agent_id":             agentID,
 			}
+			if launchID != "" {
+				l[api.LabelLaunchID] = launchID
+			}
 			for k, v := range projectkeys.ProjectNameLabels(projectName) {
 				l[k] = v
 			}
@@ -1801,6 +1808,7 @@ authDone:
 				a.HarnessConfigRevision = harnessConfigRevision
 				a.HarnessAuth = opts.HarnessAuth
 				a.Profile = profileName
+				a.LaunchID = launchID
 				return &a, nil
 			}
 		}
@@ -1819,6 +1827,7 @@ authDone:
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
+		LaunchID:              launchID,
 	}, nil
 }
 

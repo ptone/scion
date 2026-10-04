@@ -575,6 +575,20 @@ type FileMapping struct {
 	ContainerPath string // target path in container (~ = home placeholder)
 }
 
+// LabelLaunchID is the container label (Kubernetes pod label) that records
+// the launch id a container was started with.
+const LabelLaunchID = "scion.launch_id"
+
+// LaunchIDFromLabels returns the LabelLaunchID value in labels, also
+// accepting the form a runtime that rewrites label keys (Cloud Run: dots to
+// underscores) lists it under.
+func LaunchIDFromLabels(labels map[string]string) string {
+	if v, ok := labels[LabelLaunchID]; ok {
+		return v
+	}
+	return labels["scion_launch_id"]
+}
+
 // AgentInfo contains metadata about a scion agent.
 // It supports both local/solo mode and hosted/distributed mode.
 type AgentInfo struct {
@@ -623,6 +637,12 @@ type AgentInfo struct {
 	// agent. They are also included in Warnings; this field lets the broker
 	// relay just these to the hub without leaking its other local warnings.
 	HubOnlyEnvWarnings []string `json:"hubOnlyEnvWarnings,omitempty"`
+
+	// LaunchID is the launch id the returned container carries (its
+	// LabelLaunchID label), set by Manager.Start: the start's own launch id
+	// for a new container, the existing label for a reused one, and "" for
+	// a container that has none. Not serialized.
+	LaunchID string `json:"-"`
 
 	// ExplicitImage and ExplicitImagePullPolicy record the image /
 	// kubernetes.imagePullPolicy that the INLINE config (--config), not a

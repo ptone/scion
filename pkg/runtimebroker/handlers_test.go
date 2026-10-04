@@ -95,6 +95,10 @@ type mockManager struct {
 	cleanupLaunchCalls       int
 	lastCleanupLaunchHandles []agent.ResourceHandle
 	cleanupLaunchErr         error
+
+	// reusedLaunchID, when set, makes Start answer as if it reused a
+	// running container labelled with this launch id.
+	reusedLaunchID *string
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -131,11 +135,15 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 		return nil, startErr
 	}
 	agent := &api.AgentInfo{
-		ID:    "test-container-id",
-		Name:  opts.Name,
-		Phase: "running",
+		ID:       "test-container-id",
+		Name:     opts.Name,
+		Phase:    "running",
+		LaunchID: opts.Env["SCION_LAUNCH_ID"],
 	}
 	m.mu.Lock()
+	if m.reusedLaunchID != nil {
+		agent.LaunchID = *m.reusedLaunchID
+	}
 	m.agents = append(m.agents, *agent)
 	m.mu.Unlock()
 	return agent, nil

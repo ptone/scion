@@ -429,6 +429,22 @@ type CreateAgentResponse struct {
 	// LaunchInstanceID is this broker process's launch-owner identity,
 	// generated once at broker start. The Hub stores it as launch_owner.
 	LaunchInstanceID string `json:"launchInstanceId,omitempty"`
+	// EffectiveLaunchID is the launch id of the container that answered a
+	// synchronous create, start or restart that carried a launch id: the
+	// request's own id for a new container, the existing container's id
+	// when it was reused, and "" when that container has none. Absent when
+	// the request carried no launch id.
+	EffectiveLaunchID *string `json:"effectiveLaunchId,omitempty"`
+}
+
+// effectiveLaunchID returns the EffectiveLaunchID for a request that carried
+// requested and was answered by info: nil when the request carried none.
+func effectiveLaunchID(requested string, info *api.AgentInfo) *string {
+	if requested == "" || info == nil {
+		return nil
+	}
+	id := info.LaunchID
+	return &id
 }
 
 // EnvRequirementsResponse is returned by the broker when GatherEnv is true

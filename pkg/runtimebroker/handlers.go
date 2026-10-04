@@ -1343,8 +1343,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := CreateAgentResponse{
-		Agent:   agentInfoPtr(AgentInfoToResponse(*agentInfo)),
-		Created: true,
+		Agent:             agentInfoPtr(AgentInfoToResponse(*agentInfo)),
+		Created:           true,
+		EffectiveLaunchID: effectiveLaunchID(req.LaunchID, agentInfo),
 	}
 	if attempt != nil {
 		s.dispatchAttemptsMu.Lock()
@@ -2046,6 +2047,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
 		Branch        string              `json:"branch,omitempty"`
 		WorkspaceMode string              `json:"workspaceMode,omitempty"`
+
+		// LaunchID is the Hub's launch id for this start; see
+		// CreateAgentRequest.LaunchID.
+		LaunchID string `json:"launchId,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -2154,6 +2159,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		SharedDirs:               startReq.SharedDirs,
 		AgentToken:               startContextAgentToken,
 		WorkspaceMode:            startReq.WorkspaceMode,
+		LaunchID:                 startReq.LaunchID,
 		HTTPRequest:              r,
 		Operation:                opHTTPStart,
 	})
@@ -2240,8 +2246,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	agentResp := AgentInfoToResponse(*agentInfo)
 	writeJSON(w, http.StatusAccepted, CreateAgentResponse{
-		Agent:   &agentResp,
-		Created: false,
+		Agent:             &agentResp,
+		Created:           false,
+		EffectiveLaunchID: effectiveLaunchID(startReq.LaunchID, agentInfo),
 	})
 }
 
@@ -2563,6 +2570,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
 		PreResolvedSkills    *hubclient.ResolveSkillsResponse `json:"preResolvedSkills,omitempty"`
+		// LaunchID is the Hub's launch id for this restart; see
+		// CreateAgentRequest.LaunchID.
+		LaunchID string `json:"launchId,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
@@ -2605,6 +2615,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		HubEndpoint:              restartReq.HubEndpoint,
 		ResolvedEnv:              restartReq.ResolvedEnv,
 		EnvClassifications:       restartReq.EnvClassifications,
+		LaunchID:                 restartReq.LaunchID,
 		HTTPRequest:              r,
 		Operation:                opHTTPRestart,
 	})
@@ -2683,8 +2694,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 
 	agentResp := AgentInfoToResponse(*agentInfo)
 	writeJSON(w, http.StatusAccepted, CreateAgentResponse{
-		Agent:   &agentResp,
-		Created: false,
+		Agent:             &agentResp,
+		Created:           false,
+		EffectiveLaunchID: effectiveLaunchID(restartReq.LaunchID, agentInfo),
 	})
 }
 
