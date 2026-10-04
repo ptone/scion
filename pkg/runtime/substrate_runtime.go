@@ -1334,10 +1334,11 @@ func (r *SubstrateRuntime) Exec(ctx context.Context, id string, cmd []string) (s
 		return "", err
 	}
 
-	token, secrets, err := r.controlCredentials(ctx, id)
+	token, execSecrets, err := r.controlCredentials(ctx, id)
 	if err != nil {
 		return "", err
 	}
+	secrets := execRedactionSet(execSecrets, token)
 
 	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, nil, r.ExecUser(), defaultExecTimeout, execRedactor(secrets))
 	if err != nil {
@@ -1384,10 +1385,11 @@ func (r *SubstrateRuntime) ExecWithStdin(ctx context.Context, id string, cmd []s
 		return "", err
 	}
 
-	token, secrets, err := r.controlCredentials(ctx, id)
+	token, execSecrets, err := r.controlCredentials(ctx, id)
 	if err != nil {
 		return "", err
 	}
+	secrets := execRedactionSet(execSecrets, token)
 
 	data, err := readExecStdin(stdin)
 	if err != nil {
@@ -1551,6 +1553,21 @@ func execRedactor(secrets map[string]string) func(string) string {
 		return nil
 	}
 	return func(s string) string { return redactEnvValues(s, secrets) }
+}
+
+// execRedactionSet is what Exec and ExecWithStdin redact from control-server
+// output and errors: the agent's exec secrets plus its control token, which
+// the actor holds too and must never be relayed back through a broker
+// error, log line or response body. execSecrets is not modified.
+func execRedactionSet(execSecrets map[string]string, controlToken string) map[string]string {
+	set := make(map[string]string, len(execSecrets)+1)
+	for k, v := range execSecrets {
+		set[k] = v
+	}
+	if controlToken != "" {
+		set["control_token"] = controlToken
+	}
+	return set
 }
 
 // errNoControlToken is the error Exec and ExecWithStdin return when id has

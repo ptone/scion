@@ -291,7 +291,8 @@ func TestSubstrateRestart_ExecNoCredentialLeak(t *testing.T) {
 	ctx := context.Background()
 	id, persisted := runPersistedAgent(t, h, "leaky")
 	secrets := append([]string{persisted.ControlToken}, stateTestExecSecrets...)
-	echo := echoSecretsOutput()
+	// The actor holds the token too; echoed back, it must be redacted.
+	echo := echoSecretsOutput() + " token=" + persisted.ControlToken
 
 	var surfaced []string
 	note := func(out string, err error) {
