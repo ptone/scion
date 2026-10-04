@@ -99,6 +99,15 @@ type SubstrateRuntime struct {
 	// defaultHealthzTimeout directly) so tests can shrink it and exercise
 	// the timeout path in well under defaultHealthzTimeout's 5 minutes.
 	healthzTimeout time.Duration
+
+	// locks is the per-id mutex Run, Delete and the state reconciler
+	// serialise on. Nil means the process-wide substrateProcessIDLocks
+	// (always, outside tests): per-agent state is process-wide, so its
+	// serialisation is too. A test sets its own to model a second broker
+	// process sharing the same store and cluster.
+	locks *substrateIDLocks
+	// reconciler holds the state sweep's cursor (substrate_reconcile.go).
+	reconciler *substrateReconciler
 }
 
 // substrateAgentStateMu guards substrateControlTokens and
@@ -217,6 +226,9 @@ func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error
 	if errs := validation.IsDNS1123Label(sc.StateNamespace); len(errs) > 0 {
 		return nil, substrateProfileInvalid(fmt.Errorf("substrate: runtimes.<name>.substrate.state_namespace %q is not a valid namespace name: %s", sc.StateNamespace, strings.Join(errs, "; ")))
 	}
+	if err := validateStateReconcileInterval(sc); err != nil {
+		return nil, substrateProfileInvalid(err)
+	}
 	if err := substrate.Validate(sc); err != nil {
 		return nil, substrateProfileInvalid(err)
 	}
@@ -325,7 +337,7 @@ func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRunti
 		return nil, err
 	}
 
-	return &SubstrateRuntime{
+	rt := &SubstrateRuntime{
 		cfg:            sc,
 		client:         substrate.NewControlClient(conn),
 		conn:           conn,
@@ -335,7 +347,11 @@ func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRunti
 		sleep:          time.Sleep,
 		sleepCtx:       sleepWithContext,
 		healthzTimeout: defaultHealthzTimeout,
-	}, nil
+	}
+	// The background sweep that converges state objects a crashed or
+	// failed Run/Delete left behind (substrate_reconcile.go).
+	rt.startStateReconciler()
+	return rt, nil
 }
 
 // NewSubstrateRuntimeForTest builds a SubstrateRuntime with injected
@@ -470,7 +486,20 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		ControlToken: controlToken,
 		ExecSecrets:  execSecrets,
 	}
-	if err := r.state.Create(ctx, st); err != nil {
+	// Serialise with any Delete or reconciler sweep of this id in this
+	// process for the rest of the start.
+	unlock, err := r.idLocks().lock(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("substrate: wait for agent %s: %w", id, err)
+	}
+	defer unlock()
+	err = r.state.Create(ctx, st)
+	if errors.Is(err, errStateExists) && r.takeOverOrphanedState(ctx, id) {
+		// The id was held by an orphan (its agent is gone), now removed:
+		// retry the claim once.
+		err = r.state.Create(ctx, st)
+	}
+	if err != nil {
 		if errors.Is(err, errStateExists) {
 			return "", r.existingStateError(ctx, id, atespace, actorName)
 		}
@@ -728,6 +757,13 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+
+	// Serialise with any Run or reconciler sweep of this id in this process.
+	unlock, err := r.idLocks().lock(ctx, id)
+	if err != nil {
+		return fmt.Errorf("substrate: wait for agent %s: %w", id, err)
+	}
+	defer unlock()
 
 	st, err := r.markDeleting(ctx, id)
 	if err != nil {

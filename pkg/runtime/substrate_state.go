@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -118,6 +119,11 @@ type substrateAgentState struct {
 	// version is the object's resourceVersion, the compare-and-swap token
 	// for Update and Delete. Set by Create, Get, Update and List.
 	version string
+	// created is the object's server-set metadata.creationTimestamp, read
+	// by Get and List (zero when unknown). It is not part of the stored
+	// data: it is what ages a pending object for the reconciler and Run's
+	// stale takeover. Update never changes it.
+	created time.Time
 }
 
 // AgentStateStore persists substrateAgentState objects.
@@ -242,6 +248,7 @@ func decodeSubstrateState(sec *corev1.Secret) (*substrateAgentState, error) {
 		Phase:        phase,
 		ControlToken: string(sec.Data[substrateStateDataControlToken]),
 		version:      sec.GetResourceVersion(),
+		created:      sec.GetCreationTimestamp().Time,
 	}
 	if raw := sec.Data[substrateStateDataRecord]; len(raw) > 0 {
 		if err := json.Unmarshal(raw, &st.Record); err != nil {
