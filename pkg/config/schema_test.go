@@ -19,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 // --- DetectSettingsFormat tests ---
@@ -1303,4 +1304,41 @@ runtimes:
 	errors, err := ValidateSettings(data, "1")
 	require.NoError(t, err)
 	assert.NotEmpty(t, errors, "unknown key in the substrate object should fail validation")
+}
+
+// TestValidateSettings_SubstrateStateReconcileInterval pins the optional
+// runtimes.<name>.substrate.state_reconcile_interval: the schema accepts it
+// (the substrate block is additionalProperties:false, so an unlisted key
+// would be rejected) and it round-trips into V1SubstrateConfig.
+func TestValidateSettings_SubstrateStateReconcileInterval(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: api.ate-system.svc:443
+      router_endpoint: http://atenet-router.ate-system.svc:80
+      state_namespace: scion-broker-state
+      state_reconcile_interval: 15m
+`)
+	errs, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errs, "state_reconcile_interval must be a valid substrate setting")
+
+	bad := []byte(`
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      state_reconcile_intervall: 15m
+`)
+	errs, err = ValidateSettings(bad, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errs, "control: a misspelled key must be rejected, so the acceptance above is meaningful")
+
+	var sc V1SubstrateConfig
+	require.NoError(t, yaml.Unmarshal([]byte("state_reconcile_interval: 15m\n"), &sc))
+	assert.Equal(t, "15m", sc.StateReconcileInterval)
 }

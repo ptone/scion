@@ -1398,6 +1398,12 @@ type V1SubstrateConfig struct {
 	// label). The namespace and the broker's RBAC in it come from
 	// deploy/substrate/broker.yaml.
 	StateNamespace string `json:"state_namespace,omitempty" yaml:"state_namespace,omitempty" koanf:"state_namespace"`
+	// StateReconcileInterval is how often the broker sweeps the state
+	// namespace for state objects a crashed or failed start/delete left
+	// behind, and converges them (a Go duration string, e.g. "10m").
+	// Optional: defaults to 10 minutes; the minimum is 1 minute. The first
+	// sweep runs one minute after startup.
+	StateReconcileInterval string `json:"state_reconcile_interval,omitempty" yaml:"state_reconcile_interval,omitempty" koanf:"state_reconcile_interval"`
 }
 
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
