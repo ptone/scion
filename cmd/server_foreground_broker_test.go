@@ -307,8 +307,8 @@ func operatorSubstrateSettingsWithBlock(substrateFields string) string {
 // deterministic config validation is a settings problem that no retry can
 // fix, so the broker must still refuse to start. Each row exercises one
 // tagging site: a missing required api_endpoint, a missing required
-// router_endpoint, a missing or invalid required state_namespace, and
-// substrate.Validate rejecting an unsupported
+// router_endpoint, a missing or invalid required state_namespace, an
+// invalid optional state_reconcile_interval, and substrate.Validate rejecting an unsupported
 // egress_trust_bundle. The builder is stubbed to prove validation alone
 // decides this: nothing is ever built or dialed.
 func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStart(t *testing.T) {
@@ -348,6 +348,20 @@ func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStar
 					"router_endpoint": "http://atenet-router.ate-system.svc:80",
 					"state_namespace": "Not_A_Namespace"`),
 			wantInErrMsg: "state_namespace \"Not_A_Namespace\" is not a valid namespace name",
+		},
+		{
+			// The reconciler interval has a floor: a sub-minute sweep would
+			// hammer the API server for no convergence benefit.
+			name: "state_reconcile_interval below minimum",
+			settings: operatorSubstrateSettings(`,
+					"state_reconcile_interval": "30s"`),
+			wantInErrMsg: "state_reconcile_interval \"30s\" is below the minimum of 1m0s",
+		},
+		{
+			name: "state_reconcile_interval not a duration",
+			settings: operatorSubstrateSettings(`,
+					"state_reconcile_interval": "often"`),
+			wantInErrMsg: "state_reconcile_interval \"often\" is not a Go duration",
 		},
 		{
 			name: "substrate.Validate rejects egress_trust_bundle",

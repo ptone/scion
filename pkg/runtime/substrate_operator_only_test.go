@@ -153,6 +153,23 @@ var operatorOnlyRows = []struct {
 		wantRefused:     true,
 	},
 	{
+		// The sweep cadence is operator policy too: a project must not be
+		// able to change how often the broker reaps state objects.
+		name: "state_reconcile_interval-only override",
+		projectSettings: `{
+			"schema_version": "1",
+			"runtimes": {
+				"substrate-prod": {
+					"type": "substrate",
+					"substrate": {"state_reconcile_interval": "1m"}
+				}
+			}
+		}`,
+		wantAPIEndpoint: "api.ate-system.svc:443",
+		wantEgress:      []string{"storage.googleapis.com"},
+		wantRefused:     true,
+	},
+	{
 		name: "identical re-declaration",
 		projectSettings: `{
 			"schema_version": "1",
