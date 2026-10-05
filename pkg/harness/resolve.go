@@ -117,9 +117,6 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 	}, nil
 }
 
-// mergeHarnessConfigEntries overlays settings overrides on top of the
-// harness-config dir entry. Only the fields the settings layer is expected to
-// override are merged here; all other declarative metadata flows from the dir.
 // EffectiveConfig returns the harness-config entry a harness named name
 // runs with: hcDir's config.yaml (or a bare entry when hcDir is nil) with the
 // settings overlay for profile applied, and Harness defaulted to name. Resolve
@@ -143,6 +140,9 @@ func EffectiveConfig(name string, hcDir *config.HarnessConfigDir, settings *conf
 	return entry
 }
 
+// mergeHarnessConfigEntries overlays settings overrides on top of the
+// harness-config dir entry. Only the fields the settings layer is expected to
+// override are merged here; all other declarative metadata flows from the dir.
 func mergeHarnessConfigEntries(base, overlay config.HarnessConfigEntry) config.HarnessConfigEntry {
 	if overlay.Harness != "" {
 		base.Harness = overlay.Harness

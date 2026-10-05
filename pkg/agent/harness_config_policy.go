@@ -19,7 +19,9 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
 // ErrHarnessConfigPolicy marks a launch refused by the harness-config policy
@@ -45,4 +47,40 @@ func CheckHarnessConfigPolicy(ctx context.Context, name string, entry config.Har
 		return fmt.Errorf("%w: %w", ErrHarnessConfigPolicy, err)
 	}
 	return nil
+}
+
+// ErrHarnessConfigNotEvaluated is wrapped (with ErrHarnessConfigPolicy) into
+// a refusal when a harness-config policy is attached but the harness-config
+// could not be evaluated while a provisioner wrapper is staged.
+var ErrHarnessConfigNotEvaluated = errors.New("harness configuration not permitted by policy")
+
+// harnessAfterResolveError decides what Start does when harness.Resolve fails
+// for harnessName. Launch does not run a staged provisioner the policy has
+// not evaluated:
+//   - a policy is attached and a provisioner wrapper is staged in agentHome:
+//     refuse (ErrHarnessConfigPolicy, ErrHarnessConfigNotEvaluated), since
+//     the entry could not be evaluated;
+//   - otherwise (no policy, or nothing staged): fall back to
+//     harness.New(harnessType), which never constructs a container-script
+//     harness.
+//
+// No policy and "policy attached but entry not evaluable" stay distinct: with
+// no policy the fallback is unchanged.
+func harnessAfterResolveError(ctx context.Context, agentHome, harnessName, harnessType string, resolveErr error) (api.Harness, error) {
+	if config.HarnessConfigPolicyFromContext(ctx) != nil && agentHome != "" && harness.HarnessProvisionHookStaged(agentHome) {
+		return nil, fmt.Errorf("%w: %w (harness-config %q: %v)", ErrHarnessConfigPolicy, ErrHarnessConfigNotEvaluated, harnessName, resolveErr)
+	}
+	return harness.New(harnessType), nil
+}
+
+// clearProvisionHookUnlessContainerScript clears a staged provisioner wrapper
+// when h is not a container-script harness (see
+// harness.ClearHarnessProvisionHook). It applies with or without a policy:
+// a wrapper only ever runs for the container-script harness the current
+// launch resolved, and was allowed to resolve.
+func clearProvisionHookUnlessContainerScript(h api.Harness, agentHome string) error {
+	if _, ok := h.(*harness.ContainerScriptHarness); ok {
+		return nil
+	}
+	return harness.ClearHarnessProvisionHook(agentHome)
 }

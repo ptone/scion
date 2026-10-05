@@ -984,6 +984,34 @@ func parseLibVersion(src string) string {
 // cycle — see that package's own copy of this name for the full reasoning.
 const HarnessProvisionHookFilename = "20-harness-provision"
 
+// HarnessProvisionHookPath is where a container-script harness stages its
+// provisioner wrapper in an agent home.
+func HarnessProvisionHookPath(agentHome string) string {
+	return filepath.Join(agentHome, ".scion", "hooks", "pre-start.d", HarnessProvisionHookFilename)
+}
+
+// HarnessProvisionHookStaged reports whether agentHome holds a staged
+// provisioner wrapper.
+func HarnessProvisionHookStaged(agentHome string) bool {
+	_, err := os.Lstat(HarnessProvisionHookPath(agentHome))
+	return err == nil
+}
+
+// ClearHarnessProvisionHook removes a staged provisioner wrapper from
+// agentHome, as WriteProjectPreStartHook clears 30-project-custom when no
+// project hook applies. Callers use it whenever the harness a launch resolved
+// is not a container-script harness, so a wrapper staged for an earlier
+// harness-config does not run at pre-start. Nothing staged is not an error.
+func ClearHarnessProvisionHook(agentHome string) error {
+	if agentHome == "" {
+		return nil
+	}
+	if err := os.Remove(HarnessProvisionHookPath(agentHome)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale harness provisioner hook: %w", err)
+	}
+	return nil
+}
+
 func writeHookWrapper(agentHome, bundleContainerPath string) error {
 	dir := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d")
 	if err := os.MkdirAll(dir, 0755); err != nil {

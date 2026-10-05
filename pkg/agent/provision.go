@@ -1453,6 +1453,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, resolved.Config); err != nil {
 		return "", "", nil, err
 	}
+	// A provisioner wrapper runs only for the container-script harness this
+	// launch resolved: clear one staged for an earlier harness-config (e.g.
+	// an agent home being re-rendered) when this harness is not
+	// container-script. A container-script harness restages its own below.
+	if err := clearProvisionHookUnlessContainerScript(resolved.Harness, agentHome); err != nil {
+		return "", "", nil, err
+	}
 	h := resolved.Harness
 	util.Debugf("ProvisionAgent: harness implementation=%s for harness=%q", resolved.Implementation, finalScionCfg.Harness)
 	skillsDir := h.SkillsDir()

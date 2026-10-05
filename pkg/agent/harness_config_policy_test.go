@@ -333,78 +333,333 @@ func TestHarnessConfigPolicy_StartOfMissingAgentProvisions(t *testing.T) {
 	}
 }
 
-// TestHarnessConfigPolicy_ResolveCallSitesAreHooked guards completeness: every
-// harness construction from a harness-config (harness.Resolve,
-// harness.NewContainerScriptHarness) in pkg/agent and pkg/runtimebroker must
-// be one of the listed call sites, and the enclosing function must evaluate
-// the policy (CheckHarnessConfigPolicy). A new call site fails this test
-// until it is hooked and listed here.
+const harnessImportPath = "github.com/GoogleCloudPlatform/scion/pkg/harness"
+
+// TestHarnessConfigPolicy_ResolveCallSitesAreHooked guards completeness. It
+// scans every non-test Go file under pkg/ and cmd/ (except pkg/harness
+// itself) for harness constructions from a harness-config: calls to
+// pkg/harness's Resolve or NewContainerScriptHarness, found by import path,
+// so an aliased or dot import is covered. Each one must be a listed call site
+// (NewContainerScriptHarness has none outside pkg/harness), and the policy
+// check must be tied to it: a CheckHarnessConfigPolicy call later in the same
+// function whose entry argument is the constructed harness's .Config (the
+// variable the Resolve result is assigned to). resolveTemplateAndHarnessConfig
+// must likewise evaluate EffectiveConfig of the dir it resolves.
+//
+// The tie is syntactic (position and argument), not control-flow: it does not
+// prove the check is on every path, which the behavioural tests in this file
+// cover. A new call site fails this test until it is hooked and listed.
 func TestHarnessConfigPolicy_ResolveCallSitesAreHooked(t *testing.T) {
 	allowed := map[string]bool{
 		"pkg/agent/provision.go:ProvisionAgent": true,
 		"pkg/agent/run.go:Start":                true,
 	}
-	resolvers := map[string]bool{"Resolve": true, "NewContainerScriptHarness": true}
-
+	root := mustAbs(t, filepath.Join("..", ".."))
 	found := map[string]bool{}
-	for _, dir := range []string{".", "../runtimebroker"} {
-		pkgName := "pkg/" + filepath.Base(mustAbs(t, dir))
-		fset := token.NewFileSet()
-		paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, path := range paths {
-			if strings.HasSuffix(path, "_test.go") {
-				continue
-			}
-			file, err := parser.ParseFile(fset, path, nil, 0)
+	sawTemplateResolution := false
+
+	for _, top := range []string{"pkg", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, top), func(path string, d os.DirEntry, err error) error {
 			if err != nil {
-				t.Fatal(err)
+				return err
+			}
+			if d.IsDir() {
+				if path == filepath.Join(root, "pkg", "harness") || d.Name() == "testdata" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			rel, _ := filepath.Rel(root, path)
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+			if err != nil {
+				return err
+			}
+			local, dot := harnessImportName(file)
+			if local == "" && !dot && !strings.HasPrefix(rel, filepath.Join("pkg", "agent")+string(filepath.Separator)) {
+				return nil
 			}
 			for _, decl := range file.Decls {
 				fn, ok := decl.(*ast.FuncDecl)
 				if !ok || fn.Body == nil {
 					continue
 				}
-				var resolves, checks bool
-				ast.Inspect(fn.Body, func(n ast.Node) bool {
-					call, ok := n.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					switch f := call.Fun.(type) {
-					case *ast.SelectorExpr:
-						if x, ok := f.X.(*ast.Ident); ok && x.Name == "harness" && resolvers[f.Sel.Name] {
-							resolves = true
-						}
-						if f.Sel.Name == "CheckHarnessConfigPolicy" {
-							checks = true
-						}
-					case *ast.Ident:
-						if f.Name == "CheckHarnessConfigPolicy" {
-							checks = true
-						}
-					}
-					return true
-				})
-				if !resolves {
-					continue
-				}
-				site := pkgName + "/" + filepath.Base(path) + ":" + fn.Name.Name
-				found[site] = true
-				if !allowed[site] {
-					t.Errorf("unlisted harness construction at %s: evaluate the harness-config policy there (CheckHarnessConfigPolicy) and list it in this test", site)
-				} else if !checks {
-					t.Errorf("%s constructs a harness without CheckHarnessConfigPolicy", site)
+				site := filepath.ToSlash(rel) + ":" + fn.Name.Name
+				checkFunctionHooks(t, fn, site, local, dot, allowed, found)
+				if fn.Name.Name == "resolveTemplateAndHarnessConfig" {
+					sawTemplateResolution = true
+					checkTemplateResolutionHooked(t, fn)
 				}
 			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 	for site := range allowed {
 		if !found[site] {
-			t.Errorf("listed call site %s no longer constructs a harness; update this test", site)
+			t.Errorf("listed call site %s does not construct a harness; update this test", site)
 		}
+	}
+	if !sawTemplateResolution {
+		t.Error("resolveTemplateAndHarnessConfig not found; update this test")
+	}
+}
+
+// harnessImportName returns the identifier file uses for pkg/harness ("" if
+// it does not import it) and whether it is dot-imported.
+func harnessImportName(file *ast.File) (string, bool) {
+	for _, imp := range file.Imports {
+		if strings.Trim(imp.Path.Value, `"`) != harnessImportPath {
+			continue
+		}
+		if imp.Name == nil {
+			return "harness", false
+		}
+		switch imp.Name.Name {
+		case ".":
+			return "", true
+		case "_":
+			return "", false
+		default:
+			return imp.Name.Name, false
+		}
+	}
+	return "", false
+}
+
+// isHarnessCall reports whether call invokes pkg/harness's function name,
+// given how the file imports pkg/harness.
+func isHarnessCall(call *ast.CallExpr, local string, dot bool, names ...string) (string, bool) {
+	switch f := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		if x, ok := f.X.(*ast.Ident); ok && local != "" && x.Name == local {
+			for _, n := range names {
+				if f.Sel.Name == n {
+					return n, true
+				}
+			}
+		}
+	case *ast.Ident:
+		if dot {
+			for _, n := range names {
+				if f.Name == n {
+					return n, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+func isPolicyCheck(call *ast.CallExpr) bool {
+	switch f := call.Fun.(type) {
+	case *ast.Ident:
+		return f.Name == "CheckHarnessConfigPolicy"
+	case *ast.SelectorExpr:
+		return f.Sel.Name == "CheckHarnessConfigPolicy"
+	}
+	return false
+}
+
+// assignedVar returns the first left-hand identifier of the assignment whose
+// right-hand side is call, or "".
+func assignedVar(body *ast.BlockStmt, call *ast.CallExpr) string {
+	name := ""
+	ast.Inspect(body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Rhs) != 1 || as.Rhs[0] != call || len(as.Lhs) == 0 {
+			return true
+		}
+		if id, ok := as.Lhs[0].(*ast.Ident); ok {
+			name = id.Name
+		}
+		return false
+	})
+	return name
+}
+
+func checkFunctionHooks(t *testing.T, fn *ast.FuncDecl, site, local string, dot bool, allowed, found map[string]bool) {
+	t.Helper()
+	var checks []*ast.CallExpr
+	type construction struct {
+		call *ast.CallExpr
+		name string
+	}
+	var constructions []construction
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if isPolicyCheck(call) {
+			checks = append(checks, call)
+		}
+		if name, ok := isHarnessCall(call, local, dot, "Resolve", "NewContainerScriptHarness"); ok {
+			constructions = append(constructions, construction{call, name})
+		}
+		return true
+	})
+	for _, c := range constructions {
+		found[site] = true
+		if c.name == "NewContainerScriptHarness" {
+			t.Errorf("%s constructs a container-script harness directly; build it through harness.Resolve at a hooked call site", site)
+			continue
+		}
+		if !allowed[site] {
+			t.Errorf("unlisted harness construction at %s: evaluate the harness-config policy there (CheckHarnessConfigPolicy) and list it in this test", site)
+			continue
+		}
+		v := assignedVar(fn.Body, c.call)
+		var tied *ast.CallExpr
+		for _, chk := range checks {
+			if chk.Pos() <= c.call.End() || len(chk.Args) != 3 {
+				continue
+			}
+			if sel, ok := chk.Args[2].(*ast.SelectorExpr); ok && sel.Sel.Name == "Config" {
+				if x, ok := sel.X.(*ast.Ident); ok && v != "" && x.Name == v && tied == nil {
+					tied = chk
+				}
+			}
+		}
+		if tied == nil {
+			t.Errorf("%s: harness.Resolve result %q is not followed by CheckHarnessConfigPolicy(ctx, name, %s.Config)", site, v, v)
+			continue
+		}
+		checkWrapperStagedOnlyWhenAllowed(t, fn, site, tied)
+	}
+}
+
+// checkWrapperStagedOnlyWhenAllowed requires, at a hooked call site, that
+// the harness is provisioned (which is where a container-script harness
+// stages its provisioner wrapper) only after the policy check, and that a
+// stale wrapper is cleared for a non-container-script harness
+// (clearProvisionHookUnlessContainerScript) after the check. Start must also
+// route a Resolve error through harnessAfterResolveError.
+func checkWrapperStagedOnlyWhenAllowed(t *testing.T, fn *ast.FuncDecl, site string, check *ast.CallExpr) {
+	t.Helper()
+	var cleared, routedErr bool
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch f := call.Fun.(type) {
+		case *ast.Ident:
+			switch f.Name {
+			case "clearProvisionHookUnlessContainerScript":
+				if call.Pos() > check.End() {
+					cleared = true
+				}
+			case "harnessAfterResolveError":
+				routedErr = true
+			}
+		case *ast.SelectorExpr:
+			if x, ok := f.X.(*ast.Ident); ok && x.Name == "h" && f.Sel.Name == "Provision" && call.Pos() < check.End() {
+				t.Errorf("%s provisions the harness (staging any provisioner wrapper) before the policy check", site)
+			}
+		}
+		return true
+	})
+	if !cleared {
+		t.Errorf("%s does not clear a stale provisioner wrapper (clearProvisionHookUnlessContainerScript) after the policy check", site)
+	}
+	if fn.Name.Name == "Start" && !routedErr {
+		t.Errorf("%s does not route a harness.Resolve error through harnessAfterResolveError", site)
+	}
+}
+
+// TestHarnessConfigPolicy_WrapperWrittenOnlyByContainerScriptProvision
+// guards that pkg/harness stages the provisioner wrapper only from
+// (*ContainerScriptHarness).Provision, the harness a hooked call site builds
+// after the policy allowed it.
+func TestHarnessConfigPolicy_WrapperWrittenOnlyByContainerScriptProvision(t *testing.T) {
+	dir := filepath.Join("..", "harness")
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var callers []string
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "writeHookWrapper" {
+						recv := ""
+						if fn.Recv != nil && len(fn.Recv.List) == 1 {
+							if star, ok := fn.Recv.List[0].Type.(*ast.StarExpr); ok {
+								if id, ok := star.X.(*ast.Ident); ok {
+									recv = id.Name
+								}
+							}
+						}
+						callers = append(callers, recv+"."+fn.Name.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if len(callers) != 1 || callers[0] != "ContainerScriptHarness.Provision" {
+		t.Errorf("writeHookWrapper callers = %v, want only ContainerScriptHarness.Provision", callers)
+	}
+}
+
+// checkTemplateResolutionHooked requires resolveTemplateAndHarnessConfig to
+// evaluate the policy, after resolving the harness-config dir, on
+// EffectiveConfig of that dir.
+func checkTemplateResolutionHooked(t *testing.T, fn *ast.FuncDecl) {
+	t.Helper()
+	var resolveCall *ast.CallExpr
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "resolveHarnessConfigDir" {
+				resolveCall = call
+			}
+		}
+		return true
+	})
+	if resolveCall == nil {
+		t.Fatal("resolveTemplateAndHarnessConfig no longer calls resolveHarnessConfigDir; update this test")
+	}
+	dirVar := assignedVar(fn.Body, resolveCall)
+	tied := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !isPolicyCheck(call) || call.Pos() <= resolveCall.End() || len(call.Args) != 3 {
+			return true
+		}
+		inner, ok := call.Args[2].(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := inner.Fun.(*ast.SelectorExpr); !ok || sel.Sel.Name != "EffectiveConfig" {
+			return true
+		}
+		for _, a := range inner.Args {
+			if id, ok := a.(*ast.Ident); ok && id.Name == dirVar {
+				tied = true
+			}
+		}
+		return true
+	})
+	if !tied {
+		t.Errorf("resolveTemplateAndHarnessConfig does not evaluate CheckHarnessConfigPolicy on EffectiveConfig(..., %s, ...) after resolving it", dirVar)
 	}
 }
 
@@ -415,4 +670,113 @@ func mustAbs(t *testing.T, p string) string {
 		t.Fatal(err)
 	}
 	return a
+}
+
+func wrapperPath(e *policyTestEnv, agentName string) string {
+	return filepath.Join(config.GetAgentHomePath(e.scion, agentName), ".scion", "hooks", "pre-start.d", "20-harness-provision")
+}
+
+func wrapperStaged(e *policyTestEnv, agentName string) bool {
+	_, err := os.Stat(wrapperPath(e, agentName))
+	return err == nil
+}
+
+// (iii) With no policy (the solo CLI), a container-script launch stages its
+// provisioner wrapper as before.
+func TestHarnessConfigPolicy_NoPolicyStagesWrapper(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	if _, err := policyTestManager(nil).Start(context.Background(), api.StartOptions{
+		Name: "solo-wrap", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !wrapperStaged(e, "solo-wrap") {
+		t.Error("container-script launch without a policy must stage the provisioner wrapper")
+	}
+}
+
+// (ii) A relaunch whose resolved harness is not container-script clears a
+// wrapper staged by an earlier container-script run, on start and on a
+// restart-style relaunch, with or without a policy.
+func TestHarnessConfigPolicy_NonContainerScriptRelaunchClearsWrapper(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		withPol   bool
+		relaunch2 bool // relaunch a second time (restart after a start)
+	}{
+		{"start, policy attached", true, false},
+		{"restart, policy attached", true, true},
+		{"start, no policy", false, false},
+		{"restart, no policy", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newPolicyTestEnv(t)
+			e.projectHC(t, "hc-scripted", policyTestScripted)
+			e.projectHC(t, "hc-decl", policyTestDecl)
+			mgr := policyTestManager(nil)
+			if _, err := mgr.Start(context.Background(), api.StartOptions{Name: "relaunch", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true}); err != nil {
+				t.Fatalf("first Start: %v", err)
+			}
+			if !wrapperStaged(e, "relaunch") {
+				t.Fatal("fixture: wrapper should be staged by the container-script run")
+			}
+			ctx := context.Background()
+			if tc.withPol {
+				ctx = (&recordingPolicy{refuse: true}).ctx()
+			}
+			opts := api.StartOptions{Name: "relaunch", ProjectPath: e.scion, HarnessConfig: "hc-decl", NoAuth: true}
+			if _, err := mgr.Start(ctx, opts); err != nil {
+				t.Fatalf("relaunch: %v", err)
+			}
+			if tc.relaunch2 {
+				if _, err := mgr.Start(ctx, opts); err != nil {
+					t.Fatalf("second relaunch: %v", err)
+				}
+			}
+			if wrapperStaged(e, "relaunch") {
+				t.Error("a non-container-script relaunch must clear the stale provisioner wrapper")
+			}
+		})
+	}
+}
+
+// (i) After a harness.Resolve error, with a policy attached and a wrapper
+// staged, Start refuses; with no policy, or nothing staged, it falls back to
+// harness.New as before. (harness.Resolve does not currently fail for a
+// named harness-config Start resolves, so the decision is exercised
+// directly; the call-site guard requires Start's error branch to use it.)
+func TestHarnessConfigPolicy_ResolveErrorWithStagedWrapper(t *testing.T) {
+	home := t.TempDir()
+	stage := func() {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(home, ".scion", "hooks", "pre-start.d"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".scion", "hooks", "pre-start.d", "20-harness-provision"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolveErr := errors.New("resolve failed")
+	policyCtx := (&recordingPolicy{refuse: true}).ctx()
+
+	stage()
+	if _, err := harnessAfterResolveError(policyCtx, home, "hc", "generic", resolveErr); !errors.Is(err, ErrHarnessConfigPolicy) || !errors.Is(err, ErrHarnessConfigNotEvaluated) {
+		t.Errorf("policy attached + wrapper staged: expected refusal, got %v", err)
+	}
+
+	h, err := harnessAfterResolveError(context.Background(), home, "hc", "generic", resolveErr)
+	if err != nil || h == nil {
+		t.Errorf("no policy: expected the harness.New fallback, got h=%v err=%v", h, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(home, ".scion", "hooks", "pre-start.d", "20-harness-provision")); statErr != nil {
+		t.Errorf("no policy: the fallback must leave the agent home as it is: %v", statErr)
+	}
+
+	if err := os.Remove(filepath.Join(home, ".scion", "hooks", "pre-start.d", "20-harness-provision")); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := harnessAfterResolveError(policyCtx, home, "hc", "generic", resolveErr); err != nil || h == nil {
+		t.Errorf("policy attached, nothing staged: expected the fallback, got h=%v err=%v", h, err)
+	}
 }

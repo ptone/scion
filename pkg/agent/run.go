@@ -586,6 +586,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// the legacy New() shim using the bare harness type.
 	var h api.Harness
 	var harnessConfigRevision, harnessConfigSource string
+	// resolveFailed records a harness.Resolve error for a named
+	// harness-config (see harnessAfterResolveError).
+	var resolveFailed bool
 	var noAuthConfig *config.HarnessNoAuthConfig
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
@@ -622,8 +625,17 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			}
 		}
 		if err != nil {
-			util.Debugf("harness.Resolve fell back to New(%q): %v", harnessName, err)
-			h = harness.New(harnessName)
+			// The entry could not be evaluated. harness.New never constructs
+			// a container-script harness; with a policy attached and a
+			// provisioner wrapper staged, the start is refused instead
+			// (harnessAfterResolveError).
+			util.Debugf("harness.Resolve failed for %q: %v", harnessConfigName, err)
+			resolveFailed = true
+			fallback, fbErr := harnessAfterResolveError(ctx, agentHome, harnessConfigName, harnessName, err)
+			if fbErr != nil {
+				return nil, fbErr
+			}
+			h = fallback
 		} else {
 			h = resolved.Harness
 			noAuthConfig = resolved.Config.NoAuthConfig
@@ -636,6 +648,19 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	} else {
 		h = harness.New(harnessName)
 		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
+	}
+
+	// A provisioner wrapper runs only for the container-script harness this
+	// launch resolved (and the policy, if any, allowed): when the resolved
+	// harness is not container-script, clear any wrapper an earlier run
+	// staged, as WriteProjectPreStartHook clears a stale project hook below.
+	// This applies with or without a policy. After a Resolve error with no
+	// policy attached, the fallback keeps today's behaviour and leaves the
+	// agent home as it is.
+	if !resolveFailed {
+		if err := clearProvisionHookUnlessContainerScript(h, agentHome); err != nil {
+			return nil, err
+		}
 	}
 
 	// Reconcile the harness bundle for existing agents. Provision() is
