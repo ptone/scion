@@ -37,7 +37,9 @@ import {
   ARTIFACTS_FLAG,
   MAX_INLINE_TEXT_BYTES,
   artifactFileUrl,
+  baseName,
   formatBytes,
+  isInlineType,
   rendererFor,
 } from '../../client/artifacts.js';
 import type { ArtifactFile, ArtifactResponse, ArtifactRenderer } from '../../client/artifacts.js';
@@ -214,7 +216,11 @@ export class ScionPageArtifactDetail extends LitElement {
     const a = this.data?.artifact;
     if (!a || a.ownerKind !== 'agent') return;
     try {
-      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(a.ownerRef)}`);
+      // A reader may see the artifact without being allowed to see its
+      // owning agent; that is not an error worth a toast.
+      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(a.ownerRef)}`, {
+        suppressAccessDeniedToast: true,
+      });
       if (!res.ok) return;
       const agent = (await res.json()) as { name?: string; slug?: string };
       this.ownerName = agent.name || agent.slug || '';
@@ -297,13 +303,22 @@ export class ScionPageArtifactDetail extends LitElement {
     }
     const kind: ArtifactRenderer = rendererFor(f.mediaType);
     const href = artifactFileUrl(this.artifactId, v.seq, f.path);
+    // Inline types open in a new tab (on an object-storage hub the
+    // redirect is cross-origin, so download= would be ignored anyway);
+    // attachment types download under their base name.
+    const action = isInlineType(f.mediaType)
+      ? html`<sl-button size="small" href=${href} target="_blank" rel="noopener noreferrer">
+          <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
+          Open raw
+        </sl-button>`
+      : html`<sl-button size="small" href=${href} download=${baseName(f.path)}>
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Download
+        </sl-button>`;
     const bar = html`
       <div class="entry-bar">
         <span>${f.path} · ${formatBytes(f.size)}</span>
-        <sl-button size="small" href=${href} download=${f.path}>
-          <sl-icon slot="prefix" name="download"></sl-icon>
-          Download
-        </sl-button>
+        ${action}
       </div>
     `;
     if (kind === 'image') {
@@ -319,10 +334,15 @@ export class ScionPageArtifactDetail extends LitElement {
               readonly
             ></scion-code-editor>`;
     }
+    const tooLarge = (kind === 'markdown' || kind === 'text') && f.size > MAX_INLINE_TEXT_BYTES;
     return html`${bar}
       <div class="download-state">
         <sl-icon name="file-earmark-text" style="font-size: 2rem;"></sl-icon>
-        <p>This file type is not shown in the browser. Use Download to open it.</p>
+        <p>
+          ${tooLarge
+            ? `This file is too large to show here (${formatBytes(f.size)}). Use Open raw to view it.`
+            : 'This file type is not shown in the browser. Use Download to open it.'}
+        </p>
       </div>`;
   }
 }

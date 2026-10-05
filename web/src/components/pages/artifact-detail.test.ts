@@ -55,16 +55,38 @@ function artifact(path: string, mediaType: string): ArtifactResponse {
   };
 }
 
+interface MockOptions {
+  /** Status of file reads (default 200). */
+  fileStatus?: number;
+  /** Status of the owner-agent lookup (default 404). */
+  agentStatus?: number;
+}
+
 /** Mocks fetch: metadata answers meta (or 404 when null), file reads answer body. */
-function mockFetch(meta: ArtifactResponse | null, body = '# Hello'): string[] {
+function mockFetch(
+  meta: ArtifactResponse | null,
+  body = '# Hello',
+  opts: MockOptions = {}
+): string[] {
   const urls: string[] = [];
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       urls.push(url);
+      if (url.startsWith('/api/v1/agents/')) {
+        const status = opts.agentStatus ?? 404;
+        return Promise.resolve(
+          new Response('{"error":{"code":"forbidden","message":"denied"}}', { status })
+        );
+      }
       if (url.includes('/files/')) {
-        return Promise.resolve(new Response(body, { status: 200 }));
+        const status = opts.fileStatus ?? 200;
+        return Promise.resolve(
+          status === 200
+            ? new Response(body, { status })
+            : new Response('{"error":{"code":"internal","message":"boom"}}', { status })
+        );
       }
       if (meta === null) {
         return Promise.resolve(
@@ -155,5 +177,56 @@ describe('artifact page', () => {
     mockFetch(null);
     const el = await mount(true);
     expect(el.shadowRoot!.querySelector('scion-page-404')).not.toBeNull();
+  });
+
+  it('offers Open raw in a new tab for inline types, Download by base name otherwise', async () => {
+    mockFetch(artifact('design.md', 'text/markdown'));
+    let el = await mount(true);
+    let btn = el.shadowRoot!.querySelector('.entry-bar sl-button')!;
+    expect(btn.textContent).toContain('Open raw');
+    expect(btn.getAttribute('target')).toBe('_blank');
+    expect(btn.hasAttribute('download')).toBe(false);
+    document.body.innerHTML = '';
+
+    mockFetch(artifact('dir/page.html', 'text/html'));
+    el = await mount(true);
+    btn = el.shadowRoot!.querySelector('.entry-bar sl-button')!;
+    expect(btn.textContent).toContain('Download');
+    expect(btn.getAttribute('download')).toBe('page.html');
+    expect(btn.hasAttribute('target')).toBe(false);
+  });
+
+  it('says a text entry over the inline limit is too large, without fetching it', async () => {
+    const meta = artifact('huge.md', 'text/markdown');
+    meta.version!.files[0].size = 5 * 1024 * 1024;
+    const urls = mockFetch(meta);
+    const el = await mount(true);
+    expect(el.shadowRoot!.querySelector('.download-state')!.textContent).toContain('too large');
+    expect(urls.some((u) => u.includes('/files/'))).toBe(false);
+  });
+
+  it('shows the error state with Retry when the text fetch fails', async () => {
+    mockFetch(artifact('design.md', 'text/markdown'), '', { fileStatus: 500 });
+    const el = await mount(true);
+    const err = el.shadowRoot!.querySelector('.error-state');
+    expect(err).not.toBeNull();
+    expect(err!.querySelector('sl-button')!.textContent).toContain('Retry');
+  });
+
+  it('does not raise an access-denied toast when the owner lookup is refused', async () => {
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.ownerKind = 'agent';
+    meta.artifact.ownerRef = 'agent-1';
+    const urls = mockFetch(meta, '# Hello', { agentStatus: 403 });
+    const denied = vi.fn();
+    window.addEventListener('scion:access-denied', denied);
+    try {
+      const el = await mount(true);
+      expect(urls).toContain('/api/v1/agents/agent-1');
+      expect(el.shadowRoot!.querySelector('scion-markdown-preview')).not.toBeNull();
+      expect(denied).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('scion:access-denied', denied);
+    }
   });
 });
