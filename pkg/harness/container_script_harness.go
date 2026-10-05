@@ -1027,19 +1027,16 @@ func HarnessProvisionHookStaged(agentHome string) bool {
 	return err == nil
 }
 
-// ClearStagedProvisioning removes, as one unit, the container-script
-// provisioning state a harness staged in agentHome: the provisioner wrapper
+// ClearStagedProvisioning removes, as one unit, the staged provisioning state
+// in agentHome: the provisioner wrapper
 // (.scion/hooks/pre-start.d/20-harness-provision) and the whole staged bundle
 // (.scion/harness: manifest.json, the provisioner's env overlay and other
-// outputs, config.yaml, provision.py, inputs, secrets). Without the manifest,
-// sciontool init does not treat the launch as a container-script provision or
-// load a previous provisioner's env overlay.
-//
-// Callers use it whenever the harness a launch resolved is not a
-// container-script harness, as WriteProjectPreStartHook clears
-// 30-project-custom when no project hook applies, and then restage what a
-// non-container-script harness keeps in the bundle (StageCaptureAuthAssets).
-// Nothing staged is not an error.
+// outputs, config.yaml, provision.py, inputs, secrets). Callers run it
+// before staging every harness, as WriteProjectPreStartHook clears
+// 30-project-custom when no project hook applies; a container-script harness
+// then restages its own bundle and wrapper, and the control plane restages
+// its inputs and secrets. Without a manifest, sciontool init does not treat
+// a launch as a container-script provision. Nothing staged is not an error.
 func ClearStagedProvisioning(agentHome string) error {
 	if agentHome == "" {
 		return nil

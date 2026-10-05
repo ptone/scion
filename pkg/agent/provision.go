@@ -1453,13 +1453,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, resolved.Config); err != nil {
 		return "", "", nil, err
 	}
-	// Reset staged provisioning state before the harness is provisioned
-	// (resetStagedProvisioning): a non-container-script harness clears the
-	// wrapper and bundle; a container-script harness clears the whole bundle,
-	// including inputs/ (so content copied from harness-config or template
-	// home/ trees cannot land there), and the control plane restages its
-	// inputs below.
-	if err := resetStagedProvisioning(resolved.Harness, agentHome); err != nil {
+	// Clear the staged provisioning state (wrapper and whole bundle,
+	// inputs/ included) before staging, for every harness
+	// (resetStagedProvisioning): content copied from harness-config or
+	// template home/ trees cannot land in the bundle, and the control plane
+	// stages its inputs below.
+	if err := resetStagedProvisioning(agentHome); err != nil {
 		return "", "", nil, err
 	}
 	h := resolved.Harness

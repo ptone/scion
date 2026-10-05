@@ -658,16 +658,21 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
 	}
 
-	// Reset staged provisioning state before the harness is provisioned
-	// (resetStagedProvisioning), with or without a policy. A provisioner
-	// wrapper runs only for the container-script harness this launch
-	// resolved (and the policy, if any, allowed): a non-container-script
-	// harness clears the wrapper and bundle, as WriteProjectPreStartHook
-	// clears a stale project hook below; a container-script harness clears
-	// the whole bundle, gets the control-plane inputs restaged and restages
-	// its own bundle. After a Resolve
-	// error with no policy attached, the fallback keeps today's behaviour and
-	// leaves the agent home as it is.
+	// Clear the staged provisioning state (wrapper and whole bundle) before
+	// staging, for every harness and with or without a policy
+	// (resetStagedProvisioning), as WriteProjectPreStartHook clears a stale
+	// project hook below. A provisioner wrapper then runs only if this
+	// launch's container-script Provision writes it, after the control plane
+	// restages its inputs and secrets. After a Resolve error with no policy
+	// attached, the fallback keeps today's behaviour and leaves the agent
+	// home as it is.
+	// The identity of the harness-config this launch resolved, from the
+	// control plane's own resolution; recorded secrets are restored only for
+	// the harness-config revision that staged them.
+	var hcIdentity *harnessConfigIdentity
+	if !resolveFailed {
+		hcIdentity = currentHarnessConfigIdentity(harnessConfigName, resolvedHCDir, opts.HarnessConfigID)
+	}
 	if !resolveFailed {
 		// An agent provisioned before the control plane recorded its inputs
 		// has its record seeded once, before the bundle is cleared: from the
@@ -681,7 +686,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		} else if err := ensureControlPlaneInputsRecord(agentDir); err != nil {
 			return nil, fmt.Errorf("record harness inputs: %w", err)
 		}
-		if err := resetStagedProvisioning(h, agentHome); err != nil {
+		if err := resetStagedProvisioning(agentHome); err != nil {
 			return nil, err
 		}
 		// Restage the control-plane inputs (instructions, system prompt,
@@ -694,7 +699,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			// Restore exactly the secret files the control plane recorded;
 			// ApplyAuthSettings considers only these besides the secrets
 			// staged from this start's resolution.
-			restored, err := restoreSecretsRecord(agentDir, agentHome, agentID)
+			restored, err := restoreSecretsRecord(agentDir, agentHome, agentID, hcIdentity)
 			if err != nil {
 				return nil, fmt.Errorf("restage harness secrets: %w", err)
 			}
@@ -844,7 +849,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			// Record the staged secret files auth-candidates.json references,
 			// so later starts restore exactly these.
 			if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
-				if err := recordSecrets(agentDir, agentHome, cs.StagedSecretNames()); err != nil {
+				if err := recordSecrets(agentDir, agentHome, cs.StagedSecretNames(), hcIdentity); err != nil {
 					return nil, fmt.Errorf("record harness secrets: %w", err)
 				}
 			}

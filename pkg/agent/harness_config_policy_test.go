@@ -1110,7 +1110,7 @@ func TestHarnessConfigPolicy_ContainerScriptSwitchClearsPreviousBundle(t *testin
 	if err != nil || resolvedB.Implementation != "container-script" {
 		t.Fatalf("resolve B: impl=%v err=%v", resolvedB, err)
 	}
-	if err := resetStagedProvisioning(resolvedB.Harness, home); err != nil {
+	if err := resetStagedProvisioning(home); err != nil {
 		t.Fatalf("reset: %v", err)
 	}
 	for _, p := range append(aStale, filepath.Join(bundle, "manifest.json"), filepath.Join(bundle, "config.yaml")) {
@@ -1541,7 +1541,7 @@ func TestHarnessConfigPolicy_LegacyAgentSecretsNotRestored(t *testing.T) {
 	if _, err := mgr.Start(context.Background(), opts); err != nil {
 		t.Fatalf("legacy start: %v", err)
 	}
-	if !strings.Contains(logBuf.String(), "file-type auth secrets are not restored for agents provisioned before this change; re-create or re-supply credentials") || !strings.Contains(logBuf.String(), "agent_id=legacy-secrets") {
+	if !strings.Contains(logBuf.String(), "file-type auth secrets are not restored for agents provisioned before harness secrets were recorded; re-create or re-supply credentials") || !strings.Contains(logBuf.String(), "agent_id=legacy-secrets") {
 		t.Errorf("expected the legacy secrets warning with the agent id, got: %s", logBuf.String())
 	}
 	if _, err := os.Stat(filepath.Join(secrets, "OLD_TOKEN")); !os.IsNotExist(err) {
@@ -1556,5 +1556,328 @@ func TestHarnessConfigPolicy_LegacyAgentSecretsNotRestored(t *testing.T) {
 	}
 	if strings.Contains(logBuf.String(), "file-type auth secrets are not restored") {
 		t.Error("the legacy secrets warning must not repeat once the record exists")
+	}
+}
+
+const policyTestScriptedADC = policyTestScripted + `auth:
+  default_type: auth-file
+  types:
+    auth-file:
+      required_files:
+        - name: ADC_FILE
+          type: file
+          target_suffix: .config/gcloud/application_default_credentials.json
+`
+
+// Start restores the secrets record: a file-type secret staged on the first
+// start from a host credential file is restored from the record on a restart
+// whose auth inputs do not supply it, and auth-candidates.json references
+// it.
+func TestHarnessConfigPolicy_StartRestoresSecretsRecord(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-adc", policyTestScriptedADC)
+	adc := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(adc, []byte(`{"type":"authorized_user"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mgr := policyTestManager(nil)
+	opts := api.StartOptions{Name: "restore", ProjectPath: e.scion, HarnessConfig: "hc-adc", HarnessAuth: "auth-file",
+		Env: map[string]string{"GOOGLE_APPLICATION_CREDENTIALS": adc}}
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	home := config.GetAgentHomePath(e.scion, "restore")
+	secret := filepath.Join(home, ".scion", "harness", "secrets", "ADC_FILE")
+	if data, err := os.ReadFile(secret); err != nil || string(data) != `{"type":"authorized_user"}` {
+		t.Fatalf("fixture: the first start should stage ADC_FILE from the host file: %q (err=%v)", data, err)
+	}
+
+	// Restart: the host credential is removed and not supplied.
+	if err := os.Remove(adc); err != nil {
+		t.Fatal(err)
+	}
+	opts.Env = nil
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	data, err := os.ReadFile(secret)
+	if err != nil || string(data) != `{"type":"authorized_user"}` {
+		t.Fatalf("ADC_FILE not restored from the record: %q (err=%v)", data, err)
+	}
+	cands, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "inputs", "auth-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		FileSecretFiles map[string]string `json:"file_secret_files"`
+	}
+	if err := json.Unmarshal(cands, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.FileSecretFiles["ADC_FILE"] != "$HOME/.scion/harness/secrets/ADC_FILE" {
+		t.Errorf("restored ADC_FILE not referenced in file_secret_files: %v", payload.FileSecretFiles)
+	}
+}
+
+// restoreSecretsRecord restores only regular files, into a 0700 directory
+// with 0600 files, and returns their names, and only when the recorded
+// harness-config identity matches the current one; any ambiguity restores
+// nothing.
+func TestRestoreSecretsRecord(t *testing.T) {
+	agentDir := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home")
+	record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
+	if err := os.MkdirAll(record, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(record, "TOKEN_A"), []byte("a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(record, "TOKEN_A"), filepath.Join(record, "LINKED")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(record, "subdir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	id := &harnessConfigIdentity{Name: "hc", Source: "broker-local", Revision: "sha256:abc"}
+	idData, _ := json.Marshal(id)
+	if err := os.WriteFile(filepath.Join(record, secretsIdentityFile), idData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ambiguity or mismatch restores nothing.
+	for name, current := range map[string]*harnessConfigIdentity{
+		"unknown current identity": nil,
+		"different name":           {Name: "other", Source: "broker-local", Revision: "sha256:abc"},
+		"different revision":       {Name: "hc", Source: "broker-local", Revision: "sha256:def"},
+		"different hub record":     {Name: "hc", Source: "broker-local", HubRecordID: "rec-2", Revision: "sha256:abc"},
+	} {
+		got, err := restoreSecretsRecord(agentDir, home, "agent-x", current)
+		if err != nil || len(got) != 0 {
+			t.Errorf("%s: expected nothing restored, got %v (err=%v)", name, got, err)
+		}
+	}
+	for name, content := range map[string]string{"missing identity": "", "unparseable identity": "{not json"} {
+		if content == "" {
+			_ = os.Remove(filepath.Join(record, secretsIdentityFile))
+		} else if err := os.WriteFile(filepath.Join(record, secretsIdentityFile), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := restoreSecretsRecord(agentDir, home, "agent-x", id)
+		if err != nil || len(got) != 0 {
+			t.Errorf("%s: expected nothing restored, got %v (err=%v)", name, got, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(record, secretsIdentityFile), idData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".scion", "harness", "secrets", "TOKEN_A")); !os.IsNotExist(err) {
+		t.Fatalf("nothing should have been restored yet (stat err=%v)", err)
+	}
+
+	names, err := restoreSecretsRecord(agentDir, home, "agent-x", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(names, ",") != "TOKEN_A" {
+		t.Errorf("restored names = %v, want [TOKEN_A]", names)
+	}
+	dir := filepath.Join(home, ".scion", "harness", "secrets")
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("secrets dir not 0700: %v %v", info, err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, "TOKEN_A")); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("restored file not 0600: %v %v", info, err)
+	}
+	for _, name := range []string{"LINKED", "subdir", secretsIdentityFile} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s must not be restored (stat err=%v)", name, err)
+		}
+	}
+}
+
+// ProvisionAgent creates the secrets record (0700), so a new agent's first
+// start does not take the path for agents provisioned before records existed.
+func TestHarnessConfigPolicy_ProvisionCreatesSecretsRecord(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	if _, _, _, err := ProvisionAgent(context.Background(), "secrec", "", "", "hc-scripted", e.scion, "", "", "", ""); err != nil {
+		t.Fatalf("ProvisionAgent: %v", err)
+	}
+	record := filepath.Join(config.ResolveAgentDir(e.scion, "secrec"), config.HarnessSecretsRecordDirName)
+	if info, err := os.Stat(record); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("ProvisionAgent did not create a 0700 secrets record: %v %v", info, err)
+	}
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	if _, err := policyTestManager(nil).Start(context.Background(), api.StartOptions{Name: "secrec", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if strings.Contains(logBuf.String(), "not restored for agents provisioned before") {
+		t.Errorf("a new agent's first start logged the legacy secrets warning: %s", logBuf.String())
+	}
+}
+
+// adcStart starts agent name with harness-config hc, supplying the host ADC
+// file at adc when non-empty.
+func adcStart(t *testing.T, mgr Manager, e *policyTestEnv, name, hc, adc string, extra func(*api.StartOptions)) {
+	t.Helper()
+	opts := api.StartOptions{Name: name, ProjectPath: e.scion, HarnessConfig: hc, HarnessAuth: "auth-file"}
+	if adc != "" {
+		opts.Env = map[string]string{"GOOGLE_APPLICATION_CREDENTIALS": adc}
+	}
+	if extra != nil {
+		extra(&opts)
+	}
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("Start %s with %s: %v", name, hc, err)
+	}
+}
+
+// restoredADC reports whether the agent's staged secrets hold ADC_FILE and
+// auth-candidates.json references it.
+func restoredADC(t *testing.T, e *policyTestEnv, name string) (staged, referenced bool) {
+	t.Helper()
+	home := config.GetAgentHomePath(e.scion, name)
+	_, err := os.Stat(filepath.Join(home, ".scion", "harness", "secrets", "ADC_FILE"))
+	staged = err == nil
+	if data, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "inputs", "auth-candidates.json")); err == nil {
+		referenced = strings.Contains(string(data), "ADC_FILE")
+	}
+	return staged, referenced
+}
+
+func newADCFile(t *testing.T) string {
+	t.Helper()
+	adc := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(adc, []byte(`{"type":"authorized_user"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return adc
+}
+
+// Recorded secrets are restored only for the harness-config revision that
+// staged them: a same-config restart restores; a switch to a different
+// harness-config (name, source or content), a revision change of the same
+// one, or a different hub record restores nothing.
+func TestHarnessConfigPolicy_SecretsRestoredOnlyForStagingConfig(t *testing.T) {
+	t.Run("switch to a different name restores nothing", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		e.projectHC(t, "hc-a", policyTestScriptedADC)
+		e.projectHC(t, "hc-b", policyTestScriptedADC) // same content, different name
+		mgr := policyTestManager(nil)
+		adcStart(t, mgr, e, "sw", "hc-a", newADCFile(t), nil)
+		adcStart(t, mgr, e, "sw", "hc-b", "", nil)
+		if staged, ref := restoredADC(t, e, "sw"); staged || ref {
+			t.Errorf("hc-a's recorded secret was carried to hc-b (staged=%v referenced=%v)", staged, ref)
+		}
+	})
+
+	t.Run("switch does not carry env secrets", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		e.projectHC(t, "hc-env-a", policyTestScriptedAuth)
+		e.projectHC(t, "hc-env-b", policyTestScriptedAuth)
+		mgr := policyTestManager(nil)
+		if _, err := mgr.Start(context.Background(), api.StartOptions{Name: "swenv", ProjectPath: e.scion, HarnessConfig: "hc-env-a", HarnessAuth: "api-key", Env: map[string]string{"POLICY_TEST_KEY": "k1"}}); err != nil {
+			t.Fatalf("Start A: %v", err)
+		}
+		if _, err := mgr.Start(context.Background(), api.StartOptions{Name: "swenv", ProjectPath: e.scion, HarnessConfig: "hc-env-b", HarnessAuth: "api-key"}); err != nil {
+			t.Fatalf("Start B: %v", err)
+		}
+		home := config.GetAgentHomePath(e.scion, "swenv")
+		if _, err := os.Stat(filepath.Join(home, ".scion", "harness", "secrets", "POLICY_TEST_KEY")); !os.IsNotExist(err) {
+			t.Errorf("hc-env-a's recorded env secret was restored for hc-env-b (stat err=%v)", err)
+		}
+		if data, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "inputs", "auth-candidates.json")); err == nil && strings.Contains(string(data), "POLICY_TEST_KEY\":") {
+			t.Errorf("hc-env-b references hc-env-a's env secret: %s", data)
+		}
+	})
+
+	t.Run("same-config restart restores (local)", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		e.projectHC(t, "hc-a", policyTestScriptedADC)
+		mgr := policyTestManager(nil)
+		adcStart(t, mgr, e, "same", "hc-a", newADCFile(t), nil)
+		adcStart(t, mgr, e, "same", "hc-a", "", nil)
+		if staged, ref := restoredADC(t, e, "same"); !staged || !ref {
+			t.Errorf("same-config restart did not restore (staged=%v referenced=%v)", staged, ref)
+		}
+	})
+
+	t.Run("content change of the resolved dir restores nothing", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		e.projectHC(t, "hc-a", policyTestScriptedADC)
+		mgr := policyTestManager(nil)
+		adcStart(t, mgr, e, "rev", "hc-a", newADCFile(t), nil)
+		e.projectHC(t, "hc-a", policyTestScriptedADC+"# revised\n")
+		adcStart(t, mgr, e, "rev", "hc-a", "", nil)
+		if staged, ref := restoredADC(t, e, "rev"); staged || ref {
+			t.Errorf("a revised harness-config restored the earlier revision's secret (staged=%v referenced=%v)", staged, ref)
+		}
+	})
+
+	t.Run("different source restores nothing", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		e.projectHC(t, "hc-a", policyTestScriptedADC)
+		tplDir := e.template(t, "tplx", "harness_config: hc-a\n")
+		writePolicyHC(t, filepath.Join(tplDir, "harness-configs", "hc-a"), policyTestScriptedADC) // same name and content, template-bundled
+		mgr := policyTestManager(nil)
+		// Staged with the template-bundled copy, restarted with the
+		// broker-local copy of the same name and content.
+		adcStart(t, mgr, e, "src", "hc-a", newADCFile(t), func(o *api.StartOptions) { o.Template = "tplx" })
+		record := filepath.Join(config.ResolveAgentDir(e.scion, "src"), config.HarnessSecretsRecordDirName)
+		if id := readSecretsIdentity(record); id == nil || id.Source != string(config.HarnessConfigSourceTemplateBundled) {
+			t.Fatalf("fixture: expected the record staged from the template-bundled copy, got %+v", id)
+		}
+		adcStart(t, mgr, e, "src", "hc-a", "", nil)
+		if staged, ref := restoredADC(t, e, "src"); staged || ref {
+			t.Errorf("the broker-local copy restored the template-bundled copy's secret (staged=%v referenced=%v)", staged, ref)
+		}
+	})
+
+	t.Run("hub record identity", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		hydrated := filepath.Join(t.TempDir(), "hydrated", "hc-hub")
+		writePolicyHC(t, hydrated, policyTestScriptedADC)
+		mgr := policyTestManager(nil)
+		hub := func(id string) func(*api.StartOptions) {
+			return func(o *api.StartOptions) { o.HarnessConfigPath = hydrated; o.HarnessConfigID = id }
+		}
+		adcStart(t, mgr, e, "hub", "hc-hub", newADCFile(t), hub("rec-1"))
+		adcStart(t, mgr, e, "hub", "hc-hub", "", hub("rec-1"))
+		if staged, ref := restoredADC(t, e, "hub"); !staged || !ref {
+			t.Fatalf("same hub record restart did not restore (staged=%v referenced=%v)", staged, ref)
+		}
+		adcStart(t, mgr, e, "hub", "hc-hub", "", hub("rec-2"))
+		if staged, ref := restoredADC(t, e, "hub"); staged || ref {
+			t.Errorf("a different hub record restored the earlier record's secret (staged=%v referenced=%v)", staged, ref)
+		}
+	})
+}
+
+// currentHarnessConfigIdentity establishes no identity for a missing or
+// partly unreadable resolved directory (nothing is then restored).
+func TestCurrentHarnessConfigIdentity_Unestablished(t *testing.T) {
+	if id := currentHarnessConfigIdentity("hc", &config.HarnessConfigDir{Path: filepath.Join(t.TempDir(), "missing")}, ""); id != nil {
+		t.Errorf("missing dir: expected no identity, got %+v", id)
+	}
+	dir := t.TempDir()
+	writePolicyHC(t, dir, policyTestScripted)
+	if id := currentHarnessConfigIdentity("hc", &config.HarnessConfigDir{Path: dir, Source: config.HarnessConfigSourceHubHydrated}, ""); id != nil {
+		t.Errorf("hub-hydrated without a record ID: expected no identity, got %+v", id)
+	}
+	if id := currentHarnessConfigIdentity("hc", &config.HarnessConfigDir{Path: dir, Source: config.HarnessConfigSourceBrokerLocal}, ""); id == nil {
+		t.Fatal("readable local dir: expected an identity")
+	}
+	if os.Geteuid() != 0 {
+		if err := os.Chmod(filepath.Join(dir, "provision.py"), 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(dir, "provision.py"), 0o644) })
+		if id := currentHarnessConfigIdentity("hc", &config.HarnessConfigDir{Path: dir, Source: config.HarnessConfigSourceBrokerLocal}, ""); id != nil {
+			t.Errorf("partly unreadable dir: expected no identity, got %+v", id)
+		}
 	}
 }

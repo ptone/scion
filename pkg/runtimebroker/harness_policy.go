@@ -173,10 +173,10 @@ func harnessPolicyRefusalFrom(err error) (harnessPolicyDecision, bool) {
 // derives from the stored or template config are evaluated by the policy hook
 // where Start resolves them. The template chain is taken from opts.Template,
 // as harness.Resolve's caller does.
-func harnessPolicyInputForStart(opts api.StartOptions, agentID string) harnessPolicyInput {
+func harnessPolicyInputForStart(opts api.StartOptions, agentName string) harnessPolicyInput {
 	name := opts.HarnessConfig
 	if name == "" && opts.ProjectPath != "" {
-		name = agent.GetSavedHarnessConfig(agentID, harnessConfigProjectDir(opts.ProjectPath))
+		name = agent.GetSavedHarnessConfig(agentName, harnessConfigProjectDir(opts.ProjectPath))
 	}
 	// The project path is passed as given; lookupHarnessConfigForPolicy
 	// resolves it to the project dir launch uses.

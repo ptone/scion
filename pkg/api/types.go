@@ -1053,6 +1053,7 @@ type StartOptions struct {
 	Profile           string
 	HarnessConfig     string
 	HarnessConfigPath string // Resolved local dir for the harness-config (set when hydrated from the Hub); bypasses on-disk FindHarnessConfigDir lookup
+	HarnessConfigID   string // Hub harness-config record ID of the hydrated HarnessConfigPath (set with it by the broker); empty otherwise
 	HarnessAuth       string // Late-binding override for auth_selected_type (api-key, oauth-token, auth-file, vertex-ai)
 	Image             string
 	ProjectPath       string
