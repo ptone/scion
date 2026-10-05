@@ -525,12 +525,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// create-time inline config (broker-side provenance, or agent-info.json
 	// for a pre-provenance agent); it ranks just above the profile override,
 	// the same position the request image holds over the profile image.
+	// The recorded request image depends on broker-side provenance alone,
+	// never on agent-info.json being present or intact.
 	requestImage, requestImageSource := opts.Image, imageTierRequest
-	if requestImage == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-		requestImageSource = imageTierRecordedRequest
-		if provenance != nil {
+	if requestImage == "" {
+		switch {
+		case provenance != nil:
+			requestImageSource = imageTierRecordedRequest
 			requestImage = provenance.RequestImage
-		} else {
+		case finalScionCfg != nil && finalScionCfg.Info != nil:
+			requestImageSource = imageTierRecordedRequest
 			requestImage = finalScionCfg.Info.ExplicitImage
 		}
 	}

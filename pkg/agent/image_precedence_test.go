@@ -771,12 +771,20 @@ func TestStart_UnusableImageProvenanceFailsClosed(t *testing.T) {
 		{"unparseable", "{not json"},
 		{"missing version", `{"requestImage": "x:v1"}`},
 		{"wrong version", `{"version": 99}`},
+		{"unreadable (a directory)", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			projectScionDir := imagePrecedenceFixture(t, "template-pinned:v2", noOverrideSettings)
 			startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
 			provPath := filepath.Join(projectScionDir, "agents", "test-agent", imageProvenanceFile)
-			if err := os.WriteFile(provPath, []byte(tc.body), 0600); err != nil {
+			if tc.body == "" {
+				if err := os.Remove(provPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(provPath, 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(provPath, []byte(tc.body), 0600); err != nil {
 				t.Fatal(err)
 			}
 			mockRT := &runtime.MockRuntime{
@@ -791,6 +799,35 @@ func TestStart_UnusableImageProvenanceFailsClosed(t *testing.T) {
 			_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true})
 			if err == nil || !strings.Contains(err.Error(), "re-provision the agent") || !strings.Contains(err.Error(), imageProvenanceFile) {
 				t.Fatalf("expected an actionable image-provenance error, got %v", err)
+			}
+		})
+	}
+}
+
+// TestStart_RecordedRequestImageSurvivesMissingOrCorruptAgentInfo pins
+// round-5 finding 1: the recorded explicit request image is replayed from
+// broker-side provenance alone, so deleting or corrupting agent-info.json
+// (container-writable) cannot drop it below an explicit profile override.
+func TestStart_RecordedRequestImageSurvivesMissingOrCorruptAgentInfo(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mangle func(path string) error
+	}{
+		{"deleted", os.Remove},
+		{"corrupt", func(path string) error { return os.WriteFile(path, []byte("{not json"), 0644) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectScionDir := imagePrecedenceFixture(t, "template-pinned:v2", profileOverrideSettings)
+			first, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging", Image: "flag-pinned:v9"})
+			if first.Image != "flag-pinned:v9" {
+				t.Fatalf("first start: image = %q", first.Image)
+			}
+			if err := tc.mangle(filepath.Join(projectScionDir, "agents", "test-agent", "home", "agent-info.json")); err != nil {
+				t.Fatal(err)
+			}
+			restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
+			if restart.Image != "flag-pinned:v9" {
+				t.Fatalf("restart with agent-info.json %s: image = %q, want the recorded explicit image", tc.name, restart.Image)
 			}
 		})
 	}

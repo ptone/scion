@@ -21,6 +21,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // imageProvenanceFile is the broker-side agent state file that records each
@@ -29,7 +31,7 @@ import (
 // mounted into the container — so the container cannot influence the image
 // a later Start selects (ptone/scion#1799). Image provenance (including the
 // provisioned profile) is recorded broker-side.
-const imageProvenanceFile = "image-provenance.json"
+const imageProvenanceFile = config.ImageProvenanceFileName
 
 // imageProvenanceVersion is written into every record. A record without it
 // (or with another value) is rejected rather than half-trusted.
@@ -121,4 +123,40 @@ func readImageProvenance(agentDir string) (*imageProvenance, error) {
 
 func imageProvenanceError(path string, err error) error {
 	return fmt.Errorf("image provenance %s is unusable (%w); refusing to fall back to agent-info.json: re-provision the agent (scion reincarnate, or delete and re-create it)", path, err)
+}
+
+// ProvisionedProfile returns the settings profile recorded in the agent's
+// broker-side image provenance. ok is false only when the agent has no
+// provenance file (provisioned before it was recorded); a file that exists
+// but is unusable is an error, never a silent fallback.
+//
+// The broker uses it, in place of the agent-info.json profile
+// (GetSavedProfile), for the runtime selection on start and restart:
+// whichever runtime is selected decides whether the bare-image local-exists
+// check runs and so whether the image_registry prefix is applied
+// (ptone/scion#1799). The agent dir is looked up under the agents root for
+// sharedWorkspace first, then the other root, and must hold scion-agent.json.
+func ProvisionedProfile(projectPath, agentName string, sharedWorkspace bool) (profile string, ok bool, err error) {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return "", false, err
+	}
+	for _, shared := range []bool{sharedWorkspace, !sharedWorkspace} {
+		agentDir, err := checkAgentDirContained(projectDir, agentName, shared)
+		if err != nil {
+			return "", false, err
+		}
+		if config.GetScionAgentConfigPath(agentDir) == "" {
+			continue
+		}
+		p, err := readImageProvenance(agentDir)
+		if err != nil {
+			return "", false, err
+		}
+		if p == nil {
+			return "", false, nil
+		}
+		return p.Profile, true, nil
+	}
+	return "", false, nil
 }

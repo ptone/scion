@@ -2247,10 +2247,15 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if opts.ProjectPath != "" {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}
-	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	runtimeOpts, provErr := runtimeSelectionOpts(opts, id)
+	if provErr != nil {
+		s.writeImageProvenanceError(w, provErr, "start agent", id)
+		return
+	}
+	mgr, resolvedRuntimeType := s.resolveManagerForOpts(runtimeOpts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
-	if sce := rejectKubernetesAssignRuntimeChange(opts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
-		return s.resolveDispatchProfileSelection(opts)
+	if sce := rejectKubernetesAssignRuntimeChange(runtimeOpts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
 		s.writeStartContextError(w, sce, "start agent")
 		return
@@ -2703,10 +2708,15 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// a real side effect. A rejection here must leave the agent exactly as
 	// it was; running this after the stop would return 400 with the agent
 	// already stopped. See the identical re-check and comment in startAgent.
-	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	runtimeOpts, provErr := runtimeSelectionOpts(opts, id)
+	if provErr != nil {
+		s.writeImageProvenanceError(w, provErr, "restart agent", id)
+		return
+	}
+	mgr, resolvedRuntimeType := s.resolveManagerForOpts(runtimeOpts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
-	if sce := rejectKubernetesAssignRuntimeChange(opts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
-		return s.resolveDispatchProfileSelection(opts)
+	if sce := rejectKubernetesAssignRuntimeChange(runtimeOpts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
 		s.writeStartContextError(w, sce, "restart agent")
 		return

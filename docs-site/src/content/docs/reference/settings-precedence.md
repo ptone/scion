@@ -769,8 +769,10 @@ digest), the registry rewrite, the pull policy, the template tier or the profile
   lookup folds in) and the profile-level `image_registry` rewrite, on every start and restart,
   local or broker. The profile a restart passes, or the one saved in `agent-info.json`, does not
   change it. Empty means no profile was set or active at provision; the profile active at start
-  then applies, as for any settings lookup without a profile. Other uses of the saved profile (for
-  example runtime selection) are unchanged.
+  then applies, as for any settings lookup without a profile. A broker start or restart also
+  selects the runtime with this profile rather than the one saved in `agent-info.json`: the
+  selected runtime decides whether a bare image is first looked up locally, and so whether the
+  `image_registry` prefix is applied. Other uses of the saved profile are unchanged.
 - `template`: the template the agent was provisioned from. When a start carries no absolute
   template path (every local restart, and every hub start or restart), the template-tier image and
   pull policy, and the harness-config directories searched for the file tier, come from this
@@ -785,9 +787,10 @@ digest), the registry rewrite, the pull policy, the template tier or the profile
 `agent-info.json` keeps display copies (`AgentInfo.Image`, `.ExplicitImage`,
 `.ExplicitImagePullPolicy`, `.Profile`, `.Template`) for listing and status only.
 
-If `image-provenance.json` exists but cannot be read or parsed, or lacks its version marker, `Start`
-fails with an error asking you to re-provision the agent (`scion reincarnate`, or delete and
-re-create it). It never falls back to `agent-info.json`.
+If `image-provenance.json` exists but cannot be read or parsed, or lacks its version marker, the
+start or restart fails with an error asking you to re-provision the agent (`scion reincarnate`, or
+delete and re-create it); a broker returns `409 Conflict`. It never falls back to
+`agent-info.json`.
 
 An agent provisioned before image provenance was recorded falls back to its previous behaviour,
 including reading those `agent-info.json` fields: its create-time inline image ranks at the top

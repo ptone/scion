@@ -343,3 +343,11 @@ func ResolveAgentDir(projectDir, agentName string) string {
 	}
 	return filepath.Join(projectDir, "agents", agentName)
 }
+
+// ImageProvenanceFileName is the broker-side file, inside an agent's
+// directory next to scion-agent.json, where ProvisionAgent records each image
+// input it saw (pkg/agent's image provenance). It sits outside every
+// container mount scion computes for the agent, so the container cannot
+// influence the image a later Start selects; see pkg/runtime's
+// TestHarnessInputsRecordOutsideScionMounts.
+const ImageProvenanceFileName = "image-provenance.json"
