@@ -172,8 +172,9 @@ export interface Project {
   ownerId?: string;
   ownerName?: string;
   agentCount: number;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them (store.Project). */
+  created: string;
+  updated: string;
   _capabilities?: Capabilities;
   sharedDirs?: SharedDir[];
   githubInstallationId?: number | undefined;
@@ -878,8 +879,9 @@ export interface RuntimeBroker {
   labels?: Record<string, string>;
   createdBy?: string;
   createdByName?: string;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them (store.RuntimeBroker). */
+  created: string;
+  updated: string;
   _capabilities?: Capabilities;
   /**
    * The broker's effective max_agents_per_broker ceiling (ptone/scion#2061

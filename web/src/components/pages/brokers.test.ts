@@ -61,8 +61,8 @@ const NOT_ENFORCED_BROKER = {
   connectionState: 'connected',
   lastHeartbeat: new Date().toISOString(),
   autoProvide: false,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
+  created: new Date().toISOString(),
+  updated: new Date().toISOString(),
   // Stubbed: the backend doesn't produce this source yet (P1b in progress).
   agentLimit: 30,
   agentCount: 7,

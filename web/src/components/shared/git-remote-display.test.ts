@@ -25,8 +25,8 @@ const BASE: Project = {
   path: '',
   status: 'active',
   agentCount: 0,
-  createdAt: '2026-01-01T00:00:00Z',
-  updatedAt: '2026-01-01T00:00:00Z',
+  created: '2026-01-01T00:00:00Z',
+  updated: '2026-01-01T00:00:00Z',
 };
 
 async function mount(project: Partial<Project>): Promise<ScionGitRemoteDisplay> {
