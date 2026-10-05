@@ -691,8 +691,22 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		var resolveTemplatePaths []string
 		if opts.Template != "" {
 			tplName := opts.Template
-			if !filepath.IsAbs(tplName) && finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "" {
-				tplName = finalScionCfg.Info.Template
+			if !filepath.IsAbs(tplName) {
+				// For an agent with broker-side image provenance, the
+				// template recorded there (provisioning's own record) stands
+				// in for agent-info.json's template, which the container can
+				// write and which would otherwise choose the template whose
+				// bundled harness-config this resolves (ptone/scion#1799).
+				// provenance was read above, failing the start if the record
+				// is unusable. A legacy agent keeps agent-info.json's value.
+				switch {
+				case provenance != nil:
+					if provenance.Template != "" {
+						tplName = provenance.Template
+					}
+				case finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.Template != "":
+					tplName = finalScionCfg.Info.Template
+				}
 			}
 			if chain, err := config.GetTemplateChainInProject(tplName, opts.ProjectPath); err == nil {
 				for _, tpl := range chain {
