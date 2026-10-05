@@ -997,3 +997,76 @@ the protected report because a commit cannot contain its own SHA. Normal is
 pending; its actual result will be recorded afterward. No race is authorized
 on broker-01, even after GREEN. No additional heavy command, retry, round 7,
 or dependent work is authorized.
+
+### Pushed checkpoint and single normal failure
+
+The validation checkpoint was committed and pushed as
+`05a19d74e0275073700444b130e95652b7ea957b`. Before validation, HEAD/local branch/
+tracking ref/independent fork remote all matched exactly; ahead/behind was 0/0
+and porcelain status was empty. `gofmt`, `git diff --check`, exact two-path
+scope and zero production delta checks passed.
+
+Exactly one prescribed normal gate ran on that checkpoint:
+
+```text
+ulimit -v 8000000; start_seconds=$SECONDS; timeout 90m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -timeout 89m -count=1 -p 2 ./pkg/hub -run '^(TestExplainAPI_(RegisteredOperationUsesReviewedBasePermission|OperationValidationFailsClosedWithoutValueEcho|DoesNotInferOperation|EffectivePermissionsUsesNonEmittingIntrospection)|TestEffectivePermissionIntrospectionBoundaryStructure|TestEffectivePermissionIntrospectionBoundaryRejectsMutations|TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch|TestEffectivePermissionIntrospectionBoundaryImporterIsBounded|TestEffectivePermissionIntrospectionBoundaryTypeErrorsFailClosed|TestExplainBoundaryForbiddenDataResolver(MemoizesSharedDAG|FailsClosed)|TestAuthzOperationLookupIsClosed)$'; command_rc=$?; echo COMMAND_EXIT=$command_rc; echo WALL_SECONDS=$((SECONDS-start_seconds)); exit $command_rc
+```
+
+Result: **FAILED**, command exit 1, wall 441s, explicit package
+`FAIL github.com/GoogleCloudPlatform/scion/pkg/hub 422.644s`, no package `ok`,
+no timeout diagnostic. Complete decisive failure output:
+
+```text
+--- FAIL: TestEffectivePermissionIntrospectionBoundaryStructure (419.44s)
+    authz_explain_operation_contract_test.go:176:
+        Error Trace: /workspace/pkg/hub/authz_explain_operation_contract_test.go:176
+        Error: Received unexpected error:
+            handleExplainEffectivePermissions (audit_authz.go): cannot completely resolve authorization operation data provenance
+        Test: TestEffectivePermissionIntrospectionBoundaryStructure
+--- FAIL: TestEffectivePermissionIntrospectionBoundaryRejectsMutations (0.02s)
+    --- FAIL: TestEffectivePermissionIntrospectionBoundaryRejectsMutations/operation_constant_alias (0.00s)
+        authz_explain_operation_contract_test.go:256:
+            Error Trace: /workspace/pkg/hub/authz_explain_operation_contract_test.go:256
+            Error: An error is expected but got nil.
+            Test: TestEffectivePermissionIntrospectionBoundaryRejectsMutations/operation_constant_alias
+FAIL
+FAIL github.com/GoogleCloudPlatform/scion/pkg/hub 422.644s
+FAIL
+COMMAND_EXIT=1
+WALL_SECONDS=441
+```
+
+A read-only process observation at gate elapsed 3m45s showed `hub.test` and its
+module-aware `go list -deps -export` child, with CPU-active `pkg/ent` and other
+dependency compilation. Export loading, rather than a reported resolver stack,
+was the observed phase during the gate's initial silence. This observation
+is not a per-phase timing measurement or an additional test verdict.
+
+The isolated resolver proof remains conclusive: deterministic graph bounds,
+root-order/component provenance tests, and safe/forbidden/rejection summaries
+passed Stage A. The production boundary and malicious operation-constant
+alias closure are **not green**. The real structure now terminates with an
+incomplete-provenance rejection; the mutation is incorrectly accepted.
+No full-closure or completed-delivery claim is made. No other selected test
+failure diagnostic appeared, but the non-verbose failed package is not an
+explicit per-test passing packet.
+
+Static follow-up only: `explainBoundaryAssignedVar` accepts `*types.Var` and
+returns nil for a constant destination. ValueSpec dependency construction uses
+that helper, so a constant alias has no destination edge. This suggests a
+separate extraction gap behind the constant-alias failure; its baseline runtime
+status and a corrective design have not been tested or authorized here.
+The SCC correction leaves that extraction helper unchanged. The production
+incomplete result is consistent with the preserved conservative cycle rejection,
+but no exact offending production root/component was isolated after failure.
+Neither issue was fixed, allowlisted, or suppressed. Any extraction/context
+model change requires a new explicit disposition; round 7 remains blocked.
+
+No retry, race, or further heavy command ran. Race is **NOT RUN / PROHIBITED /
+DEFERRED** on broker-01, and normal failure independently bars race. The
+checkpoint is preserved; only final log/report/static/hash/ref evidence follows.
+The final evidence commit contains only this log and is reported in the
+protected report. Scope remains exactly scanner test plus project log, with
+zero production delta against pinned initial head. All original exclusions,
+resource/cache constraints and no-descendant/no-dependent-work rules hold.
+Completion/disposition remains blocked pending durable receipt of final evidence.
