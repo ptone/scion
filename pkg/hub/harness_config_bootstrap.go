@@ -78,6 +78,7 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 			}
 			imported++
 		} else {
+			oldHash := existing.ContentHash
 			changed, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDir, false)
 			if err != nil {
 				s.resourceLog.Warn("harness config bootstrap: failed to sync config, skipping",
@@ -86,6 +87,8 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 			}
 			if changed {
 				updated++
+				s.warnBootstrapOverwrite("harness-config", name, existing.ID, dirPath, oldHash,
+					s.currentHarnessConfigHash(ctx, existing.ID))
 			}
 		}
 	}
@@ -119,4 +122,26 @@ func isHarnessConfigDir(dir string) bool {
 // content hash is unchanged (used by direct imports).
 func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.HarnessConfig, dirPath string, hcDir *config.HarnessConfigDir, force bool) (bool, error) {
 	return s.harnessConfigStore(hcDir.Config.Harness).Bootstrap(ctx, existing.Name, dirPath, existing.Scope, existing.ScopeID, "", force)
+}
+
+// warnBootstrapOverwrite reports that the workstation (non-hosted) startup
+// bootstrap replaced an existing hub record's content with the local
+// ~/.scion copy. Any edit made through the hub (web UI, API) since the last
+// import is lost at this point, so this is a WARN, not routine info
+// (ptone/scion#611, workstation-mode overwrite).
+func (s *Server) warnBootstrapOverwrite(kind, name, id, dir, oldHash, newHash string) {
+	s.resourceLog.Warn("workstation bootstrap: hub record overwritten from local disk copy; "+
+		"hub-side edits to this "+kind+" were replaced",
+		"kind", kind, "name", name, "id", id, "dir", dir,
+		"oldHash", oldHash, "newHash", newHash)
+}
+
+// currentHarnessConfigHash re-reads a harness-config's stored content hash
+// (for logging); returns "" when it cannot be read.
+func (s *Server) currentHarnessConfigHash(ctx context.Context, id string) string {
+	hc, err := s.store.GetHarnessConfig(ctx, id)
+	if err != nil || hc == nil {
+		return ""
+	}
+	return hc.ContentHash
 }
