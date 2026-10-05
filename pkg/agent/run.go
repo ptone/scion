@@ -655,12 +655,20 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			// The entry could not be evaluated. harness.New never constructs
 			// a container-script harness; with a policy attached and a
 			// provisioner wrapper staged, the start is refused instead
-			// (harnessAfterResolveError). Unreachable today for a non-empty
-			// name: a provisioner comes only from a loaded harness-config
-			// directory, so Resolve has no failure mode here. Kept fail
-			// closed in case Resolve gains one; see
-			// TestHarnessConfigPolicy_ResolveErrorWithStagedWrapper.
+			// (harnessAfterResolveError); see
+			// TestHarnessConfigPolicy_ResolveErrorWithStagedWrapper. The one
+			// Resolve failure reachable today for a non-empty name, an
+			// unusable provisioner, fails the launch below without the
+			// fallback.
 			util.Debugf("harness.Resolve failed for %q: %v", harnessConfigName, err)
+			// A harness-config whose provisioner cannot run is a
+			// correctness error, with or without a policy: the harness.New
+			// fallback would boot an agent without the provisioner's output
+			// (auth, harness-native config). Fail the launch before any
+			// container is created (ptone/scion#611).
+			if errors.Is(err, harness.ErrUnusableProvisioner) {
+				return nil, err
+			}
 			resolveFailed = true
 			fallback, fbErr := harnessAfterResolveError(ctx, agentHome, harnessConfigName, harnessName, err)
 			if fbErr != nil {

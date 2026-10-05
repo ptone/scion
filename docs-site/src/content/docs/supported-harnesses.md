@@ -14,6 +14,11 @@ projection, and MCP configuration across all bundles. See
 [Harness-Specific Settings](/scion/reference/harness-settings/) for how bundles are packaged and
 managed.
 
+A harness-config that still declares `provisioner.type: builtin`, or a container-script provisioner
+with an empty `command`, cannot be launched: the start fails before the container is created and
+the error names the fix (`scion harness-config upgrade <name> --activate-script`, or reinstall from
+`harnesses/<name>`).
+
 `antigravity` and `gemini-cli` are installed by default. `opencode`, `codex`, `copilot`, `hermes`,
 `grok-build`, and `muse-code` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
 :::

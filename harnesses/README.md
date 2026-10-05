@@ -50,8 +50,11 @@ when they were part of the default set), here's what you need to know:
    provisioning was introduced.
 
 2. **Legacy config on `provisioner.type: builtin`** — the compiled-in Go
-   implementation has been removed. Run the upgrade command to switch to
-   container-script provisioning:
+   implementation has been removed. Starting an agent from such a config
+   fails before the container is created, with an error that names the
+   fix. The same applies to a container-script provisioner with an empty
+   `command`. Run the upgrade command to switch to container-script
+   provisioning:
    ```sh
    scion harness-config upgrade <name> --activate-script
    ```
@@ -71,9 +74,10 @@ when they were part of the default set), here's what you need to know:
    scion harness-config install harnesses/antigravity
    ```
 
-4. **Existing agents are unaffected** — no agent-home rewrites are
-   performed. Already-created agents continue to work with their
-   existing harness-config directories.
+4. **Existing agents keep their harness-config directories** — no
+   agent-home rewrites are performed. An already-created agent whose
+   harness-config is still on `provisioner.type: builtin` fails to start
+   until the config is upgraded (item 2).
 
 ## Writing a New Harness
 

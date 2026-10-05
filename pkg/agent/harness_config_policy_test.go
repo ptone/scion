@@ -839,6 +839,8 @@ func TestHarnessConfigPolicy_NonContainerScriptRelaunchClearsWrapper(t *testing.
 // staged, Start refuses; with no policy, or nothing staged, it falls back to
 // harness.New as before.
 //
+// An unusable provisioner (legacy "builtin", empty command) fails Start
+// before this decision (TestStart_UnusableProvisionerFailsLaunch). Otherwise
 // harness.Resolve fails only for a container-script entry without an
 // on-disk directory. Start cannot reach that today: entry.Provisioner comes
 // only from a loaded directory's config.yaml (the settings overlay,

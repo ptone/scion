@@ -17,6 +17,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1277,8 +1278,9 @@ func TestResolve_LegacyBuiltinOpencode(t *testing.T) {
 	configsDir := filepath.Join(home, ".scion", "harness-configs")
 	hcDir := filepath.Join(configsDir, "opencode")
 
-	// Legacy opencode config with provisioner.type: builtin — now treated as
-	// container-script since provisioner.type is implicit.
+	// Legacy opencode config with provisioner.type: builtin. The built-in
+	// provisioner was removed, so Resolve fails with an actionable error
+	// rather than producing an agent without provisioning (ptone/scion#611).
 	writeFile(t, filepath.Join(hcDir, "config.yaml"), `harness: opencode
 image: scion-opencode:latest
 user: scion
@@ -1292,15 +1294,13 @@ command:
 
 	t.Setenv("HOME", home)
 
-	resolved, err := Resolve(context.Background(), ResolveOptions{Name: "opencode"})
-	if err != nil {
-		t.Fatalf("Resolve should not error for legacy-builtin config: %v", err)
+	_, err := Resolve(context.Background(), ResolveOptions{Name: "opencode"})
+	var ue *UnusableProvisionerError
+	if !errors.As(err, &ue) || !errors.Is(err, ErrUnusableProvisioner) {
+		t.Fatalf("expected UnusableProvisionerError for legacy-builtin config, got %v", err)
 	}
-	if resolved.Implementation != "container-script" {
-		t.Errorf("Implementation=%q want container-script", resolved.Implementation)
-	}
-	if _, ok := resolved.Harness.(*ContainerScriptHarness); !ok {
-		t.Errorf("expected ContainerScriptHarness, got %T", resolved.Harness)
+	if ue.Type != "builtin" || ue.Path != hcDir {
+		t.Errorf("error = %+v, want type builtin at %s", ue, hcDir)
 	}
 }
 
