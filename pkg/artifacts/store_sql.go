@@ -53,6 +53,7 @@ type migration struct {
 // reorder applied ones.
 var migrations = []migration{
 	{name: migrationInitial, sqlite: sqliteSchema, postgres: postgresSchema},
+	{name: migrationRemoteFiles, sqlite: sqliteRemoteFiles, postgres: postgresRemoteFiles},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -242,8 +243,10 @@ func (s *sqlStore) CreatePublished(ctx context.Context, a *Artifact, v *Version,
 			return errors.New("artifacts: file does not belong to the version")
 		}
 		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_file
-			(version_id, path, size, sha256, media_type) VALUES (?, ?, ?, ?, ?)`),
-			f.VersionID, f.Path, f.Size, f.SHA256, f.MediaType); err != nil {
+			(version_id, path, size, sha256, media_type, origin, source_url, fetch_status, fetch_error)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			f.VersionID, f.Path, f.Size, nullString(f.SHA256), f.MediaType, fileOrigin(f.Origin),
+			nullString(f.SourceURL), nullString(f.FetchStatus), nullString(f.FetchError)); err != nil {
 			return fmt.Errorf("artifacts: insert file: %w", err)
 		}
 	}
@@ -321,7 +324,7 @@ func (s *sqlStore) GetVersion(ctx context.Context, artifactID string, seq int) (
 
 // ListFiles implements Store.
 func (s *sqlStore) ListFiles(ctx context.Context, versionID string) ([]File, error) {
-	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT version_id, path, size, sha256, media_type
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT `+fileColumns+`
 		FROM artifact_file WHERE version_id = ? ORDER BY path`), versionID)
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: list files: %w", err)
@@ -329,8 +332,8 @@ func (s *sqlStore) ListFiles(ctx context.Context, versionID string) ([]File, err
 	defer func() { _ = rows.Close() }()
 	var out []File
 	for rows.Next() {
-		var f File
-		if err := rows.Scan(&f.VersionID, &f.Path, &f.Size, &f.SHA256, &f.MediaType); err != nil {
+		f, err := scanFile(rows)
+		if err != nil {
 			return nil, fmt.Errorf("artifacts: scan file: %w", err)
 		}
 		out = append(out, f)
@@ -343,10 +346,8 @@ func (s *sqlStore) ListFiles(ctx context.Context, versionID string) ([]File, err
 
 // GetFile implements Store.
 func (s *sqlStore) GetFile(ctx context.Context, versionID, path string) (*File, error) {
-	var f File
-	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT version_id, path, size, sha256, media_type
-		FROM artifact_file WHERE version_id = ? AND path = ?`), versionID, path).Scan(
-		&f.VersionID, &f.Path, &f.Size, &f.SHA256, &f.MediaType)
+	f, err := scanFile(s.db.QueryRowContext(ctx, s.rebind(`SELECT `+fileColumns+`
+		FROM artifact_file WHERE version_id = ? AND path = ?`), versionID, path))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -354,6 +355,29 @@ func (s *sqlStore) GetFile(ctx context.Context, versionID, path string) (*File, 
 		return nil, fmt.Errorf("artifacts: get file: %w", err)
 	}
 	return &f, nil
+}
+
+// fileColumns is the artifact_file column list scanFile reads.
+const fileColumns = "version_id, path, size, sha256, media_type, origin, source_url, fetch_status, fetch_error"
+
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanFile(r rowScanner) (File, error) {
+	var (
+		f                                File
+		digest, src, status, fetchErrMsg sql.NullString
+	)
+	err := r.Scan(&f.VersionID, &f.Path, &f.Size, &digest, &f.MediaType, &f.Origin, &src, &status, &fetchErrMsg)
+	f.SHA256, f.SourceURL, f.FetchStatus, f.FetchError = digest.String, src.String, status.String, fetchErrMsg.String
+	return f, err
+}
+
+// fileOrigin defaults an empty origin to an upload.
+func fileOrigin(o string) string {
+	if o == "" {
+		return FileOriginUpload
+	}
+	return o
 }
 
 // ListGrants implements Store.

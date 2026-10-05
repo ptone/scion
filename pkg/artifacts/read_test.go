@@ -338,3 +338,16 @@ func TestReadCredentialCheckComesFirst(t *testing.T) {
 		t.Errorf("host calls %v, want Permits first", f.host.calls)
 	}
 }
+
+func TestGetFileWithoutContentIsNotFound(t *testing.T) {
+	f := newFixture(t, false)
+	pub := f.publish(agentA, "doc.md", []byte("# doc"), "")
+	if _, err := f.db.Exec(`INSERT INTO artifact_file (version_id, path, size, media_type, origin, source_url, fetch_status, fetch_error)
+		SELECT id, '_remote/x', 0, 'application/octet-stream', 'remote', 'https://example.com/x.png', 'failed', 'status 404'
+		FROM artifact_version WHERE artifact_id = ?`, pub.Artifact.ID); err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.do(&agentA, http.MethodGet, "/api/v1/artifacts/"+pub.Artifact.ID+"/files/_remote/x", nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("file without content: %d, want 404", rec.Code)
+	}
+}

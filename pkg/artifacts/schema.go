@@ -195,3 +195,40 @@ CREATE TABLE IF NOT EXISTS artifact_migrations (
     applied_at TIMESTAMPTZ NOT NULL
 );
 `
+
+// migrationRemoteFiles adds the columns that describe where a manifest file
+// came from: an upload, or a remote resource the hub fetched at publish
+// time (origin, source_url, fetch_status, fetch_error). sha256 becomes
+// nullable, because a remote fetch that failed has no content.
+const migrationRemoteFiles = "0002_artifact_file_origin"
+
+// SQLite cannot drop a NOT NULL constraint in place, so the table is
+// rebuilt with the new shape and its rows copied.
+const sqliteRemoteFiles = `
+CREATE TABLE artifact_file_new (
+    version_id   TEXT NOT NULL REFERENCES artifact_version (id),
+    path         TEXT NOT NULL,
+    size         INTEGER NOT NULL,
+    sha256       TEXT,
+    media_type   TEXT NOT NULL,
+    origin       TEXT NOT NULL DEFAULT 'upload',
+    source_url   TEXT,
+    fetch_status TEXT,
+    fetch_error  TEXT,
+    PRIMARY KEY (version_id, path)
+);
+INSERT INTO artifact_file_new (version_id, path, size, sha256, media_type)
+    SELECT version_id, path, size, sha256, media_type FROM artifact_file;
+DROP TABLE artifact_file;
+ALTER TABLE artifact_file_new RENAME TO artifact_file;
+CREATE INDEX IF NOT EXISTS idx_artifact_file_sha256
+    ON artifact_file (sha256);
+`
+
+const postgresRemoteFiles = `
+ALTER TABLE artifact_file ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'upload';
+ALTER TABLE artifact_file ADD COLUMN IF NOT EXISTS source_url TEXT;
+ALTER TABLE artifact_file ADD COLUMN IF NOT EXISTS fetch_status TEXT;
+ALTER TABLE artifact_file ADD COLUMN IF NOT EXISTS fetch_error TEXT;
+ALTER TABLE artifact_file ALTER COLUMN sha256 DROP NOT NULL;
+`
