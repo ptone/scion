@@ -22,12 +22,15 @@ import (
 
 // lookupHarnessConfigForPolicy resolves the harness-config that this
 // dispatch will use, returning the entry needed by
-// evaluateHarnessConfigPolicy. The resolution mirrors the logic in
-// extractRequiredEnvKeys: prefer the on-disk harness-config dir (in the
-// project or global path), then fall back to any settings entry. ok is
-// false when no harness-config was specified or could be found, which
-// short-circuits the policy check (no policy applies).
-func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest) (string, config.HarnessConfigEntry, bool) {
+// evaluateHarnessConfigPolicy. The directory is resolved through
+// config.ResolveHarnessConfigDir, the same ordering launch and
+// extractRequiredEnvKeys use: the hub-hydrated copy (hydratedHCPath) when
+// supplied, else template-bundled, project, then global directories, with the
+// template chain taken from hydratedTemplatePath when supplied (else the
+// request's template slug). A settings harness_configs entry is the last
+// fallback. ok is false when no harness-config was specified or could be
+// found, which short-circuits the policy check (no policy applies).
+func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest, hydratedTemplatePath, hydratedHCPath string) (string, config.HarnessConfigEntry, bool) {
 	var settings *config.VersionedSettings
 	settingsPath := req.ProjectPath
 	if settingsPath == "" {
@@ -50,8 +53,13 @@ func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest) (string, c
 	if searchPath == "" {
 		searchPath = settingsPath
 	}
-	if searchPath != "" {
-		if hcDir, err := config.FindHarnessConfigDir(name, searchPath); err == nil {
+	templateForChain := hydratedTemplatePath
+	if templateForChain == "" && req.Config != nil {
+		templateForChain = req.Config.Template
+	}
+	if hydratedHCPath != "" || searchPath != "" {
+		hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, name, searchPath, templateChainPaths(templateForChain, searchPath)...)
+		if err == nil && hcDir != nil {
 			return name, hcDir.Config, true
 		}
 	}
@@ -61,6 +69,26 @@ func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest) (string, c
 		}
 	}
 	return name, config.HarnessConfigEntry{}, false
+}
+
+// templateChainPaths returns the on-disk paths of template's chain resolved
+// against searchPath, in merge order, for use as the template-bundled tier of
+// config.ResolveHarnessConfigDir. template may be a slug or an absolute
+// (hydrated) path. Returns nil when either input is empty or the chain does
+// not resolve.
+func templateChainPaths(template, searchPath string) []string {
+	if template == "" || searchPath == "" {
+		return nil
+	}
+	chain, err := config.GetTemplateChainInProject(template, searchPath)
+	if err != nil {
+		return nil
+	}
+	paths := make([]string, 0, len(chain))
+	for _, tpl := range chain {
+		paths = append(paths, tpl.Path)
+	}
+	return paths
 }
 
 // harnessPolicyDecision describes the outcome of a per-dispatch policy check.

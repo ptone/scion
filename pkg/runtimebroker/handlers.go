@@ -770,6 +770,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
 	// This needs the resolved project path and merged env to determine which keys are missing.
+	// Hub-hydrated template and harness-config paths, filled by the
+	// env-gather preflight below when it runs, and reused (or hydrated on
+	// demand) by the harness-config policy gate so both preflights evaluate
+	// the bundle launch will actually use.
+	var hydratedTemplatePath, hydratedHCPath string
 	if req.GatherEnv && !req.NoAuth {
 		// Build a preliminary merged env for env-gather evaluation. Shared
 		// with extractRequiredEnvKeys's own requestEnv so both checks start
@@ -798,7 +803,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// request those would otherwise reject can pay for a hub round trip
 		// first. Kept in this order to sit next to the harness-config
 		// hydration it mirrors; revisit if that ordering cost matters.
-		var hydratedTemplatePath string
 		if req.Config != nil && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
 			hubConn := s.resolveHubConnection(r)
 			if hubConn != nil {
@@ -822,7 +826,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// Hydrate hub-managed harness-config before extracting required keys
 		// so that config-driven auth metadata is available during env-gather.
 		// Graceful degradation: if hydration fails, fall back to on-disk only.
-		var hydratedHCPath string
 		if req.Config != nil && (req.Config.HarnessConfigID != "" || req.Config.HarnessConfigHash != "") {
 			hubConn := s.resolveHubConnection(r)
 			if hubConn != nil {
@@ -979,7 +982,48 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// unless the broker has opted in. We check before buildStartContext so
 	// the failure happens before the broker mounts project state, downloads
 	// workspaces, or projects secrets.
-	if name, entry, ok := s.lookupHarnessConfigForPolicy(req); ok {
+	//
+	// The gate must evaluate the same bundle launch will use
+	// (ptone/scion#621): a hub-hydrated harness-config (and the hydrated
+	// template whose bundled harness-configs/ outrank project/global ones)
+	// rather than only a broker-local copy of the same name. Hydration is
+	// only needed when the policy can refuse anything; with the default
+	// allow=true every entry passes, so no hub round trip is paid. A
+	// hydration failure here fails the create with the same mapping launch
+	// would use (buildStartContext), rather than letting the gate evaluate a
+	// broker-local copy launch would not run.
+	if !s.config.AllowContainerScriptHarnesses && req.Config != nil {
+		if hubConn := s.resolveHubConnection(r); hubConn != nil {
+			failHydrate := func(what string, err error) {
+				sce := &startContextError{
+					Status:      http.StatusInternalServerError,
+					Message:     "Failed to hydrate " + what + ": " + err.Error(),
+					IsHubError:  true,
+					OriginalErr: err,
+				}
+				markAttemptFailed(http.StatusInternalServerError, sce.Message)
+				span.SetStatus(codes.Error, startContextSpanText(sce))
+				s.writeStartContextError(w, sce, "create agent")
+			}
+			if hydratedTemplatePath == "" && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
+				tplPath, err := s.hydrateTemplate(ctx, req.Config, hubConn)
+				if err != nil {
+					failHydrate("template", err)
+					return
+				}
+				hydratedTemplatePath = tplPath
+			}
+			if hydratedHCPath == "" && (req.Config.HarnessConfigID != "" || req.Config.HarnessConfigHash != "") {
+				hcPath, err := s.hydrateHarnessConfig(ctx, req.Config, hubConn)
+				if err != nil {
+					failHydrate("harness-config", err)
+					return
+				}
+				hydratedHCPath = hcPath
+			}
+		}
+	}
+	if name, entry, ok := s.lookupHarnessConfigForPolicy(req, hydratedTemplatePath, hydratedHCPath); ok {
 		if d := s.evaluateHarnessConfigPolicy(name, entry); !d.OK {
 			markAttemptFailed(d.HTTPStatus, d.Message)
 			writeError(w, d.HTTPStatus, d.Code, d.Message, nil)
@@ -1601,6 +1645,10 @@ func (s *Server) hydrateHarnessConfig(ctx context.Context, cfg *CreateAgentConfi
 
 	resolver := conn.HCResolver
 	if resolver == nil {
+		s.agentLifecycleLog.Warn("Harness-config hydration skipped: dispatch carries a hub harness-config ID or hash but this hub connection has no harness-config resolver; broker will fall back to on-disk search",
+			"harness_config", cfg.HarnessConfig,
+			"harness_config_id", cfg.HarnessConfigID,
+			"harness_config_hash", cfg.HarnessConfigHash)
 		return "", nil
 	}
 
@@ -1610,6 +1658,14 @@ func (s *Server) hydrateHarnessConfig(ctx context.Context, cfg *CreateAgentConfi
 		return resolver.Resolve(ctx, cfg.HarnessConfigID)
 	}
 
+	// Hash-only dispatch: the hub's integrity expectation cannot be honoured
+	// without a record ID to resolve, so the broker falls back to on-disk
+	// search. The hub always stamps ID and hash together, so this is reachable
+	// only from a non-hub or hand-built request; warn so the substitution is
+	// not silent (ptone/scion#620). Observability only; not refused.
+	s.agentLifecycleLog.Warn("Harness-config hydration skipped: dispatch carries a harness-config hash but no config ID; broker will fall back to on-disk search and the hash is not verified",
+		"harness_config", cfg.HarnessConfig,
+		"harness_config_hash", cfg.HarnessConfigHash)
 	return "", nil
 }
 
@@ -3547,7 +3603,7 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 // harness, auth type, and settings profile. It uses a multi-phase approach:
 //
 // Phase 1 (auth-aware): Resolves the harness type and auth_selected_type from
-// on-disk harness-config and settings, then calls RequiredAuthEnvKeysFromConfig()
+// the resolved harness-config directory (hydrated, else on-disk) and settings, then calls RequiredAuthEnvKeysFromConfig()
 // to get intrinsic credential requirements for the (harness, authType) pair.
 //
 // Phase 2 (settings-based): Extracts keys with empty values from settings
@@ -3557,9 +3613,11 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 // Phase 3 (secrets): Collects explicitly-declared secrets from settings and templates.
 //
 // hydratedHarnessConfigPath, when non-empty, points to a hub-hydrated harness-
-// config directory that supplements the on-disk search. This allows env-gather
-// to see auth metadata from hub-managed harness-configs that haven't been
-// downloaded to the standard on-disk locations yet.
+// config directory. Like launch (config.ResolveHarnessConfigDir), it replaces
+// the on-disk search entirely rather than supplementing it: harness type, auth
+// metadata and env all come from the hydrated copy, and broker-local
+// directories of the same name are consulted only when no hydrated copy was
+// supplied.
 func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplatePath string, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo, map[string][]string, map[string]string) {
 	required := make(map[string]struct{})
 	alternatives := make(map[string][]string)
@@ -3636,8 +3694,8 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		// can feed the launch-mirroring env merge below.
 		var hcDirEnv map[string]string
 
-		// Try on-disk harness-config directory first (check projectPath,
-		// then fall back to global dir for hub-dispatched agents without a local project)
+		// On-disk fallback search root: projectPath, else the global dir for
+		// hub-dispatched agents without a local project.
 		harnessConfigSearchPath := req.ProjectPath
 		if harnessConfigSearchPath == "" {
 			harnessConfigSearchPath = settingsPath
@@ -3663,44 +3721,33 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		if templateForChain == "" && req.Config != nil {
 			templateForChain = req.Config.Template
 		}
-		var harnessConfigTemplatePaths []string
-		if templateForChain != "" && harnessConfigSearchPath != "" {
-			if chain, err := config.GetTemplateChainInProject(templateForChain, harnessConfigSearchPath); err == nil {
-				for _, tpl := range chain {
-					harnessConfigTemplatePaths = append(harnessConfigTemplatePaths, tpl.Path)
-				}
-			}
+		harnessConfigTemplatePaths := templateChainPaths(templateForChain, harnessConfigSearchPath)
+		// Resolve through the shared resolver launch uses
+		// (config.ResolveHarnessConfigDir, via resolveHarnessConfigDir in
+		// pkg/agent/provision.go and harness.Resolve): a hydrated hub-managed
+		// copy, when supplied, wins unconditionally and is never merged with
+		// an on-disk copy of the same name, so harness type, auth type, auth
+		// metadata and `env:` all come from it. The on-disk search
+		// (template-bundled, project, global) is only the fallback when no
+		// hydrated copy was supplied. This keeps a broker-local dir of the
+		// same name (e.g. `harness: claude` with no `auth:`) from shadowing
+		// the hub bundle's auth metadata (ptone/scion#618, ptone/scion#619).
+		var hydratedHCPath string
+		if len(hydratedHarnessConfigPath) > 0 {
+			hydratedHCPath = hydratedHarnessConfigPath[0]
 		}
-		if harnessConfigSearchPath != "" {
-			if hcDir, err := config.FindHarnessConfigDir(harnessConfigName, harnessConfigSearchPath, harnessConfigTemplatePaths...); err == nil {
+		if hydratedHCPath != "" || harnessConfigSearchPath != "" {
+			if hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, harnessConfigName, harnessConfigSearchPath, harnessConfigTemplatePaths...); err == nil && hcDir != nil {
 				harnessType = hcDir.Config.Harness
 				authType = hcDir.Config.AuthSelectedType
-				if hcDir.Config.Auth != nil {
-					authMeta = hcDir.Config.Auth
-				}
+				authMeta = hcDir.Config.Auth
 				hcDirEnv = hcDir.Config.Env
-			}
-		}
-
-		// The hydrated hub-managed harness-config, when supplied, is what
-		// launch actually reads: resolveHarnessConfigDir
-		// (pkg/agent/provision.go) prefers the dispatch-context hydrated
-		// copy unconditionally over an on-disk one of the same name — it
-		// never merges the two. Harness/auth metadata still only falls back
-		// to the hydrated copy when the on-disk search found nothing
-		// (existing cascade), but hcDirEnv always takes the hydrated copy's
-		// value (even absent) once a hydrated copy loads, so the preflight
-		// never scores an on-disk `env:` block that launch will not use.
-		if len(hydratedHarnessConfigPath) > 0 && hydratedHarnessConfigPath[0] != "" {
-			if hcDir, err := config.LoadHarnessConfigDir(hydratedHarnessConfigPath[0]); err == nil && hcDir != nil {
-				if harnessType == "" {
-					harnessType = hcDir.Config.Harness
-					authType = hcDir.Config.AuthSelectedType
-					if hcDir.Config.Auth != nil {
-						authMeta = hcDir.Config.Auth
-					}
-				}
-				hcDirEnv = hcDir.Config.Env
+			} else if err != nil && s.config.Debug {
+				s.envSecretLog.Debug("extractRequiredEnvKeys: harness-config dir not resolved",
+					"harnessConfigName", harnessConfigName,
+					"hydrated", hydratedHCPath != "",
+					"error", err.Error(),
+				)
 			}
 		}
 
