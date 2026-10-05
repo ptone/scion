@@ -55,6 +55,10 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentNotify,
 			ScopeAgentPortForward,
 			ScopeProjectArtifactRead,
+			// Publishing artifacts is how an agent hands a document to
+			// readers on other brokers or in the web UI; it only writes
+			// artifacts homed in the agent's own project.
+			ScopeProjectArtifactWrite,
 		}
 	case AgentRoleFull:
 		return []AgentTokenScope{
@@ -70,6 +74,7 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeProjectTemplateWrite,
 			ScopeAgentSetMessageMode,
 			ScopeProjectArtifactRead,
+			ScopeProjectArtifactWrite,
 		}
 	case "":
 		return ScopesForRole(AgentRoleNone)
