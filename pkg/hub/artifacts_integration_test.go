@@ -330,3 +330,53 @@ func decodeArtifactID(t *testing.T, rec *httptest.ResponseRecorder) string {
 	require.NotEmpty(t, resp.Artifact.ID)
 	return resp.Artifact.ID
 }
+
+// TestArtifactsGrantNeverBypassesAgentScope pins the invariant on the real
+// read routes: a principal grant decides which artifacts an agent may
+// read, the project:artifact:read scope decides whether it may use the
+// artifact API at all. An agent in another project holding an explicit
+// grant reads the artifact; the same agent with a token that lacks the
+// scope gets 404 on every read route, like any unreadable artifact.
+func TestArtifactsGrantNeverBypassesAgentScope(t *testing.T) {
+	srv, s := testServer(t)
+	st, blobs := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	p1 := artifactProject(t, s, "grant-p1")
+	p2 := artifactProject(t, s, "grant-p2")
+	owner, _ := artifactAgent(t, srv, s, p1.ID, "grant-owner", AgentRoleBaseline)
+	grantee, withScope := artifactAgent(t, srv, s, p2.ID, "grant-grantee", AgentRoleBaseline)
+
+	var noRead []AgentTokenScope
+	for _, sc := range ScopesForRole(AgentRoleBaseline) {
+		if sc != ScopeProjectArtifactRead {
+			noRead = append(noRead, sc)
+		}
+	}
+	withoutScope, err := srv.GetAgentTokenService().GenerateAgentToken(grantee.ID, p2.ID, noRead, nil)
+	require.NoError(t, err)
+
+	// Publish as the owner, with a principal read grant for the grantee.
+	content := []byte("granted")
+	sum := sha256.Sum256(content)
+	digest := hex.EncodeToString(sum[:])
+	_, err = blobs.Upload(ctx, artifacts.BlobPath(srv.HubID(), digest), bytes.NewReader(content), storage.UploadOptions{})
+	require.NoError(t, err)
+	now := time.Now()
+	a := &artifacts.Artifact{ID: tid("grant-artifact"), ScopeKind: artifacts.ScopeKindProject, ScopeRef: p1.ID,
+		OwnerKind: artifacts.PrincipalKindAgent, OwnerRef: owner.ID, Title: "granted", CreatedAt: now, UpdatedAt: now}
+	v := &artifacts.Version{ID: tid("grant-version"), ArtifactID: a.ID, Seq: 1, Kind: artifacts.VersionKindPublish,
+		EntryPath: "g.txt", TotalBytes: int64(len(content)), FileCount: 1, CreatedAt: now, State: artifacts.VersionStateReady}
+	files := []artifacts.File{{VersionID: v.ID, Path: "g.txt", Size: int64(len(content)), SHA256: digest, MediaType: "text/plain"}}
+	grants := []artifacts.Grant{{ID: tid("grant-row"), ArtifactID: a.ID, SubjectKind: artifacts.SubjectPrincipal,
+		SubjectRef: artifacts.PrincipalRef(artifacts.PrincipalKindAgent, grantee.ID), Permission: artifacts.GrantRead, CreatedAt: now}}
+	require.NoError(t, st.CreatePublished(ctx, a, v, files, grants))
+
+	for _, p := range []string{
+		"/api/v1/artifacts/" + a.ID,
+		"/api/v1/artifacts/" + a.ID + "/files/g.txt",
+		"/api/v1/artifacts/" + a.ID + "/versions/1/files/g.txt",
+	} {
+		assert.Equal(t, http.StatusOK, doRequestWithAgentToken(t, srv, http.MethodGet, p, nil, withScope).Code, "granted, with scope: %s", p)
+		assert.Equal(t, http.StatusNotFound, doRequestWithAgentToken(t, srv, http.MethodGet, p, nil, withoutScope).Code, "granted, without scope: %s", p)
+	}
+}
