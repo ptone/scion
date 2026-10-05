@@ -160,8 +160,11 @@ func TestArtifactPublishScope(t *testing.T) {
 	t.Setenv("SCION_AGENT_ID", "")
 	assert.Equal(t, "hub-proj", artifactPublishScope(settings), "a user names the hub project")
 	assert.Equal(t, "", artifactPublishScope(&config.Settings{ProjectID: "local-only"}), "never a local-only project id")
+	assert.ErrorContains(t, checkArtifactPublishScope(&config.Settings{ProjectID: "local-only"}), "not linked to a hub project")
+	assert.NoError(t, checkArtifactPublishScope(settings))
 	t.Setenv("SCION_AGENT_ID", "agent-1")
 	assert.Equal(t, "", artifactPublishScope(settings), "a hub agent names no scope; the hub uses its project")
+	assert.NoError(t, checkArtifactPublishScope(&config.Settings{}), "an agent needs no linked project")
 }
 
 func TestGetArtifactDetectsCorruption(t *testing.T) {

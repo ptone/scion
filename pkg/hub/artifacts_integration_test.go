@@ -27,7 +27,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -503,4 +505,131 @@ func doRawAgentRequest(t *testing.T, srv *Server, method, path string, body []by
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+// TestArtifactServiceReachableOnlyThroughHTTPAuth pins that the artifact
+// service has no in-process callers: the hub builds it in exactly one place
+// (artifactsHandler), mounts it only on its own mux (server.go, pinned by
+// TestArtifactRoutesMatchService), and that mux is served only behind
+// applyMiddleware, whose UnifiedAuthMiddleware derives the identity from the
+// request's credentials. User identities the hub constructs in process for
+// its own decisions therefore never reach artifacts.Host.
+func TestArtifactServiceReachableOnlyThroughHTTPAuth(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	builds := map[string]int{}
+	handlerCalls := map[string]int{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		require.NoError(t, err)
+		text := string(src)
+		builds[name] += strings.Count(text, "artifacts.NewService(") + strings.Count(text, "newArtifactHost(s)")
+		handlerCalls[name] += strings.Count(text, "s.artifactsHandler()")
+		if strings.Contains(text, "mux.ServeHTTP(") {
+			t.Errorf("%s serves the hub mux in process; artifact requests must pass UnifiedAuthMiddleware", name)
+		}
+	}
+	for name, n := range builds {
+		if n > 0 && name != "artifacts_store.go" {
+			t.Errorf("%s builds the artifact service or its host; only artifacts_store.go may", name)
+		}
+	}
+	for name, n := range handlerCalls {
+		if n > 0 && name != "server.go" {
+			t.Errorf("%s calls artifactsHandler; only route registration in server.go may", name)
+		}
+	}
+	assert.Equal(t, 1, handlerCalls["server.go"], "artifactsHandler is built once, for route registration")
+
+	// Behaviourally: an identity placed in the context by in-process code,
+	// with no credentials on the request, does not survive the hub's
+	// middleware.
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	p1 := artifactProject(t, s, "inproc-p1")
+	createTestUserWithProjectRole(t, s, tid("inproc-user"), "inproc-user@test.com", p1.ID, store.ProjectRoleMember)
+	user := NewAuthenticatedUser(tid("inproc-user"), "inproc-user@test.com", "U", "member", "web")
+	rec := identityArtifactRequest(t, srv, user, http.MethodPost, "/api/v1/artifacts?name=x.md&scope="+p1.ID, []byte("x"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	id := decodeArtifactID(t, rec)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/"+id, nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), user))
+	out := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(out, req)
+	assert.NotEqual(t, http.StatusOK, out.Code, "a context identity without credentials must not read through the hub handler")
+}
+
+// bearerArtifactRequest sends a request with a bearer credential through
+// the full hub handler.
+func bearerArtifactRequest(t *testing.T, srv *Server, method, path, token string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestArtifactsAccessTokenAfterMembershipLoss pins the designed behaviour of
+// the credential check with real access tokens: it applies the token's
+// project boundary and permissions, not the holder's current project
+// membership, so a token keeps reading what its user owns after the user
+// loses the project role (owner access survives loss of the home scope),
+// while artifacts the user neither owns nor was granted stay unreadable.
+// Revoking the token cuts it off at once.
+func TestArtifactsAccessTokenAfterMembershipLoss(t *testing.T) {
+	srv, s := testServer(t)
+	st, blobs := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	p1 := artifactProject(t, s, "loss-p1")
+	userID := tid("loss-user")
+	createTestUserWithProjectRole(t, s, userID, "loss-user@test.com", p1.ID, store.ProjectRoleMember)
+	user, err := s.GetUser(ctx, userID)
+	require.NoError(t, err)
+
+	token, row, err := srv.uatService.CreateToken(rs4MintContext(userID), userID, "artifacts", p1.ID, []string{"artifact:read", "artifact:create"}, nil)
+	require.NoError(t, err)
+
+	rec := bearerArtifactRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=own.md&scope="+p1.ID, token, []byte("# own\n"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	owned := decodeArtifactID(t, rec)
+
+	// Another artifact in p1 that the user neither owns nor was granted.
+	content := []byte("other")
+	sum := sha256.Sum256(content)
+	digest := hex.EncodeToString(sum[:])
+	_, err = blobs.Upload(ctx, artifacts.BlobPath(srv.HubID(), digest), bytes.NewReader(content), storage.UploadOptions{})
+	require.NoError(t, err)
+	now := time.Now()
+	other := &artifacts.Artifact{ID: tid("loss-other"), ScopeKind: artifacts.ScopeKindProject, ScopeRef: p1.ID,
+		OwnerKind: artifacts.PrincipalKindAgent, OwnerRef: tid("loss-agent"), Title: "o", CreatedAt: now, UpdatedAt: now}
+	ov := &artifacts.Version{ID: tid("loss-other-v1"), ArtifactID: other.ID, Seq: 1, Kind: artifacts.VersionKindPublish,
+		EntryPath: "o.txt", TotalBytes: int64(len(content)), FileCount: 1, CreatedAt: now, State: artifacts.VersionStateReady}
+	require.NoError(t, st.CreatePublished(ctx, other, ov,
+		[]artifacts.File{{VersionID: ov.ID, Path: "o.txt", Size: int64(len(content)), SHA256: digest, MediaType: "text/plain"}},
+		[]artifacts.Grant{{ID: tid("loss-other-home"), ArtifactID: other.ID, SubjectKind: artifacts.SubjectScope,
+			SubjectRef: p1.ID, Permission: artifacts.GrantRead, CreatedAt: now}}))
+	require.Equal(t, http.StatusOK, bearerArtifactRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+other.ID, token, nil).Code,
+		"precondition: a member reads the project's artifacts")
+
+	// The user loses every role.
+	_, err = s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, bearerArtifactRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+owned+"/files/own.md", token, nil).Code,
+		"the owner's token still reads the owned artifact")
+	for _, p := range []string{"/api/v1/artifacts/" + other.ID, "/api/v1/artifacts/" + other.ID + "/files/o.txt"} {
+		assert.Equal(t, http.StatusNotFound, bearerArtifactRequest(t, srv, http.MethodGet, p, token, nil).Code,
+			"neither owned nor granted after the role is gone: %s", p)
+	}
+
+	// Revoking the token is the immediate cut-off.
+	require.NoError(t, srv.uatService.RevokeToken(rs4MintContext(userID), userID, row.ID))
+	rec = bearerArtifactRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+owned+"/files/own.md", token, nil)
+	assert.Contains(t, []int{http.StatusUnauthorized, http.StatusNotFound}, rec.Code, rec.Body.String())
+	assert.NotEqual(t, http.StatusOK, rec.Code)
 }
