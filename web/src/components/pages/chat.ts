@@ -3060,6 +3060,8 @@ export class ScionPageChat extends LitElement {
       const snapshot = await agentStore.ensure(HUB_AGENTS_QUERY, {
         signal: load.controller.signal,
       });
+      // The generation check is defence in depth: every bump also detaches
+      // this load, whose signal then rejects it before this line.
       if (this.v2Conversation || generation !== this._hubMembersGeneration) return;
       this._publishHubAgents(snapshot);
     } catch {
