@@ -1491,9 +1491,14 @@ type workstationResourceBootstrapper interface {
 // sharing a Postgres store would race. The key is shared with the hosted
 // bundled-resource bootstrap; the two branches are mutually exclusive.
 //
-// Caveat: in non-hosted mode each replica imports its OWN ~/.scion, so when
-// the lock is held the loser skips and the winner's disk content defines the
-// hub records. On SQLite the lock is a no-op and both imports always run.
+// Caveats:
+//   - In non-hosted mode each replica imports its OWN ~/.scion, so when the
+//     lock is held the loser skips and the winner's disk content defines the
+//     hub records.
+//   - A lock-acquire error (Postgres only, e.g. pool exhaustion) skips the
+//     import for this boot, logged at ERROR by runWithAdvisoryLock. Before
+//     the lock the import always ran; this matches the hosted branch.
+//   - On SQLite the lock is a no-op and both imports always run.
 func bootstrapWorkstationResources(ctx context.Context, s store.Store, b workstationResourceBootstrapper, globalDir string) {
 	runWithAdvisoryLock(ctx, s, store.LockBundledResources, "workstation resource bootstrap", func() {
 		globalTemplatesDir := filepath.Join(globalDir, "templates")

@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -29,13 +30,14 @@ import (
 type fakeLockingStore struct {
 	store.Store
 	acquired bool
+	lockErr  error
 	keys     []store.AdvisoryLockKey
 	released int
 }
 
 func (f *fakeLockingStore) TryAdvisoryLock(_ context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
 	f.keys = append(f.keys, key)
-	return f.acquired, func() error { f.released++; return nil }, nil
+	return f.acquired, func() error { f.released++; return nil }, f.lockErr
 }
 
 func (f *fakeLockingStore) TryAdvisoryLockObject(_ context.Context, _ store.AdvisoryLockKey, _ int32) (bool, func() error, error) {
@@ -98,4 +100,17 @@ func TestBootstrapWorkstationResources_NoLockerRunsBoth(t *testing.T) {
 
 	assert.Len(t, b.templateDirs, 1)
 	assert.Len(t, b.hcDirs, 1)
+}
+
+// A lock-acquire error skips the import for this boot (documented caveat;
+// same behaviour as the hosted branch).
+func TestBootstrapWorkstationResources_LockErrorSkipsBootstrap(t *testing.T) {
+	s := &fakeLockingStore{lockErr: errors.New("pool exhausted")}
+	b := &recordingBootstrapper{}
+
+	bootstrapWorkstationResources(context.Background(), s, b, "/g")
+
+	assert.Equal(t, []store.AdvisoryLockKey{store.LockBundledResources}, s.keys)
+	assert.Empty(t, b.templateDirs)
+	assert.Empty(t, b.hcDirs)
 }
