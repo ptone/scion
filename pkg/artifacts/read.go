@@ -201,6 +201,12 @@ func (s *Service) handleGetFile(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the file")
 		return
 	}
+	if f.SHA256 == "" {
+		// A manifest entry with no content (a remote fetch that failed)
+		// has no bytes to serve.
+		writeNotFound(w)
+		return
+	}
 	serveFile(w, r, b, f, deliveryFor(r, b))
 }
 

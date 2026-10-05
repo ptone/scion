@@ -105,7 +105,10 @@ artifact_version (
 )
 artifact_file (
   version_id FK, path text,              -- relative path inside the bundle
-  size bigint, sha256 text, media_type text,
+  size bigint, sha256 text NULL,         -- NULL only for a remote fetch that failed
+  media_type text,
+  origin text NOT NULL DEFAULT 'upload', -- 'upload' | 'remote' (fetched by the hub at publish time)
+  source_url text NULL, fetch_status text NULL, fetch_error text NULL,   -- remote files only
   PRIMARY KEY (version_id, path)
 )
 artifact_grant (

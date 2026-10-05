@@ -97,14 +97,35 @@ type Version struct {
 	State         string
 }
 
+// File origins.
+const (
+	// FileOriginUpload is a file whose bytes the publisher sent.
+	FileOriginUpload = "upload"
+	// FileOriginRemote is a remote resource the hub fetched at publish time.
+	FileOriginRemote = "remote"
+)
+
+// Fetch statuses of a remote file.
+const (
+	FetchStatusOK     = "ok"
+	FetchStatusFailed = "failed"
+)
+
 // File is a row of the artifact_file table: one file in a version's
-// manifest. SHA256 is the lowercase hex digest that addresses the blob.
+// manifest. SHA256 is the lowercase hex digest that addresses the blob, or
+// "" for a remote file whose fetch failed. Origin is FileOriginUpload (the
+// default when empty) or FileOriginRemote; SourceURL, FetchStatus and
+// FetchError describe a remote file and are "" for uploads.
 type File struct {
-	VersionID string
-	Path      string
-	Size      int64
-	SHA256    string
-	MediaType string
+	VersionID   string
+	Path        string
+	Size        int64
+	SHA256      string
+	MediaType   string
+	Origin      string
+	SourceURL   string
+	FetchStatus string
+	FetchError  string
 }
 
 // Grant is a row of the artifact_grant table.

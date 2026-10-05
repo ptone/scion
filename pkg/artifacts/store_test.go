@@ -212,7 +212,7 @@ func seedArtifact(t *testing.T, st Store, key string) (*Artifact, *Version, File
 		TotalBytes: 5, FileCount: 1, CreatedByKind: a.OwnerKind, CreatedByRef: a.OwnerRef,
 		CreatedAt: now, State: VersionStateReady,
 	}
-	f := File{VersionID: v.ID, Path: "design.md", Size: 5, SHA256: strings.Repeat("ab", 32), MediaType: "text/markdown"}
+	f := File{VersionID: v.ID, Path: "design.md", Size: 5, SHA256: strings.Repeat("ab", 32), MediaType: "text/markdown", Origin: FileOriginUpload}
 	g := Grant{
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: a.ScopeRef,
 		Permission: GrantRead, CreatedByRef: PrincipalRef(a.OwnerKind, a.OwnerRef), CreatedAt: now,
@@ -351,4 +351,106 @@ func TestStoreCreatePublishedIsAtomic(t *testing.T) {
 			t.Errorf("failed publish left an artifact row behind: %v", err)
 		}
 	})
+}
+
+// TestStoreRemoteFileColumns round-trips the origin columns: an upload
+// defaults its origin, a fetched remote file keeps its source and status,
+// and a failed fetch stores no digest.
+func TestStoreRemoteFileColumns(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, db *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		now := time.Now()
+		a := &Artifact{ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: "p", OwnerKind: PrincipalKindUser,
+			OwnerRef: "u", Title: "t", CreatedAt: now, UpdatedAt: now}
+		v := &Version{ID: uuid.NewString(), ArtifactID: a.ID, Seq: 1, Kind: VersionKindPublish, EntryPath: "doc.md",
+			TotalBytes: 9, FileCount: 3, CreatedAt: now, State: VersionStateReady}
+		files := []File{
+			{VersionID: v.ID, Path: "doc.md", Size: 4, SHA256: strings.Repeat("aa", 32), MediaType: "text/markdown"},
+			{VersionID: v.ID, Path: "_remote/" + strings.Repeat("bb", 32), Size: 5, SHA256: strings.Repeat("cc", 32),
+				MediaType: "image/png", Origin: FileOriginRemote, SourceURL: "https://example.com/a.png", FetchStatus: FetchStatusOK},
+			{VersionID: v.ID, Path: "_remote/" + strings.Repeat("dd", 32), MediaType: "application/octet-stream",
+				Origin: FileOriginRemote, SourceURL: "https://example.com/missing.png", FetchStatus: FetchStatusFailed, FetchError: "status 404"},
+		}
+		if err := st.CreatePublished(ctx, a, v, files, nil); err != nil {
+			t.Fatalf("CreatePublished: %v", err)
+		}
+		got, err := st.ListFiles(ctx, v.ID)
+		if err != nil || len(got) != 3 {
+			t.Fatalf("ListFiles = %+v, %v", got, err)
+		}
+		want := map[string]File{}
+		for _, f := range files {
+			if f.Origin == "" {
+				f.Origin = FileOriginUpload
+			}
+			want[f.Path] = f
+		}
+		for _, f := range got {
+			if f != want[f.Path] {
+				t.Errorf("file %s:\n got %+v\nwant %+v", f.Path, f, want[f.Path])
+			}
+		}
+		failed, err := st.GetFile(ctx, v.ID, files[2].Path)
+		if err != nil || failed.SHA256 != "" || failed.FetchStatus != FetchStatusFailed {
+			t.Errorf("GetFile(failed remote) = %+v, %v", failed, err)
+		}
+		var nulls int
+		if err := db.QueryRow(st.(*sqlStore).rebind("SELECT COUNT(*) FROM artifact_file WHERE sha256 IS NULL AND version_id = ?"), v.ID).Scan(&nulls); err != nil || nulls != 1 {
+			t.Errorf("rows with NULL sha256 = %d, %v; want 1", nulls, err)
+		}
+	})
+}
+
+// TestStoreMigratesInitialSchema: a database created by the initial schema
+// alone (before the origin columns) is upgraded by Init without losing rows.
+func TestStoreMigratesInitialSchema(t *testing.T) {
+	for _, b := range testBackends() {
+		t.Run(b.name, func(t *testing.T) {
+			db, _ := b.open(t)
+			st := NewStore(db, b.driver).(*sqlStore)
+			ddl, ledger := sqliteSchema, ledgerSQLite
+			if st.dialect == dialectPostgres {
+				ddl, ledger = postgresSchema, ledgerPostgres
+			}
+			for _, q := range []string{ledger, ddl} {
+				if _, err := db.Exec(q); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := db.Exec(st.rebind("INSERT INTO artifact_migrations (name, applied_at) VALUES (?, ?)"), migrationInitial, st.timeArg(time.Now())); err != nil {
+				t.Fatal(err)
+			}
+			now := st.timeArg(time.Now())
+			for _, q := range []struct {
+				sql  string
+				args []any
+			}{
+				{"INSERT INTO artifact (id, scope_kind, scope_ref, owner_kind, owner_ref, title, current_seq, created_at, updated_at) VALUES ('a1', 'project', 'p', 'user', 'u', 't', 1, ?, ?)", []any{now, now}},
+				{"INSERT INTO artifact_version (id, artifact_id, seq, kind, entry_path, total_bytes, file_count, created_at, state) VALUES ('v1', 'a1', 1, 'publish', 'f.txt', 1, 1, ?, 'ready')", []any{now}},
+				{"INSERT INTO artifact_file (version_id, path, size, sha256, media_type) VALUES ('v1', 'f.txt', 1, 'abc', 'text/plain')", nil},
+			} {
+				if _, err := db.Exec(st.rebind(q.sql), q.args...); err != nil {
+					t.Fatalf("%s: %v", q.sql, err)
+				}
+			}
+
+			if err := st.Init(context.Background()); err != nil {
+				t.Fatalf("Init over the initial schema: %v", err)
+			}
+			f, err := st.GetFile(context.Background(), "v1", "f.txt")
+			if err != nil {
+				t.Fatalf("GetFile after migration: %v", err)
+			}
+			if f.SHA256 != "abc" || f.Origin != FileOriginUpload || f.SourceURL != "" {
+				t.Errorf("migrated row = %+v", f)
+			}
+			var n int
+			if err := db.QueryRow("SELECT COUNT(*) FROM artifact_migrations").Scan(&n); err != nil || n != len(migrations) {
+				t.Errorf("ledger rows = %d, %v; want %d", n, err, len(migrations))
+			}
+			if err := st.Init(context.Background()); err != nil {
+				t.Errorf("Init after migration: %v", err)
+			}
+		})
+	}
 }
