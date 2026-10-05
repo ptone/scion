@@ -115,19 +115,21 @@ func (s *Server) authorizeResolvedTemplate(ctx context.Context, identity Identit
 	return s.authzService.CheckAccess(ctx, identity, templateResource(tmpl), ActionRead).Allowed
 }
 
-// getHarnessConfigFromTemplate returns the harness config name from a resolved template,
-// or the fallback value if no template was resolved. Prefers the template's
-// DefaultHarnessConfig (e.g. "claude-web") over the generic Harness type (e.g. "claude").
-func (s *Server) getHarnessConfigFromTemplate(template *store.Template, fallback string) string {
-	if template != nil {
-		if template.DefaultHarnessConfig != "" {
-			return template.DefaultHarnessConfig
-		}
-		if template.Harness != "" {
-			return template.Harness
-		}
+// templateHarnessConfigName is the single source of the template rung's
+// harness-config name. fromDefault reports whether the name is the
+// template's explicit DefaultHarnessConfig (a deliberate slug choice) rather
+// than the bare Harness-type fallback; resolveDerivedConfig's not-found log
+// level depends on that distinction (ptone/scion#620). Both template rungs
+// (deriveAgentConfig and resolveDerivedConfig's own fallback) use it so they
+// cannot drift.
+func templateHarnessConfigName(template *store.Template) (name string, fromDefault bool) {
+	if template == nil {
+		return "", false
 	}
-	return fallback
+	if template.DefaultHarnessConfig != "" {
+		return template.DefaultHarnessConfig, true
+	}
+	return template.Harness, false
 }
 
 type templateDefaultHarnessConfigCtxKey struct{}
@@ -354,9 +356,9 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 		agent.AppliedConfig.HarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
 	}
 	if agent.AppliedConfig.HarnessConfig == "" {
-		agent.AppliedConfig.HarnessConfig = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
-		if resolvedTemplate != nil && resolvedTemplate.DefaultHarnessConfig != "" &&
-			agent.AppliedConfig.HarnessConfig == resolvedTemplate.DefaultHarnessConfig {
+		name, fromDefault := templateHarnessConfigName(resolvedTemplate)
+		agent.AppliedConfig.HarnessConfig = name
+		if fromDefault {
 			ctx = withTemplateDefaultHarnessConfig(ctx)
 		}
 	}
@@ -575,8 +577,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	hcFromTemplateDefault := hcName != "" && !hcFromProjectAnnotation && !hcFromHubDefault &&
 		templateDefaultHarnessConfigFromContext(ctx)
 	if hcName == "" && resolvedTemplate != nil {
-		hcName = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
-		hcFromTemplateDefault = hcName != "" && hcName == resolvedTemplate.DefaultHarnessConfig
+		hcName, hcFromTemplateDefault = templateHarnessConfigName(resolvedTemplate)
 	}
 	// resolvedHC is the hub harness config resolved below, if any; the
 	// timezone capture at the end of this function reads its env.
@@ -649,7 +650,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 			//
 			//   DEBUG — anything else. Most often hcName is the template's bare
 			//           Harness type ("claude") rather than a stored
-			//           harness-config slug, via getHarnessConfigFromTemplate's
+			//           harness-config slug, via templateHarnessConfigName's
 			//           second branch. Harness configs are created through the
 			//           API rather than seeded, so "no HarnessConfig row whose
 			//           slug matches the harness type" is the default state of a

@@ -123,7 +123,7 @@ func TestApplyHubAgentDefaults_HarnessConfig(t *testing.T) {
 			wantApplied: false,
 		},
 		{
-			// getHarnessConfigFromTemplate's value, stamped by the template rung
+			// templateHarnessConfigName's value, stamped by the template rung
 			// on both paths before applyProjectDefaults runs.
 			name:        "LosesToTemplate",
 			incumbent:   "template-hc",

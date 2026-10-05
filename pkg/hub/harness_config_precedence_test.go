@@ -110,7 +110,7 @@ func createHarnessTemplate(t *testing.T, s store.Store, slug, defaultHarnessConf
 }
 
 // createHarnessOnlyTemplate creates a global template with no
-// DefaultHarnessConfig, so that getHarnessConfigFromTemplate's fallback to the
+// DefaultHarnessConfig, so that templateHarnessConfigName's fallback to the
 // bare Harness field is what supplies the template-tier value.
 func createHarnessOnlyTemplate(t *testing.T, s store.Store, slug, harness string) *store.Template {
 	t.Helper()
@@ -283,7 +283,7 @@ func TestCreateAgent_ProjectHarnessConfigBeatsProjectDefaultTemplate(t *testing.
 }
 
 // TestCreateAgent_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback pins the
-// precedence against the *other* branch of getHarnessConfigFromTemplate: a
+// precedence against the *other* branch of templateHarnessConfigName: a
 // template with no DefaultHarnessConfig, whose bare Harness field supplies the
 // template-tier value. The project annotation must still win.
 func TestCreateAgent_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback(t *testing.T) {
