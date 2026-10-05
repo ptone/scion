@@ -491,6 +491,8 @@ export class ScionPageChat extends LitElement {
    * hub view) or `loadV2Members` (a space). See {@link _sidebarShowsHubView}.
    */
   private _sidebarOwner: 'none' | 'hub' | 'space' = 'none';
+  /** The project whose members `loadV2Members` last loaded into the sidebar. */
+  private _sidebarSpaceId = '';
   /**
    * The {@link _hubMembersGeneration} whose users walk last published, or
    * null. A "join" call (no `refresh`) for that same generation walks the
@@ -1790,6 +1792,10 @@ export class ScionPageChat extends LitElement {
       if (this.v2Conversation?.isDM) return;
       if (this.v2Conversation?.projectId) {
         void this.loadV2Members(this.v2Conversation.projectId);
+      } else if (this._sidebarOwner === 'space') {
+        // A space expanded with no conversation open (mobile) keeps its own
+        // members: reload them rather than claiming the sidebar for the hub.
+        void this.loadV2Members(this._sidebarSpaceId);
       } else {
         // Human membership has no SSE event, so the users list is walked
         // again. A walk already in flight is joined, not followed by another,
@@ -3359,6 +3365,7 @@ export class ScionPageChat extends LitElement {
     const seq = ++this._membersViewSeq;
     // The sidebar is this project's now: the hub list stops updating it.
     this._sidebarOwner = 'space';
+    this._sidebarSpaceId = projectId;
     this._hubAgentsLive = false;
     // This replaces the hub lists, so the next hub view walks the users again.
     this._hubUsersLoadedGeneration = null;
