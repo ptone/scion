@@ -1023,6 +1023,41 @@ func ClearStagedProvisioning(agentHome string) error {
 	return nil
 }
 
+// ClearStagedBundle clears agentHome's staged bundle (.scion/harness) before
+// a container-script harness stages its own: every bundle entry except
+// inputs/ is removed (manifest.json, config.yaml, provision.py, dialect.yaml,
+// the harness library, capture-auth assets, secrets/, outputs/ with the env
+// overlay). Callers run it unconditionally before every container-script
+// Provision, so files a previous provisioning staged or produced are never
+// visible to the provisioner being staged; Provision restages everything its
+// harness-config needs, including capture-auth assets.
+//
+// inputs/ is kept: it holds the per-agent inputs scion writes before
+// Provision (instructions, system prompt, resolved skills), which are not
+// produced by a provisioner and are not rewritten on start.
+func ClearStagedBundle(agentHome string) error {
+	if agentHome == "" {
+		return nil
+	}
+	bundleDir := filepath.Join(agentHome, ".scion", "harness")
+	entries, err := os.ReadDir(bundleDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read staged harness bundle: %w", err)
+	}
+	for _, e := range entries {
+		if e.Name() == "inputs" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(bundleDir, e.Name())); err != nil {
+			return fmt.Errorf("clear staged harness bundle: %w", err)
+		}
+	}
+	return nil
+}
+
 func writeHookWrapper(agentHome, bundleContainerPath string) error {
 	dir := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d")
 	if err := os.MkdirAll(dir, 0755); err != nil {

@@ -631,7 +631,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			// The entry could not be evaluated. harness.New never constructs
 			// a container-script harness; with a policy attached and a
 			// provisioner wrapper staged, the start is refused instead
-			// (harnessAfterResolveError).
+			// (harnessAfterResolveError). Unreachable today for a non-empty
+			// name: a provisioner comes only from a loaded harness-config
+			// directory, so Resolve has no failure mode here. Kept fail
+			// closed in case Resolve gains one; see
+			// TestHarnessConfigPolicy_ResolveErrorWithStagedWrapper.
 			util.Debugf("harness.Resolve failed for %q: %v", harnessConfigName, err)
 			resolveFailed = true
 			fallback, fbErr := harnessAfterResolveError(ctx, agentHome, harnessConfigName, harnessName, err)
@@ -654,15 +658,17 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
 	}
 
-	// A provisioner wrapper runs only for the container-script harness this
-	// launch resolved (and the policy, if any, allowed): when the resolved
-	// harness is not container-script, clear any wrapper an earlier run
-	// staged, as WriteProjectPreStartHook clears a stale project hook below.
-	// This applies with or without a policy. After a Resolve error with no
-	// policy attached, the fallback keeps today's behaviour and leaves the
-	// agent home as it is.
+	// Reset staged provisioning state before the harness is provisioned
+	// (resetStagedProvisioning), with or without a policy. A provisioner
+	// wrapper runs only for the container-script harness this launch
+	// resolved (and the policy, if any, allowed): a non-container-script
+	// harness clears the wrapper and bundle, as WriteProjectPreStartHook
+	// clears a stale project hook below; a container-script harness clears
+	// the bundle, except inputs/, before restaging its own. After a Resolve
+	// error with no policy attached, the fallback keeps today's behaviour and
+	// leaves the agent home as it is.
 	if !resolveFailed {
-		if err := clearProvisionHookUnlessContainerScript(h, agentHome); err != nil {
+		if err := resetStagedProvisioning(h, agentHome); err != nil {
 			return nil, err
 		}
 		// Restage the capture-auth assets a non-container-script harness

@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
@@ -383,6 +384,7 @@ func TestHarnessConfigPolicy_ResolveCallSitesAreHooked(t *testing.T) {
 			if local == "" && !dot && !strings.HasPrefix(rel, filepath.Join("pkg", "agent")+string(filepath.Separator)) {
 				return nil
 			}
+			checkNoIndirectConstruction(t, file, filepath.ToSlash(rel), local, dot)
 			for _, decl := range file.Decls {
 				fn, ok := decl.(*ast.FuncDecl)
 				if !ok || fn.Body == nil {
@@ -408,6 +410,79 @@ func TestHarnessConfigPolicy_ResolveCallSitesAreHooked(t *testing.T) {
 	}
 	if !sawTemplateResolution {
 		t.Error("resolveTemplateAndHarnessConfig not found; update this test")
+	}
+}
+
+// checkNoIndirectConstruction flags, outside pkg/harness, every way to reach
+// a container-script harness other than a direct call inside a function
+// body (which checkFunctionHooks then ties to the policy check): a reference
+// to harness.Resolve or harness.NewContainerScriptHarness that is not the
+// callee of a call (a function value), any reference in a package-level
+// declaration (var initializers, including function literals), and a
+// ContainerScriptHarness composite literal or new(ContainerScriptHarness).
+func checkNoIndirectConstruction(t *testing.T, file *ast.File, rel, local string, dot bool) {
+	t.Helper()
+	if local == "" && !dot {
+		return
+	}
+	isRef := func(n ast.Node, names ...string) bool {
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			if id, ok := x.X.(*ast.Ident); ok && local != "" && id.Name == local {
+				for _, name := range names {
+					if x.Sel.Name == name {
+						return true
+					}
+				}
+			}
+		case *ast.Ident:
+			if dot {
+				for _, name := range names {
+					if x.Name == name {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	for _, decl := range file.Decls {
+		inFunc := false
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			if fn.Body == nil {
+				continue
+			}
+			inFunc = true
+		}
+		callees := map[ast.Node]bool{}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				callees[call.Fun] = true
+			}
+			return true
+		})
+		ast.Inspect(decl, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr, *ast.Ident:
+				if isRef(x, "Resolve", "NewContainerScriptHarness") {
+					switch {
+					case !inFunc:
+						t.Errorf("%s: package-level reference to pkg/harness's harness construction; construct harnesses inside a hooked function", rel)
+					case !callees[x]:
+						t.Errorf("%s: pkg/harness's harness construction used as a function value; call it directly at a hooked call site", rel)
+					}
+				}
+			case *ast.CompositeLit:
+				if x.Type != nil && isRef(x.Type, "ContainerScriptHarness") {
+					t.Errorf("%s: ContainerScriptHarness literal outside pkg/harness; build it through harness.Resolve", rel)
+				}
+			case *ast.CallExpr:
+				if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "new" && len(x.Args) == 1 && isRef(x.Args[0], "ContainerScriptHarness") {
+					t.Errorf("%s: new(ContainerScriptHarness) outside pkg/harness; build it through harness.Resolve", rel)
+				}
+			}
+			return true
+		})
 	}
 }
 
@@ -539,22 +614,29 @@ func checkFunctionHooks(t *testing.T, fn *ast.FuncDecl, site, local string, dot 
 // the harness is provisioned (which is where a container-script harness
 // stages its provisioner wrapper) only after the policy check, and that a
 // stale wrapper is cleared for a non-container-script harness
-// (clearProvisionHookUnlessContainerScript) after the check. Start must also
+// (resetStagedProvisioning) after the check. Start must also
 // route a Resolve error through harnessAfterResolveError.
 func checkWrapperStagedOnlyWhenAllowed(t *testing.T, fn *ast.FuncDecl, site string, check *ast.CallExpr) {
 	t.Helper()
 	var cleared, routedErr bool
+	var resetPos, firstProvisionPos token.Pos
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if x, ok := sel.X.(*ast.Ident); ok && x.Name == "h" && sel.Sel.Name == "Provision" && (firstProvisionPos == token.NoPos || call.Pos() < firstProvisionPos) {
+				firstProvisionPos = call.Pos()
+			}
+		}
 		switch f := call.Fun.(type) {
 		case *ast.Ident:
 			switch f.Name {
-			case "clearProvisionHookUnlessContainerScript":
+			case "resetStagedProvisioning":
 				if call.Pos() > check.End() {
 					cleared = true
+					resetPos = call.Pos()
 				}
 			case "harnessAfterResolveError":
 				routedErr = true
@@ -567,7 +649,9 @@ func checkWrapperStagedOnlyWhenAllowed(t *testing.T, fn *ast.FuncDecl, site stri
 		return true
 	})
 	if !cleared {
-		t.Errorf("%s does not clear a stale provisioner wrapper (clearProvisionHookUnlessContainerScript) after the policy check", site)
+		t.Errorf("%s does not reset staged provisioning (resetStagedProvisioning) after the policy check", site)
+	} else if firstProvisionPos != token.NoPos && resetPos > firstProvisionPos {
+		t.Errorf("%s provisions the harness before resetting staged provisioning", site)
 	}
 	if fn.Name.Name == "Start" && !routedErr {
 		t.Errorf("%s does not route a harness.Resolve error through harnessAfterResolveError", site)
@@ -873,7 +957,7 @@ func TestHarnessConfigPolicy_ContainerScriptConstructionPinnedToResolve(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	var newCallers, resolveCallers, literalSites []string
+	var newCallers, resolveCallers, literalSites, indirect []string
 	for _, path := range paths {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -883,12 +967,38 @@ func TestHarnessConfigPolicy_ContainerScriptConstructionPinnedToResolve(t *testi
 			t.Fatal(err)
 		}
 		for _, decl := range file.Decls {
+			// callees holds call targets; selector field names (x.Resolve)
+			// refer to other types' members, not these functions.
+			callees := map[ast.Node]bool{}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.CallExpr:
+					callees[x.Fun] = true
+				case *ast.SelectorExpr:
+					callees[x.Sel] = true
+				}
+				return true
+			})
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
+				// Package-level declarations must not reference the
+				// constructors at all.
+				ast.Inspect(decl, func(n ast.Node) bool {
+					if id, ok := n.(*ast.Ident); ok && !callees[id] && (id.Name == "NewContainerScriptHarness" || id.Name == "Resolve") || isCallOf(n, "NewContainerScriptHarness", "Resolve") {
+						if _, isFunc := decl.(*ast.FuncDecl); !isFunc {
+							indirect = append(indirect, "package-level reference")
+						}
+					}
+					return true
+				})
 				continue
 			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				switch x := n.(type) {
+				case *ast.Ident:
+					if (x.Name == "NewContainerScriptHarness" || x.Name == "Resolve") && !callees[x] {
+						indirect = append(indirect, fn.Name.Name+": "+x.Name+" as a value")
+					}
 				case *ast.CallExpr:
 					if id, ok := x.Fun.(*ast.Ident); ok {
 						switch id.Name {
@@ -896,6 +1006,12 @@ func TestHarnessConfigPolicy_ContainerScriptConstructionPinnedToResolve(t *testi
 							newCallers = append(newCallers, fn.Name.Name)
 						case "Resolve":
 							resolveCallers = append(resolveCallers, fn.Name.Name)
+						case "new":
+							if len(x.Args) == 1 {
+								if a, ok := x.Args[0].(*ast.Ident); ok && a.Name == "ContainerScriptHarness" {
+									literalSites = append(literalSites, fn.Name.Name+" (new)")
+								}
+							}
 						}
 					}
 				case *ast.CompositeLit:
@@ -915,6 +1031,9 @@ func TestHarnessConfigPolicy_ContainerScriptConstructionPinnedToResolve(t *testi
 	}
 	if len(literalSites) != 1 || literalSites[0] != "NewContainerScriptHarness" {
 		t.Errorf("ContainerScriptHarness literals in %v, want only NewContainerScriptHarness", literalSites)
+	}
+	if len(indirect) != 0 {
+		t.Errorf("indirect references to the harness constructors in pkg/harness: %v", indirect)
 	}
 }
 
@@ -939,4 +1058,100 @@ func TestHarnessConfigPolicy_RelaunchRestagesCaptureAuth(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(home, ".scion", "harness", "capture_auth.py")); err != nil {
 		t.Errorf("capture-auth assets not restaged after the bundle clear: %v", err)
 	}
+}
+
+// Switching an agent from container-script harness-config A to B clears A's
+// staged bundle (secrets, outputs, dialect.yaml, manifest) before B is
+// provisioned, keeping inputs/; B then stages its own bundle.
+func TestHarnessConfigPolicy_ContainerScriptSwitchClearsPreviousBundle(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-a", policyTestScripted+"# config: a\n")
+	if err := os.WriteFile(filepath.Join(e.scion, "harness-configs", "hc-a", "dialect.yaml"), []byte("name: a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.projectHC(t, "hc-b", policyTestScripted+"# config: b\n")
+	mgr := policyTestManager(nil)
+	if _, err := mgr.Start(context.Background(), api.StartOptions{Name: "switch", ProjectPath: e.scion, HarnessConfig: "hc-a", NoAuth: true}); err != nil {
+		t.Fatalf("Start with A: %v", err)
+	}
+	home := config.GetAgentHomePath(e.scion, "switch")
+	bundle := filepath.Join(home, ".scion", "harness")
+	// What A's provisioning left behind.
+	writeStagedOutputs(t, home)
+	if err := os.MkdirAll(filepath.Join(bundle, "secrets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "secrets", "A_TOKEN"), []byte("a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(bundle, "inputs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "inputs", "system-prompt.md"), []byte("prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	aStale := []string{
+		filepath.Join(bundle, "secrets", "A_TOKEN"),
+		filepath.Join(bundle, "outputs", "env.json"),
+		filepath.Join(bundle, "dialect.yaml"),
+	}
+	for _, p := range aStale {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("fixture: %s should exist after A: %v", p, err)
+		}
+	}
+
+	// Before B's Provision: resolve B and reset, as ProvisionAgent and Start
+	// do, then check the bundle before provisioning.
+	resolvedB, err := harness.Resolve(context.Background(), harness.ResolveOptions{Name: "hc-b", ProjectPath: e.scion})
+	if err != nil || resolvedB.Implementation != "container-script" {
+		t.Fatalf("resolve B: impl=%v err=%v", resolvedB, err)
+	}
+	if err := resetStagedProvisioning(resolvedB.Harness, home); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	for _, p := range append(aStale, filepath.Join(bundle, "manifest.json"), filepath.Join(bundle, "config.yaml")) {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("before B's Provision, A's staged file remains: %s (stat err=%v)", p, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(bundle, "inputs", "system-prompt.md")); err != nil {
+		t.Errorf("inputs/ must be kept: %v", err)
+	}
+
+	// The full launch path: Start with B.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{Name: "switch", ProjectPath: e.scion, HarnessConfig: "hc-b", NoAuth: true}); err != nil {
+		t.Fatalf("Start with B: %v", err)
+	}
+	for _, p := range aStale {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("after B's launch, A's staged file remains: %s (stat err=%v)", p, err)
+		}
+	}
+	staged, err := os.ReadFile(filepath.Join(bundle, "config.yaml"))
+	if err != nil || !strings.Contains(string(staged), "# config: b") {
+		t.Errorf("B's config.yaml not staged: %v\n%s", err, staged)
+	}
+	if !wrapperStaged(e, "switch") {
+		t.Error("B's provisioner wrapper should be staged")
+	}
+}
+
+// isCallOf reports whether n is a call of one of the named package-local
+// functions.
+func isCallOf(n ast.Node, names ...string) bool {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := call.Fun.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	for _, name := range names {
+		if id.Name == name {
+			return true
+		}
+	}
+	return false
 }

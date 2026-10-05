@@ -90,15 +90,20 @@ func harnessAfterResolveError(ctx context.Context, agentHome, harnessName, harne
 	return harness.New(harnessType), nil
 }
 
-// clearProvisionHookUnlessContainerScript clears staged container-script
-// provisioning state as one unit (wrapper and the staged bundle) when h is
-// not a container-script harness (see
-// harness.ClearStagedProvisioning). It applies with or without a policy:
-// a wrapper only ever runs for the container-script harness the current
-// launch resolved, and was allowed to resolve.
-func clearProvisionHookUnlessContainerScript(h api.Harness, agentHome string) error {
+// resetStagedProvisioning prepares the agent home's staged container-script
+// provisioning state for harness h, before h is provisioned:
+//   - h is not container-script: clear the provisioner wrapper and the whole
+//     staged bundle (harness.ClearStagedProvisioning), so no provisioner runs
+//     and sciontool init does not load an earlier provisioner's state;
+//   - h is container-script: clear the staged bundle, except inputs/,
+//     unconditionally (harness.ClearStagedBundle), so files a previous
+//     provisioning staged or produced are not visible to this provisioner;
+//     h then restages its own bundle and wrapper.
+//
+// It applies with or without a policy.
+func resetStagedProvisioning(h api.Harness, agentHome string) error {
 	if _, ok := h.(*harness.ContainerScriptHarness); ok {
-		return nil
+		return harness.ClearStagedBundle(agentHome)
 	}
 	return harness.ClearStagedProvisioning(agentHome)
 }

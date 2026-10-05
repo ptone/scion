@@ -1453,11 +1453,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, resolved.Config); err != nil {
 		return "", "", nil, err
 	}
-	// A provisioner wrapper runs only for the container-script harness this
-	// launch resolved: clear one staged for an earlier harness-config (e.g.
-	// an agent home being re-rendered) when this harness is not
-	// container-script. A container-script harness restages its own below.
-	if err := clearProvisionHookUnlessContainerScript(resolved.Harness, agentHome); err != nil {
+	// Reset staged provisioning state before the harness is provisioned
+	// (resetStagedProvisioning): a non-container-script harness clears the
+	// wrapper and bundle; a container-script harness clears the bundle,
+	// except inputs/, and restages its own below.
+	if err := resetStagedProvisioning(resolved.Harness, agentHome); err != nil {
 		return "", "", nil, err
 	}
 	h := resolved.Harness
