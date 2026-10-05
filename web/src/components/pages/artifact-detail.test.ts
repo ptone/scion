@@ -202,7 +202,19 @@ describe('artifact page', () => {
     const urls = mockFetch(meta);
     const el = await mount(true);
     expect(el.shadowRoot!.querySelector('.download-state')!.textContent).toContain('too large');
+    expect(el.shadowRoot!.querySelector('.download-state')!.textContent).toContain('Use Open raw');
     expect(urls.some((u) => u.includes('/files/'))).toBe(false);
+  });
+
+  it('names the Download button for a large text entry that is not an inline type', async () => {
+    const meta = artifact('bundle.js', 'text/javascript');
+    meta.version!.files[0].size = 5 * 1024 * 1024;
+    mockFetch(meta);
+    const el = await mount(true);
+    const text = el.shadowRoot!.querySelector('.download-state')!.textContent!;
+    expect(text).toContain('too large');
+    expect(text).toContain('Use Download');
+    expect(el.shadowRoot!.querySelector('.entry-bar sl-button')!.textContent).toContain('Download');
   });
 
   it('shows the error state with Retry when the text fetch fails', async () => {
