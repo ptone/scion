@@ -1070,3 +1070,44 @@ protected report. Scope remains exactly scanner test plus project log, with
 zero production delta against pinned initial head. All original exclusions,
 resource/cache constraints and no-descendant/no-dependent-work rules hold.
 Completion/disposition remains blocked pending durable receipt of final evidence.
+
+### Separate correctness findings and limits of available state evidence
+
+1. **Production incomplete-provenance rejection.** Expected regression behavior:
+   `TestEffectivePermissionIntrospectionBoundaryStructure` must return no error
+   for the unchanged production sources, while genuinely unresolved provenance
+   must still fail closed. Observed: the normal gate returned the incomplete-
+   provenance diagnostic from `handleExplainEffectivePermissions` at test line
+   176. The scanner's expression check emits that diagnostic when the resolver
+   returns `complete=false`. Available state evidence is the unchanged static
+   graph construction, the SCC implementation's cycle/nil/rejected-outgoing
+   transitions to settled `complete=false`, and Stage A's measured rejection
+   fixtures. The normal gate captured no offending object, dependency edge,
+   component membership or per-object transition trace. Therefore the terminal
+   line does not establish which production graph state caused the rejection;
+   an over-approximated feedback component is only a possible explanation.
+   No new diagnostic or production-root isolation was run after the stop.
+
+2. **Malicious operation-constant alias false negative.** Expected regression
+   behavior: the reachable local declaration
+   `const operationEffectAlias = opcatalog.EffectGrantAuthority` followed by
+   `_ = operationEffectAlias` must retain forbidden authzop provenance and make
+   boundary validation return an error. Observed: the `operation_constant_alias`
+   mutation returned nil, so its require-error assertion failed at test line
+   256. No resolver/data-flow runtime trace was captured for that mutation.
+   Available static evidence: ValueSpec dependency construction passes its
+   destination through `explainBoundaryAssignedVar`, whose `*types.Var` cast
+   returns nil for a `*types.Const`; the flow builder ignores nil destinations.
+   The SCC change leaves those functions untouched. This supports a hypothesis
+   of a missing constant-alias dependency edge, but is not a runtime-proven root
+   cause or a baseline failure determination. Stage A proves forbidden object
+   propagation on explicit graph edges, not extraction of this constant alias.
+
+These are separate correctness findings; neither is repaired or suppressed.
+Stage A GREEN remains limited to isolated graph proofs. Normal is conclusively
+FAILED at `05a19d74e0275073700444b130e95652b7ea957b`, exit 1, package 422.644s,
+wall 441s. No retry, race, further heavy command or new scanner diagnostic ran.
+A process-clearance check for the recorded gate shell, timeout, go-test,
+hub.test and export-loader PIDs found no active entries after gate completion.
+Only log/report/static/hash/ref/clean evidence and its log-only push follow.
+The worker remains retained pending durable receipt and follow-up disposition.
