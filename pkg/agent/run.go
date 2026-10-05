@@ -608,8 +608,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			Settings:      settings,
 			ConfigDirPath: opts.HarnessConfigPath,
 		})
-		// Unresolved unless a directory resolves below, so the reported
-		// provenance never keeps a stale value from an earlier run.
+		// Unresolved unless a directory resolves below. Start always reports
+		// a source (unresolved also when no name resolved, below), so an
+		// empty value on the wire means an older broker.
 		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
 		if err != nil {
 			util.Debugf("harness.Resolve fell back to New(%q): %v", harnessName, err)
@@ -625,6 +626,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	} else {
 		h = harness.New(harnessName)
+		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
 	}
 
 	// Reconcile the harness bundle for existing agents. Provision() is

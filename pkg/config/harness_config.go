@@ -79,10 +79,11 @@ const (
 	// HarnessConfigSourceBuiltin is the synthetic "generic" entry, which has
 	// no directory at all.
 	HarnessConfigSourceBuiltin HarnessConfigSource = "builtin"
-	// HarnessConfigSourceUnresolved is reported when an agent names a
-	// harness-config but no directory was resolved for it at start (the
-	// harness was built from settings or the bare harness type instead), so
-	// a stale earlier value is not left on the record.
+	// HarnessConfigSourceUnresolved is reported when no harness-config
+	// directory was resolved at start (no name resolved, or the named one
+	// did not resolve, and the harness was built from settings or the bare
+	// harness type instead), so a stale earlier value is not left on the
+	// record.
 	HarnessConfigSourceUnresolved HarnessConfigSource = "unresolved"
 )
 
