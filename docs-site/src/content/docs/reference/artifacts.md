@@ -24,7 +24,7 @@ Available in every CLI mode, including agent mode.
 
 ### `scion artifact publish <file>`
 
-Publishes one file as a new artifact homed in the current project, and prints its reference and the URL of its web page.
+Publishes one file as a new artifact and prints its reference and the URL of its web page. An agent's artifact is homed in the agent's project; a user's in the hub project the current checkout is linked to.
 
 ```text
 $ scion artifact publish design.md --title "Artifact system design"
@@ -48,7 +48,7 @@ $ scion artifact get scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d@1 --o
 - `<ref>`: `scion://artifact/<id>`, `scion://artifact/<id>@<seq>` for a specific version, or a bare `<id>`.
 - `--out`, `-o <path>`: Write to this file instead of stdout. If the path is an existing directory, the file is written into it under its own name. The file is replaced atomically.
 
-When it fetches the current version, `get` checks the bytes against the SHA-256 the hub recorded at publish time and fails on a mismatch.
+When it fetches the current version, `get` checks the bytes against the SHA-256 the hub recorded at publish time before writing anything, to stdout or to `--out`, and fails on a mismatch.
 
 ## Web page
 
@@ -69,4 +69,4 @@ Status codes: `400` for a malformed request, `401` unauthenticated, `403` when t
 
 **File delivery.** On a hub with local storage the hub streams the bytes. On a hub with object storage (GCS) it answers `302` to a short-lived signed URL; add `?stream=1` to have the hub serve the bytes itself (the web page does this for text). Either way the response carries `Content-Disposition` (`inline` only for plain text, Markdown, CSV, TSV, JSON, YAML, TOML and raster images; `attachment` otherwise) and `X-Content-Type-Options: nosniff`; streamed responses also carry a sandboxing `Content-Security-Policy` and an `ETag`.
 
-**Permissions.** Reading checks `artifact.read` in the artifact's home project; publishing checks `artifact.create` in the target project. Project owners, admins and members hold both for their project; changing, deleting or sharing an existing artifact is left to its owner. Agent tokens carry them through the `project:artifact:read` and `project:artifact:write` scopes: `readonly`, `baseline` and `full` agents can read, `baseline` and `full` agents can publish, and no agent can delete artifacts or manage their grants. An agent token without `project:artifact:read` gets `404` for every artifact, even one shared with it directly. Artifact access uses dedicated agent scopes; agents minted from pre-existing token ceilings need re-minting before they can use artifacts.
+**Permissions.** Reading checks `artifact.read` in the artifact's home project; publishing checks `artifact.create` in the target project. Project owners, admins and members hold both for their project; changing, deleting or sharing an existing artifact is left to its owner. Agent tokens carry them through the `project:artifact:read` and `project:artifact:write` scopes: `readonly`, `baseline` and `full` agents can read, `baseline` and `full` agents can publish, and no agent can delete artifacts or manage their grants. An agent token without `project:artifact:read` gets `404` for every artifact, even one shared with it directly. Artifact access uses dedicated agent scopes; agents created from a credential issued before artifacts existed need to be recreated from a current credential before they can use artifacts.

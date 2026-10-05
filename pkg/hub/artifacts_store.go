@@ -57,20 +57,22 @@ func (s *Server) artifactLimits(context.Context) artifacts.Limits {
 // artifactsHandler returns the artifact service's handler, built over this
 // server's artifacts.Host.
 //
-// The service's store, blob storage and hub id are set by the hub after its
-// routes are registered (the database, storage and hub id come later in
-// startup, and tests set them in any order), so the handler hands the
-// service the server's current values on each request. Blobs live in the
-// hub's resource storage under hubs/{hub-id}/artifacts/.
+// The service asks the server for its store, resource storage and hub id on
+// each request: they are set after the routes are registered (the database,
+// storage and hub id come later in startup, and tests set them in any
+// order). Blobs live in the hub's resource storage under
+// hubs/{hub-id}/artifacts/.
 func (s *Server) artifactsHandler() http.Handler {
 	svc := artifacts.NewService(newArtifactHost(s))
 	svc.SetLimits(s.artifactLimits)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.mu.RLock()
-		st, blobs, hubID := s.artifactStore, s.storage, s.hubID
-		s.mu.RUnlock()
-		svc.SetStore(st)
-		svc.SetBlobStorage(blobs, hubID)
-		svc.ServeHTTP(w, r)
-	})
+	svc.SetBackendProvider(s.artifactBackend)
+	return svc.Handler()
+}
+
+// artifactBackend reports the server's current artifact store, resource
+// storage and hub id.
+func (s *Server) artifactBackend() artifacts.Backend {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return artifacts.Backend{Store: s.artifactStore, Blobs: s.storage, HubID: s.hubID}
 }

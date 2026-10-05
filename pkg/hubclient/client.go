@@ -348,12 +348,12 @@ func (c *client) Messaging() MessagingService {
 	return c.messaging
 }
 
-// get performs an HTTP GET request.
 // Artifacts returns the artifact operations interface.
 func (c *client) Artifacts() ArtifactService {
 	return c.artifacts
 }
 
+// get performs an HTTP GET request.
 func (c *client) get(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
 	return c.getWithQuery(ctx, path, nil, headers)
 }

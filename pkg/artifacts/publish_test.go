@@ -104,6 +104,13 @@ func TestPublishScope(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("foreign scope: %d, want 403", rec.Code)
 	}
+	// A credential that does not permit creating in the scope is refused
+	// even where host policy would allow it.
+	f.host.deny(agentA, "project-1", PermissionCreate)
+	rec = f.do(&agentA, http.MethodPost, "/api/v1/artifacts?name=a.txt", []byte("x"), nil)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("credential without create: %d, want 403", rec.Code)
+	}
 	if !strings.Contains(strings.Join(f.host.calls, ","), "project-2 "+PermissionCreate) {
 		t.Errorf("host not asked for %s: %v", PermissionCreate, f.host.calls)
 	}
@@ -238,5 +245,30 @@ func TestDetectMediaType(t *testing.T) {
 		if got := detectMediaType(tc.name, tc.declared, []byte(tc.head)); got != tc.want {
 			t.Errorf("detectMediaType(%q, %q) = %q, want %q", tc.name, tc.declared, got, tc.want)
 		}
+	}
+}
+
+func TestBackendProvider(t *testing.T) {
+	f := newFixture(t, false)
+	svc := NewService(f.host)
+	calls := 0
+	svc.SetBackendProvider(func() Backend {
+		calls++
+		return Backend{Store: f.store, Blobs: f.blobs, HubID: "hub-1"}
+	})
+	rec := httptest.NewRecorder()
+	svc.ServeHTTP(rec, withPrincipal(httptest.NewRequest(http.MethodPost, "/api/v1/artifacts?name=p.txt", strings.NewReader("p")), agentA))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("publish through provider: %d %s", rec.Code, rec.Body.String())
+	}
+	if calls == 0 {
+		t.Error("provider was not asked")
+	}
+	// A provider that has nothing yet means 503.
+	svc.SetBackendProvider(func() Backend { return Backend{} })
+	rec = httptest.NewRecorder()
+	svc.ServeHTTP(rec, withPrincipal(httptest.NewRequest(http.MethodPost, "/api/v1/artifacts?name=p.txt", strings.NewReader("p")), agentA))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("empty provider: %d, want 503", rec.Code)
 	}
 }
