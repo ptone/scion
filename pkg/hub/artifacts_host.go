@@ -163,7 +163,9 @@ func agentHasAnyScope(agent AgentIdentity, scopes []string) bool {
 // artifactsGuard is the artifacts.Guard the hub mounts the artifact service
 // with. The hub.artifacts experiment is checked first, per request, so every
 // artifact route (including the share-link route) answers 404 while it is
-// off, before any authentication outcome is visible. Then the route goes
+// off, before any authentication outcome is visible. The artifacts settings
+// section's enabled switch (false also when the section is malformed) closes
+// the routes the same way. Then the route goes
 // through the declarative route guard for its routeMetadataTable row.
 //
 // The experiment check is per request rather than requireExperiment because
@@ -173,16 +175,10 @@ func agentHasAnyScope(agent AgentIdentity, scopes []string) bool {
 func (s *Server) artifactsGuard(pattern string, handler http.Handler) http.Handler {
 	guarded := s.guarded(pattern, handler.ServeHTTP)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.experimentEnabled(experiments.Artifacts) {
+		if !s.experimentEnabled(experiments.Artifacts) || !s.artifactsConfig().Enabled {
 			NotFound(w, "route")
 			return
 		}
 		guarded(w, r)
 	})
-}
-
-// artifactsHandler returns the artifact service's handler, built over this
-// server's artifacts.Host.
-func (s *Server) artifactsHandler() http.Handler {
-	return artifacts.NewService(newArtifactHost(s)).Handler()
 }
