@@ -789,16 +789,23 @@ func TestStart_UnusableImageProvenanceFailsClosed(t *testing.T) {
 			} else if err := os.WriteFile(provPath, []byte(tc.body), 0600); err != nil {
 				t.Fatal(err)
 			}
+			promptPath := filepath.Join(projectScionDir, "agents", "test-agent", "prompt.md")
+			deleted := false
 			mockRT := &runtime.MockRuntime{
 				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-					return []api.AgentInfo{}, nil
+					// A stopped container for this agent: step 0 would delete it.
+					return []api.AgentInfo{{Name: "test-agent", ContainerID: "stopped-1", Phase: "stopped"}}, nil
+				},
+				DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
+					deleted = true
+					return nil
 				},
 				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
 					t.Fatal("runtime must not be called with unusable image provenance")
 					return "", nil
 				},
 			}
-			_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true})
+			_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, Task: "new task for the agent"})
 			if err == nil || !strings.Contains(err.Error(), "re-provision the agent") {
 				t.Fatalf("expected an actionable image-provenance error, got %v", err)
 			}
@@ -811,8 +818,16 @@ func TestStart_UnusableImageProvenanceFailsClosed(t *testing.T) {
 			if !errors.As(err, &pe) || pe.Path != provPath {
 				t.Errorf("expected an *ImageProvenanceError carrying the path, got %#v", err)
 			}
-			if !errors.Is(err, config.ErrAgentStateDirUnavailable) {
-				t.Errorf("expected errors.Is(err, config.ErrAgentStateDirUnavailable)")
+			if !errors.Is(err, config.ErrAgentStateConflict) || errors.Is(err, config.ErrAgentStateDirUnavailable) || !config.IsAgentStateConflict(err) {
+				t.Errorf("expected an agent-state conflict (not an unavailable state dir), got %v", err)
+			}
+			// The pre-check runs before any side effect: the stopped
+			// container is not cleaned up and the task is not staged.
+			if deleted {
+				t.Error("the stopped container must not be deleted before the provenance check")
+			}
+			if data, _ := os.ReadFile(promptPath); strings.Contains(string(data), "new task for the agent") {
+				t.Error("prompt.md must not be written before the provenance check")
 			}
 		})
 	}
@@ -844,5 +859,29 @@ func TestStart_RecordedRequestImageSurvivesMissingOrCorruptAgentInfo(t *testing.
 				t.Fatalf("restart with agent-info.json %s: image = %q, want the recorded explicit image", tc.name, restart.Image)
 			}
 		})
+	}
+}
+
+// TestProvisionedProfile_AgentStateDirErrorHasNoHostPath: an unreadable
+// project-id marker surfaces as an *fs.PathError from the root lookup; the
+// resulting AgentStateDirError's message must not carry the host path (it
+// can reach a broker response), only its Path field does.
+func TestProvisionedProfile_AgentStateDirErrorHasNoHostPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	projectDir := filepath.Join(t.TempDir(), "proj", ".scion")
+	// A directory where the project-id file should be makes it unreadable.
+	if err := os.MkdirAll(filepath.Join(projectDir, "project-id"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := ProvisionedProfile(projectDir, "some-agent", true, "", false)
+	var de *AgentStateDirError
+	if !errors.As(err, &de) {
+		t.Fatalf("expected an *AgentStateDirError, got %v", err)
+	}
+	if strings.Contains(err.Error(), projectDir) {
+		t.Errorf("message must not contain the host path: %v", err)
+	}
+	if !errors.Is(err, config.ErrAgentStateDirUnavailable) || !config.IsAgentStateConflict(err) {
+		t.Errorf("expected an unavailable agent state dir, got %v", err)
 	}
 }

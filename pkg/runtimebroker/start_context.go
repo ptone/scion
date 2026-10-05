@@ -228,6 +228,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// Shared-workspace dispatch verifies the project identity before loading
+	// project settings, before the marker handling below and before the
+	// recorded profile is computed (ptone/scion#1799): see
+	// verifySharedProjectIdentity.
+	if in.SharedWorkspace || (in.Config != nil && in.Config.SharedWorkspace) {
+		if err := verifySharedProjectIdentity(in.ProjectPath, in.ProjectID); err != nil {
+			span.SetStatus(codes.Error, "shared-workspace project identity check failed")
+			return nil, s.projectIdentityStartContextError(err, in.Name)
+		}
+	}
+
 	// Ensure hub-managed projects have a .scion marker with project-id for
 	// external split storage. When the hub dispatches to a broker without a
 	// LocalPath (e.g. auto-provided embedded broker for a linked project), the

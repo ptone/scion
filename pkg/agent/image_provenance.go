@@ -138,21 +138,27 @@ func (e *ImageProvenanceError) Error() string {
 
 func (e *ImageProvenanceError) Unwrap() error { return e.Err }
 
-// Is makes errors.Is(err, config.ErrAgentStateDirUnavailable) hold, so
-// brokers map an unusable record and an unavailable state dir the same way
-// (409, re-provision).
+// Is makes errors.Is(err, config.ErrAgentStateConflict) hold: an unusable
+// record is an agent-state conflict (409, re-provision), distinct from an
+// unavailable state directory.
 func (e *ImageProvenanceError) Is(target error) bool {
-	return target == config.ErrAgentStateDirUnavailable
+	return target == config.ErrAgentStateConflict
 }
 
 func imageProvenanceError(path string, err error) error {
-	// A read error's *fs.PathError carries the host path; keep only its
-	// cause in the message (the path is kept in Path).
+	return &ImageProvenanceError{Path: path, Err: withoutHostPath(err)}
+}
+
+// withoutHostPath replaces an *fs.PathError (whose message carries the host
+// path) with its operation and cause, so an error that reaches a broker
+// response does not reveal broker paths; callers keep the path separately
+// for logs.
+func withoutHostPath(err error) error {
 	var pe *fs.PathError
 	if errors.As(err, &pe) {
-		err = fmt.Errorf("%s: %w", pe.Op, pe.Err)
+		return fmt.Errorf("%s: %w", pe.Op, pe.Err)
 	}
-	return &ImageProvenanceError{Path: path, Err: err}
+	return err
 }
 
 // AgentStateDirError reports that a start or restart cannot locate the
@@ -198,7 +204,7 @@ func ProvisionedProfile(projectPath, agentName string, sharedWorkspace bool, hub
 	agentDir, err := config.AgentDirForProject(projectDir, agentName, sharedWorkspace, hubProjectID)
 	if err != nil {
 		if sharedWorkspace {
-			return "", false, &AgentStateDirError{Err: err}
+			return "", false, &AgentStateDirError{Err: withoutHostPath(err)}
 		}
 		return "", false, nil
 	}

@@ -364,8 +364,9 @@ const HarnessSecretsRecordDirName = "harness-secrets"
 // directory next to scion-agent.json, where ProvisionAgent records each image
 // input it saw (pkg/agent's image provenance). It sits outside every
 // container mount scion computes for the agent, so the container cannot
-// influence the image a later Start selects; see pkg/runtime's
-// TestHarnessInputsRecordOutsideScionMounts.
+// influence the image a later Start selects. (The mount-source test that
+// checks this, pkg/runtime's TestHarnessInputsRecordOutsideScionMounts,
+// lives on the integration branch and covers this file there.)
 const ImageProvenanceFileName = "image-provenance.json"
 
 // ErrAgentStateDirUnavailable reports that an agent's broker-side state
@@ -374,8 +375,21 @@ const ImageProvenanceFileName = "image-provenance.json"
 // (wrapped by callers) the external agent dir a restart needs is absent.
 // Agent state for such a project is never placed in, or read from, the
 // in-project agents root, which sits inside the container-visible workspace.
-// Brokers map it to 409 (re-provision).
+// Brokers map it to 409 (re-provision); see IsAgentStateConflict.
 var ErrAgentStateDirUnavailable = errors.New("agent state directory unavailable")
+
+// ErrAgentStateConflict reports that an agent's broker-side state exists but
+// cannot be used as recorded (for example an unusable image-provenance
+// record). Like ErrAgentStateDirUnavailable, the remedy is to re-provision the
+// agent, and brokers map it to 409; IsAgentStateConflict matches both.
+var ErrAgentStateConflict = errors.New("agent state conflict")
+
+// IsAgentStateConflict reports whether err is one of the agent-state errors a
+// broker answers with 409 (re-provision): ErrAgentStateDirUnavailable or
+// ErrAgentStateConflict.
+func IsAgentStateConflict(err error) bool {
+	return errors.Is(err, ErrAgentStateDirUnavailable) || errors.Is(err, ErrAgentStateConflict)
+}
 
 // AgentsRootForProject returns the agents root a start, restart or provision
 // addresses an agent's broker-side state under:
