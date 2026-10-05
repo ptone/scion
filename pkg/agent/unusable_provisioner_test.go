@@ -107,7 +107,7 @@ func TestStart_UnusableProvisionerFailsLaunch(t *testing.T) {
 // projectFix is the advice for the project-scoped hc-bad: edit its
 // config.yaml (`upgrade` operates only on the global directory).
 func projectFix(e *policyTestEnv) string {
-	return "Edit " + filepath.Join(e.scion, "harness-configs", "hc-bad", "config.yaml")
+	return "To fix it, edit " + filepath.Join(e.scion, "harness-configs", "hc-bad", "config.yaml")
 }
 
 // A global harness-config of a bundled harness type is repaired with

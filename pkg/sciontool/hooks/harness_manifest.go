@@ -85,12 +85,14 @@ func LoadHarnessManifestRequirement(agentHome string) (HarnessManifestRequiremen
 		// The manifest carries the harness type, not the harness-config
 		// name, so the fix names the harness-config generically.
 		harnessType := manifest.HarnessConfig.Harness
-		bundled := ""
+		subject := "the agent's harness-config"
+		reinstall := ""
 		if harnessType != "" {
-			bundled = fmt.Sprintf(", a reinstall from harnesses/%s,", harnessType)
+			subject = fmt.Sprintf("a harness-config of harness type %q", harnessType)
+			reinstall = fmt.Sprintf(", a reinstall from harnesses/%s,", harnessType)
 		}
 		return HarnessManifestRequirement{Required: true, BundleDir: bundleDir},
-			fmt.Errorf("a harness-config of harness type %q is staged with provisioner.type \"builtin\", which is no longer supported; repair the agent's harness-config (`scion harness-config upgrade <harness-config> --activate-script` for a global one%s or set provisioner.type: container-script with a provisioner.command in its config.yaml), then restart the agent", harnessType, bundled)
+			fmt.Errorf("%s is staged with provisioner.type \"builtin\", which is no longer supported; repair the agent's harness-config (`scion harness-config upgrade <harness-config> --activate-script` for a global one%s or set provisioner.type: container-script with a provisioner.command in its config.yaml), then restart the agent", subject, reinstall)
 	}
 
 	// pre-start participation is the default for container-script. If the

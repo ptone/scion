@@ -148,7 +148,8 @@ func TestUnusableProvisioner_ReportedBeforePolicyRefusal(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &resp); err != nil {
 		t.Fatalf("not an ErrorResponse: %v: %s", err, body)
 	}
-	if resp.Error.Code != ErrCodeHarnessConfigUnusable || !strings.Contains(resp.Error.Message, "scion harness-config upgrade legacy-global --activate-script") {
+	if resp.Error.Code != ErrCodeHarnessConfigUnusable || !strings.Contains(resp.Error.Message, "scion harness-config upgrade legacy-global --activate-script") ||
+		!strings.Contains(resp.Error.Message, "the broker's global copy") || !strings.Contains(resp.Error.Message, "Repair it on the broker host") {
 		t.Errorf("unexpected response: %s", body)
 	}
 	if strings.Contains(body, dotScion) {

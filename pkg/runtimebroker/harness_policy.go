@@ -42,7 +42,7 @@ type harnessPolicyInput struct {
 // container-script policy check, shared by create, start and restart. Each
 // caller runs it at its single hydration point, against the hydrated
 // harness-config when there is one, before any provisioning, start or stop
-// side effect. It resolves the harness-config (lookupHarnessConfigForPolicy)
+// side effect. It resolves the harness-config (lookupHarnessConfigDirForPolicy)
 // and evaluates it (evaluateHarnessConfigPolicy).
 //
 // It is an early-out only. The authoritative evaluation is the policy hook
@@ -86,15 +86,13 @@ func (s *Server) enforceHarnessConfigPolicy(in harnessPolicyInput) harnessPolicy
 	// from settings.
 	if !s.config.AllowContainerScriptHarnesses && hcDir != nil {
 		for _, entry := range entries {
-			if err := harness.CheckProvisionerUsable(name, hcDir, entry); err != nil {
-				if ue, isUnusable := unusableProvisionerFrom(err); isUnusable {
-					return harnessPolicyDecision{
-						OK:         false,
-						Code:       ErrCodeHarnessConfigUnusable,
-						HTTPStatus: http.StatusUnprocessableEntity,
-						Message:    ue.PublicMessage(),
-						Detail:     ue.Error(),
-					}
+			if ue := harness.CheckProvisionerUsable(name, hcDir, entry); ue != nil {
+				return harnessPolicyDecision{
+					OK:         false,
+					Code:       ErrCodeHarnessConfigUnusable,
+					HTTPStatus: http.StatusUnprocessableEntity,
+					Message:    ue.PublicMessage(),
+					Detail:     ue.Error(),
 				}
 			}
 		}
@@ -191,7 +189,7 @@ func harnessPolicyRefusalFrom(err error) (harnessPolicyDecision, bool) {
 // (opts.HarnessConfigPath, set by buildStartContext's hydration) and a
 // harness-config name: the dispatch's opts.HarnessConfig, else the agent's
 // saved agent-info harness-config, else the settings default (resolved by
-// lookupHarnessConfigForPolicy). That is the early check's view; names Start
+// lookupHarnessConfigDirForPolicy). That is the early check's view; names Start
 // derives from the stored or template config are evaluated by the policy hook
 // where Start resolves them. The template chain is taken from opts.Template,
 // as harness.Resolve's caller does.
@@ -200,7 +198,7 @@ func harnessPolicyInputForStart(opts api.StartOptions, agentID string) harnessPo
 	if name == "" && opts.ProjectPath != "" {
 		name = agent.GetSavedHarnessConfig(agentID, harnessConfigProjectDir(opts.ProjectPath))
 	}
-	// The project path is passed as given; lookupHarnessConfigForPolicy
+	// The project path is passed as given; lookupHarnessConfigDirForPolicy
 	// resolves it to the project dir launch uses.
 	req := CreateAgentRequest{
 		ProjectPath: opts.ProjectPath,
@@ -222,8 +220,9 @@ func harnessPolicyInputForStart(opts api.StartOptions, agentID string) harnessPo
 	}
 }
 
-// lookupHarnessConfigForPolicy resolves the harness-config entries this
-// dispatch's launch may use, for evaluateHarnessConfigPolicy. Directories are
+// lookupHarnessConfigDirForPolicy resolves the harness-config entries this
+// dispatch's launch may use, for evaluateHarnessConfigPolicy, and the
+// directory they came from (nil for a settings entry). Directories are
 // resolved through config.ResolveHarnessConfigDir, the ordering launch and
 // extractRequiredEnvKeys use: the hub-hydrated copy (hydratedHCPath) when
 // supplied, else template-bundled, project, then global directories, with the
@@ -240,13 +239,6 @@ func harnessPolicyInputForStart(opts api.StartOptions, agentID string) harnessPo
 // is not a "not found" case: launch would use exactly that directory, so
 // the caller must not fall back to evaluating some other entry (fail
 // closed) when the policy can refuse.
-func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest, hydratedTemplatePath, hydratedHCPath string) (string, []config.HarnessConfigEntry, bool, error) {
-	name, entries, _, ok, err := s.lookupHarnessConfigDirForPolicy(req, hydratedTemplatePath, hydratedHCPath)
-	return name, entries, ok, err
-}
-
-// lookupHarnessConfigDirForPolicy is lookupHarnessConfigForPolicy that also
-// returns the directory the entry came from (nil for a settings entry).
 func (s *Server) lookupHarnessConfigDirForPolicy(req CreateAgentRequest, hydratedTemplatePath, hydratedHCPath string) (string, []config.HarnessConfigEntry, *config.HarnessConfigDir, bool, error) {
 	projectDir := harnessConfigProjectDir(req.ProjectPath)
 

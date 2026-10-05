@@ -76,17 +76,28 @@ func (e *UnusableProvisionerError) Error() string {
 	if e.Path != "" {
 		where = fmt.Sprintf(" (%s)", e.Path)
 	}
-	return fmt.Sprintf("harness-config %q%s cannot be used: %s. %s", e.Name, where, e.Reason, e.fix(true))
+	return fmt.Sprintf("harness-config %q%s cannot be used: %s. To fix it, %s", e.Name, where, e.Reason, e.fix(true))
 }
 
-// PublicMessage is Error without filesystem paths, for responses that leave
-// the machine (the broker's answer to the hub).
+// PublicMessage is Error without filesystem paths, for the broker's answer
+// to the hub. For a copy on the broker's own filesystem (global, project or
+// template scope) it says so, since repairing a copy on the caller's
+// workstation would not fix it.
 func (e *UnusableProvisionerError) PublicMessage() string {
-	scope := ""
-	if e.Scope != "" {
-		scope = fmt.Sprintf(" (%s)", e.Scope)
+	label := ""
+	switch e.Scope {
+	case "":
+	case HarnessConfigScopeHub:
+		label = " (hub)"
+	default:
+		label = fmt.Sprintf(" (the broker's %s copy)", e.Scope)
 	}
-	return fmt.Sprintf("harness-config %q%s cannot be used: %s. %s", e.Name, scope, e.Reason, e.fix(false))
+	msg := fmt.Sprintf("harness-config %q%s cannot be used: %s. ", e.Name, label, e.Reason)
+	if e.Scope == HarnessConfigScopeHub || e.Scope == "" {
+		return msg + "To fix it, " + e.fix(false)
+	}
+	return msg + "Repair it on the broker host: " + e.fix(false) +
+		fmt.Sprintf(" Alternatively, upload a working copy to the hub with `scion harness-config sync %s`; the hub then sends its copy with each dispatch.", e.Name)
 }
 
 // Fix returns the action that repairs the harness-config, with paths.
@@ -101,30 +112,27 @@ func (e *UnusableProvisionerError) fix(withPaths bool) string {
 	if withPaths && e.Path != "" {
 		configFile = filepath.Join(e.Path, "config.yaml")
 	}
-	edit := fmt.Sprintf("Edit %s: %s", configFile, provisionerEditHint)
-	reinstall := func(scopeFlag string) string {
-		return fmt.Sprintf("reinstall the bundled %s harness-config over it with `scion harness-config install --force%s --name %s harnesses/%s` (run from a scion source checkout)", e.HarnessType, scopeFlag, e.Name, e.HarnessType)
-	}
+	edit := fmt.Sprintf("edit %s: %s", configFile, provisionerEditHint)
 
 	switch e.Scope {
 	case HarnessConfigScopeGlobal:
 		if e.Bundled {
-			return fmt.Sprintf("Run `scion harness-config upgrade %s --activate-script`, or %s.", e.Name, reinstall(" --global"))
+			return fmt.Sprintf("run `scion harness-config upgrade %s --activate-script`, or reinstall the bundled %s harness-config over it with `scion harness-config install --force --global --name %s <scion-checkout>/harnesses/%s`.", e.Name, e.HarnessType, e.Name, e.HarnessType)
 		}
 		return fmt.Sprintf("%s (no bundled harness-config exists for harness type %q, so `scion harness-config upgrade` cannot repair it).", edit, e.HarnessType)
 	case HarnessConfigScopeProject:
-		if e.Bundled {
-			return fmt.Sprintf("%s; or, from the project, %s.", edit, reinstall(""))
-		}
+		// `upgrade` operates only on the global directory, and `install`
+		// without --global targets the hub project scope in Hub mode, so
+		// editing the file is the one repair that always applies here.
 		return edit + "."
 	case HarnessConfigScopeTemplate:
 		file := fmt.Sprintf("harness-configs/%s/config.yaml in the agent's template", e.Name)
 		if withPaths && e.Path != "" {
 			file = filepath.Join(e.Path, "config.yaml") + " (bundled in the agent's template)"
 		}
-		return fmt.Sprintf("Edit %s: %s.", file, provisionerEditHint)
+		return fmt.Sprintf("edit %s: %s. For a template from the hub, repair the template itself and upload it to the hub again.", file, provisionerEditHint)
 	case HarnessConfigScopeHub:
-		return fmt.Sprintf("Repair a local copy of harness-config %q (%s) and upload it to the hub with `scion harness-config sync %s`.", e.Name, provisionerEditHint, e.Name)
+		return fmt.Sprintf("pull it (`scion harness-config pull %s`), %s, and upload it to the scope it came from with `scion harness-config sync %s` (add `--global` for a global record).", e.Name, provisionerEditHint, e.Name)
 	default:
 		return edit + "."
 	}
@@ -133,7 +141,7 @@ func (e *UnusableProvisionerError) fix(withPaths bool) string {
 // CheckProvisionerUsable returns an *UnusableProvisionerError when entry's
 // provisioner block cannot provision the harness, nil otherwise (including
 // when there is no provisioner block).
-func CheckProvisionerUsable(name string, hcDir *config.HarnessConfigDir, entry config.HarnessConfigEntry) error {
+func CheckProvisionerUsable(name string, hcDir *config.HarnessConfigDir, entry config.HarnessConfigEntry) *UnusableProvisionerError {
 	prov := entry.Provisioner
 	if prov == nil {
 		return nil

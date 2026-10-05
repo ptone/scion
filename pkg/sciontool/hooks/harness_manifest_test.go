@@ -102,6 +102,26 @@ func TestLoadHarnessManifestRequirement_BuiltinRequiredWithError(t *testing.T) {
 	}
 }
 
+// A manifest without a harness type does not print an empty type.
+func TestLoadHarnessManifestRequirement_BuiltinWithoutHarnessType(t *testing.T) {
+	home := t.TempDir()
+	bundle := filepath.Join(home, ".scion", "harness")
+	if err := os.MkdirAll(bundle, 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"harness_config": {"provisioner": {"type": "builtin"}}}`
+	if err := os.WriteFile(filepath.Join(bundle, "manifest.json"), []byte(manifest), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadHarnessManifestRequirement(home)
+	if err == nil || !got.Required {
+		t.Fatalf("expected Required=true and an error, got %+v, %v", got, err)
+	}
+	if !strings.Contains(err.Error(), "the agent's harness-config is staged") || strings.Contains(err.Error(), `""`) || strings.Contains(err.Error(), "harnesses/,") {
+		t.Errorf("unexpected message: %v", err)
+	}
+}
+
 func TestLoadHarnessManifestRequirement_MalformedManifestFails(t *testing.T) {
 	home := t.TempDir()
 	bundle := filepath.Join(home, ".scion", "harness")

@@ -113,7 +113,7 @@ func TestHarnessPolicy_EvaluatesHydratedBundle(t *testing.T) {
 
 	req := CreateAgentRequest{Config: &CreateAgentConfig{HarnessConfig: "hc"}}
 
-	name, entries, ok, err := srv.lookupHarnessConfigForPolicy(req, "", hydratedDir)
+	name, entries, _, ok, err := srv.lookupHarnessConfigDirForPolicy(req, "", hydratedDir)
 	if err != nil || !ok || name != "hc" || len(entries) != 1 {
 		t.Fatalf("lookup failed: name=%q ok=%v entries=%d err=%v", name, ok, len(entries), err)
 	}
@@ -131,13 +131,13 @@ func TestHarnessPolicy_EvaluatesHydratedBundle(t *testing.T) {
 	hydrated2 := filepath.Join(t.TempDir(), "hc2")
 	writeHarnessConfigDirAt(t, hydrated2, "harness: claude\nimage: scion-claude:test\n")
 	req.Config.HarnessConfig = "hc2"
-	_, entries, ok, _ = srv.lookupHarnessConfigForPolicy(req, "", hydrated2)
+	_, entries, _, ok, _ = srv.lookupHarnessConfigDirForPolicy(req, "", hydrated2)
 	if !ok || len(entries) != 1 || entries[0].Provisioner != nil {
 		t.Errorf("broker-local scripted copy shadowed the declarative hydrated bundle: ok=%v entries=%+v", ok, entries)
 	}
 
 	// No hydrated copy: the broker-local copy is evaluated.
-	_, entries, ok, _ = srv.lookupHarnessConfigForPolicy(req, "", "")
+	_, entries, _, ok, _ = srv.lookupHarnessConfigDirForPolicy(req, "", "")
 	if !ok || len(entries) == 0 || entries[0].Provisioner == nil {
 		t.Errorf("broker-local fallback not evaluated: ok=%v", ok)
 	}
@@ -154,7 +154,7 @@ func TestHarnessPolicy_EvaluatesTemplateBundled(t *testing.T) {
 	writeHarnessConfigDirAt(t, filepath.Join(tplDir, "harness-configs", "hc"), scriptedHarnessYAML)
 
 	req := CreateAgentRequest{Config: &CreateAgentConfig{HarnessConfig: "hc"}}
-	_, entries, ok, _ := srv.lookupHarnessConfigForPolicy(req, tplDir, "")
+	_, entries, _, ok, _ := srv.lookupHarnessConfigDirForPolicy(req, tplDir, "")
 	if !ok || len(entries) == 0 || entries[0].Provisioner == nil {
 		t.Errorf("template-bundled scripted harness-config not evaluated by the gate: ok=%v", ok)
 	}

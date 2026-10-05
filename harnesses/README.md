@@ -62,17 +62,22 @@ when they were part of the default set), here's what you need to know:
    If your config directory contains a `provision.py`, the upgrade
    auto-activates container-script provisioning even without the
    `--activate-script` flag. Alternatively, reinstall the bundled config
-   over it (from a scion source checkout; `<harness>` is the harness type):
+   over it (`<harness>` is the harness type):
    ```sh
-   scion harness-config install --force --global --name <name> harnesses/<harness>
+   scion harness-config install --force --global --name <name> <scion-checkout>/harnesses/<harness>
    ```
    `upgrade` only operates on global harness-configs. For a project-level
    copy (`.scion/harness-configs/<name>`), a copy bundled in a template,
    or a harness type with no bundled config, edit its `config.yaml`: set
    `provisioner.type: container-script` with a non-empty
-   `provisioner.command`, or remove the `provisioner` block. For a hub
-   harness-config, repair a local copy and upload it with
-   `scion harness-config sync <name>`.
+   `provisioner.command`, or remove the `provisioner` block. When a
+   Runtime Broker launched from its own copy, repair that copy on the
+   broker host (or upload a working copy to the Hub, which the Hub then
+   sends with each dispatch). For a Hub harness-config, pull it
+   (`scion harness-config pull <name>`), repair it, and upload it to the
+   scope it came from with `scion harness-config sync <name>` (add
+   `--global` for a global record); for a template from the Hub, repair
+   the template itself and upload it again.
 
 3. **Fresh installs** — opencode, codex, and antigravity are no longer
    installed automatically. Restore any of them with a single command:

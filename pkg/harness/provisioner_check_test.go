@@ -75,10 +75,12 @@ func TestResolve_UnusableProvisioner_GlobalBundled(t *testing.T) {
 			}
 			assertContains(t, "error", ue.Error(), `"hc"`, hcDir, tc.wantReason,
 				"scion harness-config upgrade hc --activate-script",
-				"scion harness-config install --force --global --name hc harnesses/claude")
+				"scion harness-config install --force --global --name hc <scion-checkout>/harnesses/claude")
 			assertNotContains(t, "error", ue.Error(), "harness-config sync")
 			pub := ue.PublicMessage()
-			assertContains(t, "public message", pub, `"hc"`, tc.wantReason, "scion harness-config upgrade hc --activate-script")
+			assertContains(t, "public message", pub, `"hc"`, tc.wantReason, "the broker's global copy",
+				"Repair it on the broker host: run `scion harness-config upgrade hc --activate-script`",
+				"upload a working copy to the hub with `scion harness-config sync hc`")
 			assertNotContains(t, "public message", pub, home)
 		})
 	}
@@ -96,7 +98,7 @@ func TestResolve_UnusableProvisioner_GlobalNotBundled(t *testing.T) {
 	if ue.Scope != HarnessConfigScopeGlobal || ue.Bundled {
 		t.Errorf("error = %+v", ue)
 	}
-	assertContains(t, "error", ue.Error(), "Edit "+filepath.Join(hcDir, "config.yaml"), "provisioner.command", "cannot repair it")
+	assertContains(t, "error", ue.Error(), "To fix it, edit "+filepath.Join(hcDir, "config.yaml"), "provisioner.command", "cannot repair it")
 	assertNotContains(t, "error", ue.Error(), "--activate-script", "harness-config install")
 }
 
@@ -119,9 +121,9 @@ func TestResolve_UnusableProvisioner_Project(t *testing.T) {
 	if ue.Scope != HarnessConfigScopeProject || ue.Path != hcDir {
 		t.Errorf("error = %+v", ue)
 	}
-	assertContains(t, "error", ue.Error(), "Edit "+filepath.Join(hcDir, "config.yaml"),
-		"scion harness-config install --force --name hc harnesses/claude")
-	assertNotContains(t, "error", ue.Error(), "harness-config upgrade", "--global")
+	assertContains(t, "error", ue.Error(), "To fix it, edit "+filepath.Join(hcDir, "config.yaml"))
+	assertNotContains(t, "error", ue.Error(), "harness-config upgrade", "harness-config install", "--global")
+	assertContains(t, "public message", ue.PublicMessage(), "the broker's project copy", "Repair it on the broker host: edit its config.yaml")
 	assertNotContains(t, "public message", ue.PublicMessage(), project)
 }
 
@@ -140,7 +142,8 @@ func TestResolve_UnusableProvisioner_Template(t *testing.T) {
 		t.Errorf("scope = %q, want template", ue.Scope)
 	}
 	assertContains(t, "error", ue.Error(), filepath.Join(hcDir, "config.yaml"), "agent's template")
-	assertContains(t, "public message", ue.PublicMessage(), "harness-configs/hc/config.yaml in the agent's template")
+	assertContains(t, "public message", ue.PublicMessage(), "harness-configs/hc/config.yaml in the agent's template",
+		"the broker's template copy", "repair the template itself")
 	assertNotContains(t, "error", ue.Error(), "harness-config upgrade", "harness-config install")
 }
 
@@ -157,7 +160,9 @@ func TestResolve_UnusableProvisioner_HubHydrated(t *testing.T) {
 	if ue.Scope != HarnessConfigScopeHub {
 		t.Errorf("scope = %q, want hub", ue.Scope)
 	}
-	assertContains(t, "public message", ue.PublicMessage(), "scion harness-config sync hc", "(hub)")
+	assertContains(t, "public message", ue.PublicMessage(), "(hub)", "To fix it, pull it (`scion harness-config pull hc`)",
+		"upload it to the scope it came from with `scion harness-config sync hc` (add `--global` for a global record)")
+	assertNotContains(t, "public message", ue.PublicMessage(), "broker host")
 	assertNotContains(t, "public message", ue.PublicMessage(), hydrated)
 }
 
