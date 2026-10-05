@@ -2197,7 +2197,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_RetryAfterHashMismatchCarriesWor
 		failFirstStartWith: errors.New("Failed to hydrate harness-config: hash mismatch for file config.yaml"),
 	}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetHarnessConfigRepairer(func(ctx context.Context, name string) error { return nil })
+	dispatcher.SetHarnessConfigRepairer(func(ctx context.Context, ref HarnessConfigRepairRef) error { return nil })
 
 	gitClone := &api.GitCloneConfig{URL: "https://github.com/example/repo.git"}
 	agent := &store.Agent{
