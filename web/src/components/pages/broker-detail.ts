@@ -39,7 +39,7 @@ import { brokerTypeBadgeStyles } from '../shared/resource-styles.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { showToast } from '../../utils/toast.js';
 import '../shared/status-badge.js';
-import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { formatDateOrDash, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface BrokerProjectInfo {
@@ -609,11 +609,6 @@ export class ScionPageBrokerDetail extends LitElement {
     }
   }
 
-  /** Formats a timestamp for the header stats; "—" when missing or invalid. */
-  private formatDate(dateString: string | undefined): string {
-    return (dateString && formatInstantWithZone(dateString)) || '—';
-  }
-
   private get isAdmin(): boolean {
     return this.pageData?.user?.role === 'admin';
   }
@@ -730,7 +725,11 @@ export class ScionPageBrokerDetail extends LitElement {
         </div>
         <div class="stat">
           <span class="stat-label">Created</span>
-          <span class="stat-value-sm">${this.formatDate(this.broker.created)}</span>
+          <span class="stat-value-sm">${formatDateOrDash(this.broker.created)}</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Updated</span>
+          <span class="stat-value-sm">${formatDateOrDash(this.broker.updated)}</span>
         </div>
         <div class="stat">
           <span class="stat-label">Last Heartbeat</span>

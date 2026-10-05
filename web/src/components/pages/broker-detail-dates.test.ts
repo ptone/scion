@@ -15,7 +15,7 @@
  */
 
 /**
- * Tests for the Created stat in the broker-detail header. The hub
+ * Tests for the Created and Updated stats in the broker-detail header. The hub
  * serializes store.RuntimeBroker timestamps as `created` / `updated`
  * (ptone/scion#3344).
  */
@@ -103,7 +103,7 @@ function statValue(el: HTMLElement, label: string): string {
   return stat?.querySelector('.stat-value, .stat-value-sm')?.textContent?.trim() ?? '';
 }
 
-describe('scion-page-broker-detail — Created stat', () => {
+describe('scion-page-broker-detail — Created and Updated stats', () => {
   let element: HTMLElement | null = null;
 
   beforeAll(async () => {
@@ -127,6 +127,23 @@ describe('scion-page-broker-detail — Created stat', () => {
       updated: '2026-09-28T12:00:00Z',
     });
     expect(statValue(element, 'Created')).toMatch(/Aug 14, 2026/);
+  });
+
+  it('shows the date the hub sends as updated', async () => {
+    element = await renderBroker({
+      created: '2026-08-14T12:00:00Z',
+      updated: '2026-09-28T12:00:00Z',
+    });
+    expect(statValue(element, 'Updated')).toMatch(/Sep 28, 2026/);
+  });
+
+  it('shows a dash for the Go zero time', async () => {
+    element = await renderBroker({
+      created: '0001-01-01T00:00:00Z',
+      updated: '0001-01-01T00:00:00Z',
+    });
+    expect(statValue(element, 'Created')).toBe('—');
+    expect(statValue(element, 'Updated')).toBe('—');
   });
 
   it('shows a dash instead of a blank when the date is missing or invalid', async () => {

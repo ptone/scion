@@ -383,6 +383,20 @@ export function formatInstantWithZone(iso: string, style: InstantStyle = 'dateti
   return formatted ? `${formatted} (${zoneLabel()})` : '';
 }
 
+/**
+ * Formats a stored timestamp for a detail-page stat with
+ * `formatInstantWithZone`, or returns `'—'` when there is no usable date:
+ * missing, unparsable, or a placeholder before the year 2000. The hub sends
+ * Go's zero time (`0001-01-01T00:00:00Z`) for unset timestamps that are not
+ * `omitempty`. The year check matches `isZeroDate` in agent-detail.ts.
+ */
+export function formatDateOrDash(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime()) || date.getUTCFullYear() < 2000) return '—';
+  return formatInstantWithZone(iso) || '—';
+}
+
 // ---------------------------------------------------------------------------
 // Relative-time formatting
 // ---------------------------------------------------------------------------

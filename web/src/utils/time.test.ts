@@ -40,6 +40,7 @@ import {
   DISPLAY_TIMEZONE_CHANGED_EVENT,
   formatInstant,
   formatInstantWithZone,
+  formatDateOrDash,
   formatRelative,
   formatRelativeTime,
   parseWallClock,
@@ -386,6 +387,32 @@ describe('effective-zone store', () => {
         window.removeEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, handler);
       }
     });
+  });
+});
+
+describe('formatDateOrDash (ptone/scion#3344)', () => {
+  afterEach(() => setPreferredTimeZone(''));
+
+  it('formats a real date with the zone label', () => {
+    setPreferredTimeZone('UTC');
+    expect(formatDateOrDash('2026-08-14T12:00:00Z')).toBe(
+      formatInstantWithZone('2026-08-14T12:00:00Z')
+    );
+    expect(formatDateOrDash('2026-08-14T12:00:00Z')).toMatch(/^Aug 14, 2026, 12:00 /);
+  });
+
+  it('returns a dash for a missing date', () => {
+    expect(formatDateOrDash(undefined)).toBe('—');
+    expect(formatDateOrDash(null)).toBe('—');
+    expect(formatDateOrDash('')).toBe('—');
+  });
+
+  it('returns a dash for an invalid date', () => {
+    expect(formatDateOrDash('not-a-date')).toBe('—');
+  });
+
+  it('returns a dash for the Go zero time', () => {
+    expect(formatDateOrDash('0001-01-01T00:00:00Z')).toBe('—');
   });
 });
 

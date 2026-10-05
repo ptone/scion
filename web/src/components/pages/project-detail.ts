@@ -99,7 +99,7 @@ import { showToast } from '../../utils/toast.js';
 import { stopAllNotices, type StopAllResult } from '../../utils/stop-all.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
-import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { formatDateOrDash, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
@@ -1999,11 +1999,6 @@ export class ScionPageProjectDetail extends LitElement {
     ></sl-tooltip>`;
   }
 
-  /** Formats a timestamp for the header stats; "—" when missing or invalid. */
-  private formatDate(dateString: string | undefined): string {
-    return (dateString && formatInstantWithZone(dateString)) || '—';
-  }
-
   private getTabDataSource(tabName: string): FileBrowserDataSource {
     if (!this.fileBrowserDataSources[tabName]) {
       if (tabName === 'workspace') {
@@ -2703,13 +2698,13 @@ export class ScionPageProjectDetail extends LitElement {
         <div class="stat">
           <span class="stat-label">Created</span>
           <span class="stat-value" style="font-size: 1rem; font-weight: 500;">
-            ${this.formatDate(this.project.created)}
+            ${formatDateOrDash(this.project.created)}
           </span>
         </div>
         <div class="stat">
           <span class="stat-label">Updated</span>
           <span class="stat-value" style="font-size: 1rem; font-weight: 500;">
-            ${this.formatDate(this.project.updated)}
+            ${formatDateOrDash(this.project.updated)}
           </span>
         </div>
       </div>
