@@ -842,3 +842,158 @@ file with zero production diff. No catalog, P2, emitter/slog/sink,
 store/schema/history, sampling, transport, projection, M1, or
 `#2392 audit_emit_dispatch` behavior is changed. Fresh round 7/7 remains
 blocked because both required gates are not conclusively green.
+
+## R6 performance fix 2: settled rejection components (2026-10-05)
+
+EM authorized the broker-local protected brief whose SHA-256 is
+`e44cdf833028db3c6767512d0e3351dc677d67bc6c2cd08d6eb6e9c94f807a27`.
+EM's independent `scion look` confirmed OpenAI Codex v0.160.0 / GPT-6.1-Sol
+medium. The attempted worker `harness-config codex` was unavailable (exit 127);
+EM explicitly made its verification authoritative. The missing installed
+artifact-durability skill was explicitly nonblocking; pushed commits require
+independent remote equality, and protected reports require durable receipt.
+
+Initial HEAD/local/tracking/independent fork remote all matched
+`aa4b7aebba21d21598acc079feecf6a58cec7e3d`, with clean tree and 0/0 ahead/behind.
+The accepted P1 base `fd4f83fb7769af4b08eed1ac06be6d2442de89d7` was absent.
+One explicitly authorized exact fetch (`git fetch --no-tags --depth=1 origin
+fd4f83fb7769af4b08eed1ac06be6d2442de89d7`) exited zero; FETCH_HEAD and the
+commit object matched exactly. Local ancestor verification exited 1 in the
+shallow clone: **locally unprovable, not a successful ancestry check**.
+No deepen/retry occurred. EM accepted the independent authoritative fork
+compare (accepted merge base, 24 ahead/0 behind) and the matching local approved
+14-path base-to-HEAD diff. Ref equality and clean tree remained unchanged.
+Go and go.mod were 1.26.1, GOFLAGS unset, and the protected reviews directory
+was visible and writable. EM then explicitly accepted preflight before edits.
+
+Failure provenance: the protected val-2 report
+`/scion-volumes/scratchpad/projects/audit-update/reviews/m2-explain-r6-performance-validation-2.md`
+hashed to `3411ecb9376e9225ec84c4a28d44dc0a421d9021318194af7ee6366c6ca070f7`.
+At the exact initial head, the single normal gate failed with command exit 1,
+package time 5340.212s, wall 5366s, no package `ok`, and repeated resolver
+frames at scanner lines 1406/1417. No race or retry ran in that validation.
+
+Static diagnosis: the prior resolver cached only `complete=true`. Safe DAGs
+and forbidden fully resolved DAGs were memoized, but rejection ancestors of
+cycles or nil dependencies were recomputed on every shared path and root.
+The watchdog frames identify the dependency-recursion loop. Production
+`AuthorizeReadBatch` reassigns `ctx` via `contextWithIdentity`: the caller's
+parameter depends on the wrapper return, which depends on its parameter,
+which in turn receives the caller parameter. `loadAllAccessConstraints`
+reads cached fields, assigns returned values back into those same fields,
+and returns those values. Whole-package field/call/return dependencies thus
+create shared feedback components. The old safe-only DAG regression missed
+this rejected-subgraph class.
+
+Semantic `types.Object` keys span all roots in a single validation pass;
+expression-only nodes enumerate objects and do not introduce recursive cache
+keys. Existing edges for variables, fields, parameters, returns, aggregates,
+indexing, ranges, searches, callable aliases and method expressions remain
+intact. Type/import/interface errors still reject through their existing
+validation paths. The flow is immutable after construction.
+
+The correction uses dependency-first strongly connected component finalization.
+Index/low/on-stack traversal state remains private and is never published as a
+summary. Every outgoing dependency contributes before publishing a component's
+summary to all its members. Cyclic components, self edges, nil dependencies and
+rejected outgoing summaries remain `complete=false`; forbidden provenance is
+retained across component boundaries. A settled rejection is cached separately
+from the transient computation state, without converting rejection to success.
+Each semantic object expands once and each dependency edge is examined at most
+twice across roots. No name/surface/receiver/filename/error allowlist or
+permission-to-operation inference was added.
+
+Deterministic regressions cover 10-level shared cyclic and nil-dependency
+rejection graphs; multiple roots/repeated resolutions; reordered starting
+roots/component members; forbidden plus incomplete outgoing edges through an
+SCC; and a parsed/typechecked production-shaped parameter/return and
+field/return feedback graph. Existing safe and forbidden DAGs, mutation matrix,
+and safe interface/callable/data-flow cases remain. The prior cycle/nil tests
+still reject, but now assert settled rejection reuse instead of demanding
+uncached recomputation.
+
+Focused RED command (before the SCC correction):
+
+```text
+ulimit -v 8000000; start_seconds=$SECONDS; timeout 5m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -timeout 4m -count=1 -p 2 ./pkg/hub -run '^TestExplainBoundaryForbiddenDataResolverFailsClosed$/shared_(incomplete|cyclic)_graph_bound$'; command_rc=$?; echo COMMAND_EXIT=$command_rc; echo WALL_SECONDS=$((SECONDS-start_seconds)); exit $command_rc
+```
+
+Result: **INCONCLUSIVE**, exit 124, wall 300s, dependency-download output only;
+no package/test/count verdict. It finished untouched and was not retried.
+
+Focused GREEN command (after the correction):
+
+```text
+ulimit -v 8000000; start_seconds=$SECONDS; timeout 10m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -timeout 9m -count=1 -p 2 -v ./pkg/hub -run '^(TestExplainBoundaryForbiddenDataResolver(MemoizesSharedDAG|FailsClosed)|TestEffectivePermissionIntrospectionBoundaryRejectsMutations|TestEffectivePermissionIntrospectionBoundaryAllowsSafeInterfaceDispatch)$'; command_rc=$?; echo COMMAND_EXIT=$command_rc; echo WALL_SECONDS=$((SECONDS-start_seconds)); exit $command_rc
+```
+
+Focused GREEN result: **INCONCLUSIVE**, command exit 124, wall 600s.
+The output reached `TestEffectivePermissionIntrospectionBoundaryRejectsMutations`
+and its `interface_other-file_pointer_receiver` subtest, but emitted no case
+PASS/FAIL, resolver visit/work counts, package result or explicit `ok`.
+A read-only process check observed a CPU-active compiler before test execution;
+another at 5m19s observed the Go command with no compiler/test process. These
+observations are not a test verdict. The command ran once, without concurrent
+heavy work or retry. No regression bound or malicious/safe closure was proven
+by this run.
+
+EM required conclusive focused evidence before any validation checkpoint.
+That requirement is **unmet**: no checkpoint commit/push, and no normal gate has
+run for this correction. Changes remain uncommitted in the two authorized paths.
+The protected report and patch preserve the working change pending EM
+receipt/disposition; no claim of completed delivery or successful validation is
+made. `gofmt` and `git diff --check` passed, but are not substitutes for tests. The latest EM amendment supersedes the original race venue
+permission: broker-01 is **normal-only; race prohibited/deferred**, including
+after normal GREEN. The checkpoint must be pushed with remote equality and
+clean tree before the single prescribed normal gate. On failure/inconclusive,
+stop without retry; on GREEN, preserve/push evidence and stop for a separately
+authorized race venue. Completion requires durable report receipt.
+
+This correction is restricted to this project log and
+`pkg/hub/authz_explain_operation_contract_test.go`, with zero production delta
+against the pinned initial head. No option-B production, authzop catalog, P2,
+emitter/slog/sinks, store/schema/history, sampling, transport, projection, M1,
+or ptone/scion#2392 timing changes are authorized. Round 7 and dependent work
+remain blocked. No descendants, compare links, merge notices, merge/rebase/reset,
+force push, upstream integration, full Hub suite, lint, heavy build, make ci,
+or make ci-full are permitted. One heavy command runs at a time; shared GOCACHE
+is not cleaned, relocated, replaced or deliberately prewarmed.
+
+### Stage A isolated resolver proof and checkpoint authorization
+
+After receiving/verifying the frozen report and patch, EM separately authorized
+one isolated resolver gate (not a retry of either earlier coupled selector):
+
+```text
+ulimit -v 8000000; start_seconds=$SECONDS; timeout 20m env GOMEMLIMIT=4GiB GOCACHE=/scion-volumes/gocache go test -timeout 19m -count=1 -p 2 -v ./pkg/hub -run '^TestExplainBoundaryForbiddenDataResolver(MemoizesSharedDAG|FailsClosed)$'; command_rc=$?; echo COMMAND_EXIT=$command_rc; echo WALL_SECONDS=$((SECONDS-start_seconds)); exit $command_rc
+```
+
+Stage A: **GREEN**, exit 0, wall 20s, explicit
+`ok github.com/GoogleCloudPlatform/scion/pkg/hub 0.262s`.
+Both named tests and every subtest passed. Shared nil/cyclic rejection graphs
+each logged objects=21, expansions=21, edges=39, visits=78. The typed feedback
+graph logged universe=52, expansions=52, edges=99, visits=198 in both root
+orders. The component-boundary forbidden/incomplete propagation, cycle
+rejection, forbidden shared DAG, incomplete rejection reuse, and safe shared
+DAG assertions all passed. These measured bounds supersede the earlier lack
+of resolver execution evidence; they do not substitute for malicious/safe
+boundary-suite or real production-structure execution.
+
+Both previous runs remain distinct **INCONCLUSIVE** evidence: focused RED
+124/300s (downloads only), coupled focused GREEN 124/600s (one mutation
+started, no verdict). They were not retried. EM durably received the original
+blocked report (12,257 bytes; SHA-256
+`a9f618fc39fd17d8c7f1989d71a97fce45ea94d228ad1f06243ad50b09ee6045`) and
+patch (21,088 bytes; SHA-256
+`aa95809b4c9de81e0d5dcf87b025f2e4ebb0f02c7d2e77077d47e3d68a2e6631`).
+Those hashes identify the earlier frozen evidence, not the subsequent report.
+
+At 2026-10-05 03:14:42Z EM explicitly authorized recording Stage A, formatting
+and scope checks, committing/pushing exactly the scanner test and project log
+as a validation checkpoint, independently verifying ref equality and clean
+tree, then running exactly one unchanged prescribed normal gate. This
+supersedes the earlier pre-checkpoint hold. The checkpoint SHA is reported in
+the protected report because a commit cannot contain its own SHA. Normal is
+pending; its actual result will be recorded afterward. No race is authorized
+on broker-01, even after GREEN. No additional heavy command, retry, round 7,
+or dependent work is authorized.

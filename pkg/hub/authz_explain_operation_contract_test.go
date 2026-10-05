@@ -507,6 +507,93 @@ func TestExplainBoundaryForbiddenDataResolverMemoizesSharedDAG(t *testing.T) {
 }
 
 func TestExplainBoundaryForbiddenDataResolverFailsClosed(t *testing.T) {
+	t.Run("shared incomplete graph bound", func(t *testing.T) {
+		explainBoundaryAssertRejectedGraphBound(t, func(types.Object) map[types.Object]struct{} { return map[types.Object]struct{}{nil: {}} })
+	})
+	t.Run("shared cyclic graph bound", func(t *testing.T) {
+		explainBoundaryAssertRejectedGraphBound(t, func(object types.Object) map[types.Object]struct{} { return map[types.Object]struct{}{object: {}} })
+	})
+
+	t.Run("component boundaries preserve forbidden and incomplete provenance", func(t *testing.T) {
+		pkg := types.NewPackage("github.com/GoogleCloudPlatform/scion/pkg/hub/authzop", "authzop")
+		origin := explainBoundaryTestDataObject("Catalog", pkg)
+		require.Nil(t, pkg.Scope().Insert(origin))
+		a, b := explainBoundaryTestDataObject("a", nil), explainBoundaryTestDataObject("b", nil)
+		incomplete := explainBoundaryTestDataObject("incomplete", nil)
+		left, right := explainBoundaryTestDataObject("left", nil), explainBoundaryTestDataObject("right", nil)
+		flow := explainBoundaryDataFlow{origin: nil, incomplete: {nil: {}}, a: {b: {}}, b: {a: {}, origin: {}, incomplete: {}}, left: {a: {}}, right: {b: {}}}
+		// Fresh traversals vary both starting member/root and map iteration order.
+		for _, roots := range [][]types.Object{{left, right, a, b}, {b, a, right, left}, {right, left, b, a}} {
+			for repeat := 0; repeat < 8; repeat++ {
+				resolver := newExplainBoundaryForbiddenDataResolver(flow)
+				for _, root := range roots {
+					result := resolver.resolve(root)
+					assert.False(t, result.complete)
+					assert.Same(t, origin, result.origin, "forbidden provenance must cross and saturate the entire cyclic component")
+				}
+				assert.Equal(t, len(flow), resolver.resolveAttempts)
+				assert.Equal(t, 2*7, resolver.edgeVisits)
+				for _, member := range []types.Object{a, b, left, right, incomplete} {
+					assert.False(t, resolver.resolved[member].complete)
+				}
+			}
+		}
+	})
+	t.Run("typed production-shaped shared feedback graph", func(t *testing.T) {
+		// Mirrors AuthorizeReadBatch -> contextWithIdentity parameter/return
+		// feedback and loadAllAccessConstraints cached field/return feedback.
+		source := `package fixture
+   type cache struct { value int }; var memo cache
+   func contextWithIdentity(ctx int) int { return ctx }
+   func batch(ctx int) int { ctx = contextWithIdentity(ctx); return ctx }
+   func load() int { return memo.value }
+   func refill() { memo.value = load() }
+   func leafA() int { return batch(load()) }
+   func leafB() int { return batch(load()) }
+  `
+		previous := []string{"leafA", "leafB"}
+		for level := 0; level < 10; level++ {
+			next := []string{fmt.Sprintf("left%d", level), fmt.Sprintf("right%d", level)}
+			for _, name := range next {
+				source += fmt.Sprintf("func %s() int { return %s() + %s() }\n", name, previous[0], previous[1])
+			}
+			previous = next
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "feedback.go", source, 0)
+		require.NoError(t, err)
+		info := &types.Info{Defs: make(map[*ast.Ident]types.Object), Uses: make(map[*ast.Ident]types.Object), Selections: make(map[*ast.SelectorExpr]*types.Selection), Types: make(map[ast.Expr]types.TypeAndValue)}
+		pkg, err := (&types.Config{}).Check("example.com/fixture", fset, []*ast.File{file}, info)
+		require.NoError(t, err)
+		values := explainBoundaryFunctionValues([]*ast.File{file}, info)
+		flow := explainBoundaryDataDependencies([]*ast.File{file}, info, values)
+		universe := make(map[types.Object]bool)
+		edges := 0
+		for object, dependencies := range flow {
+			universe[object] = true
+			for dependency := range dependencies {
+				if dependency != nil {
+					universe[dependency] = true
+				}
+				edges++
+			}
+		}
+		for _, names := range [][]string{previous, {previous[1], previous[0]}} {
+			resolver := newExplainBoundaryForbiddenDataResolver(flow)
+			for repeat := 0; repeat < 3; repeat++ {
+				for _, name := range names {
+					fn := pkg.Scope().Lookup(name).(*types.Func)
+					result := resolver.resolve(fn.Type().(*types.Signature).Results().At(0))
+					assert.False(t, result.complete, "production-shaped feedback must remain fail closed")
+					assert.Nil(t, result.origin)
+				}
+			}
+			assert.LessOrEqual(t, resolver.resolveAttempts, len(universe))
+			assert.LessOrEqual(t, resolver.edgeVisits, 2*edges)
+			t.Logf("typed feedback bound: universe=%d expansions=%d edges=%d visits=%d", len(universe), resolver.resolveAttempts, edges, resolver.edgeVisits)
+		}
+	})
+
 	t.Run("dependency cycle", func(t *testing.T) {
 		left := explainBoundaryTestDataObject("left", nil)
 		right := explainBoundaryTestDataObject("right", nil)
@@ -518,7 +605,10 @@ func TestExplainBoundaryForbiddenDataResolverFailsClosed(t *testing.T) {
 		result := resolver.resolve(left)
 		assert.False(t, result.complete)
 		assert.Nil(t, result.origin)
-		assert.Empty(t, resolver.resolved, "an in-progress cycle must never become a completed cached result")
+		assert.Len(t, resolver.resolved, 2, "only settled rejection summaries may be cached for a cycle")
+		for _, cached := range resolver.resolved {
+			assert.False(t, cached.complete, "a cycle must never be consumable as safe")
+		}
 	})
 
 	t.Run("forbidden origin through shared DAG", func(t *testing.T) {
@@ -563,10 +653,41 @@ func TestExplainBoundaryForbiddenDataResolverFailsClosed(t *testing.T) {
 		assert.False(t, second.complete)
 		assert.Nil(t, first.origin)
 		assert.Nil(t, second.origin)
-		assert.NotContains(t, resolver.resolved, object)
-		assert.Equal(t, 2, resolver.resolveAttempts,
-			"an incomplete result must be retried and must never be read from the completed-result cache")
+		assert.False(t, resolver.resolved[object].complete)
+		assert.Equal(t, 1, resolver.resolveAttempts,
+			"a settled incomplete rejection must be reused, never converted to success")
 	})
+}
+
+// Shared rejected graphs occur when whole-package field, parameter and return
+// dependencies converge on a cycle or an unresolved value. Safe DAG memoization
+// alone does not bound these graphs.
+func explainBoundaryAssertRejectedGraphBound(t *testing.T, leafDependencies func(types.Object) map[types.Object]struct{}) {
+	t.Helper()
+	leaf := explainBoundaryTestDataObject("leaf", nil)
+	flow := explainBoundaryDataFlow{leaf: leafDependencies(leaf)}
+	previous := []types.Object{leaf, leaf}
+	for level := 0; level < 10; level++ {
+		next := []types.Object{explainBoundaryTestDataObject(fmt.Sprintf("left%d", level), nil), explainBoundaryTestDataObject(fmt.Sprintf("right%d", level), nil)}
+		for _, object := range next {
+			flow[object] = map[types.Object]struct{}{previous[0]: {}, previous[1]: {}}
+		}
+		previous = next
+	}
+	resolver := newExplainBoundaryForbiddenDataResolver(flow)
+	for _, root := range previous {
+		for repeat := 0; repeat < 3; repeat++ {
+			assert.False(t, resolver.resolve(root).complete)
+		}
+	}
+	assert.LessOrEqual(t, resolver.resolveAttempts, len(flow), "finalized rejection must not be re-expanded across paths or roots")
+	edges := 0
+	for _, dependencies := range flow {
+		edges += len(dependencies)
+	}
+	assert.LessOrEqual(t, resolver.edgeVisits, 2*edges)
+	t.Logf("shared rejection bound: objects=%d expansions=%d edges=%d visits=%d", len(flow), resolver.resolveAttempts, edges, resolver.edgeVisits)
+
 }
 
 func explainBoundaryTestDataObject(name string, pkg *types.Package) *types.Var {
@@ -726,16 +847,15 @@ type explainBoundaryForbiddenDataResolution struct {
 
 type explainBoundaryForbiddenDataResolver struct {
 	flow            explainBoundaryDataFlow
-	inProgress      map[types.Object]bool
+	edgeVisits      int
 	resolved        map[types.Object]explainBoundaryForbiddenDataResolution
 	resolveAttempts int
 }
 
 func newExplainBoundaryForbiddenDataResolver(flow explainBoundaryDataFlow) *explainBoundaryForbiddenDataResolver {
 	return &explainBoundaryForbiddenDataResolver{
-		flow:       flow,
-		inProgress: make(map[types.Object]bool),
-		resolved:   make(map[types.Object]explainBoundaryForbiddenDataResolution),
+		flow:     flow,
+		resolved: make(map[types.Object]explainBoundaryForbiddenDataResolution),
 	}
 }
 
@@ -1382,6 +1502,9 @@ func explainBoundaryForbiddenDataOrigin(expr ast.Expr, info *types.Info, values 
 	return origin, complete
 }
 
+// resolve publishes only settled component summaries. complete describes whether
+// provenance is accepted, not whether the summary has finished computation: an
+// immutable rejection is cacheable too. The flow is fixed for this validation.
 func (resolver *explainBoundaryForbiddenDataResolver) resolve(object types.Object) explainBoundaryForbiddenDataResolution {
 	if object == nil {
 		return explainBoundaryForbiddenDataResolution{}
@@ -1389,32 +1512,81 @@ func (resolver *explainBoundaryForbiddenDataResolver) resolve(object types.Objec
 	if result, ok := resolver.resolved[object]; ok {
 		return result
 	}
-	if resolver.inProgress[object] {
-		return explainBoundaryForbiddenDataResolution{}
-	}
-	resolver.resolveAttempts++
-	if explainBoundaryForbiddenAuthzOperationObject(object) {
-		result := explainBoundaryForbiddenDataResolution{origin: object, complete: true}
-		resolver.resolved[object] = result
-		return result
-	}
 
-	resolver.inProgress[object] = true
-	defer delete(resolver.inProgress, object)
-	result := explainBoundaryForbiddenDataResolution{complete: true}
-	for dependency := range resolver.flow[object] {
-		dependencyResult := resolver.resolve(dependency)
-		if !dependencyResult.complete {
-			result.complete = false
+	// Tarjan state belongs only to this traversal. None of it is consumable as a
+	// cached result. Components are finalized in dependency-first order.
+	type state struct {
+		index, low int
+		onStack    bool
+	}
+	states := make(map[types.Object]*state)
+	var stack []types.Object
+	var visit func(types.Object)
+	visit = func(current types.Object) {
+		node := &state{index: len(states), low: len(states), onStack: true}
+		states[current] = node
+		stack = append(stack, current)
+		resolver.resolveAttempts++
+		for dependency := range resolver.flow[current] {
+			resolver.edgeVisits++
+			if dependency == nil {
+				continue
+			}
+			if _, settled := resolver.resolved[dependency]; settled {
+				continue
+			}
+			other := states[dependency]
+			if other == nil {
+				visit(dependency)
+				other = states[dependency]
+				node.low = min(node.low, other.low)
+			} else if other.onStack {
+				node.low = min(node.low, other.index)
+			}
 		}
-		if result.origin == nil && dependencyResult.origin != nil {
-			result.origin = dependencyResult.origin
+		if node.low != node.index {
+			return
+		}
+
+		members := make(map[types.Object]struct{})
+		for {
+			member := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			states[member].onStack = false
+			members[member] = struct{}{}
+			if member == current {
+				break
+			}
+		}
+		result := explainBoundaryForbiddenDataResolution{complete: len(members) == 1}
+		for member := range members {
+			if explainBoundaryForbiddenAuthzOperationObject(member) && result.origin == nil {
+				result.origin = member
+			}
+			for dependency := range resolver.flow[member] {
+				resolver.edgeVisits++
+				if _, internal := members[dependency]; internal {
+					// A multi-node component or a self edge is unresolved and fail closed.
+					result.complete = false
+					continue
+				}
+				dependencyResult, settled := resolver.resolved[dependency]
+				if !settled || !dependencyResult.complete {
+					result.complete = false
+				}
+				if result.origin == nil && dependencyResult.origin != nil {
+					result.origin = dependencyResult.origin
+				}
+			}
+		}
+		// Every outgoing edge has now contributed, including nil/rejected edges.
+		// Publish the same settled provenance/rejection for every component member.
+		for member := range members {
+			resolver.resolved[member] = result
 		}
 	}
-	if result.complete {
-		resolver.resolved[object] = result
-	}
-	return result
+	visit(object)
+	return resolver.resolved[object]
 }
 
 func explainBoundaryInterfaceReceiver(method *types.Func) *types.Interface {
