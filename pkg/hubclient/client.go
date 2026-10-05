@@ -125,6 +125,9 @@ type Client interface {
 	// the list of skills found at the given GitHub directory URL.
 	DiscoverSkillsDirectory(ctx context.Context, req DiscoverSkillsDirectoryRequest) (*DiscoverSkillsDirectoryResponse, error)
 
+	// Artifacts returns the artifact operations interface.
+	Artifacts() ArtifactService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }
@@ -155,6 +158,7 @@ type client struct {
 	allowList             *allowListService
 	invites               *inviteService
 	messaging             *messagingService
+	artifacts             *artifactService
 }
 
 // New creates a new Hub API client.
@@ -209,6 +213,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
 	c.messaging = &messagingService{c: c}
+	c.artifacts = &artifactService{c: c}
 
 	return c, nil
 }
@@ -344,6 +349,11 @@ func (c *client) Messaging() MessagingService {
 }
 
 // get performs an HTTP GET request.
+// Artifacts returns the artifact operations interface.
+func (c *client) Artifacts() ArtifactService {
+	return c.artifacts
+}
+
 func (c *client) get(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
 	return c.getWithQuery(ctx, path, nil, headers)
 }
