@@ -461,11 +461,11 @@ func (d *HTTPAgentDispatcher) repairHarnessConfig(ctx context.Context, agent *st
 	d.log.Warn("hash mismatch detected, attempting harness-config DB→storage repair",
 		"agent", agent.Slug, "harnessConfig", name, "harnessConfigId", ref.ID)
 	if err := d.harnessConfigRepairer(ctx, ref); err != nil {
-		d.log.Warn("harness-config repair failed", "harnessConfig", name, "error", err)
+		d.log.Warn("harness-config repair failed", "harnessConfig", name, "harnessConfigId", ref.ID, "error", err)
 		return err
 	}
 	d.log.Info("harness-config repair succeeded, retrying dispatch",
-		"agent", agent.Slug, "harnessConfig", name)
+		"agent", agent.Slug, "harnessConfig", name, "harnessConfigId", ref.ID)
 	return nil
 }
 

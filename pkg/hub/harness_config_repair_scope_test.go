@@ -140,14 +140,26 @@ func TestHarnessConfigRepair_NameOnlyProjectARepairsProjectA(t *testing.T) {
 	assert.False(t, f.repaired(t, f.global))
 }
 
-func TestHarnessConfigRepair_StaleIDFallsBackToScopedName(t *testing.T) {
+// A stamped ID that no longer exists is "not found": no name fallback, so no
+// unrelated same-named record is touched (the dispatch retry still carries
+// the stale ID/hash, so re-targeting could not help it succeed).
+func TestHarnessConfigRepair_StaleIDDoesNotFallBackToName(t *testing.T) {
 	f := newRepairScopeFixture(t)
 	err := f.srv.syncHarnessConfigFromStorage(context.Background(), HarnessConfigRepairRef{
-		ID: tid("deleted-record"), Name: "claude", ProjectID: f.projectB.ID,
+		ID: tid("deleted-record"), Name: "claude", ProjectID: f.projectA.ID,
 	})
-	require.NoError(t, err)
-	assert.True(t, f.repaired(t, f.global))
+	require.Error(t, err)
+	assert.False(t, f.repaired(t, f.global))
 	assert.False(t, f.repaired(t, f.inA))
+}
+
+// The ID-only path (sync-all passes just the record ID).
+func TestHarnessConfigRepair_IDOnlyRepairsThatRecord(t *testing.T) {
+	f := newRepairScopeFixture(t)
+	err := f.srv.syncHarnessConfigFromStorage(context.Background(), HarnessConfigRepairRef{ID: f.inA.ID})
+	require.NoError(t, err)
+	assert.True(t, f.repaired(t, f.inA))
+	assert.False(t, f.repaired(t, f.global))
 }
 
 func TestHarnessConfigRepair_UnknownNameNotFound(t *testing.T) {
@@ -179,4 +191,26 @@ func TestHTTPDispatcher_RepairHarnessConfigPassesIDAndProject(t *testing.T) {
 		errors.New("Failed to hydrate harness-config: hash mismatch for file config.yaml"))
 	require.NoError(t, err)
 	assert.Equal(t, HarnessConfigRepairRef{ID: "hc-id-1", Name: "claude", ProjectID: "proj-1"}, got)
+}
+
+// An agent stamped with an ID but no name (the case the dispatcher guard now
+// admits) is still repaired, by ID.
+func TestHTTPDispatcher_RepairHarnessConfigIDOnlyAgent(t *testing.T) {
+	d := NewHTTPAgentDispatcherWithClient(nil, nil, false, slog.Default())
+	var got HarnessConfigRepairRef
+	called := false
+	d.SetHarnessConfigRepairer(func(_ context.Context, ref HarnessConfigRepairRef) error {
+		got, called = ref, true
+		return nil
+	})
+	agent := &store.Agent{
+		Slug:          "a",
+		ProjectID:     "proj-1",
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfigID: "hc-id-only"},
+	}
+	err := d.repairHashMismatch(context.Background(), agent,
+		errors.New("Failed to hydrate harness-config: hash mismatch for file config.yaml"))
+	require.NoError(t, err)
+	require.True(t, called)
+	assert.Equal(t, HarnessConfigRepairRef{ID: "hc-id-only", ProjectID: "proj-1"}, got)
 }

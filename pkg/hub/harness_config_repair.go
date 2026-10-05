@@ -138,8 +138,8 @@ func (s *Server) syncResourceFromStorage(
 // HarnessConfigRepairRef identifies the harness-config record a repair
 // should target. ID is authoritative when set (an agent's
 // AppliedConfig.HarnessConfigID, or the record already in hand during
-// sync-all). Name/ProjectID are the fallback for agents dispatched without a
-// stamped ID: the name is resolved project-scope first (ProjectID), then
+// sync-all); a stale ID is "not found", never re-targeted by name.
+// Name/ProjectID are used only for agents dispatched without a stamped ID: the name is resolved project-scope first (ProjectID), then
 // global — the same rule resolveDerivedConfig uses when it stamps the ID —
 // never "newest record with that name anywhere" (ptone/scion#2898).
 type HarnessConfigRepairRef struct {
@@ -355,8 +355,11 @@ func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.R
 					var syncErr error
 					switch kind {
 					case storage.ResourceKindHarnessConfig:
+						// ID only: the record is in hand, and if it was
+						// deleted since the list a name fallback could
+						// resolve a different (e.g. global) record.
 						syncErr = s.syncHarnessConfigFromStorage(gctx, HarnessConfigRepairRef{
-							ID: e.rec.ID, Name: e.name,
+							ID: e.rec.ID,
 						})
 					case storage.ResourceKindTemplate:
 						syncErr = s.syncTemplateFromStorage(gctx, e.name)
@@ -375,20 +378,22 @@ func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.R
 }
 
 // resolveHarnessConfigForRepair finds the harness-config record a repair
-// should act on. The ID wins when it resolves; otherwise the name is looked
-// up by slug in the agent's project scope, then global scope. Returns
-// (nil, nil) when nothing matches.
+// should act on. When an ID is given it is authoritative: a missing record
+// is "not found", with no name fallback — the dispatch retry still carries
+// the stale ID and hash, so repairing some other same-named row could not
+// make it succeed and would only touch an unrelated record. The name is
+// used only when no ID was stamped, looked up by slug in the agent's project
+// scope, then global scope. Returns (nil, nil) when nothing matches.
 func (s *Server) resolveHarnessConfigForRepair(ctx context.Context, ref HarnessConfigRepairRef) (*store.HarnessConfig, error) {
 	if ref.ID != "" {
 		hc, err := s.store.GetHarnessConfig(ctx, ref.ID)
-		if err == nil && hc != nil {
-			return hc, nil
-		}
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, nil
+			}
 			return nil, fmt.Errorf("lookup harness-config %q: %w", ref.ID, err)
 		}
-		// Stamped ID no longer exists (record deleted/recreated): fall
-		// through to the scoped name lookup.
+		return hc, nil
 	}
 	if ref.Name == "" {
 		return nil, nil
