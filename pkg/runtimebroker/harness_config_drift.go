@@ -17,7 +17,6 @@ package runtimebroker
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -93,18 +92,16 @@ func (s *Server) warnHarnessConfigDrift(agentID, name, hydratedPath, projectPath
 
 // hubCompatibleContentHash returns the hub content hash algorithm's value
 // over the files in dir, line-ending-normalized, skipping transient files
-// (isTransientHarnessConfigFile). Files are read and
+// with the same exclude patterns harness-config sync and the hub resource
+// store use (config.HarnessConfigTransientPatterns). Files are read and
 // normalized in memory; dir is not modified.
 func hubCompatibleContentHash(dir string) (string, error) {
-	files, err := transfer.CollectFiles(dir, nil)
+	files, err := transfer.CollectFiles(dir, config.HarnessConfigTransientPatterns)
 	if err != nil {
 		return "", err
 	}
 	kept := files[:0]
 	for _, f := range files {
-		if isTransientHarnessConfigFile(f.Path) {
-			continue
-		}
 		data, err := os.ReadFile(f.FullPath)
 		if err != nil {
 			return "", err
@@ -113,27 +110,6 @@ func hubCompatibleContentHash(dir string) (string, error) {
 		kept = append(kept, f)
 	}
 	return transfer.ComputeContentHash(kept), nil
-}
-
-// upgradeBackupName matches a harness-config upgrade backup:
-// <file>.bak.<YYYYMMDD>T<HHMMSS>Z.
-var upgradeBackupName = regexp.MustCompile(`\.bak\.[0-9]{8}T[0-9]{6}Z$`)
-
-// isTransientHarnessConfigFile reports whether relPath names a file that
-// does not belong to a harness-config's content: an upgrade backup
-// (*.bak.<8 digits>T<6 digits>Z) or an atomic-write leftover (.*.tmp-*).
-//
-// TODO(ptone/scion#611): switch to the shared transient-file predicate in
-// pkg/config/harness_config_transient.go once GCP#2412 merges.
-func isTransientHarnessConfigFile(relPath string) bool {
-	base := filepath.Base(relPath)
-	if upgradeBackupName.MatchString(base) {
-		return true
-	}
-	if ok, _ := filepath.Match(".*.tmp-*", base); ok {
-		return true
-	}
-	return false
 }
 
 func sameDir(a, b string) bool {

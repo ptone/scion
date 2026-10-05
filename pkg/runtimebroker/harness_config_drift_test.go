@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -164,7 +165,11 @@ func TestHubCompatibleContentHash_MatchesTransferHash(t *testing.T) {
 	}
 }
 
-func TestIsTransientHarnessConfigFile(t *testing.T) {
+// TestDriftTransientCasesMatchSharedPredicate pins the transient-file cases
+// the drift hash relies on against the shared predicate
+// (config.IsHarnessConfigTransientFile), whose patterns
+// hubCompatibleContentHash passes to transfer.CollectFiles.
+func TestDriftTransientCasesMatchSharedPredicate(t *testing.T) {
 	for path, want := range map[string]bool{
 		"config.yaml.bak.20260915T101112Z":      true,
 		"sub/provision.py.bak.20260915T101112Z": true,
@@ -177,8 +182,8 @@ func TestIsTransientHarnessConfigFile(t *testing.T) {
 		"config.yaml.tmp-123":                   false,
 		".hidden":                               false,
 	} {
-		if got := isTransientHarnessConfigFile(path); got != want {
-			t.Errorf("isTransientHarnessConfigFile(%q) = %v, want %v", path, got, want)
+		if got := config.IsHarnessConfigTransientFile(path); got != want {
+			t.Errorf("config.IsHarnessConfigTransientFile(%q) = %v, want %v", path, got, want)
 		}
 	}
 }
