@@ -596,7 +596,7 @@ type AgentInfo struct {
 	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
 	// HarnessConfigSource records which resolution branch supplied the
 	// harness-config (config.HarnessConfigSource: hub-hydrated,
-	// template-bundled, broker-local, builtin). Provenance only; empty when
+	// template-bundled, broker-local, builtin, unresolved). Provenance only; empty when
 	// unknown (ptone/scion#620).
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 	HarnessAuth         string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)

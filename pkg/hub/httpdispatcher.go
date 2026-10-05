@@ -1272,6 +1272,9 @@ func applyBrokerAgentConfig(agent *store.Agent, info *RemoteAgentInfo) {
 		if info.HarnessAuth != "" {
 			agent.AppliedConfig.HarnessAuth = info.HarnessAuth
 		}
+		// Empty only from an older broker (a current broker reports
+		// "unresolved" when no harness-config dir resolved), so keep the
+		// recorded value in that case.
 		if info.HarnessConfigSource != "" {
 			agent.AppliedConfig.HarnessConfigSource = info.HarnessConfigSource
 		}

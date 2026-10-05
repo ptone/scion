@@ -145,7 +145,7 @@ type AgentResponse struct {
 	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
 	// HarnessConfigSource mirrors api.AgentInfo.HarnessConfigSource: which
 	// resolution branch supplied the harness-config (hub-hydrated,
-	// template-bundled, broker-local, builtin). Provenance only
+	// template-bundled, broker-local, builtin, unresolved). Provenance only
 	// (ptone/scion#620).
 	HarnessConfigSource string            `json:"harnessConfigSource,omitempty"`
 	HarnessAuth         string            `json:"harnessAuth,omitempty"` // Resolved harness auth method

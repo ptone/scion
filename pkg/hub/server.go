@@ -1052,7 +1052,7 @@ type RemoteAgentInfo struct {
 	RunID string `json:"runId,omitempty"`
 	// HarnessConfigSource mirrors runtimebroker.AgentResponse.HarnessConfigSource:
 	// which resolution branch supplied the harness-config (hub-hydrated,
-	// template-bundled, broker-local, builtin). Provenance only
+	// template-bundled, broker-local, builtin, unresolved). Provenance only
 	// (ptone/scion#620). Older brokers omit it.
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 }

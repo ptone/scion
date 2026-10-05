@@ -608,6 +608,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			Settings:      settings,
 			ConfigDirPath: opts.HarnessConfigPath,
 		})
+		// Unresolved unless a directory resolves below, so the reported
+		// provenance never keeps a stale value from an earlier run.
+		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
 		if err != nil {
 			util.Debugf("harness.Resolve fell back to New(%q): %v", harnessName, err)
 			h = harness.New(harnessName)

@@ -55,23 +55,35 @@ type HarnessConfigDir struct {
 
 // HarnessConfigSource names the resolution branch a harness-config came from.
 // It is provenance only: it is reported on agent info so operators can tell
-// whether an agent ran the hub-managed bundle or a broker-local copy that
-// shadowed (or substituted for) it (ptone/scion#620).
+// which branch supplied the bundle an agent ran (ptone/scion#620). It names
+// the branch, not who manages the content: only HarnessConfigSourceHubHydrated
+// guarantees the hub's harness-config record was used, but the other values do
+// not by themselves mean the content is unmanaged (see each constant).
 type HarnessConfigSource string
 
 const (
-	// HarnessConfigSourceHubHydrated is a hub-managed bundle hydrated (or read
-	// from co-located storage) for this dispatch.
+	// HarnessConfigSourceHubHydrated is the hub harness-config record named
+	// by the dispatch, hydrated (or read from co-located storage) for it.
 	HarnessConfigSourceHubHydrated HarnessConfigSource = "hub-hydrated"
 	// HarnessConfigSourceTemplateBundled is a harness-configs/<name> directory
-	// shipped inside one of the agent's template directories.
+	// inside one of the agent's template directories. That template may
+	// itself be hub-managed (hydrated for the dispatch) or local; this value
+	// does not distinguish the two.
 	HarnessConfigSourceTemplateBundled HarnessConfigSource = "template-bundled"
 	// HarnessConfigSourceBrokerLocal is a project-level or global
-	// harness-configs/<name> directory on the broker's own disk.
+	// harness-configs/<name> directory on the broker's filesystem. For a
+	// hub-native project the project directory is broker storage under
+	// ~/.scion/projects/<name>; either way, it is not the hub harness-config
+	// record the dispatch may have named.
 	HarnessConfigSourceBrokerLocal HarnessConfigSource = "broker-local"
 	// HarnessConfigSourceBuiltin is the synthetic "generic" entry, which has
 	// no directory at all.
 	HarnessConfigSourceBuiltin HarnessConfigSource = "builtin"
+	// HarnessConfigSourceUnresolved is reported when an agent names a
+	// harness-config but no directory was resolved for it at start (the
+	// harness was built from settings or the bare harness type instead), so
+	// a stale earlier value is not left on the record.
+	HarnessConfigSourceUnresolved HarnessConfigSource = "unresolved"
 )
 
 // ResolveHarnessConfigDir is the single resolution order for an agent's
