@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -114,8 +115,12 @@ func resetStagedProvisioning(h api.Harness, agentHome string) error {
 // controlPlaneInputsDirName is the directory, in the agent directory (outside
 // the agent home the container can write), holding the control plane's copy
 // of the per-agent inputs ProvisionAgent stages for a container-script
-// harness (instructions, system prompt, resolved skills).
-const controlPlaneInputsDirName = "harness-inputs"
+// harness (instructions, system prompt, resolved skills). It lies outside
+// every container mount scion computes for the agent (pinned by
+// pkg/runtime's TestHarnessInputsRecordOutsideScionMounts). Author-configured
+// volumes are a separately tracked capability, outside the scope of this
+// record.
+const controlPlaneInputsDirName = config.HarnessInputsRecordDirName
 
 func stagedInputsDir(agentHome string) string {
 	return filepath.Join(agentHome, ".scion", "harness", "inputs")
@@ -130,7 +135,70 @@ func snapshotControlPlaneInputs(agentDir, agentHome string) error {
 	if err := os.RemoveAll(dst); err != nil {
 		return fmt.Errorf("reset control-plane inputs: %w", err)
 	}
+	// The record exists (possibly empty) once the control plane has staged
+	// inputs, so seedControlPlaneInputsIfAbsent never applies afterwards.
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("create control-plane inputs record: %w", err)
+	}
 	return copyRegularFiles(stagedInputsDir(agentHome), dst)
+}
+
+// legacyInputNames are the control-plane inputs seedControlPlaneInputsIfAbsent
+// takes from an agent home staged before the control plane recorded them.
+var legacyInputNames = []string{"instructions.md", "system-prompt.md", "resolved-skills.json"}
+
+// seedControlPlaneInputsIfAbsent creates the control plane's record of the
+// per-agent inputs for an agent provisioned before that record existed. It
+// relies on the record lying outside every container mount scion computes
+// (see controlPlaneInputsDirName); author-configured volumes are a separately
+// tracked capability, outside this change's scope. Only
+// when agentDir/harness-inputs is absent, it copies exactly
+// instructions.md, system-prompt.md and resolved-skills.json (fixed names,
+// no recursion, no globs) from the agent home's current inputs/ into the
+// record, once. Each entry is checked with Lstat and accepted only as a
+// regular file (mode&os.ModeType == 0): symlinks and every other non-regular
+// type are skipped with a warning and never followed. Accepted files are
+// copied by content into new files. A warning names the agent when the
+// record is seeded. It reports whether it seeded. Re-provisioning the agent
+// replaces the record with freshly staged control-plane inputs.
+func seedControlPlaneInputsIfAbsent(agentDir, agentHome, agentID string) (bool, error) {
+	record := filepath.Join(agentDir, controlPlaneInputsDirName)
+	if _, err := os.Lstat(record); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	src := stagedInputsDir(agentHome)
+	var seeded bool
+	for _, name := range legacyInputNames {
+		path := filepath.Join(src, name)
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if info.Mode()&os.ModeType != 0 {
+			slog.Warn("harness input not seeded: not a regular file", "agent_id", agentID, "file", name, "mode", info.Mode().Type().String())
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return false, err
+		}
+		if err := os.MkdirAll(record, 0o755); err != nil {
+			return false, err
+		}
+		if err := os.WriteFile(filepath.Join(record, name), data, 0o644); err != nil {
+			return false, err
+		}
+		seeded = true
+	}
+	if seeded {
+		slog.Warn("harness inputs seeded once from pre-existing inputs; re-provision to refresh", "agent_id", agentID)
+	}
+	return seeded, nil
 }
 
 // restoreControlPlaneInputs restages the control plane's copy of the

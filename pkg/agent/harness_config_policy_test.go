@@ -15,12 +15,14 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1214,5 +1216,85 @@ func TestHarnessConfigPolicy_InputsOnlyFromControlPlane(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(inputs, "instructions.md")); err != nil || string(got) != controlPlane {
 		t.Errorf("instructions.md not restaged from the control plane's copy: %q (err=%v)", got, err)
+	}
+}
+
+// An agent provisioned before the control plane recorded its inputs (no
+// agentDir/harness-inputs) has its record seeded once, on its next start,
+// from the three known files in its existing inputs/ (regular files only),
+// with a warning; any other file there is dropped, and later starts restore
+// the seeded record.
+func TestHarnessConfigPolicy_LegacyAgentInputsSeededOnce(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	mgr := policyTestManager(nil)
+	opts := api.StartOptions{Name: "legacy", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true}
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	agentDir := config.ResolveAgentDir(e.scion, "legacy")
+	record := filepath.Join(agentDir, controlPlaneInputsDirName)
+	if _, err := os.Stat(record); err != nil {
+		t.Fatalf("fixture: provisioning should record inputs: %v", err)
+	}
+	// Simulate an agent provisioned before the record existed.
+	if err := os.RemoveAll(record); err != nil {
+		t.Fatal(err)
+	}
+	inputs := filepath.Join(config.GetAgentHomePath(e.scion, "legacy"), ".scion", "harness", "inputs")
+	for name, body := range map[string]string{
+		"instructions.md":      "legacy instructions",
+		"resolved-skills.json": `{"skills":[]}`,
+		"planted.md":           "not a control-plane input",
+	} {
+		if err := os.WriteFile(filepath.Join(inputs, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = os.Remove(filepath.Join(inputs, "system-prompt.md"))
+	if err := os.Symlink(filepath.Join(inputs, "planted.md"), filepath.Join(inputs, "system-prompt.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("legacy start: %v", err)
+	}
+	logged := logBuf.String()
+	if !strings.Contains(logged, "harness inputs seeded once from pre-existing inputs; re-provision to refresh") || !strings.Contains(logged, "agent_id=legacy") {
+		t.Errorf("expected the seeding warning with the agent id, got log: %s", logged)
+	}
+	if !strings.Contains(logged, "harness input not seeded: not a regular file") || !strings.Contains(logged, "file=system-prompt.md") {
+		t.Errorf("expected a warning for the skipped symlink, got log: %s", logged)
+	}
+	if got, err := os.ReadFile(filepath.Join(inputs, "instructions.md")); err != nil || string(got) != "legacy instructions" {
+		t.Errorf("instructions.md not restored from the prior file: %q (err=%v)", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(inputs, "resolved-skills.json")); err != nil {
+		t.Errorf("resolved-skills.json not restored: %v", err)
+	}
+	for _, name := range []string{"planted.md", "system-prompt.md"} {
+		if _, err := os.Lstat(filepath.Join(inputs, name)); !os.IsNotExist(err) {
+			t.Errorf("%s must not be seeded (non-listed file or symlink); stat err=%v", name, err)
+		}
+	}
+
+	// Seeding happens once: later starts restore the record, not the home.
+	if err := os.WriteFile(filepath.Join(inputs, "instructions.md"), []byte("workload content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logBuf.Reset()
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("third start: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(inputs, "instructions.md")); string(got) != "legacy instructions" {
+		t.Errorf("later start must restore the seeded record, got %q", got)
+	}
+	if strings.Contains(logBuf.String(), "seeded once from pre-existing inputs") {
+		t.Error("seeding must happen only once")
 	}
 }

@@ -669,6 +669,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// error with no policy attached, the fallback keeps today's behaviour and
 	// leaves the agent home as it is.
 	if !resolveFailed {
+		// An agent provisioned before the control plane recorded its inputs
+		// has its record seeded once from the existing inputs/ (three known
+		// files), before the bundle is cleared.
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			if _, err := seedControlPlaneInputsIfAbsent(agentDir, agentHome, agentID); err != nil {
+				return nil, fmt.Errorf("seed harness inputs: %w", err)
+			}
+		}
 		if err := resetStagedProvisioning(h, agentHome); err != nil {
 			return nil, err
 		}
