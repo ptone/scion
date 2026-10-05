@@ -246,12 +246,16 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// that here so the plan shows what the broker will run. The plain
 	// harness_configs.<hc>.image default does not gain this priority and
 	// stays in the fallback below.
+	//
+	// The hub's effective settings are loaded once for both this step and
+	// the settings fallback below.
+	vs := s.reincarnateImageSettings()
 	if explicitDispatchImage(fresh) == "" {
 		overrideKey := fresh.HarnessConfig
 		if overrideKey == "" && hc != nil {
 			overrideKey = hc.Slug
 		}
-		if img := s.settingsProfileOverrideImage(overrideKey, fresh.Profile); img != "" {
+		if img := settingsProfileOverrideImage(vs, overrideKey, fresh.Profile); img != "" {
 			fresh.Image = img
 		}
 	}
@@ -266,7 +270,7 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		if settingsKey == "" {
 			settingsKey = hc.Slug
 		}
-		fresh.Image = s.settingsHarnessConfigImage(settingsKey, fresh.Profile)
+		fresh.Image = settingsHarnessConfigImage(vs, settingsKey, fresh.Profile)
 	}
 	if fresh.Image == "" && hc != nil && hc.Config != nil && hc.Config.Image != "" {
 		fresh.Image = hc.Config.Image
@@ -284,13 +288,9 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	return fresh, warnings, nil
 }
 
-// settingsHarnessConfigImage resolves the Hub settings image for a named
-// harness-config (harness_configs.<name>.image, with
-// profiles.<profileName>.harness_overrides.<name>.image outranking the base
-// entry — same precedence as pkg/config.VersionedSettings.ResolveHarnessConfig,
-// which this reuses directly). Returns "" when settings has no image for
-// this harness-config, in which case the caller falls back to the harness
-// config's own stored default.
+// reincarnateImageSettings loads the hub's effective settings for the
+// reincarnate plan's image steps, or returns nil (logged) if they cannot be
+// loaded, in which case those steps contribute nothing.
 //
 // The settings view comes from the hub's own config.LoadEffectiveSettings(""),
 // which — in postgres mode — already reflects DB-backed harness_configs and
@@ -298,17 +298,24 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 // OperationalSettings.Refresh populates (pkg/config/settings_overlay.go), the
 // same overlay a co-located broker's own LoadEffectiveSettings call sees. In
 // file/SQLite mode it reads the hub's settings.yaml directly.
-func (s *Server) settingsHarnessConfigImage(harnessConfigName, profileName string) string {
-	if harnessConfigName == "" {
-		return ""
-	}
+func (s *Server) reincarnateImageSettings() *config.VersionedSettings {
 	vs, _, err := config.LoadEffectiveSettings("")
 	if err != nil {
-		s.agentLifecycleLog.Warn("reincarnate: failed to load settings for the image fallback",
-			"harness_config_name", harnessConfigName, "error", err)
-		return ""
+		s.agentLifecycleLog.Warn("reincarnate: failed to load settings for the image plan", "error", err)
+		return nil
 	}
-	if vs == nil {
+	return vs
+}
+
+// settingsHarnessConfigImage resolves the Hub settings image for a named
+// harness-config (harness_configs.<name>.image, with
+// profiles.<profileName>.harness_overrides.<name>.image outranking the base
+// entry — same precedence as pkg/config.VersionedSettings.ResolveHarnessConfig,
+// which this reuses directly). Returns "" when settings has no image for
+// this harness-config, in which case the caller falls back to the harness
+// config's own stored default.
+func settingsHarnessConfigImage(vs *config.VersionedSettings, harnessConfigName, profileName string) string {
+	if vs == nil || harnessConfigName == "" {
 		return ""
 	}
 	resolved, err := vs.ResolveHarnessConfig(profileName, harnessConfigName)
@@ -320,14 +327,9 @@ func (s *Server) settingsHarnessConfigImage(harnessConfigName, profileName strin
 
 // settingsProfileOverrideImage returns the image that
 // profiles.<profileName>.harness_overrides.<harnessConfigName>.image sets
-// explicitly in the hub's effective settings, or "" when unset. See
-// settingsHarnessConfigImage for which settings view this reads.
-func (s *Server) settingsProfileOverrideImage(harnessConfigName, profileName string) string {
-	if harnessConfigName == "" {
-		return ""
-	}
-	vs, _, err := config.LoadEffectiveSettings("")
-	if err != nil || vs == nil {
+// explicitly in vs, or "" when unset.
+func settingsProfileOverrideImage(vs *config.VersionedSettings, harnessConfigName, profileName string) string {
+	if vs == nil {
 		return ""
 	}
 	return vs.ProfileHarnessOverrideImage(profileName, harnessConfigName)

@@ -182,7 +182,6 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 		profileOverridePolicy string
 		templateImage         string
 		templatePolicy        string
-		requestImage          string
 		wantImage             string
 		wantPolicy            string
 	}{
@@ -230,25 +229,18 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 			wantPolicy:            "Always",
 		},
 		{
-			name:                 "explicit profile harness_overrides image outranks the template image (ptone/scion#1799)",
+			// ptone/scion#1799: the explicit profile override wins at Start
+			// (and in the provision-only response, withProvisionedImage), but
+			// is never baked into the persisted scion-agent.json, which a
+			// later Start falls back to; see
+			// TestStart_RemovedProfilePinDoesNotLingerInTemplateSnapshot.
+			name:                 "explicit profile harness_overrides image is not baked into the persisted config",
 			settingsImage:        "example.com/settings-pinned:v1",
 			profileOverrideImage: "example.com/profile-pinned:v3",
 			templateImage:        "example.com/template-pinned:v2",
 			templatePolicy:       "Never",
-			wantImage:            "example.com/profile-pinned:v3",
+			wantImage:            "example.com/template-pinned:v2",
 			wantPolicy:           "Never",
-		},
-		{
-			name:                 "an explicit request image still outranks the profile harness_overrides image",
-			settingsImage:        "example.com/settings-pinned:v1",
-			profileOverrideImage: "example.com/profile-pinned:v3",
-			templateImage:        "example.com/template-pinned:v2",
-			requestImage:         "example.com/request-pinned:v9",
-			// ProvisionAgent does not fold agentImage into the persisted
-			// config (Start applies it as opts.Image); what matters here is
-			// that the profile override does not replace the template image
-			// when a request image is present.
-			wantImage: "example.com/template-pinned:v2",
 		},
 	}
 
@@ -322,7 +314,7 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 			}
 
 			agentName := "test-agent"
-			_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "test-tpl", tt.requestImage, "", projectScionDir, profileName, "", "", "")
+			_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "test-tpl", "", "", projectScionDir, profileName, "", "", "")
 			if err != nil {
 				t.Fatalf("ProvisionAgent failed: %v", err)
 			}

@@ -17,6 +17,8 @@ package agent
 import (
 	"log/slog"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -29,10 +31,12 @@ const (
 	imageTierInline            = "inline config"
 	imageTierProfileOverride   = "profile harness_overrides"
 	imageTierRequest           = "explicit --image / request image"
+	imageTierRecordedRequest   = "recorded explicit request image"
+	imageTierProvisioned       = "provisioned config"
 )
 
-// imageCandidate is one tier's contribution to the container image. An
-// empty image means the tier does not set one.
+// imageCandidate is one tier's contribution to the container image (or to
+// its Kubernetes pull policy). An empty value means the tier does not set one.
 type imageCandidate struct {
 	source string
 	image  string
@@ -47,6 +51,15 @@ type imageCandidate struct {
 // It returns the winning image and the tier that supplied it ("" when no
 // tier set an image).
 func pickImage(logger *slog.Logger, agentName string, candidates []imageCandidate) (image, source string) {
+	return pickImageField(logger, agentName, "image", candidates)
+}
+
+// pickPullPolicy is pickImage for kubernetes.imagePullPolicy.
+func pickPullPolicy(logger *slog.Logger, agentName string, candidates []imageCandidate) (policy, source string) {
+	return pickImageField(logger, agentName, "image pull policy", candidates)
+}
+
+func pickImageField(logger *slog.Logger, agentName, field string, candidates []imageCandidate) (value, source string) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -54,17 +67,68 @@ func pickImage(logger *slog.Logger, agentName string, candidates []imageCandidat
 		if c.image == "" {
 			continue
 		}
-		if image != "" && image != c.image {
-			logger.Info("image resolution: lower-tier image replaced",
+		if value != "" && value != c.image {
+			logger.Info("image resolution: lower-tier "+field+" replaced",
 				"agent", agentName,
-				"replaced_image", image,
+				"field", field,
+				"replaced_value", value,
 				"replaced_source", source,
-				"image", c.image,
+				"value", c.image,
 				"source", c.source,
 				"reason", c.source+" outranks "+source)
 		}
-		image, source = c.image, c.source
-		util.Debugf("image resolution: from %s image=%s", source, image)
+		value, source = c.image, c.source
+		util.Debugf("image resolution: %s from %s: %s", field, source, value)
 	}
-	return image, source
+	return value, source
+}
+
+// templateChainImage returns the template chain's own image and
+// kubernetes.imagePullPolicy (a later template in the chain wins), with no
+// other source folded in. Templates whose config cannot be loaded are skipped.
+func templateChainImage(chain []*config.Template) (image, pullPolicy string) {
+	for _, tpl := range chain {
+		tplCfg, err := tpl.LoadConfig()
+		if err != nil || tplCfg == nil {
+			continue
+		}
+		if tplCfg.Image != "" {
+			image = tplCfg.Image
+		}
+		if tplCfg.Kubernetes != nil && tplCfg.Kubernetes.ImagePullPolicy != "" {
+			pullPolicy = tplCfg.Kubernetes.ImagePullPolicy
+		}
+	}
+	return image, pullPolicy
+}
+
+// withProvisionedImage returns cfg with Image set to the image Start will
+// run for this freshly provisioned agent: the user's request image, then an
+// explicit profile harness_overrides image, then the provisioned config's
+// own (inline over template over settings over file) image. Only the
+// returned copy changes: the persisted scion-agent.json keeps the
+// provisioned value, so a profile pin is never baked into the record a later
+// Start falls back to (ptone/scion#1799). The broker reports this image in
+// its provision-only response, which the hub records as AppliedConfig.Image.
+func withProvisionedImage(opts api.StartOptions, cfg *api.ScionConfig) *api.ScionConfig {
+	if cfg == nil {
+		return nil
+	}
+	profileImage := ""
+	if projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath); err == nil {
+		if settings, _, _ := config.LoadEffectiveSettings(projectDir); settings != nil {
+			profileImage = settings.ProfileHarnessOverrideImage(opts.Profile, cfg.HarnessConfig)
+		}
+	}
+	image, _ := pickImage(slog.Default(), opts.Name, []imageCandidate{
+		{source: imageTierProvisioned, image: cfg.Image},
+		{source: imageTierProfileOverride, image: profileImage},
+		{source: imageTierRequest, image: opts.Image},
+	})
+	if image == cfg.Image {
+		return cfg
+	}
+	out := *cfg
+	out.Image = image
+	return &out
 }

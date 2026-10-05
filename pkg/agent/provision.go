@@ -669,7 +669,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// Deliberately no prompt.md write here: the new generation's first task
 	// (the hub-built preamble plus handoff) is delivered by the subsequent
 	// DispatchAgentStart call, not pre-staged as a file.
-	return cfg, nil
+	return withProvisionedImage(opts, cfg), nil
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -691,7 +691,7 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		}
 	}
 
-	return cfg, nil
+	return withProvisionedImage(opts, cfg), nil
 }
 
 // resolveHarnessConfigDir returns the harness-config directory for an agent,
@@ -1339,27 +1339,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	// Harness-config is base layer; template config overrides it
 	finalScionCfg = config.MergeScionConfig(hcCfg, finalScionCfg)
-	// ptone/scion#1799: an EXPLICIT profiles.<p>.harness_overrides.<h>.image
-	// outranks the template and inline images merged in above, the same as
-	// Start's image resolution (run.go). Persisting it here keeps the
-	// provision-only response (which reads this scion-agent.json) in step
-	// with what Start will run. The plain settings default merged into hcCfg
-	// above does not gain this priority, and an explicit request image
-	// (agentImage, i.e. --image / the hub's request image) still wins.
-	if settings != nil && agentImage == "" {
-		if img := settings.ProfileHarnessOverrideImage(profileName, harnessConfigName); img != "" && finalScionCfg.Image != img {
-			if finalScionCfg.Image != "" {
-				slog.Info("image resolution: lower-tier image replaced",
-					"agent", agentName,
-					"replaced_image", finalScionCfg.Image,
-					"replaced_source", "template/inline config",
-					"image", img,
-					"source", imageTierProfileOverride,
-					"reason", imageTierProfileOverride+" outranks template/inline config")
-			}
-			finalScionCfg.Image = img
-		}
-	}
 	// Ensure harness and harness_config fields are not overridden by the merge
 	finalScionCfg.Harness = hcDir.Config.Harness
 	finalScionCfg.HarnessConfig = harnessConfigName
@@ -1924,6 +1903,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	if explicitPullPolicy != "" {
 		info.ExplicitImagePullPolicy = explicitPullPolicy
+	}
+	// Record each image input at its own tier (ptone/scion#1799), so Start
+	// never has to reuse the merged finalScionCfg.Image — which folds in
+	// the inline, settings and profile values of this moment — as if it
+	// were the template's.
+	tplImage, tplPullPolicy := templateChainImage(chain)
+	info.ImageProvenance = &api.AgentImageProvenance{
+		RequestImage:            agentImage,
+		TemplateImage:           tplImage,
+		TemplateImagePullPolicy: tplPullPolicy,
 	}
 
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")

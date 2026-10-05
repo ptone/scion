@@ -39,3 +39,21 @@ func (vs *VersionedSettings) ProfileHarnessOverrideImage(profileName, harnessCon
 	}
 	return profile.HarnessOverrides[harnessConfigName].Image
 }
+
+// ProfileHarnessOverrideImagePullPolicy is ProfileHarnessOverrideImage for
+// profiles.<profileName>.harness_overrides.<harnessConfigName>.image_pull_policy.
+// An explicitly set profile pull policy takes the same tier as an explicit
+// profile image (ptone/scion#1799).
+func (vs *VersionedSettings) ProfileHarnessOverrideImagePullPolicy(profileName, harnessConfigName string) string {
+	if vs == nil || harnessConfigName == "" {
+		return ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok || profile.HarnessOverrides == nil {
+		return ""
+	}
+	return profile.HarnessOverrides[harnessConfigName].ImagePullPolicy
+}

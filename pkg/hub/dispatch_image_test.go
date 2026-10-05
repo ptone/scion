@@ -17,8 +17,10 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -188,4 +190,51 @@ func TestApplyStartExtras_Image(t *testing.T) {
 
 	applyStartExtras(payload, StartExtras{Image: "user-image:v2"})
 	assert.Equal(t, "user-image:v2", payload["image"])
+}
+
+// TestApplyAgentUpdate_EchoedImageNotFrozenIntoInlineConfig pins review
+// finding 5 of ptone/scion#1799: a configure-page Save that only echoes the
+// live (template-derived or broker-resolved) image must not write it into
+// the live InlineConfig.Image. For a legacy agent (no CreateInputs) that
+// field is what explicitDispatchImage falls back to, so the echo would be
+// replayed as the top-tier image on every later dispatch.
+func TestApplyAgentUpdate_EchoedImageNotFrozenIntoInlineConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Image = "resolved-by-broker:v1"
+		a.AppliedConfig.InlineConfig = nil
+		a.AppliedConfig.CreateInputs = nil // legacy agent
+	})
+
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"image": "resolved-by-broker:v1", // the echo
+		"model": "new-model",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.AppliedConfig.InlineConfig)
+	assert.Empty(t, updated.AppliedConfig.InlineConfig.Image, "an echoed image must not land in the live InlineConfig")
+	assert.Equal(t, "new-model", updated.AppliedConfig.InlineConfig.Model, "the rest of the PATCH still applies")
+	assert.Empty(t, explicitDispatchImage(updated.AppliedConfig))
+
+	client := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
+	require.NoError(t, d.DispatchAgentStart(ctx, updated, "", false))
+	assert.Empty(t, client.lastStartExtras.Image)
+	require.NoError(t, d.DispatchAgentRestart(ctx, updated))
+	assert.Empty(t, client.lastRestartExtras.Image)
+
+	// A genuine edit still lands, and is then dispatched as explicit.
+	rec = patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"image": "user-image:v2"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	updated, err = s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "user-image:v2", updated.AppliedConfig.InlineConfig.Image)
+	assert.Equal(t, "user-image:v2", explicitDispatchImage(updated.AppliedConfig))
 }

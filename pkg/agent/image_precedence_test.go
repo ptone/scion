@@ -17,6 +17,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -46,7 +47,7 @@ func TestPickImage_OrderAndReplacementLog(t *testing.T) {
 	if got := strings.Count(out, "lower-tier image replaced"); got != 2 {
 		t.Fatalf("expected 2 replacement log lines (file->template, template->profile), got %d:\n%s", got, out)
 	}
-	for _, want := range []string{"replaced_image=file:1", "replaced_image=tpl:2", "image=profile:3", `"profile harness_overrides outranks inline config"`} {
+	for _, want := range []string{"replaced_value=file:1", "replaced_value=tpl:2", "value=profile:3", `"profile harness_overrides outranks inline config"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log output missing %q:\n%s", want, out)
 		}
@@ -157,8 +158,8 @@ func TestStart_ExplicitProfileOverrideImageBeatsTemplateImage(t *testing.T) {
 		t.Fatalf("expected the explicit profile override to beat the template image, got %q", img)
 	}
 	if !strings.Contains(logs, "lower-tier image replaced") ||
-		!strings.Contains(logs, "replaced_image=template-pinned:v2") ||
-		!strings.Contains(logs, "image=profile-pinned:v4") ||
+		!strings.Contains(logs, "replaced_value=template-pinned:v2") ||
+		!strings.Contains(logs, " value=profile-pinned:v4") ||
 		!strings.Contains(logs, "level=INFO") {
 		t.Errorf("expected an Info log naming the replaced template image, got:\n%s", logs)
 	}
@@ -185,7 +186,7 @@ harness_configs:
 	if img != "template-pinned:v2" {
 		t.Fatalf("expected the template image to beat the plain settings default, got %q", img)
 	}
-	if !strings.Contains(logs, "replaced_image=settings-pinned:v1") {
+	if !strings.Contains(logs, "replaced_value=settings-pinned:v1") {
 		t.Errorf("expected an Info log naming the replaced settings image, got:\n%s", logs)
 	}
 }
@@ -221,7 +222,250 @@ func TestStart_RequestImageBeatsProfileOverrideAndTemplate(t *testing.T) {
 	if img != "flag-pinned:v9" {
 		t.Fatalf("expected --image to beat every other tier, got %q", img)
 	}
-	if !strings.Contains(logs, "replaced_image=profile-pinned:v4") {
+	if !strings.Contains(logs, "replaced_value=profile-pinned:v4") {
 		t.Errorf("expected an Info log naming the replaced profile image, got:\n%s", logs)
+	}
+}
+
+// writeSettings replaces the global settings.yaml written by
+// imagePrecedenceFixture (HOME is the fixture's temp dir).
+func writeSettings(t *testing.T, settingsYAML string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(os.Getenv("HOME"), ".scion", "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const noOverrideSettings = `schema_version: "1"
+active_profile: staging
+profiles:
+  staging:
+    runtime: docker
+harness_configs:
+  test-harness:
+    harness: generic
+    image: settings-pinned:v1
+`
+
+// startCapturingRun is startCapturingImage returning the whole RunConfig
+// and the Start result.
+func startCapturingRun(t *testing.T, opts api.StartOptions) (runtime.RunConfig, *api.AgentInfo) {
+	t.Helper()
+	var captured runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			captured = cfg
+			return "mock-id", nil
+		},
+	}
+	opts.BrokerMode = true
+	opts.NoAuth = true
+	info, err := NewManager(mockRT).Start(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	return captured, info
+}
+
+func pullPolicyOf(cfg runtime.RunConfig) string {
+	if cfg.Kubernetes == nil {
+		return ""
+	}
+	return cfg.Kubernetes.ImagePullPolicy
+}
+
+// TestStart_RemovedProfilePinDoesNotLingerInTemplateSnapshot pins review
+// finding 1 of ptone/scion#1799: a profile override present at provision
+// must not be baked into the record a later Start falls back to when the
+// template is unresolvable (the norm for a hub agent restarted on a broker
+// with no local template). Removing the pin must bring back the
+// template's own image, and the warning must describe what was used.
+func TestStart_RemovedProfilePinDoesNotLingerInTemplateSnapshot(t *testing.T) {
+	projectScionDir := imagePrecedenceFixture(t, "", profileOverrideSettings)
+	tplDir := filepath.Join(os.Getenv("HOME"), ".scion", "templates", "named")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness", "image": "named-template:v7"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	run, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", Template: "named", ProjectPath: projectScionDir, Profile: "staging"})
+	if run.Image != "profile-pinned:v4" {
+		t.Fatalf("first start: image = %q, want the profile pin", run.Image)
+	}
+
+	if err := os.RemoveAll(tplDir); err != nil {
+		t.Fatal(err)
+	}
+	writeSettings(t, noOverrideSettings)
+
+	run, info := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
+	if run.Image != "named-template:v7" {
+		t.Fatalf("restart after removing the pin: image = %q, want the template's own recorded image", run.Image)
+	}
+	if info == nil || !strings.Contains(strings.Join(info.Warnings, "\n"), "using the template's image recorded at an earlier provision") {
+		t.Errorf("expected the template-snapshot warning, got %v", info)
+	}
+}
+
+// TestStart_ExplicitImageStaysTopTierAcrossRestart pins review finding 2: a
+// user's explicit image (--image, or a --config image the CLI promotes to
+// opts.Image) ranks above an explicit profile override on the first start
+// AND on a later plain restart.
+func TestStart_ExplicitImageStaysTopTierAcrossRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		create api.StartOptions
+	}{
+		{"--image", api.StartOptions{Image: "flag-pinned:v9"}},
+		// The CLI promotes a --config image to opts.Image and also passes
+		// the inline config (cmd/common.go).
+		{"--config image", api.StartOptions{Image: "flag-pinned:v9", InlineConfig: &api.ScionConfig{Image: "flag-pinned:v9"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectScionDir := imagePrecedenceFixture(t, "template-pinned:v2", profileOverrideSettings)
+			create := tc.create
+			create.Name, create.ProjectPath, create.Profile = "test-agent", projectScionDir, "staging"
+			first, _ := startCapturingRun(t, create)
+			restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
+			if first.Image != "flag-pinned:v9" || restart.Image != "flag-pinned:v9" {
+				t.Fatalf("first start = %q, restart = %q; want the explicit image on both", first.Image, restart.Image)
+			}
+		})
+	}
+}
+
+// TestStart_LegacyAgentRecordedInlineImageStaysTopTier: an agent
+// provisioned before ImageProvenance existed has only Info.ExplicitImage;
+// that create-time request-level image keeps outranking a profile override.
+func TestStart_LegacyAgentRecordedInlineImageStaysTopTier(t *testing.T) {
+	projectScionDir := imagePrecedenceFixture(t, "template-pinned:v2", profileOverrideSettings)
+	startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging",
+		Image: "inline-pinned:v3", InlineConfig: &api.ScionConfig{Image: "inline-pinned:v3"}})
+
+	// Strip the provenance record, as a pre-upgrade agent-info.json would be.
+	matches, _ := filepath.Glob(filepath.Join(projectScionDir, "agents", "test-agent", "home", "agent-info.json"))
+	if len(matches) != 1 {
+		t.Fatalf("expected one agent-info.json, found %v", matches)
+	}
+	for _, p := range matches {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := raw["imageProvenance"]; !ok {
+			t.Fatalf("expected imageProvenance in %s: %s", p, data)
+		}
+		delete(raw, "imageProvenance")
+		out, _ := json.Marshal(raw)
+		if err := os.WriteFile(p, out, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
+	if restart.Image != "inline-pinned:v3" {
+		t.Fatalf("legacy restart: image = %q, want the recorded create-time inline image", restart.Image)
+	}
+}
+
+// TestStart_ProfilePullPolicyMovesWithProfileImage pins the ptone decision
+// on ptone/scion#1799: an explicitly set profile image_pull_policy takes the
+// profile image's tier (above the template), while the user's explicit
+// inline pull policy still ranks above it and the plain settings policy
+// stays below the template.
+func TestStart_ProfilePullPolicyMovesWithProfileImage(t *testing.T) {
+	const settingsWithPolicy = `schema_version: "1"
+active_profile: staging
+profiles:
+  staging:
+    runtime: docker
+    harness_overrides:
+      test-harness:
+        image: profile-pinned:v4
+        image_pull_policy: Always
+harness_configs:
+  test-harness:
+    harness: generic
+    image_pull_policy: IfNotPresent
+`
+	tplWithPolicy := func(t *testing.T, settingsYAML string) string {
+		projectScionDir := imagePrecedenceFixture(t, "", settingsYAML)
+		tpl := filepath.Join(os.Getenv("HOME"), ".scion", "templates", "default", "scion-agent.json")
+		if err := os.WriteFile(tpl, []byte(`{"default_harness_config": "test-harness", "image": "template-pinned:v2", "kubernetes": {"imagePullPolicy": "Never"}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return projectScionDir
+	}
+
+	t.Run("profile policy beats template policy", func(t *testing.T) {
+		projectScionDir := tplWithPolicy(t, settingsWithPolicy)
+		run, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
+		if run.Image != "profile-pinned:v4" || pullPolicyOf(run) != "Always" {
+			t.Fatalf("got image %q policy %q, want profile-pinned:v4 / Always", run.Image, pullPolicyOf(run))
+		}
+	})
+	t.Run("explicit inline policy beats profile policy", func(t *testing.T) {
+		projectScionDir := tplWithPolicy(t, settingsWithPolicy)
+		run, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging",
+			InlineConfig: &api.ScionConfig{Kubernetes: &api.KubernetesConfig{ImagePullPolicy: "IfNotPresent"}}})
+		if pullPolicyOf(run) != "IfNotPresent" {
+			t.Fatalf("policy = %q, want the explicit inline IfNotPresent", pullPolicyOf(run))
+		}
+	})
+	t.Run("plain settings policy stays below template policy", func(t *testing.T) {
+		projectScionDir := tplWithPolicy(t, noOverrideSettings+"    image_pull_policy: Always\n")
+		run, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
+		if pullPolicyOf(run) != "Never" {
+			t.Fatalf("policy = %q, want the template's Never", pullPolicyOf(run))
+		}
+	})
+}
+
+// TestWithProvisionedImage pins review finding 6: the provision-only
+// response reports the image Start will run (request > profile > the
+// provisioned inline/template/settings/file image), without changing the
+// persisted config it was given.
+func TestWithProvisionedImage(t *testing.T) {
+	projectScionDir := imagePrecedenceFixture(t, "", profileOverrideSettings)
+	base := &api.ScionConfig{Image: "template-pinned:v2", HarnessConfig: "test-harness"}
+
+	got := withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, base)
+	if got.Image != "profile-pinned:v4" {
+		t.Errorf("profile pin: got %q", got.Image)
+	}
+	if base.Image != "template-pinned:v2" {
+		t.Errorf("input config was mutated: %q", base.Image)
+	}
+	got = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging", Image: "request:v9"}, base)
+	if got.Image != "request:v9" {
+		t.Errorf("request image: got %q", got.Image)
+	}
+	writeSettings(t, noOverrideSettings)
+	got = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, base)
+	if got.Image != "template-pinned:v2" {
+		t.Errorf("no pin: got %q", got.Image)
+	}
+}
+
+// TestStart_InlineOnlyImageRanksTheSameOnRestart: a caller that passes an
+// inline image but no request image (not the CLI, which promotes it) keeps
+// it at the inline tier on the first start and on a plain restart alike, so
+// the explicit profile override wins both times.
+func TestStart_InlineOnlyImageRanksTheSameOnRestart(t *testing.T) {
+	projectScionDir := imagePrecedenceFixture(t, "template-pinned:v2", profileOverrideSettings)
+	first, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging",
+		InlineConfig: &api.ScionConfig{Image: "inline-pinned:v3"}})
+	restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
+	if first.Image != "profile-pinned:v4" || restart.Image != "profile-pinned:v4" {
+		t.Fatalf("first start = %q, restart = %q; want the profile pin on both", first.Image, restart.Image)
 	}
 }
