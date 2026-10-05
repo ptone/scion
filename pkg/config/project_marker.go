@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -351,3 +352,71 @@ func ResolveAgentDir(projectDir, agentName string) string {
 // influence the image a later Start selects; see pkg/runtime's
 // TestHarnessInputsRecordOutsideScionMounts.
 const ImageProvenanceFileName = "image-provenance.json"
+
+// ErrAgentStateDirUnavailable reports that an agent's broker-side state
+// directory cannot be used for a shared-workspace agent: the external agents
+// root cannot be determined (no Hub project ID and no project-id marker), or
+// (wrapped by callers) the external agent dir a restart needs is absent.
+// Agent state for such a project is never placed in, or read from, the
+// in-project agents root, which sits inside the container-visible workspace.
+// Brokers map it to 409 (re-provision).
+var ErrAgentStateDirUnavailable = errors.New("agent state directory unavailable")
+
+// AgentsRootForProject returns the agents root a start, restart or provision
+// addresses an agent's broker-side state under:
+//
+//   - not shared: <projectDir>/agents;
+//   - shared, with a Hub-supplied project ID: the external root
+//     ~/.scion/project-configs/<slug>__<id>/.scion/agents derived from that ID
+//     (the same naming GetGitProjectExternalAgentsDir uses), never from the
+//     project-id marker inside projectDir, which a shared-workspace project's
+//     container can write;
+//   - shared, without a Hub project ID (a local CLI start): the external root
+//     from the project-id marker, as GetGitProjectExternalAgentsDir;
+//   - shared, but no external root can be determined: ErrAgentStateDirUnavailable,
+//     never <projectDir>/agents.
+//
+// It does not check existence; callers decide whether the agent's dir must
+// already exist.
+func AgentsRootForProject(projectDir string, sharedWorkspace bool, hubProjectID string) (string, error) {
+	if !sharedWorkspace {
+		return filepath.Join(projectDir, "agents"), nil
+	}
+	if hubProjectID != "" {
+		projectName := GetProjectName(projectDir)
+		marker := &ProjectMarker{
+			ProjectID:   hubProjectID,
+			ProjectName: projectName,
+			ProjectSlug: api.Slugify(projectName),
+		}
+		extPath, err := marker.ExternalProjectPath()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(extPath, "agents"), nil
+	}
+	ext, err := GetGitProjectExternalAgentsDir(projectDir)
+	if err != nil {
+		return "", err
+	}
+	if ext == "" {
+		return "", fmt.Errorf("%w: shared-workspace project has no external agents root", ErrAgentStateDirUnavailable)
+	}
+	return ext, nil
+}
+
+// AgentDirForProject is filepath.Join(AgentsRootForProject(...), agentName),
+// after checking that agentName is a single clean path element under that
+// root.
+func AgentDirForProject(projectDir, agentName string, sharedWorkspace bool, hubProjectID string) (string, error) {
+	root, err := AgentsRootForProject(projectDir, sharedWorkspace, hubProjectID)
+	if err != nil {
+		return "", err
+	}
+	root = filepath.Clean(root)
+	dir := filepath.Clean(filepath.Join(root, agentName))
+	if filepath.Dir(dir) != root || filepath.Base(dir) != agentName {
+		return "", fmt.Errorf("agent %q is not a single path element under %s", agentName, root)
+	}
+	return dir, nil
+}

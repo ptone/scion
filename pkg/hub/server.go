@@ -616,6 +616,12 @@ type StartExtras struct {
 	// Config.Image, so a start or restart ranks the image exactly as the
 	// create did (ptone/scion#1799). A template-derived image is never sent.
 	Image string
+	// SharedWorkspace is set on a restart (the start request already
+	// carries it as its own field) so the broker reads and writes a
+	// shared-workspace agent's state under the same broker-side agents root
+	// as its start, never the in-project root inside the container-visible
+	// workspace (ptone/scion#1799).
+	SharedWorkspace bool
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -653,6 +659,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.Image != "" {
 		payload["image"] = extras.Image
+	}
+	if extras.SharedWorkspace {
+		payload["sharedWorkspace"] = true
 	}
 }
 

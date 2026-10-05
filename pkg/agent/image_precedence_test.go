@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -797,8 +799,20 @@ func TestStart_UnusableImageProvenanceFailsClosed(t *testing.T) {
 				},
 			}
 			_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true})
-			if err == nil || !strings.Contains(err.Error(), "re-provision the agent") || !strings.Contains(err.Error(), imageProvenanceFile) {
+			if err == nil || !strings.Contains(err.Error(), "re-provision the agent") {
 				t.Fatalf("expected an actionable image-provenance error, got %v", err)
+			}
+			// The message omits the host path (a broker returns it to the
+			// Hub); the path is carried for logs only.
+			if strings.Contains(err.Error(), provPath) {
+				t.Errorf("error message must not contain the host path, got %v", err)
+			}
+			var pe *ImageProvenanceError
+			if !errors.As(err, &pe) || pe.Path != provPath {
+				t.Errorf("expected an *ImageProvenanceError carrying the path, got %#v", err)
+			}
+			if !errors.Is(err, config.ErrAgentStateDirUnavailable) {
+				t.Errorf("expected errors.Is(err, config.ErrAgentStateDirUnavailable)")
 			}
 		})
 	}

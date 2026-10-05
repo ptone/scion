@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -121,42 +122,110 @@ func readImageProvenance(agentDir string) (*imageProvenance, error) {
 	return &p, nil
 }
 
+// ImageProvenanceError reports an image-provenance.json that exists but is
+// unusable (unreadable, unparseable, or without the version marker). Start,
+// and a broker start/restart, fail with it rather than fall back to
+// agent-info.json. Error() deliberately omits the host path, so a broker can
+// return it to the Hub; Path is for logs.
+type ImageProvenanceError struct {
+	Path string
+	Err  error
+}
+
+func (e *ImageProvenanceError) Error() string {
+	return fmt.Sprintf("the agent's image provenance record is unusable (%v); refusing to fall back to agent-info.json: re-provision the agent (scion reincarnate, or delete and re-create it)", e.Err)
+}
+
+func (e *ImageProvenanceError) Unwrap() error { return e.Err }
+
+// Is makes errors.Is(err, config.ErrAgentStateDirUnavailable) hold, so
+// brokers map an unusable record and an unavailable state dir the same way
+// (409, re-provision).
+func (e *ImageProvenanceError) Is(target error) bool {
+	return target == config.ErrAgentStateDirUnavailable
+}
+
 func imageProvenanceError(path string, err error) error {
-	return fmt.Errorf("image provenance %s is unusable (%w); refusing to fall back to agent-info.json: re-provision the agent (scion reincarnate, or delete and re-create it)", path, err)
+	// A read error's *fs.PathError carries the host path; keep only its
+	// cause in the message (the path is kept in Path).
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		err = fmt.Errorf("%s: %w", pe.Op, pe.Err)
+	}
+	return &ImageProvenanceError{Path: path, Err: err}
+}
+
+// AgentStateDirError reports that a start or restart cannot locate the
+// agent's broker-side state directory: a shared-workspace project with no
+// determinable external agents root, or (on restart) an external agent dir
+// that does not exist. The in-project agents root is never used instead
+// (ptone/scion#1799). Error() carries no host path.
+type AgentStateDirError struct {
+	Path string
+	Err  error
+}
+
+func (e *AgentStateDirError) Error() string {
+	return fmt.Sprintf("the agent's broker-side state directory is unavailable (%v); refusing to use the in-project agents root: re-provision the agent (scion reincarnate, or delete and re-create it)", e.Err)
+}
+
+func (e *AgentStateDirError) Unwrap() error { return e.Err }
+
+// Is makes errors.Is(err, config.ErrAgentStateDirUnavailable) hold for every
+// AgentStateDirError, so brokers have a single mapping to 409.
+func (e *AgentStateDirError) Is(target error) bool {
+	return target == config.ErrAgentStateDirUnavailable
 }
 
 // ProvisionedProfile returns the settings profile recorded in the agent's
 // broker-side image provenance. ok is false only when the agent has no
 // provenance file (provisioned before it was recorded); a file that exists
-// but is unusable is an error, never a silent fallback.
+// but is unusable is an *ImageProvenanceError, never a silent fallback.
 //
-// The broker uses it, in place of the agent-info.json profile
-// (GetSavedProfile), for the runtime selection on start and restart:
-// whichever runtime is selected decides whether the bare-image local-exists
-// check runs and so whether the image_registry prefix is applied
-// (ptone/scion#1799). The agent dir is looked up under the agents root for
-// sharedWorkspace first, then the other root, and must hold scion-agent.json.
-func ProvisionedProfile(projectPath, agentName string, sharedWorkspace bool) (profile string, ok bool, err error) {
+// The agent dir is config.AgentDirForProject(projectDir, agentName,
+// sharedWorkspace, hubProjectID) — the broker-side external root for a
+// shared-workspace project, located from the Hub-supplied project ID — with
+// no probing of the other agents root: in a shared-workspace project the
+// in-project root sits inside the container-visible /workspace, so it must
+// never supply this record (ptone/scion#1799). For a shared-workspace agent,
+// an undeterminable external root is an *AgentStateDirError, and so is a
+// missing agent dir when mustExist (a restart) is set.
+func ProvisionedProfile(projectPath, agentName string, sharedWorkspace bool, hubProjectID string, mustExist bool) (profile string, ok bool, err error) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return "", false, nil
+	}
+	agentDir, err := config.AgentDirForProject(projectDir, agentName, sharedWorkspace, hubProjectID)
+	if err != nil {
+		if sharedWorkspace {
+			return "", false, &AgentStateDirError{Err: err}
+		}
+		return "", false, nil
+	}
+	if sharedWorkspace && mustExist {
+		if _, statErr := os.Stat(agentDir); statErr != nil {
+			return "", false, &AgentStateDirError{Path: agentDir, Err: errors.New("external agent directory does not exist")}
+		}
+	}
+	p, err := readImageProvenance(agentDir)
 	if err != nil {
 		return "", false, err
 	}
-	for _, shared := range []bool{sharedWorkspace, !sharedWorkspace} {
-		agentDir, err := checkAgentDirContained(projectDir, agentName, shared)
-		if err != nil {
-			return "", false, err
-		}
-		if config.GetScionAgentConfigPath(agentDir) == "" {
-			continue
-		}
-		p, err := readImageProvenance(agentDir)
-		if err != nil {
-			return "", false, err
-		}
-		if p == nil {
-			return "", false, nil
-		}
-		return p.Profile, true, nil
+	if p == nil {
+		return "", false, nil
 	}
-	return "", false, nil
+	return p.Profile, true, nil
+}
+
+// logImageProvenanceError logs an *ImageProvenanceError with its host path,
+// which the error's own message omits.
+func logImageProvenanceError(agentName string, err error) {
+	var pe *ImageProvenanceError
+	if errors.As(err, &pe) {
+		slog.Error("image provenance unusable", "agent", agentName, "path", pe.Path, "error", pe.Err)
+	}
+	var de *AgentStateDirError
+	if errors.As(err, &de) {
+		slog.Error("agent state directory unavailable", "agent", agentName, "path", de.Path, "error", de.Err)
+	}
 }

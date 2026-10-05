@@ -425,6 +425,7 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
+	ctx = api.ContextWithHubProjectID(ctx, opts.HubProjectID)
 	if opts.EmptyPerAgentWorkspace {
 		ctx = api.ContextWithEmptyPerAgentWorkspace(ctx)
 	}

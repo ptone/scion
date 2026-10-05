@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -77,6 +78,12 @@ type startContextInputs struct {
 	Name    string
 	AgentID string // Hub UUID (for env injection and logging)
 	Slug    string
+
+	// SharedWorkspace is the shared-workspace flag for a start/restart that
+	// carries no Config (restart): it selects the agents root the agent's
+	// broker-side state is read from, the same one Start uses. A Config's
+	// own SharedWorkspace is used as well when present.
+	SharedWorkspace bool
 
 	// Project
 	ProjectPath string
@@ -340,12 +347,33 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// to read from a request body that doesn't exist), and handlers.go's
 	// startAgent/restartAgent already resolve the saved profile themselves,
 	// re-running this same check after their own, later resolution.
+	//
+	// Start/restart classify the runtime with the provisioned profile
+	// recorded in broker-side image provenance when the agent has it, not
+	// the agent-info.json profile (GetSavedProfile), which the container
+	// can write: this classification picks the default GCP metadata mode
+	// when the hub sends none, the Kubernetes assign mapping, the hub
+	// endpoint and extra hosts (ptone/scion#1799). An unusable provenance
+	// file fails closed (409, re-provision); an agent without one keeps
+	// the saved profile.
 	gcpIdentityProfile := ""
 	if in.Config != nil {
 		gcpIdentityProfile = in.Config.Profile
 	}
 	if gcpIdentityProfile == "" && in.Operation != opCreate {
-		gcpIdentityProfile = agent.GetSavedProfile(in.Name, in.ProjectPath)
+		profile, err := classificationProfile(in)
+		if err != nil {
+			var pe *agent.ImageProvenanceError
+			if errors.As(err, &pe) {
+				s.agentLifecycleLog.Error("image provenance unusable", "agent", in.Name, "path", pe.Path, "error", pe.Err)
+			}
+			var de *agent.AgentStateDirError
+			if errors.As(err, &de) {
+				s.agentLifecycleLog.Error("agent state directory unavailable", "agent", in.Name, "path", de.Path, "error", de.Err)
+			}
+			return nil, &startContextError{Status: http.StatusConflict, Message: err.Error(), OriginalErr: err}
+		}
+		gcpIdentityProfile = profile
 	}
 	mgr, dispatchRuntimeType := s.resolveManagerForOpts(api.StartOptions{
 		Name:        in.Name,
@@ -736,6 +764,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		opts.Branch = in.Config.Branch
 		opts.SharedWorkspace = in.Config.SharedWorkspace
 		opts.ProjectPreStartHookScript = in.Config.ProjectPreStartHookScript
+	}
+	// The Hub-supplied project ID locates a shared-workspace project's
+	// broker-side external agents root (never the project-id marker inside
+	// the container-visible workspace).
+	opts.HubProjectID = in.ProjectID
+	if in.SharedWorkspace {
+		opts.SharedWorkspace = true
 	}
 
 	if in.InlineConfig != nil {

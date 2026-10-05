@@ -769,10 +769,13 @@ digest), the registry rewrite, the pull policy, the template tier or the profile
   lookup folds in) and the profile-level `image_registry` rewrite, on every start and restart,
   local or broker. The profile a restart passes, or the one saved in `agent-info.json`, does not
   change it. Empty means no profile was set or active at provision; the profile active at start
-  then applies, as for any settings lookup without a profile. A broker start or restart also
-  selects the runtime with this profile rather than the one saved in `agent-info.json`: the
-  selected runtime decides whether a bare image is first looked up locally, and so whether the
-  `image_registry` prefix is applied. Other uses of the saved profile are unchanged.
+  then applies, as for any settings lookup without a profile. Broker start/restart also classify
+  the runtime with this profile rather than the one saved in `agent-info.json`, both for the
+  preliminary classification (which sets the default GCP metadata mode when the Hub sends none,
+  the Kubernetes `assign` mapping, the hub endpoint and extra hosts) and for the runtime the agent
+  runs on (which decides whether a bare image is first looked up locally, and so whether the
+  `image_registry` prefix is applied). If the two ever disagree, the start or restart is refused
+  with `409 Conflict`. Other uses of the saved profile are unchanged.
 - `template`: the template the agent was provisioned from. When a start carries no absolute
   template path (every local restart, and every hub start or restart), the template-tier image and
   pull policy, and the harness-config directories searched for the file tier, come from this

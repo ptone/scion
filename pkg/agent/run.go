@@ -137,6 +137,17 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// fallback for labels, RunConfig.ProjectID, etc.
 	hubDispatchedProjectID := projectID
 
+	// Fail on an unusable image provenance record before any side effect
+	// (the container cleanup below, prompt.md), reading the same agent dir
+	// GetAgent will use for opts.SharedWorkspace. The record is read again,
+	// from that same dir, where image selection uses it.
+	if preDir, dirErr := config.AgentDirForProject(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID); dirErr == nil {
+		if _, provErr := readImageProvenance(preDir); provErr != nil {
+			logImageProvenanceError(opts.Name, provErr)
+			return nil, provErr
+		}
+	}
+
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
@@ -196,6 +207,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
+	ctx = api.ContextWithHubProjectID(ctx, opts.HubProjectID)
 	if isEmptyPerAgentStart(opts) {
 		ctx = api.ContextWithEmptyPerAgentWorkspace(ctx)
 	}
@@ -316,6 +328,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// policy and the harness-config dir searched for the file tier.
 	provenance, err := readImageProvenance(agentDir)
 	if err != nil {
+		logImageProvenanceError(opts.Name, err)
 		return nil, err
 	}
 	templateName := ""

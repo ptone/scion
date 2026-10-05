@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -88,7 +89,7 @@ func TestRuntimeSelectionOpts_ProvenanceProfileSelectsRuntime(t *testing.T) {
 		t.Fatalf("precondition: saved profile = %q, want steer", saved)
 	}
 	opts := api.StartOptions{Name: id, ProjectPath: projectDir, Profile: saved}
-	runtimeOpts, err := runtimeSelectionOpts(opts, id)
+	runtimeOpts, err := runtimeSelectionOpts(opts, id, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +110,7 @@ func TestRuntimeSelectionOpts_ProvenanceProfileSelectsRuntime(t *testing.T) {
 func TestRuntimeSelectionOpts_LegacyAgentKeepsSavedProfile(t *testing.T) {
 	srv, projectDir, id := runtimeSteerFixture(t, "")
 	opts := api.StartOptions{Name: id, ProjectPath: projectDir, Profile: agent.GetSavedProfile(id, projectDir)}
-	runtimeOpts, err := runtimeSelectionOpts(opts, id)
+	runtimeOpts, err := runtimeSelectionOpts(opts, id, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +128,7 @@ func TestRuntimeSelectionOpts_LegacyAgentKeepsSavedProfile(t *testing.T) {
 func TestRuntimeSelectionOpts_UnusableProvenanceFailsClosed(t *testing.T) {
 	for _, body := range []string{"{not json", `{"profile": "prov"}`} {
 		_, projectDir, id := runtimeSteerFixture(t, body)
-		_, err := runtimeSelectionOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: "steer"}, id)
+		_, err := runtimeSelectionOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: "steer"}, id, false)
 		if err == nil || !strings.Contains(err.Error(), "re-provision the agent") {
 			t.Fatalf("body %q: expected an actionable provenance error, got %v", body, err)
 		}
@@ -167,3 +168,135 @@ func TestStartAgent_UnusableImageProvenanceIsConflict(t *testing.T) {
 }
 
 func strconvQuote(s string) string { return strconv.Quote(s) }
+
+// classificationFixture is a docker-default broker whose project maps
+// profile "local" to docker and "kube" to Kubernetes; the agent's
+// agent-info.json (container-writable) saves "kube". provenance, when
+// non-empty, is written as the agent's broker-side image-provenance.json.
+func classificationFixture(t *testing.T, provenance string) (*Server, string, string) {
+	t.Helper()
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "docker", "kube", "kubernetes")
+	const name = "classified-agent"
+	writeSavedAgentProfile(t, dotScion, name, "kube")
+	agentDir := filepath.Join(dotScion, "agents", name)
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if provenance != "" {
+		if err := os.WriteFile(filepath.Join(agentDir, "image-provenance.json"), []byte(provenance), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return srv, dotScion, name
+}
+
+func buildClassifiedStart(t *testing.T, srv *Server, dotScion, name string) (*startContext, error) {
+	t.Helper()
+	return srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        name,
+		ProjectPath: dotScion,
+		// No SCION_METADATA_MODE: the runtime-dependent default applies, the
+		// path an older hub that omits the mode would take.
+		ResolvedEnv: map[string]string{},
+		HTTPRequest: httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+name+"/start", nil),
+		Operation:   opHTTPStart,
+	})
+}
+
+// TestBuildStartContext_ClassifiesRuntimeWithProvisionedProfile: start/restart
+// classify the runtime with the provisioned profile. With the provenance
+// profile on docker and agent-info.json's profile on Kubernetes, the default
+// GCP metadata mode is block with the metadata redirect, not the Kubernetes
+// passthrough default.
+func TestBuildStartContext_ClassifiesRuntimeWithProvisionedProfile(t *testing.T) {
+	srv, dotScion, name := classificationFixture(t, `{"version": 1, "profile": "local"}`)
+	sc, err := buildClassifiedStart(t, srv, dotScion, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.RuntimeType != "docker" {
+		t.Errorf("classified runtime = %q, want docker (the provisioned profile's)", sc.RuntimeType)
+	}
+	env := sc.Opts.Env
+	if env["SCION_METADATA_MODE"] != "block" || env["GCE_METADATA_HOST"] != "localhost:18380" || env["GCE_METADATA_ROOT"] != "localhost:18380" {
+		t.Errorf("metadata env = mode %q host %q root %q, want block with the localhost:18380 redirect",
+			env["SCION_METADATA_MODE"], env["GCE_METADATA_HOST"], env["GCE_METADATA_ROOT"])
+	}
+}
+
+// TestBuildStartContext_CorruptProvenanceIsConflict: an unusable provenance
+// file fails buildStartContext with 409 (re-provision), never a fallback to
+// the saved profile.
+func TestBuildStartContext_CorruptProvenanceIsConflict(t *testing.T) {
+	srv, dotScion, name := classificationFixture(t, "{not json")
+	_, err := buildClassifiedStart(t, srv, dotScion, name)
+	sce, ok := err.(*startContextError)
+	if !ok || sce.Status != http.StatusConflict || !strings.Contains(sce.Message, "re-provision the agent") {
+		t.Fatalf("expected a 409 re-provision startContextError, got %v", err)
+	}
+}
+
+// TestBuildStartContext_LegacyAgentClassifiesWithSavedProfile: an agent with
+// no provenance file keeps the saved-profile classification (pre-existing
+// behaviour): Kubernetes, with its passthrough default.
+func TestBuildStartContext_LegacyAgentClassifiesWithSavedProfile(t *testing.T) {
+	srv, dotScion, name := classificationFixture(t, "")
+	sc, err := buildClassifiedStart(t, srv, dotScion, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.RuntimeType != "kubernetes" || sc.Opts.Env["SCION_METADATA_MODE"] != "passthrough" {
+		t.Errorf("legacy classification = runtime %q mode %q, want kubernetes / passthrough", sc.RuntimeType, sc.Opts.Env["SCION_METADATA_MODE"])
+	}
+}
+
+// TestRejectRuntimeClassificationMismatch: the late check refuses a start
+// whose preliminary classification differs from the authoritative runtime,
+// treating Kubernetes spellings as one runtime.
+func TestRejectRuntimeClassificationMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		early, late string
+		reject      bool
+	}{
+		{"docker", "docker", false},
+		{"kubernetes", "k8s", false},
+		{"docker", "kubernetes", true},
+		{"kubernetes", "docker", true},
+		{"podman", "docker", true},
+	} {
+		sce := rejectRuntimeClassificationMismatch(tc.early, tc.late)
+		if (sce != nil) != tc.reject {
+			t.Errorf("%s vs %s: rejected=%v, want %v", tc.early, tc.late, sce != nil, tc.reject)
+		}
+		if sce != nil && sce.Status != http.StatusConflict {
+			t.Errorf("%s vs %s: status %d, want 409", tc.early, tc.late, sce.Status)
+		}
+	}
+}
+
+// TestRestartAgent_ClassificationMismatchIsConflictBeforeStop: when the
+// preliminary classification (buildStartContext) and the authoritative
+// runtime disagree — here the fixture's early lookup sees docker and the late
+// one Kubernetes — and no more specific rejection applies, the restart is
+// refused with 409 before the agent is stopped.
+func TestRestartAgent_ClassificationMismatchIsConflictBeforeStop(t *testing.T) {
+	srv, mgr, remapRuntime := newTestServerForLateCheckOrdering(t, "actual-agent-name", "url-id", "kubernetes")
+	remapRuntime.RunFunc = func(ctx context.Context, config runtime.RunConfig) (string, error) {
+		t.Fatal("Start must not run on a classification mismatch")
+		return "", nil
+	}
+	body := `{"resolvedEnv": {"SCION_METADATA_MODE": "passthrough", "SCION_METADATA_MODE_SOURCE": "hub"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/url-id/restart", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "differs from the runtime it resolves to") {
+		t.Fatalf("expected 409 classification mismatch, got %d: %s", w.Code, w.Body.String())
+	}
+	if mgr.stopCalls != 0 {
+		t.Errorf("expected no stop before the mismatch rejection, got %d", mgr.stopCalls)
+	}
+}

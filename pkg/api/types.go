@@ -867,6 +867,26 @@ func IsSharedWorkspaceFromContext(ctx context.Context) bool {
 	return v
 }
 
+type hubProjectIDContextKey struct{}
+
+// ContextWithHubProjectID attaches the Hub-supplied project ID of a broker
+// dispatch. Agent-dir resolution uses it, not the project-id marker inside
+// the (possibly container-visible) project directory, to locate a
+// shared-workspace project's broker-side external agents root.
+func ContextWithHubProjectID(ctx context.Context, projectID string) context.Context {
+	if projectID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, hubProjectIDContextKey{}, projectID)
+}
+
+// HubProjectIDFromContext returns the Hub-supplied project ID attached by
+// ContextWithHubProjectID, or "" (e.g. a local CLI start).
+func HubProjectIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(hubProjectIDContextKey{}).(string)
+	return v
+}
+
 type emptyPerAgentWorkspaceContextKey struct{}
 
 // ContextWithEmptyPerAgentWorkspace returns a new context marking the agent's
@@ -1072,6 +1092,11 @@ type StartOptions struct {
 	Workspace          string
 	GitClone           *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
 	SharedWorkspace    bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
+	// HubProjectID is the Hub-supplied project ID of a broker dispatch (set
+	// by the broker from the request, never from agent or workspace state).
+	// It locates a shared-workspace project's broker-side external agents
+	// root; see config.AgentsRootForProject. Empty for local CLI starts.
+	HubProjectID string `json:"-"`
 	// FreshProvision marks this dispatch as a create, not a start or restart:
 	// GetAgent wipes and re-clones an existing populated workspace only when
 	// this is set, so a same-named leftover agent directory is not confused
