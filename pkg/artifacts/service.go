@@ -54,18 +54,29 @@ type Guard func(pattern string, handler http.Handler) http.Handler
 
 // Service is the artifact service.
 //
-// A Service is built with NewService and then configured with SetStore,
-// SetBlobStorage and SetLimits, which may run after the routes are mounted
-// (the hub opens its database after it builds its router). Until a store
-// and blob storage are set, data routes answer 503.
+// A Service is built with NewService and configured either with a backend
+// provider (SetBackendProvider), which it asks on each request, or with
+// SetStore and SetBlobStorage; limits come from SetLimits. Either may run
+// after the routes are mounted (the hub opens its database after it builds
+// its router). Until a store and blob storage are available, data routes
+// answer 503.
 type Service struct {
 	host Host
 
-	mu     sync.RWMutex
-	store  Store
-	blobs  storage.Storage
-	hubID  string
-	limits func(context.Context) Limits
+	mu       sync.RWMutex
+	store    Store
+	blobs    storage.Storage
+	hubID    string
+	limits   func(context.Context) Limits
+	provider func() Backend
+}
+
+// Backend is what a request needs from the service's environment: the
+// metadata store, the blob storage and the hub id that namespaces blobs.
+type Backend struct {
+	Store Store
+	Blobs storage.Storage
+	HubID string
 }
 
 // Limits are the size limits the service enforces.
@@ -86,6 +97,15 @@ func NewService(host Host) *Service {
 
 // Host returns the host the service was built with.
 func (s *Service) Host() Host { return s.host }
+
+// SetBackendProvider makes the service ask fn for its store, blob storage
+// and hub id on each request, instead of the values given to SetStore and
+// SetBlobStorage. fn must be safe for concurrent use and cheap.
+func (s *Service) SetBackendProvider(fn func() Backend) {
+	s.mu.Lock()
+	s.provider = fn
+	s.mu.Unlock()
+}
 
 // SetStore sets the store that holds artifact metadata.
 func (s *Service) SetStore(st Store) {
@@ -120,8 +140,13 @@ type backend struct {
 
 func (s *Service) backend() (backend, bool) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	b := backend{store: s.store, blobs: s.blobs, hubID: s.hubID, limits: s.limits}
+	provider := s.provider
+	s.mu.RUnlock()
+	if provider != nil {
+		p := provider()
+		b.store, b.blobs, b.hubID = p.Store, p.Blobs, p.HubID
+	}
 	return b, b.store != nil && b.blobs != nil && b.hubID != ""
 }
 

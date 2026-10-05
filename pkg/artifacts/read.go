@@ -43,11 +43,18 @@ const signedURLTTL = 5 * time.Minute
 // script, so nothing served from the hub's origin can act on it.
 const fileCSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox"
 
-// canRead reports whether the caller may read artifact a: its owner always
-// may (implicit admin); otherwise an unexpired grant must match, where a
-// scope grant matches when the host authorizes the caller to read
-// artifacts in that scope and a principal grant matches the caller's own
-// principal ref. An expired artifact is unreadable to everyone.
+// canRead reports whether the caller may read artifact a. The checks run in
+// a fixed order:
+//
+//  1. Host.Permits: the caller's credential must allow artifact.read in the
+//     artifact's home scope. Necessary on every path; nothing below can
+//     reach past it.
+//  2. The owner (implicit admin), or Host.Authorize for artifact.read in the
+//     home scope.
+//  3. An unexpired artifact_grant row: a principal grant matching the
+//     caller, or a scope grant for a scope the host authorizes.
+//
+// An expired artifact is unreadable to everyone.
 func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok {
@@ -57,9 +64,18 @@ func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
 	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
 		return false
 	}
+	// 1. Credential.
+	if !s.host.Permits(ctx, a.ScopeRef, PermissionRead) {
+		return false
+	}
+	// 2. Owner, or host policy in the home scope.
 	if kind == a.OwnerKind && ref == a.OwnerRef {
 		return true
 	}
+	if s.host.Authorize(ctx, a.ScopeRef, PermissionRead) {
+		return true
+	}
+	// 3. Grants.
 	grants, err := b.store.ListGrants(ctx, a.ID)
 	if err != nil {
 		slog.ErrorContext(ctx, "artifacts: list grants failed", "error", err)
@@ -73,12 +89,12 @@ func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
 			continue
 		}
 		switch g.SubjectKind {
-		case SubjectScope:
-			if g.SubjectRef != "" && s.host.Authorize(ctx, g.SubjectRef, PermissionRead) {
-				return true
-			}
 		case SubjectPrincipal:
 			if g.SubjectRef == PrincipalRef(kind, ref) {
+				return true
+			}
+		case SubjectScope:
+			if g.SubjectRef != "" && g.SubjectRef != a.ScopeRef && s.host.Authorize(ctx, g.SubjectRef, PermissionRead) {
 				return true
 			}
 		}

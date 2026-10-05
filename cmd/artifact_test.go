@@ -28,6 +28,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -131,6 +132,38 @@ func TestGetArtifact(t *testing.T) {
 	assert.Error(t, getArtifact(ctx, c.Artifacts(), &stdout, &stderr, "5f1c2d3e-0000-4000-8000-000000000002", ""))
 }
 
+func TestGetArtifactDetectsCorruptionBeforeStdout(t *testing.T) {
+	srv, _ := fakeArtifactHub(t, []byte("tampered"), sha256Hex([]byte("original")))
+	c, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	var stdout, stderr bytes.Buffer
+	err = getArtifact(context.Background(), c.Artifacts(), &stdout, &stderr, testArtifactID, "")
+	assert.ErrorContains(t, err, "sha256")
+	assert.Empty(t, stdout.String(), "unverified bytes must not reach stdout")
+}
+
+func TestGetArtifactOutMode(t *testing.T) {
+	body := []byte("# Design\n")
+	srv, _ := fakeArtifactHub(t, body, sha256Hex(body))
+	c, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	out := filepath.Join(t.TempDir(), "d.md")
+	var stdout, stderr bytes.Buffer
+	require.NoError(t, getArtifact(context.Background(), c.Artifacts(), &stdout, &stderr, testArtifactID, out))
+	st, err := os.Stat(out)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), st.Mode().Perm())
+}
+
+func TestArtifactPublishScope(t *testing.T) {
+	settings := &config.Settings{ProjectID: "local-only", Hub: &config.HubClientConfig{ProjectID: "hub-proj"}}
+	t.Setenv("SCION_AGENT_ID", "")
+	assert.Equal(t, "hub-proj", artifactPublishScope(settings), "a user names the hub project")
+	assert.Equal(t, "", artifactPublishScope(&config.Settings{ProjectID: "local-only"}), "never a local-only project id")
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	assert.Equal(t, "", artifactPublishScope(settings), "a hub agent names no scope; the hub uses its project")
+}
+
 func TestGetArtifactDetectsCorruption(t *testing.T) {
 	srv, _ := fakeArtifactHub(t, []byte("tampered"), sha256Hex([]byte("original")))
 	c, err := hubclient.New(srv.URL)
@@ -183,4 +216,15 @@ func TestArtifactErrorHints(t *testing.T) {
 	require.NoError(t, os.WriteFile(file, []byte("a"), 0o644))
 	err = publishArtifact(context.Background(), c.Artifacts(), &stdout, "", file, "", "")
 	assert.ErrorContains(t, err, "project:artifact:write")
+
+	unauthorized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":"unauthorized","message":"authentication required"}}`)
+	}))
+	t.Cleanup(unauthorized.Close)
+	c401, err := hubclient.New(unauthorized.URL)
+	require.NoError(t, err)
+	err = publishArtifact(context.Background(), c401.Artifacts(), &stdout, "", file, "", "")
+	assert.ErrorContains(t, err, "project:artifact:read")
 }

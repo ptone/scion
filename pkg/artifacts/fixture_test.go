@@ -48,9 +48,32 @@ type fakeHost struct {
 	mu    sync.Mutex
 	perms map[string]map[string]map[string]bool
 	calls []string
+	// denied lists "principalRef scope permission" triples the credential
+	// does not permit (Permits); everything else is permitted.
+	denied map[string]bool
 }
 
-func newFakeHost() *fakeHost { return &fakeHost{perms: map[string]map[string]map[string]bool{}} }
+func newFakeHost() *fakeHost {
+	return &fakeHost{perms: map[string]map[string]map[string]bool{}, denied: map[string]bool{}}
+}
+
+// deny makes Permits refuse perm in scope for p.
+func (h *fakeHost) deny(p principal, scope, perm string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.denied[PrincipalRef(p.kind, p.ref)+" "+scope+" "+perm] = true
+}
+
+func (h *fakeHost) Permits(ctx context.Context, scope, perm string) bool {
+	kind, ref, _, ok := h.Principal(ctx)
+	if !ok || scope == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, "permits "+scope+" "+perm)
+	return !h.denied[PrincipalRef(kind, ref)+" "+scope+" "+perm]
+}
 
 func (h *fakeHost) allow(p principal, scope string, perms ...string) {
 	h.mu.Lock()

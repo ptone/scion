@@ -380,3 +380,127 @@ func TestArtifactsGrantNeverBypassesAgentScope(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, doRequestWithAgentToken(t, srv, http.MethodGet, p, nil, withoutScope).Code, "granted, without scope: %s", p)
 	}
 }
+
+// identityArtifactRequest serves an artifact request with identity injected
+// into the context, through the hub's mux (route guards and handlers run).
+func identityArtifactRequest(t *testing.T, srv *Server, identity Identity, method, path string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	req = req.WithContext(contextWithIdentity(req.Context(), identity))
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestArtifactsUserAccessTokensAreBounded: a user access token's ceiling
+// and project boundary bound every artifact read and publish. Ownership and
+// grants never reach past them: a token without artifact read, or bounded
+// to another project, gets 404 on every read route even for an artifact its
+// user owns or holds a grant on.
+func TestArtifactsUserAccessTokensAreBounded(t *testing.T) {
+	srv, s := testServer(t)
+	st, blobs := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	p1 := artifactProject(t, s, "uat-p1")
+	p2 := artifactProject(t, s, "uat-p2")
+	p3 := artifactProject(t, s, "uat-p3")
+	createTestUserWithProjectRole(t, s, tid("uat-user"), "uat-user@test.com", p1.ID, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, s, tid("uat-user"), "uat-user@test.com", p2.ID, store.ProjectRoleMember)
+	user, err := s.GetUser(ctx, tid("uat-user"))
+	require.NoError(t, err)
+	session := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+
+	// An artifact the user owns, homed in p1.
+	rec := identityArtifactRequest(t, srv, session, http.MethodPost, "/api/v1/artifacts?name=own.md&scope="+p1.ID, []byte("# own\n"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	owned := decodeArtifactID(t, rec)
+
+	// An artifact homed in p3 (no role there) shared with the user by a
+	// principal grant.
+	content := []byte("granted")
+	sum := sha256.Sum256(content)
+	digest := hex.EncodeToString(sum[:])
+	_, err = blobs.Upload(ctx, artifacts.BlobPath(srv.HubID(), digest), bytes.NewReader(content), storage.UploadOptions{})
+	require.NoError(t, err)
+	now := time.Now()
+	a := &artifacts.Artifact{ID: tid("uat-granted"), ScopeKind: artifacts.ScopeKindProject, ScopeRef: p3.ID,
+		OwnerKind: artifacts.PrincipalKindAgent, OwnerRef: tid("uat-other-agent"), Title: "g", CreatedAt: now, UpdatedAt: now}
+	v := &artifacts.Version{ID: tid("uat-granted-v1"), ArtifactID: a.ID, Seq: 1, Kind: artifacts.VersionKindPublish,
+		EntryPath: "g.txt", TotalBytes: int64(len(content)), FileCount: 1, CreatedAt: now, State: artifacts.VersionStateReady}
+	require.NoError(t, st.CreatePublished(ctx, a, v,
+		[]artifacts.File{{VersionID: v.ID, Path: "g.txt", Size: int64(len(content)), SHA256: digest, MediaType: "text/plain"}},
+		[]artifacts.Grant{{ID: tid("uat-grant"), ArtifactID: a.ID, SubjectKind: artifacts.SubjectPrincipal,
+			SubjectRef: artifacts.PrincipalRef(artifacts.PrincipalKindUser, user.ID), Permission: artifacts.GrantRead, CreatedAt: now}}))
+
+	routes := func(id, file string) []string {
+		return []string{
+			"/api/v1/artifacts/" + id,
+			"/api/v1/artifacts/" + id + "/files/" + file,
+			"/api/v1/artifacts/" + id + "/versions/1/files/" + file,
+		}
+	}
+	check := func(name string, identity Identity, id, file string, want int) {
+		t.Helper()
+		for _, p := range routes(id, file) {
+			assert.Equal(t, want, identityArtifactRequest(t, srv, identity, http.MethodGet, p, nil).Code, "%s: %s", name, p)
+		}
+	}
+
+	// The session user reads both (owner; principal grant).
+	check("session, owned", session, owned, "own.md", http.StatusOK)
+	check("session, granted", session, a.ID, "g.txt", http.StatusOK)
+
+	// Owned artifact (home p1).
+	check("UAT without artifact:read, owned", artifactTestUAT(t, session, p1.ID, "agent:read"), owned, "own.md", http.StatusNotFound)
+	check("UAT bounded to p2, owned", artifactTestUAT(t, session, p2.ID, "artifact:read"), owned, "own.md", http.StatusNotFound)
+	check("UAT with artifact:read in p1, owned", artifactTestUAT(t, session, p1.ID, "artifact:read"), owned, "own.md", http.StatusOK)
+
+	// Principal-granted artifact (home p3).
+	check("UAT without artifact:read, granted", artifactTestUAT(t, session, p3.ID, "agent:read"), a.ID, "g.txt", http.StatusNotFound)
+	check("UAT bounded to p1, granted", artifactTestUAT(t, session, p1.ID, "artifact:read"), a.ID, "g.txt", http.StatusNotFound)
+	check("UAT with artifact:read in p3, granted", artifactTestUAT(t, session, p3.ID, "artifact:read"), a.ID, "g.txt", http.StatusOK)
+
+	// Publish needs artifact:create in the token, in its boundary.
+	rec = identityArtifactRequest(t, srv, artifactTestUAT(t, session, p1.ID, "artifact:read"), http.MethodPost, "/api/v1/artifacts?name=x.md&scope="+p1.ID, []byte("x"))
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	rec = identityArtifactRequest(t, srv, artifactTestUAT(t, session, p2.ID, "artifact:create"), http.MethodPost, "/api/v1/artifacts?name=x.md&scope="+p1.ID, []byte("x"))
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	rec = identityArtifactRequest(t, srv, artifactTestUAT(t, session, p1.ID, "artifact:create"), http.MethodPost, "/api/v1/artifacts?name=x.md&scope="+p1.ID, []byte("x"))
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+}
+
+// TestArtifactsPreArtifactCeilingTokenOnRoutes: a token minted under a
+// ceiling recorded before artifacts existed reads nothing and publishes
+// nothing through the real routes.
+func TestArtifactsPreArtifactCeilingTokenOnRoutes(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	p1 := artifactProject(t, s, "preart-p1")
+	_, ownerTok := artifactAgent(t, srv, s, p1.ID, "preart-owner", AgentRoleBaseline)
+	child := &store.Agent{ID: tid("art-preart-child"), Slug: "preart-child", Name: "preart-child", ProjectID: p1.ID, Phase: "running"}
+	require.NoError(t, s.CreateAgent(context.Background(), child))
+	issued := filterScopes(ScopesForRole(AgentRoleBaseline), preArtifactReadCeiling(), ScopeCeilings{})
+	childTok, err := srv.GetAgentTokenService().GenerateAgentToken(child.ID, p1.ID, issued, nil)
+	require.NoError(t, err)
+
+	rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=a.txt", []byte("a"), ownerTok)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	id := decodeArtifactID(t, rec)
+
+	for _, p := range []string{"/api/v1/artifacts/" + id, "/api/v1/artifacts/" + id + "/files/a.txt", "/api/v1/artifacts/" + id + "/versions/1/files/a.txt"} {
+		assert.Equal(t, http.StatusNotFound, doRawAgentRequest(t, srv, http.MethodGet, p, nil, childTok).Code, p)
+	}
+	rec = doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("b"), childTok)
+	assert.NotEqual(t, http.StatusCreated, rec.Code, rec.Body.String())
+}
+
+// doRawAgentRequest sends a raw-body request with an agent token through the
+// full hub handler (authentication included).
+func doRawAgentRequest(t *testing.T, srv *Server, method, path string, body []byte, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	req.Header.Set("X-Scion-Agent-Token", token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}

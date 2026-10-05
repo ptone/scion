@@ -75,14 +75,24 @@ Examples:
 		if err != nil {
 			return err
 		}
-		scope := ""
-		if id, err := resolveProjectID(settings, ""); err == nil {
-			scope = id
-		}
-		ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
-		defer cancel()
-		return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), GetHubEndpoint(settings), args[0], artifactPublishTitle, scope)
+		return publishArtifactCmd(cmd, settings, client, args[0])
 	},
+}
+
+// artifactPublishScope is the project a publish names. A hub agent names
+// none: the hub homes the artifact in the agent's own project. A user names
+// the hub project of the current checkout, never a local-only project id.
+func artifactPublishScope(settings *config.Settings) string {
+	if config.IsHubManagedAgent() {
+		return ""
+	}
+	return settings.GetHubProjectID()
+}
+
+func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hubclient.Client, file string) error {
+	ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
+	defer cancel()
+	return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), GetHubEndpoint(settings), file, artifactPublishTitle, artifactPublishScope(settings))
 }
 
 var artifactGetCmd = &cobra.Command{
@@ -93,6 +103,9 @@ var artifactGetCmd = &cobra.Command{
 <ref> is scion://artifact/<id>, scion://artifact/<id>@<seq> for a specific
 version, or a bare <id>. The file is written to stdout, or to --out (a file
 path, or an existing directory to write the file into under its own name).
+When fetching the current version, the bytes are checked against the
+sha256 recorded at publish time before anything is written; a mismatch
+writes nothing and fails.
 
 Examples:
   scion artifact get scion://artifact/5f1c2d3e-...
@@ -222,7 +235,21 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	defer func() { _ = rc.Close() }()
 
 	if outPath == "" {
-		return copyVerified(stdout, rc, wantDigest)
+		// Spool and verify first, so a consumer reading stdout never sees
+		// bytes that fail the check.
+		spool, err := os.CreateTemp("", "scion-artifact-*")
+		if err != nil {
+			return err
+		}
+		defer func() { _ = spool.Close(); _ = os.Remove(spool.Name()) }()
+		if err := copyVerified(spool, rc, wantDigest); err != nil {
+			return err
+		}
+		if _, err := spool.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		_, err = io.Copy(stdout, spool)
+		return err
 	}
 	target := outPath
 	if st, err := os.Stat(outPath); err == nil && st.IsDir() {
@@ -234,6 +261,12 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	if err := copyVerified(tmp, rc, wantDigest); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	// CreateTemp makes the file 0600; a fetched document gets the usual
+	// mode for a new file.
+	if err := tmp.Chmod(0o644); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -256,6 +289,8 @@ func artifactErrorHint(err error, publishing bool) string {
 		return ""
 	}
 	switch {
+	case apiErr.StatusCode == http.StatusUnauthorized:
+		return "\nThe hub did not accept the caller for artifacts: sign in again, or (for an agent) the token may lack the project:artifact:read scope."
 	case apiErr.StatusCode == http.StatusNotFound && !publishing:
 		return "\nThe artifact does not exist, or you cannot read it: it is not shared with you or your project, " +
 			"or (for an agent) the token lacks the project:artifact:read scope. Artifacts also require the hub.artifacts experiment."
