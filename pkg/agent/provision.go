@@ -2022,7 +2022,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// never has to reuse the merged finalScionCfg.Image — which folds in
 	// the inline, settings and profile values of this moment — as if it
 	// were the template's. Image provenance is recorded in broker-side agent
-	// state (the agent dir), never in the container-visible agent home.
+	// state (the agent dir), never in the agent home, which is inside a
+	// container mount.
 	tplImage, tplPullPolicy := templateChainImage(chain)
 	if err := writeImageProvenance(agentDir, imageProvenance{
 		RequestImage:            agentImage,

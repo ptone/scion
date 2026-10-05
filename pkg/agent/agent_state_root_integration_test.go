@@ -29,8 +29,8 @@ import (
 // C-ROOT-INT-1: in strict mode (broker mode, Hub project ID), the agent state
 // dir GetAgent and ProvisionAgent use is config.AgentDirForProject(...,
 // hubProjectID) — the broker-side external dir located from the Hub project
-// ID — whatever the project-id marker inside the (shared, container-visible)
-// project dir says, and never the in-project agents dir.
+// ID — whatever the project-id marker inside the shared workspace's project
+// dir says, and never the in-project agents dir.
 
 const (
 	rootHubProjectID       = "66666666-6666-6666-6666-666666666666"
