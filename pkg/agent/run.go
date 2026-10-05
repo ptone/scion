@@ -664,12 +664,21 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// resolved (and the policy, if any, allowed): a non-container-script
 	// harness clears the wrapper and bundle, as WriteProjectPreStartHook
 	// clears a stale project hook below; a container-script harness clears
-	// the bundle, except inputs/, before restaging its own. After a Resolve
+	// the whole bundle, gets the control-plane inputs restaged and restages
+	// its own bundle. After a Resolve
 	// error with no policy attached, the fallback keeps today's behaviour and
 	// leaves the agent home as it is.
 	if !resolveFailed {
 		if err := resetStagedProvisioning(h, agentHome); err != nil {
 			return nil, err
+		}
+		// Restage the control-plane inputs (instructions, system prompt,
+		// resolved skills) recorded at provisioning, so inputs/ holds only
+		// control-plane content.
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			if err := restoreControlPlaneInputs(agentDir, agentHome); err != nil {
+				return nil, fmt.Errorf("restage harness inputs: %w", err)
+			}
 		}
 		// Restage the capture-auth assets a non-container-script harness
 		// keeps in the bundle, as ProvisionAgent stages them.

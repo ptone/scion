@@ -1061,8 +1061,9 @@ func TestHarnessConfigPolicy_RelaunchRestagesCaptureAuth(t *testing.T) {
 }
 
 // Switching an agent from container-script harness-config A to B clears A's
-// staged bundle (secrets, outputs, dialect.yaml, manifest) before B is
-// provisioned, keeping inputs/; B then stages its own bundle.
+// staged bundle (secrets, outputs, dialect.yaml, manifest, inputs) before B
+// is provisioned; the control-plane inputs are restaged and B stages its own
+// bundle.
 func TestHarnessConfigPolicy_ContainerScriptSwitchClearsPreviousBundle(t *testing.T) {
 	e := newPolicyTestEnv(t)
 	e.projectHC(t, "hc-a", policyTestScripted+"# config: a\n")
@@ -1087,7 +1088,7 @@ func TestHarnessConfigPolicy_ContainerScriptSwitchClearsPreviousBundle(t *testin
 	if err := os.MkdirAll(filepath.Join(bundle, "inputs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bundle, "inputs", "system-prompt.md"), []byte("prompt"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(bundle, "inputs", "planted.md"), []byte("planted"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	aStale := []string{
@@ -1115,8 +1116,8 @@ func TestHarnessConfigPolicy_ContainerScriptSwitchClearsPreviousBundle(t *testin
 			t.Errorf("before B's Provision, A's staged file remains: %s (stat err=%v)", p, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(bundle, "inputs", "system-prompt.md")); err != nil {
-		t.Errorf("inputs/ must be kept: %v", err)
+	if _, err := os.Stat(filepath.Join(bundle, "inputs")); !os.IsNotExist(err) {
+		t.Errorf("before B's Provision, inputs/ must be cleared (stat err=%v)", err)
 	}
 
 	// The full launch path: Start with B.
@@ -1127,6 +1128,12 @@ func TestHarnessConfigPolicy_ContainerScriptSwitchClearsPreviousBundle(t *testin
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("after B's launch, A's staged file remains: %s (stat err=%v)", p, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(bundle, "inputs", "planted.md")); !os.IsNotExist(err) {
+		t.Errorf("a file not written by the control plane survived in inputs/ (stat err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(bundle, "inputs", "instructions.md")); err != nil {
+		t.Errorf("control-plane instructions.md not restaged: %v", err)
 	}
 	staged, err := os.ReadFile(filepath.Join(bundle, "config.yaml"))
 	if err != nil || !strings.Contains(string(staged), "# config: b") {
@@ -1154,4 +1161,58 @@ func isCallOf(n ast.Node, names ...string) bool {
 		}
 	}
 	return false
+}
+
+// inputs/ holds only control-plane content: files a harness-config or
+// template home/ tree would copy there are cleared before the control plane
+// stages its inputs at provisioning, and files the workload writes there are
+// replaced on every launch by the control plane's recorded copy.
+func TestHarnessConfigPolicy_InputsOnlyFromControlPlane(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	// A harness-config home/ tree and a template home/ tree that would
+	// place files under .scion/harness/inputs.
+	hcPlant := filepath.Join(e.scion, "harness-configs", "hc-scripted", "home", ".scion", "harness", "inputs")
+	tplDir := e.template(t, "tplx", "harness_config: hc-scripted\n")
+	tplPlant := filepath.Join(tplDir, "home", ".scion", "harness", "inputs")
+	for dir, name := range map[string]string{hcPlant: "from-hc-home.md", tplPlant: "instructions.md"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("copied home content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mgr := policyTestManager(nil)
+	if _, err := mgr.Start(context.Background(), api.StartOptions{Name: "inputs", ProjectPath: e.scion, Template: "tplx", NoAuth: true}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	home := config.GetAgentHomePath(e.scion, "inputs")
+	inputs := filepath.Join(home, ".scion", "harness", "inputs")
+	if _, err := os.Stat(filepath.Join(inputs, "from-hc-home.md")); !os.IsNotExist(err) {
+		t.Errorf("harness-config home/ content landed in inputs/ (stat err=%v)", err)
+	}
+	instr, err := os.ReadFile(filepath.Join(inputs, "instructions.md"))
+	if err != nil || strings.Contains(string(instr), "copied home content") {
+		t.Fatalf("instructions.md must be the control plane's, got %q (err=%v)", instr, err)
+	}
+	controlPlane := string(instr)
+
+	// The workload rewrites a control-plane input and adds its own file.
+	if err := os.WriteFile(filepath.Join(inputs, "instructions.md"), []byte("workload content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inputs, "workload.md"), []byte("workload content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Start(context.Background(), api.StartOptions{Name: "inputs", ProjectPath: e.scion, Template: "tplx", NoAuth: true}); err != nil {
+		t.Fatalf("relaunch: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(inputs, "workload.md")); !os.IsNotExist(err) {
+		t.Errorf("a workload-written file survived in inputs/ (stat err=%v)", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(inputs, "instructions.md")); err != nil || string(got) != controlPlane {
+		t.Errorf("instructions.md not restaged from the control plane's copy: %q (err=%v)", got, err)
+	}
 }

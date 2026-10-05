@@ -1455,8 +1455,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	// Reset staged provisioning state before the harness is provisioned
 	// (resetStagedProvisioning): a non-container-script harness clears the
-	// wrapper and bundle; a container-script harness clears the bundle,
-	// except inputs/, and restages its own below.
+	// wrapper and bundle; a container-script harness clears the whole bundle,
+	// including inputs/ (so content copied from harness-config or template
+	// home/ trees cannot land there), and the control plane restages its
+	// inputs below.
 	if err := resetStagedProvisioning(resolved.Harness, agentHome); err != nil {
 		return "", "", nil, err
 	}
@@ -1616,10 +1618,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 
 		// Stage resolved-skills.json for container-script harnesses
-		recordData, _ := json.MarshalIndent(resolvedSkillsRecord, "", "  ")
-		inputPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json")
-		if info, err := os.Stat(filepath.Dir(inputPath)); err == nil && info.IsDir() {
-			_ = os.WriteFile(inputPath, recordData, 0644)
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			recordData, _ := json.MarshalIndent(resolvedSkillsRecord, "", "  ")
+			inputPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json")
+			if err := os.MkdirAll(filepath.Dir(inputPath), 0755); err == nil {
+				_ = os.WriteFile(inputPath, recordData, 0644)
+			}
 		}
 	}
 
@@ -1989,6 +1993,15 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 		_ = f.Close()
 		util.Debugf("provision: configured git credential helper for shared workspace in %s", gitconfigPath)
+	}
+
+	// Record the per-agent inputs staged above (the control plane is their
+	// only writer since resetStagedProvisioning cleared the bundle), so Start
+	// can restage exactly this content on every launch.
+	if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+		if err := snapshotControlPlaneInputs(agentDir, agentHome); err != nil {
+			return "", "", nil, fmt.Errorf("record harness inputs: %w", err)
+		}
 	}
 
 	// 3. Harness provisioning
