@@ -360,8 +360,21 @@ const ImageProvenanceFileName = "image-provenance.json"
 // (wrapped by callers) the external agent dir a restart needs is absent.
 // Agent state for such a project is never placed in, or read from, the
 // in-project agents root, which sits inside the container-visible workspace.
-// Brokers map it to 409 (re-provision).
+// Brokers map it to 409 (re-provision); see IsAgentStateConflict.
 var ErrAgentStateDirUnavailable = errors.New("agent state directory unavailable")
+
+// ErrAgentStateConflict reports that an agent's broker-side state exists but
+// cannot be used as recorded (for example an unusable image-provenance
+// record). Like ErrAgentStateDirUnavailable, the remedy is to re-provision the
+// agent, and brokers map it to 409; IsAgentStateConflict matches both.
+var ErrAgentStateConflict = errors.New("agent state conflict")
+
+// IsAgentStateConflict reports whether err is one of the agent-state errors a
+// broker answers with 409 (re-provision): ErrAgentStateDirUnavailable or
+// ErrAgentStateConflict.
+func IsAgentStateConflict(err error) bool {
+	return errors.Is(err, ErrAgentStateDirUnavailable) || errors.Is(err, ErrAgentStateConflict)
+}
 
 // AgentsRootForProject returns the agents root a start, restart or provision
 // addresses an agent's broker-side state under:

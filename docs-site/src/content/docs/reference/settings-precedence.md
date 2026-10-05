@@ -802,6 +802,18 @@ shared-workspace flag, as starts do, so both read the same directory. A restart 
 agent directory is missing fails with `409 Conflict` (re-provision) rather than using the
 in-project directory.
 
+Shared-workspace dispatch verifies the project identity before loading project settings. On a
+shared-workspace create, start or restart, the broker compares the project identity recorded in the
+workspace with the project ID the Hub sent, before any project settings are loaded and before the
+provisioned profile is computed. The identity is the `.scion/project-id` marker, or, when `.scion`
+is itself a marker file, the project that file names. If they disagree, the dispatch is refused
+with `409 Conflict`. The workspace value is only compared, never used to choose a directory. A
+`.scion` directory without a project-id marker is accepted unchanged, and project settings then
+come from the in-repo `.scion` only. An unreadable or empty marker file is refused. This also
+applies to a project deleted and re-created under the same name whose workspace still carries the
+old marker: in shared-workspace mode that dispatch is refused rather than silently re-marked.
+Correct the marker or re-provision.
+
 An agent provisioned before image provenance was recorded falls back to its previous behaviour,
 including reading those `agent-info.json` fields: its create-time inline image ranks at the top
 tier, its saved or requested profile drives the override lookup, and the merged

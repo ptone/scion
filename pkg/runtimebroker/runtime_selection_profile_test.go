@@ -499,3 +499,36 @@ func TestRestartAgent_SharedWorkspaceMissingExternalDirIsConflict(t *testing.T) 
 		t.Errorf("expected no Stop/Start/runtime resolution, got stop=%d start=%d aux=%d", mgr.stopCalls, mgr.startCalls, *auxCalls)
 	}
 }
+
+// TestStartAgent_ClassificationMismatchIsConflictBeforeStart is the start twin
+// of TestRestartAgent_ClassificationMismatchIsConflictBeforeStop. The legacy
+// agent's saved profile ("steer") maps to Kubernetes when buildStartContext
+// classifies the runtime; the auxiliary-runtime resolution that classification
+// triggers then remaps "steer" to docker in the project settings, so the
+// handler's authoritative resolution sees docker. The two disagree, so the
+// start is refused with 409 and Start never runs.
+func TestStartAgent_ClassificationMismatchIsConflictBeforeStart(t *testing.T) {
+	srv, mgr, _, dotScion := handlerSteerFixture(t, "")
+	srv.resolveAuxiliaryRuntime = func(_, _, _ string) runtime.Runtime {
+		writeProjectSettings(t, dotScion, `schema_version: "1"
+active_profile: prov
+profiles:
+  prov:
+    runtime: local-docker
+  steer:
+    runtime: local-docker
+runtimes:
+  local-docker:
+    type: docker
+`)
+		return &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	}
+	body := `{"projectPath": ` + strconvQuote(dotScion) + `, "resolvedEnv": {"SCION_METADATA_MODE": "passthrough", "SCION_METADATA_MODE_SOURCE": "hub"}}`
+	w := postAgentOp(t, srv, "start", body)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "differs from the runtime it resolves to") {
+		t.Fatalf("expected 409 classification mismatch, got %d: %s", w.Code, w.Body.String())
+	}
+	if mgr.startCalls != 0 {
+		t.Errorf("expected no Start, got %d", mgr.startCalls)
+	}
+}

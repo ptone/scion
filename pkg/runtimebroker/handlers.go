@@ -768,6 +768,19 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
 	}
 
+	// Shared-workspace dispatch verifies the project identity before loading
+	// project settings: env-gather and the NFS check below load them before
+	// buildStartContext (which repeats this check) does (ptone/scion#1799).
+	if req.Config != nil && req.Config.SharedWorkspace {
+		if err := verifySharedProjectIdentity(req.ProjectPath, req.ProjectID); err != nil {
+			sce := s.projectIdentityStartContextError(err, req.Name)
+			markAttemptFailed(sce.Status, "shared-workspace project identity check failed")
+			span.SetStatus(codes.Error, "shared-workspace project identity check failed")
+			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
+			return
+		}
+	}
+
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
 	// This needs the resolved project path and merged env to determine which keys are missing.
 	if req.GatherEnv && !req.NoAuth {
@@ -1195,7 +1208,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			span.SetStatus(codes.Error, err.Error())
-			if errors.Is(err, config.ErrAgentStateDirUnavailable) {
+			if config.IsAgentStateConflict(err) {
 				markAttemptFailed(http.StatusConflict, "failed to provision agent")
 				writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to provision agent: "+err.Error(), nil)
 				return
@@ -2306,7 +2319,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		if errors.Is(err, agent.ErrContainerNameInUse) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), details)
-		} else if errors.Is(err, config.ErrAgentStateDirUnavailable) {
+		} else if config.IsAgentStateConflict(err) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
 		} else {
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("start agent", err).Error(), details)
@@ -2722,12 +2735,6 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	if restartReq.Image != "" {
 		opts.Image = restartReq.Image
 	}
-	if restartReq.SharedWorkspace {
-		// Start then reads and writes the agent's state under the same
-		// (external) agents root as its start, and runtime selection below
-		// reads provenance from that root.
-		opts.SharedWorkspace = true
-	}
 
 	if opts.ProjectPath != "" {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
@@ -2801,7 +2808,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// The stop above and Manager.Start may have acted, so mark the
 		// failure for the hub, and report the run the runtime holds now.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
-		if errors.Is(err, config.ErrAgentStateDirUnavailable) {
+		if config.IsAgentStateConflict(err) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to restart agent: "+err.Error(), details)
 			return
 		}
