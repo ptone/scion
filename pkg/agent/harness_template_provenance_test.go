@@ -23,14 +23,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// TestStart_AgentInfoTemplateDoesNotSteerHarnessResolve pins that, for an
+// TestStart_AgentInfoTemplateDoesNotChangeHarnessResolve pins that, for an
 // agent with broker-side image provenance, the template whose bundled
 // harness-config harness.Resolve uses comes from the provenance record, not
-// from agent-info.json (container-writable). Templates alpha and beta both
+// from agent-info.json. Templates alpha and beta both
 // bundle a harness-config named test-harness, with different contents;
 // rewriting agent-info.json's template to beta must not change the resolved
 // harness-config (observed through its revision).
-func TestStart_AgentInfoTemplateDoesNotSteerHarnessResolve(t *testing.T) {
+func TestStart_AgentInfoTemplateDoesNotChangeHarnessResolve(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldWd, _ := os.Getwd()
 	_ = os.Chdir(tmpDir)

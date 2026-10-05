@@ -235,6 +235,11 @@ func TestCreateAgentGate_LaunchReusesGateHydratedBundle(t *testing.T) {
 	if mgr.lastOpts.HarnessConfigPath != cachedPath {
 		t.Errorf("launch HarnessConfigPath = %q, want the gate-hydrated %q", mgr.lastOpts.HarnessConfigPath, cachedPath)
 	}
+	// The prehydrated path carries the dispatch's harness-config ID with the
+	// path (currentHarnessConfigIdentity needs it for a hub-hydrated config).
+	if mgr.lastOpts.HarnessConfigID != "hc-id" {
+		t.Errorf("launch HarnessConfigID = %q, want hc-id", mgr.lastOpts.HarnessConfigID)
+	}
 }
 
 // (d) allow=true: the gate does not hydrate; only launch does (one call).
@@ -251,6 +256,9 @@ func TestCreateAgentGate_AllowTrueDoesNotHydrateEarly(t *testing.T) {
 	}
 	if mgr.lastOpts.HarnessConfigPath != cachedPath {
 		t.Errorf("launch HarnessConfigPath = %q, want %q", mgr.lastOpts.HarnessConfigPath, cachedPath)
+	}
+	if mgr.lastOpts.HarnessConfigID != "hc-id" {
+		t.Errorf("launch HarnessConfigID = %q, want hc-id", mgr.lastOpts.HarnessConfigID)
 	}
 }
 
@@ -376,6 +384,9 @@ func TestStartAgentGate_HydratedConfig(t *testing.T) {
 		}
 		if got := mgr.LastStartOpts().HarnessConfigPath; got != path {
 			t.Errorf("start HarnessConfigPath = %q, want %q", got, path)
+		}
+		if got := mgr.LastStartOpts().HarnessConfigID; got != "hc-id" {
+			t.Errorf("start HarnessConfigID = %q, want hc-id", got)
 		}
 		if got := h.f.calls.Load(); got != 1 {
 			t.Errorf("expected one hydration per start, got %d", got)

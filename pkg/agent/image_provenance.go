@@ -28,10 +28,10 @@ import (
 
 // imageProvenanceFile is the broker-side agent state file that records each
 // image input ProvisionAgent saw. It lives in the agent dir next to
-// scion-agent.json — not in the agent home (agent-info.json), which is
-// mounted into the container — so the container cannot influence the image
-// a later Start selects (ptone/scion#1799). Image provenance (including the
-// provisioned profile) is recorded broker-side.
+// scion-agent.json, outside every container mount (not in the agent home,
+// where agent-info.json lives), so the image a later Start selects is
+// resolved from broker-side agent state (ptone/scion#1799). Image provenance
+// (including the provisioned profile) is recorded broker-side.
 const imageProvenanceFile = config.ImageProvenanceFileName
 
 // imageProvenanceVersion is written into every record. A record without it
@@ -68,8 +68,8 @@ type imageProvenance struct {
 	// Profile is the settings profile the agent was provisioned with
 	// (after the active-profile fallback). Start uses only this profile to
 	// look up the profile harness_overrides image and pull policy and the
-	// profile image_registry, so no agent-info.json field can steer image
-	// selection.
+	// profile image_registry; image selection reads no agent-info.json
+	// field.
 	//
 	// An empty Profile means no profile was set or active at provision; the
 	// profile active at start time then applies, as for any settings
@@ -98,8 +98,8 @@ func writeImageProvenance(agentDir string, p imageProvenance) error {
 // only when the file is genuinely absent — an agent provisioned before
 // provenance was recorded — in which case Start uses its legacy behaviour.
 // A file that exists but cannot be read, does not parse, or lacks the
-// version marker is an error: Start must fail rather than fall back to
-// agent-info.json, which the container can write.
+// version marker is an error: Start fails rather than fall back to
+// agent-info.json.
 func readImageProvenance(agentDir string) (*imageProvenance, error) {
 	if agentDir == "" {
 		return nil, nil
@@ -188,27 +188,28 @@ func (e *AgentStateDirError) Is(target error) bool {
 // provenance file (provisioned before it was recorded); a file that exists
 // but is unusable is an *ImageProvenanceError, never a silent fallback.
 //
-// The agent dir is config.AgentDirForProject(projectDir, agentName,
-// sharedWorkspace, hubProjectID) — the broker-side external root for a
-// shared-workspace project, located from the Hub-supplied project ID — with
-// no probing of the other agents root: in a shared-workspace project the
-// in-project root sits inside the container-visible /workspace, so it must
-// never supply this record (ptone/scion#1799). For a shared-workspace agent,
-// an undeterminable external root is an *AgentStateDirError, and so is a
-// missing agent dir when mustExist (a restart) is set.
+// The agent dir is AgentStateDir's (strict, as for every broker caller): the
+// same directory GetAgent and ProvisionAgent use, including the effective
+// shared-workspace detection for an agent whose state is in the external
+// agents root although the request does not carry sharedWorkspace, and with
+// no fallback to the other agents root (ptone/scion#1799). For a
+// shared-workspace agent, an undeterminable external root is an
+// *AgentStateDirError, and so is a missing agent dir when mustExist (a
+// restart) is set.
 func ProvisionedProfile(projectPath, agentName string, sharedWorkspace bool, hubProjectID string, mustExist bool) (profile string, ok bool, err error) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return "", false, nil
 	}
-	agentDir, err := config.AgentDirForProject(projectDir, agentName, sharedWorkspace, hubProjectID)
+	// The broker's callers are always strict (broker mode).
+	agentDir, shared, err := AgentStateDir(projectDir, agentName, sharedWorkspace, hubProjectID, true)
 	if err != nil {
-		if sharedWorkspace {
+		if shared {
 			return "", false, &AgentStateDirError{Err: withoutHostPath(err)}
 		}
 		return "", false, nil
 	}
-	if sharedWorkspace && mustExist {
+	if shared && mustExist {
 		if _, statErr := os.Stat(agentDir); statErr != nil {
 			return "", false, &AgentStateDirError{Path: agentDir, Err: errors.New("external agent directory does not exist")}
 		}

@@ -801,12 +801,12 @@ start or restart fails with an error asking you to re-provision the agent (`scio
 delete and re-create it); a broker returns `409 Conflict`. It never falls back to
 `agent-info.json`.
 
-For a shared-workspace agent, the record lives in the broker-side external agent directory, which
-the broker locates from the Hub-supplied project ID, never from the in-project agents directory
-inside the shared workspace or from the workspace's project-id marker. Restarts carry the
-shared-workspace flag, as starts do, so both read the same directory. A restart whose external
-agent directory is missing fails with `409 Conflict` (re-provision) rather than using the
-in-project directory.
+For a shared-workspace agent, the record lives in the broker-side external agent directory, outside
+every container mount, which the broker locates from the Hub-supplied project ID. The in-project
+agents directory and the workspace's project-id marker do not affect where it is read. Restarts
+carry the shared-workspace flag, as starts do, so both read the same directory. A broker start or
+restart of a shared-workspace agent whose external agent directory is missing fails with `409
+Conflict` (re-provision); the in-project directory is not used.
 
 Shared-workspace dispatch verifies the project identity before loading project settings. On a
 shared-workspace create, start or restart, the broker compares the project identity recorded in the
@@ -817,8 +817,9 @@ with `409 Conflict`. The workspace value is only compared, never used to choose 
 `.scion` directory without a project-id marker is accepted unchanged, and project settings then
 come from the in-repo `.scion` only. An unreadable or empty marker file is refused. This also
 applies to a project deleted and re-created under the same name whose workspace still carries the
-old marker: in shared-workspace mode that dispatch is refused rather than silently re-marked.
-Correct the marker or re-provision.
+old marker: in shared-workspace mode that dispatch is refused with `409 Conflict`. To resolve it,
+remove or correct the workspace's `.scion/project-id` (or the `.scion` marker file) so it names the
+agent's Hub project, or re-link the project.
 
 An agent provisioned before image provenance was recorded falls back to its previous behaviour,
 including reading those `agent-info.json` fields: its create-time inline image ranks at the top
@@ -847,7 +848,11 @@ overwritten with the image the broker reports. The broker's provision-only respo
 image `Start` will run. The field never feeds a later dispatch, so a hub restart re-resolves the
 profile-override, settings and file tiers live rather than freezing the image applied at creation.
 [Reincarnating an Agent](/scion/local/agent-lifecycle/#reincarnating-an-agent)'s plan preview
-mirrors this same image precedence.
+approximates this image precedence from the Hub's own view. It can differ from what the broker
+runs: it still starts from an image set on the Hub template record, which the broker no longer
+applies, and when the broker resolves the agent's harness config itself the preview cannot look up
+the profile override. The broker resolves the final image, including the profile override, and the
+image it reports replaces the preview once the agent starts.
 
 :::note[Two different processes' settings, not one]
 `Start`'s tiers above are resolved against the **broker's own** `LoadEffectiveSettings` call
@@ -878,8 +883,8 @@ effect on the next start or restart. A user's explicit image stays the top tier 
 restart, locally and via the Hub. The Hub sends only the user's explicit image as the top tier
 (see above), so a template image is resolved at the template tier everywhere and the broker's
 reported image no longer freezes. The plain `harness_configs.<name>` defaults still rank below the
-template. The broker's provision-only response and the reincarnate plan preview report the same
-resolved image.
+template. The broker's provision-only response reports the image `Start` will run; the reincarnate
+plan preview approximates it (see above).
 
 **Upgrade both sides:** the new precedence needs the Hub *and* the Runtime Broker at this version
 or later. An older broker ignores the start/restart `image` key and still ranks a template's image
@@ -896,8 +901,9 @@ template image from the template's files. Put it in the template file.
 **Behaviour change to watch for:** a profile that sets `harness_overrides.<name>.image` now
 overrides the image of every template that uses that harness config under that profile. Remove
 the override, or pass `--image`, if a template's own image must win. Conversely, a create-time
-`--image` (or `--config` image) now persists across plain restarts; a later `scion start --image`
-applies to that one start only. Re-create the agent to drop a create-time image.
+`--image` (or `--config` image) now persists across plain restarts; a later local `scion start
+--image` applies to that one start only (in Hub mode, `--image` is not applied to an existing
+agent). Re-create the agent to drop a create-time image.
 
 #### `Changed in ptone/scion#2156` — Hub settings now wins over the harness-config file's image default
 

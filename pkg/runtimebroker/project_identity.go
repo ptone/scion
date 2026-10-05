@@ -34,18 +34,19 @@ type projectIdentityError struct {
 
 func (e *projectIdentityError) Error() string {
 	return "shared-workspace dispatch verifies the project identity before loading project settings: " + e.Reason +
-		"; restore the workspace's project identity to this agent's Hub project, or re-provision the agent"
+		"; remove or correct the workspace's .scion/project-id (or the .scion marker file) so it names this agent's Hub project, or re-link the project"
 }
 
 // verifySharedProjectIdentity is the shared-workspace dispatch check that
 // runs before any project settings are loaded (create, start and restart):
 // in a shared-workspace project the project's .scion — its project-id marker
 // or, for a marker-file project, the marker file itself — sits inside the
-// container-visible workspace, and settings resolution follows it (the
+// shared workspace mount, and settings resolution follows it (the
 // marker chooses the external settings dir and hub.project_id; a marker file
 // chooses the project dir itself). The marker is never used to select
 // anything here: it is only compared with the Hub-supplied project ID of the
-// dispatch, and any disagreement denies the dispatch (ptone/scion#1799).
+// dispatch, and a marker that disagrees with the Hub project ID is refused
+// (ptone/scion#1799).
 //
 //   - .scion is a directory (git project): its project-id must be absent or
 //     empty (settings then come from the in-repo .scion only, as before; the

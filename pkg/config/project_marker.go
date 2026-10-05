@@ -374,7 +374,7 @@ const ImageProvenanceFileName = "image-provenance.json"
 // root cannot be determined (no Hub project ID and no project-id marker), or
 // (wrapped by callers) the external agent dir a restart needs is absent.
 // Agent state for such a project is never placed in, or read from, the
-// in-project agents root, which sits inside the container-visible workspace.
+// in-project agents root, which sits inside the shared workspace mount.
 // Brokers map it to 409 (re-provision); see IsAgentStateConflict.
 var ErrAgentStateDirUnavailable = errors.New("agent state directory unavailable")
 
@@ -397,9 +397,8 @@ func IsAgentStateConflict(err error) bool {
 //   - not shared: <projectDir>/agents;
 //   - shared, with a Hub-supplied project ID: the external root
 //     ~/.scion/project-configs/<slug>__<id>/.scion/agents derived from that ID
-//     (the same naming GetGitProjectExternalAgentsDir uses), never from the
-//     project-id marker inside projectDir, which a shared-workspace project's
-//     container can write;
+//     (the same naming GetGitProjectExternalAgentsDir uses); the project-id
+//     marker inside projectDir does not affect it;
 //   - shared, without a Hub project ID (a local CLI start): the external root
 //     from the project-id marker, as GetGitProjectExternalAgentsDir;
 //   - shared, but no external root can be determined: ErrAgentStateDirUnavailable,

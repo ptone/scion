@@ -876,7 +876,7 @@ type hubProjectIDContextKey struct{}
 
 // ContextWithHubProjectID attaches the Hub-supplied project ID of a broker
 // dispatch. Agent-dir resolution uses it, not the project-id marker inside
-// the (possibly container-visible) project directory, to locate a
+// the project directory, to locate a
 // shared-workspace project's broker-side external agents root.
 func ContextWithHubProjectID(ctx context.Context, projectID string) context.Context {
 	if projectID == "" {
