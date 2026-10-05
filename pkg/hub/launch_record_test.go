@@ -344,6 +344,8 @@ func TestDispatchLaunchIDRecordFailure(t *testing.T) {
 
 // TestDispatchLaunchIDActiveLaunch: a start or restart issued while an async
 // launch is in flight makes no broker call and leaves that launch in place.
+// The launch guard refuses it before a launch id is recorded; RecordLaunch's
+// own refusal is covered by TestRecordLaunchActiveLaunch.
 func TestDispatchLaunchIDActiveLaunch(t *testing.T) {
 	for _, op := range []string{"start", "restart"} {
 		t.Run(op, func(t *testing.T) {
@@ -358,7 +360,7 @@ func TestDispatchLaunchIDActiveLaunch(t *testing.T) {
 			d := NewHTTPAgentDispatcherWithClient(cs, client, false, slog.Default())
 
 			err = dispatchOp(ctx, d, op, agent)
-			require.ErrorIs(t, err, store.ErrLaunchInFlight)
+			require.ErrorIs(t, err, ErrLaunchInFlight)
 			assert.Empty(t, client.sent, "no broker call")
 			row := launchRow(t, cs, agent.ID)
 			assert.Equal(t, active, row.LaunchID, "the in-flight launch is not replaced")
