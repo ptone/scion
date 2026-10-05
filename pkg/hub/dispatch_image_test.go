@@ -242,8 +242,7 @@ func TestApplyAgentUpdate_EchoedImageNotFrozenIntoInlineConfig(t *testing.T) {
 // TestDispatchAgentRestart_CarriesSharedWorkspace: a restart of a
 // shared-workspace agent tells the broker so (as a start already does), so
 // the broker reads and writes the agent's state under the same broker-side
-// agents root as its start, never the in-project root inside the
-// container-visible workspace (ptone/scion#1799).
+// agents root as its start (ptone/scion#1799).
 func TestDispatchAgentRestart_CarriesSharedWorkspace(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {

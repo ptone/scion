@@ -206,3 +206,21 @@ func TestBuildStartContext_HarnessConfigDriftWarn(t *testing.T) {
 		t.Errorf("expected a drift WARN from buildStartContext, got log: %s", logBuf.String())
 	}
 }
+
+// TestSameDir covers warnHarnessConfigDrift's short-circuit when the
+// broker-local copy found by name is the hydrated directory itself (the same
+// path, or a symlink to it).
+func TestSameDir(t *testing.T) {
+	dir := t.TempDir()
+	other := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if !sameDir(dir, dir) || !sameDir(dir, link) {
+		t.Error("expected the same directory (directly and via a symlink) to match")
+	}
+	if sameDir(dir, other) {
+		t.Error("expected different directories not to match")
+	}
+}

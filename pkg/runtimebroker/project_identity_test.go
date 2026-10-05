@@ -64,7 +64,7 @@ func TestVerifySharedProjectIdentity(t *testing.T) {
 			t.Fatalf("no .scion at all: %v", err)
 		}
 	})
-	t.Run("forged marker is denied without leaking the path", func(t *testing.T) {
+	t.Run("mismatched marker is refused without the host path in the message", func(t *testing.T) {
 		root, _ := identityProjectDir(t, "99999999-9999-9999-9999-999999999999")
 		err := verifySharedProjectIdentity(root, identityHubProjectID)
 		if err == nil {
@@ -72,6 +72,9 @@ func TestVerifySharedProjectIdentity(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), root) {
 			t.Errorf("message must not contain the host path: %v", err)
+		}
+		if !strings.Contains(err.Error(), "remove or correct the workspace's .scion/project-id") || strings.Contains(err.Error(), "re-provision") {
+			t.Errorf("message must name the marker fix, not re-provisioning: %v", err)
 		}
 	})
 	t.Run("marker file", func(t *testing.T) {
@@ -103,12 +106,12 @@ func TestVerifySharedProjectIdentity(t *testing.T) {
 	})
 }
 
-// TestCreateAgent_ForgedMarkerDeniedBeforeProvision pins C-ADD-2 on the create
+// TestCreateAgent_MismatchedMarkerRefusedBeforeProvision pins C-ADD-2 on the create
 // path: a shared-workspace create whose project-id marker disagrees with the
 // Hub project ID is refused with 409 before Manager.Provision runs, so a
-// forged marker can never steer the settings ProvisionAgent loads, nor the
+// marker that disagrees with the Hub project ID never selects the settings ProvisionAgent loads, nor the
 // provisioned profile it records in image provenance.
-func TestCreateAgent_ForgedMarkerDeniedBeforeProvision(t *testing.T) {
+func TestCreateAgent_MismatchedMarkerRefusedBeforeProvision(t *testing.T) {
 	srv, mgr := newHubDefaultsWiringServer()
 	t.Setenv("HOME", t.TempDir())
 	root, _ := identityProjectDir(t, "99999999-9999-9999-9999-999999999999")
@@ -144,18 +147,18 @@ func TestCreateAgent_MatchingMarkerProvisions(t *testing.T) {
 	}
 }
 
-// TestStartRestart_ForgedMarkerIsConflict: shared-workspace start and restart
+// TestStartRestart_MismatchedMarkerIsConflict: shared-workspace start and restart
 // with a disagreeing marker are refused with 409 before Start (and, for
 // restart, before Stop); the same agent without the shared flag is
 // unaffected (the check applies to shared-workspace dispatch only).
-func TestStartRestart_ForgedMarkerIsConflict(t *testing.T) {
+func TestStartRestart_MismatchedMarkerIsConflict(t *testing.T) {
 	for _, op := range []string{"start", "restart"} {
 		t.Run(op, func(t *testing.T) {
-			srv, mgr, _, dotScion := handlerSteerFixture(t, "")
+			srv, mgr, _, dotScion := handlerProfileFixture(t, "")
 			if err := config.WriteProjectID(dotScion, "99999999-9999-9999-9999-999999999999"); err != nil {
 				t.Fatal(err)
 			}
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/steer-agent/"+op+"?projectId="+identityHubProjectID,
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/saved-profile-agent/"+op+"?projectId="+identityHubProjectID,
 				strings.NewReader(`{"sharedWorkspace": true, "projectPath": `+strconvQuote(dotScion)+`}`))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
@@ -170,24 +173,59 @@ func TestStartRestart_ForgedMarkerIsConflict(t *testing.T) {
 	}
 }
 
-// TestCreateAgent_ForgedMarkerDeniedBeforeEnvGather: env-gather loads project
-// settings before buildStartContext, so the create handler checks the project
-// identity before it as well.
-func TestCreateAgent_ForgedMarkerDeniedBeforeEnvGather(t *testing.T) {
-	srv, mgr := newHubDefaultsWiringServer()
-	t.Setenv("HOME", t.TempDir())
-	root, _ := identityProjectDir(t, "99999999-9999-9999-9999-999999999999")
-	body := `{"name": "identity-agent", "id": "agent-uuid-identity", "slug": "identity-agent", "gatherEnv": true,
-		"projectId": "` + identityHubProjectID + `", "projectPath": ` + strconvQuote(root) + `,
-		"config": {"template": "claude", "sharedWorkspace": true}}`
+// TestCreateAgent_MismatchedMarkerRefusedBeforeEnvGatherSettings
+// (final-broker #2): env-gather loads project settings before
+// buildStartContext. Here those settings declare an env key the request does
+// not supply, so without createAgent's own early identity check the create
+// would answer env-gather's 202; with it, the mismatched marker is refused
+// with 409 first.
+func TestCreateAgent_MismatchedMarkerRefusedBeforeEnvGatherSettings(t *testing.T) {
+	srv, _, projectDir := newTestServerWithProjectPath(t, `
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+    env:
+      REQUIRED_KEY: ""
+profiles:
+  default:
+    runtime: mock
+`)
+	dotScion := filepath.Join(t.TempDir(), "proj", ".scion")
+	if err := os.MkdirAll(filepath.Dir(dotScion), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(projectDir, dotScion); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteProjectID(dotScion, "99999999-9999-9999-9999-999999999999"); err != nil {
+		t.Fatal(err)
+	}
+	// Settings resolution follows the marker to its external config dir;
+	// put the same settings there, so env-gather would report the missing
+	// key if it ran.
+	extConfig, err := config.GetGitProjectExternalConfigDir(dotScion)
+	if err != nil || extConfig == "" {
+		t.Fatalf("external config dir: %q, %v", extConfig, err)
+	}
+	if err := os.MkdirAll(extConfig, 0755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dotScion, "settings.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extConfig, "settings.yaml"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"name": "gather-agent", "id": "agent-uuid-gather", "gatherEnv": true,
+		"projectId": "` + identityHubProjectID + `", "projectPath": ` + strconvQuote(dotScion) + `,
+		"config": {"template": "claude", "profile": "default", "sharedWorkspace": true}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "verifies the project identity") {
-		t.Fatalf("expected 409 identity mismatch before env-gather, got %d: %s", w.Code, w.Body.String())
-	}
-	if mgr.provisionCalled {
-		t.Fatal("Provision must not run")
+		t.Fatalf("expected 409 before env-gather, got %d: %s", w.Code, w.Body.String())
 	}
 }

@@ -39,6 +39,13 @@ import (
 // (a record uploaded with CRLF content or transient files hashes
 // differently); dispatchHash, the record hash the dispatch carried, is
 // logged alongside when present.
+//
+// Coverage limits, by design:
+//   - Only the project and global harness-configs/<name> directories are
+//     compared (FindHarnessConfigDir with no template paths); a copy bundled
+//     in a template is not.
+//   - The content hash covers file contents, not file paths (the hub's
+//     algorithm), so a difference that is only a rename does not WARN.
 func (s *Server) warnHarnessConfigDrift(agentID, name, hydratedPath, projectPath, dispatchHash string) {
 	if hydratedPath == "" {
 		return

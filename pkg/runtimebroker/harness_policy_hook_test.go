@@ -319,3 +319,33 @@ func TestHarnessPolicyHook_NotEvaluatedRefusal(t *testing.T) {
 		})
 	}
 }
+
+// TestHarnessPolicyHook_RestartEarlyCheckBeforeStop (final-broker #3): restart
+// evaluates the harness-config policy against the agent's saved harness-config
+// before the stop. A scripted harness-config with the policy attached is
+// refused with 403, the agent is not stopped, and the refusal carries no
+// start-attempted details.
+func TestHarnessPolicyHook_RestartEarlyCheckBeforeStop(t *testing.T) {
+	srv, mgr, globalScion := dispatchTestEnv(t, false)
+	writeHarnessConfig(t, globalScion, "scripted-hc", scriptedHarnessYAML)
+	agentHome := config.GetAgentHomePath(globalScion, "restart-gate-agent")
+	if err := os.MkdirAll(agentHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), []byte(`{"name": "restart-gate-agent", "harnessConfig": "scripted-hc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mgr.agents = []api.AgentInfo{{
+		ID: "restart-gate-agent", Name: "restart-gate-agent", ContainerID: "restart-gate-agent",
+		ProjectPath: globalScion, Phase: "running",
+		Labels: map[string]string{"scion.name": "restart-gate-agent"},
+	}}
+	code, body := postAgentAction(t, srv, "restart-gate-agent", "restart", `{}`)
+	assertPolicyRefusal(t, code, body, "scripted-hc")
+	if mgr.stopCalls != 0 || mgr.StartCalls() != 0 {
+		t.Fatalf("expected the early check to refuse before Stop/Start, got stop=%d start=%d", mgr.stopCalls, mgr.StartCalls())
+	}
+	if d := refusalDetails(t, body); d[api.BrokerErrorDetailStartAttempted] != nil {
+		t.Errorf("early-check refusal must not carry %s, got %v", api.BrokerErrorDetailStartAttempted, d)
+	}
+}

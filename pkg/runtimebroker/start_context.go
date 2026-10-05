@@ -404,9 +404,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// re-running this same check after their own, later resolution.
 	//
 	// Start/restart classify the runtime with the provisioned profile
-	// recorded in broker-side image provenance when the agent has it, not
-	// the agent-info.json profile (GetSavedProfile), which the container
-	// can write: this classification picks the default GCP metadata mode
+	// recorded in broker-side image provenance when the agent has it, rather
+	// than the agent-info.json profile (GetSavedProfile): this classification
+	// picks the default GCP metadata mode
 	// when the hub sends none, the Kubernetes assign mapping, the hub
 	// endpoint and extra hosts (ptone/scion#1799). An unusable provenance
 	// file fails closed (409, re-provision); an agent without one keeps
@@ -821,8 +821,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		opts.ProjectPreStartHookScript = in.Config.ProjectPreStartHookScript
 	}
 	// The Hub-supplied project ID locates a shared-workspace project's
-	// broker-side external agents root (never the project-id marker inside
-	// the container-visible workspace).
+	// broker-side external agents root; the project-id marker inside the
+	// workspace does not affect it.
 	opts.HubProjectID = in.ProjectID
 	if in.SharedWorkspace {
 		opts.SharedWorkspace = true

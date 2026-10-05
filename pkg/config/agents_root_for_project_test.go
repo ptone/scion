@@ -47,7 +47,7 @@ func TestAgentsRootForProject_NotShared(t *testing.T) {
 
 // TestAgentsRootForProject_HubProjectIDWinsOverMarker pins C-ROOT-5: with a
 // Hub-supplied project ID, the external root derives from that ID, not from
-// the project-id marker inside the (container-writable) project dir.
+// the project-id marker inside the project dir.
 func TestAgentsRootForProject_HubProjectIDWinsOverMarker(t *testing.T) {
 	const hubID = "22222222-2222-2222-2222-222222222222"
 	projectDir := newAgentsRootProject(t, hubID)
@@ -55,7 +55,7 @@ func TestAgentsRootForProject_HubProjectIDWinsOverMarker(t *testing.T) {
 	if err != nil || want == "" {
 		t.Fatalf("precondition: marker-based external dir = %q, %v", want, err)
 	}
-	// Tamper with the marker.
+	// Rewrite the marker to name another project.
 	if err := WriteProjectID(projectDir, "99999999-9999-9999-9999-999999999999"); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestAgentsRootForProject_HubProjectIDWinsOverMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got != want {
-		t.Fatalf("external root = %q, want %q (derived from the Hub project ID, unchanged by the tampered marker)", got, want)
+		t.Fatalf("external root = %q, want %q (derived from the Hub project ID, unchanged by a marker that names another project)", got, want)
 	}
 	if strings.HasPrefix(got, projectDir) {
 		t.Fatalf("external root %q must not be under the project dir", got)

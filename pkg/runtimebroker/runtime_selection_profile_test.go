@@ -31,17 +31,17 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// runtimeSteerFixture builds a docker-default broker whose project settings
-// map profile "prov" to docker and profile "steer" to Kubernetes, plus an
-// agent dir whose agent-info.json (container-writable) names "steer".
+// runtimeProfileFixture builds a docker-default broker whose project settings
+// map profile "prov" to docker and profile "saved" to Kubernetes, plus an
+// agent dir whose agent-info.json names "saved".
 // provenance, when non-empty, is written as the agent's broker-side
 // image-provenance.json.
-func runtimeSteerFixture(t *testing.T, provenance string) (*Server, string, string) {
+func runtimeProfileFixture(t *testing.T, provenance string) (*Server, string, string) {
 	t.Helper()
 	srv := newDiscoveryTestServer(t, "docker")
 	srv.config.ForceRuntime = ""
 	srv.resolveAuxiliaryRuntime = func(_, _, _ string) runtime.Runtime {
-		return fakeKubernetesRuntime("cluster-steer", "ns-steer")
+		return fakeKubernetesRuntime("cluster-saved", "ns-saved")
 	}
 	projectDir := t.TempDir()
 	writeProjectSettings(t, projectDir, `schema_version: "1"
@@ -49,17 +49,17 @@ active_profile: prov
 profiles:
   prov:
     runtime: local-docker
-  steer:
-    runtime: k8s-steer
+  saved:
+    runtime: k8s-saved
 runtimes:
   local-docker:
     type: docker
-  k8s-steer:
+  k8s-saved:
     type: kubernetes
-    context: cluster-steer
-    namespace: ns-steer
+    context: cluster-saved
+    namespace: ns-saved
 `)
-	const id = "steer-agent"
+	const id = "saved-profile-agent"
 	agentDir := filepath.Join(projectDir, "agents", id)
 	if err := os.MkdirAll(filepath.Join(agentDir, "home"), 0755); err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ runtimes:
 	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"harness_config": "x"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"), []byte(`{"name": "steer-agent", "profile": "steer"}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"), []byte(`{"name": "saved-profile-agent", "profile": "saved"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if provenance != "" {
@@ -84,11 +84,11 @@ runtimes:
 // agent starts on. That runtime decides whether the bare-image local-exists
 // check runs, and so whether the image_registry prefix is applied.
 func TestRuntimeSelectionOpts_ProvenanceProfileSelectsRuntime(t *testing.T) {
-	srv, projectDir, id := runtimeSteerFixture(t, `{"version": 1, "profile": "prov"}`)
+	srv, projectDir, id := runtimeProfileFixture(t, `{"version": 1, "profile": "prov"}`)
 
 	saved := agent.GetSavedProfile(id, projectDir)
-	if saved != "steer" {
-		t.Fatalf("precondition: saved profile = %q, want steer", saved)
+	if saved != "saved" {
+		t.Fatalf("precondition: saved profile = %q, want saved", saved)
 	}
 	opts := api.StartOptions{Name: id, ProjectPath: projectDir, Profile: saved}
 	runtimeOpts, err := runtimeSelectionOpts(opts, id, false)
@@ -98,7 +98,7 @@ func TestRuntimeSelectionOpts_ProvenanceProfileSelectsRuntime(t *testing.T) {
 	if runtimeOpts.Profile != "prov" {
 		t.Fatalf("runtime-selection profile = %q, want the provisioned profile prov", runtimeOpts.Profile)
 	}
-	if opts.Profile != "steer" {
+	if opts.Profile != "saved" {
 		t.Fatalf("runtimeSelectionOpts must not mutate opts; Profile = %q", opts.Profile)
 	}
 	if _, rtType := srv.resolveManagerForOpts(runtimeOpts); rtType != "docker" {
@@ -108,15 +108,15 @@ func TestRuntimeSelectionOpts_ProvenanceProfileSelectsRuntime(t *testing.T) {
 
 // TestRuntimeSelectionOpts_LegacyAgentKeepsSavedProfile: with no provenance
 // file the saved profile still selects the runtime (pre-existing
-// behaviour), which also shows the fixture's steer would otherwise apply.
+// behaviour), which also shows the saved profile would otherwise apply.
 func TestRuntimeSelectionOpts_LegacyAgentKeepsSavedProfile(t *testing.T) {
-	srv, projectDir, id := runtimeSteerFixture(t, "")
+	srv, projectDir, id := runtimeProfileFixture(t, "")
 	opts := api.StartOptions{Name: id, ProjectPath: projectDir, Profile: agent.GetSavedProfile(id, projectDir)}
 	runtimeOpts, err := runtimeSelectionOpts(opts, id, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtimeOpts.Profile != "steer" {
+	if runtimeOpts.Profile != "saved" {
 		t.Fatalf("legacy runtime-selection profile = %q, want the saved profile", runtimeOpts.Profile)
 	}
 	if _, rtType := srv.resolveManagerForOpts(runtimeOpts); rtType != "kubernetes" {
@@ -129,8 +129,8 @@ func TestRuntimeSelectionOpts_LegacyAgentKeepsSavedProfile(t *testing.T) {
 // profile.
 func TestRuntimeSelectionOpts_UnusableProvenanceFailsClosed(t *testing.T) {
 	for _, body := range []string{"{not json", `{"profile": "prov"}`} {
-		_, projectDir, id := runtimeSteerFixture(t, body)
-		_, err := runtimeSelectionOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: "steer"}, id, false)
+		_, projectDir, id := runtimeProfileFixture(t, body)
+		_, err := runtimeSelectionOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: "saved"}, id, false)
 		if err == nil || !strings.Contains(err.Error(), "re-provision the agent") {
 			t.Fatalf("body %q: expected an actionable provenance error, got %v", body, err)
 		}
@@ -173,7 +173,7 @@ func strconvQuote(s string) string { return strconv.Quote(s) }
 
 // classificationFixture is a docker-default broker whose project maps
 // profile "local" to docker and "kube" to Kubernetes; the agent's
-// agent-info.json (container-writable) saves "kube". provenance, when
+// agent-info.json saves "kube". provenance, when
 // non-empty, is written as the agent's broker-side image-provenance.json.
 func classificationFixture(t *testing.T, provenance string) (*Server, string, string) {
 	t.Helper()
@@ -303,14 +303,14 @@ func TestRestartAgent_ClassificationMismatchIsConflictBeforeStop(t *testing.T) {
 	}
 }
 
-// handlerSteerFixture builds a broker whose default runtime ("docker") is
-// backed by a mock manager, with profile "prov" -> docker and "steer" ->
+// handlerProfileFixture builds a broker whose default runtime ("docker") is
+// backed by a mock manager, with profile "prov" -> docker and "saved" ->
 // Kubernetes (an auxiliary runtime whose construction is counted). The agent
-// "steer-agent" is listed with its project path (so restart reaches the
-// runtime selection) and its agent-info.json (container-writable) names
-// "steer". provenance, when non-empty, is its broker-side
+// "saved-profile-agent" is listed with its project path (so restart reaches the
+// runtime selection) and its agent-info.json names
+// "saved". provenance, when non-empty, is its broker-side
 // image-provenance.json.
-func handlerSteerFixture(t *testing.T, provenance string) (*Server, *mockManager, *int, string) {
+func handlerProfileFixture(t *testing.T, provenance string) (*Server, *mockManager, *int, string) {
 	t.Helper()
 	clearSCIONEnv(t)
 	t.Setenv("HOME", t.TempDir())
@@ -320,15 +320,15 @@ active_profile: prov
 profiles:
   prov:
     runtime: local-docker
-  steer:
-    runtime: k8s-steer
+  saved:
+    runtime: k8s-saved
 runtimes:
   local-docker:
     type: docker
-  k8s-steer:
+  k8s-saved:
     type: kubernetes
 `)
-	const id = "steer-agent"
+	const id = "saved-profile-agent"
 	agentDir := filepath.Join(dotScion, "agents", id)
 	if err := os.MkdirAll(filepath.Join(agentDir, "home"), 0755); err != nil {
 		t.Fatal(err)
@@ -336,7 +336,7 @@ runtimes:
 	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"), []byte(`{"name": "steer-agent", "profile": "steer"}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"), []byte(`{"name": "saved-profile-agent", "profile": "saved"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if provenance != "" {
@@ -362,7 +362,7 @@ runtimes:
 
 func postAgentOp(t *testing.T, srv *Server, op, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/steer-agent/"+op, strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/saved-profile-agent/"+op, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
@@ -377,7 +377,7 @@ func postAgentOp(t *testing.T, srv *Server, op, body string) *httptest.ResponseR
 func TestStartRestart_ProvenanceProfileSelectsDefaultRuntime(t *testing.T) {
 	for _, op := range []string{"start", "restart"} {
 		t.Run(op, func(t *testing.T) {
-			srv, mgr, auxCalls, dotScion := handlerSteerFixture(t, `{"version": 1, "profile": "prov"}`)
+			srv, mgr, auxCalls, dotScion := handlerProfileFixture(t, `{"version": 1, "profile": "prov"}`)
 			w := postAgentOp(t, srv, op, `{"projectPath": `+strconvQuote(dotScion)+`}`)
 			if w.Code != http.StatusAccepted {
 				t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
@@ -398,7 +398,7 @@ func TestStartRestart_ProvenanceProfileSelectsDefaultRuntime(t *testing.T) {
 func TestStartRestart_LegacyAgentFollowsSavedProfile(t *testing.T) {
 	for _, op := range []string{"start", "restart"} {
 		t.Run(op, func(t *testing.T) {
-			srv, _, auxCalls, dotScion := handlerSteerFixture(t, "")
+			srv, _, auxCalls, dotScion := handlerProfileFixture(t, "")
 			postAgentOp(t, srv, op, `{"projectPath": `+strconvQuote(dotScion)+`}`)
 			if *auxCalls == 0 {
 				t.Errorf("expected the saved profile's Kubernetes runtime to be resolved for a legacy agent")
@@ -411,7 +411,7 @@ func TestStartRestart_LegacyAgentFollowsSavedProfile(t *testing.T) {
 // an unusable provenance file returns 409 before any Stop or Start, and the
 // response does not reveal the broker host path.
 func TestRestartAgent_UnusableImageProvenanceIsConflictBeforeStop(t *testing.T) {
-	srv, mgr, _, dotScion := handlerSteerFixture(t, "{not json")
+	srv, mgr, _, dotScion := handlerProfileFixture(t, "{not json")
 	w := postAgentOp(t, srv, "restart", `{}`)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "re-provision the agent") {
 		t.Fatalf("expected 409 with a re-provision hint, got %d: %s", w.Code, w.Body.String())
@@ -426,20 +426,20 @@ func TestRestartAgent_UnusableImageProvenanceIsConflictBeforeStop(t *testing.T) 
 
 const sharedHubProjectID = "44444444-4444-4444-4444-444444444444"
 
-// sharedRestartFixture is handlerSteerFixture for a shared-workspace project
+// sharedRestartFixture is handlerProfileFixture for a shared-workspace project
 // with Hub project ID sharedHubProjectID: the in-project agents root
-// (<project>/.scion/agents, inside the container-visible /workspace in that
-// mode) holds a forged agent dir whose provenance names "steer", and, when
+// (<project>/.scion/agents, inside the shared workspace mount in that mode)
+// holds an in-project copy of the agent dir whose provenance names "saved", and, when
 // external is set, the broker-side external agent dir (located from the Hub
 // project ID) holds the real provenance naming "prov".
 func sharedRestartFixture(t *testing.T, external bool) (*Server, *mockManager, *int) {
 	t.Helper()
-	srv, mgr, auxCalls, dotScion := handlerSteerFixture(t, `{"version": 1, "profile": "steer"}`)
+	srv, mgr, auxCalls, dotScion := handlerProfileFixture(t, `{"version": 1, "profile": "saved"}`)
 	// (No project-id marker is written here: the broker locates the external
-	// root from the Hub project ID alone. That a tampered marker does not
+	// root from the Hub project ID alone. That a marker which disagrees does not
 	// move it is pinned by config's TestAgentsRootForProject_HubProjectIDWinsOverMarker.)
 	if external {
-		extDir, err := config.AgentDirForProject(dotScion, "steer-agent", true, sharedHubProjectID)
+		extDir, err := config.AgentDirForProject(dotScion, "saved-profile-agent", true, sharedHubProjectID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -458,7 +458,7 @@ func sharedRestartFixture(t *testing.T, external bool) (*Server, *mockManager, *
 
 func postSharedRestart(t *testing.T, srv *Server) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/steer-agent/restart?projectId="+sharedHubProjectID,
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/saved-profile-agent/restart?projectId="+sharedHubProjectID,
 		strings.NewReader(`{"sharedWorkspace": true}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -469,8 +469,8 @@ func postSharedRestart(t *testing.T, srv *Server) *httptest.ResponseRecorder {
 // TestRestartAgent_SharedWorkspaceUsesExternalRoot pins the shared-workspace
 // restart path (C-ROOT-1/3/5): the restart carries sharedWorkspace, Start
 // runs with it and with the Hub project ID, and runtime selection reads the
-// external (Hub-project-ID-located) record, ignoring the forged in-project
-// record.
+// external (Hub-project-ID-located) record, ignoring the in-project
+// copy.
 func TestRestartAgent_SharedWorkspaceUsesExternalRoot(t *testing.T) {
 	srv, mgr, auxCalls := sharedRestartFixture(t, true)
 	w := postSharedRestart(t, srv)
@@ -478,7 +478,7 @@ func TestRestartAgent_SharedWorkspaceUsesExternalRoot(t *testing.T) {
 		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
 	}
 	if *auxCalls != 0 {
-		t.Errorf("the forged in-project record's profile must not select the runtime, got %d auxiliary resolutions", *auxCalls)
+		t.Errorf("the in-project copy's profile must not select the runtime, got %d auxiliary resolutions", *auxCalls)
 	}
 	if mgr.startCalls != 1 || !mgr.lastStartOpts.SharedWorkspace || mgr.lastStartOpts.HubProjectID != sharedHubProjectID {
 		t.Errorf("Start must run with SharedWorkspace and the Hub project ID, got calls=%d shared=%v hubProjectID=%q",
@@ -488,7 +488,7 @@ func TestRestartAgent_SharedWorkspaceUsesExternalRoot(t *testing.T) {
 
 // TestRestartAgent_SharedWorkspaceMissingExternalDirIsConflict: with the
 // shared flag set and no external agent dir, the restart fails closed with
-// 409 before any Stop/Start; the forged in-project dir is never used.
+// 409 before any Stop/Start; the in-project copy is never used.
 func TestRestartAgent_SharedWorkspaceMissingExternalDirIsConflict(t *testing.T) {
 	srv, mgr, auxCalls := sharedRestartFixture(t, false)
 	w := postSharedRestart(t, srv)
@@ -502,20 +502,20 @@ func TestRestartAgent_SharedWorkspaceMissingExternalDirIsConflict(t *testing.T) 
 
 // TestStartAgent_ClassificationMismatchIsConflictBeforeStart is the start twin
 // of TestRestartAgent_ClassificationMismatchIsConflictBeforeStop. The legacy
-// agent's saved profile ("steer") maps to Kubernetes when buildStartContext
+// agent's saved profile ("saved") maps to Kubernetes when buildStartContext
 // classifies the runtime; the auxiliary-runtime resolution that classification
-// triggers then remaps "steer" to docker in the project settings, so the
+// triggers then remaps "saved" to docker in the project settings, so the
 // handler's authoritative resolution sees docker. The two disagree, so the
 // start is refused with 409 and Start never runs.
 func TestStartAgent_ClassificationMismatchIsConflictBeforeStart(t *testing.T) {
-	srv, mgr, _, dotScion := handlerSteerFixture(t, "")
+	srv, mgr, _, dotScion := handlerProfileFixture(t, "")
 	srv.resolveAuxiliaryRuntime = func(_, _, _ string) runtime.Runtime {
 		writeProjectSettings(t, dotScion, `schema_version: "1"
 active_profile: prov
 profiles:
   prov:
     runtime: local-docker
-  steer:
+  saved:
     runtime: local-docker
 runtimes:
   local-docker:
@@ -530,5 +530,40 @@ runtimes:
 	}
 	if mgr.startCalls != 0 {
 		t.Errorf("expected no Start, got %d", mgr.startCalls)
+	}
+}
+
+// TestRuntimeSelectionOpts_ExternalStateWithoutSharedFlag pins final-broker
+// #1: a request that does not carry sharedWorkspace for an agent whose state
+// is stored in the external (Hub-project-ID) agents root classifies with that
+// external record, the same directory GetAgent resolves, not with the
+// in-project dir.
+func TestRuntimeSelectionOpts_ExternalStateWithoutSharedFlag(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dotScion := filepath.Join(t.TempDir(), "proj", ".scion")
+	if err := os.MkdirAll(dotScion, 0755); err != nil {
+		t.Fatal(err)
+	}
+	const name = "external-agent"
+	extDir, err := config.AgentDirForProject(dotScion, name, true, sharedHubProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(extDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "scion-agent.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "image-provenance.json"), []byte(`{"version": 1, "profile": "prov"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts := api.StartOptions{Name: name, ProjectPath: dotScion, Profile: "saved", HubProjectID: sharedHubProjectID}
+	runtimeOpts, err := runtimeSelectionOpts(opts, name, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtimeOpts.Profile != "prov" {
+		t.Fatalf("runtime-selection profile = %q, want the external record's prov", runtimeOpts.Profile)
 	}
 }

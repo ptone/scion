@@ -242,10 +242,14 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	}
 	// ptone/scion#1799: an EXPLICIT profiles.<p>.harness_overrides.<hc>.image
 	// outranks the template (and inline) image the broker would otherwise
-	// pick; only the user's explicit request image ranks above it. Mirror
-	// that here so the plan shows what the broker will run. The plain
-	// harness_configs.<hc>.image default does not gain this priority and
-	// stays in the fallback below.
+	// pick; only the user's explicit request image ranks above it. Apply
+	// that here so the plan approximates what the broker will run. The plan
+	// is an approximation from the hub's view: it starts from an image the
+	// hub template record may carry (which the broker no longer applies), and
+	// with no harness-config key (the broker resolves it) the profile
+	// override cannot be looked up. The broker resolves the final image and
+	// reports it. The plain harness_configs.<hc>.image default does not gain
+	// this priority and stays in the fallback below.
 	//
 	// The hub's effective settings are loaded once for both this step and
 	// the settings fallback below.

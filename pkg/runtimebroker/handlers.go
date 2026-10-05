@@ -1408,6 +1408,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
 			markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to create agent")
+		case config.IsAgentStateConflict(err):
+			markAttemptFailed(http.StatusConflict, "failed to create agent")
 		default:
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
@@ -1451,6 +1453,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr)
+		case config.IsAgentStateConflict(err):
+			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
 		default:
 			RuntimeError(w, runtimeOpError("create agent", err).Error())
 		}
@@ -2858,11 +2862,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// Image mirrors the same field on the start path: the user's
 		// explicit image, applied as the top tier (ptone/scion#1799).
 		Image string `json:"image,omitempty"`
-		// SharedWorkspace mirrors the start path's field: without it a
-		// restart of a shared-workspace agent would read and write the
-		// agent's state under the in-project agents root, which sits inside
-		// the container-visible /workspace, instead of the broker-side
-		// external root its start uses (ptone/scion#1799).
+		// SharedWorkspace mirrors the start path's field, so a restart of a
+		// shared-workspace agent resolves the agent's state from the same
+		// broker-side external root as its start (ptone/scion#1799).
 		SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {

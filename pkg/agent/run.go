@@ -133,7 +133,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// finding C1/S-L1): a project's harness_configs.<name>.env can set
 	// these keys, and since resolveAuthEnvOverlay only fills in *absent*
 	// keys, capturing the value here — before that overlay ever runs — is
-	// what keeps it from being attacker-influenced. The general `projectID`
+	// what keeps it equal to the dispatch-provided value. The general `projectID`
 	// below is unaffected and keeps its existing settings.Hub.ProjectID
 	// fallback for labels, RunConfig.ProjectID, etc.
 	hubDispatchedProjectID := projectID
@@ -147,9 +147,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// Fail on an unusable image provenance record before any side effect
 	// (the container cleanup below, prompt.md), reading the same agent dir
-	// GetAgent will use for opts.SharedWorkspace. The record is read again,
-	// from that same dir, where image selection uses it.
-	if preDir, dirErr := config.AgentDirForProject(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID); dirErr == nil {
+	// GetAgent will use (AgentStateDir, including its effective
+	// shared-workspace detection). The record is read again, from that same
+	// dir, where image selection uses it.
+	if preDir, _, dirErr := AgentStateDir(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID, opts.BrokerMode || opts.HubProjectID != ""); dirErr == nil {
 		if _, provErr := readImageProvenance(preDir); provErr != nil {
 			logImageProvenanceError(opts.Name, provErr)
 			return nil, provErr
@@ -331,8 +332,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Image provenance (including the provisioned profile and template) is
 	// recorded broker-side, in the agent dir; see image_provenance.go. For
 	// an agent that has it, the recorded template stands in for
-	// finalScionCfg.Info.Template, which is read from the container-writable
-	// agent-info.json: this chain selects the template-tier image and pull
+	// finalScionCfg.Info.Template (read from agent-info.json in the agent
+	// home): this chain selects the template-tier image and pull
 	// policy and the harness-config dir searched for the file tier.
 	provenance, err := readImageProvenance(agentDir)
 	if err != nil {
@@ -419,9 +420,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			settingsProfile = finalScionCfg.Info.Profile
 		}
 		// The image and pull-policy lookups use the profile recorded in
-		// broker-side image provenance when it exists — never a profile
-		// read from agent-info.json (container-writable), nor the broker's
-		// restart profile, which is itself read from there. An agent
+		// broker-side image provenance when it exists, rather than the
+		// agent-info.json profile or the broker's restart profile (which is
+		// read from agent-info.json). An agent
 		// provisioned before provenance was recorded keeps the legacy
 		// settingsProfile lookup.
 		imageProfile := settingsProfile
@@ -503,7 +504,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// since provision, or a hub agent restarted on a broker with no local
 	// copy), it falls back to the template chain's OWN image / pull policy
 	// that ProvisionAgent recorded in broker-side agent state (image-provenance.json
-	// in the agent dir, never the container-writable agent-info.json) — never to the
+	// in the agent dir, not agent-info.json in the agent home) — never to the
 	// merged scion-agent.json value, which also folds in that moment's
 	// inline, profile, settings and file values, so a profile or settings
 	// pin removed since then would otherwise linger disguised as the
@@ -694,9 +695,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if !filepath.IsAbs(tplName) {
 				// For an agent with broker-side image provenance, the
 				// template recorded there (provisioning's own record) stands
-				// in for agent-info.json's template, which the container can
-				// write and which would otherwise choose the template whose
-				// bundled harness-config this resolves (ptone/scion#1799).
+				// in for agent-info.json's template when choosing the template
+				// whose bundled harness-config this resolves, so the choice is
+				// resolved from broker-side agent state (ptone/scion#1799).
 				// provenance was read above, failing the start if the record
 				// is unusable. A legacy agent keeps agent-info.json's value.
 				switch {

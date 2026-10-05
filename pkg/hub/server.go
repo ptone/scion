@@ -624,8 +624,7 @@ type StartExtras struct {
 	// SharedWorkspace is set on a restart (the start request already
 	// carries it as its own field) so the broker reads and writes a
 	// shared-workspace agent's state under the same broker-side agents root
-	// as its start, never the in-project root inside the container-visible
-	// workspace (ptone/scion#1799).
+	// as its start (ptone/scion#1799).
 	SharedWorkspace bool
 }
 
