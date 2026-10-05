@@ -21,6 +21,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // imageProvenanceFile is the broker-side agent state file that records each
@@ -28,7 +30,7 @@ import (
 // scion-agent.json — not in the agent home (agent-info.json), which is
 // mounted into the container — so the container cannot influence the image
 // a later Start selects (ptone/scion#1799).
-const imageProvenanceFile = "image-provenance.json"
+const imageProvenanceFile = config.ImageProvenanceFileName
 
 // imageProvenance is the per-source image record. See settings-precedence.md,
 // "Container image and Kubernetes image pull policy".

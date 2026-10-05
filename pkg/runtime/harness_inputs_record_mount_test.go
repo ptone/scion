@@ -26,8 +26,10 @@ import (
 )
 
 // TestHarnessInputsRecordOutsideScionMounts pins that an agent's control-plane
-// records (<agent dir>/harness-inputs, config.HarnessInputsRecordDirName, and
-// <agent dir>/harness-secrets, config.HarnessSecretsRecordDirName) are outside
+// records (<agent dir>/harness-inputs, config.HarnessInputsRecordDirName;
+// <agent dir>/harness-secrets, config.HarnessSecretsRecordDirName; and the
+// broker-side image provenance file <agent dir>/image-provenance.json,
+// config.ImageProvenanceFileName) are outside
 // every container mount scion computes for the agent, in every runtime mode,
 // using the real mount builders. Author-configured volumes are excluded: they
 // are a separately tracked capability.
@@ -43,6 +45,15 @@ func TestHarnessInputsRecordOutsideScionMounts(t *testing.T) {
 	t.Run("docker/podman/apple run args", testRecordOutsideRunArgMounts)
 	t.Run("kubernetes pod", testRecordOutsidePodMounts)
 	t.Run("cloud run nfs host paths", testRecordOutsideCloudRunPaths)
+}
+
+// controlPlaneRecordNames are the agent-dir entries that must never be
+// visible inside the container: the harness inputs and secrets record
+// directories and the image provenance file.
+var controlPlaneRecordNames = []string{
+	config.HarnessInputsRecordDirName,
+	config.HarnessSecretsRecordDirName,
+	config.ImageProvenanceFileName,
 }
 
 // pathWithin reports whether p is base or below it.
@@ -105,7 +116,7 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 			withPaths(filepath.Join(inProject, "home"), "", filepath.Join(inProject, "workspace"), nil)},
 	}
 	for _, m := range modes {
-		for _, recordName := range []string{config.HarnessInputsRecordDirName, config.HarnessSecretsRecordDirName} {
+		for _, recordName := range controlPlaneRecordNames {
 			t.Run(m.name+"/"+recordName, func(t *testing.T) {
 				checkRecordOutsideRunArgs(t, filepath.Join(m.agentDir, recordName), m.cfg)
 			})
