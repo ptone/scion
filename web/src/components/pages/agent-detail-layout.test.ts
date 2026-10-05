@@ -69,6 +69,8 @@ describe('agent detail layout', () => {
     // The select used to force itself wider than its column with an inline
     // min-width; no sl-select on this page may set one. (The tag spans lines
     // and contains `=>`, so match up to the closing tag, not the first `>`.)
-    expect(pageSource).not.toMatch(/<sl-select\b(?:(?!<\/sl-select>)[\s\S])*?style="[^"]*min-width/);
+    expect(pageSource).not.toMatch(
+      /<sl-select\b(?:(?!<\/sl-select>)[\s\S])*?style="[^"]*min-width/
+    );
   });
 });
