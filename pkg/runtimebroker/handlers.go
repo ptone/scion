@@ -3727,7 +3727,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		// can feed the launch-mirroring env merge below.
 		var hcDirEnv map[string]string
 
-		// On-disk fallback search root: projectPath, else the global dir for
+		// Template-chain search root: projectPath, else the global dir for
 		// hub-dispatched agents without a local project.
 		harnessConfigSearchPath := req.ProjectPath
 		if harnessConfigSearchPath == "" {
@@ -3761,16 +3761,16 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		// copy, when supplied, wins unconditionally and is never merged with
 		// an on-disk copy of the same name, so harness type, auth type, auth
 		// metadata and `env:` all come from it. The on-disk search
-		// (template-bundled, project, global) is only the fallback when no
-		// hydrated copy was supplied. This keeps a broker-local dir of the
-		// same name (e.g. `harness: claude` with no `auth:`) from shadowing
-		// the hub bundle's auth metadata (ptone/scion#618, ptone/scion#619).
+		// (template-bundled, project, global) is the fallback when no
+		// hydrated copy was supplied, with the project tier in the single
+		// resolved project dir provisioning and launch use
+		// (harnessConfigProjectDir) (ptone/scion#618, ptone/scion#619).
 		var hydratedHCPath string
 		if len(hydratedHarnessConfigPath) > 0 {
 			hydratedHCPath = hydratedHarnessConfigPath[0]
 		}
-		if hydratedHCPath != "" || harnessConfigSearchPath != "" {
-			if hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, harnessConfigName, harnessConfigSearchPath, harnessConfigTemplatePaths...); err == nil && hcDir != nil {
+		if hcProjectDir := harnessConfigProjectDir(req.ProjectPath); hydratedHCPath != "" || hcProjectDir != "" {
+			if hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, harnessConfigName, hcProjectDir, harnessConfigTemplatePaths...); err == nil && hcDir != nil {
 				harnessType = hcDir.Config.Harness
 				authType = hcDir.Config.AuthSelectedType
 				authMeta = hcDir.Config.Auth

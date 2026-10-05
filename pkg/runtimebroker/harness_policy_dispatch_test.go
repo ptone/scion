@@ -15,10 +15,12 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -185,8 +187,15 @@ func TestCreateAgentGate_HydrationFailureMapsLikeLaunch(t *testing.T) {
 	}
 
 	srv, mgr, _ := dispatchTestEnv(t, false)
+	var logBuf bytes.Buffer
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, nil))
 	f, _ := attachHubHC(t, srv, "", errors.New("record vanished"))
 	code, body := dispatchStampedAgent(t, srv, "hub-only")
+	// The refusal comes from the gate, ahead of buildStartContext: the
+	// dispatch never reaches the end of pre-flight.
+	if strings.Contains(logBuf.String(), "Agent dispatch: pre-flight complete") {
+		t.Error("hydration failure was reported after pre-flight completed, not by the gate")
+	}
 	if code != wantCode || body != wantBody {
 		t.Fatalf("gate hydration failure mapped differently from launch:\n gate:   %d %s\n launch: %d %s", code, body, wantCode, wantBody)
 	}
@@ -218,7 +227,7 @@ func TestCreateAgentGate_LaunchReusesGateHydratedBundle(t *testing.T) {
 
 	code, body := dispatchStampedAgent(t, srv, "hub-only")
 	if code != http.StatusCreated {
-		t.Fatalf("declarative hub bundle should be admitted, got %d: %s", code, body)
+		t.Fatalf("declarative hub bundle should be accepted, got %d: %s", code, body)
 	}
 	if got := f.calls.Load(); got != 1 {
 		t.Errorf("expected one hydration shared by gate and launch, got %d", got)
@@ -471,5 +480,139 @@ func TestRestartAgentGate_EvaluatesCurrentConfig(t *testing.T) {
 	assertPolicyRefusal(t, code, body, "rhc")
 	if mgr.StopCalls() != stopsBefore || mgr.StartCalls() != startsBefore {
 		t.Error("restart refusal must precede stop and start")
+	}
+}
+
+// postUnstampedCreate posts a provision-only create naming harness-config
+// hcName with the given project path ("" for none).
+func postUnstampedCreate(t *testing.T, srv *Server, projectPath, hcName string) (int, string) {
+	t.Helper()
+	body := `{"name": "loc-agent", "id": "agent-uuid-loc", "slug": "loc-agent", "provisionOnly": true,
+		"projectPath": "` + projectPath + `", "config": {"harnessConfig": "` + hcName + `"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w.Code, w.Body.String()
+}
+
+// Harness-config resolution uses a single resolved project dir
+// (config.GetResolvedProjectDir) for provisioning, launch and the policy
+// gate. Each case puts a container-script harness-config in the location
+// that dir resolves to and a declarative copy of the same name in the global
+// directory; with allow=false the unstamped create is refused.
+func TestCreateAgentGate_EvaluatesResolvedProjectDir(t *testing.T) {
+	t.Run("project root resolves to <root>/.scion", func(t *testing.T) {
+		srv, mgr, globalScion := dispatchTestEnv(t, false)
+		writeHarnessConfig(t, globalScion, "loc-hc", declarativeHarnessYAML)
+		root := t.TempDir()
+		writeHarnessConfig(t, filepath.Join(root, ".scion"), "loc-hc", scriptedHarnessYAML)
+
+		code, body := postUnstampedCreate(t, srv, root, "loc-hc")
+		assertPolicyRefusal(t, code, body, "loc-hc")
+		if mgr.provisionCalled {
+			t.Error("Provision must not run when the gate refuses")
+		}
+	})
+
+	t.Run("no project path walks up to the enclosing project", func(t *testing.T) {
+		srv, mgr, globalScion := dispatchTestEnv(t, false)
+		writeHarnessConfig(t, globalScion, "loc-hc", declarativeHarnessYAML)
+		root := t.TempDir()
+		writeHarnessConfig(t, filepath.Join(root, ".scion"), "loc-hc", scriptedHarnessYAML)
+		below := filepath.Join(root, "src", "pkg")
+		if err := os.MkdirAll(below, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// dispatchTestEnv restores the original working directory.
+		if err := os.Chdir(below); err != nil {
+			t.Fatal(err)
+		}
+
+		code, body := postUnstampedCreate(t, srv, "", "loc-hc")
+		assertPolicyRefusal(t, code, body, "loc-hc")
+		if mgr.provisionCalled {
+			t.Error("Provision must not run when the gate refuses")
+		}
+	})
+
+	t.Run("split storage resolves to the external config dir", func(t *testing.T) {
+		srv, mgr, globalScion := dispatchTestEnv(t, false)
+		writeHarnessConfig(t, globalScion, "loc-hc", declarativeHarnessYAML)
+		root := t.TempDir()
+		marker := &config.ProjectMarker{ProjectID: "0f8e2c1a-split-test", ProjectName: "split-proj", ProjectSlug: "split-proj"}
+		if err := config.WriteProjectMarker(filepath.Join(root, ".scion"), marker); err != nil {
+			t.Fatal(err)
+		}
+		external, err := marker.ExternalProjectPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolved, err := config.GetResolvedProjectDir(root); err != nil || resolved != external {
+			t.Fatalf("fixture: root should resolve to the external dir %q, got %q (%v)", external, resolved, err)
+		}
+		writeHarnessConfig(t, external, "loc-hc", scriptedHarnessYAML)
+
+		code, body := postUnstampedCreate(t, srv, root, "loc-hc")
+		assertPolicyRefusal(t, code, body, "loc-hc")
+		if mgr.provisionCalled {
+			t.Error("Provision must not run when the gate refuses")
+		}
+	})
+
+	t.Run("declarative in the resolved dir passes", func(t *testing.T) {
+		srv, mgr, globalScion := dispatchTestEnv(t, false)
+		writeHarnessConfig(t, globalScion, "loc-hc", scriptedHarnessYAML) // outranked by the project copy
+		root := t.TempDir()
+		writeHarnessConfig(t, filepath.Join(root, ".scion"), "loc-hc", declarativeHarnessYAML)
+
+		code, body := postUnstampedCreate(t, srv, root, "loc-hc")
+		if code != http.StatusCreated || !mgr.provisionCalled {
+			t.Fatalf("expected 201 for a declarative entry in the resolved project dir, got %d: %s", code, body)
+		}
+	})
+}
+
+// Start uses the same resolved project dir.
+func TestStartAgentGate_EvaluatesResolvedProjectDir(t *testing.T) {
+	srv, mgr, globalScion := dispatchTestEnv(t, false)
+	writeHarnessConfig(t, globalScion, "loc-hc", declarativeHarnessYAML)
+	root := t.TempDir()
+	writeHarnessConfig(t, filepath.Join(root, ".scion"), "loc-hc", scriptedHarnessYAML)
+	code, body := postAgentAction(t, srv, "loc-agent", "start", `{"projectPath": "`+root+`", "harnessConfig": "loc-hc"}`)
+	assertPolicyRefusal(t, code, body, "loc-hc")
+	if mgr.StartCalls() != 0 {
+		t.Error("Start must not run when the gate refuses")
+	}
+}
+
+// enforceHarnessConfigPolicy's fail-closed mapping for an unloadable
+// hydrated copy: 500 runtime_error with no broker path in the response
+// when the policy can refuse; OK when it cannot.
+func TestEnforceHarnessConfigPolicy_UnloadableHydratedCopy(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		t.Run(fmt.Sprintf("allow=%v", allow), func(t *testing.T) {
+			srv, _, _ := dispatchTestEnv(t, allow)
+			missing := filepath.Join(t.TempDir(), "missing-hc")
+			d := srv.enforceHarnessConfigPolicy(harnessPolicyInput{
+				Req:            CreateAgentRequest{Config: &CreateAgentConfig{HarnessConfig: "hc"}},
+				HydratedHCPath: missing,
+			})
+			if allow {
+				if !d.OK {
+					t.Fatalf("allow=true must pass, got %+v", d)
+				}
+				return
+			}
+			if d.OK || d.HTTPStatus != http.StatusInternalServerError || d.Code != ErrCodeRuntimeError {
+				t.Fatalf("expected 500 %s refusal, got %+v", ErrCodeRuntimeError, d)
+			}
+			if strings.Contains(d.Message, missing) || strings.Contains(d.Message, "/") {
+				t.Errorf("response message must not carry a broker path: %q", d.Message)
+			}
+			if !strings.Contains(d.detail(), missing) {
+				t.Errorf("detail should carry the path for logs, got %q", d.detail())
+			}
+		})
 	}
 }

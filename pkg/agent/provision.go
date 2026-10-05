@@ -767,7 +767,13 @@ type resolvedTemplate struct {
 // ErrHarnessConfigNotFound surfaces synchronously during admission, exactly
 // as GetAgent/ProvisionAgent would raise it — the two resolutions go through
 // this one function and cannot drift apart.
-func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
+//
+// projectPath is the project path as the caller supplied it; the template
+// chain is resolved against it. projectDir is config.GetResolvedProjectDir's
+// result for it: harness-config resolution uses that single resolved project
+// dir for provisioning, launch (Start's harness.Resolve) and the runtime
+// broker's policy gate.
+func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, projectDir, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
 	chain, err := config.GetTemplateChainInProject(templateName, projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load template: %w", err)
@@ -810,7 +816,7 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 	for _, tpl := range chain {
 		templatePaths = append(templatePaths, tpl.Path)
 	}
-	hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectPath, templatePaths...)
+	hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find harness-config %q: %w", harnessConfigName, err)
 	}
@@ -856,7 +862,7 @@ func (m *AgentManager) Preflight(ctx context.Context, opts api.StartOptions) err
 		templateName = defaultTemplate
 	}
 
-	_, err = resolveTemplateAndHarnessConfig(ctx, templateName, opts.HarnessConfig, opts.ProjectPath, profileName, settings, inlineCfg)
+	_, err = resolveTemplateAndHarnessConfig(ctx, templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
 	return err
 }
 
@@ -1275,7 +1281,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// 2, 2b, 2c. Load the template chain, merge configs and resolve the
 	// harness-config, through the same resolution Preflight uses.
-	rt, err := resolveTemplateAndHarnessConfig(ctx, templateName, harnessConfig, projectPath, profileName, settings, inlineCfg)
+	rt, err := resolveTemplateAndHarnessConfig(ctx, templateName, harnessConfig, projectPath, projectDir, profileName, settings, inlineCfg)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -2509,7 +2515,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
 			effectiveTemplate, err, agentCfg.Harness, agentCfg.Image)
-		resolveModelAliasForExistingAgent(ctx, agentCfg, projectPath)
+		resolveModelAliasForExistingAgent(ctx, agentCfg, projectDir)
 		// Populate Info from agent-info.json here too, matching the
 		// successful-lookup path below. scion-agent.json never carries Info
 		// (json:"-"), so without this, run.go's own independent
@@ -2541,7 +2547,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// This covers the case where scion-agent.json was written with a raw alias
 	// (e.g. by applyInlineConfigUpdate before the hub-side fix) or where the
 	// agent was created before the hub resolved aliases at storage time.
-	resolveModelAliasForExistingAgent(ctx, finalCfg, projectPath)
+	resolveModelAliasForExistingAgent(ctx, finalCfg, projectDir)
 
 	// Ensure Info is populated from agent-info.json if available
 	if agentInfo != nil {
@@ -2562,7 +2568,10 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 // built-in alias table (harnesses/<name>/config.yaml, via
 // harness.DefaultModelAliases). This is a no-op if cfg is nil, cfg.Model is
 // empty, or cfg.Model is not a known alias.
-func resolveModelAliasForExistingAgent(ctx context.Context, cfg *api.ScionConfig, projectPath string) {
+//
+// projectDir is the resolved project dir (config.GetResolvedProjectDir), the
+// same one harness-config resolution uses elsewhere.
+func resolveModelAliasForExistingAgent(ctx context.Context, cfg *api.ScionConfig, projectDir string) {
 	if cfg == nil || cfg.Model == "" {
 		return
 	}
@@ -2573,7 +2582,7 @@ func resolveModelAliasForExistingAgent(ctx context.Context, cfg *api.ScionConfig
 		hcName = cfg.DefaultHarnessConfig
 	}
 	if hcName != "" {
-		if hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectPath); err == nil && hcDir != nil {
+		if hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectDir); err == nil && hcDir != nil {
 			// hcDir.Config is a config.HarnessConfigEntry value (not a
 			// pointer), so it can never itself be nil here; only its
 			// ModelAliases map can be nil/empty, which len() handles safely.

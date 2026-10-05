@@ -50,7 +50,7 @@ type harnessPolicyInput struct {
 // Detail, the text for logs and dispatch-attempt records; callers write it
 // with writeHarnessPolicyRefusal so every path answers identically.
 func (s *Server) enforceHarnessConfigPolicy(in harnessPolicyInput) harnessPolicyDecision {
-	name, entry, ok, err := s.lookupHarnessConfigForPolicy(in.Req, in.HydratedTemplatePath, in.HydratedHCPath)
+	name, entries, ok, err := s.lookupHarnessConfigForPolicy(in.Req, in.HydratedTemplatePath, in.HydratedHCPath)
 	if err != nil {
 		if s.config.AllowContainerScriptHarnesses {
 			return harnessPolicyDecision{OK: true}
@@ -68,7 +68,13 @@ func (s *Server) enforceHarnessConfigPolicy(in harnessPolicyInput) harnessPolicy
 	if !ok {
 		return harnessPolicyDecision{OK: true}
 	}
-	return s.evaluateHarnessConfigPolicy(name, entry)
+	// Any refused entry refuses the dispatch.
+	for _, entry := range entries {
+		if d := s.evaluateHarnessConfigPolicy(name, entry); !d.OK {
+			return d
+		}
+	}
+	return harnessPolicyDecision{OK: true}
 }
 
 // writeHarnessPolicyRefusal writes a non-OK enforceHarnessConfigPolicy
@@ -81,24 +87,23 @@ func (s *Server) writeHarnessPolicyRefusal(w http.ResponseWriter, d harnessPolic
 
 // harnessPolicyInputForStart builds the policy input for start and restart
 // from the built start context: the hydrated harness-config launch will use
-// (opts.HarnessConfigPath, set by buildStartContext's hydration) and the
-// harness-config name launch resolves (pkg/agent Start): the dispatch's
-// opts.HarnessConfig, else the agent's saved harness-config, else the
-// settings default (resolved by lookupHarnessConfigForPolicy). The template
-// chain is taken from opts.Template, as harness.Resolve's caller does.
+// (opts.HarnessConfigPath, set by buildStartContext's hydration) and a
+// harness-config name: the dispatch's opts.HarnessConfig, else the agent's
+// saved agent-info harness-config, else the settings default (resolved by
+// lookupHarnessConfigForPolicy). This covers the name tiers the hub fills in
+// practice; it does not apply every tier of config.ResolveHarnessConfigName
+// that pkg/agent Start uses (stored harness type, template
+// harness_config/default_harness_config). The template chain is taken from
+// opts.Template, as harness.Resolve's caller does.
 func harnessPolicyInputForStart(opts api.StartOptions, agentID string) harnessPolicyInput {
-	projectPath := opts.ProjectPath
-	if projectPath != "" {
-		if dir, err := config.GetResolvedProjectDir(projectPath); err == nil {
-			projectPath = dir
-		}
-	}
 	name := opts.HarnessConfig
-	if name == "" && projectPath != "" {
-		name = agent.GetSavedHarnessConfig(agentID, projectPath)
+	if name == "" && opts.ProjectPath != "" {
+		name = agent.GetSavedHarnessConfig(agentID, harnessConfigProjectDir(opts.ProjectPath))
 	}
+	// The project path is passed as given; lookupHarnessConfigForPolicy
+	// resolves it to the project dir launch uses.
 	req := CreateAgentRequest{
-		ProjectPath: projectPath,
+		ProjectPath: opts.ProjectPath,
 		Config: &CreateAgentConfig{
 			HarnessConfig: name,
 			Profile:       opts.Profile,
@@ -117,10 +122,9 @@ func harnessPolicyInputForStart(opts api.StartOptions, agentID string) harnessPo
 	}
 }
 
-// lookupHarnessConfigForPolicy resolves the harness-config that this
-// dispatch will use, returning the entry needed by
-// evaluateHarnessConfigPolicy. The directory is resolved through
-// config.ResolveHarnessConfigDir, the same ordering launch and
+// lookupHarnessConfigForPolicy resolves the harness-config entries this
+// dispatch's launch may use, for evaluateHarnessConfigPolicy. Directories are
+// resolved through config.ResolveHarnessConfigDir, the ordering launch and
 // extractRequiredEnvKeys use: the hub-hydrated copy (hydratedHCPath) when
 // supplied, else template-bundled, project, then global directories, with the
 // template chain taken from hydratedTemplatePath when supplied (else the
@@ -128,61 +132,79 @@ func harnessPolicyInputForStart(opts api.StartOptions, agentID string) harnessPo
 // fallback. ok is false when no harness-config was specified or could be
 // found, which short-circuits the policy check (no policy applies).
 //
+// Without a hydrated copy, the project tier is searched in the single resolved
+// project dir (harnessConfigProjectDir) that provisioning and launch use. The
+// result is returned as a slice so the caller evaluates every entry.
+//
 // err is non-nil only when hydratedHCPath is set but cannot be loaded. That
 // is not a "not found" case: launch would use exactly that directory, so
 // the caller must not fall back to evaluating some other entry (fail
 // closed) when the policy can refuse.
-func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest, hydratedTemplatePath, hydratedHCPath string) (string, config.HarnessConfigEntry, bool, error) {
+func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest, hydratedTemplatePath, hydratedHCPath string) (string, []config.HarnessConfigEntry, bool, error) {
+	projectDir := harnessConfigProjectDir(req.ProjectPath)
+
 	var settings *config.VersionedSettings
-	settingsPath := req.ProjectPath
-	if settingsPath == "" {
-		if globalDir, err := config.GetGlobalDir(); err == nil {
-			settingsPath = globalDir
-		}
-	}
-	if settingsPath != "" {
-		if vs, _, err := config.LoadEffectiveSettings(settingsPath); err == nil {
+	if projectDir != "" {
+		if vs, _, err := config.LoadEffectiveSettings(projectDir); err == nil {
 			settings = vs
 		}
 	}
 
 	name := s.resolveHarnessConfigForEnvGather(req, settings)
 	if name == "" {
-		return "", config.HarnessConfigEntry{}, false, nil
+		return "", nil, false, nil
 	}
 
-	searchPath := req.ProjectPath
-	if searchPath == "" {
-		searchPath = settingsPath
+	if hydratedHCPath != "" {
+		hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, name, "")
+		if err != nil {
+			return name, nil, false, fmt.Errorf("hydrated harness-config %q could not be loaded: %w", name, err)
+		}
+		return name, []config.HarnessConfigEntry{hcDir.Config}, true, nil
 	}
+
+	// The template chain is resolved against the project path as given, as
+	// launch resolves it; the project tier uses the resolved project dir.
 	templateForChain := hydratedTemplatePath
 	if templateForChain == "" && req.Config != nil {
 		templateForChain = req.Config.Template
 	}
-	if hydratedHCPath != "" || searchPath != "" {
-		hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, name, searchPath, templateChainPaths(templateForChain, searchPath)...)
+	if projectDir != "" {
+		hcDir, err := config.ResolveHarnessConfigDir("", name, projectDir, templateChainPaths(templateForChain, req.ProjectPath)...)
 		if err == nil && hcDir != nil {
-			return name, hcDir.Config, true, nil
-		}
-		if hydratedHCPath != "" {
-			return name, config.HarnessConfigEntry{}, false, fmt.Errorf("hydrated harness-config %q could not be loaded: %w", name, err)
+			return name, []config.HarnessConfigEntry{hcDir.Config}, true, nil
 		}
 	}
 	if settings != nil {
 		if hcfg, ok := settings.HarnessConfigs[name]; ok {
-			return name, hcfg, true, nil
+			return name, []config.HarnessConfigEntry{hcfg}, true, nil
 		}
 	}
-	return name, config.HarnessConfigEntry{}, false, nil
+	return name, nil, false, nil
+}
+
+// harnessConfigProjectDir returns the single resolved project dir that
+// harness-config resolution uses for provisioning, launch and the policy
+// gate: config.GetResolvedProjectDir(projectPath), which maps a project root
+// to <root>/.scion or its external split-storage directory, and an empty path
+// to the project found by walking up from the working directory, else the
+// global directory. If resolution fails the path is returned as given
+// (launch fails on the same error).
+func harnessConfigProjectDir(projectPath string) string {
+	if dir, err := config.GetResolvedProjectDir(projectPath); err == nil && dir != "" {
+		return dir
+	}
+	return projectPath
 }
 
 // templateChainPaths returns the on-disk paths of template's chain resolved
 // against searchPath, in merge order, for use as the template-bundled tier of
 // config.ResolveHarnessConfigDir. template may be a slug or an absolute
-// (hydrated) path. Returns nil when either input is empty or the chain does
-// not resolve.
+// (hydrated) path; an empty searchPath resolves as config.GetTemplateChainInProject
+// does for it (global templates). Returns nil when template is empty or the
+// chain does not resolve.
 func templateChainPaths(template, searchPath string) []string {
-	if template == "" || searchPath == "" {
+	if template == "" {
 		return nil
 	}
 	chain, err := config.GetTemplateChainInProject(template, searchPath)

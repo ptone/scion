@@ -16,12 +16,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // TestProvisionAgent_RecordsHarnessConfigSource pins the ptone/scion#620
@@ -79,4 +81,92 @@ func infoSource(cfg *api.ScionConfig) string {
 		return "<nil info>"
 	}
 	return cfg.Info.HarnessConfigSource
+}
+
+// TestHarnessConfigResolution_SingleResolvedProjectDir pins that
+// harness-config resolution uses a single resolved project dir
+// (config.GetResolvedProjectDir) for provisioning and for Start's harness
+// construction. The project path is given as the project root; a
+// harness-config of the same name exists both at <root>/harness-configs
+// and in the resolved <root>/.scion, with different content. Provisioning
+// (agent-info revision) and Start (returned revision) both use the
+// resolved copy.
+func TestHarnessConfigResolution_SingleResolvedProjectDir(t *testing.T) {
+	mockRuntimeForTest(t)
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("HOME", tmpDir)
+	if err := config.InitMachine(getTestHarnesses()); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+	root := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(root, ".scion")
+	if err := config.InitProject(projectScionDir, getTestHarnesses()); err != nil {
+		t.Fatalf("InitProject failed: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+
+	global, err := config.FindHarnessConfigDir("claude", "")
+	if err != nil {
+		t.Fatalf("global claude harness-config: %v", err)
+	}
+	writeVariant := func(dir, variant string) {
+		t.Helper()
+		if err := os.CopyFS(dir, os.DirFS(global.Path)); err != nil {
+			t.Fatalf("copy harness-config: %v", err)
+		}
+		cfgPath := filepath.Join(dir, "config.yaml")
+		data, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cfgPath, append(data, []byte("\n# variant: "+variant+"\n")...), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolvedHC := filepath.Join(projectScionDir, "harness-configs", "claude")
+	rawHC := filepath.Join(root, "harness-configs", "claude")
+	_ = os.RemoveAll(resolvedHC)
+	writeVariant(resolvedHC, "resolved")
+	writeVariant(rawHC, "raw")
+	wantRev := config.ComputeHarnessConfigRevision(resolvedHC)
+	if wantRev == config.ComputeHarnessConfigRevision(rawHC) {
+		t.Fatal("fixture: variants must differ")
+	}
+
+	mgr := NewManager(&runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	})
+	info, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:          "single-dir",
+		ProjectPath:   root,
+		HarnessConfig: "claude",
+		NoAuth:        true,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if info.HarnessConfigRevision != wantRev {
+		t.Errorf("Start resolved a different harness-config than <root>/.scion: revision %q, want %q", info.HarnessConfigRevision, wantRev)
+	}
+
+	data, err := os.ReadFile(filepath.Join(config.GetAgentHomePath(projectScionDir, "single-dir"), "agent-info.json"))
+	if err != nil {
+		t.Fatalf("read agent-info.json: %v", err)
+	}
+	var saved api.AgentInfo
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.HarnessConfigRevision != wantRev {
+		t.Errorf("provisioning resolved a different harness-config than <root>/.scion: revision %q, want %q", saved.HarnessConfigRevision, wantRev)
+	}
 }

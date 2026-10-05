@@ -31,17 +31,16 @@ profiles:
     runtime: mock
 `
 
-// TestEnvGather_HydratedAuthWinsOverOnDiskHarnessOnly covers
-// ptone/scion#618/#619: an on-disk dir of the same name declaring
-// `harness: claude` with no auth block must not shadow the
-// hydrated hub bundle's vertex-ai auth metadata. Launch uses the hydrated
-// copy, so required keys come from its vertex-ai auth type.
-func TestEnvGather_HydratedAuthWinsOverOnDiskHarnessOnly(t *testing.T) {
-	// The on-disk copy selects api-key but has no auth: block, so under the
-	// old cascade it shadowed the hydrated auth metadata and the legacy
-	// compiled table demanded ANTHROPIC_API_KEY.
+// TestEnvGather_HydratedAuthWinsOverOnDiskAuth covers
+// ptone/scion#618/#619: when a hydrated hub bundle loads, harness type, auth
+// type and auth metadata all come from it, as at launch, and an on-disk dir
+// of the same name is not consulted.
+func TestEnvGather_HydratedAuthWinsOverOnDiskAuth(t *testing.T) {
+	// The on-disk copy of the same name selects api-key with its own auth
+	// block, which requires ANTHROPIC_API_KEY; the hydrated copy selects
+	// vertex-ai. Required keys follow the hydrated copy only.
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
-		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: api-key\n", resolverTestSettings)
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: api-key\n"+claudeAuthBlock, resolverTestSettings)
 	hydratedDir := filepath.Join(t.TempDir(), "claude")
 	writeHarnessConfigDirAt(t, hydratedDir,
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock)
@@ -51,10 +50,10 @@ func TestEnvGather_HydratedAuthWinsOverOnDiskHarnessOnly(t *testing.T) {
 	req.Config = &CreateAgentConfig{HarnessConfig: "claude", Profile: "default"}
 	required, _, _, _ := srv.extractRequiredEnvKeys(req, "", hydratedDir)
 	if !slices.Contains(required, "GOOGLE_CLOUD_PROJECT") {
-		t.Errorf("hydrated vertex-ai auth was shadowed by the on-disk harness-only dir: required=%v", required)
+		t.Errorf("hydrated vertex-ai auth not used: required=%v", required)
 	}
 	if slices.Contains(required, "ANTHROPIC_API_KEY") {
-		t.Errorf("api-key requirement leaked from the on-disk copy: required=%v", required)
+		t.Errorf("on-disk api-key requirement was scored although launch uses the hydrated copy: required=%v", required)
 	}
 }
 
@@ -114,10 +113,11 @@ func TestHarnessPolicy_EvaluatesHydratedBundle(t *testing.T) {
 
 	req := CreateAgentRequest{Config: &CreateAgentConfig{HarnessConfig: "hc"}}
 
-	name, entry, ok, err := srv.lookupHarnessConfigForPolicy(req, "", hydratedDir)
-	if err != nil || !ok || name != "hc" {
-		t.Fatalf("lookup failed: name=%q ok=%v err=%v", name, ok, err)
+	name, entries, ok, err := srv.lookupHarnessConfigForPolicy(req, "", hydratedDir)
+	if err != nil || !ok || name != "hc" || len(entries) != 1 {
+		t.Fatalf("lookup failed: name=%q ok=%v entries=%d err=%v", name, ok, len(entries), err)
 	}
+	entry := entries[0]
 	if entry.Provisioner == nil {
 		t.Fatal("policy gate evaluated the broker-local copy, not the hydrated bundle")
 	}
@@ -131,14 +131,14 @@ func TestHarnessPolicy_EvaluatesHydratedBundle(t *testing.T) {
 	hydrated2 := filepath.Join(t.TempDir(), "hc2")
 	writeHarnessConfigDirAt(t, hydrated2, "harness: claude\nimage: scion-claude:test\n")
 	req.Config.HarnessConfig = "hc2"
-	_, entry, ok, _ = srv.lookupHarnessConfigForPolicy(req, "", hydrated2)
-	if !ok || entry.Provisioner != nil {
-		t.Errorf("broker-local scripted copy shadowed the declarative hydrated bundle: ok=%v provisioner=%v", ok, entry.Provisioner)
+	_, entries, ok, _ = srv.lookupHarnessConfigForPolicy(req, "", hydrated2)
+	if !ok || len(entries) != 1 || entries[0].Provisioner != nil {
+		t.Errorf("broker-local scripted copy shadowed the declarative hydrated bundle: ok=%v entries=%+v", ok, entries)
 	}
 
 	// No hydrated copy: the broker-local copy is evaluated.
-	_, entry, ok, _ = srv.lookupHarnessConfigForPolicy(req, "", "")
-	if !ok || entry.Provisioner == nil {
+	_, entries, ok, _ = srv.lookupHarnessConfigForPolicy(req, "", "")
+	if !ok || len(entries) == 0 || entries[0].Provisioner == nil {
 		t.Errorf("broker-local fallback not evaluated: ok=%v", ok)
 	}
 }
@@ -154,8 +154,8 @@ func TestHarnessPolicy_EvaluatesTemplateBundled(t *testing.T) {
 	writeHarnessConfigDirAt(t, filepath.Join(tplDir, "harness-configs", "hc"), scriptedHarnessYAML)
 
 	req := CreateAgentRequest{Config: &CreateAgentConfig{HarnessConfig: "hc"}}
-	_, entry, ok, _ := srv.lookupHarnessConfigForPolicy(req, tplDir, "")
-	if !ok || entry.Provisioner == nil {
+	_, entries, ok, _ := srv.lookupHarnessConfigForPolicy(req, tplDir, "")
+	if !ok || len(entries) == 0 || entries[0].Provisioner == nil {
 		t.Errorf("template-bundled scripted harness-config not evaluated by the gate: ok=%v", ok)
 	}
 }
