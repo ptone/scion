@@ -396,10 +396,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if profileOverrideImage != "" {
 				settingsImage = settings.HarnessConfigs[harnessConfigName].Image
 			}
-			profileOverridePullPolicy = settings.ProfileHarnessOverrideImagePullPolicy(settingsProfile, harnessConfigName)
+			// The profile's image_pull_policy rises with the profile image
+			// only: it takes the profile tier when that same override also
+			// sets an image, and otherwise stays in the settings tier, where
+			// ResolveHarnessConfig already placed it.
 			settingsPullPolicy = hConfig.ImagePullPolicy
-			if profileOverridePullPolicy != "" {
-				settingsPullPolicy = settings.HarnessConfigs[harnessConfigName].ImagePullPolicy
+			if profileOverrideImage != "" {
+				profileOverridePullPolicy = settings.ProfileHarnessOverrideImagePullPolicy(settingsProfile, harnessConfigName)
+				if profileOverridePullPolicy != "" {
+					settingsPullPolicy = settings.HarnessConfigs[harnessConfigName].ImagePullPolicy
+				}
 			}
 			if hConfig.User != "" {
 				unixUsername = hConfig.User
@@ -446,16 +452,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// When the named template can no longer be resolved (renamed or deleted
 	// since provision, or a hub agent restarted on a broker with no local
 	// copy), it falls back to the template chain's OWN image / pull policy
-	// that ProvisionAgent recorded (Info.ImageProvenance) — never to the
+	// that ProvisionAgent recorded in broker-side agent state (image-provenance.json
+	// in the agent dir, never the container-writable agent-info.json) — never to the
 	// merged scion-agent.json value, which also folds in that moment's
 	// inline, profile, settings and file values, so a profile or settings
 	// pin removed since then would otherwise linger disguised as the
 	// template's (ptone/scion#1799). An agent provisioned before
-	// ImageProvenance existed still falls back to that merged value.
-	var provenance *api.AgentImageProvenance
-	if finalScionCfg != nil && finalScionCfg.Info != nil {
-		provenance = finalScionCfg.Info.ImageProvenance
-	}
+	// image provenance was recorded still falls back to that merged value.
+	provenance := readImageProvenance(agentDir)
 	templateTierSource := imageTierTemplate
 	templateImage, templatePullPolicy := templateChainImage(templateChain)
 	if templateUnresolvable {
@@ -477,7 +481,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// CLI promotes to it, or the hub's explicit image), else the request
 	// image recorded at provision, so a first start and a plain restart rank
 	// it identically, locally and via the hub. For an agent provisioned
-	// before ImageProvenance existed, the create-time inline image
+	// before image provenance was recorded, the create-time inline image
 	// (Info.ExplicitImage — a request-level choice there, since the CLI and
 	// the hub both promote it to the request image) stands in, which keeps
 	// such an agent's image where it was before this change. The inline

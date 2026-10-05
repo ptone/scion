@@ -1895,6 +1895,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	} else {
 		info.Phase = "created"
 	}
+	// info.Image is kept for display and listing only (agent list, the
+	// broker's agent response); Start never reads it. The request image
+	// Start replays is recorded in broker-side image provenance below.
 	if agentImage != "" {
 		info.Image = agentImage
 	}
@@ -1904,16 +1907,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if explicitPullPolicy != "" {
 		info.ExplicitImagePullPolicy = explicitPullPolicy
 	}
-	// Record each image input at its own tier (ptone/scion#1799), so Start
-	// never has to reuse the merged finalScionCfg.Image — which folds in
-	// the inline, settings and profile values of this moment — as if it
-	// were the template's.
-	tplImage, tplPullPolicy := templateChainImage(chain)
-	info.ImageProvenance = &api.AgentImageProvenance{
-		RequestImage:            agentImage,
-		TemplateImage:           tplImage,
-		TemplateImagePullPolicy: tplPullPolicy,
-	}
 
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
 	if err != nil {
@@ -1921,6 +1914,19 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), agentCfgData, 0644); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write agent config: %w", err)
+	}
+	// Record each image input at its own tier (ptone/scion#1799), so Start
+	// never has to reuse the merged finalScionCfg.Image — which folds in
+	// the inline, settings and profile values of this moment — as if it
+	// were the template's. Image provenance is recorded in broker-side agent
+	// state (the agent dir), never in the container-visible agent home.
+	tplImage, tplPullPolicy := templateChainImage(chain)
+	if err := writeImageProvenance(agentDir, imageProvenance{
+		RequestImage:            agentImage,
+		TemplateImage:           tplImage,
+		TemplateImagePullPolicy: tplPullPolicy,
+	}); err != nil {
+		return "", "", nil, fmt.Errorf("failed to write image provenance: %w", err)
 	}
 
 	// Now attach Info to the config object for return and for writing agent-info.json

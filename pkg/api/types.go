@@ -641,12 +641,6 @@ type AgentInfo struct {
 	ExplicitImage           string `json:"explicitImage,omitempty"`
 	ExplicitImagePullPolicy string `json:"explicitImagePullPolicy,omitempty"`
 
-	// ImageProvenance records, per source, the image inputs ProvisionAgent
-	// saw, so a later Start can rank each one at its own tier instead of
-	// reusing the merged scion-agent.json value (ptone/scion#1799). Nil
-	// means the agent was provisioned before this field existed.
-	ImageProvenance *AgentImageProvenance `json:"imageProvenance,omitempty"`
-
 	// Timestamps
 	Created           time.Time `json:"created,omitempty"`           // When the agent was created
 	Updated           time.Time `json:"updated,omitempty"`           // Last modification timestamp
@@ -670,26 +664,6 @@ type AgentInfo struct {
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
-}
-
-// AgentImageProvenance is the per-source image record on AgentInfo. See
-// settings-precedence.md, "Container image and Kubernetes image pull policy".
-type AgentImageProvenance struct {
-	// RequestImage is the user's explicit request image at provision time
-	// (CLI --image, a local --config image the CLI promotes to it, or the
-	// Hub's request image). Start replays it at the top tier when the
-	// current request sets no image, so a first start and a later plain
-	// restart rank it the same way.
-	RequestImage string `json:"requestImage,omitempty"`
-	// TemplateImage and TemplateImagePullPolicy are the template chain's
-	// own image / kubernetes.imagePullPolicy at provision time, with no
-	// inline, profile, settings or file contribution folded in. Start uses
-	// them as the template tier only when the template can no longer be
-	// resolved (e.g. a hub agent restarted on a broker that has no local
-	// copy), so a profile or settings pin removed since provision never
-	// lingers disguised as the template's value.
-	TemplateImage           string `json:"templateImage,omitempty"`
-	TemplateImagePullPolicy string `json:"templateImagePullPolicy,omitempty"`
 }
 
 // AgentDetail provides freeform context about the current activity.
