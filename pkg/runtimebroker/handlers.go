@@ -770,11 +770,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
 	// This needs the resolved project path and merged env to determine which keys are missing.
-	// Hub-hydrated template and harness-config paths, filled by the
-	// env-gather preflight below when it runs, and reused (or hydrated on
-	// demand) by the harness-config policy gate so both preflights evaluate
-	// the bundle launch will actually use.
+	// Hub-hydrated template and harness-config, filled by the env-gather
+	// preflight below when it runs, hydrated on demand by the harness-config
+	// policy gate otherwise, and handed to buildStartContext so launch uses
+	// the bundle the preflights evaluated and avoids a redundant hydration.
+	// tplHydrated/hcHydrated record that a hydration attempt completed
+	// without error: an empty path is a legitimate result (unstamped,
+	// hash-only, or no resolver) and must not trigger another attempt.
 	var hydratedTemplatePath, hydratedHCPath string
+	var tplHydrated, hcHydrated bool
 	if req.GatherEnv && !req.NoAuth {
 		// Build a preliminary merged env for env-gather evaluation. Shared
 		// with extractRequiredEnvKeys's own requestEnv so both checks start
@@ -820,6 +824,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				hydratedTemplatePath = tplPath
+				tplHydrated = true
 			}
 		}
 
@@ -840,6 +845,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					}
 				} else {
 					hydratedHCPath = hcPath
+					hcHydrated = true
 				}
 			}
 		}
@@ -978,20 +984,19 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Phase 3 broker policy: refuse container-script harness dispatches
-	// unless the broker has opted in. We check before buildStartContext so
-	// the failure happens before the broker mounts project state, downloads
-	// workspaces, or projects secrets.
+	// Harness-config policy gate (enforceHarnessConfigPolicy): runs on
+	// create, start and restart against the single hydrated harness-config
+	// launch will use. On create it runs before buildStartContext, so a
+	// refusal happens before the broker mounts project state, downloads
+	// workspaces, or projects secrets; this is therefore create's hydration
+	// point, and buildStartContext reuses the result (Prehydrated below).
 	//
-	// The gate must evaluate the same bundle launch will use
-	// (ptone/scion#621): a hub-hydrated harness-config (and the hydrated
-	// template whose bundled harness-configs/ outrank project/global ones)
-	// rather than only a broker-local copy of the same name. Hydration is
-	// only needed when the policy can refuse anything; with the default
-	// allow=true every entry passes, so no hub round trip is paid. A
-	// hydration failure here fails the create with the same mapping launch
-	// would use (buildStartContext), rather than letting the gate evaluate a
-	// broker-local copy launch would not run.
+	// The gate evaluates the hub-hydrated harness-config and the hydrated
+	// template, whose bundled harness-configs/ outrank project/global ones
+	// (ptone/scion#621). Hydration here is only needed when the policy can
+	// refuse; with the default allow=true every entry passes and launch
+	// hydrates as usual. A hydration failure fails the create with the same
+	// mapping launch uses (buildStartContext).
 	if !s.config.AllowContainerScriptHarnesses && req.Config != nil {
 		if hubConn := s.resolveHubConnection(r); hubConn != nil {
 			failHydrate := func(what string, err error) {
@@ -1005,30 +1010,33 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				span.SetStatus(codes.Error, startContextSpanText(sce))
 				s.writeStartContextError(w, sce, "create agent")
 			}
-			if hydratedTemplatePath == "" && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
+			if !tplHydrated && (req.Config.TemplateID != "" || req.Config.TemplateHash != "") {
 				tplPath, err := s.hydrateTemplate(ctx, req.Config, hubConn)
 				if err != nil {
 					failHydrate("template", err)
 					return
 				}
-				hydratedTemplatePath = tplPath
+				hydratedTemplatePath, tplHydrated = tplPath, true
 			}
-			if hydratedHCPath == "" && (req.Config.HarnessConfigID != "" || req.Config.HarnessConfigHash != "") {
+			if !hcHydrated && (req.Config.HarnessConfigID != "" || req.Config.HarnessConfigHash != "") {
 				hcPath, err := s.hydrateHarnessConfig(ctx, req.Config, hubConn)
 				if err != nil {
 					failHydrate("harness-config", err)
 					return
 				}
-				hydratedHCPath = hcPath
+				hydratedHCPath, hcHydrated = hcPath, true
 			}
 		}
 	}
-	if name, entry, ok := s.lookupHarnessConfigForPolicy(req, hydratedTemplatePath, hydratedHCPath); ok {
-		if d := s.evaluateHarnessConfigPolicy(name, entry); !d.OK {
-			markAttemptFailed(d.HTTPStatus, d.Message)
-			writeError(w, d.HTTPStatus, d.Code, d.Message, nil)
-			return
-		}
+	if d := s.enforceHarnessConfigPolicy(harnessPolicyInput{
+		Req:                  req,
+		HydratedTemplatePath: hydratedTemplatePath,
+		HydratedHCPath:       hydratedHCPath,
+	}); !d.OK {
+		markAttemptFailed(d.HTTPStatus, d.detail())
+		span.SetStatus(codes.Error, d.detail())
+		s.writeHarnessPolicyRefusal(w, d, "create agent", req.ID)
+		return
 	}
 
 	// N1-7: with nfs.auto_mount, ensure NFS shares are mounted before an
@@ -1097,6 +1105,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// Threaded only for the workspace-source checks; the download
 		// itself runs after buildStartContext (below, or in runLaunch).
 		WorkspaceStoragePath: req.WorkspaceStoragePath,
+		// Launch uses the bundle the preflights (env-gather, policy gate)
+		// evaluated; avoids a redundant hydration.
+		Prehydrated: prehydratedBundle{
+			TemplateDone:      tplHydrated,
+			TemplatePath:      hydratedTemplatePath,
+			HarnessConfigDone: hcHydrated,
+			HarnessConfigPath: hydratedHCPath,
+		},
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, startContextSpanText(err))
@@ -2310,6 +2326,15 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		return
 	}
 
+	// Harness-config policy gate: runs on create, start and restart against
+	// the single hydrated harness-config launch will use (opts, as built by
+	// buildStartContext above), before the start's side effects (applyInlineConfigUpdate, mgr.Start).
+	if d := s.enforceHarnessConfigPolicy(harnessPolicyInputForStart(opts, id)); !d.OK {
+		span.SetStatus(codes.Error, d.detail())
+		s.writeHarnessPolicyRefusal(w, d, "start agent", id)
+		return
+	}
+
 	// Apply updated InlineConfig to scion-agent.json before starting.
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
 		s.applyInlineConfigUpdate(id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
@@ -2757,6 +2782,14 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	}
 	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
 		s.writeStartContextError(w, sce, "restart agent")
+		return
+	}
+
+	// Harness-config policy gate: runs on create, start and restart against
+	// the single hydrated harness-config launch will use (opts, as built by
+	// buildStartContext above), before the stop below.
+	if d := s.enforceHarnessConfigPolicy(harnessPolicyInputForStart(opts, id)); !d.OK {
+		s.writeHarnessPolicyRefusal(w, d, "restart agent", id)
 		return
 	}
 
