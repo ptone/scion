@@ -63,13 +63,7 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		return nil, fmt.Errorf("harness.Resolve requires a name")
 	}
 
-	var hcDir *config.HarnessConfigDir
-	var hcErr error
-	if opts.ConfigDirPath != "" {
-		hcDir, hcErr = config.LoadHarnessConfigDir(opts.ConfigDirPath)
-	} else {
-		hcDir, hcErr = config.FindHarnessConfigDir(opts.Name, opts.ProjectPath, opts.TemplatePaths...)
-	}
+	hcDir, hcErr := config.ResolveHarnessConfigDir(opts.ConfigDirPath, opts.Name, opts.ProjectPath, opts.TemplatePaths...)
 
 	entry := config.HarnessConfigEntry{Harness: opts.Name}
 	if hcDir != nil {

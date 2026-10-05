@@ -698,11 +698,10 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 // preferring a Hub-hydrated path recorded on the context (§7.3 step 4) over the
 // on-disk FindHarnessConfigDir search. This lets a broker that lacks the
 // harness-config locally use the copy fetched from the Hub's storage backend.
+// The ordering itself lives in config.ResolveHarnessConfigDir, which the
+// runtime broker's preflights share.
 func resolveHarnessConfigDir(ctx context.Context, name, projectPath string, templatePaths ...string) (*config.HarnessConfigDir, error) {
-	if hcPath := api.HarnessConfigPathFromContext(ctx); hcPath != "" {
-		return config.LoadHarnessConfigDir(hcPath)
-	}
-	return config.FindHarnessConfigDir(name, projectPath, templatePaths...)
+	return config.ResolveHarnessConfigDir(api.HarnessConfigPathFromContext(ctx), name, projectPath, templatePaths...)
 }
 
 // isGitWorkspaceProject reports whether projectDir should be treated as a

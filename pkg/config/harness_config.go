@@ -47,6 +47,57 @@ type HarnessConfigDir struct {
 	Name   string             // Directory name (e.g., "claude", "gemini-experimental")
 	Path   string             // Absolute path to the directory
 	Config HarnessConfigEntry // Parsed config.yaml content
+	// Source records which resolution branch produced this directory (see
+	// HarnessConfigSource). Empty when loaded directly via
+	// LoadHarnessConfigDir outside the resolvers.
+	Source HarnessConfigSource
+}
+
+// HarnessConfigSource names the resolution branch a harness-config came from.
+// It is provenance only: it is reported on agent info so operators can tell
+// whether an agent ran the hub-managed bundle or a broker-local copy that
+// shadowed (or substituted for) it (ptone/scion#620).
+type HarnessConfigSource string
+
+const (
+	// HarnessConfigSourceHubHydrated is a hub-managed bundle hydrated (or read
+	// from co-located storage) for this dispatch.
+	HarnessConfigSourceHubHydrated HarnessConfigSource = "hub-hydrated"
+	// HarnessConfigSourceTemplateBundled is a harness-configs/<name> directory
+	// shipped inside one of the agent's template directories.
+	HarnessConfigSourceTemplateBundled HarnessConfigSource = "template-bundled"
+	// HarnessConfigSourceBrokerLocal is a project-level or global
+	// harness-configs/<name> directory on the broker's own disk.
+	HarnessConfigSourceBrokerLocal HarnessConfigSource = "broker-local"
+	// HarnessConfigSourceBuiltin is the synthetic "generic" entry, which has
+	// no directory at all.
+	HarnessConfigSourceBuiltin HarnessConfigSource = "builtin"
+)
+
+// ResolveHarnessConfigDir is the single resolution order for an agent's
+// harness-config directory, shared by provisioning (pkg/agent), harness
+// construction (pkg/harness.Resolve) and the runtime broker's preflights
+// (auth/env-gather and the harness-config policy gate), so they all evaluate
+// the same bundle:
+//
+//  1. hydratedPath, when non-empty: the hub-hydrated copy for this dispatch.
+//     It is used unconditionally and never merged with an on-disk copy of
+//     the same name; a load failure is returned rather than falling back,
+//     because launch would not fall back either.
+//  2. Otherwise FindHarnessConfigDir: template-bundled, then project, then
+//     global directories (then the synthetic "generic" entry).
+//
+// The returned directory's Source records which branch resolved it.
+func ResolveHarnessConfigDir(hydratedPath, name, projectPath string, templatePaths ...string) (*HarnessConfigDir, error) {
+	if hydratedPath != "" {
+		hcDir, err := LoadHarnessConfigDir(hydratedPath)
+		if err != nil {
+			return nil, err
+		}
+		hcDir.Source = HarnessConfigSourceHubHydrated
+		return hcDir, nil
+	}
+	return FindHarnessConfigDir(name, projectPath, templatePaths...)
 }
 
 // LoadHarnessConfigDir loads a harness-config from an on-disk directory.
@@ -129,6 +180,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 		searched = append(searched, tplHarnessConfigDir)
 		if info, err := os.Stat(tplHarnessConfigDir); err == nil && info.IsDir() {
 			if hcDir, err := LoadHarnessConfigDir(tplHarnessConfigDir); err == nil {
+				hcDir.Source = HarnessConfigSourceTemplateBundled
 				return hcDir, nil
 			}
 		}
@@ -140,6 +192,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 		searched = append(searched, projectHarnessConfigDir)
 		if info, err := os.Stat(projectHarnessConfigDir); err == nil && info.IsDir() {
 			if hcDir, err := LoadHarnessConfigDir(projectHarnessConfigDir); err == nil {
+				hcDir.Source = HarnessConfigSourceBrokerLocal
 				return hcDir, nil
 			}
 		}
@@ -152,6 +205,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 		searched = append(searched, globalHarnessConfigDir)
 		if info, err := os.Stat(globalHarnessConfigDir); err == nil && info.IsDir() {
 			if hcDir, err := LoadHarnessConfigDir(globalHarnessConfigDir); err == nil {
+				hcDir.Source = HarnessConfigSourceBrokerLocal
 				return hcDir, nil
 			}
 		}
@@ -164,6 +218,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 		return &HarnessConfigDir{
 			Name:   "generic",
 			Config: HarnessConfigEntry{Harness: "generic", Image: "scion-base:latest", User: "scion"},
+			Source: HarnessConfigSourceBuiltin,
 		}, nil
 	}
 
