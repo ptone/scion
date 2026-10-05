@@ -130,6 +130,18 @@ func TestClassifyStartError(t *testing.T) {
 			t.Errorf("got (%q, %q), want (harness_config_policy, %q)", code, msg, d.Message)
 		}
 	})
+
+	t.Run("required skill resolution failure", func(t *testing.T) {
+		skillErr := &agent.SkillResolutionError{URI: "gh://owner/repo/my-skill@main", Code: agent.SkillErrCodeNotFound, Message: "skill not found"}
+		code, message := classifyStartError(context.Background(), fmt.Errorf("start: %w", skillErr))
+		if code != ErrCodeSkillResolution {
+			t.Fatalf("code = %q, want %q", code, ErrCodeSkillResolution)
+		}
+		if !strings.Contains(message, "gh://owner/repo/my-skill@main") {
+			t.Fatalf("message %q does not name the skill", message)
+		}
+	})
+
 	t.Run("other errors are runtime_error", func(t *testing.T) {
 		code, _ := classifyStartError(context.Background(), errors.New("boom"))
 		if code != "runtime_error" {

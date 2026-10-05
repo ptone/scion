@@ -510,9 +510,15 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 	if ue, ok := unusableProvisionerFrom(err); ok {
 		return ErrCodeHarnessConfigUnusable, ue.PublicMessage()
 	}
+	var skillErr *agent.SkillResolutionError
 	switch {
 	case errors.Is(err, agent.ErrContainerNameInUse):
 		return "name_in_use", err.Error()
+	case errors.As(err, &skillErr):
+		// A required skill could not be resolved: the same code a
+		// synchronous create or start returns, with the error naming the
+		// skill and its cause.
+		return ErrCodeSkillResolution, err.Error()
 	case errors.Is(err, config.ErrTemplateNotFound), errors.Is(err, config.ErrHarnessConfigNotFound):
 		return "template_not_found", err.Error()
 	default:
