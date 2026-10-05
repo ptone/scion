@@ -795,6 +795,13 @@ start or restart fails with an error asking you to re-provision the agent (`scio
 delete and re-create it); a broker returns `409 Conflict`. It never falls back to
 `agent-info.json`.
 
+For a shared-workspace agent, the record lives in the broker-side external agent directory, which
+the broker locates from the Hub-supplied project ID, never from the in-project agents directory
+inside the shared workspace or from the workspace's project-id marker. Restarts carry the
+shared-workspace flag, as starts do, so both read the same directory. A restart whose external
+agent directory is missing fails with `409 Conflict` (re-provision) rather than using the
+in-project directory.
+
 An agent provisioned before image provenance was recorded falls back to its previous behaviour,
 including reading those `agent-info.json` fields: its create-time inline image ranks at the top
 tier, its saved or requested profile drives the override lookup, and the merged

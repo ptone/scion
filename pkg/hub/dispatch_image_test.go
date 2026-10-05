@@ -238,3 +238,50 @@ func TestApplyAgentUpdate_EchoedImageNotFrozenIntoInlineConfig(t *testing.T) {
 	assert.Equal(t, "user-image:v2", updated.AppliedConfig.InlineConfig.Image)
 	assert.Equal(t, "user-image:v2", explicitDispatchImage(updated.AppliedConfig))
 }
+
+// TestDispatchAgentRestart_CarriesSharedWorkspace: a restart of a
+// shared-workspace agent tells the broker so (as a start already does), so
+// the broker reads and writes the agent's state under the same broker-side
+// agents root as its start, never the in-project root inside the
+// container-visible workspace (ptone/scion#1799).
+func TestDispatchAgentRestart_CarriesSharedWorkspace(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		labels map[string]string
+		want   bool
+	}{
+		{"shared-workspace project", map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeShared}, true},
+		{"per-agent project", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			memStore := createTestStore(t)
+			require.NoError(t, memStore.CreateProject(ctx, &store.Project{
+				ID: tid("project-restart-sw"), Name: "Restart SW", Slug: "restart-sw",
+				GitRemote: "github.com/test/restart-sw", Labels: tc.labels,
+			}))
+			require.NoError(t, memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+				ID: tid("host-1"), Name: "test-host", Slug: "test-host",
+				Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+			}))
+			require.NoError(t, memStore.AddProjectProvider(ctx, &store.ProjectProvider{
+				ProjectID: tid("project-restart-sw"), BrokerID: tid("host-1"), BrokerName: "test-host",
+				LocalPath: "/home/user/.scion/projects/restart-sw/.scion", Status: store.BrokerStatusOnline,
+			}))
+			client := &mockRuntimeBrokerClient{}
+			d := NewHTTPAgentDispatcherWithClient(memStore, client, false, slog.Default())
+			ag := &store.Agent{
+				ID: "agent-restart-sw", Name: "restart-sw-agent", Slug: "restart-sw-agent",
+				ProjectID: tid("project-restart-sw"), RuntimeBrokerID: tid("host-1"),
+				AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
+			}
+			require.NoError(t, d.DispatchAgentRestart(ctx, ag))
+			assert.Equal(t, tc.want, client.lastRestartExtras.SharedWorkspace)
+
+			payload := map[string]interface{}{}
+			applyStartExtras(payload, client.lastRestartExtras)
+			_, present := payload["sharedWorkspace"]
+			assert.Equal(t, tc.want, present)
+		})
+	}
+}

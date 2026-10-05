@@ -349,8 +349,9 @@ func ResolveAgentDir(projectDir, agentName string) string {
 // directory next to scion-agent.json, where ProvisionAgent records each image
 // input it saw (pkg/agent's image provenance). It sits outside every
 // container mount scion computes for the agent, so the container cannot
-// influence the image a later Start selects; see pkg/runtime's
-// TestHarnessInputsRecordOutsideScionMounts.
+// influence the image a later Start selects. (The mount-source test that
+// checks this, pkg/runtime's TestHarnessInputsRecordOutsideScionMounts,
+// lives on the integration branch and covers this file there.)
 const ImageProvenanceFileName = "image-provenance.json"
 
 // ErrAgentStateDirUnavailable reports that an agent's broker-side state

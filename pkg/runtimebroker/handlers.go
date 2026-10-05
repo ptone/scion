@@ -2707,8 +2707,12 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		EnvClassifications:       restartReq.EnvClassifications,
 		RunID:                    restartReq.RunID,
 		SharedWorkspace:          restartReq.SharedWorkspace,
-		HTTPRequest:              r,
-		Operation:                opHTTPRestart,
+		// The Hub-supplied project ID (the request's projectId) locates a
+		// shared-workspace agent's broker-side external state root, as on
+		// start; never the project-id marker inside the workspace.
+		ProjectID:   projectID,
+		HTTPRequest: r,
+		Operation:   opHTTPRestart,
 	})
 	if err != nil {
 		s.writeStartContextError(w, err, "restart agent")
