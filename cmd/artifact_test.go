@@ -160,3 +160,27 @@ func TestAgentModeArtifactVerbs(t *testing.T) {
 	assert.Equal(t, []string{"artifact", "artifact.get", "artifact.publish"}, names)
 	assert.False(t, strings.Contains(strings.Join(names, ","), "share"))
 }
+
+func TestArtifactErrorHints(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":{"code":"forbidden","message":"not allowed"}}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":{"code":"not_found","message":"not found"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	var stdout, stderr bytes.Buffer
+	err = getArtifact(context.Background(), c.Artifacts(), &stdout, &stderr, testArtifactID, "")
+	assert.ErrorContains(t, err, "project:artifact:read")
+
+	file := filepath.Join(t.TempDir(), "a.md")
+	require.NoError(t, os.WriteFile(file, []byte("a"), 0o644))
+	err = publishArtifact(context.Background(), c.Artifacts(), &stdout, "", file, "", "")
+	assert.ErrorContains(t, err, "project:artifact:write")
+}

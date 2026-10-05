@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -265,4 +266,67 @@ func TestArtifactWriteScopeDelegation(t *testing.T) {
 	grant.AgentScopes = []AgentTokenScope{ScopeProjectArtifactWrite}
 	decision = authz.CanDelegate(context.Background(), actor, grant)
 	assert.False(t, decision.Allowed, "an explicitly requested scope the actor lacks must be denied")
+}
+
+// userArtifactRequest sends an artifact request as user with a raw body.
+func userArtifactRequest(t *testing.T, srv *Server, user *store.User, method, path string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb)
+	require.NoError(t, err)
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestArtifactsProjectMembers covers the user side (a user opens the
+// artifact; P1 acceptance, ptone/scion#3208): project
+// roles carry artifact.read and artifact.create, so a project member can
+// publish into the project and other members and the project's agents can
+// read it; a user without a role in the project cannot publish there and
+// gets 404 on every read route.
+func TestArtifactsProjectMembers(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	p1 := artifactProject(t, s, "members-p1")
+	createTestUserWithProjectRole(t, s, tid("art-member"), "art-member@test.com", p1.ID, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, s, tid("art-member2"), "art-member2@test.com", p1.ID, store.ProjectRoleMember)
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: tid("art-outsider"), Email: "art-outsider@test.com", DisplayName: "Outsider", Role: "member", Status: "active"}))
+	member, err := s.GetUser(ctx, tid("art-member"))
+	require.NoError(t, err)
+	member2, err := s.GetUser(ctx, tid("art-member2"))
+	require.NoError(t, err)
+	outsider, err := s.GetUser(ctx, tid("art-outsider"))
+	require.NoError(t, err)
+	_, agentTok := artifactAgent(t, srv, s, p1.ID, "members-agent", AgentRoleBaseline)
+
+	// A member publishes into the project (users name the scope).
+	rec := userArtifactRequest(t, srv, member, http.MethodPost, "/api/v1/artifacts?name=report.md&scope="+p1.ID, []byte("# Report\n"))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	id := decodeArtifactID(t, rec)
+
+	paths := []string{
+		"/api/v1/artifacts/" + id,
+		"/api/v1/artifacts/" + id + "/files/report.md",
+		"/api/v1/artifacts/" + id + "/versions/1/files/report.md",
+	}
+	for _, p := range paths {
+		assert.Equal(t, http.StatusOK, userArtifactRequest(t, srv, member, http.MethodGet, p, nil).Code, "owner %s", p)
+		assert.Equal(t, http.StatusOK, userArtifactRequest(t, srv, member2, http.MethodGet, p, nil).Code, "member %s", p)
+		assert.Equal(t, http.StatusOK, doRequestWithAgentToken(t, srv, http.MethodGet, p, nil, agentTok).Code, "project agent %s", p)
+		assert.Equal(t, http.StatusNotFound, userArtifactRequest(t, srv, outsider, http.MethodGet, p, nil).Code, "outsider %s", p)
+	}
+
+	rec = userArtifactRequest(t, srv, outsider, http.MethodPost, "/api/v1/artifacts?name=x.md&scope="+p1.ID, []byte("x"))
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
+func decodeArtifactID(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var resp artifacts.ArtifactResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Artifact.ID)
+	return resp.Artifact.ID
 }
