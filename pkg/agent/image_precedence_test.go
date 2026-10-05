@@ -442,19 +442,19 @@ func TestWithProvisionedImage(t *testing.T) {
 	projectScionDir := imagePrecedenceFixture(t, "", profileOverrideSettings)
 	base := &api.ScionConfig{Image: "template-pinned:v2", HarnessConfig: "test-harness"}
 
-	got := withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, base)
+	got := withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, "", base)
 	if got.Image != "profile-pinned:v4" {
 		t.Errorf("profile pin: got %q", got.Image)
 	}
 	if base.Image != "template-pinned:v2" {
 		t.Errorf("input config was mutated: %q", base.Image)
 	}
-	got = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging", Image: "request:v9"}, base)
+	got = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging", Image: "request:v9"}, "", base)
 	if got.Image != "request:v9" {
 		t.Errorf("request image: got %q", got.Image)
 	}
 	writeSettings(t, noOverrideSettings)
-	got = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, base)
+	got = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, "", base)
 	if got.Image != "template-pinned:v2" {
 		t.Errorf("no pin: got %q", got.Image)
 	}
@@ -524,8 +524,8 @@ profiles:
 // TestStart_AgentInfoImageFieldsDoNotSteerImageSelection: agent-info.json is
 // in the container-writable agent home, so editing its image / provenance
 // fields must not change the image Start selects: image provenance is
-// recorded in broker-side agent state. (The pre-existing explicitImage
-// inline fallback is deliberately left as it was.)
+// recorded in broker-side agent state (see also
+// TestStart_AgentInfoExplicitImageFieldsDoNotSteerSelection).
 func TestStart_AgentInfoImageFieldsDoNotSteerImageSelection(t *testing.T) {
 	projectScionDir := imagePrecedenceFixture(t, "template-pinned:v2", profileOverrideSettings)
 	first, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
@@ -552,5 +552,129 @@ func TestStart_AgentInfoImageFieldsDoNotSteerImageSelection(t *testing.T) {
 	restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
 	if restart.Image != "profile-pinned:v4" {
 		t.Fatalf("restart after editing agent-info.json: image = %q, want the profile pin unchanged", restart.Image)
+	}
+}
+
+// TestStart_AgentInfoExplicitImageFieldsDoNotSteerSelection: for an agent
+// with broker-side image provenance, the create-time inline image and pull
+// policy are read from that provenance, so editing agent-info.json's
+// explicitImage / explicitImagePullPolicy display copies changes nothing.
+func TestStart_AgentInfoExplicitImageFieldsDoNotSteerSelection(t *testing.T) {
+	projectScionDir := imagePrecedenceFixture(t, "", noOverrideSettings)
+	tpl := filepath.Join(os.Getenv("HOME"), ".scion", "templates", "default", "scion-agent.json")
+	if err := os.WriteFile(tpl, []byte(`{"default_harness_config": "test-harness", "image": "template-pinned:v2", "kubernetes": {"imagePullPolicy": "Never"}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
+	if first.Image != "template-pinned:v2" || pullPolicyOf(first) != "Never" {
+		t.Fatalf("first start: got %q / %q, want template-pinned:v2 / Never", first.Image, pullPolicyOf(first))
+	}
+
+	infoPath := filepath.Join(projectScionDir, "agents", "test-agent", "home", "agent-info.json")
+	data, err := os.ReadFile(infoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["explicitImage"] = "attacker:v1"
+	raw["explicitImagePullPolicy"] = "Always"
+	out, _ := json.Marshal(raw)
+	if err := os.WriteFile(infoPath, out, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
+	if restart.Image != "template-pinned:v2" || pullPolicyOf(restart) != "Never" {
+		t.Fatalf("restart after editing agent-info.json: got %q / %q, want template-pinned:v2 / Never", restart.Image, pullPolicyOf(restart))
+	}
+}
+
+// TestStart_InlineValuesRecordedBrokerSide: a create-time inline image and
+// pull policy survive a plain restart through broker-side provenance.
+func TestStart_InlineValuesRecordedBrokerSide(t *testing.T) {
+	projectScionDir := imagePrecedenceFixture(t, "template-pinned:v2", noOverrideSettings)
+	startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging",
+		InlineConfig: &api.ScionConfig{Image: "inline-pinned:v3", Kubernetes: &api.KubernetesConfig{ImagePullPolicy: "IfNotPresent"}}})
+	data, err := os.ReadFile(filepath.Join(projectScionDir, "agents", "test-agent", imageProvenanceFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p imageProvenance
+	if err := json.Unmarshal(data, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.InlineImage != "inline-pinned:v3" || p.InlineImagePullPolicy != "IfNotPresent" {
+		t.Fatalf("broker-side provenance = %+v, want the inline image and pull policy", p)
+	}
+	restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
+	if restart.Image != "inline-pinned:v3" || pullPolicyOf(restart) != "IfNotPresent" {
+		t.Fatalf("restart: got %q / %q, want the recorded inline values", restart.Image, pullPolicyOf(restart))
+	}
+}
+
+// TestStart_AgentInfoProfileDoesNotSteerProfileOverride: the profile used for
+// the profile harness_overrides image lookup is the provisioned profile
+// recorded broker-side. Rewriting agent-info.json's profile to another
+// configured profile whose override sets a different image changes nothing,
+// whether the restart passes no profile (local) or the saved profile read
+// from agent-info.json (as the broker's restart does via GetSavedProfile).
+func TestStart_AgentInfoProfileDoesNotSteerProfileOverride(t *testing.T) {
+	const twoProfiles = `schema_version: "1"
+active_profile: staging
+profiles:
+  staging:
+    runtime: docker
+    harness_overrides:
+      test-harness:
+        image: profile-pinned:v4
+  other:
+    runtime: docker
+    harness_overrides:
+      test-harness:
+        image: other-profile:v8
+        image_pull_policy: Always
+harness_configs:
+  test-harness:
+    harness: generic
+`
+	projectScionDir := imagePrecedenceFixture(t, "template-pinned:v2", twoProfiles)
+	first, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
+	if first.Image != "profile-pinned:v4" {
+		t.Fatalf("first start: image = %q, want the staging pin", first.Image)
+	}
+
+	provPath := filepath.Join(projectScionDir, "agents", "test-agent", imageProvenanceFile)
+	fi, err := os.Stat(provPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("image provenance mode = %o, want 0600", fi.Mode().Perm())
+	}
+
+	infoPath := filepath.Join(projectScionDir, "agents", "test-agent", "home", "agent-info.json")
+	data, err := os.ReadFile(infoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["profile"] = "other"
+	out, _ := json.Marshal(raw)
+	if err := os.WriteFile(infoPath, out, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, restartProfile := range []string{"", "other"} {
+		restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: restartProfile})
+		if restart.Image != "profile-pinned:v4" || pullPolicyOf(restart) != "" {
+			t.Fatalf("restart (profile %q) after rewriting agent-info.json profile: got %q / %q, want profile-pinned:v4 / no policy",
+				restartProfile, restart.Image, pullPolicyOf(restart))
+		}
 	}
 }

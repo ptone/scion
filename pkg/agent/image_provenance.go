@@ -27,7 +27,8 @@ import (
 // image input ProvisionAgent saw. It lives in the agent dir next to
 // scion-agent.json — not in the agent home (agent-info.json), which is
 // mounted into the container — so the container cannot influence the image
-// a later Start selects (ptone/scion#1799).
+// a later Start selects (ptone/scion#1799). Image provenance (including the
+// provisioned profile) is recorded broker-side.
 const imageProvenanceFile = "image-provenance.json"
 
 // imageProvenance is the per-source image record. See settings-precedence.md,
@@ -48,6 +49,18 @@ type imageProvenance struct {
 	// disguised as the template's value.
 	TemplateImage           string `json:"templateImage,omitempty"`
 	TemplateImagePullPolicy string `json:"templateImagePullPolicy,omitempty"`
+	// InlineImage and InlineImagePullPolicy are the create-time inline
+	// config's own image / kubernetes.imagePullPolicy (the broker-side
+	// counterparts of agent-info.json's display copies ExplicitImage /
+	// ExplicitImagePullPolicy). Start falls back to them when the current
+	// request's inline config does not set the field.
+	InlineImage           string `json:"inlineImage,omitempty"`
+	InlineImagePullPolicy string `json:"inlineImagePullPolicy,omitempty"`
+	// Profile is the settings profile the agent was provisioned with
+	// (after the active-profile fallback). Start uses only this profile to
+	// look up the profile harness_overrides image and pull policy, so no
+	// agent-info.json field can steer image selection.
+	Profile string `json:"profile,omitempty"`
 }
 
 func writeImageProvenance(agentDir string, p imageProvenance) error {
@@ -55,7 +68,9 @@ func writeImageProvenance(agentDir string, p imageProvenance) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(agentDir, imageProvenanceFile), data, 0644)
+	// Mode 0600, written atomically (temp file + rename) so a reader never
+	// sees a partial record.
+	return writeAgentInfoFile(filepath.Join(agentDir, imageProvenanceFile), data, 0o600)
 }
 
 // readImageProvenance returns the recorded provenance, or nil when the agent

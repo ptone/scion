@@ -669,7 +669,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// Deliberately no prompt.md write here: the new generation's first task
 	// (the hub-built preamble plus handoff) is delivered by the subsequent
 	// DispatchAgentStart call, not pre-staged as a file.
-	return withProvisionedImage(opts, cfg), nil
+	return withProvisionedImage(opts, agentDir, cfg), nil
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -691,7 +691,7 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		}
 	}
 
-	return withProvisionedImage(opts, cfg), nil
+	return withProvisionedImage(opts, agentDir, cfg), nil
 }
 
 // resolveHarnessConfigDir returns the harness-config directory for an agent,
@@ -1925,6 +1925,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		RequestImage:            agentImage,
 		TemplateImage:           tplImage,
 		TemplateImagePullPolicy: tplPullPolicy,
+		InlineImage:             explicitImage,
+		InlineImagePullPolicy:   explicitPullPolicy,
+		Profile:                 profileName,
 	}); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write image provenance: %w", err)
 	}
