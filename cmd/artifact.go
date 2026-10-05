@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -28,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -166,7 +168,7 @@ func publishArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.
 		SHA256:  hex.EncodeToString(h.Sum(nil)),
 	})
 	if err != nil {
-		return fmt.Errorf("publish failed: %w", err)
+		return fmt.Errorf("publish failed: %w%s", err, artifactErrorHint(err, true))
 	}
 	a := resp.Artifact
 	seq := a.CurrentSeq
@@ -197,7 +199,7 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	}
 	meta, err := svc.Get(ctx, id)
 	if err != nil {
-		return fmt.Errorf("get artifact: %w", err)
+		return fmt.Errorf("get artifact: %w%s", err, artifactErrorHint(err, false))
 	}
 	if meta.Version == nil {
 		return fmt.Errorf("artifact %s has no published version", id)
@@ -215,7 +217,7 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	}
 	rc, err := svc.OpenFile(ctx, id, seq, entry)
 	if err != nil {
-		return fmt.Errorf("fetch %s: %w", entry, err)
+		return fmt.Errorf("fetch %s: %w%s", entry, err, artifactErrorHint(err, false))
 	}
 	defer func() { _ = rc.Close() }()
 
@@ -243,6 +245,26 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	}
 	_, _ = fmt.Fprintf(stderr, "Wrote %s\n", target)
 	return nil
+}
+
+// artifactErrorHint explains the hub's deliberately uniform answers. A read
+// of an artifact the caller may not see is 404, exactly like a missing one,
+// so the hint lists the possible causes without telling them apart.
+func artifactErrorHint(err error, publishing bool) string {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		return ""
+	}
+	switch {
+	case apiErr.StatusCode == http.StatusNotFound && !publishing:
+		return "\nThe artifact does not exist, or you cannot read it: it is not shared with you or your project, " +
+			"or (for an agent) the token lacks the project:artifact:read scope. Artifacts also require the hub.artifacts experiment."
+	case apiErr.StatusCode == http.StatusNotFound:
+		return "\nThe hub has no artifact service: the hub.artifacts experiment may be off."
+	case apiErr.StatusCode == http.StatusForbidden && publishing:
+		return "\nYou may not publish artifacts in this project; for an agent, the token may lack the project:artifact:write scope."
+	}
+	return ""
 }
 
 // copyVerified copies src to dst and, when wantDigest is set, fails if the
