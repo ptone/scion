@@ -33,14 +33,14 @@ func overwriteWarnRecords(h *levelCapturingHandler) []slog.Record {
 	defer h.mu.Unlock()
 	var out []slog.Record
 	for _, r := range h.records {
-		if strings.Contains(r.Message, "hub record overwritten from local disk copy") {
+		if strings.Contains(r.Message, "hub record replaced from local disk copy") {
 			out = append(out, r)
 		}
 	}
 	return out
 }
 
-// ptone/scion#611 (workstation mode): when the startup bootstrap overwrites
+// ptone/scion#611 (workstation mode): when the startup bootstrap replaces
 // an existing hub harness-config from the ~/.scion copy, it must WARN with
 // the old and new content hashes. An unchanged re-run must stay quiet.
 func TestBootstrapHarnessConfigsFromDir_OverwriteWarnsWithHashes(t *testing.T) {
@@ -97,11 +97,19 @@ func TestBootstrapTemplatesFromDir_OverwriteWarnsWithHashes(t *testing.T) {
 		[]byte("harness: claude\nmodel: other\n"), 0644))
 	require.NoError(t, srv.BootstrapTemplatesFromDir(ctx, dir))
 
+	after, err := s.GetTemplateBySlug(ctx, "ws-tmpl", string(store.TemplateScopeGlobal), "")
+	require.NoError(t, err)
+	require.NotEqual(t, before.ContentHash, after.ContentHash)
+
 	found := overwriteWarnRecords(h)
 	require.Len(t, found, 1)
+	assert.Equal(t, slog.LevelWarn, found[0].Level)
 	oldHash, ok := recordAttr(found[0], "oldHash")
 	require.True(t, ok)
 	assert.Equal(t, before.ContentHash, oldHash.String())
+	newHash, ok := recordAttr(found[0], "newHash")
+	require.True(t, ok)
+	assert.Equal(t, after.ContentHash, newHash.String())
 	kind, ok := recordAttr(found[0], "kind")
 	require.True(t, ok)
 	assert.Equal(t, "template", kind.String())

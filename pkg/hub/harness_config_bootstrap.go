@@ -126,12 +126,22 @@ func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.
 
 // warnBootstrapOverwrite reports that the workstation (non-hosted) startup
 // bootstrap replaced an existing hub record's content with the local
-// ~/.scion copy. Any edit made through the hub (web UI, API) since the last
-// import is lost at this point, so this is a WARN, not routine info
-// (ptone/scion#611, workstation-mode overwrite).
+// ~/.scion copy (ptone/scion#611, workstation-mode overwrite). Any edit made
+// through the hub (web UI, API) since the last import is lost at that point.
+//
+// The message states only what is known. Most overwrites are benign — e.g.
+// a binary upgrade that changed a bundled default, which UpdateDefaultTemplates
+// re-materializes on disk at every workstation start — and the hub cannot
+// currently tell those apart from a lost hub-side edit: harness-config edit
+// handlers do not set UpdatedBy, Updated is bumped by every write (including
+// this bootstrap, storage repair and image-status checks), and nothing records
+// the hash the last import wrote. Distinguishing them needs that marker
+// persisted on the record (ResourceStore/schema work, out of scope here).
+// Until then this stays at WARN because the destructive case is silent
+// otherwise.
 func (s *Server) warnBootstrapOverwrite(kind, name, id, dir, oldHash, newHash string) {
-	s.resourceLog.Warn("workstation bootstrap: hub record overwritten from local disk copy; "+
-		"hub-side edits to this "+kind+" were replaced",
+	s.resourceLog.Warn("workstation bootstrap: hub record replaced from local disk copy; "+
+		"any hub-side edits made since the last import are lost",
 		"kind", kind, "name", name, "id", id, "dir", dir,
 		"oldHash", oldHash, "newHash", newHash)
 }
@@ -144,4 +154,14 @@ func (s *Server) currentHarnessConfigHash(ctx context.Context, id string) string
 		return ""
 	}
 	return hc.ContentHash
+}
+
+// currentTemplateHash re-reads a template's stored content hash (for
+// logging); returns "" when it cannot be read.
+func (s *Server) currentTemplateHash(ctx context.Context, id string) string {
+	t, err := s.store.GetTemplate(ctx, id)
+	if err != nil || t == nil {
+		return ""
+	}
+	return t.ContentHash
 }

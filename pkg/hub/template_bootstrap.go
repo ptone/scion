@@ -87,11 +87,8 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 			}
 			if changed {
 				updated++
-				newHash := ""
-				if cur, gErr := s.store.GetTemplate(ctx, existing.ID); gErr == nil && cur != nil {
-					newHash = cur.ContentHash
-				}
-				s.warnBootstrapOverwrite("template", name, existing.ID, templatePath, oldHash, newHash)
+				s.warnBootstrapOverwrite("template", name, existing.ID, templatePath, oldHash,
+					s.currentTemplateHash(ctx, existing.ID))
 			}
 		}
 	}
