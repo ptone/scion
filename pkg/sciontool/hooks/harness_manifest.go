@@ -18,7 +18,8 @@ import (
 // the env overlay output.
 type HarnessManifestRequirement struct {
 	// Required is true when manifest.json exists with a container-script
-	// provisioner. When true, pre-start hook failures must abort startup
+	// provisioner (or the unusable legacy "builtin" one, reported with an
+	// error). When true, pre-start hook failures must abort startup
 	// because the child harness will be misconfigured otherwise.
 	Required bool
 
@@ -54,6 +55,7 @@ func LoadHarnessManifestRequirement(agentHome string) (HarnessManifestRequiremen
 	// Parse the minimal shape we care about. Future fields are ignored.
 	var manifest struct {
 		HarnessConfig struct {
+			Harness     string `json:"harness"`
 			Provisioner *struct {
 				Type             string   `json:"type"`
 				LifecycleEvents  []string `json:"lifecycle_events"`
@@ -73,9 +75,19 @@ func LoadHarnessManifestRequirement(agentHome string) (HarnessManifestRequiremen
 		return HarnessManifestRequirement{}, nil
 	}
 
-	// Builtin provisioners do not require pre-start provisioning.
+	// The legacy "builtin" provisioner has no implementation any more
+	// (harnesses/README.md), so nothing would provision the harness. The
+	// broker refuses such a harness-config before the container is created
+	// (harness.ErrUnusableProvisioner); this is defence in depth for a
+	// manifest staged by an older broker. Abort startup instead of booting a
+	// harness without its provisioning (ptone/scion#611).
 	if prov.Type == "builtin" {
-		return HarnessManifestRequirement{BundleDir: bundleDir}, nil
+		name := manifest.HarnessConfig.Harness
+		if name == "" {
+			name = "<name>"
+		}
+		return HarnessManifestRequirement{Required: true, BundleDir: bundleDir},
+			fmt.Errorf("harness %q is staged with provisioner.type \"builtin\", which is no longer supported; run `scion harness-config upgrade %s --activate-script` (or reinstall it from harnesses/%s) and restart the agent", name, name, name)
 	}
 
 	// pre-start participation is the default for container-script. If the

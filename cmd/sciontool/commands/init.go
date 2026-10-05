@@ -644,8 +644,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	harnessReq, harnessReqErr := hooks.LoadHarnessManifestRequirement(agentHome)
 	if harnessReqErr != nil {
 		log.Error("Failed to load harness manifest: %v", harnessReqErr)
-		// Treat parse errors on a present manifest as fatal — the harness
-		// staged something we cannot interpret.
+		// Treat errors on a present manifest as fatal — the harness staged
+		// something we cannot interpret, or a provisioner that cannot run
+		// (legacy "builtin"), so the harness would boot unprovisioned.
 		reportInitFailure(agentHome, fmt.Errorf("failed to load harness manifest: %w", harnessReqErr))
 		return 1
 	}
