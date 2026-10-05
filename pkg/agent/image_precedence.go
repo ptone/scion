@@ -110,14 +110,26 @@ func templateChainImage(chain []*config.Template) (image, pullPolicy string) {
 // provisioned value, so a profile pin is never baked into the record a later
 // Start falls back to (ptone/scion#1799). The broker reports this image in
 // its provision-only response, which the hub records as AppliedConfig.Image.
-func withProvisionedImage(opts api.StartOptions, cfg *api.ScionConfig) *api.ScionConfig {
+//
+// The profile override is looked up with the profile recorded in the
+// broker-side image provenance ProvisionAgent just wrote (falling back to
+// opts.Profile only if it is missing), the same profile Start will use.
+func withProvisionedImage(opts api.StartOptions, agentDir string, cfg *api.ScionConfig) (*api.ScionConfig, error) {
 	if cfg == nil {
-		return nil
+		return nil, nil
+	}
+	profile := opts.Profile
+	p, err := readImageProvenance(agentDir)
+	if err != nil {
+		return cfg, err
+	}
+	if p != nil {
+		profile = p.Profile
 	}
 	profileImage := ""
 	if projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath); err == nil {
 		if settings, _, _ := config.LoadEffectiveSettings(projectDir); settings != nil {
-			profileImage = settings.ProfileHarnessOverrideImage(opts.Profile, cfg.HarnessConfig)
+			profileImage = settings.ProfileHarnessOverrideImage(profile, cfg.HarnessConfig)
 		}
 	}
 	image, _ := pickImage(slog.Default(), opts.Name, []imageCandidate{
@@ -126,9 +138,9 @@ func withProvisionedImage(opts api.StartOptions, cfg *api.ScionConfig) *api.Scio
 		{source: imageTierRequest, image: opts.Image},
 	})
 	if image == cfg.Image {
-		return cfg
+		return cfg, nil
 	}
 	out := *cfg
 	out.Image = image
-	return &out
+	return &out, nil
 }

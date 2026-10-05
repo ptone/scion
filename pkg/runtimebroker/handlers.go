@@ -1292,6 +1292,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			span.SetStatus(codes.Error, err.Error())
+			if errors.Is(err, config.ErrAgentStateDirUnavailable) {
+				markAttemptFailed(http.StatusConflict, "failed to provision agent")
+				writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to provision agent: "+err.Error(), nil)
+				return
+			}
 			if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
 				markAttemptFailed(http.StatusNotFound, "failed to provision agent")
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to provision agent: "+err.Error(), nil)
@@ -2376,15 +2381,27 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if opts.ProjectPath != "" {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}
-	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	runtimeOpts, provErr := runtimeSelectionOpts(opts, opts.Name, false)
+	if provErr != nil {
+		s.writeImageProvenanceError(w, provErr, "start agent", id)
+		return
+	}
+	mgr, resolvedRuntimeType := s.resolveManagerForOpts(runtimeOpts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
-	if sce := rejectKubernetesAssignRuntimeChange(opts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
-		return s.resolveDispatchProfileSelection(opts)
+	if sce := rejectKubernetesAssignRuntimeChange(runtimeOpts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
 		s.writeStartContextError(w, sce, "start agent")
 		return
 	}
 	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
+		s.writeStartContextError(w, sce, "start agent")
+		return
+	}
+	// Belt and braces: the preliminary classification (buildStartContext)
+	// must agree with this authoritative runtime; the specific rejections
+	// above report their own, more actionable errors first.
+	if sce := rejectRuntimeClassificationMismatch(sc.RuntimeType, resolvedRuntimeType); sce != nil {
 		s.writeStartContextError(w, sce, "start agent")
 		return
 	}
@@ -2444,6 +2461,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), details)
 		case errors.As(err, &skillErr):
 			skillResolutionFailedWithDetails(w, skillErr, details)
+		case errors.Is(err, config.ErrAgentStateDirUnavailable):
+			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("start agent", err).Error(), details)
 		}
@@ -2826,6 +2845,12 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// Image mirrors the same field on the start path: the user's
 		// explicit image, applied as the top tier (ptone/scion#1799).
 		Image string `json:"image,omitempty"`
+		// SharedWorkspace mirrors the start path's field: without it a
+		// restart of a shared-workspace agent would read and write the
+		// agent's state under the in-project agents root, which sits inside
+		// the container-visible /workspace, instead of the broker-side
+		// external root its start uses (ptone/scion#1799).
+		SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
@@ -2870,6 +2895,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		ResolvedEnv:              restartReq.ResolvedEnv,
 		EnvClassifications:       restartReq.EnvClassifications,
 		RunID:                    restartReq.RunID,
+		SharedWorkspace:          restartReq.SharedWorkspace,
 		HTTPRequest:              r,
 		Operation:                opHTTPRestart,
 	})
@@ -2880,6 +2906,12 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	opts := sc.Opts
 	if restartReq.Image != "" {
 		opts.Image = restartReq.Image
+	}
+	if restartReq.SharedWorkspace {
+		// Start then reads and writes the agent's state under the same
+		// (external) agents root as its start, and runtime selection below
+		// reads provenance from that root.
+		opts.SharedWorkspace = true
 	}
 
 	if opts.ProjectPath != "" {
@@ -2892,15 +2924,27 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// a real side effect. A rejection here must leave the agent exactly as
 	// it was; running this after the stop would return 400 with the agent
 	// already stopped. See the identical re-check and comment in startAgent.
-	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	runtimeOpts, provErr := runtimeSelectionOpts(opts, agentName, true)
+	if provErr != nil {
+		s.writeImageProvenanceError(w, provErr, "restart agent", id)
+		return
+	}
+	mgr, resolvedRuntimeType := s.resolveManagerForOpts(runtimeOpts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
-	if sce := rejectKubernetesAssignRuntimeChange(opts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
-		return s.resolveDispatchProfileSelection(opts)
+	if sce := rejectKubernetesAssignRuntimeChange(runtimeOpts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
 		s.writeStartContextError(w, sce, "restart agent")
 		return
 	}
 	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
+		s.writeStartContextError(w, sce, "restart agent")
+		return
+	}
+	// Belt and braces: the preliminary classification (buildStartContext)
+	// must agree with this authoritative runtime; the specific rejections
+	// above report their own, more actionable errors first.
+	if sce := rejectRuntimeClassificationMismatch(sc.RuntimeType, resolvedRuntimeType); sce != nil {
 		s.writeStartContextError(w, sce, "restart agent")
 		return
 	}
@@ -2975,6 +3019,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
 			skillResolutionFailedWithDetails(w, skillErr, details)
+			return
+		}
+		if errors.Is(err, config.ErrAgentStateDirUnavailable) {
+			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to restart agent: "+err.Error(), details)
 			return
 		}
 		if strings.Contains(err.Error(), "not found") {

@@ -145,6 +145,17 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
 	}
 
+	// Fail on an unusable image provenance record before any side effect
+	// (the container cleanup below, prompt.md), reading the same agent dir
+	// GetAgent will use for opts.SharedWorkspace. The record is read again,
+	// from that same dir, where image selection uses it.
+	if preDir, dirErr := config.AgentDirForProject(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID); dirErr == nil {
+		if _, provErr := readImageProvenance(preDir); provErr != nil {
+			logImageProvenanceError(opts.Name, provErr)
+			return nil, provErr
+		}
+	}
+
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
@@ -204,6 +215,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
+	ctx = api.ContextWithHubProjectID(ctx, opts.HubProjectID)
 	if isEmptyPerAgentStart(opts) {
 		ctx = api.ContextWithEmptyPerAgentWorkspace(ctx)
 	}
@@ -315,12 +327,26 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// in finalScionCfg.Info.Template (e.g. "web-dev") may not resolve in the
 	// project, but the original opts.Template path points to the actual
 	// template directory containing harness-configs/.
+	//
+	// Image provenance (including the provisioned profile and template) is
+	// recorded broker-side, in the agent dir; see image_provenance.go. For
+	// an agent that has it, the recorded template stands in for
+	// finalScionCfg.Info.Template, which is read from the container-writable
+	// agent-info.json: this chain selects the template-tier image and pull
+	// policy and the harness-config dir searched for the file tier.
+	provenance, err := readImageProvenance(agentDir)
+	if err != nil {
+		logImageProvenanceError(opts.Name, err)
+		return nil, err
+	}
 	templateName := ""
 	if opts.Template != "" && filepath.IsAbs(opts.Template) {
 		templateName = opts.Template
 	}
 	if templateName == "" {
-		if finalScionCfg != nil && finalScionCfg.Info != nil {
+		if provenance != nil {
+			templateName = provenance.Template
+		} else if finalScionCfg != nil && finalScionCfg.Info != nil {
 			templateName = finalScionCfg.Info.Template
 		}
 	}
@@ -392,15 +418,31 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if settingsProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
 			settingsProfile = finalScionCfg.Info.Profile
 		}
+		// The image and pull-policy lookups use the profile recorded in
+		// broker-side image provenance when it exists — never a profile
+		// read from agent-info.json (container-writable), nor the broker's
+		// restart profile, which is itself read from there. An agent
+		// provisioned before provenance was recorded keeps the legacy
+		// settingsProfile lookup.
+		imageProfile := settingsProfile
+		if provenance != nil {
+			imageProfile = provenance.Profile
+		}
 		hConfig, err := settings.ResolveHarnessConfig(settingsProfile, harnessConfigName)
 		if err == nil {
+			imageHConfig := hConfig
+			if imageProfile != settingsProfile {
+				if c, imgErr := settings.ResolveHarnessConfig(imageProfile, harnessConfigName); imgErr == nil {
+					imageHConfig = c
+				}
+			}
 			// ResolveHarnessConfig folds an explicit profile
-			// harness_overrides.<hc>.image / .image_pull_policy into
-			// hConfig. That explicit override outranks the template and
+			// harness_overrides.<hc>.image / .image_pull_policy into its
+			// result. That explicit override outranks the template and
 			// inline tiers, while the plain harness_configs.<hc> default
 			// does not, so the two are split apart here.
-			profileOverrideImage = settings.ProfileHarnessOverrideImage(settingsProfile, harnessConfigName)
-			settingsImage = hConfig.Image
+			profileOverrideImage = settings.ProfileHarnessOverrideImage(imageProfile, harnessConfigName)
+			settingsImage = imageHConfig.Image
 			if profileOverrideImage != "" {
 				settingsImage = settings.HarnessConfigs[harnessConfigName].Image
 			}
@@ -408,9 +450,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			// only: it takes the profile tier when that same override also
 			// sets an image, and otherwise stays in the settings tier, where
 			// ResolveHarnessConfig already placed it.
-			settingsPullPolicy = hConfig.ImagePullPolicy
+			settingsPullPolicy = imageHConfig.ImagePullPolicy
 			if profileOverrideImage != "" {
-				profileOverridePullPolicy = settings.ProfileHarnessOverrideImagePullPolicy(settingsProfile, harnessConfigName)
+				profileOverridePullPolicy = settings.ProfileHarnessOverrideImagePullPolicy(imageProfile, harnessConfigName)
 				if profileOverridePullPolicy != "" {
 					settingsPullPolicy = settings.HarnessConfigs[harnessConfigName].ImagePullPolicy
 				}
@@ -467,7 +509,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// pin removed since then would otherwise linger disguised as the
 	// template's (ptone/scion#1799). An agent provisioned before
 	// image provenance was recorded still falls back to that merged value.
-	provenance := readImageProvenance(agentDir)
 	templateTierSource := imageTierTemplate
 	templateImage, templatePullPolicy := templateChainImage(templateChain)
 	if templateUnresolvable {
@@ -496,32 +537,45 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// tier is the CURRENT request's own inline image (opts.InlineConfig —
 	// not startInlineConfig, which a bare --harness-auth also makes
 	// non-nil), else, for a provenance-recording agent, the create-time
-	// inline image; an inline-only caller (no request image) therefore
-	// ranks the same on a first start and a restart.
+	// inline image recorded in broker-side provenance; an inline-only caller
+	// (no request image) therefore ranks the same on a first start and a
+	// restart.
 	//
 	// There is no per-request pull-policy flag, so the user's explicit pull
 	// policy is the current inline value, else the one recorded from the
-	// create-time inline config; it ranks just above the profile override,
+	// create-time inline config (broker-side provenance, or agent-info.json
+	// for a pre-provenance agent); it ranks just above the profile override,
 	// the same position the request image holds over the profile image.
+	// The recorded request image depends on broker-side provenance alone,
+	// never on agent-info.json being present or intact.
 	requestImage, requestImageSource := opts.Image, imageTierRequest
-	if requestImage == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-		requestImageSource = imageTierRecordedRequest
-		if provenance != nil {
+	if requestImage == "" {
+		switch {
+		case provenance != nil:
+			requestImageSource = imageTierRecordedRequest
 			requestImage = provenance.RequestImage
-		} else {
+		case finalScionCfg != nil && finalScionCfg.Info != nil:
+			requestImageSource = imageTierRecordedRequest
 			requestImage = finalScionCfg.Info.ExplicitImage
 		}
 	}
+	// The create-time inline values come from broker-side provenance when
+	// it exists; agent-info.json's ExplicitImage* copies (container-
+	// writable) are read only for an agent provisioned before provenance
+	// was recorded.
 	inlineImage := ""
 	if opts.InlineConfig != nil && opts.InlineConfig.Image != "" {
 		inlineImage = opts.InlineConfig.Image
-	} else if provenance != nil && finalScionCfg.Info != nil {
-		inlineImage = finalScionCfg.Info.ExplicitImage
+	} else if provenance != nil {
+		inlineImage = provenance.InlineImage
 	}
 	explicitPullPolicy := ""
-	if opts.InlineConfig != nil && opts.InlineConfig.Kubernetes != nil && opts.InlineConfig.Kubernetes.ImagePullPolicy != "" {
+	switch {
+	case opts.InlineConfig != nil && opts.InlineConfig.Kubernetes != nil && opts.InlineConfig.Kubernetes.ImagePullPolicy != "":
 		explicitPullPolicy = opts.InlineConfig.Kubernetes.ImagePullPolicy
-	} else if finalScionCfg != nil && finalScionCfg.Info != nil {
+	case provenance != nil:
+		explicitPullPolicy = provenance.InlineImagePullPolicy
+	case finalScionCfg != nil && finalScionCfg.Info != nil:
 		explicitPullPolicy = finalScionCfg.Info.ExplicitImagePullPolicy
 	}
 
@@ -570,7 +624,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// always return true from ImageExists (images are pulled on demand by the
 	// node), so we must skip the local check to ensure registry rewrite applies.
 	if settings != nil && resolvedImage != "" {
-		imageRegistry := settings.ResolveImageRegistry(opts.Profile)
+		// The profile-level image_registry is looked up with the
+		// provisioned profile recorded in broker-side provenance, never a
+		// profile read from agent-info.json (a broker start/restart fills
+		// opts.Profile from there); legacy agents keep opts.Profile.
+		registryProfile := opts.Profile
+		if provenance != nil {
+			registryProfile = provenance.Profile
+		}
+		imageRegistry := settings.ResolveImageRegistry(registryProfile)
 		if imageRegistry != "" && imagecheck.IsBareImageName(resolvedImage) {
 			runtimeName := ""
 			if m.Runtime != nil {

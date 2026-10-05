@@ -425,6 +425,7 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
+	ctx = api.ContextWithHubProjectID(ctx, opts.HubProjectID)
 	if opts.EmptyPerAgentWorkspace {
 		ctx = api.ContextWithEmptyPerAgentWorkspace(ctx)
 	}
@@ -669,7 +670,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// Deliberately no prompt.md write here: the new generation's first task
 	// (the hub-built preamble plus handoff) is delivered by the subsequent
 	// DispatchAgentStart call, not pre-staged as a file.
-	return withProvisionedImage(opts, cfg), nil
+	return withProvisionedImage(opts, agentDir, cfg)
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -691,7 +692,7 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		}
 	}
 
-	return withProvisionedImage(opts, cfg), nil
+	return withProvisionedImage(opts, agentDir, cfg)
 }
 
 // resolveHarnessConfigDir returns the harness-config directory for an agent,
@@ -950,21 +951,74 @@ func resolveWorkspaceSubdir(projectRoot, subdir string) (string, error) {
 // through GetAgent -- so this fails closed on its own rather than trust the
 // caller.
 func checkAgentDirContained(projectDir, agentName string, sharedWorkspace bool) (string, error) {
-	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
-	agentsRoot := filepath.Clean(config.SelectAgentsRoot(projectDir, sharedWorkspace))
-	cleanAgentDir := filepath.Clean(agentDir)
-	// Both conditions matter: Dir(...) != root catches a name that is
-	// outside the root entirely (e.g. "../sibling"); Base(...) != agentName
-	// catches a name that cleans down to a direct child of the root but
-	// isn't the single path element it claims to be (e.g. "x/../y" cleans
-	// to <root>/y, a direct child, even though agentName itself is not
-	// "y"). The broker's isSingleCleanPathElement enforces the same
-	// single-element rule at the request boundary; this enforces it again
-	// here, independently, for every caller.
-	if filepath.Dir(cleanAgentDir) != agentsRoot || filepath.Base(cleanAgentDir) != agentName {
-		return "", fmt.Errorf("agent %q is not a single path element under %s", agentName, agentsRoot)
+	dir, _, err := agentStateDir(projectDir, agentName, sharedWorkspace, "", false)
+	return dir, err
+}
+
+// agentStateDir is the single resolution of an agent's broker-side state
+// directory (scion-agent.json, prompt.md, the harness inputs and secrets
+// records, image provenance) for GetAgent and ProvisionAgent. Agent state for
+// shared-workspace projects is always resolved from the broker-side agent
+// dir:
+//   - the external agents root comes from config.AgentDirForProject, from the
+//     hub-supplied project ID when there is one (never from the project-id
+//     marker inside the project, which a shared workspace exposes to
+//     containers);
+//   - an agent whose external directory holds scion-agent.json is a
+//     shared-workspace agent whatever sharedWorkspace says (in worktree mode
+//     only home/ is external, never scion-agent.json), so its in-project
+//     <project>/agents/<name>, which a shared workspace mount exposes to
+//     containers, is never used;
+//   - with strict set (broker mode, or a hub-supplied project ID), a
+//     shared-workspace agent whose external root cannot be determined is an
+//     error (config.ErrAgentStateDirUnavailable), never the in-project root.
+//     Without strict (a local CLI start of a project with no project ID and
+//     no hub), there is no external root at all and the in-project root is
+//     used, as for any local project.
+//
+// The returned shared flag is the effective one. The choice depends only on
+// broker-side state and the caller's inputs, and is made before anything is
+// read from the agent directory.
+func agentStateDir(projectDir, agentName string, sharedWorkspace bool, hubProjectID string, strict bool) (string, bool, error) {
+	shared := effectiveSharedWorkspace(projectDir, agentName, sharedWorkspace, hubProjectID)
+	dir, err := config.AgentDirForProject(projectDir, agentName, shared, hubProjectID)
+	if err != nil && shared && !strict && hubProjectID == "" && errors.Is(err, config.ErrAgentStateDirUnavailable) {
+		dir, err = config.AgentDirForProject(projectDir, agentName, false, "")
 	}
-	return agentDir, nil
+	if err != nil {
+		return "", shared, err
+	}
+	return dir, shared, nil
+}
+
+// effectiveSharedWorkspace reports whether agentName's state lives in the
+// broker-side (external) agents directory: sharedWorkspace, or an external
+// agent directory (located from hubProjectID when set) holding a regular
+// scion-agent.json.
+func effectiveSharedWorkspace(projectDir, agentName string, sharedWorkspace bool, hubProjectID string) bool {
+	if sharedWorkspace {
+		return true
+	}
+	ext, err := config.AgentDirForProject(projectDir, agentName, true, hubProjectID)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(ext, "scion-agent.json"))
+	return err == nil && info.Mode().IsRegular()
+}
+
+// withAgentStateDir resolves agentName's state directory with agentStateDir
+// from ctx's shared-workspace flag and hub project ID, and returns ctx with
+// the effective shared-workspace flag.
+func withAgentStateDir(ctx context.Context, projectDir, agentName string) (context.Context, string, bool, error) {
+	requested := api.IsSharedWorkspaceFromContext(ctx)
+	hubProjectID := api.HubProjectIDFromContext(ctx)
+	strict := api.IsBrokerModeFromContext(ctx) || hubProjectID != ""
+	dir, shared, err := agentStateDir(projectDir, agentName, requested, hubProjectID, strict)
+	if shared && !requested {
+		ctx = api.ContextWithSharedWorkspace(ctx)
+	}
+	return ctx, dir, shared, err
 }
 
 // CheckAgentDirContained is the exported form of checkAgentDirContained, for
@@ -1013,7 +1067,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 		}
 	}
-	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
+	ctx, agentDir, sharedWorkspace, err := withAgentStateDir(ctx, projectDir, agentName)
+	if err != nil {
+		return "", "", nil, err
+	}
 	emptyPerAgent := api.IsEmptyPerAgentWorkspaceFromContext(ctx)
 	if emptyPerAgent {
 		// Empty-per-agent (design #2703) always means the private
@@ -1029,10 +1086,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			return "", "", nil, fmt.Errorf("empty-per-agent workspace cannot be combined with a git clone")
 		}
 	}
-	agentDir, err := checkAgentDirContained(projectDir, agentName, sharedWorkspace)
-	if err != nil {
-		return "", "", nil, err
-	}
+
 	agentHome := config.GetAgentHomePath(projectDir, agentName)
 	// In worktree mode the workspace lives under agentDir so git's relative
 	// worktree pointers resolve correctly. In shared-workspace mode there is
@@ -1967,6 +2021,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		RequestImage:            agentImage,
 		TemplateImage:           tplImage,
 		TemplateImagePullPolicy: tplPullPolicy,
+		InlineImage:             explicitImage,
+		InlineImagePullPolicy:   explicitPullPolicy,
+		Profile:                 profileName,
+		Template:                displayTemplateName,
 	}); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write image provenance: %w", err)
 	}
@@ -2406,10 +2464,17 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	util.Debugf("GetAgent: agentName=%s templateName=%q harnessConfig=%q projectPath=%q projectDir=%s",
 		agentName, templateName, harnessConfig, projectPath, projectDir)
 
-	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
-	agentDir, err := checkAgentDirContained(projectDir, agentName, sharedWorkspace)
+	ctx, agentDir, sharedWorkspace, err := withAgentStateDir(ctx, projectDir, agentName)
 	if err != nil {
 		return "", "", "", nil, err
+	}
+	// A broker start or restart of a shared-workspace agent requires its
+	// broker-side agent dir; only a create provisions a new one. A missing
+	// dir fails closed rather than provisioning anywhere else.
+	if sharedWorkspace && api.IsBrokerModeFromContext(ctx) && !api.IsFreshProvisionFromContext(ctx) {
+		if _, statErr := os.Stat(agentDir); os.IsNotExist(statErr) {
+			return "", "", "", nil, fmt.Errorf("%w: agent %q has no broker-side state directory; re-create the agent", config.ErrAgentStateDirUnavailable, agentName)
+		}
 	}
 
 	agentHome := config.GetAgentHomePath(projectDir, agentName)

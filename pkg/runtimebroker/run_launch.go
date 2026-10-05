@@ -521,6 +521,8 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 		return ErrCodeSkillResolution, err.Error()
 	case errors.Is(err, config.ErrTemplateNotFound), errors.Is(err, config.ErrHarnessConfigNotFound):
 		return "template_not_found", err.Error()
+	case errors.Is(err, config.ErrAgentStateDirUnavailable):
+		return "agent_state_unavailable", err.Error()
 	default:
 		return "runtime_error", err.Error()
 	}
