@@ -4984,3 +4984,47 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 		})
 	}
 }
+
+// TestReincarnateAgent_TemplateHarnessTypeNotUsedAsHarnessConfig pins
+// ptone/scion#601 item 2 on the reincarnate path, which re-derives the
+// harness config through deriveAgentConfig: a harness-type-only template
+// leaves the slot to the hub default (and, with none, empty).
+func TestReincarnateAgent_TemplateHarnessTypeNotUsedAsHarnessConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		hubDefault string
+		want       string
+	}{
+		{name: "NoHubDefault", hubDefault: "", want: ""},
+		{name: "HubDefaultWins", hubDefault: "hub-hc", want: "hub-hc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			if tc.hubDefault != "" {
+				setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: tc.hubDefault})
+			}
+
+			template := &store.Template{
+				ID:          tid("tmpl-harness-type-" + t.Name()),
+				Name:        "team-claude-reviewer",
+				Slug:        "reincarnate-harness-type-" + tidSlugSafe(t.Name()),
+				Harness:     "claude",
+				Scope:       store.TemplateScopeGlobal,
+				Status:      store.TemplateStatusActive,
+				ContentHash: "tmpl-hash",
+			}
+			require.NoError(t, s.CreateTemplate(context.Background(), template))
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Template = template.Slug
+			})
+
+			fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
+			require.NoError(t, err)
+			require.NotNil(t, fresh)
+			assert.Equal(t, tc.want, fresh.HarnessConfig,
+				"the template's harness type must not be used as a harness-config name on reincarnate")
+		})
+	}
+}

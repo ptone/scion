@@ -1144,7 +1144,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_Applies(t *testing.T) {
 	assert.Equal(t, "hub-tmpl", created.Template,
 		"both payload.Template and agent.Template must be set by the rung")
 	require.NotNil(t, created.AppliedConfig)
-	assert.Equal(t, "claude", created.AppliedConfig.HarnessConfig,
+	assert.Equal(t, "claude-declared", created.AppliedConfig.HarnessConfig,
 		"the resolved template's declared harness config still wins over any hub default")
 }
 
@@ -1323,7 +1323,7 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToTemplate(t *te
 	created := findMockAgent(ms, "sched-hub-hc-tmpl")
 	require.NotNil(t, created)
 	require.NotNil(t, created.AppliedConfig)
-	assert.Equal(t, "claude", created.AppliedConfig.HarnessConfig,
+	assert.Equal(t, "claude-declared", created.AppliedConfig.HarnessConfig,
 		"the template's declared harness config is in the slot before applyHubAgentDefaults runs")
 }
 

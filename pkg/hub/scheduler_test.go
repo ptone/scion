@@ -1667,7 +1667,8 @@ func (r *resolvingTemplateStore) GetTemplateBySlug(_ context.Context, slug, _, _
 		// ptone/scion#601 item 2 only DefaultHarnessConfig feeds the
 		// harness-config slot, and the panic trap below needs the slot
 		// filled so populateAgentConfig reaches GetHarnessConfigBySlug.
-		DefaultHarnessConfig: "claude",
+		// Distinct from Harness so assertions prove which field supplied it.
+		DefaultHarnessConfig: "claude-declared",
 		ContentHash:          "d00dfeed",
 		Status:               "active",
 		// Scope: global — these tests exercise the scheduler dispatch
@@ -1742,8 +1743,8 @@ func TestDispatchAgentEventHandler_ResolvableTemplateDoesNotPanic(t *testing.T) 
 	}
 	// The template's declared default_harness_config is the template-tier
 	// harness config, and no project annotation overrides it here.
-	if created.AppliedConfig == nil || created.AppliedConfig.HarnessConfig != "claude" {
-		t.Errorf("expected harness config %q, got %+v", "claude", created.AppliedConfig)
+	if created.AppliedConfig == nil || created.AppliedConfig.HarnessConfig != "claude-declared" {
+		t.Errorf("expected harness config %q, got %+v", "claude-declared", created.AppliedConfig)
 	}
 }
 

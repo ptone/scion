@@ -115,8 +115,8 @@ func createHarnessTemplate(t *testing.T, s store.Store, slug, defaultHarnessConf
 }
 
 // createHarnessOnlyTemplate creates a global template with no
-// DefaultHarnessConfig, so that templateHarnessConfigName's fallback to the
-// bare Harness field is what supplies the template-tier value.
+// DefaultHarnessConfig, only a bare Harness type, which since
+// ptone/scion#601 item 2 contributes nothing to the harness-config slot.
 func createHarnessOnlyTemplate(t *testing.T, s store.Store, slug, harness string) *store.Template {
 	t.Helper()
 	tmpl := &store.Template{
@@ -811,6 +811,40 @@ func TestSchedulerDispatch_ProjectHarnessConfigBeatsTemplateHarnessOnlyFallback(
 	agent := runDispatchAgentEvent(t, srv, s, project.ID, "sched-harness-only-tmpl", "tmpl-bare")
 	assert.Equal(t, "project-harness", agent.AppliedConfig.HarnessConfig,
 		"project annotation fills the slot; the template's harness type is not a candidate")
+}
+
+// TestSchedulerDispatch_TemplateHarnessTypeNotUsedAsHarnessConfig is the
+// scheduler twin of TestCreateAgent_TemplateHarnessTypeNotUsedAsHarnessConfig
+// (ptone/scion#601 item 2): a harness-type-only template contributes nothing
+// to the harness-config slot on the scheduled-dispatch path either.
+func TestSchedulerDispatch_TemplateHarnessTypeNotUsedAsHarnessConfig(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+
+	createHarnessOnlyTemplate(t, s, "tmpl-bare", "claude")
+
+	agent := runDispatchAgentEvent(t, srv, s, project.ID, "sched-harness-type-only", "tmpl-bare")
+	assert.Empty(t, agent.AppliedConfig.HarnessConfig,
+		"the template's harness type must not be used as a harness-config name")
+	assert.Empty(t, agent.AppliedConfig.HarnessConfigID)
+}
+
+// TestSchedulerDispatch_HubDefaultHarnessConfigBeatsNameInferredTemplateHarness
+// is the scheduler twin of
+// TestCreateAgent_HubDefaultHarnessConfigBeatsNameInferredTemplateHarness.
+func TestSchedulerDispatch_HubDefaultHarnessConfigBeatsNameInferredTemplateHarness(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+
+	const tmplName = "sched-claude-reviewer"
+	inferred := inferHarnessFromName(tmplName)
+	require.NotEmpty(t, inferred, "fixture: the template name must trigger harness inference")
+	createHarnessOnlyTemplate(t, s, tmplName, inferred)
+	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-hc"})
+
+	agent := runDispatchAgentEvent(t, srv, s, project.ID, "sched-hub-beats-inferred", tmplName)
+	assert.Equal(t, "hub-hc", agent.AppliedConfig.HarnessConfig,
+		"the hub default must beat a name-inferred template harness type")
 }
 
 // Note: the scheduler's dispatch_agent payload has no harness-config field, so
