@@ -44,10 +44,3 @@ func HarnessConfigPolicyFromContext(ctx context.Context) HarnessConfigPolicyFunc
 	p, _ := ctx.Value(harnessConfigPolicyKey{}).(HarnessConfigPolicyFunc)
 	return p
 }
-
-// HarnessInputsRecordDirName is the directory, inside an agent's directory
-// (config.ResolveAgentDir / GetAgentDir), where the control plane records
-// the per-agent inputs it stages for a container-script harness. It sits
-// outside every container mount scion computes for the agent; see
-// pkg/runtime's TestHarnessInputsRecordOutsideScionMounts.
-const HarnessInputsRecordDirName = "harness-inputs"

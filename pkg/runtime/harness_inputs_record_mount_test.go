@@ -26,10 +26,19 @@ import (
 )
 
 // TestHarnessInputsRecordOutsideScionMounts pins that an agent's control-plane
-// inputs record (<agent dir>/harness-inputs, config.HarnessInputsRecordDirName)
-// is outside every container mount scion computes for the agent, in every
-// runtime mode, using the real mount builders. Author-configured volumes are
-// excluded: they are a separately tracked capability.
+// records (<agent dir>/harness-inputs, config.HarnessInputsRecordDirName, and
+// <agent dir>/harness-secrets, config.HarnessSecretsRecordDirName) are outside
+// every container mount scion computes for the agent, in every runtime mode,
+// using the real mount builders. Author-configured volumes are excluded: they
+// are a separately tracked capability.
+//
+// The Docker/Podman/Apple case checks containment of each record path in each
+// bind mount directly. The Kubernetes and Cloud Run cases rely on an
+// assumption that holds for today's layouts: in those modes the agent
+// directory is broker-local and always lies under a .scion directory, so it
+// suffices that no mount source or subPath has a .scion element. A future
+// layout that mounts a parent of an agent directory without a .scion element
+// needs a direct containment check here instead.
 func TestHarnessInputsRecordOutsideScionMounts(t *testing.T) {
 	t.Run("docker/podman/apple run args", testRecordOutsideRunArgMounts)
 	t.Run("kubernetes pod", testRecordOutsidePodMounts)
@@ -96,12 +105,22 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 			withPaths(filepath.Join(inProject, "home"), "", filepath.Join(inProject, "workspace"), nil)},
 	}
 	for _, m := range modes {
-		t.Run(m.name, func(t *testing.T) {
-			record := filepath.Join(m.agentDir, config.HarnessInputsRecordDirName)
+		for _, recordName := range []string{config.HarnessInputsRecordDirName, config.HarnessSecretsRecordDirName} {
+			t.Run(m.name+"/"+recordName, func(t *testing.T) {
+				checkRecordOutsideRunArgs(t, filepath.Join(m.agentDir, recordName), m.cfg)
+			})
+		}
+	}
+}
+
+func checkRecordOutsideRunArgs(t *testing.T, record string, cfg RunConfig) {
+	t.Helper()
+	{
+		{
 			if !hasScionElement(record) {
 				t.Fatalf("fixture: record %s should lie under a .scion directory", record)
 			}
-			args, err := buildCommonRunArgs(m.cfg)
+			args, err := buildCommonRunArgs(cfg)
 			if err != nil {
 				t.Fatalf("buildCommonRunArgs: %v", err)
 			}
@@ -147,7 +166,7 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 					t.Errorf("record %s is visible in the container at %s via the mount of %s", record, inContainer, b.src)
 				}
 			}
-		})
+		}
 	}
 }
 

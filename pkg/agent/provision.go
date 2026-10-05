@@ -1998,10 +1998,20 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Record the per-agent inputs staged above (the control plane is their
 	// only writer since resetStagedProvisioning cleared the bundle), so Start
 	// can restage exactly this content on every launch.
+	// A harness that is not container-script stages no inputs; its record is
+	// created empty, so a later switch to a container-script harness never
+	// treats this agent as one provisioned before the record existed.
 	if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
 		if err := snapshotControlPlaneInputs(agentDir, agentHome); err != nil {
 			return "", "", nil, fmt.Errorf("record harness inputs: %w", err)
 		}
+	} else if err := resetControlPlaneInputsRecord(agentDir); err != nil {
+		return "", "", nil, fmt.Errorf("record harness inputs: %w", err)
+	}
+	// The secrets record is created empty when absent and otherwise kept: a
+	// re-render does not stage secrets, which are recorded on start.
+	if err := ensureSecretsRecord(agentDir); err != nil {
+		return "", "", nil, fmt.Errorf("record harness secrets: %w", err)
 	}
 
 	// 3. Harness provisioning

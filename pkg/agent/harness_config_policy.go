@@ -99,16 +99,14 @@ func harnessAfterResolveError(ctx context.Context, agentHome, harnessName, harne
 //   - h is not container-script: clear the provisioner wrapper and the whole
 //     staged bundle (harness.ClearStagedProvisioning), so no provisioner runs
 //     and sciontool init does not load an earlier provisioner's state;
-//   - h is container-script: clear the whole staged bundle
-//     (harness.ClearStagedBundle), including inputs/, so nothing a previous
-//     provisioning, the workload or copied home content left there is visible
-//     to this provisioner. The caller restages the control-plane inputs
-//     (ProvisionAgent writes them; Start restores them with
+//   - h is container-script: clear the wrapper and the whole staged bundle
+//     too (harness.ClearStagedProvisioning), including inputs/, so nothing a
+//     previous provisioning, the workload or copied home content left there
+//     is visible to this provisioner, and the only wrapper that can exist is
+//     the one h.Provision writes. The caller restages the control-plane
+//     inputs (ProvisionAgent writes them; Start restores them with
 //     restoreControlPlaneInputs) and h restages its own bundle and wrapper.
 func resetStagedProvisioning(h api.Harness, agentHome string) error {
-	if _, ok := h.(*harness.ContainerScriptHarness); ok {
-		return harness.ClearStagedBundle(agentHome)
-	}
 	return harness.ClearStagedProvisioning(agentHome)
 }
 
@@ -168,6 +166,12 @@ func seedControlPlaneInputsIfAbsent(agentDir, agentHome, agentID string) (bool, 
 	} else if !os.IsNotExist(err) {
 		return false, err
 	}
+	// The record is created whether or not anything qualifies, so this runs
+	// at most once per agent: an empty record means "nothing to restore",
+	// never "absent".
+	if err := os.MkdirAll(record, 0o755); err != nil {
+		return false, err
+	}
 	src := stagedInputsDir(agentHome)
 	var seeded bool
 	for _, name := range legacyInputNames {
@@ -187,9 +191,6 @@ func seedControlPlaneInputsIfAbsent(agentDir, agentHome, agentID string) (bool, 
 		if err != nil {
 			return false, err
 		}
-		if err := os.MkdirAll(record, 0o755); err != nil {
-			return false, err
-		}
 		if err := os.WriteFile(filepath.Join(record, name), data, 0o644); err != nil {
 			return false, err
 		}
@@ -197,8 +198,28 @@ func seedControlPlaneInputsIfAbsent(agentDir, agentHome, agentID string) (bool, 
 	}
 	if seeded {
 		slog.Warn("harness inputs seeded once from pre-existing inputs; re-provision to refresh", "agent_id", agentID)
+	} else {
+		slog.Info("harness inputs record created empty: no pre-existing inputs qualified", "agent_id", agentID)
 	}
 	return seeded, nil
+}
+
+// ensureControlPlaneInputsRecord creates an empty inputs record when none
+// exists, for an agent whose harness is not container-script, so the agent
+// is never later treated as one provisioned before the record existed.
+func ensureControlPlaneInputsRecord(agentDir string) error {
+	return os.MkdirAll(filepath.Join(agentDir, controlPlaneInputsDirName), 0o755)
+}
+
+// resetControlPlaneInputsRecord replaces the inputs record with an empty one
+// (ProvisionAgent, for a harness that is not container-script and stages no
+// inputs).
+func resetControlPlaneInputsRecord(agentDir string) error {
+	record := filepath.Join(agentDir, controlPlaneInputsDirName)
+	if err := os.RemoveAll(record); err != nil {
+		return err
+	}
+	return os.MkdirAll(record, 0o755)
 }
 
 // restoreControlPlaneInputs restages the control plane's copy of the
@@ -241,6 +262,91 @@ func copyRegularFiles(src, dst string) error {
 			return err
 		}
 		if err := os.WriteFile(filepath.Join(dst, e.Name()), data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// stagedSecretsDir is the agent home's staged secrets directory.
+func stagedSecretsDir(agentHome string) string {
+	return filepath.Join(agentHome, ".scion", "harness", "secrets")
+}
+
+// ensureSecretsRecord creates an empty secrets record (mode 0700) in agentDir
+// when none exists, leaving an existing record as it is. An empty record
+// restores nothing; it is distinct from an absent record.
+func ensureSecretsRecord(agentDir string) error {
+	record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
+	if err := os.MkdirAll(record, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(record, 0o700)
+}
+
+// restoreSecretsRecord restores exactly the secret files in the control
+// plane's record (agentDir/harness-secrets) into the agent home's cleared
+// staged secrets directory (0700, files 0600), and returns their names for
+// ContainerScriptHarness.SetRecordedSecrets. Only regular files are restored.
+//
+// With no record (an agent provisioned before records existed), nothing is
+// restored, a warning names the agent, and an empty record is created so the
+// warning is not repeated; file-type auth secrets for such agents must be
+// re-supplied.
+func restoreSecretsRecord(agentDir, agentHome, agentID string) ([]string, error) {
+	record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
+	entries, err := os.ReadDir(record)
+	if os.IsNotExist(err) {
+		slog.Warn("file-type auth secrets are not restored for agents provisioned before this change; re-create or re-supply credentials", "agent_id", agentID)
+		return nil, ensureSecretsRecord(agentDir)
+	}
+	if err != nil {
+		return nil, err
+	}
+	dst := stagedSecretsDir(agentHome)
+	var names []string
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(record, e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(dst, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(dst, e.Name()), data, 0o600); err != nil {
+			return nil, err
+		}
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
+// recordSecrets replaces the control plane's secrets record with the staged
+// secret files ApplyAuthSettings referenced (names), copied by content from
+// the agent home's staged secrets directory (regular files only). The record
+// is written even when names is empty.
+func recordSecrets(agentDir, agentHome string, names []string) error {
+	record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
+	if err := os.RemoveAll(record); err != nil {
+		return err
+	}
+	if err := ensureSecretsRecord(agentDir); err != nil {
+		return err
+	}
+	src := stagedSecretsDir(agentHome)
+	for _, name := range names {
+		info, err := os.Lstat(filepath.Join(src, name))
+		if err != nil || info.Mode()&os.ModeType != 0 {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(src, name))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(record, name), data, 0o600); err != nil {
 			return err
 		}
 	}

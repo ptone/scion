@@ -1298,3 +1298,263 @@ func TestHarnessConfigPolicy_LegacyAgentInputsSeededOnce(t *testing.T) {
 		t.Error("seeding must happen only once")
 	}
 }
+
+// B1: a staging failure for a container-script harness fails the launch and
+// leaves no provisioner wrapper from an earlier launch.
+func TestHarnessConfigPolicy_StagingFailureFailsLaunch(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	runs := 0
+	mgr := policyTestManager(&runs)
+	opts := api.StartOptions{Name: "stagefail", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true}
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if !wrapperStaged(e, "stagefail") {
+		t.Fatal("fixture: wrapper should be staged")
+	}
+	// provision.py becomes a directory: it exists, but staging cannot copy it.
+	prov := filepath.Join(e.scion, "harness-configs", "hc-scripted", "provision.py")
+	if err := os.Remove(prov); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(prov, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runsBefore := runs
+	_, err := mgr.Start(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "stage harness bundle") {
+		t.Fatalf("expected the launch to fail with a staging error, got %v", err)
+	}
+	if runs != runsBefore {
+		t.Error("the container must not run after a staging failure")
+	}
+	if wrapperStaged(e, "stagefail") {
+		t.Error("a provisioner wrapper remains after a staging failure")
+	}
+}
+
+func writeWorkloadInputs(t *testing.T, home string) {
+	t.Helper()
+	inputs := filepath.Join(home, ".scion", "harness", "inputs")
+	if err := os.MkdirAll(inputs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"system-prompt.md", "instructions.md"} {
+		if err := os.WriteFile(filepath.Join(inputs, name), []byte("workload content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func assertNoWorkloadInputs(t *testing.T, e *policyTestEnv, agentName string) {
+	t.Helper()
+	home := config.GetAgentHomePath(e.scion, agentName)
+	record := filepath.Join(config.ResolveAgentDir(e.scion, agentName), controlPlaneInputsDirName)
+	for _, dir := range []string{filepath.Join(home, ".scion", "harness", "inputs"), record} {
+		for _, name := range []string{"system-prompt.md", "instructions.md"} {
+			if data, err := os.ReadFile(filepath.Join(dir, name)); err == nil && string(data) == "workload content" {
+				t.Errorf("workload-written %s was promoted into %s", name, dir)
+			}
+		}
+	}
+}
+
+// B2/S3a: once the record has been checked it exists, empty if nothing
+// qualified, and an empty record restores nothing and never re-arms the
+// seed. Workload-written inputs are not promoted across restarts, for a
+// legacy agent with no staged inputs and for an agent whose harness-config
+// gains a provisioner after create.
+func TestHarnessConfigPolicy_EmptyRecordNeverPromotesWorkloadInputs(t *testing.T) {
+	t.Run("legacy agent with no staged inputs", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		e.projectHC(t, "hc-scripted", policyTestScripted)
+		mgr := policyTestManager(nil)
+		opts := api.StartOptions{Name: "legacy-empty", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true}
+		if _, err := mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		agentDir := config.ResolveAgentDir(e.scion, "legacy-empty")
+		home := config.GetAgentHomePath(e.scion, "legacy-empty")
+		// Legacy: no record, and no inputs staged in the home.
+		if err := os.RemoveAll(filepath.Join(agentDir, controlPlaneInputsDirName)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(filepath.Join(home, ".scion", "harness", "inputs")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("legacy start: %v", err)
+		}
+		entries, err := os.ReadDir(filepath.Join(agentDir, controlPlaneInputsDirName))
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("expected an empty record after the first check, got %v (err=%v)", entries, err)
+		}
+		for i := 0; i < 2; i++ {
+			writeWorkloadInputs(t, home)
+			if _, err := mgr.Start(context.Background(), opts); err != nil {
+				t.Fatalf("restart %d: %v", i, err)
+			}
+			assertNoWorkloadInputs(t, e, "legacy-empty")
+		}
+	})
+
+	t.Run("harness-config gains a provisioner after create", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		e.projectHC(t, "hc-later", policyTestDecl)
+		mgr := policyTestManager(nil)
+		opts := api.StartOptions{Name: "gains", ProjectPath: e.scion, HarnessConfig: "hc-later", NoAuth: true}
+		if _, err := mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("declarative Start: %v", err)
+		}
+		home := config.GetAgentHomePath(e.scion, "gains")
+		writeWorkloadInputs(t, home)
+		// The harness-config gains a provisioner.
+		e.projectHC(t, "hc-later", policyTestScripted)
+		for i := 0; i < 2; i++ {
+			if _, err := mgr.Start(context.Background(), opts); err != nil {
+				t.Fatalf("container-script start %d: %v", i, err)
+			}
+			assertNoWorkloadInputs(t, e, "gains")
+			writeWorkloadInputs(t, home)
+		}
+	})
+}
+
+// NB4: ProvisionAgent records the inputs it stages; the record, not the agent
+// home, is what the first start restores.
+func TestHarnessConfigPolicy_ProvisionRecordsInputs(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	if _, _, _, err := ProvisionAgent(context.Background(), "recorded", "", "", "hc-scripted", e.scion, "", "", "", ""); err != nil {
+		t.Fatalf("ProvisionAgent: %v", err)
+	}
+	home := config.GetAgentHomePath(e.scion, "recorded")
+	staged, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "inputs", "instructions.md"))
+	if err != nil {
+		t.Fatalf("fixture: provisioning should stage instructions.md: %v", err)
+	}
+	record := filepath.Join(config.ResolveAgentDir(e.scion, "recorded"), controlPlaneInputsDirName)
+	recorded, err := os.ReadFile(filepath.Join(record, "instructions.md"))
+	if err != nil || string(recorded) != string(staged) {
+		t.Fatalf("provisioning did not record the staged instructions.md (err=%v)", err)
+	}
+
+	// The workload overwrites the staged input before the first start; the
+	// first start restores the control plane's copy.
+	writeWorkloadInputs(t, home)
+	if _, err := policyTestManager(nil).Start(context.Background(), api.StartOptions{Name: "recorded", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "inputs", "instructions.md"))
+	if err != nil || string(got) != string(staged) {
+		t.Errorf("first start did not restore the recorded instructions.md: %q (err=%v)", got, err)
+	}
+}
+
+const policyTestScriptedAuth = policyTestScripted + `auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["POLICY_TEST_KEY"]
+`
+
+// Secrets record: the secret files ApplyAuthSettings stages are recorded in
+// the agent directory (0700/0600) and restored on the next start; a
+// safe-named file the workload writes into secrets/ is not referenced.
+func TestHarnessConfigPolicy_SecretsRecordedAndRestored(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-auth", policyTestScriptedAuth)
+	mgr := policyTestManager(nil)
+	opts := api.StartOptions{Name: "secrets", ProjectPath: e.scion, HarnessConfig: "hc-auth", HarnessAuth: "api-key", Env: map[string]string{"POLICY_TEST_KEY": "k1"}}
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	record := filepath.Join(config.ResolveAgentDir(e.scion, "secrets"), config.HarnessSecretsRecordDirName)
+	info, err := os.Stat(record)
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("secrets record missing or not 0700: %v %v", info, err)
+	}
+	fi, err := os.Stat(filepath.Join(record, "POLICY_TEST_KEY"))
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("staged secret not recorded 0600: %v %v", fi, err)
+	}
+
+	home := config.GetAgentHomePath(e.scion, "secrets")
+	secrets := filepath.Join(home, ".scion", "harness", "secrets")
+	if err := os.WriteFile(filepath.Join(secrets, "PLANTED_TOKEN"), []byte("planted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(secrets, "PLANTED_TOKEN")); !os.IsNotExist(err) {
+		t.Errorf("a workload-written secret file survived the restart (stat err=%v)", err)
+	}
+	cands, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "inputs", "auth-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cands), "PLANTED_TOKEN") {
+		t.Error("a workload-written secret file was referenced in auth-candidates.json")
+	}
+	if !strings.Contains(string(cands), "POLICY_TEST_KEY") {
+		t.Errorf("the recorded secret is not referenced: %s", cands)
+	}
+	if _, err := os.Stat(filepath.Join(record, "PLANTED_TOKEN")); !os.IsNotExist(err) {
+		t.Error("a workload-written secret file was recorded")
+	}
+}
+
+// An agent provisioned before secrets records existed gets no restored
+// secret files, a warning naming it, and an empty record (which never
+// re-arms the warning).
+func TestHarnessConfigPolicy_LegacyAgentSecretsNotRestored(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	mgr := policyTestManager(nil)
+	opts := api.StartOptions{Name: "legacy-secrets", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true}
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	record := filepath.Join(config.ResolveAgentDir(e.scion, "legacy-secrets"), config.HarnessSecretsRecordDirName)
+	if _, err := os.Stat(record); err != nil {
+		t.Fatalf("fixture: provisioning should create the secrets record: %v", err)
+	}
+	if err := os.RemoveAll(record); err != nil {
+		t.Fatal(err)
+	}
+	home := config.GetAgentHomePath(e.scion, "legacy-secrets")
+	secrets := filepath.Join(home, ".scion", "harness", "secrets")
+	if err := os.MkdirAll(secrets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secrets, "OLD_TOKEN"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("legacy start: %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "file-type auth secrets are not restored for agents provisioned before this change; re-create or re-supply credentials") || !strings.Contains(logBuf.String(), "agent_id=legacy-secrets") {
+		t.Errorf("expected the legacy secrets warning with the agent id, got: %s", logBuf.String())
+	}
+	if _, err := os.Stat(filepath.Join(secrets, "OLD_TOKEN")); !os.IsNotExist(err) {
+		t.Error("a secret file from before the record existed was kept")
+	}
+	if entries, err := os.ReadDir(record); err != nil || len(entries) != 0 {
+		t.Errorf("expected an empty secrets record, got %v (err=%v)", entries, err)
+	}
+	logBuf.Reset()
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logBuf.String(), "file-type auth secrets are not restored") {
+		t.Error("the legacy secrets warning must not repeat once the record exists")
+	}
+}

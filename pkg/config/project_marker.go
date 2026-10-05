@@ -343,3 +343,18 @@ func ResolveAgentDir(projectDir, agentName string) string {
 	}
 	return filepath.Join(projectDir, "agents", agentName)
 }
+
+// HarnessInputsRecordDirName is the directory, inside an agent's directory
+// (config.ResolveAgentDir / GetAgentDir), where the control plane records
+// the per-agent inputs it stages for a container-script harness. It sits
+// outside every container mount scion computes for the agent; see
+// pkg/runtime's TestHarnessInputsRecordOutsideScionMounts.
+const HarnessInputsRecordDirName = "harness-inputs"
+
+// HarnessSecretsRecordDirName is the directory, inside an agent's directory
+// next to HarnessInputsRecordDirName, where the control plane records the
+// secret files it staged for a container-script harness (mode 0700, files
+// 0600), so they can be restored on later starts. It sits outside every
+// container mount scion computes for the agent; see pkg/runtime's
+// TestHarnessInputsRecordOutsideScionMounts.
+const HarnessSecretsRecordDirName = "harness-secrets"

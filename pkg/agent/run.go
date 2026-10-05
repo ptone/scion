@@ -670,12 +670,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// leaves the agent home as it is.
 	if !resolveFailed {
 		// An agent provisioned before the control plane recorded its inputs
-		// has its record seeded once from the existing inputs/ (three known
-		// files), before the bundle is cleared.
+		// has its record seeded once, before the bundle is cleared: from the
+		// existing inputs/ (three known files) for a container-script
+		// harness, empty otherwise. Either way the record exists afterwards,
+		// so the seed never runs again for this agent.
 		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
 			if _, err := seedControlPlaneInputsIfAbsent(agentDir, agentHome, agentID); err != nil {
 				return nil, fmt.Errorf("seed harness inputs: %w", err)
 			}
+		} else if err := ensureControlPlaneInputsRecord(agentDir); err != nil {
+			return nil, fmt.Errorf("record harness inputs: %w", err)
 		}
 		if err := resetStagedProvisioning(h, agentHome); err != nil {
 			return nil, err
@@ -683,10 +687,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// Restage the control-plane inputs (instructions, system prompt,
 		// resolved skills) recorded at provisioning, so inputs/ holds only
 		// control-plane content.
-		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+		if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
 			if err := restoreControlPlaneInputs(agentDir, agentHome); err != nil {
 				return nil, fmt.Errorf("restage harness inputs: %w", err)
 			}
+			// Restore exactly the secret files the control plane recorded;
+			// ApplyAuthSettings considers only these besides the secrets
+			// staged from this start's resolution.
+			restored, err := restoreSecretsRecord(agentDir, agentHome, agentID)
+			if err != nil {
+				return nil, fmt.Errorf("restage harness secrets: %w", err)
+			}
+			cs.SetRecordedSecrets(restored)
 		}
 		// Restage the capture-auth assets a non-container-script harness
 		// keeps in the bundle, as ProvisionAgent stages them.
@@ -698,8 +710,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	// Reconcile the harness bundle for existing agents. Provision() is
-	// idempotent and stages any missing files.
+	// idempotent and stages any missing files. A container-script harness
+	// starts from a cleared bundle (resetStagedProvisioning), so a staging
+	// failure fails the launch: no provisioner wrapper or bundle from an
+	// earlier launch remains to run instead.
 	if err := h.Provision(ctx, opts.Name, agentDir, agentHome, agentWorkspace); err != nil {
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			return nil, fmt.Errorf("stage harness bundle: %w", err)
+		}
 		util.Debugf("Start: harness reconciliation failed: %v", err)
 	}
 
@@ -822,6 +840,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if applier, ok := h.(api.AuthSettingsApplier); ok {
 			if err := applier.ApplyAuthSettings(agentHome, resolved); err != nil {
 				return nil, fmt.Errorf("failed to apply auth settings: %w", err)
+			}
+			// Record the staged secret files auth-candidates.json references,
+			// so later starts restore exactly these.
+			if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+				if err := recordSecrets(agentDir, agentHome, cs.StagedSecretNames()); err != nil {
+					return nil, fmt.Errorf("record harness secrets: %w", err)
+				}
 			}
 			util.Debugf("auth: applied harness-specific settings for %q", harnessName)
 		}
