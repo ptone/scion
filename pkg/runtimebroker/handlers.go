@@ -2094,6 +2094,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// HubAgentDefaults carries the hub defaults a start applies at its
 		// lowest tier (today the auto-expose default, for buildAgentEnv).
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+		// Image is the user's explicit image, which the hub sends on every
+		// start so it ranks as the top tier (opts.Image) exactly as on
+		// create. The hub never sends a template-derived image here
+		// (ptone/scion#1799).
+		Image string `json:"image,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
@@ -2117,8 +2122,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	// Build config for buildStartContext (startAgent uses a subset of CreateAgentConfig)
 	var cfg *CreateAgentConfig
-	if startReq.Task != "" || startReq.HarnessConfig != "" || startReq.HarnessConfigID != "" || startReq.HarnessConfigHash != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace || startReq.GitClone != nil || startReq.Branch != "" {
+	if startReq.Task != "" || startReq.HarnessConfig != "" || startReq.HarnessConfigID != "" || startReq.HarnessConfigHash != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace || startReq.GitClone != nil || startReq.Branch != "" || startReq.Image != "" {
 		cfg = &CreateAgentConfig{
+			Image:             startReq.Image,
 			Task:              startReq.Task,
 			HarnessConfig:     startReq.HarnessConfig,
 			HarnessConfigID:   startReq.HarnessConfigID,
@@ -2628,6 +2634,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		RunID string `json:"runId,omitempty"`
 		// HubAgentDefaults mirrors the same field on the start path.
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+		// Image mirrors the same field on the start path: the user's
+		// explicit image, applied as the top tier (ptone/scion#1799).
+		Image string `json:"image,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
@@ -2680,6 +2689,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		return
 	}
 	opts := sc.Opts
+	if restartReq.Image != "" {
+		opts.Image = restartReq.Image
+	}
 
 	if opts.ProjectPath != "" {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)

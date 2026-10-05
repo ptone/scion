@@ -235,9 +235,13 @@ Profile-level `image_registry` takes precedence over the top-level setting.
 The `image_registry` setting is the lowest-priority way to configure images. Explicit overrides always win:
 
 1. **CLI `--image` flag** (highest priority)
-2. **Template `scion-agent.yaml`** image field
-3. **Profile `harness_overrides`** image field
+2. **Profile `harness_overrides`** image field, when explicitly set
+3. **Template `scion-agent.yaml`** image field
 4. **`image_registry`** rewrite (lowest priority)
+
+Each time a higher-priority source replaces another source's image, the agent start logs it at
+Info. See [Settings precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1)
+for the full chain.
 
 If any higher-priority override specifies a full image path, `image_registry` does not apply to that agent.
 

@@ -1008,6 +1008,9 @@ func TestHTTPAgentDispatcher_DispatchAgentReprovision(t *testing.T) {
 			HarnessConfig: "claude",
 			TemplateHash:  "new-generation-hash",
 			Image:         "new-generation-image:v2",
+			// Only an explicit (request-level) image travels as
+			// Config.Image (ptone/scion#1799).
+			CreateInputs: &store.AgentCreateInputs{InlineConfig: &api.ScionConfig{Image: "new-generation-image:v2"}},
 		},
 	}
 
@@ -5038,6 +5041,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_AppliesImageRegistry(t *testing
 			HarnessConfig: "claude",
 			Task:          "do something",
 			Image:         "scion-claude:latest",
+			InlineConfig:  &api.ScionConfig{Image: "scion-claude:latest"},
 		},
 	}
 
@@ -5087,6 +5091,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoRegistryNoRewrite(t *testing.
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Image:         "scion-claude:latest",
+			InlineConfig:  &api.ScionConfig{Image: "scion-claude:latest"},
 		},
 	}
 
@@ -5132,6 +5137,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_FullyQualifiedImageNotRewritten
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Image:         "ghcr.io/custom/image:v2",
+			InlineConfig:  &api.ScionConfig{Image: "ghcr.io/custom/image:v2"},
 		},
 	}
 

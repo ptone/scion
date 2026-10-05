@@ -211,7 +211,9 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// here instead.
 	//
 	// This preserves the broker's own image-resolution precedence (fixed by
-	// ptone/scion#2156): explicit inline, then template, then Hub settings
+	// ptone/scion#2156, amended by ptone/scion#1799 — an explicit profile
+	// harness_overrides image is applied just below, above the template):
+	// explicit inline, then template, then Hub settings
 	// harness_configs.<name> (profiles.<p>.harness_overrides.<name>
 	// outranking the base entry), then the harness config's own stored
 	// image. fresh.Image already reflects "explicit inline, then template"
@@ -236,6 +238,21 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 			s.agentLifecycleLog.Warn("reincarnate: failed to resolve harness config for the image fallback",
 				"agent_id", agent.ID, "harness_config_id", fresh.HarnessConfigID, "error", err)
 			hc = nil
+		}
+	}
+	// ptone/scion#1799: an EXPLICIT profiles.<p>.harness_overrides.<hc>.image
+	// outranks the template (and inline) image the broker would otherwise
+	// pick; only the user's explicit request image ranks above it. Mirror
+	// that here so the plan shows what the broker will run. The plain
+	// harness_configs.<hc>.image default does not gain this priority and
+	// stays in the fallback below.
+	if explicitDispatchImage(fresh) == "" {
+		overrideKey := fresh.HarnessConfig
+		if overrideKey == "" && hc != nil {
+			overrideKey = hc.Slug
+		}
+		if img := s.settingsProfileOverrideImage(overrideKey, fresh.Profile); img != "" {
+			fresh.Image = img
 		}
 	}
 	if fresh.Image == "" && hc != nil {
@@ -299,6 +316,21 @@ func (s *Server) settingsHarnessConfigImage(harnessConfigName, profileName strin
 		return ""
 	}
 	return resolved.Image
+}
+
+// settingsProfileOverrideImage returns the image that
+// profiles.<profileName>.harness_overrides.<harnessConfigName>.image sets
+// explicitly in the hub's effective settings, or "" when unset. See
+// settingsHarnessConfigImage for which settings view this reads.
+func (s *Server) settingsProfileOverrideImage(harnessConfigName, profileName string) string {
+	if harnessConfigName == "" {
+		return ""
+	}
+	vs, _, err := config.LoadEffectiveSettings("")
+	if err != nil || vs == nil {
+		return ""
+	}
+	return vs.ProfileHarnessOverrideImage(profileName, harnessConfigName)
 }
 
 // imageRegistryProvider is implemented by dispatchers that rewrite image
