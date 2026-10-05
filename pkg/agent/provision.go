@@ -1517,9 +1517,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to resolve harness for %q: %w", harnessConfigName, err)
 	}
-	// Defence in depth: resolveTemplateAndHarnessConfig evaluated the same
-	// effective entry; this check ties the policy to this harness
-	// construction, as the call-site guard requires for every one.
+	// resolveTemplateAndHarnessConfig evaluated the same effective entry;
+	// this check also ties the policy to this harness construction, as the
+	// call-site guard requires for every one.
 	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, resolved.Config); err != nil {
 		return "", "", nil, err
 	}

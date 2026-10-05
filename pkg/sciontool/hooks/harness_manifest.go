@@ -78,9 +78,9 @@ func LoadHarnessManifestRequirement(agentHome string) (HarnessManifestRequiremen
 	// The legacy "builtin" provisioner has no implementation any more
 	// (harnesses/README.md), so nothing would provision the harness. The
 	// broker refuses such a harness-config before the container is created
-	// (harness.ErrUnusableProvisioner); this is defence in depth for a
-	// manifest staged by an older broker. Abort startup instead of booting a
-	// harness without its provisioning (ptone/scion#611).
+	// (harness.ErrUnusableProvisioner); this check covers a manifest staged
+	// by an older broker. Abort startup instead of booting a harness without
+	// its provisioning (ptone/scion#611).
 	if prov.Type == "builtin" {
 		// The manifest carries the harness type, not the harness-config
 		// name, so the fix names the harness-config generically.
