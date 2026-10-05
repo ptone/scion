@@ -133,9 +133,11 @@ func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.
 // a binary upgrade that changed a bundled default, which UpdateDefaultTemplates
 // re-materializes on disk at every workstation start — and the hub cannot
 // currently tell those apart from a lost hub-side edit: harness-config edit
-// handlers do not set UpdatedBy, Updated is bumped by every write (including
-// this bootstrap, storage repair and image-status checks), and nothing records
-// the hash the last import wrote. Distinguishing them needs that marker
+// handlers do not set UpdatedBy; template edit handlers do, but this
+// bootstrap never clears it, so a set UpdatedBy means "edited at some point",
+// not "edited since the last import"; Updated is bumped by every write
+// (including this bootstrap, storage repair and image-status checks); and
+// nothing records the hash the last import wrote. Distinguishing them needs that marker
 // persisted on the record (ResourceStore/schema work, out of scope here).
 // Until then this stays at WARN because the destructive case is silent
 // otherwise.

@@ -139,9 +139,10 @@ func (s *Server) syncResourceFromStorage(
 // should target. ID is authoritative when set (an agent's
 // AppliedConfig.HarnessConfigID, or the record already in hand during
 // sync-all); a stale ID is "not found", never re-targeted by name.
-// Name/ProjectID are used only for agents dispatched without a stamped ID: the name is resolved project-scope first (ProjectID), then
-// global — the same rule resolveDerivedConfig uses when it stamps the ID —
-// never "newest record with that name anywhere" (ptone/scion#2898).
+// Name/ProjectID are used only for agents dispatched without a stamped ID:
+// the name is resolved project-scope first (ProjectID), then global — the
+// same rule resolveDerivedConfig uses when it stamps the ID — never "newest
+// record with that name anywhere" (ptone/scion#2898).
 type HarnessConfigRepairRef struct {
 	ID        string
 	Name      string
@@ -384,6 +385,11 @@ func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.R
 // make it succeed and would only touch an unrelated record. The name is
 // used only when no ID was stamped, looked up by slug in the agent's project
 // scope, then global scope. Returns (nil, nil) when nothing matches.
+//
+// There is deliberately no Status filter (the old name lookup required
+// "active"): resolveDerivedConfig stamps the ID via the same unfiltered
+// GetHarnessConfigBySlug lookup, so repair targets exactly the record
+// dispatch uses. Do not "restore" the filter without changing both.
 func (s *Server) resolveHarnessConfigForRepair(ctx context.Context, ref HarnessConfigRepairRef) (*store.HarnessConfig, error) {
 	if ref.ID != "" {
 		hc, err := s.store.GetHarnessConfig(ctx, ref.ID)
