@@ -350,48 +350,53 @@ func TestHarnessConfigPolicy_ResolveCallSitesAreHooked(t *testing.T) {
 	for _, dir := range []string{".", "../runtimebroker"} {
 		pkgName := "pkg/" + filepath.Base(mustAbs(t, dir))
 		fset := token.NewFileSet()
-		pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
+		paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, pkg := range pkgs {
-			for path, file := range pkg.Files {
-				for _, decl := range file.Decls {
-					fn, ok := decl.(*ast.FuncDecl)
-					if !ok || fn.Body == nil {
-						continue
-					}
-					var resolves, checks bool
-					ast.Inspect(fn.Body, func(n ast.Node) bool {
-						call, ok := n.(*ast.CallExpr)
-						if !ok {
-							return true
-						}
-						switch f := call.Fun.(type) {
-						case *ast.SelectorExpr:
-							if x, ok := f.X.(*ast.Ident); ok && x.Name == "harness" && resolvers[f.Sel.Name] {
-								resolves = true
-							}
-							if f.Sel.Name == "CheckHarnessConfigPolicy" {
-								checks = true
-							}
-						case *ast.Ident:
-							if f.Name == "CheckHarnessConfigPolicy" {
-								checks = true
-							}
-						}
+		for _, path := range paths {
+			if strings.HasSuffix(path, "_test.go") {
+				continue
+			}
+			file, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+				var resolves, checks bool
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
 						return true
-					})
-					if !resolves {
-						continue
 					}
-					site := pkgName + "/" + filepath.Base(path) + ":" + fn.Name.Name
-					found[site] = true
-					if !allowed[site] {
-						t.Errorf("unlisted harness construction at %s: evaluate the harness-config policy there (CheckHarnessConfigPolicy) and list it in this test", site)
-					} else if !checks {
-						t.Errorf("%s constructs a harness without CheckHarnessConfigPolicy", site)
+					switch f := call.Fun.(type) {
+					case *ast.SelectorExpr:
+						if x, ok := f.X.(*ast.Ident); ok && x.Name == "harness" && resolvers[f.Sel.Name] {
+							resolves = true
+						}
+						if f.Sel.Name == "CheckHarnessConfigPolicy" {
+							checks = true
+						}
+					case *ast.Ident:
+						if f.Name == "CheckHarnessConfigPolicy" {
+							checks = true
+						}
 					}
+					return true
+				})
+				if !resolves {
+					continue
+				}
+				site := pkgName + "/" + filepath.Base(path) + ":" + fn.Name.Name
+				found[site] = true
+				if !allowed[site] {
+					t.Errorf("unlisted harness construction at %s: evaluate the harness-config policy there (CheckHarnessConfigPolicy) and list it in this test", site)
+				} else if !checks {
+					t.Errorf("%s constructs a harness without CheckHarnessConfigPolicy", site)
 				}
 			}
 		}
