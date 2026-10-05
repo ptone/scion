@@ -17,8 +17,8 @@ package agent
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -31,9 +31,15 @@ import (
 // provisioned profile) is recorded broker-side.
 const imageProvenanceFile = "image-provenance.json"
 
+// imageProvenanceVersion is written into every record. A record without it
+// (or with another value) is rejected rather than half-trusted.
+const imageProvenanceVersion = 1
+
 // imageProvenance is the per-source image record. See settings-precedence.md,
 // "Container image and Kubernetes image pull policy".
 type imageProvenance struct {
+	// Version is always imageProvenanceVersion; see readImageProvenance.
+	Version int `json:"version"`
 	// RequestImage is the user's explicit request image at provision time
 	// (CLI --image, a local --config image the CLI promotes to it, or the
 	// Hub's request image). Start replays it at the top tier when the
@@ -58,12 +64,24 @@ type imageProvenance struct {
 	InlineImagePullPolicy string `json:"inlineImagePullPolicy,omitempty"`
 	// Profile is the settings profile the agent was provisioned with
 	// (after the active-profile fallback). Start uses only this profile to
-	// look up the profile harness_overrides image and pull policy, so no
-	// agent-info.json field can steer image selection.
+	// look up the profile harness_overrides image and pull policy and the
+	// profile image_registry, so no agent-info.json field can steer image
+	// selection.
+	//
+	// An empty Profile means no profile was set or active at provision; the
+	// profile active at start time then applies, as for any settings
+	// lookup with no profile.
 	Profile string `json:"profile,omitempty"`
+	// Template is the template the agent was provisioned from (the same
+	// value recorded, for display, as agent-info.json's template). Start
+	// resolves the template-tier image and pull policy from this template
+	// when the start request carries no absolute template path, so editing
+	// agent-info.json cannot move the agent onto another template's image.
+	Template string `json:"template,omitempty"`
 }
 
 func writeImageProvenance(agentDir string, p imageProvenance) error {
+	p.Version = imageProvenanceVersion
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
@@ -73,29 +91,34 @@ func writeImageProvenance(agentDir string, p imageProvenance) error {
 	return writeAgentInfoFile(filepath.Join(agentDir, imageProvenanceFile), data, 0o600)
 }
 
-// readImageProvenance returns the recorded provenance, or nil when the agent
-// was provisioned before it was recorded (or the file is unreadable), in
-// which case Start falls back to its legacy behaviour.
-func readImageProvenance(agentDir string) *imageProvenance {
+// readImageProvenance returns the recorded provenance. It returns (nil, nil)
+// only when the file is genuinely absent — an agent provisioned before
+// provenance was recorded — in which case Start uses its legacy behaviour.
+// A file that exists but cannot be read, does not parse, or lacks the
+// version marker is an error: Start must fail rather than fall back to
+// agent-info.json, which the container can write.
+func readImageProvenance(agentDir string) (*imageProvenance, error) {
 	if agentDir == "" {
-		return nil
+		return nil, nil
 	}
-	data, err := os.ReadFile(filepath.Join(agentDir, imageProvenanceFile))
+	path := filepath.Join(agentDir, imageProvenanceFile)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			logImageProvenanceReadError(agentDir, err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
 		}
-		return nil
+		return nil, imageProvenanceError(path, err)
 	}
 	var p imageProvenance
 	if err := json.Unmarshal(data, &p); err != nil {
-		logImageProvenanceReadError(agentDir, err)
-		return nil
+		return nil, imageProvenanceError(path, err)
 	}
-	return &p
+	if p.Version != imageProvenanceVersion {
+		return nil, imageProvenanceError(path, fmt.Errorf("unsupported or missing version %d (want %d)", p.Version, imageProvenanceVersion))
+	}
+	return &p, nil
 }
 
-func logImageProvenanceReadError(agentDir string, err error) {
-	slog.Warn("image resolution: ignoring unreadable image provenance; falling back to legacy precedence",
-		"path", filepath.Join(agentDir, imageProvenanceFile), "error", err)
+func imageProvenanceError(path string, err error) error {
+	return fmt.Errorf("image provenance %s is unusable (%w); refusing to fall back to agent-info.json: re-provision the agent (scion reincarnate, or delete and re-create it)", path, err)
 }

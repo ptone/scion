@@ -442,19 +442,19 @@ func TestWithProvisionedImage(t *testing.T) {
 	projectScionDir := imagePrecedenceFixture(t, "", profileOverrideSettings)
 	base := &api.ScionConfig{Image: "template-pinned:v2", HarnessConfig: "test-harness"}
 
-	got := withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, "", base)
+	got, _ := withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, "", base)
 	if got.Image != "profile-pinned:v4" {
 		t.Errorf("profile pin: got %q", got.Image)
 	}
 	if base.Image != "template-pinned:v2" {
 		t.Errorf("input config was mutated: %q", base.Image)
 	}
-	got = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging", Image: "request:v9"}, "", base)
+	got, _ = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging", Image: "request:v9"}, "", base)
 	if got.Image != "request:v9" {
 		t.Errorf("request image: got %q", got.Image)
 	}
 	writeSettings(t, noOverrideSettings)
-	got = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, "", base)
+	got, _ = withProvisionedImage(api.StartOptions{Name: "a", ProjectPath: projectScionDir, Profile: "staging"}, "", base)
 	if got.Image != "template-pinned:v2" {
 		t.Errorf("no pin: got %q", got.Image)
 	}
@@ -676,5 +676,122 @@ harness_configs:
 			t.Fatalf("restart (profile %q) after rewriting agent-info.json profile: got %q / %q, want profile-pinned:v4 / no policy",
 				restartProfile, restart.Image, pullPolicyOf(restart))
 		}
+	}
+}
+
+// rewriteAgentInfo applies edit to the agent's agent-info.json.
+func rewriteAgentInfo(t *testing.T, projectScionDir string, edit func(map[string]any)) {
+	t.Helper()
+	infoPath := filepath.Join(projectScionDir, "agents", "test-agent", "home", "agent-info.json")
+	data, err := os.ReadFile(infoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	edit(raw)
+	out, _ := json.Marshal(raw)
+	if err := os.WriteFile(infoPath, out, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTemplate(t *testing.T, name, body string) {
+	t.Helper()
+	dir := filepath.Join(os.Getenv("HOME"), ".scion", "templates", name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scion-agent.json"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStart_AgentInfoTemplateDoesNotSteerTemplateTier: the template-tier
+// image and pull policy come from the template recorded in broker-side
+// provenance; rewriting agent-info.json's template to another project
+// template changes nothing.
+func TestStart_AgentInfoTemplateDoesNotSteerTemplateTier(t *testing.T) {
+	projectScionDir := imagePrecedenceFixture(t, "", noOverrideSettings)
+	writeTemplate(t, "alpha", `{"default_harness_config": "test-harness", "image": "alpha-image:v1", "kubernetes": {"imagePullPolicy": "Never"}}`)
+	writeTemplate(t, "beta", `{"default_harness_config": "test-harness", "image": "beta-image:v2", "kubernetes": {"imagePullPolicy": "Always"}}`)
+
+	first, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", Template: "alpha", ProjectPath: projectScionDir, Profile: "staging"})
+	if first.Image != "alpha-image:v1" || pullPolicyOf(first) != "Never" {
+		t.Fatalf("first start: got %q / %q", first.Image, pullPolicyOf(first))
+	}
+	rewriteAgentInfo(t, projectScionDir, func(raw map[string]any) { raw["template"] = "beta" })
+
+	restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
+	if restart.Image != "alpha-image:v1" || pullPolicyOf(restart) != "Never" {
+		t.Fatalf("restart after rewriting agent-info.json template: got %q / %q, want alpha-image:v1 / Never", restart.Image, pullPolicyOf(restart))
+	}
+}
+
+// TestStart_AgentInfoProfileDoesNotSteerImageRegistry: the profile-level
+// image_registry rewrite uses the provisioned profile recorded in
+// broker-side provenance, not agent-info.json's profile, even when a
+// broker-style restart passes that saved profile as opts.Profile.
+func TestStart_AgentInfoProfileDoesNotSteerImageRegistry(t *testing.T) {
+	projectScionDir := imagePrecedenceFixture(t, "scion-test:latest", `schema_version: "1"
+active_profile: staging
+profiles:
+  staging:
+    runtime: docker
+  reg:
+    runtime: docker
+    image_registry: registry.example.com/other
+harness_configs:
+  test-harness:
+    harness: generic
+`)
+	first, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
+	if first.Image != "scion-test:latest" {
+		t.Fatalf("first start: image = %q, want the bare template image", first.Image)
+	}
+	rewriteAgentInfo(t, projectScionDir, func(raw map[string]any) { raw["profile"] = "reg" })
+
+	saved := GetSavedProfile("test-agent", projectScionDir)
+	if saved != "reg" {
+		t.Fatalf("precondition: saved profile = %q, want reg", saved)
+	}
+	restart, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: saved})
+	if restart.Image != "scion-test:latest" {
+		t.Fatalf("broker-style restart after rewriting agent-info.json profile: image = %q, want it not rewritten to the other profile's registry", restart.Image)
+	}
+}
+
+// TestStart_UnusableImageProvenanceFailsClosed: an image-provenance.json
+// that exists but is unparseable or lacks the version marker fails the start
+// with an actionable error; Start never falls back to agent-info.json.
+func TestStart_UnusableImageProvenanceFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"unparseable", "{not json"},
+		{"missing version", `{"requestImage": "x:v1"}`},
+		{"wrong version", `{"version": 99}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectScionDir := imagePrecedenceFixture(t, "template-pinned:v2", noOverrideSettings)
+			startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, Profile: "staging"})
+			provPath := filepath.Join(projectScionDir, "agents", "test-agent", imageProvenanceFile)
+			if err := os.WriteFile(provPath, []byte(tc.body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					t.Fatal("runtime must not be called with unusable image provenance")
+					return "", nil
+				},
+			}
+			_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true})
+			if err == nil || !strings.Contains(err.Error(), "re-provision the agent") || !strings.Contains(err.Error(), imageProvenanceFile) {
+				t.Fatalf("expected an actionable image-provenance error, got %v", err)
+			}
+		})
 	}
 }

@@ -307,12 +307,25 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// in finalScionCfg.Info.Template (e.g. "web-dev") may not resolve in the
 	// project, but the original opts.Template path points to the actual
 	// template directory containing harness-configs/.
+	//
+	// Image provenance (including the provisioned profile and template) is
+	// recorded broker-side, in the agent dir; see image_provenance.go. For
+	// an agent that has it, the recorded template stands in for
+	// finalScionCfg.Info.Template, which is read from the container-writable
+	// agent-info.json: this chain selects the template-tier image and pull
+	// policy and the harness-config dir searched for the file tier.
+	provenance, err := readImageProvenance(agentDir)
+	if err != nil {
+		return nil, err
+	}
 	templateName := ""
 	if opts.Template != "" && filepath.IsAbs(opts.Template) {
 		templateName = opts.Template
 	}
 	if templateName == "" {
-		if finalScionCfg != nil && finalScionCfg.Info != nil {
+		if provenance != nil {
+			templateName = provenance.Template
+		} else if finalScionCfg != nil && finalScionCfg.Info != nil {
 			templateName = finalScionCfg.Info.Template
 		}
 	}
@@ -354,9 +367,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// "Container image and Kubernetes image pull policy" section for the
 	// order (ptone/scion#1799).
 	var fileImage, settingsImage, profileOverrideImage string
-	// Image provenance (including the provisioned profile) is recorded
-	// broker-side, in the agent dir; see image_provenance.go.
-	provenance := readImageProvenance(agentDir)
 	var filePullPolicy, settingsPullPolicy, profileOverridePullPolicy string
 	if harnessConfigName != "" {
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
@@ -589,7 +599,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// always return true from ImageExists (images are pulled on demand by the
 	// node), so we must skip the local check to ensure registry rewrite applies.
 	if settings != nil && resolvedImage != "" {
-		imageRegistry := settings.ResolveImageRegistry(opts.Profile)
+		// The profile-level image_registry is looked up with the
+		// provisioned profile recorded in broker-side provenance, never a
+		// profile read from agent-info.json (a broker start/restart fills
+		// opts.Profile from there); legacy agents keep opts.Profile.
+		registryProfile := opts.Profile
+		if provenance != nil {
+			registryProfile = provenance.Profile
+		}
+		imageRegistry := settings.ResolveImageRegistry(registryProfile)
 		if imageRegistry != "" && imagecheck.IsBareImageName(resolvedImage) {
 			runtimeName := ""
 			if m.Runtime != nil {

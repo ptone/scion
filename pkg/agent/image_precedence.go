@@ -114,12 +114,16 @@ func templateChainImage(chain []*config.Template) (image, pullPolicy string) {
 // The profile override is looked up with the profile recorded in the
 // broker-side image provenance ProvisionAgent just wrote (falling back to
 // opts.Profile only if it is missing), the same profile Start will use.
-func withProvisionedImage(opts api.StartOptions, agentDir string, cfg *api.ScionConfig) *api.ScionConfig {
+func withProvisionedImage(opts api.StartOptions, agentDir string, cfg *api.ScionConfig) (*api.ScionConfig, error) {
 	if cfg == nil {
-		return nil
+		return nil, nil
 	}
 	profile := opts.Profile
-	if p := readImageProvenance(agentDir); p != nil {
+	p, err := readImageProvenance(agentDir)
+	if err != nil {
+		return cfg, err
+	}
+	if p != nil {
 		profile = p.Profile
 	}
 	profileImage := ""
@@ -134,9 +138,9 @@ func withProvisionedImage(opts api.StartOptions, agentDir string, cfg *api.Scion
 		{source: imageTierRequest, image: opts.Image},
 	})
 	if image == cfg.Image {
-		return cfg
+		return cfg, nil
 	}
 	out := *cfg
 	out.Image = image
-	return &out
+	return &out, nil
 }

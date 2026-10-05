@@ -752,10 +752,13 @@ settings, rather than trusting the merged `image` that `ProvisionAgent` persiste
 applied at provision time, so it is never reused as any single tier.
 
 What `Start` cannot re-derive, `ProvisionAgent` records per source. Image provenance (including
-the provisioned profile) is recorded broker-side: `image-provenance.json` (mode `0600`, written
-atomically) in the agent directory, next to `scion-agent.json` and outside the agent home and every
-container mount. For an agent with that file, `Start` takes every image-affecting input it cannot
-re-derive from there, and no `agent-info.json` field affects image selection:
+the provisioned profile and template) is recorded broker-side: `image-provenance.json` (mode
+`0600`, written atomically, versioned) in the agent directory, next to `scion-agent.json` and
+outside the agent home and every container mount. For an agent with that file, every
+image-affecting input comes either from the current request or from current settings, template and
+harness-config files resolved with the recorded profile and template, or from this record. No
+`agent-info.json` field and no container state affects the image reference (including its tag or
+digest), the registry rewrite, the pull policy, the template tier or the profile override:
 
 - `requestImage`: the user's explicit request image. A plain restart replays it at the top tier, so
   a first start and a later restart rank it identically, locally and via the Hub.
@@ -763,9 +766,15 @@ re-derive from there, and no `agent-info.json` field affects image selection:
   request's inline config doesn't set the field.
 - `profile`: the settings profile the agent was provisioned with. Only this profile is used to look
   up the profile `harness_overrides` image and pull policy (and the settings-tier values that
-  lookup folds in), on every start and restart, local or broker. The profile a restart passes, or
-  the one saved in `agent-info.json`, does not change it. Other uses of the saved profile (for
+  lookup folds in) and the profile-level `image_registry` rewrite, on every start and restart,
+  local or broker. The profile a restart passes, or the one saved in `agent-info.json`, does not
+  change it. Empty means no profile was set or active at provision; the profile active at start
+  then applies, as for any settings lookup without a profile. Other uses of the saved profile (for
   example runtime selection) are unchanged.
+- `template`: the template the agent was provisioned from. When a start carries no absolute
+  template path (every local restart, and every hub start or restart), the template-tier image and
+  pull policy, and the harness-config directories searched for the file tier, come from this
+  template.
 - `templateImage` / `templateImagePullPolicy`: the template chain's
   **own** values, with nothing else folded in. `Start` uses them as the template tier only when
   the template can no longer be resolved, and warns that it did. That happens when the template
@@ -774,7 +783,11 @@ re-derive from there, and no `agent-info.json` field affects image selection:
   provision never lingers disguised as the template's value.
 
 `agent-info.json` keeps display copies (`AgentInfo.Image`, `.ExplicitImage`,
-`.ExplicitImagePullPolicy`, `.Profile`) for listing and status only.
+`.ExplicitImagePullPolicy`, `.Profile`, `.Template`) for listing and status only.
+
+If `image-provenance.json` exists but cannot be read or parsed, or lacks its version marker, `Start`
+fails with an error asking you to re-provision the agent (`scion reincarnate`, or delete and
+re-create it). It never falls back to `agent-info.json`.
 
 An agent provisioned before image provenance was recorded falls back to its previous behaviour,
 including reading those `agent-info.json` fields: its create-time inline image ranks at the top
