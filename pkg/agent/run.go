@@ -295,7 +295,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	// Default values
-	resolvedImage := ""
 	unixUsername := "root"
 	profileName := opts.Profile
 
@@ -354,11 +353,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// settings); the explicit-override tier is computed further down
 	// alongside image's.
 	resolvedPullPolicy := ""
+	// The image tiers are collected separately here and resolved by
+	// pickImage further down, once every tier is known; see
+	// settings-precedence.md's "Container image and Kubernetes image pull
+	// policy" section for the order (ptone/scion#1799).
+	var fileImage, settingsImage, profileOverrideImage string
 	if harnessConfigName != "" {
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
 			if hcDir.Config.Image != "" {
-				resolvedImage = hcDir.Config.Image
-				util.Debugf("image resolution: from on-disk harness-config image=%s path=%s", resolvedImage, hcDir.Path)
+				fileImage = hcDir.Config.Image
+				util.Debugf("image resolution: on-disk harness-config image=%s path=%s", fileImage, hcDir.Path)
 			}
 			if hcDir.Config.ImagePullPolicy != "" {
 				resolvedPullPolicy = hcDir.Config.ImagePullPolicy
@@ -387,9 +391,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 		hConfig, err := settings.ResolveHarnessConfig(settingsProfile, harnessConfigName)
 		if err == nil {
-			if hConfig.Image != "" {
-				resolvedImage = hConfig.Image
-				util.Debugf("image resolution: from settings harness-config image=%s", resolvedImage)
+			// ResolveHarnessConfig folds an explicit profile
+			// harness_overrides.<hc>.image into hConfig.Image. That explicit
+			// override outranks the template and inline tiers, while the
+			// plain harness_configs.<hc>.image default does not, so the two
+			// are split apart here.
+			profileOverrideImage = settings.ProfileHarnessOverrideImage(settingsProfile, harnessConfigName)
+			settingsImage = hConfig.Image
+			if profileOverrideImage != "" {
+				settingsImage = settings.HarnessConfigs[harnessConfigName].Image
 			}
 			if hConfig.ImagePullPolicy != "" {
 				resolvedPullPolicy = hConfig.ImagePullPolicy
@@ -435,8 +445,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	var warnings []string
 
-	// The explicit tier, per field: the live template chain (later template
-	// wins) as a base, then the CURRENT request's own inline config
+	// The template and inline tiers, per field: the live template chain
+	// (later template wins), then the CURRENT request's own inline config
 	// (opts.InlineConfig — not startInlineConfig, which a bare --harness-auth
 	// also makes non-nil with no image of its own) if it sets that field,
 	// else the value ProvisionAgent recorded at creation time from the
@@ -448,27 +458,29 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// or an unrelated --config field, e.g. --model. See
 	// settings-precedence.md's "Container image and Kubernetes image pull
 	// policy" section.
-	explicitImage, explicitPullPolicy := "", ""
+	templateImage, inlineImage, explicitPullPolicy := "", "", ""
 	for _, tpl := range templateChain {
 		tplCfg, err := tpl.LoadConfig()
 		if err != nil {
 			continue
 		}
 		if tplCfg.Image != "" {
-			explicitImage = tplCfg.Image
+			templateImage = tplCfg.Image
 		}
 		if tplCfg.Kubernetes != nil && tplCfg.Kubernetes.ImagePullPolicy != "" {
 			explicitPullPolicy = tplCfg.Kubernetes.ImagePullPolicy
 		}
 	}
-	// imageFromSnapshot/pullPolicyFromSnapshot track whether the
-	// templateUnresolvable fallback below is what actually ends up supplying
-	// resolvedImage/resolvedPullPolicy, as opposed to being overridden by a
-	// higher-priority source afterward (a current or recorded inline value,
-	// or — for image — an explicit dispatch --image). The warning at the end
-	// of this section only fires when a flag is still true, so it never
-	// claims the recorded snapshot was used when it wasn't.
-	imageFromSnapshot, pullPolicyFromSnapshot := false, false
+	// snapshotImage stands in for the template tier when the template is
+	// gone; imageFromSnapshot (set from pickImage's winning tier) and
+	// pullPolicyFromSnapshot track whether that templateUnresolvable fallback
+	// is what actually ends up supplying resolvedImage/resolvedPullPolicy, as
+	// opposed to being overridden by a higher-priority source afterward (a
+	// current or recorded inline value, or — for image — an explicit profile
+	// harness override or dispatch --image). The warning at the end of this
+	// section only fires when a flag is true, so it never claims the
+	// recorded snapshot was used when it wasn't.
+	snapshotImage, pullPolicyFromSnapshot := "", false
 	if templateUnresolvable {
 		// The named template itself is gone (renamed or deleted since this
 		// agent was created) — not merely "no template pin". Fall back to
@@ -479,8 +491,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// the template disappeared. An inline override, live or recorded,
 		// still wins below, same as it would over a live template.
 		if finalScionCfg != nil && finalScionCfg.Image != "" {
-			explicitImage = finalScionCfg.Image
-			imageFromSnapshot = true
+			snapshotImage = finalScionCfg.Image
 		}
 		if finalScionCfg != nil && finalScionCfg.Kubernetes != nil && finalScionCfg.Kubernetes.ImagePullPolicy != "" {
 			explicitPullPolicy = finalScionCfg.Kubernetes.ImagePullPolicy
@@ -488,11 +499,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	}
 	if opts.InlineConfig != nil && opts.InlineConfig.Image != "" {
-		explicitImage = opts.InlineConfig.Image
-		imageFromSnapshot = false
+		inlineImage = opts.InlineConfig.Image
 	} else if finalScionCfg != nil && finalScionCfg.Info != nil && finalScionCfg.Info.ExplicitImage != "" {
-		explicitImage = finalScionCfg.Info.ExplicitImage
-		imageFromSnapshot = false
+		inlineImage = finalScionCfg.Info.ExplicitImage
 	}
 	if opts.InlineConfig != nil && opts.InlineConfig.Kubernetes != nil && opts.InlineConfig.Kubernetes.ImagePullPolicy != "" {
 		explicitPullPolicy = opts.InlineConfig.Kubernetes.ImagePullPolicy
@@ -501,21 +510,30 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		explicitPullPolicy = finalScionCfg.Info.ExplicitImagePullPolicy
 		pullPolicyFromSnapshot = false
 	}
-	if explicitImage != "" {
-		resolvedImage = explicitImage
-		util.Debugf("image resolution: from explicit template/inline-config image=%s", resolvedImage)
-	}
 	if explicitPullPolicy != "" {
 		resolvedPullPolicy = explicitPullPolicy
 	}
 
-	// Apply CLI/dispatch image override before registry rewrite so the
-	// rewrite applies last regardless of the image source.
-	if opts.Image != "" {
-		resolvedImage = opts.Image
-		imageFromSnapshot = false
-		util.Debugf("image resolution: from CLI/dispatch --image flag image=%s", resolvedImage)
+	// Resolve the image, lowest tier first. An EXPLICIT profile
+	// harness_overrides.<hc>.image outranks the template and inline tiers;
+	// only an explicit --image / request-level image (opts.Image, which a
+	// hub dispatch fills from the agent's explicit request inputs only, never
+	// from a template) ranks above it. The plain settings harness_configs
+	// default stays below the template (ptone/scion#1799). This runs before
+	// the registry rewrite so the rewrite applies last regardless of source.
+	templateTier := imageCandidate{source: imageTierTemplate, image: templateImage}
+	if snapshotImage != "" {
+		templateTier = imageCandidate{source: imageTierTemplateSnapshot, image: snapshotImage}
 	}
+	resolvedImage, imageSource := pickImage(slog.Default(), opts.Name, []imageCandidate{
+		{source: imageTierHarnessConfigFile, image: fileImage},
+		{source: imageTierSettings, image: settingsImage},
+		templateTier,
+		{source: imageTierInline, image: inlineImage},
+		{source: imageTierProfileOverride, image: profileOverrideImage},
+		{source: imageTierRequest, image: opts.Image},
+	})
+	imageFromSnapshot := imageSource == imageTierTemplateSnapshot
 
 	if imageFromSnapshot || pullPolicyFromSnapshot {
 		var fields []string
