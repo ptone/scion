@@ -1921,15 +1921,34 @@ func TestSharedWorkspaceAgentResolvesBrokerSideDir(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writeForged("scion-agent.json", `{"harness_config":"hc-forged","image":"forged:latest"}`)
+	writeForged("scion-agent.json", `{"harness_config":"hc-forged","image":"forged:latest","volumes":[{"source":"/etc","target":"/forged"}]}`)
 	writeForged(filepath.Join(controlPlaneInputsDirName, "instructions.md"), "forged instructions")
 	writeForged(filepath.Join(config.HarnessSecretsRecordDirName, "FORGED_TOKEN"), "forged")
 
-	// Restart without the shared-workspace flag.
+	// Restart without the shared-workspace flag (an older hub), capturing
+	// the run config to show the forged config's volumes are never read.
+	var runCfg runtime.RunConfig
+	mgr = NewManager(&runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			runCfg = cfg
+			return "mock-id", nil
+		},
+	})
 	opts.SharedWorkspace = false
 	info2, err := mgr.Start(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("restart without the flag: %v", err)
+	}
+	for _, v := range runCfg.Volumes {
+		if v.Source == "/etc" || v.Target == "/forged" {
+			t.Errorf("a volume from the forged in-project scion-agent.json reached the run config: %+v", v)
+		}
+	}
+	if runCfg.Image == "forged:latest" {
+		t.Error("the forged in-project scion-agent.json image was used")
 	}
 	if info2.HarnessConfig != info.HarnessConfig {
 		t.Errorf("restart used a different harness-config %q (want %q): forged config read?", info2.HarnessConfig, info.HarnessConfig)
@@ -1955,7 +1974,7 @@ func TestEffectiveSharedWorkspace(t *testing.T) {
 	if external == config.GetAgentDir(e.scion, "ext-agent", false) {
 		t.Fatal("fixture: expected an external agents root")
 	}
-	if effectiveSharedWorkspace(e.scion, "ext-agent", false) {
+	if effectiveSharedWorkspace(e.scion, "ext-agent", false, "") {
 		t.Error("no external scion-agent.json: expected in-project")
 	}
 	if err := os.MkdirAll(external, 0o755); err != nil {
@@ -1964,15 +1983,120 @@ func TestEffectiveSharedWorkspace(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(external, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !effectiveSharedWorkspace(e.scion, "ext-agent", false) {
+	if !effectiveSharedWorkspace(e.scion, "ext-agent", false, "") {
 		t.Error("external scion-agent.json present: expected the broker-side agent dir")
 	}
 	for _, bad := range []string{"", ".", "..", "a/b", "../ext-agent"} {
-		if effectiveSharedWorkspace(e.scion, bad, false) {
+		if effectiveSharedWorkspace(e.scion, bad, false, "") {
 			t.Errorf("name %q must not resolve externally", bad)
 		}
 	}
-	if !effectiveSharedWorkspace(e.scion, "anything", true) {
+	if !effectiveSharedWorkspace(e.scion, "anything", true, "") {
 		t.Error("an explicit shared-workspace flag stays shared")
+	}
+}
+
+// Start/restart parity: a restart that carries the shared-workspace flag
+// resolves the same broker-side agent dir as the start.
+func TestSharedWorkspaceRestartWithFlagResolvesBrokerSideDir(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	mgr := policyTestManager(nil)
+	opts := api.StartOptions{Name: "sw-flag", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true, SharedWorkspace: true}
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := mgr.Start(context.Background(), opts); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if _, err := os.Stat(config.GetAgentDir(e.scion, "sw-flag", false)); !os.IsNotExist(err) {
+		t.Errorf("a start or restart created an in-project agent dir (stat err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(config.GetAgentDir(e.scion, "sw-flag", true), "scion-agent.json")); err != nil {
+		t.Errorf("broker-side agent dir missing: %v", err)
+	}
+}
+
+// A broker start or restart of a shared-workspace agent whose broker-side
+// agent dir is missing fails closed (config.ErrAgentStateDirUnavailable,
+// 409 at the broker) and creates nothing, in-project or external.
+func TestSharedWorkspaceRestartMissingStateDirFailsClosed(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	runs := 0
+	_, err := policyTestManager(&runs).Start(context.Background(), api.StartOptions{
+		Name: "sw-missing", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true,
+		SharedWorkspace: true, BrokerMode: true,
+	})
+	if !errors.Is(err, config.ErrAgentStateDirUnavailable) {
+		t.Fatalf("expected ErrAgentStateDirUnavailable, got %v", err)
+	}
+	if runs != 0 {
+		t.Error("the container must not run")
+	}
+	for _, shared := range []bool{false, true} {
+		if _, err := os.Stat(config.GetAgentDir(e.scion, "sw-missing", shared)); !os.IsNotExist(err) {
+			t.Errorf("an agent dir was created (shared=%v, stat err=%v)", shared, err)
+		}
+	}
+}
+
+// With a hub-supplied project ID, the broker-side agents root comes from
+// that ID: a tampered project-id marker inside the project does not move it.
+func TestAgentStateDirUsesHubProjectID(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	hubID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	want, err := config.AgentDirForProject(e.scion, "hub-agent", true, hubID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.WriteProjectID(e.scion, "99999999-8888-7777-6666-555555555555"); err != nil {
+		t.Fatal(err)
+	}
+	dir, shared, err := agentStateDir(e.scion, "hub-agent", true, hubID, true)
+	if err != nil || !shared || dir != want {
+		t.Errorf("agentStateDir = %q (shared=%v, err=%v), want %q", dir, shared, err, want)
+	}
+	// An agent whose hub-ID external dir holds scion-agent.json stays
+	// external without the flag; a scion-agent.json only under the
+	// tampered marker's root does not make it external.
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(want, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if dir, shared, err := agentStateDir(e.scion, "hub-agent", false, hubID, true); err != nil || !shared || dir != want {
+		t.Errorf("without the flag: agentStateDir = %q (shared=%v, err=%v), want %q", dir, shared, err, want)
+	}
+	markerDir, err := config.AgentDirForProject(e.scion, "marker-agent", true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(markerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(markerDir, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, shared, _ := agentStateDir(e.scion, "marker-agent", false, hubID, true); shared {
+		t.Error("a scion-agent.json under the marker-derived root made the agent external despite the hub project ID")
+	}
+}
+
+// In broker mode, or with a hub project ID, a shared-workspace agent whose
+// broker-side root cannot be determined is an error, never the in-project
+// root; a local CLI start with neither keeps the in-project root.
+func TestAgentStateDirStrictness(t *testing.T) {
+	projectScion := filepath.Join(t.TempDir(), ".scion") // no project-id marker
+	if err := os.MkdirAll(projectScion, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := agentStateDir(projectScion, "a", true, "", true); !errors.Is(err, config.ErrAgentStateDirUnavailable) {
+		t.Errorf("strict: expected ErrAgentStateDirUnavailable, got %v", err)
+	}
+	dir, _, err := agentStateDir(projectScion, "a", true, "", false)
+	if err != nil || dir != filepath.Join(projectScion, "agents", "a") {
+		t.Errorf("local without a project ID: got %q (err=%v), want the in-project dir", dir, err)
 	}
 }
