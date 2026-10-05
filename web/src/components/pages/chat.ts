@@ -3371,6 +3371,8 @@ export class ScionPageChat extends LitElement {
     // The sidebar is this project's now: the hub list stops updating it.
     this._sidebarOwner = 'space';
     this._sidebarSpaceId = projectId;
+    // Defence in depth: the hub view also requires the hub's claim (see
+    // _sidebarShowsHubView).
     this._hubAgentsLive = false;
     // This replaces the hub lists, so the next hub view walks the users again.
     this._hubUsersLoadedGeneration = null;
