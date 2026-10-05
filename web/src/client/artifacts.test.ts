@@ -16,7 +16,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { artifactFileUrl, formatBytes, rendererFor } from './artifacts.js';
+import { artifactFileUrl, baseName, formatBytes, isInlineType, rendererFor } from './artifacts.js';
 
 describe('rendererFor', () => {
   it('maps media types to renderers', () => {
@@ -56,5 +56,32 @@ describe('formatBytes', () => {
     expect(formatBytes(12)).toBe('12 B');
     expect(formatBytes(2048)).toBe('2.0 KiB');
     expect(formatBytes(3 * 1024 * 1024)).toBe('3.0 MiB');
+  });
+});
+
+describe('isInlineType and baseName', () => {
+  it('mirrors the hub inline list', () => {
+    for (const mt of [
+      'text/markdown',
+      'text/plain',
+      'text/tab-separated-values',
+      'image/png',
+      'APPLICATION/JSON',
+    ]) {
+      expect(isInlineType(mt)).toBe(true);
+    }
+    for (const mt of [
+      'text/html',
+      'image/svg+xml',
+      'application/pdf',
+      'application/octet-stream',
+    ]) {
+      expect(isInlineType(mt)).toBe(false);
+    }
+  });
+
+  it('takes the last path segment', () => {
+    expect(baseName('dir/sub/page.html')).toBe('page.html');
+    expect(baseName('page.html')).toBe('page.html');
   });
 });

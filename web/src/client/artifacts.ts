@@ -107,6 +107,37 @@ export function artifactFileUrl(id: string, seq: number, path: string, stream = 
   return `/api/v1/artifacts/${encodeURIComponent(id)}${version}/files/${encodedPath}${query}`;
 }
 
+/**
+ * Media types the hub serves with Content-Disposition: inline (mirrors
+ * inlineSafe in pkg/artifacts/media.go). The browser displays these rather
+ * than downloading them, so the page offers "Open raw" for them and
+ * "Download" for everything else.
+ */
+const INLINE_TYPES = new Set([
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'text/tab-separated-values',
+  'application/json',
+  'application/yaml',
+  'application/toml',
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+]);
+
+/** Reports whether the hub serves a media type inline. */
+export function isInlineType(mediaType: string): boolean {
+  return INLINE_TYPES.has(mediaType.toLowerCase());
+}
+
+/** The last segment of a file path, for download file names. */
+export function baseName(path: string): string {
+  const i = path.lastIndexOf('/');
+  return i >= 0 ? path.slice(i + 1) : path;
+}
+
 /** Formats a byte count for display. */
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
