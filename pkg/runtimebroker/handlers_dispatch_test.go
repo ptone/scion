@@ -336,8 +336,12 @@ func TestAgentResponseHarnessConfigRevision(t *testing.T) {
 		Name:                  "x",
 		HarnessConfig:         "claude",
 		HarnessConfigRevision: "sha256:deadbeef",
+		HarnessConfigSource:   "broker-local",
 	})
 	if resp.HarnessConfigRevision != "sha256:deadbeef" {
 		t.Errorf("HarnessConfigRevision lost in response conversion: got %q", resp.HarnessConfigRevision)
+	}
+	if resp.HarnessConfigSource != "broker-local" {
+		t.Errorf("HarnessConfigSource lost in response conversion: got %q", resp.HarnessConfigSource)
 	}
 }

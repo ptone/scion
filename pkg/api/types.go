@@ -594,7 +594,12 @@ type AgentInfo struct {
 	// audit flows so operators can correlate an agent with the exact bundle
 	// it ran.
 	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
-	HarnessAuth           string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
+	// HarnessConfigSource records which resolution branch supplied the
+	// harness-config (config.HarnessConfigSource: hub-hydrated,
+	// template-bundled, broker-local, builtin). Provenance only; empty when
+	// unknown (ptone/scion#620).
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
+	HarnessAuth         string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
 	// Project association
 	Project     string `json:"project"`               // Project name (standard field)

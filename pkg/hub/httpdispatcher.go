@@ -1272,6 +1272,9 @@ func applyBrokerAgentConfig(agent *store.Agent, info *RemoteAgentInfo) {
 		if info.HarnessAuth != "" {
 			agent.AppliedConfig.HarnessAuth = info.HarnessAuth
 		}
+		if info.HarnessConfigSource != "" {
+			agent.AppliedConfig.HarnessConfigSource = info.HarnessConfigSource
+		}
 		if info.Image != "" {
 			agent.AppliedConfig.Image = info.Image
 		}

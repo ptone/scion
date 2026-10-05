@@ -1887,6 +1887,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		Template:              displayTemplateName,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: config.ComputeHarnessConfigRevision(hcDir.Path),
+		HarnessConfigSource:   string(hcDir.Source),
 		Profile:               profileName,
 	}
 	if optionalStatus != "" {

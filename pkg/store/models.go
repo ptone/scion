@@ -279,6 +279,13 @@ type AgentAppliedConfig struct {
 	// requiring it to exist on the broker's local filesystem.
 	HarnessConfigID   string `json:"harnessConfigId,omitempty"`   // Hub harness-config ID for fetching
 	HarnessConfigHash string `json:"harnessConfigHash,omitempty"` // Content hash for cache validation
+	// HarnessConfigSource is broker-reported provenance: which resolution
+	// branch supplied the harness-config the agent actually ran
+	// (hub-hydrated, template-bundled, broker-local, builtin). A
+	// broker-local value on an agent stamped with HarnessConfigID means the
+	// hub bundle was not used. Observability only; never read by a decision
+	// path (ptone/scion#620).
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 
 	// CreatorName is the human-readable identity of who created this agent.
 	// For user-created agents, this is the user's email.

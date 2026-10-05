@@ -585,7 +585,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// future declarative-only harnesses) are honored. Otherwise fall back to
 	// the legacy New() shim using the bare harness type.
 	var h api.Harness
-	var harnessConfigRevision string
+	var harnessConfigRevision, harnessConfigSource string
 	var noAuthConfig *config.HarnessNoAuthConfig
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
@@ -616,6 +616,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			noAuthConfig = resolved.Config.NoAuthConfig
 			if resolved.ConfigDir != nil {
 				harnessConfigRevision = config.ComputeHarnessConfigRevision(resolved.ConfigDir.Path)
+				harnessConfigSource = string(resolved.ConfigDir.Source)
 			}
 			util.Debugf("harness resolution: implementation=%s harness=%q", resolved.Implementation, resolved.Config.Harness)
 		}
@@ -1847,6 +1848,7 @@ authDone:
 				a.Phase = status
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
+				a.HarnessConfigSource = harnessConfigSource
 				a.HarnessAuth = opts.HarnessAuth
 				a.Profile = profileName
 				return &a, nil
@@ -1866,6 +1868,7 @@ authDone:
 		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
+		HarnessConfigSource:   harnessConfigSource,
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
 	}, nil
