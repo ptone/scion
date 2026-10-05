@@ -49,10 +49,27 @@ func CheckHarnessConfigPolicy(ctx context.Context, name string, entry config.Har
 	return nil
 }
 
-// ErrHarnessConfigNotEvaluated is wrapped (with ErrHarnessConfigPolicy) into
-// a refusal when a harness-config policy is attached but the harness-config
-// could not be evaluated while a provisioner wrapper is staged.
-var ErrHarnessConfigNotEvaluated = errors.New("harness configuration not permitted by policy")
+// ErrHarnessConfigNotEvaluated matches (errors.Is) a refusal when a
+// harness-config policy is attached but the harness-config could not be
+// evaluated while a provisioner wrapper is staged. The refusal itself is a
+// *HarnessConfigNotEvaluatedError, which names the harness-config.
+var ErrHarnessConfigNotEvaluated = errors.New("harness-config could not be evaluated by policy")
+
+// HarnessConfigNotEvaluatedError names the harness-config the policy could
+// not evaluate. Cause is the resolution error, for logs only.
+type HarnessConfigNotEvaluatedError struct {
+	Name  string
+	Cause error
+}
+
+func (e *HarnessConfigNotEvaluatedError) Error() string {
+	return fmt.Sprintf("harness-config %q could not be evaluated by policy: %v", e.Name, e.Cause)
+}
+
+// Is reports a match for ErrHarnessConfigNotEvaluated.
+func (e *HarnessConfigNotEvaluatedError) Is(target error) bool {
+	return target == ErrHarnessConfigNotEvaluated
+}
 
 // harnessAfterResolveError decides what Start does when harness.Resolve fails
 // for harnessName. Launch does not run a staged provisioner the policy has
@@ -68,19 +85,20 @@ var ErrHarnessConfigNotEvaluated = errors.New("harness configuration not permitt
 // no policy the fallback is unchanged.
 func harnessAfterResolveError(ctx context.Context, agentHome, harnessName, harnessType string, resolveErr error) (api.Harness, error) {
 	if config.HarnessConfigPolicyFromContext(ctx) != nil && agentHome != "" && harness.HarnessProvisionHookStaged(agentHome) {
-		return nil, fmt.Errorf("%w: %w (harness-config %q: %v)", ErrHarnessConfigPolicy, ErrHarnessConfigNotEvaluated, harnessName, resolveErr)
+		return nil, fmt.Errorf("%w: %w", ErrHarnessConfigPolicy, &HarnessConfigNotEvaluatedError{Name: harnessName, Cause: resolveErr})
 	}
 	return harness.New(harnessType), nil
 }
 
-// clearProvisionHookUnlessContainerScript clears a staged provisioner wrapper
-// when h is not a container-script harness (see
-// harness.ClearHarnessProvisionHook). It applies with or without a policy:
+// clearProvisionHookUnlessContainerScript clears staged container-script
+// provisioning state as one unit (wrapper and the staged bundle) when h is
+// not a container-script harness (see
+// harness.ClearStagedProvisioning). It applies with or without a policy:
 // a wrapper only ever runs for the container-script harness the current
 // launch resolved, and was allowed to resolve.
 func clearProvisionHookUnlessContainerScript(h api.Harness, agentHome string) error {
 	if _, ok := h.(*harness.ContainerScriptHarness); ok {
 		return nil
 	}
-	return harness.ClearHarnessProvisionHook(agentHome)
+	return harness.ClearStagedProvisioning(agentHome)
 }

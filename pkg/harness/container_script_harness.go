@@ -997,17 +997,28 @@ func HarnessProvisionHookStaged(agentHome string) bool {
 	return err == nil
 }
 
-// ClearHarnessProvisionHook removes a staged provisioner wrapper from
-// agentHome, as WriteProjectPreStartHook clears 30-project-custom when no
-// project hook applies. Callers use it whenever the harness a launch resolved
-// is not a container-script harness, so a wrapper staged for an earlier
-// harness-config does not run at pre-start. Nothing staged is not an error.
-func ClearHarnessProvisionHook(agentHome string) error {
+// ClearStagedProvisioning removes, as one unit, the container-script
+// provisioning state a harness staged in agentHome: the provisioner wrapper
+// (.scion/hooks/pre-start.d/20-harness-provision) and the whole staged bundle
+// (.scion/harness: manifest.json, the provisioner's env overlay and other
+// outputs, config.yaml, provision.py, inputs, secrets). Without the manifest,
+// sciontool init does not treat the launch as a container-script provision or
+// load a previous provisioner's env overlay.
+//
+// Callers use it whenever the harness a launch resolved is not a
+// container-script harness, as WriteProjectPreStartHook clears
+// 30-project-custom when no project hook applies, and then restage what a
+// non-container-script harness keeps in the bundle (StageCaptureAuthAssets).
+// Nothing staged is not an error.
+func ClearStagedProvisioning(agentHome string) error {
 	if agentHome == "" {
 		return nil
 	}
 	if err := os.Remove(HarnessProvisionHookPath(agentHome)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove stale harness provisioner hook: %w", err)
+	}
+	if err := os.RemoveAll(filepath.Join(agentHome, ".scion", "harness")); err != nil {
+		return fmt.Errorf("remove stale harness bundle: %w", err)
 	}
 	return nil
 }

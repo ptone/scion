@@ -589,6 +589,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// resolveFailed records a harness.Resolve error for a named
 	// harness-config (see harnessAfterResolveError).
 	var resolveFailed bool
+	// resolvedHCDir is the harness-config directory harness.Resolve used,
+	// if any (for restaging capture-auth assets after a bundle clear).
+	var resolvedHCDir *config.HarnessConfigDir
 	var noAuthConfig *config.HarnessNoAuthConfig
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
@@ -639,6 +642,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		} else {
 			h = resolved.Harness
 			noAuthConfig = resolved.Config.NoAuthConfig
+			resolvedHCDir = resolved.ConfigDir
 			if resolved.ConfigDir != nil {
 				harnessConfigRevision = config.ComputeHarnessConfigRevision(resolved.ConfigDir.Path)
 				harnessConfigSource = string(resolved.ConfigDir.Source)
@@ -660,6 +664,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if !resolveFailed {
 		if err := clearProvisionHookUnlessContainerScript(h, agentHome); err != nil {
 			return nil, err
+		}
+		// Restage the capture-auth assets a non-container-script harness
+		// keeps in the bundle, as ProvisionAgent stages them.
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); !isContainerScript && resolvedHCDir != nil && resolvedHCDir.Path != "" {
+			if err := harness.StageCaptureAuthAssets(agentHome, resolvedHCDir.Path, resolvedHCDir.Config.Auth); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: capture-auth asset staging failed: %v\n", err)
+			}
 		}
 	}
 

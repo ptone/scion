@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -60,7 +61,7 @@ func (m *hookManager) check(ctx context.Context, step string) error {
 		if config.HarnessConfigPolicyFromContext(ctx) == nil {
 			return nil
 		}
-		return fmt.Errorf("%w: %w", agent.ErrHarnessConfigPolicy, agent.ErrHarnessConfigNotEvaluated)
+		return fmt.Errorf("%w: %w", agent.ErrHarnessConfigPolicy, &agent.HarnessConfigNotEvaluatedError{Name: "hook-hc", Cause: errors.New("resolve failed at /some/broker/path")})
 	}
 	return agent.CheckHarnessConfigPolicy(ctx, "hook-hc", hookScriptedEntry)
 }
@@ -294,8 +295,8 @@ func TestHarnessPolicyHook_AsyncLaunchRefusalReported(t *testing.T) {
 }
 
 // A refusal for a harness-config that could not be evaluated is answered on
-// start and restart with a 403, a neutral message and the start-attempted
-// details.
+// start and restart with a 403, a neutral message naming the harness-config
+// and the setting (no paths), and the start-attempted details.
 func TestHarnessPolicyHook_NotEvaluatedRefusal(t *testing.T) {
 	for _, action := range []string{"start", "restart"} {
 		t.Run(action, func(t *testing.T) {
@@ -309,7 +310,7 @@ func TestHarnessPolicyHook_NotEvaluatedRefusal(t *testing.T) {
 			if err := json.Unmarshal([]byte(body), &resp); err != nil {
 				t.Fatal(err)
 			}
-			if resp.Error.Code != ErrCodeForbidden || resp.Error.Message != "Harness configuration not permitted by policy" {
+			if resp.Error.Code != ErrCodeForbidden || resp.Error.Message != `harness-config "hook-hc" not permitted by policy (allow_container_script_harnesses)` {
 				t.Errorf("unexpected refusal: %+v", resp.Error)
 			}
 			if resp.Error.Details[api.BrokerErrorDetailStartAttempted] != true {

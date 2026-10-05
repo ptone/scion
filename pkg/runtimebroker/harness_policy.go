@@ -140,18 +140,24 @@ func (s *Server) withHarnessConfigPolicy(ctx context.Context) context.Context {
 //     actionable allow_container_script_harnesses message);
 //   - any other agent.ErrHarnessConfigPolicy error (the policy is attached
 //     but the harness-config could not be evaluated) is answered with a 403
-//     and a neutral message; the underlying error goes to Detail only.
+//     and a neutral message naming the harness-config and the setting; the
+//     underlying error goes to Detail only.
 func harnessPolicyRefusalFrom(err error) (harnessPolicyDecision, bool) {
 	var r *harnessPolicyRefusal
 	if errors.As(err, &r) {
 		return r.d, true
 	}
 	if errors.Is(err, agent.ErrHarnessConfigPolicy) {
+		msg := "Harness configuration not permitted by policy (allow_container_script_harnesses)"
+		var ne *agent.HarnessConfigNotEvaluatedError
+		if errors.As(err, &ne) {
+			msg = fmt.Sprintf("harness-config %q not permitted by policy (allow_container_script_harnesses)", ne.Name)
+		}
 		return harnessPolicyDecision{
 			OK:         false,
 			Code:       ErrCodeForbidden,
 			HTTPStatus: http.StatusForbidden,
-			Message:    "Harness configuration not permitted by policy",
+			Message:    msg,
 			Detail:     err.Error(),
 		}, true
 	}

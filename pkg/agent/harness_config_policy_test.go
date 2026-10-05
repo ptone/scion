@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
 
 const (
@@ -721,6 +722,12 @@ func TestHarnessConfigPolicy_NonContainerScriptRelaunchClearsWrapper(t *testing.
 			if !wrapperStaged(e, "relaunch") {
 				t.Fatal("fixture: wrapper should be staged by the container-script run")
 			}
+			// What a provisioner run would have left: its env overlay output.
+			home := config.GetAgentHomePath(e.scion, "relaunch")
+			writeStagedOutputs(t, home)
+			if req, err := hooks.LoadHarnessManifestRequirement(home); err != nil || !req.Required {
+				t.Fatalf("fixture: container-script run should stage a required manifest (req=%+v err=%v)", req, err)
+			}
 			ctx := context.Background()
 			if tc.withPol {
 				ctx = (&recordingPolicy{refuse: true}).ctx()
@@ -737,15 +744,23 @@ func TestHarnessConfigPolicy_NonContainerScriptRelaunchClearsWrapper(t *testing.
 			if wrapperStaged(e, "relaunch") {
 				t.Error("a non-container-script relaunch must clear the stale provisioner wrapper")
 			}
+			assertNoStagedProvisioning(t, config.GetAgentHomePath(e.scion, "relaunch"))
 		})
 	}
 }
 
 // (i) After a harness.Resolve error, with a policy attached and a wrapper
 // staged, Start refuses; with no policy, or nothing staged, it falls back to
-// harness.New as before. (harness.Resolve does not currently fail for a
-// named harness-config Start resolves, so the decision is exercised
-// directly; the call-site guard requires Start's error branch to use it.)
+// harness.New as before.
+//
+// harness.Resolve fails only for a container-script entry without an
+// on-disk directory. Start cannot reach that today: entry.Provisioner comes
+// only from a loaded directory's config.yaml (the settings overlay,
+// mergeHarnessConfigEntries, never carries a provisioner, so a settings-only
+// entry with a provisioner block resolves to a generic harness), and an
+// unloadable hydrated path also resolves to a generic harness. So the
+// decision is exercised directly, and the call-site guard requires Start's
+// error branch to use it.
 func TestHarnessConfigPolicy_ResolveErrorWithStagedWrapper(t *testing.T) {
 	home := t.TempDir()
 	stage := func() {
@@ -761,8 +776,10 @@ func TestHarnessConfigPolicy_ResolveErrorWithStagedWrapper(t *testing.T) {
 	policyCtx := (&recordingPolicy{refuse: true}).ctx()
 
 	stage()
-	if _, err := harnessAfterResolveError(policyCtx, home, "hc", "generic", resolveErr); !errors.Is(err, ErrHarnessConfigPolicy) || !errors.Is(err, ErrHarnessConfigNotEvaluated) {
-		t.Errorf("policy attached + wrapper staged: expected refusal, got %v", err)
+	_, err := harnessAfterResolveError(policyCtx, home, "hc", "generic", resolveErr)
+	var ne *HarnessConfigNotEvaluatedError
+	if !errors.Is(err, ErrHarnessConfigPolicy) || !errors.Is(err, ErrHarnessConfigNotEvaluated) || !errors.As(err, &ne) || ne.Name != "hc" {
+		t.Errorf("policy attached + wrapper staged: expected a refusal naming hc, got %v", err)
 	}
 
 	h, err := harnessAfterResolveError(context.Background(), home, "hc", "generic", resolveErr)
@@ -778,5 +795,148 @@ func TestHarnessConfigPolicy_ResolveErrorWithStagedWrapper(t *testing.T) {
 	}
 	if h, err := harnessAfterResolveError(policyCtx, home, "hc", "generic", resolveErr); err != nil || h == nil {
 		t.Errorf("policy attached, nothing staged: expected the fallback, got h=%v err=%v", h, err)
+	}
+}
+
+// writeStagedOutputs writes the env overlay a provisioner run leaves in the
+// bundle's outputs directory.
+func writeStagedOutputs(t *testing.T, home string) {
+	t.Helper()
+	out := filepath.Join(home, ".scion", "harness", "outputs")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "env.json"), []byte(`{"STALE":"1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertNoStagedProvisioning checks that home holds no container-script
+// provisioning state: no wrapper, and none of the staged bundle (manifest,
+// so sciontool init does not require provisioning or load an env overlay;
+// outputs; config.yaml; provision.py).
+func assertNoStagedProvisioning(t *testing.T, home string) {
+	t.Helper()
+	for _, p := range []string{
+		filepath.Join(home, ".scion", "hooks", "pre-start.d", "20-harness-provision"),
+		filepath.Join(home, ".scion", "harness", "manifest.json"),
+		filepath.Join(home, ".scion", "harness", "outputs"),
+		filepath.Join(home, ".scion", "harness", "config.yaml"),
+		filepath.Join(home, ".scion", "harness", "provision.py"),
+	} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("stale provisioning state remains: %s (stat err=%v)", p, err)
+		}
+	}
+	req, err := hooks.LoadHarnessManifestRequirement(home)
+	if err != nil || req.Required || req.EnvOverlayPath != "" {
+		t.Errorf("sciontool init would still treat this as a container-script provision: req=%+v err=%v", req, err)
+	}
+}
+
+// ProvisionAgent alone clears container-script provisioning state staged in
+// an agent home when it renders a harness that is not container-script.
+func TestHarnessConfigPolicy_ProvisionClearsStagedProvisioning(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-decl", policyTestDecl)
+	home := config.GetAgentHomePath(e.scion, "prov-clear")
+	hookDir := filepath.Join(home, ".scion", "hooks", "pre-start.d")
+	bundle := filepath.Join(home, ".scion", "harness")
+	for _, d := range []string{hookDir, bundle} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, "20-harness-provision"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"harness_config":{"provisioner":{"type":"container-script"}},"outputs":{"env":"$HOME/.scion/harness/outputs/env.json"}}`
+	if err := os.WriteFile(filepath.Join(bundle, "manifest.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeStagedOutputs(t, home)
+
+	if _, _, _, err := ProvisionAgent(context.Background(), "prov-clear", "", "", "hc-decl", e.scion, "", "", "", ""); err != nil {
+		t.Fatalf("ProvisionAgent: %v", err)
+	}
+	assertNoStagedProvisioning(t, home)
+}
+
+// TestHarnessConfigPolicy_ContainerScriptConstructionPinnedToResolve guards
+// pkg/harness itself: NewContainerScriptHarness is called only from Resolve,
+// Resolve is not called from elsewhere in the package, and a
+// ContainerScriptHarness value is built only in NewContainerScriptHarness. So
+// every container-script harness outside pkg/harness comes from a
+// harness.Resolve call, which the call-site guard ties to the policy check.
+func TestHarnessConfigPolicy_ContainerScriptConstructionPinnedToResolve(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("..", "harness", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newCallers, resolveCallers, literalSites []string
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.CallExpr:
+					if id, ok := x.Fun.(*ast.Ident); ok {
+						switch id.Name {
+						case "NewContainerScriptHarness":
+							newCallers = append(newCallers, fn.Name.Name)
+						case "Resolve":
+							resolveCallers = append(resolveCallers, fn.Name.Name)
+						}
+					}
+				case *ast.CompositeLit:
+					if id, ok := x.Type.(*ast.Ident); ok && id.Name == "ContainerScriptHarness" {
+						literalSites = append(literalSites, fn.Name.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if len(newCallers) != 1 || newCallers[0] != "Resolve" {
+		t.Errorf("NewContainerScriptHarness callers in pkg/harness = %v, want only Resolve", newCallers)
+	}
+	if len(resolveCallers) != 0 {
+		t.Errorf("Resolve is called from %v within pkg/harness; container-script harnesses must come only from harness.Resolve call sites the policy guard checks", resolveCallers)
+	}
+	if len(literalSites) != 1 || literalSites[0] != "NewContainerScriptHarness" {
+		t.Errorf("ContainerScriptHarness literals in %v, want only NewContainerScriptHarness", literalSites)
+	}
+}
+
+// A non-container-script relaunch restages the capture-auth assets the
+// harness-config provides after clearing the container-script bundle.
+func TestHarnessConfigPolicy_RelaunchRestagesCaptureAuth(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	e.projectHC(t, "hc-decl", policyTestDecl)
+	if err := os.WriteFile(filepath.Join(e.scion, "harness-configs", "hc-decl", "capture_auth.py"), []byte("#!/usr/bin/env python3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mgr := policyTestManager(nil)
+	if _, err := mgr.Start(context.Background(), api.StartOptions{Name: "ca", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true}); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	if _, err := mgr.Start(context.Background(), api.StartOptions{Name: "ca", ProjectPath: e.scion, HarnessConfig: "hc-decl", NoAuth: true}); err != nil {
+		t.Fatalf("relaunch: %v", err)
+	}
+	home := config.GetAgentHomePath(e.scion, "ca")
+	assertNoStagedProvisioning(t, home)
+	if _, err := os.Stat(filepath.Join(home, ".scion", "harness", "capture_auth.py")); err != nil {
+		t.Errorf("capture-auth assets not restaged after the bundle clear: %v", err)
 	}
 }
