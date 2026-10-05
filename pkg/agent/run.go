@@ -612,6 +612,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// a source (unresolved also when no name resolved, below), so an
 		// empty value on the wire means an older broker.
 		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
+		if err == nil {
+			// Policy is evaluated where launch resolves the harness-config,
+			// before the harness is provisioned or the container runs. On
+			// restart the broker has already stopped the previous container
+			// by this point, as for any other start failure.
+			if policyErr := CheckHarnessConfigPolicy(ctx, harnessConfigName, resolved.Config); policyErr != nil {
+				return nil, policyErr
+			}
+		}
 		if err != nil {
 			util.Debugf("harness.Resolve fell back to New(%q): %v", harnessName, err)
 			h = harness.New(harnessName)

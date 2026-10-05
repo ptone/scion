@@ -820,6 +820,9 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 	if err != nil {
 		return nil, fmt.Errorf("failed to find harness-config %q: %w", harnessConfigName, err)
 	}
+	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, harness.EffectiveConfig(harnessConfigName, hcDir, settings, profileName)); err != nil {
+		return nil, err
+	}
 
 	return &resolvedTemplate{
 		Config:            finalScionCfg,
@@ -838,6 +841,17 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 // during admission, for an async create: Manager.Start would otherwise raise
 // the same errors, but only from inside the launch goroutine.
 func (m *AgentManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	return PreflightResolve(ctx, opts)
+}
+
+// PreflightResolve is Preflight's resolution as a package function: it
+// resolves opts' template chain and harness-config exactly as
+// ProvisionAgent does (resolveTemplateAndHarnessConfig), evaluating any
+// harness-config policy on ctx, and has no side effects. The runtime broker
+// calls it during create admission, before any workspace step, so a policy
+// refusal happens before a worktree, agent directory, staged bundle or
+// container exists.
+func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 
 	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
@@ -1427,7 +1441,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Step 3: Copy skills directories into harness-specific location
 	resolved, err := harness.Resolve(ctx, harness.ResolveOptions{
 		Name:          harnessConfigName,
-		ProjectPath:   projectPath,
+		ProjectPath:   projectDir,
 		TemplatePaths: templatePaths,
 		ProfileName:   profileName,
 		Settings:      settings,
@@ -1435,6 +1449,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	})
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to resolve harness for %q: %w", harnessConfigName, err)
+	}
+	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, resolved.Config); err != nil {
+		return "", "", nil, err
 	}
 	h := resolved.Harness
 	util.Debugf("ProvisionAgent: harness implementation=%s for harness=%q", resolved.Implementation, finalScionCfg.Harness)

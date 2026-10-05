@@ -65,20 +65,7 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 
 	hcDir, hcErr := config.ResolveHarnessConfigDir(opts.ConfigDirPath, opts.Name, opts.ProjectPath, opts.TemplatePaths...)
 
-	entry := config.HarnessConfigEntry{Harness: opts.Name}
-	if hcDir != nil {
-		entry = hcDir.Config
-	}
-
-	// Settings overlay: profile-level overrides on top of the dir entry.
-	if opts.Settings != nil {
-		settingsEntry, _ := opts.Settings.ResolveHarnessConfig(opts.ProfileName, opts.Name)
-		entry = mergeHarnessConfigEntries(entry, settingsEntry)
-	}
-
-	if entry.Harness == "" {
-		entry.Harness = opts.Name
-	}
+	entry := EffectiveConfig(opts.Name, hcDir, opts.Settings, opts.ProfileName)
 
 	// 1. Container-script harness (provisioner block present)
 	if entry.Provisioner != nil {
@@ -133,6 +120,29 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 // mergeHarnessConfigEntries overlays settings overrides on top of the
 // harness-config dir entry. Only the fields the settings layer is expected to
 // override are merged here; all other declarative metadata flows from the dir.
+// EffectiveConfig returns the harness-config entry a harness named name
+// runs with: hcDir's config.yaml (or a bare entry when hcDir is nil) with the
+// settings overlay for profile applied, and Harness defaulted to name. Resolve
+// builds harnesses from this entry, and pkg/agent evaluates harness-config
+// policy against it.
+func EffectiveConfig(name string, hcDir *config.HarnessConfigDir, settings *config.VersionedSettings, profile string) config.HarnessConfigEntry {
+	entry := config.HarnessConfigEntry{Harness: name}
+	if hcDir != nil {
+		entry = hcDir.Config
+	}
+
+	// Settings overlay: profile-level overrides on top of the dir entry.
+	if settings != nil {
+		settingsEntry, _ := settings.ResolveHarnessConfig(profile, name)
+		entry = mergeHarnessConfigEntries(entry, settingsEntry)
+	}
+
+	if entry.Harness == "" {
+		entry.Harness = name
+	}
+	return entry
+}
+
 func mergeHarnessConfigEntries(base, overlay config.HarnessConfigEntry) config.HarnessConfigEntry {
 	if overlay.Harness != "" {
 		base.Harness = overlay.Harness
