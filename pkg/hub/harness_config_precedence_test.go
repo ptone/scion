@@ -510,6 +510,65 @@ func TestCreateAgent_TemplateHarnessTypeNotFoundDoesNotWarn(t *testing.T) {
 		"a bare harness type falling through from the template is the normal case, not a warning")
 }
 
+// TestCreateAgent_UnresolvableTemplateDefaultHarnessConfigWarns covers
+// ptone/scion#620's hub half: a template's explicit default_harness_config is
+// a deliberate slug choice (unlike its bare Harness type), so when the hub has
+// no record of it the not-found log must be at WARN, with template provenance.
+// Dispatch still succeeds — observability only.
+func TestCreateAgent_UnresolvableTemplateDefaultHarnessConfigWarns(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	logs := captureHarnessLogs(srv)
+
+	createHarnessTemplate(t, s, "tmpl-missing-hc", "no-such-template-hc")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "log-template-default-unresolvable",
+		ProjectID: project.ID,
+		Template:  "tmpl-missing-hc",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	found := logs.harnessNotFoundRecords()
+	require.Len(t, found, 1, "expected exactly one not-found log record")
+	assert.Equal(t, slog.LevelWarn, found[0].Level,
+		"an unresolvable template default_harness_config must warn")
+	fromTemplate, ok := recordAttr(found[0], "from_template_default")
+	require.True(t, ok, "the log must carry the template provenance attribute")
+	assert.True(t, fromTemplate.Bool())
+	fromProject, ok := recordAttr(found[0], "from_project_annotation")
+	require.True(t, ok)
+	assert.False(t, fromProject.Bool())
+}
+
+// TestCreateAgent_RequestNamingTemplateDefaultIsNotTemplateProvenance guards
+// that template provenance is carried, not inferred by name equality: a
+// request that explicitly names the template's default slug is request
+// provenance, and keeps the pre-existing (DEBUG) level.
+func TestCreateAgent_RequestNamingTemplateDefaultIsNotTemplateProvenance(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	logs := captureHarnessLogs(srv)
+
+	createHarnessTemplate(t, s, "tmpl-same-name", "same-name-hc")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:          "log-request-same-as-template",
+		ProjectID:     project.ID,
+		Template:      "tmpl-same-name",
+		HarnessConfig: "same-name-hc",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	found := logs.harnessNotFoundRecords()
+	require.Len(t, found, 1)
+	fromTemplate, ok := recordAttr(found[0], "from_template_default")
+	require.True(t, ok)
+	assert.False(t, fromTemplate.Bool(),
+		"the request named it; template provenance must not be inferred from the name")
+	assert.Equal(t, slog.LevelDebug, found[0].Level)
+}
+
 // ---------------------------------------------------------------------------
 // active-profile: the same precedence chain, end to end
 // ---------------------------------------------------------------------------

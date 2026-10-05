@@ -130,6 +130,28 @@ func (s *Server) getHarnessConfigFromTemplate(template *store.Template, fallback
 	return fallback
 }
 
+type templateDefaultHarnessConfigCtxKey struct{}
+
+// withTemplateDefaultHarnessConfig records on ctx that the template rung of
+// deriveAgentConfig supplied the agent's harness-config name from the
+// template's explicit default_harness_config (not its bare Harness type), so
+// resolveDerivedConfig can WARN when that name does not resolve
+// (ptone/scion#620). Carried rather than inferred, like
+// withHubDefaultHarnessConfig.
+func withTemplateDefaultHarnessConfig(ctx context.Context) context.Context {
+	return context.WithValue(ctx, templateDefaultHarnessConfigCtxKey{}, true)
+}
+
+// templateDefaultHarnessConfigFromContext reports whether the agent's
+// harness-config name came from the template's default_harness_config.
+func templateDefaultHarnessConfigFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(templateDefaultHarnessConfigCtxKey{}).(bool)
+	return v
+}
+
 // buildAppliedConfig constructs an AgentAppliedConfig from a CreateAgentRequest.
 // When req.Config is a ScionConfig, its fields are extracted into the applied config
 // and the full ScionConfig is preserved as InlineConfig for threading to the broker.
@@ -333,6 +355,10 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 	}
 	if agent.AppliedConfig.HarnessConfig == "" {
 		agent.AppliedConfig.HarnessConfig = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
+		if resolvedTemplate != nil && resolvedTemplate.DefaultHarnessConfig != "" &&
+			agent.AppliedConfig.HarnessConfig == resolvedTemplate.DefaultHarnessConfig {
+			ctx = withTemplateDefaultHarnessConfig(ctx)
+		}
 	}
 
 	// Project-level defaults: limits, resources, and any of HarnessConfig/
@@ -538,8 +564,19 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// depth, not a live case. Kept so the two provenances stay mutually
 	// exclusive by construction rather than by that reasoning holding.
 	hcFromHubDefault := hcName != "" && !hcFromProjectAnnotation && hubDefaultHarnessConfigFromContext(ctx)
+	// A fourth provenance (ptone/scion#620): the template's explicit
+	// default_harness_config. Unlike the template's bare Harness type, this
+	// field names a harness-config slug on purpose, so failing to resolve it
+	// means the template author's choice is silently replaced by whatever the
+	// broker finds on disk. Carried on the context by deriveAgentConfig's
+	// template rung (same reason as the hub default: a request naming the
+	// same slug is request provenance, not template provenance), or set
+	// directly below when this function's own template fallback fills it.
+	hcFromTemplateDefault := hcName != "" && !hcFromProjectAnnotation && !hcFromHubDefault &&
+		templateDefaultHarnessConfigFromContext(ctx)
 	if hcName == "" && resolvedTemplate != nil {
 		hcName = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
+		hcFromTemplateDefault = hcName != "" && hcName == resolvedTemplate.DefaultHarnessConfig
 	}
 	// resolvedHC is the hub harness config resolved below, if any; the
 	// timezone capture at the end of this function reads its env.
@@ -603,6 +640,13 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 			//           hash. The two are distinguished in the log attributes
 			//           so an operator knows which knob to turn.
 			//
+			//   WARN  — the name is the template's explicit
+			//           default_harness_config (ptone/scion#620). The template
+			//           author named a specific harness-config; if the hub has
+			//           no record of it the agent silently runs on whatever
+			//           the broker has on disk. Observability only — dispatch
+			//           still proceeds (product decision on #620).
+			//
 			//   DEBUG — anything else. Most often hcName is the template's bare
 			//           Harness type ("claude") rather than a stored
 			//           harness-config slug, via getHarnessConfigFromTemplate's
@@ -616,7 +660,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 				projectID = project.ID
 			}
 			level := slog.LevelDebug
-			if hcFromProjectAnnotation || hcFromHubDefault {
+			if hcFromProjectAnnotation || hcFromHubDefault || hcFromTemplateDefault {
 				level = slog.LevelWarn
 			}
 			s.agentLifecycleLog.Log(ctx, level,
@@ -624,7 +668,8 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 					"agent will be dispatched without a config ID/hash and the broker must resolve it locally",
 				"slug", hcName, "agent_id", agent.ID, "project_id", projectID,
 				"from_project_annotation", hcFromProjectAnnotation,
-				"from_hub_default", hcFromHubDefault)
+				"from_hub_default", hcFromHubDefault,
+				"from_template_default", hcFromTemplateDefault)
 		}
 	}
 
