@@ -306,7 +306,8 @@ export class ScionPageArtifactDetail extends LitElement {
     // Inline types open in a new tab (on an object-storage hub the
     // redirect is cross-origin, so download= would be ignored anyway);
     // attachment types download under their base name.
-    const action = isInlineType(f.mediaType)
+    const inline = isInlineType(f.mediaType);
+    const action = inline
       ? html`<sl-button size="small" href=${href} target="_blank" rel="noopener noreferrer">
           <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
           Open raw
@@ -340,7 +341,7 @@ export class ScionPageArtifactDetail extends LitElement {
         <sl-icon name="file-earmark-text" style="font-size: 2rem;"></sl-icon>
         <p>
           ${tooLarge
-            ? `This file is too large to show here (${formatBytes(f.size)}). Use Open raw to view it.`
+            ? `This file is too large to show here (${formatBytes(f.size)}). Use ${inline ? 'Open raw' : 'Download'} to open it.`
             : 'This file type is not shown in the browser. Use Download to open it.'}
         </p>
       </div>`;
