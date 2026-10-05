@@ -16,16 +16,21 @@ package runtimebroker
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
 // hookScriptedEntry is what a fake manager reports as the harness-config
@@ -41,11 +46,21 @@ var hookScriptedEntry = config.HarnessConfigEntry{
 type hookManager struct {
 	provisionCapturingManager
 	at string // "preflight", "provision" or "start"
+	// notEvaluated makes the step report a policy refusal for a
+	// harness-config that could not be evaluated, as Start does after a
+	// resolve error with a provisioner staged.
+	notEvaluated bool
 }
 
 func (m *hookManager) check(ctx context.Context, step string) error {
 	if m.at != step {
 		return nil
+	}
+	if m.notEvaluated {
+		if config.HarnessConfigPolicyFromContext(ctx) == nil {
+			return nil
+		}
+		return fmt.Errorf("%w: %w", agent.ErrHarnessConfigPolicy, agent.ErrHarnessConfigNotEvaluated)
 	}
 	return agent.CheckHarnessConfigPolicy(ctx, "hook-hc", hookScriptedEntry)
 }
@@ -171,5 +186,135 @@ func TestCreateAgentGate_HydratedBundleWithoutName(t *testing.T) {
 	}
 	if mgr.provisionCalled {
 		t.Error("Provision must not run when the gate refuses")
+	}
+}
+
+func refusalDetails(t *testing.T, body string) map[string]interface{} {
+	t.Helper()
+	var resp ErrorResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("not an ErrorResponse: %v: %s", err, body)
+	}
+	return resp.Error.Details
+}
+
+// A refusal raised from inside Manager.Start carries the start-attempted
+// details (Start may already have acted); a refusal from the early check,
+// before any side effect, does not.
+func TestHarnessPolicyHook_StartRefusalCarriesStartAttempted(t *testing.T) {
+	for _, action := range []string{"start", "restart"} {
+		t.Run(action+" from inside Start", func(t *testing.T) {
+			srv, _ := hookTestServer(t, false, "start")
+			code, body := postJSON(t, srv, "/api/v1/agents/sa-agent/"+action, `{"runId": "run-sa"}`)
+			assertPolicyRefusal(t, code, body, "hook-hc")
+			if d := refusalDetails(t, body); d[api.BrokerErrorDetailStartAttempted] != true {
+				t.Errorf("expected %s=true in details, got %v", api.BrokerErrorDetailStartAttempted, d)
+			}
+		})
+	}
+	t.Run("start early check", func(t *testing.T) {
+		srv, mgr, _ := dispatchTestEnv(t, false)
+		attachHubHCStub(t, srv).setBundle(scriptedHarnessYAML)
+		code, body := postAgentAction(t, srv, "gate-agent", "start", stampedStartBody)
+		assertPolicyRefusal(t, code, body, "hub-only")
+		if mgr.StartCalls() != 0 {
+			t.Fatal("expected the early check to refuse before Start")
+		}
+		if d := refusalDetails(t, body); d[api.BrokerErrorDetailStartAttempted] != nil {
+			t.Errorf("early-check refusal must not carry %s, got %v", api.BrokerErrorDetailStartAttempted, d)
+		}
+	})
+}
+
+// With allow=true no policy is attached, so launch behaves as with none.
+func TestHarnessPolicyHook_NotAttachedWhenAllowed(t *testing.T) {
+	srv, _, _ := dispatchTestEnv(t, true)
+	if config.HarnessConfigPolicyFromContext(srv.withHarnessConfigPolicy(context.Background())) != nil {
+		t.Error("allow=true must not attach a harness-config policy")
+	}
+	srv2, _, _ := dispatchTestEnv(t, false)
+	if config.HarnessConfigPolicyFromContext(srv2.withHarnessConfigPolicy(context.Background())) == nil {
+		t.Error("allow=false must attach the harness-config policy")
+	}
+}
+
+// asyncHookManager evaluates the policy on its Start context, as pkg/agent
+// does, after async admission has accepted the launch.
+type asyncHookManager struct {
+	*asyncManager
+}
+
+func (m *asyncHookManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	if err := agent.CheckHarnessConfigPolicy(ctx, "hook-hc", hookScriptedEntry); err != nil {
+		return nil, err
+	}
+	return m.asyncManager.Start(ctx, opts)
+}
+
+// A refusal raised inside an async launch is reported with the
+// harness_config_policy code and the policy's actionable message.
+func TestHarnessPolicyHook_AsyncLaunchRefusalReported(t *testing.T) {
+	mgr := &asyncHookManager{asyncManager: newAsyncManager()}
+	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.config.AllowContainerScriptHarnesses = false
+
+	var mu sync.Mutex
+	var code, message string
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if req.State == hubclient.AgentLaunchReportStateFailed {
+			mu.Lock()
+			code, message = req.ErrorCode, req.Message
+			mu.Unlock()
+		}
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-policy", "asyncLaunch": true, "launchId": "L-policy",
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !waitUntil(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return code != ""
+	}) {
+		t.Fatal("expected a failed launch report")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if code != "harness_config_policy" {
+		t.Errorf("ErrorCode = %q, want harness_config_policy", code)
+	}
+	if !strings.Contains(message, "allow_container_script_harnesses=true") || !strings.Contains(message, "hook-hc") {
+		t.Errorf("message should be the policy's actionable message, got %q", message)
+	}
+}
+
+// A refusal for a harness-config that could not be evaluated is answered on
+// start and restart with a 403, a neutral message and the start-attempted
+// details.
+func TestHarnessPolicyHook_NotEvaluatedRefusal(t *testing.T) {
+	for _, action := range []string{"start", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			srv, _, _ := dispatchTestEnv(t, false)
+			srv.manager = &hookManager{at: "start", notEvaluated: true}
+			code, body := postJSON(t, srv, "/api/v1/agents/ne-agent/"+action, `{}`)
+			if code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", code, body)
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal([]byte(body), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if resp.Error.Code != ErrCodeForbidden || resp.Error.Message != "Harness configuration not permitted by policy" {
+				t.Errorf("unexpected refusal: %+v", resp.Error)
+			}
+			if resp.Error.Details[api.BrokerErrorDetailStartAttempted] != true {
+				t.Errorf("expected start-attempted details, got %v", resp.Error.Details)
+			}
+		})
 	}
 }

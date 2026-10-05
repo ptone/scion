@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -85,12 +86,16 @@ func (s *Server) enforceHarnessConfigPolicy(in harnessPolicyInput) harnessPolicy
 	return harnessPolicyDecision{OK: true}
 }
 
-// writeHarnessPolicyRefusal writes a non-OK enforceHarnessConfigPolicy
-// decision and logs it. op names the dispatch path for the log.
-func (s *Server) writeHarnessPolicyRefusal(w http.ResponseWriter, d harnessPolicyDecision, op, agentID string) {
+// writeHarnessPolicyRefusal writes a non-OK harness-config policy decision
+// and logs it. op names the dispatch path for the log. details is nil for a
+// refusal raised before any side effect (the early check, create admission,
+// Provision on create); a refusal raised from inside Manager.Start passes
+// startFailureDetails, so the hub sees the start-attempted marker and the
+// run the runtime holds now, as for any other failure from inside Start.
+func (s *Server) writeHarnessPolicyRefusal(w http.ResponseWriter, d harnessPolicyDecision, op, agentID string, details map[string]interface{}) {
 	s.agentLifecycleLog.Warn("Harness-config policy refused dispatch",
 		"op", op, "agent_id", agentID, "status", d.HTTPStatus, "detail", d.detail())
-	writeError(w, d.HTTPStatus, d.Code, d.Message, nil)
+	writeError(w, d.HTTPStatus, d.Code, d.Message, details)
 }
 
 // harnessPolicyRefusal is the error the broker's harness-config policy hook
@@ -118,12 +123,37 @@ func (s *Server) harnessConfigPolicyHook() config.HarnessConfigPolicyFunc {
 	}
 }
 
-// harnessPolicyRefusalFrom reports whether err is (or wraps) a refusal from
-// harnessConfigPolicyHook, returning its decision.
+// withHarnessConfigPolicy attaches the broker's harness-config policy hook to
+// ctx when the policy can refuse (allow_container_script_harnesses=false).
+// With allow=true every harness-config is accepted, so nothing is attached and
+// launch behaves exactly as with no policy.
+func (s *Server) withHarnessConfigPolicy(ctx context.Context) context.Context {
+	if s.config.AllowContainerScriptHarnesses {
+		return ctx
+	}
+	return config.ContextWithHarnessConfigPolicy(ctx, s.harnessConfigPolicyHook())
+}
+
+// harnessPolicyRefusalFrom reports whether err is (or wraps) a harness-config
+// policy refusal, returning the decision to answer it with:
+//   - a refusal from harnessConfigPolicyHook carries its own decision (the
+//     actionable allow_container_script_harnesses message);
+//   - any other agent.ErrHarnessConfigPolicy error (the policy is attached
+//     but the harness-config could not be evaluated) is answered with a 403
+//     and a neutral message; the underlying error goes to Detail only.
 func harnessPolicyRefusalFrom(err error) (harnessPolicyDecision, bool) {
 	var r *harnessPolicyRefusal
 	if errors.As(err, &r) {
 		return r.d, true
+	}
+	if errors.Is(err, agent.ErrHarnessConfigPolicy) {
+		return harnessPolicyDecision{
+			OK:         false,
+			Code:       ErrCodeForbidden,
+			HTTPStatus: http.StatusForbidden,
+			Message:    "Harness configuration not permitted by policy",
+			Detail:     err.Error(),
+		}, true
 	}
 	return harnessPolicyDecision{}, false
 }

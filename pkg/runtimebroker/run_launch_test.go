@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -121,6 +122,14 @@ func TestClassifyStartError(t *testing.T) {
 		}
 	})
 
+	t.Run("harness-config policy refusal", func(t *testing.T) {
+		d := harnessPolicyDecision{OK: false, Code: ErrCodeForbidden, HTTPStatus: 403, Message: "refused: set allow_container_script_harnesses=true"}
+		err := fmt.Errorf("%w: %w", agent.ErrHarnessConfigPolicy, &harnessPolicyRefusal{d: d})
+		code, msg := classifyStartError(context.Background(), err)
+		if code != "harness_config_policy" || msg != d.Message {
+			t.Errorf("got (%q, %q), want (harness_config_policy, %q)", code, msg, d.Message)
+		}
+	})
 	t.Run("other errors are runtime_error", func(t *testing.T) {
 		code, _ := classifyStartError(context.Background(), errors.New("boom"))
 		if code != "runtime_error" {
