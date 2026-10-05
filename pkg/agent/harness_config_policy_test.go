@@ -1881,3 +1881,98 @@ func TestCurrentHarnessConfigIdentity_Unestablished(t *testing.T) {
 		}
 	}
 }
+
+// Agent state for shared-workspace projects is always resolved from the
+// broker-side agent dir: a start without the shared-workspace flag (as a
+// restart dispatch may be) still uses the external agent directory and
+// restores its records, and a forged in-project agent directory
+// (scion-agent.json plus records) is ignored.
+func TestSharedWorkspaceAgentResolvesBrokerSideDir(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	e.projectHC(t, "hc-scripted", policyTestScripted)
+	mgr := policyTestManager(nil)
+	opts := api.StartOptions{Name: "sw-agent", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true, SharedWorkspace: true}
+	info, err := mgr.Start(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("shared-workspace Start: %v", err)
+	}
+	external := config.GetAgentDir(e.scion, "sw-agent", true)
+	inProject := config.GetAgentDir(e.scion, "sw-agent", false)
+	if external == inProject {
+		t.Fatalf("fixture: expected distinct external and in-project agent dirs, got %s", external)
+	}
+	if _, err := os.Stat(filepath.Join(external, "scion-agent.json")); err != nil {
+		t.Fatalf("fixture: shared-workspace agent state should be external: %v", err)
+	}
+	controlPlane, err := os.ReadFile(filepath.Join(external, controlPlaneInputsDirName, "instructions.md"))
+	if err != nil {
+		t.Fatalf("fixture: external inputs record: %v", err)
+	}
+
+	// Forge an in-project agent directory, as a container with the shared
+	// workspace mounted could.
+	writeForged := func(rel, body string) {
+		t.Helper()
+		p := filepath.Join(inProject, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeForged("scion-agent.json", `{"harness_config":"hc-forged","image":"forged:latest"}`)
+	writeForged(filepath.Join(controlPlaneInputsDirName, "instructions.md"), "forged instructions")
+	writeForged(filepath.Join(config.HarnessSecretsRecordDirName, "FORGED_TOKEN"), "forged")
+
+	// Restart without the shared-workspace flag.
+	opts.SharedWorkspace = false
+	info2, err := mgr.Start(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("restart without the flag: %v", err)
+	}
+	if info2.HarnessConfig != info.HarnessConfig {
+		t.Errorf("restart used a different harness-config %q (want %q): forged config read?", info2.HarnessConfig, info.HarnessConfig)
+	}
+	home := config.GetAgentHomePath(e.scion, "sw-agent")
+	got, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "inputs", "instructions.md"))
+	if err != nil || string(got) != string(controlPlane) {
+		t.Errorf("inputs not restored from the broker-side record: %q (err=%v)", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".scion", "harness", "secrets", "FORGED_TOKEN")); !os.IsNotExist(err) {
+		t.Errorf("a forged in-project secrets record was restored (stat err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(inProject, controlPlaneInputsDirName, "instructions.md")); err == nil {
+		if data, _ := os.ReadFile(filepath.Join(inProject, controlPlaneInputsDirName, "instructions.md")); string(data) != "forged instructions" {
+			t.Error("the restart wrote state into the in-project agent dir")
+		}
+	}
+}
+
+func TestEffectiveSharedWorkspace(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	external := config.GetAgentDir(e.scion, "ext-agent", true)
+	if external == config.GetAgentDir(e.scion, "ext-agent", false) {
+		t.Fatal("fixture: expected an external agents root")
+	}
+	if effectiveSharedWorkspace(e.scion, "ext-agent", false) {
+		t.Error("no external scion-agent.json: expected in-project")
+	}
+	if err := os.MkdirAll(external, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(external, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !effectiveSharedWorkspace(e.scion, "ext-agent", false) {
+		t.Error("external scion-agent.json present: expected the broker-side agent dir")
+	}
+	for _, bad := range []string{"", ".", "..", "a/b", "../ext-agent"} {
+		if effectiveSharedWorkspace(e.scion, bad, false) {
+			t.Errorf("name %q must not resolve externally", bad)
+		}
+	}
+	if !effectiveSharedWorkspace(e.scion, "anything", true) {
+		t.Error("an explicit shared-workspace flag stays shared")
+	}
+}

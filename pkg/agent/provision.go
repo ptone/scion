@@ -950,6 +950,7 @@ func resolveWorkspaceSubdir(projectRoot, subdir string) (string, error) {
 // through GetAgent -- so this fails closed on its own rather than trust the
 // caller.
 func checkAgentDirContained(projectDir, agentName string, sharedWorkspace bool) (string, error) {
+	sharedWorkspace = effectiveSharedWorkspace(projectDir, agentName, sharedWorkspace)
 	agentDir := config.GetAgentDir(projectDir, agentName, sharedWorkspace)
 	agentsRoot := filepath.Clean(config.SelectAgentsRoot(projectDir, sharedWorkspace))
 	cleanAgentDir := filepath.Clean(agentDir)
@@ -965,6 +966,39 @@ func checkAgentDirContained(projectDir, agentName string, sharedWorkspace bool) 
 		return "", fmt.Errorf("agent %q is not a single path element under %s", agentName, agentsRoot)
 	}
 	return agentDir, nil
+}
+
+// effectiveSharedWorkspace reports whether agentName's state lives in the
+// broker-side (external) agents directory. Agent state for shared-workspace
+// projects is always resolved from the broker-side agent dir: besides the
+// caller's sharedWorkspace flag, an agent whose external directory holds
+// scion-agent.json is a shared-workspace agent (in worktree mode only home/
+// is external, never scion-agent.json), whatever the caller passed. The
+// in-project <project>/agents/<name> directory, which a shared workspace
+// mount exposes to containers, is then never used for that agent.
+func effectiveSharedWorkspace(projectDir, agentName string, sharedWorkspace bool) bool {
+	if sharedWorkspace {
+		return true
+	}
+	if agentName == "" || agentName == "." || agentName == ".." || filepath.Base(agentName) != agentName {
+		return false
+	}
+	ext, err := config.GetGitProjectExternalAgentsDir(projectDir)
+	if err != nil || ext == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(ext, agentName, "scion-agent.json"))
+	return err == nil && info.Mode().IsRegular()
+}
+
+// withEffectiveSharedWorkspace applies effectiveSharedWorkspace to ctx's
+// shared-workspace flag, returning the updated ctx and flag.
+func withEffectiveSharedWorkspace(ctx context.Context, projectDir, agentName string) (context.Context, bool) {
+	shared := api.IsSharedWorkspaceFromContext(ctx)
+	if !shared && effectiveSharedWorkspace(projectDir, agentName, false) {
+		return api.ContextWithSharedWorkspace(ctx), true
+	}
+	return ctx, shared
 }
 
 // CheckAgentDirContained is the exported form of checkAgentDirContained, for
@@ -1013,7 +1047,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 		}
 	}
-	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
+	ctx, sharedWorkspace := withEffectiveSharedWorkspace(ctx, projectDir, agentName)
 	emptyPerAgent := api.IsEmptyPerAgentWorkspaceFromContext(ctx)
 	if emptyPerAgent {
 		// Empty-per-agent (design #2703) always means the private
@@ -2381,7 +2415,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	util.Debugf("GetAgent: agentName=%s templateName=%q harnessConfig=%q projectPath=%q projectDir=%s",
 		agentName, templateName, harnessConfig, projectPath, projectDir)
 
-	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
+	ctx, sharedWorkspace := withEffectiveSharedWorkspace(ctx, projectDir, agentName)
 	agentDir, err := checkAgentDirContained(projectDir, agentName, sharedWorkspace)
 	if err != nil {
 		return "", "", "", nil, err

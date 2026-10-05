@@ -104,6 +104,11 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 		{"per-agent workspace, no repo", inProject,
 			withPaths(filepath.Join(inProject, "home"), "", filepath.Join(inProject, "workspace"), nil)},
 	}
+	// A restart dispatch without the shared-workspace flag could resolve the
+	// in-project agent dir; in the shared-workspace layout that path is under
+	// the /workspace mount and must be shadowed by the agents tmpfs.
+	modes = append(modes, mode{"shared workspace, in-project agent dir (restart resolution)", inProject,
+		withPaths(filepath.Join(external, "home"), root, root, nil)})
 	for _, m := range modes {
 		for _, recordName := range []string{config.HarnessInputsRecordDirName, config.HarnessSecretsRecordDirName} {
 			t.Run(m.name+"/"+recordName, func(t *testing.T) {
@@ -227,5 +232,53 @@ func testRecordOutsideCloudRunPaths(t *testing.T) {
 		if hasScionElement(p) {
 			t.Errorf("cloud run %s host path %s is inside a .scion directory, where agent records live", what, p)
 		}
+	}
+}
+
+// In the shared-workspace layout the in-project agents root is shadowed with
+// a tmpfs when <workspace>/.scion is a directory, and no mask is added when
+// .scion is a project marker file.
+func TestSharedWorkspaceAgentsMask(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	hasMask := func(args []string) bool {
+		for i := 0; i < len(args)-1; i++ {
+			if args[i] == "--mount" && args[i+1] == "type=tmpfs,destination=/workspace/.scion/agents" {
+				return true
+			}
+		}
+		return false
+	}
+	root := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(filepath.Join(root, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := minimalRunConfig()
+	cfg.BrokerMode = true
+	cfg.HomeDir = filepath.Join(t.TempDir(), "home")
+	cfg.RepoRoot = root
+	cfg.Workspace = root
+	args, err := buildCommonRunArgs(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasMask(args) {
+		t.Error("shared workspace with a .scion directory: expected the agents tmpfs mask")
+	}
+
+	markerRoot := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(markerRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(markerRoot, ".scion"), []byte("project-id: x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.RepoRoot = markerRoot
+	cfg.Workspace = markerRoot
+	args, err = buildCommonRunArgs(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasMask(args) {
+		t.Error("shared workspace with a .scion marker file: no agents mask expected")
 	}
 }
