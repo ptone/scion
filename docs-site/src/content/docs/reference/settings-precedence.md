@@ -725,51 +725,80 @@ through their own chain, defined in `ProvisionAgent`'s harness-config merge
 (`pkg/agent/provision.go`) and re-resolved independently, on every `Start` call, in
 `pkg/agent/run.go`:
 
-| Priority | Source |
-| --- | --- |
-| Highest | the agent-create request / dispatch `--image` (image only — there is no per-dispatch pull-policy flag) |
-| | the current request's inline config (`opts.InlineConfig`) if it sets the field, **else** the value recorded when the agent was created from *that* agent's own inline config — either way this outranks the template chain, matching how `ProvisionAgent` already merges inline over template |
-| | the current template chain's explicit `image` / `kubernetes.imagePullPolicy`, re-read from disk on every `Start` |
-| | Hub settings `harness_configs.<name>.image` / `.image_pull_policy`, with `profiles.<p>.harness_overrides.<name>` outranking the un-overridden entry, re-resolved from current settings on every `Start` |
-| Lowest | the harness-config file's own `config.yaml` `image` / `image_pull_policy`, re-read from disk on every `Start` |
+| Priority | `image` | `kubernetes.imagePullPolicy` |
+| --- | --- | --- |
+| Highest | the user's **explicit request image**: the current request's `opts.Image` (CLI `--image`; a local `--config` file's `image` is promoted to it; in hub mode, the Hub's explicit image, sent on create, start and restart), **else** the request image recorded when the agent was provisioned | the user's **explicit pull policy**: the current request's inline config, **else** the value recorded from the create-time inline config (there is no per-request pull-policy flag) |
+| | an **explicitly set** `profiles.<p>.harness_overrides.<name>.image`, re-resolved from current settings on every `Start` | an **explicitly set** `profiles.<p>.harness_overrides.<name>.image_pull_policy`, **only when that same override also sets an image**, re-resolved likewise |
+| | the current request's inline config image, **else** the create-time inline image recorded for an agent with no request image | — (covered by the top row) |
+| | the template chain's own `image` — re-read from disk on every `Start`, or, if the template can no longer be resolved, the template's own value recorded at provision | the template chain's own `kubernetes.imagePullPolicy`, same rule |
+| | Hub settings `harness_configs.<name>.image`, re-resolved on every `Start` | Hub settings `harness_configs.<name>.image_pull_policy` (with a profile `image_pull_policy` whose override sets no image outranking it), likewise |
+| Lowest | the harness-config file's own `config.yaml` `image`, re-read on every `Start` | the harness-config file's own `image_pull_policy`, likewise |
+
+Only an *explicit* profile override moves above the template; the plain `harness_configs.<name>`
+defaults stay below it. A profile's `image_pull_policy` moves up only together with a profile
+`image` on the same override, so a profile that pins an image (for example a registry digest) and
+its pull policy is not undone by a template's `imagePullPolicy: Never`, while a profile that sets
+only a pull policy does not override a template's image and pull-policy pair. One asymmetry
+remains: the user's explicit pull policy (from an inline config) ranks above the profile's, while
+an inline *image* ranks below the profile's image. A caller that sends an inline image and pull
+policy but no request image can therefore get the profile's image with its own pull policy. The CLI
+and the Hub never do this; both promote an explicit image to the request tier. Every time a higher tier replaces a different value from a lower tier,
+`Start` logs it at Info (`image resolution: lower-tier image replaced` / `… image pull policy
+replaced`, with the replaced and winning values and both tiers), so a pin losing to a higher tier
+is never silent. That includes the routine case of a settings default replacing the
+harness-config file's image, so expect one such line on most starts.
 
 `image_pull_policy` only affects the Kubernetes runtime; other runtimes ignore
 `kubernetes.imagePullPolicy` entirely.
 
-The template and Hub-settings tiers are resolved fresh at `Start` time, including for a restart of
-an already-provisioned agent: `Start` re-reads the current template chain, the current
-harness-config file, and current settings, rather than trusting whatever `ProvisionAgent` persisted
-into the agent's `scion-agent.json` at an earlier provision. The inline tier is determined
-*directly* per field — never by comparing `finalScionCfg.Image` (the value `ProvisionAgent`
-persisted into `scion-agent.json`) against anything, because that value is populated identically
-whether it came from a genuine override or merely a file/settings default folded in as a fallback.
+Every tier is resolved fresh at `Start` time, including for a restart of an already-provisioned
+agent: `Start` re-reads the current template chain, the current harness-config file, and current
+settings, rather than trusting the merged `image` that `ProvisionAgent` persisted into the agent's
+`scion-agent.json`. That merged value folds in whatever inline, profile, settings and file values
+applied at provision time, so it is never reused as any single tier.
 
-The inline tier is, deliberately, the one exception to "every tier re-read live": a template is
-re-read live because its file lives on disk and can be edited independently of any one agent, but
-an agent's own *inline* config (`--config` at create time) has no live source to re-derive from on
-a later restart — the request that created the agent isn't replayed. So `ProvisionAgent` records
-that agent's inline `image`/`imagePullPolicy` on `agent-info.json`
-(`AgentInfo.ExplicitImage` / `.ExplicitImagePullPolicy`), and `Start` falls back to it, per field,
-whenever the *current* request's own inline config doesn't set that field — which includes a
-request that sets no inline config at all (a plain local restart), one that sets an unrelated field
-(e.g. only `--model`), and one that only passes `--harness-auth`. A hub-dispatched restart instead
-supplies a live `opts.InlineConfig` on every call (the broker resends `AppliedConfig.InlineConfig`),
-so the persisted fallback matters mainly for local (non-hub) restarts. The persisted value is never
-template-derived, so it can never go stale relative to the *current* template the way reusing a
-create-time template snapshot would.
+What `Start` cannot re-derive, `ProvisionAgent` records per source. Image provenance is recorded
+in broker-side agent state: `image-provenance.json` in the agent directory, next to
+`scion-agent.json` and outside the agent home and every container mount. `Start` reads it only from
+there, never from `agent-info.json`:
+
+- `requestImage`: the user's explicit request image. A plain restart replays it at the top tier, so
+  a first start and a later restart rank it identically, locally and via the Hub.
+- `templateImage` / `templateImagePullPolicy`: the template chain's
+  **own** values, with nothing else folded in. `Start` uses them as the template tier only when
+  the template can no longer be resolved, and warns that it did. That happens when the template
+  was renamed or deleted since provision, and routinely on a hub start or restart, whose dispatch
+  carries no template, on a broker with no local copy. So a profile or settings pin removed since
+  provision never lingers disguised as the template's value.
+
+The create-time inline values are recorded, as before, on `agent-info.json`
+(`AgentInfo.ExplicitImage` / `.ExplicitImagePullPolicy`). `AgentInfo.Image` there is for display and
+listing only.
+
+An agent provisioned before image provenance was recorded falls back to its previous behaviour: its
+create-time inline image ranks at the top tier, and the merged `scion-agent.json` value stands in
+for an unresolvable template.
 
 On a local restart, the Hub-settings tier itself is resolved against the profile the agent was
 actually created with when the restart supplies none (`opts.Profile == ""`), matching the
 broker's own restart-dispatch behavior (`agent.GetSavedProfile`) — not silently against whatever
 profile happens to be active on the machine at restart time.
 
-One place this dynamic re-resolution does **not** reach: a hub-dispatched restart's request
-carries `Config.Image` echoed back from the agent's `AppliedConfig` (the hub's own record of what
-was applied at creation or reincarnation), which arrives as `opts.Image` — the same top tier as an
-explicit dispatch `--image`. In hub mode, a plain restart therefore keeps running the image that
-was applied at creation until the agent is reincarnated, even though `Start`'s own resolution
-would otherwise pick up an interim settings change. See [Reincarnating an
-Agent](/scion/local/agent-lifecycle/#reincarnating-an-agent) for that mechanism, whose plan preview
+In hub mode, the top tier carries **only the user's explicit image**. The Hub sends it as
+`Config.Image` on create (and on the re-dispatches that reuse the create request: finalize-env and
+reincarnate's reprovision), and as the start/restart body's `image`. All of these come from the
+agent's recorded explicit inputs: `AppliedConfig.CreateInputs`, or the live `InlineConfig` for an
+agent written before `CreateInputs` existed. A configure-page Save that only echoes the current
+image back writes nothing into `InlineConfig`. A template's image is **not** sent as the top tier.
+On create the broker reads it from the hydrated template, at the template tier. On a later start
+or restart (which carries no template) it comes from the template's own value recorded at
+provision, unless a template of that name exists locally.
+
+`AppliedConfig.Image` is the Hub's display record: filled from the template at create, then
+overwritten with the image the broker reports. The broker's provision-only response reports the
+image `Start` will run. The field never feeds a later dispatch, so a hub restart re-resolves the
+profile-override, settings and file tiers live rather than freezing the image applied at creation.
+[Reincarnating an Agent](/scion/local/agent-lifecycle/#reincarnating-an-agent)'s plan preview
 mirrors this same image precedence.
 
 :::note[Two different processes' settings, not one]
@@ -783,6 +812,40 @@ DB-backed settings directly, regardless of where the broker that will actually r
 lives. The two can disagree for a remote-broker deployment; the broker's dispatch response is
 authoritative for what actually runs.
 :::
+
+#### `Changed in ptone/scion#1799` — an explicit profile harness override image beats the template image
+
+**Before:** a template's `image` (and an inline config `image`) always outranked
+`profiles.<p>.harness_overrides.<name>.image`, silently: the only trace was a debug log. In hub
+mode it was worse. The Hub copied the template's image into `AppliedConfig.Image` and sent it as
+`Config.Image`, which the broker maps to the top tier, so a template image was unbeatable by
+anything short of an explicit `--image`. The broker's reported image was written back into the
+same field, so every later re-dispatch replayed it as the top tier.
+
+**After:** an explicitly set profile override image outranks the template and inline tiers; only
+the user's explicit request image ranks above it, and every replacement is logged at Info. An
+explicitly set profile `image_pull_policy` moves up with it. Profile and settings pins are never
+baked into the record `Start` falls back to for an unresolvable template, so removing a pin takes
+effect on the next start or restart. A user's explicit image stays the top tier on every start and
+restart, locally and via the Hub. The Hub sends only the user's explicit image as the top tier
+(see above), so a template image is resolved at the template tier everywhere and the broker's
+reported image no longer freezes. The plain `harness_configs.<name>` defaults still rank below the
+template. The broker's provision-only response and the reincarnate plan preview report the same
+resolved image.
+
+**Upgrade both sides:** the new precedence needs the Hub *and* the Runtime Broker at this version
+or later. An older broker ignores the start/restart `image` key and still ranks a template's image
+above a profile override. An older Hub still sends a template's image as `Config.Image`, the top
+tier. **Upgrade the Hub first, or together with the brokers:** an agent that an older Hub creates on
+an upgraded broker has the template's image recorded as its explicit request image (the older Hub
+sent it as `Config.Image`), and it keeps that image at the top tier, even over a profile override,
+until it is reincarnated. The broker cannot tell that image apart from a genuine request image.
+
+**Behaviour change to watch for:** a profile that sets `harness_overrides.<name>.image` now
+overrides the image of every template that uses that harness config under that profile. Remove
+the override, or pass `--image`, if a template's own image must win. Conversely, a create-time
+`--image` (or `--config` image) now persists across plain restarts; a later `scion start --image`
+applies to that one start only. Re-create the agent to drop a create-time image.
 
 #### `Changed in ptone/scion#2156` — Hub settings now wins over the harness-config file's image default
 
@@ -820,8 +883,10 @@ requires a Hub and a local agent's restarts don't go through it).
 
 Separately: if an agent's **template** can no longer be resolved at all on a local restart
 (renamed or deleted since the agent was created), the restart falls back to the image/pull-policy
-recorded in the agent's `scion-agent.json` at its last provision, with a warning, rather than
-falling through to Hub settings or the file default — matching the behavior before this change.
+recorded at its last provision, with a warning, rather than falling through to Hub settings or the
+file default — matching the behavior before this change. Since ptone/scion#1799 that recorded
+value is the template's own, recorded in broker-side agent state (`image-provenance.json`), not the
+merged `scion-agent.json` value, for agents provisioned at that version or later.
 
 ---
 

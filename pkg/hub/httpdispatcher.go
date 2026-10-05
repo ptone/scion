@@ -32,7 +32,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -724,10 +723,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				RequireLocalRuntime: gcpID.RequireLocalRuntime,
 			}
 		}
-		image := agent.AppliedConfig.Image
-		if image != "" && d.imageRegistry != "" {
-			image = config.RewriteImageRegistry(image, d.imageRegistry)
-		}
+		// Only the user's explicit image travels as Config.Image (the
+		// broker's top tier); a template-derived AppliedConfig.Image does
+		// not — see explicitDispatchImage (ptone/scion#1799).
+		image := d.dispatchImageForBroker(agent.AppliedConfig)
 		req.Config = &RemoteAgentConfig{
 			Template:                  agent.Template,
 			Image:                     image,
@@ -777,7 +776,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		if d.debug {
 			d.log.Debug("buildCreateRequest: config sent to broker",
 				"template", agent.Template,
-				"image", agent.AppliedConfig.Image,
+				"image", image,
+				"appliedImage", agent.AppliedConfig.Image,
 				"harnessConfig", agent.AppliedConfig.HarnessConfig,
 				"profile", agent.AppliedConfig.Profile,
 				"templateID", agent.AppliedConfig.TemplateID,
@@ -1286,6 +1286,11 @@ func applyBrokerAgentConfig(agent *store.Agent, info *RemoteAgentInfo) {
 		if info.HarnessConfigSource != "" {
 			agent.AppliedConfig.HarnessConfigSource = info.HarnessConfigSource
 		}
+		// AppliedConfig.Image records what the broker actually resolved,
+		// for display. It never feeds a later dispatch's top-tier image
+		// (explicitDispatchImage reads the explicit inputs instead), so
+		// recording it here no longer freezes the image across restarts
+		// (ptone/scion#1799).
 		if info.Image != "" {
 			agent.AppliedConfig.Image = info.Image
 		}
@@ -3209,6 +3214,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
 		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
+		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -3341,6 +3347,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
 		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
+		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
