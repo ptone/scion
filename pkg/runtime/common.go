@@ -358,10 +358,12 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// (config.GetAgentDir with sharedWorkspace=true), so there is
 			// nothing to leak through this mount. See
 			// .design/hub-shared-workspace-isolation.md (defense by absence).
-			// The in-project agents root under the shared mount is also
-			// shadowed with a tmpfs (below), so containers cannot create
-			// entries there; agent state for shared-workspace projects is
-			// always resolved from the broker-side agent dir.
+			// Agent state for shared-workspace projects is always resolved
+			// from the broker-side agent dir (pkg/agent agentStateDir), never
+			// from the in-project agents root under this mount; that is the
+			// control on every runtime. On Docker/Podman the in-project
+			// agents root is additionally shadowed with a tmpfs (below) when
+			// <workspace>/.scion is a directory.
 			registerMount(config.Workspace, "/workspace", false, true)
 			addArg("--workdir", "/workspace")
 			if info, err := os.Stat(filepath.Join(config.Workspace, ".scion")); err == nil && info.IsDir() {
@@ -548,8 +550,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	if fullRepoRootMounted {
 		addArg("--mount", "type=tmpfs,destination=/repo-root/.scion")
 	}
-	// Shadow the in-project agents root in a shared workspace mount the same
-	// way, so containers can neither see nor create agent directories there.
+	// Docker/Podman: shadow the in-project agents root of a shared workspace
+	// mount the same way, so it is empty in the container. The Apple runtime
+	// drops --mount arguments (stripUnsupportedAppleFlags), and Kubernetes and
+	// Cloud Run build their own mounts; for those, agent state resolving only
+	// from the broker-side agent dir is the control.
 	if sharedWorkspaceAgentsMasked {
 		addArg("--mount", "type=tmpfs,destination=/workspace/.scion/agents")
 	}

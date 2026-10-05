@@ -76,20 +76,24 @@ func (e *HarnessConfigNotEvaluatedError) Is(target error) bool {
 }
 
 // harnessAfterResolveError decides what Start does when harness.Resolve fails
-// for harnessName. Launch does not run a staged provisioner the policy has
-// not evaluated:
+// for harnessName. A staged provisioner runs only if the current launch
+// resolved and staged it:
 //   - a policy is attached and a provisioner wrapper is staged in agentHome:
 //     refuse (ErrHarnessConfigPolicy, ErrHarnessConfigNotEvaluated), since
 //     the entry could not be evaluated;
-//   - otherwise (no policy, or nothing staged): fall back to
+//   - otherwise (no policy, or nothing staged): clear the staged provisioning
+//     state (resetStagedProvisioning) and fall back to
 //     harness.New(harnessType), which never constructs a container-script
 //     harness.
 //
-// No policy and "policy attached but entry not evaluable" stay distinct: with
-// no policy the fallback is unchanged.
+// No policy and "policy attached but entry not evaluable" stay distinct:
+// only the latter refuses.
 func harnessAfterResolveError(ctx context.Context, agentHome, harnessName, harnessType string, resolveErr error) (api.Harness, error) {
 	if config.HarnessConfigPolicyFromContext(ctx) != nil && agentHome != "" && harness.HarnessProvisionHookStaged(agentHome) {
 		return nil, fmt.Errorf("%w: %w", ErrHarnessConfigPolicy, &HarnessConfigNotEvaluatedError{Name: harnessName, Cause: resolveErr})
+	}
+	if err := resetStagedProvisioning(agentHome); err != nil {
+		return nil, err
 	}
 	return harness.New(harnessType), nil
 }
@@ -97,8 +101,8 @@ func harnessAfterResolveError(ctx context.Context, agentHome, harnessName, harne
 // resetStagedProvisioning clears the agent home's staged provisioning state
 // before any harness is staged, with or without a policy: the provisioner
 // wrapper and the whole staged bundle, inputs/ included
-// (harness.ClearStagedProvisioning). Nothing a previous launch, the workload
-// or copied home content left there is visible to this launch, and the only
+// (harness.ClearStagedProvisioning). Nothing a previous launch or copied home
+// content left there is visible to this launch, and the only
 // wrapper that can exist afterwards is one this launch's container-script
 // Provision writes. The caller restages the control-plane inputs and
 // secrets.
@@ -107,7 +111,7 @@ func resetStagedProvisioning(agentHome string) error {
 }
 
 // controlPlaneInputsDirName is the directory, in the agent directory (outside
-// the agent home the container can write), holding the control plane's copy
+// every container mount, unlike the agent home), holding the control plane's copy
 // of the per-agent inputs ProvisionAgent stages for a container-script
 // harness (instructions, system prompt, resolved skills). It lies outside
 // every container mount scion computes for the agent (pinned by
@@ -381,8 +385,8 @@ func recordSecrets(agentDir, agentHome string, names []string, current *harnessC
 const secretsIdentityFile = ".identity.json"
 
 // harnessConfigIdentity identifies the harness-config a launch resolved, as
-// computed by the control plane from its own resolution (never from
-// container-writable state). Recorded secrets are restored only for the
+// computed by the control plane from its own resolution, resolved from
+// broker-side agent state only. Recorded secrets are restored only for the
 // harness-config revision that staged them.
 type harnessConfigIdentity struct {
 	Name string `json:"name"`

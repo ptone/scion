@@ -779,9 +779,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// (resetStagedProvisioning), as WriteProjectPreStartHook clears a stale
 	// project hook below. A provisioner wrapper then runs only if this
 	// launch's container-script Provision writes it, after the control plane
-	// restages its inputs and secrets. After a Resolve error with no policy
-	// attached, the fallback keeps today's behaviour and leaves the agent
-	// home as it is.
+	// restages its inputs and secrets. After a Resolve error, the harness.New
+	// fallback (never a container-script harness) also starts from cleared
+	// staged provisioning, with or without a policy
+	// (harnessAfterResolveError), so a provisioner staged by an earlier
+	// launch never runs for this one.
+	//
 	// The identity of the harness-config this launch resolved, from the
 	// control plane's own resolution; recorded secrets are restored only for
 	// the harness-config revision that staged them.

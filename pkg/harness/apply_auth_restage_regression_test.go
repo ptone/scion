@@ -69,7 +69,7 @@ func TestApplyAuthSettings_CarriesOnlyRecordedSecrets(t *testing.T) {
 	}
 
 	// Restart: the secrets directory starts empty, the control plane restores
-	// the recorded files, and the workload has planted safe-named files for
+	// the recorded files, and safe-named files that were not recorded exist for
 	// both merge paths.
 	if err := os.RemoveAll(secretDir); err != nil {
 		t.Fatal(err)
@@ -85,7 +85,7 @@ func TestApplyAuthSettings_CarriesOnlyRecordedSecrets(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for name, body := range map[string]string{"WORKLOAD_TOKEN": "planted", "CLAUDE_AUTH": "planted"} {
+	for name, body := range map[string]string{"UNRECORDED_TOKEN": "unrecorded", "CLAUDE_AUTH": "unrecorded"} {
 		if err := os.WriteFile(filepath.Join(secretDir, name), []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -110,7 +110,7 @@ func TestApplyAuthSettings_CarriesOnlyRecordedSecrets(t *testing.T) {
 			t.Errorf("recorded env secret %s not carried: %v", name, payload.EnvSecretFiles)
 		}
 	}
-	if _, ok := payload.EnvSecretFiles["WORKLOAD_TOKEN"]; ok {
+	if _, ok := payload.EnvSecretFiles["UNRECORDED_TOKEN"]; ok {
 		t.Error("an unrecorded file was referenced as an env secret")
 	}
 	if _, ok := payload.FileSecretFiles["CLAUDE_AUTH"]; ok {
@@ -197,5 +197,42 @@ func TestApplyAuthSettings_RestageOverwritesExistingCandidates(t *testing.T) {
 	}
 	if _, ok := envSecrets["ANTHROPIC_API_KEY"]; ok {
 		t.Error("ANTHROPIC_API_KEY should not be in env_secret_files after re-staging with vertex-ai")
+	}
+}
+
+// StagedSecretNames lists only secret files staged under
+// $HOME/.scion/harness/secrets/. A broker-mode file secret (no host source)
+// is referenced at its harness-native container path and is not listed.
+func TestApplyAuthSettings_StagedSecretNamesOnlySecretsDir(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	agentHome := t.TempDir()
+	h.entry.Auth = &config.HarnessAuthMetadata{
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"claude": {RequiredFiles: []config.HarnessAuthFileRequirement{{Name: "CLAUDE_AUTH", TargetSuffix: ".claude/.credentials.json"}}},
+		},
+	}
+	resolved := &api.ResolvedAuth{
+		Method:  "container-script",
+		EnvVars: map[string]string{"GOOGLE_CLOUD_PROJECT": "p"},
+		Files:   []api.FileMapping{{SourcePath: "", ContainerPath: "~/.claude/.credentials.json"}},
+	}
+	if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+		t.Fatalf("ApplyAuthSettings: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		FileSecretFiles map[string]string `json:"file_secret_files"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.FileSecretFiles["CLAUDE_AUTH"] != "$HOME/.claude/.credentials.json" {
+		t.Fatalf("fixture: expected the native-path file secret reference, got %v", payload.FileSecretFiles)
+	}
+	if got := strings.Join(h.StagedSecretNames(), ","); got != "GOOGLE_CLOUD_PROJECT" {
+		t.Errorf("StagedSecretNames = %q, want only the secrets-dir file GOOGLE_CLOUD_PROJECT", got)
 	}
 }

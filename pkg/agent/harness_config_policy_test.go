@@ -836,8 +836,8 @@ func TestHarnessConfigPolicy_NonContainerScriptRelaunchClearsWrapper(t *testing.
 }
 
 // (i) After a harness.Resolve error, with a policy attached and a wrapper
-// staged, Start refuses; with no policy, or nothing staged, it falls back to
-// harness.New as before.
+// staged, Start refuses; with no policy, or nothing staged, it clears the
+// staged provisioning and falls back to harness.New.
 //
 // An unusable provisioner (legacy "builtin", empty command) fails Start
 // before this decision (TestStart_UnusableProvisionerFailsLaunch). Otherwise
@@ -870,17 +870,28 @@ func TestHarnessConfigPolicy_ResolveErrorWithStagedWrapper(t *testing.T) {
 		t.Errorf("policy attached + wrapper staged: expected a refusal naming hc, got %v", err)
 	}
 
+	// No policy: the fallback runs, and the staged wrapper and bundle are
+	// cleared, so the earlier launch's provisioner does not run.
+	if err := os.MkdirAll(filepath.Join(home, ".scion", "harness"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".scion", "harness", "manifest.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	h, err := harnessAfterResolveError(context.Background(), home, "hc", "generic", resolveErr)
 	if err != nil || h == nil {
 		t.Errorf("no policy: expected the harness.New fallback, got h=%v err=%v", h, err)
 	}
-	if _, statErr := os.Stat(filepath.Join(home, ".scion", "hooks", "pre-start.d", "20-harness-provision")); statErr != nil {
-		t.Errorf("no policy: the fallback must leave the agent home as it is: %v", statErr)
+	for _, p := range []string{
+		filepath.Join(home, ".scion", "hooks", "pre-start.d", "20-harness-provision"),
+		filepath.Join(home, ".scion", "harness"),
+	} {
+		if _, statErr := os.Stat(p); !os.IsNotExist(statErr) {
+			t.Errorf("no policy: staged provisioning not cleared on the fallback: %s (stat err=%v)", p, statErr)
+		}
 	}
 
-	if err := os.Remove(filepath.Join(home, ".scion", "hooks", "pre-start.d", "20-harness-provision")); err != nil {
-		t.Fatal(err)
-	}
+	// Policy attached, nothing staged: the fallback runs.
 	if h, err := harnessAfterResolveError(policyCtx, home, "hc", "generic", resolveErr); err != nil || h == nil {
 		t.Errorf("policy attached, nothing staged: expected the fallback, got h=%v err=%v", h, err)
 	}
@@ -1092,7 +1103,7 @@ func TestHarnessConfigPolicy_ContainerScriptSwitchClearsPreviousBundle(t *testin
 	if err := os.MkdirAll(filepath.Join(bundle, "inputs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bundle, "inputs", "planted.md"), []byte("planted"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(bundle, "inputs", "unrelated.md"), []byte("unrelated"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	aStale := []string{
@@ -1133,7 +1144,7 @@ func TestHarnessConfigPolicy_ContainerScriptSwitchClearsPreviousBundle(t *testin
 			t.Errorf("after B's launch, A's staged file remains: %s (stat err=%v)", p, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(bundle, "inputs", "planted.md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(bundle, "inputs", "unrelated.md")); !os.IsNotExist(err) {
 		t.Errorf("a file not written by the control plane survived in inputs/ (stat err=%v)", err)
 	}
 	if _, err := os.Stat(filepath.Join(bundle, "inputs", "instructions.md")); err != nil {
@@ -1169,17 +1180,17 @@ func isCallOf(n ast.Node, names ...string) bool {
 
 // inputs/ holds only control-plane content: files a harness-config or
 // template home/ tree would copy there are cleared before the control plane
-// stages its inputs at provisioning, and files the workload writes there are
+// stages its inputs at provisioning, and other files there are
 // replaced on every launch by the control plane's recorded copy.
 func TestHarnessConfigPolicy_InputsOnlyFromControlPlane(t *testing.T) {
 	e := newPolicyTestEnv(t)
 	e.projectHC(t, "hc-scripted", policyTestScripted)
 	// A harness-config home/ tree and a template home/ tree that would
 	// place files under .scion/harness/inputs.
-	hcPlant := filepath.Join(e.scion, "harness-configs", "hc-scripted", "home", ".scion", "harness", "inputs")
+	hcHomeInputs := filepath.Join(e.scion, "harness-configs", "hc-scripted", "home", ".scion", "harness", "inputs")
 	tplDir := e.template(t, "tplx", "harness_config: hc-scripted\n")
-	tplPlant := filepath.Join(tplDir, "home", ".scion", "harness", "inputs")
-	for dir, name := range map[string]string{hcPlant: "from-hc-home.md", tplPlant: "instructions.md"} {
+	tplHomeInputs := filepath.Join(tplDir, "home", ".scion", "harness", "inputs")
+	for dir, name := range map[string]string{hcHomeInputs: "from-hc-home.md", tplHomeInputs: "instructions.md"} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -1203,18 +1214,19 @@ func TestHarnessConfigPolicy_InputsOnlyFromControlPlane(t *testing.T) {
 	}
 	controlPlane := string(instr)
 
-	// The workload rewrites a control-plane input and adds its own file.
-	if err := os.WriteFile(filepath.Join(inputs, "instructions.md"), []byte("workload content"), 0o644); err != nil {
+	// inputs/ changes between launches: a control-plane input is rewritten
+	// and another file is added.
+	if err := os.WriteFile(filepath.Join(inputs, "instructions.md"), []byte("unrecorded content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(inputs, "workload.md"), []byte("workload content"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(inputs, "unrecorded.md"), []byte("unrecorded content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := mgr.Start(context.Background(), api.StartOptions{Name: "inputs", ProjectPath: e.scion, Template: "tplx", NoAuth: true}); err != nil {
 		t.Fatalf("relaunch: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(inputs, "workload.md")); !os.IsNotExist(err) {
-		t.Errorf("a workload-written file survived in inputs/ (stat err=%v)", err)
+	if _, err := os.Stat(filepath.Join(inputs, "unrecorded.md")); !os.IsNotExist(err) {
+		t.Errorf("a file the control plane did not stage remained in inputs/ (stat err=%v)", err)
 	}
 	if got, err := os.ReadFile(filepath.Join(inputs, "instructions.md")); err != nil || string(got) != controlPlane {
 		t.Errorf("instructions.md not restaged from the control plane's copy: %q (err=%v)", got, err)
@@ -1247,14 +1259,14 @@ func TestHarnessConfigPolicy_LegacyAgentInputsSeededOnce(t *testing.T) {
 	for name, body := range map[string]string{
 		"instructions.md":      "legacy instructions",
 		"resolved-skills.json": `{"skills":[]}`,
-		"planted.md":           "not a control-plane input",
+		"unrelated.md":         "not a control-plane input",
 	} {
 		if err := os.WriteFile(filepath.Join(inputs, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 	_ = os.Remove(filepath.Join(inputs, "system-prompt.md"))
-	if err := os.Symlink(filepath.Join(inputs, "planted.md"), filepath.Join(inputs, "system-prompt.md")); err != nil {
+	if err := os.Symlink(filepath.Join(inputs, "unrelated.md"), filepath.Join(inputs, "system-prompt.md")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1279,14 +1291,14 @@ func TestHarnessConfigPolicy_LegacyAgentInputsSeededOnce(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(inputs, "resolved-skills.json")); err != nil {
 		t.Errorf("resolved-skills.json not restored: %v", err)
 	}
-	for _, name := range []string{"planted.md", "system-prompt.md"} {
+	for _, name := range []string{"unrelated.md", "system-prompt.md"} {
 		if _, err := os.Lstat(filepath.Join(inputs, name)); !os.IsNotExist(err) {
 			t.Errorf("%s must not be seeded (non-listed file or symlink); stat err=%v", name, err)
 		}
 	}
 
 	// Seeding happens once: later starts restore the record, not the home.
-	if err := os.WriteFile(filepath.Join(inputs, "instructions.md"), []byte("workload content"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(inputs, "instructions.md"), []byte("unrecorded content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	logBuf.Reset()
@@ -1336,27 +1348,27 @@ func TestHarnessConfigPolicy_StagingFailureFailsLaunch(t *testing.T) {
 	}
 }
 
-func writeWorkloadInputs(t *testing.T, home string) {
+func writeUnrecordedInputs(t *testing.T, home string) {
 	t.Helper()
 	inputs := filepath.Join(home, ".scion", "harness", "inputs")
 	if err := os.MkdirAll(inputs, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"system-prompt.md", "instructions.md"} {
-		if err := os.WriteFile(filepath.Join(inputs, name), []byte("workload content"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(inputs, name), []byte("unrecorded content"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
 
-func assertNoWorkloadInputs(t *testing.T, e *policyTestEnv, agentName string) {
+func assertUnrecordedInputsNotRestored(t *testing.T, e *policyTestEnv, agentName string) {
 	t.Helper()
 	home := config.GetAgentHomePath(e.scion, agentName)
 	record := filepath.Join(config.ResolveAgentDir(e.scion, agentName), controlPlaneInputsDirName)
 	for _, dir := range []string{filepath.Join(home, ".scion", "harness", "inputs"), record} {
 		for _, name := range []string{"system-prompt.md", "instructions.md"} {
-			if data, err := os.ReadFile(filepath.Join(dir, name)); err == nil && string(data) == "workload content" {
-				t.Errorf("workload-written %s was promoted into %s", name, dir)
+			if data, err := os.ReadFile(filepath.Join(dir, name)); err == nil && string(data) == "unrecorded content" {
+				t.Errorf("an unrecorded %s was restored into %s", name, dir)
 			}
 		}
 	}
@@ -1364,10 +1376,10 @@ func assertNoWorkloadInputs(t *testing.T, e *policyTestEnv, agentName string) {
 
 // B2/S3a: once the record has been checked it exists, empty if nothing
 // qualified, and an empty record restores nothing and never re-arms the
-// seed. Workload-written inputs are not promoted across restarts, for a
+// seed. Inputs the control plane did not stage are not restored across restarts, for a
 // legacy agent with no staged inputs and for an agent whose harness-config
 // gains a provisioner after create.
-func TestHarnessConfigPolicy_EmptyRecordNeverPromotesWorkloadInputs(t *testing.T) {
+func TestHarnessConfigPolicy_EmptyRecordRestoresNoUnrecordedInputs(t *testing.T) {
 	t.Run("legacy agent with no staged inputs", func(t *testing.T) {
 		e := newPolicyTestEnv(t)
 		e.projectHC(t, "hc-scripted", policyTestScripted)
@@ -1393,11 +1405,11 @@ func TestHarnessConfigPolicy_EmptyRecordNeverPromotesWorkloadInputs(t *testing.T
 			t.Fatalf("expected an empty record after the first check, got %v (err=%v)", entries, err)
 		}
 		for i := 0; i < 2; i++ {
-			writeWorkloadInputs(t, home)
+			writeUnrecordedInputs(t, home)
 			if _, err := mgr.Start(context.Background(), opts); err != nil {
 				t.Fatalf("restart %d: %v", i, err)
 			}
-			assertNoWorkloadInputs(t, e, "legacy-empty")
+			assertUnrecordedInputsNotRestored(t, e, "legacy-empty")
 		}
 	})
 
@@ -1410,15 +1422,15 @@ func TestHarnessConfigPolicy_EmptyRecordNeverPromotesWorkloadInputs(t *testing.T
 			t.Fatalf("declarative Start: %v", err)
 		}
 		home := config.GetAgentHomePath(e.scion, "gains")
-		writeWorkloadInputs(t, home)
+		writeUnrecordedInputs(t, home)
 		// The harness-config gains a provisioner.
 		e.projectHC(t, "hc-later", policyTestScripted)
 		for i := 0; i < 2; i++ {
 			if _, err := mgr.Start(context.Background(), opts); err != nil {
 				t.Fatalf("container-script start %d: %v", i, err)
 			}
-			assertNoWorkloadInputs(t, e, "gains")
-			writeWorkloadInputs(t, home)
+			assertUnrecordedInputsNotRestored(t, e, "gains")
+			writeUnrecordedInputs(t, home)
 		}
 	})
 }
@@ -1442,9 +1454,9 @@ func TestHarnessConfigPolicy_ProvisionRecordsInputs(t *testing.T) {
 		t.Fatalf("provisioning did not record the staged instructions.md (err=%v)", err)
 	}
 
-	// The workload overwrites the staged input before the first start; the
+	// The staged input changes before the first start; the
 	// first start restores the control plane's copy.
-	writeWorkloadInputs(t, home)
+	writeUnrecordedInputs(t, home)
 	if _, err := policyTestManager(nil).Start(context.Background(), api.StartOptions{Name: "recorded", ProjectPath: e.scion, HarnessConfig: "hc-scripted", NoAuth: true}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1464,7 +1476,7 @@ const policyTestScriptedAuth = policyTestScripted + `auth:
 
 // Secrets record: the secret files ApplyAuthSettings stages are recorded in
 // the agent directory (0700/0600) and restored on the next start; a
-// safe-named file the workload writes into secrets/ is not referenced.
+// safe-named file in secrets/ that was not recorded is not referenced.
 func TestHarnessConfigPolicy_SecretsRecordedAndRestored(t *testing.T) {
 	e := newPolicyTestEnv(t)
 	e.projectHC(t, "hc-auth", policyTestScriptedAuth)
@@ -1485,27 +1497,27 @@ func TestHarnessConfigPolicy_SecretsRecordedAndRestored(t *testing.T) {
 
 	home := config.GetAgentHomePath(e.scion, "secrets")
 	secrets := filepath.Join(home, ".scion", "harness", "secrets")
-	if err := os.WriteFile(filepath.Join(secrets, "PLANTED_TOKEN"), []byte("planted"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(secrets, "UNRECORDED_TOKEN"), []byte("unrelated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := mgr.Start(context.Background(), opts); err != nil {
 		t.Fatalf("restart: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(secrets, "PLANTED_TOKEN")); !os.IsNotExist(err) {
-		t.Errorf("a workload-written secret file survived the restart (stat err=%v)", err)
+	if _, err := os.Stat(filepath.Join(secrets, "UNRECORDED_TOKEN")); !os.IsNotExist(err) {
+		t.Errorf("an unrecorded secret file remained after the restart (stat err=%v)", err)
 	}
 	cands, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "inputs", "auth-candidates.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(cands), "PLANTED_TOKEN") {
-		t.Error("a workload-written secret file was referenced in auth-candidates.json")
+	if strings.Contains(string(cands), "UNRECORDED_TOKEN") {
+		t.Error("an unrecorded secret file was referenced in auth-candidates.json")
 	}
 	if !strings.Contains(string(cands), "POLICY_TEST_KEY") {
 		t.Errorf("the recorded secret is not referenced: %s", cands)
 	}
-	if _, err := os.Stat(filepath.Join(record, "PLANTED_TOKEN")); !os.IsNotExist(err) {
-		t.Error("a workload-written secret file was recorded")
+	if _, err := os.Stat(filepath.Join(record, "UNRECORDED_TOKEN")); !os.IsNotExist(err) {
+		t.Error("an unrecorded secret file was recorded")
 	}
 }
 
@@ -1887,7 +1899,7 @@ func TestCurrentHarnessConfigIdentity_Unestablished(t *testing.T) {
 // Agent state for shared-workspace projects is always resolved from the
 // broker-side agent dir: a start without the shared-workspace flag (as a
 // restart dispatch may be) still uses the external agent directory and
-// restores its records, and a forged in-project agent directory
+// restores its records, and an in-project copy of the agent directory
 // (scion-agent.json plus records) is ignored.
 func TestSharedWorkspaceAgentResolvesBrokerSideDir(t *testing.T) {
 	e := newPolicyTestEnv(t)
@@ -1911,9 +1923,9 @@ func TestSharedWorkspaceAgentResolvesBrokerSideDir(t *testing.T) {
 		t.Fatalf("fixture: external inputs record: %v", err)
 	}
 
-	// Forge an in-project agent directory, as a container with the shared
-	// workspace mounted could.
-	writeForged := func(rel, body string) {
+	// An in-project copy of the agent directory, inside the shared
+	// workspace mount.
+	writeInProjectCopy := func(rel, body string) {
 		t.Helper()
 		p := filepath.Join(inProject, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -1923,12 +1935,12 @@ func TestSharedWorkspaceAgentResolvesBrokerSideDir(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writeForged("scion-agent.json", `{"harness_config":"hc-forged","image":"forged:latest","volumes":[{"source":"/etc","target":"/forged"}]}`)
-	writeForged(filepath.Join(controlPlaneInputsDirName, "instructions.md"), "forged instructions")
-	writeForged(filepath.Join(config.HarnessSecretsRecordDirName, "FORGED_TOKEN"), "forged")
+	writeInProjectCopy("scion-agent.json", `{"harness_config":"hc-in-project","image":"in-project:latest","volumes":[{"source":"/etc","target":"/in-project"}]}`)
+	writeInProjectCopy(filepath.Join(controlPlaneInputsDirName, "instructions.md"), "in-project instructions")
+	writeInProjectCopy(filepath.Join(config.HarnessSecretsRecordDirName, "IN_PROJECT_TOKEN"), "in-project")
 
 	// Restart without the shared-workspace flag (an older hub), capturing
-	// the run config to show the forged config's volumes are never read.
+	// the run config to show the in-project copy's volumes are never read.
 	var runCfg runtime.RunConfig
 	mgr = NewManager(&runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
@@ -1945,26 +1957,26 @@ func TestSharedWorkspaceAgentResolvesBrokerSideDir(t *testing.T) {
 		t.Fatalf("restart without the flag: %v", err)
 	}
 	for _, v := range runCfg.Volumes {
-		if v.Source == "/etc" || v.Target == "/forged" {
-			t.Errorf("a volume from the forged in-project scion-agent.json reached the run config: %+v", v)
+		if v.Source == "/etc" || v.Target == "/in-project" {
+			t.Errorf("a volume from the in-project scion-agent.json reached the run config: %+v", v)
 		}
 	}
-	if runCfg.Image == "forged:latest" {
-		t.Error("the forged in-project scion-agent.json image was used")
+	if runCfg.Image == "in-project:latest" {
+		t.Error("the in-project scion-agent.json image was used")
 	}
 	if info2.HarnessConfig != info.HarnessConfig {
-		t.Errorf("restart used a different harness-config %q (want %q): forged config read?", info2.HarnessConfig, info.HarnessConfig)
+		t.Errorf("restart used a different harness-config %q (want %q): in-project config read?", info2.HarnessConfig, info.HarnessConfig)
 	}
 	home := config.GetAgentHomePath(e.scion, "sw-agent")
 	got, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "inputs", "instructions.md"))
 	if err != nil || string(got) != string(controlPlane) {
 		t.Errorf("inputs not restored from the broker-side record: %q (err=%v)", got, err)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".scion", "harness", "secrets", "FORGED_TOKEN")); !os.IsNotExist(err) {
-		t.Errorf("a forged in-project secrets record was restored (stat err=%v)", err)
+	if _, err := os.Stat(filepath.Join(home, ".scion", "harness", "secrets", "IN_PROJECT_TOKEN")); !os.IsNotExist(err) {
+		t.Errorf("an in-project secrets record was restored (stat err=%v)", err)
 	}
 	if _, err := os.Stat(filepath.Join(inProject, controlPlaneInputsDirName, "instructions.md")); err == nil {
-		if data, _ := os.ReadFile(filepath.Join(inProject, controlPlaneInputsDirName, "instructions.md")); string(data) != "forged instructions" {
+		if data, _ := os.ReadFile(filepath.Join(inProject, controlPlaneInputsDirName, "instructions.md")); string(data) != "in-project instructions" {
 			t.Error("the restart wrote state into the in-project agent dir")
 		}
 	}
@@ -2044,7 +2056,7 @@ func TestSharedWorkspaceRestartMissingStateDirFailsClosed(t *testing.T) {
 }
 
 // With a hub-supplied project ID, the broker-side agents root comes from
-// that ID: a tampered project-id marker inside the project does not move it.
+// that ID: a project-id marker that disagrees with the hub project ID does not move it.
 func TestAgentStateDirUsesHubProjectID(t *testing.T) {
 	e := newPolicyTestEnv(t)
 	hubID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -2061,7 +2073,7 @@ func TestAgentStateDirUsesHubProjectID(t *testing.T) {
 	}
 	// An agent whose hub-ID external dir holds scion-agent.json stays
 	// external without the flag; a scion-agent.json only under the
-	// tampered marker's root does not make it external.
+	// mismatched marker's root does not make it external.
 	if err := os.MkdirAll(want, 0o755); err != nil {
 		t.Fatal(err)
 	}

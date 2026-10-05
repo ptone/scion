@@ -567,29 +567,33 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// branches, instead of derived after ProvisionAgent returns: the
 	// explicit-mount branch does not set its returned workspace to
 	// agentDir/workspace (see ProvisionAgent's Case 1), so there is no
-	// single after-the-fact derivation that works for both modes.
+	// single after-the-fact derivation that works for both modes. It is
+	// resolved exactly as ProvisionAgent resolves it below (withAgentStateDir
+	// from the provisioning context: shared-workspace flag, hub project ID,
+	// strict in broker mode), so both read the same broker-side agent dir.
+	provCtx, _ := buildProvisionContext(ctx, opts)
+	_, resolvedAgentDir, _, resolveErr := withAgentStateDir(provCtx, projectDir, opts.Name)
+	if resolveErr != nil {
+		return nil, fmt.Errorf("%w: %w", ErrReprovisionRefused, resolveErr)
+	}
 	var agentDir string
 
 	if hasGitClone {
-		agentDir = config.GetAgentDir(projectDir, opts.Name, opts.SharedWorkspace)
+		agentDir = resolvedAgentDir
 		agentWorkspace := filepath.Join(agentDir, "workspace")
 		if info, statErr := os.Stat(filepath.Join(agentWorkspace, ".git")); statErr != nil || !info.IsDir() {
 			return nil, fmt.Errorf("%w: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", ErrReprovisionRefused, opts.Name, agentWorkspace)
 		}
 	} else {
 		// Design §3.4 Amendment A23: explicit-mount case. Confirm this is an
-		// existing agent (CheckAgentDirContained both resolves the
-		// containment-checked path and, via the os.Stat below, its
-		// existence) and that the workspace path — absolute, or a
+		// existing agent (the agent dir resolved above, via the os.Stat
+		// below) and that the workspace path — absolute, or a
 		// project-relative subdir exactly as ProvisionAgent's own
 		// explicit-workspace branch accepts — already exists. A miss here is
 		// refused as ErrReprovisionRefused (409) rather than left to
 		// ProvisionAgent's untyped error (or, worse, ProvisionAgent silently
 		// creating the missing piece).
-		dir, err := CheckAgentDirContained(projectDir, opts.Name, opts.SharedWorkspace)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrReprovisionRefused, err)
-		}
+		dir := resolvedAgentDir
 		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
 			return nil, fmt.Errorf("%w: agent %q has no existing agent directory at %s; reincarnate does not create it", ErrReprovisionRefused, opts.Name, dir)
 		}
@@ -1513,6 +1517,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to resolve harness for %q: %w", harnessConfigName, err)
 	}
+	// Defence in depth: resolveTemplateAndHarnessConfig evaluated the same
+	// effective entry; this check ties the policy to this harness
+	// construction, as the call-site guard requires for every one.
 	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, resolved.Config); err != nil {
 		return "", "", nil, err
 	}

@@ -33,9 +33,9 @@ import (
 // project dir says, and never the in-project agents dir.
 
 const (
-	rootHubProjectID   = "66666666-6666-6666-6666-666666666666"
-	rootForgedMarkerID = "77777777-7777-7777-7777-777777777777"
-	rootAgentName      = "root-agent"
+	rootHubProjectID       = "66666666-6666-6666-6666-666666666666"
+	rootMismatchedMarkerID = "77777777-7777-7777-7777-777777777777"
+	rootAgentName          = "root-agent"
 )
 
 // stateRootFixture sets up HOME with a harness-config and default template,
@@ -157,7 +157,7 @@ func TestAgentStateRoot_StrictNoMarkerUsesHubRoot(t *testing.T) {
 
 // (a') A marker present at provision and deleted afterwards does not move the
 // dir a later start resolves.
-func TestAgentStateRoot_DeletedMarkerDoesNotRedirect(t *testing.T) {
+func TestAgentStateRoot_MissingMarkerDoesNotRedirect(t *testing.T) {
 	projectScionDir := stateRootFixture(t, rootHubProjectID)
 	want := provisionAndResolve(t, projectScionDir)
 	if err := os.Remove(filepath.Join(projectScionDir, "project-id")); err != nil {
@@ -175,20 +175,20 @@ func TestAgentStateRoot_DeletedMarkerDoesNotRedirect(t *testing.T) {
 
 // (b) A marker rewritten to another project's ID (before provision, or after)
 // never redirects the agent state to that project's external dir.
-func TestAgentStateRoot_RewrittenMarkerDoesNotRedirect(t *testing.T) {
+func TestAgentStateRoot_MismatchedMarkerDoesNotRedirect(t *testing.T) {
 	t.Run("rewritten before provision", func(t *testing.T) {
-		projectScionDir := stateRootFixture(t, rootForgedMarkerID)
+		projectScionDir := stateRootFixture(t, rootMismatchedMarkerID)
 		provisionAndResolve(t, projectScionDir)
-		forged, err := config.AgentDirForProject(projectScionDir, rootAgentName, true, rootForgedMarkerID)
+		mismatched, err := config.AgentDirForProject(projectScionDir, rootAgentName, true, rootMismatchedMarkerID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertNoAgentDirAt(t, forged, "the forged marker's project dir")
+		assertNoAgentDirAt(t, mismatched, "the mismatched marker's project dir")
 	})
 	t.Run("rewritten after provision", func(t *testing.T) {
 		projectScionDir := stateRootFixture(t, rootHubProjectID)
 		want := provisionAndResolve(t, projectScionDir)
-		if err := config.WriteProjectID(projectScionDir, rootForgedMarkerID); err != nil {
+		if err := config.WriteProjectID(projectScionDir, rootMismatchedMarkerID); err != nil {
 			t.Fatal(err)
 		}
 		agentDir, _, _, _, err := GetAgent(strictSharedCtx(), rootAgentName, "", "", "", projectScionDir, "", "", "", "")
@@ -198,8 +198,8 @@ func TestAgentStateRoot_RewrittenMarkerDoesNotRedirect(t *testing.T) {
 		if _, err := newRootManager().Start(context.Background(), strictSharedOpts(projectScionDir)); err != nil {
 			t.Fatalf("Start after rewriting the marker: %v", err)
 		}
-		forged, _ := config.AgentDirForProject(projectScionDir, rootAgentName, true, rootForgedMarkerID)
-		assertNoAgentDirAt(t, forged, "the forged marker's project dir")
+		mismatched, _ := config.AgentDirForProject(projectScionDir, rootAgentName, true, rootMismatchedMarkerID)
+		assertNoAgentDirAt(t, mismatched, "the mismatched marker's project dir")
 	})
 }
 
@@ -209,17 +209,17 @@ func TestAgentStateRoot_RewrittenMarkerDoesNotRedirect(t *testing.T) {
 func TestAgentStateRoot_MarkerMismatchWithMissingHubDirFailsClosed(t *testing.T) {
 	projectScionDir := stateRootFixture(t, rootHubProjectID)
 	want := provisionAndResolve(t, projectScionDir)
-	if err := config.WriteProjectID(projectScionDir, rootForgedMarkerID); err != nil {
+	if err := config.WriteProjectID(projectScionDir, rootMismatchedMarkerID); err != nil {
 		t.Fatal(err)
 	}
-	// Plant a complete agent dir under the forged marker's project and the
+	// Write a complete agent dir under the mismatched marker's project and the
 	// in-project root; neither may be used.
-	forged, _ := config.AgentDirForProject(projectScionDir, rootAgentName, true, rootForgedMarkerID)
-	for _, dir := range []string{forged, filepath.Join(projectScionDir, "agents", rootAgentName)} {
+	mismatched, _ := config.AgentDirForProject(projectScionDir, rootAgentName, true, rootMismatchedMarkerID)
+	for _, dir := range []string{mismatched, filepath.Join(projectScionDir, "agents", rootAgentName)} {
 		if err := os.MkdirAll(filepath.Join(dir, "home"), 0755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "scion-agent.json"), []byte(`{"harness_config": "test-harness", "image": "forged-image:v9"}`), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "scion-agent.json"), []byte(`{"harness_config": "test-harness", "image": "other-image:v9"}`), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
