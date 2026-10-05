@@ -20,9 +20,16 @@ import { join } from 'path';
 
 const pageSource = readFileSync(join(__dirname, 'agent-detail.ts'), 'utf-8');
 
-/** Leaf style rules from Lit cssText. */
-function styleRules(cssText: string): Map<string, string> {
-  const rules = new Map<string, string>();
+interface CssRule {
+  selector: string;
+  body: string;
+  /** True when the rule sits inside an at-rule block such as `@media`. */
+  nested: boolean;
+}
+
+/** Every leaf style rule from Lit cssText, including rules inside at-rules. */
+function cssRules(cssText: string): CssRule[] {
+  const out: CssRule[] = [];
   const stack: string[] = [];
   let buf = '';
   for (const ch of cssText.replace(/\/\*[\s\S]*?\*\//g, '')) {
@@ -32,17 +39,32 @@ function styleRules(cssText: string): Map<string, string> {
     } else if (ch === '}') {
       const selector = stack.pop() ?? '';
       if (!selector.startsWith('@')) {
-        for (const part of selector.split(',')) rules.set(part.trim(), buf);
+        const nested = stack.some((s) => s.startsWith('@'));
+        for (const part of selector.split(',')) {
+          out.push({ selector: part.trim(), body: buf, nested });
+        }
       }
       buf = '';
     } else {
       buf += ch;
     }
   }
+  return out;
+}
+
+/**
+ * Top-level style rules keyed by selector. Rules inside `@media` (or other
+ * at-rule) blocks are skipped so a responsive override cannot overwrite the
+ * base rule of the same selector.
+ */
+function styleRules(all: CssRule[]): Map<string, string> {
+  const rules = new Map<string, string>();
+  for (const r of all) if (!r.nested) rules.set(r.selector, r.body);
   return rules;
 }
 
 describe('agent detail layout', () => {
+  let all: CssRule[];
   let rules: Map<string, string>;
 
   beforeAll(async () => {
@@ -50,7 +72,8 @@ describe('agent detail layout', () => {
     const ctor = customElements.get('scion-page-agent-detail') as unknown as {
       styles: { cssText: string };
     };
-    rules = styleRules(ctor.styles.cssText);
+    all = cssRules(ctor.styles.cssText);
+    rules = styleRules(all);
   });
 
   it('wraps a long agent name with its badges instead of floating them beside it', () => {
@@ -60,6 +83,10 @@ describe('agent detail layout', () => {
     expect(text).toMatch(/min-width:\s*0/);
     expect(rules.get('.header h1') ?? '').toMatch(/overflow-wrap:\s*anywhere/);
     expect(pageSource).toMatch(/<div class="header-title-text">\s*<h1>/);
+  });
+
+  it('keeps the header icon from shrinking beside a long name', () => {
+    expect(rules.get('.header-title > sl-icon') ?? '').toMatch(/flex-shrink:\s*0/);
   });
 
   it('keeps the message-mode select inside its column', () => {
@@ -72,5 +99,9 @@ describe('agent detail layout', () => {
     expect(pageSource).not.toMatch(
       /<sl-select\b(?:(?!<\/sl-select>)[\s\S])*?style="[^"]*min-width/
     );
+    // Nor may any CSS rule (top-level or inside @media) give it one.
+    const selectRules = all.filter((r) => /\.messaging-mode\b.*\bsl-select\b/.test(r.selector));
+    expect(selectRules.length).toBeGreaterThan(0);
+    for (const r of selectRules) expect(r.body).not.toMatch(/(^|[;\s])min-width\s*:/);
   });
 });
