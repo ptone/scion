@@ -504,6 +504,9 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "launch_timeout", "launch timed out before the agent started"
 	}
+	if d, ok := harnessPolicyRefusalFrom(err); ok {
+		return "harness_config_policy", d.Message
+	}
 	switch {
 	case errors.Is(err, agent.ErrContainerNameInUse):
 		return "name_in_use", err.Error()

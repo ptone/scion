@@ -585,7 +585,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// future declarative-only harnesses) are honored. Otherwise fall back to
 	// the legacy New() shim using the bare harness type.
 	var h api.Harness
-	var harnessConfigRevision string
+	var harnessConfigRevision, harnessConfigSource string
+	// resolveFailed records a harness.Resolve error for a named
+	// harness-config (see harnessAfterResolveError).
+	var resolveFailed bool
+	// resolvedHCDir is the harness-config directory harness.Resolve used,
+	// if any (for restaging capture-auth assets after a bundle clear).
+	var resolvedHCDir *config.HarnessConfigDir
 	var noAuthConfig *config.HarnessNoAuthConfig
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
@@ -608,24 +614,110 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			Settings:      settings,
 			ConfigDirPath: opts.HarnessConfigPath,
 		})
+		// Unresolved unless a directory resolves below. Start always reports
+		// a source (unresolved also when no name resolved, below), so an
+		// empty value on the wire means an older broker.
+		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
+		if err == nil {
+			// Policy is evaluated where launch resolves the harness-config,
+			// before the harness is provisioned or the container runs. On
+			// restart the broker has already stopped the previous container
+			// by this point, as for any other start failure.
+			if policyErr := CheckHarnessConfigPolicy(ctx, harnessConfigName, resolved.Config); policyErr != nil {
+				return nil, policyErr
+			}
+		}
 		if err != nil {
-			util.Debugf("harness.Resolve fell back to New(%q): %v", harnessName, err)
-			h = harness.New(harnessName)
+			// The entry could not be evaluated. harness.New never constructs
+			// a container-script harness; with a policy attached and a
+			// provisioner wrapper staged, the start is refused instead
+			// (harnessAfterResolveError). Unreachable today for a non-empty
+			// name: a provisioner comes only from a loaded harness-config
+			// directory, so Resolve has no failure mode here. Kept fail
+			// closed in case Resolve gains one; see
+			// TestHarnessConfigPolicy_ResolveErrorWithStagedWrapper.
+			util.Debugf("harness.Resolve failed for %q: %v", harnessConfigName, err)
+			resolveFailed = true
+			fallback, fbErr := harnessAfterResolveError(ctx, agentHome, harnessConfigName, harnessName, err)
+			if fbErr != nil {
+				return nil, fbErr
+			}
+			h = fallback
 		} else {
 			h = resolved.Harness
 			noAuthConfig = resolved.Config.NoAuthConfig
+			resolvedHCDir = resolved.ConfigDir
 			if resolved.ConfigDir != nil {
 				harnessConfigRevision = config.ComputeHarnessConfigRevision(resolved.ConfigDir.Path)
+				harnessConfigSource = string(resolved.ConfigDir.Source)
 			}
 			util.Debugf("harness resolution: implementation=%s harness=%q", resolved.Implementation, resolved.Config.Harness)
 		}
 	} else {
 		h = harness.New(harnessName)
+		harnessConfigSource = string(config.HarnessConfigSourceUnresolved)
+	}
+
+	// Reset staged provisioning state before the harness is provisioned
+	// (resetStagedProvisioning), with or without a policy. A provisioner
+	// wrapper runs only for the container-script harness this launch
+	// resolved (and the policy, if any, allowed): a non-container-script
+	// harness clears the wrapper and bundle, as WriteProjectPreStartHook
+	// clears a stale project hook below; a container-script harness clears
+	// the whole bundle, gets the control-plane inputs restaged and restages
+	// its own bundle. After a Resolve
+	// error with no policy attached, the fallback keeps today's behaviour and
+	// leaves the agent home as it is.
+	if !resolveFailed {
+		// An agent provisioned before the control plane recorded its inputs
+		// has its record seeded once, before the bundle is cleared: from the
+		// existing inputs/ (three known files) for a container-script
+		// harness, empty otherwise. Either way the record exists afterwards,
+		// so the seed never runs again for this agent.
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			if _, err := seedControlPlaneInputsIfAbsent(agentDir, agentHome, agentID); err != nil {
+				return nil, fmt.Errorf("seed harness inputs: %w", err)
+			}
+		} else if err := ensureControlPlaneInputsRecord(agentDir); err != nil {
+			return nil, fmt.Errorf("record harness inputs: %w", err)
+		}
+		if err := resetStagedProvisioning(h, agentHome); err != nil {
+			return nil, err
+		}
+		// Restage the control-plane inputs (instructions, system prompt,
+		// resolved skills) recorded at provisioning, so inputs/ holds only
+		// control-plane content.
+		if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			if err := restoreControlPlaneInputs(agentDir, agentHome); err != nil {
+				return nil, fmt.Errorf("restage harness inputs: %w", err)
+			}
+			// Restore exactly the secret files the control plane recorded;
+			// ApplyAuthSettings considers only these besides the secrets
+			// staged from this start's resolution.
+			restored, err := restoreSecretsRecord(agentDir, agentHome, agentID)
+			if err != nil {
+				return nil, fmt.Errorf("restage harness secrets: %w", err)
+			}
+			cs.SetRecordedSecrets(restored)
+		}
+		// Restage the capture-auth assets a non-container-script harness
+		// keeps in the bundle, as ProvisionAgent stages them.
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); !isContainerScript && resolvedHCDir != nil && resolvedHCDir.Path != "" {
+			if err := harness.StageCaptureAuthAssets(agentHome, resolvedHCDir.Path, resolvedHCDir.Config.Auth); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: capture-auth asset staging failed: %v\n", err)
+			}
+		}
 	}
 
 	// Reconcile the harness bundle for existing agents. Provision() is
-	// idempotent and stages any missing files.
+	// idempotent and stages any missing files. A container-script harness
+	// starts from a cleared bundle (resetStagedProvisioning), so a staging
+	// failure fails the launch: no provisioner wrapper or bundle from an
+	// earlier launch remains to run instead.
 	if err := h.Provision(ctx, opts.Name, agentDir, agentHome, agentWorkspace); err != nil {
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			return nil, fmt.Errorf("stage harness bundle: %w", err)
+		}
 		util.Debugf("Start: harness reconciliation failed: %v", err)
 	}
 
@@ -748,6 +840,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if applier, ok := h.(api.AuthSettingsApplier); ok {
 			if err := applier.ApplyAuthSettings(agentHome, resolved); err != nil {
 				return nil, fmt.Errorf("failed to apply auth settings: %w", err)
+			}
+			// Record the staged secret files auth-candidates.json references,
+			// so later starts restore exactly these.
+			if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+				if err := recordSecrets(agentDir, agentHome, cs.StagedSecretNames()); err != nil {
+					return nil, fmt.Errorf("record harness secrets: %w", err)
+				}
 			}
 			util.Debugf("auth: applied harness-specific settings for %q", harnessName)
 		}
@@ -1847,6 +1946,7 @@ authDone:
 				a.Phase = status
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
+				a.HarnessConfigSource = harnessConfigSource
 				a.HarnessAuth = opts.HarnessAuth
 				a.Profile = profileName
 				return &a, nil
@@ -1866,6 +1966,7 @@ authDone:
 		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
+		HarnessConfigSource:   harnessConfigSource,
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
 	}, nil

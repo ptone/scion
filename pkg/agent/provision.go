@@ -698,11 +698,10 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 // preferring a Hub-hydrated path recorded on the context (§7.3 step 4) over the
 // on-disk FindHarnessConfigDir search. This lets a broker that lacks the
 // harness-config locally use the copy fetched from the Hub's storage backend.
+// The ordering itself lives in config.ResolveHarnessConfigDir, which the
+// runtime broker's preflights share.
 func resolveHarnessConfigDir(ctx context.Context, name, projectPath string, templatePaths ...string) (*config.HarnessConfigDir, error) {
-	if hcPath := api.HarnessConfigPathFromContext(ctx); hcPath != "" {
-		return config.LoadHarnessConfigDir(hcPath)
-	}
-	return config.FindHarnessConfigDir(name, projectPath, templatePaths...)
+	return config.ResolveHarnessConfigDir(api.HarnessConfigPathFromContext(ctx), name, projectPath, templatePaths...)
 }
 
 // isGitWorkspaceProject reports whether projectDir should be treated as a
@@ -768,7 +767,13 @@ type resolvedTemplate struct {
 // ErrHarnessConfigNotFound surfaces synchronously during admission, exactly
 // as GetAgent/ProvisionAgent would raise it — the two resolutions go through
 // this one function and cannot drift apart.
-func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
+//
+// projectPath is the project path as the caller supplied it; the template
+// chain is resolved against it. projectDir is config.GetResolvedProjectDir's
+// result for it: harness-config resolution uses that single resolved project
+// dir for provisioning, launch (Start's harness.Resolve) and the runtime
+// broker's policy gate.
+func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, projectDir, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
 	chain, err := config.GetTemplateChainInProject(templateName, projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load template: %w", err)
@@ -811,9 +816,12 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 	for _, tpl := range chain {
 		templatePaths = append(templatePaths, tpl.Path)
 	}
-	hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectPath, templatePaths...)
+	hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find harness-config %q: %w", harnessConfigName, err)
+	}
+	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, harness.EffectiveConfig(harnessConfigName, hcDir, settings, profileName)); err != nil {
+		return nil, err
 	}
 
 	return &resolvedTemplate{
@@ -833,6 +841,17 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 // during admission, for an async create: Manager.Start would otherwise raise
 // the same errors, but only from inside the launch goroutine.
 func (m *AgentManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	return PreflightResolve(ctx, opts)
+}
+
+// PreflightResolve is Preflight's resolution as a package function: it
+// resolves opts' template chain and harness-config exactly as
+// ProvisionAgent does (resolveTemplateAndHarnessConfig), evaluating any
+// harness-config policy on ctx, and has no side effects. The runtime broker
+// calls it during create admission, before any workspace step, so a policy
+// refusal happens before a worktree, agent directory, staged bundle or
+// container exists.
+func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 
 	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
@@ -857,7 +876,7 @@ func (m *AgentManager) Preflight(ctx context.Context, opts api.StartOptions) err
 		templateName = defaultTemplate
 	}
 
-	_, err = resolveTemplateAndHarnessConfig(ctx, templateName, opts.HarnessConfig, opts.ProjectPath, profileName, settings, inlineCfg)
+	_, err = resolveTemplateAndHarnessConfig(ctx, templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
 	return err
 }
 
@@ -1276,7 +1295,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// 2, 2b, 2c. Load the template chain, merge configs and resolve the
 	// harness-config, through the same resolution Preflight uses.
-	rt, err := resolveTemplateAndHarnessConfig(ctx, templateName, harnessConfig, projectPath, profileName, settings, inlineCfg)
+	rt, err := resolveTemplateAndHarnessConfig(ctx, templateName, harnessConfig, projectPath, projectDir, profileName, settings, inlineCfg)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -1422,7 +1441,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Step 3: Copy skills directories into harness-specific location
 	resolved, err := harness.Resolve(ctx, harness.ResolveOptions{
 		Name:          harnessConfigName,
-		ProjectPath:   projectPath,
+		ProjectPath:   projectDir,
 		TemplatePaths: templatePaths,
 		ProfileName:   profileName,
 		Settings:      settings,
@@ -1430,6 +1449,18 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	})
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to resolve harness for %q: %w", harnessConfigName, err)
+	}
+	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, resolved.Config); err != nil {
+		return "", "", nil, err
+	}
+	// Reset staged provisioning state before the harness is provisioned
+	// (resetStagedProvisioning): a non-container-script harness clears the
+	// wrapper and bundle; a container-script harness clears the whole bundle,
+	// including inputs/ (so content copied from harness-config or template
+	// home/ trees cannot land there), and the control plane restages its
+	// inputs below.
+	if err := resetStagedProvisioning(resolved.Harness, agentHome); err != nil {
+		return "", "", nil, err
 	}
 	h := resolved.Harness
 	util.Debugf("ProvisionAgent: harness implementation=%s for harness=%q", resolved.Implementation, finalScionCfg.Harness)
@@ -1587,10 +1618,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 
 		// Stage resolved-skills.json for container-script harnesses
-		recordData, _ := json.MarshalIndent(resolvedSkillsRecord, "", "  ")
-		inputPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json")
-		if info, err := os.Stat(filepath.Dir(inputPath)); err == nil && info.IsDir() {
-			_ = os.WriteFile(inputPath, recordData, 0644)
+		if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+			recordData, _ := json.MarshalIndent(resolvedSkillsRecord, "", "  ")
+			inputPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json")
+			if err := os.MkdirAll(filepath.Dir(inputPath), 0755); err == nil {
+				_ = os.WriteFile(inputPath, recordData, 0644)
+			}
 		}
 	}
 
@@ -1888,6 +1921,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		Template:              displayTemplateName,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: config.ComputeHarnessConfigRevision(hcDir.Path),
+		HarnessConfigSource:   string(hcDir.Source),
 		Profile:               profileName,
 	}
 	if optionalStatus != "" {
@@ -1959,6 +1993,25 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 		_ = f.Close()
 		util.Debugf("provision: configured git credential helper for shared workspace in %s", gitconfigPath)
+	}
+
+	// Record the per-agent inputs staged above (the control plane is their
+	// only writer since resetStagedProvisioning cleared the bundle), so Start
+	// can restage exactly this content on every launch.
+	// A harness that is not container-script stages no inputs; its record is
+	// created empty, so a later switch to a container-script harness never
+	// treats this agent as one provisioned before the record existed.
+	if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+		if err := snapshotControlPlaneInputs(agentDir, agentHome); err != nil {
+			return "", "", nil, fmt.Errorf("record harness inputs: %w", err)
+		}
+	} else if err := resetControlPlaneInputsRecord(agentDir); err != nil {
+		return "", "", nil, fmt.Errorf("record harness inputs: %w", err)
+	}
+	// The secrets record is created empty when absent and otherwise kept: a
+	// re-render does not stage secrets, which are recorded on start.
+	if err := ensureSecretsRecord(agentDir); err != nil {
+		return "", "", nil, fmt.Errorf("record harness secrets: %w", err)
 	}
 
 	// 3. Harness provisioning
@@ -2509,7 +2562,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
 			effectiveTemplate, err, agentCfg.Harness, agentCfg.Image)
-		resolveModelAliasForExistingAgent(ctx, agentCfg, projectPath)
+		resolveModelAliasForExistingAgent(ctx, agentCfg, projectDir)
 		// Populate Info from agent-info.json here too, matching the
 		// successful-lookup path below. scion-agent.json never carries Info
 		// (json:"-"), so without this, run.go's own independent
@@ -2541,7 +2594,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// This covers the case where scion-agent.json was written with a raw alias
 	// (e.g. by applyInlineConfigUpdate before the hub-side fix) or where the
 	// agent was created before the hub resolved aliases at storage time.
-	resolveModelAliasForExistingAgent(ctx, finalCfg, projectPath)
+	resolveModelAliasForExistingAgent(ctx, finalCfg, projectDir)
 
 	// Ensure Info is populated from agent-info.json if available
 	if agentInfo != nil {
@@ -2562,7 +2615,10 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 // built-in alias table (harnesses/<name>/config.yaml, via
 // harness.DefaultModelAliases). This is a no-op if cfg is nil, cfg.Model is
 // empty, or cfg.Model is not a known alias.
-func resolveModelAliasForExistingAgent(ctx context.Context, cfg *api.ScionConfig, projectPath string) {
+//
+// projectDir is the resolved project dir (config.GetResolvedProjectDir), the
+// same one harness-config resolution uses elsewhere.
+func resolveModelAliasForExistingAgent(ctx context.Context, cfg *api.ScionConfig, projectDir string) {
 	if cfg == nil || cfg.Model == "" {
 		return
 	}
@@ -2573,7 +2629,7 @@ func resolveModelAliasForExistingAgent(ctx context.Context, cfg *api.ScionConfig
 		hcName = cfg.DefaultHarnessConfig
 	}
 	if hcName != "" {
-		if hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectPath); err == nil && hcDir != nil {
+		if hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectDir); err == nil && hcDir != nil {
 			// hcDir.Config is a config.HarnessConfigEntry value (not a
 			// pointer), so it can never itself be nil here; only its
 			// ModelAliases map can be nil/empty, which len() handles safely.

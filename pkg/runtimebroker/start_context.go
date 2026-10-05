@@ -136,6 +136,31 @@ type startContextInputs struct {
 	// than inferred from request shape (see resolveEffectiveHubEndpoint).
 	// Required: buildStartContext rejects the zero value.
 	Operation startOperation
+
+	// PolicyPreflight, set by createAgent when the harness-config policy can
+	// refuse, runs agent.PreflightResolve (with the policy hook attached to
+	// ctx by the caller) right after hydration and before any workspace
+	// step, so a refusal happens before a worktree, agent directory, staged
+	// bundle or container exists. Hub-managed project path initialization
+	// and hydration precede it, since resolution reads their results.
+	PolicyPreflight bool
+
+	// Prehydrated carries hydration results createAgent's preflights
+	// already obtained, so launch provisions the same bundle they evaluated
+	// instead of hydrating again. Zero value (startAgent, restartAgent):
+	// hydrate here as usual.
+	Prehydrated prehydratedBundle
+}
+
+// prehydratedBundle records hub hydration already performed for a dispatch.
+// A Done flag means hydration completed without error; its Path may be empty
+// (unstamped, hash-only, or no resolver), which still means "do not hydrate
+// again".
+type prehydratedBundle struct {
+	TemplateDone      bool
+	TemplatePath      string
+	HarnessConfigDone bool
+	HarnessConfigPath string
 }
 
 // buildStartContext unifies the common startup logic shared by createAgent,
@@ -771,7 +796,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Template hydration ---
-	if hubConn != nil && in.Config != nil {
+	if in.Prehydrated.TemplateDone {
+		if in.Prehydrated.TemplatePath != "" {
+			opts.Template = in.Prehydrated.TemplatePath
+		}
+	} else if hubConn != nil && in.Config != nil {
 		templatePath, err := s.hydrateTemplate(ctx, in.Config, hubConn)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
@@ -793,7 +822,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// --- Harness-config hydration ---
 	// Resolve a Hub-managed harness-config to a local directory so provisioning
 	// can use it even on a broker that lacks the config on its local filesystem.
-	if hubConn != nil && in.Config != nil {
+	if in.Prehydrated.HarnessConfigDone {
+		if in.Prehydrated.HarnessConfigPath != "" {
+			opts.HarnessConfigPath = in.Prehydrated.HarnessConfigPath
+		}
+	} else if hubConn != nil && in.Config != nil {
 		hcPath, err := s.hydrateHarnessConfig(ctx, in.Config, hubConn)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
@@ -808,6 +841,19 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			opts.HarnessConfigPath = hcPath
 			if s.config.Debug {
 				s.agentLifecycleLog.Debug("Using hydrated harness-config", "agent_id", in.AgentID, "path", hcPath)
+			}
+		}
+	}
+
+	// --- Harness-config policy at create admission ---
+	// Same template and harness-config resolution as Provision, side-effect
+	// free. Only a policy refusal is acted on here; any other resolution
+	// error is left to Provision/Start, which report it as before.
+	if in.PolicyPreflight {
+		if err := agent.PreflightResolve(ctx, opts); err != nil {
+			if _, refused := harnessPolicyRefusalFrom(err); refused {
+				span.SetStatus(codes.Error, err.Error())
+				return nil, err
 			}
 		}
 	}
