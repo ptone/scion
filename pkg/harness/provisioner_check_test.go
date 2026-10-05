@@ -20,14 +20,40 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
+func requireUnusable(t *testing.T, err error) *UnusableProvisionerError {
+	t.Helper()
+	var ue *UnusableProvisionerError
+	if !errors.As(err, &ue) || !errors.Is(err, ErrUnusableProvisioner) {
+		t.Fatalf("expected UnusableProvisionerError, got %v", err)
+	}
+	return ue
+}
+
+func assertContains(t *testing.T, label, s string, wants ...string) {
+	t.Helper()
+	for _, w := range wants {
+		if !strings.Contains(s, w) {
+			t.Errorf("%s %q does not contain %q", label, s, w)
+		}
+	}
+}
+
+func assertNotContains(t *testing.T, label, s string, nots ...string) {
+	t.Helper()
+	for _, n := range nots {
+		if strings.Contains(s, n) {
+			t.Errorf("%s %q must not contain %q", label, s, n)
+		}
+	}
+}
+
 // Resolve refuses a harness-config whose provisioner cannot run, with a
-// typed error naming the harness-config, its directory and the fix
-// (ptone/scion#611).
-func TestResolve_UnusableProvisioner(t *testing.T) {
+// typed error naming the harness-config, the reason and a fix
+// (ptone/scion#611). Global copy of a bundled harness type: `upgrade`
+// repairs it.
+func TestResolve_UnusableProvisioner_GlobalBundled(t *testing.T) {
 	for _, tc := range []struct {
 		name, provisioner, wantReason string
 	}{
@@ -43,46 +69,96 @@ func TestResolve_UnusableProvisioner(t *testing.T) {
 			writeFile(t, filepath.Join(hcDir, "config.yaml"), "harness: claude\nimage: img:test\nprovisioner:\n"+tc.provisioner)
 			writeFile(t, filepath.Join(hcDir, "provision.py"), "#!/usr/bin/env python3\n")
 
-			_, err := Resolve(context.Background(), ResolveOptions{Name: "hc"})
-			var ue *UnusableProvisionerError
-			if !errors.As(err, &ue) || !errors.Is(err, ErrUnusableProvisioner) {
-				t.Fatalf("expected UnusableProvisionerError, got %v", err)
-			}
-			if ue.Name != "hc" || ue.Path != hcDir || ue.Source != config.HarnessConfigSourceBrokerLocal {
+			ue := requireUnusable(t, func() error { _, err := Resolve(context.Background(), ResolveOptions{Name: "hc"}); return err }())
+			if ue.Name != "hc" || ue.HarnessType != "claude" || ue.Path != hcDir || ue.Scope != HarnessConfigScopeGlobal || !ue.Bundled {
 				t.Errorf("error = %+v", ue)
 			}
-			msg := err.Error()
-			for _, want := range []string{`"hc"`, hcDir, tc.wantReason, "scion harness-config upgrade hc --activate-script", "scion harness-config install harnesses/"} {
-				if !strings.Contains(msg, want) {
-					t.Errorf("error %q does not contain %q", msg, want)
-				}
-			}
-			if strings.Contains(msg, "harness-config sync") {
-				t.Errorf("a broker-local config should not suggest a hub sync: %q", msg)
-			}
+			assertContains(t, "error", ue.Error(), `"hc"`, hcDir, tc.wantReason,
+				"scion harness-config upgrade hc --activate-script",
+				"scion harness-config install --force --global --name hc harnesses/claude")
+			assertNotContains(t, "error", ue.Error(), "harness-config sync")
+			pub := ue.PublicMessage()
+			assertContains(t, "public message", pub, `"hc"`, tc.wantReason, "scion harness-config upgrade hc --activate-script")
+			assertNotContains(t, "public message", pub, home)
 		})
 	}
 }
 
-// A hub-hydrated copy with an unusable provisioner is refused too, and the
-// fix also names updating the hub copy.
-func TestResolve_UnusableProvisioner_HubHydrated(t *testing.T) {
+// Global copy of a harness type with no bundled harness-config: `upgrade`
+// would be a no-op, so the fix is to edit config.yaml.
+func TestResolve_UnusableProvisioner_GlobalNotBundled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	hcDir := filepath.Join(home, ".scion", "harness-configs", "hc")
+	writeFile(t, filepath.Join(hcDir, "config.yaml"), "harness: generic\nimage: img:test\nprovisioner:\n  type: builtin\n")
+
+	ue := requireUnusable(t, func() error { _, err := Resolve(context.Background(), ResolveOptions{Name: "hc"}); return err }())
+	if ue.Scope != HarnessConfigScopeGlobal || ue.Bundled {
+		t.Errorf("error = %+v", ue)
+	}
+	assertContains(t, "error", ue.Error(), "Edit "+filepath.Join(hcDir, "config.yaml"), "provisioner.command", "cannot repair it")
+	assertNotContains(t, "error", ue.Error(), "--activate-script", "harness-config install")
+}
+
+// Project copy: `upgrade` only operates on the global directory, so the
+// fix names the project's config.yaml (and a project-scope reinstall for a
+// bundled type), never `upgrade`.
+func TestResolve_UnusableProvisioner_Project(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	project := filepath.Join(t.TempDir(), ".scion")
+	hcDir := filepath.Join(project, "harness-configs", "hc")
+	writeFile(t, filepath.Join(hcDir, "config.yaml"), "harness: claude\nimage: img:test\nprovisioner:\n  type: builtin\n")
+	// A usable global copy of the same name is shadowed by the project one.
+	writeFile(t, filepath.Join(home, ".scion", "harness-configs", "hc", "config.yaml"), "harness: claude\nimage: img:test\n")
+
+	ue := requireUnusable(t, func() error {
+		_, err := Resolve(context.Background(), ResolveOptions{Name: "hc", ProjectPath: project})
+		return err
+	}())
+	if ue.Scope != HarnessConfigScopeProject || ue.Path != hcDir {
+		t.Errorf("error = %+v", ue)
+	}
+	assertContains(t, "error", ue.Error(), "Edit "+filepath.Join(hcDir, "config.yaml"),
+		"scion harness-config install --force --name hc harnesses/claude")
+	assertNotContains(t, "error", ue.Error(), "harness-config upgrade", "--global")
+	assertNotContains(t, "public message", ue.PublicMessage(), project)
+}
+
+// Template-bundled copy: the template is what to fix.
+func TestResolve_UnusableProvisioner_Template(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tpl := filepath.Join(t.TempDir(), "tpl")
+	hcDir := filepath.Join(tpl, "harness-configs", "hc")
+	writeFile(t, filepath.Join(hcDir, "config.yaml"), "harness: claude\nimage: img:test\nprovisioner:\n  type: container-script\n")
+
+	ue := requireUnusable(t, func() error {
+		_, err := Resolve(context.Background(), ResolveOptions{Name: "hc", TemplatePaths: []string{tpl}})
+		return err
+	}())
+	if ue.Scope != HarnessConfigScopeTemplate {
+		t.Errorf("scope = %q, want template", ue.Scope)
+	}
+	assertContains(t, "error", ue.Error(), filepath.Join(hcDir, "config.yaml"), "agent's template")
+	assertContains(t, "public message", ue.PublicMessage(), "harness-configs/hc/config.yaml in the agent's template")
+	assertNotContains(t, "error", ue.Error(), "harness-config upgrade", "harness-config install")
+}
+
+// Hub-hydrated copy: repair a local copy and sync it to the hub.
+func TestResolve_UnusableProvisioner_HubHydrated(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	hydrated := filepath.Join(t.TempDir(), "hc")
 	writeFile(t, filepath.Join(hydrated, "config.yaml"), "harness: claude\nimage: img:test\nprovisioner:\n  type: builtin\n")
 
-	_, err := Resolve(context.Background(), ResolveOptions{Name: "hc", ConfigDirPath: hydrated})
-	var ue *UnusableProvisionerError
-	if !errors.As(err, &ue) {
-		t.Fatalf("expected UnusableProvisionerError, got %v", err)
+	ue := requireUnusable(t, func() error {
+		_, err := Resolve(context.Background(), ResolveOptions{Name: "hc", ConfigDirPath: hydrated})
+		return err
+	}())
+	if ue.Scope != HarnessConfigScopeHub {
+		t.Errorf("scope = %q, want hub", ue.Scope)
 	}
-	if ue.Source != config.HarnessConfigSourceHubHydrated {
-		t.Errorf("source = %q, want hub-hydrated", ue.Source)
-	}
-	if !strings.Contains(err.Error(), "scion harness-config sync hc") {
-		t.Errorf("error does not name the hub update: %v", err)
-	}
+	assertContains(t, "public message", ue.PublicMessage(), "scion harness-config sync hc", "(hub)")
+	assertNotContains(t, "public message", ue.PublicMessage(), hydrated)
 }
 
 // A container-script provisioner with a command, and a harness-config with

@@ -847,7 +847,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// Drift visibility: WARN when a broker-local copy of the same name
 	// differs from the hub copy this launch uses (ptone/scion#611).
 	if opts.HarnessConfigPath != "" && in.Config != nil {
-		s.warnHarnessConfigDrift(in.AgentID, in.Config.HarnessConfig, opts.HarnessConfigPath, in.ProjectPath)
+		s.warnHarnessConfigDrift(in.AgentID, in.Config.HarnessConfig, opts.HarnessConfigPath, in.ProjectPath, in.Config.HarnessConfigHash)
 	}
 
 	// --- Harness-config policy at create admission ---

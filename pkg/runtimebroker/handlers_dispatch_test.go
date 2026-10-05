@@ -176,6 +176,7 @@ image: scion-claude:test
 provisioner:
   type: container-script
   interface_version: 1
+  command: ["python3", "/home/scion/.scion/harness/provision.py"]
 `)
 
 	code, body := dispatchAgent(t, srv, "scripted-envelope")

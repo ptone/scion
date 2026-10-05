@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,7 +31,7 @@ const (
 	unusableEmptyCommandHC = "harness: generic\nimage: scion-base:test\nuser: scion\nprovisioner:\n  type: container-script\n  interface_version: 1\n"
 )
 
-func assertUnusableProvisionerErr(t *testing.T, err error, name string) {
+func assertUnusableProvisionerErr(t *testing.T, err error, name, wantFix string) {
 	t.Helper()
 	var ue *harness.UnusableProvisionerError
 	if !errors.As(err, &ue) || !errors.Is(err, harness.ErrUnusableProvisioner) {
@@ -39,8 +40,8 @@ func assertUnusableProvisionerErr(t *testing.T, err error, name string) {
 	if ue.Name != name {
 		t.Errorf("error names %q, want %q", ue.Name, name)
 	}
-	if !strings.Contains(err.Error(), "scion harness-config upgrade "+name) {
-		t.Errorf("error does not name the fix: %v", err)
+	if !strings.Contains(err.Error(), wantFix) {
+		t.Errorf("error does not name the fix %q: %v", wantFix, err)
 	}
 }
 
@@ -72,7 +73,7 @@ func TestStart_UnusableProvisionerFailsLaunch(t *testing.T) {
 				_, err := policyTestManager(&runs).Start(ctx, api.StartOptions{
 					Name: "fresh", ProjectPath: e.scion, HarnessConfig: "hc-bad", NoAuth: true,
 				})
-				assertUnusableProvisionerErr(t, err, "hc-bad")
+				assertUnusableProvisionerErr(t, err, "hc-bad", projectFix(e))
 				if runs != 0 {
 					t.Errorf("container ran %d times; want none", runs)
 				}
@@ -94,11 +95,37 @@ func TestStart_UnusableProvisionerFailsLaunch(t *testing.T) {
 				}
 				runsBefore := runs
 				_, err := mgr.Start(ctx, opts)
-				assertUnusableProvisionerErr(t, err, "hc-bad")
+				assertUnusableProvisionerErr(t, err, "hc-bad", projectFix(e))
 				if runs != runsBefore {
 					t.Error("the container must not run for an unusable provisioner")
 				}
 			})
 		}
+	}
+}
+
+// projectFix is the advice for the project-scoped hc-bad: edit its
+// config.yaml (`upgrade` operates only on the global directory).
+func projectFix(e *policyTestEnv) string {
+	return "Edit " + filepath.Join(e.scion, "harness-configs", "hc-bad", "config.yaml")
+}
+
+// A global harness-config of a bundled harness type is repaired with
+// `upgrade`, and the error says so.
+func TestStart_UnusableProvisionerGlobalNamesUpgrade(t *testing.T) {
+	e := newPolicyTestEnv(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writePolicyHC(t, filepath.Join(home, ".scion", "harness-configs", "hc-global"),
+		"harness: claude\nimage: scion-claude:test\nuser: scion\nprovisioner:\n  type: builtin\n")
+	runs := 0
+	_, err = policyTestManager(&runs).Start(context.Background(), api.StartOptions{
+		Name: "global", ProjectPath: e.scion, HarnessConfig: "hc-global", NoAuth: true,
+	})
+	assertUnusableProvisionerErr(t, err, "hc-global", "scion harness-config upgrade hc-global --activate-script")
+	if runs != 0 {
+		t.Errorf("container ran %d times; want none", runs)
 	}
 }

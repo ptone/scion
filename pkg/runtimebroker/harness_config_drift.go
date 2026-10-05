@@ -32,12 +32,20 @@ import (
 // (ptone/scion#611). Nothing is logged when no local copy exists or the
 // contents match.
 //
-// Contents are compared with the hub's content hash (transfer.CollectFiles
-// plus transfer.ComputeContentHash over line-ending-normalized files, as the
-// hub computes it when storing a harness-config), not
-// config.ComputeHarnessConfigRevision, which uses a different algorithm.
-func (s *Server) warnHarnessConfigDrift(agentID, name, hydratedPath, projectPath string) {
-	if name == "" || hydratedPath == "" {
+// Both copies are hashed with hubCompatibleContentHash: the hub's content
+// hash algorithm (transfer.ComputeContentHash) over line-ending-normalized
+// files, excluding transient files. The values are therefore comparable with
+// each other, but are not necessarily the hub record's stored content_hash
+// (a record uploaded with CRLF content or transient files hashes
+// differently); dispatchHash, the record hash the dispatch carried, is
+// logged alongside when present.
+func (s *Server) warnHarnessConfigDrift(agentID, name, hydratedPath, projectPath, dispatchHash string) {
+	if hydratedPath == "" {
+		return
+	}
+	if name == "" {
+		s.agentLifecycleLog.Debug("Harness-config drift check skipped: the dispatch names no harness-config",
+			"agent_id", agentID, "path", hydratedPath)
 		return
 	}
 	local, err := config.FindHarnessConfigDir(name, harnessConfigProjectDir(projectPath))
@@ -62,17 +70,23 @@ func (s *Server) warnHarnessConfigDrift(agentID, name, hydratedPath, projectPath
 	if hydratedHash == localHash {
 		return
 	}
-	s.agentLifecycleLog.Warn("Harness-config drift: the on-disk copy differs from the hub copy used for this agent; local starts and dispatches without a hub harness-config use the on-disk copy",
+	attrs := []any{
 		"agent_id", agentID,
 		"harness_config", name,
 		"hub_hydrated_path", hydratedPath,
-		"hub_content_hash", hydratedHash,
+		"hydrated_content_hash", hydratedHash,
 		"on_disk_path", local.Path,
-		"on_disk_content_hash", localHash)
+		"on_disk_content_hash", localHash,
+	}
+	if dispatchHash != "" {
+		attrs = append(attrs, "dispatch_content_hash", dispatchHash)
+	}
+	s.agentLifecycleLog.Warn("Harness-config drift: the on-disk copy differs from the hub copy used for this agent; local starts and dispatches without a hub harness-config use the on-disk copy", attrs...)
 }
 
-// hubCompatibleContentHash returns the hub content hash of the files in dir,
-// skipping transient files (isTransientHarnessConfigFile). Files are read and
+// hubCompatibleContentHash returns the hub content hash algorithm's value
+// over the files in dir, line-ending-normalized, skipping transient files
+// (isTransientHarnessConfigFile). Files are read and
 // normalized in memory; dir is not modified.
 func hubCompatibleContentHash(dir string) (string, error) {
 	files, err := transfer.CollectFiles(dir, nil)

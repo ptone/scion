@@ -73,13 +73,14 @@ func TestHarnessConfigDrift_WarnsWhenContentDiffers(t *testing.T) {
 		"provision.py": "print('v1')\n",
 	})
 
-	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "")
+	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "", "sha256:record")
 
 	if !driftWarned(logBuf) {
 		t.Fatalf("expected a drift WARN, got log: %s", logBuf.String())
 	}
 	out := logBuf.String()
-	for _, want := range []string{"hub_hydrated_path=" + hydrated, "on_disk_path=" + local, "harness_config=hc", "agent_id=agent-1"} {
+	for _, want := range []string{"hub_hydrated_path=" + hydrated, "on_disk_path=" + local, "harness_config=hc", "agent_id=agent-1",
+		"hydrated_content_hash=sha256:", "on_disk_content_hash=sha256:", "dispatch_content_hash=sha256:record"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("drift WARN missing %q: %s", want, out)
 		}
@@ -93,7 +94,7 @@ func TestHarnessConfigDrift_NoWarnWhenEqual(t *testing.T) {
 		"provision.py": "print('v2')\n",
 	})
 
-	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "")
+	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "", "")
 
 	if driftWarned(logBuf) {
 		t.Errorf("no drift WARN expected for equal content, got log: %s", logBuf.String())
@@ -109,7 +110,7 @@ func TestHarnessConfigDrift_NoWarnForCRLFOnlyDifference(t *testing.T) {
 		"provision.py": "print('v2')\r\n",
 	})
 
-	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "")
+	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "", "")
 
 	if driftWarned(logBuf) {
 		t.Errorf("no drift WARN expected for a line-ending-only difference, got log: %s", logBuf.String())
@@ -126,7 +127,7 @@ func TestHarnessConfigDrift_NoWarnForTransientFilesOnly(t *testing.T) {
 		".provision.py.tmp-12345":          "partial\n",
 	})
 
-	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "")
+	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "", "")
 
 	if driftWarned(logBuf) {
 		t.Errorf("no drift WARN expected when only transient files differ, got log: %s", logBuf.String())
@@ -136,7 +137,7 @@ func TestHarnessConfigDrift_NoWarnForTransientFilesOnly(t *testing.T) {
 func TestHarnessConfigDrift_NoWarnWhenNoLocalCopy(t *testing.T) {
 	srv, logBuf, _, hydrated := driftEnv(t)
 
-	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "")
+	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "", "")
 
 	if driftWarned(logBuf) {
 		t.Errorf("no drift WARN expected without an on-disk copy, got log: %s", logBuf.String())

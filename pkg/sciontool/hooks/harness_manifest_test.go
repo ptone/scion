@@ -95,7 +95,7 @@ func TestLoadHarnessManifestRequirement_BuiltinRequiredWithError(t *testing.T) {
 	if !got.Required {
 		t.Fatal("expected Required=true for builtin provisioner")
 	}
-	for _, want := range []string{`"builtin"`, "scion harness-config upgrade claude --activate-script", "harnesses/claude"} {
+	for _, want := range []string{`harness type "claude"`, `"builtin"`, "scion harness-config upgrade <harness-config> --activate-script", "harnesses/claude"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err.Error(), want)
 		}

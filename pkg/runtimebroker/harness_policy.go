@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
 // harnessPolicyInput describes the harness-config a dispatch's launch will
@@ -59,7 +60,7 @@ type harnessPolicyInput struct {
 // Detail, the text for logs and dispatch-attempt records; callers write it
 // with writeHarnessPolicyRefusal so every path answers identically.
 func (s *Server) enforceHarnessConfigPolicy(in harnessPolicyInput) harnessPolicyDecision {
-	name, entries, ok, err := s.lookupHarnessConfigForPolicy(in.Req, in.HydratedTemplatePath, in.HydratedHCPath)
+	name, entries, hcDir, ok, err := s.lookupHarnessConfigDirForPolicy(in.Req, in.HydratedTemplatePath, in.HydratedHCPath)
 	if err != nil {
 		if s.config.AllowContainerScriptHarnesses {
 			return harnessPolicyDecision{OK: true}
@@ -76,6 +77,27 @@ func (s *Server) enforceHarnessConfigPolicy(in harnessPolicyInput) harnessPolicy
 	}
 	if !ok {
 		return harnessPolicyDecision{OK: true}
+	}
+	// When the policy can refuse, an unusable provisioner is reported
+	// first: it is the more specific error, and enabling container-script
+	// harnesses would only surface it at launch (ptone/scion#611). With
+	// container-script harnesses allowed, launch reports it. A settings-only
+	// entry (no directory) is not checked: launch never takes a provisioner
+	// from settings.
+	if !s.config.AllowContainerScriptHarnesses && hcDir != nil {
+		for _, entry := range entries {
+			if err := harness.CheckProvisionerUsable(name, hcDir, entry); err != nil {
+				if ue, isUnusable := unusableProvisionerFrom(err); isUnusable {
+					return harnessPolicyDecision{
+						OK:         false,
+						Code:       ErrCodeHarnessConfigUnusable,
+						HTTPStatus: http.StatusUnprocessableEntity,
+						Message:    ue.PublicMessage(),
+						Detail:     ue.Error(),
+					}
+				}
+			}
+		}
 	}
 	// Any refused entry refuses the dispatch.
 	for _, entry := range entries {
@@ -219,6 +241,13 @@ func harnessPolicyInputForStart(opts api.StartOptions, agentID string) harnessPo
 // the caller must not fall back to evaluating some other entry (fail
 // closed) when the policy can refuse.
 func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest, hydratedTemplatePath, hydratedHCPath string) (string, []config.HarnessConfigEntry, bool, error) {
+	name, entries, _, ok, err := s.lookupHarnessConfigDirForPolicy(req, hydratedTemplatePath, hydratedHCPath)
+	return name, entries, ok, err
+}
+
+// lookupHarnessConfigDirForPolicy is lookupHarnessConfigForPolicy that also
+// returns the directory the entry came from (nil for a settings entry).
+func (s *Server) lookupHarnessConfigDirForPolicy(req CreateAgentRequest, hydratedTemplatePath, hydratedHCPath string) (string, []config.HarnessConfigEntry, *config.HarnessConfigDir, bool, error) {
 	projectDir := harnessConfigProjectDir(req.ProjectPath)
 
 	var settings *config.VersionedSettings
@@ -235,15 +264,15 @@ func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest, hydratedTe
 	if hydratedHCPath != "" {
 		hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, name, "")
 		if err != nil {
-			return name, nil, false, fmt.Errorf("hydrated harness-config %q could not be loaded: %w", name, err)
+			return name, nil, nil, false, fmt.Errorf("hydrated harness-config %q could not be loaded: %w", name, err)
 		}
 		if name == "" {
 			name = hcDir.Name
 		}
-		return name, []config.HarnessConfigEntry{hcDir.Config}, true, nil
+		return name, []config.HarnessConfigEntry{hcDir.Config}, hcDir, true, nil
 	}
 	if name == "" {
-		return "", nil, false, nil
+		return "", nil, nil, false, nil
 	}
 
 	// The template chain is resolved against the project path as given, as
@@ -255,15 +284,15 @@ func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest, hydratedTe
 	if projectDir != "" {
 		hcDir, err := config.ResolveHarnessConfigDir("", name, projectDir, templateChainPaths(templateForChain, req.ProjectPath)...)
 		if err == nil && hcDir != nil {
-			return name, []config.HarnessConfigEntry{hcDir.Config}, true, nil
+			return name, []config.HarnessConfigEntry{hcDir.Config}, hcDir, true, nil
 		}
 	}
 	if settings != nil {
 		if hcfg, ok := settings.HarnessConfigs[name]; ok {
-			return name, []config.HarnessConfigEntry{hcfg}, true, nil
+			return name, []config.HarnessConfigEntry{hcfg}, nil, true, nil
 		}
 	}
-	return name, nil, false, nil
+	return name, nil, nil, false, nil
 }
 
 // policyHarnessConfigName is the harness-config name the early policy check

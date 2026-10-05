@@ -1297,6 +1297,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				SkillResolutionFailed(w, skillErr)
 				return
 			}
+			// An unusable harness-config provisioner is a configuration
+			// error the caller must fix (ptone/scion#611).
+			if ue, ok := unusableProvisionerFrom(err); ok {
+				markAttemptFailed(http.StatusUnprocessableEntity, ue.PublicMessage())
+				s.writeUnusableProvisioner(w, ue, "provision agent", req.ID, nil)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
 			s.writeRuntimeOpError(w, ctx, "provision agent", err, "agent_id", req.ID)
 			return
@@ -1363,9 +1370,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		var skillErr *agent.SkillResolutionError
 		isSkillErr := errors.As(err, &skillErr)
 		policyDecision, isPolicyErr := harnessPolicyRefusalFrom(err)
+		unusableErr, isUnusable := unusableProvisionerFrom(err)
 		switch {
 		case isPolicyErr:
 			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
+		case isUnusable:
+			markAttemptFailed(http.StatusUnprocessableEntity, unusableErr.PublicMessage())
 		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
@@ -1405,6 +1415,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case isPolicyErr:
 			s.writeHarnessPolicyRefusal(w, policyDecision, "create agent", req.ID, nil)
+		case isUnusable:
+			s.writeUnusableProvisioner(w, unusableErr, "create agent", req.ID, nil)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			Conflict(w, err.Error())
 		case notFoundErr:
@@ -2408,7 +2420,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// created a new one), so mark the failure for the hub, and report
 		// the run the runtime holds now.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
-		if errors.Is(err, agent.ErrContainerNameInUse) {
+		if ue, ok := unusableProvisionerFrom(err); ok {
+			s.writeUnusableProvisioner(w, ue, "start agent", id, details)
+		} else if errors.Is(err, agent.ErrContainerNameInUse) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), details)
 		} else {
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("start agent", err).Error(), details)
@@ -2896,6 +2910,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// The stop above and Manager.Start may have acted, so mark the
 		// failure for the hub, and report the run the runtime holds now.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
+		if ue, ok := unusableProvisionerFrom(err); ok {
+			s.writeUnusableProvisioner(w, ue, "restart agent", id, details)
+			return
+		}
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, http.StatusNotFound, ErrCodeAgentNotFound, "Agent not found", details)
 			return

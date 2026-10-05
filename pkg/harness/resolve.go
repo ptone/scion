@@ -72,7 +72,7 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		// A provisioner that cannot run (legacy "builtin", or no command)
 		// would yield an agent without the provisioner's output; fail
 		// resolution instead (ptone/scion#611).
-		if err := checkProvisionerUsable(opts.Name, hcDir, entry); err != nil {
+		if err := CheckProvisionerUsable(opts.Name, hcDir, entry); err != nil {
 			return nil, err
 		}
 		if hcDir == nil || hcDir.Path == "" {
