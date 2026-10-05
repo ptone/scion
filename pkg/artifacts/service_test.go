@@ -79,7 +79,8 @@ func TestUnconfiguredServiceRoutes(t *testing.T) {
 		{http.MethodGet, "/api/v1/artifacts/shared/token", http.StatusNotFound},
 		{http.MethodGet, "/api/v1/artifacts/abc/unknown", http.StatusNotFound},
 		{http.MethodGet, "/api/v1/artifacts", http.StatusMethodNotAllowed},
-		{http.MethodDelete, "/api/v1/artifacts/abc", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/api/v1/artifacts/abc", http.StatusNotFound},
 	} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))

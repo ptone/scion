@@ -89,7 +89,19 @@ func artifactPublishScope(settings *config.Settings) string {
 	return settings.GetHubProjectID()
 }
 
+// checkArtifactPublishScope fails a user's publish early, before any
+// upload, when the checkout names no hub project to publish into.
+func checkArtifactPublishScope(settings *config.Settings) error {
+	if !config.IsHubManagedAgent() && artifactPublishScope(settings) == "" {
+		return errors.New("this checkout is not linked to a hub project; link it first (scion hub link) to publish artifacts")
+	}
+	return nil
+}
+
 func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hubclient.Client, file string) error {
+	if err := checkArtifactPublishScope(settings); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
 	defer cancel()
 	return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), GetHubEndpoint(settings), file, artifactPublishTitle, artifactPublishScope(settings))

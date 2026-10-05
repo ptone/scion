@@ -285,7 +285,9 @@ func TestGetFilePaths(t *testing.T) {
 			t.Errorf("%s: %d, want 404", p, rec.Code)
 		}
 	}
-	for _, p := range []string{"/api/v1/artifacts/shared/tok", "/api/v1/artifactsX", "/api/v1/artifacts/" + id + "%2Ffiles"} {
+	for _, p := range []string{"/api/v1/artifacts/shared/tok", "/api/v1/artifactsX", "/api/v1/artifacts/" + id + "%2Ffiles",
+		"/api/v1/artifacts/%00", "/api/v1/artifacts/%FF", "/api/v1/artifacts/not-a-uuid",
+		"/api/v1/artifacts/" + strings.ToUpper(id), "/api/v1/artifacts/%00/files/a%20b.txt"} {
 		if rec := f.do(&agentA, http.MethodGet, p, nil, nil); rec.Code != http.StatusNotFound {
 			t.Errorf("%s: %d, want 404", p, rec.Code)
 		}

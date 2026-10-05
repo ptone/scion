@@ -24,6 +24,7 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/google/uuid"
 )
 
 // Route patterns the service serves, in net/http ServeMux syntax.
@@ -204,6 +205,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := segs[0]
+	if !canonicalID(id) {
+		writeNotFound(w)
+		return
+	}
 	switch {
 	case len(segs) == 1:
 		if !isRead(r.Method) {
@@ -249,6 +254,18 @@ func splitEscapedPath(p string) ([]string, bool) {
 		segs[i] = u
 	}
 	return segs, true
+}
+
+// canonicalID reports whether id has the form the service assigns: a
+// lowercase 36-character UUID. Anything else is answered 404 before any
+// store lookup, so a malformed id (a NUL byte, invalid UTF-8) can never
+// reach the database driver.
+func canonicalID(id string) bool {
+	if len(id) != 36 || strings.ToLower(id) != id {
+		return false
+	}
+	_, err := uuid.Parse(id)
+	return err == nil
 }
 
 // parseSeq parses a version number: a positive decimal integer without sign
