@@ -74,12 +74,29 @@ func enableArtifactsForTest(t *testing.T, srv *Server) (artifacts.Store, *storag
 	return st, blobs
 }
 
-// artifactAgent creates an agent row in project and mints it a token with
-// the scopes of role, as the hub does at dispatch.
+// ensureEdgeBackfillComplete marks the delegation edge backfill complete,
+// as on a migrated hub, unless it already is.
+func ensureEdgeBackfillComplete(t *testing.T, s store.Store) {
+	t.Helper()
+	if _, err := s.GetHubSetting(context.Background(), "migration_delegation_edge_backfill_v1"); err == nil {
+		return
+	}
+	markEdgeBackfillComplete(t, s)
+}
+
+// artifactAgent creates an agent row in project, created by a project owner
+// with a recorded delegation edge, and mints it a token with the scopes of
+// role, as the hub does at dispatch.
 func artifactAgent(t *testing.T, srv *Server, s store.Store, projectID, slug string, role AgentRole) (*store.Agent, string) {
 	t.Helper()
 	a := &store.Agent{ID: tid("art-" + slug), Slug: slug, Name: slug, ProjectID: projectID, Phase: "running"}
 	require.NoError(t, s.CreateAgent(context.Background(), a))
+	// Created by a project owner, with a recorded delegation edge, as the
+	// agent-create handler records it.
+	delegator := tid("art-delegator-" + projectID)
+	createTestUserWithProjectRole(t, s, delegator, "delegator-"+slug+"@test.com", projectID, store.ProjectRoleOwner)
+	addRecordedArtifactEdge(t, s, delegator, a.ID, projectID)
+	ensureEdgeBackfillComplete(t, s)
 	tok, err := srv.GetAgentTokenService().GenerateAgentToken(a.ID, projectID, ScopesForRole(role), nil)
 	require.NoError(t, err)
 	return a, tok
