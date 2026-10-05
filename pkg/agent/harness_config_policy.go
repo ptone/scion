@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -93,20 +94,15 @@ func harnessAfterResolveError(ctx context.Context, agentHome, harnessName, harne
 	return harness.New(harnessType), nil
 }
 
-// resetStagedProvisioning prepares the agent home's staged container-script
-// provisioning state for harness h, before h is provisioned, with or without
-// a policy:
-//   - h is not container-script: clear the provisioner wrapper and the whole
-//     staged bundle (harness.ClearStagedProvisioning), so no provisioner runs
-//     and sciontool init does not load an earlier provisioner's state;
-//   - h is container-script: clear the wrapper and the whole staged bundle
-//     too (harness.ClearStagedProvisioning), including inputs/, so nothing a
-//     previous provisioning, the workload or copied home content left there
-//     is visible to this provisioner, and the only wrapper that can exist is
-//     the one h.Provision writes. The caller restages the control-plane
-//     inputs (ProvisionAgent writes them; Start restores them with
-//     restoreControlPlaneInputs) and h restages its own bundle and wrapper.
-func resetStagedProvisioning(h api.Harness, agentHome string) error {
+// resetStagedProvisioning clears the agent home's staged provisioning state
+// before any harness is staged, with or without a policy: the provisioner
+// wrapper and the whole staged bundle, inputs/ included
+// (harness.ClearStagedProvisioning). Nothing a previous launch, the workload
+// or copied home content left there is visible to this launch, and the only
+// wrapper that can exist afterwards is one this launch's container-script
+// Provision writes. The caller restages the control-plane inputs and
+// secrets.
+func resetStagedProvisioning(agentHome string) error {
 	return harness.ClearStagedProvisioning(agentHome)
 }
 
@@ -289,24 +285,36 @@ func ensureSecretsRecord(agentDir string) error {
 // staged secrets directory (0700, files 0600), and returns their names for
 // ContainerScriptHarness.SetRecordedSecrets. Only regular files are restored.
 //
-// With no record (an agent provisioned before records existed), nothing is
-// restored, a warning names the agent, and an empty record is created so the
-// warning is not repeated; file-type auth secrets for such agents must be
-// re-supplied.
-func restoreSecretsRecord(agentDir, agentHome, agentID string) ([]string, error) {
+// Recorded secrets are restored only for the harness-config revision that
+// staged them: nothing is restored unless the record's identity matches
+// current, the identity of the harness-config this launch resolved. A record
+// without an identity, an unreadable identity, or an unknown current identity
+// restores nothing.
+//
+// With no record (an agent provisioned before harness secrets were recorded),
+// nothing is restored, a warning names the agent, and an empty record is
+// created so the warning is not repeated.
+func restoreSecretsRecord(agentDir, agentHome, agentID string, current *harnessConfigIdentity) ([]string, error) {
 	record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
 	entries, err := os.ReadDir(record)
 	if os.IsNotExist(err) {
-		slog.Warn("file-type auth secrets are not restored for agents provisioned before this change; re-create or re-supply credentials", "agent_id", agentID)
+		slog.Warn("file-type auth secrets are not restored for agents provisioned before harness secrets were recorded; re-create or re-supply credentials", "agent_id", agentID)
 		return nil, ensureSecretsRecord(agentDir)
 	}
 	if err != nil {
 		return nil, err
 	}
+	recorded := readSecretsIdentity(record)
+	if !recorded.matches(current) {
+		if recorded != nil {
+			slog.Info("recorded secrets are restored only for the harness-config revision that staged them; none restored", "agent_id", agentID)
+		}
+		return nil, nil
+	}
 	dst := stagedSecretsDir(agentHome)
 	var names []string
 	for _, e := range entries {
-		if !e.Type().IsRegular() {
+		if !e.Type().IsRegular() || e.Name() == secretsIdentityFile {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(record, e.Name()))
@@ -326,9 +334,11 @@ func restoreSecretsRecord(agentDir, agentHome, agentID string) ([]string, error)
 
 // recordSecrets replaces the control plane's secrets record with the staged
 // secret files ApplyAuthSettings referenced (names), copied by content from
-// the agent home's staged secrets directory (regular files only). The record
-// is written even when names is empty.
-func recordSecrets(agentDir, agentHome string, names []string) error {
+// the agent home's staged secrets directory (regular files only), together
+// with current, the identity of the harness-config that staged them (0600).
+// The record is written even when names is empty; with no current identity
+// no identity is written, so the record restores nothing.
+func recordSecrets(agentDir, agentHome string, names []string, current *harnessConfigIdentity) error {
 	record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
 	if err := os.RemoveAll(record); err != nil {
 		return err
@@ -338,6 +348,9 @@ func recordSecrets(agentDir, agentHome string, names []string) error {
 	}
 	src := stagedSecretsDir(agentHome)
 	for _, name := range names {
+		if name == secretsIdentityFile {
+			continue
+		}
 		info, err := os.Lstat(filepath.Join(src, name))
 		if err != nil || info.Mode()&os.ModeType != 0 {
 			continue
@@ -350,5 +363,109 @@ func recordSecrets(agentDir, agentHome string, names []string) error {
 			return err
 		}
 	}
+	if current != nil {
+		data, err := json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(record, secretsIdentityFile), data, 0o600); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// secretsIdentityFile is the file in the secrets record holding the identity
+// of the harness-config that staged the recorded secrets. Its name cannot be
+// a secret name (secret names are environment-variable names).
+const secretsIdentityFile = ".identity.json"
+
+// harnessConfigIdentity identifies the harness-config a launch resolved, as
+// computed by the control plane from its own resolution (never from
+// container-writable state). Recorded secrets are restored only for the
+// harness-config revision that staged them.
+type harnessConfigIdentity struct {
+	Name string `json:"name"`
+	// Source is the resolution branch (config.HarnessConfigSource).
+	Source string `json:"source"`
+	// HubRecordID is the hub harness-config record ID, set only for a
+	// hub-hydrated harness-config.
+	HubRecordID string `json:"hub_record_id,omitempty"`
+	// Revision is the content revision of the resolved harness-config
+	// directory (config.ComputeHarnessConfigRevision).
+	Revision string `json:"revision"`
+}
+
+// currentHarnessConfigIdentity computes the identity of the harness-config
+// directory a launch resolved, over the directory the control plane actually
+// uses, after resolution. It returns nil when the identity cannot be
+// established (no directory, a missing or partly unreadable directory, no
+// revision, or a hub-hydrated directory without its record ID); recorded
+// secrets are then not restored.
+//
+// The comparison only restricts restores: it never grants or gates anything
+// else. Changing the resolved directory's content changes its revision, so it
+// can only make that harness-config's own record fail to match (nothing
+// restored); it can never make a different harness-config's record match,
+// since name, source and hub record ID are part of the identity.
+func currentHarnessConfigIdentity(name string, dir *config.HarnessConfigDir, hubRecordID string) *harnessConfigIdentity {
+	if name == "" || dir == nil || dir.Path == "" || !dirFullyReadable(dir.Path) {
+		return nil
+	}
+	rev := config.ComputeHarnessConfigRevision(dir.Path)
+	if rev == "" {
+		return nil
+	}
+	id := &harnessConfigIdentity{Name: name, Source: string(dir.Source), Revision: rev}
+	if dir.Source == config.HarnessConfigSourceHubHydrated {
+		if hubRecordID == "" {
+			return nil
+		}
+		id.HubRecordID = hubRecordID
+	}
+	return id
+}
+
+func (a *harnessConfigIdentity) matches(b *harnessConfigIdentity) bool {
+	return a != nil && b != nil && a.Name != "" && a.Revision != "" && *a == *b
+}
+
+// readSecretsIdentity reads the identity recorded with the secrets record, or
+// nil when absent or unreadable.
+func readSecretsIdentity(record string) *harnessConfigIdentity {
+	data, err := os.ReadFile(filepath.Join(record, secretsIdentityFile))
+	if err != nil {
+		return nil
+	}
+	var id harnessConfigIdentity
+	if err := json.Unmarshal(data, &id); err != nil {
+		return nil
+	}
+	return &id
+}
+
+// dirFullyReadable reports whether path is a directory whose entries can all
+// be walked and whose regular files can all be opened.
+func dirFullyReadable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	ok := true
+	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			ok = false
+			return filepath.SkipAll
+		}
+		if d.Type().IsRegular() {
+			f, openErr := os.Open(p)
+			if openErr != nil {
+				ok = false
+				return filepath.SkipAll
+			}
+			_ = f.Close()
+		}
+		return nil
+	})
+	return ok
 }

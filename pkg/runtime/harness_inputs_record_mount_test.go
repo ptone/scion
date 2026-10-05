@@ -115,57 +115,53 @@ func testRecordOutsideRunArgMounts(t *testing.T) {
 
 func checkRecordOutsideRunArgs(t *testing.T, record string, cfg RunConfig) {
 	t.Helper()
-	{
-		{
-			if !hasScionElement(record) {
-				t.Fatalf("fixture: record %s should lie under a .scion directory", record)
+	if !hasScionElement(record) {
+		t.Fatalf("fixture: record %s should lie under a .scion directory", record)
+	}
+	args, err := buildCommonRunArgs(cfg)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs: %v", err)
+	}
+	var tmpfs []string
+	type bind struct{ src, dst string }
+	var binds []bind
+	for i := 0; i < len(args)-1; i++ {
+		switch args[i] {
+		case "-v":
+			parts := strings.SplitN(args[i+1], ":", 3)
+			if len(parts) >= 2 {
+				binds = append(binds, bind{parts[0], parts[1]})
 			}
-			args, err := buildCommonRunArgs(cfg)
-			if err != nil {
-				t.Fatalf("buildCommonRunArgs: %v", err)
-			}
-			var tmpfs []string
-			type bind struct{ src, dst string }
-			var binds []bind
-			for i := 0; i < len(args)-1; i++ {
-				switch args[i] {
-				case "-v":
-					parts := strings.SplitN(args[i+1], ":", 3)
-					if len(parts) >= 2 {
-						binds = append(binds, bind{parts[0], parts[1]})
-					}
-				case "--mount":
-					spec := args[i+1]
-					if strings.Contains(spec, "type=tmpfs") {
-						for _, kv := range strings.Split(spec, ",") {
-							if v, ok := strings.CutPrefix(kv, "destination="); ok {
-								tmpfs = append(tmpfs, v)
-							}
-						}
-					} else {
-						t.Errorf("unexpected non-tmpfs --mount %q; extend this test", spec)
+		case "--mount":
+			spec := args[i+1]
+			if strings.Contains(spec, "type=tmpfs") {
+				for _, kv := range strings.Split(spec, ",") {
+					if v, ok := strings.CutPrefix(kv, "destination="); ok {
+						tmpfs = append(tmpfs, v)
 					}
 				}
+			} else {
+				t.Errorf("unexpected non-tmpfs --mount %q; extend this test", spec)
 			}
-			if len(binds) == 0 {
-				t.Fatal("fixture: expected bind mounts")
+		}
+	}
+	if len(binds) == 0 {
+		t.Fatal("fixture: expected bind mounts")
+	}
+	for _, b := range binds {
+		if !pathWithin(record, b.src) {
+			continue
+		}
+		rel, _ := filepath.Rel(b.src, record)
+		inContainer := filepath.Join(b.dst, rel)
+		masked := false
+		for _, m := range tmpfs {
+			if pathWithin(inContainer, m) {
+				masked = true
 			}
-			for _, b := range binds {
-				if !pathWithin(record, b.src) {
-					continue
-				}
-				rel, _ := filepath.Rel(b.src, record)
-				inContainer := filepath.Join(b.dst, rel)
-				masked := false
-				for _, m := range tmpfs {
-					if pathWithin(inContainer, m) {
-						masked = true
-					}
-				}
-				if !masked {
-					t.Errorf("record %s is visible in the container at %s via the mount of %s", record, inContainer, b.src)
-				}
-			}
+		}
+		if !masked {
+			t.Errorf("record %s is visible in the container at %s via the mount of %s", record, inContainer, b.src)
 		}
 	}
 }

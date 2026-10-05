@@ -825,6 +825,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if in.Prehydrated.HarnessConfigDone {
 		if in.Prehydrated.HarnessConfigPath != "" {
 			opts.HarnessConfigPath = in.Prehydrated.HarnessConfigPath
+			if in.Config != nil {
+				opts.HarnessConfigID = in.Config.HarnessConfigID
+			}
 		}
 	} else if hubConn != nil && in.Config != nil {
 		hcPath, err := s.hydrateHarnessConfig(ctx, in.Config, hubConn)
@@ -839,6 +842,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 		if hcPath != "" {
 			opts.HarnessConfigPath = hcPath
+			opts.HarnessConfigID = in.Config.HarnessConfigID
 			if s.config.Debug {
 				s.agentLifecycleLog.Debug("Using hydrated harness-config", "agent_id", in.AgentID, "path", hcPath)
 			}
