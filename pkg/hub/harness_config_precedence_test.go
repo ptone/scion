@@ -847,5 +847,28 @@ func TestSchedulerDispatch_HubDefaultHarnessConfigBeatsNameInferredTemplateHarne
 		"the hub default must beat a name-inferred template harness type")
 }
 
+// TestSchedulerDispatch_UnresolvableTemplateDefaultHarnessConfigWarns is the
+// scheduler twin of TestCreateAgent_UnresolvableTemplateDefaultHarnessConfigWarns
+// (ptone/scion#620). The template provenance travels on ctx through
+// deriveAgentConfig, so this pins it on the scheduled-dispatch path too.
+func TestSchedulerDispatch_UnresolvableTemplateDefaultHarnessConfigWarns(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	logs := captureHarnessLogs(srv)
+
+	createHarnessTemplate(t, s, "tmpl-missing-hc", "no-such-template-hc")
+
+	agent := runDispatchAgentEvent(t, srv, s, project.ID, "sched-template-default-unresolvable", "tmpl-missing-hc")
+	assert.Equal(t, "no-such-template-hc", agent.AppliedConfig.HarnessConfig)
+
+	found := logs.harnessNotFoundRecords()
+	require.Len(t, found, 1, "expected exactly one not-found log record")
+	assert.Equal(t, slog.LevelWarn, found[0].Level,
+		"an unresolvable template default_harness_config must warn on the scheduler path too")
+	fromTemplate, ok := recordAttr(found[0], "from_template_default")
+	require.True(t, ok)
+	assert.True(t, fromTemplate.Bool())
+}
+
 // Note: the scheduler's dispatch_agent payload has no harness-config field, so
 // the "explicit request value wins" case has no scheduler-side equivalent.

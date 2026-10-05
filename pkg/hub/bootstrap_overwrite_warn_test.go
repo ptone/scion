@@ -83,8 +83,10 @@ func TestBootstrapHarnessConfigsFromDir_OverwriteWarnsWithHashes(t *testing.T) {
 func TestBootstrapTemplatesFromDir_OverwriteWarnsWithHashes(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
+	// The template WARN goes to the template subsystem logger, alongside
+	// the template bootstrap's other lines.
 	h := &levelCapturingHandler{}
-	srv.resourceLog = slog.New(h)
+	srv.templateLog = slog.New(h)
 
 	dir := makeTemplateDir(t, "ws-tmpl", map[string]string{
 		"scion-agent.yaml": "harness: claude\n",

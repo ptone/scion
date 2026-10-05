@@ -170,6 +170,18 @@ func TestHarnessConfigRepair_UnknownNameNotFound(t *testing.T) {
 	require.Error(t, err)
 }
 
+// Sync-all must repair each listed record by its own ID. Both same-named
+// records (global and project A) are stale; a name-based call would resolve
+// both to the same record (global) and leave project A's unrepaired.
+func TestSyncAllHarnessConfigsFromStorage_RepairsEachSameNamedRecordByID(t *testing.T) {
+	f := newRepairScopeFixture(t)
+
+	f.srv.SyncAllHarnessConfigsFromStorage(context.Background())
+
+	assert.True(t, f.repaired(t, f.global), "the global record must be repaired")
+	assert.True(t, f.repaired(t, f.inA), "the project-A record must be repaired by its own ID")
+}
+
 // The dispatcher repairer must hand the stamped ID and the agent's project to
 // the repair callback, not just the name.
 func TestHTTPDispatcher_RepairHarnessConfigPassesIDAndProject(t *testing.T) {

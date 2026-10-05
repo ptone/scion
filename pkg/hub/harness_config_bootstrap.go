@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -87,7 +88,7 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 			}
 			if changed {
 				updated++
-				s.warnBootstrapOverwrite("harness-config", name, existing.ID, dirPath, oldHash,
+				warnBootstrapOverwrite(s.resourceLog, "harness-config", name, existing.ID, dirPath, oldHash,
 					s.currentHarnessConfigHash(ctx, existing.ID))
 			}
 		}
@@ -141,8 +142,12 @@ func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.
 // Distinguishing them needs that marker persisted on the record
 // (ResourceStore/schema work, out of scope here). Until then this stays at
 // WARN because the destructive case is silent otherwise.
-func (s *Server) warnBootstrapOverwrite(kind, name, id, dir, oldHash, newHash string) {
-	s.resourceLog.Warn("workstation bootstrap: hub record replaced from local disk copy; "+
+//
+// log is the caller's subsystem logger (resourceLog for harness-configs,
+// templateLog for templates) so the WARN lands next to that bootstrap's
+// other log lines.
+func warnBootstrapOverwrite(log *slog.Logger, kind, name, id, dir, oldHash, newHash string) {
+	log.Warn("workstation bootstrap: hub record replaced from local disk copy; "+
 		"any hub-side edits made since the last import are lost",
 		"kind", kind, "name", name, "id", id, "dir", dir,
 		"oldHash", oldHash, "newHash", newHash)

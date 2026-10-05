@@ -87,7 +87,7 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 			}
 			if changed {
 				updated++
-				s.warnBootstrapOverwrite("template", name, existing.ID, templatePath, oldHash,
+				warnBootstrapOverwrite(s.templateLog, "template", name, existing.ID, templatePath, oldHash,
 					s.currentTemplateHash(ctx, existing.ID))
 			}
 		}

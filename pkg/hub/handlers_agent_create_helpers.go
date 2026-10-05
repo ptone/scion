@@ -577,12 +577,12 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	hcFromHubDefault := hcName != "" && !hcFromProjectAnnotation && hubDefaultHarnessConfigFromContext(ctx)
 	// A fourth provenance (ptone/scion#620): the template's declared
 	// harness_config/default_harness_config. It names a harness-config slug
-	// on purpose, so failing to resolve it
-	// means the template author's choice is silently replaced by whatever the
-	// broker finds on disk. Carried on the context by deriveAgentConfig's
-	// template rung (same reason as the hub default: a request naming the
-	// same slug is request provenance, not template provenance), or set
-	// directly below when this function's own template fallback fills it.
+	// on purpose, so failing to resolve it means the template author's choice
+	// is silently replaced by whatever the broker finds on disk. Carried on
+	// the context by deriveAgentConfig's template rung (same reason as the
+	// hub default: a request naming the same slug is request provenance, not
+	// template provenance), or set directly below when this function's own
+	// template fallback fills it.
 	hcFromTemplateDefault := hcName != "" && !hcFromProjectAnnotation && !hcFromHubDefault &&
 		templateDefaultHarnessConfigFromContext(ctx)
 	if hcName == "" && resolvedTemplate != nil {
