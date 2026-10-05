@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -35,12 +36,19 @@ type harnessPolicyInput struct {
 	HydratedHCPath       string
 }
 
-// enforceHarnessConfigPolicy is the broker's container-script policy gate,
-// shared by create, start and restart. Each caller runs it at its single
-// hydration point, against the same hydrated harness-config launch will use,
-// and before any provisioning, start or stop side effect. It resolves the
-// harness-config (lookupHarnessConfigForPolicy) and evaluates it
-// (evaluateHarnessConfigPolicy).
+// enforceHarnessConfigPolicy is the broker's early, side-effect-free
+// container-script policy check, shared by create, start and restart. Each
+// caller runs it at its single hydration point, against the hydrated
+// harness-config when there is one, before any provisioning, start or stop
+// side effect. It resolves the harness-config (lookupHarnessConfigForPolicy)
+// and evaluates it (evaluateHarnessConfigPolicy).
+//
+// It is an early-out only. The authoritative evaluation is the policy hook
+// (harnessConfigPolicyHook), which pkg/agent runs where launch resolves the
+// harness-config, with launch's own name resolution and the effective entry.
+// A refusal from either refuses the dispatch: this check passing never
+// overrides the hook, so where the two disagree the hook's refusal stands
+// (fail closed).
 //
 // When the policy can refuse (allow_container_script_harnesses=false) and a
 // hydrated copy is supplied but cannot be loaded, it fails closed with a 500.
@@ -85,16 +93,50 @@ func (s *Server) writeHarnessPolicyRefusal(w http.ResponseWriter, d harnessPolic
 	writeError(w, d.HTTPStatus, d.Code, d.Message, nil)
 }
 
+// harnessPolicyRefusal is the error the broker's harness-config policy hook
+// returns to pkg/agent; pkg/agent wraps it with agent.ErrHarnessConfigPolicy.
+// It carries the decision so every dispatch path writes the same refusal.
+type harnessPolicyRefusal struct {
+	d harnessPolicyDecision
+}
+
+func (e *harnessPolicyRefusal) Error() string { return e.d.detail() }
+
+// harnessConfigPolicyHook returns the broker's container-script policy as a
+// config.HarnessConfigPolicyFunc. Create, start and restart attach it to the
+// launch context, so the policy is evaluated where launch resolves the
+// harness-config (pkg/agent: template and harness-config resolution and each
+// harness construction), against the effective entry exactly as it will run.
+// enforceHarnessConfigPolicy remains the early, side-effect-free refusal
+// ahead of that.
+func (s *Server) harnessConfigPolicyHook() config.HarnessConfigPolicyFunc {
+	return func(name string, entry config.HarnessConfigEntry) error {
+		if d := s.evaluateHarnessConfigPolicy(name, entry); !d.OK {
+			return &harnessPolicyRefusal{d: d}
+		}
+		return nil
+	}
+}
+
+// harnessPolicyRefusalFrom reports whether err is (or wraps) a refusal from
+// harnessConfigPolicyHook, returning its decision.
+func harnessPolicyRefusalFrom(err error) (harnessPolicyDecision, bool) {
+	var r *harnessPolicyRefusal
+	if errors.As(err, &r) {
+		return r.d, true
+	}
+	return harnessPolicyDecision{}, false
+}
+
 // harnessPolicyInputForStart builds the policy input for start and restart
 // from the built start context: the hydrated harness-config launch will use
 // (opts.HarnessConfigPath, set by buildStartContext's hydration) and a
 // harness-config name: the dispatch's opts.HarnessConfig, else the agent's
 // saved agent-info harness-config, else the settings default (resolved by
-// lookupHarnessConfigForPolicy). This covers the name tiers the hub fills in
-// practice; it does not apply every tier of config.ResolveHarnessConfigName
-// that pkg/agent Start uses (stored harness type, template
-// harness_config/default_harness_config). The template chain is taken from
-// opts.Template, as harness.Resolve's caller does.
+// lookupHarnessConfigForPolicy). That is the early check's view; names Start
+// derives from the stored or template config are evaluated by the policy hook
+// where Start resolves them. The template chain is taken from opts.Template,
+// as harness.Resolve's caller does.
 func harnessPolicyInputForStart(opts api.StartOptions, agentID string) harnessPolicyInput {
 	name := opts.HarnessConfig
 	if name == "" && opts.ProjectPath != "" {
@@ -150,17 +192,22 @@ func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest, hydratedTe
 		}
 	}
 
-	name := s.resolveHarnessConfigForEnvGather(req, settings)
-	if name == "" {
-		return "", nil, false, nil
-	}
+	name := policyHarnessConfigName(req, settings)
 
+	// A hydrated copy is what launch loads whatever name it resolves, so it
+	// is evaluated even when no name resolves here.
 	if hydratedHCPath != "" {
 		hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, name, "")
 		if err != nil {
 			return name, nil, false, fmt.Errorf("hydrated harness-config %q could not be loaded: %w", name, err)
 		}
+		if name == "" {
+			name = hcDir.Name
+		}
 		return name, []config.HarnessConfigEntry{hcDir.Config}, true, nil
+	}
+	if name == "" {
+		return "", nil, false, nil
 	}
 
 	// The template chain is resolved against the project path as given, as
@@ -181,6 +228,25 @@ func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest, hydratedTe
 		}
 	}
 	return name, nil, false, nil
+}
+
+// policyHarnessConfigName is the harness-config name the early policy check
+// evaluates: the dispatch's explicit harness-config, else the profile or
+// settings default (config.ResolveHarnessConfigName's CLI, profile and
+// settings tiers). Names launch derives from template, inline or stored
+// config are evaluated where launch resolves them (CheckHarnessConfigPolicy
+// in pkg/agent).
+func policyHarnessConfigName(req CreateAgentRequest, settings *config.VersionedSettings) string {
+	inputs := config.HarnessConfigInputs{Settings: settings}
+	if req.Config != nil {
+		inputs.CLIFlag = req.Config.HarnessConfig
+		inputs.ProfileName = req.Config.Profile
+	}
+	res, err := config.ResolveHarnessConfigName(inputs)
+	if err != nil {
+		return ""
+	}
+	return res.Name
 }
 
 // harnessConfigProjectDir returns the single resolved project dir that
@@ -254,15 +320,18 @@ func (d harnessPolicyDecision) detail() string {
 // Future additions (e.g., trusted_harness_config_publishers) can extend this
 // function without touching the dispatch path.
 //
-// GUARD: entry is the resolved harness-config directory (or settings) entry
-// WITHOUT the profile harness_overrides merge that launch applies
-// (VersionedSettings.ResolveHarnessConfig via harness.Resolve). Today the
-// policy reads only Provisioner, which overrides cannot set, so the two agree.
-// Any policy field that a profile harness_override can mutate (image, image
-// pull policy, user, env, volumes, auth type, resources) MUST be evaluated
-// after the override merge, or the gate will judge a different value than the
-// one launch uses. TestEvaluateHarnessConfigPolicy_IgnoresOverrideMutableFields
-// fails if this function starts depending on such a field.
+// GUARD: from the policy hook, entry is the effective entry launch runs
+// (harness.EffectiveConfig, which applies the settings overlay including
+// profile harness_overrides). From the early check
+// (enforceHarnessConfigPolicy), entry is the directory (or settings) entry
+// WITHOUT that merge. Today the policy reads only Provisioner, which overrides
+// cannot set, so both agree. Any policy field that a profile harness_override
+// can mutate (image, image pull policy, user, env, volumes, auth type,
+// resources) MUST be evaluated only after the override merge (i.e. from the
+// hook, or with the early check applying the merge too), or the early check
+// will judge a different value than the one launch uses.
+// TestEvaluateHarnessConfigPolicy_IgnoresOverrideMutableFields fails if this
+// function starts depending on such a field.
 func (s *Server) evaluateHarnessConfigPolicy(harnessConfigName string, entry config.HarnessConfigEntry) harnessPolicyDecision {
 	if entry.Provisioner == nil {
 		return harnessPolicyDecision{OK: true}

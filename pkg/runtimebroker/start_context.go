@@ -137,6 +137,14 @@ type startContextInputs struct {
 	// Required: buildStartContext rejects the zero value.
 	Operation startOperation
 
+	// PolicyPreflight, set by createAgent when the harness-config policy can
+	// refuse, runs agent.PreflightResolve (with the policy hook attached to
+	// ctx by the caller) right after hydration and before any workspace
+	// step, so a refusal happens before a worktree, agent directory, staged
+	// bundle or container exists. Hub-managed project path initialization
+	// and hydration precede it, since resolution reads their results.
+	PolicyPreflight bool
+
 	// Prehydrated carries hydration results createAgent's preflights
 	// already obtained, so launch provisions the same bundle they evaluated
 	// instead of hydrating again. Zero value (startAgent, restartAgent):
@@ -833,6 +841,19 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			opts.HarnessConfigPath = hcPath
 			if s.config.Debug {
 				s.agentLifecycleLog.Debug("Using hydrated harness-config", "agent_id", in.AgentID, "path", hcPath)
+			}
+		}
+	}
+
+	// --- Harness-config policy at create admission ---
+	// Same template and harness-config resolution as Provision, side-effect
+	// free. Only a policy refusal is acted on here; any other resolution
+	// error is left to Provision/Start, which report it as before.
+	if in.PolicyPreflight {
+		if err := agent.PreflightResolve(ctx, opts); err != nil {
+			if _, refused := harnessPolicyRefusalFrom(err); refused {
+				span.SetStatus(codes.Error, err.Error())
+				return nil, err
 			}
 		}
 	}

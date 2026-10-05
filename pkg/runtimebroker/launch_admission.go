@@ -66,6 +66,11 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 
 	if err := mgr.Preflight(ctx, opts); err != nil {
 		span.SetStatus(codes.Error, err.Error())
+		if d, ok := harnessPolicyRefusalFrom(err); ok {
+			markAttemptFailed(d.HTTPStatus, d.detail())
+			s.writeHarnessPolicyRefusal(w, d, "create agent", req.ID)
+			return
+		}
 		if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)

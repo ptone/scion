@@ -984,9 +984,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Harness-config policy gate (enforceHarnessConfigPolicy): runs on
-	// create, start and restart against the single hydrated harness-config
-	// launch will use. On create it runs before buildStartContext, so a
+	// Harness-config policy, early check (enforceHarnessConfigPolicy): runs
+	// on create, start and restart against the single hydrated
+	// harness-config launch will use. It is an early-out only; the policy
+	// hook pkg/agent evaluates where launch resolves the harness-config is
+	// authoritative (see enforceHarnessConfigPolicy). On create it runs
+	// before buildStartContext, so a
 	// refusal happens before the broker mounts project state, downloads
 	// workspaces, or projects secrets; this is therefore create's hydration
 	// point, and buildStartContext reuses the result (Prehydrated below).
@@ -1080,6 +1083,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	s.agentLifecycleLog.Info("Agent dispatch: pre-flight complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(createStart).String())
 	buildCtxStart := time.Now()
+	// Harness-config policy is evaluated where launch resolves the
+	// harness-config: create admission (PolicyPreflight below), Preflight,
+	// Provision and Start, on the sync and async paths alike (runLaunch's
+	// context derives from this one). This hook is authoritative; the
+	// enforceHarnessConfigPolicy pre-check above is an early, side-effect-free
+	// refusal only, and when the two disagree the hook's refusal stands.
+	ctx = config.ContextWithHarnessConfigPolicy(ctx, s.harnessConfigPolicyHook())
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:               req.Name,
 		AgentID:            req.ID,
@@ -1105,6 +1115,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// Threaded only for the workspace-source checks; the download
 		// itself runs after buildStartContext (below, or in runLaunch).
 		WorkspaceStoragePath: req.WorkspaceStoragePath,
+		PolicyPreflight:      !s.config.AllowContainerScriptHarnesses && !req.Reprovision,
 		// Launch uses the bundle the preflights (env-gather, policy gate)
 		// evaluated; avoids a redundant hydration.
 		Prehydrated: prehydratedBundle{
@@ -1115,6 +1126,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
+		if d, refused := harnessPolicyRefusalFrom(err); refused {
+			markAttemptFailed(d.HTTPStatus, d.detail())
+			span.SetStatus(codes.Error, d.detail())
+			s.writeHarnessPolicyRefusal(w, d, "create agent", req.ID)
+			return
+		}
 		span.SetStatus(codes.Error, startContextSpanText(err))
 		status := s.writeStartContextError(w, err, "create agent")
 		markAttemptFailed(status, err.Error())
@@ -1243,6 +1260,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			cfg, err = sc.Manager.Provision(ctx, opts)
 		}
 		if err != nil {
+			if d, ok := harnessPolicyRefusalFrom(err); ok {
+				markAttemptFailed(d.HTTPStatus, d.detail())
+				span.SetStatus(codes.Error, d.detail())
+				s.writeHarnessPolicyRefusal(w, d, "provision agent", req.ID)
+				return
+			}
 			// Design §3.4 Amendment A4.2: Reprovision wraps every refusal in
 			// agent.ErrReprovisionRefused (workspace preconditions, running-container
 			// check). Surface those as 409 Conflict rather than a generic 500 so
@@ -1335,7 +1358,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// 500/502, so the caller gets an actionable response (#2546).
 		var skillErr *agent.SkillResolutionError
 		isSkillErr := errors.As(err, &skillErr)
+		policyDecision, isPolicyErr := harnessPolicyRefusalFrom(err)
 		switch {
+		case isPolicyErr:
+			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
 		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
@@ -1373,6 +1399,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		span.SetStatus(codes.Error, err.Error())
 		switch {
+		case isPolicyErr:
+			s.writeHarnessPolicyRefusal(w, policyDecision, "create agent", req.ID)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			Conflict(w, err.Error())
 		case notFoundErr:
@@ -2353,9 +2381,14 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
+	ctx = config.ContextWithHarnessConfigPolicy(ctx, s.harnessConfigPolicyHook())
 	agentInfo, err := mgr.Start(ctx, opts)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
+		if d, ok := harnessPolicyRefusalFrom(err); ok {
+			s.writeHarnessPolicyRefusal(w, d, "start agent", id)
+			return
+		}
 		s.agentLifecycleLog.Error("Agent start failed",
 			"agent_id", id, "error", err)
 		// Manager.Start may have acted (removed the previous entry or
@@ -2823,8 +2856,17 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 	}
 
+	// Policy is evaluated where Start resolves the harness-config; that
+	// runs after the stop above, so a refusal leaves the agent stopped, as
+	// any other start failure after the stop does. The pre-check before
+	// the stop refuses the cases visible without Start's resolution.
+	ctx = config.ContextWithHarnessConfigPolicy(ctx, s.harnessConfigPolicyHook())
 	agentInfo, err := mgr.Start(ctx, opts)
 	if err != nil {
+		if d, ok := harnessPolicyRefusalFrom(err); ok {
+			s.writeHarnessPolicyRefusal(w, d, "restart agent", id)
+			return
+		}
 		s.agentLifecycleLog.Error("Agent restart failed",
 			"agent_id", id, "error", err)
 		// The stop above and Manager.Start may have acted, so mark the
