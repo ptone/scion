@@ -100,16 +100,14 @@ func hubCompatibleContentHash(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	kept := files[:0]
-	for _, f := range files {
-		data, err := os.ReadFile(f.FullPath)
+	for i := range files {
+		data, err := os.ReadFile(files[i].FullPath)
 		if err != nil {
 			return "", err
 		}
-		f.Hash = transfer.HashBytes(transfer.NormalizeFileContent(data))
-		kept = append(kept, f)
+		files[i].Hash = transfer.HashBytes(transfer.NormalizeFileContent(data))
 	}
-	return transfer.ComputeContentHash(kept), nil
+	return transfer.ComputeContentHash(files), nil
 }
 
 func sameDir(a, b string) bool {

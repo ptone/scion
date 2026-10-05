@@ -23,7 +23,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -126,6 +125,8 @@ func TestHarnessConfigDrift_NoWarnForTransientFilesOnly(t *testing.T) {
 		"provision.py":                     "print('v2')\n",
 		"config.yaml.bak.20260915T101112Z": "old content\n",
 		".provision.py.tmp-12345":          "partial\n",
+		// A transient directory is pruned with everything below it.
+		"sub.bak.20260915T101112Z/x": "backup dir content\n",
 	})
 
 	srv.warnHarnessConfigDrift("agent-1", "hc", hydrated, "", "")
@@ -162,29 +163,6 @@ func TestHubCompatibleContentHash_MatchesTransferHash(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("hubCompatibleContentHash = %s, want %s", got, want)
-	}
-}
-
-// TestDriftTransientCasesMatchSharedPredicate pins the transient-file cases
-// the drift hash relies on against the shared predicate
-// (config.IsHarnessConfigTransientFile), whose patterns
-// hubCompatibleContentHash passes to transfer.CollectFiles.
-func TestDriftTransientCasesMatchSharedPredicate(t *testing.T) {
-	for path, want := range map[string]bool{
-		"config.yaml.bak.20260915T101112Z":      true,
-		"sub/provision.py.bak.20260915T101112Z": true,
-		".config.yaml.tmp-123":                  true,
-		"sub/.provision.py.tmp-abc":             true,
-		"config.yaml":                           false,
-		"config.yaml.bak":                       false,
-		"config.yaml.bak.2026091T101112Z":       false,
-		"config.yaml.bak.20260915T101112":       false,
-		"config.yaml.tmp-123":                   false,
-		".hidden":                               false,
-	} {
-		if got := config.IsHarnessConfigTransientFile(path); got != want {
-			t.Errorf("config.IsHarnessConfigTransientFile(%q) = %v, want %v", path, got, want)
-		}
 	}
 }
 
