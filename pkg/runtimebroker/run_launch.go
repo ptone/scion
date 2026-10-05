@@ -507,6 +507,9 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 	if d, ok := harnessPolicyRefusalFrom(err); ok {
 		return "harness_config_policy", d.Message
 	}
+	if ue, ok := unusableProvisionerFrom(err); ok {
+		return ErrCodeHarnessConfigUnusable, ue.PublicMessage()
+	}
 	switch {
 	case errors.Is(err, agent.ErrContainerNameInUse):
 		return "name_in_use", err.Error()

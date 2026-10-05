@@ -69,6 +69,12 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 
 	// 1. Container-script harness (provisioner block present)
 	if entry.Provisioner != nil {
+		// A provisioner that cannot run (legacy "builtin", or no command)
+		// would yield an agent without the provisioner's output; fail
+		// resolution instead (ptone/scion#611).
+		if ue := CheckProvisionerUsable(opts.Name, hcDir, entry); ue != nil {
+			return nil, ue
+		}
 		if hcDir == nil || hcDir.Path == "" {
 			return nil, fmt.Errorf("container-script harness %q requires an on-disk harness-config directory: %w", opts.Name, hcErr)
 		}

@@ -260,7 +260,7 @@ func TestLookupHarnessConfigForPolicy_UnloadableHydratedFailsClosed(t *testing.T
 	writeHarnessConfig(t, dotScion, "hc", "harness: claude\nimage: scion-claude:test\n")
 
 	req := CreateAgentRequest{Config: &CreateAgentConfig{HarnessConfig: "hc"}}
-	_, _, ok, err := srv.lookupHarnessConfigForPolicy(req, "", filepath.Join(t.TempDir(), "missing"))
+	_, _, _, ok, err := srv.lookupHarnessConfigDirForPolicy(req, "", filepath.Join(t.TempDir(), "missing"))
 	if err == nil || ok {
 		t.Fatalf("expected an error and no fallback to the broker-local copy, got ok=%v err=%v", ok, err)
 	}

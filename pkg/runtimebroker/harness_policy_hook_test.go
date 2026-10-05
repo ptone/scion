@@ -169,7 +169,7 @@ func TestPolicyHarnessConfigName_NoTemplateNameInference(t *testing.T) {
 	srv, _, dotScion := dispatchTestEnv(t, false)
 	writeHarnessConfig(t, dotScion, "tplname", scriptedHarnessYAML)
 	req := CreateAgentRequest{ProjectPath: dotScion, Config: &CreateAgentConfig{Template: "tplname"}}
-	name, _, _, err := srv.lookupHarnessConfigForPolicy(req, "", "")
+	name, _, _, _, err := srv.lookupHarnessConfigDirForPolicy(req, "", "")
 	if err != nil || name == "tplname" {
 		t.Errorf("the template name was used as the harness-config name: name=%q err=%v", name, err)
 	}
