@@ -559,8 +559,8 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// Record where the name came from, for the not-found log level below. A
 	// name that arrived from the project's default-harness-config annotation
 	// is operator-supplied and displaced the template, so failing to resolve
-	// it is worth a warning. Anything else — most often the template's bare
-	// Harness type — is the pre-existing normal case.
+	// it is worth a warning. Other provenances are classified below; a name
+	// supplied on the request stays at DEBUG (see the level table).
 	hcFromProjectAnnotation := hcName != "" && project != nil && project.Annotations != nil &&
 		project.Annotations[projectSettingDefaultHarnessConfig] == hcName
 	// A third provenance: the hub operational default_harness_config, applied

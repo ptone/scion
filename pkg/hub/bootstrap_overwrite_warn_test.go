@@ -95,6 +95,11 @@ func TestBootstrapTemplatesFromDir_OverwriteWarnsWithHashes(t *testing.T) {
 	before, err := s.GetTemplateBySlug(ctx, "ws-tmpl", string(store.TemplateScopeGlobal), "")
 	require.NoError(t, err)
 
+	// Unchanged disk copy: no overwrite, no warning (template sync computes
+	// its own "changed", so a false positive would WARN on every start).
+	require.NoError(t, srv.BootstrapTemplatesFromDir(ctx, dir))
+	assert.Empty(t, overwriteWarnRecords(h), "an unchanged re-import must not warn")
+
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "ws-tmpl", "scion-agent.yaml"),
 		[]byte("harness: claude\nmodel: other\n"), 0644))
 	require.NoError(t, srv.BootstrapTemplatesFromDir(ctx, dir))

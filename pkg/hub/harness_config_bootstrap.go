@@ -143,11 +143,11 @@ func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.
 // (ResourceStore/schema work, out of scope here). Until then this stays at
 // WARN because the destructive case is silent otherwise.
 //
-// log is the caller's subsystem logger (resourceLog for harness-configs,
+// logger is the caller's subsystem logger (resourceLog for harness-configs,
 // templateLog for templates) so the WARN lands next to that bootstrap's
 // other log lines.
-func warnBootstrapOverwrite(log *slog.Logger, kind, name, id, dir, oldHash, newHash string) {
-	log.Warn("workstation bootstrap: hub record replaced from local disk copy; "+
+func warnBootstrapOverwrite(logger *slog.Logger, kind, name, id, dir, oldHash, newHash string) {
+	logger.Warn("workstation bootstrap: hub record replaced from local disk copy; "+
 		"any hub-side edits made since the last import are lost",
 		"kind", kind, "name", name, "id", id, "dir", dir,
 		"oldHash", oldHash, "newHash", newHash)
