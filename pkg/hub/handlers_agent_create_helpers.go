@@ -116,20 +116,26 @@ func (s *Server) authorizeResolvedTemplate(ctx context.Context, identity Identit
 }
 
 // templateHarnessConfigName is the single source of the template rung's
-// harness-config name. fromDefault reports whether the name is the
-// template's explicit DefaultHarnessConfig (a deliberate slug choice) rather
-// than the bare Harness-type fallback; resolveDerivedConfig's not-found log
-// level depends on that distinction (ptone/scion#620). Both template rungs
-// (deriveAgentConfig and resolveDerivedConfig's own fallback) use it so they
-// cannot drift.
-func templateHarnessConfigName(template *store.Template) (name string, fromDefault bool) {
+// harness-config name: the template's declared harness_config /
+// default_harness_config (both land in Template.DefaultHarnessConfig), or ""
+// when it declares none. Both template rungs (deriveAgentConfig and
+// resolveDerivedConfig's own fallback) use it so they cannot drift.
+//
+// It deliberately does NOT fall back to Template.Harness (ptone/scion#601
+// item 2, product decision (a)). That field is a harness *type* — and for any
+// template whose name merely contains claude/gemini/opencode/codex it is
+// inferred from the name (inferHarnessFromName) — not a harness-config slug.
+// Using it as one filled the slot before applyHubAgentDefaults, so a hub
+// operator's agent_defaults.default_harness_config silently lost to a
+// name-inferred type, and it diverged from the broker resolver
+// (pkg/config.ResolveHarnessConfigName), which never treats a template's
+// harness type as a config name. With no declared name, the hub default and
+// then broker-side resolution (profile / settings defaults) decide.
+func templateHarnessConfigName(template *store.Template) string {
 	if template == nil {
-		return "", false
+		return ""
 	}
-	if template.DefaultHarnessConfig != "" {
-		return template.DefaultHarnessConfig, true
-	}
-	return template.Harness, false
+	return template.DefaultHarnessConfig
 }
 
 type templateDefaultHarnessConfigCtxKey struct{}
@@ -349,6 +355,10 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 //     default only fills a slot that request, project, AND template all
 //     left empty (design §5.2 risk (b);
 //     TestCreateAgent_HubDefaultHarnessConfig_LosesToTemplate pins this).
+//     "Template" means only the template's declared harness_config/
+//     default_harness_config, never its harness type (ptone/scion#601
+//     item 2), so a harness-type-only template leaves the slot to the hub
+//     default.
 func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
 	// Harness-config resolution: request (already on AppliedConfig.HarnessConfig
 	// from the explicit-inputs setup) > project annotation > template default.
@@ -356,9 +366,8 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 		agent.AppliedConfig.HarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
 	}
 	if agent.AppliedConfig.HarnessConfig == "" {
-		name, fromDefault := templateHarnessConfigName(resolvedTemplate)
-		agent.AppliedConfig.HarnessConfig = name
-		if fromDefault {
+		if name := templateHarnessConfigName(resolvedTemplate); name != "" {
+			agent.AppliedConfig.HarnessConfig = name
 			ctx = withTemplateDefaultHarnessConfig(ctx)
 		}
 	}
@@ -566,9 +575,9 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// depth, not a live case. Kept so the two provenances stay mutually
 	// exclusive by construction rather than by that reasoning holding.
 	hcFromHubDefault := hcName != "" && !hcFromProjectAnnotation && hubDefaultHarnessConfigFromContext(ctx)
-	// A fourth provenance (ptone/scion#620): the template's explicit
-	// default_harness_config. Unlike the template's bare Harness type, this
-	// field names a harness-config slug on purpose, so failing to resolve it
+	// A fourth provenance (ptone/scion#620): the template's declared
+	// harness_config/default_harness_config. It names a harness-config slug
+	// on purpose, so failing to resolve it
 	// means the template author's choice is silently replaced by whatever the
 	// broker finds on disk. Carried on the context by deriveAgentConfig's
 	// template rung (same reason as the hub default: a request naming the
@@ -577,7 +586,8 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	hcFromTemplateDefault := hcName != "" && !hcFromProjectAnnotation && !hcFromHubDefault &&
 		templateDefaultHarnessConfigFromContext(ctx)
 	if hcName == "" && resolvedTemplate != nil {
-		hcName, hcFromTemplateDefault = templateHarnessConfigName(resolvedTemplate)
+		hcName = templateHarnessConfigName(resolvedTemplate)
+		hcFromTemplateDefault = hcName != ""
 	}
 	// resolvedHC is the hub harness config resolved below, if any; the
 	// timezone capture at the end of this function reads its env.
@@ -648,14 +658,12 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 			//           the broker has on disk. Observability only — dispatch
 			//           still proceeds (product decision on #620).
 			//
-			//   DEBUG — anything else. Most often hcName is the template's bare
-			//           Harness type ("claude") rather than a stored
-			//           harness-config slug, via templateHarnessConfigName's
-			//           second branch. Harness configs are created through the
-			//           API rather than seeded, so "no HarnessConfig row whose
-			//           slug matches the harness type" is the default state of a
-			//           fresh deployment. Warning there would fire on every
-			//           single agent create and train operators to ignore it.
+			//   DEBUG — anything else: in practice a name supplied explicitly
+			//           on the request (or carried over from an existing
+			//           agent's config). The template's bare Harness type used
+			//           to land here as the common case; since
+			//           ptone/scion#601 item 2 it is never used as a
+			//           harness-config name (see templateHarnessConfigName).
 			projectID := ""
 			if project != nil {
 				projectID = project.ID

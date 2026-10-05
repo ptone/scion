@@ -612,7 +612,7 @@ only what is still unset:
 | --- | --- |
 | Highest | the agent-create request / inline config |
 | | the project's `scion.io/default-*` annotation (e.g., `scion.io/default-harness-config`, `scion.io/default-model`, `scion.io/default-thinking-level`) |
-| | the template's `scion-agent.yaml` |
+| | the template's `scion-agent.yaml` (for `harness_config`: only a declared `harness_config` / `default_harness_config`, never the template's `harness` type) |
 | | hub `agent_defaults` — **see [Bucket 4](#bucket-4--operatoradmin-settings), the position is not settled** |
 | Lowest | the broker's own `settings.yaml` defaults (e.g., `default_max_turns` / `default_max_model_calls` / `default_max_duration`) |
 
@@ -622,6 +622,11 @@ layer, so it fills in only when nothing above it sets a model. The broker then r
 through the harness-config's `model_aliases` and injects the result as `SCION_MODEL`. The codex and
 gemini-cli harness-configs both declare `model: medium` this way. The hub does not apply this
 default itself: it resolves only an explicit tier.
+
+#### `Changed in this release` — a template's harness type is no longer used as a harness-config name
+
+**Before:** When a template declared no `harness_config` / `default_harness_config`, the Hub used the template's `harness` *type* (for example `claude`) as the harness-config name. The Hub infers that type from the template's name for any template whose name contains `claude`, `gemini`, `opencode` or `codex`. Because the template tier sits above hub `agent_defaults`, the inferred type silently beat an operator's `agent_defaults.default_harness_config`.
+**After:** Only a declared `harness_config` / `default_harness_config` fills the template tier. When the template declares neither, the hub `agent_defaults.default_harness_config` applies. If that is unset too, the Runtime Broker resolves the harness config itself (profile `default_harness_config`, then the settings `default_harness_config`), as it already did for local agents. Agents created from such templates no longer show the harness type as their harness config.
 
 #### `Changed in this release` — project `default-harness-config` correctly outranks template harness config
 
