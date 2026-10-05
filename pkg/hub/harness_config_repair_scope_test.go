@@ -148,7 +148,7 @@ func TestHarnessConfigRepair_StaleIDDoesNotFallBackToName(t *testing.T) {
 	err := f.srv.syncHarnessConfigFromStorage(context.Background(), HarnessConfigRepairRef{
 		ID: tid("deleted-record"), Name: "claude", ProjectID: f.projectA.ID,
 	})
-	require.Error(t, err)
+	require.ErrorContains(t, err, "not found")
 	assert.False(t, f.repaired(t, f.global))
 	assert.False(t, f.repaired(t, f.inA))
 }
@@ -167,7 +167,7 @@ func TestHarnessConfigRepair_UnknownNameNotFound(t *testing.T) {
 	err := f.srv.syncHarnessConfigFromStorage(context.Background(), HarnessConfigRepairRef{
 		Name: "no-such-config", ProjectID: f.projectA.ID,
 	})
-	require.Error(t, err)
+	require.ErrorContains(t, err, "not found")
 }
 
 // Sync-all must repair each listed record by its own ID. Both same-named
