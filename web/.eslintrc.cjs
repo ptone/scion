@@ -82,6 +82,7 @@ module.exports = {
                 'src/components/shared/group-member-editor-membership.test.ts',
                 'src/components/pages/onboarding.test.ts',
                 'src/components/pages/chat-hub-members.test.ts',
+                'src/components/shared/chat/chat-thread-peer-project.test.ts',
             ],
             parserOptions: { project: './src/components/tsconfig.component-tests.json' },
         },
