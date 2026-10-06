@@ -81,7 +81,7 @@ test-fast:
 # Skips four pkg/hub tests with known pre-existing, tracked failures
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
-	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit tests (SQLite-enabled)..."
+	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/artifacts tests (SQLite-enabled)..."
 	@go test -count=1 -timeout 40m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
 		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/artifacts/...
@@ -228,7 +228,7 @@ test-webchat-postgres:
 		fi; \
 	done
 
-## test-artifacts-postgres: Run the pkg/artifacts store and service tests against SQLite and a real Postgres
+## test-artifacts-postgres: Run the pkg/artifacts tests: store tests on SQLite and a real Postgres (service tests on SQLite)
 # Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). The artifact
 # store is not an Ent store (design D3: own tables, created by Init), so like
 # the web chat store it has its own Postgres SQL and its own Postgres tests.
@@ -238,7 +238,7 @@ test-webchat-postgres:
 # /postgres subtest passed. Each test works in its own throwaway schema.
 # CI runs this in the T1 Launch Store PostgreSQL Tests job.
 test-artifacts-postgres:
-	@echo "Running artifact store tests against SQLite and Postgres..."
+	@echo "Running pkg/artifacts tests (store tests on SQLite and Postgres)..."
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently be left out." >&2; \
 		exit 1; \
