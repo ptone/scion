@@ -72,8 +72,9 @@ type imageHit struct {
 // spans are skipped.
 //
 // The work is linear in the document and bounded by limit: each kind of
-// reference is scanned once and stops after limit distinct URLs, so the
-// result holds the first limit URLs of the document. It is a best-effort
+// reference is scanned once and stops after limit distinct URLs or past the
+// position where the result is already complete, so the result holds the
+// first limit URLs of the document. It is a best-effort
 // scan for the URLs to fetch; the renderer matches what it finds against
 // the manifest and shows a placeholder for anything missing.
 func extractImageURLs(markdown string, limit int) []string {
@@ -92,15 +93,35 @@ func extractImageURLs(markdown string, limit int) []string {
 	})
 
 	var hits []imageHit
+	// cutoff is the position of the limit-th distinct URL found so far; a
+	// later scan stops there, because nothing after it can make the result.
+	cutoff := len(text)
+	updateCutoff := func() {
+		sort.SliceStable(hits, func(i, j int) bool { return hits[i].pos < hits[j].pos })
+		seen := map[string]bool{}
+		for _, h := range hits {
+			if !seen[h.url] {
+				seen[h.url] = true
+				if len(seen) == limit {
+					cutoff = h.pos
+					return
+				}
+			}
+		}
+	}
 	collectIn := func(src string, re *regexp.Regexp, dest func(m []int) string) {
 		seen := map[string]bool{}
 		scanMatches(re, src, func(m []int) bool {
+			if m[0] > cutoff {
+				return false
+			}
 			if u := normalizeDestination(dest(m)); u != "" && !seen[u] {
 				seen[u] = true
 				hits = append(hits, imageHit{m[0], u})
 			}
 			return len(seen) < limit
 		})
+		updateCutoff()
 	}
 	collect := func(re *regexp.Regexp, dest func(m []int) string) { collectIn(text, re, dest) }
 	collect(inlineImage, func(m []int) string { return text[m[2]:m[3]] })
@@ -117,7 +138,6 @@ func extractImageURLs(markdown string, limit int) []string {
 	shown := blankHTMLBlocks(text)
 	collectIn(shown, imgTag, func(m []int) string { return imgSrc(shown[m[0]:m[1]]) })
 
-	sort.SliceStable(hits, func(i, j int) bool { return hits[i].pos < hits[j].pos })
 	var out []string
 	seen := map[string]bool{}
 	for _, h := range hits {

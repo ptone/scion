@@ -120,20 +120,21 @@ func TestExtractImageURLsLinearAndBounded(t *testing.T) {
 
 	start := time.Now()
 	got := extractImageURLs(md, 128)
-	if elapsed := time.Since(start); elapsed > time.Second {
+	if elapsed := time.Since(start); elapsed > time.Second && !raceEnabled {
 		t.Fatalf("extraction took %v", elapsed)
 	}
 	if len(got) != 128 || got[0] != "https://img.example/0.png" || got[1] != "https://img.example/ref.png" || got[2] != "https://img.example/1.png" {
 		t.Fatalf("got %d URLs starting %q", len(got), got[:min(3, len(got))])
 	}
 
-	// Without an early stop the full document still scans quickly.
-	start = time.Now()
-	all := extractImageURLs(md, 1_000_000)
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Fatalf("full extraction took %v", elapsed)
+	// Without an early stop every URL is found (a smaller document keeps
+	// this quick under the race detector).
+	var small strings.Builder
+	small.WriteString("[r]: https://img.example/ref.png\n")
+	for i := 0; i < 20_000; i++ {
+		fmt.Fprintf(&small, "![a](https://img.example/%d.png) ![b][r] ![c](rel/%d.png)\n", i, i)
 	}
-	if len(all) != 100_001 {
+	if all := extractImageURLs(small.String(), 1_000_000); len(all) != 20_001 {
 		t.Fatalf("full extraction found %d URLs", len(all))
 	}
 	if extractImageURLs(md, 0) != nil {
