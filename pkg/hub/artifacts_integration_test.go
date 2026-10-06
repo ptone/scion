@@ -577,7 +577,7 @@ func TestArtifactServiceReachableOnlyThroughHTTPAuth(t *testing.T) {
 	req = req.WithContext(contextWithIdentity(req.Context(), user))
 	out := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(out, req)
-	assert.NotEqual(t, http.StatusOK, out.Code, "a context identity without credentials must not read through the hub handler")
+	assert.Equal(t, http.StatusUnauthorized, out.Code, "a context identity without credentials must not read through the hub handler: %s", out.Body.String())
 }
 
 // bearerArtifactRequest sends a request with a bearer credential through
