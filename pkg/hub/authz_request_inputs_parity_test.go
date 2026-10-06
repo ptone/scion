@@ -66,6 +66,10 @@ type storeCallRecord struct {
 	hasInputMemo  bool
 	hasEdgesMemo  bool
 	ceilingActive bool
+	// stack holds the fully qualified function names on the calling
+	// goroutine's stack at the time of the call, innermost first. It is
+	// captured only when recordCalls is set.
+	stack []string
 }
 
 // memoTestStore wraps a real store.Store and intercepts the methods the
@@ -131,6 +135,7 @@ func (m *memoTestStore) call(ctx context.Context, method string) error {
 			hasInputMemo:  authzInputMemoFromContext(ctx) != nil,
 			hasEdgesMemo:  delegationEdgesMemoFromContext(ctx) != nil,
 			ceilingActive: getDelegationCeilingCache(ctx) != nil,
+			stack:         callerFuncNames(),
 		})
 	}
 	fault := m.fault
@@ -690,7 +695,9 @@ func runBatchLegIfApplicable(t *testing.T, s store.Store, identity Identity, tup
 	ctx := context.Background()
 	refStore := newMemoTestStore(s)
 	refAuthz, refEmit := newRecordingAuthz(refStore)
-	refCaps := refAuthz.ComputeCapabilitiesBatch(ctx, identity, resources, resourceType)
+	// The batch installs the memo itself, so the reference masks it to
+	// keep every decision on its own store loads.
+	refCaps := refAuthz.ComputeCapabilitiesBatch(maskAllAuthzMemo(ctx), identity, resources, resourceType)
 
 	candStore := newMemoTestStore(s)
 	candAuthz, candEmit := newRecordingAuthz(candStore)
@@ -855,13 +862,30 @@ func TestParity_StoreCallCounts_ComputeCapabilitiesBatch(t *testing.T) {
 			// for a 501-row fixture).
 			assert.Equal(t, 1, pages, "exactly one constraint page for a fixture with far fewer than 500 rows")
 
+			// With no outer memo the batch installs its own, at the same cost.
+			selfStore := newMemoTestStore(s)
+			selfAuthz, _ := newRecordingAuthz(selfStore)
+			selfAuthz.ComputeCapabilitiesBatch(ctx, f.user, resources, "agent")
+			for _, m := range []string{"GetEffectiveGroups", "ListRoleBindingsForPrincipals", "GetRoleDefinitionsByIDs", "ListAccessConstraints"} {
+				assert.Equal(t, memoStore.countOf(m), selfStore.countOf(m), "%s with the batch's own memo", m)
+			}
+
+			// A masked memo gives the per-decision cost of evaluating with no memo.
 			plainStore := newMemoTestStore(s)
 			plainAuthz, _ := newRecordingAuthz(plainStore)
-			plainAuthz.ComputeCapabilitiesBatch(ctx, f.user, resources, "agent")
+			plainAuthz.ComputeCapabilitiesBatch(maskAllAuthzMemo(ctx), f.user, resources, "agent")
 			k := len(ResourceActions["agent"])
 			require.Equal(t, 8, k, "test assumes 8 agent resource actions; ResourceActions[\"agent\"] changed")
-			assert.Equal(t, k*n, plainStore.countOf("GetEffectiveGroups"), "GetEffectiveGroups without the memo")
-			assert.Equal(t, k*n, plainStore.countOf("ListRoleBindingsForPrincipals"), "ListRoleBindingsForPrincipals without the memo")
+			// Without the memo, each action the kernel denies also reaches the
+			// owner/ancestor candidates, whose project-access check
+			// (ptone/scion#2141) loads the closure and bindings once more per
+			// decision. The project-member role grants one of the eight agent
+			// actions, so seven decisions per agent make that check. Under
+			// the memo (asserted above) the check reads the memo and adds
+			// nothing.
+			const relationshipChecks = 7
+			assert.Equal(t, (k+relationshipChecks)*n, plainStore.countOf("GetEffectiveGroups"), "GetEffectiveGroups without the memo")
+			assert.Equal(t, (k+relationshipChecks)*n, plainStore.countOf("ListRoleBindingsForPrincipals"), "ListRoleBindingsForPrincipals without the memo")
 			assert.Equal(t, k*n, plainStore.countOf("GetRoleDefinitionsByIDs"), "GetRoleDefinitionsByIDs without the memo")
 			assert.Equal(t, k*n*pages, plainStore.countOf("ListAccessConstraints"), "ListAccessConstraints without the memo")
 		})
@@ -1229,6 +1253,17 @@ var e5bExpectedFaultReason = map[string]string{
 // k-1 flips from a genuine allow to a genuine, specifically-reasoned
 // fail-closed deny, which is the only way this row can prove the fault was
 // observed (and not simply irrelevant) in the reference.
+//
+// The production install sites (the capability functions,
+// AuthorizeReadBatch and the agent list handlers) put every decision of a
+// call or list request under one memo, so this divergence is reachable in
+// production, for read decisions as well as writes: a load that fails after
+// an earlier success in the same request no longer denies the later
+// decision. That is accepted. The memo reuses only a value the same request
+// already loaded successfully, a failure before the first success is never
+// cached and still fails closed, a done ctx bypasses the memo, and lookups
+// made for other principals (relationship candidates, the delegation
+// ceiling's delegators) never observe it.
 func TestParity_E5b_DocumentedDivergenceOnLaterTransient(t *testing.T) {
 	for _, method := range []string{"GetEffectiveGroups", "ListRoleBindingsForPrincipals", "GetRoleDefinitionsByIDs", "ListAccessConstraints"} {
 		for _, k := range []int{2, 5} {
@@ -2007,6 +2042,16 @@ func TestParity_A7Prime_FirstAttemptTransientPlusDeterministicFault(t *testing.T
 // step-10 decision: the documented later-transient divergence — it fires there, never
 // on the candidate's (memo hit). The candidate's corresponding decision
 // deep-equals the same decision in a no-fault run.
+//
+// Because an edge-lookup error fails closed for every action, (c) applies
+// to read decisions exactly as to writes: a memo hit on the requester's
+// edges masks a later transient edge error for a read too. With the memo
+// installed at the capability functions, AuthorizeReadBatch and the agent
+// list handlers, that holds for every listing request; the install-site
+// form is pinned by TestMemoInstall_LaterEdgeFaultServedFromMemoAtInstallSites.
+// Edge lookups made while walking a relationship candidate's source agent
+// chain never share the memo (TestMemoInstall_SourceAgentEdgeFaultNotServedFromMemo),
+// so the divergence is limited to the requester's own ceiling lookups.
 func TestParity_A8_DelegationEdgesFail(t *testing.T) {
 	t.Run("always", func(t *testing.T) {
 		_, s := authzTestSetup(t)
@@ -2285,6 +2330,14 @@ func TestParity_A8_DelegationEdgesFail(t *testing.T) {
 // write (upstream #2206 removed the old read-only fail-open skip entirely
 // — a done-ctx store error now fails closed uniformly, regardless of
 // action) — only the call count catches that regression.
+//
+// The read arm matters as much as the write arm here: with the memo
+// installed at the capability functions, AuthorizeReadBatch and the agent
+// list handlers, a memo hit can mask a later transient edge error for a
+// read (see the delegation-edge fault test above). This test is what keeps
+// that accepted divergence from extending to a cancelled request: on a done
+// ctx the edges are always looked up again, so read and write both fail
+// closed.
 func TestParity_E6b_DoneCtxEdgesBypass_RequiredGate(t *testing.T) {
 	for _, variant := range []string{"honours", "ignores"} {
 		for _, ac := range []struct {
@@ -2727,10 +2780,10 @@ func TestParity_C1_ConstraintDenyOnProject(t *testing.T) {
 	}
 }
 
-// TestParity_R1_OwnerOnlyNoBinding is row R1: a user with no role
-// binding at all, granted only through the resource-owner relationship.
-// Deep-equal.
-func TestParity_R1_OwnerOnlyNoBinding(t *testing.T) {
+// TestParity_R1_OwnerAccessOnlyBinding is row R1: a user whose only role
+// binding is an access-only project binding (no permissions), granted only
+// through the resource-owner relationship. Deep-equal.
+func TestParity_R1_OwnerAccessOnlyBinding(t *testing.T) {
 	_, s := authzTestSetup(t)
 	ctx := context.Background()
 	ownerID := tid("r1-owner")
@@ -2739,6 +2792,10 @@ func TestParity_R1_OwnerOnlyNoBinding(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Slug: "r1-proj", Name: "r1"}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: ownerID, Email: "r1@test.com", DisplayName: "r1", Role: "member", Status: "active"}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "r1-agent", Name: "r1-agent", ProjectID: projectID, Phase: "running", OwnerID: ownerID}))
+	// The access-only project binding gives the owner relationship the
+	// active project access it requires (ptone/scion#2141) without granting
+	// any permission itself.
+	grantProjectAccessOnly(t, s, ownerID, projectID)
 	owner := NewAuthenticatedUser(ownerID, "r1@test.com", "r1", "member", "api")
 	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, OwnerID: ownerID}
 
@@ -3152,43 +3209,60 @@ func TestParity_T5_SecretProgenyRawLoop(t *testing.T) {
 	// admission stage needs a real stored agent row plus a resolvable
 	// delegation-edge chain to an active, admitted project-Beta user,
 	// independent of the progeny sharing-source relationship
-	// (gf.projectOwnerID, via Ancestry).
-	agentID := tid("t5-secret-agent")
+	// (gf.projectOwnerID, via Ancestry). project.secret_read requires
+	// recorded provenance on every delegation hop, so the allow path seeds
+	// a recorded edge; the sibling agent below carries an unrecorded edge
+	// and is denied.
 	betaMemberID := tid("t5-beta-member")
 	createDCUser(t, gf.store, betaMemberID, "t5-beta-member@test.com", gf.projectBeta.ID, store.ProjectRoleAdmin)
-	require.NoError(t, gf.store.CreateAgent(context.Background(), &store.Agent{
-		ID: agentID, Slug: "t5-secret-agent", Name: "t5-secret-agent",
-		ProjectID: gf.projectBeta.ID, Phase: "running",
-		OwnerID: betaMemberID, Ancestry: []string{gf.projectOwnerID},
-	}))
-	createDCEdge(t, gf.store, store.DelegationPrincipalUser, betaMemberID, store.DelegationPrincipalAgent, agentID, store.RoleScopeProject, gf.projectBeta.ID, string(AgentRoleFull))
-	agent := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: gf.projectBeta.ID,
-		Ancestry:  []string{gf.projectOwnerID},
-		Scopes:    allRegisteredAgentScopes(),
-	}}
+	newAgent := func(slug string, seedEdge func(t *testing.T, s store.Store, delegatorType, delegatorID, delegateType, delegateID, scopeType, scopeID, role string)) AgentIdentity {
+		agentID := tid(slug)
+		require.NoError(t, gf.store.CreateAgent(context.Background(), &store.Agent{
+			ID: agentID, Slug: slug, Name: slug,
+			ProjectID: gf.projectBeta.ID, Phase: "running",
+			OwnerID: betaMemberID, Ancestry: []string{gf.projectOwnerID},
+		}))
+		seedEdge(t, gf.store, store.DelegationPrincipalUser, betaMemberID, store.DelegationPrincipalAgent, agentID, store.RoleScopeProject, gf.projectBeta.ID, string(AgentRoleFull))
+		return &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: agentID},
+			ProjectID: gf.projectBeta.ID,
+			Ancestry:  []string{gf.projectOwnerID},
+			Scopes:    allRegisteredAgentScopes(),
+		}}
+	}
 	secretRes := Resource{Type: "secret", ID: gf.secretID}
 	p := permissions.Permission{ID: "project.secret_read", Action: string(ActionRead)}
-
 	ctx := context.Background()
-	refStore := newMemoTestStore(gf.store)
-	refAuthz, refEmit := newRecordingAuthz(refStore)
-	refDecision := decideExplicit(t, refAuthz, agent, secretRes, p)
+	decidePair := func(agent AgentIdentity) (Decision, Decision) {
+		refStore := newMemoTestStore(gf.store)
+		refAuthz, refEmit := newRecordingAuthz(refStore)
+		refDecision := decideExplicit(t, refAuthz, agent, secretRes, p)
+
+		candStore := newMemoTestStore(gf.store)
+		candAuthz, candEmit := newRecordingAuthz(candStore)
+		candDecision := candAuthz.Decide(withAuthzInputMemo(ctx), AuthzRequest{
+			Principal:  principalContextForIdentity(agent),
+			Credential: credentialContextForIdentity(agent),
+			Resource:   secretRes,
+			Action:     ActionRead,
+			Permission: p.ID,
+		})
+
+		assertDecisionsEqual(t, refDecision, candDecision, "memo-ctx candidate must match the reference")
+		assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot())
+		return refDecision, candDecision
+	}
+
+	refDecision, _ := decidePair(newAgent("t5-secret-agent", seedRecordedDelegationEdge))
 	require.True(t, refDecision.Allowed, "reference progeny secret read must be allowed: %q", refDecision.Reason)
 
-	candStore := newMemoTestStore(gf.store)
-	candAuthz, candEmit := newRecordingAuthz(candStore)
-	candDecision := candAuthz.Decide(withAuthzInputMemo(ctx), AuthzRequest{
-		Principal:  principalContextForIdentity(agent),
-		Credential: credentialContextForIdentity(agent),
-		Resource:   secretRes,
-		Action:     ActionRead,
-		Permission: p.ID,
-	})
-
-	assertDecisionsEqual(t, refDecision, candDecision, "memo-ctx candidate must match the reference")
-	assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot())
+	// The same row through an unrecorded edge is denied at the hop ceiling,
+	// identically on both sides.
+	unrecRef, unrecCand := decidePair(newAgent("t5-secret-agent-unrecorded", createDCEdge))
+	assert.False(t, unrecRef.Allowed, "reference progeny secret read through an unrecorded edge must be denied")
+	assert.Equal(t, DenyCauseCeilingUnrecorded, unrecRef.DenyCause, "reference deny cause: reason=%q", unrecRef.Reason)
+	assert.Contains(t, unrecRef.Reason, "project.secret_read requires recorded provenance")
+	assert.Equal(t, DenyCauseCeilingUnrecorded, unrecCand.DenyCause, "candidate deny cause: reason=%q", unrecCand.Reason)
 }
 
 // TestParity_T8_SecretUseRuntimeRow is row T8: raw Decide,
@@ -3220,7 +3294,9 @@ func TestParity_T8_SecretUseRuntimeRow(t *testing.T) {
 	// UATScope), so no standard seeded user role grants it; f.delegatorID
 	// needs an explicit role binding for it, or the ceiling denies "the
 	// delegator does not hold secret.use" even though the progeny grant
-	// itself succeeds.
+	// itself succeeds. secret.use also requires recorded provenance on
+	// every delegation hop, so the allow path seeds a recorded edge; the
+	// sibling agent below carries an unrecorded edge and is denied.
 	t8RD := createTestRoleDefinition(t, s, "t8-secret-use-role", store.RoleScopeProject, []string{"secret.use"})
 	_, err := s.CreateRoleBinding(context.Background(), &store.RoleBinding{
 		RoleDefinitionID: t8RD.ID,
@@ -3231,44 +3307,57 @@ func TestParity_T8_SecretUseRuntimeRow(t *testing.T) {
 		CreatedBy:        "test",
 	})
 	require.NoError(t, err)
-	useAgentID := tid("t8-use-agent")
-	createDCAgent(t, s, useAgentID, f.projectID, f.delegatorID, AgentRoleFull)
-	createDCEdge(t, s, store.DelegationPrincipalUser, f.delegatorID, store.DelegationPrincipalAgent, useAgentID, store.RoleScopeProject, f.projectID, string(AgentRoleFull))
-	useAgent := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: useAgentID},
-		ProjectID: f.projectID,
-		Ancestry:  []string{f.delegatorID},
-		Scopes:    allRegisteredAgentScopes(),
-	}}
+	newUseAgent := func(slug string, seedEdge func(t *testing.T, s store.Store, delegatorType, delegatorID, delegateType, delegateID, scopeType, scopeID, role string)) AgentIdentity {
+		useAgentID := tid(slug)
+		createDCAgent(t, s, useAgentID, f.projectID, f.delegatorID, AgentRoleFull)
+		seedEdge(t, s, store.DelegationPrincipalUser, f.delegatorID, store.DelegationPrincipalAgent, useAgentID, store.RoleScopeProject, f.projectID, string(AgentRoleFull))
+		return &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: useAgentID},
+			ProjectID: f.projectID,
+			Ancestry:  []string{f.delegatorID},
+			Scopes:    allRegisteredAgentScopes(),
+		}}
+	}
 
 	ctx := context.Background()
-	refStore := newMemoTestStore(s)
-	refAuthz, refEmit := newRecordingAuthz(refStore)
-	refDecision := decideExplicit(t, refAuthz, useAgent, secretRes, p)
-	require.Len(t, refEmit.snapshot(), 1, "audit invariant: exactly one audit record per decision (reference)")
+	decidePair := func(useAgent AgentIdentity) (Decision, Decision) {
+		refStore := newMemoTestStore(s)
+		refAuthz, refEmit := newRecordingAuthz(refStore)
+		refDecision := decideExplicit(t, refAuthz, useAgent, secretRes, p)
+		require.Len(t, refEmit.snapshot(), 1, "audit invariant: exactly one audit record per decision (reference)")
 
-	candStore := newMemoTestStore(s)
-	candAuthz, candEmit := newRecordingAuthz(candStore)
-	mctx := withAuthzInputMemo(ctx)
-	candDecision := candAuthz.Decide(mctx, AuthzRequest{
-		Principal:  principalContextForIdentity(useAgent),
-		Credential: credentialContextForIdentity(useAgent),
-		Resource:   secretRes,
-		Action:     ActionUse,
-		Permission: p.ID,
-	})
-	require.Len(t, candEmit.snapshot(), 1, "audit invariant: exactly one audit record per decision (candidate)")
+		candStore := newMemoTestStore(s)
+		candAuthz, candEmit := newRecordingAuthz(candStore)
+		mctx := withAuthzInputMemo(ctx)
+		candDecision := candAuthz.Decide(mctx, AuthzRequest{
+			Principal:  principalContextForIdentity(useAgent),
+			Credential: credentialContextForIdentity(useAgent),
+			Resource:   secretRes,
+			Action:     ActionUse,
+			Permission: p.ID,
+		})
+		require.Len(t, candEmit.snapshot(), 1, "audit invariant: exactly one audit record per decision (candidate)")
 
+		// Compare the audit sequence, not just the Decision.
+		assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot())
+		assertDecisionsEqual(t, refDecision, candDecision)
+		return refDecision, candDecision
+	}
+
+	refDecision, _ := decidePair(newUseAgent("t8-use-agent", seedRecordedDelegationEdge))
 	// H2: the progeny grant must actually be what allowed secret.use,
 	// not some other path (e.g. a vacuously-passing deny on both sides).
 	require.True(t, refDecision.Allowed, "reference secret.use must be allowed via the progeny grant: reason=%q", refDecision.Reason)
 	assert.Contains(t, refDecision.Reason, "progeny", "H2: the reference Reason must show the progeny grant")
 	assert.Contains(t, refDecision.Reason, "relationship grant", "H2: the reference Reason must show a relationship grant, not a role binding")
 
-	// Compare the audit sequence, not just the Decision.
-	assertAuditSequenceEqual(t, refEmit.snapshot(), candEmit.snapshot())
-
-	assertDecisionsEqual(t, refDecision, candDecision)
+	// The same row through an unrecorded edge is denied at the hop ceiling,
+	// identically on both sides.
+	unrecRef, unrecCand := decidePair(newUseAgent("t8-use-agent-unrecorded", createDCEdge))
+	assert.False(t, unrecRef.Allowed, "reference secret.use through an unrecorded edge must be denied")
+	assert.Equal(t, DenyCauseCeilingUnrecorded, unrecRef.DenyCause, "reference deny cause: reason=%q", unrecRef.Reason)
+	assert.Contains(t, unrecRef.Reason, "secret.use requires recorded provenance")
+	assert.Equal(t, DenyCauseCeilingUnrecorded, unrecCand.DenyCause, "candidate deny cause: reason=%q", unrecCand.Reason)
 }
 
 // =============================================================================
@@ -3509,6 +3598,32 @@ func TestParity_X5_BatchLevelInstallIsPerCall(t *testing.T) {
 
 	caps2 := authz.ComputeCapabilities(withAuthzInputMemo(context.Background()), f.user, f.agentRes)
 	assert.Contains(t, caps2.Actions, string(ActionDelete), "the second call's own fresh memo must see the new admin binding")
+}
+
+// TestParity_CapabilitiesForActionsInstallIsPerCall checks that the
+// per-action capability function, called with no outer memo, installs a
+// memo scoped to that call: a binding added between two calls is visible
+// to the second.
+func TestParity_CapabilitiesForActionsInstallIsPerCall(t *testing.T) {
+	_, s := authzTestSetup(t)
+	f := newP1Fixture(t, s, "per-call-actions")
+	authz, _ := newRecordingAuthz(newMemoTestStore(s))
+	actions := []Action{ActionRead, ActionDelete}
+	resources := []Resource{f.agentRes, f.agentRes}
+
+	caps1 := authz.ComputeCapabilitiesForActions(context.Background(), f.user, resources, actions)
+	for i := range caps1 {
+		require.Equal(t, []string{string(ActionRead)}, caps1[i].Actions, "an ordinary member starts with read only (resource %d)", i)
+	}
+
+	createDCUser(t, s, f.userID, "per-call-actions@test.com", f.projectID, store.ProjectRoleOwner)
+
+	caps2 := authz.ComputeCapabilitiesForActions(context.Background(), f.user, resources, actions)
+	for i := range caps2 {
+		assert.Contains(t, caps2[i].Actions, string(ActionDelete), "the second call's own memo must see the new owner binding (resource %d)", i)
+	}
+	batch := authz.ComputeCapabilitiesBatch(context.Background(), f.user, []Resource{f.agentRes}, "agent")
+	assert.Contains(t, batch[0].Actions, string(ActionDelete), "a later batch call installs its own memo too")
 }
 
 // =============================================================================
@@ -3796,6 +3911,9 @@ func TestParity_R2_AncestorOnly(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Slug: "r2-proj", Name: "r2"}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "r2-agent", Name: "r2-agent", ProjectID: projectID, Phase: "running", Ancestry: []string{ancestorID}}))
 	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, Ancestry: []string{ancestorID}}
+	// Access-only project binding: the ancestor relationship requires active
+	// project access (ptone/scion#2141); the binding grants no permission.
+	grantProjectAccessOnly(t, s, ancestorID, projectID)
 
 	ancestor := NewAuthenticatedUser(ancestorID, "r2-ancestor@test.com", "r2a", "member", "api")
 	refDecisions, _, _, _ := runParity(t, s, ancestor, agentResourceTuples(res))
@@ -3815,11 +3933,14 @@ func TestParity_R2_AncestorOnly(t *testing.T) {
 }
 
 // TestParity_R3_RelationshipGrantRestrictedByUATScope is row R3
-// ("relationship grant restricted by UAT scope | deep-equal 'relationship
-// grant restricted by ...'"). The UAT owner's ceiling does not cover
-// agent.delete, so the owner relationship would grant it but the 7a
-// restriction blocks it, producing the "relationship grant restricted by"
-// Reason prefix (decide step 9).
+// ("relationship grant restricted by UAT scope | deep-equal"). The UAT
+// owner's ceiling does not cover agent.delete, so the owner relationship
+// would grant it but the token's scope blocks it. Step 1
+// (enforceUATConstraints) evaluates the token's permission ceiling — the
+// same ceiling the 7a restriction uses — so for a UAT the scope denial
+// lands at step 1, before any relationship candidate is considered. The
+// 7a "relationship grant restricted by credential_scope" branch is still
+// exercised for agent tokens (authz_relationship_rules_test.go).
 func TestParity_R3_RelationshipGrantRestrictedByUATScope(t *testing.T) {
 	_, s := authzTestSetup(t)
 	ctx := context.Background()
@@ -3832,11 +3953,9 @@ func TestParity_R3_RelationshipGrantRestrictedByUATScope(t *testing.T) {
 	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, OwnerID: ownerID}
 
 	owner := NewAuthenticatedUser(ownerID, "r3-owner@test.com", "r3", "member", "api")
-	// Step 1 (enforceUATConstraints) checks the identity's legacy scopes
-	// list independently of the 7a ceiling restriction: the legacy list
-	// must name agent:delete so the request reaches the kernel/relationship
-	// stage at all, while the ceiling deliberately omits it so 7a is what
-	// actually blocks the owner-relationship grant.
+	// The legacy scopes list names agent:delete while the ceiling omits it:
+	// step 1 consults the ceiling, so the legacy list cannot widen the
+	// token past it.
 	ceiling, ok := permissions.BuildCeilingFromSelectors([]string{"agent:read"}) // deliberately NOT agent:delete
 	require.True(t, ok)
 	scoped := NewScopedUserIdentityWithCeiling(owner, projectID, []string{"agent:delete"}, "r3-uat", ceiling)
@@ -3848,7 +3967,7 @@ func TestParity_R3_RelationshipGrantRestrictedByUATScope(t *testing.T) {
 	refDecisions, _, _, _ := runParity(t, s, scoped, []rawTuple{{res, ActionDelete}, {res, ActionRead}})
 	require.Len(t, refDecisions, 2)
 	assert.False(t, refDecisions[0].Allowed)
-	assert.Contains(t, refDecisions[0].Reason, "relationship grant restricted by", "H2: must hit the restricted-relationship-grant branch, not a plain deny")
+	assert.Equal(t, "token does not have scope: agent:delete", refDecisions[0].Reason, "H2: the ceiling, not the legacy scopes list, must decide the step-1 scope check")
 }
 
 // =============================================================================
@@ -3868,8 +3987,11 @@ func runBatchParity(t *testing.T, s store.Store, identity Identity, resourceType
 
 	refStore := newMemoTestStore(s)
 	refAuthz, refEmit := newRecordingAuthz(refStore)
-	refCaps := refAuthz.ComputeCapabilitiesBatch(ctx, identity, []Resource{res}, resourceType)
-	refAllowed, refErr := refAuthz.AuthorizeReadBatch(ctx, identity, []Resource{res})
+	// Both functions install the memo themselves, so the reference masks
+	// it to keep every decision on its own store loads.
+	refCtx := maskAllAuthzMemo(ctx)
+	refCaps := refAuthz.ComputeCapabilitiesBatch(refCtx, identity, []Resource{res}, resourceType)
+	refAllowed, refErr := refAuthz.AuthorizeReadBatch(refCtx, identity, []Resource{res})
 	require.NoError(t, refErr)
 	require.Len(t, refEmit.snapshot(), wantDecisions, "audit invariant: exactly one audit record per decision (reference)")
 

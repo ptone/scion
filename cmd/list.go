@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcache"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -192,7 +193,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 
 	parsedLabels, err := parseLabels(filterLabels)
 	if err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	opts := &hubclient.ListAgentsOptions{
@@ -751,6 +752,7 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		CreatedBy:         a.CreatedBy,
 		OwnerID:           a.OwnerID,
 		StateVersion:      a.StateVersion,
+		ProvisionedOnly:   a.ProvisionedOnly,
 	}
 
 	// Fall back to AppliedConfig fields if top-level fields are empty
@@ -793,7 +795,7 @@ func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
 // validateListFlags checks that filter and sort flag values are valid.
 func validateListFlags() error {
 	if listCount < 0 {
-		return fmt.Errorf("invalid --count value %d: must be non-negative", listCount)
+		return newUsageError("invalid --count value %d: must be non-negative", listCount)
 	}
 	if filterPhase != "" {
 		filterPhase = strings.ToLower(filterPhase)
@@ -802,7 +804,7 @@ func validateListFlags() error {
 			for _, p := range state.Phases() {
 				valid = append(valid, string(p))
 			}
-			return fmt.Errorf("invalid phase %q; valid values: %s", filterPhase, strings.Join(valid, ", "))
+			return newUsageError("invalid phase %q; valid values: %s", filterPhase, strings.Join(valid, ", "))
 		}
 	}
 	if filterActivity != "" {
@@ -812,7 +814,7 @@ func validateListFlags() error {
 			for _, a := range state.Activities() {
 				valid = append(valid, string(a))
 			}
-			return fmt.Errorf("invalid activity %q; valid values: %s", filterActivity, strings.Join(valid, ", "))
+			return newUsageError("invalid activity %q; valid values: %s", filterActivity, strings.Join(valid, ", "))
 		}
 	}
 	if sortField != "" {
@@ -823,7 +825,7 @@ func validateListFlags() error {
 				valid = append(valid, k)
 			}
 			sort.Strings(valid)
-			return fmt.Errorf("invalid sort field %q; valid values: %s", sortField, strings.Join(valid, ", "))
+			return newUsageError("invalid sort field %q; valid values: %s", sortField, strings.Join(valid, ", "))
 		}
 	}
 	return nil
@@ -951,6 +953,7 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		if phase == string(state.PhaseStopped) && state.Activity(a.Activity).IsTerminal() {
 			phase = a.Activity
 		}
+		phase = provisionedPhaseLabel(phase, a.ProvisionedOnly)
 		containerStatus := a.ContainerStatus
 		if containerStatus == "created" && a.ID == "" {
 			containerStatus = "none"
@@ -979,48 +982,12 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 	return nil
 }
 
-// formatLastSeen formats a timestamp as a human-readable relative time.
-func formatLastSeen(t time.Time) string {
-	if t.IsZero() {
-		return "-"
-	}
-
-	d := time.Since(t)
-	if d < 0 {
-		return "just now"
-	}
-
-	switch {
-	case d < time.Minute:
-		secs := int(d.Seconds())
-		if secs <= 1 {
-			return "just now"
-		}
-		return fmt.Sprintf("%d seconds ago", secs)
-	case d < time.Hour:
-		mins := int(d.Minutes())
-		if mins == 1 {
-			return "1 minute ago"
-		}
-		return fmt.Sprintf("%d minutes ago", mins)
-	case d < 24*time.Hour:
-		hours := int(d.Hours())
-		if hours == 1 {
-			return "1 hour ago"
-		}
-		return fmt.Sprintf("%d hours ago", hours)
-	default:
-		days := int(d.Hours() / 24)
-		if days == 1 {
-			return "1 day ago"
-		}
-		return fmt.Sprintf("%d days ago", days)
-	}
-}
-
 // formatLastActivity formats a status and timestamp as a combined "activity, time ago" string.
 func formatLastActivity(status string, t time.Time) string {
-	timePart := formatLastSeen(t)
+	timePart := "-"
+	if !t.IsZero() {
+		timePart = clitime.Ago(t)
+	}
 	if status == "" || status == "WORKING" || status == "working" {
 		return timePart
 	}
@@ -1140,6 +1107,16 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// provisionedPhaseLabel shows phase "created" as "created (not started)"
+// when the Hub reports the agent provisioned but not started
+// (ptone/scion#2929), so it does not read as a stuck start.
+func provisionedPhaseLabel(phase string, provisionedOnly bool) string {
+	if provisionedOnly && phase == string(state.PhaseCreated) {
+		return phase + " (not started)"
+	}
+	return phase
 }
 
 // hubAgentPhaseActivity returns the phase and activity for a Hub agent,

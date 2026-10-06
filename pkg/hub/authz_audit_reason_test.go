@@ -240,7 +240,7 @@ func TestAuthorizationAuditReasonMappings(t *testing.T) {
 			"project-1",
 			[]string{"agent:read"},
 		)
-		decision := service.enforceUATDelegation(identity, GrantDescriptor{ScopeType: "project", ScopeID: "project-2"})
+		decision := service.enforceUATDelegation(context.Background(), identity, GrantDescriptor{ScopeType: "project", ScopeID: "project-2"})
 		require.NotNil(t, decision)
 		assertDecisionAuditReason(t, *decision, auditevent.ReasonPolicyDenied)
 	})

@@ -29,6 +29,12 @@ package hub
 // checkAgentHoldsPermission, IsSystemAdmin, migrationSentinelCeiling) is
 // untouched and runs on a masked ctx that this memo is invisible to, except
 // for delegation edges, which are the one ceiling input shared per phase.
+// decide's relationship candidates run with both keys masked, so lookups
+// made there for a progeny source user or a source agent's delegation chain
+// never see the requester's memo. The one exception is the project-access
+// stage (relationshipProjectAccessStage): it evaluates the requester's own
+// project access and reads the requester's memo through the request
+// context; every other relationship stage stays masked.
 
 import (
 	"context"
@@ -163,21 +169,24 @@ func delegationEdgesMemoFromContext(ctx context.Context) *authzInputMemo {
 
 // maskAuthzInputs hides the principal/constraint memo (inputsKey) from
 // everything reached from the returned ctx, without touching the edges key.
-// decide calls this exactly once, wrapping the ctx passed into
-// checkDelegationCeiling (authz.go, the step-10 call site — match by name,
-// not line number, since it moves as unrelated code lands above it in
-// decide), so the whole delegation-ceiling subtree — including both
-// getEffectivePermissions calls and their constraint loads, IsSystemAdmin,
-// GetUser, resolveUserDelegatorAuthority/evaluateUserDelegatorAuthority/
-// userRelationshipAuthority and migrationSentinelCeiling — sees no input
-// memo. Only delegation edges remain shared for that subtree. A second,
-// UNMASKED caller of the chain-walk exists (authz_relationship_rules.go's
-// relationshipSourceDelegationHolds, reached from decide's step 9 on a
-// kernel deny); it is safe only because this memo has no production
-// install site anywhere, so nothing ever puts a real memo on its ctx.
-// Before any install site goes live, that caller must also be masked —
-// or, more robustly, the mask should move inside the chain-walk itself so
-// every current and future caller gets it automatically.
+// It is applied in three places: decide wraps the ctx passed into
+// checkDelegationCeiling (the step-10 call site), and the chain walk
+// (walkDelegationChainWithCause) and the execution-project stage
+// (executionProjectAdmission) apply it to their own ctx at entry, so every
+// current and future caller of either gets it. The delegator side of the
+// ceiling — both getEffectivePermissions calls and their constraint loads,
+// IsSystemAdmin, GetUser, resolveUserDelegatorAuthority/
+// evaluateUserDelegatorAuthority/userRelationshipAuthority and
+// migrationSentinelCeiling — and the execution source user's project
+// admission therefore see no input memo. Only delegation edges remain
+// shared under this mask.
+//
+// decide's relationship-candidate step (step 9) runs under the stronger
+// maskAllAuthzMemo instead, so nothing reached from it — including the
+// chain walk via relationshipSourceDelegationHolds — observes either key,
+// except the project-access stage (relationshipProjectAccessStage), which
+// evaluates the requester's own access on the request context and so reads
+// the requester's memo.
 func maskAuthzInputs(ctx context.Context) context.Context {
 	return context.WithValue(ctx, authzInputsContextKey{}, &authzMemoHolder{masked: true})
 }
@@ -217,7 +226,8 @@ func (m *authzInputMemo) entryFor(key principalKey) *memoEntry {
 // or query a different ref set — authz_candelegate.go, authz_boundary.go's
 // project-scoped grant resolvers, hasActiveSystemRole, getEffectivePermissions
 // — must NOT use it; they keep their own direct loads, which this design
-// does not touch.
+// does not touch. ProjectMembershipEvidence uses it (via inputsForPrincipal)
+// because it issues exactly this unfiltered closure-plus-bindings query.
 //
 // A handle is used for exactly one decision (or one ResolveListScopes call)
 // and must not be reused across decisions or shared between goroutines.
@@ -252,6 +262,25 @@ func (a *AuthzService) inputsFor(ctx context.Context, identity Identity) *princi
 		h.key = principalKey{normType: NormalizePrincipalType(identity.Type()), id: identity.ID()}
 	}
 	h.memo = authzInputMemoFromContext(ctx)
+	return h
+}
+
+// inputsForPrincipal returns a memo-backed handle for principal, or nil when
+// no memo is visible in ctx, principal carries no Identity, the principal
+// type is not memoized, or principal.Identity does not resolve to the same
+// principalKey as principal.Kind/ID. A nil return means the caller keeps its
+// own direct load. Used by ProjectMembershipEvidence (authz_boundary.go),
+// whose closure and unscoped-bindings query is the same shape this memo
+// serves for decide.
+func (a *AuthzService) inputsForPrincipal(ctx context.Context, principal PrincipalContext) *principalInputs {
+	if principal.Identity == nil || authzInputMemoFromContext(ctx) == nil {
+		return nil
+	}
+	h := a.inputsFor(ctx, principal.Identity)
+	want := principalKey{normType: NormalizePrincipalType(string(principal.Kind)), id: principal.ID}
+	if h.key != want || !h.memoEligible() {
+		return nil
+	}
 	return h
 }
 

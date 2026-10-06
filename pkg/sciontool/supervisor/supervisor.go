@@ -20,11 +20,18 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
 // ErrNoCommand is returned when no command is specified for the supervisor to run.
 var ErrNoCommand = errors.New("no command specified")
+
+// ErrAlreadyStarted is returned by Run when the Supervisor has already
+// started a child process, or another Run call on it is in progress. A
+// Supervisor runs at most one child; a Run that failed before starting the
+// child may be retried.
+var ErrAlreadyStarted = errors.New("supervisor already started")
 
 // ErrPrivilegeDropRequired is returned by Run when Config.RequirePrivilegeDrop
 // is set but Config.UID/GID do not both pass the same UID>0 && GID>0
@@ -73,17 +80,25 @@ type Config struct {
 	// change mergeEnvOverlay's precedence rule — it is correct for its own
 	// case. See the override reasoning in the P2d PR description.
 	SecretOverrides map[string]string
+	// WorkingDir sets the child process's working directory (exec.Cmd.Dir).
+	// Empty (the zero value) leaves cmd.Dir unset, so the child inherits
+	// this process's own current working directory — exactly today's
+	// behaviour for every caller that does not set this field. Supervisor
+	// never inspects the environment or filesystem to decide this itself;
+	// the caller resolves it (see commands.InitRunOptions.WorkingDir, set
+	// only by substrate-serve's InitRunner wiring).
+	WorkingDir string
 	// RequirePrivilegeDrop is the caller's own
-	// commands.InitRunOptions.RequirePrivilegeDrop. It gates
-	// chownRecursive's hard-link guard: a regular file with more than one
-	// hard link is skipped rather than chowned only when this is true,
-	// since the guard is new, security-motivated behaviour — a legitimately
-	// hard-linked file under an unenforced container's home directory would
-	// otherwise be silently left unowned by the target user and break
-	// writes, with no privilege boundary at stake to justify that when this
-	// is unset. The fd-relative, no-follow walk itself (see chownRecursive's
-	// doc comment) is unconditional — it is behaviour-preserving and has no
-	// legitimate dependent case.
+	// commands.InitRunOptions.RequirePrivilegeDrop (true only for
+	// substrate). It gates chownRecursive's hard-link guard: a regular file
+	// with more than one hard link is skipped rather than chowned only when
+	// this is true, since the guard is new, security-motivated behaviour —
+	// a legitimately hard-linked file under a non-substrate container's home
+	// directory would otherwise be silently left unowned by the target user
+	// and break writes, with no privilege boundary at stake to justify that
+	// on runtimes other than substrate. The fd-relative, no-follow walk
+	// itself (see chownRecursive's doc comment) is unconditional — it is
+	// behaviour-preserving and has no legitimate dependent case.
 	RequirePrivilegeDrop bool
 }
 
@@ -108,11 +123,19 @@ type Supervisor struct {
 	execToken *procreap.Token
 
 	// mu protects the process state
-	mu        sync.Mutex
+	mu sync.Mutex
+	// running is set, under mu, by the Run call that owns this Supervisor,
+	// and cleared again if that Run fails before starting the child, so
+	// concurrent or repeated Run calls cannot both start a child.
+	running   bool
 	started   bool
 	exited    bool
 	exitCode  int
 	exitError error
+
+	// startedCh is closed once the child process has been started (and
+	// Signal can reach it). It is never closed if Run fails before Start.
+	startedCh chan struct{}
 
 	// done is closed when the child process exits
 	done chan struct{}
@@ -121,14 +144,36 @@ type Supervisor struct {
 // New creates a new Supervisor with the given configuration.
 func New(config Config) *Supervisor {
 	return &Supervisor{
-		config: config,
-		done:   make(chan struct{}),
+		config:    config,
+		startedCh: make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 }
 
 // Run starts and supervises the given command until it exits or the context
-// is cancelled. It returns the exit code of the child process.
+// is cancelled. It returns the exit code of the child process. A Supervisor
+// runs at most one child: once a Run has started its child, or while another
+// Run is in progress, Run returns ErrAlreadyStarted. A Run that fails before
+// starting the child may be retried.
 func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
+	s.mu.Lock()
+	// running stays set after a successful start, so it alone covers both cases.
+	if s.running {
+		s.mu.Unlock()
+		return 1, ErrAlreadyStarted
+	}
+	s.running = true
+	s.mu.Unlock()
+	// Release the claim if this Run returns before the child started, so a
+	// failed start can be retried. Once started is set it stays claimed.
+	defer func() {
+		s.mu.Lock()
+		if !s.started {
+			s.running = false
+		}
+		s.mu.Unlock()
+	}()
+
 	if len(args) == 0 {
 		return 1, ErrNoCommand
 	}
@@ -139,6 +184,14 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	s.cmd.Stdout = os.Stdout
 	s.cmd.Stderr = os.Stderr
 
+	// Leave cmd.Dir unset (today's behaviour: the child inherits this
+	// process's own cwd) unless the caller explicitly resolved one. See
+	// Config.WorkingDir's doc comment.
+	if s.config.WorkingDir != "" {
+		s.cmd.Dir = s.config.WorkingDir
+		log.Debug("Child working directory: %s", s.config.WorkingDir)
+	}
+
 	// Start in a new process group so we can signal the whole group
 	s.cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
@@ -147,10 +200,8 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	// Drop privileges if UID/GID specified (skip in rootless mode where
 	// UID 0 inside the container is already the unprivileged host user).
 	if s.config.UID > 0 && s.config.GID > 0 {
-		s.cmd.SysProcAttr.Credential = &syscall.Credential{
-			Uid: uint32(s.config.UID),
-			Gid: uint32(s.config.GID),
-		}
+		// Keeps the runtime-granted nfs shared-dir groups (ptone/scion#3155).
+		s.cmd.SysProcAttr.Credential = suppgroups.Credential(uint32(s.config.UID), uint32(s.config.GID))
 		log.Debug("Child will run as UID=%d, GID=%d", s.config.UID, s.config.GID)
 	} else if s.config.RequirePrivilegeDrop {
 		return 1, ErrPrivilegeDropRequired
@@ -237,6 +288,19 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 		s.cmd.Env = removeEnvVar(s.cmd.Env, hooks.NativeTelemetryPolicyKey)
 	}
 
+	// Tell the child its logical cwd explicitly. exec.Cmd setting Dir does
+	// not itself add PWD to the environment, so without this the child
+	// would inherit this process's own PWD. sh, tmux and Node's
+	// process.cwd() all prefer PWD over getcwd() when the two agree, so
+	// this keeps a symlinked WorkingDir's logical path visible instead of
+	// its resolved physical one — the same PWD behaviour Docker/Podman/
+	// Kubernetes already get from the shell that applies the image's
+	// WORKDIR. Scoped to WorkingDir != "" so every other caller, which
+	// never sets it, is unaffected.
+	if s.config.WorkingDir != "" {
+		s.cmd.Env = setEnvVar(s.cmd.Env, "PWD", s.config.WorkingDir)
+	}
+
 	// Start and register the child's PID as a single gated step so
 	// sciontool init's SIGCHLD reaper cannot observe it as
 	// exited-and-unmanaged in the gap between Start() returning and
@@ -255,6 +319,7 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	s.mu.Lock()
 	s.started = true
 	s.mu.Unlock()
+	close(s.startedCh)
 
 	// Wait for the child in a goroutine
 	go s.waitForChild()
@@ -362,6 +427,16 @@ func (s *Supervisor) shutdown() (int, error) {
 		defer s.mu.Unlock()
 		return s.exitCode, s.exitError
 	}
+}
+
+// Started returns a channel that is closed once the child process has been
+// started, i.e. from the point at which Signal reaches it rather than being
+// a no-op. It is never closed if Run fails before starting the child, so
+// callers waiting on it should also select on Done or a deadline. It is
+// closed at most once: only the Run that starts the child closes it, and any
+// later Run returns ErrAlreadyStarted.
+func (s *Supervisor) Started() <-chan struct{} {
+	return s.startedCh
 }
 
 // Done returns a channel that is closed when the child process exits.
@@ -486,7 +561,7 @@ func indexByte(s string, c byte) int {
 //
 // requirePrivilegeDrop gates the walk's hard-link guard only — see
 // Config.RequirePrivilegeDrop's doc comment for why that one part of this
-// is new behaviour that must not change a caller that leaves it unset.
+// is new behaviour that must not change non-substrate runtimes.
 //
 // Per-entry chown failures and hard-link-guard skips are logged (entry name
 // only) rather than silently discarded.

@@ -66,6 +66,9 @@ type WebHealthInfo struct {
 // web server's /healthz endpoint. It includes backward-compatible top-level
 // fields (status, version, scionVersion, uptime) plus per-component sub-objects.
 type CompositeHealthResponse struct {
+	// Status must stay the first field: shell health checks
+	// (scripts/starter-hub/gce-start-hub.sh, scripts/single-node-vm/deploy.sh)
+	// read the top-level status by matching the body prefix {"status":"...".
 	Status       string      `json:"status"`
 	Version      string      `json:"version"`
 	ScionVersion string      `json:"scionVersion"`
@@ -237,7 +240,7 @@ var spaShellTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
     <title>Scion</title>
 
     <!-- app-icons:start -- kept identical to web/index.html; see TestSPAShellAppIconTags. -->
@@ -980,10 +983,11 @@ func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp.Hub = hubHealth
 
 		// Inherit top-level version/uptime from hub health if available.
+		// Same severity semantics as GetHealthInfo: the composite is the
+		// worst of its components, so an unhealthy hub (critical check
+		// failed) makes the composite unhealthy, not merely degraded.
 		if h, ok := hubHealth.(interface{ HealthStatus() string }); ok {
-			if h.HealthStatus() != "healthy" {
-				resp.Status = "degraded"
-			}
+			resp.Status = worseHealthStatus(resp.Status, h.HealthStatus())
 		}
 		// Use hub's uptime as the authoritative uptime.
 		if h, ok := hubHealth.(*HealthResponse); ok {
@@ -1002,9 +1006,7 @@ func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp.Broker = brokerHealth
 
 		if h, ok := brokerHealth.(interface{ HealthStatus() string }); ok {
-			if h.HealthStatus() != "healthy" {
-				resp.Status = "degraded"
-			}
+			resp.Status = worseHealthStatus(resp.Status, h.HealthStatus())
 		}
 	}
 

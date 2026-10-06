@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -79,7 +80,7 @@ func TestKeysCmd_IsRegistered(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Hub-aware keys: sendKeysViaHub must POST {"keys": ...} to the dedicated
-// /keys route (never /message, never a Raw StructuredMessage) for both agent
+// /keys route (never /message) for both agent
 // and human senders, and must never retry or fall back on failure.
 // ---------------------------------------------------------------------------
 
@@ -272,14 +273,7 @@ func filteringMockRuntime(agents []api.AgentInfo, exec func(id string, cmd []str
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 			var out []api.AgentInfo
 			for _, a := range agents {
-				match := true
-				for k, v := range filter {
-					if a.Labels[k] != v {
-						match = false
-						break
-					}
-				}
-				if match {
+				if runtime.LabelsMatchFilter(a.Labels, filter) {
 					out = append(out, a)
 				}
 			}
@@ -465,6 +459,190 @@ func TestResolveLocalKeysTarget_NotFoundInSelectedProject(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
+// writeUnlinkedProjectWithCreatedAgents creates an unlinked local project
+// (a .scion directory with no Hub-linked project ID) containing on-disk
+// created agents with no container, and returns the project directory to
+// pass as --project. These agents are found only by agent.List's
+// created-agent scan, never by the runtime layer.
+func writeUnlinkedProjectWithCreatedAgents(t *testing.T, root string, names ...string) string {
+	t.Helper()
+	dir := filepath.Join(root, "unlinked")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".scion"), 0755))
+	resolved, err := config.GetResolvedProjectDir(dir)
+	require.NoError(t, err)
+	require.NotEmpty(t, resolved)
+	for _, n := range names {
+		agentDir := filepath.Join(resolved, "agents", n)
+		require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte("{}"), 0644))
+	}
+	return dir
+}
+
+// TestResolveLocalKeysTarget_UnlinkedCreatedAgents covers name resolution
+// in an unlinked local project whose agents exist only on disk (no
+// container): a name matching one of them is "exists but is not running",
+// never a delivery target, and an unknown name is "not found" rather than
+// "ambiguous" or the project's sole agent.
+func TestResolveLocalKeysTarget_UnlinkedCreatedAgents(t *testing.T) {
+	tests := []struct {
+		name       string
+		agents     []string
+		target     string
+		notRunning bool
+		wantErrIn  string
+	}{
+		{name: "created agent among two", agents: []string{"builder", "reviewer"}, target: "reviewer", notRunning: true, wantErrIn: "agent 'reviewer' exists in project"},
+		{name: "sole created agent", agents: []string{"builder"}, target: "builder", notRunning: true, wantErrIn: "is not running"},
+		{name: "unknown name among two agents", agents: []string{"builder", "reviewer"}, target: "missing", wantErrIn: "not found"},
+		{name: "unknown name with a single agent", agents: []string{"builder"}, target: "missing", wantErrIn: "not found"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origProjectPath := projectPath
+			defer func() { projectPath = origProjectPath }()
+
+			tmp := t.TempDir()
+			t.Setenv("HOME", tmp)
+			projectPath = writeUnlinkedProjectWithCreatedAgents(t, tmp, tt.agents...)
+
+			mgr := agent.NewManager(filteringMockRuntime(nil, nil))
+			defer mgr.Close()
+
+			target, _, err := resolveLocalKeysTarget(context.Background(), mgr, tt.target)
+			require.Error(t, err)
+			assert.Empty(t, target.Name, "an error must not carry a target")
+			assert.Contains(t, err.Error(), tt.wantErrIn)
+			assert.NotContains(t, err.Error(), "ambiguous")
+			assert.Equal(t, tt.notRunning, errors.Is(err, agentkeys.ErrAgentNotRunning))
+			if tt.notRunning {
+				assert.NotContains(t, err.Error(), "not found")
+			}
+		})
+	}
+}
+
+// TestResolveLocalKeysTarget_RunningContainerWithCreatedSibling covers an
+// unlinked project holding one running container and one on-disk created
+// sibling: the running name resolves to the container, and the created
+// name is "not running" rather than resolving to the container.
+func TestResolveLocalKeysTarget_RunningContainerWithCreatedSibling(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	projectPath = writeUnlinkedProjectWithCreatedAgents(t, tmp, "reviewer")
+	resolved, err := config.GetResolvedProjectDir(projectPath)
+	require.NoError(t, err)
+
+	running := []api.AgentInfo{{
+		Name:        "builder",
+		ContainerID: "container-builder",
+		Phase:       string(state.PhaseRunning),
+		Labels: map[string]string{
+			"scion.agent":                "true",
+			"scion.name":                 "builder",
+			"agent_id":                   "agent-builder",
+			projectkeys.LabelProjectPath: resolved,
+		},
+	}}
+	mgr := agent.NewManager(filteringMockRuntime(running, nil))
+	defer mgr.Close()
+
+	target, scope, err := resolveLocalKeysTarget(context.Background(), mgr, "builder")
+	require.NoError(t, err)
+	assert.Equal(t, "container-builder", target.ContainerID)
+	assert.Equal(t, "agent-builder", target.Labels["agent_id"])
+	assert.Empty(t, scope.hubProjectID)
+	assert.Equal(t, resolved, scope.projectPath)
+
+	target, _, err = resolveLocalKeysTarget(context.Background(), mgr, "reviewer")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agentkeys.ErrAgentNotRunning)
+	assert.Contains(t, err.Error(), "agent 'reviewer' exists in project")
+	assert.Contains(t, err.Error(), "'scion start --project "+projectPath+" reviewer'", "the hint must repeat the --project the user passed")
+	assert.Empty(t, target.ContainerID, "the created sibling must never resolve to the running container")
+}
+
+func TestNewLocalKeysNotRunningError_StartHint(t *testing.T) {
+	tests := []struct {
+		name, projectName, projectFlag, want string
+	}{
+		{name: "no --project", projectName: "proj", want: "'scion start reviewer'"},
+		{name: "--project passed", projectName: "proj", projectFlag: "/work/proj", want: "'scion start --project /work/proj reviewer'"},
+		{name: "--project with a space is quoted", projectName: "proj", projectFlag: "/work/my proj", want: `'scion start --project "/work/my proj" reviewer'`},
+		{name: "no project name", projectFlag: "/work/proj", want: "'scion start --project /work/proj reviewer'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := newLocalKeysNotRunningError("reviewer", tt.projectName, tt.projectFlag)
+			assert.ErrorIs(t, err, agentkeys.ErrAgentNotRunning)
+			assert.Contains(t, err.Error(), tt.want)
+			assert.Contains(t, err.Error(), "is not running")
+		})
+	}
+}
+
+// TestResolveLocalKeysTarget_HubLinkedCreatedAgent covers a Hub-linked
+// project, whose lookup is scoped by project ID and so never sees on-disk
+// created agents directly: a name matching one still reports "not
+// running", and an unknown name still reports "not found".
+func TestResolveLocalKeysTarget_HubLinkedCreatedAgent(t *testing.T) {
+	origProjectPath := projectPath
+	defer func() { projectPath = origProjectPath }()
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	dir := writeLocalProjectSettings(t, filepath.Join(tmp, "linked"), "linked-id")
+	resolved, err := config.GetResolvedProjectDir(dir)
+	require.NoError(t, err)
+	agentDir := filepath.Join(resolved, "agents", "reviewer")
+	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte("{}"), 0644))
+	projectPath = dir
+
+	mgr := agent.NewManager(filteringMockRuntime(nil, nil))
+	defer mgr.Close()
+
+	_, _, err = resolveLocalKeysTarget(context.Background(), mgr, "reviewer")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, agentkeys.ErrAgentNotRunning)
+	assert.Contains(t, err.Error(), "is not running")
+
+	_, _, err = resolveLocalKeysTarget(context.Background(), mgr, "missing")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, agentkeys.ErrAgentNotRunning)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestSendKeysLocal_CreatedOnlyTarget_RejectsAsNotRunning covers the
+// delivery entry point: a created-only target is rejected with the
+// agent_not_running code and no keystrokes are executed anywhere.
+func TestSendKeysLocal_CreatedOnlyTarget_RejectsAsNotRunning(t *testing.T) {
+	origProjectPath := projectPath
+	origFormat := outputFormat
+	defer func() { projectPath = origProjectPath; outputFormat = origFormat }()
+	outputFormat = "json"
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	projectPath = writeUnlinkedProjectWithCreatedAgents(t, tmp, "reviewer")
+
+	var execs []string
+	mgr := agent.NewManager(filteringMockRuntime(nil, func(id string, _ []string) { execs = append(execs, id) }))
+	defer mgr.Close()
+
+	var sendErr error
+	stdout := captureStdout(t, func() {
+		sendErr = sendKeysLocalWithManager(context.Background(), mgr, "reviewer", "Escape")
+	})
+	require.Error(t, sendErr)
+	assert.Empty(t, execs, "no keystrokes may be delivered to a created-only agent")
+	assert.Contains(t, stdout, string(agentkeys.OutcomeAgentNotRunning))
+	assert.NotContains(t, stdout, string(agentkeys.OutcomeNotFound))
+}
+
 // ---------------------------------------------------------------------------
 // JSON mode (AC): `scion keys` in JSON mode must emit exactly one parseable
 // result on stdout, with no progress text mixed in.
@@ -591,14 +769,7 @@ func filteringMockRuntimeWithStdin(agents []api.AgentInfo, captured *[]cmdExecRe
 		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 			var out []api.AgentInfo
 			for _, a := range agents {
-				match := true
-				for k, v := range filter {
-					if a.Labels[k] != v {
-						match = false
-						break
-					}
-				}
-				if match {
+				if runtime.LabelsMatchFilter(a.Labels, filter) {
 					out = append(out, a)
 				}
 			}
@@ -698,7 +869,7 @@ func TestSendKeysLocalWithManager_UnlinkedProject_ExactDelivery(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// An empty --raw/keys body must be rejected locally before any network call
+// An empty keys body must be rejected locally before any network call
 // (Hub) or List call (local), not sent through to be rejected server-side.
 // ---------------------------------------------------------------------------
 
@@ -784,6 +955,105 @@ func TestSendKeysViaHub_BareHTML5xx_IsUnknownNeverRejected(t *testing.T) {
 				"a bare HTML 5xx with no contract body must classify as unknown, never a definite rejection")
 			assert.NotContains(t, err.Error(), "keys rejected",
 				"must never be reported as safe to retry")
+		})
+	}
+}
+
+// TestSendKeysViaHub_Bodyless502_ClearErrorNeverEmptyCode proves a 502
+// with no body at all (a proxy or load balancer in front of the Hub) gives
+// a clear "unknown" error, a failing command (and therefore a non-zero
+// exit code from Execute), and a non-empty outcome code in both text and
+// JSON mode.
+func TestSendKeysViaHub_Bodyless502_ClearErrorNeverEmptyCode(t *testing.T) {
+	for _, format := range []string{"", "json"} {
+		t.Run("format="+format, func(t *testing.T) {
+			origFormat := outputFormat
+			defer func() { outputFormat = origFormat }()
+			outputFormat = format
+
+			server := newKeysMockHubServerFailing(t, "", http.StatusBadGateway, "")
+			defer server.Close()
+
+			client, err := hubclient.New(server.URL)
+			require.NoError(t, err)
+			hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-bodyless-502"}
+
+			var cmdErr error
+			stdout := captureStdout(t, func() {
+				cmdErr = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+			})
+			require.Error(t, cmdErr, "a bodyless 502 must fail the command so Execute exits non-zero")
+			assert.Contains(t, cmdErr.Error(), "keys unknown for agent 'target-agent'")
+			assert.Contains(t, cmdErr.Error(), "502")
+			assert.Contains(t, cmdErr.Error(), "check before resending")
+			assert.NotContains(t, cmdErr.Error(), ": :", "no empty fields in the error text")
+			// apiclient fills a bodyless 502 with the generic internal_error
+			// code; the CLI must replace it with the keys outcome.
+			assert.Contains(t, cmdErr.Error(), "no keys outcome from the Hub")
+
+			if format == "json" {
+				var result ActionResult
+				require.NoError(t, json.Unmarshal([]byte(stdout), &result))
+				assert.Equal(t, "error", result.Status)
+				assert.Equal(t, "unknown", result.Details["outcome"])
+				assert.Equal(t, string(agentkeys.OutcomeKeysOutcomeUnknown), result.Details["code"],
+					"a bodyless 502 must report keys_outcome_unknown, not the client's generic internal_error")
+				assert.Contains(t, result.Message, "HTTP 502 Bad Gateway")
+			}
+		})
+	}
+}
+
+// TestClassifyHubKeysError_EmptyCodeNeverSurfaces covers an API error that
+// carries no code and no message at all, the shape a proxy can produce:
+// the classified result always has a non-empty code and message.
+func TestClassifyHubKeysError_EmptyCodeNeverSurfaces(t *testing.T) {
+	cases := []struct {
+		status      int
+		wantOutcome keysOutcomeStatus
+		wantCode    string
+	}{
+		{http.StatusBadGateway, keysOutcomeUnknown, string(agentkeys.OutcomeKeysOutcomeUnknown)},
+		{http.StatusGatewayTimeout, keysOutcomeUnknown, string(agentkeys.OutcomeKeysOutcomeUnknown)},
+		{http.StatusServiceUnavailable, keysOutcomeUnknown, string(agentkeys.OutcomeKeysOutcomeUnknown)},
+		{http.StatusBadRequest, keysOutcomeRejected, "http_400"},
+	}
+	for _, tc := range cases {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			res := classifyHubKeysError(&apiclient.APIError{StatusCode: tc.status})
+			assert.Equal(t, tc.wantOutcome, res.Outcome)
+			assert.Equal(t, tc.wantCode, res.Code)
+			assert.NotEmpty(t, res.Message)
+		})
+	}
+}
+
+// TestClassifyHubKeysError_GenericCodeWithoutOperationID covers the shapes
+// apiclient.ParseErrorResponse really produces for a response that did not
+// come from the keys handler: a generic status-derived or proxy code and no
+// operation_id. An ambiguous status maps to keys_outcome_unknown; a keys
+// outcome code, or a response carrying an operation_id, keeps its code.
+func TestClassifyHubKeysError_GenericCodeWithoutOperationID(t *testing.T) {
+	withOp := map[string]interface{}{"operation_id": "op-1"}
+	cases := []struct {
+		name        string
+		err         *apiclient.APIError
+		wantOutcome keysOutcomeStatus
+		wantCode    string
+	}{
+		{"bodyless 502", &apiclient.APIError{StatusCode: 502, Code: "internal_error", Message: "Bad Gateway"}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"bodyless 504", &apiclient.APIError{StatusCode: 504, Code: "internal_error", Message: "Gateway Timeout"}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"proxy 503", &apiclient.APIError{StatusCode: 503, Code: "service_unavailable", Message: "upstream unhealthy"}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"hub 500 with operation_id", &apiclient.APIError{StatusCode: 500, Code: "internal_error", Message: "unexpected", Details: withOp}, keysOutcomeUnknown, "internal_error"},
+		{"hub keys_outcome_unknown", &apiclient.APIError{StatusCode: 502, Code: "keys_outcome_unknown", Message: "broker failed", Details: withOp}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"definite 400 keeps generic code", &apiclient.APIError{StatusCode: 400, Code: "invalid_request", Message: "Bad Request"}, keysOutcomeRejected, "invalid_request"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := classifyHubKeysError(tc.err)
+			assert.Equal(t, tc.wantOutcome, res.Outcome)
+			assert.Equal(t, tc.wantCode, res.Code)
+			assert.NotEmpty(t, res.Message)
 		})
 	}
 }

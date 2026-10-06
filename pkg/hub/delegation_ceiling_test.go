@@ -120,6 +120,32 @@ func createDCEdge(t *testing.T, s store.Store, delegatorType, delegatorID, deleg
 	}))
 }
 
+// seedRecordedDelegationEdge records an active edge carrying recorded
+// authority: a principal effect ceiling with session provenance, version 1.
+// This is the edge an interactive session create writes. createDCEdge, by
+// contrast, writes an edge without provenance (it reads as unrecorded, the
+// state of edges that predate provenance recording).
+func seedRecordedDelegationEdge(t *testing.T, s store.Store, delegatorType, delegatorID, delegateType, delegateID, scopeType, scopeID, role string) {
+	t.Helper()
+	require.NoError(t, s.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
+		DelegatorType: delegatorType,
+		DelegatorID:   delegatorID,
+		DelegateType:  delegateType,
+		DelegateID:    delegateID,
+		ScopeType:     scopeType,
+		ScopeID:       scopeID,
+		Role:          role,
+		Active:        true,
+		AuthorityProvenance: store.AuthorityProvenance{
+			ProvenanceVersion:    1,
+			SourcePrincipalKind:  delegatorType,
+			SourcePrincipalID:    delegatorID,
+			SourceCredentialKind: store.SourceCredentialSession,
+		},
+		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}))
+}
+
 func dcAgentIdentity(agentID, projectID string, role AgentRole) AgentIdentity {
 	return &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: agentID},
@@ -548,7 +574,7 @@ func TestDelegationEdgeStore_CRUD(t *testing.T) {
 	assert.Equal(t, tid("dc-edge-agent-1"), edges[0].DelegateID)
 
 	// Deactivate
-	require.NoError(t, s.DeactivateDelegationEdge(ctx, edge.ID))
+	revokeDelegateEdges(t, s, tid("dc-edge-agent-1"))
 
 	// Should not appear in active queries
 	edges, err = s.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, tid("dc-edge-agent-1"))
@@ -883,7 +909,7 @@ func TestDelegationEdge_CreateRevokeCreateRevoke(t *testing.T) {
 	require.NoError(t, s.CreateDelegationEdge(ctx, edge1), "first edge creation should succeed")
 
 	// Revoke first edge
-	require.NoError(t, s.DeactivateDelegationEdge(ctx, edge1.ID), "first revocation should succeed")
+	revokeDelegateEdges(t, s, agentID)
 
 	// Create second edge (same delegate + scope)
 	edge2 := &store.DelegationEdge{
@@ -901,7 +927,7 @@ func TestDelegationEdge_CreateRevokeCreateRevoke(t *testing.T) {
 	// Revoke second edge — this MUST NOT fail with a unique violation.
 	// Before the partial index fix, the second revocation would conflict
 	// with edge1's inactive row on the unique index.
-	require.NoError(t, s.DeactivateDelegationEdge(ctx, edge2.ID), "second revocation must not fail (R2-1)")
+	revokeDelegateEdges(t, s, agentID)
 
 	// Verify both edges are now inactive
 	edges, err := s.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID)

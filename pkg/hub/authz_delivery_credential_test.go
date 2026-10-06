@@ -56,7 +56,10 @@ func newHubDeliveryTestAgent(t *testing.T, s store.Store, agentID, projectID, ow
 		ProjectID: projectID, Phase: string(state.PhaseRunning),
 		OwnerID: ownerID, CreatedBy: ownerID, Ancestry: []string{ownerID},
 	}))
-	createDCEdge(t, s, store.DelegationPrincipalUser, ownerID, store.DelegationPrincipalAgent, agentID,
+	// A recorded edge (session provenance, principal ceiling): delivery
+	// permissions require recorded provenance on every hop, so an edge
+	// without provenance would deny the ordinary-proof controls below.
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, ownerID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
 }
 
@@ -896,7 +899,7 @@ func TestHubDelivery_Stage2RejectsNonDeliverPermission(t *testing.T) {
 		c := progenyCandidate(t, principal, action, permissionID)
 		var rejectedBy, detail string
 		policyKind := permissions.RelationshipPrincipalKind(string(principal.Kind))
-		_, ok := f.authz.runRelationshipStages(ctx, principal, policyKind, secretRes, permissionID, nil, c,
+		_, ok := f.authz.runRelationshipStages(ctx, principal, policyKind, secretRes, permissionID, nil, c, nil,
 			func(kind, d string) { rejectedBy, detail = kind, d })
 		return ok, rejectedBy, detail
 	}

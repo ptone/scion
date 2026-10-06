@@ -125,6 +125,9 @@ type Client interface {
 	// the list of skills found at the given GitHub directory URL.
 	DiscoverSkillsDirectory(ctx context.Context, req DiscoverSkillsDirectoryRequest) (*DiscoverSkillsDirectoryResponse, error)
 
+	// Artifacts returns the artifact operations interface.
+	Artifacts() ArtifactService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }
@@ -155,6 +158,7 @@ type client struct {
 	allowList             *allowListService
 	invites               *inviteService
 	messaging             *messagingService
+	artifacts             *artifactService
 }
 
 // New creates a new Hub API client.
@@ -209,6 +213,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
 	c.messaging = &messagingService{c: c}
+	c.artifacts = &artifactService{c: c}
 
 	return c, nil
 }
@@ -341,6 +346,11 @@ func (c *client) Invites() InviteService {
 // Messaging returns the cross-project messaging operations interface.
 func (c *client) Messaging() MessagingService {
 	return c.messaging
+}
+
+// Artifacts returns the artifact operations interface.
+func (c *client) Artifacts() ArtifactService {
+	return c.artifacts
 }
 
 // get performs an HTTP GET request.
@@ -479,7 +489,13 @@ func WithTimeout(d time.Duration) Option {
 	}
 }
 
-// WithRetry configures retry behavior.
+// WithRetry configures retry behavior: up to maxRetries further attempts
+// after a transport error or a 5xx response (see apiclient.Transport.Do).
+// Retries are off by default. A retry replays the whole request, body
+// included, and only the methods that use the no-retry send are exempt, so
+// enabling this on a client that issues non-idempotent writes can duplicate
+// them. Pinning those writes to the no-retry send is tracked in
+// ptone/scion#2955.
 func WithRetry(maxRetries int, wait time.Duration) Option {
 	return func(c *client) {
 		c.transport.MaxRetries = maxRetries

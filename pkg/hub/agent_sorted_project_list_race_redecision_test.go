@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This file covers includeDeleted semantics and the step 5a re-decision
+// This file covers includeDeleted semantics and the race re-decision
 // protocol's exact-decision-count and short-page-continuation behavior for
 // rows that change, disappear, or move between the member read and the
 // full-row read.
@@ -113,15 +113,22 @@ func TestListProjectAgentsSorted_IncludeDeleted_Paged(t *testing.T) {
 // landing between the member read and the full-row read.
 type ownerChangingAfterMembersStore struct {
 	store.Store
+	fault      *storeFaultSwitch // nil: always active
 	once       sync.Once
 	agentID    string
 	newOwnerID string
 }
 
+// newOwnerChangingAfterMembersStore is the installStoreFault wrap func for
+// ownerChangingAfterMembersStore. Set agentID and newOwnerID before arming.
+func newOwnerChangingAfterMembersStore(inner store.Store, fault *storeFaultSwitch) *ownerChangingAfterMembersStore {
+	return &ownerChangingAfterMembersStore{Store: inner, fault: fault}
+}
+
 func (o *ownerChangingAfterMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
 	members, err := o.Store.ListAgentMembers(ctx, filter, sortKey, dir, max)
-	if err != nil {
-		return nil, err
+	if err != nil || !o.fault.Active() {
+		return members, err
 	}
 	o.once.Do(func() {
 		a, gerr := o.GetAgent(ctx, o.agentID)
@@ -138,10 +145,11 @@ func (o *ownerChangingAfterMembersStore) ListAgentMembers(ctx context.Context, f
 // candidate owned by the caller (readable only via the owner relationship
 // grant, not via any role permission) whose OwnerID changes away from the
 // caller between the two reads must be re-decided on the full row and
-// dropped, in exactly 9 decisions for that item (1 step-3 read + 8 step-5a
-// full re-decision + 0 step-6, since it was re-decided).
+// dropped, in exactly 9 decisions for that item (1 read-pass decision + 8
+// for the full-row race re-decision + 0 remaining-actions, since it was
+// re-decided).
 func TestListProjectAgentsSorted_Race_OwnerChange_BecomesUnreadable(t *testing.T) {
-	f := sortedListSetup(t)
+	f, raced, fault := sortedListSetupWithFault(t, newOwnerChangingAfterMembersStore)
 	ctx := context.Background()
 
 	caller := &store.User{
@@ -159,8 +167,8 @@ func TestListProjectAgentsSorted_Race_OwnerChange_BecomesUnreadable(t *testing.T
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, a))
 
-	raced := &ownerChangingAfterMembersStore{Store: f.store, agentID: a.ID, newOwnerID: f.owner.ID}
-	f.srv.store = raced
+	raced.agentID, raced.newOwnerID = a.ID, f.owner.ID
+	fault.Arm()
 
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
@@ -170,24 +178,24 @@ func TestListProjectAgentsSorted_Race_OwnerChange_BecomesUnreadable(t *testing.T
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents, "an item whose owner changed away from the caller mid-request must be dropped")
 
-	// 1 (gate) + 1 (step-3 read, still owned by caller at that snapshot) +
-	// 8 (step-5a full re-decision, now unreadable) + 0 (step-6 skip) +
-	// 4 (scope caps) = 14.
+	// 1 (gate) + 1 (read pass, still owned by caller at that snapshot) +
+	// 8 (full-row race re-decision, now unreadable) + 0 (remaining-actions
+	// skip) + 4 (scope caps) = 14.
 	assert.Len(t, emitter.records, 14)
 }
 
 // --- exact decision counts for missing-row / project-drop ---------
 
 // TestListProjectAgentsSorted_Race_MissingRow_ExactDecisionCount extends the
-// existing missing-row race test with the exact decision count the design
-// requires ("no additional decision"): 1 (gate) + 1 (step-3 read) + 0 (step
-// 5a drop) + 4 (scope caps) = 6.
+// existing missing-row race test with the exact decision count required
+// (a dropped row costs no additional decision): 1 (gate) + 1 (read pass)
+// + 0 (race-check drop) + 4 (scope caps) = 6.
 func TestListProjectAgentsSorted_Race_MissingRow_ExactDecisionCount(t *testing.T) {
-	f := sortedListSetup(t)
+	f, raced, fault := sortedListSetupWithFault(t, newDeletingAfterMembersStore)
 	a := f.createAgent(t, "race-missing-count", string(state.PhaseStopped), nil)
 
-	raced := &deletingAfterMembersStore{Store: f.store, agentID: a.ID}
-	f.srv.store = raced
+	raced.agentID = a.ID
+	fault.Arm()
 
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
@@ -196,18 +204,18 @@ func TestListProjectAgentsSorted_Race_MissingRow_ExactDecisionCount(t *testing.T
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents)
-	assert.Len(t, emitter.records, 6, "a missing row must cost exactly the step-3 read, no more")
+	assert.Len(t, emitter.records, 6, "a missing row must cost exactly the read-pass decision, no more")
 }
 
 // TestListProjectAgentsSorted_Race_ProjectMismatch_ExactDecisionCount is the
-// project-mismatch analogue of the above: 1 (gate) + 1 (step-3 read) + 0
-// (step 5a drop, ProjectID check) + 4 (scope caps) = 6.
+// project-mismatch analogue of the above: 1 (gate) + 1 (read pass) + 0
+// (race-check drop, ProjectID check) + 4 (scope caps) = 6.
 func TestListProjectAgentsSorted_Race_ProjectMismatch_ExactDecisionCount(t *testing.T) {
-	f := sortedListSetup(t)
+	f, raced, fault := sortedListSetupWithFault(t, newReprojectingListAgentsStore)
 	a := f.createAgent(t, "race-project-count", string(state.PhaseStopped), nil)
 
-	raced := &reprojectingListAgentsStore{Store: f.store, agentID: a.ID, newProjectID: tid("sl-other-project-count")}
-	f.srv.store = raced
+	raced.agentID, raced.newProjectID = a.ID, tid("sl-other-project-count")
+	fault.Arm()
 
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
@@ -216,7 +224,7 @@ func TestListProjectAgentsSorted_Race_ProjectMismatch_ExactDecisionCount(t *test
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents)
-	assert.Len(t, emitter.records, 6, "a project-mismatched row must cost exactly the step-3 read, no more")
+	assert.Len(t, emitter.records, 6, "a project-mismatched row must cost exactly the read-pass decision, no more")
 }
 
 // --- missing-row drop in paged mode must leave a valid short page ---
@@ -227,16 +235,16 @@ func TestListProjectAgentsSorted_Race_ProjectMismatch_ExactDecisionCount(t *test
 // the next page picks up where the walk actually left off rather than
 // skipping or re-serving anything.
 func TestListProjectAgentsSorted_Race_MissingRow_PagedShortPageContinues(t *testing.T) {
-	f := sortedListSetup(t)
+	f, raced, fault := sortedListSetupWithFault(t, newDeletingAfterMembersStore)
 	// Created oldest-to-newest, so under dir=desc the order is c2, c1, c0.
 	c0 := f.createAgent(t, "short-c0", string(state.PhaseStopped), nil)
 	c1 := f.createAgent(t, "short-c1", string(state.PhaseStopped), nil)
 	c2 := f.createAgent(t, "short-c2", string(state.PhaseStopped), nil)
 
-	// limit=2: page 0 is [c2, c1]. Drop c1 (the last item of page 0) at the
-	// step-5a boundary.
-	raced := &deletingAfterMembersStore{Store: f.store, agentID: c1.ID}
-	f.srv.store = raced
+	// limit=2: page 0 is [c2, c1]. Drop c1 (the last item of page 0)
+	// between the member read and the full-row read.
+	raced.agentID = c1.ID
+	fault.Arm()
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("sort=updated&limit=2"), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -261,14 +269,21 @@ func TestListProjectAgentsSorted_Race_MissingRow_PagedShortPageContinues(t *test
 // representation within one request.
 type labelsNilToEmptyAfterMembersStore struct {
 	store.Store
+	fault   *storeFaultSwitch // nil: always active
 	once    sync.Once
 	agentID string
 }
 
+// newLabelsNilToEmptyAfterMembersStore is the installStoreFault wrap func
+// for labelsNilToEmptyAfterMembersStore. Set agentID before arming.
+func newLabelsNilToEmptyAfterMembersStore(inner store.Store, fault *storeFaultSwitch) *labelsNilToEmptyAfterMembersStore {
+	return &labelsNilToEmptyAfterMembersStore{Store: inner, fault: fault}
+}
+
 func (l *labelsNilToEmptyAfterMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
 	members, err := l.Store.ListAgentMembers(ctx, filter, sortKey, dir, max)
-	if err != nil {
-		return nil, err
+	if err != nil || !l.fault.Active() {
+		return members, err
 	}
 	l.once.Do(func() {
 		a, gerr := l.GetAgent(ctx, l.agentID)
@@ -286,11 +301,11 @@ func (l *labelsNilToEmptyAfterMembersStore) ListAgentMembers(ctx context.Context
 // end to end through the real handler, not just at the resourceEqual unit
 // level -- exactly 5+8n (13 at n=1), never 5+9n (14).
 func TestListProjectAgentsSorted_NilVsEmptyLabels_EndToEndZeroRedecisions(t *testing.T) {
-	f := sortedListSetup(t)
+	f, raced, fault := sortedListSetupWithFault(t, newLabelsNilToEmptyAfterMembersStore)
 	a := f.createAgent(t, "nilempty-e2e", string(state.PhaseStopped), nil) // Labels left nil
 
-	raced := &labelsNilToEmptyAfterMembersStore{Store: f.store, agentID: a.ID}
-	f.srv.store = raced
+	raced.agentID = a.ID
+	fault.Arm()
 
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
@@ -311,15 +326,22 @@ func TestListProjectAgentsSorted_NilVsEmptyLabels_EndToEndZeroRedecisions(t *tes
 // directions.
 type fieldMutatingAfterMembersStore struct {
 	store.Store
+	fault   *storeFaultSwitch // nil: always active
 	once    sync.Once
 	agentID string
 	mutate  func(a *store.Agent)
 }
 
+// newFieldMutatingAfterMembersStore is the installStoreFault wrap func for
+// fieldMutatingAfterMembersStore. Set agentID and mutate before arming.
+func newFieldMutatingAfterMembersStore(inner store.Store, fault *storeFaultSwitch) *fieldMutatingAfterMembersStore {
+	return &fieldMutatingAfterMembersStore{Store: inner, fault: fault}
+}
+
 func (f *fieldMutatingAfterMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
 	members, err := f.Store.ListAgentMembers(ctx, filter, sortKey, dir, max)
-	if err != nil {
-		return nil, err
+	if err != nil || !f.fault.Active() {
+		return members, err
 	}
 	f.once.Do(func() {
 		a, gerr := f.GetAgent(ctx, f.agentID)
@@ -352,7 +374,7 @@ func TestListProjectAgentsSorted_NilVsEmpty_TableDriven_EndToEndZeroRedecisions(
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			f := sortedListSetup(t)
+			f, raced, fault := sortedListSetupWithFault(t, newFieldMutatingAfterMembersStore)
 			ctx := context.Background()
 
 			a := &store.Agent{
@@ -368,8 +390,8 @@ func TestListProjectAgentsSorted_NilVsEmpty_TableDriven_EndToEndZeroRedecisions(
 			tc.initial(a)
 			require.NoError(t, f.store.UpdateAgent(ctx, a))
 
-			raced := &fieldMutatingAfterMembersStore{Store: f.store, agentID: a.ID, mutate: tc.mutate}
-			f.srv.store = raced
+			raced.agentID, raced.mutate = a.ID, tc.mutate
+			fault.Arm()
 
 			emitter := &recordingDecisionAuditEmitter{}
 			f.srv.authzService.SetDecisionAuditEmitter(emitter)

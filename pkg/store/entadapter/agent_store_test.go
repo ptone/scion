@@ -342,6 +342,38 @@ func TestAgentStore_UpdateAgentExposedPorts(t *testing.T) {
 	assert.ErrorIs(t, s.UpdateAgentExposedPorts(ctx, uuid.NewString(), ports), store.ErrNotFound)
 }
 
+// TestAgentStore_ExposedPortsStoredUTC checks that ExposedAt, a time embedded
+// in the agents.exposed_ports JSON column (out of reach of the ent UTC
+// mutation hook), is stored in UTC by both writers, at the same instant, and
+// that the caller's slice is not modified.
+func TestAgentStore_ExposedPortsStoredUTC(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	plus2 := time.Date(2030, 1, 1, 12, 0, 0, 500, time.FixedZone("", 2*3600))
+	a := makeAgent(projectID, "ports-utc")
+	a.ExposedPorts = []store.ExposedPort{{Port: 3000, ExposedAt: plus2, ExposedBy: "agent"}}
+	require.NoError(t, s.CreateAgent(ctx, a))
+	assert.Equal(t, plus2.Location(), a.ExposedPorts[0].ExposedAt.Location(), "CreateAgent must not modify the caller's slice")
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ExposedPorts, 1)
+	assert.Equal(t, time.UTC, got.ExposedPorts[0].ExposedAt.Location(), "CreateAgent: ExposedAt location")
+	assert.True(t, got.ExposedPorts[0].ExposedAt.Equal(plus2), "CreateAgent: ExposedAt instant")
+
+	kathmandu := time.Date(2030, 6, 1, 9, 45, 0, 0, time.FixedZone("+0545", 5*3600+45*60))
+	ports := []store.ExposedPort{{Port: 4000, ExposedAt: kathmandu, ExposedBy: "agent"}}
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, a.ID, ports))
+	assert.Equal(t, kathmandu.Location(), ports[0].ExposedAt.Location(), "UpdateAgentExposedPorts must not modify the caller's slice")
+
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ExposedPorts, 1)
+	assert.Equal(t, time.UTC, got.ExposedPorts[0].ExposedAt.Location(), "UpdateAgentExposedPorts: ExposedAt location")
+	assert.Equal(t, "2030-06-01T04:00:00Z", got.ExposedPorts[0].ExposedAt.Format(time.RFC3339Nano))
+}
+
 // TestAgentStore_TerminalPhaseClearsStalledActivity verifies that transitioning
 // to a terminal phase (stopped/error) without an explicit activity clears a
 // lingering live activity such as "stalled", while preserving terminal
@@ -793,7 +825,7 @@ func TestAgentStore_AppliedConfigValidatedOnRead(t *testing.T) {
 		require.NoError(t, err, "one bad field must not make the agent unreadable")
 		require.NotNil(t, got.AppliedConfig)
 		assert.Nil(t, got.AppliedConfig.GCPIdentity,
-			"an unusable metadata mode must not reach callers; the agent falls back to the secure default")
+			"an unusable metadata mode must not reach callers; the agent falls back to the runtime default")
 		assert.Equal(t, "img:1", got.AppliedConfig.Image)
 	})
 
@@ -1749,4 +1781,154 @@ func TestAgentStore_NoWidening_NewFiltersRespectAuthorizedProjectIDs(t *testing.
 		require.NoError(t, err)
 		assert.ElementsMatch(t, []string{visibleDescendant.ID}, ids(result.Items))
 	})
+}
+
+func TestUpdateAgentStatus_ClearMessageIf(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "clear-message-if")
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	const notice = "Stop queued: broker offline."
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: notice}))
+
+	// A different value leaves the message in place.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		ContainerStatus: "stopped",
+		ClearMessageIf:  "some other notice",
+	}))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, notice, got.Message)
+	assert.Equal(t, "stopped", got.ContainerStatus)
+
+	// The matching value clears it.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{ClearMessageIf: notice}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.Message)
+
+	// An explicit message in the same update wins.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: notice}))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: "newer", ClearMessageIf: notice}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "newer", got.Message)
+}
+
+// IfPhase makes UpdateAgentStatus conditional on the stored phase
+// (ptone/scion#2014): a mismatch writes nothing and returns ErrPhaseMismatch,
+// which is a version conflict.
+func TestUpdateAgentStatus_IfPhase(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "if-phase")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+
+	err := s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "starting", Message: "x", IfPhase: "stopped"})
+	require.ErrorIs(t, err, store.ErrPhaseMismatch)
+	require.ErrorIs(t, err, store.ErrVersionConflict)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase)
+	assert.Empty(t, got.Message, "a mismatched update writes nothing")
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", IfPhase: "running"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+}
+
+// IfRunID makes UpdateAgentStatus conditional on the stored run_id
+// (ptone/scion#2550): a mismatch writes nothing and returns ErrRunChanged,
+// which is a version conflict; a match applies; an empty IfRunID does not
+// check the run.
+func TestUpdateAgentStatus_IfRunID(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "if-run-id")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-new")
+	require.NoError(t, err)
+
+	err = s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", ContainerStatus: "stopped", IfRunID: "run-old"})
+	require.ErrorIs(t, err, store.ErrRunChanged)
+	require.ErrorIs(t, err, store.ErrVersionConflict)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase, "a mismatched update writes nothing")
+	assert.NotEqual(t, "stopped", got.ContainerStatus)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", IfRunID: "run-new"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase, "an empty IfRunID applies unconditionally")
+}
+
+// ClearTerminalRemnants applies the stopped/error -> running clear whatever
+// the stored phase (ptone/scion#2014): message (unless set on the update),
+// stalled marker, exit code and reason.
+func TestUpdateAgentStatus_ClearTerminalRemnants(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "clear-remnants")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	code := 137
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		Phase: "starting", Message: "Agent crashed with exit code 137", ExitCode: &code, ExitReason: "crashed",
+	}))
+	row, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	row.StalledFromActivity = "working"
+	require.NoError(t, s.UpdateAgent(ctx, row))
+
+	// Without the flag, starting -> running keeps them.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, got.Message)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", ClearTerminalRemnants: true}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.Message)
+	assert.Empty(t, got.StalledFromActivity)
+	assert.Empty(t, got.ExitReason)
+	assert.Nil(t, got.ExitCode)
+
+	// An explicit message in the same update wins.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: "fresh", ClearTerminalRemnants: true}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "fresh", got.Message)
+}
+
+// SetAgentWorkspacePlacement writes a live row, and leaves a soft-deleted
+// row untouched with ErrNotFound.
+func TestAgentStore_SetAgentWorkspacePlacementSkipsSoftDeleted(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "placement-soft-deleted")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.SetAgentWorkspacePlacement(ctx, a.ID, "export"))
+
+	a.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, a))
+
+	err := s.SetAgentWorkspacePlacement(ctx, a.ID, "local")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	row, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+	require.NoError(t, err)
+	assert.Equal(t, "export", row.WorkspacePlacement, "a soft-deleted row is left unchanged")
+	assert.NotNil(t, row.DeletedAt)
+
+	assert.ErrorIs(t, s.SetAgentWorkspacePlacement(ctx, uuid.NewString(), "export"), store.ErrNotFound)
 }

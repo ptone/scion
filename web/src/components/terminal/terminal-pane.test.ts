@@ -387,6 +387,52 @@ describe('OSC 0 window-state tracking (F1 fix)', () => {
   });
 });
 
+it('a stopping agent shows a non-fatal "Agent is stopping…" notice; running, stopped and deleted clear it (ptone/scion#2483 C#11)', async () => {
+  await mountConnected();
+  const source = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+  source.onopen?.();
+  await vi.waitFor(() => expect(registry.metadata.get(agentId)?.availability).toBe('ready'));
+  const notice = (): HTMLElement =>
+    page.shadowRoot!.querySelector<HTMLElement>('.stopping-notice[role="status"]')!;
+  const send = (subject: string, data: unknown): void => {
+    source.dispatchEvent(new MessageEvent('update', { data: JSON.stringify({ subject, data }) }));
+  };
+  await page.updateComplete;
+  // The live region exists before any text arrives (screen readers only
+  // announce changes inside a region that is already there).
+  const region = notice();
+  expect(region.textContent?.trim()).toBe('');
+  expect(region.classList.contains('idle')).toBe(true);
+
+  send(`agent.${agentId}.status`, { phase: 'stopping' });
+  await page.updateComplete;
+  expect(notice()).toBe(region);
+  expect(region.textContent?.trim()).toBe('Agent is stopping…');
+  expect(region.classList.contains('idle')).toBe(false);
+  expect(page.session?.state.connection).toBe('connected'); // no teardown
+  expect(FakeSocket.instances[0].close).not.toHaveBeenCalled();
+
+  send(`agent.${agentId}.status`, { phase: 'running' });
+  await page.updateComplete;
+  expect(region.textContent?.trim()).toBe('');
+  expect(page.session?.state.connection).toBe('connected');
+
+  send(`agent.${agentId}.status`, { phase: 'stopping' });
+  await page.updateComplete;
+  expect(region.textContent?.trim()).toBe('Agent is stopping…');
+  send(`agent.${agentId}.status`, { phase: 'stopped' });
+  await page.updateComplete;
+  expect(region.textContent?.trim()).toBe('');
+
+  send(`agent.${agentId}.status`, { phase: 'stopping' });
+  await page.updateComplete;
+  expect(region.textContent?.trim()).toBe('Agent is stopping…');
+  send(`agent.${agentId}.deleted`, {});
+  await vi.waitFor(() => expect(registry.metadata.get(agentId)?.availability).toBe('deleted'));
+  await page.updateComplete;
+  expect(region.textContent?.trim()).toBe('');
+});
+
 it('a failed metadata snapshot does not remove the independently authorized terminal host', async () => {
   page.dispose();
   FakeEventSource.instances = [];
@@ -1114,5 +1160,30 @@ describe('focusTerminal()', () => {
     page.focusTerminal();
 
     expect(document.activeElement).toBe(page);
+  });
+});
+
+describe('pane navigation', () => {
+  it('"Open in graph" navigates through the shared helper (nav-click on document)', async () => {
+    await mountToFrame();
+    (page as unknown as { projectId: string }).projectId = 'proj 1';
+    page.requestUpdate();
+    await page.updateComplete;
+
+    const paths: string[] = [];
+    const onNav = (e: Event): void => {
+      paths.push((e as CustomEvent<{ path: string }>).detail.path);
+    };
+    document.addEventListener('nav-click', onNav);
+    try {
+      const button = page.shadowRoot!.querySelector<HTMLButtonElement>(
+        'button[title="Open in graph"]'
+      );
+      expect(button).not.toBeNull();
+      button!.click();
+    } finally {
+      document.removeEventListener('nav-click', onNav);
+    }
+    expect(paths).toEqual([`/agents/graph?project=proj%201&focus=${agentId}`]);
   });
 });

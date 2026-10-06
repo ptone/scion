@@ -44,13 +44,18 @@ import type { User } from '../../shared/types.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../utils/feature-flags.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { apiFetch } from '../../client/api.js';
-import { stateManager } from '../../client/state.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
+import { TRAY_COUNT_EVENT, type TrayCountDetail } from '../../client/tray-count-events.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
-import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from '../../client/terminal-palette-events.js';
+import {
+  GRAPH_PALETTE_AVAILABILITY_EVENT,
+  GRAPH_PALETTE_OPEN_REQUEST_EVENT,
+  isGraphPaletteAvailable,
+} from '../../client/graph-palette-events.js';
 import { touchMenuItemStyles } from './touch-styles.js';
 import './notification-tray.js';
 import './inbox-tray.js';
+import { isMacPlatform } from '../../utils/platform.js';
 
 // ---------------------------------------------------------------------------
 // Project-context helpers for the dashboard <-> chat mode switch.
@@ -82,23 +87,6 @@ export function slugFromChatPath(path: string): string | null {
   if (/^\/chat\/dm\//.test(path)) return null;
   const m = path.match(/^\/chat\/([^/?#]+)/);
   return m ? m[1] : null;
-}
-
-/**
- * Detect whether the current device is a Mac (including iPhone/iPad/iPod),
- * for the palette button's shortcut label and `aria-keyshortcuts`. Prefers
- * the User-Agent Client Hints API (`navigator.userAgentData`), which is not
- * subject to User-Agent string reduction, and falls back to the deprecated
- * `navigator.platform` where Client Hints is unavailable -- notably Safari,
- * which never implemented it. Guarded for environments with no `navigator`
- * at all.
- */
-export function isMacPlatform(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  const uaDataPlatform = (navigator as Navigator & { userAgentData?: { platform?: string } })
-    .userAgentData?.platform;
-  if (uaDataPlatform) return /mac/i.test(uaDataPlatform);
-  return /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 }
 
 /** URL for the Scion documentation site, opened by the Help button. */
@@ -146,13 +134,20 @@ export class ScionHeader extends LitElement {
   @state()
   private terminalSessionCount = 0;
 
-  /** Unread message count from the inbox tray (best-effort sync). */
+  /** Whether a graph view on screen offers the "Jump to agent" palette. */
+  @state()
+  private graphPaletteAvailable = false;
+
+  /** Unread message count, from the inbox tray's count events. */
   @state()
   private inboxCount = 0;
 
-  /** Unacknowledged notification count from the notification tray. */
+  /** Unacknowledged notification count, from the notification tray's count events. */
   @state()
   private notificationCount = 0;
+
+  /** The user id that inboxCount and notificationCount belong to. */
+  private countsUserId: string | null = null;
 
   /** Whether the device's primary pointer is touch — hides keyboard-shortcut affordances on the palette button. */
   private touchPrimary = new TouchPrimaryController(this);
@@ -177,8 +172,17 @@ export class ScionHeader extends LitElement {
          is the one element here that can lose characters harmlessly. */
       grid-template-columns: minmax(0, 1fr) auto minmax(max-content, 1fr);
       align-items: center;
+      /* The page uses viewport-fit=cover, so the header runs under a notch
+         or status bar. The top inset is padding on top of the content
+         height (content-box, stated explicitly so the header never loses
+         its 60px row to the inset), and the side insets (landscape) widen
+         the inline padding. Every inset is 0 on devices without one. A shell
+         that already clears the left inset beside the header (a sidebar)
+         sets --scion-header-inset-left to 0px so it is not applied twice. */
+      box-sizing: content-box;
       height: var(--scion-header-height, 60px);
-      padding: 0 1.5rem;
+      padding: env(safe-area-inset-top, 0px) max(1.5rem, env(safe-area-inset-right, 0px)) 0
+        max(1.5rem, var(--scion-header-inset-left, env(safe-area-inset-left, 0px)));
       background: var(--scion-surface, #ffffff);
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
@@ -879,9 +883,11 @@ export class ScionHeader extends LitElement {
 
   // =========================================================================
   // Palette button -- opens a quick palette from the header: the chat quick
-  // switcher on a chat route, or the terminal view's agents-only "Jump to
-  // agent" palette on /terminals. One button, one render path, shared by
-  // both hosts -- see renderPaletteButton's own doc comment.
+  // switcher on a chat route, or a graph view's "Jump to agent" palette
+  // while one is on screen. One button, one render path, shared by every
+  // host -- see renderPaletteButton's own doc comment. The terminal view
+  // has none here: its "Jump to agent" button is a labelled footer in its
+  // Open terminals column (TerminalWorkspaceRoot.buildRailFooter).
   // =========================================================================
 
   /**
@@ -893,17 +899,20 @@ export class ScionHeader extends LitElement {
    * keeps it too, both to discover the shortcut (via the tooltip) and for a
    * pointer/trackpad user who would rather click than reach for a chord.
    *
-   * Which route owns the click is resolved once here (`isChat`) and threaded
-   * through to the click handler, rather than re-resolved there: the route
-   * could otherwise change between render and click (unlikely for a header
-   * button, but this keeps the two in sync by construction rather than by
-   * coincidence).
+   * Which host owns the click is resolved once here, as its open-request
+   * event, and threaded through to the click handler rather than re-resolved
+   * there: the route could otherwise change between render and click
+   * (unlikely for a header button, but this keeps the two in sync by
+   * construction rather than by coincidence).
    */
   private renderPaletteButton(): TemplateResult | typeof nothing {
     if (!this.user) return nothing;
     const isChat = this.isChatView();
-    const isTerminal = this.isTerminalView();
-    if (!isChat && !isTerminal) return nothing;
+    const isGraph = !isChat && !this.isTerminalView() && this.graphPaletteAvailable;
+    if (!isChat && !isGraph) return nothing;
+    const openRequestEvent = isChat
+      ? CHAT_PALETTE_OPEN_REQUEST_EVENT
+      : GRAPH_PALETTE_OPEN_REQUEST_EVENT;
 
     const isTouch = this.touchPrimary.isTouch;
     const isMac = isMacPlatform();
@@ -920,7 +929,7 @@ export class ScionHeader extends LitElement {
           aria-label=${ariaLabel}
           aria-haspopup="dialog"
           aria-keyshortcuts=${isTouch ? nothing : ariaKeyshortcuts}
-          @click=${(e: Event): void => this.handlePaletteButtonClick(e, isChat)}
+          @click=${(e: Event): void => this.handlePaletteButtonClick(e, openRequestEvent)}
         >
           <sl-icon name="compass" aria-hidden="true"></sl-icon>
         </button>
@@ -936,15 +945,10 @@ export class ScionHeader extends LitElement {
    * instant the palette closes. Focusing the button explicitly first, before
    * dispatching, makes capture reliably see this button instead.
    */
-  private handlePaletteButtonClick(e: Event, isChat: boolean): void {
+  private handlePaletteButtonClick(e: Event, openRequestEvent: string): void {
     const btn = e.currentTarget as HTMLElement;
     btn.focus({ preventScroll: true });
-    this.dispatchEvent(
-      new CustomEvent(
-        isChat ? CHAT_PALETTE_OPEN_REQUEST_EVENT : TERMINAL_PALETTE_OPEN_REQUEST_EVENT,
-        { bubbles: true, composed: true }
-      )
-    );
+    this.dispatchEvent(new CustomEvent(openRequestEvent, { bubbles: true, composed: true }));
   }
 
   // =========================================================================
@@ -1205,13 +1209,13 @@ export class ScionHeader extends LitElement {
   // =========================================================================
 
   // ----------------------------------------------------------------------
-  // COUPLING: inbox-tray.ts (.inbox-btn, .messages property)
-  //           notification-tray.ts (.bell-btn, .notifications property)
-  // If either tray renames these selectors or properties, update the
-  // references in openInboxTray(), openNotificationTray(),
-  // hideTrayTriggers(), and syncTrayCounts() below.
-  // TODO: Add public toggle() methods and unreadCount getters to the
-  // tray components so the header does not need to pierce shadow DOMs.
+  // COUPLING: inbox-tray.ts (.inbox-btn)
+  //           notification-tray.ts (.bell-btn)
+  // If either tray renames these selectors, update the
+  // references in openInboxTray(), openNotificationTray() and
+  // hideTrayTriggers() below. Badge counts arrive through TRAY_COUNT_EVENT.
+  // TODO: Add public toggle() methods to the tray components so the header
+  // does not need to pierce shadow DOMs.
   // ----------------------------------------------------------------------
 
   /**
@@ -1259,33 +1263,16 @@ export class ScionHeader extends LitElement {
   }
 
   /**
-   * Sync the header's badge counts with the tray components' internal state.
-   * The trays manage their own polling / SSE subscriptions -- we just read
-   * their array lengths after a short delay to let their fetch settle.
+   * Sets a badge count from a tray's count event. Each tray dispatches one
+   * whenever its list changes, so the badges follow the trays' lists, however
+   * long a fetch takes.
    */
-  private syncTrayCounts(): void {
-    // Delay initial sync to allow tray components to complete their first
-    // data fetch. 500ms is adequate for typical latencies; SSE events will
-    // correct the count if the trays load slower.
-    setTimeout(() => {
-      if (!this.isConnected) return;
-      const inbox = this.shadowRoot?.querySelector('scion-inbox-tray') as
-        | (Element & { messages?: unknown[] })
-        | null;
-      const notif = this.shadowRoot?.querySelector('scion-notification-tray') as
-        | (Element & { notifications?: unknown[] })
-        | null;
-
-      const newInbox = inbox?.messages?.length ?? 0;
-      const newNotif = notif?.notifications?.length ?? 0;
-      if (this.inboxCount !== newInbox) this.inboxCount = newInbox;
-      if (this.notificationCount !== newNotif) this.notificationCount = newNotif;
-    }, 500);
-  }
-
-  /** Bound handler for SSE tray-count events. */
-  private readonly handleTrayCountEvent = (): void => {
-    this.syncTrayCounts();
+  private readonly handleTrayCount = (event: Event): void => {
+    const detail = (event as CustomEvent<TrayCountDetail>).detail;
+    if (!detail) return;
+    const count = Math.max(0, detail.count);
+    if (detail.source === 'inbox') this.inboxCount = count;
+    else if (detail.source === 'notifications') this.notificationCount = count;
   };
 
   // =========================================================================
@@ -1417,11 +1404,13 @@ export class ScionHeader extends LitElement {
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
     );
+    this.graphPaletteAvailable = isGraphPaletteAvailable();
+    window.addEventListener(GRAPH_PALETTE_AVAILABILITY_EVENT, this.handleGraphPaletteAvailability);
     this.rememberModePath();
 
-    // Listen for SSE events to keep tray badge counts in sync.
-    stateManager.addEventListener('user-message-created', this.handleTrayCountEvent);
-    stateManager.addEventListener('notification-created', this.handleTrayCountEvent);
+    // The trays sit in this shadow root; their composed count events reach
+    // the host.
+    this.addEventListener(TRAY_COUNT_EVENT, this.handleTrayCount);
   }
 
   override disconnectedCallback(): void {
@@ -1430,22 +1419,43 @@ export class ScionHeader extends LitElement {
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
     );
-    stateManager.removeEventListener('user-message-created', this.handleTrayCountEvent);
-    stateManager.removeEventListener('notification-created', this.handleTrayCountEvent);
+    window.removeEventListener(
+      GRAPH_PALETTE_AVAILABILITY_EVENT,
+      this.handleGraphPaletteAvailability
+    );
+    this.removeEventListener(TRAY_COUNT_EVENT, this.handleTrayCount);
   }
 
   override firstUpdated(): void {
     // Give the tray components a frame to finish their first render so
-    // their shadow DOMs are ready, then hide their trigger buttons and
-    // read initial badge counts.
+    // their shadow DOMs are ready, then hide their trigger buttons.
     requestAnimationFrame(() => {
       this.hideTrayTriggers();
-      this.syncTrayCounts();
     });
+  }
+
+  override willUpdate(changedProperties: Map<string, unknown>): void {
+    if (changedProperties.has('user')) this.resetCountsOnUserChange();
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) this.rememberModePath();
+  }
+
+  /**
+   * Clears the badge counts when the signed-in user id changes, so the badges
+   * never show the previous user's counts. The trays clear their lists in
+   * their own next update, a render later than this one; clearing here keeps
+   * that render from pairing the new user with the old counts. The trays'
+   * count events then fill the badges in. A new user object with the same id
+   * keeps the counts.
+   */
+  private resetCountsOnUserChange(): void {
+    const id = this.user?.id ?? null;
+    if (id === this.countsUserId) return;
+    this.countsUserId = id;
+    this.inboxCount = 0;
+    this.notificationCount = 0;
   }
 
   // =========================================================================
@@ -1456,10 +1466,16 @@ export class ScionHeader extends LitElement {
     this.terminalSessionCount = Math.max(0, event.detail?.count ?? 0);
   };
 
+  private readonly handleGraphPaletteAvailability = (): void => {
+    this.graphPaletteAvailable = isGraphPaletteAvailable();
+  };
+
   private rememberModePath(): void {
     const path = this.currentPath || window.location.pathname;
     if (path.startsWith('/chat')) {
-      rememberedModePaths.chat = path;
+      // Drop a `#msg-…` jump target: coming back to chat should land where
+      // the user left off, not replay the jump that first opened the thread.
+      rememberedModePaths.chat = path.split('#')[0];
     } else if (path !== '/terminals' && !path.startsWith('/terminals/')) {
       rememberedModePaths.dashboard = path || '/';
     }

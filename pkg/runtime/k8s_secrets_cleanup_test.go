@@ -80,13 +80,25 @@ func newGKECleanupTestRuntime(t *testing.T) (*KubernetesRuntime, *k8sfake.Client
 	return rt, clientset, dynClient
 }
 
-// runUntilPodSubmitted drives Run(config) until it submits the pod Create
-// call, then cancels the context so waitForPodReady returns immediately
+// failPodReadiness makes every pod Get on clientset fail with a plain
+// (non-context) error, so Run's waitForPodReady returns at its first poll
 // instead of polling for up to 10 minutes against a fake API server that
-// will never report the pod Ready. Returns the pod as submitted.
+// never reports the pod Ready. A plain error, rather than cancelling Run's
+// context, models a start that failed but was not abandoned, so Run keeps
+// the pod and its Secrets for the test to inspect (an abandoned start
+// removes them; see TestRun_CancelledWhilePending_RemovesPodAndSecrets).
+func failPodReadiness(clientset *k8sfake.Clientset) {
+	clientset.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, fmt.Errorf("simulated readiness failure")
+	})
+}
+
+// runUntilPodSubmitted drives Run(config) until it submits the pod Create
+// call and then fails readiness (see failPodReadiness). Returns the pod as
+// submitted.
 func runUntilPodSubmitted(t *testing.T, rt *KubernetesRuntime, clientset *k8sfake.Clientset, config RunConfig) *corev1.Pod {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	var (
@@ -98,9 +110,9 @@ func runUntilPodSubmitted(t *testing.T, rt *KubernetesRuntime, clientset *k8sfak
 		mu.Lock()
 		pod = p.DeepCopy()
 		mu.Unlock()
-		cancel()
 		return false, nil, nil // let the default reactor actually store the pod
 	})
+	failPodReadiness(clientset)
 
 	_, _ = rt.Run(ctx, config)
 
@@ -258,7 +270,7 @@ func TestDelete_PodGone_CrossProjectSafety(t *testing.T) {
 
 	// No pod exists for either agent (simulating a previously force-deleted
 	// or evicted agent). Delete must not error and must not cross projects.
-	if err := rt.Delete(ctx, proj1Name); err != nil {
+	if err := rt.Delete(ctx, RunRef{ID: proj1Name}); err != nil {
 		t.Fatalf("Delete should succeed when the pod is already gone: %v", err)
 	}
 
@@ -288,7 +300,7 @@ func TestDelete_DoesNotCrossAgentOnEnvSuffix(t *testing.T) {
 		t.Fatalf("createAgentSecret (target) failed: %v", err)
 	}
 
-	if err := rt.Delete(ctx, targetName); err != nil {
+	if err := rt.Delete(ctx, RunRef{ID: targetName}); err != nil {
 		t.Fatalf("Delete should succeed when the pod is already gone: %v", err)
 	}
 
@@ -329,7 +341,7 @@ func TestRun_Delete_RoundTrip_NoSecretsLeftBehind(t *testing.T) {
 		t.Fatalf("precondition: auth Secret should exist after Run: %v", err)
 	}
 
-	if err := rt.Delete(context.Background(), agentName); err != nil {
+	if err := rt.Delete(context.Background(), RunRef{ID: agentName}); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 
@@ -362,7 +374,7 @@ func TestRun_Delete_RoundTrip_GKE_SPCCleanedUp(t *testing.T) {
 		t.Fatalf("precondition: SPC should exist after Run: %v", err)
 	}
 
-	if err := rt.Delete(context.Background(), agentName); err != nil {
+	if err := rt.Delete(context.Background(), RunRef{ID: agentName}); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 
@@ -533,7 +545,7 @@ func TestRun_InitContainerFailure_ThenHubDelete_CleansUpSecrets(t *testing.T) {
 
 	// Simulate the hub's reconciliation observing the failed agent and
 	// auto-cleaning it, exactly as it would for a healthy agent being removed.
-	if err := rt.Delete(context.Background(), agentName); err != nil {
+	if err := rt.Delete(context.Background(), RunRef{ID: agentName}); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 	if _, err := clientset.CoreV1().Secrets("default").Get(context.Background(), secretName, metav1.GetOptions{}); !k8serrors.IsNotFound(err) {

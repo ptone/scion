@@ -724,3 +724,97 @@ func TestFanOutEventBus_UserTopicBufferFullPropagatesSentinel(t *testing.T) {
 		}
 	})
 }
+
+// ErrInProcessPublish lets callers tell "the hub's own subscribers did not
+// get the message" apart from "an external spoke failed" (ptone/scion#1906).
+func TestFanOutEventBus_InProcessFailureWrappedInSentinel(t *testing.T) {
+	failing := func() *stubEventBus {
+		b := newStubEventBus()
+		b.publishFunc = func(context.Context, string, *messages.StructuredMessage) error {
+			return errors.New("spoke down")
+		}
+		return b
+	}
+	closedInproc := func() *stubEventBus {
+		b := newStubEventBus()
+		b.publishFunc = func(context.Context, string, *messages.StructuredMessage) error {
+			return ErrEventBusClosed
+		}
+		return b
+	}
+
+	for _, channel := range []string{"", "telegram"} {
+		t.Run("channel="+channel, func(t *testing.T) {
+			newMsg := func() *messages.StructuredMessage {
+				m := messages.NewInstruction("agent:a", "user:alice", "hi")
+				m.Channel = channel
+				return m
+			}
+
+			// A failing non-observer plugin spoke: error returned, but not
+			// attributed to the inprocess spoke.
+			fan := NewFanOutEventBus([]NamedEventBus{
+				{Name: InProcessBusName, Bus: newStubEventBus()},
+				{Name: "telegram", Bus: failing()},
+			}, slog.Default())
+			err := fan.Publish(context.Background(), "t", newMsg())
+			if err == nil {
+				t.Fatal("expected the plugin spoke error to be returned")
+			}
+			if errors.Is(err, ErrInProcessPublish) {
+				t.Fatalf("plugin spoke failure must not match ErrInProcessPublish: %v", err)
+			}
+
+			// A failing inprocess spoke: wrapped, cause preserved.
+			fan = NewFanOutEventBus([]NamedEventBus{
+				{Name: InProcessBusName, Bus: closedInproc()},
+				{Name: "telegram", Bus: newStubEventBus()},
+			}, slog.Default())
+			err = fan.Publish(context.Background(), "t", newMsg())
+			if !errors.Is(err, ErrInProcessPublish) || !errors.Is(err, ErrEventBusClosed) {
+				t.Fatalf("expected ErrInProcessPublish wrapping ErrEventBusClosed, got %v", err)
+			}
+		})
+	}
+}
+
+func TestFanOutEventBus_SubscribeNilHandler(t *testing.T) {
+	inproc := NewInProcessEventBus(slog.Default())
+	external := newStubEventBus()
+	var externalSubs int
+	external.subscribeFunc = func(_ string, _ EventHandler) (Subscription, error) {
+		externalSubs++
+		return &stubSubscription{}, nil
+	}
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+		{Name: "external", Bus: external},
+	}, slog.Default())
+	defer func() { _ = fan.Close() }()
+
+	sub, err := fan.Subscribe("test.>", nil)
+	if !errors.Is(err, ErrNilHandler) {
+		t.Fatalf("Subscribe(nil) error = %v, want ErrNilHandler", err)
+	}
+	if sub != nil {
+		t.Fatalf("Subscribe(nil) returned a non-nil subscription")
+	}
+	if externalSubs != 0 {
+		t.Errorf("external spoke subscribed %d times, want 0", externalSubs)
+	}
+
+	// The rejected pattern must not be replayed onto spokes added later.
+	added := newStubEventBus()
+	var replayed []string
+	added.subscribeFunc = func(pattern string, _ EventHandler) (Subscription, error) {
+		replayed = append(replayed, pattern)
+		return &stubSubscription{}, nil
+	}
+	if err := fan.AddSpoke(NamedEventBus{Name: "added", Bus: added}); err != nil {
+		t.Fatalf("AddSpoke: %v", err)
+	}
+	if len(replayed) != 0 {
+		t.Errorf("rejected pattern replayed onto new spoke: %v", replayed)
+	}
+}

@@ -23,6 +23,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,8 +40,23 @@ import (
 // ---------------------------------------------------------------------------
 
 // mockUATStore implements store.UserAccessTokenStore for validate-only tests.
+// ValidateToken updates last-used from a background goroutine, so every
+// access to tokens goes through mu. Tests that edit a stored row use mutate.
 type mockUATStore struct {
+	mu     sync.Mutex
 	tokens map[string]*store.UserAccessToken
+}
+
+// mutate applies fn to the stored token with the given ID while holding mu.
+func (m *mockUATStore) mutate(t *testing.T, id string, fn func(*store.UserAccessToken)) {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tok, ok := m.tokens[id]
+	if !ok {
+		t.Fatalf("token %q not found in mock store", id)
+	}
+	fn(tok)
 }
 
 func newMockUATStore() *mockUATStore {
@@ -48,6 +64,8 @@ func newMockUATStore() *mockUATStore {
 }
 
 func (m *mockUATStore) CreateUserAccessToken(_ context.Context, token *store.UserAccessToken) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, exists := m.tokens[token.ID]; exists {
 		return store.ErrAlreadyExists
 	}
@@ -57,6 +75,8 @@ func (m *mockUATStore) CreateUserAccessToken(_ context.Context, token *store.Use
 }
 
 func (m *mockUATStore) GetUserAccessToken(_ context.Context, id string) (*store.UserAccessToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	t, ok := m.tokens[id]
 	if !ok {
 		return nil, store.ErrNotFound
@@ -66,6 +86,8 @@ func (m *mockUATStore) GetUserAccessToken(_ context.Context, id string) (*store.
 }
 
 func (m *mockUATStore) GetUserAccessTokenByHash(_ context.Context, hash string) (*store.UserAccessToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, t := range m.tokens {
 		if t.KeyHash == hash {
 			cp := *t
@@ -76,6 +98,8 @@ func (m *mockUATStore) GetUserAccessTokenByHash(_ context.Context, hash string) 
 }
 
 func (m *mockUATStore) UpdateUserAccessTokenLastUsed(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	t, ok := m.tokens[id]
 	if !ok {
 		return store.ErrNotFound
@@ -86,6 +110,8 @@ func (m *mockUATStore) UpdateUserAccessTokenLastUsed(_ context.Context, id strin
 }
 
 func (m *mockUATStore) RevokeUserAccessToken(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	t, ok := m.tokens[id]
 	if !ok {
 		return store.ErrNotFound
@@ -95,6 +121,8 @@ func (m *mockUATStore) RevokeUserAccessToken(_ context.Context, id string) error
 }
 
 func (m *mockUATStore) DeleteUserAccessToken(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, ok := m.tokens[id]; !ok {
 		return store.ErrNotFound
 	}
@@ -103,6 +131,8 @@ func (m *mockUATStore) DeleteUserAccessToken(_ context.Context, id string) error
 }
 
 func (m *mockUATStore) ListUserAccessTokens(_ context.Context, userID string) ([]store.UserAccessToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var result []store.UserAccessToken
 	for _, t := range m.tokens {
 		if t.UserID == userID {
@@ -113,6 +143,8 @@ func (m *mockUATStore) ListUserAccessTokens(_ context.Context, userID string) ([
 }
 
 func (m *mockUATStore) CountUserAccessTokens(_ context.Context, userID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	count := 0
 	for _, t := range m.tokens {
 		if t.UserID == userID && !t.Revoked {
@@ -123,6 +155,8 @@ func (m *mockUATStore) CountUserAccessTokens(_ context.Context, userID string) (
 }
 
 func (m *mockUATStore) DeleteUserAccessTokensByProject(_ context.Context, projectID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	count := 0
 	for id, t := range m.tokens {
 		if t.ProjectID == projectID {
@@ -148,6 +182,15 @@ func (m *mockUserStore) GetUser(_ context.Context, id string) (*store.User, erro
 		return nil, store.ErrNotFound
 	}
 	return u, nil
+}
+func (m *mockUserStore) GetUsersByIDs(_ context.Context, ids []string) (map[string]*store.User, error) {
+	out := make(map[string]*store.User, len(ids))
+	for _, id := range ids {
+		if u, ok := m.users[id]; ok {
+			out[id] = u
+		}
+	}
+	return out, nil
 }
 func (m *mockUserStore) GetUserByEmail(context.Context, string) (*store.User, error) {
 	return nil, store.ErrNotFound
@@ -235,8 +278,8 @@ func TestValidateToken(t *testing.T) {
 		if identity.ID() != tid("user-1") {
 			t.Errorf("expected user ID 'user-1', got %q", identity.ID())
 		}
-		if identity.ScopedProjectID() != tid("project-1") {
-			t.Errorf("expected project 'project-1', got %q", identity.ScopedProjectID())
+		if identity.Boundary().ProjectID != tid("project-1") {
+			t.Errorf("expected project 'project-1', got %q", identity.Boundary().ProjectID)
 		}
 		if identity.CredentialID() != token.stored.ID {
 			t.Errorf("expected credential ID %q, got %q", token.stored.ID, identity.CredentialID())
@@ -266,7 +309,9 @@ func TestValidateToken(t *testing.T) {
 	t.Run("revoked token", func(t *testing.T) {
 		revokedToken := seedTestToken(t, tokenStore, tid("user-1"), tid("project-1"),
 			[]string{"agent:read"})
-		tokenStore.tokens[revokedToken.stored.ID].Revoked = true
+		tokenStore.mutate(t, revokedToken.stored.ID, func(tok *store.UserAccessToken) {
+			tok.Revoked = true
+		})
 		_, err := svc.ValidateToken(ctx, revokedToken.plaintext)
 		if !errors.Is(err, ErrUATRevoked) {
 			t.Errorf("expected ErrUATRevoked, got %v", err)
@@ -277,7 +322,9 @@ func TestValidateToken(t *testing.T) {
 		expiredToken := seedTestToken(t, tokenStore, tid("user-1"), tid("project-1"),
 			[]string{"agent:read"})
 		past := time.Now().Add(-1 * time.Hour)
-		tokenStore.tokens[expiredToken.stored.ID].ExpiresAt = &past
+		tokenStore.mutate(t, expiredToken.stored.ID, func(tok *store.UserAccessToken) {
+			tok.ExpiresAt = &past
+		})
 		_, err := svc.ValidateToken(ctx, expiredToken.plaintext)
 		if !errors.Is(err, ErrUATExpired) {
 			t.Errorf("expected ErrUATExpired, got %v", err)
@@ -315,9 +362,10 @@ func TestValidateToken_RejectsMalformedStoredBoundary(t *testing.T) {
 			// row's own load-time validation must still catch it — belt and
 			// suspenders, since a malformed row must never authenticate
 			// regardless of how it came to exist.
-			stored := tokenStore.tokens[token.stored.ID]
-			stored.BoundaryKind = c.boundaryKind
-			stored.ProjectID = c.projectID
+			tokenStore.mutate(t, token.stored.ID, func(stored *store.UserAccessToken) {
+				stored.BoundaryKind = c.boundaryKind
+				stored.ProjectID = c.projectID
+			})
 
 			_, err := svc.ValidateToken(context.Background(), token.plaintext)
 			if !errors.Is(err, ErrInvalidUAT) {
@@ -373,9 +421,10 @@ func TestValidateToken_CarriesStoredBoundary(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			svc, tokenStore, _ := newTestValidateService()
 			token := seedTestToken(t, tokenStore, tid("user-1"), projectID, []string{"agent:read"})
-			stored := tokenStore.tokens[token.stored.ID]
-			stored.BoundaryKind = c.boundaryKind
-			stored.ProjectID = c.projectID
+			tokenStore.mutate(t, token.stored.ID, func(stored *store.UserAccessToken) {
+				stored.BoundaryKind = c.boundaryKind
+				stored.ProjectID = c.projectID
+			})
 
 			identity, err := svc.ValidateToken(context.Background(), token.plaintext)
 			if err != nil {
@@ -384,8 +433,8 @@ func TestValidateToken_CarriesStoredBoundary(t *testing.T) {
 			if got := identity.Boundary(); got != c.wantBoundary {
 				t.Errorf("identity.Boundary() = %+v, want %+v", got, c.wantBoundary)
 			}
-			if got := identity.ScopedProjectID(); got != c.wantProjectID {
-				t.Errorf("identity.ScopedProjectID() = %q, want %q", got, c.wantProjectID)
+			if got := identity.Boundary().ProjectID; got != c.wantProjectID {
+				t.Errorf("identity.Boundary().ProjectID = %q, want %q", got, c.wantProjectID)
 			}
 
 			cc := credentialContextForIdentity(identity)
@@ -508,8 +557,8 @@ func TestScopedUserIdentity(t *testing.T) {
 	if scoped.Email() != "test@example.com" {
 		t.Errorf("expected email 'test@example.com', got %q", scoped.Email())
 	}
-	if scoped.ScopedProjectID() != tid("project-1") {
-		t.Errorf("expected project 'project-1', got %q", scoped.ScopedProjectID())
+	if scoped.Boundary().ProjectID != tid("project-1") {
+		t.Errorf("expected project 'project-1', got %q", scoped.Boundary().ProjectID)
 	}
 	if !scoped.HasScope("agent:attach") {
 		t.Error("expected HasScope('agent:attach') to be true")

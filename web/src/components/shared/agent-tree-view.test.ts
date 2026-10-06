@@ -30,6 +30,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vite
 import './agent-tree-view.js';
 import type { ScionAgentTreeView } from './agent-tree-view.js';
 import type { Agent } from '../../shared/types.js';
+import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
   layoutForest,
@@ -66,7 +67,7 @@ describe('scion-agent-tree-view keyboard shortcuts', () => {
   let el: ScionAgentTreeView;
 
   beforeEach(async () => {
-    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    el = document.createElement('scion-agent-tree-view');
     el.agents = [agent('r1', 'root', ['user-1']), agent('k1', 'kid', ['user-1', 'r1'])];
     document.body.appendChild(el);
     await el.updateComplete;
@@ -119,7 +120,7 @@ describe('scion-agent-tree-view keyboard shortcuts', () => {
 
   it('zooms in on "+"/"=" and out on "-"', () => {
     // scale is internal state; reach in for assertion purposes only.
-    const scaleOf = () => (el as unknown as { scale: number }).scale;
+    const scaleOf = (): number => (el as unknown as { scale: number }).scale;
     const initial = scaleOf();
     pressKey('+');
     expect(scaleOf()).toBeCloseTo(initial * 1.25);
@@ -191,7 +192,7 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
   }
 
   beforeEach(async () => {
-    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    el = document.createElement('scion-agent-tree-view');
     el.agents = baseAgents();
     document.body.appendChild(el);
     await el.updateComplete;
@@ -311,6 +312,17 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
     expect(statusLabel('k1')).toBe('stopped');
   });
 
+  it('shows a provision-only agent as created (not started) with a start hint (ptone/scion#2929)', async () => {
+    el.agents = el.agents.map((a) =>
+      a.id === 'k1' ? { ...a, phase: 'created', provisionedOnly: true } : a
+    );
+    await el.updateComplete;
+
+    const badge = el.shadowRoot!.querySelector('a.node[href="/agents/k1"] scion-status-badge');
+    expect(badge?.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
+    expect(badge?.getAttribute('title')).toContain('scion start kid');
+  });
+
   /** Edges whose title indicates non-messageable ("mismatch") styling. */
   function titledEdges(): Element[] {
     return Array.from(el.shadowRoot!.querySelectorAll('svg path.edge')).filter((p) =>
@@ -354,7 +366,7 @@ describe('scion-agent-tree-view auto-fit scope detection (#2388 review N3)', () 
   }
 
   beforeEach(async () => {
-    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    el = document.createElement('scion-agent-tree-view');
     el.agents = [
       { ...agent('r1', 'root', ['user-1']), projectId: 'p1' } as Agent,
       { ...agent('k1', 'kid', ['user-1', 'r1']), projectId: 'p1' } as Agent,
@@ -444,7 +456,7 @@ describe('scion-agent-tree-view stable layout & keyed rendering on delete', () =
   }
 
   beforeEach(async () => {
-    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    el = document.createElement('scion-agent-tree-view');
     el.agents = baseAgents();
     document.body.appendChild(el);
     await el.updateComplete;
@@ -568,7 +580,7 @@ describe('scion-agent-tree-view stable layout & keyed rendering on delete', () =
     el.agents = [agent('solo', 'aaa-solo', ['user-1']), agent('r2', 'zzz-root-2', ['user-2'])];
     await el.updateComplete;
 
-    const userEls = () => Array.from(el.shadowRoot!.querySelectorAll('.node.user'));
+    const userEls = (): Element[] => Array.from(el.shadowRoot!.querySelectorAll('.node.user'));
     expect(userEls()).toHaveLength(2);
     const survivor = userEls()[1]; // user-2's card, rendered after user-1's
 
@@ -621,7 +633,7 @@ describe('scion-agent-tree-view filterKey distinguishes a filter change from a d
   }
 
   beforeEach(async () => {
-    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    el = document.createElement('scion-agent-tree-view');
     el.filterKey = 'running';
     el.agents = baseAgents();
     document.body.appendChild(el);
@@ -692,7 +704,7 @@ describe('scion-agent-tree-view edge endpoint lookup via id map (#2388)', () => 
       { ...agent('r2', 'root-2', ['user-2']), messageMode: 'project' } as Agent,
       { ...agent('k2', 'kid-2', ['user-2', 'r2']), messageMode: 'project' } as Agent,
     ];
-    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    el = document.createElement('scion-agent-tree-view');
     el.agents = agents;
     document.body.appendChild(el);
     await el.updateComplete;
@@ -826,7 +838,7 @@ describe('hover/relatedIds highlighting', () => {
     ];
 
     beforeEach(async () => {
-      el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+      el = document.createElement('scion-agent-tree-view');
       el.agents = fixture;
       document.body.appendChild(el);
       await el.updateComplete;
@@ -877,7 +889,7 @@ describe('hover/relatedIds highlighting', () => {
     ];
 
     beforeEach(async () => {
-      el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+      el = document.createElement('scion-agent-tree-view');
       el.agents = fixture;
       document.body.appendChild(el);
       await el.updateComplete;
@@ -892,15 +904,15 @@ describe('hover/relatedIds highlighting', () => {
       // budget is exceeded, so a regressed guard fails this test cleanly
       // instead of hanging it.
       type AgentByIdHost = { getAgentById(a: Agent[]): Map<string, Agent> };
-      const real = (Object.getPrototypeOf(el) as AgentByIdHost).getAgentById;
+      const real = (Object.getPrototypeOf(el) as AgentByIdHost).getAgentById.bind(el);
       let calls = 0;
       vi.spyOn(el as unknown as AgentByIdHost, 'getAgentById').mockImplementation(function (
         this: unknown,
         a: Agent[]
       ) {
-        const m = real.call(this, a);
+        const m = real(a);
         const bounded = new Map(m);
-        bounded.get = (k: string) => {
+        bounded.get = (k: string): Agent | undefined => {
           if (++calls > 1000) throw new Error('relatedIds ancestor walk did not terminate');
           return m.get(k);
         };
@@ -934,7 +946,7 @@ describe('hover/relatedIds highlighting', () => {
     ];
 
     beforeEach(async () => {
-      el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+      el = document.createElement('scion-agent-tree-view');
       el.agents = fixture;
       document.body.appendChild(el);
       await el.updateComplete;
@@ -1019,7 +1031,7 @@ describe('hover/relatedIds highlighting', () => {
     ];
 
     beforeEach(async () => {
-      el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+      el = document.createElement('scion-agent-tree-view');
       el.agents = fixture;
       document.body.appendChild(el);
       await el.updateComplete;
@@ -1067,5 +1079,661 @@ describe('hover/relatedIds highlighting', () => {
       expect(isDim('p2')).toBe(false);
       expect(findUserNode(fixture, 'user-2').classList.contains('dim')).toBe(false);
     });
+  });
+});
+
+describe('scion-agent-tree-view revealAgent and focusAgentNode', () => {
+  let el: ScionAgentTreeView;
+
+  interface Internals {
+    scale: number;
+    panX: number;
+    panY: number;
+    didAutoFit: boolean;
+    collapsedIds: ReadonlySet<string>;
+    pendingRevealId: string | null;
+    highlightId: string | null;
+    layoutCache: { layout: ForestLayout } | null;
+  }
+  const internals = (): Internals => el as unknown as Internals;
+
+  const CANVAS_W = 800;
+  const CANVAS_H = 600;
+  let canvasSize = { width: CANVAS_W, height: CANVAS_H };
+
+  function stubCanvas(): void {
+    const canvas = el.shadowRoot!.querySelector<HTMLElement>('.canvas')!;
+    canvas.getBoundingClientRect = (): DOMRect =>
+      ({
+        left: 0,
+        top: 0,
+        x: 0,
+        y: 0,
+        ...canvasSize,
+        right: canvasSize.width,
+        bottom: canvasSize.height,
+      }) as DOMRect;
+  }
+
+  function nextFrame(): Promise<void> {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  /** Lets the update and both frames it schedules (auto-fit, focus) run. */
+  async function settle(): Promise<void> {
+    await el.updateComplete;
+    stubCanvas();
+    await nextFrame();
+    await nextFrame();
+    await el.updateComplete;
+  }
+
+  function node(id: string): HTMLElement | null {
+    return el.shadowRoot!.querySelector<HTMLElement>(`a.node[data-agent-id="${id}"]`);
+  }
+
+  function positioned(id: string): { px: number; py: number } {
+    const n = internals().layoutCache!.layout.nodes.find((p) => p.agent.id === id);
+    if (!n) throw new Error(`${id} is not laid out`);
+    return n;
+  }
+
+  function expectCenteredOn(id: string, scale: number): void {
+    const { px, py } = positioned(id);
+    expect(internals().scale).toBe(scale);
+    expect(internals().panX).toBeCloseTo(CANVAS_W / 2 - (px + NODE_W / 2) * scale);
+    expect(internals().panY).toBeCloseTo(CANVAS_H / 2 - (py + NODE_H / 2) * scale);
+    const stage = el.shadowRoot!.querySelector<HTMLElement>('.stage')!;
+    expect(stage.getAttribute('style')).toContain(
+      `translate(${internals().panX}px, ${internals().panY}px) scale(${scale})`
+    );
+  }
+
+  beforeEach(async () => {
+    canvasSize = { width: CANVAS_W, height: CANVAS_H };
+    el = document.createElement('scion-agent-tree-view');
+    el.agents = [
+      agent('r1', 'root', ['user-1']),
+      agent('k1', 'kid', ['user-1', 'r1']),
+      agent('g1', 'grandkid', ['user-1', 'r1', 'k1']),
+      agent('r2', 'other root', ['user-1']),
+      agent('k2', 'other kid', ['user-1', 'r2']),
+    ];
+    document.body.appendChild(el);
+    await settle();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    el.remove();
+    document.body.innerHTML = '';
+  });
+
+  it('returns false and changes nothing for an id that is not in the graph', async () => {
+    internals().scale = 1.5;
+    internals().panX = 12;
+    internals().panY = 34;
+    await el.updateComplete;
+
+    expect(el.revealAgent('missing')).toBe(false);
+    await settle();
+
+    expect(internals().scale).toBe(1.5);
+    expect(internals().panX).toBe(12);
+    expect(internals().panY).toBe(34);
+    expect(el.shadowRoot!.querySelector('.jump-highlight')).toBeNull();
+  });
+
+  it('centers on the node at the current zoom instead of resetting it', async () => {
+    internals().scale = 1.5;
+    await el.updateComplete;
+
+    expect(el.revealAgent('k2')).toBe(true);
+    await settle();
+
+    expectCenteredOn('k2', 1.5);
+  });
+
+  it('expands collapsed ancestors so the node is laid out, leaving other collapses alone', async () => {
+    internals().collapsedIds = new Set(['r1', 'k1', 'r2']);
+    await el.updateComplete;
+    expect(node('g1')).toBeNull();
+
+    expect(el.revealAgent('g1')).toBe(true);
+    await settle();
+
+    expect([...internals().collapsedIds]).toEqual(['r2']);
+    expect(node('g1')).not.toBeNull();
+    expectCenteredOn('g1', internals().scale);
+  });
+
+  it('highlights the node briefly and leaves keyboard focus alone', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    el.revealAgent('k1');
+    await settle();
+
+    expect(node('k1')!.classList.contains('jump-highlight')).toBe(true);
+    expect(el.shadowRoot!.querySelectorAll('.jump-highlight')).toHaveLength(1);
+    expect(el.shadowRoot!.activeElement).toBeNull();
+
+    vi.advanceTimersByTime(2000);
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('.jump-highlight')).toBeNull();
+  });
+
+  it('moves the highlight to the latest jump', async () => {
+    el.revealAgent('k1');
+    await settle();
+    el.revealAgent('r2');
+    await settle();
+
+    expect(node('k1')!.classList.contains('jump-highlight')).toBe(false);
+    expect(node('r2')!.classList.contains('jump-highlight')).toBe(true);
+    expectCenteredOn('r2', internals().scale);
+  });
+
+  it('is not overridden by an initial fit that is still pending', async () => {
+    internals().didAutoFit = false;
+    el.revealAgent('k2');
+    await settle();
+
+    const scale = internals().scale;
+    expectCenteredOn('k2', scale);
+
+    // A later render must not run the initial fit over the centering either.
+    internals().scale = 1.5;
+    el.requestUpdate();
+    await settle();
+    expect(internals().scale).toBe(1.5);
+  });
+
+  it("leaves the target's own collapse alone", async () => {
+    internals().collapsedIds = new Set(['k1']);
+    await el.updateComplete;
+
+    expect(el.revealAgent('k1')).toBe(true);
+    await settle();
+
+    expect([...internals().collapsedIds]).toEqual(['k1']);
+    expect(node('g1')).toBeNull();
+    expectCenteredOn('k1', internals().scale);
+  });
+
+  it('stops expanding at a cycle in the ancestry', async () => {
+    el.agents = [
+      agent('x2', 'loop a', ['user-1', 'x3']),
+      agent('x3', 'loop b', ['user-1', 'x2']),
+      agent('x1', 'leaf', ['user-1', 'x2']),
+    ];
+    internals().collapsedIds = new Set(['x2', 'x3']);
+    await el.updateComplete;
+
+    expect(el.revealAgent('x1')).toBe(true);
+    expect(internals().collapsedIds.size).toBe(0);
+  });
+
+  it('restarts the highlight timer when the same agent is picked again', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    el.revealAgent('k1');
+    await settle();
+    vi.advanceTimersByTime(1500);
+
+    el.revealAgent('k1');
+    await settle();
+    vi.advanceTimersByTime(1000);
+    await el.updateComplete;
+    expect(node('k1')!.classList.contains('jump-highlight')).toBe(true);
+
+    vi.advanceTimersByTime(1000);
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('.jump-highlight')).toBeNull();
+  });
+
+  it('focusAgentNode focuses the node without letting the browser scroll it into view', () => {
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+
+    expect(el.focusAgentNode('k1')).toBe(true);
+
+    expect(el.shadowRoot!.activeElement).toBe(node('k1'));
+    const call = focus.mock.contexts.findIndex((ctx) => ctx === node('k1'));
+    expect(call).toBeGreaterThanOrEqual(0);
+    expect(focus.mock.calls[call]).toEqual([{ preventScroll: true }]);
+  });
+
+  it('focusAgentNode returns false for a node that is not rendered', async () => {
+    internals().collapsedIds = new Set(['k1']);
+    await el.updateComplete;
+
+    expect(el.focusAgentNode('g1')).toBe(false);
+    expect(el.focusAgentNode('missing')).toBe(false);
+    expect(el.shadowRoot!.activeElement).toBeNull();
+  });
+
+  it('drops a jump whose agent leaves the graph before it is applied', async () => {
+    internals().scale = 1.25;
+    internals().panX = 10;
+    internals().panY = 20;
+    await el.updateComplete;
+    const agents = el.agents;
+
+    el.revealAgent('k2');
+    el.agents = agents.filter((a) => a.id !== 'k2');
+    await settle();
+    expect(internals().pendingRevealId).toBeNull();
+
+    el.agents = agents;
+    await settle();
+    expect(internals().panX).toBe(10);
+    expect(internals().panY).toBe(20);
+  });
+
+  it('on disconnect drops the pending jump and the highlight, and frees its frame and timer', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'requestAnimationFrame', 'cancelAnimationFrame'],
+    });
+    canvasSize = { width: 0, height: 0 };
+    internals().scale = 1.25;
+    internals().panX = 10;
+    internals().panY = 20;
+    el.revealAgent('k1');
+    await el.updateComplete;
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    el.remove();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(internals().pendingRevealId).toBeNull();
+
+    canvasSize = { width: CANVAS_W, height: CANVAS_H };
+    document.body.appendChild(el);
+    await el.updateComplete;
+    stubCanvas();
+    vi.advanceTimersByTime(100);
+    await el.updateComplete;
+
+    expect(el.shadowRoot!.querySelector('.jump-highlight')).toBeNull();
+    expect(internals().scale).toBe(1.25);
+    expect(internals().panX).toBe(10);
+    expect(internals().panY).toBe(20);
+  });
+
+  it('on disconnect clears a highlight that is showing, so a reconnect shows none', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    el.revealAgent('k1');
+    await settle();
+    expect(node('k1')!.classList.contains('jump-highlight')).toBe(true);
+
+    el.remove();
+    expect(internals().highlightId).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+
+    document.body.appendChild(el);
+    await settle();
+    expect(el.shadowRoot!.querySelector('.jump-highlight')).toBeNull();
+  });
+
+  it('waits for the canvas to have a size, then centers on the next render', async () => {
+    canvasSize = { width: 0, height: 0 };
+    internals().scale = 1.25;
+    el.revealAgent('k2');
+    await settle();
+    expect(internals().pendingRevealId).toBe('k2');
+
+    canvasSize = { width: CANVAS_W, height: CANVAS_H };
+    el.requestUpdate();
+    await settle();
+
+    expect(internals().pendingRevealId).toBeNull();
+    expectCenteredOn('k2', 1.25);
+  });
+
+  it('starts the highlight once the node is centered, not when the reveal is asked for', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    canvasSize = { width: 0, height: 0 };
+    el.revealAgent('k2');
+    await settle();
+    expect(el.shadowRoot!.querySelector('.jump-highlight')).toBeNull();
+
+    vi.advanceTimersByTime(500);
+    canvasSize = { width: CANVAS_W, height: CANVAS_H };
+    el.requestUpdate();
+    await settle();
+    expectCenteredOn('k2', internals().scale);
+    expect(node('k2')!.classList.contains('jump-highlight')).toBe(true);
+
+    vi.advanceTimersByTime(1900);
+    await el.updateComplete;
+    expect(node('k2')!.classList.contains('jump-highlight')).toBe(true);
+    vi.advanceTimersByTime(100);
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('.jump-highlight')).toBeNull();
+  });
+
+  it('gives up on a reveal whose canvas has no size for a second', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    canvasSize = { width: 0, height: 0 };
+    internals().scale = 1.25;
+    internals().panX = 10;
+    internals().panY = 20;
+    el.revealAgent('k2');
+    await settle();
+    vi.advanceTimersByTime(999);
+    expect(internals().pendingRevealId).toBe('k2');
+    vi.advanceTimersByTime(1);
+    expect(internals().pendingRevealId).toBeNull();
+
+    canvasSize = { width: CANVAS_W, height: CANVAS_H };
+    el.requestUpdate();
+    await settle();
+    expect(internals().scale).toBe(1.25);
+    expect(internals().panX).toBe(10);
+    expect(internals().panY).toBe(20);
+    expect(el.shadowRoot!.querySelector('.jump-highlight')).toBeNull();
+  });
+});
+
+// ptone/scion#765: dragging the canvas to pan must not start a text
+// selection, while text stays selectable when no pan is in progress.
+describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
+  let el: ScionAgentTreeView;
+
+  beforeEach(async () => {
+    el = document.createElement('scion-agent-tree-view');
+    el.agents = [agent('r1', 'root', ['user-1']), agent('k1', 'kid', ['user-1', 'r1'])];
+    document.body.appendChild(el);
+    await el.updateComplete;
+  });
+
+  afterEach(() => {
+    el.remove();
+    document.body.innerHTML = '';
+  });
+
+  function canvas(): HTMLElement {
+    return el.shadowRoot!.querySelector('.canvas')!;
+  }
+
+  function pointer(type: string, target: EventTarget = canvas()): void {
+    target.dispatchEvent(
+      new PointerEvent(type, { bubbles: true, composed: true, cancelable: true, pointerId: 1 })
+    );
+  }
+
+  /** Dispatches a selectstart on `target` and returns whether it was prevented. */
+  // Not composed, as browsers fire it: a selectstart on shadow-root text
+  // never reaches document, so the component must listen on its render root.
+  function selectStartPrevented(target: EventTarget): boolean {
+    const ev = new Event('selectstart', { bubbles: true, composed: false, cancelable: true });
+    target.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  }
+
+  /** Some text node inside the canvas (a node label), where a selection would begin. */
+  function textTarget(): Node {
+    const walker = document.createTreeWalker(canvas(), NodeFilter.SHOW_TEXT);
+    let n: Node | null;
+    while ((n = walker.nextNode())) {
+      if (n.textContent?.trim()) return n;
+    }
+    return canvas();
+  }
+
+  it('prevents selectstart during an active pan', () => {
+    pointer('pointerdown');
+    expect(canvas().classList.contains('dragging')).toBe(true);
+    expect(selectStartPrevented(textTarget())).toBe(true);
+    // Also outside the canvas while the gesture is active.
+    expect(selectStartPrevented(document.body)).toBe(true);
+    pointer('pointerup');
+  });
+
+  it('does not prevent selectstart when no pan is active', () => {
+    expect(selectStartPrevented(textTarget())).toBe(false);
+
+    pointer('pointerdown');
+    pointer('pointerup');
+    expect(canvas().classList.contains('dragging')).toBe(false);
+    expect(selectStartPrevented(textTarget())).toBe(false);
+    expect(selectStartPrevented(document.body)).toBe(false);
+  });
+
+  it('stops suppressing selection after pointercancel and after disconnect mid-pan', () => {
+    pointer('pointerdown');
+    pointer('pointercancel');
+    expect(selectStartPrevented(textTarget())).toBe(false);
+
+    pointer('pointerdown');
+    el.remove();
+    expect(selectStartPrevented(document.body)).toBe(false);
+  });
+
+  it('clears a selection that started during the pan on pointerup', () => {
+    // Mocked as Chromium reports a selection of shadow-root text: type
+    // 'Range' but isCollapsed true (window.getSelection() is retargeted to
+    // the host), so the check must key off type, not isCollapsed.
+    const removeAllRanges = vi.fn();
+    const sel: { type: string; isCollapsed: boolean; removeAllRanges: () => void } = {
+      type: 'Caret',
+      isCollapsed: true,
+      removeAllRanges,
+    };
+    const spy = vi.spyOn(window, 'getSelection').mockReturnValue(sel as unknown as Selection);
+    try {
+      pointer('pointerdown');
+      sel.type = 'Range'; // a selection slipped through mid-gesture
+      pointer('pointerup');
+      expect(removeAllRanges).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('leaves a selection that existed before the pan, and one made without panning', () => {
+    const removeAllRanges = vi.fn();
+    const sel = { type: 'Range', isCollapsed: true, removeAllRanges };
+    const spy = vi.spyOn(window, 'getSelection').mockReturnValue(sel as unknown as Selection);
+    try {
+      pointer('pointerdown');
+      pointer('pointerup');
+      // pointerup with no pan in progress (e.g. after a click on a link).
+      pointer('pointerup');
+      expect(removeAllRanges).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('removes the selectstart listeners from both the render root and document when the pan ends', () => {
+    const rootRemove = vi.spyOn(el.renderRoot, 'removeEventListener');
+    const docRemove = vi.spyOn(document, 'removeEventListener');
+    try {
+      pointer('pointerdown');
+      pointer('pointerup');
+      const removedSelectStart = (spy: typeof rootRemove): boolean =>
+        spy.mock.calls.some(([type, , opts]) => type === 'selectstart' && opts === true);
+      expect(removedSelectStart(rootRemove)).toBe(true);
+      expect(removedSelectStart(docRemove)).toBe(true);
+    } finally {
+      rootRemove.mockRestore();
+      docRemove.mockRestore();
+    }
+  });
+
+  // ptone/scion#2941: only the primary button starts a pan.
+  it('does not start a pan on a right or middle button press', () => {
+    for (const button of [1, 2]) {
+      const ev = new PointerEvent('pointerdown', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        pointerId: 1,
+        button,
+      });
+      canvas().dispatchEvent(ev);
+      expect(canvas().classList.contains('dragging')).toBe(false);
+      expect(ev.defaultPrevented).toBe(false);
+      expect(selectStartPrevented(document.body)).toBe(false);
+      pointer('pointerup');
+    }
+    // The primary button still pans, for a mouse, a touch contact and a pen.
+    for (const pointerType of ['mouse', 'touch', 'pen']) {
+      canvas().dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          pointerId: 1,
+          button: 0,
+          pointerType,
+        })
+      );
+      expect(canvas().classList.contains('dragging'), pointerType).toBe(true);
+      pointer('pointerup');
+      expect(canvas().classList.contains('dragging')).toBe(false);
+    }
+  });
+
+  // The Ctrl check applies to a mouse only: a touch or pen contact pans
+  // even with Ctrl held (e.g. a keyboard-attached tablet).
+  it('still pans on a touch or pen contact with Ctrl held', () => {
+    for (const pointerType of ['touch', 'pen']) {
+      canvas().dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          pointerId: 1,
+          button: 0,
+          pointerType,
+          ctrlKey: true,
+        })
+      );
+      expect(canvas().classList.contains('dragging'), pointerType).toBe(true);
+      pointer('pointerup');
+      expect(canvas().classList.contains('dragging')).toBe(false);
+    }
+  });
+
+  // macOS Ctrl+click is a context-menu click that reports button 0.
+  it('does not start a pan on a mouse Ctrl+click', () => {
+    const ev = new PointerEvent('pointerdown', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      pointerId: 1,
+      button: 0,
+      pointerType: 'mouse',
+      ctrlKey: true,
+    });
+    canvas().dispatchEvent(ev);
+    expect(canvas().classList.contains('dragging')).toBe(false);
+    expect(ev.defaultPrevented).toBe(false);
+    pointer('pointerup');
+  });
+
+  it('ends the pan and stops suppressing selection when pointer capture is lost', () => {
+    pointer('pointerdown');
+    expect(selectStartPrevented(document.body)).toBe(true);
+    pointer('lostpointercapture');
+    expect(canvas().classList.contains('dragging')).toBe(false);
+    expect(selectStartPrevented(document.body)).toBe(false);
+  });
+
+  it('does not clear a selection on a pointerup with no pan in progress', () => {
+    // Fresh element: no earlier pan has set hadSelectionAtPanStart, so only
+    // the dragging guard in onPointerUp keeps the selection (e.g. a click on
+    // a node link, whose pointerup still bubbles to the canvas).
+    const removeAllRanges = vi.fn();
+    const sel = { type: 'Range', isCollapsed: true, removeAllRanges };
+    const spy = vi.spyOn(window, 'getSelection').mockReturnValue(sel as unknown as Selection);
+    try {
+      pointer('pointerup', el.shadowRoot!.querySelector('.canvas a')!);
+      pointer('pointerup');
+      expect(removeAllRanges).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not start a pan (or suppress selection) from a link or button', () => {
+    // Node cards are links, so a pointerdown on a node label never pans and a
+    // double-click there can still select the label text.
+    const link = el.shadowRoot!.querySelector('.canvas a');
+    expect(link).not.toBeNull();
+    pointer('pointerdown', link!);
+    expect(canvas().classList.contains('dragging')).toBe(false);
+    expect(selectStartPrevented(textTarget())).toBe(false);
+  });
+});
+
+// ptone/scion#2483 phase 2: the graph shows each node's deletion state in
+// compact form (no lifecycle actions in the graph).
+describe('deletion badge on graph nodes', () => {
+  const T0 = Date.parse('2026-10-04T12:00:00Z');
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  const base = { soft: false, claim: 1, startedAt: iso(T0) };
+  let el: ScionAgentTreeView;
+
+  async function mountTree(agents: Agent[]): Promise<void> {
+    el = document.createElement('scion-agent-tree-view');
+    el.agents = agents;
+    document.body.appendChild(el);
+    await el.updateComplete;
+  }
+
+  afterEach(() => {
+    el?.remove();
+    vi.useRealTimers();
+  });
+
+  /** The compact badge text and full title on the node linking to /agents/<id>. */
+  async function nodeBadge(id: string): Promise<{ text: string; title: string } | null> {
+    const badge = el.shadowRoot!.querySelector<HTMLElement & { updateComplete: Promise<boolean> }>(
+      `a.node[href="/agents/${id}"] scion-deletion-badge`
+    );
+    await badge?.updateComplete;
+    const inner = badge?.shadowRoot?.querySelector<HTMLElement>('.badge');
+    return inner ? { text: inner.textContent?.trim() ?? '', title: inner.title } : null;
+  }
+
+  it('shows Deleting…, Delete failed and Interrupted compactly, with the full label as title', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], now: T0 });
+    await mountTree([
+      {
+        ...agent('d1', 'deleting'),
+        deletion: { ...base, state: 'deleting', leaseExpiresAt: iso(T0 + 60_000) },
+      },
+      {
+        ...agent('d2', 'failed'),
+        deletion: { ...base, state: 'failed', code: 'runtime_error', error: 'broker refused' },
+      },
+      { ...agent('d3', 'abandoned'), deletion: { ...base, state: 'failed', code: 'abandoned' } },
+      agent('d4', 'plain'),
+    ]);
+    expect(await nodeBadge('d1')).toEqual({ text: 'Deleting…', title: 'Deleting…' });
+    expect(await nodeBadge('d2')).toEqual({
+      text: 'Delete failed',
+      title: 'Delete failed: broker refused',
+    });
+    expect(await nodeBadge('d3')).toEqual({ text: 'Interrupted', title: 'Delete interrupted' });
+    expect(await nodeBadge('d4')).toBeNull();
+    // The status badge is still there, and the graph offers no delete actions.
+    expect(
+      el.shadowRoot!.querySelector('a.node[href="/agents/d1"] scion-status-badge')
+    ).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('scion-deletion-banner')).toBeNull();
+  });
+
+  it('flips a deleting node to Interrupted at its lease with no new data', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], now: T0 });
+    await mountTree([
+      {
+        ...agent('d1', 'deleting'),
+        deletion: { ...base, state: 'deleting', leaseExpiresAt: iso(T0 + 20_000) },
+      },
+    ]);
+    expect((await nodeBadge('d1'))?.text).toBe('Deleting…');
+    vi.advanceTimersByTime(20_000);
+    await el.updateComplete;
+    expect((await nodeBadge('d1'))?.text).toBe('Interrupted');
   });
 });

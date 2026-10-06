@@ -29,6 +29,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { vi } from 'vitest';
+import { setPreferredTimeZone } from '../../../utils/time.js';
 
 // A stand-in for marked + DOMPurify. It reproduces the shapes the mention
 // post-processing has to cope with — paragraphs, fenced code, inline code and
@@ -917,6 +918,13 @@ describe('scion-chat-message delivery state', () => {
     return el.shadowRoot?.querySelector('.delivery-state');
   }
 
+  it('shows "Waking agent…" while a wake-and-send is in flight', async () => {
+    const el = await mountOutbound({ dispatchState: 'waking' });
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Waking agent');
+    expect(state?.classList.contains('waking')).toBe(true);
+  });
+
   it('shows "Agent unreachable" when dispatchFailureCode is agent_unreachable', async () => {
     const el = await mountOutbound({
       dispatchState: 'failed',
@@ -982,6 +990,21 @@ describe('scion-chat-message delivery state', () => {
     expect(state?.textContent).toContain('reincarnating');
     const icon = state?.querySelector('sl-icon');
     expect(icon?.getAttribute('name')).toBe('pause-circle');
+  });
+
+  it('shows a "Not delivered to any agent" hint for dispatchState=no_recipient', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'no_recipient',
+    });
+
+    const state = deliveryState(el);
+    expect(state).toBeTruthy();
+    expect(state?.classList.contains('no-recipient')).toBe(true);
+    expect(state?.classList.contains('dispatched')).toBe(false);
+    expect(state?.textContent).toContain('Not delivered to any agent');
+    expect(state?.textContent).toContain('mention an agent');
+    const icon = state?.querySelector('sl-icon');
+    expect(icon?.getAttribute('name')).toBe('info-circle');
   });
 });
 
@@ -1224,5 +1247,132 @@ describe('scion-chat-message gs:// linkification', () => {
     const links = ghRefLinksIn(el);
     expect(links).toHaveLength(1);
     expect(links[0].textContent).toBe('ptone/scion#2217');
+  });
+});
+
+// Review round 2, R2-3: AC4 ("sees native chat timestamps in Tokyo time,
+// with a zone label") was implemented (R1-3) but had no test pinning it.
+describe('scion-chat-message zone label (AC4, review R2-3)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    setPreferredTimeZone('');
+  });
+
+  it('renders the preferred-zone time and a title with the full instant and zone', async () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'hello';
+    el.fromAgent = true;
+    el.timestamp = '2026-09-23T15:00:00Z'; // -> 2026-09-24T00:00 JST
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+
+    const timeEl = el.shadowRoot?.querySelector('.msg-time');
+    expect(timeEl?.textContent).toBe('00:00');
+    expect(timeEl?.getAttribute('title')).toBe('Sep 24, 2026, 00:00 (Asia/Tokyo)');
+  });
+
+  // Review R2-1: a message already mounted (e.g. before /auth/me resolves,
+  // or before a later preference change) must not stay stuck in the
+  // browser zone — DisplayZoneController re-renders it.
+  it('re-renders in the new zone after a mounted message outlives a preference change', async () => {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'hello';
+    el.fromAgent = true;
+    el.timestamp = '2026-09-23T15:00:00Z';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.msg-time')?.textContent).toBe('15:00'); // UTC (Auto)
+
+    setPreferredTimeZone('Asia/Tokyo');
+    await el.updateComplete;
+
+    const timeEl = el.shadowRoot?.querySelector('.msg-time');
+    expect(timeEl?.textContent).toBe('00:00');
+    expect(timeEl?.getAttribute('title')).toBe('Sep 24, 2026, 00:00 (Asia/Tokyo)');
+  });
+});
+
+describe('scion-chat-message wide tables', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('wraps each table in a named, keyboard-reachable sideways scroller, once', async () => {
+    const el = await mount(
+      '<table><tr><td>a</td></tr></table><table><caption> Agents </caption><tr><td>b</td></tr></table>'
+    );
+    const wrappers = Array.from(
+      el.shadowRoot?.querySelectorAll<HTMLElement>('.md-content .md-table-scroll') ?? []
+    );
+    expect(wrappers).toHaveLength(2);
+    for (const w of wrappers) {
+      expect(w.firstElementChild?.tagName).toBe('TABLE');
+      expect(w.tabIndex).toBe(0);
+      expect(w.getAttribute('role')).toBe('region');
+    }
+    expect(wrappers.map((w) => w.getAttribute('aria-label'))).toEqual(['Table', 'Agents']);
+
+    // A re-render of the same content does not wrap twice.
+    el.requestUpdate();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelectorAll('.md-table-scroll .md-table-scroll')).toHaveLength(0);
+  });
+});
+
+const { imageThumbStyle, knownImageSize } = await import('./chat-message.js');
+
+describe('inline image thumbnail box', () => {
+  const ref = (id: string, extra: { width?: number; height?: number } = {}) => ({
+    id,
+    name: `${id}.png`,
+    mime: 'image/png',
+    size: 10,
+    ...extra,
+  });
+
+  it('reserves the whole thumbnail box while the size is unknown', () => {
+    expect(knownImageSize(ref('unknown'))).toBeNull();
+    expect(imageThumbStyle(null)).toEqual({
+      width: '320px',
+      aspectRatio: '320 / 240',
+    });
+  });
+
+  it('scales a large image down into the thumbnail box, keeping its ratio', () => {
+    // Width-bound: 1200x500 fits at 320 wide.
+    expect(imageThumbStyle({ width: 1200, height: 500 })).toEqual({
+      width: '320px',
+      aspectRatio: '1200 / 500',
+    });
+    // Height-bound: 600x900 fits at 240 tall, so 160 wide.
+    expect(imageThumbStyle({ width: 600, height: 900 })).toEqual({
+      width: '160px',
+      aspectRatio: '600 / 900',
+    });
+  });
+
+  it('never enlarges a small image', () => {
+    expect(imageThumbStyle({ width: 40, height: 30 })).toEqual({
+      width: '40px',
+      aspectRatio: '40 / 30',
+    });
+  });
+
+  it('takes a size only from the server, never from an earlier load', () => {
+    expect(knownImageSize(ref('sent', { width: 800, height: 600 }))).toEqual({
+      width: 800,
+      height: 600,
+    });
+    expect(knownImageSize(ref('broken', { width: 0, height: 0 }))).toBeNull();
   });
 });

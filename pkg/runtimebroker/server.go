@@ -35,6 +35,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -54,6 +55,10 @@ import (
 
 // ServerConfig holds configuration for the Runtime Broker API server.
 type ServerConfig struct {
+	// DeleteClock, for tests only, replaces time.Now as the clock the delete
+	// notAfter check reads (see delete_not_after.go). nil means time.Now.
+	DeleteClock func() time.Time
+
 	// Port is the HTTP port to listen on.
 	Port int
 	// Host is the address to bind to (e.g., "0.0.0.0" or "127.0.0.1").
@@ -140,7 +145,8 @@ type ServerConfig struct {
 
 	// Workspace sync settings
 	// StorageBucket is the GCS bucket name for workspace storage.
-	// Used when workspace sync requests don't specify a bucket.
+	// Used when workspace sync requests, or a create request carrying a
+	// workspace upload, don't specify a bucket.
 	StorageBucket string
 	// WorktreeBase is the base directory for agent worktrees.
 	// Used as a fallback when resolving workspace paths.
@@ -160,11 +166,30 @@ type ServerConfig struct {
 	// projected secrets. Defaults to true; set false to block such dispatches.
 	AllowContainerScriptHarnesses bool
 
-	// NFSConfig holds NFS workspace storage settings for this broker.
-	// When non-nil with shares configured, the broker can provision and
-	// clean up NFS-backed workspace subtrees. Used by deleteProject (N1-6)
-	// to also remove the NFS project subtree on project deletion.
+	// NFSConfig holds NFS workspace storage settings for this broker. The
+	// server command sets it from server.workspace_storage when the backend
+	// is "nfs" (see brokerNFSConfig in cmd). When non-nil with shares
+	// configured, the broker constructs an NFSMountReconciler that mounts
+	// each share at <MountRoot>/<share.ID> in the background at startup,
+	// reports per-share state in /healthz, and re-checks the shares before
+	// NFS-backed agent dispatches. Nil leaves all NFS handling off.
 	NFSConfig *config.V1NFSConfig
+
+	// WorkspaceStorageBackend is the configured server.workspace_storage
+	// backend name ("" means "local"). It is reported to the hub, with
+	// NFSConfig's first share, as the broker's workspace storage descriptor
+	// (see BuildWorkspaceStorageDescriptor).
+	WorkspaceStorageBackend string
+
+	// DefaultProfile is the broker's default (active) profile name from its
+	// settings (active_profile), reported to the hub on every heartbeat. A
+	// pointer to "" reports that the settings name no active profile; nil
+	// (settings failed to load) omits it, so the hub keeps its value.
+	DefaultProfile *string
+
+	// NFSMountChecker overrides the mount layer the NFS reconciler uses.
+	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
+	NFSMountChecker MountChecker
 
 	// ColocatedStorage is the storage backend of a Hub running co-located in the
 	// same process. When set and backed by the local filesystem, the broker
@@ -239,6 +264,10 @@ type Server struct {
 	// launches (design t1-async-create-v11.md §3.8.1, §7 P1b-1). It is an
 	// optimisation only -- correctness comes from the Hub's answers.
 	launchRegistry *launchRegistry
+	// startsInFlight tracks the starts running on the start, restart and
+	// synchronous create handlers (start_tracker.go). The heartbeat reports
+	// them, stop waits for its agent's, and Shutdown waits for all.
+	startsInFlight *startTracker
 	// launchInstanceID identifies this broker process as a launch owner
 	// (design §3.2's LaunchInstanceID / launch_owner), generated once here at
 	// startup.
@@ -271,6 +300,19 @@ type Server struct {
 	// the API server.
 	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
 
+	// loadSettings, when non-nil, replaces config.LoadEffectiveSettings in
+	// resolveManagerForOptsStrict (handlers.go). nil, the default, uses the
+	// real loader; tests set it per fixture to exercise each settings
+	// outcome.
+	loadSettings func(projectDir string) (*config.VersionedSettings, []string, error)
+
+	// agentOwnRuntimes memoises the runtime an existing agent's saved
+	// profile resolves to (see ensureAgentOwnRuntime), keyed by project dir
+	// and profile; agentOwnRuntimeGroup collapses concurrent resolutions of
+	// one key into a single call. Failed resolutions are not stored.
+	agentOwnRuntimes     sync.Map
+	agentOwnRuntimeGroup singleflight.Group
+
 	// projectProvisionMu serializes worktree provisioning per project on this
 	// node. Without this, concurrent agent creations for the same project could
 	// race inside ProvisionShared (double-clone / corrupt .git state).
@@ -279,6 +321,18 @@ type Server struct {
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
+	// exportIDs reads (or creates) the export identity marker reported in
+	// the workspace storage descriptor.
+	exportIDs exportIDProbe
+	// NFS reconcile loop state (all unused when nfsMountReconciler is nil).
+	// nfsStartupReconcileDone is closed once the loop's first pass has
+	// finished; nfsReconcileStopped is closed when the loop exits.
+	nfsStartupReconcileDone chan struct{}
+	nfsReconcileStopped     chan struct{}
+	nfsReconcileOnce        sync.Once
+	nfsReconcileCancel      context.CancelFunc
+	// nfsReconcileInterval overrides DefaultNFSReconcileInterval (tests).
+	nfsReconcileInterval time.Duration
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -337,6 +391,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		// discoverAuxiliaryRuntimesForProjects and resolveManagerForOpts).
 		resolveAuxiliaryRuntime: agent.ResolveRuntime,
 		launchRegistry:          newLaunchRegistry(),
+		startsInFlight:          newStartTracker(),
 		launchInstanceID:        uuid.NewString(),
 
 		// Subsystem loggers
@@ -365,14 +420,33 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	}
 
 	// Initialize NFS mount reconciler when NFS storage is configured.
-	// This only constructs the reconciler; Reconcile() is called in Start().
+	// This only constructs the reconciler; its loop is started in Start().
 	if cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 {
 		nfsLog := logging.Subsystem("broker.nfs-mount")
-		checker := NewExecMountChecker(nfsLog)
+		checker := cfg.NFSMountChecker
+		if checker == nil {
+			checker = NewExecMountChecker(nfsLog)
+		}
 		srv.nfsMountReconciler = NewNFSMountReconciler(cfg.NFSConfig, checker, nfsLog)
+		// On Kubernetes and Cloud Run the platform mounts the export into
+		// the agent, so the broker never mounts it; it only verifies.
+		if rt != nil && NFSWarnOnlyRuntime(rt.Name()) {
+			srv.nfsMountReconciler.SetVerifyOnly(fmt.Sprintf(
+				"the broker's default runtime is %s, so the broker does not mount it", rt.Name()))
+		}
+		srv.nfsStartupReconcileDone = make(chan struct{})
+		srv.nfsReconcileStopped = make(chan struct{})
 		slog.Info("NFS mount reconciler initialized",
 			"shares", len(cfg.NFSConfig.Shares),
-			"mountRoot", cfg.NFSConfig.MountRoot)
+			"mountRoot", cfg.NFSConfig.MountRoot,
+			"autoMount", cfg.NFSConfig.AutoMount,
+			"brokerMounts", srv.nfsMountReconciler.MountsShares())
+		if srv.nfsMountReconciler.MountsShares() {
+			if err := srv.nfsMountReconciler.mountPrivilegeError(); err != nil {
+				slog.Warn("server.workspace_storage.nfs.auto_mount is on but the broker cannot mount; shares are checked only",
+					"reason", err)
+			}
+		}
 	}
 
 	// Initialize Hub integration if enabled
@@ -997,19 +1071,13 @@ func (s *Server) Start(ctx context.Context) error {
 	// a broker restart.
 	s.discoverAuxiliaryRuntimes()
 
-	// Reconcile NFS mounts at startup (ensure configured shares are mounted).
-	if s.nfsMountReconciler != nil {
-		if err := s.nfsMountReconciler.Reconcile(); err != nil {
-			slog.Warn("NFS mount reconciliation returned error at startup", "error", err)
-		}
-		if !s.nfsMountReconciler.IsHealthy() {
-			slog.Error("NFS mounts unhealthy at startup",
-				"detail", s.nfsMountReconciler.HealthCheckString())
-		} else {
-			slog.Info("NFS mounts reconciled at startup",
-				"status", s.nfsMountReconciler.HealthCheckString())
-		}
-	}
+	// Check (and, with nfs.auto_mount, mount) the configured NFS shares.
+	// This runs in the background: an NFS mount or mountpoint check against
+	// an unreachable server can block for minutes, and a failed mount must
+	// not delay or stop the broker from serving projects that do not use
+	// NFS. Until the first pass finishes, /healthz reports the shares as not
+	// reconciled.
+	s.startNFSReconcileLoop(ctx)
 
 	// Start all hub connections' services
 	s.hubMu.RLock()
@@ -1044,14 +1112,68 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// startNFSReconcileLoop starts the NFS reconciler's background loop (see
+// NFSMountReconciler.Run). It is a no-op when NFS is not configured, and
+// starts at most one loop per Server. The loop stops when ctx is cancelled
+// or Shutdown is called.
+func (s *Server) startNFSReconcileLoop(ctx context.Context) {
+	if s.nfsMountReconciler == nil {
+		return
+	}
+	s.nfsReconcileOnce.Do(func() {
+		loopCtx, cancel := context.WithCancel(ctx)
+		s.mu.Lock()
+		s.nfsReconcileCancel = cancel
+		s.mu.Unlock()
+		go func() {
+			defer close(s.nfsReconcileStopped)
+			s.nfsMountReconciler.Run(loopCtx, s.nfsReconcileInterval, func() {
+				s.logNFSStartupResult()
+				close(s.nfsStartupReconcileDone)
+			})
+		}()
+	})
+}
+
+// logNFSStartupResult logs the outcome of the first reconcile pass. Failures
+// are recorded per share (surfaced in /healthz and by scion doctor) and
+// never stop the broker.
+func (s *Server) logNFSStartupResult() {
+	r := s.nfsMountReconciler
+	if r.IsHealthy() {
+		slog.Info("NFS mounts checked at startup",
+			"status", r.HealthCheckString(), "autoMount", r.AutoMount())
+		return
+	}
+	slog.Error("NFS mounts unhealthy at startup; the broker keeps serving",
+		"detail", r.HealthCheckString(), "autoMount", r.AutoMount())
+}
+
+// ghResolutionCacheCloseTimeout bounds how long Shutdown waits for
+// background refreshes of the GitHub resolution cache before writing it to
+// disk (see GitHubResolutionCache.Close).
+const ghResolutionCacheCloseTimeout = 10 * time.Second
+
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	// Write any resolution cache entries still waiting for their delayed
-	// write. Deferred so it runs on every return path, and after the HTTP
-	// server has drained, when in-flight requests have finished adding to it.
+	// Close the resolution cache: wait, within a bound, for background
+	// refreshes still running, then write any entries still waiting for
+	// their delayed write. Deferred so it runs on every return path, and
+	// after the HTTP server has drained, when in-flight requests have
+	// finished adding to it.
+	//
+	// parentCtx keeps the caller's ctx: ctx is reassigned below to the
+	// drain timeout, whose cancel runs before this deferred func, so a
+	// bound derived from it would already be cancelled here.
+	parentCtx := ctx
 	defer func() {
-		if s.ghResolutionCache != nil {
-			s.ghResolutionCache.Flush()
+		if s.ghResolutionCache == nil {
+			return
+		}
+		closeCtx, cancel := context.WithTimeout(parentCtx, ghResolutionCacheCloseTimeout)
+		defer cancel()
+		if err := s.ghResolutionCache.Close(closeCtx); err != nil {
+			slog.Warn("GitHub resolution cache closed before background refreshes finished", "error", err)
 		}
 	}()
 
@@ -1066,6 +1188,27 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		close(credWatcherStop)
 	}
 
+	// Stop the NFS reconcile loop. Cancelling its context kills a mount
+	// command in progress (its whole process group), so the loop ends
+	// promptly; it is not waited for.
+	s.mu.RLock()
+	nfsCancel := s.nfsReconcileCancel
+	s.mu.RUnlock()
+	if nfsCancel != nil {
+		nfsCancel()
+	}
+
+	// Cancel every start still running on a start, restart or create
+	// handler and wait for Run's deferred cleanup, before the hub
+	// connections and the HTTP server drain, so no start outlives the
+	// starts this process last reported in flight.
+	// One deadline covers both this wait and the HTTP drain below.
+	ctx, cancel := context.WithTimeout(ctx, shutdownDeadline)
+	defer cancel()
+	if !s.startsInFlight.cancelAllAndWait(ctx) {
+		s.agentLifecycleLog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
+	}
+
 	// Stop all hub connections
 	s.hubMu.RLock()
 	for _, conn := range s.hubConnections {
@@ -1078,9 +1221,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	slog.Info("Runtime Broker API server shutting down...")
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 
 	return srv.Shutdown(ctx)
 }
@@ -1442,18 +1582,73 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 // Every error errs toward an explicit failure, never toward a false
 // not-found or a wrong target.
 func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) (string, agent.Manager, scionrt.Runtime, error) {
+	m, err := s.lookupAgentMatch(ctx, slug, projectID)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	return m.containerID, m.manager, m.runtime, nil
+}
+
+// agentMatch is the result of lookupAgentMatch: the container identifier,
+// the manager and runtime that listed it, and the listed entry itself.
+//
+// matched reports that exactly one entry matched. It is also set alongside
+// the ErrAgentNotFound returned for a matched entry that carries no
+// container identifier: there is nothing to act on, but the entry's listed
+// name and project path are still the agent's.
+type agentMatch struct {
+	containerID string
+	manager     agent.Manager
+	runtime     scionrt.Runtime
+	entry       api.AgentInfo
+	matched     bool
+}
+
+// lookupAgentMatch is lookupAgentTarget's search, returning the matched
+// entry as well, so a caller that needs the agent's listed name or project
+// path reads them from the same entry it acts on. Resolution order and
+// errors are exactly lookupAgentTarget's.
+func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (agentMatch, error) {
+	return s.lookupAgentMatchForRun(ctx, slug, projectID, "")
+}
+
+// lookupAgentMatchForRun is lookupAgentMatch for a run-scoped operation:
+// among the entries the runtime lists for slug, those of run runID are
+// preferred (see preferRunEntries) before the match must be unique, so a
+// pod of the requested run is found even when a same-named pod of another
+// run is listed beside it (for example in another namespace). With an
+// empty runID it is exactly lookupAgentMatch.
+func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, runID string) (agentMatch, error) {
 	if s.manager == nil {
-		return "", nil, nil, fmt.Errorf("agent manager not available")
+		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
 
 	slug = strings.ToLower(slug)
 
 	filter := scopedNameFilter(slug, projectID)
-	agents, err := s.manager.List(ctx, filter)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+
+	// The agent's own runtime, when known (ensureAgentOwnRuntime), is the
+	// only one searched; a failed List there is ErrAgentListUnavailable.
+	if own := s.ownRuntimeFor(ctx); own != nil {
+		agents, err := listInOwnRuntime(ctx, own, slug, projectID)
+		if err != nil {
+			return agentMatch{}, err
+		}
+		return runAgentMatchFrom(slug, runID, agents, own.mgr, own.rt)
 	}
-	agents = agentsForProject(agents, projectID)
+
+	// A recorded runtime type (ptone/scion#2748) can exclude the default
+	// runtime; auxListAgentsSorted applies the same restriction.
+	useDefault := s.defaultRuntimeAllowed(ctx)
+	var agents []api.AgentInfo
+	var err error
+	if useDefault {
+		agents, err = s.manager.List(ctx, filter)
+		if err != nil {
+			return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
+		agents = agentsForProject(agents, projectID)
+	}
 	matchManager := s.manager
 	matchRuntime := s.runtime
 
@@ -1461,7 +1656,7 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 	if len(agents) == 0 {
 		auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, false, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
 		if auxErr != nil {
-			return "", nil, nil, auxErr
+			return agentMatch{}, auxErr
 		}
 		agents = auxAgents
 		matchManager = auxManager
@@ -1474,17 +1669,19 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
-		agents, err = s.manager.List(ctx, fallbackFilter)
-		if err != nil {
-			return "", nil, nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		if useDefault {
+			agents, err = s.manager.List(ctx, fallbackFilter)
+			if err != nil {
+				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+			}
+			agents = agentsWithoutProjectLabel(agents)
 		}
-		agents = agentsWithoutProjectLabel(agents)
 		matchManager = s.manager
 		matchRuntime = s.runtime
 		if len(agents) == 0 {
 			auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
 			if auxErr != nil {
-				return "", nil, nil, auxErr
+				return agentMatch{}, auxErr
 			}
 			agents = auxAgents
 			matchManager = auxManager
@@ -1492,13 +1689,114 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 		}
 	}
 
+	return runAgentMatchFrom(slug, runID, agents, matchManager, matchRuntime)
+}
+
+// allOtherRuns reports whether every entry is labelled with a run other
+// than runID (none is the requested run's, and none is a legacy entry).
+func allOtherRuns(agents []api.AgentInfo, runID string) bool {
+	for _, a := range agents {
+		if a.RunID == "" || a.RunID == runID {
+			return false
+		}
+	}
+	return true
+}
+
+// otherRunsHoldNameError is a run-scoped lookup's result when every entry
+// listed for the slug is labelled with a run other than the requested one
+// and more than one distinct entry is listed (for example same-named pods
+// of two other runs in two namespaces). Nothing of the requested run
+// exists, so this is a run mismatch, as for a run-scoped delete
+// (filterDeleteCandidatesByRun), not an ambiguity. currentRunID is the run
+// holding the name when all those entries share one, else empty.
+type otherRunsHoldNameError struct {
+	slug         string
+	currentRunID string
+}
+
+func (e *otherRunsHoldNameError) Error() string {
+	return fmt.Sprintf("agent '%s': every listed entry belongs to another run", e.slug)
+}
+
+// runAgentMatchFrom is agentMatchFrom for a lookup naming run runID (empty:
+// exactly agentMatchFrom): the entries are narrowed by preferRunEntries,
+// and when only distinct entries of other runs remain, the result is an
+// otherRunsHoldNameError rather than an ambiguity error.
+func runAgentMatchFrom(slug, runID string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime) (agentMatch, error) {
+	agents = preferRunEntries(agents, runID)
+	if runID != "" && len(dedupeAgentEntries(agents)) > 1 && allOtherRuns(agents, runID) {
+		current := agents[0].RunID
+		for _, a := range agents[1:] {
+			if a.RunID != current {
+				current = ""
+				break
+			}
+		}
+		return agentMatch{}, &otherRunsHoldNameError{slug: slug, currentRunID: current}
+	}
+	return agentMatchFrom(slug, agents, matchManager, matchRuntime)
+}
+
+// preferRunEntries narrows the entries listed for a run-scoped lookup with
+// the rule a run-scoped delete applies (filterDeleteCandidatesByRun):
+// entries labelled runID win; without one, legacy entries carrying no run
+// label match by name. When neither exists, every entry is kept, so the
+// caller still sees another run holding the name (and refuses with the
+// run-mismatch 404, or fails closed when that is ambiguous). An empty runID
+// keeps agents unchanged.
+func preferRunEntries(agents []api.AgentInfo, runID string) []api.AgentInfo {
+	if runID == "" || len(agents) < 2 {
+		return agents
+	}
+	var exact, legacy []api.AgentInfo
+	for _, a := range agents {
+		switch a.RunID {
+		case runID:
+			exact = append(exact, a)
+		case "":
+			legacy = append(legacy, a)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	if len(legacy) > 0 {
+		return legacy
+	}
+	return agents
+}
+
+// listInOwnRuntime lists agent slug in the agent's own runtime with the
+// project scoping lookupAgentMatch and LookupAgent use: entries labelled for
+// projectID, else (with a projectID) entries carrying no project label. A
+// failed List wraps ErrAgentListUnavailable.
+func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID string) ([]api.AgentInfo, error) {
+	agents, err := own.mgr.List(ctx, scopedNameFilter(slug, projectID))
+	if err != nil {
+		return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+	}
+	agents = agentsForProject(agents, projectID)
+	if len(agents) == 0 && projectID != "" {
+		agents, err = own.mgr.List(ctx, map[string]string{"scion.name": slug})
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
+		agents = agentsWithoutProjectLabel(agents)
+	}
+	return agents, nil
+}
+
+// agentMatchFrom builds lookupAgentMatch's result from the entries the
+// runtime behind matchManager/matchRuntime listed for slug.
+func agentMatchFrom(slug string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime) (agentMatch, error) {
 	if len(agents) == 0 {
-		return "", nil, nil, &agentNotFoundError{slug: slug}
+		return agentMatch{}, &agentNotFoundError{slug: slug}
 	}
 
 	entry, err := uniqueAgentEntry(slug, agents)
 	if err != nil {
-		return "", nil, nil, err
+		return agentMatch{}, err
 	}
 
 	// Get container ID - prefer label, then ContainerID from runtime, then ID
@@ -1510,10 +1808,11 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 		containerID = entry.ID
 	}
 	if containerID == "" {
-		return "", nil, nil, fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
+		return agentMatch{manager: matchManager, runtime: matchRuntime, entry: entry, matched: true},
+			fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
 	}
 
-	return containerID, matchManager, matchRuntime, nil
+	return agentMatch{containerID: containerID, manager: matchManager, runtime: matchRuntime, entry: entry, matched: true}, nil
 }
 
 // auxListAgentsSorted queries every currently registered auxiliary runtime
@@ -1541,22 +1840,13 @@ func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) 
 // other: they are paired at the moment the match is found, not looked up
 // again afterward.
 func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback bool, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, scionrt.Runtime, error) {
-	s.auxiliaryRuntimesMu.RLock()
-	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
-	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-	for name, aux := range s.auxiliaryRuntimes {
-		auxNames = append(auxNames, name)
-		auxRuntimes[name] = aux
-	}
-	s.auxiliaryRuntimesMu.RUnlock()
-	sort.Strings(auxNames)
-
 	var listErr error
-	for _, rtName := range auxNames {
-		auxAgents, auxErr := auxRuntimes[rtName].Manager.List(ctx, filter)
+	for _, aux := range s.sortedAuxiliaryRuntimesFor(ctx) {
+		rtName := aux.identity
+		auxAgents, auxErr := aux.Manager.List(ctx, filter)
 		if auxErr != nil {
 			if listErr == nil {
-				listErr = fmt.Errorf("auxiliary runtime %q: %w", rtName, auxErr)
+				listErr = fmt.Errorf("%w %q: %v", errAuxiliaryRuntimeList, rtName, auxErr)
 			}
 			continue
 		}
@@ -1566,14 +1856,20 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback 
 				msg += " (fallback)"
 			}
 			slog.Debug(msg, "slug", slug, "runtime", rtName)
-			return matched, auxRuntimes[rtName].Manager, auxRuntimes[rtName].Runtime, nil
+			return matched, aux.Manager, aux.Runtime, nil
 		}
 	}
 	if listErr != nil {
-		return nil, nil, nil, fmt.Errorf("%w: %v", ErrAgentListUnavailable, listErr)
+		return nil, nil, nil, fmt.Errorf("%w: %w", ErrAgentListUnavailable, listErr)
 	}
 	return nil, nil, nil, nil
 }
+
+// errAuxiliaryRuntimeList marks an ErrAgentListUnavailable error that came
+// from an auxiliary runtime's List call (the default runtime listed
+// successfully), so a caller can treat it differently from a default-runtime
+// failure.
+var errAuxiliaryRuntimeList = errors.New("auxiliary runtime")
 
 // LookupAgent implements AgentLookup interface.
 // It looks up an agent by slug and returns detailed info including the runtime.
@@ -1586,15 +1882,37 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	slug = strings.ToLower(slug)
 	filter := scopedNameFilter(slug, projectID)
 
-	// Try default manager first
-	agents, err := s.manager.List(ctx, filter)
-	if err != nil {
-		return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+	// The PTY attach paths reach here without handleAgentByID, so the
+	// agent's own runtime is resolved here (see ensureAgentOwnRuntime),
+	// with the hub's projectPath hint when the caller attached one
+	// (withProjectPathHint). When known, it is the only runtime searched.
+	if agentOwnRuntimeFrom(ctx) == nil {
+		ctx = s.ensureAgentOwnRuntime(ctx, slug, projectID, projectPathHintFrom(ctx))
 	}
-	agents = agentsForProject(agents, projectID)
+	own := s.ownRuntimeFor(ctx)
+
+	var agents []api.AgentInfo
+	var err error
+	if own != nil {
+		agents, err = listInOwnRuntime(ctx, own, slug, projectID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Try default manager first
+		agents, err = s.manager.List(ctx, filter)
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
+		agents = agentsForProject(agents, projectID)
+	}
 
 	runtimeName := s.runtime.Name()
 	var matchedRuntime scionrt.Runtime
+	if own != nil {
+		runtimeName = own.rt.Name()
+		matchedRuntime = own.rt
+	}
 
 	// listUnavailable tracks whether any consulted runtime's List call itself
 	// failed (as opposed to succeeding with zero matches). A failure here must
@@ -1608,7 +1926,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// pathological overlap cases (e.g. two Kubernetes namespace-scoped
 	// entries plus one with ListAllNamespaces) more than one could plausibly
 	// answer for the same slug.
-	if len(agents) == 0 {
+	if len(agents) == 0 && own == nil {
 		for _, aux := range s.sortedAuxiliaryRuntimes() {
 			auxAgents, auxErr := aux.Manager.List(ctx, filter)
 			if auxErr != nil {
@@ -1634,7 +1952,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// containers that lack a project label (pre-existing agents or solo/CLI
 	// mode). A container labeled for a different project must not match a
 	// project-scoped request, or same-slug agents across projects would collide.
-	if len(agents) == 0 && projectID != "" {
+	if len(agents) == 0 && projectID != "" && own == nil {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
 		if err != nil {
@@ -1797,7 +2115,11 @@ func uniqueAgentEntry(slug string, agents []api.AgentInfo) (api.AgentInfo, error
 
 // dedupeAgentEntries collapses entries that refer to the same backing
 // container (the same container can be reported more than once, e.g. by a
-// runtime that is registered both as default and auxiliary).
+// runtime that is registered both as default and auxiliary). Entries are
+// keyed by operation ID (scionrt.AgentOperationID), so same-named
+// Kubernetes pods in two namespaces stay distinct (and a lookup matching
+// both is ambiguous) rather than collapsing to whichever was listed first;
+// for other runtimes that is the container ID.
 func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
 	if len(agents) < 2 {
 		return agents
@@ -1805,7 +2127,7 @@ func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
 	seen := make(map[string]bool, len(agents))
 	out := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		key := a.ContainerID
+		key := scionrt.AgentOperationID(a)
 		if key == "" {
 			key = a.ID
 		}

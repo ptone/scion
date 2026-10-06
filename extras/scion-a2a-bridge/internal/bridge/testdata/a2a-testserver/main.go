@@ -202,17 +202,17 @@ func (m *mockProdAgentService) ResetAuth(ctx context.Context, agentID string) er
 func (m *mockProdAgentService) Delete(ctx context.Context, agentID string, opts *hubclient.DeleteAgentOptions) error {
 	return fmt.Errorf("not implemented")
 }
-func (m *mockProdAgentService) Start(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockProdAgentService) Start(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockProdAgentService) Stop(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockProdAgentService) Stop(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockProdAgentService) Suspend(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockProdAgentService) Suspend(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockProdAgentService) Restart(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockProdAgentService) Restart(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockProdAgentService) StopAll(ctx context.Context) (*hubclient.StopAllResponse, error) {
 	return nil, fmt.Errorf("not implemented")
@@ -293,6 +293,7 @@ func (m *mockProdHubClient) ProjectPreStartHooks(projectID string) hubclient.Pro
 	return nil
 }
 func (m *mockProdHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }
+func (m *mockProdHubClient) Artifacts() hubclient.ArtifactService               { return nil }
 func (m *mockProdHubClient) Messaging() hubclient.MessagingService              { return nil }
 func (m *mockProdHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil

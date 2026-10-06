@@ -18,15 +18,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
@@ -141,10 +145,10 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 		return
 	}
 
-	// Prevent re-running completed migrations. There is no CLI flag that
-	// re-runs a completed migration through this endpoint; the message must
-	// not claim one exists.
-	if op.Status == store.MaintenanceStatusCompleted {
+	// Prevent re-running completed migrations, except the idempotent ones in
+	// rerunnableMigrations. There is no CLI flag that re-runs a completed
+	// migration through this endpoint; the message must not claim one exists.
+	if op.Status == store.MaintenanceStatusCompleted && !rerunnableMigrations[key] {
 		writeError(w, http.StatusConflict, ErrCodeConflict, "Migration already completed", nil)
 		return
 	}
@@ -155,13 +159,23 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 		return
 	}
 
-	// Parse request body for params.
-	var body map[string]interface{}
-	if r.Body != nil {
-		defer func() { _ = r.Body.Close() }()
-		_ = json.NewDecoder(r.Body).Decode(&body)
+	// Parse request body for params. dryRun is honored in every form a
+	// caller is likely to send; one that cannot be read is rejected rather
+	// than silently starting a real run (ptone/scion#1976).
+	params, err := parseMigrationRunRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+		return
 	}
-	params := parseMigrationParams(body)
+
+	// A dry run of a completed (rerunnable) migration is rejected: its
+	// outcome would overwrite the completed record (a dry run resets the
+	// operation to pending, and a failed one marks it failed), and a real
+	// re-run is idempotent and reports its own count.
+	if op.Status == store.MaintenanceStatusCompleted && params["dryRun"] == "true" {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "Migration already completed; a re-run is idempotent, so run it without dryRun", nil)
+		return
+	}
 
 	// Resolve the executor for this migration key.
 	executor, err := s.resolveMaintenanceExecutor(key)
@@ -245,6 +259,68 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 	})
 }
 
+// parseMigrationRunRequest reads the parameters of a migration run request.
+// The documented form is {"params": {"dryRun": true, ...}}, but a dry run is
+// also accepted as a top-level "dryRun" body field, as the dryRun query
+// parameter, and with a string value ("true"/"false"). Before this, any form
+// other than a boolean under "params" was dropped and a REAL run started, so
+// a malformed body or an unreadable dryRun value is now a 400 instead.
+func parseMigrationRunRequest(r *http.Request) (map[string]string, error) {
+	var body map[string]interface{}
+	if r.Body != nil {
+		defer func() { _ = r.Body.Close() }()
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("invalid request body: %v", err)
+		}
+	}
+	params := parseMigrationParams(body)
+	delete(params, "dryRun")
+
+	dryRun := false
+	apply := func(where string, v interface{}) error {
+		var b bool
+		switch val := v.(type) {
+		case bool:
+			b = val
+		case string:
+			parsed, err := strconv.ParseBool(strings.TrimSpace(val))
+			if err != nil {
+				return fmt.Errorf("%s must be a boolean, got %q", where, val)
+			}
+			b = parsed
+		default:
+			return fmt.Errorf("%s must be a boolean", where)
+		}
+		dryRun = dryRun || b
+		return nil
+	}
+	if q := r.URL.Query(); q.Has("dryRun") {
+		if err := apply("dryRun query parameter", q.Get("dryRun")); err != nil {
+			return nil, err
+		}
+	}
+	if v, ok := body["dryRun"]; ok {
+		if err := apply("dryRun", v); err != nil {
+			return nil, err
+		}
+	}
+	if raw, ok := body["params"]; ok {
+		m, isMap := raw.(map[string]interface{})
+		if !isMap {
+			return nil, fmt.Errorf("params must be an object")
+		}
+		if v, ok := m["dryRun"]; ok {
+			if err := apply("params.dryRun", v); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if dryRun {
+		params["dryRun"] = "true"
+	}
+	return params, nil
+}
+
 // resolveMaintenanceExecutor returns the executor for a given operation key.
 func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, error) {
 	mc := s.config.MaintenanceConfig
@@ -265,6 +341,13 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			Store:         s.store,
 			SecretBackend: s.GetSecretBackend(),
 		}, nil
+	case entadapter.AppliedConfigTZCleanupKey:
+		return &AppliedConfigTZCleanupExecutor{Store: s.store}, nil
+	case entadapter.AutoExposeEnvNormalizeKey:
+		return &AutoExposeEnvNormalizeExecutor{Store: s.store}, nil
+	case entadapter.UTCTimestampNormalizeKey:
+		db, dbDialect := s.storeDB()
+		return &UTCTimestampNormalizeExecutor{DB: db, Dialect: dbDialect}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry,

@@ -35,18 +35,24 @@ type Action string
 
 // Action constants for authorization checks.
 const (
-	ActionCreate       Action = "create"
-	ActionRead         Action = "read"
-	ActionUpdate       Action = "update"
-	ActionDelete       Action = "delete"
-	ActionList         Action = "list"
-	ActionManage       Action = "manage"
-	ActionStart        Action = "start"
-	ActionStop         Action = "stop"
-	ActionMessage      Action = "message"
-	ActionAttach       Action = "attach"
-	ActionLifecycle    Action = "lifecycle"
-	ActionPortAccess   Action = "port_access"
+	ActionCreate     Action = "create"
+	ActionRead       Action = "read"
+	ActionUpdate     Action = "update"
+	ActionDelete     Action = "delete"
+	ActionList       Action = "list"
+	ActionManage     Action = "manage"
+	ActionStart      Action = "start"
+	ActionStop       Action = "stop"
+	ActionMessage    Action = "message"
+	ActionAttach     Action = "attach"
+	ActionLifecycle  Action = "lifecycle"
+	ActionPortAccess Action = "port_access"
+	// ActionTunnel gates the Conduit `scion tunnel` / `scion ssh` request
+	// path (not a stream kind). It is not a registered permission of its
+	// own: it is granted wherever agent.port_access is (see
+	// conduitAuthzFor), so every role, relationship and token scope that
+	// carries port access carries it.
+	ActionTunnel       Action = "tunnel"
 	ActionRegister     Action = "register"
 	ActionAddMember    Action = "addMember"
 	ActionRemoveMember Action = "removeMember"
@@ -116,6 +122,12 @@ type Resource struct {
 	// grant (skillProgenyAdapter, authz_skill_progeny.go) match the same
 	// column the skill list predicate filters on. Empty otherwise.
 	ScopeUserID string
+
+	// launchedTarget is the agent record the single-agent GET handlers
+	// read from the store, set only by agentStatusReadResource. The
+	// launcher status-read rule (authz_launcher_read.go) decides from it
+	// alone. It is unexported so no decoded request can carry it.
+	launchedTarget *store.Agent
 }
 
 // PrincipalKind describes the authenticated actor evaluated by an authorization request.
@@ -201,6 +213,16 @@ type AuthzRequest struct {
 	Permission string // Canonical permission ID (e.g., "hub.settings.read"); when set, role binding evaluation uses this instead of Resource+Action.
 	Explain    bool   // When true, collect step-by-step trace in Decision
 
+	// TargetEvidence is the collection-level classification the bearer
+	// gate (step 1) uses to resolve the target scope of a request that
+	// names no existing resource instance. Trusted server-side operation
+	// code constructs it; it is never taken from a client-supplied field.
+	// The zero value classifies the request from Resource alone. Evidence
+	// with IsCollectionLevel set must name the permission this request
+	// evaluates; the gate denies evidence that names any other permission.
+	// It is read only by the bearer gate and grants nothing by itself.
+	TargetEvidence TargetScopeEvidence
+
 	// Actor and Purpose describe who initiated the operation and why, when
 	// that differs from Principal (for example a delivery performed for a
 	// target agent). They are recorded on every decision (and in its
@@ -208,6 +230,11 @@ type AuthzRequest struct {
 	// decision.
 	Actor   *DecisionActor
 	Purpose string
+
+	// bearerRun carries the bearer gate's request-scoped memo and outcome
+	// for EvaluateBearerCeiling. It is set only by in-package callers,
+	// grants nothing, and callers of Decide leave it nil.
+	bearerRun *bearerGateRun
 
 	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
 	// record for this request regardless of the allow-sampling rate
@@ -224,26 +251,31 @@ type AuthzRequest struct {
 // authorization kernel. AuthzRequest remains the ordinary producer/emission
 // contract; introspection cannot populate audit ownership through this type.
 type authorizationEvaluationRequest struct {
-	Principal  PrincipalContext
-	Credential CredentialContext
-	Resource   Resource
-	Action     Action
-	Permission string
-	Explain    bool
-	Actor      *DecisionActor
-	Purpose    string
+	Principal      PrincipalContext
+	Credential     CredentialContext
+	Resource       Resource
+	Action         Action
+	Permission     string
+	Explain        bool
+	Actor          *DecisionActor
+	Purpose        string
+	TargetEvidence TargetScopeEvidence
+	// bearerRun carries evaluation memo/trace only, never ordinary audit ownership.
+	bearerRun *bearerGateRun
 }
 
 func authorizationEvaluationFromRequest(request AuthzRequest) authorizationEvaluationRequest {
 	return authorizationEvaluationRequest{
-		Principal:  request.Principal,
-		Credential: request.Credential,
-		Resource:   request.Resource,
-		Action:     request.Action,
-		Permission: request.Permission,
-		Explain:    request.Explain,
-		Actor:      request.Actor,
-		Purpose:    request.Purpose,
+		Principal:      request.Principal,
+		Credential:     request.Credential,
+		Resource:       request.Resource,
+		Action:         request.Action,
+		Permission:     request.Permission,
+		Explain:        request.Explain,
+		Actor:          request.Actor,
+		Purpose:        request.Purpose,
+		TargetEvidence: request.TargetEvidence,
+		bearerRun:      request.bearerRun,
 	}
 }
 
@@ -388,14 +420,38 @@ const (
 	// role-definition resolution (Step 4), and access-constraint load
 	// failure (Step 7c, detected after Step 9 because the failure there
 	// is folded into a deny-all restriction rather than an early return).
+	// The bearer gate (evaluateBearerGate) also sets it when the live
+	// project access lookup for a user access token fails on a store fault.
 	DenyCauseResolutionError DenyCause = "resolution_error"
+
+	// DenyCauseCeilingUnrecorded marks a deny where the source credential's
+	// ceiling version is not one this binary interprets, or a hop whose
+	// provenance is unrecorded or of an unknown version meets a permission
+	// that requires recorded provenance. An unknown ceiling version on a
+	// bounded hop in the walk is reported as DenyCauseCeilingEffectExceeded.
+	DenyCauseCeilingUnrecorded DenyCause = "ceiling_unrecorded"
+
+	// DenyCauseCeilingEffectExceeded marks a deny where the permission or
+	// requested role lies outside a frozen effect ceiling on the chain.
+	DenyCauseCeilingEffectExceeded DenyCause = "ceiling_effect_exceeded"
+
+	// DenyCauseCeilingResourceMissing marks a deny where a resource a
+	// frozen ceiling refers to does not resolve. Reserved for the
+	// service-account parent-ceiling evaluator: no code path in this
+	// package emits it.
+	DenyCauseCeilingResourceMissing DenyCause = "ceiling_resource_missing"
+
+	// DenyCauseCeilingSourceNotAllowed marks a deny where the source
+	// credential is not accepted as an authority source on this server.
+	DenyCauseCeilingSourceNotAllowed DenyCause = "ceiling_source_not_allowed"
 )
 
 // IsIndeterminate reports whether this deny was caused by a store or
 // resolution fault on the tagged paths, rather than a policy fact — the
 // access check could not be decided. Tagged: principal, role-binding,
-// role-definition and access-constraint resolution in decide(), and the
-// delegation-ceiling error. Not yet tagged: relationship-fact and
+// role-definition and access-constraint resolution in decide(), the
+// user-access-token live project access lookup (evaluateBearerGate), and
+// the delegation-ceiling error. Not yet tagged: relationship-fact and
 // source-active lookup failures (isCurrentHubMember, relationshipSourceActive,
 // progenySourceFor). A false result for those candidates does not prove a
 // policy deny.
@@ -450,6 +506,13 @@ type AuthzService struct {
 	// through that wiring (e.g. a bare &AuthzService{} in a test) fails
 	// closed.
 	devLocalEnabled bool
+
+	// mintDevAuthOverride mirrors the agent-token mint's dev-auth role
+	// override: when set, mintCandidateScopes raises a role below full to
+	// full before applying the ceiling filter. Set once at server
+	// construction from ServerConfig.DevAuthToken != "". It is separate
+	// from devLocalEnabled and is read only by mintCandidateScopes.
+	mintDevAuthOverride bool
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -508,7 +571,20 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 // decide is Decide's body: the AK1 kernel evaluation itself.
 // All grants are traced to either a RoleBinding or a named relationship grant.
 // All reductions are traced to a named restriction. No undocumented bypasses.
+//
+// request.bearerRun, when non-nil, supplies the request-scoped
+// project-admission memo to the bearer gate (step 1) and receives the gate's
+// outcome; nil uses no memo and records nothing. It never changes the
+// authorization result.
 func (a *AuthzService) decide(ctx context.Context, request authorizationEvaluationRequest) Decision {
+	bearer := request.bearerRun
+	// admissionMemo is the request-scoped project-admission memo shared by
+	// the bearer gate (step 1) and the relationship project-access stage
+	// (step 9), so a request reads project access from the store once.
+	admissionMemo := bearer.memoOrNil()
+	if admissionMemo == nil {
+		admissionMemo = &ProjectAdmissionCache{}
+	}
 	derivedPrincipal := principalContextForIdentity(request.Principal.Identity)
 	derivedCredential := credentialContextForIdentity(request.Principal.Identity)
 
@@ -695,16 +771,22 @@ func (a *AuthzService) decide(ctx context.Context, request authorizationEvaluati
 		}
 	}
 
-	// ── Step 1: UAT project constraint (pre-kernel gate) ──────────────
-	// UAT tokens are project-scoped. Resources outside the token's project
-	// are denied before kernel evaluation. This is a credential constraint,
-	// not a bypass — it can only narrow, never widen.
+	// ── Step 1: Bearer credential gate (pre-kernel) ───────────────────
+	// A UAT-kind credential is confined to its boundary and permission
+	// ceiling, and a project target additionally requires the holder's
+	// current access to that project (evaluateBearerGate,
+	// authz_bearer.go). This is a credential constraint, not an allow path: it
+	// can only narrow, never widen. It runs before the kernel and before
+	// relationship grants, so neither can reach a target outside the
+	// boundary or a project the holder cannot currently access.
 	if credential.Kind == CredentialKindUAT {
-		if user, ok := principal.Identity.(UserIdentity); ok {
-			if scoped, ok := user.(*ScopedUserIdentity); ok {
-				if denied := a.enforceUATConstraints(scoped, request.Resource, request.Action); denied != nil {
-					return decorateDecision(*denied, request, principal, credential, auditPermissionID(request))
+		if in, ok := bearerGateInputsFor(principal, credential); ok {
+			if denied := a.evaluateBearerGate(ctx, principal, in, request.Resource, request.TargetEvidence, request.Action, permissionID, admissionMemo, bearer.traceOrNil()); denied != nil {
+				denied.AuditReason = auditevent.ReasonPolicyDenied
+				if denied.DenyCause == DenyCauseResolutionError {
+					denied.AuditReason = auditevent.ReasonDependencyUnavailable
 				}
+				return decorateDecision(*denied, request, principal, credential, auditPermissionID(request))
 			}
 		}
 	}
@@ -970,15 +1052,29 @@ func (a *AuthzService) decide(ctx context.Context, request authorizationEvaluati
 	}
 
 	// ── Step 9: Relationship candidates ───────────────────────────────
-	// On a kernel deny, named relationships (owner, ancestor, progeny,
-	// hub-member assign) are evaluated as typed candidates through the
-	// common stages in authz_relationship_rules.go:
+	// On a kernel deny, named relationships (owner, ancestor, launcher,
+	// progeny, hub-member assign) are evaluated as typed candidates
+	// through the common stages in authz_relationship_rules.go:
 	// relationship policy, hub-attested ancestry, relationship fact, source
 	// activity, and the same restrictions the kernel applied (7a/7b/7c).
 	// With Explain, candidates are also evaluated on a kernel allow so the
 	// provenance lists them.
+	//
+	// Candidates run with both memo keys masked. Their stages reach
+	// lookups made on behalf of a principal other than the requester (the
+	// progeny source user's system authority and project admission, and the
+	// source agent's delegation chain), and those must always read the
+	// store, never the requester's memoized principals, constraints or
+	// edges. The restrictions passed in were already resolved above.
+	var relationshipFault bool
 	if !kernelAdmits || request.Explain {
-		rel := a.evaluateRelationshipCandidates(ctx, principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain)
+		rel := a.evaluateRelationshipCandidates(maskAllAuthzMemo(ctx), principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain,
+			&relationshipProjectAccess{memo: admissionMemo, requestCtx: ctx})
+		// A project-access lookup fault (stage 2c) that leaves the request
+		// denied is a resolution error, not a policy fact.
+		if !kernelAdmits && rel.accepted == nil && rel.projectAccessFault {
+			relationshipFault = true
+		}
 		if !kernelAdmits {
 			if rel.accepted != nil {
 				kernelProvenance := decision.Provenance
@@ -1006,7 +1102,7 @@ func (a *AuthzService) decide(ctx context.Context, request authorizationEvaluati
 	// relationship candidates), because the deny-all restriction from 7c
 	// applies to both. Step 10 below only overwrites DenyCause on decisions
 	// that were allowed at this point, so it cannot clobber this tag.
-	if !decision.Allowed && constraintLoadFailed {
+	if !decision.Allowed && (constraintLoadFailed || relationshipFault) {
 		decision.AuditReason = auditevent.ReasonDependencyUnavailable
 		decision.DenyCause = DenyCauseResolutionError
 	}
@@ -1022,6 +1118,7 @@ func (a *AuthzService) decide(ctx context.Context, request authorizationEvaluati
 				ctx = contextWithDelegationCeilingCache(ctx)
 			}
 			ceilingReq := request
+			ceilingReq.bearerRun = nil
 			ceilingReq.Principal = principal
 			ceilingReq.Permission = permissionID
 			var ceilingCause DenyCause
@@ -1037,17 +1134,11 @@ func (a *AuthzService) decide(ctx context.Context, request authorizationEvaluati
 			// through the untouched edges key — safe because edges are keyed
 			// by delegate, not by the requesting principal.
 			//
-			// This call site is the ONLY masked entry point into the chain
-			// today, because the memo has no production install site and is
-			// dormant everywhere, including here. A second caller of
-			// walkDelegationChain exists in authz_relationship_rules.go
-			// (relationshipSourceDelegationHolds, reached from
-			// evaluateRelationshipCandidates on a kernel deny) and runs on
-			// an UNMASKED ctx; it is safe only while nothing installs the
-			// memo. Before any install site goes live, that caller must
-			// also be masked — or, more robustly, the mask should move
-			// inside the chain-walk itself so every current and future
-			// caller gets it automatically.
+			// The chain walk also applies maskAuthzInputs to its own ctx at
+			// entry, so its other caller (relationshipSourceDelegationHolds,
+			// reached from the relationship candidates in step 9, which
+			// already run with both memo keys masked) and any future caller
+			// get the same guarantee without relying on this call site.
 			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(maskAuthzInputs(ctx), ceilingReq, permissionID, agent.ID(), nil, &ceilingCause)
 			if ceilingErr != nil {
 				decision.Allowed = false
@@ -1101,6 +1192,9 @@ func (a *AuthzService) AuthorizeReadBatch(ctx context.Context, identity Identity
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// The memo caches successful loads only, so a store failure still
+	// reaches the decision that observed it and fails closed.
+	ctx = withAuthzInputMemo(ctx)
 	if GetIdentityFromContext(ctx) != identity {
 		ctx = contextWithIdentity(ctx, identity)
 	}
@@ -1640,6 +1734,11 @@ func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 			if permissionID == permissions.PermissionGCPServiceAccountUse {
 				return agentGCPServiceAccountUseScopeMatch(agent, permissionID, resource)
 			}
+			// agent.read has no agent scope. The launcher status read
+			// (authz_launcher_read.go) admits it for one stored target.
+			if permissionID == permissionAgentRead && launcherStatusReadHolds(agent, resource, ActionRead, permissionID) {
+				return true
+			}
 			_, ok := allowed[permissionID]
 			return ok
 		},
@@ -1841,12 +1940,28 @@ func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.A
 	}
 
 	// Within an install phase (see authz_request_inputs.go), the constraint
-	// slot is consumed only by decide's own step 7c and by
-	// ResolveListScopes: the delegation ceiling runs on a masked ctx (see
-	// checkDelegationCeiling's call site above), so getEffectivePermissions
-	// never sees this memo, and no other production consumer is reachable
-	// from the batch/handler install sites. Adding a new consumer inside a
-	// phase requires updating this comment and this package's parity test matrix.
+	// slot is consumed only by decide's own access-constraint restriction
+	// (accessConstraintRestrictions, called from decide) and by
+	// ResolveListScopes (applyListScopeConstraints). Every other consumer is
+	// reached only on a masked ctx:
+	//   - decide's relationship candidates run under maskAllAuthzMemo, which
+	//     covers executionProjectAdmission -> ProjectAdmissionForClass ->
+	//     SystemAuthorityProof and relationshipSourceDelegationHolds -> the
+	//     delegation chain walk. The one exception is the project-access
+	//     stage (relationshipProjectAccessStage, stage 2c): it evaluates the
+	//     requester's own project access, so decide passes it the request
+	//     context, and its ProjectTargetAdmission -> ProjectMembershipEvidence
+	//     and SystemAuthorityProof -> accessConstraintRestrictions read the
+	//     requester's memoized principals, bindings and constraint slot;
+	//   - the delegation ceiling call site and the chain walk itself run
+	//     under maskAuthzInputs, which covers getEffectivePermissions and
+	//     userRelationshipAuthority;
+	//   - CanMintSelector runs under maskAllAuthzMemo.
+	// The access-constraint impact computation (computePrincipalImpact), the
+	// material runtime's SystemAuthorityProof call and the handlers that call
+	// getEffectivePermissions are outside every install site. Adding a new
+	// consumer requires updating this comment and the store-call recorder
+	// test that asserts no masked call observes a memo.
 	//
 	// On a done ctx the memo is bypassed entirely: today's uncached call
 	// is made with today's ctx and its result returned verbatim, and
@@ -2138,7 +2253,7 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		// switch is reached, so v is guaranteed non-nil here and
 		// v.Boundary() cannot dereference a nil receiver.
 		boundary := v.Boundary()
-		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: v.ScopedProjectID(), Boundary: &boundary, Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
+		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: boundary.ProjectID, Boundary: &boundary, Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
 		// Carry the descriptive decoration, if ValidateToken attached one,
 		// through to the credential context. This is the single copy point;
 		// decoration is never otherwise derived here. Decoration() already
@@ -2217,31 +2332,25 @@ func auditPermissionID(request authorizationEvaluationRequest) string {
 	return ""
 }
 
-// enforceUATConstraints checks the project and scope restrictions carried by a
-// ScopedUserIdentity (produced from a UAT). Returns a deny Decision if the
-// request falls outside the token's allowed project or scopes, nil otherwise.
-func (a *AuthzService) enforceUATConstraints(scoped *ScopedUserIdentity, resource Resource, action Action) *Decision {
-	// Enforce project constraint: the resource must belong to the token's project.
-	projectID := scoped.ScopedProjectID()
-	if resource.Type == "project" {
-		if resource.ID != projectID {
-			return &Decision{Allowed: false, Reason: "token not scoped for this project", AuditReason: auditevent.ReasonPolicyDenied}
+// enforceUATConstraints applies the bearer gate (evaluateBearerGate) to a
+// request presented with a ScopedUserIdentity, using the identity's own
+// boundary and ceiling and no collection-level evidence. It returns a deny
+// Decision when the request falls outside the token's boundary, ceiling, or
+// the holder's current project access, and nil otherwise. permissionID is
+// the canonical permission Decide resolved for the request.
+func (a *AuthzService) enforceUATConstraints(ctx context.Context, principal PrincipalContext, scoped *ScopedUserIdentity, resource Resource, action Action, permissionID string) *Decision {
+	in := bearerGateInputs{missing: true}
+	if scoped != nil {
+		in = bearerGateInputs{boundary: scoped.Boundary(), ceiling: scoped.Ceiling()}
+	}
+	denied := a.evaluateBearerGate(ctx, principal, in, resource, TargetScopeEvidence{}, action, permissionID, nil, nil)
+	if denied != nil {
+		denied.AuditReason = auditevent.ReasonPolicyDenied
+		if denied.DenyCause == DenyCauseResolutionError {
+			denied.AuditReason = auditevent.ReasonDependencyUnavailable
 		}
-	} else if resource.ParentType == "project" && resource.ParentID != projectID {
-		return &Decision{Allowed: false, Reason: "token not scoped for this project", AuditReason: auditevent.ReasonPolicyDenied}
-	} else if resource.Type != "" && resource.Type != "project" && resource.ParentType != "project" {
-		// Resource has no project association (hub-level).
-		// UATs are project-scoped and must not access hub-level resources.
-		return &Decision{Allowed: false, Reason: "token not scoped for hub-level resources", AuditReason: auditevent.ReasonPolicyDenied}
 	}
-
-	// Enforce scope constraint: the resource:action must be in the token's scopes.
-	scope := resource.Type + ":" + string(action)
-	if !scoped.HasScope(scope) {
-		return &Decision{Allowed: false, Reason: "token does not have scope: " + scope, AuditReason: auditevent.ReasonPolicyDenied}
-	}
-
-	return nil
+	return denied
 }
 
 // canAccessAsAncestor checks if the principal appears in the resource's ancestry chain.
@@ -2652,8 +2761,10 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 
 // getProjectScopedPermissions returns only the permissions that the principal
 // holds through project-scoped role bindings for the given project. System-
-// scoped bindings are excluded. This is the A2 issuer-ceiling resolver: hub
-// or system authority must not enlarge a project-scoped token.
+// scoped bindings are excluded: hub or system authority must not enlarge a
+// project-scoped token. Not called from production code; retained because
+// authz_boundary_test.go pins its binding-resolution parity with
+// projectScopedPermissionsStrict.
 //
 // The method retains group-expanded principals, activation-window filtering,
 // and AccessConstraint reduction — exactly as getEffectivePermissions does —

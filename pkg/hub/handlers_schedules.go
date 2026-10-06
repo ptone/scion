@@ -24,7 +24,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/robfig/cron/v3"
 )
 
 // CreateScheduleRequest is the API request for creating a recurring schedule.
@@ -216,7 +215,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// supported event types — not just "message". A malformed or non-object
 	// payload is rejected first, with a sanitized 400; see
 	// validateAndRejectScheduledPayload for the required order.
-	if !s.validateAndRejectScheduledPayload(w, req.EventType, req.Payload) {
+	if !s.validateAndRejectScheduledPayload(w, r, req.EventType, req.Payload) {
 		return
 	}
 	if req.EventType == "dispatch_agent" {
@@ -234,11 +233,10 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		}
 	}
 
-	// Validate cron expression using standard 5-field parser
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	cronSchedule, err := parser.Parse(req.CronExpr)
+	// Validate cron expression (standard 5-field, UTC-only).
+	cronSchedule, err := parseScheduleCron(req.CronExpr)
 	if err != nil {
-		ValidationError(w, fmt.Sprintf("invalid cron expression: %v", err), nil)
+		writeCronParseError(w, err)
 		return
 	}
 
@@ -397,7 +395,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	if req.EventType != "" {
 		effectiveEventType = req.EventType
 	}
-	// Tombstone a caller-supplied (ptone/scion#2200)
+	// Tombstone a caller-supplied
 	// "raw" key in the advanced Payload JSON, for both supported event types
 	// — not just "message". Checked whenever the caller supplies a
 	// replacement Payload in this request: an update that leaves Payload
@@ -406,7 +404,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// payload is rejected first, with a sanitized 400; see
 	// validateAndRejectScheduledPayload for the required order.
 	if req.Payload != "" {
-		if !s.validateAndRejectScheduledPayload(w, effectiveEventType, req.Payload) {
+		if !s.validateAndRejectScheduledPayload(w, r, effectiveEventType, req.Payload) {
 			return
 		}
 	} else if req.EventType != "" && req.EventType != schedule.EventType {
@@ -417,7 +415,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		// Payload against the new type now, so an incompatible stored
 		// payload (e.g. one with a field only valid for the old type) is
 		// caught at authoring time instead of failing silently later.
-		if !s.validateAndRejectScheduledPayload(w, effectiveEventType, schedule.Payload) {
+		if !s.validateAndRejectScheduledPayload(w, r, effectiveEventType, schedule.Payload) {
 			return
 		}
 	}
@@ -459,10 +457,9 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// changesFutureDispatch below.
 	if req.CronExpr != "" && req.CronExpr != originalCronExpr {
 		// Validate new cron expression
-		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-		cronSchedule, err := parser.Parse(req.CronExpr)
+		cronSchedule, err := parseScheduleCron(req.CronExpr)
 		if err != nil {
-			ValidationError(w, fmt.Sprintf("invalid cron expression: %v", err), nil)
+			writeCronParseError(w, err)
 			return
 		}
 		schedule.CronExpr = req.CronExpr
@@ -493,10 +490,12 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// scheduler would treat it as immediately due.
 	enabling := req.Status == store.ScheduleStatusActive && originalStatus != store.ScheduleStatusActive
 	if enabling && !fields.CronExpr {
-		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-		cronSchedule, err := parser.Parse(schedule.CronExpr)
+		// A stored expression that no longer parses (for example one with a
+		// zone prefix, which is no longer supported) cannot be enabled; the
+		// user must edit it first.
+		cronSchedule, err := parseScheduleCron(schedule.CronExpr)
 		if err != nil {
-			InternalError(w)
+			writeCronParseError(w, err)
 			return
 		}
 		nextRunAt := cronSchedule.Next(time.Now().UTC())
@@ -631,10 +630,12 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	// Recompute next run time
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	cronSchedule, err := parser.Parse(schedule.CronExpr)
+	// A stored expression that no longer parses (for example one with a
+	// zone prefix, which is no longer supported) cannot be resumed; the user
+	// must edit it first.
+	cronSchedule, err := parseScheduleCron(schedule.CronExpr)
 	if err != nil {
-		InternalError(w)
+		writeCronParseError(w, err)
 		return
 	}
 	nextRunAt := cronSchedule.Next(time.Now().UTC())

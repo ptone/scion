@@ -28,6 +28,7 @@
 
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import { DENSE_PALETTE_FONT_SIZES, paletteFontSizes } from '../palette-typography.js';
+import { paletteInputHasFocus, slowPaletteModule } from '../palette-focus.js';
 
 const agentA = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -229,6 +230,27 @@ test('the header button opens the palette, labeled "Jump to agent"', async ({ pa
   );
 });
 
+test('a dismiss refocuses the header button that opened the palette', async ({ page }) => {
+  await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
+  await page.goto(`/terminals/${agentA}`);
+  await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+
+  await paletteButton(page).click();
+  await expect(paletteOption(page, 'Alice-bot')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(paletteDialog(page)).toBeHidden();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        let el: Element | null = document.activeElement;
+        while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+        return el?.classList.contains('palette-button') ?? false;
+      })
+    )
+    .toBe(true);
+});
+
 test('the palette uses the same type scale as the chat palette', async ({ page }) => {
   await setup(page, { [agentA]: { ...fixture(agentA, 'Alice-bot'), project: 'Fixture Project' } });
   await page.goto(`/terminals/${agentA}`);
@@ -412,6 +434,76 @@ test('Meta+K opens the palette even with a terminal pane focused', async ({ page
   await expect(paletteDialog(page)).toBeVisible();
 });
 
+/**
+ * After `open`, types `bob` without waiting for the palette and checks it all
+ * became the query: the input has focus right after the open, the results
+ * are filtered, and nothing reached the focused pane's PTY.
+ */
+async function expectTypingRightAfterOpenFilters(
+  page: Page,
+  open: () => Promise<void>,
+  ptyInput: () => string
+): Promise<void> {
+  await open();
+  await page.keyboard.type('bob');
+
+  await expect(paletteDialog(page)).toBeVisible();
+  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('bob');
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveText([/Bob-bot/]);
+  expect(ptyInput()).toBe('');
+}
+
+const typingAgents = {
+  [agentA]: fixture(agentA, 'Alice-bot'),
+  [agentB]: fixture(agentB, 'Bob-bot'),
+};
+
+for (const slow of [false, true]) {
+  test(`typing straight after Meta+K in a pane becomes the query, not PTY input${slow ? ', while the palette module loads' : ''}`, async ({
+    page,
+  }) => {
+    if (slow) await slowPaletteModule(page);
+    const { attaches, ptyInput } = await setup(page, typingAgents);
+    await page.goto(`/terminals/${agentA}`);
+    await expect.poll(() => attaches()).toBeGreaterThan(0);
+    await focusPaneTextarea(page.locator('.xterm-helper-textarea').first());
+
+    await expectTypingRightAfterOpenFilters(page, () => page.keyboard.press('Meta+k'), ptyInput);
+  });
+}
+
+test('typing straight after the rail footer button becomes the query, while the palette module loads', async ({
+  page,
+}) => {
+  await slowPaletteModule(page);
+  const { attaches, ptyInput } = await setup(page, typingAgents);
+  await page.goto(`/terminals/${agentA}`);
+  await expect.poll(() => attaches()).toBeGreaterThan(0);
+
+  await expectTypingRightAfterOpenFilters(
+    page,
+    () => page.locator('#terminal-workspace .terminal-jump-btn').click(),
+    ptyInput
+  );
+});
+
+test('typing straight after a reopen from a pane becomes the new query', async ({ page }) => {
+  const { attaches, ptyInput } = await setup(page, typingAgents);
+  await page.goto(`/terminals/${agentA}`);
+  await expect.poll(() => attaches()).toBeGreaterThan(0);
+  const helperTextarea = page.locator('.xterm-helper-textarea').first();
+  await focusPaneTextarea(helperTextarea);
+  await page.keyboard.press('Meta+k');
+  await page.keyboard.type('ali');
+  await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('ali');
+  await page.keyboard.press('Escape');
+  await expect(paletteDialog(page)).toBeHidden();
+  await focusPaneTextarea(helperTextarea);
+
+  await expectTypingRightAfterOpenFilters(page, () => page.keyboard.press('Meta+k'), ptyInput);
+});
+
 test("Meta+K does not open the palette over a terminal pane's own open dialog", async ({
   page,
 }) => {
@@ -461,6 +553,116 @@ test('Ctrl+K outside any pane opens the palette', async ({ page }) => {
   await page.keyboard.press('Control+k');
 
   await expect(paletteDialog(page)).toBeVisible();
+});
+
+/**
+ * Whether the palette's dialog is open with no show or hide animation still
+ * running, so what it shows is what it settled on.
+ */
+function paletteSettledOpen(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const dialog = document
+      .querySelector('scion-quick-palette')
+      ?.shadowRoot?.querySelector('sl-dialog') as (HTMLElement & { open?: boolean }) | null;
+    const animated = dialog?.shadowRoot?.querySelector('.dialog');
+    return Boolean(
+      dialog?.open && animated && animated.getAnimations({ subtree: true }).length === 0
+    );
+  });
+}
+
+test('a reopen during the close animation shows a focused palette, and keeps the invoker', async ({
+  page,
+}) => {
+  await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
+  await page.goto(`/terminals/${agentA}`);
+  await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+  const input = page.locator('scion-quick-palette #palette-query-input');
+  const focusInPalette = (): Promise<boolean> =>
+    page.evaluate(() => {
+      let el: Element | null = document.activeElement;
+      while (el) {
+        if (el.tagName === 'SCION-QUICK-PALETTE') return true;
+        el = el.shadowRoot?.activeElement ?? null;
+      }
+      return false;
+    });
+
+  await paletteButton(page).click();
+  await expect(input).toBeFocused();
+  // The second press lands while the first close is still animating.
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+k');
+
+  await expect.poll(() => paletteSettledOpen(page)).toBe(true);
+  await expect(paletteDialog(page)).toBeVisible();
+  await expect(input).toBeVisible();
+  await expect(input).toBeFocused();
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press('Tab');
+    expect(await focusInPalette()).toBe(true);
+  }
+  await page.keyboard.press('Escape');
+  await expect(paletteDialog(page)).toBeHidden();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        let el: Element | null = document.activeElement;
+        while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+        return el?.classList.contains('palette-button') ?? false;
+      })
+    )
+    .toBe(true);
+});
+
+test('an Escape during a reopen in the close animation leaves it closed, and refocuses the invoker', async ({
+  page,
+}) => {
+  await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
+  await page.goto(`/terminals/${agentA}`);
+  await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+  const input = page.locator('scion-quick-palette #palette-query-input');
+
+  await paletteButton(page).click();
+  await expect(input).toBeFocused();
+  // Resolves two tasks after the close animation ends, once a reopen
+  // deferred until then has either shown or been cancelled.
+  await page.evaluate(() => {
+    const w = window as unknown as { hideSettled?: Promise<void> };
+    w.hideSettled = new Promise((resolve) => {
+      // Only the palette's own dialog: the header button's tooltip fires one too.
+      const listener = (e: Event): void => {
+        const dialog = document
+          .querySelector('scion-quick-palette')
+          ?.shadowRoot?.querySelector('sl-dialog');
+        if (e.composedPath()[0] !== dialog) return;
+        document.removeEventListener('sl-after-hide', listener);
+        setTimeout(() => setTimeout(resolve));
+      };
+      document.addEventListener('sl-after-hide', listener);
+    });
+  });
+  // All three presses land while the first close is still animating.
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+k');
+  await page.keyboard.press('Escape');
+
+  await page.evaluate(() => (window as unknown as { hideSettled: Promise<void> }).hideSettled);
+  expect(
+    await page.evaluate(
+      () => (document.querySelector('scion-quick-palette') as { open?: boolean } | null)?.open
+    )
+  ).toBe(false);
+  await expect(paletteDialog(page)).toBeHidden();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        let el: Element | null = document.activeElement;
+        while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+        return el?.classList.contains('palette-button') ?? false;
+      })
+    )
+    .toBe(true);
 });
 
 test.describe('leaving /terminals with the palette open', () => {

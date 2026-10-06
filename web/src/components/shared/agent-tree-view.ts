@@ -43,7 +43,11 @@ import {
   canMessageAgent,
   isTerminalAvailable,
 } from '../../shared/types.js';
-import { getStateDisplay, type StatusVariant } from '../../shared/agent-state-display.js';
+import {
+  agentStatusBadge,
+  getStateDisplay,
+  type StatusVariant,
+} from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
   computeStableLayout,
@@ -60,8 +64,8 @@ import {
   type PositionedEdge,
   type PositionedUser,
 } from '../../shared/lineage.js';
-import type { StatusType } from './status-badge.js';
 import './status-badge.js';
+import { DeletionLeaseController } from './deletion-badge.js';
 import { getMessageModeDisplay, getDenialMessage } from '../../shared/message-mode.js';
 import type { MessageMode } from '../../shared/types.js';
 import './quick-message-dialog.js';
@@ -109,6 +113,25 @@ const VARIANT_COLOR: Record<StatusVariant, string> = {
 
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 2.5;
+/** How long {@link ScionAgentTreeView.revealAgent} highlights the node it brought into view. */
+const HIGHLIGHT_MS = 2000;
+/**
+ * How long {@link ScionAgentTreeView.revealAgent} waits for the canvas to
+ * have a size before it gives up, so a much later render cannot move the
+ * viewport.
+ */
+const PENDING_REVEAL_MS = 1000;
+
+/**
+ * Whether `sel` holds a non-empty range selection. Uses `type`, not
+ * `isCollapsed`: for a selection inside a shadow root, Chromium retargets
+ * `window.getSelection()` to the host and reports `isCollapsed === true`
+ * even though `type === 'Range'` and the text is non-empty, so
+ * `isCollapsed` cannot detect a selection of the graph's own text.
+ */
+function hasRangeSelection(sel: Selection | null): boolean {
+  return !!sel && sel.type === 'Range';
+}
 
 /**
  * Inline agent lineage graph component. Accepts an `agents` property (the
@@ -160,6 +183,16 @@ export class ScionAgentTreeView extends LitElement {
   @property({ type: String })
   filterKey = '';
 
+  /**
+   * Mark nodes whose parent agent is not in `agents` with an "ancestor not
+   * loaded" tab. Hosts set it only while `agents` is known to be an
+   * incomplete set (the standalone graph's capped or failed load); on a
+   * complete set a missing parent was deleted or is filtered out, so it is
+   * left unmarked.
+   */
+  @property({ attribute: false })
+  markMissingAncestors = false;
+
   @state() private showUsers = false;
   @state() private hoverId: string | null = null;
   @state() private collapsedIds: ReadonlySet<string> = new Set();
@@ -169,11 +202,22 @@ export class ScionAgentTreeView extends LitElement {
   @state() private quickMessageAgentId = '';
   @state() private quickMessageAgentName = '';
   @state() private quickMessageOpen = false;
+  /** Node briefly highlighted by {@link revealAgent}. */
+  @state() private highlightId: string | null = null;
 
   @query('.canvas') private canvasEl?: HTMLDivElement;
 
+  /**
+   * Re-renders when a node's delete lease lapses (it flips to interrupted)
+   * or a failed view expires (ptone/scion#2483 phase 2), like the pages.
+   */
+  private readonly deletionLease = new DeletionLeaseController(this, () => this.agents);
+
   private boundOnWheel = (e: WheelEvent) => this.onWheel(e);
   private boundOnKeyDown = (e: KeyboardEvent) => this.onKeyDown(e);
+  private boundOnSelectStart = (e: Event): void => this.onSelectStart(e);
+  /** Whether a range selection (see hasRangeSelection) already existed when the current pan began. */
+  private hadSelectionAtPanStart = false;
   /** Canvas-content size of the last computed layout (for keyboard "fit"). */
   private contentW = 0;
   private contentH = 0;
@@ -184,6 +228,11 @@ export class ScionAgentTreeView extends LitElement {
   private dragPanY = 0;
   /** True once the initial fit-to-view / center-on-focus has fired. */
   private didAutoFit = false;
+  /** Node {@link revealAgent} still has to center on, once it is laid out. */
+  private pendingRevealId: string | null = null;
+  private pendingRevealFrame = 0;
+  private pendingRevealTimer: ReturnType<typeof setTimeout> | undefined;
+  private highlightTimer: ReturnType<typeof setTimeout> | undefined;
 
   /**
    * Cached forest layout, reused whenever the topology signature (section
@@ -353,6 +402,7 @@ export class ScionAgentTreeView extends LitElement {
     }
 
     .canvas.dragging {
+      -webkit-user-select: none;
       user-select: none;
       cursor: grabbing;
     }
@@ -456,6 +506,13 @@ export class ScionAgentTreeView extends LitElement {
       box-shadow: 0 0 0 3px var(--sl-color-primary-200);
     }
 
+    /* Node just brought into view by revealAgent(): a short-lived ring. No
+       animation, since changing .node's animation would replay node-in. */
+    .node.jump-highlight {
+      border-color: var(--sl-color-primary-600);
+      box-shadow: 0 0 0 4px var(--sl-color-primary-300);
+    }
+
     .node .name {
       font-weight: 600;
       font-size: 0.95rem;
@@ -467,6 +524,30 @@ export class ScionAgentTreeView extends LitElement {
 
     .node:hover .name {
       text-decoration: underline;
+    }
+
+    /* A node whose parent agent is not loaded: a tab above the card. */
+    .node .ancestor-missing {
+      position: absolute;
+      top: -9px;
+      left: 8px;
+      padding: 0 6px;
+      font-size: 0.65rem;
+      line-height: 16px;
+      white-space: nowrap;
+      border: 1px dashed var(--sl-color-neutral-400);
+      border-radius: 8px;
+      background: var(--sl-color-neutral-50);
+      color: var(--sl-color-neutral-700);
+    }
+
+    /* Status badge plus the compact deletion badge (graph shows the
+       deletion state, never lifecycle actions). */
+    .node .badges {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      min-width: 0;
     }
 
     .node .meta {
@@ -640,6 +721,92 @@ export class ScionAgentTreeView extends LitElement {
     super.disconnectedCallback();
     this.removeEventListener('wheel', this.boundOnWheel);
     window.removeEventListener('keydown', this.boundOnKeyDown);
+    this.endPan();
+    cancelAnimationFrame(this.pendingRevealFrame);
+    this.dropPendingReveal();
+    clearTimeout(this.highlightTimer);
+    this.highlightId = null;
+  }
+
+  override updated(changedProperties: Map<PropertyKey, unknown>): void {
+    super.updated(changedProperties);
+    if (this.pendingRevealId === null) return;
+    // Scheduled after render's own auto-fit frame, so a fit that is still
+    // pending cannot override the centering.
+    cancelAnimationFrame(this.pendingRevealFrame);
+    this.pendingRevealFrame = requestAnimationFrame(() => this.applyPendingReveal());
+  }
+
+  /**
+   * Brings one agent into view: expands any collapsed ancestors so its node
+   * is laid out, centers the viewport on it at the current zoom and
+   * highlights it briefly. Keyboard focus is left alone (see
+   * {@link focusAgentNode}).
+   *
+   * The centering waits for the canvas to have a size, for a short while
+   * only, and the highlight starts once the node is centered.
+   *
+   * @returns false, doing nothing, if the agent is not in `agents`.
+   */
+  revealAgent(agentId: string): boolean {
+    const byId = new Map(this.agents.map((a) => [a.id, a]));
+    const target = byId.get(agentId);
+    if (!target) return false;
+    const expanded = new Set(this.collapsedIds);
+    const seen = new Set<string>([agentId]);
+    let parentId = parentIdOf(target);
+    while (parentId && byId.has(parentId) && !seen.has(parentId)) {
+      seen.add(parentId);
+      expanded.delete(parentId);
+      parentId = parentIdOf(byId.get(parentId)!);
+    }
+    if (expanded.size !== this.collapsedIds.size) this.collapsedIds = expanded;
+    this.pendingRevealId = agentId;
+    clearTimeout(this.pendingRevealTimer);
+    this.pendingRevealTimer = setTimeout(() => {
+      this.pendingRevealId = null;
+    }, PENDING_REVEAL_MS);
+    this.requestUpdate();
+    return true;
+  }
+
+  /**
+   * Moves keyboard focus to one agent's node, without scrolling.
+   *
+   * @returns false, doing nothing, if the node is not rendered.
+   */
+  focusAgentNode(agentId: string): boolean {
+    const link = this.renderRoot.querySelector<HTMLElement>(
+      `.node-wrapper a.node[data-agent-id="${CSS.escape(agentId)}"]`
+    );
+    if (!link) return false;
+    link.focus({ preventScroll: true });
+    return true;
+  }
+
+  private applyPendingReveal(): void {
+    const id = this.pendingRevealId;
+    if (id === null) return;
+    const node = this.layoutCache?.layout.nodes.find((n) => n.agent.id === id);
+    if (!node) {
+      // No longer in the graph (filtered out or deleted meanwhile).
+      this.dropPendingReveal();
+      return;
+    }
+    // Keep the request pending while the canvas has no size (hidden or
+    // mid-transition); the next render retries it.
+    if (!this.centerOn(node, this.scale)) return;
+    this.dropPendingReveal();
+    this.highlightId = id;
+    clearTimeout(this.highlightTimer);
+    this.highlightTimer = setTimeout(() => {
+      this.highlightId = null;
+    }, HIGHLIGHT_MS);
+  }
+
+  private dropPendingReveal(): void {
+    this.pendingRevealId = null;
+    clearTimeout(this.pendingRevealTimer);
   }
 
   override willUpdate(changedProperties: Map<PropertyKey, unknown>): void {
@@ -718,18 +885,29 @@ export class ScionAgentTreeView extends LitElement {
     this.panY = Math.max((rect.height - contentH * this.scale) / 2, 8);
   }
 
-  /** Centers the viewport on one node at 1:1 scale (for deep-link focus). */
-  private centerOn(n: PositionedNode): void {
+  /**
+   * Centers the viewport on one node at `scale` (1:1 by default, for
+   * deep-link focus). Returns false, changing nothing, while the canvas has
+   * no size.
+   */
+  private centerOn(n: PositionedNode, scale = 1): boolean {
     const canvas = this.canvasEl;
-    if (!canvas) return;
+    if (!canvas) return false;
     const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-    this.scale = 1;
-    this.panX = rect.width / 2 - (n.px + NODE_W / 2);
-    this.panY = rect.height / 2 - (n.py + NODE_H / 2);
+    if (rect.width === 0 || rect.height === 0) return false;
+    this.scale = scale;
+    this.panX = rect.width / 2 - (n.px + NODE_W / 2) * scale;
+    this.panY = rect.height / 2 - (n.py + NODE_H / 2) * scale;
+    return true;
   }
 
   private onPointerDown(e: PointerEvent): void {
+    // Only the primary button pans (ptone/scion#2941): a right click opens the
+    // context menu and a middle click may autoscroll, neither should drag the
+    // graph. On macOS Ctrl+click is a right click but reports button 0, so a
+    // mouse press with Ctrl held does not pan either. Touch and pen contacts
+    // report button 0 (and are not checked for Ctrl), so they still pan.
+    if (e.button !== 0 || (e.pointerType === 'mouse' && e.ctrlKey)) return;
     // Only pan from the background — keep node and control clicks working.
     for (const el of e.composedPath()) {
       if (el === this.canvasEl) break;
@@ -743,6 +921,19 @@ export class ScionAgentTreeView extends LitElement {
     this.dragStartY = e.clientY;
     this.dragPanX = this.panX;
     this.dragPanY = this.panY;
+    // preventDefault on pointerdown does not reliably stop text selection in
+    // Chromium, and a selection can begin before the .dragging class
+    // (user-select: none) applies (ptone/scion#765). Suppress selectstart
+    // for the duration of the gesture instead. selectstart is not composed,
+    // so one fired on text in this component's shadow root (node and user
+    // labels) never reaches document: the render root needs its own capture
+    // listener. Text inside a nested component's shadow root is not covered,
+    // but no such text is pannable today (badges sit inside node links,
+    // which never pan). The document listener still catches a selection
+    // starting outside the component.
+    this.hadSelectionAtPanStart = hasRangeSelection(window.getSelection());
+    this.renderRoot.addEventListener('selectstart', this.boundOnSelectStart, true);
+    document.addEventListener('selectstart', this.boundOnSelectStart, true);
     this.canvasEl?.setPointerCapture(e.pointerId);
     this.canvasEl?.classList.add('dragging');
   }
@@ -754,9 +945,37 @@ export class ScionAgentTreeView extends LitElement {
   }
 
   private onPointerUp(e: PointerEvent): void {
-    this.dragging = false;
+    if (this.dragging) {
+      // Drop any selection that slipped through during the pan; leave one
+      // that already existed before it.
+      const sel = window.getSelection();
+      if (sel && hasRangeSelection(sel) && !this.hadSelectionAtPanStart) sel.removeAllRanges();
+    }
+    this.endPan();
     this.canvasEl?.releasePointerCapture(e.pointerId);
+  }
+
+  /**
+   * Ends the pan if pointer capture is lost without a pointerup/pointercancel
+   * (e.g. the browser drops capture), so the selectstart
+   * suppression cannot outlive the gesture. Idempotent after onPointerUp.
+   */
+  private onLostPointerCapture(): void {
+    this.endPan();
+  }
+
+  /** Ends a pan gesture: stops suppressing selection and drops the dragging style. */
+  private endPan(): void {
+    this.dragging = false;
+    this.hadSelectionAtPanStart = false;
+    this.renderRoot.removeEventListener('selectstart', this.boundOnSelectStart, true);
+    document.removeEventListener('selectstart', this.boundOnSelectStart, true);
     this.canvasEl?.classList.remove('dragging');
+  }
+
+  /** Prevents text selection from starting while a pan is in progress. */
+  private onSelectStart(e: Event): void {
+    if (this.dragging) e.preventDefault();
   }
 
   private onShowUsersChange(e: Event): void {
@@ -1037,6 +1256,7 @@ export class ScionAgentTreeView extends LitElement {
         @pointermove=${this.onPointerMove}
         @pointerup=${this.onPointerUp}
         @pointercancel=${this.onPointerUp}
+        @lostpointercapture=${this.onLostPointerCapture}
         @pointerleave=${() => (this.hoverId = null)}
       >
         <div
@@ -1202,9 +1422,14 @@ export class ScionAgentTreeView extends LitElement {
     const status = getAgentDisplayStatus(agent);
     const color = VARIANT_COLOR[getStateDisplay(status).variant];
     const modeDisplay = getMessageModeDisplay(agent.messageMode);
-    const creator = agent.appliedConfig?.creatorName || agent.createdBy || '';
+    const creator = agent.creatorName || agent.appliedConfig?.creatorName || agent.createdBy || '';
     const parentId = parentIdOf(agent);
     const isRoot = !parentId || !agentById.has(parentId);
+    // On an incomplete set, a direct parent that is an agent (ancestry
+    // longer than the root user) but is not loaded: the node renders as a
+    // root and says so.
+    const ancestorMissing =
+      this.markMissingAncestors && isRoot && (agent.ancestry?.length ?? 0) > 1;
     const dim = related !== null && !related.has(agent.id);
     const descendants = hiddenCounts.get(agent.id) ?? 0;
     const collapsed = this.collapsedIds.has(agent.id);
@@ -1221,17 +1446,33 @@ export class ScionAgentTreeView extends LitElement {
         @pointerleave=${() => (this.hoverId = null)}
       >
         <a
-          class="node ${dim ? 'dim' : ''} ${agent.id === this.focusId ? 'focus' : ''}"
+          class="node ${dim ? 'dim' : ''} ${agent.id === this.focusId ? 'focus' : ''} ${agent.id ===
+          this.highlightId
+            ? 'jump-highlight'
+            : ''}"
+          data-agent-id=${agent.id}
           href="/agents/${agent.id}"
           style="border-left-color: ${color}"
           title=${`${agent.name}${agent.template ? ` — ${agent.template}` : ''}${isRoot && creator ? `\ncreated by ${creator}` : ''}`}
         >
+          ${ancestorMissing
+            ? html`<span
+                class="ancestor-missing"
+                role="img"
+                aria-label="Ancestor not loaded"
+                title="Ancestor not loaded"
+                ><sl-icon name="diagram-3"></sl-icon> ancestor not loaded</span
+              >`
+            : nothing}
           <span class="name">${agent.name}</span>
-          <scion-status-badge
-            status=${status as StatusType}
-            label=${status}
-            size="small"
-          ></scion-status-badge>
+          <span class="badges">
+            ${agentStatusBadge(agent, { status, size: 'small' })}
+            <scion-deletion-badge
+              .deletion=${this.deletionLease.view(agent)}
+              size="small"
+              compact
+            ></scion-deletion-badge>
+          </span>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
           <span
             class="mode-icon"
@@ -1308,7 +1549,7 @@ export class ScionAgentTreeView extends LitElement {
     let label = '';
     for (const a of agents) {
       if (a.ancestry?.length !== 1 || a.ancestry[0] !== u.id) continue;
-      label = a.appliedConfig?.creatorName || a.createdBy || '';
+      label = a.creatorName || a.appliedConfig?.creatorName || a.createdBy || '';
       if (label) break;
     }
     if (!label) label = u.id.slice(0, 8);

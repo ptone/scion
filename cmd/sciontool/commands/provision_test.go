@@ -154,6 +154,11 @@ func TestProvisionCmd_Clone_Idempotent(t *testing.T) {
 	if err := os.WriteFile(sentinelPath, []byte("provisioned_at=test\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// A provisioned workspace with content. (A marked but completely empty
+	// workspace is cloned into instead.)
+	if err := os.WriteFile(filepath.Join(wsDir, "README.md"), []byte("existing\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	oldWorkspace := provisionWorkspace
 	oldMode := provisionMode
@@ -176,6 +181,7 @@ func TestProvisionCmd_Clone_Idempotent(t *testing.T) {
 
 	t.Setenv("SCION_CLONE_URL", "https://nonexistent.example.com/repo.git")
 	t.Setenv("SCION_CLONE_BRANCH", "main")
+	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "test-proj")
 
 	if err := runProvision(context.Background()); err != nil {
@@ -212,6 +218,7 @@ func TestProvisionCmd_SharedDirPaths_ParsedAndProvisioned(t *testing.T) {
 	provisionGID = os.Getgid()
 
 	t.Setenv("SCION_CLONE_URL", "")
+	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "test-proj-shared-dirs")
 	t.Setenv("SCION_SHARED_DIR_PATHS", "scratchpad="+sharedRootA+",other-scratchpad="+sharedRootB)
 
@@ -250,6 +257,7 @@ func TestProvisionCmd_Clone_NoURL(t *testing.T) {
 
 	t.Setenv("SCION_CLONE_URL", "")
 	t.Setenv("SCION_CLONE_BRANCH", "")
+	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "test-proj-no-url")
 
 	if err := runProvision(context.Background()); err != nil {
@@ -274,6 +282,7 @@ func runProvisionWithFailingChown(t *testing.T, bestEffortValue *string) (error,
 
 	t.Setenv("SCION_CLONE_URL", "")
 	t.Setenv("SCION_SHARED_DIR_PATHS", "")
+	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "proj-chown")
 	if bestEffortValue != nil {
 		t.Setenv(provision.ChownBestEffortEnv, *bestEffortValue)

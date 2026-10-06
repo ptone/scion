@@ -71,6 +71,14 @@ type Agent struct {
 	TaskSummary     string        `json:"taskSummary,omitempty"`
 	Message         string        `json:"message,omitempty"`
 
+	// WorkspacePlacement is where the agent's last start placed its
+	// workspace, as its broker reported it: api.WorkspacePlacementExport
+	// (the broker's shared NFS export) or api.WorkspacePlacementLocal. ""
+	// means unknown. CreateAgent and UpdateAgent never write it; the only
+	// writer is SetAgentWorkspacePlacement, so a whole-row write holding an
+	// older copy cannot clobber a newer report.
+	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
+
 	// Enriched fields (populated by Hub when returning data, not persisted)
 	Project           string `json:"project,omitempty"`           // Project name (resolved from ProjectID)
 	RuntimeBrokerName string `json:"runtimeBrokerName,omitempty"` // Broker name (resolved from RuntimeBrokerID)
@@ -139,6 +147,51 @@ type Agent struct {
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
 
+	// RunID is the identity of the agent's current or most recent run
+	// (ptone/scion#2550), minted by the Hub per create/start/restart
+	// dispatch and carried on the runtime entry as the scion.run_id label.
+	// "" for a row not dispatched since run IDs existed. Like the launch
+	// columns, UpdateAgent never writes it; the only writer is SetAgentRunID,
+	// so a concurrent whole-row CAS write cannot clobber it.
+	RunID string `json:"-"`
+
+	// PreviousRunIDs are the runs, oldest first, whose runtime entries may
+	// still exist besides RunID's (ptone/scion#3097): SetAgentRunID appends
+	// the run it replaced (see AppendPreviousRunID),
+	// CompareAndSwapAgentRunID, which settles the run, clears them, and
+	// RevertAgentRunID leaves them (so the list may also hold RunID). A
+	// delete names each of them other than RunID. Like RunID, UpdateAgent
+	// never writes it.
+	PreviousRunIDs []string `json:"-"`
+
+	// RunIntent is whether the agent should be running ("running" or
+	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
+	// time of the last intent write. Internal bookkeeping, untagged like the
+	// launch columns. UpdateAgent and CreateAgent never write them; the only
+	// writers are SetRunIntent, RevertRunIntent and BackfillRunIntent.
+	RunIntent   RunIntent  `json:"-"`
+	RunIntentAt *time.Time `json:"-"`
+	// RunIntentMarkedAt equals RunIntentAt when the intent was last written
+	// by code that maintains start claims (see RunIntentWrittenWithClaims).
+	RunIntentMarkedAt *time.Time `json:"-"`
+
+	// Start claim (see start_claim.go). StartClaimID is "" when no claim is
+	// held. Internal bookkeeping, untagged like the launch columns.
+	// UpdateAgent and CreateAgent never write them; the only writers are the
+	// AgentStore start-claim methods and a launch's terminal write.
+	StartClaimID            string          `json:"-"`
+	StartClaimKind          StartClaimKind  `json:"-"`
+	StartClaimState         StartClaimState `json:"-"`
+	StartClaimOwner         string          `json:"-"`
+	StartClaimTarget        string          `json:"-"`
+	StartClaimAt            *time.Time      `json:"-"`
+	StartClaimLeaseUntil    *time.Time      `json:"-"`
+	StartClaimUnconfirmedAt *time.Time      `json:"-"`
+	StartClaimHoldUntil     *time.Time      `json:"-"`
+	// StartClaimLaunchID is the launch a create claim is linked to ("" when
+	// none): only that launch's end settles the claim.
+	StartClaimLaunchID string `json:"-"`
+
 	// Launch is the computed, client-facing view of the launch_* columns
 	// above (design §3.2; see launch_view.go). It is nil unless a
 	// caller populates it (e.g. enrichAgent/enrichAgents in pkg/hub via
@@ -146,6 +199,44 @@ type Agent struct {
 	// populate it themselves, so a snapshot always reflects the fields
 	// present at the moment it was computed, not at load time.
 	Launch *AgentLaunch `json:"launch,omitempty"`
+
+	// ProvisionedOnly is a computed, read-only view (ptone/scion#2929):
+	// true when the agent was provisioned but never asked to run (see
+	// ComputeAgentProvisionedOnly). Like Launch, only the hub populates it,
+	// at response time. No omitempty (as on the SSE status event): this
+	// struct is the REST agent shape, and an explicit false lets the web's
+	// partial seed merge clear a previously merged true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
+
+	// --- Backend-driven agent delete (design ptone/scion#2483 §2.1) ---
+	// The persisted deletion_* columns: a leased, sticky delete marker.
+	// Internal bookkeeping, untagged (json:"-") like the launch_* columns.
+	// UpdateAgent never writes them (they are absent from its Ent builder
+	// chain); the only writer is UpdateAgentDeletion. See deletion_view.go
+	// for the client-facing Deletion view and the predicates.
+	DeletionState     string     `json:"-"` // "" | "deleting" | "finalizing" | "failed"
+	DeletionClaim     int64      `json:"-"` // claim epoch, bumped on every successful claim
+	DeletionLeaseAt   *time.Time `json:"-"` // lease expiry; renewed by the live engine
+	DeletionStartedAt *time.Time `json:"-"`
+	DeletionFailedAt  *time.Time `json:"-"`
+	DeletionCode      string     `json:"-"`
+	DeletionError     string     `json:"-"`
+	DeletionPrior     string     `json:"-"` // JSON DeletionPriorState
+	DeletionRequest   string     `json:"-"` // JSON DeletionRequestInfo
+
+	// SoftDeleteOpID is the operation ID of the soft delete that set
+	// DeletedAt ("" when the agent is live or was soft-deleted before the
+	// column existed). Restore reactivates only the delegation edges
+	// deactivated under this ID. Only Store.SetAgentSoftDeleteOpID writes
+	// it; UpdateAgent ignores this field. No authorization decision reads it.
+	SoftDeleteOpID string `json:"-"`
+
+	// Deletion is the computed, client-facing view of the deletion_* columns
+	// (design §2.2; see ComputeAgentDeletion). Like Launch it is populated
+	// only by the hub at response time. Unlike Launch it is always present
+	// on the wire: an explicit null when no delete is active or failed, so
+	// web delta merges clear it.
+	Deletion *DeletionInfo `json:"deletion"`
 }
 
 // InFlightPhases are the agent phases considered "in flight" for a launch
@@ -264,6 +355,10 @@ type AgentAppliedConfig struct {
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// Set during workspace bootstrap for non-git projects.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
+	// WorkspaceStorageBucket is the GCS bucket the hub uploaded
+	// WorkspaceStoragePath to. It is sent to the broker with the create so
+	// a broker without its own bucket setting can download the workspace.
+	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
 
 	// InlineConfig holds the full ScionConfig provided via the --config flag
 	// or Hub API config field. When set, the dispatcher threads it through to the
@@ -286,6 +381,31 @@ type AgentAppliedConfig struct {
 	// Bounded to 64 KB at the Hub API layer. When non-empty, the broker stages it
 	// into $HOME/.scion/hooks/pre-start.d/30-project-custom before container start.
 	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
+
+	// ExplicitTimezone is the agent's pinned container timezone (an IANA
+	// name such as "Europe/Paris"). It is the first rung of the hub's agent
+	// TZ chain (see resolveAgentTZ in pkg/hub) and outranks hub env-var
+	// storage and agent_defaults.default_timezone. Empty means "not pinned".
+	// It is written only by explicit acts: the create pipeline (a TZ from
+	// the request config, the hub template or the hub harness config), the
+	// agent PATCH's top-level explicitTimezone field, legacy adoption of a
+	// TZ persisted in Env before this field existed, and the reincarnate
+	// carry-forward. TZ never lives in Env or InlineConfig.Env once this
+	// field is in use.
+	ExplicitTimezone string `json:"explicitTimezone,omitempty"`
+
+	// ExplicitTimezoneLegacy records that ExplicitTimezone was adopted from
+	// a TZ persisted in Env (or InlineConfig.Env) by an older hub, rather
+	// than set by an explicit act. It is provenance only: the resolver
+	// reports such a pin with the source "legacy". Any PATCH of
+	// explicitTimezone clears it.
+	ExplicitTimezoneLegacy bool `json:"explicitTimezoneLegacy,omitempty"`
+
+	// ExplicitTimezoneUnpinned records an explicit unpin (a PATCH with
+	// explicitTimezone ""). It stops the create pipeline from re-pinning a
+	// template or create-time TZ, including on reincarnate. A non-empty
+	// explicitTimezone write clears it.
+	ExplicitTimezoneUnpinned bool `json:"explicitTimezoneUnpinned,omitempty"`
 
 	// CreateInputs snapshots the explicit request-level inputs: the ones
 	// captured at create time, before any template/harness-config/hub-default
@@ -547,6 +667,57 @@ const (
 	LabelTemplate = "scion.io/template"
 )
 
+// Project members group marker annotations (ptone/scion#2556).
+const (
+	// AnnotationProjectMembersGroup marks a group as the hub-managed
+	// project:<slug>:members group. It is the only key the hub writes and the
+	// key project registration checks before adopting an existing group with
+	// that slug. The hub (createProjectMembersGroup) and the store marker
+	// backfill both write it.
+	AnnotationProjectMembersGroup = "scion.io/project-members-group"
+
+	// LegacyAnnotationProjectMembersGroup is the marker key the store marker
+	// backfill wrote before ptone/scion#2556. The one-shot migration
+	// MigrateLegacyProjectMembersGroupMarkers rewrites it to
+	// AnnotationProjectMembersGroup. No current code sets it; the migration
+	// only removes it. The group API marker guards and the owner-clearing
+	// backfill still accept it, because an older binary may write it during
+	// a rolling upgrade.
+	LegacyAnnotationProjectMembersGroup = "scion.io/system-project-members-group"
+)
+
+// AnnotationProjectAgentsGroup marks a group as the hub-managed
+// project:<slug>:agents group. The hub (createProjectGroup) writes it and
+// checks it (isSystemProjectAgentsGroup) before adopting an existing group
+// with that slug, and the store agents group marker backfill writes it on
+// legitimate pre-upgrade groups.
+const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
+
+// IsProjectMembersGroup reports whether g is a system project members group:
+// it belongs to a project and carries either members-group marker key with
+// the value "true".
+//
+// Project members groups are system-managed. They cannot be the principal of
+// a role binding or be nested as a child of another group; the store
+// refuses both with ErrProjectMembersGroupPrincipal.
+func IsProjectMembersGroup(g *Group) bool {
+	if g == nil || g.ProjectID == "" || g.Annotations == nil {
+		return false
+	}
+	return g.Annotations[AnnotationProjectMembersGroup] == "true" ||
+		g.Annotations[LegacyAnnotationProjectMembersGroup] == "true"
+}
+
+// Git source labels for git-anchored projects. LabelCloneURL is the URL agents
+// and shared-workspace init actually clone from (it takes precedence over
+// Project.GitRemote), LabelSourceURL records the remote as the user entered it,
+// and LabelDefaultBranch is the branch to clone.
+const (
+	LabelCloneURL      = "scion.dev/clone-url"
+	LabelSourceURL     = "scion.dev/source-url"
+	LabelDefaultBranch = "scion.dev/default-branch"
+)
+
 // Workspace mode constants for git projects.
 // When a git project has the workspace mode label set to "shared", it uses a
 // single shared clone mounted by all agents instead of per-agent clones.
@@ -580,6 +751,15 @@ const (
 	// on K8s are not supported and fall back to clone-per-agent).
 	// Maps from label value "worktree-per-agent".
 	SharingModeWorktreePerAgent WorkspaceSharingMode = "worktree-per-agent"
+
+	// SharingModeEmptyPerAgent: each agent gets its own private, initially
+	// empty, non-git directory. Only valid for non-git (hub-managed) projects;
+	// the hub derives it from the "per-agent" label on a project without a git
+	// remote (see ResolveProjectSharingMode). It is the canonical value sent to
+	// brokers and exported as SCION_WORKSPACE_MODE; the bare "per-agent" label
+	// is never forwarded for such projects because label-only resolution maps
+	// it to clone-per-agent.
+	SharingModeEmptyPerAgent WorkspaceSharingMode = "empty-per-agent"
 )
 
 // ResolveWorkspaceSharingMode maps a workspace mode label value (wire format) to
@@ -594,9 +774,52 @@ func ResolveWorkspaceSharingMode(label string) WorkspaceSharingMode {
 		return SharingModeClonePerAgent
 	case WorkspaceModeWorktreePerAgent:
 		return SharingModeWorktreePerAgent
+	case string(SharingModeEmptyPerAgent):
+		return SharingModeEmptyPerAgent
 	default:
 		// Empty or unrecognized: default to shared-plain.
 		return SharingModeSharedPlain
+	}
+}
+
+// ResolveProjectSharingMode is the single source of truth mapping a project's
+// workspace-mode label and git-ness to the canonical WorkspaceSharingMode.
+// For git projects it matches ResolveWorkspaceSharingMode, except that a raw
+// "empty-per-agent" label (a non-git-only mode) resolves to
+// SharingModeSharedPlain like any other unrecognized value. For non-git
+// projects, "per-agent" (or the canonical "empty-per-agent") resolves to
+// SharingModeEmptyPerAgent and everything else to SharingModeSharedPlain.
+func ResolveProjectSharingMode(label string, isGit bool) WorkspaceSharingMode {
+	if isGit {
+		if label == string(SharingModeEmptyPerAgent) {
+			return SharingModeSharedPlain
+		}
+		return ResolveWorkspaceSharingMode(label)
+	}
+	switch label {
+	case WorkspaceModePerAgent, string(SharingModeEmptyPerAgent):
+		return SharingModeEmptyPerAgent
+	default:
+		return SharingModeSharedPlain
+	}
+}
+
+// ValidateWorkspaceMode reports whether a requested workspace mode (API/label
+// value) is allowed for a project of the given git-ness. An empty mode is
+// always valid (it means "no label"). worktree-per-agent requires a git
+// remote; unknown values are rejected.
+func ValidateWorkspaceMode(mode string, isGit bool) error {
+	switch mode {
+	case "", WorkspaceModeShared, WorkspaceModePerAgent:
+		return nil
+	case WorkspaceModeWorktreePerAgent:
+		if !isGit {
+			return fmt.Errorf("workspace mode %q requires a git remote", mode)
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid workspace mode %q: must be one of %q, %q, %q",
+			mode, WorkspaceModeShared, WorkspaceModePerAgent, WorkspaceModeWorktreePerAgent)
 	}
 }
 
@@ -662,6 +885,19 @@ func (p *Project) IsWorktreePerAgent() bool {
 	return p.GitRemote != "" && p.Labels[LabelWorkspaceMode] == WorkspaceModeWorktreePerAgent
 }
 
+// SharingMode returns the canonical workspace sharing mode for this project,
+// derived from its workspace-mode label and whether it has a git remote.
+func (p *Project) SharingMode() WorkspaceSharingMode {
+	return ResolveProjectSharingMode(p.Labels[LabelWorkspaceMode], p.GitRemote != "")
+}
+
+// IsEmptyPerAgent returns true if this is a non-git project configured so
+// each agent gets its own empty, private workspace directory. It is defined
+// via SharingMode so the two can never disagree.
+func (p *Project) IsEmptyPerAgent() bool {
+	return p != nil && p.SharingMode() == SharingModeEmptyPerAgent
+}
+
 // IsTemplate returns true if this project is marked as a project template.
 func (p *Project) IsTemplate() bool {
 	return p.Labels[LabelTemplate] == "true"
@@ -700,6 +936,12 @@ type RuntimeBroker struct {
 	// the broker has not reported one (e.g. registered before this field
 	// existed) or the hub has not yet learned it.
 	DefaultProfile string `json:"defaultProfile,omitempty"`
+
+	// WorkspaceStorage describes where the broker places agent workspaces,
+	// reported at registration and refreshed on every heartbeat (stored as
+	// JSON). Nil means the broker has never reported it (an older broker);
+	// the hub refuses a cross-broker move involving such a broker.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
 
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
@@ -747,6 +989,21 @@ type BrokerCapabilities struct {
 	// create path and the launch-report protocol (design t1-async-create-v11.md
 	// §3.2, §7 P1b-1).
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// EmptyPerAgentWorkspace indicates the broker can provision the
+	// empty-per-agent workspace sharing mode (private empty directory per
+	// agent on non-git projects). The hub refuses to dispatch such agents to
+	// brokers without it, returning 412 (fail closed; design #2703 D3).
+	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// AgentMove indicates the broker can take part in moving an agent
+	// between brokers that share a workspace export (`scion reincarnate
+	// --broker`). The hub refuses a move unless both the source and the
+	// target broker report it (412).
+	AgentMove bool `json:"agentMove"`
+	// StartsInFlight indicates the broker reports the agent starts still
+	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
+	// then does the hub read a start's absence from that list as "no start
+	// in flight".
+	StartsInFlight bool `json:"startsInFlight,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -764,6 +1021,25 @@ type BrokerProfile struct {
 	// pkg/runtime.HasAttachSupport uses), not false. A plain bool could not
 	// tell that "never reported" apart from an explicit false.
 	Attach *bool `json:"attach,omitempty"`
+	// ServiceAccountMappings lists the GCP service accounts this profile
+	// maps to a Kubernetes ServiceAccount (kubernetes_service_account_mappings
+	// in the broker's global settings, profile and runtime-entry level).
+	// Reported at broker join and refreshed by heartbeat (ProfileSAMappings),
+	// only for Kubernetes profiles; the Hub uses it only to warn about registered
+	// service accounts no profile maps (ptone/scion#3329 phase 2).
+	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
+	// MappingsReported is true when the broker reported
+	// ServiceAccountMappings for this profile, so an empty list means
+	// "nothing mapped" rather than "unknown" (an older broker, or a broker
+	// that could not read its settings).
+	MappingsReported bool `json:"mappingsReported,omitempty"`
+}
+
+// BrokerProfileSAMapping is one GCP service account a broker profile maps
+// to a Kubernetes ServiceAccount. A struct, not a bare string, so a later
+// phase can add per-entry details (such as the namespace) without a rename.
+type BrokerProfileSAMapping struct {
+	GSA string `json:"gsa"`
 }
 
 // ProjectProvider links a runtime broker to a project.
@@ -896,20 +1172,17 @@ type HarnessConfig struct {
 
 // HarnessConfigData holds the harness-specific configuration details.
 type HarnessConfigData struct {
-	Harness                 string                   `json:"harness,omitempty"`
-	Image                   string                   `json:"image,omitempty"`
-	User                    string                   `json:"user,omitempty"`
-	Model                   string                   `json:"model,omitempty"`
-	Args                    []string                 `json:"args,omitempty"`
-	Env                     map[string]string        `json:"env,omitempty"`
-	AuthSelectedType        string                   `json:"authSelectedType,omitempty"`
-	Secrets                 []api.RequiredSecret     `json:"secrets,omitempty"`
-	ModelAliases            map[string]string        `json:"modelAliases,omitempty"`
-	ThinkingBudgetMap       map[string]int           `json:"thinkingBudgetMap,omitempty"`
-	ThinkingBudgetFlag      string                   `json:"thinkingBudgetFlag,omitempty"`
-	ThinkingBudgetConfigKey string                   `json:"thinkingBudgetConfigKey,omitempty"`
-	NoAuthBehavior          string                   `json:"noAuthBehavior,omitempty"`
-	AuthMeta                *api.HarnessAuthMetadata `json:"authMeta,omitempty"`
+	Harness          string                   `json:"harness,omitempty"`
+	Image            string                   `json:"image,omitempty"`
+	User             string                   `json:"user,omitempty"`
+	Model            string                   `json:"model,omitempty"`
+	Args             []string                 `json:"args,omitempty"`
+	Env              map[string]string        `json:"env,omitempty"`
+	AuthSelectedType string                   `json:"authSelectedType,omitempty"`
+	Secrets          []api.RequiredSecret     `json:"secrets,omitempty"`
+	ModelAliases     map[string]string        `json:"modelAliases,omitempty"`
+	NoAuthBehavior   string                   `json:"noAuthBehavior,omitempty"`
+	AuthMeta         *api.HarnessAuthMetadata `json:"authMeta,omitempty"`
 }
 
 // HarnessConfigStatus constants
@@ -1242,6 +1515,11 @@ const (
 	// (dispatch was attempted and rejected) and "pending" (dispatch is
 	// still outstanding) — deferred means dispatch was never attempted.
 	MessageDispatchDeferred = "deferred"
+	// MessageDispatchNoRecipient marks a group-thread message that resolved
+	// no agent recipient (no default agent, no reply-to agent, no agent
+	// @mention). It is saved to the thread but no agent was given it, so it
+	// must not read as "dispatched". Terminal: nothing retries it.
+	MessageDispatchNoRecipient = "no_recipient"
 )
 
 // MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
@@ -1340,8 +1618,22 @@ type ListOptions struct {
 	// Stores reject a cursor whose binding does not match.
 	CursorBinding string
 	Labels        map[string]string // Label selectors
-	SortBy        string            // Sort field (interpretation is store-specific)
-	SortDir       string            // Sort direction: "asc" or "desc" (default depends on field)
+	// SortBy and SortDir select the agent list's sorted mode: "created" or
+	// "updated", with "asc" or "desc". Empty SortBy is the legacy path
+	// (ORDER BY created DESC, id DESC), which AgentStore.ListAgents leaves
+	// byte-identical to today. Unknown non-empty values fail closed with
+	// ErrInvalidInput.
+	SortBy  string // Sort field (interpretation is store-specific)
+	SortDir string // Sort direction: "asc" or "desc" (default depends on field)
+	// SortCursor is the decoded v2 sorted-mode position, consulted only
+	// when SortBy is non-empty, in place of Cursor: the caller decodes and
+	// validates the opaque cursor itself via store.DecodeAgentCursor before
+	// any store call, so this carries the already-trusted position rather
+	// than requiring the store to decode an opaque string a second time.
+	// nil means page 0. A non-empty Cursor in sorted mode is rejected with
+	// ErrInvalidInput. CursorBinding above is still consulted in sorted
+	// mode, to mint NextCursor via store.EncodeAgentCursor.
+	SortCursor *AgentCursor
 }
 
 // ListResult is a generic result container for list operations.
@@ -2065,6 +2357,15 @@ type MessageFilter struct {
 	ConversationID string    // Filter by conversation_id (S4 conversation model)
 	Before         time.Time // Upper bound for created_at (exclusive)
 	After          time.Time // Lower bound for created_at (exclusive)
+}
+
+// LatestMessageOptions narrows the per-key latest-message lookups
+// (LatestMessagesByThreadIDs, LatestMessagesByConversationIDs). Each field
+// has the meaning of the MessageFilter field of the same name; empty fields
+// do not filter.
+type LatestMessageOptions struct {
+	Channel     string // Only messages on this channel
+	ExcludeType string // Ignore messages of this type
 }
 
 // =============================================================================
@@ -2865,6 +3166,123 @@ type DelegationEdge struct {
 	Grandfathered bool      `json:"grandfathered"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`
+
+	// AuthorityProvenance, EffectCeiling and Deactivation are recorded at
+	// write time and stay off public JSON. Their zero values mean
+	// "unrecorded": an edge written without them never reads as principal.
+	AuthorityProvenance
+	EffectCeiling
+	Deactivation
+}
+
+// EffectCeilingKind is the kind of a frozen effect ceiling.
+type EffectCeilingKind string
+
+const (
+	// EffectCeilingUnrecorded is the zero value: provenance was not
+	// recorded. It never carries permission IDs and is never read as
+	// EffectCeilingPrincipal.
+	EffectCeilingUnrecorded EffectCeilingKind = ""
+	// EffectCeilingBounded carries a complete permission allow-list
+	// interpreted under Version. An empty list allows nothing.
+	EffectCeilingBounded EffectCeilingKind = "bounded"
+	// EffectCeilingPrincipal carries no credential caveat: the live
+	// principal's authority is the only bound.
+	EffectCeilingPrincipal EffectCeilingKind = "principal"
+)
+
+// EffectCeiling is the frozen upper bound recorded with an
+// authority-producing write. It is never recomputed after the write.
+type EffectCeiling struct {
+	Kind              EffectCeilingKind          `json:"-"`
+	Version           permissions.CeilingVersion `json:"-"` // bounded only: copied unchanged from a UAT source, or V1 for coverage computed from an agent parent
+	PermissionIDs     []string                   `json:"-"` // bounded only; sorted, de-duplicated
+	BoundaryKind      string                     `json:"-"` // permissions.BoundaryKind of the source credential; "" for principal
+	BoundaryProjectID string                     `json:"-"`
+	SourceExpiresAt   *time.Time                 `json:"-"` // UAT expiry when the source credential is a UAT (descriptive only)
+}
+
+// Frozen returns the permission ceiling for a bounded ceiling. ok is false
+// for principal and unrecorded; callers must branch on Kind and must never
+// treat !ok as unrestricted.
+func (c EffectCeiling) Frozen() (permissions.FrozenPermissionCeiling, bool) {
+	if c.Kind != EffectCeilingBounded {
+		return permissions.FrozenPermissionCeiling{}, false
+	}
+	ids := c.PermissionIDs
+	if ids == nil {
+		ids = []string{}
+	}
+	return permissions.FrozenPermissionCeiling{Version: c.Version, PermissionIDs: ids}, true
+}
+
+// SourceCredentialKind is the credential that authenticated the source of an
+// authority-producing write.
+type SourceCredentialKind string
+
+const (
+	SourceCredentialSession         SourceCredentialKind = "session"
+	SourceCredentialDevLocal        SourceCredentialKind = "dev_local"
+	SourceCredentialUAT             SourceCredentialKind = "uat"
+	SourceCredentialAgent           SourceCredentialKind = "agent"
+	SourceCredentialScheduler       SourceCredentialKind = "scheduler"
+	SourceCredentialSystemMigration SourceCredentialKind = "system_migration"
+)
+
+// ProvenanceVersionV1 is the first recorded AuthorityProvenance layout.
+// ProvenanceVersion 0 means provenance was not recorded.
+const ProvenanceVersionV1 = 1
+
+// AuthorityProvenance records who authorized an authority-producing write
+// and with which credential. The Initiator* fields use the
+// InitiatorAttribution names and value domain.
+type AuthorityProvenance struct {
+	ProvenanceVersion           int                  `json:"-"` // 0 = unrecorded, 1 = v1
+	SourcePrincipalKind         string               `json:"-"` // "user" | "agent"
+	SourcePrincipalID           string               `json:"-"`
+	SourceCredentialKind        SourceCredentialKind `json:"-"`
+	SourceCredentialID          string               `json:"-"` // UAT ID, agent credential JTI; "" for session and dev_local
+	SourceEventID               string               `json:"-"` // scheduler: fired scheduled event ID (reference only)
+	SourceScheduleID            string               `json:"-"` // scheduler: recurring schedule ID, may be empty
+	SourceAuthorizationRevision int                  `json:"-"` // scheduler: revision the event snapshotted
+	InitiatorPrincipalKind      string               `json:"-"`
+	InitiatorPrincipalID        string               `json:"-"`
+	InitiatorCredentialKind     string               `json:"-"` // InitiatorCredentialKind* domain
+	InitiatorCredentialID       string               `json:"-"`
+}
+
+// EdgeDeactivationCause records why a delegation edge or assignment was
+// deactivated. The empty value means active, or deactivated before causes
+// were recorded.
+type EdgeDeactivationCause string
+
+const (
+	EdgeDeactivationAgentSoftDelete     EdgeDeactivationCause = "agent_soft_delete"
+	EdgeDeactivationAgentHardDelete     EdgeDeactivationCause = "agent_hard_delete"
+	EdgeDeactivationDelegatorDeleted    EdgeDeactivationCause = "delegator_deleted"
+	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
+	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
+)
+
+// ValidEdgeDeactivationCause reports whether c is a cause that may be
+// recorded on a delegation edge.
+func ValidEdgeDeactivationCause(c EdgeDeactivationCause) bool {
+	switch c {
+	case EdgeDeactivationAgentSoftDelete,
+		EdgeDeactivationAgentHardDelete,
+		EdgeDeactivationDelegatorDeleted,
+		EdgeDeactivationCreateCompensation,
+		EdgeDeactivationReincarnateReplaced:
+		return true
+	}
+	return false
+}
+
+// Deactivation is the deactivation record of an edge or assignment.
+type Deactivation struct {
+	Cause EdgeDeactivationCause `json:"-"`
+	At    *time.Time            `json:"-"`
+	OpID  string                `json:"-"` // one ID per deactivating operation
 }
 
 // Delegation edge principal types

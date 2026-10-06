@@ -40,17 +40,32 @@ const (
 )
 
 var (
-	ErrInvalidUAT        = errors.New("invalid access token")
-	ErrUATExpired        = errors.New("access token expired")
-	ErrUATRevoked        = errors.New("access token revoked")
-	ErrInvalidUATFormat  = errors.New("invalid token format")
-	ErrUATLimitExceeded  = errors.New("token limit exceeded")
-	ErrInvalidUATScope   = errors.New("invalid token scope")
-	ErrUATExpiryTooLong  = errors.New("token expiry exceeds maximum (1 year)")
-	ErrUATExpiryPast     = errors.New("token expiry must be in the future")
-	ErrUATNameRequired   = errors.New("token name is required")
+	ErrInvalidUAT       = errors.New("invalid access token")
+	ErrUATExpired       = errors.New("access token expired")
+	ErrUATRevoked       = errors.New("access token revoked")
+	ErrInvalidUATFormat = errors.New("invalid token format")
+	ErrUATLimitExceeded = errors.New("token limit exceeded")
+	ErrInvalidUATScope  = errors.New("invalid token scope")
+	ErrUATExpiryTooLong = errors.New("token expiry exceeds maximum (1 year)")
+	ErrUATExpiryPast    = errors.New("token expiry must be in the future")
+	ErrUATNameRequired  = errors.New("token name is required")
+	ErrUATScopeEmpty    = errors.New("at least one scope is required")
+
+	// ErrUATProjectIDEmpty is returned when a token request names neither
+	// an explicit boundary nor a project ID. Its message names the project
+	// ID shorthand that most clients send; the HTTP response also carries
+	// details field "boundary" and reason "boundary_required".
 	ErrUATProjectIDEmpty = errors.New("project ID is required")
-	ErrUATScopeEmpty     = errors.New("at least one scope is required")
+
+	// ErrUATBoundaryRequired is the boundary name for ErrUATProjectIDEmpty:
+	// the same error value. A missing boundary is never read as a hub
+	// boundary.
+	ErrUATBoundaryRequired = ErrUATProjectIDEmpty
+
+	// ErrUATBoundaryInvalid is returned when a token request names a
+	// boundary that is not a valid project or hub boundary, or names a
+	// project ID that disagrees with its boundary.
+	ErrUATBoundaryInvalid = errors.New("token boundary is invalid")
 
 	// ErrUATScopeViolation is returned when the issuer does not hold all
 	// requested scopes in the target project.
@@ -64,6 +79,31 @@ var (
 	// (UAT, agent JWT, broker token) attempts a token-management operation.
 	ErrUATCredentialDenied = errors.New("access tokens cannot manage other access tokens")
 )
+
+// UATScopeViolationError names the selector and machine-readable reason when
+// CanMintSelector (pkg/hub/authz_boundary.go) denies a requested selector at
+// mint time. Unwrap returns ErrUATScopeViolation so existing
+// errors.Is(err, ErrUATScopeViolation) callers (handlers_auth.go's error
+// mapping, TestRS4_DenialCodeStability) keep working unchanged.
+// handlers_auth.go's scope_violation response already writes err.Error() as
+// its message, so the 403 body now includes the selector and reason text
+// (e.g. `requested scopes exceed issuer authority: selector "agent:delete"
+// denied (flat_role_insufficient)`), where it previously carried only the
+// sentinel text. This is reached only once project admission has already
+// succeeded, never on the uniform ErrUATProjectForbidden path (see
+// CreateToken below), so it does not weaken oracle resistance.
+type UATScopeViolationError struct {
+	Selector string
+	Reason   MintDenialReason
+}
+
+func (e *UATScopeViolationError) Error() string {
+	return fmt.Sprintf("%v: selector %q denied (%s)", ErrUATScopeViolation, e.Selector, e.Reason)
+}
+
+func (e *UATScopeViolationError) Unwrap() error {
+	return ErrUATScopeViolation
+}
 
 // UATRejection reports that a presented UAT failed ValidateToken, and
 // classifies why. Reason is one of "invalid", "revoked", "expired", or
@@ -187,12 +227,49 @@ type TokenMetadata struct {
 // so a future field (e.g. a hub-vs-project boundary kind) can be added
 // without growing a positional argument list.
 type CreateTokenParams struct {
-	UserID    string
-	Name      string
+	UserID string
+	Name   string
+	// Boundary is the credential boundary the token is issued under. A
+	// zero Boundary with a non-empty ProjectID is the project boundary for
+	// that project. A zero Boundary with an empty ProjectID is rejected
+	// with ErrUATBoundaryRequired; it never means hub.
+	Boundary TokenBoundary
+	// ProjectID is the project-boundary shorthand. When Boundary is also
+	// set, ProjectID must be empty or name Boundary's project.
 	ProjectID string
 	Scopes    []string
 	ExpiresAt *time.Time
 	Metadata  TokenMetadata
+}
+
+// resolveTokenBoundary returns the boundary a token request names, from
+// either the explicit boundary or the project ID shorthand. A request that
+// names neither is rejected; a request whose two forms disagree, or whose
+// boundary is not valid, is rejected. A project ID that is present but
+// blank, in either form, is invalid.
+func resolveTokenBoundary(boundary TokenBoundary, projectID string) (TokenBoundary, error) {
+	if isBlankPresent(projectID) || isBlankPresent(boundary.ProjectID) {
+		return TokenBoundary{}, ErrUATBoundaryInvalid
+	}
+	if boundary == (TokenBoundary{}) {
+		if projectID == "" {
+			return TokenBoundary{}, ErrUATBoundaryRequired
+		}
+		return TokenBoundary{Kind: BoundaryKindProject, ProjectID: projectID}, nil
+	}
+	if !boundary.Valid() {
+		return TokenBoundary{}, ErrUATBoundaryInvalid
+	}
+	if projectID != "" && (boundary.Kind != BoundaryKindProject || boundary.ProjectID != projectID) {
+		return TokenBoundary{}, ErrUATBoundaryInvalid
+	}
+	return boundary, nil
+}
+
+// isBlankPresent reports whether v is non-empty but contains only white
+// space.
+func isBlankPresent(v string) bool {
+	return v != "" && strings.TrimSpace(v) == ""
 }
 
 // CreateToken generates a new user access token with issuer ceiling,
@@ -220,8 +297,9 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 	if params.Name == "" {
 		return "", nil, ErrUATNameRequired
 	}
-	if params.ProjectID == "" {
-		return "", nil, ErrUATProjectIDEmpty
+	boundary, err := resolveTokenBoundary(params.Boundary, params.ProjectID)
+	if err != nil {
+		return "", nil, err
 	}
 	// Bounded validation of name/purpose/labels at issuance. Metadata is
 	// immutable afterward, so this is the only place it is checked.
@@ -254,51 +332,71 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 		return "", nil, ErrUATExpiryTooLong
 	}
 
-	// --- Issuer ceiling at mint (target-project only) with oracle resistance ---
-	// Resolve only project-scoped permissions for the target project. System/hub
-	// authority must not enlarge the token.
+	// --- Mint eligibility via CanMintSelector (ptone/scion#2092, #2117) ---
+	// CanMintSelector composes project admission (current membership OR, per
+	// selector, exact-permission system authority on the exact requested
+	// permission) with per-selector mint eligibility (the existing flat
+	// project-role subset check, unchanged, or declared relationship
+	// candidacy for resource-relative selectors such as
+	// agent:attach/agent:port_access, which are mintable before any target
+	// exists) in one batched call, with admission checked once for the
+	// whole request. This replaces only the flat eligibility subset loop;
+	// selector resolution (expandScopes above) and the persisted ceiling
+	// (below) are a separate concern (ptone/scion#2118 owns normalizing
+	// those, including at load time).
 	//
-	// getProjectScopedPermissions filters to ScopeType==project && ScopeID==projectID
-	// while retaining group-expanded principals (transitive membership), activation
-	// window filtering (future/expired bindings excluded), and AccessConstraint
-	// reduction. If the result is empty, the user has no project-level authority —
-	// this covers both non-membership and nonexistent projects with the same error
-	// (oracle resistance, G10).
-	//
-	// Note: authorization runs outside WithTx. The TOCTOU window is acceptable
-	// because (1) use-time enforcement narrows every request to the intersection
-	// of token scopes and the user's current permissions, and (2) token minting
-	// only reads authority state, it does not mutate it. See O1 documentation in
-	// rs4_credential_test.go.
-	actorPerms, err := s.authz.getProjectScopedPermissions(ctx, store.RoleBindingPrincipalUser, params.UserID, params.ProjectID)
-	if err != nil {
-		s.logger.Warn("RS4: failed to resolve project-scoped permissions",
-			"user_id", params.UserID, "project_id", params.ProjectID, "error", err)
+	// Note: authorization runs outside WithTx. The TOCTOU window is
+	// acceptable because (1) use-time enforcement narrows every request to
+	// the intersection of token scopes and the user's current permissions,
+	// and (2) token minting only reads authority state, it does not mutate
+	// it. See O1 documentation in rs4_credential_test.go.
+	identity := GetIdentityFromContext(ctx)
+	// enforceSessionCredential above already rejects a missing identity;
+	// this keeps the mint path fail-closed on its own rather than relying
+	// on that ordering.
+	if isNilIdentity(identity) {
 		return "", nil, ErrUATProjectForbidden
 	}
-	if len(actorPerms) == 0 {
+	principal := principalContextForIdentity(identity)
+	eligibility, err := s.authz.CanMintSelector(ctx, principal, boundary, expanded)
+	if err != nil {
+		s.logger.Warn("RS4: CanMintSelector failed",
+			"user_id", params.UserID, "boundary_kind", string(boundary.Kind), "project_id", boundary.ProjectID, "error", err)
 		return "", nil, ErrUATProjectForbidden
+	}
+	for _, result := range eligibility {
+		if result.OK {
+			continue
+		}
+		// Oracle resistance: MintDenialProjectAccessRequired means
+		// CanMintSelector's ONE admission check for the whole batch failed
+		// (no membership and no exact-permission system authority) -- every
+		// selector gets this same reason uniformly in that case. Preserve
+		// the existing contract that a non-member and a nonexistent project
+		// both get the bare ErrUATProjectForbidden, with no selector
+		// detail, so neither is distinguishable from the other or from
+		// "authority exists but not for this selector." Only a per-selector
+		// eligibility denial (admission passed, this specific selector
+		// didn't) surfaces the typed UATScopeViolationError.
+		if result.Reason == MintDenialProjectAccessRequired {
+			return "", nil, ErrUATProjectForbidden
+		}
+		return "", nil, &UATScopeViolationError{Selector: result.Selector, Reason: result.Reason}
 	}
 
-	// Resolve the requested scopes to a CeilingVersionV1 ceiling and verify
-	// the issuer holds every resulting permission in the target project;
-	// that same ceiling is persisted below and is what runtime authorization
-	// and delegation enforce. Fail closed if any valid scope does not
-	// resolve.
+	// --- Persisted ceiling (ptone/scion#2118) ---
+	// Resolve the requested scopes to a CeilingVersionV1 ceiling; this is
+	// what is persisted below and is what runtime authorization and
+	// delegation enforce going forward, pinned to the version's rules. Fail
+	// closed if any valid scope does not resolve to a selector mapping —
+	// CanMintSelector's per-selector eligibility above already proved the
+	// issuer's authority, so this is a resolvability check, not an
+	// authority check.
 	ceiling, ceilingOK := permissions.BuildCeilingFromSelectors(expanded)
 	if !ceilingOK {
 		s.logger.Error("RS4: scope-to-permission mapping gap — some valid scope has no resolvable selector",
 			"expanded_count", len(expanded))
 		return "", nil, ErrUATScopeViolation
-	}
-	actorPermSet := make(map[string]bool, len(actorPerms))
-	for _, p := range actorPerms {
-		actorPermSet[p] = true
-	}
-	for _, permID := range ceiling.PermissionIDs {
-		if !actorPermSet[permID] {
-			return "", nil, ErrUATScopeViolation
-		}
 	}
 
 	// --- Atomic mint: token insert + audit in one transaction ---
@@ -337,7 +435,8 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 			Name:                 params.Name,
 			Prefix:               prefix,
 			KeyHash:              hashStr,
-			ProjectID:            params.ProjectID,
+			BoundaryKind:         string(boundary.Kind),
+			ProjectID:            boundary.ProjectID,
 			Scopes:               expanded,
 			CeilingVersion:       ceiling.Version,
 			CeilingPermissionIDs: ceiling.PermissionIDs,
@@ -359,8 +458,12 @@ func (s *UserAccessTokenService) CreateTokenWithParams(ctx context.Context, para
 
 		// B3/G3: Atomic audit — commit or roll back with the token.
 		scopesJSON, _ := json.Marshal(expanded)
-		afterSummary := fmt.Sprintf(`{"token_id":%q,"scopes":%s,"project_id":%q}`,
-			token.ID, string(scopesJSON), params.ProjectID)
+		afterSummary := fmt.Sprintf(`{"token_id":%q,"scopes":%s,"boundary_kind":%q}`,
+			token.ID, string(scopesJSON), string(boundary.Kind))
+		if boundary.Kind == BoundaryKindProject {
+			afterSummary = fmt.Sprintf(`{"token_id":%q,"scopes":%s,"boundary_kind":%q,"project_id":%q}`,
+				token.ID, string(scopesJSON), string(boundary.Kind), boundary.ProjectID)
+		}
 		// Record that purpose/label metadata was set and which label keys
 		// were used, without recording label or purpose values in audit
 		// (values are issuer-supplied and unbounded-trust text).

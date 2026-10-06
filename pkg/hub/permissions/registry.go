@@ -48,6 +48,10 @@ const (
 	ResourceSecret         = "secret"
 	ResourceEnvVar         = "env_var"
 	ResourceSkillInjection = "skill_injection"
+	// ResourceArtifact is the artifact service's resource type
+	// (pkg/artifacts). Artifact permissions are checked in the hub's
+	// artifacts.Host adapter against the artifact's home project.
+	ResourceArtifact = "artifact"
 
 	ActionCreate         = "create"
 	ActionRead           = "read"
@@ -134,10 +138,10 @@ type Permission struct {
 	NonRouteUse    []string
 	// ExcludeFromManageAlias keeps this permission's UAT scope out of the
 	// resource's "<resource>:manage" convenience alias. Used for observation
-	// permissions (agent.attach, agent.port_access) that project owners/admins
-	// no longer hold through their role, so that they can still mint
-	// agent:manage tokens (miller79/scion#88). The scope remains available
-	// for explicit selection.
+	// permissions (agent.attach, agent.port_access) that some project roles
+	// do not hold (owners/admins lack attach; members lack
+	// port_access), so that holders of those roles can still mint
+	// agent:manage tokens. The scope remains available for explicit selection.
 	ExcludeFromManageAlias bool
 }
 
@@ -167,6 +171,12 @@ var Registry = []Permission{
 	{ID: "project.manage", Resource: ResourceProject, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "project:manage", Description: "Manage project administration (RS1 membership operations)", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
+
+	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", AgentScopes: []string{"project:artifact:write"}, Description: "Publish new versions of artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
@@ -206,15 +216,10 @@ var Registry = []Permission{
 
 	// broker.create is a hub-level permission: registration is gated by an
 	// explicit hub-member role grant (seed.go hubMemberPermissionIDs), not by
-	// mere authentication. The agreed cross-workstream UAT selector name for
-	// this permission is "broker:create" (ptone/scion#2104, ptone/scion#2107),
-	// but it has no UATScope yet: today's UATs are project-bound, and
-	// enforceUATConstraints already rejects any project-scoped UAT against
-	// this hub-level resource. ptone/scion#2123 introduces hub-bound UAT
-	// boundaries; only then does a broker:create selector become
-	// mintable/usable, and this entry gains UATScope: "broker:create" at that
-	// point.
-	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerCreate", "pkg/hub/handlers_projects_core.go"}},
+	// mere authentication. Its UAT selector "broker:create" is mintable only
+	// on a hub-boundary token (PermissionAllowedBoundaries). Broker creation
+	// does not admit bearer credentials (authorizeBrokerCreate).
+	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "broker:create", Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerCreate", "pkg/hub/handlers_projects_core.go"}},
 	{ID: "broker.read", Resource: ResourceBroker, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "broker:read", Description: "Read brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.update", Resource: ResourceBroker, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.delete", Resource: ResourceBroker, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},

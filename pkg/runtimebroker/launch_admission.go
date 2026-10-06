@@ -62,6 +62,15 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 			BadRequest(w, httpMessage)
 			return
 		}
+		// Likewise a broker with no bucket for the upload refuses here with
+		// the synchronous path's 422, before accepting a launch that could
+		// only fail (ptone/scion#3422).
+		if s.workspaceStorageBucket(req) == "" {
+			span.SetStatus(codes.Error, errWorkspaceStorageUnconfigured.Error())
+			markAttemptFailed(http.StatusUnprocessableEntity, "storage bucket not configured")
+			writeWorkspaceStorageUnconfigured(w)
+			return
+		}
 	}
 
 	if err := mgr.Preflight(ctx, opts); err != nil {
@@ -98,6 +107,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 	runCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(-20*time.Second))
 
 	rec := newLaunchRecord(req.LaunchID, req.ID, store.LaunchKindCreate, s.resolveHubNameForLaunch(r), deadline, cancel)
+	rec.RunID = req.RunID
 	supersededDone := s.launchRegistry.Begin(key, rec)
 
 	resp := CreateAgentResponse{

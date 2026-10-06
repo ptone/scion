@@ -1120,9 +1120,10 @@ func TestRun_NFSLockLost_CreatesWaitPod(t *testing.T) {
 	config := nfsBaseConfig("scion-test-lock-lost")
 	config.Locker = &alwaysLoseLocker{}
 
-	// Run() will create the pod but waitForPodReady will time out with the
-	// fake clientset. Use a short-lived context so we don't block for 10m.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Run() creates the pod, then fails readiness at its first poll (see
+	// failPodReadiness), which keeps the pod for inspection.
+	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r.Run(ctx, config) //nolint:errcheck
 
@@ -1156,8 +1157,10 @@ func TestRun_NFSLockWon_CreatesClonePod(t *testing.T) {
 	config := nfsBaseConfig("scion-test-lock-won")
 	config.Locker = locker
 
-	// Short-lived context to avoid blocking on waitForPodReady.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Run() creates the pod, then fails readiness at its first poll (see
+	// failPodReadiness), which keeps the pod for inspection.
+	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r.Run(ctx, config) //nolint:errcheck
 
@@ -1682,8 +1685,10 @@ func TestBuildPod_NFSBackend_InitContainer_NoSharedDirMounts_WhenSharedDirStorag
 		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
 	}
 	ic := pod.Spec.InitContainers[0]
-	if len(ic.VolumeMounts) != 1 {
-		t.Errorf("expected only the workspace mount on the init container, got %d: %+v",
+	// The workspace and the provisioning state directory (#2670); no
+	// shared-dir mounts.
+	if len(ic.VolumeMounts) != 2 || ic.VolumeMounts[1].MountPath != NFSProvisionStateMountPath {
+		t.Errorf("expected only the workspace and provisioning state mounts on the init container, got %d: %+v",
 			len(ic.VolumeMounts), ic.VolumeMounts)
 	}
 	for _, env := range ic.Env {
@@ -1865,7 +1870,12 @@ func TestCreateSharedDirPVCs_LocalBackend_CreatesPVCs(t *testing.T) {
 
 // --- Phase 3 guardrail regression: K8s + NFS + worktree-per-agent ---
 
-func TestBuildPod_NFSBackend_WorktreeSubPath_StillRouted(t *testing.T) {
+func TestBuildPod_NFSBackend_WorktreeSubPath_Rejected(t *testing.T) {
+	// A workspace subPath that does not end in <projectID>/workspace (here
+	// an agent's worktree, a shape worktree-per-agent no longer uses: see
+	// NFSWorktreeName) has no project directory to hold the provisioning
+	// state directory next to the workspace, so the pod is not built
+	// (#2670, fail closed).
 	r := newNFSTestK8sRuntime()
 	config := RunConfig{
 		Name:                 "test-nfs-worktree",
@@ -1880,22 +1890,8 @@ func TestBuildPod_NFSBackend_WorktreeSubPath_StillRouted(t *testing.T) {
 		},
 	}
 
-	pod, err := r.buildPod("default", config)
-	require.NoError(t, err)
-
-	wsVol := findVolume(pod, "workspace")
-	require.NotNil(t, wsVol, "workspace volume must exist")
-	require.NotNil(t, wsVol.PersistentVolumeClaim,
-		"NFS worktree backend must use PVC, not EmptyDir")
-	assert.Equal(t, "scion-workspaces", wsVol.PersistentVolumeClaim.ClaimName)
-
-	wsMount := findVolumeMount(&pod.Spec.Containers[0], "workspace")
-	require.NotNil(t, wsMount, "workspace mount must exist")
-	assert.Equal(t, "projects/proj-123/workspace/worktrees/agent-1", wsMount.SubPath,
-		"worktree subPath must route through NFS PVC")
-
-	require.NotEmpty(t, pod.Spec.InitContainers,
-		"NFS+worktree must still inject the provisioning init container")
+	_, err := r.buildPod("default", config)
+	require.ErrorContains(t, err, "unexpected NFS workspace subPath")
 }
 
 // findVolume finds a volume by name in a pod spec.

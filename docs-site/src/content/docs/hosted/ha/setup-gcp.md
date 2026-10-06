@@ -508,6 +508,165 @@ Pods dispatched to a different namespace (e.g. `default`) will fail with
 `PermissionDenied: secretmanager.versions.access denied`.
 :::
 
+### 2i. GKE Workload Identity for GCP Identity Mode Assign
+
+GCP identity mode **assign** on the Kubernetes runtime authenticates agent pods via
+Workload Identity, not via the sciontool metadata emulator used on Docker. Scion does
+not create, annotate, or bind Kubernetes ServiceAccounts (KSAs) for this — pre-provision
+each one yourself, then tell the broker about it in its own `settings.yaml`.
+
+**Cluster and node pool prerequisites** (once per cluster, if not already done for 2h):
+
+```bash
+# Enable Workload Identity Federation on the cluster.
+gcloud container clusters update CLUSTER_NAME \
+  --location=REGION \
+  --workload-pool=$PROJECT_ID.svc.id.goog
+
+# Enable GKE_METADATA on every node pool agent pods run on.
+gcloud container node-pools update NODE_POOL_NAME \
+  --cluster=CLUSTER_NAME \
+  --location=REGION \
+  --workload-metadata=GKE_METADATA
+```
+
+:::note[Autopilot clusters]
+GKE Autopilot has Workload Identity Federation enabled on every node by default and has
+no node pools to update — skip the `gcloud container node-pools update` command above on
+Autopilot.
+:::
+
+For every GCP service account (GSA) you plan to assign to agents on this cluster:
+
+```bash
+# Choose (or create) a KSA for this GSA, in the namespace agents dispatch to.
+export AGENT_GSA="agent-worker@$PROJECT_ID.iam.gserviceaccount.com"
+export AGENT_KSA="agent-worker-ksa"
+export AGENT_NAMESPACE="scion-agents"
+
+kubectl create serviceaccount $AGENT_KSA --namespace=$AGENT_NAMESPACE \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Annotate the KSA with the GSA it is bound to.
+kubectl annotate serviceaccount $AGENT_KSA \
+  --namespace=$AGENT_NAMESPACE \
+  iam.gke.io/gcp-service-account=$AGENT_GSA \
+  --overwrite
+
+# Grant the WI binding (KSA -> GSA), scoped to this namespace and KSA.
+gcloud iam service-accounts add-iam-policy-binding \
+  $AGENT_GSA \
+  --role=roles/iam.workloadIdentityUser \
+  --member="serviceAccount:$PROJECT_ID.svc.id.goog[$AGENT_NAMESPACE/$AGENT_KSA]" \
+  --project=$PROJECT_ID
+```
+
+:::note[If this agent also uses `gke: true` volumes]
+Once a pod authenticates as `$AGENT_KSA` via Workload Identity, CSI Secret Manager mounts
+and GCS FUSE volumes on that pod also authenticate as `$AGENT_GSA` — not as the `default`
+KSA's GSA from 2h. Grant `$AGENT_GSA` whatever those volumes need directly (for example
+`roles/secretmanager.secretAccessor` for CSI secrets, or bucket-level object access for
+FUSE), the same way 2h's GSA needed it. 2h's existing grant does not extend to this GSA.
+:::
+
+Then add the GSA-to-KSA mapping to the runtime broker's own **global** settings — never a
+project's own settings.yaml, which this mapping deliberately ignores — under the
+`kubernetes`-typed runtime entry, or under a profile in that same global source to
+override the runtime-level mapping for agents created under that profile only:
+
+```yaml
+runtimes:
+  remote:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      agent-worker@PROJECT_ID.iam.gserviceaccount.com: agent-worker-ksa
+```
+
+Where "global settings" lives depends on your deployment mode:
+
+- **File-only mode** (no database configured): this is `~/.scion/settings.yaml` on the
+  broker host, as shown above.
+- **Broker in the same process as a database-backed Hub** (the Cloud Run + Cloud SQL
+  setup in this guide, which starts the Hub and the Runtime Broker together): as
+  §3c below explains, `runtimes` and `profiles` are persisted to the database on first
+  boot and the database then takes over as the source of truth for those sections —
+  editing the `settings.yaml` secret afterward and redeploying has no effect on them,
+  the same way it has no effect on `admin_emails`. Set or update the mapping with
+  `PUT /api/v1/admin/server-config` (the Hub's Settings admin page sends this same
+  request) instead, sending the complete `runtimes` and/or `profiles` object you want in
+  effect — a mapping added only to the `settings.yaml` secret after first boot is
+  silently ignored, and every `assign` dispatch then fails with "no mapping" even though
+  the file looks correct.
+- **Standalone Runtime Broker** (running in a separate process from the Hub, even when the Hub
+  uses a database): the broker reads only its own `~/.scion/settings.yaml`; the Hub
+  database's `runtimes` and `profiles` do not apply to it.
+
+A Kubernetes dispatch with GCP identity mode `assign` whose GSA has no entry here fails
+at dispatch time with an actionable error naming this setting — it does not fall back to
+the emulator or to the pod's default identity. This mapping is authoritative: if the
+create or start request itself also names an explicit `kubernetes.serviceAccountName`
+that differs from the mapped KSA for that GSA, the dispatch is rejected rather than
+silently resolved either way. A `serviceAccountName` set only in a template (not on the
+request) is not a conflict — it is overridden by the mapping instead, the same way any
+other request-level value already overrides a template value.
+
+:::caution
+Each mapping is **namespace-scoped** by the WI binding's member string
+(`$PROJECT_ID.svc.id.goog[NAMESPACE/KSA]`), the same as 2h. An agent dispatched to a
+different namespace than the one you bound needs its own KSA, annotation, and binding —
+the `kubernetes_service_account_mappings` entry only names the KSA, not its namespace.
+:::
+
+The namespace an assign dispatch runs in comes only from the broker's global settings:
+the selected runtime entry's `namespace`, then the runtime's default namespace. Provision
+the mapped KSA in that namespace:
+
+```yaml
+runtimes:
+  remote:
+    type: kubernetes
+    namespace: scion-agents
+    kubernetes_service_account_mappings:
+      agent-worker@PROJECT_ID.iam.gserviceaccount.com: agent-worker-ksa
+```
+
+Profiles have no namespace setting of their own. A profile that needs a different
+namespace selects its own runtime entry, which sets that namespace and the mapping for
+the KSA provisioned there:
+
+```yaml
+runtimes:
+  remote:
+    type: kubernetes
+    namespace: scion-agents
+    kubernetes_service_account_mappings:
+      agent-worker@PROJECT_ID.iam.gserviceaccount.com: agent-worker-ksa
+  remote-team:
+    type: kubernetes
+    namespace: team-agents
+    kubernetes_service_account_mappings:
+      agent-worker@PROJECT_ID.iam.gserviceaccount.com: team-worker-ksa
+profiles:
+  team:
+    runtime: remote-team
+```
+
+A create or start request that names a namespace explicitly is accepted only when it
+equals that resolved namespace.
+
+A project's own settings.yaml can still set `runtimes.<entry>.namespace` or
+`runtimes.<entry>.context` for the entry an assign dispatch selects, and the pod would be
+placed with the project's value. Such a dispatch is refused with 400, naming the runtime
+entry and both values; remove the project's override, or select another runtime entry.
+
+A broker whose server configuration forces a runtime (`ForceRuntime`, which skips
+profile resolution) does not consult profiles for this lookup either. It reads the
+mapping and the namespace from the runtime entry whose key is the forced runtime's type
+name, for example `runtimes: kubernetes:`. The forced Kubernetes runtime places pods in
+its own namespace, so that namespace must equal the entry's resolved namespace;
+otherwise the dispatch is refused with 400. The entry's `context` is not consulted in
+this case.
+
 ### IAM Verification
 
 ```bash
@@ -835,7 +994,7 @@ gcloud run deploy scion-hub \
   --add-cloudsql-instances=$PROJECT_ID:$REGION:scion-hub-db \
   --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents,SESSION_SECRET=$SESSION_SECRET" \
   --set-secrets="/etc/scion/kubeconfig.yaml=scion-gke-kubeconfig:latest,/home/scion/.scion/settings.yaml=scion-hub-settings:latest" \
-  --min-instances=1 \
+  --min-instances=2 \
   --max-instances=3 \
   --cpu=1 \
   --memory=512Mi \
@@ -846,6 +1005,14 @@ gcloud run deploy scion-hub \
   --no-allow-unauthenticated \
   --quiet
 ```
+
+:::note[Why min-instances=2?]
+An HA Hub needs at least two running replicas, so that losing one instance
+(crash, host maintenance, scale-in) never leaves the Hub with zero warm
+replicas. With `--min-instances=1` there is no failover peer, and the
+deployment is not HA (see [HA overview](/scion/hosted/ha/overview/)).
+`--max-instances=3` leaves room for Cloud Run to scale up under load.
+:::
 
 :::caution[Cloud Run Timeout Warning]
 We explicitly set `--timeout=900` (15 minutes). When dispatching the very first agent, GKE Autopilot triggers node provisioning to scale up from 0 nodes, which routinely takes 5-10 minutes. The default Cloud Run timeout (300 seconds) will prematurely kill the request, return a `503 Service Unavailable`, and tear down the initiating container. Set the timeout to at least 900 seconds to prevent this.
@@ -1010,6 +1177,16 @@ gcloud run deploy scion-discord \
   --no-allow-unauthenticated \
   --quiet
 ```
+
+:::note[The Discord service is a singleton, not HA]
+`--min-instances=1 --max-instances=1` is intentional. The Discord plugin
+holds a single, unsharded Gateway connection per bot token; a second instance
+would receive and process every event twice, so the service runs as exactly
+one instance and is not replicated like the Hub. It is not covered by the HA
+guarantee. While it is down or restarting (for example during the redeploy
+checklist in Section 7a), the Hub keeps serving but the Discord integration is
+unavailable.
+:::
 
 ---
 

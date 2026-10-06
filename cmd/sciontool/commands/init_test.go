@@ -9,12 +9,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,6 +41,8 @@ var hubEnvVars = []string{
 	"SCION_AUTH_TOKEN",
 	"SCION_AGENT_ID",
 	"SCION_AGENT_MODE",
+	"SCION_TRANSPORT_TOKEN",
+	"SCION_TRANSPORT_TOKEN_FILE",
 }
 
 // scrubHubEnv clears all Hub-related environment variables for the
@@ -151,6 +153,7 @@ func TestExtractChildCommand(t *testing.T) {
 }
 
 func TestInitCommand_Help(t *testing.T) {
+	resetRootCmdState(t)
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
 	rootCmd.SetArgs([]string{"init", "--help"})
@@ -1844,6 +1847,88 @@ func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootUIDWithNonRootGID(t *test
 	}
 }
 
+// TestGitCloneWorkspace_FailedCloneKeepsWorkspaceDir covers a workspace
+// that is the root of a mount, as on Kubernetes where /workspace is a
+// volume mount: the directory itself cannot be removed or replaced. A
+// failed clone must clean up only the directory's contents, leaving the
+// same directory (same inode) and anything that was already in it, so a
+// retry clones into it again.
+func TestGitCloneWorkspace_FailedCloneKeepsWorkspaceDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	originDir := t.TempDir()
+	runGitForTest(t, originDir, "init", "-b", "main")
+	runGitForTest(t, originDir, "config", "user.email", "test@example.com")
+	runGitForTest(t, originDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(originDir, "README.md"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, originDir, "add", "README.md")
+	runGitForTest(t, originDir, "commit", "-m", "init")
+
+	// The workspace directory exists before the clone, with a marker
+	// directory in it, as the mount and the runtime leave it.
+	workspacePath := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(filepath.Join(workspacePath, ".scion-volumes"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the directory open, so a removed directory's inode stays in use
+	// and cannot be handed to a new directory at the same path.
+	handle, err := os.Open(workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handle.Close() })
+	before, err := handle.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("SCION_GIT_CLONE_URL", "file://"+originDir)
+	t.Setenv("SCION_GIT_BRANCH", "main")
+	t.Setenv("SCION_GIT_DEPTH", "")
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("SCION_WORKSPACE_PATH", workspacePath)
+	t.Setenv("SCION_AGENT_BRANCH", "")
+
+	badAgentHome := filepath.Join(t.TempDir(), "does-not-exist", "nested")
+	if err := gitCloneWorkspace(0, 0, badAgentHome, false); err == nil {
+		t.Fatal("expected gitCloneWorkspace to fail")
+	}
+
+	after, err := os.Stat(workspacePath)
+	if err != nil {
+		t.Fatalf("workspace directory removed by the cleanup: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("workspace directory was replaced by the cleanup, want the same directory")
+	}
+	entries, err := os.ReadDir(workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != ".scion-volumes" {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Fatalf("want only the pre-existing .scion-volumes after cleanup, found: %v", names)
+	}
+
+	if err := gitCloneWorkspace(0, 0, t.TempDir(), false); err != nil {
+		t.Fatalf("retry after cleanup failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspacePath, "README.md")); err != nil {
+		t.Fatalf("expected README.md after the retry: %v", err)
+	}
+	retried, err := os.Stat(workspacePath)
+	if err != nil || !os.SameFile(before, retried) {
+		t.Fatalf("retry replaced the workspace directory (err %v)", err)
+	}
+}
+
 // TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop proves that,
 // with euid stubbed to 0, the body of postPreStartOwnershipFixup forwards its own
 // requirePrivilegeDrop, unchanged, to chownTreeRootOwned for every directory
@@ -2041,7 +2126,7 @@ func TestSetupHostUser_ZeroUIDGIDModeGated(t *testing.T) {
 func TestRunServicesStart_DefaultForwardsRequirePrivilegeDrop(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	log.SetLogPath(filepath.Join(home, "agent.log"))
+	setTestLogPath(t, filepath.Join(home, "agent.log"))
 	logDir := filepath.Join(home, ".scion", "services", "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -2074,19 +2159,25 @@ func TestRunServicesStart_DefaultForwardsRequirePrivilegeDrop(t *testing.T) {
 }
 
 // TestHarnessSupervisorConfig pins harnessSupervisorConfig's mapping from
-// its inputs to supervisor.Config: every field must come through unchanged.
+// its inputs to supervisor.Config: every field must come through unchanged,
+// and WorkingDir in particular must be copied from opts.WorkingDir when set
+// and be "" when it is not (the value every caller except substrate-serve's
+// InitRunner passes, and what docker/k8s depend on for byte-identical
+// behaviour).
 func TestHarnessSupervisorConfig(t *testing.T) {
 	const gracePeriod = 7 * time.Second
 	envOverlay := map[string]string{"FOO": "bar"}
 	secretOverrides := map[string]string{"SECRET": "shh"}
 
 	tests := []struct {
-		name                string
-		opts                InitRunOptions
-		wantRequirePrivDrop bool
+		name             string
+		opts             InitRunOptions
+		want             string // expected WorkingDir
+		wantPrivDropDrop bool
 	}{
-		{name: "RequirePrivilegeDrop unset", opts: InitRunOptions{}},
-		{name: "RequirePrivilegeDrop is copied through", opts: InitRunOptions{RequirePrivilegeDrop: true}, wantRequirePrivDrop: true},
+		{name: "WorkingDir set is copied through", opts: InitRunOptions{WorkingDir: "/workspace"}, want: "/workspace"},
+		{name: "WorkingDir unset is empty", opts: InitRunOptions{}, want: ""},
+		{name: "RequirePrivilegeDrop is copied through", opts: InitRunOptions{RequirePrivilegeDrop: true}, want: "", wantPrivDropDrop: true},
 	}
 
 	for _, tt := range tests {
@@ -2101,7 +2192,8 @@ func TestHarnessSupervisorConfig(t *testing.T) {
 				EnvOverlay:            envOverlay,
 				NativeTelemetryPolicy: "enabled",
 				SecretOverrides:       secretOverrides,
-				RequirePrivilegeDrop:  tt.wantRequirePrivDrop,
+				WorkingDir:            tt.want,
+				RequirePrivilegeDrop:  tt.wantPrivDropDrop,
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("harnessSupervisorConfig() = %+v, want %+v", got, want)
@@ -2152,14 +2244,14 @@ func TestResolveProjectHookPath(t *testing.T) {
 	}
 }
 
-// TestBlockClaudeDebugSymlink_NonEnforced_KeepsHistoricalPathBasedBehaviour
-// proves unenforced runtimes keep the historical, path-based behavior: a
-// pre-existing symlink at debugDir is followed (os.MkdirAll short-circuits,
-// os.Chmod chmods the target) exactly like the original inline
-// os.MkdirAll+os.Chmod did. This is deliberate — see blockClaudeDebugSymlink's
-// doc comment for why a legitimate unenforced setup may symlink .claude
-// itself (e.g. to a mounted volume), and refusing that would break it.
-func TestBlockClaudeDebugSymlink_NonEnforced_KeepsHistoricalPathBasedBehaviour(t *testing.T) {
+// TestBlockClaudeDebugSymlink_NonEnforced_KeepsPathBasedBehaviour proves
+// non-substrate runtimes keep plain, path-based behavior: a pre-existing
+// symlink at debugDir is followed (os.MkdirAll short-circuits, os.Chmod
+// chmods the target), the same as a plain inline os.MkdirAll+os.Chmod would
+// do. This is deliberate — see blockClaudeDebugSymlink's doc comment for why
+// a legitimate non-substrate setup may symlink .claude itself (e.g. to a
+// mounted volume), and refusing that would break it.
+func TestBlockClaudeDebugSymlink_NonEnforced_KeepsPathBasedBehaviour(t *testing.T) {
 	tmpHome := t.TempDir()
 	victim := t.TempDir()
 	if err := os.Chmod(victim, 0o700); err != nil {
@@ -2297,10 +2389,10 @@ func TestBlockClaudeDebugSymlink_Enforced_ChmodSurvivesSwapAfterEnsure(t *testin
 }
 
 // TestCleanGcloudConfigForMetadata_NonEnforced_KeepsHistoricalBehaviour
-// proves unenforced runtimes are byte-identical: entries under gcloudDir
+// proves non-substrate runtimes are byte-identical: entries under gcloudDir
 // (except the preserved ADC file) are removed via the historical
 // os.ReadDir+os.RemoveAll path, including through a symlinked gcloudDir
-// itself — a legitimate unenforced setup may bind-mount or symlink
+// itself — a legitimate non-substrate setup may bind-mount or symlink
 // ~/.config/gcloud, and refusing that would break it.
 func TestCleanGcloudConfigForMetadata_NonEnforced_KeepsHistoricalBehaviour(t *testing.T) {
 	real := t.TempDir()
@@ -2406,7 +2498,7 @@ func TestCleanGcloudConfigForMetadata_Enforced_CleansRealDir(t *testing.T) {
 func TestCleanGcloudConfigForMetadata_Enforced_MissingDirIsNoop(t *testing.T) {
 	tmpHome := t.TempDir()
 	logPath := filepath.Join(tmpHome, "capture.log")
-	log.SetLogPath(logPath)
+	setTestLogPath(t, logPath)
 	log.SetQuiet(true)
 	t.Cleanup(func() { log.SetQuiet(false) })
 
@@ -2431,7 +2523,7 @@ func TestCleanGcloudConfigForMetadata_Enforced_MissingDirIsNoop(t *testing.T) {
 func TestCleanGcloudConfigForMetadata_Enforced_SymlinkLogsErrorLine(t *testing.T) {
 	tmpHome := t.TempDir()
 	logPath := filepath.Join(tmpHome, "capture.log")
-	log.SetLogPath(logPath)
+	setTestLogPath(t, logPath)
 	log.SetQuiet(true)
 	t.Cleanup(func() { log.SetQuiet(false) })
 
@@ -2532,7 +2624,7 @@ func TestChownTreeRootOwned_MissingRootIsSilentNoop(t *testing.T) {
 // TestChownTreeRootOwned_NonEnforced_FollowsAncestorSymlink proves the
 // runtime gating: on non-enforced runtimes, an ancestor-path symlink is followed
 // (the historical filepath.WalkDir behaviour), not refused — a legitimate
-// unenforced setup may symlink an ancestor of the walked root (e.g. from
+// non-substrate setup may symlink an ancestor of the walked root (e.g. from
 // a bind-mounted host path), and refusing that would break it.
 func TestChownTreeRootOwned_NonEnforced_FollowsAncestorSymlink(t *testing.T) {
 	origFilter := chownTreeRootOwnedFilter
@@ -2567,7 +2659,7 @@ func TestChownTreeRootOwned_NonEnforced_FollowsAncestorSymlink(t *testing.T) {
 }
 
 // TestChownTreeRootOwned_Enforced_RefusesAncestorSymlink proves the other
-// half of the same gating: when enforced, the same ancestor-path symlink is
+// half of the same runtime gating: on substrate (enforced), the same ancestor-path symlink is
 // refused rather than followed, so the whole fixup for that root is skipped
 // (nothing chowned) instead of silently descending through workload-
 // controlled redirection.
@@ -2713,7 +2805,7 @@ func TestWriteEnvFile_ChownGating(t *testing.T) {
 	}
 }
 
-// TestReadServicesYAML_NonEnforced_FollowsSymlink proves unenforced
+// TestReadServicesYAML_NonEnforced_FollowsSymlink proves non-substrate
 // runtimes are byte-identical to the historical os.ReadFile: a symlinked
 // services config is followed and its content returned.
 func TestReadServicesYAML_NonEnforced_FollowsSymlink(t *testing.T) {
@@ -2812,7 +2904,7 @@ func TestReadServicesYAML_Enforced_MissingFileIsQuietError(t *testing.T) {
 	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
 
 	logPath := filepath.Join(tmpHome, "capture.log")
-	log.SetLogPath(logPath)
+	setTestLogPath(t, logPath)
 	log.SetQuiet(true)
 	t.Cleanup(func() { log.SetQuiet(false) })
 
@@ -3035,35 +3127,7 @@ func TestValidateServiceSpecs_DropsInvalidNamesKeepsValidOnes(t *testing.T) {
 	}
 }
 
-// captureStderr redirects os.Stderr for the duration of fn and returns
-// everything written to it. log.write always writes to whatever os.Stderr
-// currently is (read fresh on each call, never cached), so this needs no
-// change to the log package itself. Not safe to run with t.Parallel().
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	// Some other test elsewhere in this package's suite exercises a real
-	// cobra command invocation that calls log.SetQuiet(true) without ever
-	// resetting it, which would otherwise silently suppress every stderr
-	// write regardless of test order. Force it off for the duration of
-	// this capture so the result reflects this test's own behavior.
-	log.SetQuiet(false)
-	t.Cleanup(func() { log.SetQuiet(false) })
-
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	orig := os.Stderr
-	os.Stderr = w
-	t.Cleanup(func() { os.Stderr = orig })
-	fn()
-	os.Stderr = orig
-	_ = w.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	_ = r.Close()
-	return buf.String()
-}
+// captureStderr is defined in substrate_rootfs_test.go and reused here.
 
 // gitConfigGet reads key from the gitconfig file at path via git itself,
 // returning "" if the key is absent or the file can't be read — good enough
@@ -3113,8 +3177,6 @@ func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 	}
 }
 
-var startProcreapReaperOnce sync.Once
-
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD is the
 // regression test for the property that configureSharedWorkspaceGit's
 // internal runGitConfig closure must invoke git through procreap's managed
@@ -3138,8 +3200,22 @@ var startProcreapReaperOnce sync.Once
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
 // ./cmd/sciontool/commands/`; with procreap.CombinedOutputManaged in place
 // it passes reliably.
+//
+// The reaper runs until its process exits and reaps every child that is not
+// started through procreap, so this test runs in a child copy of the test
+// binary (see runInReaperChild). Started in this process, it would keep
+// reaping the git children of the tests that run after it.
 func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testing.T) {
-	startProcreapReaperOnce.Do(procreap.StartReaper)
+	if os.Getenv(reaperChildEnv) != "1" {
+		runInReaperChild(t)
+		return
+	}
+	// Keep the marker out of the environment of every process the child
+	// body starts (git, etc.).
+	if err := os.Unsetenv(reaperChildEnv); err != nil {
+		t.Fatalf("os.Unsetenv(%s): %v", reaperChildEnv, err)
+	}
+	procreap.StartReaper()
 
 	// log.Init() runs first because the logger's lazy initialization is not concurrency-safe.
 	log.Init()
@@ -3529,4 +3605,38 @@ func TestNewLifecycleManager_WiresEnforcedModeConsistently(t *testing.T) {
 // without duplicating NewLifecycleManager's own resolution logic here.
 func defaultHooksDirsForTest() []string {
 	return hooks.NewLifecycleManager().HooksDirs
+}
+
+// reaperChildEnv is set in the child test process that runInReaperChild
+// starts.
+const reaperChildEnv = "SCION_TEST_REAPER_CHILD"
+
+// runInReaperChild runs the calling test alone in a child copy of the test
+// binary, with reaperChildEnv set, and fails the test if it fails there. A
+// test that starts the procreap reaper uses it so the reaper ends with the
+// child process.
+func runInReaperChild(t *testing.T) {
+	t.Helper()
+	quotedName := regexp.QuoteMeta(t.Name())
+	args := []string{"-test.run=^" + quotedName + "$", "-test.count=1", "-test.v"}
+	// Propagate the parent's deadline so a hung child cannot outlive the
+	// parent: CommandContext does not kill the child if the parent panics
+	// on its own -timeout.
+	if d, ok := t.Deadline(); ok {
+		if remaining := time.Until(d); remaining > 0 {
+			args = append(args, "-test.timeout="+remaining.String())
+		}
+	}
+	cmd := exec.CommandContext(t.Context(), os.Args[0], args...)
+	cmd.Env = append(os.Environ(), reaperChildEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s in a child test process: %v\n%s", t.Name(), err, out)
+	}
+	// Guard against a vacuous pass: match the whole result line so a test
+	// like <name>_Longer or <name>/sub cannot satisfy it.
+	passLine := regexp.MustCompile(`(?m)^--- PASS: ` + quotedName + ` \(`)
+	if !passLine.Match(out) {
+		t.Fatalf("%s did not run in the child test process:\n%s", t.Name(), out)
+	}
 }

@@ -43,7 +43,6 @@ import {
   canLifecycle,
   canMessageAgent,
   isTerminalAvailable,
-  getAgentDisplayStatus,
   isAgentRunning,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
@@ -54,10 +53,15 @@ interface AgentNotificationsResponse {
   agentNotifications: Notification[];
 }
 import type { StatusType } from '../shared/status-badge.js';
+import { agentStatusBadge, stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import '../shared/status-badge.js';
+import { DeletionLeaseController } from '../shared/deletion-badge.js';
+import '../shared/deletion-banner.js';
+import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
+import type { AgentDeleteRequest } from '../../client/agent-delete.js';
 import '../shared/message-mode-badge.js';
 import '../shared/messageability-indicator.js';
 import {
@@ -65,7 +69,7 @@ import {
   getMessageModeDisplay,
   MESSAGE_MODE_DISPLAY,
 } from '../../shared/message-mode.js';
-import type { MessageMode, AgentMessageabilityDetail } from '../../shared/types.js';
+import type { DeletionInfo, MessageMode, AgentMessageabilityDetail } from '../../shared/types.js';
 import '../shared/agent-log-viewer.js';
 import type { ScionAgentLogViewer } from '../shared/agent-log-viewer.js';
 import '../shared/agent-message-viewer.js';
@@ -81,6 +85,10 @@ import '../shared/effective-access-boundary-notice.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { formatNumber } from '../../utils/format-number.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { navigateTo, stripBasePath } from '../../client/navigation.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -133,6 +141,14 @@ function formatDurationHMS(totalSeconds: number): string {
 
 @customElement('scion-page-agent-detail')
 export class ScionPageAgentDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
+  /** Lease timer for this agent's delete view (ptone/scion#2483 N4). */
+  private readonly deletionLease = new DeletionLeaseController(this, () =>
+    this.agent ? [this.agent] : []
+  );
+
   @property({ type: Object })
   pageData: PageData | null = null;
 
@@ -231,24 +247,41 @@ export class ScionPageAgentDetail extends LitElement {
     }
     .header-title {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 0.75rem;
       margin-bottom: 0.5rem;
     }
-    .header-title sl-icon {
+    .header-title > sl-icon {
+      flex-shrink: 0;
       color: var(--scion-primary, #3b82f6);
       font-size: 1.5rem;
+      /* Centre the icon on the first line of the name: (1.95rem h1 line box
+         - 1.5rem icon) / 2. */
+      margin-top: 0.225rem;
+    }
+    /* A long name wraps on its own line; the badges then follow on the next
+       line instead of floating beside a multi-line name. */
+    .header-title-text {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 0.75rem;
+      min-width: 0;
     }
     .header h1 {
       font-size: 1.5rem;
       font-weight: 700;
+      line-height: 1.3;
       color: var(--scion-text, #1e293b);
       margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .header-meta {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 1rem;
+      gap: 0.5rem 1rem;
       margin-top: 0.5rem;
     }
     .template-badge {
@@ -260,6 +293,9 @@ export class ScionPageAgentDetail extends LitElement {
       border-radius: var(--scion-radius, 0.5rem);
       font-size: 0.875rem;
       color: var(--scion-text-muted, #64748b);
+      /* One long template name breaks inside its own item. */
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .project-link,
     .broker-link {
@@ -269,6 +305,15 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--scion-text-muted, #64748b);
       text-decoration: none;
       font-size: 0.875rem;
+      /* One long project or broker name breaks inside its own item. */
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    /* The icon keeps its size when a long name wraps beside it. */
+    .template-badge sl-icon,
+    .project-link sl-icon,
+    .broker-link sl-icon {
+      flex-shrink: 0;
     }
     .project-link:hover,
     .broker-link:hover {
@@ -279,8 +324,28 @@ export class ScionPageAgentDetail extends LitElement {
       gap: 0.5rem;
       flex-shrink: 0;
     }
+    /* On a phone the actions drop below the title and wrap, rather than
+       pushing the last of them off the right edge. */
+    @media (max-width: 640px) {
+      .header {
+        flex-wrap: wrap;
+      }
+      .header-info {
+        min-width: 0;
+        flex-basis: 100%;
+      }
+      .header-actions {
+        flex-wrap: wrap;
+        flex-shrink: 1;
+        min-width: 0;
+      }
+    }
 
     /* ---- Error banner ---- */
+    scion-deletion-banner.deletion-banner {
+      margin-bottom: 1.5rem;
+    }
+
     .agent-error-banner {
       background: var(--sl-color-danger-50, #fef2f2);
       border: 1px solid var(--sl-color-danger-200, #fecaca);
@@ -369,6 +434,28 @@ export class ScionPageAgentDetail extends LitElement {
     .info-value.mono {
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.875rem;
+    }
+    /* Messaging: the mode select needs more room than an info-grid column
+       gives it, so this card wraps instead of letting the select overlap the
+       reachability column. */
+    .messaging-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.5rem;
+    }
+    .messaging-grid .messaging-mode {
+      flex: 1 1 280px;
+      min-width: 0;
+    }
+    .messaging-grid .messaging-reach {
+      flex: 1 1 200px;
+      min-width: 0;
+    }
+    /* Cap the select, not its column, so a read-only mode description can
+       use the full column width. */
+    .messaging-mode sl-select {
+      width: 100%;
+      max-width: 360px;
     }
 
     /* ---- Task summary ---- */
@@ -688,28 +775,21 @@ export class ScionPageAgentDetail extends LitElement {
     }
   }
 
-  /** Dispatch SPA navigation via the document-level nav-click listener. */
-  private navigateViaSpa(path: string): void {
-    this.dispatchEvent(
-      new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true })
-    );
-  }
-
   /**
    * True while this element is still attached AND the app's current route
    * is still this agent's detail page. Guards the deferred SPA-redirect in
    * {@link showDeletedStateThenRedirect}: `renderRoute` (main.ts) keeps the
    * previous page connected-but-hidden behind `/terminals`, so
    * `isConnected` alone cannot distinguish "visible" from "hidden behind
-   * another route". An `endsWith` check (rather than importing
-   * `stripBasePath` from main.ts, which is out of scope for this fix)
-   * tolerates a reverse-proxy base path. Trailing slashes are stripped
-   * first so `/agents/<id>/` still counts as this agent's route.
+   * another route". The base path is stripped the same way the router does
+   * (so this works behind a reverse proxy), then the app path must be
+   * exactly this agent's route. Trailing slashes are stripped first so
+   * `/agents/<id>/` still counts as this agent's route.
    */
   private isOnThisAgentRoute(): boolean {
     if (!this.isConnected || typeof window === 'undefined') return false;
-    const pathname = window.location.pathname.replace(/\/+$/, '');
-    return pathname.endsWith(`/agents/${this.agentId}`);
+    const appPath = stripBasePath(window.location.pathname).replace(/\/+$/, '');
+    return appPath === `/agents/${this.agentId}`;
   }
 
   /**
@@ -744,9 +824,52 @@ export class ScionPageAgentDetail extends LitElement {
     this.deleteRedirectTimer = setTimeout(() => {
       this.deleteRedirectTimer = null;
       if (this.isOnThisAgentRoute()) {
-        this.navigateViaSpa(this.redirectTarget);
+        navigateTo(this.redirectTarget);
       }
     }, DELETE_REDIRECT_DELAY_MS);
+  }
+
+  /**
+   * Delete through the shared helper (ptone/scion#2483 phase 2): the header
+   * Delete button (`event` for the Alt-key bypass), and the failure
+   * banner's Retry (no confirm) and Force. On 204 show the deleted state and
+   * redirect. On 202 stay with "Deleting…" (the helper applied the
+   * response's view); the SSE `deleted` event then runs
+   * `showDeletedStateThenRedirect` through `onAgentsUpdated`, as it does for
+   * a delete started elsewhere.
+   */
+  private async deleteAgent(opts: AgentDeleteRequest = {}): Promise<void> {
+    if (!this.agent) return;
+    const outcome = await runAgentDelete({
+      agentId: this.agentId,
+      agentName: this.agent.name,
+      ...opts,
+      onBusy: (busy): void => {
+        this.actionLoading = { ...this.actionLoading, delete: busy };
+      },
+    });
+    if (outcome.kind === 'deleted') {
+      this.showDeletedStateThenRedirect();
+    } else if (outcome.kind === 'failed') {
+      showToast(outcome.message);
+    }
+  }
+
+  /** Failure banner with Retry and Force, under the header. */
+  private renderDeletionBanner(): TemplateResult | typeof nothing {
+    const agent = this.agent;
+    const view = agent ? this.deletionLease.view(agent) : null;
+    if (!agent || view?.state !== 'failed') return nothing;
+    return html`<scion-deletion-banner
+      class="deletion-banner"
+      live
+      .deletion=${view}
+      agent-name=${agent.name}
+      ?can-delete=${can(agent._capabilities, 'delete')}
+      ?busy=${this.actionLoading['delete'] || false}
+      @deletion-retry=${(): void => void this.deleteAgent({ confirm: false })}
+      @deletion-force=${(): void => void this.deleteAgent({ force: true })}
+    ></scion-deletion-banner>`;
   }
 
   private onProjectsUpdated(): void {
@@ -898,19 +1021,8 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private formatDate(dateString: string): string {
-    try {
-      if (this.isZeroDate(dateString)) return '—';
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(date);
-    } catch {
-      return dateString;
-    }
+    if (this.isZeroDate(dateString)) return '—';
+    return formatInstantWithZone(dateString) || dateString;
   }
 
   private isZeroDate(dateString: string): boolean {
@@ -920,29 +1032,8 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private formatRelativeTime(dateString: string): string {
-    try {
-      if (this.isZeroDate(dateString)) return '—';
-      const date = new Date(dateString);
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (this.isZeroDate(dateString)) return '—';
+    return formatRelative(dateString);
   }
 
   private async handleAction(action: AgentLifecycleAction, event?: MouseEvent): Promise<void> {
@@ -961,49 +1052,7 @@ export class ScionPageAgentDetail extends LitElement {
     }
 
     if (action === 'delete') {
-      if (
-        !event?.altKey &&
-        !(await showConfirm(`Are you sure you want to delete agent "${this.agent.name}"?`))
-      ) {
-        return;
-      }
-      this.actionLoading = { ...this.actionLoading, delete: true };
-
-      try {
-        const response = await apiFetch(`/api/v1/agents/${this.agentId}`, {
-          method: 'DELETE',
-        });
-
-        if (!response.ok) {
-          // If the broker is unreachable (502/503), offer a force-delete fallback.
-          if (response.status === 502 || response.status === 503) {
-            const forceConfirmed = await showConfirm(
-              'Delete failed — the broker may be unreachable. Force delete this agent? This will remove the hub record without notifying the broker.',
-              { title: 'Force Delete', confirmText: 'Force Delete', variant: 'danger' }
-            );
-            if (forceConfirmed) {
-              const forceResponse = await apiFetch(`/api/v1/agents/${this.agentId}?force=true`, {
-                method: 'DELETE',
-              });
-              if (!forceResponse.ok) {
-                throw new Error(
-                  await extractApiError(forceResponse, 'Failed to force delete agent')
-                );
-              }
-              this.showDeletedStateThenRedirect();
-              return;
-            }
-          }
-          throw new Error(await extractApiError(response, 'Failed to delete agent'));
-        }
-
-        this.showDeletedStateThenRedirect();
-      } catch (err) {
-        console.error('Failed to delete agent:', err);
-        showToast(err instanceof Error ? err.message : 'Failed to delete agent');
-      } finally {
-        this.actionLoading = { ...this.actionLoading, delete: false };
-      }
+      await this.deleteAgent({ event });
       return;
     }
 
@@ -1031,7 +1080,7 @@ export class ScionPageAgentDetail extends LitElement {
       const response = await apiFetch(actionUrls[action], lifecycleActionRequestInit(action));
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `Failed to ${action} agent`));
+        throw new Error(await lifecycleActionErrorMessage(response, `Failed to ${action} agent`));
       }
 
       this.backgroundRefresh();
@@ -1159,7 +1208,7 @@ export class ScionPageAgentDetail extends LitElement {
         ${this.project ? `To ${this.project.name}` : 'Back to Agents'}
       </a>
 
-      ${this.renderHeader()}
+      ${this.renderHeader()} ${this.renderDeletionBanner()}
       ${this.agent.phase === 'error' && (this.agent.detail?.message || this.agent.message)
         ? html`
             <div class="agent-error-banner">
@@ -1200,6 +1249,7 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-quick-message-dialog
         agentId=${this.agentId}
         agentName=${this.agent.name || ''}
+        userId=${this.currentUserId}
         ?open=${this.quickMessageOpen}
         @sl-request-close=${() => {
           this.quickMessageOpen = false;
@@ -1284,7 +1334,9 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-chat-thread
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        .conversationKey=${this.currentUserId ? `dm:agent:${this.agentId}:user:${this.currentUserId}` : ''}
+        .conversationKey=${this.currentUserId
+          ? `dm:agent:${this.agentId}:user:${this.currentUserId}`
+          : ''}
         .projectId=${agent.projectId || ''}
         .currentUserId=${this.currentUserId}
         ?isDM=${true}
@@ -1309,22 +1361,37 @@ export class ScionPageAgentDetail extends LitElement {
   // Header
   // ---------------------------------------------------------------------------
 
+  /**
+   * The header badge shows only a live delete; a failed one (abandoned
+   * included) shows the failure banner under the header instead.
+   */
+  private deletingView(agent: Agent): DeletionInfo | null {
+    const view = this.deletionLease.view(agent);
+    return view?.state === 'deleting' ? view : null;
+  }
+
   private renderHeader() {
     const agent = this.agent!;
+    // While the hub is deleting, hide every lifecycle action and Delete.
+    const deleting = this.deletionLease.isDeleting(agent);
+    const lifecycleOk = canLifecycle(agent._capabilities) && !deleting;
     return html`
       <div class="header">
         <div class="header-info">
           <div class="header-title">
             <sl-icon name="cpu"></sl-icon>
-            <h1>${agent.name}</h1>
-            <scion-status-badge
-              status=${getAgentDisplayStatus(agent) as StatusType}
-              label=${getAgentDisplayStatus(agent)}
-            ></scion-status-badge>
-            <scion-message-mode-badge
-              mode=${agent.messageMode || 'project'}
-              size="medium"
-            ></scion-message-mode-badge>
+            <div class="header-title-text">
+              <h1>${agent.name}</h1>
+              ${agentStatusBadge(agent)}
+              <scion-deletion-badge
+                .deletion=${this.deletingView(agent)}
+                live
+              ></scion-deletion-badge>
+              <scion-message-mode-badge
+                mode=${agent.messageMode || 'project'}
+                size="medium"
+              ></scion-message-mode-badge>
+            </div>
           </div>
           <div class="header-meta">
             <span class="template-badge">
@@ -1406,7 +1473,7 @@ export class ScionPageAgentDetail extends LitElement {
             : nothing}
           ${isAgentRunning(agent)
             ? html`
-                ${canLifecycle(agent._capabilities)
+                ${lifecycleOk
                   ? html`
                       ${agent.harnessCapabilities?.resume?.support !== 'no'
                         ? html`
@@ -1438,7 +1505,7 @@ export class ScionPageAgentDetail extends LitElement {
                   : nothing}
               `
             : agent.phase === 'suspended'
-              ? canLifecycle(agent._capabilities)
+              ? lifecycleOk
                 ? html`
                     <sl-button
                       variant="success"
@@ -1452,7 +1519,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing
-              : canLifecycle(agent._capabilities)
+              : lifecycleOk
                 ? html`
                     ${agent.phase === 'error'
                       ? html`
@@ -1481,7 +1548,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing}
-          ${agent.phase === 'created'
+          ${agent.phase === 'created' || can(agent._capabilities, 'update')
             ? html`
                 <a href="/agents/${this.agentId}/configure" style="text-decoration: none;">
                   <sl-button variant="default" size="small">
@@ -1491,7 +1558,7 @@ export class ScionPageAgentDetail extends LitElement {
                 </a>
               `
             : nothing}
-          ${can(agent._capabilities, 'delete')
+          ${can(agent._capabilities, 'delete') && !deleting
             ? html`
                 <sl-button
                   variant="danger"
@@ -1553,11 +1620,15 @@ export class ScionPageAgentDetail extends LitElement {
           <div class="info-item">
             <span class="info-label">Phase</span>
             <span class="info-value">
-              <scion-status-badge
-                status=${agent.phase as StatusType}
-                label=${agent.phase}
+              ${agentStatusBadge(agent, {
+                status: agent.phase,
+                label: agent.phase,
+                size: 'small',
+              })}
+              <scion-deletion-badge
+                .deletion=${this.deletionLease.view(agent)}
                 size="small"
-              ></scion-status-badge>
+              ></scion-deletion-badge>
             </span>
           </div>
           <div class="info-item">
@@ -1566,7 +1637,7 @@ export class ScionPageAgentDetail extends LitElement {
               ${agent.activity
                 ? html`<scion-status-badge
                       status=${agent.activity as StatusType}
-                      label=${agent.activity}
+                      label=${stateLabel(agent.activity)}
                       size="small"
                     ></scion-status-badge
                     >${(agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ||
@@ -1724,23 +1795,35 @@ export class ScionPageAgentDetail extends LitElement {
     const ports = agent.exposedPorts;
     if (!ports || ports.length === 0) return nothing;
 
+    // Opening a port goes through the port proxy, which the hub authorizes
+    // with agent.port_access. Fail closed: without the capability, list the
+    // ports but offer no link that would only return 403 (ptone/scion#2540).
+    const canOpen = can(agent._capabilities, 'port_access');
+
     return html`
       <div class="card">
         <h3 class="card-title">Exposed Ports</h3>
+        ${canOpen
+          ? nothing
+          : html`<p class="port-no-access" style="color: var(--scion-text-muted, #64748b);">
+              You don't have port access on this agent.
+            </p>`}
         <div class="info-grid">
           ${ports.map(
             (p) => html`
               <div class="info-item">
                 <span class="info-label"> :${p.port}${p.label ? ` (${p.label})` : ''} </span>
                 <span class="info-value">
-                  <a
-                    href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
-                    target="_blank"
-                    rel="noopener"
-                    class="port-link"
-                  >
-                    Open in new tab
-                  </a>
+                  ${canOpen
+                    ? html`<a
+                        href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
+                        target="_blank"
+                        rel="noopener"
+                        class="port-link"
+                      >
+                        Open in new tab
+                      </a>`
+                    : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
                 </span>
               </div>
             `
@@ -1771,27 +1854,27 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="info-grid">
           <div class="info-item">
             <span class="info-label">TOTAL SESSIONS</span>
-            <span class="info-value">${m.totalSessions.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalSessions)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">INPUT TOKENS</span>
-            <span class="info-value">${m.totalTokensInput.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensInput)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">OUTPUT TOKENS</span>
-            <span class="info-value">${m.totalTokensOutput.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensOutput)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">CACHED TOKENS</span>
-            <span class="info-value">${m.totalTokensCached.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensCached)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">REASONING TOKENS</span>
-            <span class="info-value">${m.totalTokensReasoning.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensReasoning)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">AVG TOKENS / SESSION</span>
-            <span class="info-value">${m.avgTokensPerSession.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.avgTokensPerSession)}</span>
           </div>
         </div>
       </div>
@@ -1801,7 +1884,7 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="info-grid">
           <div class="info-item">
             <span class="info-label">TOTAL TOOL CALLS</span>
-            <span class="info-value">${m.totalToolCalls.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalToolCalls)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">AVG DURATION</span>
@@ -1903,8 +1986,8 @@ export class ScionPageAgentDetail extends LitElement {
     return html`
       <div class="card">
         <h3 class="card-title">Messaging</h3>
-        <div class="info-grid">
-          <div class="info-item">
+        <div class="messaging-grid">
+          <div class="info-item messaging-mode">
             <span class="info-label">Message Mode</span>
             <span class="info-value">
               ${canSetMode
@@ -1916,7 +1999,6 @@ export class ScionPageAgentDetail extends LitElement {
                         const newMode = (e.target as HTMLSelectElement).value as MessageMode;
                         void this.handleModeChange(newMode, e.target as HTMLElement);
                       }}
-                      style="min-width: 280px; max-width: 360px;"
                     >
                       ${(Object.keys(MESSAGE_MODE_DISPLAY) as MessageMode[]).map(
                         (mode) => html`
@@ -1932,8 +2014,12 @@ export class ScionPageAgentDetail extends LitElement {
                       )}
                     </sl-select>
                     ${(agent.messageMode || 'project') === 'hub'
-                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem; max-width: 360px;">
-                          Hub mode: sends within this project and to permitted agents in other projects. External messaging requires the Hub cross-project switch to be enabled.
+                      ? html`<div
+                          style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem; max-width: 360px;"
+                        >
+                          Hub mode: sends within this project and to permitted agents in other
+                          projects. External messaging requires the Hub cross-project switch to be
+                          enabled.
                         </div>`
                       : nothing}
                   `
@@ -1946,7 +2032,9 @@ export class ScionPageAgentDetail extends LitElement {
                       ${modeDisplay.description}
                     </span>
                     ${(agent.messageMode || 'project') === 'hub'
-                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem;">
+                      ? html`<div
+                          style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem;"
+                        >
                           External messaging requires the Hub cross-project switch to be enabled.
                         </div>`
                       : nothing}
@@ -1955,7 +2043,7 @@ export class ScionPageAgentDetail extends LitElement {
           </div>
           ${messageability && 'reachableAgentCount' in messageability
             ? html`
-                <div class="info-item">
+                <div class="info-item messaging-reach">
                   <span class="info-label">Reachability</span>
                   <span class="info-value">
                     Can reach ${messageability.reachableAgentCount} agents,

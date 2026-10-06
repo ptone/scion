@@ -15,7 +15,9 @@
 package util
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -58,20 +60,23 @@ func GetGitVersion() (string, string, error) {
 	if err != nil {
 		return "", gitPath, err
 	}
-	// Output is usually "git version 2.47.0"
+	// Output is usually "git version 2.48.0"
 	version := strings.TrimPrefix(strings.TrimSpace(string(output)), "git version ")
 	return version, gitPath, nil
 }
 
-// CheckGitVersion returns an error if the git version is less than 2.47.0.
+// CheckGitVersion returns an error if the git version is less than 2.48.0.
+//
+// 2.48 is required: `git worktree add --relative-paths` first shipped in
+// git 2.48; 2.47.x rejects the flag.
 func CheckGitVersion() error {
 	version, gitPath, err := GetGitVersion()
 	if err != nil {
 		return fmt.Errorf("failed to get git version: %w", err)
 	}
 
-	if err := CompareGitVersion(version, 2, 47); err != nil {
-		return fmt.Errorf("git version 2.47.0 or newer is required; scion requires worktree support with relative paths (found %s at %s)", version, gitPath)
+	if err := CompareGitVersion(version, 2, 48); err != nil {
+		return fmt.Errorf("git version 2.48.0 or newer is required; scion requires worktree support with relative paths (found %s at %s)", version, gitPath)
 	}
 
 	return nil
@@ -208,7 +213,57 @@ func CreateWorktree(path, branch string) error {
 	return nil
 }
 
+// ErrPathNotContained is returned by RemoveWorktree when path's resolved
+// (symlink-free) location does not lie under base's resolved location.
+//
+// Callers MUST NOT fall back to a raw recursive removal of path when they see
+// this error — the whole point of the check is that path's real, on-disk
+// location may not be what its lexical form suggests (an intermediate path
+// component, e.g. a worktrees directory or the leaf itself, may be a symlink
+// pointing outside base). Falling back to removing path anyway would defeat
+// the check entirely.
+var ErrPathNotContained = errors.New("path resolves outside the expected base directory")
+
+// pathResolvedUnderBase reports whether candidate, after resolving all
+// symlinks, is a strict descendant of base, also resolved. It fails closed
+// (returns false) on any resolution error, on base==candidate (removing the
+// base itself is never intended), and on non-existent paths — existence must
+// be checked by the caller first.
+// pathResolvedUnderBase also returns the resolved candidate path so a caller
+// that proceeds after a true result can act on that same resolved location
+// (see RemoveWorktree) rather than re-resolving it later — closing the
+// window between "checked" and "used" during which the lexical path could
+// start pointing somewhere else.
+func pathResolvedUnderBase(base, candidate string) (ok bool, resolvedCandidate string, err error) {
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return false, "", fmt.Errorf("resolve base %q: %w", base, err)
+	}
+	resolvedCandidate, err = filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return false, "", fmt.Errorf("resolve candidate %q: %w", candidate, err)
+	}
+	rel, err := filepath.Rel(resolvedBase, resolvedCandidate)
+	if err != nil {
+		return false, "", nil
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false, "", nil
+	}
+	return true, resolvedCandidate, nil
+}
+
 // RemoveWorktree removes a git worktree at the specified path.
+//
+// base is the expected repo/worktree-parent root that path must resolve
+// under; both must be non-empty absolute paths. Before touching anything on
+// disk, RemoveWorktree resolves symlinks on both base and path and refuses
+// (returning ErrPathNotContained) unless path's real location is a strict
+// descendant of base's real location. This guards against a path that is
+// lexically inside base but, through a symlinked intermediate directory or a
+// symlinked leaf, actually resolves outside it — a caller holding such a
+// path (e.g. one sourced from stored/discovered state rather than freshly
+// created here) must not have it silently honored.
 //
 // Instead of using "git worktree remove" (which does its own directory
 // deletion and can trigger macOS autofs timeouts on symlinks pointing to
@@ -217,7 +272,37 @@ func CreateWorktree(path, branch string) error {
 //  2. Removes the worktree directory using RemoveAllSafe (which uses unlinkat
 //     to avoid autofs triggers).
 //  3. Runs "git worktree prune" to clean up the now-stale worktree record.
-func RemoveWorktree(path string, deleteBranch bool) (bool, error) {
+func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
+	// Every failure from here through the containment check is a pre-removal
+	// validation failure, not a removal-mechanics failure — none of them have
+	// proven path safe to act on, so all of them wrap ErrPathNotContained
+	// (not just the explicit "not contained" case below). A caller that only
+	// treats the explicit case as no-fallback-eligible would otherwise fall
+	// back to a raw RemoveAllSafe(path) on, for example, an unresolvable
+	// symlink loop — exactly the unvalidated recursive removal this whole
+	// check exists to prevent.
+	if base == "" || path == "" {
+		return false, fmt.Errorf("RemoveWorktree: base and path must both be non-empty: %w", ErrPathNotContained)
+	}
+	if !filepath.IsAbs(base) || !filepath.IsAbs(path) {
+		return false, fmt.Errorf("RemoveWorktree: base and path must both be absolute paths: %w", ErrPathNotContained)
+	}
+
+	if _, statErr := os.Lstat(path); statErr != nil {
+		if errors.Is(statErr, fs.ErrNotExist) {
+			return false, nil // nothing to remove
+		}
+		return false, fmt.Errorf("RemoveWorktree: lstat %q: %w: %w", path, statErr, ErrPathNotContained)
+	}
+
+	contained, resolvedPath, err := pathResolvedUnderBase(base, path)
+	if err != nil {
+		return false, fmt.Errorf("RemoveWorktree: %w: %w", err, ErrPathNotContained)
+	}
+	if !contained {
+		return false, fmt.Errorf("RemoveWorktree: %q does not resolve under %q: %w", path, base, ErrPathNotContained)
+	}
+
 	var branchName string
 	var repoRoot string
 	branchDeleted := false
@@ -247,9 +332,14 @@ func RemoveWorktree(path string, deleteBranch bool) (bool, error) {
 	// Remove the worktree directory ourselves using RemoveAllSafe, which
 	// uses unlinkat for symlinks to avoid triggering macOS autofs timeouts.
 	// This replaces "git worktree remove" which uses its own (slow) deletion.
-	Debugf("RemoveWorktree: removing worktree directory %s via RemoveAllSafe", path)
+	// Act on resolvedPath (computed above), not the lexical path: using the
+	// lexical form here would re-open the check-then-use window the
+	// containment check just closed — path's containment was proven for its
+	// resolved location, not for whatever the lexical string might resolve to
+	// if something changed between the check and this call.
+	Debugf("RemoveWorktree: removing worktree directory %s via RemoveAllSafe", resolvedPath)
 	removeStart := time.Now()
-	if err := RemoveAllSafe(path); err != nil {
+	if err := RemoveAllSafe(resolvedPath); err != nil {
 		Debugf("RemoveWorktree: RemoveAllSafe failed in %v: %v", time.Since(removeStart), err)
 		return false, err
 	}
@@ -592,15 +682,36 @@ func NormalizeGitRemote(remote string) string {
 	remote = strings.TrimPrefix(remote, "ssh://")
 	remote = strings.TrimPrefix(remote, "git://")
 
-	// Handle SSH shorthand format (git@host:path → host/path)
+	// Handle SSH shorthand format (git@host:path → host/path). A bracketed
+	// IPv6 host (git@[::1]:path) is split after its closing ']'; one followed
+	// by '/' or the end (from ssh://git@[::1]/path) is left as is. A bracketed
+	// host that is not an IPv6 literal, or is followed by anything else
+	// (git@[x@y]:path, git@[::1]x@y:path), is left without the userinfo strip
+	// below, so any '@' in it remains (callers that persist the result refuse
+	// a normalized remote with '@').
+	malformedBracket := false
 	if strings.HasPrefix(remote, "git@") {
 		remote = strings.TrimPrefix(remote, "git@")
-		remote = strings.Replace(remote, ":", "/", 1)
+		if strings.HasPrefix(remote, "[") {
+			end := strings.Index(remote, "]")
+			switch {
+			case end < 0 || !isBracketedIPv6(remote[:end+1]):
+				malformedBracket = true
+			case strings.HasPrefix(remote[end+1:], ":"):
+				remote = remote[:end+1] + "/" + remote[end+2:]
+			case end+1 == len(remote) || remote[end+1] == '/':
+				// ssh://git@[::1]/path: nothing to split.
+			default:
+				malformedBracket = true
+			}
+		} else {
+			remote = strings.Replace(remote, ":", "/", 1)
+		}
 	}
 
 	// Strip user info (user@, user:pass@) for scheme-based URLs.
 	// This handles token-authenticated HTTPS URLs like x-access-token:TOKEN@github.com/...
-	if atIdx := strings.Index(remote, "@"); atIdx >= 0 {
+	if atIdx := strings.Index(remote, "@"); atIdx >= 0 && !malformedBracket {
 		slashIdx := strings.Index(remote, "/")
 		if slashIdx < 0 || atIdx < slashIdx {
 			remote = remote[atIdx+1:]
@@ -657,6 +768,112 @@ func IsGitURL(s string) bool {
 	}
 
 	return false
+}
+
+// StripGitURLCredentials removes credentials from a git remote URL so it can
+// be stored or displayed safely (for example in a readable project label).
+//
+//   - http(s):// and git:// URLs lose their userinfo entirely, e.g.
+//     https://user:TOKEN@github.com/org/repo.git -> https://github.com/org/repo.git
+//   - ssh:// URLs keep the login name (it selects the SSH account and is not
+//     a secret) but lose any password: ssh://git:pw@host/x -> ssh://git@host/x
+//   - SCP-style shorthand (git@host:org/repo) carries no password and is
+//     returned unchanged, as is anything without a "scheme://" prefix.
+//
+// The userinfo ends at the first '@' that is preceded by a valid login (no
+// '/' before the first ':') and followed by a host (no '@' or '/') — the RFC
+// 3986 authority with a lenient password. So a password containing an
+// unencoded '/' or '@' (https://u:p/w@host/org/repo) is still removed rather
+// than left in place, and a '@' after the start of the path (.../repo@v1,
+// .../repo@github.com/x) is never treated as userinfo.
+//
+// The URL is edited textually rather than round-tripped through net/url so
+// that the rest of it is preserved byte-for-byte.
+func StripGitURLCredentials(remote string) string {
+	schemeEnd := strings.Index(remote, "://")
+	if schemeEnd < 0 {
+		return remote
+	}
+	scheme := strings.ToLower(remote[:schemeEnd])
+	authorityStart := schemeEnd + len("://")
+	rest := remote[authorityStart:]
+	limit := strings.IndexAny(rest, "?#")
+	if limit < 0 {
+		limit = len(rest)
+	}
+	at := userinfoEnd(rest[:limit])
+	if at < 0 {
+		return remote
+	}
+	userinfo, hostAndPath := rest[:at], rest[at+1:]
+	if scheme == "ssh" {
+		if colon := strings.Index(userinfo, ":"); colon >= 0 {
+			userinfo = userinfo[:colon]
+		}
+		if userinfo != "" && !strings.ContainsAny(userinfo, "/@") {
+			return remote[:authorityStart] + userinfo + "@" + hostAndPath
+		}
+	}
+	return remote[:authorityStart] + hostAndPath
+}
+
+// userinfoEnd returns the index of the '@' ending the userinfo of s (a URL
+// with its "scheme://" prefix, query and fragment removed), or -1 if s has no
+// userinfo. It picks the first '@' such that the login before it (up to the
+// first ':') contains no '/', and the host after it (up to the next '/') is
+// non-empty and contains no '@'. Once a '/' appears in the login position the
+// path has started, so no later '@' can end the userinfo.
+//
+// A '/' after the first ':' is ambiguous: "host:8443/org/repo@v1" is a port
+// followed by a path with '@', while "user:pa/ss@host/repo" is a password
+// with an unencoded '/'. When the text before that '/' is a valid host:port
+// (a 1-65535 port without leading zeros), s is read as RFC 3986 does, with no
+// userinfo. Otherwise it cannot be a valid authority, so the '@' is taken to
+// end a password and the credential is stripped (fail closed). Callers that
+// persist the result must still reject '@' in the path, since a password
+// that looks like a port ("user:8443/x@host/repo") is left in place.
+func userinfoEnd(s string) int {
+	for from := 0; ; {
+		i := strings.Index(s[from:], "@")
+		if i < 0 {
+			return -1
+		}
+		at := from + i
+		userinfo := s[:at]
+		login, _, _ := strings.Cut(userinfo, ":")
+		if strings.Contains(login, "/") {
+			return -1
+		}
+		if authority, _, ok := strings.Cut(userinfo, "/"); ok && isHostAndPort(authority) {
+			return -1
+		}
+		host, _, _ := strings.Cut(s[at+1:], "/")
+		if host != "" && !strings.Contains(host, "@") {
+			return at
+		}
+		from = at + 1
+	}
+}
+
+// isHostAndPort reports whether s is a non-empty host followed by ':' and a
+// port of 1-65535 without leading zeros (e.g. "host:8443", "[::1]:8443").
+func isHostAndPort(s string) bool {
+	colon := strings.LastIndex(s, ":")
+	if colon <= 0 {
+		return false
+	}
+	port := s[colon+1:]
+	if port == "" || len(port) > 5 || port[0] == '0' {
+		return false
+	}
+	n := 0
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n <= 65535
 }
 
 // ToHTTPSCloneURL converts any git URL to HTTPS clone form with a .git suffix.

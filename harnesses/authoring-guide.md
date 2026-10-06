@@ -523,6 +523,16 @@ Key API surface:
 - **`resolve_model(ctx)`** — reads `SCION_MODEL`, normalizes shorthand (see
   the Model resolution section above), and maps the result through
   `ctx.harness_config["model_aliases"]`; returns `""` when nothing is set.
+- **`resolve_thinking(ctx)`** — reads `SCION_THINKING_LEVEL` (0-100), parses
+  and clamps it with `parse_thinking_level`, and maps it through
+  `ctx.harness_config["thinking"]` (the config.yaml `thinking:` block:
+  `levels: [{max, value}]` plus optional `default`) via `map_thinking_level`.
+  Returns the native value string, or `None` when the provisioner should emit
+  nothing. Writing the value to the harness's native knob stays in
+  provision.py. Requires `INTERFACE_VERSION >= 3`. Three writers ship as
+  examples: codex writes a TOML key (`model_reasoning_effort`), antigravity
+  adds a CLI flag in its wrapper script (`agy --effort`), and claude adds an
+  env var to the `write_outputs(env=...)` overlay (`CLAUDE_CODE_EFFORT_LEVEL`).
 - **Auth engine** — `AuthSpec(harness, [methods])` with
   `env_method(name, any_of=/all_of=, hint=, env_fallback=)` and
   `file_method(name, path=, secret_key=, hint=)`. `select_auth` honors an
@@ -649,8 +659,8 @@ Map into the normalized event vocabulary: `session-start`, `session-end`,
 `prompt-submit`, `tool-start`, `tool-end`, `model-start`, `model-end`,
 `agent-end`, `subagent-end`, `response-complete`, `notification`.
 Extractable fields include `prompt`, `tool_name`, `tool_input`,
-`tool_output`, `message`, `session_id`, `success`, `error`, `assistant_text`,
-`file_path`, and the token fields `input_tokens` (→ `input`), `output_tokens`
+`tool_output`, `message`, `session_id`, `success`, `error`, `file_path`,
+and the token fields `input_tokens` (→ `input`), `output_tokens`
 (→ `output`), `cached_tokens` (→ `cache_read`), `cache_write_tokens` (→
 `cache_write`) and `reasoning_tokens` (→ `reasoning`, informational only).
 `output_tokens` must be the *total* output including reasoning (canonical
@@ -781,7 +791,7 @@ permanent; check whether they've been fixed.
   line. Claude's simple mapping is the only project-scope path exercised.
 - **Version numbering is not unified**: `provisioner.interface_version` in
   config.yaml (1), the manifest `schema_version` (1), and
-  `scion_harness.INTERFACE_VERSION` (2) are three separate counters. Guard on
+  `scion_harness.INTERFACE_VERSION` (3) are three separate counters. Guard on
   the library's `INTERFACE_VERSION`; the other two are effectively constant
   today.
 - **`outputs/status.json`** is declared in the manifest outputs but nothing

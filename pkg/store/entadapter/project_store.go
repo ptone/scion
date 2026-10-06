@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -247,6 +248,36 @@ func (s *ProjectStore) LockProjectForMembership(ctx context.Context, projectID s
 	return nil
 }
 
+// LockProjectAgents locks every agent row of the project FOR UPDATE, in
+// ascending agent-ID order, on PostgreSQL. On SQLite it is a plain read
+// (writes are already database-serialized). See store.ProjectStore.
+func (s *ProjectStore) LockProjectAgents(ctx context.Context, projectID string) error {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return err
+	}
+	_, err = lockProjectAgentIDs(ctx, s.client, uid)
+	return err
+}
+
+// lockProjectAgentIDs returns the IDs of the project's agents (soft-deleted
+// ones included) in ascending ID order. On PostgreSQL the rows are locked
+// FOR UPDATE, so the locks are taken in ID order: the order every agent
+// hard-delete path (and the project delete) uses (DeleteAgent, DeleteProject,
+// ProjectDeletionService via LockProjectAgents, PurgeDeletedAgents,
+// finalize-hard), so they cannot deadlock (40P01) on overlapping agents.
+// Shared by LockProjectAgents and CompositeStore.DeleteProject so both lock
+// the same way.
+func lockProjectAgentIDs(ctx context.Context, client *ent.Client, projectID uuid.UUID) ([]uuid.UUID, error) {
+	q := client.Agent.Query().
+		Where(agent.ProjectIDEQ(projectID)).
+		Order(ent.Asc(agent.FieldID))
+	if client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	return q.IDs(ctx)
+}
+
 // GetProjectBySlug retrieves a project by its exact (case-sensitive) slug.
 func (s *ProjectStore) GetProjectBySlug(ctx context.Context, slug string) (*store.Project, error) {
 	p, err := s.client.Project.Query().Where(project.SlugEQ(slug)).Only(ctx)
@@ -316,8 +347,13 @@ func (s *ProjectStore) NextAvailableSlug(ctx context.Context, baseSlug string) (
 	}
 }
 
-// UpdateProject updates an existing project.
+// UpdateProject updates an existing project. It never writes owner_id:
+// SetProjectOwnerID is the only writer of that column (ptone/scion#2597).
+// p.OwnerID is ignored on input and refreshed from the stored row on success.
 func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) error {
+	if p == nil {
+		return fmt.Errorf("UpdateProject: nil project: %w", store.ErrInvalidInput)
+	}
 	uid, err := parseUUID(p.ID)
 	if err != nil {
 		return err
@@ -325,8 +361,7 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 
 	update := s.client.Project.UpdateOneID(uid).
 		SetName(p.Name).
-		SetSlug(p.Slug).
-		SetOwnerID(p.OwnerID)
+		SetSlug(p.Slug)
 
 	if p.GitRemote != "" {
 		update.SetGitRemote(p.GitRemote)
@@ -379,6 +414,9 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 		return mapError(err)
 	}
 	p.Updated = updated.Updated
+	// owner_id is not written here, so report the stored value rather than
+	// leaving the caller holding a possibly stale owner.
+	p.OwnerID = updated.OwnerID
 	return nil
 }
 
@@ -460,6 +498,19 @@ func (s *ProjectStore) DeleteProject(ctx context.Context, id string) error {
 
 // ListProjects returns projects matching the filter criteria.
 func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	return s.listProjects(ctx, filter, opts, true)
+}
+
+// ListProjectSummaries returns the projects ListProjects would return for
+// the same filter and options, without populateProjectComputed's
+// per-project queries.
+func (s *ProjectStore) ListProjectSummaries(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	return s.listProjects(ctx, filter, opts, false)
+}
+
+// listProjects implements ListProjects and ListProjectSummaries; computed
+// selects whether each row is enriched by populateProjectComputed.
+func (s *ProjectStore) listProjects(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions, computed bool) (*store.ListResult[store.Project], error) {
 	query := s.client.Project.Query()
 
 	// Membership / ownership filtering mirrors the SQLite precedence:
@@ -602,8 +653,10 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 	items := make([]store.Project, 0, len(rows))
 	for _, p := range rows {
 		sp := entProjectToStore(p)
-		if err := s.populateProjectComputed(ctx, sp, p.ID); err != nil {
-			return nil, err
+		if computed {
+			if err := s.populateProjectComputed(ctx, sp, p.ID); err != nil {
+				return nil, err
+			}
 		}
 		items = append(items, *sp)
 	}
@@ -740,6 +793,7 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
 	sb.DefaultProfile = b.DefaultProfile
+	unmarshalRawJSON(b.WorkspaceStorage, &sb.WorkspaceStorage)
 	sb.Labels = b.Labels
 	if sb.Labels == nil {
 		sb.Labels = make(map[string]string)
@@ -767,6 +821,7 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
 		SetRuntimes(marshalRawJSON(b.Profiles)).
 		SetDefaultProfile(b.DefaultProfile).
+		SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
 
@@ -868,6 +923,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetCapabilities(marshalRawJSON(b.Capabilities)).
 			SetRuntimes(marshalRawJSON(b.Profiles)).
 			SetDefaultProfile(b.DefaultProfile).
+			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 			SetLabels(b.Labels).
 			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
@@ -972,6 +1028,10 @@ func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error
 	// form (AC-P2-4, ptone/scion#2061 P2 review round 2, R3).
 	if _, err := tx.BrokerSetting.Delete().Where(brokersetting.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
 		return fmt.Errorf("delete runtime broker: delete broker settings: %w", err)
+	}
+	// broker_target_inventory has no FK to runtime_brokers either.
+	if _, err := tx.BrokerTargetInventory.Delete().Where(brokertargetinventory.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete target inventory: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete runtime broker: commit: %w", err)

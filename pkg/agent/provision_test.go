@@ -18,12 +18,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -1524,8 +1527,9 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 }
 
 // TestProvisionAgent_SharedWorkspaceMigratesLegacyState verifies that an
-// agent provisioned under the old layout (prompt.md / scion-agent.json
-// in-project) gets its state moved to the external path on next provision.
+// agent provisioned under the old layout (prompt.md, scion-agent.json and
+// the shared-dir storage record in-project) gets its state moved to the
+// external path on next provision.
 func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -1562,6 +1566,9 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(legacyDir, "scion-agent.json"), []byte(`{"harness":"claude"}`), 0644); err != nil {
 		t.Fatalf("write legacy scion-agent.json: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(legacyDir, sharedDirStorageRecordFile), []byte(`{"backend":"nfs"}`+"\n"), 0644); err != nil {
+		t.Fatalf("write legacy shared-dir storage record: %v", err)
+	}
 
 	sharedWorkspace := filepath.Join(tmpDir, "shared-ws")
 	_ = os.MkdirAll(sharedWorkspace, 0755)
@@ -1587,6 +1594,9 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(legacyDir, "scion-agent.json")); err == nil {
 		t.Errorf("legacy in-project scion-agent.json still exists after migration")
 	}
+	if _, err := os.Stat(filepath.Join(legacyDir, sharedDirStorageRecordFile)); err == nil {
+		t.Errorf("legacy in-project shared-dir storage record still exists after migration")
+	}
 
 	// External path must contain the migrated content.
 	extAgentDir := filepath.Join(tmpDir, ".scion", "project-configs", "project__550e8400", ".scion", "agents", "legacy-agent")
@@ -1596,6 +1606,14 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	}
 	if string(data) != "old task" {
 		t.Errorf("migrated prompt.md content = %q, want %q", string(data), "old task")
+	}
+	// The recorded shared-dir storage backend moves with the agent state.
+	recorded, err := readSharedDirStorageRecord(extAgentDir)
+	if err != nil {
+		t.Fatalf("reading the migrated shared-dir storage record: %v", err)
+	}
+	if recorded != "nfs" {
+		t.Errorf("migrated shared-dir storage backend = %q, want %q", recorded, "nfs")
 	}
 }
 
@@ -2371,6 +2389,80 @@ func TestProvisionAgent_RequiredGHSkillWithResolver_Provisions(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "deploy") {
 		t.Errorf("resolution record should contain skill name, got: %s", string(data))
+	}
+}
+
+// TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError
+// exercises provision.go's SkillResolutionError construction through the
+// actual ProvisionAgent entry point with a real GitHubSkillResolver, rather
+// than injecting the error directly into a runtimebroker mock as the broker
+// tests do (#2546 O3). The test server returns a 429 with Retry-After: 120,
+// and ctx carries a 2-minute deadline. The rate-limit cooldown ends the call
+// at that first response, without retrying. A watchdog cancels ctx if it
+// does not, so a regression fails in seconds. The test also pins RetryAfter
+// end to end: cooldown -> cooldownRetryAfter -> ResolveError ->
+// SkillResolutionError.
+func TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "gh-skill-ratelimit-tpl")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"skills": [
+			{"uri": "gh://owner/repo/my-skill@main"}
+		]
+	}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	server, mux := newTestGitHubServer(t)
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120") // starts a 120s cooldown
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	resolver := newTestGitHubResolver(server)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	watchdog := time.AfterFunc(3*time.Second, cancel)
+	defer watchdog.Stop()
+	ctx = ContextWithSkillResolver(ctx, resolver)
+	_, _, _, err := ProvisionAgent(ctx, "gh-ratelimit-agent", "gh-skill-ratelimit-tpl", "", "", projectScionDir, "", "", "", "")
+	if err == nil {
+		t.Fatal("expected provisioning to fail when the required gh:// skill is rate limited")
+	}
+
+	var skillErr *SkillResolutionError
+	if !errors.As(err, &skillErr) {
+		t.Fatalf("expected a *SkillResolutionError, got %T: %v", err, err)
+	}
+	if skillErr.Code != SkillErrCodeRateLimited {
+		t.Errorf("expected code %s, got %s", SkillErrCodeRateLimited, skillErr.Code)
+	}
+	if skillErr.URI != "gh://owner/repo/my-skill@main" {
+		t.Errorf("expected URI to name the ref, got %s", skillErr.URI)
+	}
+	// The cooldown runs on the real clock, so allow one second of slip
+	// between the 429 and cooldownRetryAfter reading the time left.
+	if skillErr.RetryAfter != "120" && skillErr.RetryAfter != "119" {
+		t.Errorf("expected RetryAfter 120 (or 119), got %q", skillErr.RetryAfter)
 	}
 }
 
@@ -3809,5 +3901,195 @@ func TestGetAgent_RelativeWorkspaceResume(t *testing.T) {
 		if evalOriginal != evalResume {
 			t.Errorf("expected resume workspace source %q, got %q", evalOriginal, evalResume)
 		}
+	}
+}
+
+// provisionAgentRepoRootScaffold creates a minimal global .scion dir under
+// tmpDir with a "claude" harness-config and a "claude" template
+// (default_harness_config pointing at it), changes the working directory and
+// HOME to tmpDir for the duration of the test, and creates an empty project
+// .scion dir under tmpDir/project. Returns the project's .scion directory
+// (the projectPath ProvisionAgent expects) and the template directory, so a
+// caller that needs to mutate the template's scion-agent.json (e.g. an
+// override test) can overwrite filepath.Join(tplDir, "scion-agent.json")
+// afterward.
+func provisionAgentRepoRootScaffold(t *testing.T, tmpDir string) (projectScionDir, tplDir string) {
+	t.Helper()
+
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	if err := os.MkdirAll(globalTemplatesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir = filepath.Join(globalTemplatesDir, "claude")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "claude"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir = filepath.Join(projectDir, ".scion")
+	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	return projectScionDir, tplDir
+}
+
+// TestProvisionAgent_PersistsValidatedRepoRoot confirms ProvisionAgent
+// itself persists a fresh, validated provisioned-worktree repo root, not
+// only run.go's Start. Start does not always run after ProvisionAgent: the
+// hub's provision-only flow (DispatchAgentProvision, via Manager.Provision)
+// can provision an agent without starting it in the same dispatch. Without a
+// persist here, a later start/restart — which carries no ctx signal of its
+// own, since the broker does not re-run tryProvisionWorktree on that
+// dispatch — would find nothing on disk and fall back to detectRepoRoot,
+// losing RepoRoot. Both call sites share one gate,
+// persistProvisionedWorktreeRepoRootIfValid: Start's own call still covers
+// the one case ProvisionAgent never runs at all — GetAgent skipping it
+// because the agent directory already exists (see
+// TestStartPersistsFreshProvisionedWorktreeRepoRootWhenProvisionAgentIsSkipped
+// in run_test.go). ProvisionAgent still sets ExplicitWorkspace, needed
+// either way for GetAgent's managed-worktree recovery skip on resume.
+func TestProvisionAgent_PersistsValidatedRepoRoot(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
+
+	// Stand in for a broker-provisioned worktree: a real git worktree, so
+	// this test isn't the reason a validation gate would reject it.
+	repoRoot := filepath.Join(tmpDir, "shared-base")
+	_ = os.MkdirAll(repoRoot, 0755)
+	setupGitRepo(t, repoRoot)
+	worktree := createRealWorktree(t, repoRoot, "agent-1")
+
+	ctx := api.ContextWithProvisionedWorktreeRepoRoot(context.Background(), repoRoot)
+
+	agentName := "provisioned-wt-agent"
+	_, ws, cfg, err := ProvisionAgent(ctx, agentName, "claude", "", "", projectScionDir, "", "", "", worktree)
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+	if ws != "" {
+		t.Errorf("expected empty managed workspace path, got %q", ws)
+	}
+	if !cfg.ExplicitWorkspace {
+		t.Error("expected ExplicitWorkspace to be true (needed for GetAgent's resume-recovery skip)")
+	}
+
+	// Exact comparison, not EvalSymlinks-normalized: the value is persisted
+	// verbatim from ctx, and run.go/common.go's mount-branch decision depends
+	// on that exact lexical string, so a persist that silently changed the
+	// spelling of the path would be a real regression this must catch.
+	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
+	if got := readProvisionedWorktreeRepoRoot(agentDir); got != repoRoot {
+		t.Errorf("persisted repo root = %q, want %q (ProvisionAgent must persist a validated ctx signal itself)", got, repoRoot)
+	}
+}
+
+// TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset confirms the
+// counterpart: a plain user --workspace (no ContextWithProvisionedWorktreeRepoRoot
+// on ctx) must not persist a provisioned-worktree repo root, so run.go's
+// Start falls through to detectRepoRoot and keeps RepoRoot "" for this case.
+func TestProvisionAgent_UserWorkspaceOverrideLeavesRepoRootUnset(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
+
+	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
+	_ = os.MkdirAll(userWorkspace, 0755)
+
+	agentName := "user-ws-agent"
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "claude", "", "", projectScionDir, "", "", "", userWorkspace)
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+	if !cfg.ExplicitWorkspace {
+		t.Error("expected ExplicitWorkspace to be true for a user --workspace override")
+	}
+	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
+	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
+		t.Errorf("expected no persisted repo root for a user --workspace override, got %q", got)
+	}
+}
+
+// TestProvisionAgent_TemplateSuppliedRepoRootIsInert is a regression test
+// proving a template's scion-agent.json setting
+// "provisioned_worktree_repo_root" (the old, now-removed ScionConfig field
+// name) or "provisionedWorktreeRepoRoot" (the also-removed AgentInfo field
+// name) has no effect. Neither ScionConfig nor AgentInfo has a field for
+// either key, so no unmarshal of a template document can ever populate
+// anything ProvisionAgent or run.go trusts — proven here by asserting no
+// repo root gets persisted for a plain --workspace agent.
+func TestProvisionAgent_TemplateSuppliedRepoRootIsInert(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectScionDir, tplDir := provisionAgentRepoRootScaffold(t, tmpDir)
+
+	// A template that tries to set the repo root to "/" via both the old and
+	// new field names.
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"provisioned_worktree_repo_root": "/",
+		"provisionedWorktreeRepoRoot": "/"
+	}`
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644); err != nil {
+		t.Fatalf("failed to overwrite template config: %v", err)
+	}
+
+	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
+	_ = os.MkdirAll(userWorkspace, 0755)
+
+	// Plain user --workspace, no broker ctx signal — reachable by any hub
+	// user or template author, so it must stay inert.
+	agentName := "template-override-agent"
+	_, _, _, err := ProvisionAgent(context.Background(), agentName, "claude", "", "", projectScionDir, "", "", "", userWorkspace)
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
+	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
+		t.Fatalf("template-supplied repo root persisted into state: %q (want empty)", got)
+	}
+}
+
+// TestProvisionAgent_InlineConfigSuppliedRepoRootIsInert is the inline-config
+// variant of the same case: an inline config (as sent by the hub for
+// CreateAgentRequest.Config or --config) setting the same two field names
+// must also have no effect.
+func TestProvisionAgent_InlineConfigSuppliedRepoRootIsInert(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectScionDir, _ := provisionAgentRepoRootScaffold(t, tmpDir)
+
+	userWorkspace := filepath.Join(tmpDir, "operators-own-dir")
+	_ = os.MkdirAll(userWorkspace, 0755)
+
+	// Simulate the hub forwarding a user-supplied inline config document
+	// (the exact shape CreateAgentRequest.Config/InlineConfig arrives in):
+	// unmarshal untrusted JSON into api.ScionConfig, exactly like
+	// config.ParseScionAgentConfig does, then pass the result through as the
+	// inline config ProvisionAgent merges over the template.
+	rawInline := []byte(`{
+		"provisioned_worktree_repo_root": "/etc",
+		"provisionedWorktreeRepoRoot": "/etc"
+	}`)
+	var inline api.ScionConfig
+	if err := json.Unmarshal(rawInline, &inline); err != nil {
+		t.Fatalf("unmarshal inline config: %v", err)
+	}
+
+	agentName := "inline-override-agent"
+	_, _, _, err := ProvisionAgent(context.Background(), agentName, "claude", "", "", projectScionDir, "", "", "", userWorkspace, &inline)
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
+	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
+		t.Fatalf("inline-config-supplied repo root persisted into state: %q (want empty)", got)
 	}
 }

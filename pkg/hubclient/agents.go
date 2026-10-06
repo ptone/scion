@@ -48,17 +48,18 @@ type AgentService interface {
 	// Delete removes an agent.
 	Delete(ctx context.Context, agentID string, opts *DeleteAgentOptions) error
 
-	// Start starts a stopped agent.
-	Start(ctx context.Context, agentID string) error
+	// Start starts a stopped agent. It sends no request body, so it never
+	// asks for a force-resume; see agentService.Start.
+	Start(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Stop stops a running agent.
-	Stop(ctx context.Context, agentID string) error
+	Stop(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Suspend pauses a running agent, preserving state for later resume.
-	Suspend(ctx context.Context, agentID string) error
+	Suspend(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Restart restarts an agent.
-	Restart(ctx context.Context, agentID string) error
+	Restart(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// ResetAuth injects a fresh token into a running agent without restarting.
 	ResetAuth(ctx context.Context, agentID string) error
@@ -216,10 +217,14 @@ type StopAllResult struct {
 
 // StopAllResponse is the response from the stop-all endpoint.
 type StopAllResponse struct {
-	Stopped int             `json:"stopped"`
-	Failed  int             `json:"failed"`
-	Total   int             `json:"total"`
-	Results []StopAllResult `json:"results"`
+	Stopped int `json:"stopped"`
+	Failed  int `json:"failed"`
+	// StopRecorded counts agents whose start was in flight: the stop intent
+	// is recorded but the start is not interrupted (result status
+	// "stop_recorded").
+	StopRecorded int             `json:"stopRecorded,omitempty"`
+	Total        int             `json:"total"`
+	Results      []StopAllResult `json:"results"`
 }
 
 // CreateAgentRequest is the request body for creating an agent.
@@ -256,6 +261,12 @@ type CreateAgentRequest struct {
 	// AgentRole specifies the requested authorization role.
 	AgentRole string `json:"agentRole,omitempty"`
 
+	// NoAuth disables auth credential propagation into the agent container
+	// (CLI --no-auth). Honoured by the Hub on the create path only; an
+	// existing agent that is resumed/restarted in place does not re-read it
+	// (ptone/scion#1855).
+	NoAuth bool `json:"noAuth,omitempty"`
+
 	// MessageMode specifies the initial message mode for the agent.
 	// Valid values: "none", "lineage", "branch", "project", "hub".
 	// When omitted, resolved from template, parent inheritance, or "project" default.
@@ -265,6 +276,13 @@ type CreateAgentRequest struct {
 	// Controls metadata server behavior and optional service account binding.
 	// When nil, the project default (if any) is applied by the Hub.
 	GCPIdentity *GCPIdentityConfig `json:"gcp_identity,omitempty"`
+
+	// AcceptAsyncLaunch opts in to a non-blocking launch. A Hub that has
+	// async launch enabled may then answer as soon as the broker accepts the
+	// create, with the agent in a pre-running phase and an active Launch;
+	// the client follows the launch with GET agent. A Hub that does not
+	// support or enable it ignores the field and answers synchronously.
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
 }
 
 // GCPIdentityConfig specifies GCP identity configuration for agent creation.
@@ -456,6 +474,15 @@ func (s *agentService) Update(ctx context.Context, agentID string, req *UpdateAg
 
 // Delete removes an agent.
 func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteAgentOptions) error {
+	resp, err := s.c.delete(ctx, s.deletePath(agentID, opts), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// deletePath builds the DELETE URL, with the query parameters for opts.
+func (s *agentService) deletePath(agentID string, opts *DeleteAgentOptions) string {
 	path := s.agentPath(agentID)
 	if opts != nil {
 		query := url.Values{}
@@ -474,48 +501,76 @@ func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteA
 			path += "?" + query.Encode()
 		}
 	}
-
-	resp, err := s.c.delete(ctx, path, nil)
-	if err != nil {
-		return err
-	}
-	return apiclient.CheckResponse(resp)
+	return path
 }
 
-// Start starts a stopped agent.
-func (s *agentService) Start(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/start", nil, nil)
-	if err != nil {
-		return err
-	}
-	return apiclient.CheckResponse(resp)
+// Start starts a stopped agent via the hub's /start lifecycle action. It
+// sends no request body.
+//
+// The hub's /start route also accepts an optional {"forceResume":true} body
+// (hub.AgentLifecycleStartRequest), which resumes the interrupted harness
+// session of an agent in phase=error. The client deliberately does not expose
+// it here: the scion CLI reaches force-resume through the create path
+// instead (`scion resume --force` sends CreateAgentRequest with Resume and
+// ForceResume set), which also covers an agent that is not yet provisioned
+// or no longer exists on the hub. No caller needs force-resume on Start
+// (ptone/scion#2864).
+func (s *agentService) Start(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "start")
 }
 
 // Stop stops a running agent.
-func (s *agentService) Stop(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/stop", nil, nil)
-	if err != nil {
-		return err
-	}
-	return apiclient.CheckResponse(resp)
+func (s *agentService) Stop(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "stop")
 }
 
 // Suspend pauses a running agent, preserving state for later resume.
-func (s *agentService) Suspend(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/suspend", nil, nil)
-	if err != nil {
-		return err
-	}
-	return apiclient.CheckResponse(resp)
+func (s *agentService) Suspend(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "suspend")
 }
 
 // Restart restarts an agent.
-func (s *agentService) Restart(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/restart", nil, nil)
+func (s *agentService) Restart(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "restart")
+}
+
+// LifecycleResponse is the result of a start, stop, suspend or restart.
+type LifecycleResponse struct {
+	// Agent is the agent as the hub left it, when the hub returned it.
+	Agent *Agent
+	// Warnings are messages the hub raised while applying the action.
+	Warnings []string
+	// Queued is true when the hub accepted the action but has not applied
+	// it yet (HTTP 202), for example a stop for an agent whose broker is
+	// offline, which runs when the broker reconnects.
+	Queued bool
+}
+
+// lifecycle posts a lifecycle action and decodes the hub's response. The
+// body is the agent plus an optional warnings list; a body that cannot be
+// decoded is ignored, since the action itself succeeded.
+func (s *agentService) lifecycle(ctx context.Context, agentID, action string) (*LifecycleResponse, error) {
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/"+action, nil, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
+	out := &LifecycleResponse{Queued: resp.StatusCode == http.StatusAccepted}
+	var body struct {
+		Agent
+		Warnings []string `json:"warnings,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err == nil {
+		out.Warnings = body.Warnings
+		if body.ID != "" {
+			agent := body.Agent
+			out.Agent = &agent
+		}
+	}
+	return out, nil
 }
 
 // ResetAuth injects a fresh token into a running agent without restarting.
@@ -718,6 +773,10 @@ type OutboundMessageResult struct {
 	RecipientID string `json:"recipient_id"`
 	// Deferred is set only when Status == "deferred".
 	Deferred string `json:"deferred,omitempty"`
+	// ConversationID is the conversation the message was recorded in. It is
+	// empty on hubs that predate this field, and on paths that do not report
+	// it (for example, a send to another agent).
+	ConversationID string `json:"conversation_id,omitempty"`
 	// MentionResults reports the outcome of server-side @mention fan-out,
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
@@ -962,19 +1021,29 @@ func (s *agentService) Reincarnate(ctx context.Context, agentID string, req *Rei
 	return apiclient.DecodeResponse[ReincarnateAgentResponse](resp)
 }
 
-// ReincarnateAgentRequest is the request body for Reincarnate. Phase 1
-// supports only Handoff and DryRun; every override field is accepted on the
-// wire (so a hub that has adopted overrides can still parse an old client's
-// request), but a Phase-1 hub rejects any of them with a 400.
+// ReincarnateAgentRequest is the request body for Reincarnate. Besides
+// Handoff and DryRun it carries the patch fields of ptone/scion#3302. A hub
+// that predates them ignores ServiceAccount, Role and ThinkingLevel and
+// rejects the others with a 400; ReincarnationPlan.Patched tells a client
+// whether the hub applied them.
 type ReincarnateAgentRequest struct {
 	Handoff string `json:"handoff,omitempty"`
 	DryRun  bool   `json:"dryRun,omitempty"`
+	// TargetBroker (a broker ID, name or slug) asks to move the agent to
+	// that broker, which must mount the same NFS export as its current one.
+	TargetBroker string `json:"targetBroker,omitempty"`
 
-	// Phase 3 overrides — not yet supported by a Phase 1 hub.
-	Image          string            `json:"image,omitempty"`
+	// Patch fields: each changes the next generation's setting, and later
+	// reincarnations keep it. Empty (nil for ThinkingLevel) is unchanged.
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+	Role           string `json:"role,omitempty"`
+	Image          string `json:"image,omitempty"`
+	Model          string `json:"model,omitempty"`
+	ThinkingLevel  *int   `json:"thinkingLevel,omitempty"`
+	HarnessAuth    string `json:"harnessAuth,omitempty"`
+
+	// Overrides not yet supported by the hub.
 	HarnessConfig  string            `json:"harnessConfig,omitempty"`
-	HarnessAuth    string            `json:"harnessAuth,omitempty"`
-	Model          string            `json:"model,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	TemplateHash   string            `json:"templateHash,omitempty"`
 	ResetOverrides bool              `json:"resetOverrides,omitempty"`
@@ -988,6 +1057,38 @@ type ReincarnateAgentResponse struct {
 	Generation int               `json:"generation"`
 	State      string            `json:"state"`
 	Plan       ReincarnationPlan `json:"plan"`
+	// SourceBrokerID and TargetBrokerID are set when the request named a
+	// target broker; they are equal for a plain reincarnation.
+	SourceBrokerID string `json:"sourceBrokerId,omitempty"`
+	TargetBrokerID string `json:"targetBrokerId,omitempty"`
+	// MoveVerdict is the move eligibility verdict of a dry-run move.
+	MoveVerdict *MoveVerdict `json:"moveVerdict,omitempty"`
+}
+
+// MoveVerdict is the hub's eligibility verdict for moving an agent to
+// another broker. A refused request carries it in the error details under
+// "verdict". Checks lists every check in evaluation order, each passed,
+// failed or not_evaluated.
+type MoveVerdict struct {
+	Eligible     bool          `json:"eligible"`
+	SourceBroker MoveBrokerRef `json:"sourceBroker"`
+	TargetBroker MoveBrokerRef `json:"targetBroker"`
+	Profile      string        `json:"profile,omitempty"`
+	RuntimeType  string        `json:"runtimeType,omitempty"`
+	Checks       []MoveCheck   `json:"checks"`
+}
+
+// MoveBrokerRef identifies a broker in a MoveVerdict.
+type MoveBrokerRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+// MoveCheck is one move eligibility check result.
+type MoveCheck struct {
+	Name    string `json:"name"`
+	Result  string `json:"result"`
+	Message string `json:"message,omitempty"`
 }
 
 // FieldChange describes an old→new change to a single scalar field on the
@@ -1015,4 +1116,13 @@ type ReincarnationPlan struct {
 	EnvKeys    KeyDiff     `json:"envKeys"`
 	Branch     string      `json:"branch"`
 	Warnings   []string    `json:"warnings,omitempty"`
+
+	// Patched lists the patch fields the hub applied, in display order.
+	Patched []string `json:"patched,omitempty"`
+	// Old and new values of patch fields not otherwise on the plan, set
+	// only when patched.
+	Role           *FieldChange `json:"role,omitempty"`
+	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
+	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
+	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
 }
