@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -51,7 +52,17 @@ func (s *Server) artifactsConfig() opsettings.ArtifactsConfig {
 // artifactLimits feeds the artifacts settings section to the service on
 // every write, so a limit change applies without a restart.
 func (s *Server) artifactLimits(context.Context) artifacts.Limits {
-	return artifacts.Limits{MaxFileBytes: s.artifactsConfig().MaxFileBytes}
+	cfg := s.artifactsConfig()
+	return artifacts.Limits{
+		MaxFileBytes: cfg.MaxFileBytes,
+		RemoteImages: artifacts.RemoteImageLimits{
+			Enabled:      cfg.RemoteImagesEnabled,
+			MaxCount:     cfg.RemoteImageMaxCount,
+			MaxBytes:     cfg.RemoteImageMaxBytes,
+			FetchTimeout: time.Duration(cfg.RemoteImageFetchTimeoutS) * time.Second,
+			TotalBudget:  time.Duration(cfg.RemoteImageTotalBudgetS) * time.Second,
+		},
+	}
 }
 
 // artifactsHandler returns the artifact service's handler, built over this

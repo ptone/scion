@@ -65,6 +65,9 @@ type PublishArtifactRequest struct {
 type ArtifactResponse struct {
 	Artifact Artifact         `json:"artifact"`
 	Version  *ArtifactVersion `json:"version,omitempty"`
+	// Warnings are publish-time notices, such as remote images that could
+	// not be fetched. The publish succeeded regardless.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Artifact describes an artifact.
@@ -104,6 +107,11 @@ type ArtifactFile struct {
 	Size      int64  `json:"size"`
 	SHA256    string `json:"sha256"`
 	MediaType string `json:"mediaType"`
+	// Origin is "remote" for an image the hub fetched at publish time;
+	// SourceURL and FetchStatus describe that fetch.
+	Origin      string `json:"origin,omitempty"`
+	SourceURL   string `json:"sourceUrl,omitempty"`
+	FetchStatus string `json:"fetchStatus,omitempty"`
 }
 
 type artifactService struct {

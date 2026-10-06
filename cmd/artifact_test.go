@@ -90,7 +90,7 @@ func TestPublishArtifact(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "design.md")
 	require.NoError(t, os.WriteFile(file, body, 0o644))
 	var out bytes.Buffer
-	require.NoError(t, publishArtifact(context.Background(), c.Artifacts(), &out, "https://hub.example/", file, "My design", "proj-1"))
+	require.NoError(t, publishArtifact(context.Background(), c.Artifacts(), &out, io.Discard, "https://hub.example/", file, "My design", "proj-1"))
 
 	assert.Equal(t, "scion://artifact/"+testArtifactID+"  (v1)\nhttps://hub.example/projects/proj-1/artifacts/"+testArtifactID+"\n", out.String())
 	require.Len(t, *seen, 1)
@@ -99,7 +99,7 @@ func TestPublishArtifact(t *testing.T) {
 	assert.Equal(t, "My design", q.Get("title"))
 	assert.Equal(t, "proj-1", q.Get("scope"))
 
-	err = publishArtifact(context.Background(), c.Artifacts(), &out, "", t.TempDir(), "", "")
+	err = publishArtifact(context.Background(), c.Artifacts(), &out, io.Discard, "", t.TempDir(), "", "")
 	assert.ErrorContains(t, err, "not a regular file")
 }
 
@@ -217,7 +217,7 @@ func TestArtifactErrorHints(t *testing.T) {
 
 	file := filepath.Join(t.TempDir(), "a.md")
 	require.NoError(t, os.WriteFile(file, []byte("a"), 0o644))
-	err = publishArtifact(context.Background(), c.Artifacts(), &stdout, "", file, "", "")
+	err = publishArtifact(context.Background(), c.Artifacts(), &stdout, io.Discard, "", file, "", "")
 	assert.ErrorContains(t, err, "project:artifact:write")
 
 	unauthorized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -228,6 +228,31 @@ func TestArtifactErrorHints(t *testing.T) {
 	t.Cleanup(unauthorized.Close)
 	c401, err := hubclient.New(unauthorized.URL)
 	require.NoError(t, err)
-	err = publishArtifact(context.Background(), c401.Artifacts(), &stdout, "", file, "", "")
+	err = publishArtifact(context.Background(), c401.Artifacts(), &stdout, io.Discard, "", file, "", "")
 	assert.ErrorContains(t, err, "project:artifact:read")
+}
+
+// TestPublishArtifactPrintsWarnings: publish warnings (remote images that
+// could not be fetched) go to the warning writer; the reference on stdout is
+// unchanged.
+func TestPublishArtifactPrintsWarnings(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(hubclient.ArtifactResponse{
+			Artifact: hubclient.Artifact{ID: testArtifactID, CurrentSeq: 1, ScopeRef: "proj-1"},
+			Version:  &hubclient.ArtifactVersion{Seq: 1},
+			Warnings: []string{"image could not be fetched: https://img.example/a.png"},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	c, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	file := filepath.Join(t.TempDir(), "doc.md")
+	require.NoError(t, os.WriteFile(file, []byte("![a](https://img.example/a.png)"), 0o644))
+
+	var out, warn bytes.Buffer
+	require.NoError(t, publishArtifact(context.Background(), c.Artifacts(), &out, &warn, "", file, "", ""))
+	assert.Equal(t, "scion://artifact/"+testArtifactID+"  (v1)\n", out.String())
+	assert.Equal(t, "warning: image could not be fetched: https://img.example/a.png\n", warn.String())
 }

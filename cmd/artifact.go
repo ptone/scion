@@ -104,7 +104,7 @@ func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hu
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
 	defer cancel()
-	return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), GetHubEndpoint(settings), file, artifactPublishTitle, artifactPublishScope(settings))
+	return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, artifactPublishTitle, artifactPublishScope(settings))
 }
 
 var artifactGetCmd = &cobra.Command{
@@ -163,8 +163,9 @@ func requireArtifactHubClient() (*config.Settings, hubclient.Client, error) {
 }
 
 // publishArtifact publishes the file at filePath and prints the reference
-// and the artifact's web page.
-func publishArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.Writer, hubEndpoint, filePath, title, scope string) error {
+// and the artifact's web page to out, and any publish warnings (such as
+// remote images that could not be fetched) to warn.
+func publishArtifact(ctx context.Context, svc hubclient.ArtifactService, out, warn io.Writer, hubEndpoint, filePath, title, scope string) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -203,6 +204,9 @@ func publishArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.
 	_, _ = fmt.Fprintf(out, "%s  (v%d)\n", artifacts.FormatRef(a.ID, 0), seq)
 	if page := artifactPageURL(hubEndpoint, a.ScopeRef, a.ID); page != "" {
 		_, _ = fmt.Fprintln(out, page)
+	}
+	for _, w := range resp.Warnings {
+		_, _ = fmt.Fprintf(warn, "warning: %s\n", w)
 	}
 	return nil
 }
