@@ -159,14 +159,16 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		lim := b.remoteImageLimits(ctx)
 		var urls []string
 		if lim.Enabled {
-			// Fetching happens inside this request: extend its write
-			// deadline past the fetch budget so the response is not cut
-			// off after the artifact is recorded.
-			extendWriteDeadline(w, lim.TotalBudget+publishDeadlineMargin)
 			urls, err = spool.markdownImageURLs(ctx, remoteExtractLimit(lim))
 			if err != nil {
 				slog.ErrorContext(ctx, "artifacts: read spooled markdown failed", "error", err)
 			}
+		}
+		if len(urls) > 0 {
+			// Fetching happens inside this request: set its write deadline
+			// past the fetch budget so the response is not cut off after
+			// the artifact is recorded.
+			extendWriteDeadline(w, lim.TotalBudget+publishDeadlineMargin)
 		}
 		remote, warn := s.fetchRemoteImages(ctx, b, lim, versionID, urls)
 		warnings = warn
@@ -240,10 +242,12 @@ type spooled struct {
 // budget runs out.
 const publishDeadlineMargin = 30 * time.Second
 
-// extendWriteDeadline moves the response's write deadline to d from now,
-// when the server supports it. The hub's server-wide write timeout runs
-// from the end of the request headers and would otherwise also have to
-// cover reading the upload and the fetches.
+// extendWriteDeadline sets the response's write deadline to d from now,
+// when the server supports it. It replaces the server-wide write deadline
+// for this request, which runs from the end of the request headers and
+// would otherwise also have to cover reading the upload and the fetches.
+// On a server configured with a longer write timeout, or none, this
+// request's deadline becomes the shorter d.
 func extendWriteDeadline(w http.ResponseWriter, d time.Duration) {
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(d)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		slog.Warn("artifacts: could not extend the publish write deadline", "error", err)
