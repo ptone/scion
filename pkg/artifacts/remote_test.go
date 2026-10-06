@@ -63,7 +63,7 @@ func (f *fakeFetcher) Fetch(ctx context.Context, u string) (*remotefetch.Result,
 		if reason == "" {
 			reason = remotefetch.ReasonStatus
 		}
-		return nil, &remotefetch.Error{Reason: reason, Detail: "detail that must not leak: 10.0.0.5"}
+		return nil, &remotefetch.Error{Reason: reason, Detail: "server-side detail: 10.0.0.5"}
 	}
 	sum := sha256.Sum256(body)
 	return &remotefetch.Result{Body: body, ContentType: remotefetch.SniffImage(body), SHA256: hex.EncodeToString(sum[:])}, nil
@@ -168,10 +168,10 @@ func TestExtractImageURLsLinearAndBounded(t *testing.T) {
 	}
 }
 
-// TestExtractImageURLsAdversarialInputs: inputs shaped to make a scanner
-// rescan (unclosed destinations, labels, tags and code spans, long single
-// lines) are processed in linear time.
-func TestExtractImageURLsAdversarialInputs(t *testing.T) {
+// TestExtractImageURLsUnusualInputs: unusual inputs (unclosed
+// destinations, labels, tags and code spans, long single lines) are
+// processed within a time bound.
+func TestExtractImageURLsUnusualInputs(t *testing.T) {
 	const size = 1 << 20
 	repeat := func(unit string) string { return strings.Repeat(unit, size/len(unit)+1)[:size] }
 	inputs := map[string]string{
@@ -374,9 +374,9 @@ func TestPublishMarkdownFetchesRemoteImages(t *testing.T) {
 		t.Fatalf("warnings %q, want %q", resp.Warnings, wantWarnings)
 	}
 	rec := f.do(&agentA, http.MethodGet, "/api/v1/artifacts/"+resp.Artifact.ID, nil, nil)
-	for _, leak := range []string{"denied", "10.0.0.5", "bad_status", "detail"} {
-		if strings.Contains(rec.Body.String(), leak) {
-			t.Fatalf("metadata leaks %q: %s", leak, rec.Body.String())
+	for _, internal := range []string{"denied", "10.0.0.5", "bad_status", "detail"} {
+		if strings.Contains(rec.Body.String(), internal) {
+			t.Fatalf("metadata shows server-side text %q: %s", internal, rec.Body.String())
 		}
 	}
 	// The stored error text is the generic one for both failures.
@@ -427,7 +427,8 @@ func TestServeRemoteImages(t *testing.T) {
 
 // TestRemoteImageAuthorization: remote files go through the same chain as
 // any other file, credential check first; an unreadable artifact answers a
-// plain 404 even for a failed image, so the status header is no oracle.
+// plain 404 even for a failed image, so the status header says nothing
+// about an artifact the caller cannot read.
 func TestRemoteImageAuthorization(t *testing.T) {
 	f := newFixture(t, false)
 	good, bad := "https://img.example/good.png", "https://img.example/bad.png"

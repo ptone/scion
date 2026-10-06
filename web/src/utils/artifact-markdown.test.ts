@@ -123,7 +123,7 @@ describe('renderArtifactMarkdown', () => {
       `![failed](${FAILED})`,
       '![local](img/local.png)',
       '![data](data:image/png;base64,AAAA)',
-      `<img src="${GOOD}" srcset="https://evil.example/x.png 2x" alt="inline">`,
+      `<img src="${GOOD}" srcset="https://other.example/x.png 2x" alt="inline">`,
       '<script>alert(1)</script>',
       '<video src="https://img.example/v.mp4"></video>',
     ].join('\n\n');
@@ -146,7 +146,7 @@ describe('renderArtifactMarkdown', () => {
     // attribute may reference one.
     for (const el of Array.from(doc.body.querySelectorAll('*'))) {
       for (const attr of Array.from(el.attributes)) {
-        expect(attr.value, `${el.tagName} ${attr.name}`).not.toMatch(/img\.example|evil\.example/);
+        expect(attr.value, `${el.tagName} ${attr.name}`).not.toMatch(/img\.example|other\.example/);
       }
     }
   });
