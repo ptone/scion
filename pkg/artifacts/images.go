@@ -58,6 +58,8 @@ const (
 	// maxDestinationBytes bounds an image destination; normalizeDestination
 	// rejects anything longer.
 	maxDestinationBytes = 2049
+	// maxDestinationParens bounds parenthesis nesting in a destination.
+	maxDestinationParens = 32
 	// ctxCheckEvery is how many scan steps run between context checks.
 	ctxCheckEvery = 1024
 )
@@ -114,15 +116,18 @@ func extractImageURLs(ctx context.Context, markdown string, limit int) []string 
 		if !ok {
 			return nil
 		}
-		hits = append(hits, lineImgTags(line, lineStart)...)
+		tags, ok := lineImgTags(ctx, line, lineStart, &steps)
+		if !ok {
+			return nil
+		}
+		hits = append(hits, tags...)
 		sort.SliceStable(hits, func(i, j int) bool { return hits[i].pos < hits[j].pos })
 		for _, h := range hits {
-			u := normalizeDestination(h.url)
-			if u == "" || seen[u] {
+			if seen[h.url] {
 				continue
 			}
-			seen[u] = true
-			out = append(out, u)
+			seen[h.url] = true
+			out = append(out, h.url)
 			if len(out) == limit {
 				return out
 			}
@@ -130,6 +135,15 @@ func extractImageURLs(ctx context.Context, markdown string, limit int) []string 
 		lineStart = lineEnd + 1
 	}
 	return out
+}
+
+// addHit appends dest to hits when it normalizes to an absolute http(s)
+// URL, so relative and unusable destinations never accumulate.
+func addHit(hits []imageHit, pos int, dest string) []imageHit {
+	if u := normalizeDestination(dest); u != "" {
+		hits = append(hits, imageHit{pos, u})
+	}
+	return hits
 }
 
 // lineImages finds the ![alt](dest), ![alt][ref], ![ref][] and ![ref]
@@ -162,9 +176,7 @@ func lineImages(ctx context.Context, line string, offset int, defs map[string]st
 		switch {
 		case after < len(line) && line[after] == '(':
 			dest, end := parseDestination(line, after+1, nextAngle)
-			if dest != "" {
-				hits = append(hits, imageHit{offset + start, dest})
-			}
+			hits = addHit(hits, offset+start, dest)
 			pos = end
 		case after < len(line) && line[after] == '[':
 			refStart := after + 1
@@ -177,14 +189,10 @@ func lineImages(ctx context.Context, line string, offset int, defs map[string]st
 			if ref == "" {
 				ref = label
 			}
-			if dest, ok := defs[normalizeLabel(ref)]; ok {
-				hits = append(hits, imageHit{offset + start, dest})
-			}
+			hits = addHit(hits, offset+start, defs[normalizeLabel(ref)])
 			pos = refEnd + 1
 		default:
-			if dest, ok := defs[normalizeLabel(label)]; ok {
-				hits = append(hits, imageHit{offset + start, dest})
-			}
+			hits = addHit(hits, offset+start, defs[normalizeLabel(label)])
 			pos = after
 		}
 	}
@@ -204,13 +212,33 @@ func parseDestination(line string, i int, nextAngle *nextIndex) (string, int) {
 			return line[i+1 : gt], gt + 1
 		}
 	}
-	end := i
+	// A bare destination may hold balanced parentheses (nesting capped as
+	// CommonMark implementations do) and backslash escapes.
+	end, depth := i, 0
 	for end < len(line) && end-i < maxDestinationBytes {
 		c := line[end]
-		if c == ' ' || c == '\t' || c == ')' {
+		if c == ' ' || c == '\t' {
 			break
 		}
+		if c == '\\' && end+1 < len(line) {
+			end += 2
+			continue
+		}
+		if c == '(' {
+			if depth == maxDestinationParens {
+				break
+			}
+			depth++
+		} else if c == ')' {
+			if depth == 0 {
+				break
+			}
+			depth--
+		}
 		end++
+	}
+	if end-i > maxDestinationBytes {
+		end = i + maxDestinationBytes
 	}
 	if end == i {
 		return "", i + 1
@@ -221,10 +249,14 @@ func parseDestination(line string, i int, nextAngle *nextIndex) (string, int) {
 // lineImgTags finds the complete <img ...> tags on one line and returns
 // their src attributes. A tag runs to the next '>'; an unclosed one ends
 // at the next '<', where the scan resumes.
-func lineImgTags(line string, offset int) []imageHit {
+func lineImgTags(ctx context.Context, line string, offset int, steps *int) ([]imageHit, bool) {
 	var hits []imageHit
 	nextStop := newNextIndex(line, "<>")
 	for pos := 0; pos < len(line); {
+		*steps++
+		if *steps%ctxCheckEvery == 0 && ctx.Err() != nil {
+			return nil, false
+		}
 		lt := strings.IndexByte(line[pos:], '<')
 		if lt < 0 {
 			break
@@ -242,12 +274,10 @@ func lineImgTags(line string, offset int) []imageHit {
 			pos = stop
 			continue
 		}
-		if src := imgSrc(line[lt : stop+1]); src != "" {
-			hits = append(hits, imageHit{offset + lt, src})
-		}
+		hits = addHit(hits, offset+lt, imgSrc(line[lt:stop+1]))
 		pos = stop + 1
 	}
-	return hits
+	return hits, true
 }
 
 // hasTagName reports whether s begins with tag name (case-insensitive)
@@ -339,21 +369,99 @@ func referenceDefinitions(ctx context.Context, text string) (map[string]string, 
 	return defs, true
 }
 
-// imgSrc returns the src attribute of one <img> tag.
+// imgSrc returns the src attribute of one <img> tag, with character
+// references decoded.
 func imgSrc(tag string) string {
-	z := html.NewTokenizer(strings.NewReader(tag))
-	if tt := z.Next(); tt != html.StartTagToken && tt != html.SelfClosingTagToken {
+	t, ok := parseTag(tag)
+	if !ok || t.closing || !strings.EqualFold(t.name, "img") {
 		return ""
 	}
-	for {
-		k, v, more := z.TagAttr()
-		if string(k) == "src" {
-			return string(v)
+	return t.src
+}
+
+// tagInfo is the result of parseTag.
+type tagInfo struct {
+	name    string
+	closing bool
+	src     string
+	end     int // position just past the closing '>'
+}
+
+// parseTag parses the HTML tag at the start of s: '<', an optional '/', a
+// name, then attributes (name, optional '=' and a quoted or unquoted
+// value) up to '>'. It returns the tag's name, its src attribute (decoded)
+// and where it ends. It reads s once and allocates only to decode a src
+// value that holds character references.
+func parseTag(s string) (tagInfo, bool) {
+	var t tagInfo
+	if len(s) < 2 || s[0] != '<' {
+		return t, false
+	}
+	i := 1
+	if s[i] == '/' {
+		t.closing = true
+		i++
+	}
+	n := i
+	for n < len(s) && (isASCIILetter(s[n]) || (n > i && (s[n] >= '0' && s[n] <= '9' || s[n] == '-'))) {
+		n++
+	}
+	if n == i {
+		return t, false
+	}
+	t.name = s[i:n]
+	i = n
+	for i < len(s) {
+		for i < len(s) && (isHTMLSpace(s[i]) || s[i] == '/') {
+			i++
 		}
-		if !more {
-			return ""
+		if i >= len(s) {
+			return t, false
+		}
+		if s[i] == '>' {
+			t.end = i + 1
+			return t, true
+		}
+		nameStart := i
+		for i < len(s) && !isHTMLSpace(s[i]) && s[i] != '=' && s[i] != '>' && s[i] != '/' {
+			i++
+		}
+		attr := s[nameStart:i]
+		for i < len(s) && isHTMLSpace(s[i]) {
+			i++
+		}
+		if i >= len(s) || s[i] != '=' {
+			continue
+		}
+		i++
+		for i < len(s) && isHTMLSpace(s[i]) {
+			i++
+		}
+		var value string
+		if i < len(s) && (s[i] == '"' || s[i] == '\'') {
+			q := s[i]
+			j := strings.IndexByte(s[i+1:], q)
+			if j < 0 {
+				return t, false
+			}
+			value = s[i+1 : i+1+j]
+			i += j + 2
+		} else {
+			vStart := i
+			for i < len(s) && !isHTMLSpace(s[i]) && s[i] != '>' {
+				i++
+			}
+			value = s[vStart:i]
+		}
+		if t.src == "" && strings.EqualFold(attr, "src") {
+			t.src = html.UnescapeString(value)
 		}
 	}
+	return t, false
+}
+
+func isHTMLSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
 }
 
 // leadingSpaces returns the index after up to max leading spaces, or -1 if
@@ -378,9 +486,19 @@ func normalizeLabel(l string) string {
 func normalizeDestination(raw string) string {
 	s := strings.TrimSpace(raw)
 	s = strings.TrimSuffix(strings.TrimPrefix(s, "<"), ">")
-	s = mdEscape.ReplaceAllString(s, "$1")
+	if s == "" || len(s) > maxDestinationBytes-1 {
+		return ""
+	}
+	// Only absolute http(s) URLs are kept; checking the scheme first keeps
+	// relative destinations free of any further work.
+	if !hasPrefixFold(s, "http://") && !hasPrefixFold(s, "https://") {
+		return ""
+	}
+	if strings.IndexByte(s, '\\') >= 0 {
+		s = mdEscape.ReplaceAllString(s, "$1")
+	}
 	s = strings.TrimSpace(html.UnescapeString(s))
-	if s == "" || len(s) > 2048 {
+	if len(s) > maxDestinationBytes-1 {
 		return ""
 	}
 	u, err := url.Parse(s)
@@ -392,6 +510,10 @@ func normalizeDestination(raw string) string {
 		return s
 	}
 	return ""
+}
+
+func hasPrefixFold(s, prefix string) bool {
+	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
 }
 
 // htmlBlock is an open HTML block: its CommonMark kind (1-7), the end
@@ -434,10 +556,11 @@ func visibleText(ctx context.Context, md string) (string, bool) {
 		fenceLen      int
 		block         *htmlBlock
 		prevParagraph bool
+		inIndented    bool // inside an indented code block
+		inList        bool // inside a list, where indentation is item content
+		prevBlank     = true
 	)
-	blank := func(line string) {
-		b.WriteString(strings.Repeat(" ", len(line)))
-	}
+	blank := func(line string) { writeSpaces(&b, len(line)) }
 	flush := func() {
 		if block.kind == 7 && block.loneImg && len(block.lines) == 1 {
 			b.WriteString(block.lines[0])
@@ -486,7 +609,21 @@ func visibleText(ctx context.Context, md string) (string, bool) {
 				fenceChar = 0
 			}
 			blank(line)
+		case inIndented && (isBlank || isIndentedCode(line)):
+			blank(line)
 		default:
+			inIndented = false
+			if !isBlank && !isIndentedCode(line) {
+				// A list goes on through its items and lines that continue
+				// them directly; after a blank line, any other unindented
+				// line ends it.
+				inList = isListItem(line) || (inList && !prevBlank)
+			}
+			if !isBlank && !prevParagraph && !inList && isIndentedCode(line) {
+				inIndented = true
+				blank(line)
+				break
+			}
 			if c, n := fenceRun(line); n >= 3 {
 				fenceChar, fenceLen = c, n
 				blank(line)
@@ -505,6 +642,7 @@ func visibleText(ctx context.Context, md string) (string, bool) {
 			b.WriteString(blankCodeSpans(line))
 			prevParagraph = !isBlank && !isATXHeading(line)
 		}
+		prevBlank = isBlank
 		if last {
 			break
 		}
@@ -564,8 +702,18 @@ func startHTMLBlock(line string, prevParagraph bool) *htmlBlock {
 	for n < len(name) && (isASCIILetter(name[n]) || (n > 0 && (name[n] >= '0' && name[n] <= '9' || name[n] == '-'))) {
 		n++
 	}
-	if n > 0 && type6Tags[strings.ToLower(name[:n])] && hasTagName(name, name[:n]) {
-		return &htmlBlock{kind: 6}
+	if n > 0 && n <= 16 && hasTagName(name, name[:n]) {
+		var buf [16]byte
+		for k := 0; k < n; k++ {
+			c := name[k]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			buf[k] = c
+		}
+		if type6Tags[string(buf[:n])] {
+			return &htmlBlock{kind: 6}
+		}
 	}
 	if prevParagraph {
 		return nil
@@ -579,32 +727,37 @@ func startHTMLBlock(line string, prevParagraph bool) *htmlBlock {
 // loneTag reports whether s is exactly one complete open or closing tag,
 // and whether that tag is an opening <img>.
 func loneTag(s string) (lone, isImg bool) {
-	z := html.NewTokenizer(strings.NewReader(s))
-	tt := z.Next()
-	if tt != html.StartTagToken && tt != html.SelfClosingTagToken && tt != html.EndTagToken {
+	if !strings.HasSuffix(s, ">") {
 		return false, false
 	}
-	if len(z.Raw()) != len(s) {
+	t, ok := parseTag(s)
+	if !ok || t.end != len(s) {
 		return false, false
 	}
-	name, _ := z.TagName()
-	for _, t := range type1Tags {
-		if string(name) == t {
+	for _, name := range type1Tags {
+		if strings.EqualFold(t.name, name) {
 			return false, false
 		}
 	}
-	return true, tt != html.EndTagToken && string(name) == "img"
+	return true, !t.closing && strings.EqualFold(t.name, "img")
 }
 
 // blankCodeSpans blanks the code spans of one line: a run of backticks up
 // to the next run of the same length. Runs are paired with a precomputed
-// "next run of this length" table, so the line is processed in linear time.
+// "next run of this length" table, so the line is processed in linear time;
+// the tables are sized exactly, after counting the runs.
 func blankCodeSpans(line string) string {
 	if strings.IndexByte(line, '`') < 0 {
 		return line
 	}
-	type run struct{ start, n int }
-	var runs []run
+	count := 0
+	for i := 0; i < len(line); i++ {
+		if line[i] == '`' && (i == 0 || line[i-1] != '`') {
+			count++
+		}
+	}
+	type run struct{ start, n int32 }
+	runs := make([]run, 0, count)
 	for i := 0; i < len(line); {
 		if line[i] != '`' {
 			i++
@@ -614,18 +767,18 @@ func blankCodeSpans(line string) string {
 		for j < len(line) && line[j] == '`' {
 			j++
 		}
-		runs = append(runs, run{i, j - i})
+		runs = append(runs, run{int32(i), int32(j - i)})
 		i = j
 	}
-	next := make([]int, len(runs))
-	lastOfLen := map[int]int{}
+	next := make([]int32, len(runs))
+	lastOfLen := map[int32]int32{}
 	for k := len(runs) - 1; k >= 0; k-- {
 		if j, ok := lastOfLen[runs[k].n]; ok {
 			next[k] = j
 		} else {
 			next[k] = -1
 		}
-		lastOfLen[runs[k].n] = k
+		lastOfLen[runs[k].n] = int32(k)
 	}
 	out := []byte(line)
 	for k := 0; k < len(runs); {
@@ -637,9 +790,32 @@ func blankCodeSpans(line string) string {
 		for p := runs[k].start; p < runs[j].start+runs[j].n; p++ {
 			out[p] = ' '
 		}
-		k = j + 1
+		k = int(j) + 1
 	}
 	return string(out)
+}
+
+// isIndentedCode reports whether line is indented enough (four spaces or a
+// tab) to be indented code when it does not continue a paragraph.
+func isIndentedCode(line string) bool {
+	return strings.HasPrefix(line, "    ") || strings.HasPrefix(line, "\t")
+}
+
+// isListItem reports whether line starts a list item ("- ", "* ", "+ " or
+// "1. " style, up to three spaces in).
+func isListItem(line string) bool {
+	i := leadingSpaces(line, 3)
+	if i < 0 || i >= len(line) {
+		return false
+	}
+	if c := line[i]; c == '-' || c == '*' || c == '+' {
+		return i+1 == len(line) || line[i+1] == ' ' || line[i+1] == '\t'
+	}
+	j := i
+	for j < len(line) && j-i < 9 && line[j] >= '0' && line[j] <= '9' {
+		j++
+	}
+	return j > i && j < len(line) && (line[j] == '.' || line[j] == ')') && (j+1 == len(line) || line[j+1] == ' ' || line[j+1] == '\t')
 }
 
 func isATXHeading(line string) bool {
@@ -656,7 +832,32 @@ func isATXHeading(line string) bool {
 
 func isASCIILetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 
-// containsFold reports whether s contains substr, ignoring ASCII case.
+// containsFold reports whether s contains substr, ignoring ASCII case. It
+// checks each position where substr's first byte (in either case) occurs.
 func containsFold(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+	if substr == "" {
+		return true
+	}
+	first := substr[0]
+	alt := first
+	if isASCIILetter(first) {
+		alt = first ^ 0x20
+	}
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if (s[i] == first || s[i] == alt) && strings.EqualFold(s[i:i+len(substr)], substr) {
+			return true
+		}
+	}
+	return false
+}
+
+const spaces64 = "                                                                "
+
+// writeSpaces writes n spaces to b without allocating.
+func writeSpaces(b *strings.Builder, n int) {
+	for n > len(spaces64) {
+		b.WriteString(spaces64)
+		n -= len(spaces64)
+	}
+	b.WriteString(spaces64[:n])
 }

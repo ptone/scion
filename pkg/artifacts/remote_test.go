@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -102,6 +103,14 @@ func TestExtractImageURLs(t *testing.T) {
 		"<span>x</span> <img src=\"https://img.example/in-para.png\">",
 		"",
 		"<!-- <img src=\"https://img.example/comment.png\"> -->",
+		"",
+		"![w](https://upload.example/File_(1).png)",
+		"",
+		"    ![code](https://img.example/indented.png)",
+		"",
+		"- item",
+		"",
+		"    ![continued](https://img.example/list-continuation.png)",
 		"![esc](https://img.example/a\\_b.png)",
 		"[link not image](https://img.example/link.png)",
 	}, "\n")
@@ -115,6 +124,8 @@ func TestExtractImageURLs(t *testing.T) {
 		"https://img.example/html.png?x=1&y=2",
 		"https://img.example/alone.png",
 		"https://img.example/in-para.png",
+		"https://upload.example/File_(1).png",
+		"https://img.example/list-continuation.png",
 		"https://img.example/a_b.png",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -186,6 +197,66 @@ func TestExtractImageURLsAdversarialInputs(t *testing.T) {
 				t.Fatalf("%s: extraction took %v", name, elapsed)
 			}
 		})
+	}
+}
+
+// TestExtractImageURLsCost: tag-heavy and relative-heavy inputs of 4 MiB
+// stay within the time bound and allocate a small multiple of the input.
+func TestExtractImageURLsCost(t *testing.T) {
+	const size = 4 << 20
+	repeat := func(unit string) string { return strings.Repeat(unit, size/len(unit)+1)[:size] }
+	for name, md := range map[string]string{
+		"img tags on one line": repeat(`<img alt="x" src="https://img.example/a.png"> `),
+		"lone img lines":       repeat("<img src=\"https://img.example/a.png\">\n\n"),
+		"relative images":      repeat("![](a) "),
+		"tags without src":     repeat("<img alt=x> "),
+		"backtick runs":        repeat("` `` ``` "),
+	} {
+		t.Run(name, func(t *testing.T) {
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			start := time.Now()
+			extractImageURLs(context.Background(), md, 128)
+			elapsed := time.Since(start)
+			runtime.ReadMemStats(&after)
+			if elapsed > time.Second && !raceEnabled {
+				t.Fatalf("took %v", elapsed)
+			}
+			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 16*size {
+				t.Fatalf("allocated %d bytes for a %d byte input", alloc, size)
+			}
+		})
+	}
+}
+
+// TestParseTag covers the hand-written tag parser used for <img src>.
+func TestParseTag(t *testing.T) {
+	for in, want := range map[string]string{
+		`<img src="https://a.example/x.png">`:             "https://a.example/x.png",
+		`<IMG alt='a b' SRC='https://a.example/y.png' />`: "https://a.example/y.png",
+		`<img src=https://a.example/z.png>`:               "https://a.example/z.png",
+		`<img src="https://a.example/q?a=1&amp;b=2">`:     "https://a.example/q?a=1&b=2",
+		`<img data-src="x" src = "s">`:                    "s",
+		`<img alt="x">`:                                   "",
+		`<img src="unterminated>`:                         "",
+		`<imgx src="a">`:                                  "",
+	} {
+		if got := imgSrc(in); got != want {
+			t.Errorf("imgSrc(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for in, want := range map[string][2]bool{
+		`<img src="x">`:      {true, true},
+		`</div>`:             {true, false},
+		`<span>`:             {true, false},
+		`<img src="x"> tail`: {false, false},
+		`<script>`:           {false, false},
+	} {
+		lone, isImg := loneTag(in)
+		if lone != want[0] || isImg != want[1] {
+			t.Errorf("loneTag(%q) = %v, %v, want %v", in, lone, isImg, want)
+		}
 	}
 }
 
