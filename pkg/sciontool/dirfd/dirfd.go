@@ -128,11 +128,25 @@ func EnsureDirNoFollow(path string, mode os.FileMode) (*os.File, error) {
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
 
-	if err := unix.Mkdirat(dirFd, leaf, uint32(mode)); err != nil && err != syscall.EEXIST {
-		return nil, fmt.Errorf("dirfd: mkdir %s: %w", path, err)
+	merr := unix.Mkdirat(dirFd, leaf, uint32(mode))
+	if merr != nil && merr != syscall.EEXIST {
+		return nil, fmt.Errorf("dirfd: mkdir %s: %w", path, merr)
 	}
 
-	return OpenAt(dirFd, leaf, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY, 0)
+	f, err := OpenAt(dirFd, leaf, syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_RDONLY, 0)
+	if err != nil {
+		return nil, err
+	}
+	if merr == nil {
+		// Created here: pin the requested mode regardless of the process
+		// umask (sciontool runs with umask 002 for nfs shared-dir writers,
+		// ptone/scion#3155). A pre-existing directory is left alone.
+		if cerr := pinCreatedDirMode(int(f.Fd()), mode); cerr != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("dirfd: chmod %s: %w", path, cerr)
+		}
+	}
+	return f, nil
 }
 
 // EnsureDirNoFollowUnderRoot ensures that path exists as a directory,
@@ -254,6 +268,14 @@ func EnsureDirNoFollowUnderRoot(root, path string, mode os.FileMode, uid, gid in
 		_ = syscall.Close(curFd)
 		curFd = child
 
+		if created {
+			// Pin the requested mode regardless of the process umask
+			// (sciontool runs with umask 002 for nfs shared-dir writers,
+			// ptone/scion#3155), so e.g. a secret's ~/.ssh stays 0755/0700.
+			if cerr := pinCreatedDirMode(curFd, mode); cerr != nil {
+				return -1, true, fmt.Errorf("dirfd: chmod %s: %w", name, cerr)
+			}
+		}
 		if created && uid > 0 {
 			// fchown on the fd this call just created and opened, never a
 			// path-based os.Chown.
@@ -307,4 +329,24 @@ func RefuseSymlinkOrNonRegularAt(dirFd int, name string) error {
 		return fmt.Errorf("refusing %s: existing entry is not a regular file", name)
 	}
 	return nil
+}
+
+// pinCreatedDirMode limits the rwx bits of a directory this package just
+// created (fd) to those in mode, so the process umask cannot widen them
+// (sciontool runs with umask 002 for nfs shared-dir writers,
+// ptone/scion#3155). Special bits the kernel set at creation, such as a
+// setgid bit inherited from the parent, are kept. It only calls fchmod
+// when a bit actually needs removing, so under umask 022 it changes
+// nothing for the 0755/0700 modes callers use.
+func pinCreatedDirMode(fd int, mode os.FileMode) error {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	perm := uint32(st.Mode) & 0o7777
+	want := (perm &^ 0o777) | (perm & uint32(mode.Perm()))
+	if want == perm {
+		return nil
+	}
+	return unix.Fchmod(fd, want)
 }

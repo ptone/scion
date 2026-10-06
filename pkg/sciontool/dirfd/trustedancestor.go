@@ -192,6 +192,10 @@ func EnsureDirTrustedAncestorFollow(path string) (dirFd int, err error) {
 				return -1, fmt.Errorf("dirfd: open %s after create: %w", name, operr)
 			}
 			stack = append(stack, child)
+			// Limit to 0755 regardless of the process umask (ptone/scion#3155).
+			if cerr := pinCreatedDirMode(child, 0o755); cerr != nil {
+				return -1, fmt.Errorf("dirfd: chmod %s: %w", name, cerr)
+			}
 			continue
 		case operr != syscall.ELOOP && !isSymlinkAt(curFd, name):
 			return -1, fmt.Errorf("dirfd: open %s: %w", name, operr)
