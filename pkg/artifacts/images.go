@@ -70,7 +70,7 @@ const (
 	// above what it allocates before it allocates; once the budget is
 	// spent, extraction stops and the images found so far are kept.
 	maxAllocPerByte = 8
-	minAllocBudget  = 64 << 10
+	minAllocBudget  = 256 << 10
 	// longRun is the backtick run length above which code spans are paired
 	// through a short list instead of a table indexed by run length.
 	longRun = 4096
@@ -80,10 +80,8 @@ const (
 // size.
 const (
 	extractionCharge = 512 // the extraction's own state and result
-	urlParseCharge   = 144 // a parsed URL
-	userinfoCharge   = 48  // a parsed URL's user info
 	mapBaseCharge    = 512 // a map's first table
-	defEntryCharge   = 192 // one entry of the reference definition map
+	defEntryCharge   = 128 // one entry of the reference definition map
 	seenEntryCharge  = 128 // one entry of the found-URL set
 )
 
@@ -119,7 +117,9 @@ type imageHit struct {
 // document. A quarter of the budget is kept for the image scan, so images
 // in the part of the document already read are found even when an earlier
 // pass stops. Each destination occurrence is normalized and charged;
-// reference definitions are normalized once and stored. It returns nil
+// a reference definition is normalized once, at the first image that uses
+// it, and later uses are lookups.
+// An <img> src is read as the browser reads it. It returns nil
 // once ctx is done. It is a best-effort scan for the URLs to fetch; the
 // renderer matches what it finds against the manifest and shows a
 // placeholder for anything missing.
@@ -206,14 +206,15 @@ func extractImages(ctx context.Context, markdown string, limit, allocPerByte int
 type extraction struct {
 	ctx           context.Context
 	limit         int
-	read          int               // bytes scanned, for context checks
-	allocCap      int               // the allocation charge the current pass may reach
-	allocUsed     int               // bytes charged for allocations
-	stopped       bool              // the current pass reached allocCap
-	budgetReached bool              // some pass reached its cap (keeps what was found)
-	cancelled     bool              // ctx is done (returns nothing)
-	seen          map[string]bool   // URLs already found
-	defs          map[string]string // reference label -> normalized URL
+	read          int              // bytes scanned, for context checks
+	allocCap      int              // the allocation charge the current pass may reach
+	allocUsed     int              // bytes charged for allocations
+	stopped       bool             // the current pass reached allocCap
+	budgetReached bool             // some pass reached its cap (keeps what was found)
+	cancelled     bool             // ctx is done (returns nothing)
+	seen          map[string]bool  // URLs already found
+	defs          map[string]int32 // reference label -> index in defList
+	defList       []definition     // the reference definitions
 	out           []string
 
 	hits      []imageHit // the images found on one line
@@ -273,10 +274,10 @@ func (e *extraction) done() bool {
 	return e.stopped || e.cancelled || len(e.seen) >= e.limit
 }
 
-// normalize unwraps, unescapes and validates one image destination. It
-// returns "" unless the result is an absolute http or https URL. Each copy
-// and the URL parse are charged before they are made; a destination equal
-// to a URL already found is not parsed again.
+// normalize unwraps, unescapes and validates one markdown image
+// destination: backslash escapes and character references are decoded, as
+// the markdown renderer does. It returns "" unless the result is an
+// absolute http or https URL. Each copy is charged before it is made.
 func (e *extraction) normalize(raw string) string {
 	s := strings.TrimSpace(raw)
 	s = strings.TrimSuffix(strings.TrimPrefix(s, "<"), ">")
@@ -300,42 +301,137 @@ func (e *extraction) normalize(raw string) string {
 		}
 		s = html.UnescapeString(s)
 	}
-	s = strings.TrimSpace(s)
+	return e.validURL(strings.TrimSpace(s))
+}
+
+// normalizeTag validates the src attribute of an <img> tag, as written, the
+// way the browser reads it: character references are decoded once, ASCII
+// tab and newline bytes are removed, leading and trailing spaces and
+// control bytes are trimmed, and a backslash before the query or fragment
+// is read as '/', as the WHATWG URL parser does for http and https. No
+// markdown escapes apply. It returns "" unless the result is an absolute
+// http or https URL. Each copy is charged before it is made.
+func (e *extraction) normalizeTag(raw string) string {
+	s := raw
+	if strings.IndexByte(s, '&') >= 0 {
+		if !e.spendAlloc(2 * allocSize(len(s))) { // a copy and the result
+			return ""
+		}
+		s = html.UnescapeString(s)
+	}
+	s = strings.TrimFunc(s, func(r rune) bool { return r <= ' ' })
+	if s == "" || len(s) > maxDestinationBytes-1 {
+		return ""
+	}
+	if !hasPrefixFold(s, "http://") && !hasPrefixFold(s, "https://") {
+		return ""
+	}
+	if strings.ContainsAny(s, "\t\n\r\\") {
+		if !e.spendAlloc(allocSize(len(s))) {
+			return ""
+		}
+		s = browserURLText(s)
+	}
+	return e.validURL(s)
+}
+
+// browserURLText removes ASCII tab and newline bytes from s and, before the
+// first '?' or '#', reads each backslash as '/', as the WHATWG URL parser
+// does for http and https URLs.
+func browserURLText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inPath := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\t' || c == '\n' || c == '\r':
+			continue
+		case c == '?' || c == '#':
+			inPath = false
+		case c == '\\' && inPath:
+			c = '/'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// validURL returns s if it is an absolute http or https URL with a host,
+// else "". A URL already found is not parsed again; otherwise the parse is
+// charged before it runs.
+func (e *extraction) validURL(s string) string {
 	if len(s) > maxDestinationBytes-1 {
 		return ""
 	}
 	if e.seen[s] {
 		return s
 	}
-	if !e.spendAlloc(urlParseCost(s)) || !isHTTPURL(s) {
+	if !authorityParsesCheaply(s) || !e.spendAlloc(urlParseCost(s)) || !isHTTPURL(s) {
 		return ""
 	}
 	return s
 }
 
-// urlParseCost is the charge for url.Parse(s): the URL structure, its
-// user info when s may hold one, and the unescaped and re-escaped copies of
-// its path and fragment when s holds a byte the parser may rewrite.
+// urlParseCost is the charge for url.Parse(s): a fixed bound of eight
+// bytes per input byte plus 512. url.Parse allocates the URL structure
+// (144 bytes), the user info (48), a lowercased scheme, and for the path
+// and the fragment an unescaped and a re-escaped copy, where an escaped
+// byte grows to three. Its error paths quote part of the input; the two
+// that can quote a long part (a port that is not numeric, a bracketed host
+// with other bytes) are rejected before parsing by
+// authorityParsesCheaply, and the others quote at most three bytes. The
+// largest allocation measured for any destination up to
+// maxDestinationBytes (repeated '#' in a fragment, percent escapes, bytes
+// the parser escapes, uppercase schemes, IPv6 hosts, user info, long
+// paths and numeric ports) is well within this charge.
 func urlParseCost(s string) int {
-	cost := urlParseCharge
-	if strings.IndexByte(s, '@') >= 0 {
-		cost += userinfoCharge
-	}
-	for i := 0; i < len(s); i++ {
-		if !urlPlainByte(s[i]) {
-			return cost + 8*len(s)
-		}
-	}
-	return cost
+	return 8*len(s) + 512
 }
 
-// urlPlainByte reports whether url.Parse keeps c as it is in every part
-// of a URL, so it makes no copy for it.
-func urlPlainByte(c byte) bool {
-	if isASCIILetter(c) || c >= '0' && c <= '9' {
+// authorityParsesCheaply reports whether the authority of s (between "//"
+// and the first '/', '?' or '#') avoids the url.Parse error paths that
+// quote a long part of the input: after any user info, a bracketed host
+// may hold only letters, digits and ":.%-_~", and a port must be digits.
+// Every URL it rejects is one url.Parse rejects too.
+func authorityParsesCheaply(s string) bool {
+	i := strings.Index(s, "://")
+	if i < 0 {
 		return true
 	}
-	return strings.IndexByte("-._~/:?=&+,;$#@", c) >= 0
+	rest := s[i+3:]
+	if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+		rest = rest[:j]
+	}
+	if at := strings.LastIndexByte(rest, '@'); at >= 0 {
+		rest = rest[at+1:]
+	}
+	port := ""
+	if strings.HasPrefix(rest, "[") {
+		end := strings.LastIndexByte(rest, ']')
+		if end < 0 {
+			return true // url.Parse rejects it with a fixed message
+		}
+		for k := 1; k < end; k++ {
+			if c := rest[k]; !isASCIILetter(c) && (c < '0' || c > '9') && strings.IndexByte(":.%-_~", c) < 0 {
+				return false
+			}
+		}
+		if port = rest[end+1:]; port != "" {
+			if port[0] != ':' {
+				return false
+			}
+			port = port[1:]
+		}
+	} else if c := strings.LastIndexByte(rest, ':'); c >= 0 {
+		port = rest[c+1:]
+	}
+	for k := 0; k < len(port); k++ {
+		if port[k] < '0' || port[k] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // isHTTPURL reports whether s parses as a URL with an http or https scheme
@@ -413,41 +509,64 @@ func (e *extraction) lineImages(line string, offset int, hits []imageHit) []imag
 			if ref == "" {
 				ref = label
 			}
-			hits = e.addURL(hits, offset+start, e.definition(ref))
+			hits = e.addURL(hits, offset+start, e.definitionURL(ref))
 			pos = refEnd + 1
 		default:
-			hits = e.addURL(hits, offset+start, e.definition(label))
+			hits = e.addURL(hits, offset+start, e.definitionURL(label))
 			pos = after
 		}
 	}
 	return hits
 }
 
-// definition returns the normalized URL a reference label is defined as,
-// or "". The lookup itself does not allocate; folding a label that needs
-// it uses the reused label buffer.
-func (e *extraction) definition(label string) string {
+// definition is one reference definition: its destination as written and,
+// once an image has used it, its normalized URL ("" when unusable).
+type definition struct {
+	dest string
+	url  string
+	done bool
+}
+
+// definitionSize is the size of one definition, for charging defList.
+const definitionSize = 40
+
+// definitionURL returns the normalized URL a reference label is defined as,
+// or "". The first use normalizes the destination (charged) and writes the
+// result back into the definition; later uses are a label lookup only. The
+// lookup does not allocate; folding a label that needs it uses the reused
+// label buffer.
+func (e *extraction) definitionURL(label string) string {
 	if len(e.defs) == 0 {
 		return ""
 	}
-	if labelIsPlain(label) {
-		return e.defs[label]
-	}
-	if !e.foldLabel(label) {
+	plain := labelIsPlain(label)
+	if !plain && !e.foldLabel(label) {
 		return ""
 	}
-	return e.defs[string(e.labelBuf)]
+	k, ok := e.lookupLabel(label, plain)
+	if !ok {
+		return ""
+	}
+	d := &e.defList[k]
+	if !d.done {
+		u := e.normalize(d.dest)
+		if e.stopped || e.cancelled {
+			return ""
+		}
+		d.url, d.done = u, true
+	}
+	return d.url
 }
 
-// definedLabel reports whether a label is already defined: the label
-// itself when plain, else its folded form in e.labelBuf.
-func (e *extraction) definedLabel(label string, plain bool) bool {
+// lookupLabel returns the index of a label's definition: the label itself
+// when plain, else its folded form in e.labelBuf.
+func (e *extraction) lookupLabel(label string, plain bool) (int32, bool) {
 	if plain {
-		_, ok := e.defs[label]
-		return ok
+		k, ok := e.defs[label]
+		return k, ok
 	}
-	_, ok := e.defs[string(e.labelBuf)]
-	return ok
+	k, ok := e.defs[string(e.labelBuf)]
+	return k, ok
 }
 
 // foldLabel writes the normalized form of a label that is not plain into
@@ -534,14 +653,7 @@ func (e *extraction) lineImgTags(line string, offset int, hits []imageHit) []ima
 			pos = stop
 			continue
 		}
-		src := rawImgSrc(line[lt : stop+1])
-		if strings.IndexByte(src, '&') >= 0 {
-			if !e.spendAlloc(2 * allocSize(len(src))) { // decoding: a copy and the result
-				break
-			}
-			src = html.UnescapeString(src)
-		}
-		hits = e.addURL(hits, offset+lt, e.normalize(src))
+		hits = e.addURL(hits, offset+lt, e.normalizeTag(rawImgSrc(line[lt:stop+1])))
 		pos = stop + 1
 	}
 	return hits
@@ -595,8 +707,9 @@ func (n *nextIndex) from(i int) int {
 }
 
 // referenceDefinitions collects [label]: destination lines, at most
-// maxRefDefinitions, normalizing each destination once and keeping only
-// usable (absolute http(s)) ones. Each line is read once.
+// maxRefDefinitions. The first definition of a label wins, as in the
+// renderer; its destination is stored as written and normalized once, at
+// the first image that uses it (definitionURL). Each line is read once.
 func (e *extraction) referenceDefinitions(text string) {
 	for lineStart := 0; lineStart < len(text) && len(e.defs) < maxRefDefinitions && !e.stopped; {
 		lineEnd := strings.IndexByte(text[lineStart:], '\n')
@@ -630,11 +743,10 @@ func (e *extraction) referenceDefinitions(text string) {
 		if !plain && !e.foldLabel(label) {
 			return
 		}
-		if e.definedLabel(label, plain) {
+		if _, defined := e.lookupLabel(label, plain); defined {
 			continue
 		}
-		u := e.normalize(dest)
-		if u == "" {
+		if dest == "" {
 			continue
 		}
 		key := label
@@ -644,17 +756,25 @@ func (e *extraction) referenceDefinitions(text string) {
 			}
 			key = string(e.labelBuf)
 		}
-		charge := defEntryCharge
+		charge, n := defEntryCharge, 0
 		if e.defs == nil {
 			charge += mapBaseCharge
+		}
+		if len(e.defList) == cap(e.defList) {
+			n = max(16, 2*cap(e.defList))
+			charge += allocSize(definitionSize * n)
 		}
 		if !e.spendAlloc(charge) {
 			return
 		}
 		if e.defs == nil {
-			e.defs = map[string]string{}
+			e.defs = map[string]int32{}
 		}
-		e.defs[key] = u
+		if n > 0 {
+			e.defList = append(make([]definition, 0, n), e.defList...)
+		}
+		e.defs[key] = int32(len(e.defList))
+		e.defList = append(e.defList, definition{dest: dest})
 	}
 }
 

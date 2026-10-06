@@ -31,6 +31,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
 )
@@ -162,7 +163,9 @@ func TestExtractImageURLsLinearAndBounded(t *testing.T) {
 	for i := 0; i < 20_000; i++ {
 		fmt.Fprintf(&small, "![a](https://img.example/%d.png) ![b][r] ![c](rel/%d.png)\n", i, i)
 	}
-	if all := extractImageURLs(context.Background(), small.String(), 1_000_000); len(all) != 20_001 {
+	// A larger allowance than the default keeps the budget out of this
+	// check: every one of the 20,001 distinct URLs is parsed.
+	if all := extractImages(context.Background(), small.String(), 1_000_000, 64).urls; len(all) != 20_001 {
 		t.Fatalf("full extraction found %d URLs", len(all))
 	}
 	if extractImageURLs(context.Background(), md, 0) != nil {
@@ -240,6 +243,9 @@ var costShapes = []struct {
 		d := strings.Repeat("\\!&amp;", 40) + strings.Repeat("%25", 150) + strconv.Itoa(i)
 		return "[a" + strconv.Itoa(i) + "]: https://h/\\!&amp;![](https://h/\\!&amp;<img/src=https://h/" + d + ">)\n"
 	}},
+	{name: "fragment with repeated #", unit: "![](https:///#" + strings.Repeat("#", 2000) + ") "},
+	{name: "invalid port", unit: "![](http://a:" + strings.Repeat("\xff", 64) + ") ![](http://a:b) "},
+	{name: "uppercase scheme", unit: "![](HTTPS:///a) "},
 	{name: "invalid UTF-8 labels defined and looked up", preamble: "[x]: https://img.example/x.png\n", unit: "[![" + strings.Repeat("\xff", 990) + "]: x\n"},
 }
 
@@ -329,6 +335,7 @@ func TestExtractImageURLsCostMixed(t *testing.T) {
 
 // TestExtractImageURLsCostComposed: documents composed at random from
 // destination contents (escapes, character references, percent escapes,
+// repeated '#', invalid ports and IPv6 literals, uppercase schemes,
 // missing hosts, relative paths, distinct suffixes) and labels (case,
 // whitespace, non-ASCII and invalid bytes), placed in random containers
 // (inline images, <img src>, definitions and their uses, all of them on
@@ -353,6 +360,16 @@ func TestExtractImageURLsCostComposed(t *testing.T) {
 		func(rng *rand.Rand, i int) string {
 			return "https://img.example/" + strings.Repeat("%25", rng.Intn(300)) + "#" + strings.Repeat("é", rng.Intn(100)) + strconv.Itoa(i)
 		},
+		func(rng *rand.Rand, i int) string {
+			return "https://img.example/#" + strings.Repeat("#", rng.Intn(600)) + strconv.Itoa(i)
+		},
+		func(rng *rand.Rand, i int) string {
+			return "http://a:" + strings.Repeat([]string{"b", "\xff", "\u0085"}[rng.Intn(3)], rng.Intn(300)) + strconv.Itoa(i)
+		},
+		func(rng *rand.Rand, i int) string {
+			return "http://[" + strings.Repeat([]string{"\xff", "g", ":"}[rng.Intn(3)], rng.Intn(300)) + "]/" + strconv.Itoa(i)
+		},
+		func(rng *rand.Rand, i int) string { return "HTTPS:///" + strconv.Itoa(i) },
 	}
 	labelPieces := []string{"a", "B", " ", "  ", "\t", "\f", "é", "\xff", "\u023a"}
 	label := func(rng *rand.Rand, i int) string {
@@ -472,7 +489,7 @@ func TestExtractImageURLsReserve(t *testing.T) {
 	const first = "![a](https://img.example/first.png)\n\n"
 	bodies := map[string]func(int) string{
 		"code spans":  func(i int) string { return strings.Repeat("`a` ", i+1) + "\n" },
-		"definitions": func(i int) string { return "[D" + strconv.Itoa(i) + "]: https://img.example/" + strconv.Itoa(i) + "\n" },
+		"definitions": func(i int) string { return "[" + strings.Repeat("\xff", 300) + strconv.Itoa(i) + "]: x\n" },
 		"lone tags":   func(i int) string { return "<img src=\"https://img.example/" + strconv.Itoa(i) + "&amp;\">\n\n" },
 	}
 	for name, gen := range bodies {
@@ -498,15 +515,21 @@ func TestExtractImageURLsChargeSites(t *testing.T) {
 		{"visible buffer", strings.Repeat("plain text\n", size/11)},
 		{"html blocks", strings.Repeat("<div>\n\n<br>\n\n", size/13)},
 		{"code-span tables", strings.Repeat("` ", size/2)},
-		{"markdown escapes", gen(func(i int) string { return "![](https://h/" + strings.Repeat("\\_", 700) + strconv.Itoa(i) + ")\n" })},
-		{"character references", gen(func(i int) string { return "![](https://h/?" + strings.Repeat("&amp;", 300) + strconv.Itoa(i) + ")\n" })},
+		// One destination repeated: it is parsed once, so its copies are
+		// what each repeat allocates.
+		{"markdown escapes", gen(func(i int) string { return "![](https://h/" + strings.Repeat("\\_", 700) + ")\n" })},
+		{"character references", gen(func(i int) string { return "![](https://h/?" + strings.Repeat("&amp;", 300) + ")\n" })},
 		{"URL parse", gen(func(i int) string { return "![](http:///" + strconv.Itoa(i) + ") " })},
 		{"URL parse with user info", gen(func(i int) string { return "![](http://u@/" + strconv.Itoa(i) + ") " })},
 		{"URL parse with rewritten bytes", gen(func(i int) string { return "![](https://h/" + strings.Repeat("!", 300) + strconv.Itoa(i) + ")\n" })},
 		{"found URLs", gen(func(i int) string { return "![](https://h/" + strconv.Itoa(i) + ") " })},
-		{"tag src decoding", gen(func(i int) string {
-			return "<img src=\"https://h/?" + strings.Repeat("&amp;", 300) + strconv.Itoa(i) + "\"> "
-		})},
+		{"fragment with repeated #", gen(func(i int) string { return "![](https://h/#" + strings.Repeat("#", 300) + strconv.Itoa(i) + ")\n" })},
+		{"invalid port", gen(func(i int) string { return "![](http://a:" + strings.Repeat("\xff", 300) + strconv.Itoa(i) + ")\n" })},
+		{"invalid port after an IPv6 literal", gen(func(i int) string { return "![](http://[::1]:" + strings.Repeat("\xff", 300) + strconv.Itoa(i) + ")\n" })},
+		{"invalid IPv6 literal", gen(func(i int) string { return "![](http://[" + strings.Repeat("\xff", 300) + strconv.Itoa(i) + "])\n" })},
+		{"uppercase scheme", gen(func(i int) string { return "![](HTTPS:///" + strconv.Itoa(i) + ") " })},
+		{"tag src decoding", gen(func(i int) string { return "<img src=\"https://h/?" + strings.Repeat("&amp;", 300) + "\"> " })},
+		{"tag src backslashes", gen(func(i int) string { return "<img src=\"https://h/" + strings.Repeat("\\", 300) + "\"> " })},
 		{"definition keys", gen(func(i int) string {
 			return "[" + strings.Repeat("A", 900) + strconv.Itoa(i) + "]: https://h/" + strconv.Itoa(i) + "\n"
 		})},
@@ -538,10 +561,12 @@ func growthCharges(n, elem int) int {
 	return total
 }
 
-// TestExtractImageURLsChargeAccounting: for small documents the bytes
-// charged are exactly the listed steps, so leaving any fixed charge out
-// fails its subtest, and the bytes allocated (averaged over many runs) are
-// no more than those charged.
+// TestExtractImageURLsChargeAccounting: conservative charge accounting for
+// small documents. The bytes charged are exactly the charges of the listed
+// steps (a URL parse is charged its fixed bound; a definition is charged
+// when stored, and its normalization at its first use), so leaving any
+// charge out fails its subtest, and the bytes allocated (averaged over many
+// runs) are no more than those charged.
 func TestExtractImageURLsChargeAccounting(t *testing.T) {
 	var many strings.Builder
 	for i := 0; i < 40; i++ {
@@ -559,10 +584,10 @@ func TestExtractImageURLsChargeAccounting(t *testing.T) {
 	}{
 		{"extraction state", "x", state},
 		{"found-URL set", "![](https://h/a)", func(md string) int {
-			return state(md) + urlParseCharge + mapBaseCharge + seenEntryCharge + growthCharges(1, 24) + growthCharges(1, 16)
+			return state(md) + urlParseCost("https://h/a") + mapBaseCharge + seenEntryCharge + growthCharges(1, 24) + growthCharges(1, 16)
 		}},
 		{"definition map", "[r]: https://h/r\n", func(md string) int {
-			return state(md) + urlParseCharge + mapBaseCharge + defEntryCharge
+			return state(md) + mapBaseCharge + defEntryCharge + growthCharges(1, definitionSize)
 		}},
 		{"hit and result slices", many.String(), func(md string) int {
 			return state(md) + manyCost + mapBaseCharge + 40*seenEntryCharge + growthCharges(40, 24) + growthCharges(40, 16)
@@ -584,6 +609,88 @@ func TestExtractImageURLsChargeAccounting(t *testing.T) {
 			}
 			if alloc := (after.TotalAlloc - before.TotalAlloc) / runs; alloc > uint64(used) {
 				t.Fatalf("allocated %d bytes per run, %d charged", alloc, used)
+			}
+		})
+	}
+}
+
+// TestExtractionFixedCharges: each fixed charge covers the structure it
+// stands for, measured: the extraction's state, a map's first table, and
+// one entry of the found-URL set and of the definition map at any size
+// up to the extraction limits.
+func TestExtractionFixedCharges(t *testing.T) {
+	if size := allocSize(int(unsafe.Sizeof(extraction{}))); size > extractionCharge {
+		t.Errorf("extraction state is %d bytes, charge %d", size, extractionCharge)
+	}
+	if size := int(unsafe.Sizeof(definition{})); size != definitionSize {
+		t.Errorf("a definition is %d bytes, charged as %d", size, definitionSize)
+	}
+	keys := make([]string, maxRefDefinitions)
+	for i := range keys {
+		keys[i] = "https://img.example/" + strconv.Itoa(i)
+	}
+	measure := func(n int, build func(n int) any) int {
+		const runs = 20
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		var sink any
+		for r := 0; r < runs; r++ {
+			sink = build(n)
+		}
+		runtime.ReadMemStats(&after)
+		_ = sink
+		return int(after.TotalAlloc-before.TotalAlloc) / runs
+	}
+	seen := func(n int) any {
+		m := map[string]bool{}
+		for _, k := range keys[:n] {
+			m[k] = true
+		}
+		return m
+	}
+	defs := func(n int) any {
+		m := map[string]int32{}
+		for i, k := range keys[:n] {
+			m[k] = int32(i)
+		}
+		return m
+	}
+	for _, n := range []int{1, 8, 9, 64, 100, 1000, 2000, maxRefDefinitions} {
+		if got, charge := measure(n, seen), mapBaseCharge+n*seenEntryCharge; got > charge {
+			t.Errorf("found-URL set of %d: %d bytes, charge %d", n, got, charge)
+		}
+		if got, charge := measure(n, defs), mapBaseCharge+n*defEntryCharge; got > charge {
+			t.Errorf("definition map of %d: %d bytes, charge %d", n, got, charge)
+		}
+		if n >= 9 {
+			if got := (measure(n, seen) - measure(1, seen)) / (n - 1); got > seenEntryCharge {
+				t.Errorf("found-URL set of %d: %d bytes per entry, charge %d", n, got, seenEntryCharge)
+			}
+			if got := (measure(n, defs) - measure(1, defs)) / (n - 1); got > defEntryCharge {
+				t.Errorf("definition map of %d: %d bytes per entry, charge %d", n, got, defEntryCharge)
+			}
+		}
+	}
+}
+
+// TestExtractImageURLsDefinitionReuse: a long definition used many times
+// is normalized once, at its first use; later uses are label lookups and
+// charge nothing.
+func TestExtractImageURLsDefinitionReuse(t *testing.T) {
+	def := "[r]: https://h/" + strings.Repeat("\\_", 900) + "?a=&amp;\n"
+	for _, unit := range []string{"![a][r] ", "![a][r]\n", "![R] "} {
+		t.Run(fmt.Sprintf("%q", unit), func(t *testing.T) {
+			md := costDocument(def, unit, nil, 512<<10)
+			res := extractImages(context.Background(), md, 128, maxAllocPerByte)
+			want := "https://h/" + strings.Repeat("_", 900) + "?a=&"
+			if res.budgetReached || len(res.urls) != 1 || res.urls[0] != want {
+				t.Fatalf("got %d URLs, budget reached %v", len(res.urls), res.budgetReached)
+			}
+			// One normalization: its copies and parse, well under one
+			// charge per use.
+			if perUse := res.allocUsed - extractionCharge - allocSize(len(md)); perUse > 64<<10 {
+				t.Fatalf("charged %d bytes beyond the buffer", perUse)
 			}
 		})
 	}
@@ -644,6 +751,50 @@ func TestPublishWarnsOnceBeyondWindowAndBudget(t *testing.T) {
 	resp := f.publish(agentA, "doc.md", []byte(md), "")
 	if len(resp.Warnings) != 1 || resp.Warnings[0] != warnBeyondWindow {
 		t.Fatalf("warnings %q", resp.Warnings)
+	}
+}
+
+// TestExtractImageURLsTagSrcAsBrowser: an <img> src yields the URL the
+// browser requests: character references decoded once, no markdown
+// escapes, tabs and newlines removed, and a backslash before the query or
+// fragment read as '/'.
+func TestExtractImageURLsTagSrcAsBrowser(t *testing.T) {
+	for src, want := range map[string]string{
+		`https://h/a?b=&amp;amp;c`:  "https://h/a?b=&amp;c",
+		`https://h/&amp;lt;x.png`:   "https://h/&lt;x.png",
+		`https://h/a\_b.png`:        "https://h/a/_b.png",
+		`https://h/a\b.png?q=\x#\y`: `https://h/a/b.png?q=\x#\y`,
+		"https://h/a\tb.png":        "https://h/ab.png",
+		`https://h/x&#46;png`:       "https://h/x.png",
+	} {
+		md := "x <img src=\"" + src + "\">\n\n<img src=\"" + src + "\">\n"
+		if got := extractImageURLs(context.Background(), md, 8); len(got) != 1 || got[0] != want {
+			t.Errorf("src %q: got %q, want %q", src, got, want)
+		}
+	}
+	// Markdown destinations keep their own rules: backslash escapes are
+	// removed and character references are decoded once.
+	if got := extractImageURLs(context.Background(), "![a](https://h/a\\_b.png?x=&amp;amp;y)", 8); len(got) != 1 || got[0] != "https://h/a_b.png?x=&amp;y" {
+		t.Errorf("markdown destination: got %q", got)
+	}
+}
+
+// TestRemoteExtractLimit: extraction reads exactly four times the fetch
+// cap of distinct URLs, no more and no fewer.
+func TestRemoteExtractLimit(t *testing.T) {
+	lim := RemoteImageLimits{MaxCount: 32}
+	if got := remoteExtractLimit(lim); got != 128 {
+		t.Fatalf("remoteExtractLimit = %d, want 128", got)
+	}
+	for _, n := range []int{127, 128, 129, 200} {
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, "![](https://img.example/%d.png)\n", i)
+		}
+		got := extractImageURLs(context.Background(), b.String(), remoteExtractLimit(lim))
+		if want := min(n, 128); len(got) != want {
+			t.Errorf("%d distinct URLs: extracted %d, want %d", n, len(got), want)
+		}
 	}
 }
 
