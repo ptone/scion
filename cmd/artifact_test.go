@@ -230,6 +230,9 @@ func TestArtifactErrorHints(t *testing.T) {
 	require.NoError(t, err)
 	err = publishArtifact(context.Background(), c401.Artifacts(), &stdout, io.Discard, "", file, "", "")
 	assert.ErrorContains(t, err, "project:artifact:read")
+	err = getArtifact(context.Background(), c401.Artifacts(), &stdout, &stderr, testArtifactID, "")
+	assert.ErrorContains(t, err, "invalid or expired")
+	assert.NotContains(t, err.Error(), "project:artifact:read", "a 401 on get is about the credential, not the read scope")
 }
 
 // TestPublishArtifactPrintsWarnings: publish warnings (remote images that

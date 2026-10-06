@@ -260,7 +260,10 @@ export class ScionPageArtifactDetail extends LitElement {
     }
     if (!this.data) return nothing;
     return html`
-      <a href=${`/projects/${encodeURIComponent(this.projectId)}`} class="back-link">
+      <a
+        href=${`/projects/${encodeURIComponent(this.data.artifact.scopeRef || this.projectId)}`}
+        class="back-link"
+      >
         <sl-icon name="arrow-left"></sl-icon>
         Project
       </a>

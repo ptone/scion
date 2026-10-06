@@ -244,4 +244,56 @@ describe('artifact page', () => {
       window.removeEventListener('scion:access-denied', denied);
     }
   });
+
+  it("links back to the artifact's own project, not the one in the URL", async () => {
+    mockFetch(artifact('design.md', 'text/markdown'));
+    const el = await mount(true); // URL project is p-1; scopeRef is p-1 too
+    expect(el.shadowRoot!.querySelector('a.back-link')!.getAttribute('href')).toBe('/projects/p-1');
+    document.body.innerHTML = '';
+
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.scopeRef = 'home-project';
+    mockFetch(meta);
+    const el2 = await mount(true);
+    expect(el2.shadowRoot!.querySelector('a.back-link')!.getAttribute('href')).toBe(
+      '/projects/home-project'
+    );
+  });
+
+  it('shows only images the hub serves in the markdown preview', async () => {
+    mockFetch(
+      artifact('design.md', 'text/markdown'),
+      [
+        '![remote](https://elsewhere.example/p.png)',
+        '![protocol-relative](//elsewhere.example/q.png)',
+        '![other route](/api/v1/artifacts/x/files/a.png)',
+        '![relative](img/b.png)',
+        '![inline](data:image/png;base64,AAAA)',
+        '<img src="https://elsewhere.example/raw.png">',
+      ].join('\n\n')
+    );
+    const el = await mount(true);
+    const frameEl = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      updateComplete: Promise<unknown>;
+    };
+    expect(frameEl).not.toBeNull();
+    let srcdoc = '';
+    for (let i = 0; i < 20 && !srcdoc; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      await frameEl.updateComplete;
+      srcdoc = frameEl.shadowRoot!.querySelector('iframe')?.srcdoc ?? '';
+    }
+    const doc = new DOMParser().parseFromString(srcdoc, 'text/html');
+    const srcs = Array.from(doc.querySelectorAll('img')).map((i) => i.getAttribute('src'));
+    // Only the version's own file loads; nothing leaves the hub origin.
+    expect(srcs).toEqual([`/api/v1/artifacts/${ID}/versions/1/files/img/b.png?stream=1`]);
+    for (const node of Array.from(doc.body.querySelectorAll('*'))) {
+      for (const attr of Array.from(node.attributes)) {
+        expect(attr.value).not.toContain('elsewhere.example');
+      }
+    }
+    const text = doc.body.textContent ?? '';
+    expect(text).toContain('remote');
+    expect(text).toContain('protocol-relative');
+  });
 });

@@ -72,19 +72,22 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
-## test-hub-sqlite: Run pkg/hub (and perf/bench/seed) tests with SQLite
+## test-hub-sqlite: Run pkg/hub, perf/bench/seed, pkg/conduit, pkg/store/entadapter and pkg/artifacts tests with SQLite
 # enabled (no build tag). This is the ~67% of pkg/hub's test files that
 # "make test-fast" never compiles (see ptone/scion#1118), plus
-# perf/bench/seed's own SQLite-backed tests, which carry the same
-# `//go:build !no_sqlite` constraint for the same reason (ptone/scion#2393),
-# plus pkg/artifacts, whose store and service tests run on SQLite.
+# perf/bench/seed's and pkg/store/entadapter's own SQLite-backed tests,
+# which carry the same `//go:build !no_sqlite` constraint for the same
+# reason (ptone/scion#2393, ptone/scion#2851), and pkg/conduit's
+# relay/router tests, which run against the SQLite-backed conduit
+# registry store, and pkg/artifacts, whose store and service tests run on
+# SQLite.
 # Skips four pkg/hub tests with known pre-existing, tracked failures
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
-	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit tests (SQLite-enabled)..."
+	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/store/entadapter + pkg/artifacts tests (SQLite-enabled)..."
 	@go test -count=1 -timeout 40m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
-		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/artifacts/...
+		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/... ./pkg/artifacts/...
 
 ## test-fixture-coverage: Run the hub fixture coverage gate (TestFixtureCoverage) with SQLite
 # internal/fixturegen's tests carry `//go:build !no_sqlite`, so
@@ -182,7 +185,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_|TestPreviousRunIDs_)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
@@ -228,7 +231,7 @@ test-webchat-postgres:
 		fi; \
 	done
 
-## test-artifacts-postgres: Run the pkg/artifacts store and service tests against SQLite and a real Postgres
+## test-artifacts-postgres: Run the pkg/artifacts tests: store tests on SQLite and a real Postgres (service tests on SQLite)
 # Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). The artifact
 # store is not an Ent store (design D3: own tables, created by Init), so like
 # the web chat store it has its own Postgres SQL and its own Postgres tests.
@@ -238,7 +241,7 @@ test-webchat-postgres:
 # /postgres subtest passed. Each test works in its own throwaway schema.
 # CI runs this in the T1 Launch Store PostgreSQL Tests job.
 test-artifacts-postgres:
-	@echo "Running artifact store tests against SQLite and Postgres..."
+	@echo "Running pkg/artifacts tests (store tests on SQLite and Postgres)..."
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
 		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently be left out." >&2; \
 		exit 1; \

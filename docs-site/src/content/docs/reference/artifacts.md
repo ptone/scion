@@ -4,7 +4,7 @@ description: The scion artifact command and the /api/v1/artifacts routes for pub
 ---
 
 :::caution[Experimental]
-Artifacts are behind the `hub.artifacts` experiment, which is **off by default**. While it is off, every `/api/v1/artifacts` route answers `404` and the web UI shows no artifact pages. An admin enables it under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)). Artifacts require Hub mode.
+Artifacts are behind the `hub.artifacts` experiment, which is **off by default**. While it is off, or when the hub's `artifacts` settings section is disabled, every `/api/v1/artifacts` route answers `404` and the web UI shows no artifact pages. An admin enables it under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)). Artifacts require Hub mode.
 :::
 
 An **artifact** is a published file with a stable reference, `scion://artifact/<id>`, that works from any runtime broker, in any project the reader can access, and in the web UI. The hub stores the bytes, so a reader never needs access to the publisher's filesystem or shared directories.
@@ -79,7 +79,7 @@ All routes are under `/api/v1/artifacts` and use the hub's usual authentication 
 | `GET /api/v1/artifacts/{id}/files/{path}` | A file of the current version. |
 | `GET /api/v1/artifacts/{id}/versions/{seq}/files/{path}` | A file of version `seq`. |
 
-Status codes: `400` for a malformed request, `401` unauthenticated (also returned to an agent token without `project:artifact:read`), `403` when the caller may not publish in the scope, `404` for an absent or unreadable artifact, `413` when the file exceeds `artifacts.max_file_bytes` (rejected before anything is stored).
+Status codes: `400` for a malformed request, `401` unauthenticated (also returned on publish to an agent token without `project:artifact:read`; reads answer `404`), `403` when the caller may not publish in the scope, `404` for an absent or unreadable artifact, `413` when the file exceeds `artifacts.max_file_bytes` (rejected before anything is stored), `503` when the hub has no artifact storage configured.
 
 **File delivery.** On a hub with local storage the hub streams the bytes. On a hub with object storage (GCS) it answers `302` to a short-lived signed URL; add `?stream=1` to have the hub serve the bytes itself (the web page does this for text). Either way the response carries `Content-Disposition` (`inline` only for plain text, Markdown, CSV, TSV, JSON, YAML, TOML and raster images; `attachment` otherwise) and `X-Content-Type-Options: nosniff`; streamed responses also carry a sandboxing `Content-Security-Policy` and an `ETag`.
 

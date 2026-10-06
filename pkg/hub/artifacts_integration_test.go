@@ -510,7 +510,7 @@ func TestArtifactsPreArtifactCeilingTokenOnRoutes(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, doRawAgentRequest(t, srv, http.MethodGet, p, nil, childTok).Code, p)
 	}
 	rec = doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("b"), childTok)
-	assert.NotEqual(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "an agent without the artifact read scope is not served: %s", rec.Body.String())
 }
 
 // doRawAgentRequest sends a raw-body request with an agent token through the
@@ -649,4 +649,63 @@ func TestArtifactsAccessTokenAfterMembershipLoss(t *testing.T) {
 	rec = bearerArtifactRequest(t, srv, http.MethodGet, "/api/v1/artifacts/"+owned+"/files/own.md", token, nil)
 	assert.Contains(t, []int{http.StatusUnauthorized, http.StatusNotFound}, rec.Code, rec.Body.String())
 	assert.NotEqual(t, http.StatusOK, rec.Code)
+}
+
+// TestArtifactsAgentChainCheckedAtUse: an agent's delegation chain is
+// checked at use on every read path, ownership and grants included. While
+// its token still carries project:artifact:read, an agent whose edge is gone
+// stops reading what it owns, and an agent whose delegator no longer holds
+// artifact read stops reading what it was granted. A grant to an agent in
+// another project works while that agent's own chain allows reads.
+func TestArtifactsAgentChainCheckedAtUse(t *testing.T) {
+	srv, s := testServer(t)
+	st, blobs := enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	p1 := artifactProject(t, s, "chain-p1")
+	p2 := artifactProject(t, s, "chain-p2")
+	owner, ownerTok := artifactAgent(t, srv, s, p1.ID, "chain-owner", AgentRoleBaseline)
+	reader, readerTok := artifactAgent(t, srv, s, p2.ID, "chain-reader", AgentRoleBaseline)
+
+	// An artifact owned by the p1 agent, with a principal grant to the p2
+	// agent (grants have no API yet), written the way publish writes it.
+	content := []byte("chain")
+	sum := sha256.Sum256(content)
+	digest := hex.EncodeToString(sum[:])
+	_, err := blobs.Upload(ctx, artifacts.BlobPath(srv.HubID(), digest), bytes.NewReader(content), storage.UploadOptions{})
+	require.NoError(t, err)
+	now := time.Now()
+	id := tid("chain-artifact")
+	a := &artifacts.Artifact{ID: id, ScopeKind: artifacts.ScopeKindProject, ScopeRef: p1.ID,
+		OwnerKind: artifacts.PrincipalKindAgent, OwnerRef: owner.ID, Title: "c", CreatedAt: now, UpdatedAt: now}
+	v := &artifacts.Version{ID: tid("chain-artifact-v1"), ArtifactID: id, Seq: 1, Kind: artifacts.VersionKindPublish,
+		EntryPath: "c.txt", TotalBytes: int64(len(content)), FileCount: 1, CreatedAt: now, State: artifacts.VersionStateReady}
+	require.NoError(t, st.CreatePublished(ctx, a, v,
+		[]artifacts.File{{VersionID: v.ID, Path: "c.txt", Size: int64(len(content)), SHA256: digest, MediaType: "text/plain"}},
+		[]artifacts.Grant{
+			{ID: tid("chain-home"), ArtifactID: id, SubjectKind: artifacts.SubjectScope, SubjectRef: p1.ID, Permission: artifacts.GrantRead, CreatedAt: now},
+			{ID: tid("chain-grant"), ArtifactID: id, SubjectKind: artifacts.SubjectPrincipal,
+				SubjectRef: artifacts.PrincipalRef(artifacts.PrincipalKindAgent, reader.ID), Permission: artifacts.GrantRead, CreatedAt: now},
+		}))
+
+	routes := []string{"/api/v1/artifacts/" + id, "/api/v1/artifacts/" + id + "/files/c.txt", "/api/v1/artifacts/" + id + "/versions/1/files/c.txt"}
+	expect := func(name, token string, want int) {
+		t.Helper()
+		for _, p := range routes {
+			assert.Equal(t, want, doRawAgentRequest(t, srv, http.MethodGet, p, nil, token).Code, "%s: %s", name, p)
+		}
+	}
+	expect("owner", ownerTok, http.StatusOK)
+	expect("cross-project grantee", readerTok, http.StatusOK)
+
+	// The grantee's delegator loses its role in p2: the grant no longer
+	// reaches past the chain.
+	_, err = s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, tid("art-delegator-"+p2.ID))
+	require.NoError(t, err)
+	expect("grantee with a narrowed chain", readerTok, http.StatusNotFound)
+
+	// The owner loses its edge: ownership no longer reaches past the chain.
+	_, err = s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, owner.ID,
+		store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "chain-test"})
+	require.NoError(t, err)
+	expect("owner without an edge", ownerTok, http.StatusNotFound)
 }

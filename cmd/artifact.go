@@ -305,8 +305,10 @@ func artifactErrorHint(err error, publishing bool) string {
 		return ""
 	}
 	switch {
+	case apiErr.StatusCode == http.StatusUnauthorized && publishing:
+		return "\nThe hub did not accept the caller for publishing: sign in again, or (for an agent) the token may lack the project:artifact:read scope."
 	case apiErr.StatusCode == http.StatusUnauthorized:
-		return "\nThe hub did not accept the caller for artifacts: sign in again, or (for an agent) the token may lack the project:artifact:read scope."
+		return "\nThe hub did not accept the credential: sign in again; an agent token may be invalid or expired."
 	case apiErr.StatusCode == http.StatusNotFound && !publishing:
 		return "\nThe artifact does not exist, or you cannot read it: it is not shared with you or your project, " +
 			"or (for an agent) the token lacks the project:artifact:read scope. Artifacts also require the hub.artifacts experiment."
