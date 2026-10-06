@@ -1,6 +1,6 @@
 # Artifact system
 
-Status: design accepted (decisions D1–D20); implementation in phases tracked by ptone/scion#3202. Phase P0 (scaffolding) is ptone/scion#3203, phase P1 (vertical slice) is ptone/scion#3208. This document carries the design's proposed design, data model, API and UX sections so the design travels with the code. Prior art: ptone/scion#874 ("Praxis"), ptone/scion#518.
+Status: design accepted (decisions D1–D20); implementation in phases tracked by ptone/scion#3202. Phase P0 (scaffolding) is ptone/scion#3203, phase P1 (vertical slice) is ptone/scion#3208. This document carries the proposed design, data model, API and UX of the artifact system so the design travels with the code. Prior art: ptone/scion#874 ("Praxis"), ptone/scion#518.
 
 The feature is behind the `hub.artifacts` experiment (default off).
 
