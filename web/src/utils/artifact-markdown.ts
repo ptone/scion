@@ -54,7 +54,17 @@ export interface ArtifactImageContext {
   files: ArtifactFile[];
 }
 
-export type ResolvedImage = { kind: 'file' | 'remote'; src: string } | { kind: 'placeholder' };
+/**
+ * Why an image is shown as a placeholder: a remote image the version holds
+ * no copy of ("not-fetched", for example one past the scanned part of the
+ * entry), a remote image whose fetch failed ("failed"), or any other
+ * source the preview does not load.
+ */
+export type PlaceholderReason = 'not-fetched' | 'failed' | 'unavailable';
+
+export type ResolvedImage =
+  | { kind: 'file' | 'remote'; src: string }
+  | { kind: 'placeholder'; reason: PlaceholderReason };
 
 const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 const IMG_TAG = /^\s*<img\b[^<>]*>\s*$/i;
@@ -115,15 +125,16 @@ function encodePath(p: string): string {
 export function resolveImageSrc(rawSrc: string, ctx: ArtifactImageContext): ResolvedImage {
   const src = rawSrc.trim();
   if (!src || src.startsWith('//') || src.startsWith('\\')) {
-    return { kind: 'placeholder' };
+    return { kind: 'placeholder', reason: 'unavailable' };
   }
   if (SCHEME.test(src)) {
     const normalized = normalizeRemoteUrl(src);
-    if (!normalized) return { kind: 'placeholder' };
+    if (!normalized) return { kind: 'placeholder', reason: 'unavailable' };
     const file = ctx.files.find(
       (f) => f.origin === 'remote' && f.sourceUrl && normalizeRemoteUrl(f.sourceUrl) === normalized
     );
-    if (!file || file.fetchStatus !== 'ok') return { kind: 'placeholder' };
+    if (!file) return { kind: 'placeholder', reason: 'not-fetched' };
+    if (file.fetchStatus !== 'ok') return { kind: 'placeholder', reason: 'failed' };
     return { kind: 'remote', src: `${ctx.filesBase}${encodePath(file.path)}?stream=1` };
   }
   let rel: string;
@@ -133,30 +144,46 @@ export function resolveImageSrc(rawSrc: string, ctx: ArtifactImageContext): Reso
       resolved.origin !== new URL(RELATIVE_BASE).origin ||
       !resolved.pathname.startsWith('/files/')
     ) {
-      return { kind: 'placeholder' };
+      return { kind: 'placeholder', reason: 'unavailable' };
     }
     rel = decodeURIComponent(resolved.pathname.slice('/files/'.length));
   } catch {
-    return { kind: 'placeholder' };
+    return { kind: 'placeholder', reason: 'unavailable' };
   }
   if (!rel || rel === '_remote' || rel.startsWith('_remote/')) {
-    return { kind: 'placeholder' };
+    return { kind: 'placeholder', reason: 'unavailable' };
   }
   // Only a file the version actually holds is requested.
   if (!ctx.files.some((f) => f.path === rel && f.origin !== 'remote')) {
-    return { kind: 'placeholder' };
+    return { kind: 'placeholder', reason: 'unavailable' };
   }
   return { kind: 'file', src: `${ctx.filesBase}${encodePath(rel)}?stream=1` };
 }
 
-/** The element shown instead of an image that cannot be loaded. */
-export function imagePlaceholder(doc: Document, alt: string): HTMLElement {
+const PLACEHOLDER_TEXT: Record<PlaceholderReason, string> = {
+  'not-fetched': 'Image not fetched',
+  failed: 'Image could not be fetched',
+  unavailable: 'Image unavailable',
+};
+
+/**
+ * The element shown instead of an image that cannot be loaded. Its text
+ * says why: "not fetched" (the version holds no copy), "could not be
+ * fetched" (the fetch failed) or "unavailable".
+ */
+export function imagePlaceholder(
+  doc: Document,
+  alt: string,
+  reason: PlaceholderReason = 'unavailable'
+): HTMLElement {
+  const label = PLACEHOLDER_TEXT[reason];
   const span = doc.createElement('span');
   span.className = 'artifact-image-placeholder';
+  span.dataset.reason = reason;
   span.setAttribute('role', 'img');
-  span.setAttribute('aria-label', alt || 'Image unavailable');
-  span.setAttribute('title', 'Image unavailable');
-  span.textContent = alt ? `[image: ${alt}]` : '[image unavailable]';
+  span.setAttribute('aria-label', alt ? `${label}: ${alt}` : label);
+  span.setAttribute('title', label);
+  span.textContent = alt ? `[${label.toLowerCase()}: ${alt}]` : `[${label.toLowerCase()}]`;
   return span;
 }
 
@@ -170,7 +197,9 @@ export function rewriteImages(root: ParentNode, ctx: ArtifactImageContext): void
     img.removeAttribute('sizes');
     const resolved = resolveImageSrc(img.getAttribute('src') ?? '', ctx);
     if (resolved.kind === 'placeholder') {
-      img.replaceWith(imagePlaceholder(img.ownerDocument, img.getAttribute('alt') ?? ''));
+      img.replaceWith(
+        imagePlaceholder(img.ownerDocument, img.getAttribute('alt') ?? '', resolved.reason)
+      );
       continue;
     }
     img.setAttribute('src', resolved.src);

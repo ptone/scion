@@ -80,10 +80,11 @@ describe('resolveImageSrc', () => {
       src: `${BASE}${UNICODE_PATH}?stream=1`,
     });
   });
-  it('shows a placeholder for a failed or unknown remote image', () => {
-    expect(resolveImageSrc(FAILED, ctx)).toEqual({ kind: 'placeholder' });
+  it('tells a failed remote image apart from one never fetched', () => {
+    expect(resolveImageSrc(FAILED, ctx)).toEqual({ kind: 'placeholder', reason: 'failed' });
     expect(resolveImageSrc('https://img.example/never-fetched.png', ctx)).toEqual({
       kind: 'placeholder',
+      reason: 'not-fetched',
     });
   });
   it('resolves relative paths against the version files', () => {
@@ -97,7 +98,10 @@ describe('resolveImageSrc', () => {
     });
   });
   it('shows a placeholder for a relative path the version does not hold', () => {
-    expect(resolveImageSrc('img/missing.png', ctx)).toEqual({ kind: 'placeholder' });
+    expect(resolveImageSrc('img/missing.png', ctx)).toEqual({
+      kind: 'placeholder',
+      reason: 'unavailable',
+    });
     expect(resolveImageSrc('doc.md', ctx)).toEqual({ kind: 'file', src: `${BASE}doc.md?stream=1` });
   });
   it('drops everything else', () => {
@@ -111,7 +115,10 @@ describe('resolveImageSrc', () => {
       '/api/v1/agents',
       '_remote/' + 'a'.repeat(64),
     ]) {
-      expect(resolveImageSrc(src, ctx), src).toEqual({ kind: 'placeholder' });
+      expect(resolveImageSrc(src, ctx), src).toEqual({
+        kind: 'placeholder',
+        reason: 'unavailable',
+      });
     }
   });
 });
@@ -149,6 +156,18 @@ describe('renderArtifactMarkdown', () => {
         expect(attr.value, `${el.tagName} ${attr.name}`).not.toMatch(/img\.example|other\.example/);
       }
     }
+  });
+
+  it('says whether a remote image was not fetched or could not be fetched', async () => {
+    const out = await renderArtifactMarkdown(
+      `![late](https://img.example/never-fetched.png)\n\n![broken](${FAILED})`,
+      ctx
+    );
+    const doc = new DOMParser().parseFromString(out, 'text/html');
+    const spans = Array.from(doc.querySelectorAll('.artifact-image-placeholder')) as HTMLElement[];
+    expect(spans.map((sp) => sp.dataset.reason)).toEqual(['not-fetched', 'failed']);
+    expect(spans[0].textContent).toBe('[image not fetched: late]');
+    expect(spans[1].textContent).toBe('[image could not be fetched: broken]');
   });
 
   it('shows other raw HTML as text', async () => {
