@@ -259,7 +259,10 @@ export class ScionPageArtifactDetail extends LitElement {
     }
     if (!this.data) return nothing;
     return html`
-      <a href=${`/projects/${encodeURIComponent(this.projectId)}`} class="back-link">
+      <a
+        href=${`/projects/${encodeURIComponent(this.data.artifact.scopeRef || this.projectId)}`}
+        class="back-link"
+      >
         <sl-icon name="arrow-left"></sl-icon>
         Project
       </a>
@@ -328,7 +331,10 @@ export class ScionPageArtifactDetail extends LitElement {
     }
     if ((kind === 'markdown' || kind === 'text') && this.text !== null) {
       return kind === 'markdown'
-        ? html`${bar}<scion-markdown-preview .content=${this.text}></scion-markdown-preview>`
+        ? html`${bar}<scion-markdown-preview
+              .content=${this.text}
+              same-origin-images
+            ></scion-markdown-preview>`
         : html`${bar}<scion-code-editor
               .content=${this.text}
               .language=${getLanguageFromPath(f.path)}

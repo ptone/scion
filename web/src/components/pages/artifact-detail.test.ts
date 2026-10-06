@@ -241,4 +241,53 @@ describe('artifact page', () => {
       window.removeEventListener('scion:access-denied', denied);
     }
   });
+
+  it("links back to the artifact's own project, not the one in the URL", async () => {
+    mockFetch(artifact('design.md', 'text/markdown'));
+    const el = await mount(true); // URL project is p-1; scopeRef is p-1 too
+    expect(el.shadowRoot!.querySelector('a.back-link')!.getAttribute('href')).toBe('/projects/p-1');
+    document.body.innerHTML = '';
+
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.scopeRef = 'home-project';
+    mockFetch(meta);
+    const el2 = await mount(true);
+    expect(el2.shadowRoot!.querySelector('a.back-link')!.getAttribute('href')).toBe(
+      '/projects/home-project'
+    );
+  });
+
+  it('shows only images the hub serves in the markdown preview', async () => {
+    mockFetch(
+      artifact('design.md', 'text/markdown'),
+      [
+        '![remote](https://elsewhere.example/p.png)',
+        '![protocol-relative](//elsewhere.example/q.png)',
+        '![local](/api/v1/artifacts/x/files/a.png)',
+        '![relative](img/b.png)',
+        '![inline](data:image/png;base64,AAAA)',
+        '<img src="https://elsewhere.example/raw.png">',
+      ].join('\n\n')
+    );
+    const el = await mount(true);
+    const preview = el.shadowRoot!.querySelector('scion-markdown-preview') as HTMLElement & {
+      updateComplete: Promise<unknown>;
+    };
+    expect(preview.hasAttribute('same-origin-images')).toBe(true);
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await preview.updateComplete;
+    }
+    const srcs = Array.from(preview.shadowRoot!.querySelectorAll('img')).map((i) =>
+      i.getAttribute('src')
+    );
+    expect(srcs).toEqual([
+      '/api/v1/artifacts/x/files/a.png',
+      'img/b.png',
+      'data:image/png;base64,AAAA',
+    ]);
+    const text = preview.shadowRoot!.textContent ?? '';
+    expect(text).toContain('remote');
+    expect(text).toContain('protocol-relative');
+  });
 });
