@@ -52,7 +52,7 @@ When it fetches the current version, `get` checks the bytes against the SHA-256 
 
 ## Web page
 
-`/projects/<project-id>/artifacts/<id>` shows the artifact's title, owner, version and reference, and renders the entry file: Markdown as formatted text, text and code (including JSON, YAML, CSV) in a read-only editor, and PNG, JPEG, GIF and WebP images inline. Other types (including HTML, SVG and PDF) are offered as a download. The Markdown preview shows only images served by the hub (relative paths and inline images); images that point to other hosts appear as their alt text.
+`/projects/<project-id>/artifacts/<id>` shows the artifact's title, owner, version and reference, and renders the entry file: Markdown as formatted text, text and code (including JSON, YAML, CSV) in a read-only editor, and PNG, JPEG, GIF and WebP images inline. Other types (including HTML, SVG and PDF) are offered as a download. The Markdown preview loads no images from other hosts: they appear as their alt text. Inline (data:) images are shown.
 
 ## API
 
