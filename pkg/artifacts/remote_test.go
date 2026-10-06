@@ -518,6 +518,12 @@ func TestServeRemoteImages(t *testing.T) {
 	if cc := rec.Header().Get("Cache-Control"); cc != "private, max-age=31536000, immutable" {
 		t.Fatalf("cache control %q", cc)
 	}
+	// On the current-version route the same image is not cached as
+	// immutable: that route can point at another version later.
+	current := "/api/v1/artifacts/" + resp.Artifact.ID + "/files/" + RemotePath(good) + "?stream=1"
+	if rec := f.do(&agentA, http.MethodGet, current, nil, nil); rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "private, no-cache" {
+		t.Fatalf("current route: %d %q", rec.Code, rec.Header().Get("Cache-Control"))
+	}
 	if rec.Header().Get(HeaderRemoteStatus) != "" {
 		t.Fatal("status header on a good image")
 	}

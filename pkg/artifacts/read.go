@@ -41,9 +41,9 @@ const signedURLTTL = 5 * time.Minute
 // HeaderRemoteStatus marks the 404 of a remote image whose fetch failed.
 const HeaderRemoteStatus = "X-Artifact-Remote-Status"
 
-// remoteCacheControl is the caching of a streamed remote image: its path is
-// fixed to its source URL within one immutable version, so it never
-// changes.
+// remoteCacheControl is the caching of a streamed remote image requested
+// by an explicit version: its path is fixed to its source URL within one
+// immutable version, so it never changes.
 const remoteCacheControl = "private, max-age=31536000, immutable"
 
 // fileCSP is the Content-Security-Policy of every streamed file response.
@@ -221,7 +221,9 @@ func (s *Service) handleGetFile(w http.ResponseWriter, r *http.Request, id strin
 		writeNotFound(w)
 		return
 	}
-	serveFile(w, r, b, f, deliveryFor(r, b))
+	// A remote image is cached as immutable only on a versioned URL; the
+	// current-version URL can point at another version later.
+	serveFile(w, r, b, f, deliveryFor(r, b), seq > 0 && f.Origin == FileOriginRemote)
 }
 
 // delivery is how file bytes reach the client.
@@ -254,7 +256,7 @@ func deliveryFor(r *http.Request, b backend) delivery {
 // happened. The headers that make a file safe to serve (disposition,
 // nosniff, private caching) are set here for every delivery, so all read
 // routes, now and in later phases, share one code path.
-func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how delivery) {
+func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how delivery, immutable bool) {
 	ctx := r.Context()
 	disposition := contentDisposition(f.MediaType, f.Path)
 	ctype := responseContentType(f.MediaType)
@@ -282,7 +284,7 @@ func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how d
 
 	etag := `"sha256:` + f.SHA256 + `"`
 	h.Set("ETag", etag)
-	if f.Origin == FileOriginRemote {
+	if immutable {
 		h.Set("Cache-Control", remoteCacheControl)
 	} else {
 		h.Set("Cache-Control", "private, no-cache")
