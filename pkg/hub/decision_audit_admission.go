@@ -250,6 +250,7 @@ type decisionAuditRouter struct {
 	attachment, sequence          uint64
 	refreshSlots                  [2]decisionAuditRefreshObservation
 	refreshOverlap, refreshPoison bool
+	propagationLost               bool
 	mutations                     uint8
 	lastTick                      time.Duration
 	clockInvalid                  bool
@@ -339,6 +340,7 @@ func sameDecisionAuditSnapshot(a, b ExperimentsSnapshot) bool {
 func (r *decisionAuditRouter) nextSequenceLocked() bool {
 	if r.sequence == ^uint64(0) {
 		r.refreshPoison = true
+		r.state.observation = decisionAuditRefreshObservation{}
 		return false
 	}
 	r.sequence++
@@ -346,18 +348,26 @@ func (r *decisionAuditRouter) nextSequenceLocked() bool {
 }
 
 func (r *decisionAuditRouter) beginRefresh(source *OperationalSettings) decisionAuditRefreshObservation {
+	return r.beginRefreshForAttachment(source, nil)
+}
+
+func (r *decisionAuditRouter) beginRefreshForAttachment(source *OperationalSettings, expected *uint64) decisionAuditRefreshObservation {
 	r.gate.Lock()
 	defer r.gate.Unlock()
-	if !r.sourceMatchesLocked(source) || r.state.closed || r.state.fault || r.mutations != 0 || r.refreshPoison {
-		return decisionAuditRefreshObservation{source: source}
+	if expected != nil && *expected != r.attachment {
+		return decisionAuditRefreshObservation{source: source, attachment: *expected}
+	}
+	rejected := decisionAuditRefreshObservation{source: source, attachment: r.attachment}
+	if !r.sourceMatchesLocked(source) || r.state.closed || r.state.fault || r.mutations != 0 || r.refreshPoison || r.propagationLost {
+		return rejected
 	}
 	reading, ok := r.clockLocked()
 	if !ok {
 		r.state.observation = decisionAuditRefreshObservation{}
-		return decisionAuditRefreshObservation{source: source}
+		return rejected
 	}
 	if !r.nextSequenceLocked() {
-		return decisionAuditRefreshObservation{source: source}
+		return rejected
 	}
 	free := -1
 	occupied := false
@@ -371,7 +381,7 @@ func (r *decisionAuditRouter) beginRefresh(source *OperationalSettings) decision
 	r.state.observation = decisionAuditRefreshObservation{}
 	if free < 0 {
 		r.refreshPoison = true
-		return decisionAuditRefreshObservation{source: source}
+		return rejected
 	}
 	if occupied {
 		r.refreshOverlap = true
@@ -382,6 +392,11 @@ func (r *decisionAuditRouter) beginRefresh(source *OperationalSettings) decision
 }
 
 func (r *decisionAuditRouter) finishRefresh(token decisionAuditRefreshObservation, snapshot ExperimentsSnapshot, err error) decisionAuditRefreshObservation {
+	result, _ := r.finishRefreshForAttachment(token, snapshot, err)
+	return result
+}
+
+func (r *decisionAuditRouter) finishRefreshForAttachment(token decisionAuditRefreshObservation, snapshot ExperimentsSnapshot, err error) (decisionAuditRefreshObservation, bool) {
 	r.gate.Lock()
 	active := false
 	for i, pending := range r.refreshSlots {
@@ -405,10 +420,10 @@ func (r *decisionAuditRouter) finishRefresh(token decisionAuditRefreshObservatio
 	// invalidate another attached source's freshly accepted state.
 	if token.source != r.source || token.attachment != r.attachment {
 		r.gate.Unlock()
-		return decisionAuditRefreshObservation{}
+		return decisionAuditRefreshObservation{}, false
 	}
 	reading, clockOK := r.clockLocked()
-	valid := active && !overlapping && !r.refreshPoison && err == nil && clockOK && !r.state.closed && !r.state.fault && r.mutations == 0 &&
+	valid := active && !overlapping && !r.refreshPoison && !r.propagationLost && err == nil && clockOK && !r.state.closed && !r.state.fault && r.mutations == 0 &&
 		r.sourceMatchesLocked(token.source) && token.sequence == r.sequence && token.generation == r.admission.manifest.generation &&
 		token.epoch == reading.epoch && reading.tick >= token.q0 && reading.tick-token.q0 <= decisionAuditRefreshBudget &&
 		reading.tick < token.q0+decisionAuditLease && boundedDecisionAuditSnapshot(snapshot) && snapshot.Revision >= r.maxRevision &&
@@ -423,7 +438,7 @@ func (r *decisionAuditRouter) finishRefresh(token decisionAuditRefreshObservatio
 		if cancel != nil {
 			cancel()
 		}
-		return decisionAuditRefreshObservation{}
+		return decisionAuditRefreshObservation{}, true
 	}
 	token.tracked = false
 	token.successful = true
@@ -434,7 +449,7 @@ func (r *decisionAuditRouter) finishRefresh(token decisionAuditRefreshObservatio
 	result := token
 	result.snapshot = cloneDecisionAuditSnapshot(snapshot)
 	r.gate.Unlock()
-	return result
+	return result, true
 }
 
 // Source pointer publication shares the handoff gate. No cache mutex is taken.
@@ -446,6 +461,7 @@ func (r *decisionAuditRouter) setSource(source *OperationalSettings) {
 		r.refreshPoison = true
 	} else {
 		r.attachment++
+		r.propagationLost = false // only a new explicit attachment releases lifecycle loss
 	}
 	r.nextSequenceLocked()
 	r.state.observation = decisionAuditRefreshObservation{}
@@ -464,6 +480,34 @@ func (r *decisionAuditRouter) setSource(source *OperationalSettings) {
 	if source != nil {
 		source.decisionAuditObserver.Store(r)
 	}
+}
+
+// Attachment identity is captured before propagation work starts. No cache lock
+// is held here and no clock, handler or context method is invoked.
+func (r *decisionAuditRouter) propagationAttachment(source *OperationalSettings) uint64 {
+	r.gate.Lock()
+	defer r.gate.Unlock()
+	if source != r.source {
+		return 0
+	}
+	return r.attachment
+}
+
+// Called with the source cache mutex held, matching Refresh's cache -> gate
+// order. Return cancellation for invocation after BOTH locks are released.
+func (r *decisionAuditRouter) losePropagation(source *OperationalSettings, attachment uint64) (context.CancelFunc, bool) {
+	r.gate.Lock()
+	defer r.gate.Unlock()
+	if source != r.source || attachment != r.attachment {
+		return nil, false
+	}
+	r.propagationLost = true
+	r.nextSequenceLocked()
+	r.state.observation = decisionAuditRefreshObservation{}
+	if r.slot != nil {
+		return r.slot.cancel, true
+	}
+	return nil, true
 }
 
 func (r *decisionAuditRouter) invalidateSource() { r.invalidateSettings(nil) }
@@ -556,7 +600,7 @@ func (r *decisionAuditRouter) EmitDecisionAudit(ctx context.Context, record *sto
 	// Ordinary production always exits here with empty admission and no clock,
 	// settings proof, timer, NEW target or callback invoked.
 	r.gate.Lock()
-	candidate := r.admission != nil && !r.state.closed && !r.state.fault && r.state.active < decisionAuditNewCapacity && r.state.observation.successful && r.sourceMatchesLocked(r.source) &&
+	candidate := r.admission != nil && !r.refreshPoison && !r.propagationLost && !r.state.closed && !r.state.fault && r.state.active < decisionAuditNewCapacity && r.state.observation.successful && r.sourceMatchesLocked(r.source) &&
 		sameDecisionAuditReference(ctx, r.admission.manifest.binding.caller)
 	source := r.source
 	r.gate.Unlock()
@@ -569,7 +613,7 @@ func (r *decisionAuditRouter) EmitDecisionAudit(ctx context.Context, record *sto
 	r.gate.Lock()
 	current := r.state.observation
 	reading, clockOK := r.clockLocked()
-	eligible := bounded && !r.state.closed && !r.state.fault && r.state.active < decisionAuditNewCapacity && r.mutations == 0 &&
+	eligible := bounded && !r.refreshPoison && !r.propagationLost && !r.state.closed && !r.state.fault && r.state.active < decisionAuditNewCapacity && r.mutations == 0 &&
 		r.sourceMatchesLocked(source) && sameDecisionAuditReference(ctx, r.admission.manifest.binding.caller) && ctx.Err() == nil &&
 		clockOK && current.successful && observed.successful &&
 		current.source == source && current.attachment == r.attachment && observed.attachment == current.attachment &&

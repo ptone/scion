@@ -258,18 +258,32 @@ func NewOperationalSettings(
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
 // against the cache, and returns the names of sections that changed.
 func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
+	return o.refreshForDecisionAuditAttachment(ctx, nil)
+}
+
+// Propagation reads retain their original attachment even if an explicit source
+// handoff occurs before their read begins. Generic cache ingestion is unchanged.
+func (o *OperationalSettings) refreshForDecisionAuditAttachment(ctx context.Context, attachment *decisionAuditPropagationAttachment) ([]string, error) {
 	observer := o.decisionAuditObserver.Load()
+	if attachment != nil {
+		observer = attachment.observer
+	}
 	var observation decisionAuditRefreshObservation
 	if observer != nil {
-		observation = observer.beginRefresh(o)
+		if attachment == nil {
+			observation = observer.beginRefresh(o)
+		} else {
+			observation = observer.beginRefreshForAttachment(o, &attachment.attachment)
+		}
 	}
 	rows, err := o.store.ListHubSettings(ctx)
 	if err != nil {
-		if observer != nil {
-			observer.finishRefresh(observation, ExperimentsSnapshot{}, err)
-		}
 		o.mu.Lock()
-		o.decisionAuditObservation = decisionAuditRefreshObservation{}
+		if observer != nil {
+			if _, current := observer.finishRefreshForAttachment(observation, ExperimentsSnapshot{}, err); current {
+				o.decisionAuditObservation = decisionAuditRefreshObservation{}
+			}
+		}
 		o.mu.Unlock()
 		return nil, fmt.Errorf("operational settings refresh: %w", err)
 	}
@@ -361,7 +375,9 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 		if auditErr == nil && observation.tracked {
 			snapshot = o.experimentsSnapshotLocked()
 		}
-		o.decisionAuditObservation = observer.finishRefresh(observation, snapshot, auditErr)
+		if result, current := observer.finishRefreshForAttachment(observation, snapshot, auditErr); current {
+			o.decisionAuditObservation = result
+		}
 	}
 	return changed, nil
 }
@@ -759,7 +775,8 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 	o.server = server
 
 	propCtx, cancel := context.WithCancel(ctx)
-	o.stopPropagation = cancel
+	attachment := o.decisionAuditPropagationAttachment()
+	o.stopPropagation = func() { o.loseDecisionAuditPropagation(attachment); cancel() }
 
 	// --- Subscribe to admin.settings.updated events (§3.6 primary) ---
 	ch, unsub := o.events.Subscribe(settingsUpdatedSubject)
@@ -770,11 +787,11 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		defer unsub()
 		defer func() {
 			if r := recover(); r != nil {
-				o.invalidateDecisionAuditObservation()
+				o.loseDecisionAuditPropagation(attachment)
 				slog.Error("Settings propagation subscription loop panicked — propagation stopped on this replica", "panic", r)
 			}
 		}()
-		o.runSubscriptionLoop(propCtx, ch, server)
+		o.runSubscriptionLoopForAttachment(propCtx, ch, server, attachment)
 	}()
 
 	// --- Poll backstop at 60s with jitter (§3.6 backstop) ---
@@ -783,11 +800,11 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		defer o.propagationWg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				o.invalidateDecisionAuditObservation()
+				o.loseDecisionAuditPropagation(attachment)
 				slog.Error("Settings propagation poll backstop panicked — propagation stopped on this replica", "panic", r)
 			}
 		}()
-		o.runPollBackstop(propCtx, server)
+		o.runPollBackstopForAttachment(propCtx, server, attachment)
 	}()
 
 	// --- Reconnect refresh callback (§3.6 reconnect) ---
@@ -796,16 +813,17 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 	if pgPub, ok := o.events.(*PostgresEventPublisher); ok {
 		pgPub.SetOnReconnect(func() {
 			slog.Info("Event listener reconnected — refreshing operational settings unconditionally")
-			o.refreshAndApply(propCtx, server)
+			o.refreshAndApplyForAttachment(propCtx, server, &attachment)
 		})
 	}
 }
 
 // StopPropagation stops the propagation goroutines and waits for them to exit.
 func (o *OperationalSettings) StopPropagation() {
-	o.invalidateDecisionAuditObservation()
 	if o.stopPropagation != nil {
 		o.stopPropagation()
+	} else {
+		o.loseDecisionAuditPropagation(o.decisionAuditPropagationAttachment())
 	}
 	o.propagationWg.Wait()
 }
@@ -813,7 +831,10 @@ func (o *OperationalSettings) StopPropagation() {
 // runSubscriptionLoop listens for admin.settings.updated events and triggers
 // Refresh + apply on receipt.
 func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan Event, server *Server) {
-	defer o.invalidateDecisionAuditObservation()
+	o.runSubscriptionLoopForAttachment(ctx, ch, server, o.decisionAuditPropagationAttachment())
+}
+func (o *OperationalSettings) runSubscriptionLoopForAttachment(ctx context.Context, ch <-chan Event, server *Server, attachment decisionAuditPropagationAttachment) {
+	defer o.loseDecisionAuditPropagation(attachment)
 	for {
 		select {
 		case <-ctx.Done():
@@ -828,7 +849,7 @@ func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan
 			if err := json.Unmarshal(evt.Data, &payload); err == nil {
 				slog.Info("Received settings update event", "section", payload.Section, "revision", payload.Revision)
 			}
-			o.refreshAndApply(ctx, server)
+			o.refreshAndApplyForAttachment(ctx, server, &attachment)
 		}
 	}
 }
@@ -838,6 +859,9 @@ func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan
 // backstop for missed NOTIFY events (design §3.6). It also runs on SQLite,
 // where it is a cheap re-read of the local DB.
 func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Server) {
+	o.runPollBackstopForAttachment(ctx, server, o.decisionAuditPropagationAttachment())
+}
+func (o *OperationalSettings) runPollBackstopForAttachment(ctx context.Context, server *Server, attachment decisionAuditPropagationAttachment) {
 	interval := o.PollInterval
 	if interval == 0 {
 		interval = 60 * time.Second
@@ -862,7 +886,7 @@ func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Serve
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			o.refreshAndApply(ctx, server)
+			o.refreshAndApplyForAttachment(ctx, server, &attachment)
 		}
 	}
 }
@@ -872,7 +896,10 @@ func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Serve
 // ApplySnapshot writes the same values and ApplyMaintenanceFromSnapshot
 // is idempotent by design.
 func (o *OperationalSettings) refreshAndApply(ctx context.Context, server *Server) {
-	changed, err := o.Refresh(ctx)
+	o.refreshAndApplyForAttachment(ctx, server, nil)
+}
+func (o *OperationalSettings) refreshAndApplyForAttachment(ctx context.Context, server *Server, attachment *decisionAuditPropagationAttachment) {
+	changed, err := o.refreshForDecisionAuditAttachment(ctx, attachment)
 	if err != nil {
 		slog.Error("Settings propagation refresh failed", "error", err)
 		return
@@ -1830,6 +1857,35 @@ func applySnapshotLogLevel(level string) {
 		lvl = slog.LevelError
 	}
 	slog.SetLogLoggerLevel(lvl)
+}
+
+// Lifecycle authority belongs to this captured router/source attachment, never
+// whichever attachment happens to be live when an old callback finally runs.
+type decisionAuditPropagationAttachment struct {
+	observer   *decisionAuditRouter
+	attachment uint64
+}
+
+func (o *OperationalSettings) decisionAuditPropagationAttachment() decisionAuditPropagationAttachment {
+	observer := o.decisionAuditObserver.Load()
+	if observer == nil {
+		return decisionAuditPropagationAttachment{}
+	}
+	return decisionAuditPropagationAttachment{observer: observer, attachment: observer.propagationAttachment(o)}
+}
+func (o *OperationalSettings) loseDecisionAuditPropagation(attachment decisionAuditPropagationAttachment) {
+	if attachment.observer == nil {
+		return
+	}
+	o.mu.Lock()
+	cancel, current := attachment.observer.losePropagation(o, attachment.attachment)
+	if current {
+		o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	}
+	o.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // Invalidation carries no freshness proof and cannot reset a NEW fault.

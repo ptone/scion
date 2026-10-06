@@ -231,3 +231,102 @@ is staged, log unstaged, and commit/push remain held for manager disposition.
 Earlier compatibility evidence and all sealed RED/GREEN/blocker artifacts are
 preserved. Human-directed messages/questions from this worker: none. Lifecycle
 completion/deletion remains held pending durable receipt and explicit release.
+
+## Quality-gate corrections — finite mechanics only, 2026-10-06
+
+Correction base: `5ea96416729ccd739d3a4bbd9809026d9498001a`.
+Amendments 25–32 authorize this bounded correction checkpoint. The independent
+input verdicts were code REQUEST CHANGES, test REQUEST CHANGES, and security
+APPROVE exclusively for the bounded default-off posture. Security approval
+waived none of the code or test findings and granted no production admission.
+Protected reports under the workstream reviews directory are:
+
+| Input | SHA-256 |
+| --- | --- |
+| m2-defaultoff-code-review-1.md | bf58f8ab7103e584360f25c6bd88c14a648a12a1bdca68a52e81741479cea439 |
+| m2-defaultoff-test-review-1.md | ec7dc3877701106332db85b784cfca5c9dc8dae2cc3b501bb8298eb972270414 |
+| m2-defaultoff-security-review-1.md | 8bbc91c19e718ba250692c75d24dd4e039b8c797416dd531ca7b6d79be3b2262 |
+
+Code H1 required persistent propagation-lifecycle rejection; M1/M2 required real
+lower-authoritative-revision and otherwise-eligible live ownership fixtures.
+Test F1–F5 required causal K=1/concurrent handoff, independent h+1 cancellation
+and h+2/+1ns completion, occupied NEW close/cancel/wait/reference cleanup and
+HTTP drain, authoritative revision regression, and isolated safety boundaries.
+A27 adds these finite oracles only in the two existing test paths. Manifest
+cardinality coverage truthfully proves seven accepted roles/eight rejected; the
+16-entry ceiling is redundant/unreachable in this schema, not tested at 16/17.
+Virtual-clock boundaries do not prove real scheduler or arbitrary-I/O bounds.
+
+A28's single accepted expanded RED produced five failing subcases and ten
+assertion errors: stop, channel-close, recovered-loop and stop-during-read each
+failed two lifecycle assertions; sequence exhaustion failed both the in-read
+ownership assertion and persistent poisoned-observation assertion. The tenth
+assertion was independently classified as the second manifestation of the same
+sequence defect. No RED rerun or automatic repair followed. Protected raw:
+`m2-defaultoff-quality-gate-red-amendment-28.txt`, 1,205 lines / 125,624 bytes,
+SHA-256 `fab127694a414e678650b59fb16d87076bbeacdfece14f0298a0d435b7eb1628`.
+
+A29 production corrections are confined to decision_audit_admission.go and
+operational_settings.go. A gate-owned per-attachment propagation-loss latch
+rejects new reads, publication and both candidate/final NEW handoff. Propagation
+start, polling, reconnect, subscription exit/recovery and stop carry a captured
+router/source/attachment identity; callbacks from an old attachment cannot
+clear a current proof. Only explicit source attachment handoff clears the
+attachment's lifecycle loss. Refresh poison, clock poison and fault stay latched.
+Sequence exhaustion atomically sets poison and empties the router observation;
+no successful read can revive it. Refresh completion publishes or clears the
+copied Ops proof only for its current attachment. Lock acquisition stays
+OperationalSettings.mu -> router.gate, with no reverse acquisition.
+
+A30 corrects only the frozen sequence-exhaustion fixture predicate: it requires
+an already-empty router observation and uses the copied Ops proof as the
+otherwise-eligible stale baseline before the poisoned emission. Ownership and
+persistent-poison assertions are unchanged. This tests the combined atomic
+clearing/poison invariant; it does not isolate removal of the poison guard alone.
+Lifecycle slot cancellation executes outside both locks. Refresh completion
+cancellation executes outside router.gate but still under OperationalSettings.mu,
+preserving the preexisting refresh completion behavior; error completion now
+uses the same mu -> gate publication ordering. No parent watcher, new goroutine,
+queue, exported positive constructor or production trust adapter was added.
+
+A31's single literal 35-name focused GREEN acquired heavy-build slot 4 after
+168 seconds with 43 GB available and exited 0. Start 22:24:38.417435Z; end
+22:37:54.276329Z; total queue-inclusive wall 795.858956 seconds. Package results:
+experiments PASS 0.005s, hub PASS 4.055s. All 35 named tests and 155 emitted
+subtests passed: 190 matching RUN/PASS outcomes, with zero missing, unexpected,
+duplicate, failed or skipped outcomes and no setup/VCS/compile/resource/timeout/
+deadlock/watchdog/unrecovered-panic failure. The caught recovered-loop fixture
+panic log is expected in a passing test. Protected raw:
+`m2-defaultoff-quality-gate-green-amendment-31.txt`, 1,186 lines / 123,945 bytes,
+SHA-256 `c63ed820d42bb8b1378bc4c9e21e9da48ef62a3099a048b37992529f7b8c4724`.
+
+The exact command is preserved in the protected A30 review and A31 raw evidence:
+normal heavy-build wrapper, HEAVY_BUILD_MAX_WAIT=2700 (45m queue), acquire-time
+available memory >=30 GB, ulimit -v 12000000, GOMEMLIMIT=6GiB, GOGC=40,
+GOFLAGS=-gcflags=-c=1, GOCACHE=/scion-volumes/gocache, independent timeout 15m,
+go test -timeout 14m -count=1 -p 1 -v ./pkg/experiments ./pkg/hub with the unchanged
+literal 35-name selector. No outer timeout, second invocation, retry, race,
+full suite, build, vet, lint, generator or resource-cap enlargement followed.
+
+Production NEW remains structurally unadmitted and the registered experiment
+remains default false, including under a fresh true production override. Every
+hard pre-activation gate remains rejecting: ratified production census and exact
+whole manifest; T1–T25/SCC/provenance/constructor authority; clean source/build
+and exact live profile/capture/bindings for root, legacy, handler, clock, timer,
+settings and originating caller; monotonic elapsed clock/suspension/epoch and
+timer scheduler; bounded cooperative authoritative store/source; accepting
+handler; complete synchronous cancellation/return/reference cleanup graph;
+independent critical audit-warning, alert and dashboard delivery; production
+freshness/drain/persistence/no-loss evidence and explicit activation approval.
+Finite fixture GREEN supplies none of those production contracts or approvals.
+The retained #2502 legacy lifecycle and ordinary authorization/sampling/results
+remain separate from finite NEW mechanics.
+
+Fresh post-fix independent re-review is still pending. No final quality-gate
+approval, reviewer launch, activation, deployment, live-setting change, cutover,
+legacy retirement, main merge, PR or explain round 7 is claimed. This checkpoint
+contains exactly four correction paths plus this appended project log. Earlier
+history is preserved byte-for-byte, and all sealed reports/evidence stay outside
+Git unchanged. Human-directed messages/questions from this worker: none.
+Completion/deletion remains held for durable receipt, independent re-review and
+explicit lifecycle disposition.
