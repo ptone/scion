@@ -31,13 +31,6 @@ export class ScionMarkdownPreview extends LitElement {
   @property({ type: String })
   content = '';
 
-  /**
-   * Show only images served by this page's origin (relative, same-origin
-   * and data: images); others are replaced by their alt text.
-   */
-  @property({ type: Boolean, attribute: 'same-origin-images' })
-  sameOriginImages = false;
-
   @state() private renderedHtml = '';
   @state() private loading = true;
   @state() private error: string | null = null;
@@ -217,7 +210,7 @@ export class ScionMarkdownPreview extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('content') || changed.has('sameOriginImages')) {
+    if (changed.has('content')) {
       void this.renderMarkdown();
     }
   }
@@ -228,9 +221,7 @@ export class ScionMarkdownPreview extends LitElement {
 
     try {
       const renderer = await getMarkdownRenderer();
-      this.renderedHtml = renderer.render(this.content, {
-        sameOriginImagesOnly: this.sameOriginImages,
-      });
+      this.renderedHtml = renderer.render(this.content);
     } catch (err) {
       console.error('Failed to render markdown:', err);
       this.error = 'Failed to render markdown preview';
