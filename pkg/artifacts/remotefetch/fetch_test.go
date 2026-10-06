@@ -129,6 +129,8 @@ func newTestEnv(t *testing.T, handler http.HandlerFunc, cfg Config) *testEnv {
 		"loopback6.test": addrs("::1"),
 		"mapped.test":    addrs("::ffff:169.254.169.254"),
 		"public-ok.test": {serverAddr},
+		"ula.test":       addrs("fd12::5"),
+		"nat64.test":     addrs("64:ff9b::a9fe:a9fe"),
 	}}
 	cfg.Logger = slog.New(slog.NewTextHandler(env.logs, nil))
 	f := New(cfg)
@@ -349,6 +351,9 @@ func TestFetchDeniedAddresses(t *testing.T) {
 		"CGNAT":                         "100.64.0.1",
 		"mixed public and private DNS":  "mixed.test",
 		"mixed public and ULA DNS":      "mixed6.test",
+		"metadata, IPv4-translated":     "[::ffff:0:a9fe:a9fe]",
+		"ULA via DNS":                   "ula.test",
+		"NAT64 of metadata via DNS":     "nat64.test",
 	} {
 		t.Run(name, func(t *testing.T) {
 			before := strings.Count(env.logs.String(), "denied before connecting")
@@ -374,12 +379,24 @@ func TestIsDenied(t *testing.T) {
 		"100.64.0.1", "192.0.0.8", "192.0.2.1", "198.18.0.1", "198.51.100.1", "203.0.113.1",
 		"240.0.0.1", "255.255.255.255", "::127.0.0.1", "64:ff9b::7f00:1", "2001::1",
 		"2001:db8::1", "2002:7f00:1::1", "fec0::1", "100::1",
+		// IPv4-translated (SIIT) forms of loopback, metadata and private.
+		"::ffff:0:7f00:1", "::ffff:0:a9fe:a9fe", "::ffff:0:a00:1",
+		// Outside 2000::/3: denied by default.
+		"fc00::1", "fd00::1", "fe80::1", "ff02::1", "4000::1", "5f00::1", "8000::1", "e000::1",
+		// Non-global ranges inside 2000::/3.
+		"2001:10::1", "2001:20::1", "3fff::1", "64:ff9b::808:808", "2002:808:808::1", "2001::808:808",
 	} {
 		if !isDenied(netip.MustParseAddr(a)) {
 			t.Errorf("%s not denied", a)
 		}
 	}
-	for _, a := range []string{"93.184.216.34", "8.8.8.8", "2606:2800:220:1::1", "1.1.1.1"} {
+	for _, a := range []string{
+		"93.184.216.34", "8.8.8.8", "2606:2800:220:1::1", "1.1.1.1",
+		// Public IPv4 in mapped and translated form is judged as IPv4.
+		"::ffff:8.8.8.8", "::ffff:0:808:808",
+		// Ordinary global unicast.
+		"2a00:1450:4001::1", "2606:4700:4700::1111", "2001:4860:4860::8888", "3ffe::1",
+	} {
 		if isDenied(netip.MustParseAddr(a)) {
 			t.Errorf("%s denied", a)
 		}
