@@ -70,6 +70,8 @@ type Service struct {
 	hubID    string
 	limits   func(context.Context) Limits
 	provider func() Backend
+
+	fetcherFactory func(RemoteImageLimits) ImageFetcher
 }
 
 // Backend is what a request needs from the service's environment: the
@@ -84,6 +86,9 @@ type Backend struct {
 type Limits struct {
 	// MaxFileBytes caps the size of one file.
 	MaxFileBytes int64
+	// RemoteImages bound the remote images fetched at publish time. A zero
+	// value means the defaults (DefaultRemoteImageLimits).
+	RemoteImages RemoteImageLimits
 }
 
 // DefaultMaxFileBytes is the per-file limit used when no limits getter is

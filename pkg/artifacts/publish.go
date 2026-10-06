@@ -74,6 +74,10 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "name must be a plain file name")
 		return
 	}
+	if isReservedPath(name) {
+		writeError(w, http.StatusBadRequest, "bad_request", "names under "+RemotePrefix+" are reserved")
+		return
+	}
 	title := strings.TrimSpace(q.Get(paramTitle))
 	if title == "" {
 		title = name
@@ -143,29 +147,47 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
+	versionID := uuid.NewString()
+	f := File{VersionID: versionID, Path: name, Size: spool.size, SHA256: spool.digest, MediaType: mediaType}
+	files := []File{f}
+	totalBytes := spool.size
+	var warnings []string
+	if mediaType == "text/markdown" {
+		// Remote images are fetched now, once, so opening the artifact
+		// never makes the hub fetch anything.
+		urls, err := spool.markdownImageURLs()
+		if err != nil {
+			slog.ErrorContext(ctx, "artifacts: read spooled markdown failed", "error", err)
+		}
+		remote, w := s.fetchRemoteImages(ctx, b, versionID, urls)
+		warnings = w
+		for _, rf := range remote {
+			files = append(files, rf)
+			totalBytes += rf.Size
+		}
+	}
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Title: title, CurrentSeq: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	v := &Version{
-		ID: uuid.NewString(), ArtifactID: a.ID, Seq: 1, Kind: VersionKindPublish, EntryPath: name,
-		TotalBytes: spool.size, FileCount: 1, CreatedByKind: kind, CreatedByRef: ref,
+		ID: versionID, ArtifactID: a.ID, Seq: 1, Kind: VersionKindPublish, EntryPath: name,
+		TotalBytes: totalBytes, FileCount: len(files), CreatedByKind: kind, CreatedByRef: ref,
 		CreatedAt: now, State: VersionStateReady,
 	}
-	f := File{VersionID: v.ID, Path: name, Size: spool.size, SHA256: spool.digest, MediaType: mediaType}
 	g := Grant{
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectScope, SubjectRef: scope,
 		Permission: GrantRead, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now,
 	}
 	// A failure here can leave an unreferenced blob behind; blobs are
 	// content-addressed, so a retry reuses it and the blob sweep reclaims it.
-	if err := b.store.CreatePublished(ctx, a, v, []File{f}, []Grant{g}); err != nil {
+	if err := b.store.CreatePublished(ctx, a, v, files, []Grant{g}); err != nil {
 		slog.ErrorContext(ctx, "artifacts: publish failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
 		return
 	}
-	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, []File{f})})
+	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Warnings: warnings})
 }
 
 // putBlob stores the spooled body at its content address unless a blob
@@ -202,6 +224,19 @@ type spooled struct {
 	size   int64
 	digest string
 	head   []byte
+}
+
+// markdownImageURLs reads the spooled body as markdown and returns the
+// remote image URLs it references.
+func (s *spooled) markdownImageURLs() ([]string, error) {
+	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	body, err := io.ReadAll(s.file)
+	if err != nil {
+		return nil, err
+	}
+	return extractImageURLs(string(body)), nil
 }
 
 func (s *spooled) Close() {

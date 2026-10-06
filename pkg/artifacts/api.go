@@ -65,6 +65,9 @@ type ArtifactResponse struct {
 	Artifact ArtifactInfo `json:"artifact"`
 	// Version is the current version.
 	Version *VersionInfo `json:"version,omitempty"`
+	// Warnings are publish-time notices, such as remote images that could
+	// not be fetched. The publish succeeded regardless.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ArtifactInfo describes an artifact.
@@ -104,6 +107,12 @@ type FileInfo struct {
 	Size      int64  `json:"size"`
 	SHA256    string `json:"sha256"`
 	MediaType string `json:"mediaType"`
+	// Origin is "remote" for an image the hub fetched at publish time and
+	// omitted for uploaded files. SourceURL is the URL it was fetched from
+	// and FetchStatus is "ok" or "failed".
+	Origin      string `json:"origin,omitempty"`
+	SourceURL   string `json:"sourceUrl,omitempty"`
+	FetchStatus string `json:"fetchStatus,omitempty"`
 }
 
 func artifactInfo(a *Artifact) ArtifactInfo {
@@ -121,7 +130,11 @@ func versionInfo(v *Version, files []File) *VersionInfo {
 		CreatedByRef: v.CreatedByRef, CreatedAt: v.CreatedAt, State: v.State, Files: []FileInfo{},
 	}
 	for _, f := range files {
-		out.Files = append(out.Files, FileInfo{Path: f.Path, Size: f.Size, SHA256: f.SHA256, MediaType: f.MediaType})
+		fi := FileInfo{Path: f.Path, Size: f.Size, SHA256: f.SHA256, MediaType: f.MediaType}
+		if f.Origin == FileOriginRemote {
+			fi.Origin, fi.SourceURL, fi.FetchStatus = f.Origin, f.SourceURL, f.FetchStatus
+		}
+		out.Files = append(out.Files, fi)
 	}
 	return out
 }

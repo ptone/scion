@@ -38,6 +38,14 @@ const paramStream = "stream"
 // redirects to. It only has to outlive the redirect.
 const signedURLTTL = 5 * time.Minute
 
+// HeaderRemoteStatus marks the 404 of a remote image whose fetch failed.
+const HeaderRemoteStatus = "X-Artifact-Remote-Status"
+
+// remoteCacheControl is the caching of a streamed remote image: its path is
+// fixed to its source URL within one immutable version, so it never
+// changes.
+const remoteCacheControl = "private, max-age=31536000, immutable"
+
 // fileCSP is the Content-Security-Policy of every streamed file response.
 // A file opened directly in the browser gets an opaque origin and no
 // script, so nothing served from the hub's origin can act on it.
@@ -201,9 +209,15 @@ func (s *Service) handleGetFile(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the file")
 		return
 	}
+	if f.Origin == FileOriginRemote && (f.FetchStatus != FetchStatusOK || f.SHA256 == "") {
+		// A remote image whose fetch failed has no bytes. The header lets
+		// the renderer show its placeholder; it carries no reason.
+		w.Header().Set(HeaderRemoteStatus, FetchStatusFailed)
+		writeNotFound(w)
+		return
+	}
 	if f.SHA256 == "" {
-		// A manifest entry with no content (a remote fetch that failed)
-		// has no bytes to serve.
+		// A manifest entry with no content has no bytes to serve.
 		writeNotFound(w)
 		return
 	}
@@ -268,7 +282,11 @@ func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how d
 
 	etag := `"sha256:` + f.SHA256 + `"`
 	h.Set("ETag", etag)
-	h.Set("Cache-Control", "private, no-cache")
+	if f.Origin == FileOriginRemote {
+		h.Set("Cache-Control", remoteCacheControl)
+	} else {
+		h.Set("Cache-Control", "private, no-cache")
+	}
 	h.Set("Content-Security-Policy", fileCSP)
 	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
 		w.WriteHeader(http.StatusNotModified)
