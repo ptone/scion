@@ -18,7 +18,8 @@
  * Artifact page (experiment hub.artifacts)
  *
  * Shows an artifact's title, owner and current version, and renders its
- * entry file: markdown through <scion-markdown-preview>, text through a
+ * entry file: markdown through <scion-artifact-markdown-frame> (a sandboxed
+ * frame whose images load only from the hub), text through a
  * read-only <scion-code-editor>, raster images through <img>. Other types
  * are offered as a download.
  * Route: /projects/{projectId}/artifacts/{artifactId}
@@ -44,7 +45,7 @@ import {
 } from '../../client/artifacts.js';
 import type { ArtifactFile, ArtifactResponse, ArtifactRenderer } from '../../client/artifacts.js';
 import { getLanguageFromPath } from '../shared/code-editor.js';
-import '../shared/markdown-preview.js';
+import '../shared/artifact-markdown-frame.js';
 import '../shared/code-editor.js';
 import './not-found.js';
 
@@ -324,11 +325,20 @@ export class ScionPageArtifactDetail extends LitElement {
     `;
     if (kind === 'image') {
       return html`${bar}
-        <div class="image-frame"><img src=${href} alt=${this.data!.artifact.title} /></div>`;
+        <div class="image-frame">
+          <img
+            src=${artifactFileUrl(this.artifactId, v.seq, f.path, true)}
+            alt=${this.data!.artifact.title}
+          />
+        </div>`;
     }
     if ((kind === 'markdown' || kind === 'text') && this.text !== null) {
       return kind === 'markdown'
-        ? html`${bar}<scion-markdown-preview .content=${this.text}></scion-markdown-preview>`
+        ? html`${bar}<scion-artifact-markdown-frame
+              .content=${this.text}
+              .filesBase=${artifactFileUrl(this.artifactId, v.seq, '')}
+              .files=${v.files}
+            ></scion-artifact-markdown-frame>`
         : html`${bar}<scion-code-editor
               .content=${this.text}
               .language=${getLanguageFromPath(f.path)}

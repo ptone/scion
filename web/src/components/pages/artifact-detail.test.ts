@@ -137,11 +137,12 @@ describe('artifact page', () => {
   it('renders markdown, fetching the bytes through the hub', async () => {
     const urls = mockFetch(artifact('design.md', 'text/markdown'), '# Hello');
     const el = await mount(true);
-    const preview = el.shadowRoot!.querySelector('scion-markdown-preview') as
-      | (HTMLElement & { content: string })
+    const preview = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as
+      | (HTMLElement & { content: string; filesBase: string })
       | null;
     expect(preview).not.toBeNull();
     expect(preview!.content).toBe('# Hello');
+    expect(preview!.filesBase).toBe(`/api/v1/artifacts/${ID}/versions/1/files/`);
     expect(urls).toContain(`/api/v1/artifacts/${ID}/versions/1/files/design.md?stream=1`);
     expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Design');
   });
@@ -161,7 +162,9 @@ describe('artifact page', () => {
     const urls = mockFetch(artifact('shot.png', 'image/png'));
     const el = await mount(true);
     const img = el.shadowRoot!.querySelector('img');
-    expect(img?.getAttribute('src')).toBe(`/api/v1/artifacts/${ID}/versions/1/files/shot.png`);
+    expect(img?.getAttribute('src')).toBe(
+      `/api/v1/artifacts/${ID}/versions/1/files/shot.png?stream=1`
+    );
     expect(urls.some((u) => u.includes('/files/'))).toBe(false);
   });
 
@@ -235,7 +238,7 @@ describe('artifact page', () => {
     try {
       const el = await mount(true);
       expect(urls).toContain('/api/v1/agents/agent-1');
-      expect(el.shadowRoot!.querySelector('scion-markdown-preview')).not.toBeNull();
+      expect(el.shadowRoot!.querySelector('scion-artifact-markdown-frame')).not.toBeNull();
       expect(denied).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener('scion:access-denied', denied);

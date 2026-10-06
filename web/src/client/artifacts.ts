@@ -28,6 +28,12 @@ export interface ArtifactFile {
   size: number;
   sha256: string;
   mediaType: string;
+  /** "remote" for an image the hub fetched at publish time. */
+  origin?: string;
+  /** The URL a remote image was fetched from. */
+  sourceUrl?: string;
+  /** "ok" or "failed" for a remote image. */
+  fetchStatus?: string;
 }
 
 export interface ArtifactVersion {
