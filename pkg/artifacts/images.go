@@ -60,8 +60,16 @@ const (
 	maxDestinationBytes = 2049
 	// maxDestinationParens bounds parenthesis nesting in a destination.
 	maxDestinationParens = 32
-	// ctxCheckEvery is how many scan steps run between context checks.
-	ctxCheckEvery = 1024
+	// ctxCheckEvery is how many units of work run between context checks.
+	ctxCheckEvery = 1 << 16
+	// maxImageScanBytes bounds the part of a document scanned for images:
+	// images are taken from the first 8 MiB.
+	maxImageScanBytes = 8 << 20
+	// maxWorkPerByte bounds the work of one extraction, in units per
+	// scanned byte; minWorkBudget is added so small documents are never
+	// cut short. Images found before the bound are kept.
+	maxWorkPerByte = 32
+	minWorkBudget  = 1 << 16
 )
 
 // imageHit is one candidate image URL and where it first appears.
@@ -74,88 +82,148 @@ type imageHit struct {
 // markdown document references, in order of first appearance and without
 // duplicates: inline images, reference-style images resolved through their
 // definitions, and <img> tags where the web renderer shows them (inline in
-// a paragraph, or a lone <img> forming its own HTML block). Fenced code,
-// code spans, and HTML blocks other than a lone <img> are skipped, as the
-// renderer shows them as text.
+// a paragraph, or a lone <img> forming its own HTML block). Fenced and
+// indented code, code spans, and HTML blocks other than a lone <img> are
+// skipped, as the renderer shows them as code or text.
 //
-// The parse is linear in the document: lines are processed once, scans
-// move forward only, lookaheads are capped (labels, destinations) or
-// consumed, and the "next ]" and "next >" positions are cached so they are
-// never searched twice. It stops at limit URLs, and returns nil once ctx is
-// done. It is a best-effort scan for the URLs to fetch; the renderer
+// Scanning is bounded: images are taken from the first maxImageScanBytes of
+// the document, and the work is metered (bytes examined, plus the bytes of
+// each destination normalized) against maxWorkPerByte units per scanned
+// byte. When the meter runs out, the images found before the bound are
+// kept; the outcome depends only on the document. Within the bound the
+// parse moves forward only, caps its lookaheads, and normalizes each
+// distinct destination and reference definition once. It returns nil once
+// ctx is done. It is a best-effort scan for the URLs to fetch; the renderer
 // matches what it finds against the manifest and shows a placeholder for
 // anything missing.
 func extractImageURLs(ctx context.Context, markdown string, limit int) []string {
-	if limit <= 0 {
-		return nil
-	}
-	visible, ok := visibleText(ctx, markdown)
-	if !ok {
-		return nil
-	}
-	defs, ok := referenceDefinitions(ctx, visible)
-	if !ok {
-		return nil
-	}
+	return extractImageURLsWithBudget(ctx, markdown, limit, maxWorkPerByte)
+}
 
-	var out []string
-	seen := map[string]bool{}
-	steps := 0
-	for lineStart := 0; lineStart < len(visible); {
+// extractImageURLsWithBudget is extractImageURLs with the work allowance
+// per scanned byte as a parameter, so tests can exercise the bound.
+func extractImageURLsWithBudget(ctx context.Context, markdown string, limit, perByte int) []string {
+	if limit <= 0 || ctx.Err() != nil {
+		return nil
+	}
+	if len(markdown) > maxImageScanBytes {
+		markdown = markdown[:maxImageScanBytes]
+	}
+	e := &extraction{
+		ctx:      ctx,
+		limit:    limit,
+		budget:   perByte*len(markdown) + minWorkBudget,
+		seen:     map[string]bool{},
+		resolved: map[string]string{},
+	}
+	visible := e.visibleText(markdown)
+	if e.cancelled {
+		return nil
+	}
+	if !e.budgetReached {
+		e.referenceDefinitions(visible)
+	}
+	for lineStart := 0; lineStart < len(visible) && !e.done(); {
 		lineEnd := strings.IndexByte(visible[lineStart:], '\n')
 		if lineEnd < 0 {
 			lineEnd = len(visible)
 		} else {
 			lineEnd += lineStart
 		}
-		if ctx.Err() != nil {
-			return nil
-		}
 		line := visible[lineStart:lineEnd]
-		hits, ok := lineImages(ctx, line, lineStart, defs, &steps)
-		if !ok {
-			return nil
+		if !e.spend(len(line) + 1) {
+			break
 		}
-		tags, ok := lineImgTags(ctx, line, lineStart, &steps)
-		if !ok {
-			return nil
-		}
-		hits = append(hits, tags...)
+		hits := e.lineImages(line, lineStart, nil)
+		hits = e.lineImgTags(line, lineStart, hits)
 		sort.SliceStable(hits, func(i, j int) bool { return hits[i].pos < hits[j].pos })
 		for _, h := range hits {
-			if seen[h.url] {
-				continue
+			if len(e.out) == e.limit {
+				break
 			}
-			seen[h.url] = true
-			out = append(out, h.url)
-			if len(out) == limit {
-				return out
-			}
+			e.out = append(e.out, h.url)
 		}
 		lineStart = lineEnd + 1
 	}
-	return out
+	if e.cancelled || ctx.Err() != nil {
+		return nil
+	}
+	return e.out
 }
 
-// addHit appends dest to hits when it normalizes to an absolute http(s)
-// URL, so relative and unusable destinations never accumulate.
-func addHit(hits []imageHit, pos int, dest string) []imageHit {
-	if u := normalizeDestination(dest); u != "" {
-		hits = append(hits, imageHit{pos, u})
+// extraction is the state of one extractImageURLs call: the work meter,
+// the URLs found, and the per-document caches that keep each destination
+// and definition from being normalized twice.
+type extraction struct {
+	ctx           context.Context
+	limit         int
+	budget        int
+	used          int
+	budgetReached bool              // the work meter ran out (keeps what was found)
+	cancelled     bool              // ctx is done (returns nothing)
+	seen          map[string]bool   // URLs already found
+	resolved      map[string]string // raw destination -> normalized URL or ""
+	defs          map[string]string // reference label -> normalized URL
+	out           []string
+}
+
+// spend charges n units of work. It returns false once the meter has run
+// out or ctx is done; the context is checked every ctxCheckEvery units.
+func (e *extraction) spend(n int) bool {
+	if e.budgetReached || e.cancelled {
+		return false
 	}
-	return hits
+	before := e.used
+	e.used += n
+	if e.used/ctxCheckEvery != before/ctxCheckEvery && e.ctx.Err() != nil {
+		e.cancelled = true
+		return false
+	}
+	if e.used > e.budget {
+		e.budgetReached = true
+		return false
+	}
+	return true
+}
+
+// done reports whether extraction should stop: the limit is reached, the
+// meter ran out, or ctx is done.
+func (e *extraction) done() bool {
+	return e.budgetReached || e.cancelled || len(e.seen) >= e.limit
+}
+
+// normalize returns the normalized URL for a raw destination, computing it
+// once per distinct destination.
+func (e *extraction) normalize(raw string) string {
+	if u, ok := e.resolved[raw]; ok {
+		return u
+	}
+	if !e.spend(len(raw)) {
+		return ""
+	}
+	u := normalizeDestination(raw)
+	e.resolved[raw] = u
+	return u
+}
+
+// addURL appends a found URL (already normalized) to hits unless it was
+// found before or is empty.
+func (e *extraction) addURL(hits []imageHit, pos int, u string) []imageHit {
+	if u == "" || e.seen[u] || len(e.seen) >= e.limit {
+		return hits
+	}
+	e.seen[u] = true
+	return append(hits, imageHit{pos, u})
 }
 
 // lineImages finds the ![alt](dest), ![alt][ref], ![ref][] and ![ref]
 // images on one line. offset is the line's position in the document.
-func lineImages(ctx context.Context, line string, offset int, defs map[string]string, steps *int) ([]imageHit, bool) {
-	var hits []imageHit
+func (e *extraction) lineImages(line string, offset int, hits []imageHit) []imageHit {
 	nextClose := newNextIndex(line, "]")
 	nextAngle := newNextIndex(line, ">")
-	for pos := 0; pos < len(line); {
-		*steps++
-		if *steps%ctxCheckEvery == 0 && ctx.Err() != nil {
-			return nil, false
+	for pos := 0; pos < len(line) && !e.done(); {
+		if !e.spend(1) {
+			break
 		}
 		i := strings.Index(line[pos:], "![")
 		if i < 0 {
@@ -176,7 +244,7 @@ func lineImages(ctx context.Context, line string, offset int, defs map[string]st
 		switch {
 		case after < len(line) && line[after] == '(':
 			dest, end := parseDestination(line, after+1, nextAngle)
-			hits = addHit(hits, offset+start, dest)
+			hits = e.addURL(hits, offset+start, e.normalize(dest))
 			pos = end
 		case after < len(line) && line[after] == '[':
 			refStart := after + 1
@@ -189,14 +257,23 @@ func lineImages(ctx context.Context, line string, offset int, defs map[string]st
 			if ref == "" {
 				ref = label
 			}
-			hits = addHit(hits, offset+start, defs[normalizeLabel(ref)])
+			hits = e.addURL(hits, offset+start, e.definition(ref))
 			pos = refEnd + 1
 		default:
-			hits = addHit(hits, offset+start, defs[normalizeLabel(label)])
+			hits = e.addURL(hits, offset+start, e.definition(label))
 			pos = after
 		}
 	}
-	return hits, true
+	return hits
+}
+
+// definition returns the normalized URL a reference label is defined as,
+// or "".
+func (e *extraction) definition(label string) string {
+	if len(e.defs) == 0 || !e.spend(len(label)) {
+		return ""
+	}
+	return e.defs[normalizeLabel(label)]
 }
 
 // parseDestination reads an inline link destination starting at i (just
@@ -246,16 +323,14 @@ func parseDestination(line string, i int, nextAngle *nextIndex) (string, int) {
 	return line[i:end], end
 }
 
-// lineImgTags finds the complete <img ...> tags on one line and returns
-// their src attributes. A tag runs to the next '>'; an unclosed one ends
-// at the next '<', where the scan resumes.
-func lineImgTags(ctx context.Context, line string, offset int, steps *int) ([]imageHit, bool) {
-	var hits []imageHit
+// lineImgTags finds the complete <img ...> tags on one line and adds their
+// src attributes. A tag runs to the next '>'; an unclosed one ends at the
+// next '<', where the scan resumes.
+func (e *extraction) lineImgTags(line string, offset int, hits []imageHit) []imageHit {
 	nextStop := newNextIndex(line, "<>")
-	for pos := 0; pos < len(line); {
-		*steps++
-		if *steps%ctxCheckEvery == 0 && ctx.Err() != nil {
-			return nil, false
+	for pos := 0; pos < len(line) && !e.done(); {
+		if !e.spend(1) {
+			break
 		}
 		lt := strings.IndexByte(line[pos:], '<')
 		if lt < 0 {
@@ -274,10 +349,13 @@ func lineImgTags(ctx context.Context, line string, offset int, steps *int) ([]im
 			pos = stop
 			continue
 		}
-		hits = addHit(hits, offset+lt, imgSrc(line[lt:stop+1]))
+		if !e.spend(stop + 1 - lt) {
+			break
+		}
+		hits = e.addURL(hits, offset+lt, e.normalize(imgSrc(line[lt:stop+1])))
 		pos = stop + 1
 	}
-	return hits, true
+	return hits
 }
 
 // hasTagName reports whether s begins with tag name (case-insensitive)
@@ -328,21 +406,22 @@ func (n *nextIndex) from(i int) int {
 }
 
 // referenceDefinitions collects [label]: destination lines, at most
-// maxRefDefinitions. Each line is read once.
-func referenceDefinitions(ctx context.Context, text string) (map[string]string, bool) {
-	defs := map[string]string{}
-	for lineStart := 0; lineStart < len(text) && len(defs) < maxRefDefinitions; {
+// maxRefDefinitions, normalizing each destination once and keeping only
+// usable (absolute http(s)) ones. Each line is read once.
+func (e *extraction) referenceDefinitions(text string) {
+	e.defs = map[string]string{}
+	for lineStart := 0; lineStart < len(text) && len(e.defs) < maxRefDefinitions; {
 		lineEnd := strings.IndexByte(text[lineStart:], '\n')
 		if lineEnd < 0 {
 			lineEnd = len(text)
 		} else {
 			lineEnd += lineStart
 		}
-		if ctx.Err() != nil {
-			return nil, false
-		}
 		line := text[lineStart:lineEnd]
 		lineStart = lineEnd + 1
+		if !e.spend(len(line) + 1) {
+			return
+		}
 
 		i := leadingSpaces(line, 3)
 		if i < 0 || i >= len(line) || line[i] != '[' {
@@ -357,16 +436,15 @@ func referenceDefinitions(ctx context.Context, text string) (map[string]string, 
 		if j >= len(line) || line[j] != ':' {
 			continue
 		}
-		j++
-		dest, _ := parseDestination(line, j, newNextIndex(line, ">"))
-		if dest == "" {
+		dest, _ := parseDestination(line, j+1, newNextIndex(line, ">"))
+		key := normalizeLabel(label)
+		if _, defined := e.defs[key]; defined {
 			continue
 		}
-		if key := normalizeLabel(label); defs[key] == "" {
-			defs[key] = dest
+		if u := e.normalize(dest); u != "" {
+			e.defs[key] = u
 		}
 	}
-	return defs, true
 }
 
 // imgSrc returns the src attribute of one <img> tag, with character
@@ -477,6 +555,18 @@ func leadingSpaces(line string, max int) int {
 	return i
 }
 func normalizeLabel(l string) string {
+	// Fast path: a label with no uppercase letters and single spaces only
+	// is already normalized and needs no copy.
+	plain := len(l) > 0 && l[0] != ' ' && l[len(l)-1] != ' '
+	for i := 0; plain && i < len(l); i++ {
+		c := l[i]
+		if c >= 'A' && c <= 'Z' || c == '\t' || c == '\n' || c == '\r' || (c == ' ' && l[i-1] == ' ') {
+			plain = false
+		}
+	}
+	if plain {
+		return l
+	}
 	return strings.ToLower(strings.Join(strings.Fields(l), " "))
 }
 
@@ -517,12 +607,16 @@ func hasPrefixFold(s, prefix string) bool {
 }
 
 // htmlBlock is an open HTML block: its CommonMark kind (1-7), the end
-// marker of kinds 1-5, and its lines so far.
+// marker of kinds 1-5, whether it opened with a lone <img>, and its line
+// count. Only the first line is held, until it is known whether the block
+// is that one lone <img>; later lines are blanked as they come.
 type htmlBlock struct {
-	kind    int
-	end     string
-	lines   []string
-	loneImg bool
+	kind         int
+	end          string
+	loneImg      bool
+	first        string
+	firstWritten bool
+	lines        int
 }
 
 // type1Tags start CommonMark HTML blocks of kind 1, which end at their
@@ -545,10 +639,11 @@ var type6Tags = map[string]bool{
 
 // visibleText returns the document with every part the web renderer shows
 // as code or text blanked to spaces, offsets and newlines preserved: fenced
-// code, code spans, and HTML blocks (CommonMark kinds 1-7) other than a
-// block that is exactly one lone <img> tag. Each line is examined once;
-// the result is false once ctx is done.
-func visibleText(ctx context.Context, md string) (string, bool) {
+// and indented code, code spans, and HTML blocks (CommonMark kinds 1-7)
+// other than a block that is exactly one lone <img> tag. Each line is
+// examined once and charged to the work meter; when the meter runs out the
+// rest of the document is left out.
+func (e *extraction) visibleText(md string) string {
 	var b strings.Builder
 	b.Grow(len(md))
 	var (
@@ -561,23 +656,23 @@ func visibleText(ctx context.Context, md string) (string, bool) {
 		prevBlank     = true
 	)
 	blank := func(line string) { writeSpaces(&b, len(line)) }
-	flush := func() {
-		if block.kind == 7 && block.loneImg && len(block.lines) == 1 {
-			b.WriteString(block.lines[0])
-		} else {
-			for i, l := range block.lines {
-				if i > 0 {
-					b.WriteByte('\n')
-				}
-				blank(l)
+	writeFirst := func() {
+		if !block.firstWritten {
+			blank(block.first)
+			block.firstWritten = true
+		}
+	}
+	finish := func() {
+		if !block.firstWritten {
+			if block.kind == 7 && block.loneImg && block.lines == 1 {
+				b.WriteString(block.first)
+			} else {
+				blank(block.first)
 			}
 		}
 		block = nil
 	}
 	for lineStart, first := 0, true; lineStart <= len(md); first = false {
-		if ctx.Err() != nil {
-			return "", false
-		}
 		lineEnd := strings.IndexByte(md[lineStart:], '\n')
 		last := lineEnd < 0
 		if last {
@@ -586,6 +681,10 @@ func visibleText(ctx context.Context, md string) (string, bool) {
 			lineEnd += lineStart
 		}
 		line := md[lineStart:lineEnd]
+		// Each line is read a bounded number of times below.
+		if !e.spend(4*len(line) + 1) {
+			break
+		}
 		isBlank := strings.TrimSpace(line) == ""
 		if !first && block == nil {
 			b.WriteByte('\n')
@@ -594,14 +693,17 @@ func visibleText(ctx context.Context, md string) (string, bool) {
 		switch {
 		case block != nil:
 			if block.kind >= 6 && isBlank {
-				flush()
+				finish()
 				b.WriteByte('\n')
 				b.WriteString(line)
 				prevParagraph = false
 			} else {
-				block.lines = append(block.lines, line)
+				writeFirst()
+				b.WriteByte('\n')
+				blank(line)
+				block.lines++
 				if block.kind < 6 && containsFold(line, block.end) {
-					flush()
+					finish()
 				}
 			}
 		case fenceChar != 0:
@@ -632,9 +734,9 @@ func visibleText(ctx context.Context, md string) (string, bool) {
 			}
 			if blk := startHTMLBlock(line, prevParagraph); blk != nil {
 				block = blk
-				block.lines = []string{line}
+				block.first, block.lines = line, 1
 				if blk.kind < 6 && containsFold(line[strings.IndexByte(line, '<')+1:], blk.end) {
-					flush()
+					finish()
 				}
 				prevParagraph = false
 				break
@@ -649,9 +751,9 @@ func visibleText(ctx context.Context, md string) (string, bool) {
 		lineStart = lineEnd + 1
 	}
 	if block != nil {
-		flush()
+		finish()
 	}
-	return b.String(), true
+	return b.String()
 }
 
 // fenceRun returns the fence character and run length if line opens or

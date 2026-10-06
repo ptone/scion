@@ -260,11 +260,13 @@ func (s *spooled) markdownImageURLs(ctx context.Context, limit int) ([]string, e
 	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	body, err := io.ReadAll(s.file)
-	if err != nil {
+	// One copy of at most the part that is scanned for images.
+	var body strings.Builder
+	body.Grow(int(min(s.size, maxImageScanBytes)))
+	if _, err := io.Copy(&body, io.LimitReader(s.file, maxImageScanBytes)); err != nil {
 		return nil, err
 	}
-	return extractImageURLs(ctx, string(body), limit), nil
+	return extractImageURLs(ctx, body.String(), limit), nil
 }
 
 func (s *spooled) Close() {

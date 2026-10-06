@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -200,33 +201,141 @@ func TestExtractImageURLsUnusualInputs(t *testing.T) {
 	}
 }
 
-// TestExtractImageURLsCost: tag-heavy and relative-heavy inputs of 4 MiB
-// stay within the time bound and allocate a small multiple of the input.
+// costShapes are document shapes the extraction cost tests mix: repeated
+// units, some with a preamble (a reference definition or an opening tag).
+var costShapes = []struct{ name, preamble, unit string }{
+	{"img tags on one line", "", `<img alt="x" src="https://img.example/a.png"> `},
+	{"lone img lines", "", "<img src=\"https://img.example/a.png\">\n\n"},
+	{"relative images", "", "![](a) "},
+	{"tags without src", "", "<img alt=x> "},
+	{"backtick runs", "", "` `` ``` "},
+	{"unclosed angle destinations", "", "![](<a "},
+	{"unclosed reference labels", "", "![a][ "},
+	{"unclosed img tags", "", "<img a "},
+	{"definition lines", "", "[a]: <b \n"},
+	{"long inline destination", "", "![a](https://img.example/" + strings.Repeat("a", 2000) + ") "},
+	{"reference reused, one line", "[r]: https://img.example/" + strings.Repeat("a", 2000) + "\n", "![a][r] "},
+	{"reference reused, per line", "[r]: https://img.example/" + strings.Repeat("a", 2000) + "\n", "![a][r]\n"},
+	{"reference with escapes", "[r]: https://img.example/" + strings.Repeat("\\_", 1000) + "\n", "![a][r] "},
+	{"reference with character references", "[r]: https://img.example/?" + strings.Repeat("&amp;", 400) + "\n", "![a][r] "},
+	{"open comment block", "<!--\n", "x <img src=\"https://img.example/a.png\">\n"},
+	{"open div block", "<div>\n", "line ![a](https://img.example/a.png)\n"},
+	{"open pre block", "<pre>\n", "code\n"},
+}
+
+func costDocument(preamble, unit string, size int) string {
+	n := (size - len(preamble)) / len(unit)
+	return preamble + strings.Repeat(unit, n)
+}
+
+// measureExtraction runs one extraction and reports its time and bytes
+// allocated.
+func measureExtraction(md string) (time.Duration, uint64) {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	start := time.Now()
+	extractImageURLs(context.Background(), md, 128)
+	elapsed := time.Since(start)
+	runtime.ReadMemStats(&after)
+	return elapsed, after.TotalAlloc - before.TotalAlloc
+}
+
+// TestExtractImageURLsCost: every known document shape at 4 MiB is
+// extracted within a time bound and allocates a small multiple of the
+// document.
 func TestExtractImageURLsCost(t *testing.T) {
 	const size = 4 << 20
-	repeat := func(unit string) string { return strings.Repeat(unit, size/len(unit)+1)[:size] }
-	for name, md := range map[string]string{
-		"img tags on one line": repeat(`<img alt="x" src="https://img.example/a.png"> `),
-		"lone img lines":       repeat("<img src=\"https://img.example/a.png\">\n\n"),
-		"relative images":      repeat("![](a) "),
-		"tags without src":     repeat("<img alt=x> "),
-		"backtick runs":        repeat("` `` ``` "),
-	} {
-		t.Run(name, func(t *testing.T) {
-			var before, after runtime.MemStats
-			runtime.GC()
-			runtime.ReadMemStats(&before)
-			start := time.Now()
-			extractImageURLs(context.Background(), md, 128)
-			elapsed := time.Since(start)
-			runtime.ReadMemStats(&after)
+	for _, shape := range costShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			elapsed, alloc := measureExtraction(costDocument(shape.preamble, shape.unit, size))
 			if elapsed > time.Second && !raceEnabled {
 				t.Fatalf("took %v", elapsed)
 			}
-			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 16*size {
-				t.Fatalf("allocated %d bytes for a %d byte input", alloc, size)
+			if alloc > 16*size {
+				t.Fatalf("allocated %d bytes for a %d byte document", alloc, size)
 			}
 		})
+	}
+}
+
+// TestExtractImageURLsCostMixed: random mixes of the known shapes, at the
+// scanned size of 8 MiB, stay within the time and allocation bounds.
+func TestExtractImageURLsCostMixed(t *testing.T) {
+	const size = maxImageScanBytes
+	for seed := int64(1); seed <= 4; seed++ {
+		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
+			rng := rand.New(rand.NewSource(seed))
+			var b strings.Builder
+			for b.Len() < size {
+				shape := costShapes[rng.Intn(len(costShapes))]
+				chunk := 1 + rng.Intn(64<<10)
+				b.WriteString(costDocument(shape.preamble, shape.unit, len(shape.preamble)+chunk))
+				if rng.Intn(4) == 0 {
+					b.WriteString("\n\n")
+				}
+			}
+			md := b.String()[:size]
+			elapsed, alloc := measureExtraction(md)
+			if elapsed > 2*time.Second && !raceEnabled {
+				t.Fatalf("took %v", elapsed)
+			}
+			if alloc > 16*size {
+				t.Fatalf("allocated %d bytes for a %d byte document", alloc, size)
+			}
+		})
+	}
+}
+
+// TestExtractImageURLsAtMaxFileSize: a document at the default file limit
+// is scanned up to the 8 MiB bound within the time bound.
+func TestExtractImageURLsAtMaxFileSize(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large document")
+	}
+	md := costDocument("[r]: https://img.example/"+strings.Repeat("a", 2000)+"\n", "![a][r] ", 32<<20)
+	elapsed, alloc := measureExtraction(md)
+	if elapsed > 2*time.Second && !raceEnabled {
+		t.Fatalf("took %v", elapsed)
+	}
+	if alloc > 16*maxImageScanBytes {
+		t.Fatalf("allocated %d bytes", alloc)
+	}
+}
+
+// TestExtractImageURLsWorkBound: when the work bound is reached, the
+// images found before it are kept, and the result is the same every time.
+func TestExtractImageURLsWorkBound(t *testing.T) {
+	head := "![a](https://img.example/1.png) ![b](https://img.example/2.png)\n![c](https://img.example/3.png)\n"
+	md := head + costDocument("", "![x](rel/a.png) ", 1<<20) + "\n![late](https://img.example/late.png)\n"
+	ctx := context.Background()
+	// An allowance just above what the earlier whole-document passes need
+	// (about 5 units per byte), so the bound is reached while scanning for
+	// images.
+	got := extractImageURLsWithBudget(ctx, md, 128, 5)
+	want := []string{"https://img.example/1.png", "https://img.example/2.png", "https://img.example/3.png"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := 0; i < 3; i++ {
+		if again := extractImageURLsWithBudget(ctx, md, 128, 5); strings.Join(again, " ") != strings.Join(got, " ") {
+			t.Fatalf("run %d: %v, want %v", i, again, got)
+		}
+	}
+	// With the normal allowance the late image is found too.
+	if all := extractImageURLs(ctx, md, 128); len(all) != 4 {
+		t.Fatalf("normal allowance found %v", all)
+	}
+}
+
+// TestExtractImageURLsScanBound: images are taken from the first 8 MiB of
+// the document.
+func TestExtractImageURLsScanBound(t *testing.T) {
+	filler := strings.Repeat("text text text text text text text\n", maxImageScanBytes/35+1)
+	md := "![a](https://img.example/early.png)\n" + filler + "![b](https://img.example/late.png)\n"
+	got := extractImageURLs(context.Background(), md, 128)
+	if len(got) != 1 || got[0] != "https://img.example/early.png" {
+		t.Fatalf("got %v", got)
 	}
 }
 
