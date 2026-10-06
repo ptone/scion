@@ -88,10 +88,18 @@ func TestExtractImageURLs(t *testing.T) {
 		"Text with <img alt=x src=\"https://img.example/html.png?x=1&amp;y=2\"> inline.",
 		"",
 		"<img src=\"https://img.example/alone.png\">",
+		"",
+		"<img src=\"https://img.example/block-1.png\">",
+		"more text <img src=\"https://img.example/block-2.png\">",
+		"",
+		"para",
+		"<span>x</span> <img src=\"https://img.example/in-para.png\">",
+		"",
+		"<!-- <img src=\"https://img.example/comment.png\"> -->",
 		"![esc](https://img.example/a\\_b.png)",
 		"[link not image](https://img.example/link.png)",
 	}, "\n")
-	got := extractImageURLs(md, 100)
+	got := extractImageURLs(context.Background(), md, 100)
 	want := []string{
 		"https://img.example/a.png",
 		"https://img.example/b c.png",
@@ -100,6 +108,7 @@ func TestExtractImageURLs(t *testing.T) {
 		"https://img.example/short.png",
 		"https://img.example/html.png?x=1&y=2",
 		"https://img.example/alone.png",
+		"https://img.example/in-para.png",
 		"https://img.example/a_b.png",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -119,7 +128,7 @@ func TestExtractImageURLsLinearAndBounded(t *testing.T) {
 	md := b.String()
 
 	start := time.Now()
-	got := extractImageURLs(md, 128)
+	got := extractImageURLs(context.Background(), md, 128)
 	if elapsed := time.Since(start); elapsed > time.Second && !raceEnabled {
 		t.Fatalf("extraction took %v", elapsed)
 	}
@@ -134,11 +143,53 @@ func TestExtractImageURLsLinearAndBounded(t *testing.T) {
 	for i := 0; i < 20_000; i++ {
 		fmt.Fprintf(&small, "![a](https://img.example/%d.png) ![b][r] ![c](rel/%d.png)\n", i, i)
 	}
-	if all := extractImageURLs(small.String(), 1_000_000); len(all) != 20_001 {
+	if all := extractImageURLs(context.Background(), small.String(), 1_000_000); len(all) != 20_001 {
 		t.Fatalf("full extraction found %d URLs", len(all))
 	}
-	if extractImageURLs(md, 0) != nil {
+	if extractImageURLs(context.Background(), md, 0) != nil {
 		t.Fatal("limit 0 must extract nothing")
+	}
+}
+
+// TestExtractImageURLsAdversarialInputs: inputs shaped to make a scanner
+// rescan (unclosed destinations, labels, tags and code spans, long single
+// lines) are processed in linear time.
+func TestExtractImageURLsAdversarialInputs(t *testing.T) {
+	const size = 1 << 20
+	repeat := func(unit string) string { return strings.Repeat(unit, size/len(unit)+1)[:size] }
+	inputs := map[string]string{
+		"unclosed angle destinations":  repeat("![](<a "),
+		"unclosed reference labels":    repeat("![a][ "),
+		"unclosed img tags":            repeat("<img a "),
+		"definition lines":             repeat("[a]: <b \n"),
+		"image openers only":           repeat("!["),
+		"long label without close":     "![" + repeat("a"),
+		"unclosed code spans":          repeat("`a "),
+		"backtick runs of rising size": repeat("` `` ``` "),
+		"angle brackets":               repeat("<"),
+		"html comment never closed":    "<!--\n" + repeat("<img src=\"https://x.example/a.png\"> "),
+		"div blocks":                   repeat("<div>\n"),
+		"destinations at the cap":      repeat("![](" + strings.Repeat("a", 3000) + " "),
+		"mixed":                        repeat("![a](<b ![c][ <img d [e]: <f `g "),
+	}
+	for name, md := range inputs {
+		t.Run(name, func(t *testing.T) {
+			start := time.Now()
+			extractImageURLs(context.Background(), md, 128)
+			if elapsed := time.Since(start); elapsed > time.Second && !raceEnabled {
+				t.Fatalf("%s: extraction took %v", name, elapsed)
+			}
+		})
+	}
+}
+
+// TestExtractImageURLsStopsWhenCancelled: a cancelled context ends
+// extraction with no result.
+func TestExtractImageURLsStopsWhenCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := extractImageURLs(ctx, "![a](https://img.example/a.png)", 10); got != nil {
+		t.Fatalf("got %v from a cancelled context", got)
 	}
 }
 
