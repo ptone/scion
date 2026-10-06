@@ -157,11 +157,18 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		// never makes the hub fetch anything.
 		// The limits are read once, so extraction and fetching agree.
 		lim := b.remoteImageLimits(ctx)
-		var urls []string
+		var urls, scanWarnings []string
 		if lim.Enabled {
-			urls, err = spool.markdownImageURLs(ctx, remoteExtractLimit(lim))
+			res, err := spool.markdownImages(ctx, remoteExtractLimit(lim))
 			if err != nil {
 				slog.ErrorContext(ctx, "artifacts: read spooled markdown failed", "error", err)
+			}
+			urls = res.urls
+			if res.truncated {
+				scanWarnings = append(scanWarnings, warnBeyondWindow)
+			}
+			if res.budgetReached {
+				scanWarnings = append(scanWarnings, warnScanStopped)
 			}
 		}
 		if len(urls) > 0 {
@@ -171,7 +178,7 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 			extendWriteDeadline(w, lim.TotalBudget+publishDeadlineMargin)
 		}
 		remote, warn := s.fetchRemoteImages(ctx, b, lim, versionID, urls)
-		warnings = warn
+		warnings = append(scanWarnings, warn...)
 		for _, rf := range remote {
 			files = append(files, rf)
 			totalBytes += rf.Size
@@ -254,19 +261,29 @@ func extendWriteDeadline(w http.ResponseWriter, d time.Duration) {
 	}
 }
 
-// markdownImageURLs reads the spooled body as markdown and returns the
-// remote image URLs it references.
-func (s *spooled) markdownImageURLs(ctx context.Context, limit int) ([]string, error) {
+// Publish warnings about the scan for remote images. They sit next to the
+// per-image warnings.
+const (
+	warnBeyondWindow = "remote images beyond the first 2 MiB were not fetched"
+	warnScanStopped  = "some remote images were not fetched"
+)
+
+// markdownImages reads the spooled body as markdown and returns the remote
+// image URLs it references, with whether the entry was larger than the
+// scanned window and whether the scan stopped at its work bound.
+func (s *spooled) markdownImages(ctx context.Context, limit int) (extractResult, error) {
 	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
+		return extractResult{}, err
 	}
 	// One copy of at most the part that is scanned for images.
 	var body strings.Builder
 	body.Grow(int(min(s.size, maxImageScanBytes)))
 	if _, err := io.Copy(&body, io.LimitReader(s.file, maxImageScanBytes)); err != nil {
-		return nil, err
+		return extractResult{}, err
 	}
-	return extractImageURLs(ctx, body.String(), limit), nil
+	res := extractImages(ctx, body.String(), limit, maxWorkPerByte)
+	res.truncated = s.size > maxImageScanBytes
+	return res, nil
 }
 
 func (s *spooled) Close() {

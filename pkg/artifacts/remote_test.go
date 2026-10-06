@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -201,66 +202,98 @@ func TestExtractImageURLsUnusualInputs(t *testing.T) {
 	}
 }
 
-// costShapes are document shapes the extraction cost tests mix: repeated
-// units, some with a preamble (a reference definition or an opening tag).
-var costShapes = []struct{ name, preamble, unit string }{
-	{"img tags on one line", "", `<img alt="x" src="https://img.example/a.png"> `},
-	{"lone img lines", "", "<img src=\"https://img.example/a.png\">\n\n"},
-	{"relative images", "", "![](a) "},
-	{"tags without src", "", "<img alt=x> "},
-	{"backtick runs", "", "` `` ``` "},
-	{"unclosed angle destinations", "", "![](<a "},
-	{"unclosed reference labels", "", "![a][ "},
-	{"unclosed img tags", "", "<img a "},
-	{"definition lines", "", "[a]: <b \n"},
-	{"long inline destination", "", "![a](https://img.example/" + strings.Repeat("a", 2000) + ") "},
-	{"reference reused, one line", "[r]: https://img.example/" + strings.Repeat("a", 2000) + "\n", "![a][r] "},
-	{"reference reused, per line", "[r]: https://img.example/" + strings.Repeat("a", 2000) + "\n", "![a][r]\n"},
-	{"reference with escapes", "[r]: https://img.example/" + strings.Repeat("\\_", 1000) + "\n", "![a][r] "},
-	{"reference with character references", "[r]: https://img.example/?" + strings.Repeat("&amp;", 400) + "\n", "![a][r] "},
-	{"open comment block", "<!--\n", "x <img src=\"https://img.example/a.png\">\n"},
-	{"open div block", "<div>\n", "line ![a](https://img.example/a.png)\n"},
-	{"open pre block", "<pre>\n", "code\n"},
+// costShapes are document shapes the extraction cost tests mix: a
+// preamble (a reference definition or an opening tag) and a unit repeated,
+// or a generated unit that differs on each repeat.
+var costShapes = []struct {
+	name, preamble, unit string
+	gen                  func(i int) string
+}{
+	{name: "img tags on one line", unit: `<img alt="x" src="https://img.example/a.png"> `},
+	{name: "lone img lines", unit: "<img src=\"https://img.example/a.png\">\n\n"},
+	{name: "relative images", unit: "![](a) "},
+	{name: "tags without src", unit: "<img alt=x> "},
+	{name: "backtick runs", unit: "` `` ``` "},
+	{name: "unclosed angle destinations", unit: "![](<a "},
+	{name: "unclosed reference labels", unit: "![a][ "},
+	{name: "unclosed img tags", unit: "<img a "},
+	{name: "definition lines", unit: "[a]: <b \n"},
+	{name: "long inline destination", unit: "![a](https://img.example/" + strings.Repeat("a", 2000) + ") "},
+	{name: "reference reused, one line", preamble: "[r]: https://img.example/" + strings.Repeat("a", 2000) + "\n", unit: "![a][r] "},
+	{name: "reference reused, per line", preamble: "[r]: https://img.example/" + strings.Repeat("a", 2000) + "\n", unit: "![a][r]\n"},
+	{name: "reference with escapes", preamble: "[r]: https://img.example/" + strings.Repeat("\\_", 1000) + "\n", unit: "![a][r] "},
+	{name: "reference with character references", preamble: "[r]: https://img.example/?" + strings.Repeat("&amp;", 400) + "\n", unit: "![a][r] "},
+	{name: "open comment block", preamble: "<!--\n", unit: "x <img src=\"https://img.example/a.png\">\n"},
+	{name: "open div block", preamble: "<div>\n", unit: "line ![a](https://img.example/a.png)\n"},
+	{name: "open pre block", preamble: "<pre>\n", unit: "code\n"},
+	{name: "one destination read by three scanners", gen: func(i int) string {
+		d := "http:///" + strings.Repeat("\\!", 340) + strconv.Itoa(i)
+		return "[l" + strconv.Itoa(i) + "]: " + d + "<img/src=" + d + ">![](" + d + ")\n"
+	}},
+	{name: "distinct short relative destinations", gen: func(i int) string { return "![](" + strconv.Itoa(i) + ") " }},
+	{name: "spaced labels with a non-ASCII byte", preamble: "[x]: https://img.example/x.png\n", unit: "![a\ta\ta\ta\ta\ta\ta\ta\té] "},
 }
 
-func costDocument(preamble, unit string, size int) string {
-	n := (size - len(preamble)) / len(unit)
-	return preamble + strings.Repeat(unit, n)
+// costDocument builds a document of about size bytes from a shape.
+func costDocument(preamble, unit string, gen func(int) string, size int) string {
+	if gen == nil {
+		n := (size - len(preamble)) / len(unit)
+		return preamble + strings.Repeat(unit, n)
+	}
+	var b strings.Builder
+	b.WriteString(preamble)
+	for i := 0; b.Len() < size; i++ {
+		b.WriteString(gen(i))
+	}
+	return b.String()[:size]
 }
 
-// measureExtraction runs one extraction and reports its time and bytes
-// allocated.
-func measureExtraction(md string) (time.Duration, uint64) {
+// measureExtraction runs one extraction and reports its time, bytes
+// allocated and work units metered.
+func measureExtraction(md string) (time.Duration, uint64, int) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 	start := time.Now()
-	extractImageURLs(context.Background(), md, 128)
+	res := extractImages(context.Background(), md, 128, maxWorkPerByte)
 	elapsed := time.Since(start)
 	runtime.ReadMemStats(&after)
-	return elapsed, after.TotalAlloc - before.TotalAlloc
+	return elapsed, after.TotalAlloc - before.TotalAlloc, res.used
 }
 
-// TestExtractImageURLsCost: every known document shape at 4 MiB is
-// extracted within a time bound and allocates a small multiple of the
-// document.
+// allocPerUnit bounds the bytes allocated per metered work unit: every
+// step that allocates is charged to the meter.
+const allocPerUnit = 2
+
+// checkCost asserts the time, allocation and metered-allocation bounds for
+// one extraction of a document of size bytes.
+func checkCost(t *testing.T, md string, size int, maxTime time.Duration) {
+	t.Helper()
+	elapsed, alloc, used := measureExtraction(md)
+	if elapsed > maxTime && !raceEnabled {
+		t.Fatalf("took %v", elapsed)
+	}
+	if alloc > 16*uint64(size) {
+		t.Fatalf("allocated %d bytes for a %d byte document", alloc, size)
+	}
+	if alloc > allocPerUnit*uint64(used)+1<<20 {
+		t.Fatalf("allocated %d bytes for %d metered units", alloc, used)
+	}
+}
+
+// TestExtractImageURLsCost: every known document shape, filling the 2 MiB
+// window, is extracted within the time and allocation bounds.
 func TestExtractImageURLsCost(t *testing.T) {
-	const size = 4 << 20
+	const size = maxImageScanBytes
 	for _, shape := range costShapes {
 		t.Run(shape.name, func(t *testing.T) {
-			elapsed, alloc := measureExtraction(costDocument(shape.preamble, shape.unit, size))
-			if elapsed > time.Second && !raceEnabled {
-				t.Fatalf("took %v", elapsed)
-			}
-			if alloc > 16*size {
-				t.Fatalf("allocated %d bytes for a %d byte document", alloc, size)
-			}
+			checkCost(t, costDocument(shape.preamble, shape.unit, shape.gen, size), size, time.Second)
 		})
 	}
 }
 
-// TestExtractImageURLsCostMixed: random mixes of the known shapes, at the
-// scanned size of 8 MiB, stay within the time and allocation bounds.
+// TestExtractImageURLsCostMixed: random mixes of the known shapes, filling
+// the window, stay within the time and allocation bounds.
 func TestExtractImageURLsCostMixed(t *testing.T) {
 	const size = maxImageScanBytes
 	for seed := int64(1); seed <= 4; seed++ {
@@ -270,31 +303,73 @@ func TestExtractImageURLsCostMixed(t *testing.T) {
 			for b.Len() < size {
 				shape := costShapes[rng.Intn(len(costShapes))]
 				chunk := 1 + rng.Intn(64<<10)
-				b.WriteString(costDocument(shape.preamble, shape.unit, len(shape.preamble)+chunk))
+				b.WriteString(costDocument(shape.preamble, shape.unit, shape.gen, len(shape.preamble)+chunk))
 				if rng.Intn(4) == 0 {
 					b.WriteString("\n\n")
 				}
 			}
-			md := b.String()[:size]
-			elapsed, alloc := measureExtraction(md)
-			if elapsed > 2*time.Second && !raceEnabled {
-				t.Fatalf("took %v", elapsed)
+			checkCost(t, b.String()[:size], size, time.Second)
+		})
+	}
+}
+
+// TestExtractImageURLsCostComposed: documents composed at random from
+// destination contents (escapes, character references, missing hosts,
+// relative paths, distinct suffixes) placed in random containers (inline
+// images, <img src>, definition lines, or all of them on one line) stay
+// within the time and allocation bounds, and their allocation stays within
+// a fixed multiple of the work metered.
+func TestExtractImageURLsCostComposed(t *testing.T) {
+	const size = maxImageScanBytes
+	contents := []func(rng *rand.Rand, i int) string{
+		func(rng *rand.Rand, i int) string {
+			return "https://img.example/" + strings.Repeat("\\!", rng.Intn(400)) + strconv.Itoa(i)
+		},
+		func(rng *rand.Rand, i int) string {
+			return "https://img.example/?" + strings.Repeat("&amp;", rng.Intn(300)) + strconv.Itoa(i)
+		},
+		func(rng *rand.Rand, i int) string {
+			return "http:///" + strings.Repeat("a", rng.Intn(600)) + strconv.Itoa(i)
+		},
+		func(rng *rand.Rand, i int) string { return strconv.Itoa(i) },
+		func(rng *rand.Rand, i int) string {
+			return "https://img.example/" + strings.Repeat("b", rng.Intn(1500)) + strconv.Itoa(i)
+		},
+	}
+	containers := []func(d string, i int) string{
+		func(d string, i int) string { return "![a](" + d + ") " },
+		func(d string, i int) string { return "<img/src=" + d + "> " },
+		func(d string, i int) string {
+			return "[l" + strconv.Itoa(i) + "]: " + d + "\n![x][l" + strconv.Itoa(i) + "] "
+		},
+		func(d string, i int) string {
+			return "[l" + strconv.Itoa(i) + "]: " + d + "<img/src=" + d + ">![](" + d + ")\n"
+		},
+	}
+	for seed := int64(1); seed <= 6; seed++ {
+		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
+			rng := rand.New(rand.NewSource(seed))
+			var b strings.Builder
+			for i := 0; b.Len() < size; i++ {
+				d := contents[rng.Intn(len(contents))](rng, i)
+				b.WriteString(containers[rng.Intn(len(containers))](d, i))
+				if rng.Intn(8) == 0 {
+					b.WriteString("\n")
+				}
 			}
-			if alloc > 16*size {
-				t.Fatalf("allocated %d bytes for a %d byte document", alloc, size)
-			}
+			checkCost(t, b.String()[:size], size, time.Second)
 		})
 	}
 }
 
 // TestExtractImageURLsAtMaxFileSize: a document at the default file limit
-// is scanned up to the 8 MiB bound within the time bound.
+// is scanned up to the 2 MiB window within the time bound.
 func TestExtractImageURLsAtMaxFileSize(t *testing.T) {
 	if testing.Short() {
 		t.Skip("large document")
 	}
-	md := costDocument("[r]: https://img.example/"+strings.Repeat("a", 2000)+"\n", "![a][r] ", 32<<20)
-	elapsed, alloc := measureExtraction(md)
+	md := costDocument("[r]: https://img.example/"+strings.Repeat("a", 2000)+"\n", "![a][r] ", nil, 32<<20)
+	elapsed, alloc, _ := measureExtraction(md)
 	if elapsed > 2*time.Second && !raceEnabled {
 		t.Fatalf("took %v", elapsed)
 	}
@@ -307,18 +382,22 @@ func TestExtractImageURLsAtMaxFileSize(t *testing.T) {
 // images found before it are kept, and the result is the same every time.
 func TestExtractImageURLsWorkBound(t *testing.T) {
 	head := "![a](https://img.example/1.png) ![b](https://img.example/2.png)\n![c](https://img.example/3.png)\n"
-	md := head + costDocument("", "![x](rel/a.png) ", 1<<20) + "\n![late](https://img.example/late.png)\n"
+	md := head + costDocument("", "![x](rel/a.png) ", nil, 1<<20) + "\n![late](https://img.example/late.png)\n"
 	ctx := context.Background()
-	// An allowance just above what the earlier whole-document passes need
-	// (about 5 units per byte), so the bound is reached while scanning for
+	// An allowance above what the earlier whole-document passes need
+	// (about 6 units per byte), so the bound is reached while scanning for
 	// images.
-	got := extractImageURLsWithBudget(ctx, md, 128, 5)
+	res := extractImages(ctx, md, 128, 8)
+	if !res.budgetReached {
+		t.Fatal("the work bound was not reached")
+	}
+	got := res.urls
 	want := []string{"https://img.example/1.png", "https://img.example/2.png", "https://img.example/3.png"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 	for i := 0; i < 3; i++ {
-		if again := extractImageURLsWithBudget(ctx, md, 128, 5); strings.Join(again, " ") != strings.Join(got, " ") {
+		if again := extractImages(ctx, md, 128, 8).urls; strings.Join(again, " ") != strings.Join(got, " ") {
 			t.Fatalf("run %d: %v, want %v", i, again, got)
 		}
 	}
@@ -328,14 +407,32 @@ func TestExtractImageURLsWorkBound(t *testing.T) {
 	}
 }
 
-// TestExtractImageURLsScanBound: images are taken from the first 8 MiB of
-// the document.
+// TestExtractImageURLsScanBound: images are taken from the first 2 MiB of
+// the document, and the result says the document was longer.
 func TestExtractImageURLsScanBound(t *testing.T) {
 	filler := strings.Repeat("text text text text text text text\n", maxImageScanBytes/35+1)
 	md := "![a](https://img.example/early.png)\n" + filler + "![b](https://img.example/late.png)\n"
-	got := extractImageURLs(context.Background(), md, 128)
-	if len(got) != 1 || got[0] != "https://img.example/early.png" {
-		t.Fatalf("got %v", got)
+	res := extractImages(context.Background(), md, 128, maxWorkPerByte)
+	if len(res.urls) != 1 || res.urls[0] != "https://img.example/early.png" || !res.truncated {
+		t.Fatalf("got %v, truncated %v", res.urls, res.truncated)
+	}
+	if maxImageScanBytes != 2<<20 {
+		t.Fatalf("the publish warning names 2 MiB; the window is %d bytes", maxImageScanBytes)
+	}
+}
+
+// TestPublishWarnsBeyondWindow: a markdown entry larger than the scanned
+// window publishes with one warning saying later images were not fetched.
+func TestPublishWarnsBeyondWindow(t *testing.T) {
+	f := newFixture(t, false)
+	f.useFetcher(&fakeFetcher{bodies: map[string][]byte{"https://img.example/a.png": testPNG}})
+	md := "![a](https://img.example/a.png)\n" + strings.Repeat("text\n", maxImageScanBytes/5+1) + "![b](https://img.example/b.png)\n"
+	resp := f.publish(agentA, "doc.md", []byte(md), "")
+	if len(resp.Warnings) != 1 || resp.Warnings[0] != warnBeyondWindow {
+		t.Fatalf("warnings %q", resp.Warnings)
+	}
+	if resp.Version.FileCount != 2 {
+		t.Fatalf("files %d: the image past the window must have no row", resp.Version.FileCount)
 	}
 }
 

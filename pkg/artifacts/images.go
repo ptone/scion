@@ -19,9 +19,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/html"
 )
@@ -44,8 +44,6 @@ func isReservedPath(p string) bool {
 	return p == strings.TrimSuffix(RemotePrefix, "/") || strings.HasPrefix(p, RemotePrefix)
 }
 
-var mdEscape = regexp.MustCompile(`\\([!-/:-@\[-\x60{-~])`)
-
 // Extraction bounds. Every scan below moves forward only and every
 // lookahead is either capped or consumed, so extraction is linear in the
 // document.
@@ -63,13 +61,16 @@ const (
 	// ctxCheckEvery is how many units of work run between context checks.
 	ctxCheckEvery = 1 << 16
 	// maxImageScanBytes bounds the part of a document scanned for images:
-	// images are taken from the first 8 MiB.
-	maxImageScanBytes = 8 << 20
+	// images are taken from the first 2 MiB.
+	maxImageScanBytes = 2 << 20
 	// maxWorkPerByte bounds the work of one extraction, in units per
 	// scanned byte; minWorkBudget is added so small documents are never
 	// cut short. Images found before the bound are kept.
 	maxWorkPerByte = 32
 	minWorkBudget  = 1 << 16
+	// allocUnit is the charge for a fixed-size allocation (a map entry, a
+	// slice element, a parsed URL's structure).
+	allocUnit = 256
 )
 
 // imageHit is one candidate image URL and where it first appears.
@@ -97,28 +98,41 @@ type imageHit struct {
 // matches what it finds against the manifest and shows a placeholder for
 // anything missing.
 func extractImageURLs(ctx context.Context, markdown string, limit int) []string {
-	return extractImageURLsWithBudget(ctx, markdown, limit, maxWorkPerByte)
+	return extractImages(ctx, markdown, limit, maxWorkPerByte).urls
 }
 
-// extractImageURLsWithBudget is extractImageURLs with the work allowance
-// per scanned byte as a parameter, so tests can exercise the bound.
-func extractImageURLsWithBudget(ctx context.Context, markdown string, limit, perByte int) []string {
+// extractResult is the outcome of one extraction: the URLs found, whether
+// the document was longer than the scanned window, whether the work bound
+// stopped extraction early, and the work units metered.
+type extractResult struct {
+	urls          []string
+	truncated     bool
+	budgetReached bool
+	used          int
+}
+
+// extractImages is extractImageURLs with the full result and the work
+// allowance per scanned byte as a parameter, so tests can exercise the
+// bound.
+func extractImages(ctx context.Context, markdown string, limit, perByte int) extractResult {
 	if limit <= 0 || ctx.Err() != nil {
-		return nil
+		return extractResult{}
 	}
+	var res extractResult
 	if len(markdown) > maxImageScanBytes {
 		markdown = markdown[:maxImageScanBytes]
+		res.truncated = true
 	}
 	e := &extraction{
-		ctx:      ctx,
-		limit:    limit,
-		budget:   perByte*len(markdown) + minWorkBudget,
-		seen:     map[string]bool{},
-		resolved: map[string]string{},
+		ctx:    ctx,
+		limit:  limit,
+		budget: perByte*len(markdown) + minWorkBudget,
+		seen:   map[string]bool{},
 	}
+	e.spend(len(markdown)) // the visible-text buffer
 	visible := e.visibleText(markdown)
 	if e.cancelled {
-		return nil
+		return extractResult{}
 	}
 	if !e.budgetReached {
 		e.referenceDefinitions(visible)
@@ -146,9 +160,10 @@ func extractImageURLsWithBudget(ctx context.Context, markdown string, limit, per
 		lineStart = lineEnd + 1
 	}
 	if e.cancelled || ctx.Err() != nil {
-		return nil
+		return extractResult{}
 	}
-	return e.out
+	res.urls, res.budgetReached, res.used = e.out, e.budgetReached, e.used
+	return res
 }
 
 // extraction is the state of one extractImageURLs call: the work meter,
@@ -162,7 +177,6 @@ type extraction struct {
 	budgetReached bool              // the work meter ran out (keeps what was found)
 	cancelled     bool              // ctx is done (returns nothing)
 	seen          map[string]bool   // URLs already found
-	resolved      map[string]string // raw destination -> normalized URL or ""
 	defs          map[string]string // reference label -> normalized URL
 	out           []string
 }
@@ -192,24 +206,23 @@ func (e *extraction) done() bool {
 	return e.budgetReached || e.cancelled || len(e.seen) >= e.limit
 }
 
-// normalize returns the normalized URL for a raw destination, computing it
-// once per distinct destination.
+// normalize returns the normalized URL for a raw destination. Its cost is
+// charged to the meter: the bytes it reads and the copies and URL parse it
+// may allocate.
 func (e *extraction) normalize(raw string) string {
-	if u, ok := e.resolved[raw]; ok {
-		return u
-	}
-	if !e.spend(len(raw)) {
+	if !e.spend(3*len(raw) + allocUnit) {
 		return ""
 	}
-	u := normalizeDestination(raw)
-	e.resolved[raw] = u
-	return u
+	return normalizeDestination(raw)
 }
 
 // addURL appends a found URL (already normalized) to hits unless it was
 // found before or is empty.
 func (e *extraction) addURL(hits []imageHit, pos int, u string) []imageHit {
-	if u == "" || e.seen[u] || len(e.seen) >= e.limit {
+	if u == "" || len(e.seen) >= e.limit || !e.spend(len(u)) || e.seen[u] {
+		return hits
+	}
+	if !e.spend(allocUnit) { // the set entry and the hit
 		return hits
 	}
 	e.seen[u] = true
@@ -270,7 +283,7 @@ func (e *extraction) lineImages(line string, offset int, hits []imageHit) []imag
 // definition returns the normalized URL a reference label is defined as,
 // or "".
 func (e *extraction) definition(label string) string {
-	if len(e.defs) == 0 || !e.spend(len(label)) {
+	if len(e.defs) == 0 || !e.spend(2*len(label)) {
 		return ""
 	}
 	return e.defs[normalizeLabel(label)]
@@ -349,7 +362,7 @@ func (e *extraction) lineImgTags(line string, offset int, hits []imageHit) []ima
 			pos = stop
 			continue
 		}
-		if !e.spend(stop + 1 - lt) {
+		if !e.spend(2 * (stop + 1 - lt)) { // reading the tag and decoding its src
 			break
 		}
 		hits = e.addURL(hits, offset+lt, e.normalize(imgSrc(line[lt:stop+1])))
@@ -437,6 +450,9 @@ func (e *extraction) referenceDefinitions(text string) {
 			continue
 		}
 		dest, _ := parseDestination(line, j+1, newNextIndex(line, ">"))
+		if !e.spend(2*len(label) + allocUnit) { // the label key and the map entry
+			return
+		}
 		key := normalizeLabel(label)
 		if _, defined := e.defs[key]; defined {
 			continue
@@ -560,14 +576,30 @@ func normalizeLabel(l string) string {
 	plain := len(l) > 0 && l[0] != ' ' && l[len(l)-1] != ' '
 	for i := 0; plain && i < len(l); i++ {
 		c := l[i]
-		if c >= 'A' && c <= 'Z' || c == '\t' || c == '\n' || c == '\r' || (c == ' ' && l[i-1] == ' ') {
+		if c >= 'A' && c <= 'Z' || c == '\t' || c == '\n' || c == '\r' || c >= 0x80 || (c == ' ' && l[i-1] == ' ') {
 			plain = false
 		}
 	}
 	if plain {
 		return l
 	}
-	return strings.ToLower(strings.Join(strings.Fields(l), " "))
+	// One pass into one buffer: whitespace runs collapse to one space,
+	// leading and trailing whitespace is dropped, letters are case-folded.
+	var b strings.Builder
+	b.Grow(len(l))
+	pendingSpace := false
+	for _, r := range l {
+		if unicode.IsSpace(r) {
+			pendingSpace = b.Len() > 0
+			continue
+		}
+		if pendingSpace {
+			b.WriteByte(' ')
+			pendingSpace = false
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
 }
 
 // normalizeDestination unwraps, unescapes and validates one image
@@ -585,7 +617,7 @@ func normalizeDestination(raw string) string {
 		return ""
 	}
 	if strings.IndexByte(s, '\\') >= 0 {
-		s = mdEscape.ReplaceAllString(s, "$1")
+		s = unescapeMarkdown(s)
 	}
 	s = strings.TrimSpace(html.UnescapeString(s))
 	if len(s) > maxDestinationBytes-1 {
@@ -600,6 +632,25 @@ func normalizeDestination(raw string) string {
 		return s
 	}
 	return ""
+}
+
+// unescapeMarkdown removes the backslash in front of each ASCII punctuation
+// character, in one pass into one buffer.
+func unescapeMarkdown(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) && isASCIIPunct(s[i+1]) {
+			i++
+		}
+		out = append(out, s[i])
+	}
+	return string(out)
+}
+
+// isASCIIPunct reports whether c is ASCII punctuation, the characters a
+// backslash escapes in markdown.
+func isASCIIPunct(c byte) bool {
+	return c >= '!' && c <= '/' || c >= ':' && c <= '@' || c >= '[' && c <= '`' || c >= '{' && c <= '~'
 }
 
 func hasPrefixFold(s, prefix string) bool {
@@ -733,6 +784,7 @@ func (e *extraction) visibleText(md string) string {
 				break
 			}
 			if blk := startHTMLBlock(line, prevParagraph); blk != nil {
+				e.spend(allocUnit) // the block's state
 				block = blk
 				block.first, block.lines = line, 1
 				if blk.kind < 6 && containsFold(line[strings.IndexByte(line, '<')+1:], blk.end) {
@@ -740,6 +792,9 @@ func (e *extraction) visibleText(md string) string {
 				}
 				prevParagraph = false
 				break
+			}
+			if strings.IndexByte(line, '`') >= 0 {
+				e.spend(16 * len(line)) // the code-span tables and the line copy
 			}
 			b.WriteString(blankCodeSpans(line))
 			prevParagraph = !isBlank && !isATXHeading(line)
