@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -41,6 +42,7 @@ type fakeFetcher struct {
 	reasons    map[string]remotefetch.Reason
 	calls      []string
 	noDeadline bool
+	delay      time.Duration
 }
 
 func (f *fakeFetcher) Fetch(ctx context.Context, u string) (*remotefetch.Result, error) {
@@ -51,7 +53,11 @@ func (f *fakeFetcher) Fetch(ctx context.Context, u string) (*remotefetch.Result,
 	}
 	body, ok := f.bodies[u]
 	reason := f.reasons[u]
+	delay := f.delay
 	f.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	if !ok {
 		if reason == "" {
 			reason = remotefetch.ReasonStatus
@@ -190,6 +196,34 @@ func TestExtractImageURLsStopsWhenCancelled(t *testing.T) {
 	cancel()
 	if got := extractImageURLs(ctx, "![a](https://img.example/a.png)", 10); got != nil {
 		t.Fatalf("got %v from a cancelled context", got)
+	}
+}
+
+// TestPublishExtendsWriteDeadline: fetching runs inside the publish
+// request, so the handler extends its write deadline past the fetch budget;
+// a server write timeout shorter than the fetch does not cut the response.
+func TestPublishExtendsWriteDeadline(t *testing.T) {
+	f := newFixture(t, false)
+	f.useFetcher(&fakeFetcher{bodies: map[string][]byte{"https://img.example/a.png": testPNG}, delay: 600 * time.Millisecond})
+	f.svc.SetLimits(func(context.Context) Limits {
+		return Limits{MaxFileBytes: 1 << 20, RemoteImages: RemoteImageLimits{
+			Enabled: true, MaxCount: 4, MaxBytes: 1 << 20, FetchTimeout: 2 * time.Second, TotalBudget: 2 * time.Second,
+		}}
+	})
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.svc.ServeHTTP(w, withPrincipal(r, agentA))
+	}))
+	srv.Config.WriteTimeout = 300 * time.Millisecond
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Post(srv.URL+"/api/v1/artifacts?name=doc.md", "text/markdown", strings.NewReader("![a](https://img.example/a.png)"))
+	if err != nil {
+		t.Fatalf("publish: %v (the response was cut off)", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status %d", resp.StatusCode)
 	}
 }
 

@@ -96,8 +96,7 @@ func (b backend) remoteImageLimits(ctx context.Context) RemoteImageLimits {
 // returns one manifest row per URL it processed, in order, plus the
 // warnings for the publisher. A failure never fails the publish: the row is
 // marked failed with a generic error and the warning is generic too.
-func (s *Service) fetchRemoteImages(ctx context.Context, b backend, versionID string, urls []string) ([]File, []string) {
-	lim := b.remoteImageLimits(ctx)
+func (s *Service) fetchRemoteImages(ctx context.Context, b backend, lim RemoteImageLimits, versionID string, urls []string) ([]File, []string) {
 	if !lim.Enabled || len(urls) == 0 {
 		return nil, nil
 	}

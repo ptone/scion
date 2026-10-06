@@ -159,8 +159,7 @@ type ArtifactsSettings struct {
 	RemoteImageFetchTimeoutS *int `json:"remote_image_fetch_timeout_s,omitempty"`
 	// RemoteImageTotalBudgetS bounds the time spent fetching all images of
 	// one version, in seconds. At least RemoteImageFetchTimeoutS and at most
-	// ArtifactsMaxRemoteImageTotalBudgetS, which keeps it below the hub's
-	// write timeout.
+	// ArtifactsMaxRemoteImageTotalBudgetS.
 	RemoteImageTotalBudgetS *int `json:"remote_image_total_budget_s,omitempty"`
 }
 
@@ -181,8 +180,10 @@ const (
 	ArtifactsDefaultRemoteImageTotalBudgetS        = 30
 
 	// ArtifactsMaxRemoteImageTotalBudgetS caps remote_image_total_budget_s.
-	// Remote images are fetched inside the publish request, so the budget
-	// must stay below the hub's HTTP write timeout (60 s by default).
+	// Remote images are fetched inside the publish request; the publish
+	// handler extends its own write deadline by the budget plus a margin, so
+	// the hub's server-wide write timeout does not cut the response. The cap
+	// bounds how long one publish can hold its request open.
 	ArtifactsMaxRemoteImageTotalBudgetS = 60
 )
 

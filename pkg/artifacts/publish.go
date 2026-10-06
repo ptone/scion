@@ -155,15 +155,21 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if mediaType == "text/markdown" {
 		// Remote images are fetched now, once, so opening the artifact
 		// never makes the hub fetch anything.
+		// The limits are read once, so extraction and fetching agree.
+		lim := b.remoteImageLimits(ctx)
 		var urls []string
-		if lim := b.remoteImageLimits(ctx); lim.Enabled {
+		if lim.Enabled {
+			// Fetching happens inside this request: extend its write
+			// deadline past the fetch budget so the response is not cut
+			// off after the artifact is recorded.
+			extendWriteDeadline(w, lim.TotalBudget+publishDeadlineMargin)
 			urls, err = spool.markdownImageURLs(ctx, remoteExtractLimit(lim))
 			if err != nil {
 				slog.ErrorContext(ctx, "artifacts: read spooled markdown failed", "error", err)
 			}
 		}
-		remote, w := s.fetchRemoteImages(ctx, b, versionID, urls)
-		warnings = w
+		remote, warn := s.fetchRemoteImages(ctx, b, lim, versionID, urls)
+		warnings = warn
 		for _, rf := range remote {
 			files = append(files, rf)
 			totalBytes += rf.Size
@@ -227,6 +233,21 @@ type spooled struct {
 	size   int64
 	digest string
 	head   []byte
+}
+
+// publishDeadlineMargin is the time a publish keeps for storing the fetched
+// images, recording the artifact and writing the response after the fetch
+// budget runs out.
+const publishDeadlineMargin = 30 * time.Second
+
+// extendWriteDeadline moves the response's write deadline to d from now,
+// when the server supports it. The hub's server-wide write timeout runs
+// from the end of the request headers and would otherwise also have to
+// cover reading the upload and the fetches.
+func extendWriteDeadline(w http.ResponseWriter, d time.Duration) {
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(d)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		slog.Warn("artifacts: could not extend the publish write deadline", "error", err)
+	}
 }
 
 // markdownImageURLs reads the spooled body as markdown and returns the
