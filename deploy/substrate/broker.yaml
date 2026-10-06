@@ -191,6 +191,17 @@ data:
   settings.yaml: |
     schema_version: "1"
     active_profile: substrate
+    # Required solely to satisfy the generic requireImageRegistryForBroker()
+    # startup gate (cmd/server_foreground.go), which refuses to start any
+    # runtime broker without an image registry. It is NOT consumed by the
+    # substrate runtime: actor images are digest-pinned, and
+    # RewriteImageRegistry is a no-op on digest/fully-qualified refs. Any
+    # syntactically valid registry value satisfies the gate. TODO: drop this
+    # once the gate follow-up ptone/scion#3540 (making the gate runtime-aware) lands. The
+    # gate reads this key through config.LoadEffectiveSettings(""), which
+    # only sees this mounted file because the container's workingDir is
+    # $HOME (see the Deployment below).
+    image_registry: "${IMAGE_REGISTRY}"
     server:
       broker:
         broker_id: "${HUB_BROKER_ID}"
@@ -301,6 +312,18 @@ spec:
       containers:
         - name: scion-substrate-broker
           image: ${BROKER_IMAGE}
+          # The broker resolves its settings with
+          # config.LoadEffectiveSettings(""), which looks for a project
+          # `.scion` starting from the process's working directory, and a
+          # project layer takes precedence over the global
+          # $HOME/.scion/settings.yaml mounted below. The image's default
+          # working directory (/app) would resolve as that project context
+          # instead, shadowing the mounted settings: the substrate profile,
+          # state_namespace and image_registry would never load, and the
+          # broker exits at startup. Running from $HOME makes the mounted
+          # file the settings the broker actually uses. Keep this equal to
+          # the HOME env value below.
+          workingDir: /home/scion
           # runAsNonRoot/runAsUser are deliberately NOT set here: the
           # branch-built broker image (Dockerfile.hub) has no USER
           # directive, so it runs as root by design, and runAsNonRoot:

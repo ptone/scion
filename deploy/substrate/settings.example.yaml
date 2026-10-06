@@ -23,6 +23,16 @@ schema_version: "1"
 # ConfigMap comment.
 active_profile: substrate
 
+# Gate-only, NOT consumed by the substrate runtime. Required solely to
+# satisfy the generic requireImageRegistryForBroker() startup gate
+# (cmd/server_foreground.go), which refuses to start any runtime broker
+# without an image registry. Substrate actor images are digest-pinned and
+# RewriteImageRegistry is a no-op on digest/fully-qualified refs, so this
+# value is never pulled from. The value below is an illustrative
+# placeholder, not a real registry; in broker.yaml it is `${IMAGE_REGISTRY}`.
+# TODO: drop once the gate follow-up ptone/scion#3540 (making the gate runtime-aware) lands.
+image_registry: us-docker.pkg.dev/<your-project>/scion
+
 server:
   broker:
     # Not a secret: a stable UUID printed by `scion runtime-broker

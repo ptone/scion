@@ -424,6 +424,22 @@ Named (non-default) profiles are unaffected — they are resolved per request,
 so a profile whose construction fails retries on the next request rather than
 staying degraded until a restart.
 
+## `image_registry` is gate-only
+
+The broker's `settings.yaml` carries an `image_registry` key (the
+`${IMAGE_REGISTRY}` placeholder) that the substrate runtime never uses. It
+is required solely to satisfy the generic `requireImageRegistryForBroker()`
+startup gate, which exits the broker with "image_registry is not
+configured" when no registry is set; actor images are digest-pinned, and
+`RewriteImageRegistry` is a no-op on digest/fully-qualified refs. Changing
+or rotating its value has no effect on running or future actors, but
+removing it makes the broker fail at startup (CrashLoopBackOff). The gate
+reads it from the mounted settings only because the container's
+`workingDir` is `$HOME`; if you change `workingDir` or `HOME`, keep them
+equal, or the image's default `/app` working directory shadows the mounted
+settings (losing the substrate profile and `state_namespace` too). TODO:
+drop the key once the gate follow-up ptone/scion#3540 (making the gate runtime-aware) lands.
+
 ## Known limits
 
 The runtime's behavior in areas outside this broker's control — logging,

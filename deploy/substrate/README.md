@@ -143,6 +143,23 @@ every manifest.
 | `SANDBOX_CONFIG_NAME` | The `SandboxConfig` CRD instance actor templates use |
 | `WORKER_SELECTOR_KEY` / `WORKER_SELECTOR_VALUE` | One label key/value pinning actors to a `WorkerPool` — matched against **the `WorkerPool` object's own `metadata.labels`**, not any Pod label (see `cluster/README.md`, "`worker_selector`") |
 | `SNAPSHOT_STORAGE_URI` | Bucket/prefix for actor snapshots |
+| `IMAGE_REGISTRY` | Value for the settings' top-level `image_registry` key, e.g. `us-docker.pkg.dev/<your-project>/scion` (illustrative only). **Gate-only:** required solely to satisfy the generic `requireImageRegistryForBroker()` startup gate; NOT consumed by the substrate runtime — see the callout below the table |
+
+**`IMAGE_REGISTRY` only satisfies a startup gate.** Every runtime broker
+runs the generic `requireImageRegistryForBroker()` check
+(`cmd/server_foreground.go`) and exits at startup with "image_registry is
+not configured" if no registry is set. That gate exists for runtimes that
+pull agent images by name; the substrate runtime does not consume
+`image_registry` at all — actor images are digest-pinned, and
+`RewriteImageRegistry` is a no-op on digest/fully-qualified refs. So any
+syntactically valid registry value works here; it is never pulled from by
+this broker. It is provided as the `image_registry` key in the mounted
+`settings.yaml` (not the `SCION_IMAGE_REGISTRY` env var), and the gate only
+sees that key because the broker container's `workingDir` is `$HOME` — the
+image's default `/app` working directory would resolve as a project
+context and shadow the mounted global settings (which would also drop the
+substrate profile and `state_namespace`). TODO: remove this placeholder
+once the gate follow-up ptone/scion#3540 (making the gate runtime-aware) lands.
 
 **`BROKER_NAMESPACE` is baked into the router NetworkPolicy at apply time,
 not read live.** The router `NetworkPolicy`'s `namespaceSelector` matches on
@@ -324,6 +341,9 @@ export SANDBOX_CONFIG_NAME=gvisor-default
 export WORKER_SELECTOR_KEY=pool
 export WORKER_SELECTOR_VALUE=scion-agents
 export SNAPSHOT_STORAGE_URI=gs://<your-bucket>/scion/
+# Gate-only: satisfies requireImageRegistryForBroker(); never pulled from by
+# the substrate runtime (see "IMAGE_REGISTRY only satisfies a startup gate").
+export IMAGE_REGISTRY=us-docker.pkg.dev/<your-project>/scion
 
 envsubst < deploy/substrate/broker.yaml > /tmp/broker.rendered.yaml
 
