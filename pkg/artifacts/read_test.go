@@ -304,23 +304,43 @@ func TestGetFilePaths(t *testing.T) {
 // owner, home-scope and grant paths, and a refusal there is the same 404
 // even for the owner or a principal-grant holder.
 func TestReadCredentialCheckComesFirst(t *testing.T) {
-	f := newFixture(t, false)
+	// Local storage streams; the object-store fixture redirects by default
+	// and streams with ?stream=1. The credential check guards all three.
+	for _, tc := range []struct {
+		name     string
+		redirect bool
+		query    string
+	}{
+		{"local", false, ""},
+		{"object store, redirect", true, ""},
+		{"object store, stream", true, "?stream=1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { checkCredentialFirst(t, tc.redirect, tc.query) })
+	}
+}
+
+func checkCredentialFirst(t *testing.T, redirect bool, query string) {
+	f := newFixture(t, redirect)
 	pub := f.publish(agentA, "doc.md", []byte("# doc"), "")
 	id := pub.Artifact.ID
 	if _, err := f.db.Exec(`INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at)
 		VALUES ('gx', ?, 'principal', ?, 'read', ?)`, id, PrincipalRef(agentX.kind, agentX.ref), time.Now().UTC().Format(sqliteTimeLayout)); err != nil {
 		t.Fatal(err)
 	}
-	path := "/api/v1/artifacts/" + id + "/files/doc.md"
+	path := "/api/v1/artifacts/" + id + "/files/doc.md" + query
+	okCode := http.StatusOK
+	if redirect && query == "" {
+		okCode = http.StatusFound
+	}
 	for _, p := range []principal{agentA, agentB, agentX} {
-		if rec := f.do(&p, http.MethodGet, path, nil, nil); rec.Code != http.StatusOK {
-			t.Fatalf("%s before deny: %d", p.ref, rec.Code)
+		if rec := f.do(&p, http.MethodGet, path, nil, nil); rec.Code != okCode {
+			t.Fatalf("%s before deny: %d, want %d", p.ref, rec.Code, okCode)
 		}
 		f.host.deny(p, "project-1", PermissionRead)
 	}
 	notFound := f.do(&agentA, http.MethodGet, "/api/v1/artifacts/00000000-0000-4000-8000-000000000000", nil, nil).Body.String()
 	for name, p := range map[string]principal{"owner": agentA, "home-scope member": agentB, "principal grant": agentX} {
-		for _, route := range []string{"/api/v1/artifacts/" + id, path, "/api/v1/artifacts/" + id + "/versions/1/files/doc.md"} {
+		for _, route := range []string{"/api/v1/artifacts/" + id, path, "/api/v1/artifacts/" + id + "/versions/1/files/doc.md" + query} {
 			rec := f.do(&p, http.MethodGet, route, nil, nil)
 			if rec.Code != http.StatusNotFound || rec.Body.String() != notFound {
 				t.Errorf("%s %s: %d, want the missing-artifact 404", name, route, rec.Code)
