@@ -27,7 +27,7 @@
  *   - CSP default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'.
  *
  * Images are rewritten before the document is built: a relative path loads
- * the version's own file, an absolute http(s) URL loads the copy the hub
+ * the version's own file when the manifest lists it, an absolute http(s) URL loads the copy the hub
  * fetched at publish time (files/_remote/...), found through the version's
  * manifest, and anything else becomes a placeholder. Every image request
  * uses ?stream=1, so it is answered by the hub itself.
@@ -140,6 +140,10 @@ export function resolveImageSrc(rawSrc: string, ctx: ArtifactImageContext): Reso
     return { kind: 'placeholder' };
   }
   if (!rel || rel === '_remote' || rel.startsWith('_remote/')) {
+    return { kind: 'placeholder' };
+  }
+  // Only a file the version actually holds is requested.
+  if (!ctx.files.some((f) => f.path === rel && f.origin !== 'remote')) {
     return { kind: 'placeholder' };
   }
   return { kind: 'file', src: `${ctx.filesBase}${encodePath(rel)}?stream=1` };

@@ -177,7 +177,7 @@ func newFixture(t *testing.T, redirect bool) *fixture {
 
 	svc := NewService(host)
 	// Tests never reach the network: by default every remote image fails.
-	svc.SetImageFetcherFactory(func(RemoteImageLimits) ImageFetcher { return &fakeFetcher{} })
+	svc.setImageFetcherFactory(func(RemoteImageLimits) ImageFetcher { return &fakeFetcher{} })
 	svc.SetStore(st)
 	svc.SetBlobStorage(blobs, "hub-1")
 	return &fixture{t: t, svc: svc, host: host, db: db, store: st, blobs: blobs, local: local}

@@ -21,6 +21,7 @@ import type { ScionArtifactMarkdownFrame } from './artifact-markdown-frame.js';
 const BASE = '/api/v1/artifacts/a1/versions/1/files/';
 const files: ArtifactFile[] = [
   { path: 'doc.md', size: 1, sha256: 'x', mediaType: 'text/markdown' },
+  { path: 'img/a.png', size: 1, sha256: 'z', mediaType: 'image/png' },
   {
     path: '_remote/' + 'a'.repeat(64),
     size: 5,

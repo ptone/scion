@@ -34,6 +34,9 @@ const UNICODE_PATH = '_remote/' + 'c'.repeat(64);
 
 const files: ArtifactFile[] = [
   { path: 'doc.md', size: 10, sha256: 'x', mediaType: 'text/markdown' },
+  { path: 'img/a b.png', size: 3, sha256: 'p', mediaType: 'image/png' },
+  { path: 'shot.png', size: 3, sha256: 'q', mediaType: 'image/png' },
+  { path: 'img/local.png', size: 3, sha256: 'r', mediaType: 'image/png' },
   {
     path: GOOD_PATH,
     size: 5,
@@ -92,6 +95,10 @@ describe('resolveImageSrc', () => {
       kind: 'file',
       src: `${BASE}shot.png?stream=1`,
     });
+  });
+  it('shows a placeholder for a relative path the version does not hold', () => {
+    expect(resolveImageSrc('img/missing.png', ctx)).toEqual({ kind: 'placeholder' });
+    expect(resolveImageSrc('doc.md', ctx)).toEqual({ kind: 'file', src: `${BASE}doc.md?stream=1` });
   });
   it('drops everything else', () => {
     for (const src of [

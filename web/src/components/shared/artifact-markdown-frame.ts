@@ -94,10 +94,18 @@ export class ScionArtifactMarkdownFrame extends LitElement {
       const h = doc.documentElement?.scrollHeight ?? 0;
       if (h > 0) frame.style.height = `${h + 2}px`;
     };
+    const toPlaceholder = (img: HTMLImageElement): void => {
+      img.replaceWith(imagePlaceholder(doc, img.getAttribute('alt') ?? ''));
+    };
     for (const img of Array.from(doc.querySelectorAll('img'))) {
+      if (img.complete && img.naturalWidth === 0) {
+        // Already failed before the frame's load event.
+        toPlaceholder(img);
+        continue;
+      }
       img.addEventListener('load', resize);
       img.addEventListener('error', () => {
-        img.replaceWith(imagePlaceholder(doc, img.getAttribute('alt') ?? ''));
+        toPlaceholder(img);
         resize();
       });
     }

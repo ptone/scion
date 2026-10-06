@@ -51,6 +51,11 @@ type ImageFetcher interface {
 	Fetch(ctx context.Context, rawURL string) (*remotefetch.Result, error)
 }
 
+// remoteExtractLimit is how many distinct image URLs are read from one
+// document: a few times the fetch cap, so the warning can say roughly how
+// many were left out, while a large document is never scanned beyond it.
+func remoteExtractLimit(l RemoteImageLimits) int { return 4 * l.MaxCount }
+
 // remoteFetchConcurrency is how many images of one version are fetched at
 // once.
 const remoteFetchConcurrency = 4
@@ -64,21 +69,27 @@ func defaultFetcherFactory(l RemoteImageLimits) ImageFetcher {
 	return remotefetch.New(remotefetch.Config{MaxBytes: l.MaxBytes, Timeout: l.FetchTimeout})
 }
 
-// SetImageFetcherFactory replaces the function that builds the fetcher for
-// a publish from the current limits. Tests use it to avoid the network.
-func (s *Service) SetImageFetcherFactory(fn func(RemoteImageLimits) ImageFetcher) {
+// setImageFetcherFactory replaces the function that builds the fetcher for
+// a publish from the current limits. It is unexported so only this
+// package's tests can replace the guarded fetcher.
+func (s *Service) setImageFetcherFactory(fn func(RemoteImageLimits) ImageFetcher) {
 	s.mu.Lock()
 	s.fetcherFactory = fn
 	s.mu.Unlock()
 }
 
+// remoteImageLimits returns the host's remote image limits. Without a
+// limits getter the defaults apply; limits the host does supply but that
+// are incomplete or invalid turn remote images off (fail closed).
 func (b backend) remoteImageLimits(ctx context.Context) RemoteImageLimits {
-	if b.limits != nil {
-		if l := b.limits(ctx).RemoteImages; l.MaxCount > 0 && l.MaxBytes > 0 && l.FetchTimeout > 0 && l.TotalBudget > 0 {
-			return l
-		}
+	if b.limits == nil {
+		return DefaultRemoteImageLimits()
 	}
-	return DefaultRemoteImageLimits()
+	l := b.limits(ctx).RemoteImages
+	if l.MaxCount <= 0 || l.MaxBytes <= 0 || l.FetchTimeout <= 0 || l.TotalBudget <= 0 {
+		return RemoteImageLimits{}
+	}
+	return l
 }
 
 // fetchRemoteImages fetches the images at urls into the blob store and
@@ -92,7 +103,11 @@ func (s *Service) fetchRemoteImages(ctx context.Context, b backend, versionID st
 	}
 	var warnings []string
 	if len(urls) > lim.MaxCount {
-		warnings = append(warnings, fmt.Sprintf("%d more remote images were not fetched (at most %d per version)", len(urls)-lim.MaxCount, lim.MaxCount))
+		more := fmt.Sprintf("%d", len(urls)-lim.MaxCount)
+		if len(urls) >= remoteExtractLimit(lim) {
+			more += " or more"
+		}
+		warnings = append(warnings, fmt.Sprintf("%s more remote images were not fetched (at most %d per version)", more, lim.MaxCount))
 		urls = urls[:lim.MaxCount]
 	}
 	s.mu.RLock()

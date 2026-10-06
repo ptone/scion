@@ -429,10 +429,11 @@ func compileSchemas() {
 			"additionalProperties": false,
 		},
 		// artifacts schema is hand-written -- it is runtime/API-owned state
-		// with no $defs in settings-v1.schema.json. The per-field minimums
+		// with no $defs in settings-v1.schema.json. The per-field bounds
 		// match ArtifactsSettings.Resolve; the cross-field rules (file limit
-		// <= bundle limit, default TTL <= max TTL) are not expressible here
-		// and are enforced by Resolve, which fails closed.
+		// <= bundle limit, default TTL <= max TTL, remote image limits
+		// against the file limits, budget >= fetch timeout) are not
+		// expressible here and are enforced by Resolve, which fails closed.
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -446,8 +447,8 @@ func compileSchemas() {
 				"remote_images_enabled":        map[string]interface{}{"type": "boolean"},
 				"remote_image_max_count":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"remote_image_max_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
-				"remote_image_fetch_timeout_s": map[string]interface{}{"type": "integer", "minimum": 1},
-				"remote_image_total_budget_s":  map[string]interface{}{"type": "integer", "minimum": 1},
+				"remote_image_fetch_timeout_s": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": ArtifactsMaxRemoteImageTotalBudgetS},
+				"remote_image_total_budget_s":  map[string]interface{}{"type": "integer", "minimum": 1, "maximum": ArtifactsMaxRemoteImageTotalBudgetS},
 			},
 			"additionalProperties": false,
 		},

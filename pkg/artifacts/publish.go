@@ -155,9 +155,12 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if mediaType == "text/markdown" {
 		// Remote images are fetched now, once, so opening the artifact
 		// never makes the hub fetch anything.
-		urls, err := spool.markdownImageURLs()
-		if err != nil {
-			slog.ErrorContext(ctx, "artifacts: read spooled markdown failed", "error", err)
+		var urls []string
+		if lim := b.remoteImageLimits(ctx); lim.Enabled {
+			urls, err = spool.markdownImageURLs(remoteExtractLimit(lim))
+			if err != nil {
+				slog.ErrorContext(ctx, "artifacts: read spooled markdown failed", "error", err)
+			}
 		}
 		remote, w := s.fetchRemoteImages(ctx, b, versionID, urls)
 		warnings = w
@@ -228,7 +231,7 @@ type spooled struct {
 
 // markdownImageURLs reads the spooled body as markdown and returns the
 // remote image URLs it references.
-func (s *spooled) markdownImageURLs() ([]string, error) {
+func (s *spooled) markdownImageURLs(limit int) ([]string, error) {
 	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
@@ -236,7 +239,7 @@ func (s *spooled) markdownImageURLs() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return extractImageURLs(string(body)), nil
+	return extractImageURLs(string(body), limit), nil
 }
 
 func (s *spooled) Close() {

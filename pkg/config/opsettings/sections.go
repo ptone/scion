@@ -158,7 +158,9 @@ type ArtifactsSettings struct {
 	// seconds.
 	RemoteImageFetchTimeoutS *int `json:"remote_image_fetch_timeout_s,omitempty"`
 	// RemoteImageTotalBudgetS bounds the time spent fetching all images of
-	// one version, in seconds.
+	// one version, in seconds. At least RemoteImageFetchTimeoutS and at most
+	// ArtifactsMaxRemoteImageTotalBudgetS, which keeps it below the hub's
+	// write timeout.
 	RemoteImageTotalBudgetS *int `json:"remote_image_total_budget_s,omitempty"`
 }
 
@@ -177,6 +179,11 @@ const (
 	ArtifactsDefaultRemoteImageMaxBytes      int64 = 5 << 20 // 5 MiB
 	ArtifactsDefaultRemoteImageFetchTimeoutS       = 10
 	ArtifactsDefaultRemoteImageTotalBudgetS        = 30
+
+	// ArtifactsMaxRemoteImageTotalBudgetS caps remote_image_total_budget_s.
+	// Remote images are fetched inside the publish request, so the budget
+	// must stay below the hub's HTTP write timeout (60 s by default).
+	ArtifactsMaxRemoteImageTotalBudgetS = 60
 )
 
 // ArtifactsConfig is the resolved artifact service configuration: every
@@ -225,6 +232,7 @@ func DefaultArtifactsConfig() ArtifactsConfig {
 func MalformedArtifactsConfig() ArtifactsConfig {
 	c := DefaultArtifactsConfig()
 	c.Enabled = false
+	c.RemoteImagesEnabled = false
 	c.Malformed = true
 	return c
 }
@@ -235,7 +243,10 @@ func MalformedArtifactsConfig() ArtifactsConfig {
 // service fails closed rather than running with a limit nobody set.
 //
 // Valid means: every size and count limit, both link TTLs and both remote
-// image timeouts are at least 1, retention is at least 0, a file limit does not exceed the bundle
+// image timeouts are at least 1, retention is at least 0, a remote image
+// is no larger than a file, there are no more remote images than files,
+// the remote image budget is at least one fetch timeout and at most
+// ArtifactsMaxRemoteImageTotalBudgetS, a file limit does not exceed the bundle
 // limit, and the default link TTL does not exceed the maximum.
 func (a ArtifactsSettings) Resolve() (ArtifactsConfig, error) {
 	c := DefaultArtifactsConfig()
@@ -300,6 +311,14 @@ func (a ArtifactsSettings) Resolve() (ArtifactsConfig, error) {
 		err = fmt.Errorf("remote_image_fetch_timeout_s must be at least 1, got %d", c.RemoteImageFetchTimeoutS)
 	case c.RemoteImageTotalBudgetS < 1:
 		err = fmt.Errorf("remote_image_total_budget_s must be at least 1, got %d", c.RemoteImageTotalBudgetS)
+	case c.RemoteImageMaxBytes > c.MaxFileBytes:
+		err = fmt.Errorf("remote_image_max_bytes (%d) exceeds max_file_bytes (%d)", c.RemoteImageMaxBytes, c.MaxFileBytes)
+	case c.RemoteImageMaxCount > c.MaxFiles:
+		err = fmt.Errorf("remote_image_max_count (%d) exceeds max_files (%d)", c.RemoteImageMaxCount, c.MaxFiles)
+	case c.RemoteImageTotalBudgetS < c.RemoteImageFetchTimeoutS:
+		err = fmt.Errorf("remote_image_total_budget_s (%d) is below remote_image_fetch_timeout_s (%d)", c.RemoteImageTotalBudgetS, c.RemoteImageFetchTimeoutS)
+	case c.RemoteImageTotalBudgetS > ArtifactsMaxRemoteImageTotalBudgetS:
+		err = fmt.Errorf("remote_image_total_budget_s must be at most %d, got %d", ArtifactsMaxRemoteImageTotalBudgetS, c.RemoteImageTotalBudgetS)
 	case c.LinkDefaultTTLHours > c.LinkMaxTTLHours:
 		err = fmt.Errorf("link_default_ttl_hours (%d) exceeds link_max_ttl_hours (%d)", c.LinkDefaultTTLHours, c.LinkMaxTTLHours)
 	}

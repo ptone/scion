@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -62,7 +63,7 @@ func (f *fakeFetcher) Fetch(ctx context.Context, u string) (*remotefetch.Result,
 }
 
 func (f *fixture) useFetcher(ff *fakeFetcher) {
-	f.svc.SetImageFetcherFactory(func(RemoteImageLimits) ImageFetcher { return ff })
+	f.svc.setImageFetcherFactory(func(RemoteImageLimits) ImageFetcher { return ff })
 }
 
 func TestExtractImageURLs(t *testing.T) {
@@ -82,11 +83,15 @@ func TestExtractImageURLs(t *testing.T) {
 		"\x60\x60\x60",
 		"![fenced](https://img.example/fenced.png)",
 		"\x60\x60\x60",
-		"<p><img alt=x src=\"https://img.example/html.png?x=1&amp;y=2\"></p>",
+		"<p><img alt=x src=\"https://img.example/in-block.png\"></p>",
+		"",
+		"Text with <img alt=x src=\"https://img.example/html.png?x=1&amp;y=2\"> inline.",
+		"",
+		"<img src=\"https://img.example/alone.png\">",
 		"![esc](https://img.example/a\\_b.png)",
 		"[link not image](https://img.example/link.png)",
 	}, "\n")
-	got := extractImageURLs(md)
+	got := extractImageURLs(md, 100)
 	want := []string{
 		"https://img.example/a.png",
 		"https://img.example/b c.png",
@@ -94,10 +99,74 @@ func TestExtractImageURLs(t *testing.T) {
 		"https://img.example/logo.png",
 		"https://img.example/short.png",
 		"https://img.example/html.png?x=1&y=2",
+		"https://img.example/alone.png",
 		"https://img.example/a_b.png",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// TestExtractImageURLsLinearAndBounded: a large document of interleaved
+// inline and reference images is scanned in linear time, and extraction
+// stops at the limit.
+func TestExtractImageURLsLinearAndBounded(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("[r]: https://img.example/ref.png\n")
+	for i := 0; i < 100_000; i++ {
+		fmt.Fprintf(&b, "![a](https://img.example/%d.png) ![b][r] ![c](rel/%d.png)\n", i, i)
+	}
+	md := b.String()
+
+	start := time.Now()
+	got := extractImageURLs(md, 128)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("extraction took %v", elapsed)
+	}
+	if len(got) != 128 || got[0] != "https://img.example/0.png" || got[1] != "https://img.example/ref.png" || got[2] != "https://img.example/1.png" {
+		t.Fatalf("got %d URLs starting %q", len(got), got[:min(3, len(got))])
+	}
+
+	// Without an early stop the full document still scans quickly.
+	start = time.Now()
+	all := extractImageURLs(md, 1_000_000)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("full extraction took %v", elapsed)
+	}
+	if len(all) != 100_001 {
+		t.Fatalf("full extraction found %d URLs", len(all))
+	}
+	if extractImageURLs(md, 0) != nil {
+		t.Fatal("limit 0 must extract nothing")
+	}
+}
+
+// TestRemoteImageLimitsFailClosed: limits a host supplies that are
+// incomplete or invalid turn remote images off; the defaults apply only
+// when the host gives no limits at all.
+func TestRemoteImageLimitsFailClosed(t *testing.T) {
+	ctx := context.Background()
+	if got := (backend{}).remoteImageLimits(ctx); got != DefaultRemoteImageLimits() {
+		t.Fatalf("no limits getter: %+v", got)
+	}
+	for name, l := range map[string]RemoteImageLimits{
+		"zero":            {},
+		"enabled, no cap": {Enabled: true, MaxBytes: 1, FetchTimeout: time.Second, TotalBudget: time.Second},
+		"negative bytes":  {Enabled: true, MaxCount: 1, MaxBytes: -1, FetchTimeout: time.Second, TotalBudget: time.Second},
+	} {
+		b := backend{limits: func(context.Context) Limits { return Limits{RemoteImages: l} }}
+		if got := b.remoteImageLimits(ctx); got.Enabled {
+			t.Fatalf("%s: remote images enabled: %+v", name, got)
+		}
+	}
+
+	f := newFixture(t, false)
+	ff := &fakeFetcher{bodies: map[string][]byte{"https://img.example/a.png": testPNG}}
+	f.useFetcher(ff)
+	f.svc.SetLimits(func(context.Context) Limits { return Limits{MaxFileBytes: 1 << 20} })
+	resp := f.publish(agentA, "doc.md", []byte("![a](https://img.example/a.png)"), "")
+	if len(ff.calls) != 0 || resp.Version.FileCount != 1 {
+		t.Fatalf("host limits without remote image limits must not fetch: calls %v files %d", ff.calls, resp.Version.FileCount)
 	}
 }
 

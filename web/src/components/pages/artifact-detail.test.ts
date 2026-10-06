@@ -285,8 +285,9 @@ describe('artifact page', () => {
     }
     const doc = new DOMParser().parseFromString(srcdoc, 'text/html');
     const srcs = Array.from(doc.querySelectorAll('img')).map((i) => i.getAttribute('src'));
-    // Only the version's own file loads; nothing leaves the hub origin.
-    expect(srcs).toEqual([`/api/v1/artifacts/${ID}/versions/1/files/img/b.png?stream=1`]);
+    // A single-file version holds no img/b.png, so nothing loads at all;
+    // in particular nothing leaves the hub origin.
+    expect(srcs).toEqual([]);
     for (const node of Array.from(doc.body.querySelectorAll('*'))) {
       for (const attr of Array.from(node.attributes)) {
         expect(attr.value).not.toContain('elsewhere.example');

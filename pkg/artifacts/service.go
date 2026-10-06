@@ -86,8 +86,9 @@ type Backend struct {
 type Limits struct {
 	// MaxFileBytes caps the size of one file.
 	MaxFileBytes int64
-	// RemoteImages bound the remote images fetched at publish time. A zero
-	// value means the defaults (DefaultRemoteImageLimits).
+	// RemoteImages bound the remote images fetched at publish time. A host
+	// that sets a limits getter must fill them in: incomplete or invalid
+	// values turn remote images off.
 	RemoteImages RemoteImageLimits
 }
 

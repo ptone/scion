@@ -60,13 +60,13 @@ When it fetches the current version, `get` checks the bytes against the SHA-256 
 
 Images in a Markdown artifact are fetched at publish time and served from the hub, so opening an artifact never makes the hub or the reader's browser contact another server.
 
-- **Remote images.** When a Markdown file is published, the hub fetches each absolute `https` image it references (`![alt](https://...)`, reference-style images and `<img src="https://...">`) once, and stores it in the version as a file at `_remote/<sha256 of the URL>`. Images in code blocks are ignored. Only PNG, JPEG, GIF and WebP images are kept; SVG and other types are not. An image that cannot be fetched (for example a non-`https` URL, an address the hub does not fetch from, a timeout, a missing image or another type) is recorded as failed, the publish still succeeds, and the response and the CLI list one warning per such image. A later publish fetches again.
+- **Remote images.** When a Markdown file is published, the hub fetches each absolute `https` image it references (`![alt](https://...)`, reference-style images, and `<img src="https://...">` written inline in text or on a line of its own) once, and stores it in the version as a file at `_remote/<sha256 of the URL>`. Images in code blocks are ignored. Only PNG, JPEG, GIF and WebP images are kept; SVG and other types are not. An image that cannot be fetched (for example a non-`https` URL, an address the hub does not fetch from, a timeout, a missing image or another type) is recorded as failed, the publish still succeeds, and the response and the CLI list one warning per such image. A later publish fetches again.
 - **Relative images.** `![alt](img/chart.png)` refers to a file of the same version.
 - **Rendering.** The web page shows Markdown in a sandboxed frame that loads images only from the hub: remote images from their `_remote/` copy, relative images from the version's files. Any other image source, and any image that failed to fetch, is shown as a placeholder with its alt text.
 - **Reading a remote image.** `GET /api/v1/artifacts/{id}/versions/{seq}/files/_remote/<hash>` follows the same access checks as any other file. A fetched image is served with its detected type; a failed one answers `404` with the header `X-Artifact-Remote-Status: failed`. The version's file manifest lists each remote image with `origin: "remote"`, its `sourceUrl` and its `fetchStatus` (`ok` or `failed`).
 - **Reserved names.** Files may not be published under `_remote/`.
 
-Settings (in the `artifacts` section): `remote_images_enabled` (default `true`), `remote_image_max_count` (images fetched per version, default `32`; further images are not fetched and get one warning), `remote_image_max_bytes` (per image, default 5 MiB), `remote_image_fetch_timeout_s` (per image, default `10`) and `remote_image_total_budget_s` (all images of one version, default `30`).
+Settings (in the `artifacts` section): `remote_images_enabled` (default `true`), `remote_image_max_count` (images fetched per version, default `32`; further images are not fetched and get one warning), `remote_image_max_bytes` (per image, default 5 MiB, at most `max_file_bytes`), `remote_image_fetch_timeout_s` (per image, default `10`) and `remote_image_total_budget_s` (all images of one version, default `30`, between the fetch timeout and 60 seconds, since images are fetched while the publish request is open). `remote_image_max_count` may not exceed `max_files`.
 
 ## API
 
@@ -75,7 +75,7 @@ All routes are under `/api/v1/artifacts` and use the hub's usual authentication 
 | Method and path | Purpose |
 | :--- | :--- |
 | `POST /api/v1/artifacts?name=<file>[&title=<title>][&scope=<project-id>]` | Publish the raw request body as a new single-file artifact. `scope` defaults to the caller's project (agents); users must set it. Optional header `X-Content-SHA256` (hex) is verified. Returns `201` with the artifact, its first version and any publish `warnings`. |
-| `GET /api/v1/artifacts/{id}` | The artifact and its current version, including the file manifest (`path`, `size`, `sha256`, `mediaType`). |
+| `GET /api/v1/artifacts/{id}` | The artifact and its current version, including the file manifest (`path`, `size`, `sha256`, `mediaType`, and for remote images `origin`, `sourceUrl` and `fetchStatus`; see [Images in Markdown artifacts](#images-in-markdown-artifacts)). |
 | `GET /api/v1/artifacts/{id}/files/{path}` | A file of the current version. |
 | `GET /api/v1/artifacts/{id}/versions/{seq}/files/{path}` | A file of version `seq`. |
 

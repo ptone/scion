@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -48,89 +49,161 @@ var (
 	refDefinition = regexp.MustCompile(`(?m)^ {0,3}\[([^\]]+)\]:[ \t]*(<[^>\n]*>|\S+)`)
 	inlineImage   = regexp.MustCompile(`!\[[^\]]*\]\([ \t]*(<[^>\n]*>|[^\s)]+)`)
 	refImage      = regexp.MustCompile(`!\[([^\]]*)\](?:\[([^\]]*)\])?`)
+	imgTag        = regexp.MustCompile(`(?i)<img\b[^<>]*>`)
+	htmlBlockLine = regexp.MustCompile(`^ {0,3}</?([A-Za-z][A-Za-z0-9-]*)`)
 	mdEscape      = regexp.MustCompile(`\\([!-/:-@\[-\x60{-~])`)
 )
 
-// extractImageURLs returns the absolute http(s) image URLs a markdown
-// document references, in order of first appearance and without
+// maxRefDefinitions bounds the reference definitions remembered from one
+// document.
+const maxRefDefinitions = 4096
+
+// imageHit is one candidate image URL and where it first appears.
+type imageHit struct {
+	pos int
+	url string
+}
+
+// extractImageURLs returns at most limit absolute http(s) image URLs a
+// markdown document references, in order of first appearance and without
 // duplicates: inline images, reference-style images resolved through their
-// definitions, and the src of inline <img> HTML. Code blocks and code spans
-// are skipped. It is a best-effort scan for the URLs to fetch; the renderer
-// matches what it finds against the manifest and shows a placeholder for
-// anything missing.
-func extractImageURLs(markdown string) []string {
+// definitions, and <img> tags where the web renderer shows them (inline in
+// text or alone on a line, not inside an HTML block). Code blocks and code
+// spans are skipped.
+//
+// The work is linear in the document and bounded by limit: each kind of
+// reference is scanned once and stops after limit distinct URLs, so the
+// result holds the first limit URLs of the document. It is a best-effort
+// scan for the URLs to fetch; the renderer matches what it finds against
+// the manifest and shows a placeholder for anything missing.
+func extractImageURLs(markdown string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
 	text := stripCode(markdown)
 
 	defs := map[string]string{}
-	for _, m := range refDefinition.FindAllStringSubmatch(text, -1) {
-		label := normalizeLabel(m[1])
+	scanMatches(refDefinition, text, func(m []int) bool {
+		label := normalizeLabel(text[m[2]:m[3]])
 		if _, seen := defs[label]; !seen {
-			defs[label] = m[2]
+			defs[label] = text[m[4]:m[5]]
 		}
-	}
+		return len(defs) < maxRefDefinitions
+	})
 
-	type hit struct {
-		pos int
-		raw string
+	var hits []imageHit
+	collectIn := func(src string, re *regexp.Regexp, dest func(m []int) string) {
+		seen := map[string]bool{}
+		scanMatches(re, src, func(m []int) bool {
+			if u := normalizeDestination(dest(m)); u != "" && !seen[u] {
+				seen[u] = true
+				hits = append(hits, imageHit{m[0], u})
+			}
+			return len(seen) < limit
+		})
 	}
-	var hits []hit
-	for _, m := range inlineImage.FindAllStringSubmatchIndex(text, -1) {
-		hits = append(hits, hit{m[0], text[m[2]:m[3]]})
-	}
-	for _, m := range refImage.FindAllStringSubmatchIndex(text, -1) {
-		end := m[1]
-		if end < len(text) && text[end] == '(' {
-			continue // an inline image, handled above
+	collect := func(re *regexp.Regexp, dest func(m []int) string) { collectIn(text, re, dest) }
+	collect(inlineImage, func(m []int) string { return text[m[2]:m[3]] })
+	collect(refImage, func(m []int) string {
+		if m[1] < len(text) && text[m[1]] == '(' {
+			return "" // an inline image, handled above
 		}
 		label := text[m[2]:m[3]]
 		if m[4] >= 0 && m[5] > m[4] {
 			label = text[m[4]:m[5]]
 		}
-		if dest, ok := defs[normalizeLabel(label)]; ok {
-			hits = append(hits, hit{m[0], dest})
-		}
-	}
-	z := html.NewTokenizer(strings.NewReader(text))
-	offset := 0
-	for {
-		tt := z.Next()
-		if tt == html.ErrorToken {
-			break
-		}
-		raw := z.Raw()
-		if tt == html.StartTagToken || tt == html.SelfClosingTagToken {
-			if name, hasAttr := z.TagName(); string(name) == "img" && hasAttr {
-				for {
-					k, v, more := z.TagAttr()
-					if string(k) == "src" {
-						hits = append(hits, hit{offset, string(v)})
-					}
-					if !more {
-						break
-					}
-				}
-			}
-		}
-		offset += len(raw)
-	}
+		return defs[normalizeLabel(label)]
+	})
+	shown := blankHTMLBlocks(text)
+	collectIn(shown, imgTag, func(m []int) string { return imgSrc(shown[m[0]:m[1]]) })
 
-	// Order by position so the result follows the document.
-	for i := 1; i < len(hits); i++ {
-		for j := i; j > 0 && hits[j].pos < hits[j-1].pos; j-- {
-			hits[j], hits[j-1] = hits[j-1], hits[j]
-		}
-	}
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].pos < hits[j].pos })
 	var out []string
 	seen := map[string]bool{}
 	for _, h := range hits {
-		u := normalizeDestination(h.raw)
-		if u == "" || seen[u] {
+		if seen[h.url] {
 			continue
 		}
-		seen[u] = true
-		out = append(out, u)
+		seen[h.url] = true
+		out = append(out, h.url)
+		if len(out) == limit {
+			break
+		}
 	}
 	return out
+}
+
+// scanMatches calls fn for each successive match of re in text, left to
+// right, until fn returns false. Each call searches only the rest of the
+// text, so a full scan is linear.
+func scanMatches(re *regexp.Regexp, text string, fn func(m []int) bool) {
+	for off := 0; off < len(text); {
+		m := re.FindStringSubmatchIndex(text[off:])
+		if m == nil {
+			return
+		}
+		for i := range m {
+			if m[i] >= 0 {
+				m[i] += off
+			}
+		}
+		if !fn(m) {
+			return
+		}
+		next := m[1]
+		if next == m[0] {
+			next++
+		}
+		off = next
+	}
+}
+
+// blankHTMLBlocks returns text with every HTML block blanked to spaces, so
+// only <img> tags the renderer would show remain: a block starts at a line
+// that begins with a tag other than <img> and runs to the next blank line,
+// and the renderer shows such a block as text. Offsets are preserved.
+func blankHTMLBlocks(text string) string {
+	var b strings.Builder
+	b.Grow(len(text))
+	inBlock := false
+	for _, line := range strings.SplitAfter(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			inBlock = false
+		} else if !inBlock {
+			if m := htmlBlockLine.FindStringSubmatch(line); m != nil && !strings.EqualFold(m[1], "img") {
+				inBlock = true
+			}
+		}
+		if inBlock {
+			b.WriteString(strings.Map(func(r rune) rune {
+				if r == '\n' {
+					return r
+				}
+				return ' '
+			}, line))
+			continue
+		}
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+// imgSrc returns the src attribute of one <img> tag.
+func imgSrc(tag string) string {
+	z := html.NewTokenizer(strings.NewReader(tag))
+	if tt := z.Next(); tt != html.StartTagToken && tt != html.SelfClosingTagToken {
+		return ""
+	}
+	for {
+		k, v, more := z.TagAttr()
+		if string(k) == "src" {
+			return string(v)
+		}
+		if !more {
+			return ""
+		}
+	}
 }
 
 // stripCode blanks fenced code blocks and code spans so images inside them
