@@ -612,3 +612,16 @@ func TestFetchConnectTimeout(t *testing.T) {
 		t.Fatalf("connect timeout not applied: %v", elapsed)
 	}
 }
+
+// TestFetchUnresolvableHost: a host name that does not resolve fails with
+// ReasonResolve, before any connection.
+func TestFetchUnresolvableHost(t *testing.T) {
+	env := newTestEnv(t, serveBytes(pngBytes, ""), Config{})
+	_, err := env.fetcher.Fetch(context.Background(), env.url("unresolvable.test", "/i"))
+	if got := reasonOf(t, err); got != ReasonResolve {
+		t.Fatalf("reason %q, want %q", got, ReasonResolve)
+	}
+	if env.connections() != 0 {
+		t.Fatalf("%d connections made", env.connections())
+	}
+}

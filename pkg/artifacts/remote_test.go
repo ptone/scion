@@ -407,6 +407,90 @@ func TestPublishExtendsWriteDeadline(t *testing.T) {
 	}
 }
 
+// TestFetchFloor: refused and unresolvable image fetches complete no
+// sooner than the fetch floor, once per publish however many there are;
+// a publish whose fetches all succeed is not held.
+func TestFetchFloor(t *testing.T) {
+	const floor = 300 * time.Millisecond
+	good := "https://img.example/good.png"
+	publishWith := func(t *testing.T, md string, reasons map[string]remotefetch.Reason) time.Duration {
+		t.Helper()
+		f := newFixture(t, false)
+		f.svc.fetchFloor = floor
+		f.useFetcher(&fakeFetcher{bodies: map[string][]byte{good: testPNG}, reasons: reasons})
+		start := time.Now()
+		f.publish(agentA, "doc.md", []byte(md), "")
+		return time.Since(start)
+	}
+	t.Run("refused", func(t *testing.T) {
+		u := "https://refused.example/a.png"
+		if d := publishWith(t, "![a]("+u+")", map[string]remotefetch.Reason{u: remotefetch.ReasonDeniedAddress}); d < floor {
+			t.Fatalf("took %v, want at least %v", d, floor)
+		}
+	})
+	t.Run("unresolvable", func(t *testing.T) {
+		u := "https://unresolvable.example/a.png"
+		if d := publishWith(t, "![a]("+u+")", map[string]remotefetch.Reason{u: remotefetch.ReasonResolve}); d < floor {
+			t.Fatalf("took %v, want at least %v", d, floor)
+		}
+	})
+	t.Run("many refused cost one floor", func(t *testing.T) {
+		var md strings.Builder
+		reasons := map[string]remotefetch.Reason{}
+		for i := 0; i < 50; i++ {
+			u := fmt.Sprintf("https://refused.example/%d.png", i)
+			reasons[u] = remotefetch.ReasonDeniedAddress
+			fmt.Fprintf(&md, "![a](%s)\n", u)
+		}
+		if d := publishWith(t, md.String(), reasons); d < floor || d > 3*floor {
+			t.Fatalf("took %v, want about one floor (%v)", d, floor)
+		}
+	})
+	t.Run("all fetched", func(t *testing.T) {
+		if d := publishWith(t, "![a]("+good+")", nil); d >= floor {
+			t.Fatalf("took %v, want well under the floor %v", d, floor)
+		}
+	})
+	t.Run("floor stays within the fetch budget", func(t *testing.T) {
+		u := "https://refused.example/a.png"
+		f := newFixture(t, false)
+		f.svc.fetchFloor = 5 * time.Second
+		f.useFetcher(&fakeFetcher{reasons: map[string]remotefetch.Reason{u: remotefetch.ReasonDeniedAddress}})
+		f.svc.SetLimits(func(context.Context) Limits {
+			return Limits{MaxFileBytes: 1 << 20, RemoteImages: RemoteImageLimits{
+				Enabled: true, MaxCount: 4, MaxBytes: 1 << 20, FetchTimeout: 200 * time.Millisecond, TotalBudget: 200 * time.Millisecond,
+			}}
+		})
+		start := time.Now()
+		f.publish(agentA, "doc.md", []byte("![a]("+u+")"), "")
+		if d := time.Since(start); d > 2*time.Second {
+			t.Fatalf("took %v, want the floor cut short by the 200ms budget", d)
+		}
+	})
+	t.Run("refused by the production fetcher", func(t *testing.T) {
+		// The real fetcher with its production address rules: an IP
+		// literal in a denied range is refused before any connection (no
+		// DNS involved), and the publish is held for the floor.
+		f := newFixture(t, false)
+		f.svc.fetchFloor = floor
+		f.svc.setImageFetcherFactory(defaultFetcherFactory)
+		start := time.Now()
+		resp := f.publish(agentA, "doc.md", []byte("![a](https://169.254.169.254/latest/meta-data/)"), "")
+		if d := time.Since(start); d < floor {
+			t.Fatalf("took %v, want at least %v", d, floor)
+		}
+		if len(resp.Warnings) != 1 {
+			t.Fatalf("warnings %q", resp.Warnings)
+		}
+	})
+	t.Run("missing image is not held", func(t *testing.T) {
+		u := "https://img.example/missing.png"
+		if d := publishWith(t, "![a]("+u+")", map[string]remotefetch.Reason{u: remotefetch.ReasonStatus}); d >= floor {
+			t.Fatalf("took %v; only refused and unresolvable fetches are held", d)
+		}
+	})
+}
+
 // TestRemoteImageLimitsFailClosed: limits a host supplies that are
 // incomplete or invalid turn remote images off; the defaults apply only
 // when the host gives no limits at all.

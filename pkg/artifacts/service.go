@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/google/uuid"
@@ -72,6 +73,9 @@ type Service struct {
 	provider func() Backend
 
 	fetcherFactory func(RemoteImageLimits) ImageFetcher
+	// fetchFloor overrides the fetch floor in tests; zero means the
+	// fetcher's connect timeout.
+	fetchFloor time.Duration
 }
 
 // Backend is what a request needs from the service's environment: the

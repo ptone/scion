@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
@@ -178,6 +179,8 @@ func newFixture(t *testing.T, redirect bool) *fixture {
 	svc := NewService(host)
 	// Tests never reach the network: by default every remote image fails.
 	svc.setImageFetcherFactory(func(RemoteImageLimits) ImageFetcher { return &fakeFetcher{} })
+	// A short fetch floor keeps tests quick; TestFetchFloor sets its own.
+	svc.fetchFloor = time.Millisecond
 	svc.SetStore(st)
 	svc.SetBlobStorage(blobs, "hub-1")
 	return &fixture{t: t, svc: svc, host: host, db: db, store: st, blobs: blobs, local: local}

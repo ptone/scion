@@ -17,6 +17,7 @@ package artifacts
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -119,7 +120,9 @@ func (s *Service) fetchRemoteImages(ctx context.Context, b backend, lim RemoteIm
 
 	budget, cancel := context.WithTimeout(ctx, lim.TotalBudget)
 	defer cancel()
+	phaseStart := time.Now()
 	files := make([]File, len(urls))
+	floored := make([]bool, len(urls))
 	sem := make(chan struct{}, remoteFetchConcurrency)
 	var wg sync.WaitGroup
 	for i, u := range urls {
@@ -128,10 +131,16 @@ func (s *Service) fetchRemoteImages(ctx context.Context, b backend, lim RemoteIm
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			files[i] = s.fetchOne(ctx, budget, b, fetcher, versionID, u)
+			files[i], floored[i] = s.fetchOne(ctx, budget, b, fetcher, versionID, u)
 		}(i, u)
 	}
 	wg.Wait()
+	for _, f := range floored {
+		if f {
+			s.waitFetchFloor(budget, phaseStart)
+			break
+		}
+	}
 	for _, f := range files {
 		if f.FetchStatus != FetchStatusOK {
 			warnings = append(warnings, remoteFetchFailed+": "+f.SourceURL)
@@ -142,21 +151,50 @@ func (s *Service) fetchRemoteImages(ctx context.Context, b backend, lim RemoteIm
 
 // fetchOne fetches one image under the budget and stores it. Uploads use
 // ctx, not the budget, so a fetched image is not lost to the deadline.
-func (s *Service) fetchOne(ctx, budget context.Context, b backend, fetcher ImageFetcher, versionID, u string) File {
+//
+// The second result reports a fetch that was refused by the address rules
+// or whose host could not be resolved; such fetches complete no sooner
+// than the fetch floor (see waitFetchFloor).
+func (s *Service) fetchOne(ctx, budget context.Context, b backend, fetcher ImageFetcher, versionID, u string) (File, bool) {
 	f := File{VersionID: versionID, Path: RemotePath(u), Origin: FileOriginRemote, SourceURL: u}
 	res, err := fetcher.Fetch(budget, u)
 	if err != nil {
 		// The fetcher logs the specific reason.
 		f.FetchStatus, f.FetchError = FetchStatusFailed, remoteFetchFailed
-		return f
+		var fe *remotefetch.Error
+		floored := errors.As(err, &fe) && (fe.Reason == remotefetch.ReasonDeniedAddress || fe.Reason == remotefetch.ReasonResolve)
+		return f, floored
 	}
 	if err := putBlobBytes(ctx, b, res.SHA256, res.Body, res.ContentType); err != nil {
 		slog.ErrorContext(ctx, "artifacts: remote image blob write failed", "error", err)
 		f.FetchStatus, f.FetchError = FetchStatusFailed, remoteFetchFailed
-		return f
+		return f, false
 	}
 	f.Size, f.SHA256, f.MediaType, f.FetchStatus = int64(len(res.Body)), res.SHA256, res.ContentType, FetchStatusOK
-	return f
+	return f, false
+}
+
+// waitFetchFloor makes the fetch phase that started at start last at least
+// the fetch floor: the fetcher's connect timeout. It runs once per publish,
+// however many fetches were refused or unresolvable, and never past the
+// fetch budget (budget is the budget's context).
+func (s *Service) waitFetchFloor(budget context.Context, start time.Time) {
+	s.mu.RLock()
+	floor := s.fetchFloor
+	s.mu.RUnlock()
+	if floor <= 0 {
+		floor = remotefetch.DefaultConnectTimeout
+	}
+	d := floor - time.Since(start)
+	if d <= 0 {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-budget.Done():
+	}
 }
 
 // putBlobBytes stores body at its content address unless that blob exists.
