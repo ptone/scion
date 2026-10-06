@@ -17,10 +17,13 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
@@ -1294,6 +1297,177 @@ func TestApplySnapshot_DefaultUserRoleNormalized(t *testing.T) {
 			}
 			if got := srv.DefaultUserRole(); got != tt.wantRole {
 				t.Errorf("DefaultUserRole() = %q, want %q", got, tt.wantRole)
+			}
+		})
+	}
+}
+
+// The authoritative-read fixture is bounded/cooperative before delegating to
+// the existing in-memory store. Its closed modes never block a real thread.
+type auditFixtureSettingStore struct {
+	*fakeHubSettingStore
+	clock  *auditFixtureClock
+	mode   string
+	ops    *OperationalSettings
+	nested bool
+	calls  int
+}
+
+func (s *auditFixtureSettingStore) ListHubSettings(ctx context.Context) ([]store.HubSetting, error) {
+	s.calls++
+	if s.calls > 8 {
+		return nil, fmt.Errorf("finite read invocation cap")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	switch s.mode {
+	case "failure":
+		return nil, fmt.Errorf("finite read failure")
+	case "blocked", "late":
+		s.clock.advance(s.clock.tick + 2*time.Second)
+	case "overlap":
+		if !s.nested {
+			s.nested = true
+			_, err := s.ops.Refresh(ctx)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	rows, err := s.fakeHubSettingStore.ListHubSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	size := 0
+	for _, row := range rows {
+		size += len(row.Value)
+	}
+	if len(rows) > decisionAuditSettingsMaxRows || size > decisionAuditSettingsMaxBytes {
+		return nil, fmt.Errorf("finite read input cap")
+	}
+	return rows, nil
+}
+func newAuditFixtureSettings(t *testing.T, f *auditFixture) (*OperationalSettings, *auditFixtureSettingStore) {
+	t.Helper()
+	st := &auditFixtureSettingStore{fakeHubSettingStore: newFakeHubSettingStore(), clock: f.clock}
+	st.seed("experiments", json.RawMessage(`{"overrides":{"hub.authorization_decision_audit_v2":true}}`))
+	ops := NewOperationalSettings(st, emptyKoanf(), emptyKoanf())
+	st.ops = ops
+	f.router.server.SetOperationalSettings(ops)
+	return ops, st
+}
+
+func TestDecisionAuditRefresh_ObservationAndUnchangedRenewal(t *testing.T) {
+	f := newAuditFixture(t, auditFixtureAccept)
+	f.requireAdmission(t)
+	ops, st := f.ops, f.settings
+	for i := 0; i < 2; i++ {
+		f.clock.advance(time.Duration(i) * time.Second)
+		q0 := f.clock.tick
+		changed, err := ops.Refresh(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		snap, obs := ops.decisionAuditSnapshot()
+		if i == 1 && len(changed) != 0 {
+			t.Fatal("unchanged authoritative refresh must retain generic changed-list semantics")
+		}
+		if !obs.successful || obs.q0 != q0 || obs.deadline != q0+decisionAuditLease || obs.snapshot.Revision != snap.Revision || !snap.Overrides[experiments.AuthorizationDecisionAuditV2] {
+			t.Fatal("successful unchanged read must renew matching observation from read start")
+		}
+		snap.Overrides[experiments.AuthorizationDecisionAuditV2] = false
+		copied, _ := ops.decisionAuditSnapshot()
+		if !copied.Overrides[experiments.AuthorizationDecisionAuditV2] {
+			t.Fatal("consumer snapshot must not alias cache")
+		}
+	}
+	if st.calls != 2 {
+		t.Fatal("observer must not add an authoritative read")
+	}
+	revision, err := ops.Update(context.Background(), "experiments", json.RawMessage(`{"overrides":{"hub.authorization_decision_audit_v2":true}}`), "fixture", 1, "test")
+	if err != nil || revision != 2 {
+		t.Fatalf("fixture Update: %d/%v", revision, err)
+	}
+	_, obs := ops.decisionAuditSnapshot()
+	if obs.successful || f.router.inspect().observation.successful {
+		t.Fatal("true Update/cache publication must not renew a lease")
+	}
+}
+
+func TestDecisionAuditRefresh_FailureBlockedAndOutOfOrder(t *testing.T) {
+	for _, mode := range []string{"failure", "blocked", "late", "overlap", "canceled", "obsolete", "older-revision"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newAuditFixture(t, auditFixtureAccept)
+			f.requireAdmission(t)
+			ops, st := f.ops, f.settings
+			if _, err := ops.Refresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			_, old := ops.decisionAuditSnapshot()
+			st.mode = mode
+			ctx := context.Background()
+			if mode == "canceled" {
+				c, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = c
+			}
+			_, _ = ops.Refresh(ctx)
+			if mode == "obsolete" {
+				f.router.server.SetOperationalSettings(nil)
+				f.router.finishRefresh(old, old.snapshot, nil)
+			}
+			if mode == "older-revision" {
+				newer := old.snapshot
+				newer.Revision++
+				f.router.finishRefresh(old, newer, nil)
+				f.router.finishRefresh(old, old.snapshot, nil)
+			}
+			f.emit()
+			if f.handler.calls != 0 || len(f.legacy.records) != 1 {
+				t.Fatal("failure/blocked/overlap/obsolete read cannot retain or mint NEW ownership")
+			}
+			if f.router.inspect().observation.successful {
+				t.Fatal("invalid read must leave NEW observation invalid")
+			}
+		})
+	}
+}
+
+func TestDecisionAuditRefresh_WritesDetachAndDisconnectInvalidate(t *testing.T) {
+	for _, mode := range []string{"false", "delete", "detach", "replace", "stop", "channel-close"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newAuditFixture(t, auditFixtureAccept)
+			f.requireAdmission(t)
+			ops := f.ops
+			if _, err := ops.Refresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			_, old := ops.decisionAuditSnapshot()
+			switch mode {
+			case "false":
+				if _, err := ops.Update(context.Background(), "experiments", json.RawMessage(`{"overrides":{"hub.authorization_decision_audit_v2":false}}`), "fixture", 1, "test"); err != nil {
+					t.Fatal(err)
+				}
+			case "delete":
+				if err := ops.DeleteSection(context.Background(), "experiments"); err != nil {
+					t.Fatal(err)
+				}
+			case "detach":
+				f.router.server.SetOperationalSettings(nil)
+			case "replace":
+				f.router.server.SetOperationalSettings(NewOperationalSettings(newFakeHubSettingStore(), emptyKoanf(), emptyKoanf()))
+			case "stop":
+				ops.StopPropagation()
+			case "channel-close":
+				ch := make(chan Event)
+				close(ch)
+				ops.runSubscriptionLoop(context.Background(), ch, f.router.server)
+			}
+			f.router.finishRefresh(old, old.snapshot, nil)
+			f.emit()
+			if f.handler.calls != 0 || len(f.legacy.records) != 1 || f.router.inspect().observation.successful {
+				t.Fatal("mutation/disconnect/detach invalidation must reject old callbacks before later handoff")
 			}
 		})
 	}

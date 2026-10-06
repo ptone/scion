@@ -23,6 +23,7 @@ import (
 	"maps"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -207,6 +208,12 @@ type OperationalSettings struct {
 	mu             sync.RWMutex
 	cache          map[string]sectionState // section name → cached value + revision
 
+	// Audit observation is copied under mu with the matching experiment snapshot.
+	// Mutations prevent a read begun across a write from certifying freshness.
+	decisionAuditObserver    atomic.Pointer[decisionAuditRouter]
+	decisionAuditObservation decisionAuditRefreshObservation
+	decisionAuditMutations   uint8
+
 	// Event publisher for cross-replica propagation: LISTEN/NOTIFY on
 	// postgres, in-process channel on SQLite; nil until SetEventPublisher.
 	events EventPublisher
@@ -251,11 +258,44 @@ func NewOperationalSettings(
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
 // against the cache, and returns the names of sections that changed.
 func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
+	observer := o.decisionAuditObserver.Load()
+	var observation decisionAuditRefreshObservation
+	if observer != nil {
+		observation = observer.beginRefresh(o)
+	}
 	rows, err := o.store.ListHubSettings(ctx)
 	if err != nil {
+		if observer != nil {
+			observer.finishRefresh(observation, ExperimentsSnapshot{}, err)
+		}
+		o.mu.Lock()
+		o.decisionAuditObservation = decisionAuditRefreshObservation{}
+		o.mu.Unlock()
 		return nil, fmt.Errorf("operational settings refresh: %w", err)
 	}
 
+	// Bound audit proof work only. Generic cache ingestion/changed-list behavior
+	// stays as before, including when these local proof caps reject the read.
+	var auditErr error
+	if auditErr == nil && observer != nil && observation.tracked {
+		if len(rows) > decisionAuditSettingsMaxRows {
+			auditErr = fmt.Errorf("audit read row cap")
+		} else {
+			size := 0
+			for _, row := range rows {
+				for _, n := range []int{len(row.Value), len(row.Section), len(row.UpdatedBy), len(row.Origin)} {
+					if n > decisionAuditSettingsMaxBytes-size {
+						auditErr = fmt.Errorf("audit read byte cap")
+						break
+					}
+					size += n
+				}
+				if auditErr != nil {
+					break
+				}
+			}
+		}
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -313,6 +353,16 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 		}
 	}
 
+	if observer != nil {
+		if o.decisionAuditMutations != 0 {
+			auditErr = fmt.Errorf("audit source mutation in flight")
+		}
+		var snapshot ExperimentsSnapshot
+		if auditErr == nil && observation.tracked {
+			snapshot = o.experimentsSnapshotLocked()
+		}
+		o.decisionAuditObservation = observer.finishRefresh(observation, snapshot, auditErr)
+	}
 	return changed, nil
 }
 
@@ -568,6 +618,8 @@ func (o *OperationalSettings) Update(
 	expectedRevision int64,
 	origin string,
 ) (int64, error) {
+	o.beginDecisionAuditMutation()
+	defer o.endDecisionAuditMutation()
 	// Validate via opsettings registry.
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
 		return 0, fmt.Errorf("validation failed for section %q: %v", section, errs)
@@ -607,6 +659,10 @@ func (o *OperationalSettings) Update(
 		Malformed:            malformed,
 		ExperimentsOverrides: experimentsOverrides,
 	}
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.invalidateSettings(o)
+	}
 	o.mu.Unlock()
 
 	// Publish admin.settings.updated event to propagate the change to other
@@ -637,12 +693,18 @@ func (o *OperationalSettings) Update(
 // cache, publishes an event so peers refresh, and self-applies. The section
 // falls back to bootstrap material immediately (design §3.2.4).
 func (o *OperationalSettings) DeleteSection(ctx context.Context, section string) error {
+	o.beginDecisionAuditMutation()
+	defer o.endDecisionAuditMutation()
 	if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}
 
 	o.mu.Lock()
 	delete(o.cache, section)
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.invalidateSettings(o)
+	}
 	o.mu.Unlock()
 
 	if o.events != nil {
@@ -708,6 +770,7 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		defer unsub()
 		defer func() {
 			if r := recover(); r != nil {
+				o.invalidateDecisionAuditObservation()
 				slog.Error("Settings propagation subscription loop panicked — propagation stopped on this replica", "panic", r)
 			}
 		}()
@@ -720,6 +783,7 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		defer o.propagationWg.Done()
 		defer func() {
 			if r := recover(); r != nil {
+				o.invalidateDecisionAuditObservation()
 				slog.Error("Settings propagation poll backstop panicked — propagation stopped on this replica", "panic", r)
 			}
 		}()
@@ -739,6 +803,7 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 
 // StopPropagation stops the propagation goroutines and waits for them to exit.
 func (o *OperationalSettings) StopPropagation() {
+	o.invalidateDecisionAuditObservation()
 	if o.stopPropagation != nil {
 		o.stopPropagation()
 	}
@@ -748,6 +813,7 @@ func (o *OperationalSettings) StopPropagation() {
 // runSubscriptionLoop listens for admin.settings.updated events and triggers
 // Refresh + apply on receipt.
 func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan Event, server *Server) {
+	defer o.invalidateDecisionAuditObservation()
 	for {
 		select {
 		case <-ctx.Done():
@@ -1683,7 +1749,11 @@ type ExperimentsSnapshot struct {
 func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
+	return o.experimentsSnapshotLocked()
+}
 
+// Caller holds mu. Snapshot mapping and cloning retain their existing semantics.
+func (o *OperationalSettings) experimentsSnapshotLocked() ExperimentsSnapshot {
 	state, ok := o.cache["experiments"]
 	if !ok {
 		return ExperimentsSnapshot{Overrides: map[string]bool{}}
@@ -1760,4 +1830,58 @@ func applySnapshotLogLevel(level string) {
 		lvl = slog.LevelError
 	}
 	slog.SetLogLoggerLevel(lvl)
+}
+
+// Invalidation carries no freshness proof and cannot reset a NEW fault.
+func (o *OperationalSettings) invalidateDecisionAuditObservation() {
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.invalidateSettings(o)
+	}
+	o.mu.Lock()
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	o.mu.Unlock()
+}
+
+func (o *OperationalSettings) decisionAuditSnapshot() (ExperimentsSnapshot, decisionAuditRefreshObservation) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	// Reject before cloning if a concurrent generic write installed uncapped data.
+	state, present := o.cache["experiments"]
+	if !present || len(state.Value) > decisionAuditSettingsMaxBytes || len(state.ExperimentsOverrides) > decisionAuditSettingsMaxRows {
+		return ExperimentsSnapshot{}, decisionAuditRefreshObservation{}
+	}
+	size := 0
+	for name := range state.ExperimentsOverrides {
+		if len(name) > decisionAuditSettingsMaxBytes-size {
+			return ExperimentsSnapshot{}, decisionAuditRefreshObservation{}
+		}
+		size += len(name)
+	}
+	observation := o.decisionAuditObservation
+	observation.snapshot = cloneDecisionAuditSnapshot(observation.snapshot)
+	return o.experimentsSnapshotLocked(), observation
+}
+
+func (o *OperationalSettings) beginDecisionAuditMutation() {
+	o.mu.Lock()
+	if o.decisionAuditMutations < 2 {
+		o.decisionAuditMutations++
+	}
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.mutation(o, true)
+	}
+	o.mu.Unlock()
+}
+
+func (o *OperationalSettings) endDecisionAuditMutation() {
+	o.mu.Lock()
+	if o.decisionAuditMutations > 0 {
+		o.decisionAuditMutations--
+	}
+	o.decisionAuditObservation = decisionAuditRefreshObservation{}
+	if observer := o.decisionAuditObserver.Load(); observer != nil {
+		observer.mutation(o, false)
+	}
+	o.mu.Unlock()
 }

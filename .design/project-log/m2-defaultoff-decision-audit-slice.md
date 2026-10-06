@@ -135,3 +135,99 @@ of this checkpoint. Retained legacy #2502 lifecycle remains separate from the
 unimplemented NEW 2-second drain. Human-directed questions sent by this worker:
 none; manager acceptance exchanges are agent-directed. After delivery the worker
 remains blocked pending durable receipt and explicit lifecycle disposition.
+
+## Default-off vertical slice — accepted finite mechanics, 2026-10-06
+
+Implementation base: `591e24c340fa9b0f68102a11c0c649a98749c58f`.
+Amendments 13–23 separately authorize this slice after the compatibility
+checkpoint described above. That earlier merge/conflict history is inherited
+compatibility work, not this slice's implementation scope. The eleven final
+implementation/test paths are:
+
+```text
+pkg/experiments/registry.go
+pkg/experiments/registry_test.go
+pkg/hub/audit_authz_test.go
+pkg/hub/decision_audit_admission.go
+pkg/hub/decision_audit_admission_test.go
+pkg/hub/handlers_health.go
+pkg/hub/handlers_health_summary_test.go
+pkg/hub/handlers_health_test.go
+pkg/hub/operational_settings.go
+pkg/hub/operational_settings_test.go
+pkg/hub/server.go
+```
+
+This log, `.design/project-log/m2-defaultoff-decision-audit-slice.md`, is the
+single additional path. The slice preserves ordinary authorization results,
+sampling, H1–H4, and the retained #2502 writer/metrics/legacy lifecycle. It adds
+only the server-layer alpha experiment `hub.authorization_decision_audit_v2`,
+registered default false, and bounded fail-closed local routing mechanics.
+
+Finite admission validates the whole canonical manifest and exact live
+root/legacy/handler/clock/timer/settings/caller graph; missing, extra, drifted,
+unknown or over-cap facts reject wholesale. Expected positive constructor facts
+are test-only. Successful authoritative read observations alone establish the
+q0-based 74-second lease with one-second read slack in the approved 75-second
+budget. Source/attachment/sequence/generation/revision/epoch and matching copied
+snapshots must still agree at handoff; failed, canceled, overlapping, obsolete,
+stale or unproved reads stay off. Wall time, events and cached true are not proof.
+
+One stable router provides K=1 synchronous NEW ownership, with no queue or
+hidden goroutine. Ineligible decisions choose legacy exactly once. An admitted
+finite NEW failure/panic/nonacceptance/caller cancellation latches fault once;
+the triggering record may be lost, with no same-record fallback/retry. The next
+record chooses legacy. The admitted finite caller is live-bound before methods;
+unproved/hostile or pre-canceled callers reject before NEW. Caller cancellation
+during NEW is accounted on synchronous return, without parenting or a watcher.
+Independent cooperative mechanics cancel at h+1 and complete/release by h+2;
+this is separate from retained legacy's 4s+1s shutdown and HTTP drain behavior.
+
+The locally readable NEW health fault is a critical audit/logging warning:
+possible triggering-record loss, NEW off, subsequent legacy routing. It remains
+latched independently of the failed sink. Historical legacy drops/closed state
+have a separate fixed check. Only its Hub availability effect is noncritical:
+health degrades while serving/readiness remain available, and existing truly
+availability-critical failures still win. No broader dashboard delivery claim.
+
+Accepted Stage-A RED: protected `reviews/m2-defaultoff-stage-a-seam-red-amendment-15.txt`,
+42 lines / 2,278 bytes / SHA-256
+`cee01061bfbae74761ca36072f07e592973f9b2cd6b8c451dc1a65158d0abbcb`.
+Its three intended failures were the absent compiled registry entry, nil exact
+finite admission, and NEW count 0 versus required 1 (legacy count 1). Prior
+one-owner/result checks passed; no unrelated failure. It was not rerun.
+
+Accepted Stage-B GREEN: protected `reviews/m2-defaultoff-stage-b-green-amendment-22.txt`,
+1,098 lines / 115,716 bytes / SHA-256
+`0fa4809e4df2e386945de88c9ee717dd575c886d2c423309a82094f289f6f95c`.
+The exact literal command is sealed in that evidence: heavy-build wrapper,
+`HEAVY_BUILD_MAX_WAIT=2700` (45-minute queue maximum), acquire-time available
+memory >=30 GB, independent `timeout 15m`, `ulimit -v 12000000`,
+`GOMEMLIMIT=6GiB`, `GOGC=40`, `GOFLAGS=-gcflags=-c=1`,
+`GOCACHE=/scion-volumes/gocache`; targeted `go test -timeout 14m -count=1 -p 1 -v`
+on `./pkg/experiments ./pkg/hub`, exact 35-name selector, no full suite/race.
+The single invocation acquired slot 2 immediately at 47 GB available, exited 0
+in 586.857204 seconds, and produced experiments `ok` (0.005s) and Hub `ok`
+(3.902s). All 35 named tests and 112 subtests passed (147 matching RUN/PASS
+outcomes), with no missing/unexpected/duplicate/skip/fail/timeout/setup/resource
+result. This includes the live-caller mutation, hostile/unproved and pre-canceled
+caller rejection, distinct post-handoff caller-cancel mode, and retained invariants.
+No repair, retry, extra Go command or resource-cap enlargement followed.
+
+Production NEW remains structurally unadmitted even with a fresh true override:
+no ratified production census/manifest, exact live bindings, clean-build/live
+profile, elapsed clock/timer, cooperative store/source, accepting handler,
+originating caller or complete-return/cleanup contract is supplied. No T1–T25
+entry, profile, imported target or trust boundary is approved by finite fixtures.
+Independent critical warning/alert/dashboard-delivery proof remains a hard
+pre-activation gate. These tests do not prove production persistence, no-loss,
+freshness source, drain timing or sink health/alert delivery.
+
+No activation, deployment, live-setting change, cutover, legacy retirement,
+PR/main merge, reviewer launch or explain round 7 is authorized. Production
+trust/census/live-profile/clock/store/handler/caller/complete-return/alert-delivery
+and activation gates remain rejecting. At this log-review stage implementation
+is staged, log unstaged, and commit/push remain held for manager disposition.
+Earlier compatibility evidence and all sealed RED/GREEN/blocker artifacts are
+preserved. Human-directed messages/questions from this worker: none. Lifecycle
+completion/deletion remains held pending durable receipt and explicit release.
