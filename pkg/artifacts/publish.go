@@ -164,10 +164,11 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 				slog.ErrorContext(ctx, "artifacts: read spooled markdown failed", "error", err)
 			}
 			urls = res.urls
+			// One warning about the scan: the window one when the entry
+			// is larger than the window, else the budget one.
 			if res.truncated {
 				scanWarnings = append(scanWarnings, warnBeyondWindow)
-			}
-			if res.budgetReached {
+			} else if res.budgetReached {
 				scanWarnings = append(scanWarnings, warnScanStopped)
 			}
 		}
@@ -270,7 +271,7 @@ const (
 
 // markdownImages reads the spooled body as markdown and returns the remote
 // image URLs it references, with whether the entry was larger than the
-// scanned window and whether the scan stopped at its work bound.
+// scanned window and whether the scan stopped at its allocation budget.
 func (s *spooled) markdownImages(ctx context.Context, limit int) (extractResult, error) {
 	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
 		return extractResult{}, err
@@ -281,7 +282,7 @@ func (s *spooled) markdownImages(ctx context.Context, limit int) (extractResult,
 	if _, err := io.Copy(&body, io.LimitReader(s.file, maxImageScanBytes)); err != nil {
 		return extractResult{}, err
 	}
-	res := extractImages(ctx, body.String(), limit, maxWorkPerByte)
+	res := extractImages(ctx, body.String(), limit, maxAllocPerByte)
 	res.truncated = s.size > maxImageScanBytes
 	return res, nil
 }
