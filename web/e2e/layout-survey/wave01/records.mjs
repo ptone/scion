@@ -458,6 +458,34 @@ export function provenanceEnvKey(prov) {
     )
   );
 }
+/**
+ * Ruling R-12 leaf-wise comparison of the environment fields of two
+ * provenance records. A value recorded on both sides (an explicit `absent`
+ * included) that differs is listed in `differs`; a key recorded on only one
+ * side (undefined/null on the other) is not a value and is listed in
+ * `oneSided`. Arrays (files_examined, legacy merged files) compare whole.
+ * @param {any} pre @param {any} post
+ */
+export function provenanceEnvDiff(pre, post) {
+  /** @type {string[]} */ const differs = [];
+  /** @type {string[]} */ const oneSided = [];
+  const rec = (a, b, at) => {
+    const ra = a !== undefined && a !== null;
+    const rb = b !== undefined && b !== null;
+    if (!ra && !rb) return;
+    if (ra !== rb) return void oneSided.push(at);
+    if (isObj(a) && isObj(b)) {
+      for (const k of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort())
+        rec(a[k], b[k], `${at}.${k}`);
+      return;
+    }
+    if (provenanceKey({ v: a }) !== provenanceKey({ v: b })) differs.push(at);
+  };
+  for (const k of PROVENANCE_COMPARED_FIELDS)
+    rec(isObj(pre) ? pre[k] : undefined, isObj(post) ? post[k] : undefined, k);
+  return { differs, oneSided };
+}
+
 /** Comparison form of the supporting metadata only (recorded, not graded). */
 export function provenanceSupportKey(prov) {
   if (!isObj(prov)) return null;
@@ -852,32 +880,42 @@ export function evaluateEnvPost(post, run) {
       'E-ENV-3: POST declares test-login disabled, but the runner authenticated via test-login during the batch'
     );
   if (post.e_env_1_provenance !== undefined) {
-    // E-ENV-1b is required on PRE; on POST it is optional, but if carried it
-    // must be complete, not forbidden, and equal to PRE.
+    // E-ENV-1b is required on PRE; on POST it is optional. Ruling R-12
+    // (assessor 17:38Z): on an ATTRIBUTABLE POST record (same host and
+    // generation, and the same serving process: serving_process_start_ts ==
+    // PRE process_start_ts, R-10) environment values are compared FIRST;
+    // any value recorded on both sides (an explicit `absent` is a value) that
+    // differs ⇒ FAIL, whatever else is incomplete. Incompleteness is recorded
+    // alongside. A key missing on one side is not compared ⇒ INCONCLUSIVE.
+    const postProv = post.e_env_1_provenance;
     const pc = checkProvenance(
-      post.e_env_1_provenance,
+      postProv,
       post.e_env_1_dev_auth_effective,
       post.slotGeneration,
       run.startedAt
     );
     if (pc.forbidden.length) fails.push(`E-ENV-1 (POST record): ${pc.forbidden.join('; ')}`);
-    else if (!pc.complete || pc.contradictions.length)
+    const bound =
+      post.slotGeneration === run.slotGeneration &&
+      hb.status === 'ok' &&
+      (run.preBaseURL === undefined || hostBinding(post, run.preBaseURL).status === 'ok');
+    const recordStart = isObj(postProv) ? postProv.support?.hosted?.process_start_ts : undefined;
+    const sameProcess =
+      typeof run.preProcessStartTs === 'string' &&
+      post.serving_process_start_ts === run.preProcessStartTs &&
+      (recordStart === undefined || recordStart === run.preProcessStartTs);
+    if (!bound)
+      problems.push('POST e_env_1_provenance not bound to this slot (R-3) — not compared');
+    else if (!sameProcess)
+      // R-10/R-12: serving_process_start_ts missing, or a different process
+      // start (restart) ⇒ not attributable ⇒ no comparison (INCONCLUSIVE).
       problems.push(
-        `POST e_env_1_provenance incomplete/contradictory: ${[...pc.missing, ...pc.contradictions].join('; ')}`
-      );
-    else if (
-      run.preProcessStartTs &&
-      post.e_env_1_provenance?.support?.hosted?.process_start_ts !== run.preProcessStartTs
-    )
-      // R-10: a different serving-process start is a restart ⇒ continuity
-      // INCONCLUSIVE (reported below), not an environment-value FAIL.
-      problems.push(
-        'POST record from a different serving-process start (restart; R-10) — not compared'
+        'POST record not attributable to the PRE serving process (serving_process_start_ts missing or different; R-10) — not compared'
       );
     else if (run.preProvenanceKey) {
       // The PRE key may be the environment-only form (runner, RB4-1) or a
-      // whole-record canonical form; both are projected onto the compared
-      // environment fields, so support metadata never decides equality.
+      // whole-record canonical form; both are compared on the environment
+      // fields only, so support metadata never decides equality.
       let preProv = null;
       try {
         preProv = JSON.parse(run.preProvenanceKey);
@@ -886,16 +924,28 @@ export function evaluateEnvPost(post, run) {
       }
       if (!isObj(preProv)) problems.push('PRE provenance key unreadable — not compared');
       else {
-        if (provenanceEnvKey(post.e_env_1_provenance) !== provenanceEnvKey(preProv))
-          fails.push('same-slot PRE/POST disagreement on e_env_1_provenance (environment values)');
+        const d = provenanceEnvDiff(preProv, postProv);
+        if (d.differs.length)
+          fails.push(
+            `same-slot PRE/POST disagreement on e_env_1_provenance (environment values): ${d.differs.join(', ')}`
+          );
+        if (d.oneSided.length)
+          problems.push(
+            `POST/PRE environment value(s) not recorded on both sides — not compared: ${d.oneSided.join(', ')}`
+          );
         const preSupport =
           run.preSupportKey ?? (isObj(preProv.support) ? provenanceSupportKey(preProv) : null);
-        if (preSupport && provenanceSupportKey(post.e_env_1_provenance) !== preSupport)
+        if (preSupport && provenanceSupportKey(postProv) !== preSupport)
           notes.push(
             'PRE/POST support metadata differs (recorded only; not an environment value — RB4-1)'
           );
       }
-    }
+    } else problems.push('missing: PRE provenance key — not compared');
+    // Completeness/contradictions are graded AFTER the comparison (R-12).
+    if (!pc.forbidden.length && (!pc.complete || pc.contradictions.length))
+      problems.push(
+        `POST e_env_1_provenance incomplete/contradictory: ${[...pc.missing, ...pc.contradictions].join('; ')}`
+      );
   } else if (post.e_env_1_dev_auth_effective === true)
     fails.push('E-ENV-1 (POST): declared effective dev-auth ON');
   // Ruling R-10 continuity: POST must show the SAME serving-process start as

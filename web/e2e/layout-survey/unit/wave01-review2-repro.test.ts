@@ -636,3 +636,152 @@ describe('review4 RB4-2: a validator on a dirty/untracked covered tree never yie
     expect(r.classification).toBe('REJECTED (FAIL or invalid)');
   });
 });
+
+// ─── ruling R-12 (assessor 17:38Z): compare environment values first ─────
+
+describe('R-12: attributable POST compares recorded environment values BEFORE completeness', () => {
+  const mut = (f: (p: any) => void) => {
+    const p = JSON.parse(JSON.stringify(PROV));
+    f(p);
+    return p;
+  };
+  const incomplete = (p: any) => {
+    delete p.support.hosted.log_ts_source;
+    delete p.support.auth_mode;
+  };
+  it('incomplete POST record (missing support tags / auth_mode) + env absent vs "false" ⇒ FAIL, incompleteness recorded alongside', () => {
+    const out = evaluateEnvPost(
+      post({
+        e_env_1_provenance: mut((p) => {
+          incomplete(p);
+          p.env.SCION_SERVER_AUTH_DEVMODE = 'false';
+        }),
+      }),
+      run
+    );
+    expect(out.outcome).toBe('fail');
+    expect(out.fails.join(' ')).toContain('env.SCION_SERVER_AUTH_DEVMODE');
+    expect(out.open.join(' ')).toContain('incomplete');
+  });
+  it('explicit absent vs "workstation" (SCION_SERVER_MODE) on an incomplete record ⇒ FAIL', () => {
+    const out = evaluateEnvPost(
+      post({
+        e_env_1_provenance: mut((p) => {
+          incomplete(p);
+          p.env.SCION_SERVER_MODE = 'workstation';
+        }),
+      }),
+      run
+    );
+    expect(out.outcome).toBe('fail');
+    expect(out.fails.join(' ')).toContain('env.SCION_SERVER_MODE');
+  });
+  it('load_path settings-global vs settings-local ⇒ FAIL', () => {
+    const out = evaluateEnvPost(
+      post({ e_env_1_provenance: mut((p) => (p.load_path = 'settings-local')) }),
+      run
+    );
+    expect(out.outcome).toBe('fail');
+    expect(out.fails.join(' ')).toContain('load_path');
+  });
+  it('internal declared-vs-flag inconsistency does not prevent the comparison: a flags difference ⇒ FAIL', () => {
+    const out = evaluateEnvPost(
+      post({
+        e_env_1_provenance: mut((p) => {
+          p.flags['--production'] = false;
+          p.declared_effective_auth_mode = 'oauth'; // unsupported by support.auth_mode ⇒ incomplete
+        }),
+      }),
+      run
+    );
+    expect(out.outcome).toBe('fail');
+    expect(out.fails.join(' ')).toContain('flags.--production');
+    expect(out.fails.join(' ')).toContain('declared_effective_auth_mode');
+  });
+  it('missing-key control: a key not recorded on POST is not a value ⇒ not compared ⇒ INCONCLUSIVE, no FAIL', () => {
+    const out = evaluateEnvPost(
+      post({ e_env_1_provenance: mut((p) => delete p.env.SCION_SERVER_AUTH_MODE) }),
+      run
+    );
+    expect(out.outcome).toBe('inconclusive');
+    expect(out.fails).toEqual([]);
+    expect(out.open.join(' ')).toContain('env.SCION_SERVER_AUTH_MODE');
+  });
+  it('missing-key control: a whole field missing on POST ⇒ INCONCLUSIVE, no FAIL', () => {
+    const out = evaluateEnvPost(
+      post({ e_env_1_provenance: mut((p) => delete p.files_examined) }),
+      run
+    );
+    expect(out.outcome).toBe('inconclusive');
+    expect(out.fails).toEqual([]);
+  });
+  it('wrong slot generation + env difference ⇒ not compared ⇒ INCONCLUSIVE (R-3)', () => {
+    const out = evaluateEnvPost(
+      post({
+        slotGeneration: 'g8',
+        e_env_1_provenance: mut((p) => (p.env.SCION_SERVER_MODE = 'workstation')),
+      }),
+      run
+    );
+    expect(out.outcome).toBe('inconclusive');
+    expect(out.fails).toEqual([]);
+  });
+  it('wrong host + env difference ⇒ not compared ⇒ INCONCLUSIVE (R-3)', () => {
+    const out = evaluateEnvPost(
+      post({
+        baseURL: B,
+        e_env_1_provenance: mut((p) => (p.env.SCION_SERVER_MODE = 'workstation')),
+      }),
+      run
+    );
+    expect(out.outcome).toBe('inconclusive');
+    expect(out.fails).toEqual([]);
+  });
+  it('serving_process_start_ts missing + env difference ⇒ not attributable ⇒ INCONCLUSIVE (R-10)', () => {
+    const out = evaluateEnvPost(
+      post({
+        serving_process_start_ts: undefined,
+        e_env_1_provenance: mut((p) => (p.env.SCION_SERVER_MODE = 'workstation')),
+      }),
+      run
+    );
+    expect(out.outcome).toBe('inconclusive');
+    expect(out.fails).toEqual([]);
+  });
+  it('different serving process start + env difference ⇒ INCONCLUSIVE (restart), not FAIL', () => {
+    const out = evaluateEnvPost(
+      post({
+        serving_process_start_ts: '2026-10-07T16:10:00Z',
+        e_env_1_provenance: mut((p) => {
+          p.support.hosted.process_start_ts = '2026-10-07T16:10:00Z';
+          p.support.hosted.log_ts = '2026-10-07T16:10:05Z';
+          p.env.SCION_SERVER_MODE = 'workstation';
+        }),
+      }),
+      run
+    );
+    expect(out.outcome).toBe('inconclusive');
+    expect(out.fails).toEqual([]);
+  });
+  it('record process start differs from serving_process_start_ts (same as PRE) ⇒ not compared ⇒ INCONCLUSIVE', () => {
+    const out = evaluateEnvPost(
+      post({
+        e_env_1_provenance: mut((p) => {
+          p.support.hosted.process_start_ts = '2026-10-07T15:31:00Z';
+          p.env.SCION_SERVER_MODE = 'workstation';
+        }),
+      }),
+      run
+    );
+    expect(out.outcome).toBe('inconclusive');
+    expect(out.fails).toEqual([]);
+  });
+  it('both PRE key forms (env-only and whole-record) give the same R-12 outcome', () => {
+    const p = mut((x) => {
+      incomplete(x);
+      x.env.SCION_SERVER_AUTH_DEVMODE = 'false';
+    });
+    const whole = { ...run, preProvenanceKey: provenanceKey(PROV), preSupportKey: undefined };
+    expect(evaluateEnvPost(post({ e_env_1_provenance: p }), whole).outcome).toBe('fail');
+  });
+});

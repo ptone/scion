@@ -296,15 +296,31 @@ The steward writes the POST declaration after the batch. It must:
 - carry `e_env_3_test_login_enabled`, `e_env_4_runtime_broker_effective` and
   `e_env_4_no_broker_process_or_dispatch`.
 
-The E-ENV-1b record is optional on POST. If present, it must be complete and
-non-forbidden, and (same process start) its **environment values** must equal
-PRE's: `flags`, `load_path`, `files_examined`, `path_values`, `env`,
+The E-ENV-1b record is optional on POST. If present, it must be
+non-forbidden and complete, and its **environment values** must equal PRE's:
+`flags`, `load_path`, `files_examined`, `path_values`, `env`,
 `declared_effective_hosted`, `declared_effective_auth_mode` (review4 RB4-1).
-A difference ⇒ FAIL. `support.*` is supporting metadata (source text,
-timestamp precision, advisory `batch_start`): a PRE/POST difference there is
-recorded as a note, never a FAIL (an invalid support field still makes the
-record incomplete ⇒ INCONCLUSIVE). `run.json` `envPreProvenanceKey` is the
-environment-only canonical form; `envPreSupportKey` is recorded only.
+Order (ruling R-12):
+
+1. **Attribution first.** The record is compared only if it is bound to the
+   same host and `slotGeneration` and shows the same serving process
+   (`serving_process_start_ts` equals PRE's process start, and the record's
+   own `support.hosted.process_start_ts`, if present, agrees). Otherwise ⇒
+   not compared ⇒ INCONCLUSIVE (R-3/R-10). Incompleteness in unrelated
+   fields does not make it unattributable.
+2. **Compare before completeness.** Leaf by leaf, every value recorded on
+   both sides (an explicit `absent` is a value) that differs ⇒ **FAIL**,
+   listed by path (e.g. `env.SCION_SERVER_MODE`). A key recorded on only one
+   side is not a value: it is not compared ⇒ INCONCLUSIVE unless another FAIL
+   applies. Arrays (`files_examined`, legacy merged files) compare whole.
+3. **Then completeness.** Missing or invalid fields are recorded alongside
+   (`missing:`) and never downgrade a FAIL.
+
+`support.*` is supporting metadata (source text, timestamp precision,
+advisory `batch_start`): a PRE/POST difference there is recorded as a note,
+never a FAIL (an invalid support field still makes the record incomplete ⇒
+INCONCLUSIVE). `run.json` `envPreProvenanceKey` is the environment-only
+canonical form; `envPreSupportKey` is recorded only.
 
 These are FAIL:
 

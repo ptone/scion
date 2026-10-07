@@ -37,6 +37,10 @@ export declare function gradeEEnv1(
 export declare function provenanceKey(prov: unknown): string | null;
 export declare const PROVENANCE_COMPARED_FIELDS: readonly string[];
 export declare function provenanceEnvKey(prov: unknown): string | null;
+export declare function provenanceEnvDiff(
+  pre: unknown,
+  post: unknown
+): { differs: string[]; oneSided: string[] };
 export declare function provenanceSupportKey(prov: unknown): string | null;
 export declare function preComparisonInputs(decl: unknown): {
   envPreBaseURL: string | null;
