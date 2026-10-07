@@ -639,6 +639,47 @@ describe('A-F1 keyboard (rev 8 rules + ruling R-16, no repair)', () => {
     });
     expect(pressChecks(p, stableBl(['p'])).result).toBe('inconclusive');
   });
+  it('R-18 Q-A: an outline present in U2 and removed on focus ⇒ INCONCLUSIVE (not FAIL)', () => {
+    const c = pressChecks(press(1, fe('p')), stableBl(['p'], { p: { ...BASE, ...RING } }));
+    expect(c).toMatchObject({ result: 'inconclusive', decidedBy: 'undeterminable' });
+    expect(c.undeterminableReasons).toContain(
+      'outline-* change while an outline is present in U2 or F'
+    );
+    expect(c.indicatorValuesU2).toMatchObject({ 'outline-style': 'solid' });
+    expect(c.indicatorValuesF).toMatchObject({ 'outline-style': 'none' });
+  });
+  it('R-18 Q-A: outline width set to 0 on focus (style kept) ⇒ INCONCLUSIVE', () => {
+    expect(
+      pressChecks(
+        press(1, fe('p', { ...RING, 'outline-width': '0px' })),
+        stableBl(['p'], { p: { ...BASE, ...RING } })
+      ).result
+    ).toBe('inconclusive');
+  });
+  it("R-18 Q-B: a running animation recorded on the element's own ::after (path suffix) ⇒ INCONCLUSIVE even with an appearing outline", () => {
+    const c = pressChecks(
+      press(1, fe('p', RING), [], 'forward', {
+        runningAnimations: [{ path: 'p::after', kind: 'CSSAnimation', name: 'step' }],
+      }),
+      stableBl(['p'])
+    );
+    expect(c.result).toBe('inconclusive');
+  });
+  it('review7 O-1: a press without pseudo/ancestor F samples ⇒ missing baseline ⇒ INCONCLUSIVE, never FAIL', () => {
+    const c = pressChecks(
+      press(1, fe('p'), [], 'forward', { focusNodes: undefined }),
+      stableBl(['p'])
+    );
+    expect(c).toMatchObject({ result: 'inconclusive', baselineMissing: true });
+  });
+  it('R-18 Q-A: outline style solid with width 0 in F, none in U2 (both none/0) ⇒ FAIL', () => {
+    expect(
+      pressChecks(
+        press(1, fe('p', { 'outline-style': 'solid', 'outline-width': '0px' })),
+        stableBl(['p'])
+      )
+    ).toMatchObject({ decidedBy: 'static-no-indicator', result: 'fail' });
+  });
   it('R-16 3: fully static (no change on any sampled node) ⇒ FAIL', () => {
     const c = pressChecks(press(1, fe('p')), stableBl(['p']));
     expect(c).toMatchObject({ decidedBy: 'static-no-indicator', result: 'fail' });

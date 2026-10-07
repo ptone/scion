@@ -753,7 +753,11 @@ export function pressChecks(
   // F per sampled node; the element's own F is its full computed style.
   const fNodes: Record<string, Style> = { ...(p.focusNodes ?? {}), [e.path]: e.style };
   const sampledNodes = Object.keys(fNodes).sort();
-  const baselineMissing = sampledNodes.some((k) => !baseline.u1[k] || !baseline.u2[k]);
+  // review7 O-1: a press without the pseudo/ancestor F samples cannot be
+  // graded on the rev 8 node set ⇒ treated as a missing baseline.
+  const focusNodesMissing = !p.focusNodes || !(`${e.path}::before` in p.focusNodes);
+  const baselineMissing =
+    focusNodesMissing || sampledNodes.some((k) => !baseline.u1[k] || !baseline.u2[k]);
   const running = p.runningAnimations ?? [];
   const nodeDiffsU1U2: Record<string, string[]> = {};
   const nodeDiffsU2F: Record<string, string[]> = {};
@@ -791,11 +795,17 @@ export function pressChecks(
       reasons.push('outline or box-shadow present in both U2 and F (persistent)');
     if (elDiffs.some((k) => !isOutlineProp(k)))
       reasons.push('non-outline difference U2/F on the element');
+    // Ruling R-18 Q-A: an outline-* change while the outline is present in U2
+    // or F is a visible change (not proven absence, not an appearing
+    // indicator); the FAIL exclusion only absorbs outline-* noise while the
+    // outline is none/0 on both sides.
+    if (elDiffs.some(isOutlineProp) && (outlinePresent(u2el) || outlinePresent(fel)))
+      reasons.push('outline-* change while an outline is present in U2 or F');
     if (otherNodeDiffs.length) reasons.push('U2/F difference on a pseudo-element or ancestor');
     decidedBy = reasons.length ? 'undeterminable' : 'static-no-indicator';
-    // Rule 3 needs F = U2 on every node except the element's own outline-*;
-    // with no listed condition this holds by construction (stable, no other
-    // node diffs, only outline-* element diffs).
+    // Rule 3: with no listed condition, F = U2 on every node except
+    // outline-* on the element while its outline is none/0 in BOTH U2 and F
+    // (R-18 Q-A); everything else was caught above.
   }
   const indicator: IndicatorState =
     decidedBy === 'outline-appears' || decidedBy === 'box-shadow-appears'

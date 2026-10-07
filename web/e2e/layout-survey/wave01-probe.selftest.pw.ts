@@ -241,6 +241,22 @@ const HTML2 = `<!doctype html><html><head><style>
   #under{outline:none;position:relative}
   #under::after{content:'';position:absolute;left:0;right:0;bottom:-2px;height:2px;background:transparent}
   #under:focus-visible::after{background:rgb(0,0,255)}
+  #rmring{outline:2px solid rgb(0,128,0)}
+  #rmring:focus-visible{outline:none}
+  @keyframes pstep{0%{opacity:1}50%{opacity:0}}
+  #pseudoanim{position:relative}
+  #pseudoanim::after{content:'';display:inline-block;width:4px;height:4px;background:red;animation:pstep 2s steps(1) infinite}
+  #pseudoanim:focus-visible{outline:2px solid rgb(0,0,255)}
+  @keyframes dspin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+  #descanim .spin{display:inline-block;animation:dspin 20s linear infinite}
+  #descanim:focus-visible{outline:2px solid rgb(0,0,255)}
+  #pbt{position:relative}
+  #pbt::before{content:'';display:inline-block;width:4px;height:4px;background:rgb(255,255,255);transition:background-color 5s linear}
+  #pbt:focus-visible::before{background:rgb(255,0,0)}
+  #pbt:focus-visible{outline:2px solid rgb(0,0,255)}
+  #apwrap{display:inline-block;position:relative}
+  #apwrap::after{content:'';display:inline-block;width:4px;height:4px;background:red;animation:pstep 2s steps(1) infinite}
+  #apl:focus-visible{outline:2px solid rgb(0,0,255)}
 </style></head><body>
 <a id="noring" href="#a" style="outline:none">No ring</a>
 <a id="zero" href="#b" style="outline:0">Zero outline</a>
@@ -257,6 +273,11 @@ const HTML2 = `<!doctype html><html><head><style>
 <a id="permshadow" href="#m">Permanent box-shadow</a>
 <span id="fwwrap"><a id="fwl" href="#n">Focus-within wrapper indicator</a></span>
 <a id="under" href="#o">::after focus underline</a>
+<a id="rmring" href="#p">Outline removed on focus</a>
+<a id="pseudoanim" href="#q">Animated ::after + ring</a>
+<a id="descanim" href="#r"><span class="spin">*</span> Animated descendant + ring</a>
+<a id="pbt" href="#s">::before transition on focus + ring</a>
+<span id="apwrap"><a id="apl" href="#t">Ring inside a wrapper with an animated ::after</a></span>
 <span id="ws-normal" style="white-space:normal">Double  Space
   wrapped</span>
 <span id="ws-pre" style="white-space:pre-wrap">A  B</span>
@@ -280,7 +301,7 @@ const HTML2 = `<!doctype html><html><head><style>
 
 async function tabTo(page: Page, id: string) {
   const baseline = await sampleFocusBaseline(page);
-  for (let i = 0; i < 15; i++) {
+  for (let i = 0; i < 40; i++) {
     await page.keyboard.press('Tab');
     await twoFrames(page); // same post-Tab settle as the runner (review5 O-3)
     const a = await run<{
@@ -524,3 +545,54 @@ for (const [id, label] of [
     expect(c.runningAnimations.length).toBeGreaterThan(0);
     expect(c.undeterminableReasons).toContain('animation/transition running at F');
   });
+
+// ─── ruling R-18 controls (assessor 18:36Z) ──────────────────────────────
+
+test('R-18 Q-A: an outline present unfocused and removed on focus ⇒ INCONCLUSIVE (not FAIL)', async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const c = await tabTo(page, 'rmring');
+  expect(c, JSON.stringify(c)).toMatchObject({ result: 'inconclusive' });
+  expect(c.undeterminableReasons).toContain(
+    'outline-* change while an outline is present in U2 or F'
+  );
+});
+
+test("R-18 Q-B: a steps(1) animation on the element's own ::after + an appearing outline ⇒ INCONCLUSIVE, animation recorded", async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const c = await tabTo(page, 'pseudoanim');
+  expect(c, JSON.stringify(c)).toMatchObject({ result: 'inconclusive' });
+  expect(c.runningAnimations.some((x) => x.path.endsWith('::after'))).toBe(true);
+});
+
+test('R-18: an animation on a DESCENDANT of the focused element + an appearing outline ⇒ PASS (out of scope)', async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const c = await tabTo(page, 'descanim');
+  expect(c, JSON.stringify(c)).toMatchObject({ decidedBy: 'outline-appears', result: 'pass' });
+  expect(c.runningAnimations).toEqual([]);
+});
+
+test('R-18 Q-B: a ::before TRANSITION running at F + an appearing outline ⇒ INCONCLUSIVE, transition recorded', async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const c = await tabTo(page, 'pbt');
+  expect(c, JSON.stringify(c)).toMatchObject({ result: 'inconclusive' });
+  expect(
+    c.runningAnimations.some((x) => x.path.endsWith('::before') && x.kind === 'CSSTransition')
+  ).toBe(true);
+});
+
+test("R-18: an animation on an ANCESTOR's pseudo-element + an appearing outline ⇒ PASS (out of scope)", async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const c = await tabTo(page, 'apl');
+  expect(c, JSON.stringify(c)).toMatchObject({ decidedBy: 'outline-appears', result: 'pass' });
+  expect(c.runningAnimations).toEqual([]);
+});

@@ -694,17 +694,26 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
     // Rev 8 A-F1: CSS animations/transitions in play state `running` on
     // the focused element or any flat-tree ancestor at the time F is sampled.
     const runningAnimations: Array<{ path: string; kind: string; name: string | null }> = [];
-    for (let e: Element | null = a; e; e = flatParent(e)) {
-      for (const an of e.getAnimations()) {
+    // Ruling R-18 Q-B: scope = exactly the sampled nodes — the focused element
+    // and its own ::before/::after (getAnimations({subtree:true}) filtered to
+    // effects targeting the element), plus every flat-tree ancestor (own
+    // animations only; ancestors' pseudo-elements and descendants out of scope).
+    const pushRunning = (host: Element, list: Animation[]) => {
+      for (const an of list) {
         if (an.playState !== 'running') continue;
+        const eff = an.effect as (KeyframeEffect & { pseudoElement?: string | null }) | null;
+        if (eff && eff.target !== host) continue;
         const x = an as Animation & { animationName?: string; transitionProperty?: string };
         runningAnimations.push({
-          path: deepPath(e),
+          path: deepPath(host) + (eff?.pseudoElement ?? ''),
           kind: an.constructor?.name ?? 'Animation',
           name: x.animationName ?? x.transitionProperty ?? (an.id || null),
         });
       }
-    }
+    };
+    pushRunning(a, a.getAnimations({ subtree: true }));
+    for (let e: Element | null = flatParent(a); e; e = flatParent(e))
+      pushRunning(e, e.getAnimations());
     return {
       outside: false,
       innerWidth: window.innerWidth,

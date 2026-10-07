@@ -63,6 +63,15 @@
  *   zz-rv6-af1.selftest.pw.ts 8264 B 13dbf9be5b7646c51ff0829f8f9aaba79d15de41262a8288c39f17f1d2a070bb
  *   plus outputs rv6-r12.out 51e4bb84…, rv6-r14.out 14929…, rv6-scratch.out ffc69910…, rv6-af1.out e0197c03…,
  *   rb42-rv6.sh ed16dc6c…, zz-rv6.config.ts 3f326ada…
+ *
+ * review7 round 1 (report wl-wave1-runner-review7-r1.md 21824 B
+ * 0988feeda008e4fd08c90b0a44813af1111931bab282ddf031d7f9b726124342, head
+ * c94de2c8; manifest repros.MANIFEST.sha256 fccafd439f460e9b305cac5076f54ad660fd7e146f74a7b3807514edfc10e7d5,
+ * 23 files) artifacts, byte-verified and kept private (0600):
+ *   zz-rv7-af1.selftest.pw.ts 2bf0fe47… (RB7-1 case B ⇒ INCONCLUSIVE, RB7-2 case E ⇒ INCONCLUSIVE at the fix head;
+ *                  equivalent named controls in wave01-probe.selftest.pw.ts "R-18")
+ *   af1.test.ts 7e7c5a61… (pure-function A-F1 matrix; equivalent unit cases in wave01-evaluate.test.ts)
+ *   rv7-r15.mjs 9ba21c99… (48-case R-15 matrix, all as required), rv7-insert.txt d5eae169…, rb42-rv7.sh 8884343f…
  */
 
 import { execFileSync } from 'node:child_process';
