@@ -12,5 +12,12 @@
     "noUnusedLocals": false,
     "exactOptionalPropertyTypes": false
   },
-  "include": ["./*.ts", "./lib/*.ts", "./lib/*.d.mts", "./unit/*.ts"]
+  "include": [
+    "./*.ts",
+    "./lib/*.ts",
+    "./lib/*.d.mts",
+    "./wave01/*.ts",
+    "./wave01/*.d.mts",
+    "./unit/*.ts"
+  ]
 }
