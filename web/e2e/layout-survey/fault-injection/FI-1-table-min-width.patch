@@ -1,13 +1,11 @@
-diff --git a/web/src/components/pages/admin-groups.ts b/web/src/components/pages/admin-groups.ts
-index e57ddb8..f25690b 100644
 --- a/web/src/components/pages/admin-groups.ts
 +++ b/web/src/components/pages/admin-groups.ts
-@@ -180,6 +180,8 @@ export class ScionPageAdminGroups extends LitElement {
-       border: 1px solid var(--scion-border, #e2e8f0);
-       border-radius: var(--scion-radius-lg, 0.75rem);
-       overflow: hidden;
+@@ -188,6 +188,8 @@
+     table {
+       width: 100%;
+       border-collapse: collapse;
 +      /* FAULT-INJECTION FI-1 (layout-survey rehearsal, TEST-ONLY, NEVER SHIP) */
 +      min-width: 1600px;
      }
  
-     table {
+     th {

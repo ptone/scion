@@ -201,6 +201,8 @@ export async function createSession(
   const safeName = testUser.email.replace(/[^a-zA-Z0-9]/g, '_');
   const storageStatePath = path.join(storageDir, `${safeName}.json`);
   fs.writeFileSync(storageStatePath, JSON.stringify(storageState, null, 2), { mode: 0o600 });
+  // `mode` only applies on creation; enforce 0600 when the file pre-existed.
+  fs.chmodSync(storageStatePath, 0o600);
 
   return {
     user: data.user,

@@ -25,6 +25,13 @@
 //      Computes binary/asset-tree/main.js/lockfile/settings/suite/recipe
 //      digests and writes an immutable Release record (refuses to overwrite).
 //
+//   (release also needs --server-launch-flags="<non-secret server start flags>",
+//    recorded as serverLaunch {hosted, runtimeBroker, testLogin, devAuth})
+//
+//   node records.mjs validate-run RUN_DIR --release FILE
+//      Cross-checks every capture in a run against the Release (id, record
+//      digest, slotGeneration, main.js pre/post) and run.json batch validity.
+//
 //   node records.mjs validate FILE...
 //      Validates required fields / digest formats for any of the 4 records
 //      (and capture records written by capture.pw.ts). Exit 1 on any error.
@@ -35,6 +42,7 @@ import * as path from 'node:path';
 import {
   fixtureRecipeSha,
   scenarioSuiteSha,
+  sha256,
   sha256File,
   SHA256_RE,
   treeDigest,
@@ -62,6 +70,7 @@ export const REQUIRED = {
     'stewardIdentity',
     'releaseKind',
     'publicationCheckpoint',
+    'serverLaunch',
   ],
   capture: [
     'status',
@@ -79,6 +88,9 @@ export const REQUIRED = {
     'startedAt',
     'endedAt',
     'mainJs',
+    'runId',
+    'releaseRecordSha256',
+    'integration',
   ],
   finding: [
     'captureIds',
@@ -158,6 +170,10 @@ export function validateRecord(rec) {
         errs.push(`release.includedCommits entry ${c} is not a full git SHA`);
     if (rec.releaseKind && !['preview', 'verification'].includes(rec.releaseKind))
       errs.push('release.releaseKind must be preview|verification');
+    const sl = rec.serverLaunch ?? {};
+    for (const k of ['hosted', 'runtimeBroker', 'testLogin', 'devAuth'])
+      if (typeof sl[k] !== 'boolean') errs.push(`release.serverLaunch.${k} must be boolean`);
+    if (sl.devAuth === true) errs.push('release.serverLaunch.devAuth must be false for the survey');
     try {
       const u = new URL(rec.baseURL);
       if (u.pathname !== '/' || u.search) errs.push('release.baseURL must be an origin');
@@ -166,6 +182,11 @@ export function validateRecord(rec) {
     }
   }
   if (kind === 'capture') {
+    if (rec.releaseRecordSha256 && !SHA256_RE.test(rec.releaseRecordSha256))
+      errs.push('capture.releaseRecordSha256 is not 64-hex');
+    if (rec.mainJs && !('post' in rec.mainJs))
+      errs.push('capture.mainJs.post missing (record must carry the post-batch digest)');
+    if (typeof rec.batchValid !== 'boolean') errs.push('capture.batchValid must be boolean');
     for (const f of rec.files ?? []) {
       if (!f.path || path.isAbsolute(f.path) || f.path.split('/').includes('..'))
         errs.push(`capture file path not relative-safe: ${f.path}`);
@@ -210,6 +231,12 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error(`unexpected argument ${a}`);
+    const eq = a.indexOf('=');
+    if (eq > 0) {
+      // --flag=value form (required when the value itself starts with "--")
+      out[a.slice(2, eq)] = a.slice(eq + 1);
+      continue;
+    }
     const v = argv[i + 1];
     if (v === undefined || v.startsWith('--')) throw new Error(`flag ${a} needs a value`);
     out[a.slice(2)] = v;
@@ -223,6 +250,63 @@ function need(args, k) {
   if (v === undefined || String(v).trim() === '')
     throw new Error(`--${k} is required and must be non-empty`);
   return String(v).trim();
+}
+
+/**
+ * Parse the steward's NON-SECRET server launch flags into the Release
+ * `serverLaunch` summary. Rejects anything that looks like secret material.
+ */
+export function parseServerLaunch(flags) {
+  if (/secret|token|password|key=/i.test(flags))
+    throw new Error('--server-launch-flags must not contain secret material');
+  const has = (f) => new RegExp(`(^|\\s)${f}(=true)?(\\s|$)`).test(flags);
+  const off = (f) => new RegExp(`(^|\\s)${f}=false(\\s|$)`).test(flags);
+  return {
+    flags: flags.trim(),
+    hosted: has('--hosted'),
+    runtimeBroker: !off('--enable-runtime-broker') && has('--enable-runtime-broker'),
+    testLogin: has('--enable-test-login'),
+    devAuth: has('--dev-auth'),
+  };
+}
+
+/**
+ * Cross-record check for one published/unsealed capture run: every capture
+ * must reference this Release (id, record digest, slotGeneration, main.js),
+ * carry pre+post digests equal to the Release, and the batch must be valid.
+ */
+export function validateRun(runDir, releaseFile) {
+  const errs = [];
+  const bytes = fs.readFileSync(releaseFile);
+  const release = JSON.parse(bytes.toString('utf-8'));
+  const relSha = sha256(bytes);
+  errs.push(...validateRecord(release).map((e) => `release: ${e}`));
+  const run = JSON.parse(fs.readFileSync(path.join(runDir, 'run.json'), 'utf-8'));
+  if (run.batchValid !== true) errs.push('run.json batchValid is not true');
+  if (run.releaseRecordSha256 !== relSha)
+    errs.push('run.json releaseRecordSha256 != release file digest');
+  const captures = fs.readdirSync(runDir).filter((f) => f.endsWith('.capture.json'));
+  if (captures.length === 0) errs.push('no capture records in run');
+  const ids = new Set();
+  for (const f of captures) {
+    const c = JSON.parse(fs.readFileSync(path.join(runDir, f), 'utf-8'));
+    ids.add(c.id);
+    errs.push(...validateRecord(c).map((e) => `${f}: ${e}`));
+    if (c.runId !== run.runId) errs.push(`${f}: runId != run.json runId`);
+    if (c.releaseId !== release.id) errs.push(`${f}: releaseId != release.id`);
+    if (c.releaseRecordSha256 !== relSha)
+      errs.push(`${f}: releaseRecordSha256 != release file digest`);
+    if (c.slotGeneration !== release.slotGeneration) errs.push(`${f}: slotGeneration mismatch`);
+    if (c.mainJs?.expected !== release.mainJsSha256)
+      errs.push(`${f}: mainJs.expected != release.mainJsSha256`);
+    if (c.mainJs?.pre?.sha256 !== release.mainJsSha256) errs.push(`${f}: mainJs.pre != release`);
+    if (c.mainJs?.post?.sha256 !== release.mainJsSha256) errs.push(`${f}: mainJs.post != release`);
+    if (c.batchValid !== true) errs.push(`${f}: batchValid is not true`);
+    if (c.status !== 'complete') errs.push(`${f}: status ${c.status}`);
+  }
+  for (const id of run.captureIds ?? [])
+    if (!ids.has(id)) errs.push(`run.json captureId ${id} has no record`);
+  return errs;
 }
 
 export function buildRelease(args) {
@@ -257,6 +341,7 @@ export function buildRelease(args) {
     stewardIdentity: need(args, 'steward'),
     releaseKind: need(args, 'release-kind'),
     publicationCheckpoint: need(args, 'publication-checkpoint'),
+    serverLaunch: parseServerLaunch(need(args, 'server-launch-flags')),
   };
   const errs = validateRecord(rec);
   if (errs.length) throw new Error(`release record invalid:\n  ${errs.join('\n  ')}`);
@@ -286,7 +371,17 @@ function main() {
     }
     process.exit(bad ? 1 : 0);
   }
-  console.error('usage: records.mjs release --out FILE ... | records.mjs validate FILE...');
+  if (cmd === 'validate-run') {
+    const args = parseArgs(rest.slice(1));
+    if (!rest[0] || rest[0].startsWith('--'))
+      throw new Error('validate-run needs RUN_DIR --release FILE');
+    const errs = validateRun(rest[0], need(args, 'release'));
+    console.log(errs.length ? `INVALID ${rest[0]}\n  ${errs.join('\n  ')}` : `ok      ${rest[0]}`);
+    process.exit(errs.length ? 1 : 0);
+  }
+  console.error(
+    'usage: records.mjs release --out FILE ... | validate FILE... | validate-run RUN_DIR --release FILE'
+  );
   process.exit(2);
 }
 

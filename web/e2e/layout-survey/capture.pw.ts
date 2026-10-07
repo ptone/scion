@@ -39,7 +39,10 @@ import {
 } from './lib/digest.mjs';
 import {
   assertBadgesVisible,
-  assertLinksReachable,
+  assertContainersFit,
+  assertNamesVisible,
+  assertTableFits,
+  measureTableFit,
   assertNoDocumentOverflow,
   measureDocument,
   measureRow,
@@ -47,6 +50,7 @@ import {
   type RowMetrics,
 } from './lib/geometry.js';
 import { envelope, readbackGroups, writeJSONExclusive, type FixtureMap } from './lib/records.js';
+import { validateRecord } from './scripts/records.mjs';
 import { openAdminSession } from './lib/session.js';
 
 const PROFILES = [
@@ -67,11 +71,48 @@ const SCENARIO = {
 };
 
 interface ReleaseRecord {
+  kind: string;
   id: string;
   slotGeneration: string;
   mainJsSha256: string;
   baseURL: string;
   releaseKind: string;
+  sourceSha: string;
+  scenarioSuiteSha: string;
+  serverLaunch: Record<string, unknown>;
+}
+
+/**
+ * Non-secret evidence that the slot is the real hosted Hub integration:
+ * unauthenticated API refusal (no dev-auth auto-session), healthz component
+ * summary, the steward-declared launch mode from the Release, and the
+ * runner's own no-mock guarantee.
+ */
+async function probeIntegration(baseURL: string, release: ReleaseRecord) {
+  const anon = await fetch(`${baseURL}/api/v1/groups`, { redirect: 'manual' });
+  let health: Record<string, unknown> = {};
+  try {
+    const res = await fetch(`${baseURL}/healthz`, { redirect: 'manual' });
+    health = res.ok ? ((await res.json()) as Record<string, unknown>) : {};
+  } catch {
+    health = {};
+  }
+  const web = (health.web ?? {}) as Record<string, unknown>;
+  const hub = (health.hub ?? {}) as Record<string, unknown>;
+  return {
+    anonymousGroupsApiStatus: anon.status,
+    anonymousRefused: anon.status === 401,
+    healthz: {
+      status: health.status ?? null,
+      scionVersion: health.scionVersion ?? null,
+      components: Object.keys(health).sort(),
+      webAssetsEmbedded: web.assetsEmbedded ?? null,
+      hubChecks: Object.keys((hub.checks ?? {}) as object).sort(),
+    },
+    declaredServerLaunch: release.serverLaunch,
+    auth: 'test-login (real /api/v1/auth/test-login; no dev-auth)',
+    mocks: 'none: the runner registers no page.route/context.route interception',
+  };
 }
 
 interface ReadyCheck {
@@ -149,17 +190,21 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
   const cfg = loadCaptureConfig();
   assertDisjoint(cfg.evidenceDir, cfg.privateDir);
 
-  const release = JSON.parse(fs.readFileSync(cfg.releaseFile, 'utf-8')) as ReleaseRecord;
-  for (const f of ['id', 'slotGeneration', 'mainJsSha256', 'baseURL', 'releaseKind'] as const) {
-    if (!release[f]) throw new Error(`release record missing ${f}`);
+  const releaseBytes = fs.readFileSync(cfg.releaseFile);
+  const releaseRecordSha256 = sha256(releaseBytes);
+  const release = JSON.parse(releaseBytes.toString('utf-8')) as ReleaseRecord;
+  const releaseErrors = validateRecord(release) as string[];
+  if (release.kind !== 'release' || releaseErrors.length) {
+    throw new Error(`release record invalid: ${releaseErrors.join('; ') || 'kind != release'}`);
   }
   if (!SHA256_RE.test(release.mainJsSha256)) throw new Error('release mainJsSha256 is not 64-hex');
   if (new URL(release.baseURL).origin !== cfg.baseURL) {
     throw new Error(`release baseURL ${release.baseURL} != LAYOUT_SURVEY_BASE_URL ${cfg.baseURL}`);
   }
   const fixture = JSON.parse(fs.readFileSync(cfg.fixtureMapFile, 'utf-8')) as FixtureMap;
-  if (fixture.baseURL !== cfg.baseURL)
-    throw new Error('fixture map baseURL does not match the slot under test');
+  // The map may come from the closed seed snapshot restored into this slot,
+  // so its seed-time baseURL can differ; the per-profile real-API readback
+  // against THIS slot is what proves the rows exist here.
   if (!fixture.readback?.ok) throw new Error('fixture map has no successful steward readback');
 
   const runId = `capture-run-${new Date().toISOString().replace(/[:.]/g, '').slice(0, 15)}Z-${randomUUID().slice(0, 8)}`;
@@ -189,6 +234,8 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
     },
   ];
 
+  const integration = await probeIntegration(cfg.baseURL, release);
+
   const browserVersion = (browser as Browser).version();
   const fontDigest = fontInventoryDigest();
   const longRes = fixture.resources.find((r) => r.key === 'long');
@@ -196,6 +243,7 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
 
   const captureIds: string[] = [];
   const errors: string[] = [];
+  const records: Array<Record<string, unknown> & { id: string; profileKey: string }> = [];
 
   for (const profile of PROFILES) {
     const env = envelope('capture', cfg.operatorIdentity);
@@ -293,8 +341,13 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
       await shot('default', false);
       await shot('default', true);
       const docDefault = await measureDocument(page);
-      assertions['default'] = [assertNoDocumentOverflow(docDefault)];
-      writeGeometry('default', { document: docDefault });
+      const fitDefault = await measureTableFit(page);
+      assertions['default'] = [
+        assertTableFits(fitDefault),
+        assertNoDocumentOverflow(docDefault),
+        assertContainersFit(docDefault),
+      ];
+      writeGeometry('default', { document: docDefault, tableFit: fitDefault });
 
       // ── State 2: filtered to the seeded fixture rows ────────────────
       const filtered = `/admin/groups?q=${encodeURIComponent(fixture.searchTerm)}`;
@@ -324,7 +377,9 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
       await shot('fixture-filter', false);
       await shot('fixture-filter', true);
       const docFiltered = await measureDocument(page);
+      const fitFiltered = await measureTableFit(page);
       const rows: RowMetrics[] = [];
+      const accessibleNames: Record<string, string | null> = {};
       for (const r of fixture.resources) {
         const link = page.locator(
           `a.group-name-link[href="/admin/groups/${encodeURIComponent(r.id)}"]`
@@ -337,11 +392,17 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
           at: new Date().toISOString(),
         });
         rows.push(await measureRow(page, r.key, r.id));
+        const snap = await link.ariaSnapshot().catch(() => '');
+        const m = /link "((?:[^"\\]|\\.)*)"/.exec(snap);
+        accessibleNames[r.key] = m ? JSON.parse(`"${m[1]}"`) : null;
       }
+      const expectedNames = Object.fromEntries(fixture.resources.map((r) => [r.key, r.name]));
       assertions['fixture-filter'] = [
+        assertTableFits(fitFiltered),
         assertNoDocumentOverflow(docFiltered),
         assertBadgesVisible(rows, docFiltered.innerWidth),
-        assertLinksReachable(rows, docFiltered.innerWidth),
+        assertNamesVisible(rows, docFiltered.innerWidth, expectedNames, accessibleNames),
+        assertContainersFit(docFiltered),
       ];
       observations['fixture-filter'] = {
         longNameTruncated: rows.find((r) => r.key === 'long')?.linkTruncated ?? null,
@@ -352,7 +413,12 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
           meets44x44ProductTarget: !!r.link && r.link.width >= 44 && r.link.height >= 44,
         })),
       };
-      writeGeometry('fixture-filter', { document: docFiltered, rows });
+      writeGeometry('fixture-filter', {
+        document: docFiltered,
+        tableFit: fitFiltered,
+        rows,
+        accessibleNames,
+      });
 
       // ── Interaction LS-I1: open the long-name group from the list ───
       const longLink = page.locator(
@@ -378,6 +444,7 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
       });
       assertions['fixture-filter']!.push({
         id: 'LS-I1-long-name-link-opens-detail',
+        oracleClause: 'B-I1',
         description: 'clicking the long-name row link navigates to /admin/groups/<id>',
         outcome: navOk ? 'pass' : 'fail',
         details: { finalPath: new URL(page.url()).pathname },
@@ -405,6 +472,7 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
     const record = {
       ...env,
       kind: 'capture' as const,
+      runId,
       status,
       errorReason,
       scenarioKey: SCENARIO.key,
@@ -412,9 +480,12 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
       purpose: 'survey',
       capturerIdentity: cfg.operatorIdentity,
       releaseId: release.id,
+      releaseRecordSha256,
       slotGeneration: release.slotGeneration,
       releaseKind: release.releaseKind,
+      servedSourceSha: release.sourceSha,
       baseURL: cfg.baseURL,
+      integration,
       route: {
         template: SCENARIO.routeTemplate,
         states: ['default', `fixture-filter (?q=${fixture.searchTerm})`],
@@ -422,12 +493,15 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
       resourceKeys: Object.fromEntries(fixture.resources.map((r) => [r.key, r.id])),
       fixture: {
         fixtureMapId: fixture.id,
+        seededBaseURL: fixture.baseURL,
         recipeId: fixture.recipeId,
         fixtureRecipeSha: fixture.fixtureRecipeSha,
         runnerRecipeSha: fixtureRecipeSha(),
         profiles: SCENARIO.fixtureProfiles,
       },
+      // Runner identity (distinct from the served source above).
       scenarioSuiteSha: scenarioSuiteSha(),
+      runnerReleaseScenarioSuiteSha: release.scenarioSuiteSha,
       role: SCENARIO.roleKey,
       principalId: inventory.principal.id,
       environment: {
@@ -455,7 +529,7 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
       startedAt,
       endedAt: new Date().toISOString(),
     };
-    writeJSONExclusive(path.join(runDir, `${profile.key}.capture.json`), record);
+    records.push(record);
     captureIds.push(record.id);
   }
 
@@ -463,20 +537,36 @@ test('attach-only capture: /admin/groups at phone/tablet/desktop', async ({ brow
   const mainPost = await fetchMainJs(cfg.baseURL);
   const releaseOkPost = mainPost.sha256 === release.mainJsSha256;
   const batchValid = releaseOkPre && releaseOkPost && mainPre.sha256 === mainPost.sha256;
+  const batchInvalidReason = batchValid
+    ? null
+    : 'assets/main.js digest mismatch before/after batch (design §86): all captures invalid';
+
+  // Capture records are written only after the post-batch check so each one
+  // carries both digests and the batch verdict (no implicit link to run.json).
+  for (const record of records) {
+    writeJSONExclusive(path.join(runDir, `${record.profileKey}.capture.json`), {
+      ...record,
+      mainJs: { expected: release.mainJsSha256, pre: mainPre, post: mainPost },
+      batchValid,
+      batchInvalidReason,
+    });
+  }
 
   writeJSONExclusive(path.join(runDir, 'run.json'), {
     ...envelope('capture', cfg.operatorIdentity),
     kind: 'capture-run',
     runId,
     releaseId: release.id,
+    releaseRecordSha256,
     slotGeneration: release.slotGeneration,
+    servedSourceSha: release.sourceSha,
+    scenarioSuiteSha: scenarioSuiteSha(),
     baseURL: cfg.baseURL,
+    integration,
     captureIds,
     mainJs: { expected: release.mainJsSha256, pre: mainPre, post: mainPost },
     batchValid,
-    batchInvalidReason: batchValid
-      ? null
-      : 'assets/main.js digest mismatch before/after batch (design §86): all captures invalid',
+    batchInvalidReason,
     attachOnly: {
       builtHub: false,
       startedHub: false,

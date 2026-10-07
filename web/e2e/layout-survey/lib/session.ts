@@ -38,6 +38,9 @@ export interface IssuanceInventory {
   principal: { id: string; email: string; role: string };
   purpose: string;
   issuedBy: string;
+  /** Whether any token refresh was performed by this tool (it never refreshes). */
+  refreshPerformed: false;
+  note: string;
   credentials: IssuedCredential[];
 }
 
@@ -91,6 +94,8 @@ export async function openAdminSession(opts: {
     principal: { id: session.user.id, email: session.user.email, role: session.user.role },
     purpose: opts.purpose,
     issuedBy: opts.operatorIdentity,
+    refreshPerformed: false,
+    note: 'No refresh is performed by the layout-survey tools. Cookie issuedAt is approximated by the test-login request time; challenge expiry is the harness 300 s lifetime.',
     credentials: [
       {
         type: 'test-login-challenge',
@@ -124,7 +129,12 @@ export async function openAdminSession(opts: {
       null,
       2
     ),
-    { mode: 0o600 }
+    { mode: 0o600, flag: 'wx' } // never overwrite an earlier issuance record
   );
+  // File-mode contract: every value-bearing file in the private dir is 0600.
+  for (const f of [credFile, session.storageStatePath]) {
+    fs.chmodSync(f, 0o600);
+    if ((fs.statSync(f).mode & 0o077) !== 0) throw new Error(`credential file ${f} is not 0600`);
+  }
   return { session, inventory };
 }

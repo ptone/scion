@@ -56,6 +56,10 @@ export interface RowMetrics {
   found: boolean;
   link: Box | null;
   linkTruncated: boolean | null;
+  /** Rendered text (textContent, whitespace-normalised), title and aria-label of the name link. */
+  linkText: string | null;
+  linkTitle: string | null;
+  linkAriaLabel: string | null;
   linkHitTestOk: boolean | null;
   badge: Box | null;
   badgeHitTestOk: boolean | null;
@@ -138,6 +142,63 @@ export async function measureDocument(page: Page): Promise<DocumentMetrics> {
   });
 }
 
+export interface TableFit {
+  found: boolean;
+  tableScrollWidth: number | null;
+  containerClientWidth: number | null;
+  containerPath: string | null;
+}
+
+/**
+ * B-C1 input: the groups table's scrollWidth versus the clientWidth of its
+ * clipping container C(table) = nearest ancestor (walking out of shadow
+ * roots) whose computed overflow-x is hidden|clip|auto|scroll.
+ */
+export async function measureTableFit(page: Page): Promise<TableFit> {
+  return page.evaluate(() => {
+    const findDeep = (root: Document | ShadowRoot, sel: string): Element | null => {
+      const hit = root.querySelector(sel);
+      if (hit) return hit;
+      for (const el of Array.from(root.querySelectorAll('*'))) {
+        if (el.shadowRoot) {
+          const r = findDeep(el.shadowRoot, sel);
+          if (r) return r;
+        }
+      }
+      return null;
+    };
+    const up = (el: Element): Element | null =>
+      el.parentElement ?? (el.getRootNode() as ShadowRoot).host ?? null;
+    const table = findDeep(document, 'table[aria-label="Groups"]') as HTMLElement | null;
+    if (!table)
+      return {
+        found: false,
+        tableScrollWidth: null,
+        containerClientWidth: null,
+        containerPath: null,
+      };
+    let c: Element | null = up(table);
+    while (c) {
+      const ox = getComputedStyle(c).overflowX;
+      if (ox === 'hidden' || ox === 'clip' || ox === 'auto' || ox === 'scroll') break;
+      c = up(c);
+    }
+    const name = (el: Element) =>
+      el.tagName.toLowerCase() +
+      (typeof el.className === 'string' && el.className
+        ? '.' + el.className.trim().split(/\s+/).join('.')
+        : '');
+    return {
+      found: true,
+      tableScrollWidth: table.scrollWidth,
+      containerClientWidth: c
+        ? (c as HTMLElement).clientWidth
+        : document.documentElement.clientWidth,
+      containerPath: c ? name(c) : 'viewport',
+    };
+  });
+}
+
 /**
  * Measure one fixture row identified by its group id (the row's name link
  * points at /admin/groups/<id>). Hit tests resolve through shadow roots.
@@ -190,6 +251,9 @@ export async function measureRow(page: Page, key: string, groupId: string): Prom
           found: false,
           link: null,
           linkTruncated: null,
+          linkText: null,
+          linkTitle: null,
+          linkAriaLabel: null,
           linkHitTestOk: null,
           badge: null,
           badgeHitTestOk: null,
@@ -204,7 +268,7 @@ export async function measureRow(page: Page, key: string, groupId: string): Prom
       while (clip) {
         const ox = getComputedStyle(clip).overflowX;
         if (ox === 'hidden' || ox === 'clip' || ox === 'auto' || ox === 'scroll') break;
-        clip = clip.parentElement;
+        clip = clip.parentElement ?? (clip.getRootNode() as ShadowRoot).host ?? null;
       }
       const lr = link.getBoundingClientRect();
       const br = badge?.getBoundingClientRect() ?? null;
@@ -213,6 +277,9 @@ export async function measureRow(page: Page, key: string, groupId: string): Prom
         found: true,
         link: box(lr),
         linkTruncated: link.scrollWidth > link.clientWidth + 1,
+        linkText: (link.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        linkTitle: link.getAttribute('title'),
+        linkAriaLabel: link.getAttribute('aria-label'),
         linkHitTestOk: hits(link, lr),
         badge: br ? box(br) : null,
         badgeHitTestOk: badge && br ? hits(badge, br) : null,
@@ -226,6 +293,8 @@ export async function measureRow(page: Page, key: string, groupId: string): Prom
 
 export interface AssertionOutcome {
   id: string;
+  /** Matching clause of uat-lead's frozen Rehearsal-B supplement (sha256 a8462af0…). */
+  oracleClause?: string;
   description: string;
   outcome: 'pass' | 'fail' | 'not-applicable';
   details: unknown;
@@ -236,6 +305,7 @@ export function assertNoDocumentOverflow(m: DocumentMetrics): AssertionOutcome {
   const overflow = m.docScrollWidth - m.innerWidth;
   return {
     id: 'LS-A1-no-document-horizontal-overflow',
+    oracleClause: 'B-A1',
     description: `documentElement.scrollWidth <= innerWidth + ${TOLERANCE_PX}px`,
     outcome: overflow <= TOLERANCE_PX ? 'pass' : 'fail',
     details: { docScrollWidth: m.docScrollWidth, innerWidth: m.innerWidth, overflowPx: overflow },
@@ -260,29 +330,105 @@ export function assertBadgesVisible(rows: RowMetrics[], innerWidth: number): Ass
     .map((r) => r.key);
   return {
     id: 'LS-A2-type-badge-unclipped',
+    oracleClause: 'B-A2',
     description: `every fixture row's .type-badge lies within the viewport and its clipping ancestor (±${TOLERANCE_PX}px) and its centre hit-tests to itself`,
     outcome: failures.length === 0 && rows.length > 0 ? 'pass' : 'fail',
     details: { failingRows: failures },
   };
 }
 
-/** LS-A3: each fixture row's name link is on-screen horizontally and hit-testable (not occluded). */
-export function assertLinksReachable(rows: RowMetrics[], innerWidth: number): AssertionOutcome {
-  const failures = rows
-    .filter(
-      (r) =>
-        !r.found ||
-        !r.link ||
-        r.link.x < -TOLERANCE_PX ||
-        r.link.x > innerWidth ||
-        r.linkHitTestOk !== true
-    )
-    .map((r) => r.key);
+/**
+ * LS-A3 (B-A3): each fixture row's name link box lies horizontally inside the
+ * viewport (±1px), its centre hit-tests to the link, and the full fixture
+ * name is available either (i) rendered untruncated, or (ii) ellipsized with
+ * the exact name in `title` or the accessible name. `accessibleNames` maps
+ * row key -> computed accessible name (from Playwright), or null.
+ */
+export function assertNamesVisible(
+  rows: RowMetrics[],
+  innerWidth: number,
+  expectedNames: Record<string, string>,
+  accessibleNames: Record<string, string | null>
+): AssertionOutcome {
+  const perRow = rows.map((r) => {
+    const name = expectedNames[r.key];
+    const onScreen =
+      !!r.link && r.link.x >= -TOLERANCE_PX && r.link.right <= innerWidth + TOLERANCE_PX;
+    const shapeI = r.linkTruncated === false && r.linkText === name;
+    const shapeII =
+      r.linkTruncated === true &&
+      (r.linkTitle === name || r.linkAriaLabel === name || accessibleNames[r.key] === name);
+    const ok = r.found && onScreen && r.linkHitTestOk === true && !!name && (shapeI || shapeII);
+    return {
+      key: r.key,
+      ok,
+      onScreen,
+      hit: r.linkHitTestOk,
+      shape: shapeI ? 'i' : shapeII ? 'ii' : null,
+    };
+  });
+  const failures = perRow.filter((p) => !p.ok).map((p) => p.key);
   return {
-    id: 'LS-A3-name-link-reachable',
-    description:
-      'every fixture row name link starts inside the viewport and its centre hit-tests to the link',
+    id: 'LS-A3-name-visible-and-reachable',
+    oracleClause: 'B-A3',
+    description: `every fixture row name link lies within the viewport (±${TOLERANCE_PX}px), its centre hit-tests to the link, and the full name is rendered untruncated (i) or ellipsized with the exact name in title/accessible name (ii)`,
     outcome: failures.length === 0 && rows.length > 0 ? 'pass' : 'fail',
-    details: { failingRows: failures },
+    details: { failingRows: failures, perRow },
+  };
+}
+
+/** LS-C1 (B-C1): the groups table fits its clipping container. */
+export function assertTableFits(fit: TableFit): AssertionOutcome {
+  const ok =
+    fit.found &&
+    fit.tableScrollWidth !== null &&
+    fit.containerClientWidth !== null &&
+    fit.tableScrollWidth <= fit.containerClientWidth + TOLERANCE_PX;
+  return {
+    id: 'LS-C1-table-fits-clip-container',
+    oracleClause: 'B-C1',
+    description: `groups table.scrollWidth <= clientWidth of its clipping container + ${TOLERANCE_PX}px`,
+    outcome: ok ? 'pass' : 'fail',
+    details: fit,
+  };
+}
+
+/**
+ * Named intentional-overflow policies (design §147: intentional horizontal
+ * scroll/clip needs a named policy, not a blanket exemption).
+ */
+export const OVERFLOW_POLICIES: Array<{
+  name: string;
+  matches: (e: { path: string; clientWidth: number }) => boolean;
+}> = [
+  {
+    // visually-hidden accessibility text (1px clip box), e.g. table caption.sr-only
+    name: 'sr-only-visually-hidden',
+    matches: (e) => e.clientWidth <= 1 && /\.sr-only\b/.test(e.path),
+  },
+];
+
+/**
+ * LS-A4 (reviewer D1; supports B-C1/B-OVR): no visible scroll container
+ * (overflow-x auto|scroll — e.g. app-shell `.content`) and no block clip
+ * container (overflow-x hidden|clip without text ellipsis — e.g.
+ * `.table-container`) anywhere in the page, including shadow roots, has
+ * scrollWidth > clientWidth + 1, except entries matching a named policy.
+ */
+export function assertContainersFit(m: DocumentMetrics): AssertionOutcome {
+  const offenders = [
+    ...m.overflowingScrollContainers.map((e) => ({ ...e, type: 'scroll' as const })),
+    ...m.clippedOverflow.map((e) => ({ ...e, type: 'clip' as const })),
+  ];
+  const exempted = offenders
+    .map((e) => ({ ...e, policy: OVERFLOW_POLICIES.find((p) => p.matches(e))?.name ?? null }))
+    .filter((e) => e.policy);
+  const failing = offenders.filter((e) => !OVERFLOW_POLICIES.some((p) => p.matches(e)));
+  return {
+    id: 'LS-A4-no-unexpected-container-overflow',
+    oracleClause: 'B-OVR (supporting; reviewer D1)',
+    description: `no scroll/clip container in the page (incl. shadow roots) has scrollWidth > clientWidth + ${TOLERANCE_PX}px, except named policies: ${OVERFLOW_POLICIES.map((p) => p.name).join(', ')}`,
+    outcome: failing.length === 0 ? 'pass' : 'fail',
+    details: { failing, exempted },
   };
 }

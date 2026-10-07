@@ -47,7 +47,10 @@ test('steward seed: /admin/groups fixture (groups-v1)', async () => {
     fs.readFileSync(path.join(SUITE_DIR, 'fixtures', 'groups-v1.json'), 'utf-8')
   ) as Recipe;
 
-  const { session, inventory } = await openAdminSession({ ...cfg, purpose: 'steward-seed' });
+  const { session, inventory } = await openAdminSession({
+    ...cfg,
+    purpose: `steward-seed-${cfg.fixtureTag}`,
+  });
   const searchTerm = `ls-${cfg.fixtureTag}-`;
 
   const resources: FixtureResource[] = [];
@@ -82,7 +85,7 @@ test('steward seed: /admin/groups fixture (groups-v1)', async () => {
     searchTerm,
     resources,
     readback,
-    seedIdentity: { principalId: inventory.principal.id, purpose: 'steward-seed' },
+    seedIdentity: { principalId: inventory.principal.id, purpose: inventory.purpose },
   };
   fs.mkdirSync(path.dirname(cfg.fixtureMapFile), { recursive: true });
   writeJSONExclusive(cfg.fixtureMapFile, map);

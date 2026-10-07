@@ -27,15 +27,16 @@ import {
 import { sha256, treeDigest } from '../lib/digest.mjs';
 import {
   assertBadgesVisible,
+  assertContainersFit,
+  assertNamesVisible,
   assertNoDocumentOverflow,
+  assertTableFits,
   type DocumentMetrics,
   type RowMetrics,
 } from '../lib/geometry.js';
 import { jwtTimes } from '../lib/session.js';
-// @ts-expect-error -- plain ESM script without declarations
 import { collectSecretValues, scanDir } from '../scripts/bundle.mjs';
-// @ts-expect-error -- plain ESM script without declarations
-import { validateRecord } from '../scripts/records.mjs';
+import { parseServerLaunch, validateRecord } from '../scripts/records.mjs';
 
 let tmp: string;
 beforeEach(() => {
@@ -128,6 +129,9 @@ describe('geometry assertions', () => {
     found: true,
     link: box(70, 300),
     linkTruncated: false,
+    linkText: key,
+    linkTitle: null,
+    linkAriaLabel: null,
     linkHitTestOk: true,
     badge: box(badgeX, badgeRight),
     badgeHitTestOk: hit,
@@ -150,6 +154,114 @@ describe('geometry assertions', () => {
     expect(clipped.details).toEqual({ failingRows: ['long'] });
     expect(assertBadgesVisible([row('occluded', 300, 350, false)], 390).outcome).toBe('fail');
     expect(assertBadgesVisible([], 390).outcome).toBe('fail');
+  });
+});
+
+describe('container-fit and full-name assertions (B-C1 / LS-A4 / B-A3)', () => {
+  const box = (x: number, right: number) => ({
+    x,
+    y: 0,
+    width: right - x,
+    height: 20,
+    right,
+    bottom: 20,
+  });
+  const base: RowMetrics = {
+    key: 'long',
+    found: true,
+    link: box(70, 300),
+    linkTruncated: false,
+    linkText: 'Long Name',
+    linkTitle: null,
+    linkAriaLabel: null,
+    linkHitTestOk: true,
+    badge: box(310, 360),
+    badgeHitTestOk: true,
+    clipContainer: box(16, 374),
+    row: box(16, 374),
+  };
+  it('LS-C1 compares table.scrollWidth with the clip container clientWidth (±1px)', () => {
+    const fit = (t: number, c: number) => ({
+      found: true,
+      tableScrollWidth: t,
+      containerClientWidth: c,
+      containerPath: 'div.table-container',
+    });
+    expect(assertTableFits(fit(357, 356)).outcome).toBe('pass');
+    expect(assertTableFits(fit(868, 356)).outcome).toBe('fail');
+    expect(
+      assertTableFits({
+        found: false,
+        tableScrollWidth: null,
+        containerClientWidth: null,
+        containerPath: null,
+      }).outcome
+    ).toBe('fail');
+  });
+  it('LS-A4 fails app-shell scroll overflow (FI-1 shape) and exempts only named sr-only clips', () => {
+    const doc = (extra: Partial<DocumentMetrics>): DocumentMetrics => ({
+      innerWidth: 390,
+      innerHeight: 844,
+      devicePixelRatio: 1,
+      docScrollWidth: 390,
+      docClientWidth: 390,
+      bodyScrollWidth: 390,
+      overflowingScrollContainers: [],
+      clippedOverflow: [],
+      offViewportElements: [],
+      ...extra,
+    });
+    const srOnly = { path: 'table > caption.sr-only', scrollWidth: 585, clientWidth: 1 };
+    expect(assertContainersFit(doc({ clippedOverflow: [srOnly] })).outcome).toBe('pass');
+    const fi1 = doc({
+      overflowingScrollContainers: [
+        { path: 'scion-app > div.content', scrollWidth: 1626, clientWidth: 390, overflowX: 'auto' },
+      ],
+    });
+    expect(assertNoDocumentOverflow(fi1).outcome).toBe('pass'); // the D1 blind spot
+    expect(assertContainersFit(fi1).outcome).toBe('fail');
+    const clip = doc({
+      clippedOverflow: [
+        { path: 'sl-tab-panel > div.table-container', scrollWidth: 868, clientWidth: 356 },
+      ],
+    });
+    expect(assertContainersFit(clip).outcome).toBe('fail');
+  });
+  it('LS-A3 accepts shape (i) full text and shape (ii) ellipsis + exact title/accessible name only', () => {
+    const names = { long: 'Long Name' };
+    expect(assertNamesVisible([base], 390, names, {}).outcome).toBe('pass');
+    const cut = { ...base, linkTruncated: true };
+    expect(assertNamesVisible([cut], 390, names, {}).outcome).toBe('fail');
+    expect(assertNamesVisible([{ ...cut, linkTitle: 'Long Name' }], 390, names, {}).outcome).toBe(
+      'pass'
+    );
+    expect(assertNamesVisible([cut], 390, names, { long: 'Long Name' }).outcome).toBe('pass');
+    expect(assertNamesVisible([{ ...cut, linkTitle: 'Long' }], 390, names, {}).outcome).toBe(
+      'fail'
+    );
+    expect(assertNamesVisible([{ ...base, link: box(70, 703) }], 390, names, {}).outcome).toBe(
+      'fail'
+    );
+    expect(assertNamesVisible([{ ...base, linkHitTestOk: false }], 390, names, {}).outcome).toBe(
+      'fail'
+    );
+    expect(assertNamesVisible([], 390, names, {}).outcome).toBe('fail');
+  });
+});
+
+describe('server launch summary (D3)', () => {
+  it('derives hosted/broker/test-login/dev-auth from non-secret flags', () => {
+    expect(
+      parseServerLaunch(
+        '--hosted --enable-hub --enable-web --enable-runtime-broker=false --enable-test-login'
+      )
+    ).toMatchObject({ hosted: true, runtimeBroker: false, testLogin: true, devAuth: false });
+    expect(parseServerLaunch('--enable-runtime-broker --dev-auth')).toMatchObject({
+      hosted: false,
+      runtimeBroker: true,
+      devAuth: true,
+    });
+    expect(() => parseServerLaunch('--hosted --session-secret abc')).toThrow(/secret/);
   });
 });
 

@@ -120,4 +120,19 @@ describe('createSession', () => {
     expect(s.accessToken).toBe('a.b.c');
     fs.rmSync(path.dirname(dir), { recursive: true, force: true });
   });
+
+  it('re-tightens a pre-existing storage file to 0600 (mode only applies on create)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ls-auth-'));
+    const pre = path.join(dir, 'reuse_survey_test.json');
+    fs.writeFileSync(pre, '{}', { mode: 0o644 });
+    fs.chmodSync(pre, 0o644);
+    const s = await createSession(
+      baseURL,
+      { email: 'reuse@survey.test', role: 'viewer' },
+      { storageDir: dir }
+    );
+    expect(s.storageStatePath).toBe(pre);
+    expect(fs.statSync(pre).mode & 0o777).toBe(0o600);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
