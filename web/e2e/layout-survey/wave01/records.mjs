@@ -1104,7 +1104,12 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
   const run = JSON.parse(fs.readFileSync(runFile, 'utf-8'));
   if (run.kind !== RUN_KIND) errs.push(`mismatch: run.json kind must be ${RUN_KIND}`);
   if (run.evidenceMode !== 'evidence') errs.push('mismatch: run is debug-non-evidence');
-  if (run.batchValid !== true) errs.push('mismatch: run.json batchValid is not true');
+  // Ruling R-13: batchValid is a DERIVED flag. Its causes (abort, E-MAIN,
+  // E-ENV gates, post probes, pair) are re-checked independently below and
+  // classified there (missing ⇒ `missing:`, contradiction ⇒ `mismatch:`). The
+  // flag itself is a mismatch only if malformed, inconsistent between copies,
+  // or false with no independently established cause (checked at the end).
+  if (typeof run.batchValid !== 'boolean') errs.push('mismatch: run.json batchValid not boolean');
   if (run.baseReleaseSha256 !== baseSha) errs.push('mismatch: run.baseReleaseSha256 != base file');
   if (run.companionSha256 !== compSha) errs.push('mismatch: run.companionSha256 != companion file');
   if (run.runner?.suiteDigest !== comp.runner?.suiteDigest)
@@ -1185,10 +1190,16 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
         `missing: post-batch dev-auth probes not both OFF (P-API ${pc.api}, P-WEB ${pc.web})`
       );
   }
-  if (run.envPostSelfAnon401?.status !== 401)
-    errs.push(
-      `mismatch: post-batch anonymous probe status ${run.envPostSelfAnon401?.status ?? 'missing'} (E-ENV-2)`
-    );
+  {
+    // R-13: E-ENV-2 needs an OBSERVED 401. No response (missing, status 0,
+    // fetch error) is missing evidence; an observed non-401 is a contradiction.
+    const st = run.envPostSelfAnon401?.status;
+    if (typeof st !== 'number' || st <= 0 || run.envPostSelfAnon401?.error)
+      errs.push(
+        `missing: post-batch anonymous probe returned no response (${st ?? 'absent'}; E-ENV-2 INCONCLUSIVE)`
+      );
+    else if (st !== 401) errs.push(`mismatch: post-batch anonymous probe status ${st} (E-ENV-2)`);
+  }
   if (envPostFile === undefined) {
     errs.push('missing: POST env declaration not supplied (--env-post); E-ENV-4 INCONCLUSIVE');
   } else {
@@ -1241,8 +1252,17 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
     m(c.runner?.head === comp.runner?.commit, 'runner HEAD');
     m(c.mainJs?.expected === base.mainJsSha256, 'mainJs.expected');
     m(c.mainJs?.pre?.sha256 === base.mainJsSha256, 'mainJs.pre');
-    m(c.mainJs?.post?.sha256 === base.mainJsSha256, 'mainJs.post');
-    m(c.batchValid === true, 'batchValid');
+    // R-13: a post-batch main.js that was not obtained is missing evidence;
+    // an obtained, different digest is a contradiction (E-MAIN).
+    if (typeof c.mainJs?.post?.sha256 !== 'string')
+      errs.push(`${f}: missing: mainJs.post not obtained (E-MAIN INCONCLUSIVE)`);
+    else m(c.mainJs.post.sha256 === base.mainJsSha256, 'mainJs.post');
+    // Copies of the derived flag must agree with run.json (R-13).
+    m(c.batchValid === run.batchValid, 'batchValid differs from run.json');
+    m(
+      (c.batchInvalidReason ?? null) === (run.batchInvalidReason ?? null),
+      'batchInvalidReason differs from run.json'
+    );
     if (c.status === 'complete' && c.substep === 'M0')
       m(
         c.loadedMainEntry?.sha256 === base.mainJsSha256,
@@ -1263,6 +1283,10 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
     if (!ids.has(id)) errs.push(`missing: capture ${id} listed in run.json`);
   if ((run.captureIds ?? []).length !== ids.size)
     errs.push('mismatch: run.json captureIds count != capture files');
+  // R-13: a false derived flag must be explained by an independently
+  // established cause; otherwise the copies contradict the evidence.
+  if (run.batchValid === false && errs.length === 0)
+    errs.push('mismatch: batchValid false without an independently established cause');
   return errs;
 }
 

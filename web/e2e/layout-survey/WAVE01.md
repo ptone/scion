@@ -518,6 +518,21 @@ test still FAIL independently. Such presses record `baselineMissing: true`.
 - every expected record exists;
 - every complete M0 has exactly one M0-primary full-page screenshot.
 
+- **Classification (ruling R-13):** missing or unexplained evidence is
+  `missing:` (INCONCLUSIVE), and only contradictions are `mismatch:`
+  (REJECTED).
+  - Missing/unexplained: post-batch P-API/P-WEB not obtained or outside the
+    classified set (e.g. HTTP 500), a post-batch anonymous probe with no
+    response (absent, status 0, fetch error), a post-batch main.js not
+    obtained.
+  - Contradictions: a probe showing ON, an observed non-401 anonymous status,
+    a different main.js digest, bound forbidden declarations, same-slot
+    environment differences (R-12), hash/binding mismatches.
+  - `batchValid` is a derived flag. Its causes are re-checked independently
+    and classified there. The flag itself is a mismatch only if it is not a
+    boolean, if a capture copy (or `batchInvalidReason`) differs from
+    run.json, or if it is false with no independently established cause.
+
 ## Known limits (documented, review1 non-blocking)
 
 - **N2:** mutation detection uses page `request` events. It does not cover

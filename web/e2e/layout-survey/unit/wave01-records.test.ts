@@ -847,6 +847,139 @@ describe('capture records and validate-run', () => {
       )
     ).toBe(true);
   });
+  // ── Ruling R-13: missing post-batch evidence ⇒ INCONCLUSIVE; contradictions ⇒ REJECTED.
+  const classify = (errs: string[]) =>
+    errs.length === 0
+      ? 'VALID'
+      : errs.some((e) => /mismatch:/.test(e))
+        ? 'REJECTED'
+        : 'INCONCLUSIVE';
+  /** The runner's derived flag on every copy (run.json + captures), with one reason. */
+  const derivedInvalid = (reason: string, mutRun?: (r: Record<string, any>) => void) =>
+    [
+      (c: Record<string, any>) =>
+        Object.assign(c, { batchValid: false, batchInvalidReason: reason }),
+      (r: Record<string, any>) => {
+        Object.assign(r, { batchValid: false, batchInvalidReason: reason });
+        mutRun?.(r);
+      },
+    ] as const;
+  it('R-13 (a): post-batch P-API/P-WEB not obtained (network error) ⇒ INCONCLUSIVE, derived batchValid=false not a mismatch', () => {
+    const errs = writeRun(
+      ...derivedInvalid(
+        'post-batch dev-auth probes P-API missing, P-WEB missing (E-ENV-1)',
+        (r) => {
+          r.envPostDevAuthProbes = { api: null, web: null };
+        }
+      )
+    );
+    expect(errs.some((e) => e.startsWith('missing: post-batch dev-auth probes'))).toBe(true);
+    expect(classify(errs)).toBe('INCONCLUSIVE');
+  });
+  it('R-13 (b): post-batch P-API HTTP 500 (unexplained) ⇒ INCONCLUSIVE', () => {
+    const errs = writeRun(
+      ...derivedInvalid(
+        'post-batch dev-auth probes P-API unexplained, P-WEB off (E-ENV-1)',
+        (r) => {
+          r.envPostDevAuthProbes = {
+            ...PROBES_OFF,
+            api: { status: 500, message: null, at: '2026-10-07T15:50:02Z' },
+          };
+        }
+      )
+    );
+    expect(classify(errs)).toBe('INCONCLUSIVE');
+  });
+  it('R-13 (c): post-batch anonymous probe never returned (status 0 / fetch error) ⇒ INCONCLUSIVE, not "≠ 401"', () => {
+    const errs = writeRun(
+      ...derivedInvalid('post-batch anonymous probe status 0 (E-ENV-2)', (r) => {
+        r.envPostSelfAnon401 = {
+          status: 0,
+          at: '2026-10-07T15:50:01Z',
+          error: 'TypeError: fetch failed',
+        };
+      })
+    );
+    expect(errs.some((e) => e.startsWith('missing: post-batch anonymous probe'))).toBe(true);
+    expect(classify(errs)).toBe('INCONCLUSIVE');
+    // also: probe record absent entirely
+    expect(
+      classify(
+        writeRun(
+          ...derivedInvalid('post-batch anonymous probe status undefined (E-ENV-2)', (r) => {
+            delete r.envPostSelfAnon401;
+          })
+        )
+      )
+    ).toBe('INCONCLUSIVE');
+  });
+  it('R-13: post-batch main.js not obtained ⇒ INCONCLUSIVE; obtained but different ⇒ REJECTED', () => {
+    expect(
+      classify(
+        writeRun(
+          (c) => {
+            c.mainJs.post = { status: 0, sha256: null, at: 'x', error: 'fetch failed' };
+            Object.assign(c, { batchValid: false, batchInvalidReason: 'r' });
+          },
+          (r) => Object.assign(r, { batchValid: false, batchInvalidReason: 'r' })
+        )
+      )
+    ).toBe('INCONCLUSIVE');
+    expect(
+      classify(
+        writeRun(
+          (c) => {
+            c.mainJs.post = { status: 200, sha256: 'f'.repeat(64), at: 'x' };
+            Object.assign(c, { batchValid: false, batchInvalidReason: 'r' });
+          },
+          (r) => Object.assign(r, { batchValid: false, batchInvalidReason: 'r' })
+        )
+      )
+    ).toBe('REJECTED');
+  });
+  it('R-13 control: post-batch P-API ON ⇒ REJECTED', () => {
+    const errs = writeRun(
+      ...derivedInvalid('post-batch dev-auth probes P-API on, P-WEB off (E-ENV-1 FAIL)', (r) => {
+        r.envPostDevAuthProbes = {
+          ...PROBES_OFF,
+          api: { ...PROBES_OFF.api, message: 'invalid development token' },
+        };
+      })
+    );
+    expect(errs.some((e) => e.startsWith('mismatch: post-batch dev-auth probe shows ON'))).toBe(
+      true
+    );
+    expect(classify(errs)).toBe('REJECTED');
+  });
+  it('R-13 control: an observed non-401 anonymous status (302 redirect) ⇒ REJECTED', () => {
+    expect(
+      classify(
+        writeRun(
+          ...derivedInvalid('post-batch anonymous probe status 302 (E-ENV-2)', (r) => {
+            r.envPostSelfAnon401 = { status: 302, at: '2026-10-07T15:50:01Z' };
+          })
+        )
+      )
+    ).toBe('REJECTED');
+  });
+  it('R-13 tamper controls: flag-copy inconsistency or a false flag with no established cause ⇒ REJECTED', () => {
+    // capture says false, run.json says true
+    expect(
+      writeRun((c) => Object.assign(c, { batchValid: false, batchInvalidReason: 'x' })).some((e) =>
+        e.includes('mismatch: batchValid differs from run.json')
+      )
+    ).toBe(true);
+    // every copy false but nothing independently explains it
+    const errs = writeRun(...derivedInvalid('unexplained'));
+    expect(errs).toContain('mismatch: batchValid false without an independently established cause');
+    expect(classify(errs)).toBe('REJECTED');
+    // malformed flag
+    expect(
+      writeRun(undefined, (r) => (r.batchValid = 'yes')).some((e) =>
+        e.includes('batchValid not boolean')
+      )
+    ).toBe(true);
+  });
   it('an aborted run never validates (review1 B4)', () => {
     expect(
       writeRun(undefined, (r) =>
