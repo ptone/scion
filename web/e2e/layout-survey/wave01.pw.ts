@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /**
- * ATTACH-ONLY Wave01 measurement batch (contract FROZEN rev 7).
+ * ATTACH-ONLY Wave01 measurement batch (contract FROZEN rev 8).
  *
  * Never builds, starts, seeds, resets or stops anything; registers no route
  * interception. Per batch: capture-host + suite-digest checks, Release pair

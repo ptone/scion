@@ -463,8 +463,9 @@ export async function twoFrames(page: Page): Promise<void> {
 }
 
 /**
- * Rev 7 §2 A-F1 rule (c): two unfocused full-style samples U1, U2 of every
- * focusable element in this context, separated by the SAME settle used after
+ * Rev 8 §2 A-F1: two unfocused full-style samples U1, U2 of every sampled
+ * node (each focusable element, its ::before/::after and every flat-tree
+ * ancestor) in this context, separated by the SAME settle used after
  * every key press (twoFrames), with no input in between. Never focuses or
  * scrolls. Shared by the batch runner and the real-Chromium selftests.
  */

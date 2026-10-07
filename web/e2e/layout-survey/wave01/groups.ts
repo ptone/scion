@@ -16,7 +16,7 @@
  * W01-S01 / W01-S02 adapter (/admin/groups default and fixture filter).
  * Groups-table clauses are the pilot finding rev 2 B-* definitions with
  * fixture IDs bound from Wave01 in-batch readback; shell clauses and A-F1
- * follow contract FROZEN rev 7.
+ * follow contract FROZEN rev 8.
  */
 
 import { AF1_N, NAV_TIMEOUT_MS, TOL, type ProfileId } from './contract.js';
@@ -40,6 +40,7 @@ import {
   type FixtureRowObs,
   type Observation,
   type Outcome,
+  pressForRaw,
   type PressRecord,
   type FocusBaseline,
 } from './evaluate.js';
@@ -585,7 +586,7 @@ export async function traverse(
   startPath: string | null;
   startReached: string[];
 }> {
-  // Rev 7 A-F1 (c): U1, settle, U2 before the first press (raw maps are
+  // Rev 8 A-F1: U1, settle, U2 before the first press (raw maps are
   // preserved in the M1 raw record).
   const baseline = await sampleFocusBaseline(ctx.page);
   const start = (await pe(ctx.page, {
@@ -630,6 +631,7 @@ export async function traverse(
       innerWidth: number;
       innerHeight: number;
       runningAnimations?: PressRecord['runningAnimations'];
+      focusNodes?: PressRecord['focusNodes'];
     };
     const reached = reachedBy(a.element?.path, targets);
     reached.forEach((r) => remaining.delete(r));
@@ -642,6 +644,7 @@ export async function traverse(
       element: a.element,
       reached,
       runningAnimations: a.runningAnimations ?? [],
+      focusNodes: a.focusNodes ?? {},
     });
     if (a.outside) break; // rev 3 §2 A-F1: focus leaving the page ends this direction
   }
@@ -654,7 +657,14 @@ export async function runM1Forward(ctx: SubstepCtx, state: StateDef, rb: Readbac
   const targets = await resolveTargets(ctx, state.af1Targets, rb);
   const limit = state.af1Targets.length ? AF1_N : 20;
   const t = await traverse(ctx, 'forward', targets, limit);
-  writeRaw(ctx, 'M1-forward.presses', { targets, ...t }, 'M1-raw');
+  // Rev 8: the raw record keeps the full U1/U2 maps, each press's element F,
+  // per-node differing property names and the element's indicator values.
+  writeRaw(
+    ctx,
+    'M1-forward.presses',
+    { targets, ...t, presses: t.presses.map((p) => pressForRaw(p, t.baseline)) },
+    'M1-raw'
+  );
   await screenshot(ctx, 'M1-forward.end.viewport', false, 'M1-screenshot');
   return { targets, ...t };
 }
@@ -674,7 +684,12 @@ export async function runM1Backward(
       'A-F1 retry: declared targets resolved differently than in the forward context'
     );
   const t = await traverse(ctx, 'backward', targets, AF1_N);
-  writeRaw(ctx, 'M1-backward.presses', { targets, ...t }, 'M1-raw');
+  writeRaw(
+    ctx,
+    'M1-backward.presses',
+    { targets, ...t, presses: t.presses.map((p) => pressForRaw(p, t.baseline)) },
+    'M1-raw'
+  );
   await screenshot(ctx, 'M1-backward.end.viewport', false, 'M1-screenshot');
   return t;
 }

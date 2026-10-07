@@ -349,6 +349,26 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
     return out;
   };
 
+  /**
+   * Rev 8 A-F1 sampled nodes of a focus candidate: the element, its
+   * ::before/::after pseudo-elements and every flat-tree ancestor up to the
+   * document root, keyed by node. Adds into `out` (shared nodes deduplicated).
+   */
+  const sampleNodes = (
+    el: Element,
+    out: Record<string, Record<string, string>> = {}
+  ): Record<string, Record<string, string>> => {
+    const p0 = deepPath(el);
+    if (!out[p0]) out[p0] = fullStyle(getComputedStyle(el));
+    if (!out[p0 + '::before']) out[p0 + '::before'] = fullStyle(getComputedStyle(el, '::before'));
+    if (!out[p0 + '::after']) out[p0 + '::after'] = fullStyle(getComputedStyle(el, '::after'));
+    for (let a = flatParent(el); a; a = flatParent(a)) {
+      const pa = deepPath(a);
+      if (!out[pa]) out[pa] = fullStyle(getComputedStyle(a));
+    }
+    return out;
+  };
+
   const styleVector = (cs: CSSStyleDeclaration): Record<string, string> => ({
     outlineStyle: cs.outlineStyle,
     outlineWidth: cs.outlineWidth,
@@ -671,7 +691,7 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
         innerHeight: window.innerHeight,
       };
     }
-    // Rev 7 A-F1 (c): CSS animations/transitions in play state `running` on
+    // Rev 8 A-F1: CSS animations/transitions in play state `running` on
     // the focused element or any flat-tree ancestor at the time F is sampled.
     const runningAnimations: Array<{ path: string; kind: string; name: string | null }> = [];
     for (let e: Element | null = a; e; e = flatParent(e)) {
@@ -692,17 +712,19 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
       tag: a.localName,
       element: measureEl(a, req.policies, req.policyContext, req.actionable, true),
       runningAnimations,
+      // Rev 8: F for every sampled node (element, ::before/::after, flat-tree ancestors).
+      focusNodes: sampleNodes(a),
     };
   }
 
   if (req.op === 'focus-baseline') {
-    // Unfocused style vectors of every focusable element, keyed by path,
+    // Rev 8 A-F1: unfocused full computed style of every sampled node of every
+    // focusable element — the element, its ::before/::after, and every
+    // flat-tree ancestor — keyed by node (path, path::before, path::after),
     // captured before the first key press in the same context.
     const out: Record<string, Record<string, string>> = {};
     for (const el of allDeep(document)) {
-      if ((el as HTMLElement).tabIndex >= 0 || el.localName === 'a') {
-        out[deepPath(el)] = fullStyle(getComputedStyle(el));
-      }
+      if ((el as HTMLElement).tabIndex >= 0 || el.localName === 'a') sampleNodes(el, out);
     }
     return out;
   }

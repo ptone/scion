@@ -28,6 +28,7 @@ import {
   evalBOVR,
   hitTest,
   pressChecks,
+  pressForRaw,
   EMPTY_BASELINE,
   renderedTextEquals,
   resolveObservations,
@@ -487,23 +488,31 @@ describe('B-* groups clauses (pilot finding rev 2)', () => {
   });
 });
 
-describe('A-F1 keyboard (rev 7 rules, no repair)', () => {
-  const focused = (path: string, over: Parameters<typeof el>[0] = {}) =>
-    el({
-      path,
-      style: {
-        outlineStyle: 'solid',
-        outlineWidth: '2px',
-        boxShadow: 'none',
-        color: 'rgb(0, 0, 0)',
-      },
-      ...over,
-    });
+describe('A-F1 keyboard (rev 8 rules + ruling R-16, no repair)', () => {
+  type St = Record<string, string>;
+  const BASE: St = {
+    'outline-style': 'none',
+    'outline-width': '0px',
+    'outline-color': 'rgb(0, 0, 0)',
+    'outline-offset': '0px',
+    'box-shadow': 'none',
+    color: 'rgb(0, 0, 0)',
+    'background-color': 'rgba(0, 0, 0, 0)',
+  };
+  const RING: St = {
+    'outline-style': 'solid',
+    'outline-width': '2px',
+    'outline-color': 'rgb(0, 0, 255)',
+  };
+  const ANC = 'html>body';
+  /** A focused element with F = BASE + over, plus pseudo/ancestor F nodes. */
+  const fe = (path: string, over: St = {}) => el({ path, style: { ...BASE, ...over } });
   const press = (
     n: number,
     element: RawElement | null,
     reached: string[] = [],
-    direction: 'forward' | 'backward' = 'forward'
+    direction: 'forward' | 'backward' = 'forward',
+    extra: Partial<PressRecord> = {}
   ): PressRecord => ({
     direction,
     press: n,
@@ -512,203 +521,221 @@ describe('A-F1 keyboard (rev 7 rules, no repair)', () => {
     innerHeight: VH,
     element,
     reached,
+    focusNodes: element
+      ? { [`${element.path}::before`]: BASE, [`${element.path}::after`]: BASE, [ANC]: BASE }
+      : undefined,
+    ...extra,
   });
-  it('all targets reached with visible indicator ⇒ pass', () => {
-    const r = evalAF1({
-      targets: ['a', 'b'],
-      forward: [
-        press(1, focused('x')),
-        press(2, focused('btn'), ['a']),
-        press(3, focused('link'), ['b']),
-      ],
-      backward: null,
-      baselineForward: EMPTY_BASELINE,
-      baselineBackward: null,
-      startReached: [],
-    });
-    expect(r.outcome).toBe('pass');
-  });
-  // Rev 7 §2 A-F1: an indicator is established only by (a)/(b) on F; rule (c)
-  // yields FAIL (fully static) or INCONCLUSIVE, never PASS.
-  const bl = (path: string, u1: Record<string, string>, u2: Record<string, string> = u1) => ({
-    u1: { [path]: u1 },
-    u2: { [path]: u2 },
-  });
+  /** Stable baseline (U1 = U2) for the given element paths, all nodes = BASE unless overridden. */
+  const stableBl = (paths: string[], over: Record<string, St> = {}) => {
+    const m: Record<string, St> = { [ANC]: BASE };
+    for (const p of paths) {
+      m[p] = BASE;
+      m[`${p}::before`] = BASE;
+      m[`${p}::after`] = BASE;
+    }
+    Object.assign(m, over);
+    return { u1: { ...m }, u2: { ...m } };
+  };
   const anim = [{ path: 'p', kind: 'CSSAnimation', name: 'pulse' }];
-  it('rev 7: (a) outline or (b) box-shadow on F ⇒ PASS, with and without baseline', () => {
-    expect(pressChecks(press(1, focused('p')), EMPTY_BASELINE)).toMatchObject({
-      indicator: 'present',
-      decidedBy: 'outline',
-      result: 'pass',
-      baselineMissing: true,
-    });
-    const shadow = el({ path: 'p', style: { ...el({}).style, boxShadow: '0 0 0 2px blue' } });
-    expect(pressChecks(press(1, shadow), EMPTY_BASELINE)).toMatchObject({
-      decidedBy: 'box-shadow',
-      result: 'pass',
-    });
-    expect(pressChecks(press(1, shadow), bl('p', { ...el({}).style }))).toMatchObject({
-      decidedBy: 'box-shadow',
+
+  it('R-16 1: outline APPEARS on focus with a stable complete baseline ⇒ PASS', () => {
+    const c = pressChecks(press(1, fe('p', RING)), stableBl(['p']));
+    expect(c).toMatchObject({
+      decidedBy: 'outline-appears',
       result: 'pass',
       baselineMissing: false,
     });
-    // (a) still decides even with a running animation at F.
+    expect(c.indicatorValuesU2).toMatchObject({ 'outline-style': 'none', 'box-shadow': 'none' });
+    expect(c.indicatorValuesF).toMatchObject({ 'outline-style': 'solid', 'outline-width': '2px' });
+  });
+  it('R-16 1: box-shadow APPEARS on focus ⇒ PASS', () => {
     expect(
-      pressChecks({ ...press(1, focused('p')), runningAnimations: anim }, EMPTY_BASELINE).result
-    ).toBe('pass');
+      pressChecks(press(1, fe('p', { 'box-shadow': '0 0 0 3px red' })), stableBl(['p']))
+    ).toMatchObject({ decidedBy: 'box-shadow-appears', result: 'pass' });
   });
-  it('rev 7 (c): fully static (U1 = U2, no animation, F = U2 non-outline) ⇒ no indicator ⇒ FAIL', () => {
-    const plain = el({ path: 'p' });
-    const c = pressChecks(press(1, plain), bl('p', { ...plain.style }));
-    expect(c).toMatchObject({
-      indicator: 'absent',
-      decidedBy: 'static-no-indicator',
-      result: 'fail',
-      diffU1U2: [],
-      diffU2F: [],
+  it('R-16 1: an appearing outline decides PASS even if an ancestor also changed', () => {
+    const p = press(1, fe('p', RING), [], 'forward', {
+      focusNodes: { 'p::before': BASE, 'p::after': BASE, [ANC]: { ...BASE, color: 'red' } },
     });
-    expect(
-      evalAF1({
-        targets: [],
-        forward: [press(1, plain)],
-        backward: null,
-        baselineForward: bl('p', { ...plain.style }),
-        baselineBackward: null,
-        startReached: [],
-      }).outcome
-    ).toBe('fail');
+    expect(pressChecks(p, stableBl(['p'])).result).toBe('pass');
   });
-  it('rev 7 (c): an outline-* change only (Chromium UA outline-offset) is still static ⇒ FAIL', () => {
-    const f = el({ path: 'p', style: { ...el({}).style, 'outline-offset': '1px' } });
-    const u = { ...f.style, 'outline-offset': '0px' };
-    expect(pressChecks(press(1, f), bl('p', u, { ...u }))).toMatchObject({
-      decidedBy: 'static-no-indicator',
-      result: 'fail',
-      diffU2F: [],
-    });
-  });
-  it('rev 7 (c): a stable non-outline focus change (U1 = U2 ≠ F) ⇒ INCONCLUSIVE, never PASS (open coverage)', () => {
-    const plain = el({ path: 'p' });
-    const u = { ...plain.style, color: 'rgb(9, 9, 9)' };
-    const c = pressChecks(press(1, plain), bl('p', u, { ...u }));
-    expect(c).toMatchObject({
-      indicator: 'undeterminable',
-      decidedBy: 'undeterminable',
-      result: 'inconclusive',
-      diffU2F: ['color'],
-      indicatorBy: null,
-    });
-    const r = evalAF1({
-      targets: [],
-      forward: [press(1, plain)],
-      backward: null,
-      baselineForward: bl('p', u, { ...u }),
-      baselineBackward: null,
-      startReached: [],
-    });
-    expect(r.outcome).toBe('inconclusive');
-  });
-  it('rev 7 (c): U1 ≠ U2 ⇒ INCONCLUSIVE', () => {
-    const plain = el({ path: 'p' });
-    const c = pressChecks(
-      press(1, plain),
-      bl('p', { ...plain.style, color: 'rgb(1, 1, 1)' }, { ...plain.style })
-    );
-    expect(c).toMatchObject({ result: 'inconclusive', diffU1U2: ['color'] });
-  });
-  it('rev 7 (c): U1 ≠ U2 on an outline-* property only is not "U1 = U2 in every property" ⇒ INCONCLUSIVE', () => {
-    const plain = el({ path: 'p' });
-    const c = pressChecks(
-      press(1, plain),
-      bl('p', { ...plain.style, outlineWidth: '1px' }, { ...plain.style })
-    );
-    expect(c).toMatchObject({
-      result: 'inconclusive',
-      diffU1U2: [],
-      anyDiffU1U2: ['outlineWidth'],
-    });
-  });
-  it('rev 7 (c): running animation at F with an otherwise static element ⇒ INCONCLUSIVE; recorded', () => {
-    const plain = el({ path: 'p' });
-    const c = pressChecks(
-      { ...press(1, plain), runningAnimations: anim },
-      bl('p', { ...plain.style })
-    );
-    expect(c).toMatchObject({ result: 'inconclusive', runningAnimations: anim });
-  });
-  it('rev 7 (c): animation AND a stable font-weight focus change ⇒ INCONCLUSIVE', () => {
-    const f = el({ path: 'p', style: { ...el({}).style, 'font-weight': '700' } });
-    const u = { ...f.style, 'font-weight': '400' };
-    expect(
-      pressChecks({ ...press(1, f), runningAnimations: anim }, bl('p', u, { ...u })).result
-    ).toBe('inconclusive');
-  });
-  it('rev 7 (c): no U1/U2 baseline and no (a)/(b) ⇒ INCONCLUSIVE, baselineMissing recorded', () => {
-    expect(pressChecks(press(1, el({ path: 'p' })), EMPTY_BASELINE)).toMatchObject({
+  it('R-16 2: no baseline ⇒ INCONCLUSIVE even with an outline on F', () => {
+    expect(pressChecks(press(1, fe('p', RING)), EMPTY_BASELINE)).toMatchObject({
       result: 'inconclusive',
       baselineMissing: true,
     });
   });
-  it('rev 7: visibility/hit failures FAIL independently of the indicator (incl. undeterminable)', () => {
+  it('R-16 2: baseline missing for a pseudo-element node only ⇒ INCONCLUSIVE', () => {
+    const bl = stableBl(['p']);
+    delete bl.u1['p::after'];
+    delete bl.u2['p::after'];
+    expect(pressChecks(press(1, fe('p', RING)), bl)).toMatchObject({
+      result: 'inconclusive',
+      baselineMissing: true,
+    });
+  });
+  it('R-16 2: U1 ≠ U2 on an ancestor ⇒ INCONCLUSIVE even with an appearing outline', () => {
+    const bl = stableBl(['p']);
+    bl.u1[ANC] = { ...BASE, color: 'rgb(1, 1, 1)' };
+    const c = pressChecks(press(1, fe('p', RING)), bl);
+    expect(c).toMatchObject({ result: 'inconclusive' });
+    expect(c.nodeDiffsU1U2).toEqual({ [ANC]: ['color'] });
+  });
+  it('R-16 2: running animation at F ⇒ INCONCLUSIVE even with an appearing outline', () => {
+    expect(
+      pressChecks(
+        press(1, fe('p', RING), [], 'forward', { runningAnimations: anim }),
+        stableBl(['p'])
+      ).result
+    ).toBe('inconclusive');
+  });
+  it('R-16 2: persistent outline unchanged on focus ⇒ INCONCLUSIVE (never PASS or FAIL)', () => {
+    const c = pressChecks(press(1, fe('p', RING)), stableBl(['p'], { p: { ...BASE, ...RING } }));
+    expect(c).toMatchObject({ result: 'inconclusive', decidedBy: 'undeterminable' });
+    expect(c.undeterminableReasons).toContain(
+      'outline or box-shadow present in both U2 and F (persistent)'
+    );
+  });
+  it('R-16 2: persistent outline whose colour changes on focus ⇒ INCONCLUSIVE (outline-* exclusion does not apply)', () => {
+    const c = pressChecks(
+      press(1, fe('p', { ...RING, 'outline-color': 'rgb(255, 0, 0)' })),
+      stableBl(['p'], { p: { ...BASE, ...RING } })
+    );
+    expect(c.result).toBe('inconclusive');
+  });
+  it('R-16 2: persistent box-shadow unchanged ⇒ INCONCLUSIVE', () => {
+    const sh = { 'box-shadow': '0 0 0 1px rgb(204, 204, 204)' };
+    expect(
+      pressChecks(press(1, fe('p', sh)), stableBl(['p'], { p: { ...BASE, ...sh } })).result
+    ).toBe('inconclusive');
+  });
+  it('R-16 2: non-outline element change (background) ⇒ INCONCLUSIVE', () => {
+    const c = pressChecks(
+      press(1, fe('p', { 'background-color': 'rgb(255, 255, 0)' })),
+      stableBl(['p'])
+    );
+    expect(c).toMatchObject({ result: 'inconclusive' });
+    expect(c.nodeDiffsU2F).toEqual({ p: ['background-color'] });
+  });
+  it('R-16 2: :focus-within style on an ancestor (element static) ⇒ INCONCLUSIVE', () => {
+    const p = press(1, fe('p'), [], 'forward', {
+      focusNodes: { 'p::before': BASE, 'p::after': BASE, [ANC]: { ...BASE, ...RING } },
+    });
+    const c = pressChecks(p, stableBl(['p']));
+    expect(c).toMatchObject({ result: 'inconclusive' });
+    expect(c.undeterminableReasons).toContain('U2/F difference on a pseudo-element or ancestor');
+  });
+  it('R-16 2: ::after focus underline (element static) ⇒ INCONCLUSIVE', () => {
+    const p = press(1, fe('p'), [], 'forward', {
+      focusNodes: {
+        'p::before': BASE,
+        'p::after': { ...BASE, 'background-color': 'blue' },
+        [ANC]: BASE,
+      },
+    });
+    expect(pressChecks(p, stableBl(['p'])).nodeDiffsU2F).toEqual({
+      'p::after': ['background-color'],
+    });
+    expect(pressChecks(p, stableBl(['p'])).result).toBe('inconclusive');
+  });
+  it('R-16 3: fully static (no change on any sampled node) ⇒ FAIL', () => {
+    const c = pressChecks(press(1, fe('p')), stableBl(['p']));
+    expect(c).toMatchObject({ decidedBy: 'static-no-indicator', result: 'fail' });
+    expect(c.nodeDiffsU2F).toEqual({});
+    expect(c.sampledNodes).toEqual([ANC, 'p', 'p::after', 'p::before'].sort());
+  });
+  it('R-16 3: outline-offset-only change while outline none (UA :focus-visible) ⇒ FAIL', () => {
+    expect(
+      pressChecks(press(1, fe('p', { 'outline-offset': '1px' })), stableBl(['p']))
+    ).toMatchObject({ decidedBy: 'static-no-indicator', result: 'fail' });
+  });
+  it('visibility/hit failures FAIL independently of an appearing outline', () => {
     const off = el({
       path: 'p',
+      style: { ...BASE, ...RING },
       box: { y: 2000 },
       hit: { cx: 35, cy: 2010, inViewport: false, hitPath: null, ok: false },
     });
-    expect(pressChecks(press(1, off), EMPTY_BASELINE).result).toBe('fail');
-    expect(
-      pressChecks(press(1, { ...focused('p'), box: off.box, hit: off.hit }), EMPTY_BASELINE).result
-    ).toBe('fail');
-  });
-  it('rev 7: FAIL dominates INCONCLUSIVE in the aggregate', () => {
-    const plain = el({ path: 'q' });
-    expect(
-      evalAF1({
-        targets: [],
-        forward: [press(1, el({ path: 'p' })), press(2, plain)],
-        backward: null,
-        baselineForward: bl('q', { ...plain.style }),
-        baselineBackward: null,
-        startReached: [],
-      }).outcome
-    ).toBe('fail');
-  });
-  it('focus offscreen (no native scroll repair) fails', () => {
-    const off = focused('o', {
-      box: { y: 2000 },
-      hit: { cx: 35, cy: 2010, inViewport: false, hitPath: null, ok: false },
+    expect(pressChecks(press(1, off), stableBl(['p']))).toMatchObject({
+      decidedBy: 'outline-appears',
+      result: 'fail',
+      visible: false,
     });
-    expect(pressChecks(press(1, off), EMPTY_BASELINE)).toMatchObject({ visible: false, ok: false });
   });
-  it('focus hidden by an intentional scroller (outside its visible area) fails', () => {
+  it('focus hidden by an intentional scroller (outside its visible area) fails visibility', () => {
     const content = chain({
       path: '.content',
       overflowY: 'auto',
       padBox: { left: 0, top: 60, right: VW, bottom: 400 },
       policies: ['POL-V-APP-CONTENT'],
     });
-    const hidden = focused('h', { box: { y: 500 }, chain: [content, viewport()] });
-    expect(pressChecks(press(1, hidden), EMPTY_BASELINE).visible).toBe(false);
+    const hidden = el({
+      path: 'h',
+      style: { ...BASE, ...RING },
+      box: { y: 500 },
+      chain: [content, viewport()],
+    });
+    expect(pressChecks(press(1, hidden), stableBl(['h'])).visible).toBe(false);
+  });
+  it('aggregate: all targets reached with appearing outlines ⇒ PASS; FAIL dominates INCONCLUSIVE', () => {
+    const bl = stableBl(['x', 'btn', 'link', 'q', 'r']);
+    expect(
+      evalAF1({
+        targets: ['a', 'b'],
+        forward: [
+          press(1, fe('x', RING)),
+          press(2, fe('btn', RING), ['a']),
+          press(3, fe('link', RING), ['b']),
+        ],
+        backward: null,
+        baselineForward: bl,
+        baselineBackward: null,
+        startReached: [],
+      }).outcome
+    ).toBe('pass');
+    expect(
+      evalAF1({
+        targets: [],
+        forward: [press(1, fe('q', { 'background-color': 'red' })), press(2, fe('r'))],
+        backward: null,
+        baselineForward: bl,
+        baselineBackward: null,
+        startReached: [],
+      }).outcome
+    ).toBe('fail');
+    expect(
+      evalAF1({
+        targets: [],
+        forward: [press(1, fe('q', RING)), press(2, fe('r', { 'background-color': 'red' }))],
+        backward: null,
+        baselineForward: bl,
+        baselineBackward: null,
+        startReached: [],
+      }).outcome
+    ).toBe('inconclusive');
   });
   it('focus-outside-document ends the direction ungraded; Shift+Tab retry can still reach the target', () => {
+    const bl = stableBl(['x', 'btn']);
     const r = evalAF1({
       targets: ['a'],
-      forward: [press(1, focused('x')), press(2, null)],
-      backward: [press(1, focused('btn'), ['a'], 'backward')],
-      baselineForward: EMPTY_BASELINE,
-      baselineBackward: EMPTY_BASELINE,
+      forward: [press(1, fe('x', RING)), press(2, null)],
+      backward: [press(1, fe('btn', RING), ['a'], 'backward')],
+      baselineForward: bl,
+      baselineBackward: bl,
       startReached: [],
     });
     expect(r.outcome).toBe('pass');
     expect(JSON.stringify(r.details)).toContain('focus-outside-document');
   });
   it('target unreached in both directions ⇒ fail', () => {
+    const bl = stableBl(['x']);
     const r = evalAF1({
       targets: ['a'],
-      forward: [press(1, focused('x'))],
+      forward: [press(1, fe('x', RING))],
       backward: [press(1, null, [], 'backward')],
-      baselineForward: EMPTY_BASELINE,
-      baselineBackward: EMPTY_BASELINE,
+      baselineForward: bl,
+      baselineBackward: bl,
       startReached: [],
     });
     expect(r.outcome).toBe('fail');
@@ -725,6 +752,17 @@ describe('A-F1 keyboard (rev 7 rules, no repair)', () => {
         startReached: ['a'],
       }).outcome
     ).toBe('pass');
+  });
+  it('pressForRaw drops the per-node F maps and keeps per-node names and indicator values', () => {
+    const p = press(1, fe('p', RING));
+    const raw = pressForRaw(p, stableBl(['p']));
+    expect(raw).not.toHaveProperty('focusNodes');
+    expect(raw).toMatchObject({
+      sampledNodes: [ANC, 'p', 'p::after', 'p::before'].sort(),
+      indicatorValuesF: { 'outline-style': 'solid' },
+    });
+    expect(raw.nodeDiffsU2F).toHaveProperty('p');
+    expect(raw.element?.style).toBeDefined();
   });
 });
 

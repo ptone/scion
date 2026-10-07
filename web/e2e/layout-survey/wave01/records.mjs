@@ -452,9 +452,14 @@ export const PROVENANCE_COMPARED_FIELDS = [
 ];
 export function provenanceEnvKey(prov) {
   if (!isObj(prov)) return null;
+  // Ruling R-15 (review6 RB6-1): a field not recorded on this side is OMITTED,
+  // never encoded as a value, so the comparison treats it as one-sided.
   return provenanceKey(
     Object.fromEntries(
-      PROVENANCE_COMPARED_FIELDS.map((k) => [k, k in prov ? prov[k] : '<missing>'])
+      PROVENANCE_COMPARED_FIELDS.filter((k) => k in prov && prov[k] !== undefined).map((k) => [
+        k,
+        prov[k],
+      ])
     )
   );
 }
@@ -469,9 +474,11 @@ export function provenanceEnvKey(prov) {
 export function provenanceEnvDiff(pre, post) {
   /** @type {string[]} */ const differs = [];
   /** @type {string[]} */ const oneSided = [];
+  // R-15: the legacy '<missing>' sentinel (older comparison keys) is never a value.
+  const recorded = (v) => v !== undefined && v !== null && v !== '<missing>';
   const rec = (a, b, at) => {
-    const ra = a !== undefined && a !== null;
-    const rb = b !== undefined && b !== null;
+    const ra = recorded(a);
+    const rb = recorded(b);
     if (!ra && !rb) return;
     if (ra !== rb) return void oneSided.push(at);
     if (isObj(a) && isObj(b)) {
@@ -1051,7 +1058,7 @@ export function validateCapture(rec) {
   if (rec.schemaVersion !== 1) errs.push('schemaVersion must be 1');
   if (rec.kind !== CAPTURE_KIND) errs.push(`kind must be ${CAPTURE_KIND}`);
   if (rec.contractSha256 !== CONTRACT_SHA256)
-    errs.push('contractSha256 is not the pinned FROZEN rev 7 digest');
+    errs.push('contractSha256 is not the pinned FROZEN rev 8 digest');
   if (!SUBSTEPS.includes(rec.substep)) errs.push(`substep ${rec.substep} invalid`);
   if (!STATUSES.includes(rec.status)) errs.push(`status ${rec.status} invalid`);
   if (rec.status !== 'complete' && isEmpty(rec.errorReason))

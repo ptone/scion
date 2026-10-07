@@ -147,11 +147,14 @@ test('native Tab focus resolves to the deep element inside a shadow-hosted targe
   let reached = false;
   for (let i = 0; i < 10 && !reached; i++) {
     await page.keyboard.press('Tab');
+    await twoFrames(page);
     const a = await run<{
       outside: boolean;
       element: RawElement | null;
       innerWidth: number;
       innerHeight: number;
+      runningAnimations?: Array<{ path: string; kind: string; name: string | null }>;
+      focusNodes?: Record<string, Record<string, string>>;
     }>(page, req({ op: 'active', policies: POLICIES, policyContext: [], actionable: ACTIONABLE }));
     if (a.element && a.element.path.startsWith(hostPath + '>')) {
       reached = true;
@@ -165,10 +168,14 @@ test('native Tab focus resolves to the deep element inside a shadow-hosted targe
           innerHeight: a.innerHeight,
           element: a.element,
           reached: [],
+          runningAnimations: a.runningAnimations ?? [],
+          focusNodes: a.focusNodes ?? {},
         },
         baseline
       );
-      expect(c.indicator, 'focus-visible outline detected').toBe('present');
+      expect(c.indicator, `focus-visible outline appears (${JSON.stringify(c)})`).toBe('present');
+      expect(c.sampledNodes.some((k) => k.endsWith('::after'))).toBe(true);
+      expect(c.sampledNodes.some((k) => k === hostPath)).toBe(true);
       expect(c.hit).toBe(true);
     }
   }
@@ -226,6 +233,14 @@ const HTML2 = `<!doctype html><html><head><style>
   #slow{outline:none;animation:slow 60s linear infinite}
   #ring:focus-visible{outline:2px solid rgb(0,0,255)}
   #shadow:focus-visible{outline:none;box-shadow:0 0 0 3px rgb(0,0,255)}
+  #permring{outline:2px solid rgb(0,128,0)}
+  #permshadow{outline:none;box-shadow:0 0 0 1px rgb(204,204,204)}
+  #fwwrap{display:inline-block}
+  #fwwrap:focus-within{outline:3px solid rgb(0,128,0)}
+  #fwl{outline:none}
+  #under{outline:none;position:relative}
+  #under::after{content:'';position:absolute;left:0;right:0;bottom:-2px;height:2px;background:transparent}
+  #under:focus-visible::after{background:rgb(0,0,255)}
 </style></head><body>
 <a id="noring" href="#a" style="outline:none">No ring</a>
 <a id="zero" href="#b" style="outline:0">Zero outline</a>
@@ -238,6 +253,10 @@ const HTML2 = `<!doctype html><html><head><style>
 <a id="slow" href="#i">Slow animation, no focus style</a>
 <a id="ring" href="#j">Outline focus style</a>
 <a id="shadow" href="#k">Box-shadow focus style</a>
+<a id="permring" href="#l">Permanent outline</a>
+<a id="permshadow" href="#m">Permanent box-shadow</a>
+<span id="fwwrap"><a id="fwl" href="#n">Focus-within wrapper indicator</a></span>
+<a id="under" href="#o">::after focus underline</a>
 <span id="ws-normal" style="white-space:normal">Double  Space
   wrapped</span>
 <span id="ws-pre" style="white-space:pre-wrap">A  B</span>
@@ -270,9 +289,10 @@ async function tabTo(page: Page, id: string) {
       innerWidth: number;
       innerHeight: number;
       runningAnimations?: Array<{ path: string; kind: string; name: string | null }>;
+      focusNodes?: Record<string, Record<string, string>>;
     }>(page, req({ op: 'active', policies: POLICIES, policyContext: [], actionable: ACTIONABLE }));
     if (a.element?.idAttr === id) {
-      return pressChecks(
+      const c = pressChecks(
         {
           direction: 'forward',
           press: i + 1,
@@ -282,15 +302,17 @@ async function tabTo(page: Page, id: string) {
           element: a.element,
           reached: [],
           runningAnimations: a.runningAnimations ?? [],
+          focusNodes: a.focusNodes ?? {},
         },
         baseline
       );
+      return { ...c, path: a.element.path, elDiffU2F: c.nodeDiffsU2F?.[a.element.path] ?? [] };
     }
   }
   throw new Error(`never focused #${id}`);
 }
 
-test('B1 negative control: static outline:none / outline:0 with no other change has NO indicator ⇒ FAIL (rev 7 (c))', async ({
+test('B1 negative control: static outline:none / outline:0 with no change on any sampled node ⇒ FAIL (rev 8 / R-16)', async ({
   page,
 }) => {
   await page.setContent(HTML2);
@@ -305,16 +327,99 @@ test('B1 negative control: static outline:none / outline:0 with no other change 
   expect(zero, JSON.stringify(zero)).toMatchObject({ indicator: 'absent', result: 'fail' });
 });
 
-test('rev 7: a real outline or box-shadow focus style ⇒ PASS (rule (a)/(b))', async ({ page }) => {
+test('rev 8: a focus ring or box-shadow that APPEARS on focus ⇒ PASS', async ({ page }) => {
   await page.setContent(HTML2);
   const ring = await tabTo(page, 'ring');
-  expect(ring, JSON.stringify(ring)).toMatchObject({ decidedBy: 'outline', result: 'pass' });
+  expect(ring, JSON.stringify(ring)).toMatchObject({
+    decidedBy: 'outline-appears',
+    result: 'pass',
+  });
+  expect(ring.indicatorValuesU2).toMatchObject({ 'outline-style': 'none' });
+  expect(ring.indicatorValuesF).toMatchObject({ 'outline-style': 'solid', 'outline-width': '2px' });
   await page.setContent(HTML2);
   const shadow = await tabTo(page, 'shadow');
-  expect(shadow, JSON.stringify(shadow)).toMatchObject({ decidedBy: 'box-shadow', result: 'pass' });
+  expect(shadow, JSON.stringify(shadow)).toMatchObject({
+    decidedBy: 'box-shadow-appears',
+    result: 'pass',
+  });
 });
 
-test('rev 7 (c): a stable background focus change ⇒ INCONCLUSIVE (candidate indicator, never PASS)', async ({
+test('rev 8 / R-16: a permanent outline or box-shadow unchanged on focus ⇒ INCONCLUSIVE (never PASS or FAIL)', async ({
+  page,
+}) => {
+  for (const id of ['permring', 'permshadow']) {
+    await page.setContent(HTML2);
+    const c = await tabTo(page, id);
+    expect(c, JSON.stringify(c)).toMatchObject({ result: 'inconclusive', indicatorBy: null });
+    expect(c.undeterminableReasons).toContain(
+      'outline or box-shadow present in both U2 and F (persistent)'
+    );
+  }
+});
+
+test('rev 8: a :focus-within wrapper outline (element static) ⇒ INCONCLUSIVE, change recorded on the ancestor', async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const c = await tabTo(page, 'fwl');
+  expect(c, JSON.stringify(c)).toMatchObject({ result: 'inconclusive' });
+  const anc = Object.keys(c.nodeDiffsU2F ?? {}).filter((k) => k !== c.path);
+  expect(anc.some((k) => k.includes('#fwwrap'))).toBe(true);
+});
+
+test('rev 8: an ::after focus underline (element static) ⇒ INCONCLUSIVE, change recorded on ::after', async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const c = await tabTo(page, 'under');
+  expect(c, JSON.stringify(c)).toMatchObject({ result: 'inconclusive' });
+  expect(c.nodeDiffsU2F?.[`${c.path}::after`]).toContain('background-color');
+});
+
+test('rev 8: no baseline (element inserted after U1/U2) + a ring on F ⇒ INCONCLUSIVE', async ({
+  page,
+}) => {
+  await page.setContent(
+    '<!doctype html><style>a{display:inline-block}#late:focus-visible{outline:2px solid blue}</style><div id="w"></div>'
+  );
+  const baseline = await sampleFocusBaseline(page);
+  await page.evaluate(() => {
+    const a = document.createElement('a');
+    a.id = 'late';
+    a.href = '#l';
+    a.textContent = 'late';
+    document.getElementById('w')!.appendChild(a);
+  });
+  await page.keyboard.press('Tab');
+  await twoFrames(page);
+  const a = await run<{
+    outside: boolean;
+    element: RawElement | null;
+    innerWidth: number;
+    innerHeight: number;
+    runningAnimations?: Array<{ path: string; kind: string; name: string | null }>;
+    focusNodes?: Record<string, Record<string, string>>;
+  }>(page, req({ op: 'active', policies: POLICIES, policyContext: [], actionable: ACTIONABLE }));
+  expect(a.element?.idAttr).toBe('late');
+  const c = pressChecks(
+    {
+      direction: 'forward',
+      press: 1,
+      outside: false,
+      innerWidth: a.innerWidth,
+      innerHeight: a.innerHeight,
+      element: a.element,
+      reached: [],
+      runningAnimations: a.runningAnimations ?? [],
+      focusNodes: a.focusNodes ?? {},
+    },
+    baseline
+  );
+  expect(c, JSON.stringify(c)).toMatchObject({ result: 'inconclusive', baselineMissing: true });
+  expect(c.indicatorValuesF).toMatchObject({ 'outline-style': 'solid' });
+});
+
+test('rev 8: a stable background focus change ⇒ INCONCLUSIVE (candidate indicator, never PASS)', async ({
   page,
 }) => {
   await page.setContent(HTML2);
@@ -324,8 +429,10 @@ test('rev 7 (c): a stable background focus change ⇒ INCONCLUSIVE (candidate in
     result: 'inconclusive',
     indicatorBy: null,
   });
-  expect(bg.diffU2F).toContain('background-color');
-  expect(bg.diffU2F!.some((k) => k.startsWith('outline'))).toBe(false);
+  expect(bg.elDiffU2F).toContain('background-color');
+  // Per-node names are recorded raw (outline-* included, e.g. the UA
+  // outline-offset); the only non-outline element change is the background.
+  expect(bg.elDiffU2F.filter((k) => !k.startsWith('outline'))).toEqual(['background-color']);
 });
 
 test('rev 3 rendered-text rule against real innerText and computed white-space', async ({
@@ -383,20 +490,20 @@ test('R-5 real-Chromium control: NBSP and U+3000 stay significant in innerText a
   expect(renderedTextEquals(e.innerText, 'A B C', e.whiteSpace).equal).toBe(false);
 });
 
-test('O2 (rev 7): stable font-weight / border-left-width focus changes ⇒ INCONCLUSIVE (open coverage)', async ({
+test('O2 (rev 8): stable font-weight / border-left-width focus changes ⇒ INCONCLUSIVE (open coverage)', async ({
   page,
 }) => {
   await page.setContent(HTML2);
   const fw = await tabTo(page, 'fw');
   expect(fw, JSON.stringify(fw)).toMatchObject({ result: 'inconclusive', indicatorBy: null });
-  expect(fw.diffU2F).toContain('font-weight');
+  expect(fw.elDiffU2F).toContain('font-weight');
   await page.setContent(HTML2);
   const blw = await tabTo(page, 'blw');
   expect(blw, JSON.stringify(blw)).toMatchObject({ result: 'inconclusive', indicatorBy: null });
-  expect(blw.diffU2F).toContain('border-left-width');
+  expect(blw.elDiffU2F).toContain('border-left-width');
 });
 
-// ─── rev 7 A-F1 (c) animation controls (review4 O-b, review5 O-1) ───────
+// ─── rev 8 A-F1 animation controls (review4 O-b, review5 O-1) ────────────
 
 for (const [id, label] of [
   ['anim', 'review4 O-b: running alternate animation, no focus style'],
@@ -404,7 +511,7 @@ for (const [id, label] of [
   ['slow', 'review5 O-1: 60 s linear animation, no focus style'],
   ['animfw', 'animation AND a stable font-weight focus style'],
 ] as const)
-  test(`rev 7 (c) ${label} ⇒ INCONCLUSIVE (never PASS); running animation recorded`, async ({
+  test(`rev 8 ${label} ⇒ INCONCLUSIVE (never PASS); running animation recorded`, async ({
     page,
   }) => {
     await page.setContent(HTML2);

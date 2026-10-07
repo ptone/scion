@@ -51,6 +51,18 @@
  *   restart.mjs    1769 B 80797fdbd4acf7d2156283db6b2de3e5192d07473a38a4811ee43622799021da (O-2 ⇒ ruling R-14, below)
  *   o-slow.mjs     1951 B 36f24d8cb509317215e75eea4ce3be708956e61f7d3a82897824c14768909eef (O-1 ⇒ contract rev 6/7;
  *                  real-Chromium steps(1)/60 s controls in wave01-probe.selftest.pw.ts)
+ *
+ * review6 round 1 (report wl-wave1-runner-review6-r1.md 22216 B
+ * 506a80c2567b5349e72cc54e191df210fd4fa48a0e103a9448992eaa5db246f0 + addendum1
+ * 1802 B f76de41e50cbe06c9604d6daa770aeddc77c24c9408d9f3186754316bfad9cb1, head
+ * 29019b8a) artifacts, byte-verified and kept private (0600):
+ *   rv6-r12.mjs    4855 B 46d83210af6436c03a20558f53c0998b7eb505bcc738508d2fc8e8f7e6537345 (RB6-1 S2–S5; below)
+ *   rv6-r14.mjs    3853 B 803aed212451d88d6c875c6a2c108abd36376e41986508a5a2e7502cd9261d87 (R-14 table)
+ *   rv6-insert.txt 3366 B 23067dccdce4057e4f46bdf79c2c2cd32396f69a842871069a6ce4c1e10c431d (stopped-run
+ *                  cases translated in unit/wave01-records.test.ts "R-15")
+ *   zz-rv6-af1.selftest.pw.ts 8264 B 13dbf9be5b7646c51ff0829f8f9aaba79d15de41262a8288c39f17f1d2a070bb
+ *   plus outputs rv6-r12.out 51e4bb84…, rv6-r14.out 14929…, rv6-scratch.out ffc69910…, rv6-af1.out e0197c03…,
+ *   rb42-rv6.sh ed16dc6c…, zz-rv6.config.ts 3f326ada…
  */
 
 import { execFileSync } from 'node:child_process';
@@ -69,6 +81,7 @@ import {
   provenanceKey,
   provenanceEnvKey,
   provenanceSupportKey,
+  preComparisonInputs,
 } from '../wave01/records.mjs';
 
 const A = 'https://slot-a.example';
@@ -895,5 +908,65 @@ describe('ruling R-14 (review5 O-2, restart.mjs): shared booleans are slot-level
     const out = evaluateEnvPost(post({ ...restarted, e_env_1_provenance: p }), run);
     expect(out.outcome).toBe('inconclusive');
     expect(out.fails).toEqual([]);
+  });
+});
+
+describe('ruling R-15 (review6 RB6-1, rv6-r12 S1–S5): a field missing from the PRE record is never a value', () => {
+  const runFor = (preProv: any) => {
+    const p = preComparisonInputs({ ...decl(), e_env_1_provenance: preProv });
+    return {
+      ...run,
+      preProvenanceKey: p.envPreProvenanceKey,
+      preSupportKey: p.envPreSupportKey,
+      preProcessStartTs: p.envPreProcessStartTs ?? run.preProcessStartTs,
+    };
+  };
+  for (const field of [
+    'flags',
+    'load_path',
+    'files_examined',
+    'path_values',
+    'env',
+    'declared_effective_hosted',
+    'declared_effective_auth_mode',
+  ])
+    it(`PRE top-level ${field} missing, same-process POST has it ⇒ not compared ⇒ INCONCLUSIVE, never FAIL`, () => {
+      const pre = JSON.parse(JSON.stringify(PROV));
+      delete pre[field];
+      const out = evaluateEnvPost(post({ e_env_1_provenance: PROV }), runFor(pre));
+      expect(out.outcome).toBe('inconclusive');
+      expect(out.fails).toEqual([]);
+      expect(out.open.join(' ')).toContain(field);
+    });
+  it('the comparison key omits an unrecorded field (no "<missing>" sentinel)', () => {
+    const pre = JSON.parse(JSON.stringify(PROV));
+    delete pre.env;
+    expect(provenanceEnvKey(pre)).not.toContain('<missing>');
+    expect(JSON.parse(provenanceEnvKey(pre)!)).not.toHaveProperty('env');
+  });
+  it('a legacy sentinel-form PRE key ("<missing>") is still treated as unrecorded ⇒ INCONCLUSIVE', () => {
+    const legacy = JSON.parse(provenanceEnvKey(PROV)!);
+    legacy.env = '<missing>';
+    const out = evaluateEnvPost(post({ e_env_1_provenance: PROV }), {
+      ...run,
+      preProvenanceKey: JSON.stringify(legacy),
+    });
+    expect(out.outcome).toBe('inconclusive');
+    expect(out.fails).toEqual([]);
+  });
+  it('PRE nested key missing (S1) ⇒ INCONCLUSIVE; a real PRE/POST difference alongside still FAILs', () => {
+    const pre = JSON.parse(JSON.stringify(PROV));
+    delete pre.env.SCION_SERVER_MODE;
+    expect(evaluateEnvPost(post({ e_env_1_provenance: PROV }), runFor(pre)).outcome).toBe(
+      'inconclusive'
+    );
+    const pre2 = JSON.parse(JSON.stringify(PROV));
+    delete pre2.files_examined;
+    const changed = JSON.parse(JSON.stringify(PROV));
+    changed.load_path = 'settings-local';
+    const out = evaluateEnvPost(post({ e_env_1_provenance: changed }), runFor(pre2));
+    expect(out.outcome).toBe('fail');
+    expect(out.fails.join(' ')).toContain('load_path');
+    expect(out.fails.join(' ')).not.toContain('files_examined');
   });
 });

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Wave01 suite digest (contract FROZEN rev7 §5b E-RUN) and capture-host checks.
+// Wave01 suite digest (contract FROZEN rev8 §5b E-RUN) and capture-host checks.
 //
 // Canonical definition (assessor-confirmed 2026-10-07T14:57Z):
 //   files  = tracked blobs at the runner commit under SUITE_PATHS ∪ EXTENSION_PATHS
@@ -101,7 +101,7 @@ export function suiteDigest(opts = {}) {
     const p = rec.slice(tab + 1);
     if (type !== 'blob' || !REGULAR_MODES.has(mode ?? '')) {
       throw new Error(
-        `suite digest: non-regular entry ${mode} ${type} ${p} under covered paths is undefined by contract rev7 §5b; stop and ask the assessor`
+        `suite digest: non-regular entry ${mode} ${type} ${p} under covered paths is undefined by contract rev8 §5b; stop and ask the assessor`
       );
     }
     entries.push({ path: p, bytes: git(['cat-file', 'blob', /** @type {string} */ (oid)], root) });

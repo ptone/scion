@@ -143,9 +143,9 @@ describe('suite digest (§5b E-RUN, assessor-confirmed canonical form)', () => {
 });
 
 describe('manifest and pins', () => {
-  it('pins contract rev 7', () => {
+  it('pins contract rev 8', () => {
     expect(CONTRACT.sha256).toBe(
-      '3e3662f5080c084dac2de8445923642592e0db048b7b321c77c5274a64d34008'
+      'f2d4f52308582daf4dd7b44d5143aa724f630e1091e99acd608463261d9e4f5e'
     );
     expect(CONTRACT_SHA256).toBe(CONTRACT.sha256);
   });
@@ -209,7 +209,7 @@ function mkPair(over: { base?: Record<string, unknown>; comp?: Record<string, un
     baseURL: 'https://baseline.example',
     releaseKind: 'verification',
     phase: 'baseline',
-    contract: { name: 'wave01-contract-FROZEN-rev7.md', sha256: CONTRACT_SHA256 },
+    contract: { name: 'wave01-contract-FROZEN-rev8.md', sha256: CONTRACT_SHA256 },
     servedSourceSha: base.sourceSha,
     backendSourceSha: base.backendSourceSha,
     runner: {
@@ -980,6 +980,27 @@ describe('capture records and validate-run', () => {
       )
     ).toBe(true);
   });
+  // ── Ruling R-15 (review6 RB6-1, rv6-insert stoppedPre): end to end through validateRun.
+  const stoppedPre = (drop: string) => (r: Record<string, any>) => {
+    const d = JSON.parse(r.envPreDeclarationRaw);
+    delete d.e_env_1_provenance[drop];
+    r.envPreDeclarationRaw = JSON.stringify(d);
+    r.envDeclarationSha256 = sha(r.envPreDeclarationRaw);
+    Object.assign(r, preComparisonInputs(d));
+    r.env[0] = { gate: 'E-ENV-1', outcome: 'inconclusive' };
+    r.batchValid = false;
+    r.stopped = ['E-ENV evidence missing/stale (E-ENV-1)'];
+  };
+  for (const field of ['env', 'files_examined', 'flags', 'declared_effective_auth_mode'])
+    it(`R-15: stopped run whose PRE record lacks ${field} (POST has it) ⇒ INCONCLUSIVE, not REJECTED`, () => {
+      const errs = writeRun((c) => (c.batchValid = false), stoppedPre(field));
+      expect(
+        errs.some((e) => /mismatch:/.test(e)),
+        JSON.stringify(errs)
+      ).toBe(false);
+      expect(errs.join(' ')).toContain('not recorded on both sides');
+      expect(classify(errs)).toBe('INCONCLUSIVE');
+    });
   it('an aborted run never validates (review1 B4)', () => {
     expect(
       writeRun(undefined, (r) =>
