@@ -698,11 +698,14 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
     // and its own ::before/::after (getAnimations({subtree:true}) filtered to
     // effects targeting the element), plus every flat-tree ancestor (own
     // animations only; ancestors' pseudo-elements and descendants out of scope).
+    const seen = new Set<Animation>();
     const pushRunning = (host: Element, list: Animation[]) => {
       for (const an of list) {
         if (an.playState !== 'running') continue;
         const eff = an.effect as (KeyframeEffect & { pseudoElement?: string | null }) | null;
         if (eff && eff.target !== host) continue;
+        if (seen.has(an)) continue;
+        seen.add(an);
         const x = an as Animation & { animationName?: string; transitionProperty?: string };
         runningAnimations.push({
           path: deepPath(host) + (eff?.pseudoElement ?? ''),
@@ -711,9 +714,32 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
         });
       }
     };
+    const scope: Element[] = [a];
+    for (let e: Element | null = flatParent(a); e; e = flatParent(e)) scope.push(e);
     pushRunning(a, a.getAnimations({ subtree: true }));
-    for (let e: Element | null = flatParent(a); e; e = flatParent(e))
-      pushRunning(e, e.getAnimations());
+    for (const e of scope.slice(1)) pushRunning(e, e.getAnimations());
+    // RB8-1 (R-20 + addendum): also every animation registry (Document /
+    // ShadowRoot) holding an in-scope node — catches script animations on the
+    // element's own pseudo created before its box existed and shadow-internal
+    // targets; exact filter: target in scope, pseudo only ::before/::after of `a`.
+    const roots = new Set<Document | ShadowRoot>();
+    for (const n of scope) {
+      const r = n.getRootNode();
+      if (r instanceof Document || r instanceof ShadowRoot) roots.add(r);
+    }
+    for (const r of roots)
+      for (const an of r.getAnimations()) {
+        const eff = an.effect as (KeyframeEffect & { pseudoElement?: string | null }) | null;
+        const t = eff?.target ?? null;
+        const pe = eff?.pseudoElement ?? null;
+        if (!t) continue;
+        if (
+          t === a
+            ? pe === null || pe === '::before' || pe === '::after'
+            : pe === null && scope.includes(t)
+        )
+          pushRunning(t, [an]);
+      }
     return {
       outside: false,
       innerWidth: window.innerWidth,

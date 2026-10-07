@@ -511,12 +511,23 @@ focusable element, separated by the same settle used after every Tab (two
 animation frames), with no input in between. At each press the probe takes
 F for the focused element's sampled nodes.
 
-**Running animations (R-18 Q-B).** The scope is exactly the sampled nodes:
-CSS animations/transitions in play state `running` on the focused element
-or its own `::before`/`::after` (`getAnimations({ subtree: true })` filtered
-to effects targeting the element, recorded as `path::before`/`path::after`),
-and on every flat-tree ancestor (own animations only). Descendants of the
-focused element and ancestors' pseudo-elements are out of scope.
+**Running animations (R-18 Q-B, R-20 + addendum; review8 RB8-1).** The
+scope is exactly the sampled nodes: any animation (CSS animation, CSS
+transition or script Web Animation) in play state `running` whose effect
+target is the focused element, its own `::before`/`::after`, or a flat-tree
+ancestor (own animations only). Descendants of the focused element and
+ancestors' pseudo-elements are out of scope. The collector is the union of:
+the element's `getAnimations({ subtree: true })` filtered to effects
+targeting it; each ancestor's own `getAnimations()`; and the
+`getAnimations()` of each in-scope node's OWN root node (Document or
+ShadowRoot, never the slot host's), filtered to targets in scope with a
+pseudo-element only `::before`/`::after` of the focused element. The union is
+deduplicated per Animation. The registry part catches script animations on
+an own pseudo-element created before its box existed (or after the box was
+removed and recreated), in light DOM, shadow trees and slotted content.
+Entries are recorded as `path` or `path::before`/`path::after`. (Counting
+other own pseudo-elements such as `::marker` from the subtree collector is
+conservative over-inclusion, R-20 Q2.)
 
 **Per press, first match wins (R-16):**
 

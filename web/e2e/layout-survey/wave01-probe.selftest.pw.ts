@@ -596,3 +596,103 @@ test("R-18: an animation on an ANCESTOR's pseudo-element + an appearing outline 
   expect(c, JSON.stringify(c)).toMatchObject({ decidedBy: 'outline-appears', result: 'pass' });
   expect(c.runningAnimations).toEqual([]);
 });
+
+// ─── review8 RB8-1 (R-20 + addendum): script animations, registry union ────
+// Real probe → pressChecks with a ring APPEARING on focus: each animated case
+// must be INCONCLUSIVE because of the running animation (recorded), and each
+// unanimated twin must PASS, so the collector — not some other difference —
+// decides.
+
+const HTML3 = `<!doctype html><html><head><style>
+  html,body{margin:0;font:14px sans-serif}
+  body>a,x-sh,x-slot,x-slot>a{display:inline-block;margin:2px}
+  a:focus-visible{outline:2px solid rgb(0,0,255)}
+  a::after{content:var(--c,none)}
+</style></head><body>
+<a id="prebox" href="#1">light pre-box</a>
+<a id="recreate" href="#2">light removed/recreated</a>
+<a id="lightctl" href="#3">light control</a>
+<a id="desc" href="#4"><span id="descspan">*</span> descendant animation</a>
+<x-sh id="sh"></x-sh>
+<x-slot id="slothost"><a id="slotpre" href="#5">slotted pre-box</a> <a id="slotre" href="#6">slotted removed/recreated</a> <a id="slotctl" href="#7">slotted control</a></x-slot>
+<script>
+  customElements.define('x-sh', class extends HTMLElement { constructor(){ super();
+    this.attachShadow({mode:'open'}).innerHTML =
+      '<style>a{display:inline-block;margin:2px} a:focus-visible{outline:2px solid rgb(0,0,255)} a::after{content:var(--c,none)}</style>'
+      + '<a id="shpre" href="#8">shadow pre-box</a> <a id="shre" href="#9">shadow removed/recreated</a>'
+      + ' <span id="shwrap"><a id="shinner" href="#10">shadow ancestor animated</a></span> <a id="shctl" href="#11">shadow control</a>'; } });
+  customElements.define('x-slot', class extends HTMLElement { constructor(){ super();
+    this.attachShadow({mode:'open'}).innerHTML = '<span id="sw"><slot></slot></span>'; } });
+</script></body></html>`;
+
+const KF = { opacity: [1, 0.99] };
+const LONG = { duration: 1e6, iterations: Infinity };
+
+async function setupScriptAnimations(page: Page) {
+  await page.evaluate(
+    ({ KF, LONG }) => {
+      const sh = document.getElementById('sh')!.shadowRoot!;
+      const el = (id: string) =>
+        (document.getElementById(id) ?? sh.getElementById(id)) as HTMLElement;
+      // own ::after animated BEFORE its box exists, then the box is created
+      for (const id of ['prebox', 'shpre', 'slotpre']) {
+        el(id).animate(KF, { ...LONG, pseudoElement: '::after' });
+        el(id).style.setProperty('--c', "'x'");
+      }
+      // own ::after box created, animated, removed, recreated
+      for (const id of ['recreate', 'shre', 'slotre']) {
+        el(id).style.setProperty('--c', "'x'");
+        el(id).animate(KF, { ...LONG, pseudoElement: '::after' });
+        el(id).style.setProperty('--c', 'none');
+        el(id).style.setProperty('--c', "'y'");
+      }
+      // unanimated twins with the same ::after box
+      for (const id of ['lightctl', 'shctl', 'slotctl']) el(id).style.setProperty('--c', "'x'");
+      // in-scope ancestor inside the shadow root; descendant (out of scope)
+      el('shwrap').animate(KF, LONG);
+      el('descspan').animate(KF, LONG);
+    },
+    { KF, LONG }
+  );
+}
+
+for (const [id, label, suffix] of [
+  ['prebox', 'light DOM: own ::after animated before its box exists', '::after'],
+  ['recreate', 'light DOM: own ::after box removed and recreated', '::after'],
+  ['shpre', 'shadow-internal: own ::after animated before its box exists', '::after'],
+  ['shre', 'shadow-internal: own ::after box removed and recreated', '::after'],
+  ['shinner', 'shadow-internal: script animation on an in-scope shadow ancestor', '#shwrap'],
+  ['slotpre', 'slotted light DOM: own ::after animated before its box exists', '::after'],
+  ['slotre', 'slotted light DOM: own ::after box removed and recreated', '::after'],
+] as const)
+  test(`RB8-1: ${label} + appearing ring ⇒ INCONCLUSIVE, animation recorded once`, async ({
+    page,
+  }) => {
+    await page.setContent(HTML3);
+    await setupScriptAnimations(page);
+    const c = await tabTo(page, id);
+    expect(c, JSON.stringify(c)).toMatchObject({ result: 'inconclusive' });
+    expect(c.indicatorValuesU2).toMatchObject({ 'outline-style': 'none' });
+    expect(c.indicatorValuesF).toMatchObject({ 'outline-style': 'solid' });
+    expect(c.undeterminableReasons).toContain('animation/transition running at F');
+    expect(
+      c.runningAnimations.some((x) => x.kind === 'Animation' && x.path.includes(suffix)),
+      JSON.stringify(c.runningAnimations)
+    ).toBe(true);
+    // registry ∪ element collectors are deduplicated
+    expect(new Set(c.runningAnimations.map((x) => x.path)).size).toBe(c.runningAnimations.length);
+  });
+
+for (const [id, label] of [
+  ['lightctl', 'light DOM control (same ::after box, no animation)'],
+  ['shctl', 'shadow-internal control (no animation on it or its ancestors)'],
+  ['slotctl', 'slotted light DOM control (no animation)'],
+  ['desc', 'script animation on a DESCENDANT only (out of scope)'],
+] as const)
+  test(`RB8-1: ${label} + appearing ring ⇒ PASS, nothing recorded`, async ({ page }) => {
+    await page.setContent(HTML3);
+    await setupScriptAnimations(page);
+    const c = await tabTo(page, id);
+    expect(c, JSON.stringify(c)).toMatchObject({ decidedBy: 'outline-appears', result: 'pass' });
+    expect(c.runningAnimations).toEqual([]);
+  });
