@@ -89,13 +89,32 @@ The helper refuses to run, and writes nothing, when:
 
 - the recipe fails validation (all problems are listed together);
 - `--attest-stopped-clone` is empty;
-- `--db` is not absolute, does not exist (it never creates a DB), is a symlink
-  or non-regular file, or is empty;
+- `--db` is not absolute; contains `?`, `#`, `%` or NUL, which SQLite URI
+  parsing would reinterpret so that a different file opened than the one
+  checked; is not a clean path; resolves through a symlink in any component;
+  does not exist (it never creates a DB); or is not a non-empty regular file.
+  The same check guards every SQLite open (store open, reopen, checkpoint), so
+  the checked path and the opened path are always identical;
 - `<db>-wal` is non-empty, meaning the clone was not checkpointed;
 - `<db>.wave01-fixtures.run` exists, meaning this clone was already used;
 - preflight fails: the admin or a project is missing or mismatched, or any
   recipe agent ID, `(project, slug)`, identity key, broker ID, broker name or
   broker slug already exists.
+
+**Migrate runs before preflight.** Opening the store runs the existing
+`Migrate`, as the offline-writer pattern does, before preflight and before the
+marker. On a clone of a slot already booted at the same backend commit this is
+expected to be a byte no-op: the schema is current and backfills are
+marker-gated. On any other DB it can write. So the "writes nothing" guarantee
+above holds without qualification only for refusals that happen before the
+open. Once the store has been opened, every outcome records after-digests:
+
+- A refusal whose digests are unchanged reports `refused`.
+- A refusal whose DB digest changed, or that left a non-empty WAL, reports
+  `refused-clone-modified-discard` with `cloneChanged: true`. Discard that
+  clone.
+
+Every manifest carries this disclosure in `migrateOrder`.
 
 Just before the first write it creates `<db>.wave01-fixtures.run` with
 `O_EXCL`. The tool never removes it, so a clone can only ever be used by one
@@ -150,7 +169,9 @@ replaced.
      -manifest /data/<slot>/fixture-clone/manifest.json
    ```
    Exit 0 with `outcome: ok` and `verified: true` is required. Any other
-   outcome means: discard the clone.
+   outcome means: discard the clone. Outcomes are `ok`, `refused`,
+   `refused-clone-modified-discard`, `partial-discard-clone`, `failed` and
+   `validated-only`.
 6. Put the clone in place as the slot DB and restart the slot's existing hub
    binary (same `binarySha256`). Startup runs `BackfillRoleBindings` and the
    other marker-gated backfills.
@@ -192,6 +213,13 @@ rows. The tests cover:
   readback (NULL heartbeat/live columns, `run_intent = stopped`, identity
   keys, no join token or secret);
 - rerun refusal (by marker, and by preflight with the marker removed);
+- `--db` URI metacharacters (`?`, `#`, `%`, `?mode=rwc`) refused before any
+  open. An existing prefix DB stays byte-identical and no alternate file is
+  created. Mutation-checked: the test fails with the guard disabled;
+- symlinked parent directories and unclean paths refused;
+- a refusal after a Migrate write classified as
+  `refused-clone-modified-discard`; binding refusals on a current clone stay
+  `refused` with unchanged after-digests;
 - binding mismatches;
 - pre-existing slug, identity key and broker name;
 - target preconditions (missing DB never created, relative path, symlink,
@@ -199,4 +227,13 @@ rows. The tests cover:
 - honest partial-failure reporting, using an injected SQLite trigger;
 - the full validation matrix and strict decoding of forbidden fields;
 - negative checks showing `Verify` catches each forbidden state when it is
-  written behind the helper's back.
+  written behind the helper's back: lastSeen, startedAt, lastActivityEvent,
+  runtimeBrokerId, runIntent, launch_*, start_claim_*, deletion_*,
+  reincarnation, connectionState, phase running, a missing identity key, and
+  broker online/connected/heartbeat. Also an agent credential, a delegation
+  edge, a join token and a broker secret, each created through the real store
+  methods.
+
+Not covered by a negative test: the containerStatus, runtimeState,
+stalledFromActivity, toolName and softDeleteOpId branches. These share one
+check with connectionState, which is covered.

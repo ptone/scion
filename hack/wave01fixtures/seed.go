@@ -51,6 +51,9 @@ type fixtureStore struct {
 // entc.OpenSQLite -> entadapter.NewCompositeStore -> Migrate. The caller must
 // have pinned the process to UTC (util.PinProcessUTC) first.
 func openStore(ctx context.Context, dbPath string) (*fixtureStore, error) {
+	if err := safeDBPath(dbPath); err != nil {
+		return nil, err
+	}
 	client, err := entc.OpenSQLite("file:"+dbPath+"?cache=shared", entc.PoolConfig{})
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -344,6 +347,13 @@ func (f *fixtureStore) Verify(ctx context.Context, r *Recipe) error {
 		}
 		if !got.DeletedAt.IsZero() {
 			add("agent %s: deletedAt is set", id)
+		}
+		// Runtime-observation fields: never written by the helper and with
+		// no schema default; connectionState in particular drives
+		// online-looking UI (review1 N2).
+		if got.ConnectionState != "" || got.ContainerStatus != "" || got.RuntimeState != "" ||
+			got.StalledFromActivity != "" || got.ToolName != "" || got.SoftDeleteOpID != "" {
+			add("agent %s: a runtime-observation field (connectionState/containerStatus/runtimeState/stalledFromActivity/toolName/softDeleteOpId) is set", id)
 		}
 		// Forbidden: launch_* columns.
 		if got.LaunchAsyncOptIn || got.LaunchID != "" || got.LaunchState != "" || got.LaunchEndReason != "" ||

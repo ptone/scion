@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -100,6 +101,9 @@ func newHubDB(t *testing.T) string {
 	t.Helper()
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "hub.db")
+	// openStore refuses paths that do not exist yet (it never creates a DB
+	// in production use), so the test creates the empty file first.
+	require.NoError(t, os.WriteFile(dbPath, nil, 0o600))
 	fs, err := openStore(ctx, dbPath)
 	require.NoError(t, err)
 	require.NoError(t, fs.store.CreateUser(ctx, &store.User{
@@ -294,6 +298,9 @@ func TestPreflightRefusesWrongBinding(t *testing.T) {
 			m, err := Run(ctx, runOpts(db, writeRecipe(t, r)))
 			require.Error(t, err)
 			assert.Equal(t, "refused", m.Outcome)
+			require.NotNil(t, m.After, "after-digests are recorded once the store was opened")
+			assert.False(t, m.CloneChanged, "Migrate on a current-schema clone must be a byte no-op")
+			assert.Equal(t, m.Before.DB.SHA256, m.After.DB.SHA256)
 			_, statErr := os.Stat(db + markerSuffix)
 			assert.True(t, os.IsNotExist(statErr), "no marker on preflight refusal")
 			_, err = checkpoint(db)
@@ -362,7 +369,7 @@ func TestTargetPreconditions(t *testing.T) {
 		link := filepath.Join(t.TempDir(), "link.db")
 		require.NoError(t, os.Symlink(db, link))
 		_, err := Run(ctx, runOpts(link, recipe))
-		require.ErrorContains(t, err, "regular file")
+		require.ErrorContains(t, err, "symlink")
 	})
 }
 
@@ -526,15 +533,21 @@ func TestVerifyDetectsForbiddenState(t *testing.T) {
 		arg  string
 		want string
 	}{
-		"last_seen":         {"UPDATE agents SET last_seen = '2026-10-07 12:00:00+00:00' WHERE id = ?", agentID, "lastSeen is set"},
-		"started_at":        {"UPDATE agents SET started_at = '2026-10-07 12:00:00+00:00' WHERE id = ?", agentID, "startedAt is set"},
-		"runtime_broker_id": {"UPDATE agents SET runtime_broker_id = 'x' WHERE id = ?", agentID, "runtimeBrokerId is set"},
-		"run_intent":        {"UPDATE agents SET run_intent = 'running' WHERE id = ?", agentID, "runIntent"},
-		"launch_state":      {"UPDATE agents SET launch_state = 'ended' WHERE id = ?", agentID, "launch_* column"},
-		"phase running":     {"UPDATE agents SET phase = 'running' WHERE id = ?", agentID, "not allowed"},
-		"identity key":      {"DELETE FROM agent_identity_keys WHERE agent_id = ?", agentID, "identity keys"},
-		"broker online":     {"UPDATE runtime_brokers SET status = 'online' WHERE id = ?", brokerID, "want offline"},
-		"broker heartbeat":  {"UPDATE runtime_brokers SET last_heartbeat = '2026-10-07 12:00:00+00:00' WHERE id = ?", brokerID, "lastHeartbeat is set"},
+		"last_seen":           {"UPDATE agents SET last_seen = '2026-10-07 12:00:00+00:00' WHERE id = ?", agentID, "lastSeen is set"},
+		"started_at":          {"UPDATE agents SET started_at = '2026-10-07 12:00:00+00:00' WHERE id = ?", agentID, "startedAt is set"},
+		"runtime_broker_id":   {"UPDATE agents SET runtime_broker_id = 'x' WHERE id = ?", agentID, "runtimeBrokerId is set"},
+		"run_intent":          {"UPDATE agents SET run_intent = 'running' WHERE id = ?", agentID, "runIntent"},
+		"launch_state":        {"UPDATE agents SET launch_state = 'ended' WHERE id = ?", agentID, "launch_* column"},
+		"phase running":       {"UPDATE agents SET phase = 'running' WHERE id = ?", agentID, "not allowed"},
+		"identity key":        {"DELETE FROM agent_identity_keys WHERE agent_id = ?", agentID, "identity keys"},
+		"broker online":       {"UPDATE runtime_brokers SET status = 'online' WHERE id = ?", brokerID, "want offline"},
+		"broker heartbeat":    {"UPDATE runtime_brokers SET last_heartbeat = '2026-10-07 12:00:00+00:00' WHERE id = ?", brokerID, "lastHeartbeat is set"},
+		"last_activity_event": {"UPDATE agents SET last_activity_event = '2026-10-07 12:00:00+00:00' WHERE id = ?", agentID, "lastActivityEvent is set"},
+		"deletion_state":      {"UPDATE agents SET deletion_state = 'deleting' WHERE id = ?", agentID, "deletion_* column"},
+		"start_claim_id":      {"UPDATE agents SET start_claim_id = 'claim-1' WHERE id = ?", agentID, "start_claim_* column"},
+		"reincarnation_state": {"UPDATE agents SET reincarnation_state = 'claimed' WHERE id = ?", agentID, "reincarnation column"},
+		"connection_state":    {"UPDATE agents SET connection_state = 'connected' WHERE id = ?", agentID, "runtime-observation field"},
+		"broker connected":    {"UPDATE runtime_brokers SET connection_state = 'connected' WHERE id = ?", brokerID, "want disconnected"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -550,6 +563,157 @@ func TestVerifyDetectsForbiddenState(t *testing.T) {
 			fs, err := openStore(ctx, db)
 			require.NoError(t, err)
 			defer func() { _ = fs.Close() }()
+			require.ErrorContains(t, fs.Verify(ctx, r), tc.want)
+		})
+	}
+}
+
+// TestDBPathURIMetacharactersRefused covers review1 M1: a --db path that SQLite
+// URI parsing would reinterpret ('?', '#', '%') must be refused before any open,
+// so no alternate prefix file is created, migrated or written, and an existing
+// prefix DB stays byte-identical.
+func TestDBPathURIMetacharactersRefused(t *testing.T) {
+	ctx := context.Background()
+	recipe := writeRecipe(t, sliceRecipe())
+	// Subtest names stay free of URI metacharacters: t.TempDir embeds them
+	// in the directory path, which the guard would (rightly) refuse.
+	suffixes := map[string]string{"question": "?x.db", "hash": "#x.db", "percent": "%3Fx.db", "mode-param": "?mode=rwc"}
+	for label, suffix := range suffixes {
+		t.Run("existing prefix "+label, func(t *testing.T) {
+			prefix := newHubDB(t) // .../hub.db: a real hub DB the bad path would alias
+			prefixBefore, err := dbState(prefix)
+			require.NoError(t, err)
+			bad := prefix + suffix
+			data, err := os.ReadFile(prefix)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(bad, data, 0o600))
+			badBefore, err := dbState(bad)
+			require.NoError(t, err)
+
+			m, err := Run(ctx, runOpts(bad, recipe))
+			require.ErrorContains(t, err, "SQLite URI")
+			assert.Equal(t, "refused", m.Outcome)
+			assert.Nil(t, m.Before, "refused before any digest/open")
+
+			prefixAfter, err := dbState(prefix)
+			require.NoError(t, err)
+			assert.Equal(t, prefixBefore, prefixAfter, "existing prefix DB (and its WAL/SHM) unchanged")
+			badAfter, err := dbState(bad)
+			require.NoError(t, err)
+			assert.Equal(t, badBefore, badAfter, "validated file unchanged")
+			for _, p := range []string{bad + markerSuffix, prefix + markerSuffix} {
+				_, statErr := os.Stat(p)
+				assert.True(t, os.IsNotExist(statErr), "no marker %s", p)
+			}
+		})
+		t.Run("absent prefix "+label, func(t *testing.T) {
+			dir := t.TempDir()
+			prefix := filepath.Join(dir, "hub")
+			bad := prefix + suffix
+			data, err := os.ReadFile(newHubDB(t))
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(bad, data, 0o600))
+			_, err = Run(ctx, runOpts(bad, recipe))
+			require.ErrorContains(t, err, "SQLite URI")
+			entries, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "no alternate file may be created next to the clone")
+			assert.Equal(t, filepath.Base(bad), entries[0].Name())
+		})
+	}
+	// The same guard protects every SQLite open, not only Run's target check.
+	_, err := openStore(ctx, "/tmp/hub?x.db")
+	require.ErrorContains(t, err, "SQLite URI")
+	_, err = checkpoint("/tmp/hub#x.db")
+	require.ErrorContains(t, err, "SQLite URI")
+}
+
+func TestDBPathSymlinkAndUncleanRefused(t *testing.T) {
+	ctx := context.Background()
+	recipe := writeRecipe(t, sliceRecipe())
+	db := newHubDB(t)
+	before, err := dbState(db)
+	require.NoError(t, err)
+
+	linkDir := filepath.Join(t.TempDir(), "via-link")
+	require.NoError(t, os.Symlink(filepath.Dir(db), linkDir))
+	_, err = Run(ctx, runOpts(filepath.Join(linkDir, filepath.Base(db)), recipe))
+	require.ErrorContains(t, err, "resolves through a symlink")
+
+	_, err = Run(ctx, runOpts(filepath.Dir(db)+"/./"+filepath.Base(db), recipe))
+	require.ErrorContains(t, err, "not a clean path")
+
+	after, err := dbState(db)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "the real DB is untouched")
+	_, statErr := os.Stat(db + markerSuffix)
+	assert.True(t, os.IsNotExist(statErr))
+}
+
+// TestRefusalAfterMigrateWriteIsClassified covers review1 L1: when the target
+// is not a current-schema hub clone, opening it runs Migrate, which writes;
+// the refusal must then say the clone was modified and must be discarded.
+func TestRefusalAfterMigrateWriteIsClassified(t *testing.T) {
+	ctx := context.Background()
+	db := filepath.Join(t.TempDir(), "not-a-hub.db")
+	sdb, err := sql.Open("sqlite", "file:"+db)
+	require.NoError(t, err)
+	_, err = sdb.Exec("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)")
+	require.NoError(t, err)
+	require.NoError(t, sdb.Close())
+
+	m, err := Run(ctx, runOpts(db, writeRecipe(t, sliceRecipe())))
+	require.Error(t, err)
+	assert.Equal(t, "refused-clone-modified-discard", m.Outcome)
+	assert.True(t, m.CloneChanged)
+	require.NotNil(t, m.After)
+	assert.NotEqual(t, m.Before.DB.SHA256, m.After.DB.SHA256)
+	assert.Contains(t, err.Error(), "DISCARD")
+	assert.Contains(t, m.MigrateOrder, "before preflight")
+	_, statErr := os.Stat(db + markerSuffix)
+	assert.True(t, os.IsNotExist(statErr), "no marker: no fixture write was attempted")
+}
+
+// TestVerifyDetectsForbiddenRelations covers the credential, delegation-edge,
+// join-token and broker-secret branches of Verify by creating each forbidden
+// row through the real store methods after a successful run.
+func TestVerifyDetectsForbiddenRelations(t *testing.T) {
+	ctx := context.Background()
+	r := sliceRecipe()
+	agentID, brokerID := r.Agents[0].ID, r.Brokers[0].ID
+	now := time.Now().UTC()
+	cases := map[string]struct {
+		create func(s store.Store) error
+		want   string
+	}{
+		"agent credential": {func(s store.Store) error {
+			return s.CreateAgentCredential(ctx, &store.AgentCredential{ID: "e0000000-0000-4000-8000-000000000001",
+				AgentID: agentID, ProjectID: testProjectID, TokenJTIHash: "jti-hash", IssuedAt: now, ExpiresAt: now.Add(time.Hour)})
+		}, "agent credentials"},
+		"delegation edge": {func(s store.Store) error {
+			return s.CreateDelegationEdge(ctx, &store.DelegationEdge{ID: "e0000000-0000-4000-8000-000000000002",
+				DelegatorType: "user", DelegatorID: testAdminID, DelegateType: delegateTypeAgent, DelegateID: agentID,
+				ScopeType: store.RoleScopeProject, ScopeID: testProjectID, Role: "baseline", Active: true})
+		}, "delegation edges"},
+		"join token": {func(s store.Store) error {
+			return s.CreateJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "hash",
+				ExpiresAt: now.Add(time.Hour), CreatedAt: now, CreatedBy: testAdminID})
+		}, "join token exists"},
+		"broker secret": {func(s store.Store) error {
+			return s.CreateBrokerSecret(ctx, &store.BrokerSecret{BrokerID: brokerID, SecretKey: []byte("k"),
+				Algorithm: store.BrokerSecretAlgorithmHMACSHA256, CreatedAt: now, Status: store.BrokerSecretStatusActive})
+		}, "broker secret exists"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			db := newHubDB(t)
+			_, err := Run(ctx, runOpts(db, writeRecipe(t, r)))
+			require.NoError(t, err)
+			fs, err := openStore(ctx, db)
+			require.NoError(t, err)
+			defer func() { _ = fs.Close() }()
+			require.NoError(t, fs.Verify(ctx, r), "clean before the forbidden row")
+			require.NoError(t, tc.create(fs.store))
 			require.ErrorContains(t, fs.Verify(ctx, r), tc.want)
 		})
 	}

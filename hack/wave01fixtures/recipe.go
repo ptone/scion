@@ -100,8 +100,10 @@ type RecipeBroker struct {
 	Labels  map[string]string `json:"labels,omitempty"`
 }
 
-// agentRoles mirrors pkg/hub.ValidAgentRole (cross-checked in tests) without
-// linking the hub server package into the helper binary.
+// agentRoles mirrors pkg/hub.ValidAgentRole (pkg/hub/agentrole.go) without
+// linking the hub server package into the helper binary. It is NOT
+// cross-checked by a test, to keep pkg/hub out of the test build; re-check it
+// by hand if the stock roles change.
 var agentRoles = map[string]bool{"none": true, "readonly": true, "baseline": true, "full": true}
 
 // stateKind is one of the five (phase, activity) pairs the frozen acceptance

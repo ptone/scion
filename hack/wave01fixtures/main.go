@@ -62,6 +62,22 @@ var Divergences = []string{
 	"Agents with exit fields carry StateVersion 2 (one UpdateAgent after create); others carry StateVersion 1.",
 }
 
+// MigrateOrder discloses, in every manifest, that the store's Migrate runs
+// before preflight and before the run marker (review1 L1).
+const MigrateOrder = "entadapter Migrate runs when the store is opened, before preflight and before the run marker. " +
+	"On a clone of a slot already booted at the same backend commit it is expected to be a byte no-op. " +
+	"Preflight never writes. After-digests are recorded for every outcome after open; a refusal whose " +
+	"digests differ from before is reported as refused-clone-modified-discard."
+
+// cloneChanged reports whether the DB file changed or a non-empty WAL was
+// left behind between two digests.
+func cloneChanged(before, after *DBState) bool {
+	if before == nil || after == nil {
+		return true
+	}
+	return before.DB.SHA256 != after.DB.SHA256 || (after.WAL.Exists && after.WAL.Size > 0)
+}
+
 // FileDigest records one database file's state.
 type FileDigest struct {
 	Path   string `json:"path"`
@@ -97,6 +113,8 @@ type Manifest struct {
 	Checkpoint      string           `json:"checkpoint,omitempty"`
 	Written         *WriteResult     `json:"written,omitempty"`
 	Verified        bool             `json:"verified"`
+	CloneChanged    bool             `json:"cloneChanged"`
+	MigrateOrder    string           `json:"migrateOrder"`
 	Divergences     []string         `json:"divergences"`
 }
 
@@ -171,8 +189,8 @@ func dbState(dbPath string) (*DBState, error) {
 // checkpointed clone. It cannot prove no process has the file open; that is
 // the steward's process/checkpoint evidence (H2).
 func checkTarget(dbPath string) error {
-	if !filepath.IsAbs(dbPath) {
-		return fmt.Errorf("--db must be an absolute path")
+	if err := safeDBPath(dbPath); err != nil {
+		return err
 	}
 	fi, err := os.Lstat(dbPath)
 	if err != nil {
@@ -194,6 +212,33 @@ func checkTarget(dbPath string) error {
 	return nil
 }
 
+// safeDBPath requires dbPath to be a path SQLite will open verbatim and that
+// names exactly the file the target checks inspect. The DSN is built as
+// "file:"+path, and both entc (which cuts the DSN at the first '?') and SQLite
+// URI parsing treat '?', '#' and '%' specially, so a path containing them
+// would validate one file and open another (review1 M1). The path must also
+// be clean and free of symlinks in any component, so the digests, marker and
+// manifest all refer to the file actually written.
+func safeDBPath(dbPath string) error {
+	if !filepath.IsAbs(dbPath) {
+		return fmt.Errorf("--db must be an absolute path")
+	}
+	if strings.ContainsAny(dbPath, "?#%\x00") {
+		return fmt.Errorf("--db %q contains '?', '#', '%%' or NUL, which SQLite URI parsing would reinterpret; rename the clone", dbPath)
+	}
+	if filepath.Clean(dbPath) != dbPath {
+		return fmt.Errorf("--db %q is not a clean path (use %q)", dbPath, filepath.Clean(dbPath))
+	}
+	resolved, err := filepath.EvalSymlinks(dbPath)
+	if err != nil {
+		return fmt.Errorf("--db %s: %w (the helper never creates a database)", dbPath, err)
+	}
+	if resolved != dbPath {
+		return fmt.Errorf("--db %s resolves through a symlink to %s; pass the real path of the clone", dbPath, resolved)
+	}
+	return nil
+}
+
 // createMarker atomically claims the clone for this run (O_EXCL).
 func createMarker(dbPath string, m *Manifest) error {
 	fh, err := os.OpenFile(dbPath+markerSuffix, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -209,6 +254,9 @@ func createMarker(dbPath string, m *Manifest) error {
 // checkpoint folds the WAL into the main DB file after the store is closed,
 // so the after-digest describes the complete database.
 func checkpoint(dbPath string) (string, error) {
+	if err := safeDBPath(dbPath); err != nil {
+		return "", err
+	}
 	db, err := sql.Open("sqlite", "file:"+dbPath)
 	if err != nil {
 		return "", err
@@ -244,10 +292,14 @@ func Run(ctx context.Context, o Options) (*Manifest, error) {
 		Helper:          helperProvenance(),
 		RecipePath:      o.RecipePath,
 		Divergences:     Divergences,
+		MigrateOrder:    MigrateOrder,
 		Outcome:         "refused",
 	}
 	fail := func(outcome string, err error) (*Manifest, error) {
 		m.Outcome, m.Error, m.FinishedAt = outcome, err.Error(), time.Now().UTC()
+		if m.After != nil {
+			m.CloneChanged = cloneChanged(m.Before, m.After)
+		}
 		return m, err
 	}
 
@@ -281,19 +333,34 @@ func Run(ctx context.Context, o Options) (*Manifest, error) {
 		return fail("refused", fmt.Errorf("digest before: %w", err))
 	}
 
-	// Preflight on its own connection; nothing is written on refusal.
+	// Opening runs the store's Migrate (the offline-writer pattern) BEFORE
+	// preflight and before the marker. On a clone of a slot already booted
+	// at the same backend commit this is expected to be a byte no-op (schema
+	// current, backfills marker-gated); on any other DB it may write.
+	// Preflight itself never writes. From here on every outcome records
+	// After digests, and a refusal whose digests differ from Before is
+	// classified as a modified clone that must be discarded.
+	refusedAfterOpen := func(cause error) (*Manifest, error) {
+		m.After, _ = dbState(o.DBPath)
+		if cloneChanged(m.Before, m.After) {
+			return fail("refused-clone-modified-discard",
+				fmt.Errorf("%w; the clone changed while opening (Migrate wrote): DISCARD it", cause))
+		}
+		return fail("refused", cause)
+	}
 	fs1, err := openStore(ctx, o.DBPath)
 	if err != nil {
-		return fail("failed", err)
+		m.After, _ = dbState(o.DBPath)
+		return fail("failed", fmt.Errorf("%w; DISCARD this clone", err))
 	}
 	perr := fs1.Preflight(ctx, r)
 	if perr != nil {
 		_ = fs1.Close()
-		return fail("refused", perr)
+		return refusedAfterOpen(perr)
 	}
 	if err := createMarker(o.DBPath, m); err != nil {
 		_ = fs1.Close()
-		return fail("refused", err)
+		return refusedAfterOpen(err)
 	}
 	res, werr := fs1.Write(ctx, r)
 	m.Written = &res
@@ -308,7 +375,8 @@ func Run(ctx context.Context, o Options) (*Manifest, error) {
 	// Reopen and verify what was persisted.
 	fs2, err := openStore(ctx, o.DBPath)
 	if err != nil {
-		return fail("failed", fmt.Errorf("reopen for verification: %w", err))
+		m.After, _ = dbState(o.DBPath)
+		return fail("failed", fmt.Errorf("reopen for verification: %w; DISCARD this clone", err))
 	}
 	verr := fs2.Verify(ctx, r)
 	_ = fs2.Close()
@@ -325,6 +393,7 @@ func Run(ctx context.Context, o Options) (*Manifest, error) {
 	if m.After, err = dbState(o.DBPath); err != nil {
 		return fail("failed", fmt.Errorf("digest after: %w", err))
 	}
+	m.CloneChanged = cloneChanged(m.Before, m.After)
 	m.Outcome, m.FinishedAt = "ok", time.Now().UTC()
 	return m, nil
 }
