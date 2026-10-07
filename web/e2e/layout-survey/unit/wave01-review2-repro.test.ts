@@ -22,13 +22,16 @@
  *   run-loopback.sh 1232 B e45a36d2209e5acb99bd74b69eb6e99d3505aff3d0ecea1843e8550ab1002a47
  * The loopback modes (SAFETY, readback failure, test-login abort) are
  * captured in wave01-loopback.selftest.pw.ts. Case IDs are kept so a future
- * reviewer can map each one. E-ENV-1 cases are TRANSLATED to contract
+ * reviewer can map each one. Assertions are the CORRECTED outcomes (several
+ * review2 printouts showed the a472d6a0/ba58ceac defects: C3, C5, P4, P5, R2,
+ * R4). E-ENV-1 cases are TRANSLATED to contract
  * FROZEN rev 4 (probes + provenance record, R-7); the R-6/R-4 source-list
  * semantics they originally exercised are withdrawn.
  */
 
 import { describe, expect, it } from 'vitest';
 import {
+  applyAuthCheck,
   envDecision,
   evaluateEnv,
   evaluateEnvPost,
@@ -135,7 +138,7 @@ describe('review2 envrepro2 C0–C9 (PRE)', () => {
     expect(r.by['E-ENV-1']).toBe('inconclusive');
     expect(r.D).toMatchObject({ stop: true, fails: [] });
   });
-  it('C3 bound, steward anon 200 ⇒ E-ENV-2 FAIL', () => {
+  it('C3 bound, steward anon 200 ⇒ E-ENV-2 FAIL (RB1; a472d6a0 wrongly passed)', () => {
     expect(grade(decl({ e_env_2_anon_401: { status: 200, ts: iso(-9) } })).by['E-ENV-2']).toBe(
       'fail'
     );
@@ -144,9 +147,12 @@ describe('review2 envrepro2 C0–C9 (PRE)', () => {
     const { flags: _f, ...noFlags } = PROV;
     expect(grade(decl({ e_env_1_provenance: noFlags })).by['E-ENV-1']).toBe('inconclusive');
   });
-  it('C5 bound, test-login false ⇒ auth check pending and stop (success ⇒ FAIL, tested in env-table)', () => {
+  it('C5 bound PRE test-login=false, runner test-login then succeeds ⇒ E-ENV-3 FAIL (RB3; a472d6a0 wrongly passed)', () => {
     const r = grade(decl({ e_env_3_test_login_enabled: false }));
     expect(r.D).toMatchObject({ stop: true, authCheckPending: true });
+    const after = applyAuthCheck(r.g, { succeeded: true, at: iso(0) });
+    expect(after.find((x) => x.gate === 'E-ENV-3')!.outcome).toBe('fail');
+    expect(envDecision(after).fails).toContain('E-ENV-3');
   });
   it('C6 baseURL missing ⇒ declaration gates INCONCLUSIVE', () => {
     const r = grade(decl({ baseURL: undefined }));
@@ -181,10 +187,10 @@ describe('review2 envrepro2 P1–P5 (POST)', () => {
   it('P3 PRE A / POST B (run A) ⇒ INCONCLUSIVE', () => {
     expect(evaluateEnvPost(post({ baseURL: B }), run).outcome).toBe('inconclusive');
   });
-  it('P4 PRE test-login true, POST false (same slot) ⇒ FAIL', () => {
+  it('P4 PRE test-login true, POST false (same slot) ⇒ FAIL (RB3; a472d6a0 wrongly passed)', () => {
     expect(evaluateEnvPost(post({ e_env_3_test_login_enabled: false }), run).outcome).toBe('fail');
   });
-  it('P5 POST without test-login field ⇒ INCONCLUSIVE', () => {
+  it('P5 POST without test-login field ⇒ INCONCLUSIVE (RB3; a472d6a0 wrongly passed)', () => {
     expect(evaluateEnvPost(post({ e_env_3_test_login_enabled: undefined }), run).outcome).toBe(
       'inconclusive'
     );
@@ -207,8 +213,11 @@ describe('review2 envrepro R1–R8 (round-1 repros, current semantics)', () => {
     expect(r.by['E-ENV-1']).toBe('inconclusive');
     expect(r.D.stop).toBe(true);
   });
-  it('R4 E-ENV-3 test-login false ⇒ stop pending the runner auth check', () => {
-    expect(grade(decl({ e_env_3_test_login_enabled: false })).D.stop).toBe(true);
+  it('R4 E-ENV-3 test-login false + runner test-login succeeds ⇒ FAIL (same defect as C5)', () => {
+    const r = grade(decl({ e_env_3_test_login_enabled: false }));
+    expect(r.D.stop).toBe(true);
+    const after = applyAuthCheck(r.g, { succeeded: true, at: iso(0) });
+    expect(after.find((x) => x.gate === 'E-ENV-3')!.outcome).toBe('fail');
   });
   it('R5 POST for host-B ⇒ INCONCLUSIVE', () => {
     expect(evaluateEnvPost(post({ baseURL: 'https://host-b.example' }), run).outcome).toBe(
