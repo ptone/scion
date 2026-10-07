@@ -79,7 +79,7 @@ to this window only if all of these hold:
 
 - `slotGeneration` equals the base Release's.
 - `window_start` ≤ batch start and is no older than
-  `LAYOUT_SURVEY_ENV_MAX_AGE_MIN` (default 60, recorded in run.json).
+  `LAYOUT_SURVEY_ENV_MAX_AGE_MIN` (default 30, ii2-confirmed; recorded in run.json).
 - `e_env_5.ts` lies in [window_start, batch start].
 
 Per-gate requirements:
@@ -147,7 +147,7 @@ Steps:
    LAYOUT_SURVEY_OPERATOR=ii2 LAYOUT_SURVEY_ADMIN_EMAIL=… LAYOUT_SURVEY_FIXTURE_MAP=… \
    LAYOUT_SURVEY_EVIDENCE_DIR=… LAYOUT_SURVEY_STATE_DIR=… \
    LAYOUT_SURVEY_BASE_RELEASE_FILE=base.json LAYOUT_SURVEY_COMPANION_FILE=companion.json \
-   LAYOUT_SURVEY_ENV_DECLARATION_FILE=env-pre.json [LAYOUT_SURVEY_ENV_MAX_AGE_MIN=60] \
+   LAYOUT_SURVEY_ENV_DECLARATION_FILE=env-pre.json [LAYOUT_SURVEY_ENV_MAX_AGE_MIN=30] \
    LAYOUT_SURVEY_REVIEWED_RUNNER_COMMIT=<reviewed sha> LAYOUT_SURVEY_REVIEWED_SUITE_DIGEST=<digest> \
    [LAYOUT_SURVEY_STATES=W01-S01,W01-S02] [CHROMIUM_EXECUTABLE=…] \
    npx playwright test -c e2e/layout-survey/playwright.wave01.config.ts

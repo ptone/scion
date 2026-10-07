@@ -24,6 +24,7 @@ import {
   applyBatch,
   clearQuarantine,
   emptyLedger,
+  DEFAULT_ENV_MAX_AGE_MIN,
   envDecision,
   envStop,
   evaluateEnvPost,
@@ -377,6 +378,14 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
     ).toBe('inconclusive');
     const { window_start: ws, ...d } = decl;
     expect(gate(evaluateEnv({ ...d, window_ts: ws }, self, rel, W), 'E-ENV-1').outcome).toBe(
+      'pass'
+    );
+  });
+  it('default max age is 30 min (ii2-confirmed): a 40-min-old window is stale without an explicit override', () => {
+    expect(DEFAULT_ENV_MAX_AGE_MIN).toBe(30);
+    const d = { ...decl, window_start: '2026-10-07T15:20:00Z' };
+    expect(gate(evaluateEnv(d, self, rel, { batchStart }), 'E-ENV-1').outcome).toBe('inconclusive');
+    expect(gate(evaluateEnv(d, self, rel, { batchStart, maxAgeMin: 60 }), 'E-ENV-1').outcome).toBe(
       'pass'
     );
   });

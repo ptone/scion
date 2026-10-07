@@ -35,7 +35,7 @@ const SHA_RE = /^[0-9a-f]{64}$/;
 // ─── E-ENV (§5a) ─────────────────────────────────────────────────────────
 
 /** Default maximum age (minutes) of the PRE declaration's window_start at batch start. */
-export const DEFAULT_ENV_MAX_AGE_MIN = 60;
+export const DEFAULT_ENV_MAX_AGE_MIN = 30; // ii2-confirmed 15:49Z
 
 const ms = (iso) => {
   if (typeof iso !== 'string') return NaN;
