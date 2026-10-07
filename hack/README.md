@@ -25,6 +25,7 @@ Developer convenience scripts for local development, testing, and infrastructure
 | `go run ./hack/apitest` | Stress tests API-level multi-hub integration against shared Postgres DB |
 | `go run ./hack/dbdiag` | Diagnoses database connection pool usage and active advisory locks |
 | `go run ./hack/minttoken` | Mints a long-lived user access-token JWT for local API integration testing |
+| `go run ./hack/wave01fixtures` | Steward-only offline helper that seeds stopped agent / offline broker fixture rows into an isolated, stopped hub DB clone (see its README) |
 
 ### Kubernetes Test Manifests
 

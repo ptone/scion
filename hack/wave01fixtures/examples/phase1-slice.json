@@ -1,0 +1,29 @@
+{
+  "schema": "scion.wave01.fixtures/v1",
+  "admin": {
+    "userId": "00000000-0000-4000-8000-00000000a001",
+    "email": "wave01-admin@example.test"
+  },
+  "projects": [
+    { "id": "00000000-0000-4000-8000-00000000b001", "slug": "payments-platform-reliability" }
+  ],
+  "agents": [
+    {
+      "id": "00000000-0000-4000-8000-00000000c001",
+      "projectId": "00000000-0000-4000-8000-00000000b001",
+      "slug": "ledger-reconciler",
+      "template": "default",
+      "agentRole": "baseline",
+      "phase": "stopped",
+      "taskSummary": "Reconciled the nightly ledger export against settlement files and flagged two mismatched batches for review.",
+      "labels": { "team": "payments", "env": "staging" }
+    }
+  ],
+  "brokers": [
+    {
+      "id": "00000000-0000-4000-8000-00000000d001",
+      "name": "build-runner-eu-west1-a",
+      "slug": "build-runner-eu-west1-a"
+    }
+  ]
+}
