@@ -31,6 +31,9 @@ import {
   evaluateEnvPost,
   hostBinding,
   provenanceKey,
+  preComparisonInputs,
+  provenanceEnvKey,
+  provenanceSupportKey,
   evaluateEnv,
   isQuarantined,
   validateCapture,
@@ -140,9 +143,9 @@ describe('suite digest (§5b E-RUN, assessor-confirmed canonical form)', () => {
 });
 
 describe('manifest and pins', () => {
-  it('pins contract rev 4', () => {
+  it('pins contract rev 5', () => {
     expect(CONTRACT.sha256).toBe(
-      '0fcc579e4a09d4479ec94a8d52ce28ff13e4136645feb77002be3d945dd9c855'
+      '9df504e038c1f76539063c776b8b919d3c245c4a02e31db9cbff943c070c288d'
     );
     expect(CONTRACT_SHA256).toBe(CONTRACT.sha256);
   });
@@ -206,7 +209,7 @@ function mkPair(over: { base?: Record<string, unknown>; comp?: Record<string, un
     baseURL: 'https://baseline.example',
     releaseKind: 'verification',
     phase: 'baseline',
-    contract: { name: 'wave01-contract-FROZEN-rev4.md', sha256: CONTRACT_SHA256 },
+    contract: { name: 'wave01-contract-FROZEN-rev5.md', sha256: CONTRACT_SHA256 },
     servedSourceSha: base.sourceSha,
     backendSourceSha: base.backendSourceSha,
     runner: {
@@ -466,7 +469,8 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
         e_env_4_runtime_broker_effective: false,
         e_env_4_no_broker_process_or_dispatch: true,
       },
-      preProvenanceKey: provenanceKey(PROV),
+      preProvenanceKey: provenanceEnvKey(PROV),
+      preSupportKey: provenanceSupportKey(PROV),
       preProcessStartTs: '2026-10-07T15:30:00Z',
     };
     const post = {
@@ -599,21 +603,22 @@ describe('E7 quarantine', () => {
 });
 
 describe('capture records and validate-run', () => {
+  const POST_OK = {
+    baseURL: 'https://baseline.example',
+    window_start: '2026-10-07T15:00:00Z',
+    window_end: '2026-10-07T16:00:00Z',
+    serving_process_start_ts: '2026-10-07T15:30:00Z',
+    slotGeneration: 'gen-1',
+    e_env_1_dev_auth_effective: false,
+    e_env_1_provenance: PROV,
+    e_env_3_test_login_enabled: true,
+    e_env_4_runtime_broker_effective: false,
+    e_env_4_no_broker_process_or_dispatch: true,
+  };
   function writeRun(
     mutate?: (c: Record<string, any>) => void,
     mutateRun?: (r: Record<string, any>) => void,
-    envPost: Record<string, unknown> | null | 'omit' = {
-      baseURL: 'https://baseline.example',
-      window_start: '2026-10-07T15:00:00Z',
-      window_end: '2026-10-07T16:00:00Z',
-      serving_process_start_ts: '2026-10-07T15:30:00Z',
-      slotGeneration: 'gen-1',
-      e_env_1_dev_auth_effective: false,
-      e_env_1_provenance: PROV,
-      e_env_3_test_login_enabled: true,
-      e_env_4_runtime_broker_effective: false,
-      e_env_4_no_broker_process_or_dispatch: true,
-    }
+    envPost: Record<string, unknown> | null | 'omit' = POST_OK
   ) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wave01-run-'));
     const { base, baseBytes, comp } = mkPair();
@@ -719,15 +724,9 @@ describe('capture records and validate-run', () => {
         { gate: 'E-ENV-5', outcome: 'pass' },
       ],
       envPostSelfAnon401: { status: 401, at: '2026-10-07T15:50:01Z' },
-      envPreBaseURL: 'https://baseline.example',
-      envPreProcessStartTs: '2026-10-07T15:30:00Z',
       envPostDevAuthProbes: PROBES_OFF,
-      envPreValues: {
-        e_env_1_dev_auth_effective: false,
-        e_env_3_test_login_enabled: true,
-        e_env_4_runtime_broker_effective: false,
-        e_env_4_no_broker_process_or_dispatch: true,
-      },
+      // O-a: the run.json copies are what the runner writes (one derivation).
+      ...preComparisonInputs(preDecl),
       baseURL: 'https://baseline.example',
     };
     mutateRun?.(runObj);
@@ -781,15 +780,52 @@ describe('capture records and validate-run', () => {
       }).some((e) => e.startsWith('mismatch: POST env E-ENV-4'))
     ).toBe(true);
   });
+  /** Re-seal the embedded raw PRE declaration after a mutation (sha kept consistent). */
+  const reseal = (mut: (d: Record<string, any>) => void) => (r: Record<string, any>) => {
+    const d = JSON.parse(r.envPreDeclarationRaw);
+    mut(d);
+    r.envPreDeclarationRaw = JSON.stringify(d);
+    r.envDeclarationSha256 = sha(r.envPreDeclarationRaw);
+    Object.assign(r, preComparisonInputs(d));
+  };
   it('validate-run: PRE/POST baseURL must bind to the run and to each other', () => {
     expect(
-      writeRun(undefined, (r) => (r.envPreBaseURL = 'https://candidate.example')).some((e) =>
-        e.includes('not bound to Release baseURL')
-      )
+      writeRun(
+        undefined,
+        reseal((d) => (d.baseURL = 'https://candidate.example'))
+      ).some((e) => e.includes('not bound to Release baseURL'))
     ).toBe(true);
     expect(
-      writeRun(undefined, (r) => delete r.envPreBaseURL).some((e) =>
-        e.includes('run.envPreBaseURL')
+      writeRun(
+        undefined,
+        reseal((d) => delete d.baseURL)
+      ).some((e) => e.includes('missing: PRE declaration baseURL'))
+    ).toBe(true);
+  });
+  it('O-a: PRE comparison inputs are derived from the embedded raw declaration; tampered run.json copies are mismatches', () => {
+    for (const [k, v] of [
+      ['envPreBaseURL', 'https://candidate.example'],
+      ['envPreValues', { e_env_1_dev_auth_effective: true }],
+      ['envPreProvenanceKey', '{}'],
+      ['envPreSupportKey', '{}'],
+      ['envPreProcessStartTs', '2026-10-07T15:31:00Z'],
+    ] as const) {
+      const errs = writeRun(undefined, (r) => (r[k] = v));
+      expect(errs).toContain(
+        `mismatch: run.${k} differs from the value derived from envPreDeclarationRaw`
+      );
+    }
+    // With every run.json copy removed, the derived values still drive the
+    // POST comparison: a POST env-value change is a FAIL (mismatch:).
+    const strip = (r: Record<string, any>) => {
+      for (const k of Object.keys(preComparisonInputs({}))) delete r[k];
+    };
+    expect(writeRun(undefined, strip)).toEqual([]);
+    const post = JSON.parse(JSON.stringify(POST_OK));
+    post.e_env_1_provenance.flags['--production'] = false;
+    expect(
+      writeRun(undefined, strip, post).some((e) =>
+        e.startsWith('mismatch: POST env same-slot PRE/POST disagreement on e_env_1_provenance')
       )
     ).toBe(true);
   });

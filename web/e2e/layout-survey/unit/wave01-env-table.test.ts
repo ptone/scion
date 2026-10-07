@@ -28,6 +28,8 @@ import {
   SHARED_ENV_BOOLEANS,
   sharedEnvValues,
   provenanceKey,
+  provenanceEnvKey,
+  provenanceSupportKey,
 } from '../wave01/records.mjs';
 
 const HOST = 'https://baseline.example';
@@ -118,7 +120,8 @@ const RUN = {
   baseURL: HOST,
   preBaseURL: HOST,
   preValues: sharedEnvValues(PRE),
-  preProvenanceKey: provenanceKey(PROV),
+  preProvenanceKey: provenanceEnvKey(PROV),
+  preSupportKey: provenanceSupportKey(PROV),
   preProcessStartTs: '2026-10-07T15:30:00Z',
   testLoginUsed: true,
 };

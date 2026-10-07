@@ -35,6 +35,16 @@ export declare function gradeEEnv1(
   b: { attributable: boolean; bound: boolean; batchStart?: string }
 ): { outcome: 'pass' | 'fail' | 'inconclusive'; reasons: string[] } & Record<string, unknown>;
 export declare function provenanceKey(prov: unknown): string | null;
+export declare const PROVENANCE_COMPARED_FIELDS: readonly string[];
+export declare function provenanceEnvKey(prov: unknown): string | null;
+export declare function provenanceSupportKey(prov: unknown): string | null;
+export declare function preComparisonInputs(decl: unknown): {
+  envPreBaseURL: string | null;
+  envPreValues: Record<string, boolean | null> | null;
+  envPreProvenanceKey: string | null;
+  envPreSupportKey: string | null;
+  envPreProcessStartTs: string | null;
+};
 export declare function sharedEnvValues(decl: unknown): Record<string, boolean | null>;
 export declare function applyAuthCheck(
   results: EnvGate[],
@@ -72,10 +82,18 @@ export declare function evaluateEnvPost(
     preBaseURL?: string;
     preValues?: Record<string, boolean | null>;
     preProvenanceKey?: string | null;
+    preSupportKey?: string | null;
     preProcessStartTs?: string | null;
     testLoginUsed?: boolean;
   }
-): { outcome: 'pass' | 'fail' | 'inconclusive'; problems: string[]; attributable: boolean };
+): {
+  outcome: 'pass' | 'fail' | 'inconclusive';
+  problems: string[];
+  fails: string[];
+  open: string[];
+  notes: string[];
+  attributable: boolean;
+};
 export declare function canonicalOrigin(v: unknown): string | null;
 export declare function hostBinding(
   decl: unknown,
@@ -126,5 +144,20 @@ export declare function validationRecord(
   baseFile: string,
   companionFile: string,
   envPostFile: string | undefined,
-  errs: string[]
-): Record<string, unknown>;
+  runErrs: string[],
+  identity?: ValidatorIdentity
+): Record<string, unknown> & {
+  errors: string[];
+  classification: string;
+  validator: ValidatorIdentity;
+};
+export interface ValidatorIdentity {
+  head?: string;
+  suiteDigest?: string;
+  suiteFileCount?: number;
+  method?: string;
+  clean: boolean;
+  cleanProblems: string[];
+  error?: string;
+}
+export declare function validatorIdentity(opts?: { root?: string }): ValidatorIdentity;

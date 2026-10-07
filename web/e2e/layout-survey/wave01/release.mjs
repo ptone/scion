@@ -45,8 +45,8 @@ import {
 } from './suite-digest.mjs';
 
 export const COMPANION_KIND = 'wave01-release-ext';
-export const CONTRACT_SHA256 = '0fcc579e4a09d4479ec94a8d52ce28ff13e4136645feb77002be3d945dd9c855';
-export const CONTRACT_NAME = 'wave01-contract-FROZEN-rev4.md';
+export const CONTRACT_SHA256 = '9df504e038c1f76539063c776b8b919d3c245c4a02e31db9cbff943c070c288d';
+export const CONTRACT_NAME = 'wave01-contract-FROZEN-rev5.md';
 export const FRONTEND_BASELINE = '1694e51145a0a26bedf754751a130d7b05544232';
 export const BACKEND = '4a253489ebe3298fcfe4d7271b3642a5578b2b31';
 const SHA_RE = /^[0-9a-f]{64}$/;

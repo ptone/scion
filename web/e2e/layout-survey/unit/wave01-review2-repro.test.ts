@@ -27,16 +27,37 @@
  * R4). E-ENV-1 cases are TRANSLATED to contract
  * FROZEN rev 4 (probes + provenance record, R-7); the R-6/R-4 source-list
  * semantics they originally exercised are withdrawn.
+ *
+ * review4 round 1 (report wl-wave1-runner-review4-r1.md 20213 B
+ * e059ea6a…, head 719ccced) artifacts, byte-verified on receipt and kept
+ * private (0600):
+ *   post4.mjs        2656 B c8ebb04b… (RB4-1 P0–P6, translated below)
+ *   tamper-repro.sh  1232 B 729759b0… (RB4-2, translated to a temp-repo test below)
+ *   o2-anim.mjs      1313 B 27d58e6a… (O-b ⇒ contract rev 5 A-F1 (c); real-Chromium
+ *                    controls in wave01-probe.selftest.pw.ts)
+ *   env3-tagged.mjs  5492 B ca0937c1da575bcd0abd0905aa2ec9f523edbfa0fae1b38d5e6bd117a396e491
+ *   env3b-tagged.mjs 2954 B e681292eb747b42eb4b977f1b8aae9e14ccc5485eeaea96d2c12ca74ffbc9f7a
+ *   env3c-tagged.mjs 2225 B c3f18a3bf160bc33e6d0d1b45f3174d92eba8eca30f42a2e10f821d3ea51e363
+ *                    (review3 Q/C cases with source tags; outputs identical at
+ *                    719ccced and this head; covered by the review3 section)
  */
 
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  validationRecord,
+  validatorIdentity,
   applyAuthCheck,
   envDecision,
   evaluateEnv,
   evaluateEnvPost,
   sharedEnvValues,
   provenanceKey,
+  provenanceEnvKey,
+  provenanceSupportKey,
 } from '../wave01/records.mjs';
 
 const A = 'https://slot-a.example';
@@ -109,7 +130,8 @@ const run = {
   baseURL: A,
   preBaseURL: A,
   preValues: sharedEnvValues(decl()),
-  preProvenanceKey: provenanceKey(PROV),
+  preProvenanceKey: provenanceEnvKey(PROV),
+  preSupportKey: provenanceSupportKey(PROV),
   preProcessStartTs: '2026-10-07T15:30:00Z',
   testLoginUsed: true,
 };
@@ -437,5 +459,180 @@ describe('review3 RB-2 continuity (R-10) on POST', () => {
     const changed = JSON.parse(JSON.stringify(PROV));
     changed.files_examined = ['./other.yaml'];
     expect(evaluateEnvPost(post({ e_env_1_provenance: changed }), run).outcome).toBe('fail');
+  });
+});
+
+// ─── review4 round 1 (head 719ccced) ─────────────────────────────────────
+
+describe('review4 RB4-1: same-process PRE/POST compares ENVIRONMENT values only (post4 P0–P6)', () => {
+  const mut = (f: (p: any) => void) => {
+    const p = JSON.parse(JSON.stringify(PROV));
+    f(p);
+    return p;
+  };
+  // post4.mjs passes the WHOLE-record canonical key as preProvenanceKey; the
+  // runner now records the environment-only key. Both forms must agree.
+  const runs = {
+    'env-only PRE key (runner)': run,
+    'whole-record PRE key (post4 form)': {
+      ...run,
+      preProvenanceKey: provenanceKey(PROV),
+      preSupportKey: undefined,
+    },
+  };
+  for (const [label, r] of Object.entries(runs)) {
+    it(`${label}: P0 identical POST record ⇒ pass, no notes`, () => {
+      const out = evaluateEnvPost(post({ e_env_1_provenance: PROV }), r);
+      expect(out.outcome).toBe('pass');
+      expect(out.notes).toEqual([]);
+    });
+    for (const [id, f] of [
+      [
+        'P1 log_ts_source text differs',
+        (p: any) => (p.support.hosted.log_ts_source = 'journalctl -u scion-hub'),
+      ],
+      [
+        'P2 process_start_source text differs',
+        (p: any) => (p.support.hosted.process_start_source = 'systemctl show ActiveEnterTimestamp'),
+      ],
+      [
+        'P3 log_ts same instant, different precision',
+        (p: any) => (p.support.hosted.log_ts = '2026-10-07T15:30:05.000Z'),
+      ],
+      [
+        'P4 advisory batch_start added on POST',
+        (p: any) => (p.support.hosted.batch_start = batchStart),
+      ],
+    ] as const) {
+      it(`${label}: ${id} ⇒ pass; support difference recorded as a note, not FAIL`, () => {
+        const out = evaluateEnvPost(post({ e_env_1_provenance: mut(f) }), r);
+        expect(out.outcome).toBe('pass');
+        expect(out.fails).toEqual([]);
+        expect(out.notes.join(' ')).toContain('support metadata differs');
+      });
+    }
+    it(`${label}: P5 dev_auth.basis free-text wording ⇒ INCONCLUSIVE (invalid enumerated basis), never FAIL`, () => {
+      const out = evaluateEnvPost(
+        post({
+          e_env_1_provenance: mut(
+            (p) => (p.support.dev_auth.basis = 'recorded inputs (flags/settings/env)')
+          ),
+        }),
+        r
+      );
+      expect(out.outcome).toBe('inconclusive');
+      expect(out.fails).toEqual([]);
+    });
+    it(`${label}: P6 control — an environment value differs ⇒ FAIL`, () => {
+      const out = evaluateEnvPost(
+        post({ e_env_1_provenance: mut((p) => (p.env.SCION_SERVER_AUTH_DEVMODE = 'false')) }),
+        r
+      );
+      expect(out.outcome).toBe('fail');
+      expect(out.fails.join(' ')).toContain('environment values');
+    });
+  }
+  it('every compared environment field is graded (flags, load_path, files_examined, path_values, env, declared_*)', () => {
+    for (const f of [
+      (p: any) => (p.flags['--production'] = false),
+      (p: any) => (p.files_examined = ['./other.yaml']),
+      (p: any) => (p.path_values['server.mode'] = 'hosted '),
+      (p: any) => (p.declared_effective_auth_mode = 'oauth'),
+    ])
+      expect(evaluateEnvPost(post({ e_env_1_provenance: mut(f) }), run).outcome).not.toBe('pass');
+  });
+});
+
+describe('owner O-d: POST fails and open problems stay separately labelled under an aggregate FAIL', () => {
+  it('a FAIL with a missing field reports both lists', () => {
+    const out = evaluateEnvPost(
+      post({ e_env_4_runtime_broker_effective: true, e_env_3_test_login_enabled: undefined }),
+      run
+    );
+    expect(out.outcome).toBe('fail');
+    expect(out.fails.join(' ')).toContain('E-ENV-4');
+    expect(out.open.join(' ')).toContain('e_env_3_test_login_enabled missing');
+    expect(out.problems).toEqual([...out.fails, ...out.open]);
+  });
+});
+
+describe('review4 RB4-2: a validator on a dirty/untracked covered tree never yields VALID (tamper-repro translated)', () => {
+  const git = (cwd: string, ...a: string[]) =>
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], {
+      cwd,
+      stdio: 'pipe',
+    });
+  const mkRepo = () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wave01-rb42-'));
+    git(root, 'init', '-q');
+    for (const f of ['web/e2e/layout-survey/wave01/records.mjs', 'web/e2e/harness/hub.ts']) {
+      fs.mkdirSync(path.join(root, path.dirname(f)), { recursive: true });
+      fs.writeFileSync(path.join(root, f), `// ${f}\n`);
+    }
+    git(root, 'add', '-A');
+    git(root, 'commit', '-q', '-m', 'init');
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wave01-rb42-run-'));
+    fs.writeFileSync(path.join(runDir, 'run.json'), '{}');
+    return { root, runDir };
+  };
+  const rec = (runDir: string, root: string) =>
+    validationRecord(
+      runDir,
+      '/nonexistent/b',
+      '/nonexistent/c',
+      undefined,
+      [],
+      validatorIdentity({ root })
+    );
+  it('clean tree: identity clean, an error-free run is VALID', () => {
+    const { root, runDir } = mkRepo();
+    const r = rec(runDir, root);
+    expect(r.validator).toMatchObject({ clean: true, cleanProblems: [] });
+    expect(r.validator.suiteDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(r.classification).toBe('VALID');
+  });
+  it('modified validator (tamper-repro: appended export) ⇒ clean false ⇒ INCONCLUSIVE, never VALID', () => {
+    const { root, runDir } = mkRepo();
+    fs.appendFileSync(
+      path.join(root, 'web/e2e/layout-survey/wave01/records.mjs'),
+      '\n// dirty: validator behaviour altered\nexport const TAMPER = 1;\n'
+    );
+    const r = rec(runDir, root);
+    expect(r.validator.clean).toBe(false);
+    expect(r.classification).toBe('INCONCLUSIVE');
+    expect(r.errors.join(' ')).toContain('validator identity unverified');
+  });
+  it('untracked file under a covered path ⇒ not VALID', () => {
+    const { root, runDir } = mkRepo();
+    fs.writeFileSync(path.join(root, 'web/e2e/harness/extra.ts'), 'x');
+    expect(rec(runDir, root).classification).toBe('INCONCLUSIVE');
+  });
+  it('staged-only change ⇒ not VALID', () => {
+    const { root, runDir } = mkRepo();
+    fs.appendFileSync(path.join(root, 'web/e2e/harness/hub.ts'), 'y');
+    git(root, 'add', '-A');
+    expect(rec(runDir, root).classification).toBe('INCONCLUSIVE');
+  });
+  it('identity that cannot be established (not a repo) ⇒ not VALID', () => {
+    const runDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wave01-rb42-run-'));
+    fs.writeFileSync(path.join(runDir, 'run.json'), '{}');
+    const id = validatorIdentity({ root: os.tmpdir() });
+    expect(id.clean).toBe(false);
+    expect(validationRecord(runDir, '/x', '/y', undefined, [], id).classification).toBe(
+      'INCONCLUSIVE'
+    );
+  });
+  it('run mismatches still classify REJECTED even on a dirty validator', () => {
+    const { root, runDir } = mkRepo();
+    fs.writeFileSync(path.join(root, 'web/e2e/harness/extra.ts'), 'x');
+    const r = validationRecord(
+      runDir,
+      '/x',
+      '/y',
+      undefined,
+      ['mismatch: z'],
+      validatorIdentity({ root })
+    );
+    expect(r.classification).toBe('REJECTED (FAIL or invalid)');
   });
 });

@@ -28,6 +28,7 @@ import {
   evalBOVR,
   hitTest,
   pressChecks,
+  EMPTY_BASELINE,
   renderedTextEquals,
   resolveObservations,
   type PressRecord,
@@ -521,34 +522,128 @@ describe('A-F1 keyboard (rev 3 rules, no repair)', () => {
         press(3, focused('link'), ['b']),
       ],
       backward: null,
-      baselineForward: {},
+      baselineForward: EMPTY_BASELINE,
       baselineBackward: null,
       startReached: [],
     });
     expect(r.outcome).toBe('pass');
   });
-  it('focused element without indicator fails; style diff from unfocused baseline counts as indicator', () => {
+  // Rev 5 §2 A-F1 rule (c): stable difference only (U1 == U2, F != U2).
+  const bl = (path: string, u1: Record<string, string>, u2: Record<string, string> = u1) => ({
+    u1: { [path]: u1 },
+    u2: { [path]: u2 },
+  });
+  it('rev 5 (c): no outline/box-shadow and NO difference at all ⇒ indicator absent ⇒ FAIL', () => {
     const plain = el({ path: 'p' });
-    expect(pressChecks(press(1, plain), {}).indicator).toBe(false);
+    const c = pressChecks(press(1, plain), bl('p', { ...plain.style }));
+    expect(c).toMatchObject({
+      indicator: 'absent',
+      result: 'fail',
+      diffKeys: [],
+      unstableKeys: [],
+    });
     expect(
-      pressChecks(press(1, plain), { p: { ...plain.style, color: 'rgb(9, 9, 9)' } })
-    ).toMatchObject({ indicator: true, indicatorBy: 'style-diff-from-unfocused' });
+      evalAF1({
+        targets: [],
+        forward: [press(1, plain)],
+        backward: null,
+        baselineForward: bl('p', { ...plain.style }),
+        baselineBackward: null,
+        startReached: [],
+      }).outcome
+    ).toBe('fail');
+  });
+  it('rev 5 (c): a stable non-outline difference (U1 == U2, F differs) counts ⇒ PASS', () => {
+    const plain = el({ path: 'p' });
+    const u = { ...plain.style, color: 'rgb(9, 9, 9)' };
+    expect(pressChecks(press(1, plain), bl('p', u, { ...u }))).toMatchObject({
+      indicator: 'present',
+      indicatorBy: 'stable-style-diff-from-unfocused',
+      diffKeys: ['color'],
+      diffU1U2: [],
+      result: 'pass',
+    });
+  });
+  it('rev 5 (c): animation only (unstable U1/U2, nothing stable differs) ⇒ undeterminable ⇒ A-F1 INCONCLUSIVE, never PASS', () => {
+    const plain = el({ path: 'p', style: { ...el({}).style, color: 'rgb(3, 3, 3)' } });
+    const u1 = { ...plain.style, color: 'rgb(1, 1, 1)' };
+    const u2 = { ...plain.style, color: 'rgb(2, 2, 2)' };
+    const c = pressChecks(press(1, plain), bl('p', u1, u2));
+    expect(c).toMatchObject({
+      indicator: 'undeterminable',
+      result: 'inconclusive',
+      diffKeys: [],
+      unstableKeys: ['color'],
+      diffU1U2: ['color'],
+      diffU2F: ['color'],
+    });
     const r = evalAF1({
       targets: [],
       forward: [press(1, plain)],
       backward: null,
-      baselineForward: {},
+      baselineForward: bl('p', u1, u2),
       baselineBackward: null,
       startReached: [],
     });
-    expect(r.outcome).toBe('fail');
+    expect(r.outcome).toBe('inconclusive');
+  });
+  it('rev 5 (c): animation AND a stable focus style change ⇒ PASS on the stable property only', () => {
+    const f = el({
+      path: 'p',
+      style: { ...el({}).style, color: 'rgb(3, 3, 3)', 'font-weight': '700' },
+    });
+    const u1 = { ...f.style, color: 'rgb(1, 1, 1)', 'font-weight': '400' };
+    const u2 = { ...f.style, color: 'rgb(2, 2, 2)', 'font-weight': '400' };
+    expect(pressChecks(press(1, f), bl('p', u1, u2))).toMatchObject({
+      indicator: 'present',
+      diffKeys: ['font-weight'],
+      unstableKeys: ['color'],
+      result: 'pass',
+    });
+  });
+  it('rev 5 (c): outline-* changes never count, stable or not', () => {
+    const f = el({ path: 'p', style: { ...el({}).style, 'outline-offset': '1px' } });
+    const u = { ...f.style, 'outline-offset': '0px' };
+    expect(pressChecks(press(1, f), bl('p', u, { ...u }))).toMatchObject({
+      indicator: 'absent',
+      result: 'fail',
+      diffU2F: ['outline-offset'],
+    });
+  });
+  it('rev 5 (c): FAIL dominates INCONCLUSIVE in the aggregate; visibility failure is FAIL even with an undeterminable indicator', () => {
+    const anim = el({ path: 'p', style: { ...el({}).style, color: 'rgb(3, 3, 3)' } });
+    const u1 = { ...anim.style, color: 'rgb(1, 1, 1)' };
+    const u2 = { ...anim.style, color: 'rgb(2, 2, 2)' };
+    const off = el({
+      path: 'p',
+      style: anim.style,
+      box: { y: 2000 },
+      hit: { cx: 35, cy: 2010, inViewport: false, hitPath: null, ok: false },
+    });
+    expect(pressChecks(press(1, off), bl('p', u1, u2)).result).toBe('fail');
+    expect(
+      evalAF1({
+        targets: [],
+        forward: [press(1, anim), press(2, el({ path: 'q' }))],
+        backward: null,
+        baselineForward: { u1: { p: u1, q: el({}).style }, u2: { p: u2, q: el({}).style } },
+        baselineBackward: null,
+        startReached: [],
+      }).outcome
+    ).toBe('fail');
+  });
+  it('rev 5 (c): no unfocused samples for the element ⇒ undeterminable (INCONCLUSIVE), never PASS', () => {
+    expect(pressChecks(press(1, el({ path: 'p' })), EMPTY_BASELINE)).toMatchObject({
+      indicator: 'undeterminable',
+      result: 'inconclusive',
+    });
   });
   it('focus offscreen (no native scroll repair) fails', () => {
     const off = focused('o', {
       box: { y: 2000 },
       hit: { cx: 35, cy: 2010, inViewport: false, hitPath: null, ok: false },
     });
-    expect(pressChecks(press(1, off), {})).toMatchObject({ visible: false, ok: false });
+    expect(pressChecks(press(1, off), EMPTY_BASELINE)).toMatchObject({ visible: false, ok: false });
   });
   it('focus hidden by an intentional scroller (outside its visible area) fails', () => {
     const content = chain({
@@ -558,15 +653,15 @@ describe('A-F1 keyboard (rev 3 rules, no repair)', () => {
       policies: ['POL-V-APP-CONTENT'],
     });
     const hidden = focused('h', { box: { y: 500 }, chain: [content, viewport()] });
-    expect(pressChecks(press(1, hidden), {}).visible).toBe(false);
+    expect(pressChecks(press(1, hidden), EMPTY_BASELINE).visible).toBe(false);
   });
   it('focus-outside-document ends the direction ungraded; Shift+Tab retry can still reach the target', () => {
     const r = evalAF1({
       targets: ['a'],
       forward: [press(1, focused('x')), press(2, null)],
       backward: [press(1, focused('btn'), ['a'], 'backward')],
-      baselineForward: {},
-      baselineBackward: {},
+      baselineForward: EMPTY_BASELINE,
+      baselineBackward: EMPTY_BASELINE,
       startReached: [],
     });
     expect(r.outcome).toBe('pass');
@@ -577,8 +672,8 @@ describe('A-F1 keyboard (rev 3 rules, no repair)', () => {
       targets: ['a'],
       forward: [press(1, focused('x'))],
       backward: [press(1, null, [], 'backward')],
-      baselineForward: {},
-      baselineBackward: {},
+      baselineForward: EMPTY_BASELINE,
+      baselineBackward: EMPTY_BASELINE,
       startReached: [],
     });
     expect(r.outcome).toBe('fail');
@@ -590,7 +685,7 @@ describe('A-F1 keyboard (rev 3 rules, no repair)', () => {
         targets: ['a'],
         forward: [],
         backward: null,
-        baselineForward: {},
+        baselineForward: EMPTY_BASELINE,
         baselineBackward: null,
         startReached: ['a'],
       }).outcome

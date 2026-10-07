@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /**
- * ATTACH-ONLY Wave01 measurement batch (contract FROZEN rev 4).
+ * ATTACH-ONLY Wave01 measurement batch (contract FROZEN rev 5).
  *
  * Never builds, starts, seeds, resets or stops anything; registers no route
  * interception. Per batch: capture-host + suite-digest checks, Release pair
@@ -48,8 +48,7 @@ import {
   envDecision,
   DEFAULT_ENV_MAX_AGE_MIN,
   classifyDevAuthProbes,
-  provenanceKey,
-  sharedEnvValues,
+  preComparisonInputs,
   evaluateEnv,
   isQuarantined,
   loadLedger,
@@ -312,14 +311,13 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
             // Value-free steward PRE declaration, embedded so the assessor grades
             // from the record itself (assertValueFree enforced at load).
             envPreDeclaration: envDecl,
-            envPreBaseURL: typeof envDecl?.baseURL === 'string' ? envDecl.baseURL : null,
-            envPreValues: envDecl ? sharedEnvValues(envDecl) : null,
-            envPreProvenanceKey: envDecl ? provenanceKey(envDecl.e_env_1_provenance) : null,
+            // O-a: one derivation (records.mjs preComparisonInputs), re-derived
+            // from envPreDeclarationRaw by validate-run. envPreProvenanceKey is
+            // the environment-only view (RB4-1); envPreSupportKey is recorded only.
+            ...preComparisonInputs(envDecl),
             envPreDevAuthProbes: preProbes,
             envPreSelfAnon401: self401,
             envPreDeclarationRaw: envDeclBytes ? envDeclBytes.toString('utf-8') : null,
-            envPreProcessStartTs:
-              envDecl?.e_env_1_provenance?.support?.hosted?.process_start_ts ?? null,
             authCheckInventory,
             envAuthCheck: authCheckAttempt,
             expectedRecords,

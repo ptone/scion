@@ -15,15 +15,16 @@
 /**
  * Pinned identities and frozen constants of the Wave01 acceptance contract.
  * Values are copied from the contract text; the runner never learns them
- * from results. Section references (§) are to FROZEN rev 4.
+ * from results. Section references (§) are to FROZEN rev 5.
  */
 
 export const CONTRACT = Object.freeze({
-  name: 'wave01-contract-FROZEN-rev4.md',
-  revision: 4,
-  bytes: 48891,
-  sha256: '0fcc579e4a09d4479ec94a8d52ce28ff13e4136645feb77002be3d945dd9c855',
+  name: 'wave01-contract-FROZEN-rev5.md',
+  revision: 5,
+  bytes: 50327,
+  sha256: '9df504e038c1f76539063c776b8b919d3c245c4a02e31db9cbff943c070c288d',
   supersedes: [
+    '0fcc579e4a09d4479ec94a8d52ce28ff13e4136645feb77002be3d945dd9c855',
     '69ec8b81af27c0bbb5be53a4cdf0722c98022368d6ebc947213431aeb03d6680',
     '1877b1d40a5e4bf04d87e47d419a4451cac5ccb2d3f27f9a63d8ce32c88a5447',
     'f7143415343058363d29fb0fcf693bdd4183088a4fcf916d62d7feea2747e8ae',

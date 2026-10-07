@@ -23,7 +23,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sha256, validatePair, CONTRACT_SHA256 } from './release.mjs';
-import { suiteDigest } from './suite-digest.mjs';
+import { suiteDigest, captureHostCheck } from './suite-digest.mjs';
 
 export const CAPTURE_KIND = 'wave01-capture';
 export const RUN_KIND = 'wave01-capture-run';
@@ -433,6 +433,57 @@ export function provenanceKey(prov) {
   return JSON.stringify(canon(prov));
 }
 
+/**
+ * Environment-only comparison form of a provenance record (review4 RB4-1,
+ * assessor-concurred 17:17Z). PRE/POST same-process equality is graded on the
+ * ENVIRONMENT values only: flags, load_path, files_examined, path_values, env
+ * and the declared_effective_* values. `support.*` is supporting metadata
+ * (source text, timestamp precision, advisory batch_start); differences there
+ * are recorded as notes, never an environment FAIL.
+ */
+export const PROVENANCE_COMPARED_FIELDS = [
+  'flags',
+  'load_path',
+  'files_examined',
+  'path_values',
+  'env',
+  'declared_effective_hosted',
+  'declared_effective_auth_mode',
+];
+export function provenanceEnvKey(prov) {
+  if (!isObj(prov)) return null;
+  return provenanceKey(
+    Object.fromEntries(
+      PROVENANCE_COMPARED_FIELDS.map((k) => [k, k in prov ? prov[k] : '<missing>'])
+    )
+  );
+}
+/** Comparison form of the supporting metadata only (recorded, not graded). */
+export function provenanceSupportKey(prov) {
+  if (!isObj(prov)) return null;
+  return provenanceKey(isObj(prov.support) ? prov.support : { '<missing>': true });
+}
+
+/**
+ * PRE comparison inputs, derived ONLY from the PRE declaration (owner O-a):
+ * the runner records them in run.json, and validate-run re-derives them from
+ * the embedded raw declaration bytes rather than trusting those fields.
+ * @param {any} decl
+ */
+export function preComparisonInputs(decl) {
+  const prov = decl?.e_env_1_provenance;
+  return {
+    envPreBaseURL: typeof decl?.baseURL === 'string' ? decl.baseURL : null,
+    envPreValues: decl ? sharedEnvValues(decl) : null,
+    envPreProvenanceKey: decl ? provenanceEnvKey(prov) : null,
+    envPreSupportKey: decl ? provenanceSupportKey(prov) : null,
+    envPreProcessStartTs:
+      typeof prov?.support?.hosted?.process_start_ts === 'string'
+        ? prov.support.hosted.process_start_ts
+        : null,
+  };
+}
+
 /** Value snapshot of the shared booleans of a declaration (recorded in run.json). */
 export function sharedEnvValues(decl) {
   return Object.fromEntries(
@@ -741,12 +792,21 @@ export function envStop(results) {
  * [run.startedAt, run.endedAt]; same slotGeneration; dev-auth and runtime
  * broker effective false; no broker process/dispatch true.
  * @param {any} post
- * @param {{startedAt: string, endedAt: string, slotGeneration: string, baseURL: string, preBaseURL?: string, preValues?: Record<string, boolean | null>, preProvenanceKey?: string | null, preProcessStartTs?: string | null, testLoginUsed?: boolean}} run
+ * @param {{startedAt: string, endedAt: string, slotGeneration: string, baseURL: string, preBaseURL?: string, preValues?: Record<string, boolean | null>, preProvenanceKey?: string | null, preSupportKey?: string | null, preProcessStartTs?: string | null, testLoginUsed?: boolean}} run
  */
 export function evaluateEnvPost(post, run) {
-  if (!post) return { outcome: 'inconclusive', problems: ['missing: POST env declaration'] };
+  if (!post)
+    return {
+      outcome: 'inconclusive',
+      problems: ['missing: POST env declaration'],
+      fails: [],
+      open: ['missing: POST env declaration'],
+      notes: [],
+      attributable: false,
+    };
   const problems = [];
   const fails = [];
+  const notes = [];
   const ws = ms(post.window_start ?? post.window_ts);
   const we = ms(post.window_end);
   const rs = ms(run.startedAt);
@@ -814,11 +874,28 @@ export function evaluateEnvPost(post, run) {
       problems.push(
         'POST record from a different serving-process start (restart; R-10) — not compared'
       );
-    else if (
-      run.preProvenanceKey &&
-      provenanceKey(post.e_env_1_provenance) !== run.preProvenanceKey
-    )
-      fails.push('same-slot PRE/POST disagreement on e_env_1_provenance (environment values)');
+    else if (run.preProvenanceKey) {
+      // The PRE key may be the environment-only form (runner, RB4-1) or a
+      // whole-record canonical form; both are projected onto the compared
+      // environment fields, so support metadata never decides equality.
+      let preProv = null;
+      try {
+        preProv = JSON.parse(run.preProvenanceKey);
+      } catch {
+        /* reported below */
+      }
+      if (!isObj(preProv)) problems.push('PRE provenance key unreadable — not compared');
+      else {
+        if (provenanceEnvKey(post.e_env_1_provenance) !== provenanceEnvKey(preProv))
+          fails.push('same-slot PRE/POST disagreement on e_env_1_provenance (environment values)');
+        const preSupport =
+          run.preSupportKey ?? (isObj(preProv.support) ? provenanceSupportKey(preProv) : null);
+        if (preSupport && provenanceSupportKey(post.e_env_1_provenance) !== preSupport)
+          notes.push(
+            'PRE/POST support metadata differs (recorded only; not an environment value — RB4-1)'
+          );
+      }
+    }
   } else if (post.e_env_1_dev_auth_effective === true)
     fails.push('E-ENV-1 (POST): declared effective dev-auth ON');
   // Ruling R-10 continuity: POST must show the SAME serving-process start as
@@ -863,6 +940,11 @@ export function evaluateEnvPost(post, run) {
   return {
     outcome: fails.length ? 'fail' : problems.length ? 'inconclusive' : 'pass',
     problems: [...fails, ...problems],
+    // O-d: graded contradictions and open (missing/unattributable) problems
+    // kept apart so validate-run can label them mismatch:/missing:.
+    fails: [...fails],
+    open: [...problems],
+    notes,
     attributable,
   };
 }
@@ -919,7 +1001,7 @@ export function validateCapture(rec) {
   if (rec.schemaVersion !== 1) errs.push('schemaVersion must be 1');
   if (rec.kind !== CAPTURE_KIND) errs.push(`kind must be ${CAPTURE_KIND}`);
   if (rec.contractSha256 !== CONTRACT_SHA256)
-    errs.push('contractSha256 is not the pinned FROZEN rev 4 digest');
+    errs.push('contractSha256 is not the pinned FROZEN rev 5 digest');
   if (!SUBSTEPS.includes(rec.substep)) errs.push(`substep ${rec.substep} invalid`);
   if (!STATUSES.includes(rec.status)) errs.push(`status ${rec.status} invalid`);
   if (rec.status !== 'complete' && isEmpty(rec.errorReason))
@@ -989,7 +1071,10 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
     else if (gte.outcome !== 'pass' && !(gte.gate === 'E-ENV-4' && gte.awaitingPost))
       errs.push(`missing: ${gte.gate} ${gte.outcome} (pre window)`);
   }
-  if (!run.envPreValues) errs.push('missing: run.envPreValues (PRE shared env values)');
+  // O-a: every PRE comparison input is derived from the embedded RAW
+  // declaration below; the run.json copies are only cross-checked.
+  /** @type {ReturnType<typeof preComparisonInputs> | null} */
+  let pre = null;
   // review3 O1: recompute the PRE gates from the embedded RAW declaration and
   // the recorded probe / auth-check results instead of trusting run.env.
   if (typeof run.envPreDeclarationRaw !== 'string') errs.push('missing: run.envPreDeclarationRaw');
@@ -1003,6 +1088,10 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
       errs.push('mismatch: embedded PRE declaration is not JSON');
     }
     if (decl) {
+      pre = preComparisonInputs(decl);
+      for (const [k, v] of Object.entries(pre))
+        if (k in run && provenanceKey({ v: run[k] ?? null }) !== provenanceKey({ v }))
+          errs.push(`mismatch: run.${k} differs from the value derived from envPreDeclarationRaw`);
       let recomputed = evaluateEnv(
         decl,
         run.envPreSelfAnon401 ?? null,
@@ -1019,10 +1108,12 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
       }
     }
   }
-  if (!run.envPreBaseURL) errs.push('missing: run.envPreBaseURL (PRE declaration baseURL)');
-  else if (hostBinding({ baseURL: run.envPreBaseURL }, base.baseURL).status !== 'ok')
+  if (!pre?.envPreValues) errs.push('missing: PRE shared env values (from envPreDeclarationRaw)');
+  if (!pre?.envPreBaseURL)
+    errs.push('missing: PRE declaration baseURL (from envPreDeclarationRaw)');
+  else if (hostBinding({ baseURL: pre.envPreBaseURL }, base.baseURL).status !== 'ok')
     errs.push(
-      `missing: PRE env baseURL ${run.envPreBaseURL} is not bound to Release baseURL ${base.baseURL} (INCONCLUSIVE)`
+      `missing: PRE env baseURL ${pre.envPreBaseURL} is not bound to Release baseURL ${base.baseURL} (INCONCLUSIVE)`
     );
   if (run.baseURL && new URL(run.baseURL).origin !== new URL(base.baseURL).origin)
     errs.push('mismatch: run.baseURL != Release baseURL');
@@ -1059,16 +1150,19 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
       endedAt: run.endedAt,
       slotGeneration: base.slotGeneration,
       baseURL: run.baseURL ?? base.baseURL,
-      preBaseURL: run.envPreBaseURL ?? undefined,
-      preValues: run.envPreValues ?? undefined,
-      preProvenanceKey: run.envPreProvenanceKey ?? undefined,
-      preProcessStartTs: run.envPreProcessStartTs ?? null,
+      preBaseURL: pre?.envPreBaseURL ?? undefined,
+      preValues: pre?.envPreValues ?? undefined,
+      preProvenanceKey: pre?.envPreProvenanceKey ?? undefined,
+      preSupportKey: pre?.envPreSupportKey ?? undefined,
+      preProcessStartTs: pre?.envPreProcessStartTs ?? null,
       testLoginUsed:
         Array.isArray(run.issuanceInventory?.credentials) &&
         run.issuanceInventory.credentials.length > 0,
     });
-    if (r.outcome === 'fail') errs.push(...r.problems.map((p) => `mismatch: POST env ${p}`));
-    else if (r.outcome !== 'pass') errs.push(...r.problems.map((p) => `missing: POST env ${p}`));
+    // O-d: per-problem labels survive an aggregate FAIL — graded
+    // contradictions are `mismatch:`, open/unattributable ones `missing:`.
+    errs.push(...r.fails.map((p) => `mismatch: POST env ${p}`));
+    errs.push(...r.open.map((p) => `missing: POST env ${p}`));
   }
   // Completeness (review1 N5): every expected (state, profile, substep)
   // record exists, and every complete M0 carries a primary screenshot.
@@ -1147,13 +1241,35 @@ export function coverageSummary(runDir) {
   return { perState, totals };
 }
 
-/** review3 O5: which code produced the verdict (runner commit + suite digest). */
-function validatorIdentity() {
+/**
+ * review3 O5 + review4 RB4-2: which code produced the verdict, and whether
+ * that code IS the committed tree it names. The digest is computed from HEAD's
+ * tracked blobs, so it identifies the executing validator only when the
+ * covered tree (web/e2e/layout-survey, web/e2e/harness) is clean: no
+ * modified, staged or untracked files. `clean: false` ⇒ the validation record
+ * can never be VALID (assessor 17:17Z: unverified ⇒ INCONCLUSIVE until
+ * re-validated cleanly). The root is derived from THIS module's location, i.e.
+ * the tree the executing validator was loaded from.
+ * @param {{root?: string}} [opts]
+ */
+export function validatorIdentity(opts = {}) {
   try {
-    const d = suiteDigest();
-    return { head: d.commit, suiteDigest: d.digest, suiteFileCount: d.fileCount, method: d.method };
+    const d = suiteDigest({ root: opts.root });
+    const h = captureHostCheck({ root: opts.root, reviewedCommit: 'HEAD' });
+    return {
+      head: d.commit,
+      suiteDigest: d.digest,
+      suiteFileCount: d.fileCount,
+      method: d.method,
+      clean: h.ok,
+      cleanProblems: h.problems,
+    };
   } catch (e) {
-    return { error: String(e instanceof Error ? e.message : e).slice(0, 200) };
+    return {
+      clean: false,
+      cleanProblems: ['validator identity could not be established'],
+      error: String(e instanceof Error ? e.message : e).slice(0, 200),
+    };
   }
 }
 
@@ -1163,7 +1279,25 @@ function validatorIdentity() {
  * environment-validity evidence). `classification` follows §0/§5a: any
  * `mismatch:` ⇒ REJECTED-FAIL-OR-INVALID; only `missing:` ⇒ INCONCLUSIVE.
  */
-export function validationRecord(runDir, baseFile, companionFile, envPostFile, errs) {
+export function validationRecord(
+  runDir,
+  baseFile,
+  companionFile,
+  envPostFile,
+  runErrs,
+  identity = validatorIdentity()
+) {
+  // RB4-2: an unverified validator identity is never VALID. The validator is
+  // not run evidence, so this is `missing:` (verdict unverified ⇒
+  // INCONCLUSIVE), never a FAIL of the run itself.
+  const errs = [
+    ...runErrs,
+    ...(identity.clean === true
+      ? []
+      : (identity.cleanProblems ?? ['validator cleanliness not established']).map(
+          (p) => `missing: validator identity unverified (re-validate on a clean tree): ${p}`
+        )),
+  ];
   const files = fs
     .readdirSync(runDir)
     .filter((f) => fs.statSync(path.join(runDir, f)).isFile())
@@ -1176,7 +1310,7 @@ export function validationRecord(runDir, baseFile, companionFile, envPostFile, e
     kind: 'wave01-validation',
     createdAt: new Date().toISOString(),
     contractSha256: CONTRACT_SHA256,
-    validator: validatorIdentity(),
+    validator: identity,
     runDir: path.basename(runDir),
     verdict: errs.length === 0 ? 'accepted' : 'rejected',
     classification:
@@ -1284,7 +1418,7 @@ function main() {
     if (!dir || dir.startsWith('--'))
       throw new Error('validate-run RUN_DIR --base FILE --companion FILE');
     const i = rest.indexOf('--env-post');
-    const errs = validateRun(
+    const runErrs = validateRun(
       dir,
       arg(rest, 'base'),
       arg(rest, 'companion'),
@@ -1292,7 +1426,8 @@ function main() {
     );
     const o = rest.indexOf('--out');
     const envPost = i >= 0 ? arg(rest, 'env-post') : undefined;
-    const rec = validationRecord(dir, arg(rest, 'base'), arg(rest, 'companion'), envPost, errs);
+    const rec = validationRecord(dir, arg(rest, 'base'), arg(rest, 'companion'), envPost, runErrs);
+    const errs = rec.errors;
     if (o >= 0) {
       const out = arg(rest, 'out');
       fs.writeFileSync(out, JSON.stringify(rec, null, 2) + '\n', { flag: 'wx', mode: 0o444 });

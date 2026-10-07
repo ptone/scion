@@ -37,7 +37,7 @@ import {
   type ProbeRequest,
   type RawElement,
 } from './probe.js';
-import type { NavRaw } from './evaluate.js';
+import type { FocusBaseline, NavRaw } from './evaluate.js';
 import { sha256 } from './release.mjs';
 
 export interface Profile {
@@ -435,4 +435,20 @@ export async function twoFrames(page: Page): Promise<void> {
   await page.evaluate(
     () => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
   );
+}
+
+/**
+ * Rev 5 §2 A-F1 rule (c): two unfocused full-style samples U1, U2 of every
+ * focusable element in this context, separated by the SAME settle used after
+ * every key press (twoFrames), with no input in between. Never focuses or
+ * scrolls. Shared by the batch runner and the real-Chromium selftests.
+ */
+export async function sampleFocusBaseline(page: Page): Promise<FocusBaseline> {
+  const sample = () => pe<Record<string, Record<string, string>>>(page, { op: 'focus-baseline' });
+  const u1At = now();
+  const u1 = await sample();
+  await twoFrames(page);
+  const u2At = now();
+  const u2 = await sample();
+  return { u1, u2, u1At, u2At, settle: 'two-animation-frames' };
 }

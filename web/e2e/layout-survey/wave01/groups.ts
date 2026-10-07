@@ -16,7 +16,7 @@
  * W01-S01 / W01-S02 adapter (/admin/groups default and fixture filter).
  * Groups-table clauses are the pilot finding rev 2 B-* definitions with
  * fixture IDs bound from Wave01 in-batch readback; shell clauses and A-F1
- * follow contract FROZEN rev 4.
+ * follow contract FROZEN rev 5.
  */
 
 import { AF1_N, NAV_TIMEOUT_MS, TOL, type ProfileId } from './contract.js';
@@ -41,6 +41,7 @@ import {
   type Observation,
   type Outcome,
   type PressRecord,
+  type FocusBaseline,
 } from './evaluate.js';
 import type { StateDef, TargetDef } from './manifest.js';
 import { probe, type MeasureResult, type ProbeQuery, type RawElement } from './probe.js';
@@ -56,6 +57,7 @@ import {
   pe,
   pointerClick,
   positionStep,
+  sampleFocusBaseline,
   scrollerForPolicy,
   screenshot,
   twoFrames,
@@ -579,14 +581,13 @@ export async function traverse(
   opts: { expectBodyStart: boolean } = { expectBodyStart: true }
 ): Promise<{
   presses: PressRecord[];
-  baseline: Record<string, Record<string, string>>;
+  baseline: FocusBaseline;
   startPath: string | null;
   startReached: string[];
 }> {
-  const baseline = (await pe(ctx.page, { op: 'focus-baseline' })) as Record<
-    string,
-    Record<string, string>
-  >;
+  // Rev 5 A-F1 (c): U1, settle, U2 before the first press (raw maps are
+  // preserved in the M1 raw record).
+  const baseline = await sampleFocusBaseline(ctx.page);
   const start = (await pe(ctx.page, {
     op: 'active',
     policies: POLICIES,
