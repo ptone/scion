@@ -515,12 +515,20 @@ export function evalBA2(rows: FixtureRowObs[]): ClauseResult {
 
 /** B-A3 element check for one row. */
 /**
- * Rev 3 §1 rendered-text comparison: apply the element's computed
- * white-space collapsing to v, then compare with the element's innerText.
- * normal/nowrap: collapse every whitespace run (incl. newlines) to one space
- * and trim; pre/pre-wrap/break-spaces: exact; pre-line: collapse spaces/tabs
+ * Rev 3 §1 rendered-text comparison with assessor ruling R-5 (16:03Z): apply
+ * the element's computed white-space collapsing to v, then compare with the
+ * element's innerText. Collapsible white space is EXACTLY U+0020 space,
+ * U+0009 tab, U+000A line feed and U+000D carriage return (CSS Text).
+ * Form feed, NBSP (U+00A0), U+2000–U+200A, U+202F, U+3000 and every other
+ * character stay significant (JS `\s` / String#trim are NOT used).
+ * normal/nowrap: collapse runs of the set to one space and trim the set;
+ * pre/pre-wrap/break-spaces: exact; pre-line: collapse runs of space/tab
  * only. Returns the transformed v for the record.
  */
+const CSS_WS_RUN = /[ \u0009\u000A\u000D]+/g;
+const CSS_WS_EDGE = /^[ \u0009\u000A\u000D]+|[ \u0009\u000A\u000D]+$/g;
+const CSS_SPACE_TAB_RUN = /[ \u0009]+/g;
+
 export function renderedTextEquals(
   innerText: string | null,
   v: string,
@@ -532,11 +540,11 @@ export function renderedTextEquals(
     expected = v;
     rule = 'exact';
   } else if (whiteSpace === 'pre-line') {
-    expected = v.replace(/[ \t]+/g, ' ');
-    rule = 'collapse-spaces-tabs';
+    expected = v.replace(CSS_SPACE_TAB_RUN, ' ');
+    rule = 'collapse-space-tab (R-5)';
   } else {
-    expected = v.replace(/\s+/g, ' ').trim();
-    rule = 'collapse-all-trim';
+    expected = v.replace(CSS_WS_RUN, ' ').replace(CSS_WS_EDGE, '');
+    rule = 'collapse-css-whitespace-trim (R-5: U+0020 U+0009 U+000A U+000D only)';
   }
   return { equal: innerText !== null && innerText === expected, expected, rule };
 }

@@ -62,7 +62,19 @@ They contain key names, booleans and UTC timestamps only.
   "window_end": "…Z (POST only)",
   "slotGeneration": "…",
   "e_env_1_dev_auth_effective": false,
-  "e_env_1_sources": ["unit/args", "settings", "environment"],
+  "e_env_1_sources": {
+    "unit/args": { "--dev-auth": false, "--hosted": true, "--production": "absent" },
+    "settings": {
+      "global": "absent",
+      "local": { "auth.devMode": false, "auth.mode": "absent", "mode": "hosted" }
+    },
+    "environment": {
+      "SCION_SERVER_AUTH_DEVMODE": "absent",
+      "SCION_SERVER_AUTH_MODE": "absent",
+      "SCION_SERVER_MODE": "absent"
+    },
+    "keys_checked": ["<concrete key names inspected>"]
+  },
   "e_env_3_test_login_enabled": true,
   "e_env_4_runtime_broker_effective": false,
   "e_env_4_no_broker_process_or_dispatch": true,
@@ -71,68 +83,120 @@ They contain key names, booleans and UTC timestamps only.
 }
 ```
 
-`window_ts` is accepted as an alias for `window_start`.
+`window_ts` is accepted as an alias for `window_start`. Every "absent" must be
+written explicitly. A missing key is never defaulted. The settings key-path
+spelling is pending ii2's source read.
 
-**Binding (rulings R-2/R-3; ii2 and owner, 15:54–15:57Z).** Each
-declaration must carry `baseURL`: the served target, as a canonical
-http(s) origin. It must use the configured hostname, never a raw IP, and
-must have no path or credentials. It is compared by exact parsed `origin`
-equality, the same way the Release pair is validated. There is no `host`
-alias and no substring matching.
+### Binding (rulings R-2/R-3)
+
+Each declaration must carry `baseURL`, the served target, as a canonical
+http(s) origin:
+
+- configured hostname, never a raw IP;
+- no path and no credentials;
+- compared by exact parsed `origin` equality, the same way the Release pair
+  is validated;
+- no `host` alias and no substring matching.
 
 PRE.baseURL must equal POST.baseURL, which must equal the run's served
-baseURL. Each declaration's `slotGeneration` must equal the base Release's.
+baseURL. `slotGeneration` must equal the base Release's.
 
-- **Not bound** (other host or origin, PRE and POST on different hosts, or
-  another generation): the declaration is not evidence for this slot, so its
-  gates are **INCONCLUSIVE** whatever its values say. It is recorded as
-  `crossHost` / `bindingMismatch`.
+- **Not bound** (another origin, PRE and POST on different hosts, or another
+  generation): the declaration is unattributable. Every gate it feeds is
+  **INCONCLUSIVE** whatever its values, and it is recorded as `crossHost` or
+  `bindingMismatch`.
 - **FAIL** only for contradictions of the environment:
-  - the runner's own probes (anonymous probe ≠ 401);
-  - a correctly bound declaration reporting a forbidden state (dev-auth on,
-    broker on, dispatch during the batch, E-ENV-5 accepted);
+  - the runner's own probes;
+  - a correctly bound declaration reporting a forbidden state;
   - same-slot PRE and POST disagreeing on an environment value.
 
 Either outcome stops capture, and validate-run rejects the run.
 
+### E-ENV-1 derivation (rulings R-4 and R-6)
+
+The per-layer raw values are applied through the served backend's
+precedence. It was source-checked at 1694e511, which matches backend
+4a253489:
+
+| Step         | Rule                                                                                                                            | Source                                                                    |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| config value | `SCION_SERVER_*` env > local settings > global settings > embedded default (`auth.devMode=false`; `auth.mode` and `mode` unset) | `pkg/config/hub_config.go:966-970, 1036-1043, 1536-1546, 1817-1822`       |
+| hosted       | `--hosted`/`--production` if either is set, else config `mode` ∈ {hosted, production}                                           | `cmd/server.go:235-236`, `cmd/server_foreground.go:1013-1018`             |
+| devMode      | explicit `--dev-auth`; else ON if non-hosted (workstation default); else config devMode                                         | `server_foreground.go:1020-1024, 1064-1066`, `cmd/server_config.go:35-36` |
+| auth.mode    | config `auth.mode` (`"dev"` = exclusive dev human auth)                                                                         | `hub_config.go:582-588`                                                   |
+
+A missing input is unknown, never defaulted. E-ENV-1 is graded in the
+assessor's order, and the first match wins:
+
+1. **Unbound** declaration ⇒ INCONCLUSIVE.
+2. **FAIL** if any of:
+   - the chain derives devMode ON;
+   - effective `auth.mode = "dev"`;
+   - the declared `e_env_1_dev_auth_effective` is `true`.
+
+   This holds even when other classes are missing, as long as they cannot
+   change the result. A declared-vs-derived disagreement is recorded with
+   the FAIL.
+
+3. **INCONCLUSIVE** if any of:
+   - a class or key that could change the result is missing or malformed;
+   - the chain cannot be derived;
+   - hosted mode is not evidenced;
+   - the declared value is missing.
+4. **PASS** only if all three classes are explicit, the chain derives OFF,
+   hosted mode is evidenced, and declared = `false`.
+
+### Other gates
+
+- **E-ENV-2:** decided by the runner's own anonymous probe, which must be
+  taken at or after window_start with `redirect: manual`; a redirect is not a 401. On a bound declaration, a steward `e_env_2_anon_401.status ≠ 401` is a
+  FAIL regardless of its timestamp. Whether that timestamp falls in the window
+  is recorded only; it is an implementation choice, not a frozen rule. A
+  missing steward probe is recorded, and the runner's own probe still decides.
+- **E-ENV-3:** a bound PRE with `e_env_3_test_login_enabled: true` passes. A
+  bound PRE declaring `false` makes the runner attempt its own test-login.
+  Success is a contradiction (FAIL); refusal means capture is impossible
+  (INCONCLUSIVE). The batch stops either way.
+- **E-ENV-4:** the PRE part needs effective `false` and no-dispatch `true`.
+  It then becomes `awaitingPost`.
+- **E-ENV-5:** `e_env_5.ts` must lie in [window_start, batch start]. A status
+  other than 401 or 403 on a bound declaration is a FAIL, and the steward
+  sends a private security report.
+
 ### PRE declaration
 
-`LAYOUT_SURVEY_ENV_DECLARATION_FILE` is graded before capture. It is bound
-to this window only if all of these hold:
+`LAYOUT_SURVEY_ENV_DECLARATION_FILE` is graded before capture.
 
-- `slotGeneration` equals the base Release's.
-- `window_start` ≤ batch start and is no older than
-  `LAYOUT_SURVEY_ENV_MAX_AGE_MIN` (default 30, ii2-confirmed; recorded in run.json).
-- `e_env_5.ts` lies in [window_start, batch start].
-
-Per-gate requirements:
-
-- **E-ENV-1** needs a non-empty `e_env_1_sources`.
-- **E-ENV-2** is the runner's own anonymous probe, taken at or after
-  window_start with `redirect: manual` (a redirect is not a 401).
-- **E-ENV-4** PRE part needs effective false **and** no-dispatch true. It is
-  then `awaitingPost`, because "during the batch" can only be attested
-  afterwards.
-
-Outcomes:
-
-- Any FAIL stops the batch (batch FAIL). If E-ENV-5 was accepted, the steward
-  also sends a private security report.
-- Any other missing or stale evidence stops the batch in evidence mode
-  (INCONCLUSIVE).
+- `LAYOUT_SURVEY_ENV_MAX_AGE_MIN` (default 30) is runner hygiene only, not a
+  contract parameter. It never replaces the in-window probes or the POST
+  proof, and it is recorded in run.json.
+- Any FAIL, or any missing or stale evidence in evidence mode, stops the
+  batch before capture.
 - After the batch, the runner probes anonymous 401 again. A non-401 result
   invalidates the batch.
 
 ### POST declaration
 
-The steward writes it after the batch. It must:
+The steward writes the POST declaration after the batch. It must:
 
 - cover `run.json` `startedAt..endedAt`;
-- carry the same slotGeneration;
-- declare dev-auth and runtime broker effective false, and no-dispatch true.
+- carry the same `baseURL` and `slotGeneration`;
+- carry `e_env_3_test_login_enabled`, `e_env_4_runtime_broker_effective` and
+  `e_env_4_no_broker_process_or_dispatch`.
 
-`validate-run --env-post` makes it mandatory: missing ⇒ INCONCLUSIVE,
-contradicted ⇒ FAIL.
+E-ENV-1 is optional on POST (R-4). If present, it must derive cleanly and its
+layer values must equal PRE's.
+
+These are FAIL:
+
+- any shared boolean (`e_env_1_dev_auth_effective`,
+  `e_env_3_test_login_enabled`, `e_env_4_*`) differing between same-slot PRE
+  and POST;
+- a POST declaring test-login disabled while the runner authenticated via
+  test-login during the batch.
+
+`validate-run --env-post` makes the POST declaration mandatory: missing ⇒
+INCONCLUSIVE, contradicted ⇒ FAIL.
 
 ## Operator recipe (steward/capturer = ii2)
 
@@ -185,7 +249,14 @@ Steps:
    - the fixture map sha256 equals the companion's.
 6. **POST env declaration** covering the run's `startedAt..endedAt`.
 7. **Validate:**
-   `node e2e/layout-survey/wave01/records.mjs validate-run <run dir> --base base.json --companion companion.json --env-post env-post.json`.
+   `node e2e/layout-survey/wave01/records.mjs validate-run <run dir> --base base.json --companion companion.json --env-post env-post.json --out validation.json`.
+   `--out` writes an immutable `wave01-validation` record. It binds the
+   run.json sha256, every run file's sha256, both Release digests and the POST
+   digest, and carries the verdict and classification: VALID, INCONCLUSIVE, or
+   REJECTED (FAIL or invalid). **Only a passing validation record is final
+   environment-validity evidence.** run.json `batchValid` is provisional.
+   Coverage counts per state are printed and recorded separately from
+   validity.
    Then seal and publish with the pilot `scripts/bundle.mjs publish`.
 8. **Quarantine:** the ledger is
    `$LAYOUT_SURVEY_STATE_DIR/wave01-quarantine-ledger.json`. It is steward
@@ -235,9 +306,18 @@ Each record carries:
 Each finished substep is also written immediately as an immutable
 `.provisional.json`.
 
-If the batch aborts (unexpected exception or timeout), a `finally` block
-still writes the final records gathered so far and `run.json` with
-`aborted: true` and `batchValid: false`. `validate-run` rejects aborted runs.
+If the batch aborts on an exception, a `finally` block still writes the final
+records gathered so far and `run.json` with `aborted: true` and
+`batchValid: false`. A pre-capture exception writes a minimal aborted
+run.json, because the run directory is created first.
+
+A Playwright test timeout or a killed process is not guaranteed to reach the
+`finally` block (review2 N-f). In that case only the `.provisional.json` copies
+survive, and the run has no valid run.json, so it can never validate.
+`validate-run` rejects aborted runs.
+
+The runner exits non-zero whenever any substep is a capture error, matching
+the pilot convention. All records are written before it exits.
 
 ### Capture errors
 
@@ -269,7 +349,27 @@ still writes the final records gathered so far and `run.json` with
   inventory. That is fine as private evidence; keep it out of public
   summaries (E-PUB).
 - SAFETY would turn any background non-GET request into a capture error. No
-  such call exists in the shell or admin-groups source at 1694e511.
+  such call exists in the shell or admin-groups source at 1694e511. The monitor
+  is context-wide, so popups and new pages are included (review2 N-e).
+- **N-b:** the PRE max age (30 min) is runner hygiene. The owner and assessor
+  say it is not a grading threshold, and it never replaces the in-window
+  probe or the POST proof.
+
+## Local non-evidence tests
+
+- `unit/wave01-*.test.ts` (vitest): the evaluators, the records/E-ENV logic,
+  and a table-driven E-ENV matrix (`wave01-env-table.test.ts`).
+- `wave01-probe.selftest.pw.ts`: real-Chromium probe controls on a synthetic
+  shadow/slot DOM. It covers the B1 negative control, the rev 3 (c) positive
+  control, R-5 NBSP/U+3000 preservation, accessible names and wheel
+  positioning.
+- `wave01-loopback.selftest.pw.ts`: runs the **real** `wave01.pw.ts` as a
+  child process in debug mode against a 127.0.0.1 node server, which is not a
+  hub. It checks the clean path, the SAFETY priority, readback failure as
+  per-substep capture errors, and an honest aborted run on test-login failure.
+
+Run all of the above with
+`CHROMIUM_EXECUTABLE=… npx playwright test -c e2e/layout-survey/playwright.wave01-selftest.config.ts`.
 
 ## Contract → code coverage (rev 3)
 

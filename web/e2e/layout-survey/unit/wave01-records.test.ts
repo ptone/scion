@@ -30,6 +30,7 @@ import {
   envStop,
   evaluateEnvPost,
   hostBinding,
+  sourcesKey,
   evaluateEnv,
   isQuarantined,
   validateCapture,
@@ -47,6 +48,20 @@ import {
   suiteDigest,
   SUITE_DIGEST_METHOD,
 } from '../wave01/suite-digest.mjs';
+
+const R6_SOURCES = {
+  'unit/args': { '--dev-auth': false, '--hosted': true, '--production': 'absent' },
+  settings: {
+    global: 'absent',
+    local: { 'auth.devMode': false, 'auth.mode': 'absent', mode: 'hosted' },
+  },
+  environment: {
+    SCION_SERVER_AUTH_DEVMODE: 'absent',
+    SCION_SERVER_AUTH_MODE: 'absent',
+    SCION_SERVER_MODE: 'absent',
+  },
+  keys_checked: ['argv', 'settings.local:server.auth', 'env:SCION_SERVER_*'],
+};
 
 const sha = (b: Buffer | string) => createHash('sha256').update(b).digest('hex');
 
@@ -304,7 +319,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
     slotGeneration: 'gen-1',
     baseURL: 'https://baseline.example',
     e_env_1_dev_auth_effective: false,
-    e_env_1_sources: ['unit/args', 'settings', 'environment'],
+    e_env_1_sources: R6_SOURCES,
     e_env_3_test_login_enabled: true,
     e_env_4_runtime_broker_effective: false,
     e_env_4_no_broker_process_or_dispatch: true,
@@ -437,6 +452,13 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
       slotGeneration: 'gen-1',
       baseURL: 'https://baseline.example',
       preBaseURL: 'https://baseline.example',
+      preValues: {
+        e_env_1_dev_auth_effective: false,
+        e_env_3_test_login_enabled: true,
+        e_env_4_runtime_broker_effective: false,
+        e_env_4_no_broker_process_or_dispatch: true,
+      },
+      preSourcesKey: sourcesKey(R6_SOURCES),
     };
     const post = {
       baseURL: 'https://baseline.example',
@@ -444,6 +466,8 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
       window_end: '2026-10-07T16:25:00Z',
       slotGeneration: 'gen-1',
       e_env_1_dev_auth_effective: false,
+      e_env_1_sources: R6_SOURCES,
+      e_env_3_test_login_enabled: true,
       e_env_4_runtime_broker_effective: false,
       e_env_4_no_broker_process_or_dispatch: true,
     };
@@ -575,6 +599,8 @@ describe('capture records and validate-run', () => {
       window_end: '2026-10-07T16:00:00Z',
       slotGeneration: 'gen-1',
       e_env_1_dev_auth_effective: false,
+      e_env_1_sources: R6_SOURCES,
+      e_env_3_test_login_enabled: true,
       e_env_4_runtime_broker_effective: false,
       e_env_4_no_broker_process_or_dispatch: true,
     }
@@ -653,6 +679,12 @@ describe('capture records and validate-run', () => {
       ],
       envPostSelfAnon401: { status: 401, at: '2026-10-07T15:20:01Z' },
       envPreBaseURL: 'https://baseline.example',
+      envPreValues: {
+        e_env_1_dev_auth_effective: false,
+        e_env_3_test_login_enabled: true,
+        e_env_4_runtime_broker_effective: false,
+        e_env_4_no_broker_process_or_dispatch: true,
+      },
       baseURL: 'https://baseline.example',
     };
     mutateRun?.(runObj);
@@ -698,6 +730,8 @@ describe('capture records and validate-run', () => {
         window_end: '2026-10-07T16:00:00Z',
         slotGeneration: 'gen-1',
         e_env_1_dev_auth_effective: false,
+        e_env_1_sources: R6_SOURCES,
+        e_env_3_test_login_enabled: true,
         e_env_4_runtime_broker_effective: false,
         e_env_4_no_broker_process_or_dispatch: false,
       }).some((e) => e.startsWith('mismatch: POST env E-ENV-4'))

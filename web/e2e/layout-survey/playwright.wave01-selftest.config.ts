@@ -17,7 +17,7 @@ import { defineConfig } from '@playwright/test';
 /** LOCAL NON-EVIDENCE probe self-test (synthetic DOM via setContent; no Hub). */
 export default defineConfig({
   testDir: '.',
-  testMatch: 'wave01-probe.selftest.pw.ts',
+  testMatch: ['wave01-probe.selftest.pw.ts', 'wave01-loopback.selftest.pw.ts'],
   workers: 1,
   retries: 0,
   forbidOnly: true,

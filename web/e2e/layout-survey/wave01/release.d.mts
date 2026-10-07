@@ -18,8 +18,20 @@ export declare function validatePair(a: {
   };
 }): string[];
 export declare function validateDistinctPairs(
-  a: { base: any; companion: any; baseSha256?: string; companionSha256?: string },
-  b: { base: any; companion: any; baseSha256?: string; companionSha256?: string }
+  a: {
+    base: any;
+    companion: any;
+    baseBytes?: Buffer;
+    baseSha256?: string;
+    companionSha256?: string;
+  },
+  b: {
+    base: any;
+    companion: any;
+    baseBytes?: Buffer;
+    baseSha256?: string;
+    companionSha256?: string;
+  }
 ): string[];
 export declare function buildBase(args: Record<string, string>): Record<string, unknown>;
 export declare function buildCompanion(args: Record<string, string>): Record<string, unknown>;

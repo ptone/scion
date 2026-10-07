@@ -5,11 +5,40 @@ export declare const STATUSES: string[];
 export declare const OUTCOMES: string[];
 export declare const QUARANTINE_AFTER: number;
 export declare const DEFAULT_ENV_MAX_AGE_MIN: number;
+export declare const E_ENV_1_SOURCE_CLASSES: readonly string[];
+export declare const SHARED_ENV_BOOLEANS: readonly string[];
+export declare const E_ENV_1_FLAGS: readonly string[];
+export declare const E_ENV_1_SETTINGS_KEYS: readonly string[];
+export declare const E_ENV_1_ENV_KEYS: Readonly<Record<string, string>>;
+export interface DevAuthDerivation {
+  effectiveDevMode: boolean | 'unknown';
+  effectiveAuthMode: string | null | 'unknown';
+  hosted: boolean | 'unknown';
+  flags: Record<string, boolean | 'absent' | 'unknown'>;
+  config: Record<string, { value: unknown; from: string }>;
+  complete: boolean;
+  problems: string[];
+}
+export declare function deriveDevAuth(sources: unknown): DevAuthDerivation;
+export declare function gradeEEnv1(decl: unknown): {
+  outcome: 'pass' | 'fail' | 'inconclusive';
+  reasons: string[];
+  derivation: DevAuthDerivation;
+  declared: unknown;
+  declaredVsDerived?: 'agree' | 'disagree';
+};
+export declare function sourcesKey(sources: unknown): string | null;
+export declare function sharedEnvValues(decl: unknown): Record<string, boolean | null>;
+export declare function applyAuthCheck(
+  results: EnvGate[],
+  attempt: { succeeded: boolean; at: string; detail?: string }
+): EnvGate[];
 export interface EnvGate {
   gate: string;
   outcome: 'pass' | 'fail' | 'inconclusive';
   details: unknown;
   awaitingPost?: boolean;
+  awaitingAuthCheck?: boolean;
 }
 export declare function evaluateEnv(
   decl: unknown,
@@ -21,6 +50,7 @@ export declare function envDecision(results: EnvGate[]): {
   stop: boolean;
   fails: string[];
   missing: string[];
+  authCheckPending: boolean;
   securityReport: boolean;
 };
 export declare function envStop(results: EnvGate[]): boolean;
@@ -32,6 +62,9 @@ export declare function evaluateEnvPost(
     slotGeneration: string;
     baseURL: string;
     preBaseURL?: string;
+    preValues?: Record<string, boolean | null>;
+    preSourcesKey?: string | null;
+    testLoginUsed?: boolean;
   }
 ): { outcome: 'pass' | 'fail' | 'inconclusive'; problems: string[]; attributable: boolean };
 export declare function canonicalOrigin(v: unknown): string | null;
@@ -75,3 +108,14 @@ export declare function clearQuarantine(
   reason: string
 ): Ledger;
 export declare function saveLedger(file: string, ledger: Ledger): void;
+export declare function coverageSummary(runDir: string): {
+  perState: Record<string, { complete: number; captureError: number; blocked: number }>;
+  totals: { complete: number; captureError: number; blocked: number };
+};
+export declare function validationRecord(
+  runDir: string,
+  baseFile: string,
+  companionFile: string,
+  envPostFile: string | undefined,
+  errs: string[]
+): Record<string, unknown>;

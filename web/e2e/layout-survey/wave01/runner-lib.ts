@@ -133,13 +133,14 @@ export async function openSubstep(
     if (m.type() === 'error' && ctx.consoleErrors.length < 30)
       ctx.consoleErrors.push(m.text().slice(0, 300));
   });
-  page.on('request', (r) => {
+  // Context-wide (popups/new pages included; review2 N-e).
+  context.on('request', (r) => {
     const method = r.method();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
       ctx.mutatingRequests.push({ method, path: new URL(r.url()).pathname });
     }
   });
-  page.on('response', async (r) => {
+  context.on('response', async (r) => {
     if (r.status() >= 400 && ctx.failedRequests.length < 30)
       ctx.failedRequests.push({ path: new URL(r.url()).pathname, status: r.status() });
     if (r.request().resourceType() === 'script') {
@@ -303,7 +304,14 @@ export async function accessibleName(
 ): Promise<string | null> {
   const snap = await loc.ariaSnapshot({ timeout: 5_000 }).catch(() => '');
   const m = new RegExp(`^- ${role} "((?:[^"\\\\]|\\\\.)*)"`, 'm').exec(snap);
-  if (m) return JSON.parse(`"${m[1]}"`) as string;
+  if (m) {
+    try {
+      return JSON.parse(`"${m[1]}"`) as string;
+    } catch {
+      // Escapes outside JSON (e.g. \xNN) — keep the raw snapshot text (review2 N-h).
+      return m[1]!;
+    }
+  }
   const plain = new RegExp(`^- ${role} ([^:\\n"][^:\\n]*?)(?::|$)`, 'm').exec(snap);
   return plain ? plain[1]!.trim() : null;
 }

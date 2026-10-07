@@ -16,7 +16,7 @@
 // record validation, run validation against the Release pair, and the E7
 // quarantine ledger (contract §3: 3 consecutive capture errors ⇒ quarantine).
 //
-//   node wave01/records.mjs validate-run RUN_DIR --base FILE --companion FILE --env-post FILE
+//   node wave01/records.mjs validate-run RUN_DIR --base FILE --companion FILE --env-post FILE [--out FILE]
 //   node wave01/records.mjs quarantine-status --ledger FILE
 //   node wave01/records.mjs quarantine-clear --ledger FILE --state W01-Sxx --by ID --reason TEXT
 
@@ -33,6 +33,223 @@ export const QUARANTINE_AFTER = 3;
 const SHA_RE = /^[0-9a-f]{64}$/;
 
 // ─── E-ENV (§5a) ─────────────────────────────────────────────────────────
+
+/**
+ * §5a E-ENV-1 "across service unit/args, settings file and environment".
+ * Ruling R-6 (assessor 16:11–16:12Z): each class records RAW layer values;
+ * the effective value is DERIVED through the served backend's precedence
+ * (source-checked at 1694e511, = backend 4a253489):
+ *   config value  = SCION_SERVER_* env > local settings > global settings >
+ *                   embedded default (auth.devMode=false, auth.mode/mode unset)
+ *                   (pkg/config/hub_config.go:966-970, 1036-1043, 1536-1546, 1817-1822)
+ *   hosted        = --hosted/--production if either flag is set, else config
+ *                   mode ∈ {hosted, production} (cmd/server.go:235-236,
+ *                   cmd/server_foreground.go:1013-1018)
+ *   devMode       = explicit --dev-auth, else ON when non-hosted (workstation
+ *                   defaults), else config devMode
+ *                   (server_foreground.go:1020-1024, 1064-1066; server_config.go:35-36)
+ *   auth.mode     = config auth.mode ("dev" = exclusive dev human auth)
+ * "absent" must be explicit; a missing input is UNKNOWN, never defaulted.
+ */
+export const E_ENV_1_SOURCE_CLASSES = Object.freeze(['unit/args', 'settings', 'environment']);
+export const E_ENV_1_FLAGS = Object.freeze(['--dev-auth', '--hosted', '--production']);
+export const E_ENV_1_SETTINGS_KEYS = Object.freeze(['auth.devMode', 'auth.mode', 'mode']);
+export const E_ENV_1_ENV_KEYS = Object.freeze({
+  'auth.devMode': 'SCION_SERVER_AUTH_DEVMODE',
+  'auth.mode': 'SCION_SERVER_AUTH_MODE',
+  mode: 'SCION_SERVER_MODE',
+});
+const CONFIG_DEFAULTS = Object.freeze({ 'auth.devMode': false, 'auth.mode': null, mode: null });
+const UNKNOWN = Symbol('unknown');
+
+/** Shared environment booleans compared between same-slot PRE and POST (review2 RB3). */
+export const SHARED_ENV_BOOLEANS = Object.freeze([
+  'e_env_1_dev_auth_effective',
+  'e_env_3_test_login_enabled',
+  'e_env_4_runtime_broker_effective',
+  'e_env_4_no_broker_process_or_dispatch',
+]);
+
+const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+const okBool = (v) => typeof v === 'boolean' || v === 'absent';
+const okStr = (v) => (typeof v === 'string' && v !== '') || v === 'absent';
+
+/**
+ * Derive effective dev-auth from raw layers (R-6). Returns the derivation
+ * with `unknown` markers instead of guessing; `problems` lists missing or
+ * malformed inputs.
+ * @param {unknown} sources
+ */
+export function deriveDevAuth(sources) {
+  const problems = [];
+  const src = isObj(sources) ? sources : null;
+  if (!src) problems.push('e_env_1_sources missing or not an object');
+  for (const k of Object.keys(src ?? {}))
+    if (![...E_ENV_1_SOURCE_CLASSES, 'keys_checked'].includes(k))
+      problems.push(`unknown class ${k}`);
+  // unit/args
+  const ua = src && isObj(src['unit/args']) ? src['unit/args'] : null;
+  if (src && !ua) problems.push('class unit/args missing/malformed');
+  const flag = (name) => {
+    if (!ua || !(name in ua)) {
+      if (ua) problems.push(`unit/args ${name} missing`);
+      return UNKNOWN;
+    }
+    if (!okBool(ua[name])) {
+      problems.push(`unit/args ${name} malformed`);
+      return UNKNOWN;
+    }
+    return ua[name];
+  };
+  const devFlag = flag('--dev-auth');
+  const hostedFlag = flag('--hosted');
+  const prodFlag = flag('--production');
+  // settings + environment layers → config values
+  const st = src && isObj(src.settings) ? src.settings : null;
+  if (src && !st) problems.push('class settings missing/malformed');
+  const env = src && isObj(src.environment) ? src.environment : null;
+  if (src && !env) problems.push('class environment missing/malformed');
+  const layerValue = (layer, key, valid) => {
+    // returns value | 'absent' | UNKNOWN
+    if (layer === 'absent') return 'absent';
+    if (!isObj(layer) || !(key in layer) || !valid(layer[key])) return UNKNOWN;
+    return layer[key];
+  };
+  const fileLayer = (scope) => {
+    if (!st || !(scope in st)) {
+      if (st)
+        problems.push(`settings.${scope} missing (write "absent" if the file does not exist)`);
+      return UNKNOWN;
+    }
+    const l = st[scope];
+    if (l !== 'absent' && !isObj(l)) {
+      problems.push(`settings.${scope} malformed`);
+      return UNKNOWN;
+    }
+    return l;
+  };
+  const globalL = fileLayer('global');
+  const localL = fileLayer('local');
+  const resolve = (key, valid) => {
+    // env > local > global > default; an UNKNOWN layer blocks resolution
+    // unless a higher layer already decided.
+    const envKey = E_ENV_1_ENV_KEYS[key];
+    const chain = [
+      [
+        'environment',
+        env ? (envKey in env && valid(env[envKey]) ? env[envKey] : UNKNOWN) : UNKNOWN,
+      ],
+      ['settings.local', localL === UNKNOWN ? UNKNOWN : layerValue(localL, key, valid)],
+      ['settings.global', globalL === UNKNOWN ? UNKNOWN : layerValue(globalL, key, valid)],
+    ];
+    for (const [name, v] of chain) {
+      if (v === UNKNOWN) {
+        problems.push(`${name}: ${key} missing/malformed`);
+        return { value: UNKNOWN, from: name };
+      }
+      if (v !== 'absent') return { value: v, from: name };
+    }
+    return { value: CONFIG_DEFAULTS[key], from: 'embedded-default' };
+  };
+  const devCfg = resolve('auth.devMode', okBool);
+  const authMode = resolve('auth.mode', okStr);
+  const modeCfg = resolve('mode', okStr);
+  // hosted
+  let hosted;
+  if (hostedFlag === UNKNOWN || prodFlag === UNKNOWN) hosted = UNKNOWN;
+  else if (hostedFlag !== 'absent' || prodFlag !== 'absent')
+    hosted = hostedFlag === true || prodFlag === true;
+  else
+    hosted =
+      modeCfg.value === UNKNOWN
+        ? UNKNOWN
+        : modeCfg.value === 'hosted' || modeCfg.value === 'production';
+  // effective devMode
+  let devMode;
+  if (devFlag === true) devMode = true;
+  else if (devFlag === false) devMode = false;
+  else if (devFlag === UNKNOWN) devMode = UNKNOWN;
+  else if (hosted === false) devMode = true;
+  else if (hosted === true) devMode = devCfg.value;
+  else devMode = devCfg.value === true ? true : UNKNOWN; // ON in both branches
+  const show = (v) => (v === UNKNOWN ? 'unknown' : v);
+  return {
+    effectiveDevMode: show(devMode),
+    effectiveAuthMode: show(authMode.value),
+    hosted: show(hosted),
+    flags: {
+      '--dev-auth': show(devFlag),
+      '--hosted': show(hostedFlag),
+      '--production': show(prodFlag),
+    },
+    config: {
+      'auth.devMode': { value: show(devCfg.value), from: devCfg.from },
+      'auth.mode': { value: show(authMode.value), from: authMode.from },
+      mode: { value: show(modeCfg.value), from: modeCfg.from },
+    },
+    complete: problems.length === 0,
+    problems: Array.from(new Set(problems)),
+  };
+}
+
+/**
+ * Grade E-ENV-1 from an ATTRIBUTABLE declaration per the R-6 order:
+ * FAIL if a forbidden state is established (derived devMode ON, effective
+ * auth.mode "dev", or declared effective ON) — even with other inputs
+ * missing; INCONCLUSIVE if OFF is not proven; PASS only with complete
+ * explicit evidence, derived OFF, hosted evidenced and declared OFF.
+ */
+export function gradeEEnv1(decl) {
+  const d = deriveDevAuth(decl?.e_env_1_sources);
+  const declared = decl?.e_env_1_dev_auth_effective;
+  const reasons = [];
+  if (d.effectiveDevMode === true) reasons.push('derived effective devMode ON');
+  if (d.effectiveAuthMode === 'dev') reasons.push('effective auth.mode "dev"');
+  if (declared === true) reasons.push('declared e_env_1_dev_auth_effective ON');
+  if (reasons.length) {
+    return {
+      outcome: 'fail',
+      reasons,
+      derivation: d,
+      declared,
+      declaredVsDerived: declared === d.effectiveDevMode ? 'agree' : 'disagree',
+    };
+  }
+  const open = [];
+  if (!d.complete) open.push(...d.problems);
+  if (d.effectiveDevMode !== false) open.push(`effective devMode ${d.effectiveDevMode}`);
+  if (d.effectiveAuthMode === 'unknown') open.push('effective auth.mode unknown');
+  if (d.hosted !== true) open.push(`hosted mode not evidenced (${d.hosted})`);
+  if (declared !== false)
+    open.push(
+      `declared e_env_1_dev_auth_effective ${declared === undefined ? 'missing' : 'malformed'}`
+    );
+  return { outcome: open.length ? 'inconclusive' : 'pass', reasons: open, derivation: d, declared };
+}
+
+/** Canonical comparison form of a sources object (for PRE/POST equality). */
+export function sourcesKey(sources) {
+  if (!isObj(sources)) return null;
+  const canon = (v) =>
+    isObj(v)
+      ? Object.fromEntries(
+          Object.keys(v)
+            .sort()
+            .map((k) => [k, canon(v[k])])
+        )
+      : Array.isArray(v)
+        ? v.map(canon)
+        : v;
+  const { keys_checked: _k, ...rest } = sources;
+  return JSON.stringify(canon(rest));
+}
+
+/** Value snapshot of the shared booleans of a declaration (recorded in run.json). */
+export function sharedEnvValues(decl) {
+  return Object.fromEntries(
+    SHARED_ENV_BOOLEANS.map((k) => [k, typeof decl?.[k] === 'boolean' ? decl[k] : null])
+  );
+}
 
 /** Default maximum age (minutes) of the PRE declaration's window_start at batch start. */
 export const DEFAULT_ENV_MAX_AGE_MIN = 30; // ii2-confirmed 15:49Z
@@ -163,31 +380,63 @@ export function evaluateEnv(decl, selfAnon401, release, window) {
     if (!bound || !extraOk) return 'inconclusive';
     return b;
   };
-  const sources = decl.e_env_1_sources;
-  const sourcesOk =
-    Array.isArray(sources) &&
-    sources.length > 0 &&
-    sources.every((x) => typeof x === 'string' && x);
+  const e1 = gradeEEnv1(decl);
   const out = [
-    g('E-ENV-1', grade(decl.e_env_1_dev_auth_effective, false, sourcesOk), {
-      effective: decl.e_env_1_dev_auth_effective ?? null,
-      sources: sources ?? null,
-      sourcesOk,
-      binding,
-    }),
-    g('E-ENV-2', selfOutcome(ws), {
-      self: selfAnon401,
-      steward: decl.e_env_2_anon_401 ?? null,
-      windowStart: wsIso ?? null,
-    }),
     g(
-      'E-ENV-3',
-      bound && typeof decl.e_env_3_test_login_enabled === 'boolean' ? 'pass' : 'inconclusive',
+      'E-ENV-1',
+      !attributable
+        ? 'inconclusive'
+        : e1.outcome === 'fail'
+          ? 'fail'
+          : !bound
+            ? 'inconclusive'
+            : e1.outcome,
       {
-        testLoginEnabled: decl.e_env_3_test_login_enabled ?? null,
-        note: 'recorded separately; capture principal is synthetic',
+        rule: 'R-6 derivation (raw layers through backend precedence)',
+        ...e1,
         binding,
       }
+    ),
+    (() => {
+      // Own probe is graded independently of any declaration. A BOUND
+      // declaration whose steward anonymous probe is ≠ 401 is a declared
+      // forbidden state ⇒ FAIL (review2 RB1, R-3). The steward probe's
+      // timestamp-in-window is RECORDED only, pending an assessor ruling.
+      const own = selfOutcome(ws);
+      const sw = decl.e_env_2_anon_401;
+      const swStatus = sw && typeof sw.status === 'number' ? sw.status : null;
+      const swTs = ms(sw?.ts);
+      const swTsInWindow =
+        !Number.isNaN(swTs) &&
+        !Number.isNaN(ws) &&
+        !Number.isNaN(batchStart) &&
+        swTs >= ws &&
+        swTs <= batchStart;
+      const stewardContradicts = attributable && swStatus !== null && swStatus !== 401;
+      return g('E-ENV-2', own === 'fail' || stewardContradicts ? 'fail' : own, {
+        self: selfAnon401,
+        selfOutcome: own,
+        steward: sw ?? null,
+        stewardStatusGraded: attributable ? swStatus : null,
+        stewardContradicts,
+        stewardTsInWindow: swTsInWindow,
+        stewardTsRule:
+          'recorded only (pending assessor ruling on review2 RB1 timestamp restriction)',
+        windowStart: wsIso ?? null,
+      });
+    })(),
+    g(
+      'E-ENV-3',
+      bound && decl.e_env_3_test_login_enabled === true ? 'pass' : 'inconclusive',
+      {
+        testLoginEnabled: decl.e_env_3_test_login_enabled ?? null,
+        note:
+          decl.e_env_3_test_login_enabled === false
+            ? 'declared test-login DISABLED: the capture principal authenticates via test-login, so capture cannot proceed (stop); if the runner nevertheless authenticates in the window, validate-run grades the contradiction FAIL'
+            : 'recorded separately; capture principal is synthetic',
+        binding,
+      },
+      { awaitingAuthCheck: bound && decl.e_env_3_test_login_enabled === false }
     ),
   ];
   const eff4 = bool3(decl.e_env_4_runtime_broker_effective, false);
@@ -255,14 +504,44 @@ export function evaluateEnv(decl, selfAnon401, release, window) {
 export function envDecision(results) {
   const fails = results.filter((r) => r.outcome === 'fail').map((r) => r.gate);
   const missing = results
-    .filter((r) => r.outcome === 'inconclusive' && !r.awaitingPost)
+    .filter((r) => r.outcome === 'inconclusive' && !r.awaitingPost && !r.awaitingAuthCheck)
     .map((r) => r.gate);
+  const authCheckPending = results.some((r) => r.awaitingAuthCheck);
   return {
-    stop: fails.length > 0 || missing.length > 0,
+    stop: fails.length > 0 || missing.length > 0 || authCheckPending,
     fails,
     missing,
+    authCheckPending,
     securityReport: fails.includes('E-ENV-5'),
   };
+}
+
+/**
+ * review2 RB3 / assessor 16:03Z: a BOUND PRE declaring test-login disabled is
+ * checked against the runner's own test-login attempt. Success contradicts
+ * the declaration ⇒ E-ENV-3 FAIL; refusal is consistent ⇒ INCONCLUSIVE
+ * (capture impossible). Either way the batch stops.
+ * @param {Array<any>} results
+ * @param {{succeeded: boolean, at: string, detail?: string}} attempt
+ */
+export function applyAuthCheck(results, attempt) {
+  return results.map((r) => {
+    if (r.gate !== 'E-ENV-3' || !r.awaitingAuthCheck) return r;
+    return {
+      ...r,
+      outcome: attempt.succeeded ? 'fail' : 'inconclusive',
+      awaitingAuthCheck: false,
+      details: {
+        ...r.details,
+        authCheck: {
+          ...attempt,
+          verdict: attempt.succeeded
+            ? 'contradiction: runner test-login succeeded although the bound PRE declares it disabled'
+            : 'consistent: runner test-login refused; capture impossible',
+        },
+      },
+    };
+  });
 }
 
 /** Back-compat helper: true when the batch must stop on E-ENV. */
@@ -276,7 +555,7 @@ export function envStop(results) {
  * [run.startedAt, run.endedAt]; same slotGeneration; dev-auth and runtime
  * broker effective false; no broker process/dispatch true.
  * @param {any} post
- * @param {{startedAt: string, endedAt: string, slotGeneration: string, baseURL: string, preBaseURL?: string}} run
+ * @param {{startedAt: string, endedAt: string, slotGeneration: string, baseURL: string, preBaseURL?: string, preValues?: Record<string, boolean | null>, preSourcesKey?: string | null, testLoginUsed?: boolean}} run
  */
 export function evaluateEnvPost(post, run) {
   if (!post) return { outcome: 'inconclusive', problems: ['missing: POST env declaration'] };
@@ -308,10 +587,6 @@ export function evaluateEnvPost(post, run) {
     problems.push('POST/run window timestamps missing or not UTC ISO');
   else if (!(ws <= rs && we >= re))
     problems.push('POST window does not cover [run.startedAt, run.endedAt]');
-  if (post.e_env_1_dev_auth_effective === true)
-    fails.push('E-ENV-1: dev-auth effective ON in POST window');
-  else if (post.e_env_1_dev_auth_effective !== false)
-    problems.push('POST e_env_1_dev_auth_effective missing');
   if (post.e_env_4_runtime_broker_effective === true)
     fails.push('E-ENV-4: runtime broker effective ON in POST window');
   else if (post.e_env_4_runtime_broker_effective !== false)
@@ -320,6 +595,36 @@ export function evaluateEnvPost(post, run) {
     fails.push('E-ENV-4: broker process/dispatch during the batch');
   else if (post.e_env_4_no_broker_process_or_dispatch !== true)
     problems.push('POST e_env_4_no_broker_process_or_dispatch missing');
+  // review2 RB3: test-login state required on POST; E-ENV-1 sources complete;
+  // steward anonymous probe (if present) must be 401; same-slot PRE/POST
+  // shared booleans must agree; a POST claiming test-login disabled while the
+  // runner authenticated via test-login in the window is a contradiction.
+  if (typeof post.e_env_3_test_login_enabled !== 'boolean')
+    problems.push('POST e_env_3_test_login_enabled missing');
+  else if (post.e_env_3_test_login_enabled === false && run.testLoginUsed === true)
+    fails.push(
+      'E-ENV-3: POST declares test-login disabled, but the runner authenticated via test-login during the batch'
+    );
+  if (post.e_env_1_dev_auth_effective !== undefined || post.e_env_1_sources !== undefined) {
+    // R-4/R-6: optional on POST; if carried it must derive cleanly and equal PRE.
+    const pe1 = gradeEEnv1(post);
+    if (pe1.outcome === 'fail') fails.push(`E-ENV-1 (POST): ${pe1.reasons.join('; ')}`);
+    else if (pe1.outcome !== 'pass')
+      problems.push(`POST E-ENV-1 not proven OFF: ${pe1.reasons.join('; ')}`);
+    else if (run.preSourcesKey && sourcesKey(post.e_env_1_sources) !== run.preSourcesKey)
+      fails.push('same-slot PRE/POST disagreement on e_env_1_sources layer values');
+  }
+  const sw = post.e_env_2_anon_401;
+  if (sw && typeof sw.status === 'number' && sw.status !== 401)
+    fails.push(`E-ENV-2: POST steward anonymous probe status ${sw.status}`);
+  if (run.preValues) {
+    for (const k of SHARED_ENV_BOOLEANS) {
+      const a = run.preValues[k];
+      const b = typeof post[k] === 'boolean' ? post[k] : null;
+      if (a === null || a === undefined || b === null) continue; // missing values are reported above/elsewhere
+      if (a !== b) fails.push(`same-slot PRE/POST disagreement on ${k}: PRE ${a}, POST ${b}`);
+    }
+  } else problems.push('missing: PRE shared env values (run.envPreValues)');
   // Ruling R-3: a POST declaration not bound to this run's host (or not
   // matching PRE's host) or generation is unattributable ⇒ INCONCLUSIVE; its
   // value contradictions are recorded but not graded FAIL.
@@ -462,6 +767,7 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
     else if (gte.outcome !== 'pass' && !(gte.gate === 'E-ENV-4' && gte.awaitingPost))
       errs.push(`missing: ${gte.gate} ${gte.outcome} (pre window)`);
   }
+  if (!run.envPreValues) errs.push('missing: run.envPreValues (PRE shared env values)');
   if (!run.envPreBaseURL) errs.push('missing: run.envPreBaseURL (PRE declaration baseURL)');
   else if (hostBinding({ baseURL: run.envPreBaseURL }, base.baseURL).status !== 'ok')
     errs.push(
@@ -487,6 +793,11 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
       slotGeneration: base.slotGeneration,
       baseURL: run.baseURL ?? base.baseURL,
       preBaseURL: run.envPreBaseURL ?? undefined,
+      preValues: run.envPreValues ?? undefined,
+      preSourcesKey: run.envPreSourcesKey ?? undefined,
+      testLoginUsed:
+        Array.isArray(run.issuanceInventory?.credentials) &&
+        run.issuanceInventory.credentials.length > 0,
     });
     if (r.outcome === 'fail') errs.push(...r.problems.map((p) => `mismatch: POST env ${p}`));
     else if (r.outcome !== 'pass') errs.push(...r.problems.map((p) => `missing: POST env ${p}`));
@@ -541,6 +852,70 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
   if ((run.captureIds ?? []).length !== ids.size)
     errs.push('mismatch: run.json captureIds count != capture files');
   return errs;
+}
+
+/**
+ * Coverage counts per state, separate from validity (review2 N-j): a run can
+ * validate while every slice record is BLOCKED; this makes that visible.
+ * @param {string} runDir
+ */
+export function coverageSummary(runDir) {
+  const perState = {};
+  for (const f of fs.readdirSync(runDir).filter((x) => x.endsWith('.capture.json'))) {
+    const c = JSON.parse(fs.readFileSync(path.join(runDir, f), 'utf-8'));
+    const st = (perState[c.stateId] ??= { complete: 0, captureError: 0, blocked: 0 });
+    if (c.status === 'complete') st.complete++;
+    else if (c.status === 'capture-error') st.captureError++;
+    else st.blocked++;
+  }
+  const totals = Object.values(perState).reduce(
+    (a, b) => ({
+      complete: a.complete + b.complete,
+      captureError: a.captureError + b.captureError,
+      blocked: a.blocked + b.blocked,
+    }),
+    { complete: 0, captureError: 0, blocked: 0 }
+  );
+  return { perState, totals };
+}
+
+/**
+ * Immutable validation result bound to the exact inputs (owner 16:04Z: the
+ * passing validate-run output, not run.json batchValid, is the final
+ * environment-validity evidence). `classification` follows §0/§5a: any
+ * `mismatch:` ⇒ REJECTED-FAIL-OR-INVALID; only `missing:` ⇒ INCONCLUSIVE.
+ */
+export function validationRecord(runDir, baseFile, companionFile, envPostFile, errs) {
+  const files = fs
+    .readdirSync(runDir)
+    .filter((f) => fs.statSync(path.join(runDir, f)).isFile())
+    .sort()
+    .map((f) => ({ path: f, sha256: sha256(fs.readFileSync(path.join(runDir, f))) }));
+  const fileSha = (f) => (f && fs.existsSync(f) ? sha256(fs.readFileSync(f)) : null);
+  const mismatches = errs.filter((e) => /mismatch:/.test(e));
+  return {
+    schemaVersion: 1,
+    kind: 'wave01-validation',
+    createdAt: new Date().toISOString(),
+    contractSha256: CONTRACT_SHA256,
+    runDir: path.basename(runDir),
+    verdict: errs.length === 0 ? 'accepted' : 'rejected',
+    classification:
+      errs.length === 0
+        ? 'VALID'
+        : mismatches.length
+          ? 'REJECTED (FAIL or invalid)'
+          : 'INCONCLUSIVE',
+    inputs: {
+      runJsonSha256: fileSha(path.join(runDir, 'run.json')),
+      baseReleaseSha256: fileSha(baseFile),
+      companionSha256: fileSha(companionFile),
+      envPostSha256: fileSha(envPostFile),
+      files,
+    },
+    errors: errs,
+    coverage: coverageSummary(runDir),
+  };
 }
 
 // ─── E7 quarantine ledger ────────────────────────────────────────────────
@@ -636,7 +1011,23 @@ function main() {
       arg(rest, 'companion'),
       i >= 0 ? arg(rest, 'env-post') : undefined
     );
-    console.log(errs.length ? `INVALID ${dir}\n  ${errs.join('\n  ')}` : `ok      ${dir}`);
+    const o = rest.indexOf('--out');
+    const envPost = i >= 0 ? arg(rest, 'env-post') : undefined;
+    const rec = validationRecord(dir, arg(rest, 'base'), arg(rest, 'companion'), envPost, errs);
+    if (o >= 0) {
+      const out = arg(rest, 'out');
+      fs.writeFileSync(out, JSON.stringify(rec, null, 2) + '\n', { flag: 'wx', mode: 0o444 });
+      console.log(`${sha256(fs.readFileSync(out))}  ${out}`);
+    }
+    console.log(
+      errs.length
+        ? `INVALID ${dir} (${rec.classification})\n  ${errs.join('\n  ')}`
+        : `ok      ${dir}`
+    );
+    // Coverage is reported separately from validity (review2 N-j).
+    console.log(
+      `coverage: ${JSON.stringify(rec.coverage.totals)} per-state ${JSON.stringify(rec.coverage.perState)}`
+    );
     process.exit(errs.length ? 1 : 0);
   }
   if (cmd === 'quarantine-status') {

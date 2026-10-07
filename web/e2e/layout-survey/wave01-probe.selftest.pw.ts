@@ -222,6 +222,7 @@ const HTML2 = `<!doctype html><html><head><style>
 <span id="ws-normal" style="white-space:normal">Double  Space
   wrapped</span>
 <span id="ws-pre" style="white-space:pre-wrap">A  B</span>
+<span id="ws-nbsp" style="white-space:normal">A&nbsp;B&#x3000;C</span>
 <scion-app></scion-app>
 <script>
   customElements.define('scion-nav', class extends HTMLElement {
@@ -332,4 +333,15 @@ test('N4: nav op + computed accessible names through shadow roots (quotes, backs
   const an2 = evalAN2(nav);
   expect(an2.outcome, 'aria-label override ≠ label ⇒ A-N2 fails').toBe('fail');
   expect((an2.details as { domCount: number }).domCount).toBe(4);
+});
+
+test('R-5 real-Chromium control: NBSP and U+3000 stay significant in innerText and in the comparison', async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const m = await measure(page, [{ key: 'n', op: 'one', css: '#ws-nbsp' }]);
+  const e = m.elements.n![0]!;
+  expect(e.innerText).toBe('A\u00a0B\u3000C');
+  expect(renderedTextEquals(e.innerText, 'A\u00a0B\u3000C', e.whiteSpace).equal).toBe(true);
+  expect(renderedTextEquals(e.innerText, 'A B C', e.whiteSpace).equal).toBe(false);
 });

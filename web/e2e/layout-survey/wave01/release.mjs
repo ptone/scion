@@ -266,6 +266,7 @@ export function validatePair({ baseBytes, companion, expect = {} }) {
 
 /**
  * Baseline and each candidate are DISTINCT pairs (assessor ruling R-2,
+ * each pair validated with validatePair when its bytes are given;
  * 15:39Z): distinct base Release and companion (ids and file sha256),
  * host-distinct baseURLs (not ports alone), and each pair internally
  * consistent (validatePair). slotGeneration VALUES need not differ; slot
@@ -275,6 +276,18 @@ export function validatePair({ baseBytes, companion, expect = {} }) {
  */
 export function validateDistinctPairs(a, b) {
   const errs = [];
+  // Each pair must itself be internally consistent (review2 N-a).
+  for (const [label, p] of [
+    ['a', a],
+    ['b', b],
+  ]) {
+    if (p.baseBytes)
+      errs.push(
+        ...validatePair({ baseBytes: p.baseBytes, companion: p.companion }).map(
+          (e) => `pair ${label}: ${e}`
+        )
+      );
+  }
   if (a.companion.id === b.companion.id) errs.push('same companion id');
   if (a.base.id === b.base.id) errs.push('same base Release id');
   if (a.baseSha256 && a.baseSha256 === b.baseSha256) errs.push('same base Release file sha256');
@@ -285,6 +298,12 @@ export function validateDistinctPairs(a, b) {
   if (hostA === hostB) errs.push('baseline/candidate baseURL hosts must differ (not ports alone)');
   if (`${hostA}|${a.base.slotGeneration}` === `${hostB}|${b.base.slotGeneration}`)
     errs.push('same slot identity (host, slotGeneration)');
+  if (
+    a.companion.phase === 'candidate' &&
+    b.companion.phase === 'candidate' &&
+    a.base.sourceSha === b.base.sourceSha
+  )
+    errs.push('two candidate pairs for the same served head');
   return errs;
 }
 
@@ -438,6 +457,7 @@ function main() {
       return {
         base: JSON.parse(bb.toString('utf-8')),
         companion: JSON.parse(cb.toString('utf-8')),
+        baseBytes: bb,
         baseSha256: sha256(bb),
         companionSha256: sha256(cb),
       };

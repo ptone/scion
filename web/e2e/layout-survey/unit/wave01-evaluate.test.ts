@@ -670,9 +670,31 @@ describe('rev 3 rendered-text comparison (B-A3 shape (i))', () => {
     ]);
     expect(r.outcome).toBe('pass');
     expect(JSON.stringify(r.details)).toContain('Double  Space');
-    expect(JSON.stringify(r.details)).toContain('collapse-all-trim');
+    expect(JSON.stringify(r.details)).toContain('collapse-css-whitespace-trim');
   });
   it('a missing innerText never passes shape (i)', () => {
     expect(renderedTextEquals(null, 'x', 'normal').equal).toBe(false);
+  });
+});
+
+describe('R-5: only U+0020/U+0009/U+000A/U+000D collapse (review2 RB4)', () => {
+  const cases: Array<[string, string, string, boolean]> = [
+    ['NBSP preserved', 'A B', 'A B', false],
+    ['NBSP exact', 'A B', 'A B', true],
+    ['NBSP not trimmed', ' A', ' A', true],
+    ['en/em spaces preserved', 'A B', 'A B', false],
+    ['narrow NBSP preserved', 'A B', 'A B', false],
+    ['ideographic space preserved', 'A　B', 'A B', false],
+    ['form feed preserved', 'A\u000CB', 'A B', false],
+    ['CR collapses', 'A B', 'A\r\nB', true],
+    ['tab+LF collapse and trim', 'A B', '\tA\n\nB  ', true],
+  ];
+  for (const [label, innerText, v, equal] of cases) {
+    it(label, () => {
+      expect(renderedTextEquals(innerText, v, 'normal').equal).toBe(equal);
+    });
+  }
+  it('pre-line collapses only space/tab', () => {
+    expect(renderedTextEquals('A B', 'A  B', 'pre-line').equal).toBe(false);
   });
 });
