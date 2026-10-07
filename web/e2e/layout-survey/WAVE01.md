@@ -1,15 +1,19 @@
 # Layout survey — Wave01 measurement runner
 
 Attach-only measurement runner for the Wave01 campaign, graded under
-**`wave01-contract-FROZEN-rev3.md`** (44319 B, sha256
-`69ec8b81af27c0bbb5be53a4cdf0722c98022368d6ebc947213431aeb03d6680`). It
-supersedes rev 2 (`1877b1d4…5447`) and rev 1 (`f7143415…e8ae`). No Wave01
-evidence exists under either.
+**`wave01-contract-FROZEN-rev4.md`** (48891 B, sha256
+`0fcc579e4a09d4479ec94a8d52ce28ff13e4136645feb77002be3d945dd9c855`). It
+supersedes rev 3 (`69ec8b81…6680`), rev 2 (`1877b1d4…5447`) and rev 1
+(`f7143415…e8ae`). No Wave01 evidence exists under any of them. Ruling R-6 is
+withdrawn.
 
 - Groups-table clauses: pilot finding rev 2 (`8a287ba4…56ec572fc`).
 - Helper-seeded rows: helper excerpt (`d03ca22a…1ea40`).
-- Interpretation rulings: R-1 (APP shell = `scion-app`, folded into rev 3
-  §1a) and R-2 (Release distinctness, below).
+- Interpretation rulings, folded into rev 4:
+  - R-1: APP shell = `scion-app`.
+  - R-2/R-3: slot binding.
+  - R-5: whitespace set.
+- R-7: per-artifact E-ENV-1 attribution.
 
 This is measurement tooling only. It changes no product code. The pilot
 runner (`capture.pw.ts`, `playwright.config.ts`) is unchanged.
@@ -62,18 +66,23 @@ They contain key names, booleans and UTC timestamps only.
   "window_end": "…Z (POST only)",
   "slotGeneration": "…",
   "e_env_1_dev_auth_effective": false,
-  "e_env_1_sources": {
-    "unit/args": { "--dev-auth": false, "--hosted": true, "--production": "absent" },
-    "settings": {
-      "global": "absent",
-      "local": { "auth.devMode": false, "auth.mode": "absent", "mode": "hosted" }
+  "e_env_1_provenance": {
+    "flags": { "--hosted": true, "--production": "absent", "--dev-auth": false },
+    "load_path": "settings-global | settings-local | legacy",
+    "files_examined": ["<paths inspected>"],
+    "path_values": {
+      "server.mode": "hosted",
+      "server.auth.dev_mode": false,
+      "server.auth.mode": "absent"
     },
-    "environment": {
+    "env": {
+      "SCION_SERVER_MODE": "absent",
       "SCION_SERVER_AUTH_DEVMODE": "absent",
       "SCION_SERVER_AUTH_MODE": "absent",
-      "SCION_SERVER_MODE": "absent"
+      "SCION_SERVER_AUTH_DEV_MODE": "absent"
     },
-    "keys_checked": ["<concrete key names inspected>"]
+    "declared_effective_hosted": true,
+    "declared_effective_auth_mode": "oauth"
   },
   "e_env_3_test_login_enabled": true,
   "e_env_4_runtime_broker_effective": false,
@@ -84,8 +93,12 @@ They contain key names, booleans and UTC timestamps only.
 ```
 
 `window_ts` is accepted as an alias for `window_start`. Every "absent" must be
-written explicitly. A missing key is never defaulted. The settings key-path
-spelling is pending ii2's source read.
+written explicitly. A missing key is never defaulted.
+
+On the legacy load path, `path_values` is
+`{ "files": [ { "file", "mode", "auth.devMode", "auth.mode" }, … ] }`, listed in
+merge order. The exact record shape is pending ii2's confirmation after the
+roll.
 
 ### Binding (rulings R-2/R-3)
 
@@ -112,39 +125,63 @@ baseURL. `slotGeneration` must equal the base Release's.
 
 Either outcome stops capture, and validate-run rejects the run.
 
-### E-ENV-1 derivation (rulings R-4 and R-6)
+### E-ENV-1 (contract rev 4 §5a; ruling R-7)
 
-The per-layer raw values are applied through the served backend's
-precedence. It was source-checked at 1694e511, which matches backend
-4a253489:
+All citations are at 1694e511, which matches served backend 4a253489.
 
-| Step         | Rule                                                                                                                            | Source                                                                    |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| config value | `SCION_SERVER_*` env > local settings > global settings > embedded default (`auth.devMode=false`; `auth.mode` and `mode` unset) | `pkg/config/hub_config.go:966-970, 1036-1043, 1536-1546, 1817-1822`       |
-| hosted       | `--hosted`/`--production` if either is set, else config `mode` ∈ {hosted, production}                                           | `cmd/server.go:235-236`, `cmd/server_foreground.go:1013-1018`             |
-| devMode      | explicit `--dev-auth`; else ON if non-hosted (workstation default); else config devMode                                         | `server_foreground.go:1020-1024, 1064-1066`, `cmd/server_config.go:35-36` |
-| auth.mode    | config `auth.mode` (`"dev"` = exclusive dev human auth)                                                                         | `hub_config.go:582-588`                                                   |
+**E-ENV-1a: runner probes**, sent to the run's own served origin before
+capture (as a gate) and again after the batch. No real credential is used.
 
-A missing input is unknown, never defaulted. E-ENV-1 is graded in the
-assessor's order, and the first match wins:
+- **P-API:** `GET /api/v1/groups` with `Authorization: Bearer scion_dev_<64 fresh random hex>`.
+  The token is generated per probe and never recorded.
+  - 401 `"development authentication is not enabled"` ⇒ OFF.
+  - `"invalid development token"` or any 2xx ⇒ ON.
+  - Anything else ⇒ unexplained.
+  - Sources: `pkg/hub/auth.go:467-477`, `detectTokenType` :686-689,
+    `writeError` JSON in `errors.go:284-304`.
+- **P-WEB:** a cookie-less `GET /auth/me`.
+  - 401 without a user identity ⇒ OFF.
+  - Any returned identity ⇒ ON.
+  - Anything else ⇒ unexplained.
+  - Sources: `web.go:949`, :2773-2800; `devAuthMiddleware` :1896-1945,
+    wired at :2969.
 
-1. **Unbound** declaration ⇒ INCONCLUSIVE.
-2. **FAIL** if any of:
-   - the chain derives devMode ON;
-   - effective `auth.mode = "dev"`;
-   - the declared `e_env_1_dev_auth_effective` is `true`.
+**E-ENV-1b: steward provenance record** of the actual serving process. It
+holds the process flags, the load path taken (`hub_config.go:1059-1080`
+settings path, where global and local are alternatives; :1180+ legacy merge),
+that path's values, the camelCase serve-path env keys (:1536-1546,
+:1817-1822), `SCION_SERVER_AUTH_DEV_MODE` as present/absent, and the declared
+effective hosted mode, dev-auth and auth.mode.
 
-   This holds even when other classes are missing, as long as they cannot
-   change the result. A declared-vs-derived disagreement is recorded with
-   the FAIL.
+The runner checks the record for binding, completeness and contradictions,
+and **never resolves precedence**. Contradiction checks are limited to inputs
+at the top of precedence:
 
+- an explicit `--dev-auth` vs the declared dev-auth (applied last,
+  `server_foreground.go:1064-1066`);
+- an explicit `--hosted`/`--production` vs the declared hosted mode
+  (:1013-1018);
+- a set `SCION_SERVER_AUTH_MODE` vs the declared auth.mode. The env value is
+  last on both load paths, and no CLI flag or later code writes `Auth.Mode`
+  (the only writer is `settings_v1.go:3280`).
+
+Lower-layer file values are recorded but never checked.
+
+**Grading (R-7, per artifact).** Probe results are attributable by
+construction. A record bound to another host or generation is excluded and
+counts as missing.
+
+1. Either probe ON ⇒ **FAIL**, whatever any record says.
+2. The attributable record shows dev-auth ON, hosted false, explicit
+   `--dev-auth=true`, or declared auth.mode `"dev"` ⇒ **FAIL**.
 3. **INCONCLUSIVE** if any of:
-   - a class or key that could change the result is missing or malformed;
-   - the chain cannot be derived;
-   - hosted mode is not evidenced;
-   - the declared value is missing.
-4. **PASS** only if all three classes are explicit, the chain derives OFF,
-   hosted mode is evidenced, and declared = `false`.
+   - a probe is missing or unexplained;
+   - the record is missing, unbound, incomplete or contradictory.
+4. **PASS** only if both probes are OFF and an attributable, complete record
+   declares hosted true and dev-auth OFF.
+
+After the batch, a probe ON ⇒ E-ENV-1 FAIL and the batch is invalid.
+Missing or unexplained post-batch probes ⇒ INCONCLUSIVE in validate-run.
 
 ### Other gates
 
@@ -184,8 +221,8 @@ The steward writes the POST declaration after the batch. It must:
 - carry `e_env_3_test_login_enabled`, `e_env_4_runtime_broker_effective` and
   `e_env_4_no_broker_process_or_dispatch`.
 
-E-ENV-1 is optional on POST (R-4). If present, it must derive cleanly and its
-layer values must equal PRE's.
+The E-ENV-1b record is optional on POST. If present, it must be complete and
+non-forbidden, and must equal PRE's.
 
 These are FAIL:
 
@@ -360,18 +397,20 @@ the pilot convention. All records are written before it exits.
 - `unit/wave01-*.test.ts` (vitest): the evaluators, the records/E-ENV logic,
   and a table-driven E-ENV matrix (`wave01-env-table.test.ts`).
 - `wave01-probe.selftest.pw.ts`: real-Chromium probe controls on a synthetic
-  shadow/slot DOM. It covers the B1 negative control, the rev 3 (c) positive
+  shadow/slot DOM. It covers the B1 negative control, the rev 4 (c) positive
   control, R-5 NBSP/U+3000 preservation, accessible names and wheel
   positioning.
 - `wave01-loopback.selftest.pw.ts`: runs the **real** `wave01.pw.ts` as a
   child process in debug mode against a 127.0.0.1 node server, which is not a
   hub. It checks the clean path, the SAFETY priority, readback failure as
-  per-substep capture errors, and an honest aborted run on test-login failure.
+  per-substep capture errors, an honest aborted run on test-login failure, and
+  a dev-auth-ON server (the rev 4 probes stop the batch with E-ENV-1 FAIL and
+  never record the probe token).
 
 Run all of the above with
 `CHROMIUM_EXECUTABLE=… npx playwright test -c e2e/layout-survey/playwright.wave01-selftest.config.ts`.
 
-## Contract → code coverage (rev 3)
+## Contract → code coverage (rev 4)
 
 - **impl** = implemented and unit/self-tested.
 - **BLOCKED** = not implemented at this commit. The affected states emit
@@ -385,7 +424,7 @@ Run all of the above with
 | §1 K(e) + axis-aware CLIP; scrollers, offscreen ≠ clipped, reachability                                                                                                            | `probe.chainEntry`, `evaluate.clip` (pending + inner-scroller deferral), `runner-lib.positionStep`, `resolveObservations`       | impl                                                                                                                                            |
 | §1 programmatic positioning (labelled; never reachability)                                                                                                                         | `probe` `programmatic-scroll`; resolution ⇒ inconclusive                                                                        | impl                                                                                                                                            |
 | §1 actionable target                                                                                                                                                               | `contract.ACTIONABLE`, `probe.isActionable`                                                                                     | impl                                                                                                                                            |
-| §1 rendered-text comparison (rev 3)                                                                                                                                                | `evaluate.renderedTextEquals` on `innerText` + computed `white-space`; raw readback recorded                                    | impl for B-A3 (real-Chromium control)                                                                                                           |
+| §1 rendered-text comparison (rev 4, R-5)                                                                                                                                           | `evaluate.renderedTextEquals` on `innerText` + computed `white-space`; raw readback recorded                                    | impl for B-A3 (real-Chromium control)                                                                                                           |
 | §1 FULL(e, v) generic rule                                                                                                                                                         | — (S01/S02 use the pilot B-A3 shapes)                                                                                           | BLOCKED (A-L3/A-T1, S03+)                                                                                                                       |
 | §1a APP shell `scion-app` (R-1 erratum)                                                                                                                                            | `contract.APP_SHELL_TAG`                                                                                                        | impl                                                                                                                                            |
 | §1b policies, POL-SR                                                                                                                                                               | `contract.POLICIES`, `probe.policiesFor`, `probe.isSrOnly`                                                                      | impl                                                                                                                                            |
@@ -393,16 +432,17 @@ Run all of the above with
 | A-D1, A-C1, A-S1/A-S2 (page layer), A-N2                                                                                                                                           | `evalAD1/AC1/AS1/AS2/AN2` (+ live accessible names)                                                                             | impl                                                                                                                                            |
 | §2c active layer / background inert / M0-underlay                                                                                                                                  | —                                                                                                                               | BLOCKED (S05, A-N1 P1)                                                                                                                          |
 | A-N1 (M2)                                                                                                                                                                          | —                                                                                                                               | BLOCKED (S04, S05)                                                                                                                              |
-| A-F1 (rev 3: body start asserted, Tab/Shift+Tab, stop rule, focus-outside-document, composed-descendant target; indicator (a) outline, (b) box-shadow, (c) non-outline style diff) | `groups.traverse`, `evaluate.pressChecks`/`evalAF1`                                                                             | impl (real-Chromium negative + positive controls). BLOCKED with S05/S07/S08/S15: start points after preparation actions, and drawer focus scope |
+| A-F1 (rev 4: body start asserted, Tab/Shift+Tab, stop rule, focus-outside-document, composed-descendant target; indicator (a) outline, (b) box-shadow, (c) non-outline style diff) | `groups.traverse`, `evaluate.pressChecks`/`evalAF1`                                                                             | impl (real-Chromium negative + positive controls). BLOCKED with S05/S07/S08/S15: start points after preparation actions, and drawer focus scope |
 | A-L1…A-L5, A-T1…A-T3                                                                                                                                                               | —                                                                                                                               | BLOCKED (S03–S15)                                                                                                                               |
-| B-C1, B-A1, B-A2, B-A3, B-OVR, B-I1 (pilot finding rev 2 + rev 3 rendered-text rule)                                                                                               | `evalBC1/BA1/BA2/BA3/BOVR`, `groups.runM3`                                                                                      | impl (S01/S02)                                                                                                                                  |
+| B-C1, B-A1, B-A2, B-A3, B-OVR, B-I1 (pilot finding rev 2 + rev 4 rendered-text rule)                                                                                               | `evalBC1/BA1/BA2/BA3/BOVR`, `groups.runM3`                                                                                      | impl (S01/S02)                                                                                                                                  |
 | §2a measured interactions / forbidden activation                                                                                                                                   | `pointerClick` (refuses on a failed hit test); SAFETY non-GET check with priority                                               | impl                                                                                                                                            |
 | §2a R0 (no networkidle), readback-bound expectations                                                                                                                               | `waitR0`, guarded `groups.readback`                                                                                             | impl                                                                                                                                            |
 | §2b M0-primary + M0-pos-k (same context), M1, M3                                                                                                                                   | `groups.runM0/runM1Forward/runM1Backward/runM3`                                                                                 | impl; M2 BLOCKED                                                                                                                                |
 | §3 capture errors never graded; quarantine after 3 (immediate, in-batch)                                                                                                           | `wave01.pw.ts`; `records.applyBatch/isQuarantined/clearQuarantine`                                                              | impl                                                                                                                                            |
 | §4 counting                                                                                                                                                                        | `expectedRecords` = 15 × 3 × substeps; one M0 per state × profile                                                               | impl (S01/S02 captured; others BLOCKED records)                                                                                                 |
 | §5 fixtures                                                                                                                                                                        | groups via API + readback; companion `fixtureHelper`                                                                            | impl for groups; helper states BLOCKED                                                                                                          |
-| §5a E-ENV-1…5                                                                                                                                                                      | `records.evaluateEnv` (PRE, window-bound), `envDecision`, post anonymous probe, `evaluateEnvPost` via `validate-run --env-post` | impl                                                                                                                                            |
+| §5a E-ENV-1 (rev 4: P-API/P-WEB probes pre + post; E-ENV-1b provenance completeness/contradictions; R-7 per-artifact)                                                              | `wave01.pw.ts` `devAuthProbes`; `records.classifyDevAuthProbes/checkProvenance/gradeEEnv1`; post probes in `validate-run`       | impl (unit tables + real-runner loopback dev-auth-ON control)                                                                                   |
+| §5a E-ENV-2…5, slot binding                                                                                                                                                        | `records.evaluateEnv` (PRE, window-bound), `envDecision`, post anonymous probe, `evaluateEnvPost` via `validate-run --env-post` | impl                                                                                                                                            |
 | §5b E-REL (pair; R-2 distinctness)                                                                                                                                                 | `release.mjs` buildBase/buildCompanion/validatePair/validateDistinctPairs                                                       | impl                                                                                                                                            |
 | §5b E-MAIN, E-RUN, attach-only                                                                                                                                                     | `wave01.pw.ts`, `suite-digest.mjs`, `playwright.wave01.config.ts`                                                               | impl                                                                                                                                            |
 | §5b E-XFER, E-ID, E-CRED retirement, E-PUB                                                                                                                                         | steward / assessor processes; the runner records a value-free issuance inventory                                                | outside runner                                                                                                                                  |

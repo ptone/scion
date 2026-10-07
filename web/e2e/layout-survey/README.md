@@ -1,6 +1,6 @@
 # Layout survey — Phase-1 runner (`/admin/groups`)
 
-> Wave01 (15 states × 3 profiles, contract FROZEN rev 3) uses a separate
+> Wave01 (15 states × 3 profiles, contract FROZEN rev 4) uses a separate
 > runner: see [`WAVE01.md`](WAVE01.md). Everything below is the unchanged
 > Phase-1 pilot runner.
 

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /**
- * Frozen Wave01 scenario manifest (contract FROZEN rev 3 §4a), transcribed
+ * Frozen Wave01 scenario manifest (contract FROZEN rev 4 §4a), transcribed
  * row by row. `adapter` says whether this runner commit implements the
  * state; unimplemented states emit explicit BLOCKED records and are never
  * reported as passing.

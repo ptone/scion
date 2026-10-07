@@ -35,7 +35,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB = path.resolve(HERE, '..', '..');
 const PW_CLI = path.join(WEB, 'node_modules', '@playwright', 'test', 'cli.js');
 
-type Mode = 'clean' | 'safety' | 'bad-readback' | 'login-fail';
+type Mode = 'clean' | 'safety' | 'bad-readback' | 'login-fail' | 'dev-auth-on';
 
 const GROUPS = [
   {
@@ -118,6 +118,34 @@ function startServer(mode: Mode): Promise<{ server: http.Server; baseURL: string
     const authed =
       /Bearer tok-/.test(req.headers.authorization ?? '') ||
       /sess=lb/.test(req.headers.cookie ?? '');
+    // rev 4 E-ENV-1a probes, mirroring pkg/hub/auth.go:467-477 and web.go:2773-2800.
+    if (
+      u.pathname === '/api/v1/groups' &&
+      /^Bearer scion_dev_/.test(req.headers.authorization ?? '')
+    ) {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      return res.end(
+        JSON.stringify({
+          error: {
+            code: 'unauthorized',
+            message:
+              mode === 'dev-auth-on'
+                ? 'invalid development token'
+                : 'development authentication is not enabled',
+          },
+        })
+      );
+    }
+    if (u.pathname === '/auth/me') {
+      if (mode === 'dev-auth-on') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        return res.end(
+          JSON.stringify({ userId: 'dev-user', email: 'dev@localhost', role: 'admin' })
+        );
+      }
+      res.writeHead(401, { 'content-type': 'application/json' });
+      return res.end('{"error":"authentication required"}');
+    }
     if (u.pathname === '/assets/main.js') {
       res.writeHead(200, { 'content-type': 'application/javascript' });
       return res.end(mainJs(mode));
@@ -315,5 +343,18 @@ test('test-login failure: honest aborted run.json, batchValid false, test fails'
   const r = await runRunner('login-fail');
   expect(r.run).toMatchObject({ aborted: true, batchValid: false });
   expect(String(r.run.abortReason)).toContain('test-login failed');
+  expect(r.code).not.toBe(0);
+});
+
+test('dev-auth ON (rev 4 probes): E-ENV-1 FAIL stops the batch before capture with an honest run.json', async () => {
+  const r = await runRunner('dev-auth-on');
+  expect(r.run.batchValid).toBe(false);
+  expect((r.run.stopped as string[]).join(' ')).toContain('E-ENV-1');
+  const e1 = (r.run.env as Array<{ gate: string; outcome: string }>).find(
+    (g) => g.gate === 'E-ENV-1'
+  )!;
+  expect(e1.outcome).toBe('fail');
+  expect(r.files.filter((f) => f.endsWith('.capture.json'))).toEqual([]);
+  expect(JSON.stringify(r.run)).not.toMatch(/scion_dev_[0-9a-f]{64}/);
   expect(r.code).not.toBe(0);
 });

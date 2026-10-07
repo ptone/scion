@@ -30,7 +30,7 @@ import {
   envStop,
   evaluateEnvPost,
   hostBinding,
-  sourcesKey,
+  provenanceKey,
   evaluateEnv,
   isQuarantined,
   validateCapture,
@@ -49,19 +49,34 @@ import {
   SUITE_DIGEST_METHOD,
 } from '../wave01/suite-digest.mjs';
 
-const R6_SOURCES = {
-  'unit/args': { '--dev-auth': false, '--hosted': true, '--production': 'absent' },
-  settings: {
-    global: 'absent',
-    local: { 'auth.devMode': false, 'auth.mode': 'absent', mode: 'hosted' },
+const PROV = {
+  flags: { '--hosted': true, '--production': 'absent', '--dev-auth': false },
+  load_path: 'settings-global',
+  files_examined: ['~/.scion/settings.yaml'],
+  path_values: {
+    'server.mode': 'hosted',
+    'server.auth.dev_mode': false,
+    'server.auth.mode': 'absent',
   },
-  environment: {
+  env: {
+    SCION_SERVER_MODE: 'absent',
     SCION_SERVER_AUTH_DEVMODE: 'absent',
     SCION_SERVER_AUTH_MODE: 'absent',
-    SCION_SERVER_MODE: 'absent',
+    SCION_SERVER_AUTH_DEV_MODE: 'absent',
   },
-  keys_checked: ['argv', 'settings.local:server.auth', 'env:SCION_SERVER_*'],
+  declared_effective_hosted: true,
+  declared_effective_auth_mode: 'oauth',
 };
+const PROBES_OFF = {
+  api: {
+    status: 401,
+    message: 'development authentication is not enabled',
+    at: '2026-10-07T15:59:30Z',
+  },
+  web: { status: 401, hasIdentity: false, at: '2026-10-07T15:59:31Z' },
+};
+const ev = (...a: Parameters<typeof evaluateEnv>) =>
+  evaluateEnv(a[0], a[1], a[2], a[3], a[4] === undefined ? PROBES_OFF : a[4]);
 
 const sha = (b: Buffer | string) => createHash('sha256').update(b).digest('hex');
 
@@ -112,9 +127,9 @@ describe('suite digest (§5b E-RUN, assessor-confirmed canonical form)', () => {
 });
 
 describe('manifest and pins', () => {
-  it('pins contract rev 3', () => {
+  it('pins contract rev 4', () => {
     expect(CONTRACT.sha256).toBe(
-      '69ec8b81af27c0bbb5be53a4cdf0722c98022368d6ebc947213431aeb03d6680'
+      '0fcc579e4a09d4479ec94a8d52ce28ff13e4136645feb77002be3d945dd9c855'
     );
     expect(CONTRACT_SHA256).toBe(CONTRACT.sha256);
   });
@@ -178,7 +193,7 @@ function mkPair(over: { base?: Record<string, unknown>; comp?: Record<string, un
     baseURL: 'https://baseline.example',
     releaseKind: 'verification',
     phase: 'baseline',
-    contract: { name: 'wave01-contract-FROZEN-rev3.md', sha256: CONTRACT_SHA256 },
+    contract: { name: 'wave01-contract-FROZEN-rev4.md', sha256: CONTRACT_SHA256 },
     servedSourceSha: base.sourceSha,
     backendSourceSha: base.backendSourceSha,
     runner: {
@@ -319,7 +334,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
     slotGeneration: 'gen-1',
     baseURL: 'https://baseline.example',
     e_env_1_dev_auth_effective: false,
-    e_env_1_sources: R6_SOURCES,
+    e_env_1_provenance: PROV,
     e_env_3_test_login_enabled: true,
     e_env_4_runtime_broker_effective: false,
     e_env_4_no_broker_process_or_dispatch: true,
@@ -335,7 +350,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
   const gate = (r: ReturnType<typeof evaluateEnv>, id: string) => r.find((x) => x.gate === id)!;
 
   it('complete, bound evidence ⇒ E-ENV-1/2/3/5 pass, E-ENV-4 awaits POST evidence, no stop', () => {
-    const r = evaluateEnv(decl, self, rel, W);
+    const r = ev(decl, self, rel, W);
     expect(['E-ENV-1', 'E-ENV-2', 'E-ENV-3', 'E-ENV-5'].map((g) => gate(r, g).outcome)).toEqual([
       'pass',
       'pass',
@@ -346,7 +361,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
     expect(envDecision(r)).toMatchObject({ stop: false, fails: [], missing: [] });
   });
   it('review1 B2 repro: broker effective ON + anonymous 200 ⇒ FAIL and stop', () => {
-    const r = evaluateEnv(
+    const r = ev(
       { ...decl, e_env_4_runtime_broker_effective: true },
       { ...self, status: 200 },
       rel,
@@ -357,7 +372,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
     expect(envDecision(r)).toMatchObject({ stop: true, fails: ['E-ENV-2', 'E-ENV-4'] });
   });
   it('review1 B3 repro: stale window, stale E-ENV-5 ts, empty sources, no-dispatch false ⇒ never all-pass; stop', () => {
-    const r = evaluateEnv(
+    const r = ev(
       {
         ...decl,
         window_start: '2020-01-01T00:00:00Z',
@@ -374,73 +389,53 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
     expect(gate(r, 'E-ENV-5').outcome).toBe('inconclusive');
     expect(envDecision(r).stop).toBe(true);
   });
-  it('empty E-ENV-1 sources alone ⇒ inconclusive (stop)', () => {
-    const r = evaluateEnv({ ...decl, e_env_1_sources: [] }, self, rel, W);
+  it('missing E-ENV-1b provenance record ⇒ inconclusive (stop) even with probes OFF', () => {
+    const { e_env_1_provenance: _p, ...noProv } = decl;
+    const r = ev(noProv, self, rel, W);
     expect(gate(r, 'E-ENV-1').outcome).toBe('inconclusive');
     expect(envDecision(r).missing).toContain('E-ENV-1');
   });
   it('missing no-dispatch attestation ⇒ E-ENV-4 inconclusive without awaitingPost (stop)', () => {
     const { e_env_4_no_broker_process_or_dispatch: _x, ...d } = decl;
-    const r = evaluateEnv(d, self, rel, W);
+    const r = ev(d, self, rel, W);
     expect(gate(r, 'E-ENV-4')).toMatchObject({ outcome: 'inconclusive', awaitingPost: false });
     expect(envDecision(r).stop).toBe(true);
   });
   it('window in the future or older than maxAge ⇒ inconclusive; window_ts alias accepted', () => {
     expect(
-      gate(evaluateEnv({ ...decl, window_start: '2026-10-07T16:05:00Z' }, self, rel, W), 'E-ENV-1')
-        .outcome
+      gate(ev({ ...decl, window_start: '2026-10-07T16:05:00Z' }, self, rel, W), 'E-ENV-1').outcome
     ).toBe('inconclusive');
     expect(
-      gate(evaluateEnv({ ...decl, window_start: '2026-10-07T14:30:00Z' }, self, rel, W), 'E-ENV-1')
-        .outcome
+      gate(ev({ ...decl, window_start: '2026-10-07T14:30:00Z' }, self, rel, W), 'E-ENV-1').outcome
     ).toBe('inconclusive');
     const { window_start: ws, ...d } = decl;
-    expect(gate(evaluateEnv({ ...d, window_ts: ws }, self, rel, W), 'E-ENV-1').outcome).toBe(
-      'pass'
-    );
+    expect(gate(ev({ ...d, window_ts: ws }, self, rel, W), 'E-ENV-1').outcome).toBe('pass');
   });
   it('default max age is 30 min (ii2-confirmed): a 40-min-old window is stale without an explicit override', () => {
     expect(DEFAULT_ENV_MAX_AGE_MIN).toBe(30);
     const d = { ...decl, window_start: '2026-10-07T15:20:00Z' };
-    expect(gate(evaluateEnv(d, self, rel, { batchStart }), 'E-ENV-1').outcome).toBe('inconclusive');
-    expect(gate(evaluateEnv(d, self, rel, { batchStart, maxAgeMin: 60 }), 'E-ENV-1').outcome).toBe(
-      'pass'
-    );
+    expect(gate(ev(d, self, rel, { batchStart }), 'E-ENV-1').outcome).toBe('inconclusive');
+    expect(gate(ev(d, self, rel, { batchStart, maxAgeMin: 60 }), 'E-ENV-1').outcome).toBe('pass');
   });
   it('a self probe before the window start is not evidence for this window', () => {
     expect(
-      gate(evaluateEnv(decl, { status: 401, at: '2026-10-07T15:00:00Z' }, rel, W), 'E-ENV-2')
-        .outcome
+      gate(ev(decl, { status: 401, at: '2026-10-07T15:00:00Z' }, rel, W), 'E-ENV-2').outcome
     ).toBe('inconclusive');
   });
   it('accepted repo-default secret ⇒ E-ENV-5 FAIL, stop, security report', () => {
-    const r = evaluateEnv(
-      { ...decl, e_env_5: { ...decl.e_env_5, result_status: 200 } },
-      self,
-      rel,
-      W
-    );
+    const r = ev({ ...decl, e_env_5: { ...decl.e_env_5, result_status: 200 } }, self, rel, W);
     expect(gate(r, 'E-ENV-5').outcome).toBe('fail');
     expect(envDecision(r)).toMatchObject({ stop: true, securityReport: true });
     expect(envStop(r)).toBe(true);
   });
   it('a redirect is not a 401', () => {
-    expect(gate(evaluateEnv(decl, { ...self, status: 302 }, rel, W), 'E-ENV-2').outcome).toBe(
-      'fail'
-    );
+    expect(gate(ev(decl, { ...self, status: 302 }, rel, W), 'E-ENV-2').outcome).toBe('fail');
   });
   it('missing declaration or other slot generation ⇒ inconclusive', () => {
-    expect(
-      evaluateEnv(null, self, rel, W).filter((g) => g.outcome === 'inconclusive')
-    ).toHaveLength(4);
+    expect(ev(null, self, rel, W).filter((g) => g.outcome === 'inconclusive')).toHaveLength(4);
     expect(
       gate(
-        evaluateEnv(
-          decl,
-          self,
-          { slotGeneration: 'gen-9', baseURL: 'https://baseline.example' },
-          W
-        ),
+        ev(decl, self, { slotGeneration: 'gen-9', baseURL: 'https://baseline.example' }, W),
         'E-ENV-1'
       ).outcome
     ).toBe('inconclusive');
@@ -458,7 +453,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
         e_env_4_runtime_broker_effective: false,
         e_env_4_no_broker_process_or_dispatch: true,
       },
-      preSourcesKey: sourcesKey(R6_SOURCES),
+      preProvenanceKey: provenanceKey(PROV),
     };
     const post = {
       baseURL: 'https://baseline.example',
@@ -466,7 +461,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
       window_end: '2026-10-07T16:25:00Z',
       slotGeneration: 'gen-1',
       e_env_1_dev_auth_effective: false,
-      e_env_1_sources: R6_SOURCES,
+      e_env_1_provenance: PROV,
       e_env_3_test_login_enabled: true,
       e_env_4_runtime_broker_effective: false,
       e_env_4_no_broker_process_or_dispatch: true,
@@ -503,7 +498,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
   });
 
   it('negative control: SAME slotGeneration on a DIFFERENT host is never evidence for this run (R-2)', () => {
-    const r = evaluateEnv({ ...decl, baseURL: 'https://candidate.example' }, self, rel, W);
+    const r = ev({ ...decl, baseURL: 'https://candidate.example' }, self, rel, W);
     for (const g of ['E-ENV-1', 'E-ENV-3', 'E-ENV-4', 'E-ENV-5'])
       expect(gate(r, g).outcome, g).toBe('inconclusive');
     expect(gate(r, 'E-ENV-4').awaitingPost).toBe(false);
@@ -511,7 +506,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
     expect(envDecision(r).stop).toBe(true);
   });
   it('R-3: a cross-host declaration is unattributable ⇒ INCONCLUSIVE even with forbidden values', () => {
-    const r = evaluateEnv(
+    const r = ev(
       {
         ...decl,
         baseURL: 'https://candidate.example',
@@ -527,7 +522,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
     expect(envDecision(r)).toMatchObject({ stop: true, fails: [] });
   });
   it('R-3: generation mismatch is recorded as bindingMismatch and is INCONCLUSIVE', () => {
-    const r = evaluateEnv(
+    const r = ev(
       { ...decl, slotGeneration: 'gen-2', e_env_4_runtime_broker_effective: true },
       self,
       rel,
@@ -538,8 +533,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
   });
   it('R-3: a BOUND declaration reporting a forbidden state is FAIL', () => {
     expect(
-      gate(evaluateEnv({ ...decl, e_env_1_dev_auth_effective: true }, self, rel, W), 'E-ENV-1')
-        .outcome
+      gate(ev({ ...decl, e_env_1_dev_auth_effective: true }, self, rel, W), 'E-ENV-1').outcome
     ).toBe('fail');
   });
   it('baseURL is compared as a parsed canonical origin: no host alias, no IP, no path, port matters', () => {
@@ -557,7 +551,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
       hostBinding({ baseURL: 'https://BASELINE.example' }, 'https://baseline.example').status
     ).toBe('ok');
     const { baseURL: _b, ...noUrl } = decl;
-    expect(gate(evaluateEnv(noUrl, self, rel, W), 'E-ENV-1').outcome).toBe('inconclusive');
+    expect(gate(ev(noUrl, self, rel, W), 'E-ENV-1').outcome).toBe('inconclusive');
   });
 });
 
@@ -599,7 +593,7 @@ describe('capture records and validate-run', () => {
       window_end: '2026-10-07T16:00:00Z',
       slotGeneration: 'gen-1',
       e_env_1_dev_auth_effective: false,
-      e_env_1_sources: R6_SOURCES,
+      e_env_1_provenance: PROV,
       e_env_3_test_login_enabled: true,
       e_env_4_runtime_broker_effective: false,
       e_env_4_no_broker_process_or_dispatch: true,
@@ -679,6 +673,7 @@ describe('capture records and validate-run', () => {
       ],
       envPostSelfAnon401: { status: 401, at: '2026-10-07T15:20:01Z' },
       envPreBaseURL: 'https://baseline.example',
+      envPostDevAuthProbes: PROBES_OFF,
       envPreValues: {
         e_env_1_dev_auth_effective: false,
         e_env_3_test_login_enabled: true,
@@ -730,7 +725,7 @@ describe('capture records and validate-run', () => {
         window_end: '2026-10-07T16:00:00Z',
         slotGeneration: 'gen-1',
         e_env_1_dev_auth_effective: false,
-        e_env_1_sources: R6_SOURCES,
+        e_env_1_provenance: PROV,
         e_env_3_test_login_enabled: true,
         e_env_4_runtime_broker_effective: false,
         e_env_4_no_broker_process_or_dispatch: false,

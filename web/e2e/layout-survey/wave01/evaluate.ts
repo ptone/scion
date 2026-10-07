@@ -27,7 +27,7 @@ export type Outcome = 'pass' | 'fail' | 'pending' | 'inconclusive' | 'not-applic
 export interface ClauseResult {
   clause: string;
   /** Source of the clause definition. */
-  source: 'contract-rev3' | 'pilot-finding-rev2';
+  source: 'contract-rev4' | 'pilot-finding-rev2';
   outcome: Outcome;
   policyIds: string[];
   details: unknown;
@@ -260,7 +260,7 @@ function combine(outcomes: Outcome[]): Outcome {
 export function evalAD1(m: Pick<MeasureResult, 'doc' | 'innerWidth'>): ClauseResult {
   return {
     clause: 'A-D1',
-    source: 'contract-rev3',
+    source: 'contract-rev4',
     outcome: m.doc.scrollWidth <= m.innerWidth + TOL ? 'pass' : 'fail',
     policyIds: [],
     details: { docScrollWidth: m.doc.scrollWidth, innerWidth: m.innerWidth },
@@ -272,7 +272,7 @@ export function evalAC1(overflow: RawOverflowEntry[] | null): ClauseResult {
   if (!overflow) {
     return {
       clause: 'A-C1',
-      source: 'contract-rev3',
+      source: 'contract-rev4',
       outcome: 'inconclusive',
       policyIds: [],
       details: 'no overflow scan',
@@ -289,7 +289,7 @@ export function evalAC1(overflow: RawOverflowEntry[] | null): ClauseResult {
   }
   return {
     clause: 'A-C1',
-    source: 'contract-rev3',
+    source: 'contract-rev4',
     outcome: failing.length === 0 ? 'pass' : 'fail',
     policyIds: Array.from(new Set(exempt.map((e) => e.exemptBy))),
     details: { scanned: overflow.length, failing, exempt },
@@ -317,7 +317,7 @@ export function evalAS1(
     const ok = sidebarHidden && !!menuBtn && menuBtn.visible && btn?.status === 'pass';
     return {
       clause: 'A-S1',
-      source: 'contract-rev3',
+      source: 'contract-rev4',
       outcome: ok ? 'pass' : btn?.status === 'pending' && sidebarHidden ? 'pending' : 'fail',
       policyIds: [],
       details: {
@@ -335,7 +335,7 @@ export function evalAS1(
       : 0;
   return {
     clause: 'A-S1',
-    source: 'contract-rev3',
+    source: 'contract-rev4',
     outcome: visible && inX && !!content && ow <= TOL ? 'pass' : 'fail',
     policyIds: [],
     details: {
@@ -376,7 +376,7 @@ export function evalAS2(
   const outcome: Outcome = !headerOk || overlaps.length ? 'fail' : combine(statuses);
   return {
     clause: 'A-S2',
-    source: 'contract-rev3',
+    source: 'contract-rev4',
     outcome,
     policyIds: [],
     details: { headerBox: header?.box ?? null, targets: per, siblingOverlaps: overlaps },
@@ -400,7 +400,7 @@ export function evalAN2(nav: NavRaw[]): ClauseResult {
   if (rendered.length === 0) {
     return {
       clause: 'A-N2',
-      source: 'contract-rev3',
+      source: 'contract-rev4',
       outcome: 'not-applicable',
       policyIds: [],
       details: { rendered: 0, domCount: nav.length },
@@ -413,7 +413,7 @@ export function evalAN2(nav: NavRaw[]): ClauseResult {
   });
   return {
     clause: 'A-N2',
-    source: 'contract-rev3',
+    source: 'contract-rev4',
     outcome: per.every((p) => p.nameOk && p.tipOk) ? 'pass' : 'fail',
     policyIds: [],
     details: { rendered: rendered.length, domCount: nav.length, entries: per },
@@ -727,7 +727,7 @@ export function evalAF1(input: {
   const unreached = input.targets.filter((t) => !reachedF.has(t) && !reachedB.has(t));
   return {
     clause: 'A-F1',
-    source: 'contract-rev3',
+    source: 'contract-rev4',
     outcome: anyBad || unreached.length > 0 ? 'fail' : 'pass',
     policyIds: [],
     details: {

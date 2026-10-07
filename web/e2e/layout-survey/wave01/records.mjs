@@ -35,32 +35,34 @@ const SHA_RE = /^[0-9a-f]{64}$/;
 // ─── E-ENV (§5a) ─────────────────────────────────────────────────────────
 
 /**
- * §5a E-ENV-1 "across service unit/args, settings file and environment".
- * Ruling R-6 (assessor 16:11–16:12Z): each class records RAW layer values;
- * the effective value is DERIVED through the served backend's precedence
- * (source-checked at 1694e511, = backend 4a253489):
- *   config value  = SCION_SERVER_* env > local settings > global settings >
- *                   embedded default (auth.devMode=false, auth.mode/mode unset)
- *                   (pkg/config/hub_config.go:966-970, 1036-1043, 1536-1546, 1817-1822)
- *   hosted        = --hosted/--production if either flag is set, else config
- *                   mode ∈ {hosted, production} (cmd/server.go:235-236,
- *                   cmd/server_foreground.go:1013-1018)
- *   devMode       = explicit --dev-auth, else ON when non-hosted (workstation
- *                   defaults), else config devMode
- *                   (server_foreground.go:1020-1024, 1064-1066; server_config.go:35-36)
- *   auth.mode     = config auth.mode ("dev" = exclusive dev human auth)
- * "absent" must be explicit; a missing input is UNKNOWN, never defaulted.
+ * Contract FROZEN rev 4 §5a E-ENV-1 (rulings R-7 per-artifact attribution).
+ * E-ENV-1a: two runner probes of the serving process, inside the window,
+ * with no real credential:
+ *   P-API  protected API + `Authorization: Bearer scion_dev_<64 fresh hex>`:
+ *          401 "development authentication is not enabled" ⇒ OFF;
+ *          "invalid development token" or any 2xx ⇒ ON (pkg/hub/auth.go:467-477,
+ *          detectTokenType :686-689, writeError {"error":{"message"}} errors.go:284-304)
+ *   P-WEB  cookie-less GET /auth/me: 401 without identity ⇒ OFF; any returned
+ *          identity ⇒ ON (web.go:949, :2773-2800; devAuthMiddleware :1896-1945)
+ * E-ENV-1b: steward provenance record of the ACTUAL serving process (load
+ * path + values); the runner checks binding/completeness/contradictions only
+ * and never resolves precedence.
  */
-export const E_ENV_1_SOURCE_CLASSES = Object.freeze(['unit/args', 'settings', 'environment']);
-export const E_ENV_1_FLAGS = Object.freeze(['--dev-auth', '--hosted', '--production']);
-export const E_ENV_1_SETTINGS_KEYS = Object.freeze(['auth.devMode', 'auth.mode', 'mode']);
-export const E_ENV_1_ENV_KEYS = Object.freeze({
-  'auth.devMode': 'SCION_SERVER_AUTH_DEVMODE',
-  'auth.mode': 'SCION_SERVER_AUTH_MODE',
-  mode: 'SCION_SERVER_MODE',
-});
-const CONFIG_DEFAULTS = Object.freeze({ 'auth.devMode': false, 'auth.mode': null, mode: null });
-const UNKNOWN = Symbol('unknown');
+export const DEV_AUTH_OFF_MESSAGE = 'development authentication is not enabled';
+export const DEV_AUTH_ON_MESSAGE = 'invalid development token';
+export const LOAD_PATHS = Object.freeze(['settings-global', 'settings-local', 'legacy']);
+export const PROVENANCE_FLAGS = Object.freeze(['--hosted', '--production', '--dev-auth']);
+export const SETTINGS_PATH_KEYS = Object.freeze([
+  'server.mode',
+  'server.auth.dev_mode',
+  'server.auth.mode',
+]);
+export const LEGACY_FILE_KEYS = Object.freeze(['mode', 'auth.devMode', 'auth.mode']);
+export const PROVENANCE_ENV_KEYS = Object.freeze([
+  'SCION_SERVER_MODE',
+  'SCION_SERVER_AUTH_DEVMODE',
+  'SCION_SERVER_AUTH_MODE',
+]);
 
 /** Shared environment booleans compared between same-slot PRE and POST (review2 RB3). */
 export const SHARED_ENV_BOOLEANS = Object.freeze([
@@ -72,164 +74,171 @@ export const SHARED_ENV_BOOLEANS = Object.freeze([
 
 const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const okBool = (v) => typeof v === 'boolean' || v === 'absent';
-const okStr = (v) => (typeof v === 'string' && v !== '') || v === 'absent';
+const okVal = (v) =>
+  (typeof v === 'string' && v !== '') || typeof v === 'boolean' || v === 'absent';
 
 /**
- * Derive effective dev-auth from raw layers (R-6). Returns the derivation
- * with `unknown` markers instead of guessing; `problems` lists missing or
- * malformed inputs.
- * @param {unknown} sources
+ * Classify the two probes. Input is what the runner observed (status, error
+ * message / identity presence, timestamp); no credential value is recorded.
+ * @param {{status: number, message: string | null, at: string} | null} api
+ * @param {{status: number, hasIdentity: boolean, at: string} | null} web
  */
-export function deriveDevAuth(sources) {
-  const problems = [];
-  const src = isObj(sources) ? sources : null;
-  if (!src) problems.push('e_env_1_sources missing or not an object');
-  for (const k of Object.keys(src ?? {}))
-    if (![...E_ENV_1_SOURCE_CLASSES, 'keys_checked'].includes(k))
-      problems.push(`unknown class ${k}`);
-  // unit/args
-  const ua = src && isObj(src['unit/args']) ? src['unit/args'] : null;
-  if (src && !ua) problems.push('class unit/args missing/malformed');
-  const flag = (name) => {
-    if (!ua || !(name in ua)) {
-      if (ua) problems.push(`unit/args ${name} missing`);
-      return UNKNOWN;
-    }
-    if (!okBool(ua[name])) {
-      problems.push(`unit/args ${name} malformed`);
-      return UNKNOWN;
-    }
-    return ua[name];
-  };
-  const devFlag = flag('--dev-auth');
-  const hostedFlag = flag('--hosted');
-  const prodFlag = flag('--production');
-  // settings + environment layers → config values
-  const st = src && isObj(src.settings) ? src.settings : null;
-  if (src && !st) problems.push('class settings missing/malformed');
-  const env = src && isObj(src.environment) ? src.environment : null;
-  if (src && !env) problems.push('class environment missing/malformed');
-  const layerValue = (layer, key, valid) => {
-    // returns value | 'absent' | UNKNOWN
-    if (layer === 'absent') return 'absent';
-    if (!isObj(layer) || !(key in layer) || !valid(layer[key])) return UNKNOWN;
-    return layer[key];
-  };
-  const fileLayer = (scope) => {
-    if (!st || !(scope in st)) {
-      if (st)
-        problems.push(`settings.${scope} missing (write "absent" if the file does not exist)`);
-      return UNKNOWN;
-    }
-    const l = st[scope];
-    if (l !== 'absent' && !isObj(l)) {
-      problems.push(`settings.${scope} malformed`);
-      return UNKNOWN;
-    }
-    return l;
-  };
-  const globalL = fileLayer('global');
-  const localL = fileLayer('local');
-  const resolve = (key, valid) => {
-    // env > local > global > default; an UNKNOWN layer blocks resolution
-    // unless a higher layer already decided.
-    const envKey = E_ENV_1_ENV_KEYS[key];
-    const chain = [
-      [
-        'environment',
-        env ? (envKey in env && valid(env[envKey]) ? env[envKey] : UNKNOWN) : UNKNOWN,
-      ],
-      ['settings.local', localL === UNKNOWN ? UNKNOWN : layerValue(localL, key, valid)],
-      ['settings.global', globalL === UNKNOWN ? UNKNOWN : layerValue(globalL, key, valid)],
-    ];
-    for (const [name, v] of chain) {
-      if (v === UNKNOWN) {
-        problems.push(`${name}: ${key} missing/malformed`);
-        return { value: UNKNOWN, from: name };
-      }
-      if (v !== 'absent') return { value: v, from: name };
-    }
-    return { value: CONFIG_DEFAULTS[key], from: 'embedded-default' };
-  };
-  const devCfg = resolve('auth.devMode', okBool);
-  const authMode = resolve('auth.mode', okStr);
-  const modeCfg = resolve('mode', okStr);
-  // hosted
-  let hosted;
-  if (hostedFlag === UNKNOWN || prodFlag === UNKNOWN) hosted = UNKNOWN;
-  else if (hostedFlag !== 'absent' || prodFlag !== 'absent')
-    hosted = hostedFlag === true || prodFlag === true;
-  else
-    hosted =
-      modeCfg.value === UNKNOWN
-        ? UNKNOWN
-        : modeCfg.value === 'hosted' || modeCfg.value === 'production';
-  // effective devMode
-  let devMode;
-  if (devFlag === true) devMode = true;
-  else if (devFlag === false) devMode = false;
-  else if (devFlag === UNKNOWN) devMode = UNKNOWN;
-  else if (hosted === false) devMode = true;
-  else if (hosted === true) devMode = devCfg.value;
-  else devMode = devCfg.value === true ? true : UNKNOWN; // ON in both branches
-  const show = (v) => (v === UNKNOWN ? 'unknown' : v);
+export function classifyDevAuthProbes(api, web) {
+  const apiV = !api
+    ? 'missing'
+    : (api.status >= 200 && api.status < 300) || api.message === DEV_AUTH_ON_MESSAGE
+      ? 'on'
+      : api.status === 401 && api.message === DEV_AUTH_OFF_MESSAGE
+        ? 'off'
+        : 'unexplained';
+  const webV = !web
+    ? 'missing'
+    : web.hasIdentity
+      ? 'on'
+      : web.status === 401
+        ? 'off'
+        : 'unexplained';
+  return { api: apiV, web: webV };
+}
+
+/**
+ * E-ENV-1b provenance record checks (no precedence resolution).
+ * @param {unknown} prov
+ * @param {unknown} declaredDevAuth e_env_1_dev_auth_effective
+ */
+export function checkProvenance(prov, declaredDevAuth) {
+  const missing = [];
+  const contradictions = [];
+  const forbidden = [];
+  if (!isObj(prov))
+    return { complete: false, missing: ['e_env_1_provenance'], contradictions, forbidden };
+  const flags = isObj(prov.flags) ? prov.flags : null;
+  if (!flags) missing.push('flags');
+  for (const f of PROVENANCE_FLAGS) if (!flags || !okBool(flags[f])) missing.push(`flags.${f}`);
+  if (!LOAD_PATHS.includes(prov.load_path)) missing.push('load_path');
+  if (
+    !Array.isArray(prov.files_examined) ||
+    prov.files_examined.length === 0 ||
+    !prov.files_examined.every((x) => typeof x === 'string' && x)
+  )
+    missing.push('files_examined');
+  const pv = prov.path_values;
+  if (prov.load_path === 'legacy') {
+    const files = isObj(pv) && Array.isArray(pv.files) ? pv.files : null;
+    if (!files || files.length === 0) missing.push('path_values.files');
+    else
+      files.forEach((f, i) => {
+        if (!isObj(f) || typeof f.file !== 'string' || !f.file)
+          missing.push(`path_values.files[${i}].file`);
+        for (const k of LEGACY_FILE_KEYS)
+          if (!isObj(f) || !okVal(f[k])) missing.push(`path_values.files[${i}].${k}`);
+      });
+  } else if (prov.load_path) {
+    for (const k of SETTINGS_PATH_KEYS)
+      if (!isObj(pv) || !okVal(pv[k])) missing.push(`path_values.${k}`);
+  }
+  const env = isObj(prov.env) ? prov.env : null;
+  if (!env) missing.push('env');
+  for (const k of PROVENANCE_ENV_KEYS) if (!env || !okVal(env[k])) missing.push(`env.${k}`);
+  if (!env || !['present', 'absent'].includes(env.SCION_SERVER_AUTH_DEV_MODE))
+    missing.push('env.SCION_SERVER_AUTH_DEV_MODE');
+  if (typeof prov.declared_effective_hosted !== 'boolean')
+    missing.push('declared_effective_hosted');
+  if (
+    typeof prov.declared_effective_auth_mode !== 'string' ||
+    prov.declared_effective_auth_mode === ''
+  )
+    missing.push('declared_effective_auth_mode');
+  if (typeof declaredDevAuth !== 'boolean') missing.push('e_env_1_dev_auth_effective');
+  // Forbidden states declared or directly recorded.
+  if (declaredDevAuth === true) forbidden.push('declared effective dev-auth ON');
+  if (prov.declared_effective_hosted === false)
+    forbidden.push('declared effective hosted mode false (non-hosted)');
+  if (flags && flags['--dev-auth'] === true) forbidden.push('explicit --dev-auth=true');
+  if (prov.declared_effective_auth_mode === 'dev')
+    forbidden.push('declared effective auth.mode "dev"');
+  // Contradictions with inputs that directly override everything.
+  if (
+    flags &&
+    typeof flags['--dev-auth'] === 'boolean' &&
+    typeof declaredDevAuth === 'boolean' &&
+    flags['--dev-auth'] !== declaredDevAuth
+  )
+    contradictions.push(
+      `explicit --dev-auth=${flags['--dev-auth']} but declared effective dev-auth ${declaredDevAuth}`
+    );
+  if (flags && typeof prov.declared_effective_hosted === 'boolean') {
+    const h = flags['--hosted'];
+    const pr = flags['--production'];
+    const anyTrue = h === true || pr === true;
+    const explicitFalse = (h === false || pr === false) && !anyTrue;
+    if (anyTrue && prov.declared_effective_hosted === false)
+      contradictions.push('explicit --hosted/--production true but declared hosted false');
+    if (explicitFalse && prov.declared_effective_hosted === true)
+      contradictions.push('explicit --hosted/--production false but declared hosted true');
+  }
+  if (
+    env &&
+    typeof env.SCION_SERVER_AUTH_MODE === 'string' &&
+    env.SCION_SERVER_AUTH_MODE !== 'absent' &&
+    typeof prov.declared_effective_auth_mode === 'string' &&
+    env.SCION_SERVER_AUTH_MODE !== prov.declared_effective_auth_mode
+  )
+    contradictions.push(
+      `SCION_SERVER_AUTH_MODE=${env.SCION_SERVER_AUTH_MODE} but declared auth.mode ${prov.declared_effective_auth_mode}`
+    );
   return {
-    effectiveDevMode: show(devMode),
-    effectiveAuthMode: show(authMode.value),
-    hosted: show(hosted),
-    flags: {
-      '--dev-auth': show(devFlag),
-      '--hosted': show(hostedFlag),
-      '--production': show(prodFlag),
-    },
-    config: {
-      'auth.devMode': { value: show(devCfg.value), from: devCfg.from },
-      'auth.mode': { value: show(authMode.value), from: authMode.from },
-      mode: { value: show(modeCfg.value), from: modeCfg.from },
-    },
-    complete: problems.length === 0,
-    problems: Array.from(new Set(problems)),
+    complete: missing.length === 0,
+    missing: Array.from(new Set(missing)),
+    contradictions,
+    forbidden,
   };
 }
 
 /**
- * Grade E-ENV-1 from an ATTRIBUTABLE declaration per the R-6 order:
- * FAIL if a forbidden state is established (derived devMode ON, effective
- * auth.mode "dev", or declared effective ON) — even with other inputs
- * missing; INCONCLUSIVE if OFF is not proven; PASS only with complete
- * explicit evidence, derived OFF, hosted evidenced and declared OFF.
+ * E-ENV-1 per ruling R-7: per-artifact attribution. Own probes are
+ * attributable by construction (probe ON ⇒ FAIL regardless). An unbound
+ * record is excluded and counts as missing. Then FAIL on a forbidden state
+ * in the attributable record; INCONCLUSIVE if anything required is missing,
+ * contradictory or unexplained; PASS only with both probes OFF and an
+ * attributable complete record declaring hosted true and dev-auth OFF.
+ * @param {any} decl
+ * @param {{api: any, web: any} | null} probes
+ * @param {{attributable: boolean, bound: boolean}} b
  */
-export function gradeEEnv1(decl) {
-  const d = deriveDevAuth(decl?.e_env_1_sources);
-  const declared = decl?.e_env_1_dev_auth_effective;
-  const reasons = [];
-  if (d.effectiveDevMode === true) reasons.push('derived effective devMode ON');
-  if (d.effectiveAuthMode === 'dev') reasons.push('effective auth.mode "dev"');
-  if (declared === true) reasons.push('declared e_env_1_dev_auth_effective ON');
-  if (reasons.length) {
+export function gradeEEnv1(decl, probes, b) {
+  const cls = classifyDevAuthProbes(probes?.api ?? null, probes?.web ?? null);
+  const prov = b.attributable
+    ? checkProvenance(decl?.e_env_1_provenance, decl?.e_env_1_dev_auth_effective)
+    : null;
+  const details = {
+    probes: { observed: probes ?? null, classified: cls },
+    provenance: prov,
+    recordAttributable: b.attributable,
+    recordBoundToWindow: b.bound,
+  };
+  if (cls.api === 'on' || cls.web === 'on')
     return {
       outcome: 'fail',
-      reasons,
-      derivation: d,
-      declared,
-      declaredVsDerived: declared === d.effectiveDevMode ? 'agree' : 'disagree',
+      reasons: [`probe shows dev-auth ON (P-API ${cls.api}, P-WEB ${cls.web})`],
+      ...details,
     };
-  }
+  if (prov && prov.forbidden.length)
+    return { outcome: 'fail', reasons: prov.forbidden, ...details };
   const open = [];
-  if (!d.complete) open.push(...d.problems);
-  if (d.effectiveDevMode !== false) open.push(`effective devMode ${d.effectiveDevMode}`);
-  if (d.effectiveAuthMode === 'unknown') open.push('effective auth.mode unknown');
-  if (d.hosted !== true) open.push(`hosted mode not evidenced (${d.hosted})`);
-  if (declared !== false)
-    open.push(
-      `declared e_env_1_dev_auth_effective ${declared === undefined ? 'missing' : 'malformed'}`
-    );
-  return { outcome: open.length ? 'inconclusive' : 'pass', reasons: open, derivation: d, declared };
+  if (cls.api !== 'off') open.push(`P-API ${cls.api}`);
+  if (cls.web !== 'off') open.push(`P-WEB ${cls.web}`);
+  if (!b.attributable)
+    open.push('provenance record not attributable to this slot (counts as missing)');
+  else if (!b.bound) open.push('provenance record not bound to this capture window');
+  if (prov && !prov.complete) open.push(`provenance incomplete: ${prov.missing.join(', ')}`);
+  if (prov && prov.contradictions.length) open.push(...prov.contradictions);
+  return { outcome: open.length ? 'inconclusive' : 'pass', reasons: open, ...details };
 }
 
-/** Canonical comparison form of a sources object (for PRE/POST equality). */
-export function sourcesKey(sources) {
-  if (!isObj(sources)) return null;
+/** Canonical comparison form of a provenance record (PRE/POST equality). */
+export function provenanceKey(prov) {
+  if (!isObj(prov)) return null;
   const canon = (v) =>
     isObj(v)
       ? Object.fromEntries(
@@ -240,8 +249,7 @@ export function sourcesKey(sources) {
       : Array.isArray(v)
         ? v.map(canon)
         : v;
-  const { keys_checked: _k, ...rest } = sources;
-  return JSON.stringify(canon(rest));
+  return JSON.stringify(canon(prov));
 }
 
 /** Value snapshot of the shared booleans of a declaration (recorded in run.json). */
@@ -321,7 +329,7 @@ export function hostBinding(decl, runBaseURL) {
  * @param {{slotGeneration: string, baseURL: string}} release
  * @param {{batchStart: string, maxAgeMin?: number}} window
  */
-export function evaluateEnv(decl, selfAnon401, release, window) {
+export function evaluateEnv(decl, selfAnon401, release, window, probes = null) {
   const g = (gate, outcome, details, extra = {}) => ({ gate, outcome, details, ...extra });
   const batchStart = ms(window?.batchStart);
   const maxAgeMin = window?.maxAgeMin ?? DEFAULT_ENV_MAX_AGE_MIN;
@@ -334,7 +342,14 @@ export function evaluateEnv(decl, selfAnon401, release, window) {
   };
   if (!decl) {
     return [
-      g('E-ENV-1', 'inconclusive', 'no steward PRE env declaration'),
+      (() => {
+        // R-7: own probes are attributable even without any declaration.
+        const e1 = gradeEEnv1(null, probes, { attributable: false, bound: false });
+        return g('E-ENV-1', e1.outcome, {
+          rule: 'rev 4 §5a (R-7); no steward PRE declaration',
+          ...e1,
+        });
+      })(),
       g('E-ENV-2', selfOutcome(NaN), { self: selfAnon401 }),
       g('E-ENV-3', 'inconclusive', 'no steward PRE env declaration'),
       g('E-ENV-4', 'inconclusive', 'no steward PRE env declaration'),
@@ -380,23 +395,13 @@ export function evaluateEnv(decl, selfAnon401, release, window) {
     if (!bound || !extraOk) return 'inconclusive';
     return b;
   };
-  const e1 = gradeEEnv1(decl);
+  const e1 = gradeEEnv1(decl, probes, { attributable, bound });
   const out = [
-    g(
-      'E-ENV-1',
-      !attributable
-        ? 'inconclusive'
-        : e1.outcome === 'fail'
-          ? 'fail'
-          : !bound
-            ? 'inconclusive'
-            : e1.outcome,
-      {
-        rule: 'R-6 derivation (raw layers through backend precedence)',
-        ...e1,
-        binding,
-      }
-    ),
+    g('E-ENV-1', e1.outcome, {
+      rule: 'rev 4 §5a E-ENV-1a probes + 1b provenance (R-7)',
+      ...e1,
+      binding,
+    }),
     (() => {
       // Own probe is graded independently of any declaration. A BOUND
       // declaration whose steward anonymous probe is ≠ 401 is a declared
@@ -555,7 +560,7 @@ export function envStop(results) {
  * [run.startedAt, run.endedAt]; same slotGeneration; dev-auth and runtime
  * broker effective false; no broker process/dispatch true.
  * @param {any} post
- * @param {{startedAt: string, endedAt: string, slotGeneration: string, baseURL: string, preBaseURL?: string, preValues?: Record<string, boolean | null>, preSourcesKey?: string | null, testLoginUsed?: boolean}} run
+ * @param {{startedAt: string, endedAt: string, slotGeneration: string, baseURL: string, preBaseURL?: string, preValues?: Record<string, boolean | null>, preProvenanceKey?: string | null, testLoginUsed?: boolean}} run
  */
 export function evaluateEnvPost(post, run) {
   if (!post) return { outcome: 'inconclusive', problems: ['missing: POST env declaration'] };
@@ -605,15 +610,22 @@ export function evaluateEnvPost(post, run) {
     fails.push(
       'E-ENV-3: POST declares test-login disabled, but the runner authenticated via test-login during the batch'
     );
-  if (post.e_env_1_dev_auth_effective !== undefined || post.e_env_1_sources !== undefined) {
-    // R-4/R-6: optional on POST; if carried it must derive cleanly and equal PRE.
-    const pe1 = gradeEEnv1(post);
-    if (pe1.outcome === 'fail') fails.push(`E-ENV-1 (POST): ${pe1.reasons.join('; ')}`);
-    else if (pe1.outcome !== 'pass')
-      problems.push(`POST E-ENV-1 not proven OFF: ${pe1.reasons.join('; ')}`);
-    else if (run.preSourcesKey && sourcesKey(post.e_env_1_sources) !== run.preSourcesKey)
-      fails.push('same-slot PRE/POST disagreement on e_env_1_sources layer values');
-  }
+  if (post.e_env_1_provenance !== undefined) {
+    // E-ENV-1b is required on PRE; on POST it is optional, but if carried it
+    // must be complete, not forbidden, and equal to PRE.
+    const pc = checkProvenance(post.e_env_1_provenance, post.e_env_1_dev_auth_effective);
+    if (pc.forbidden.length) fails.push(`E-ENV-1 (POST record): ${pc.forbidden.join('; ')}`);
+    else if (!pc.complete || pc.contradictions.length)
+      problems.push(
+        `POST e_env_1_provenance incomplete/contradictory: ${[...pc.missing, ...pc.contradictions].join('; ')}`
+      );
+    else if (
+      run.preProvenanceKey &&
+      provenanceKey(post.e_env_1_provenance) !== run.preProvenanceKey
+    )
+      fails.push('same-slot PRE/POST disagreement on e_env_1_provenance');
+  } else if (post.e_env_1_dev_auth_effective === true)
+    fails.push('E-ENV-1 (POST): declared effective dev-auth ON');
   const sw = post.e_env_2_anon_401;
   if (sw && typeof sw.status === 'number' && sw.status !== 401)
     fails.push(`E-ENV-2: POST steward anonymous probe status ${sw.status}`);
@@ -697,7 +709,7 @@ export function validateCapture(rec) {
   if (rec.schemaVersion !== 1) errs.push('schemaVersion must be 1');
   if (rec.kind !== CAPTURE_KIND) errs.push(`kind must be ${CAPTURE_KIND}`);
   if (rec.contractSha256 !== CONTRACT_SHA256)
-    errs.push('contractSha256 is not the pinned FROZEN rev 3 digest');
+    errs.push('contractSha256 is not the pinned FROZEN rev 4 digest');
   if (!SUBSTEPS.includes(rec.substep)) errs.push(`substep ${rec.substep} invalid`);
   if (!STATUSES.includes(rec.status)) errs.push(`status ${rec.status} invalid`);
   if (rec.status !== 'complete' && isEmpty(rec.errorReason))
@@ -777,6 +789,22 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
     errs.push('mismatch: run.baseURL != Release baseURL');
   if (!Array.isArray(run.env) || run.env.length !== 5)
     errs.push('missing: run.env must carry E-ENV-1..5');
+  // rev 4 §5a: P-API/P-WEB repeated after the batch; ON ⇒ E-ENV-1 FAIL (batch
+  // invalid); missing/unexplained ⇒ INCONCLUSIVE.
+  {
+    const pc = classifyDevAuthProbes(
+      run.envPostDevAuthProbes?.api ?? null,
+      run.envPostDevAuthProbes?.web ?? null
+    );
+    if (pc.api === 'on' || pc.web === 'on')
+      errs.push(
+        `mismatch: post-batch dev-auth probe shows ON (P-API ${pc.api}, P-WEB ${pc.web}) — E-ENV-1 FAIL`
+      );
+    else if (pc.api !== 'off' || pc.web !== 'off')
+      errs.push(
+        `missing: post-batch dev-auth probes not both OFF (P-API ${pc.api}, P-WEB ${pc.web})`
+      );
+  }
   if (run.envPostSelfAnon401?.status !== 401)
     errs.push(
       `mismatch: post-batch anonymous probe status ${run.envPostSelfAnon401?.status ?? 'missing'} (E-ENV-2)`
@@ -794,7 +822,7 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
       baseURL: run.baseURL ?? base.baseURL,
       preBaseURL: run.envPreBaseURL ?? undefined,
       preValues: run.envPreValues ?? undefined,
-      preSourcesKey: run.envPreSourcesKey ?? undefined,
+      preProvenanceKey: run.envPreProvenanceKey ?? undefined,
       testLoginUsed:
         Array.isArray(run.issuanceInventory?.credentials) &&
         run.issuanceInventory.credentials.length > 0,

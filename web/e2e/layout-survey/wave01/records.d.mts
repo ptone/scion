@@ -5,29 +5,25 @@ export declare const STATUSES: string[];
 export declare const OUTCOMES: string[];
 export declare const QUARANTINE_AFTER: number;
 export declare const DEFAULT_ENV_MAX_AGE_MIN: number;
-export declare const E_ENV_1_SOURCE_CLASSES: readonly string[];
 export declare const SHARED_ENV_BOOLEANS: readonly string[];
-export declare const E_ENV_1_FLAGS: readonly string[];
-export declare const E_ENV_1_SETTINGS_KEYS: readonly string[];
-export declare const E_ENV_1_ENV_KEYS: Readonly<Record<string, string>>;
-export interface DevAuthDerivation {
-  effectiveDevMode: boolean | 'unknown';
-  effectiveAuthMode: string | null | 'unknown';
-  hosted: boolean | 'unknown';
-  flags: Record<string, boolean | 'absent' | 'unknown'>;
-  config: Record<string, { value: unknown; from: string }>;
-  complete: boolean;
-  problems: string[];
-}
-export declare function deriveDevAuth(sources: unknown): DevAuthDerivation;
-export declare function gradeEEnv1(decl: unknown): {
-  outcome: 'pass' | 'fail' | 'inconclusive';
-  reasons: string[];
-  derivation: DevAuthDerivation;
-  declared: unknown;
-  declaredVsDerived?: 'agree' | 'disagree';
-};
-export declare function sourcesKey(sources: unknown): string | null;
+export declare const DEV_AUTH_OFF_MESSAGE: string;
+export declare const DEV_AUTH_ON_MESSAGE: string;
+export declare const LOAD_PATHS: readonly string[];
+export type ProbeClass = 'off' | 'on' | 'unexplained' | 'missing';
+export declare function classifyDevAuthProbes(
+  api: { status: number; message: string | null; at: string } | null,
+  web: { status: number; hasIdentity: boolean; at: string } | null
+): { api: ProbeClass; web: ProbeClass };
+export declare function checkProvenance(
+  prov: unknown,
+  declaredDevAuth: unknown
+): { complete: boolean; missing: string[]; contradictions: string[]; forbidden: string[] };
+export declare function gradeEEnv1(
+  decl: unknown,
+  probes: { api: unknown; web: unknown } | null,
+  b: { attributable: boolean; bound: boolean }
+): { outcome: 'pass' | 'fail' | 'inconclusive'; reasons: string[] } & Record<string, unknown>;
+export declare function provenanceKey(prov: unknown): string | null;
 export declare function sharedEnvValues(decl: unknown): Record<string, boolean | null>;
 export declare function applyAuthCheck(
   results: EnvGate[],
@@ -44,7 +40,8 @@ export declare function evaluateEnv(
   decl: unknown,
   selfAnon401: { status: number; at: string } | null,
   release: { slotGeneration: string; baseURL: string },
-  window: { batchStart: string; maxAgeMin?: number }
+  window: { batchStart: string; maxAgeMin?: number },
+  probes?: { api: unknown; web: unknown } | null
 ): EnvGate[];
 export declare function envDecision(results: EnvGate[]): {
   stop: boolean;
@@ -63,7 +60,7 @@ export declare function evaluateEnvPost(
     baseURL: string;
     preBaseURL?: string;
     preValues?: Record<string, boolean | null>;
-    preSourcesKey?: string | null;
+    preProvenanceKey?: string | null;
     testLoginUsed?: boolean;
   }
 ): { outcome: 'pass' | 'fail' | 'inconclusive'; problems: string[]; attributable: boolean };

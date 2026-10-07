@@ -16,7 +16,7 @@
  * W01-S01 / W01-S02 adapter (/admin/groups default and fixture filter).
  * Groups-table clauses are the pilot finding rev 2 B-* definitions with
  * fixture IDs bound from Wave01 in-batch readback; shell clauses and A-F1
- * follow contract FROZEN rev 3.
+ * follow contract FROZEN rev 4.
  */
 
 import { AF1_N, NAV_TIMEOUT_MS, TOL, type ProfileId } from './contract.js';

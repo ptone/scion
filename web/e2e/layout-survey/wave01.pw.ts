@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /**
- * ATTACH-ONLY Wave01 measurement batch (contract FROZEN rev 3).
+ * ATTACH-ONLY Wave01 measurement batch (contract FROZEN rev 4).
  *
  * Never builds, starts, seeds, resets or stops anything; registers no route
  * interception. Per batch: capture-host + suite-digest checks, Release pair
@@ -25,7 +25,7 @@
  */
 
 import { test, expect, type Browser } from '@playwright/test';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -47,8 +47,9 @@ import {
   applyAuthCheck,
   envDecision,
   DEFAULT_ENV_MAX_AGE_MIN,
+  classifyDevAuthProbes,
+  provenanceKey,
   sharedEnvValues,
-  sourcesKey,
   evaluateEnv,
   isQuarantined,
   loadLedger,
@@ -81,6 +82,63 @@ async function fetchMainJs(baseURL: string) {
   const res = await fetch(`${baseURL}/assets/main.js`, { redirect: 'manual' });
   if (!res.ok) return { status: res.status, sha256: null as string | null, at };
   return { status: res.status, sha256: sha256(Buffer.from(await res.arrayBuffer())), at };
+}
+
+/**
+ * Rev 4 §5a E-ENV-1a probes. P-API sends a FRESH random fake dev token (never a
+ * real credential; the value is not recorded); P-WEB is a cookie-less
+ * GET /auth/me. Only status, the error message and identity presence are kept.
+ */
+async function devAuthProbes(baseURL: string) {
+  const fake = `scion_dev_${randomBytes(32).toString('hex')}`;
+  const apiAt = now();
+  let api: {
+    status: number;
+    message: string | null;
+    at: string;
+    endpoint: string;
+    token: string;
+  } | null = null;
+  try {
+    const res = await fetch(`${baseURL}/api/v1/groups`, {
+      headers: { Authorization: `Bearer ${fake}` },
+      redirect: 'manual',
+    });
+    let message: string | null = null;
+    try {
+      const body = (await res.json()) as { error?: { message?: string } | string };
+      message = typeof body.error === 'object' ? (body.error?.message ?? null) : null;
+    } catch {
+      message = null;
+    }
+    api = {
+      status: res.status,
+      message,
+      at: apiAt,
+      endpoint: 'GET /api/v1/groups',
+      token: 'scion_dev_<64 fresh random hex; not recorded>',
+    };
+  } catch {
+    api = null;
+  }
+  const webAt = now();
+  let web: { status: number; hasIdentity: boolean; at: string; endpoint: string } | null = null;
+  try {
+    const res = await fetch(`${baseURL}/auth/me`, { redirect: 'manual' });
+    let hasIdentity = false;
+    try {
+      const body = (await res.json()) as Record<string, unknown>;
+      hasIdentity = ['userId', 'UserID', 'email', 'Email', 'id'].some(
+        (k) => typeof body[k] === 'string' && body[k] !== ''
+      );
+    } catch {
+      hasIdentity = false;
+    }
+    web = { status: res.status, hasIdentity, at: webAt, endpoint: 'GET /auth/me (no cookie)' };
+  } catch {
+    web = null;
+  }
+  return { api, web };
 }
 
 async function anon401(baseURL: string) {
@@ -150,11 +208,13 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
     const envDecl = envDeclBytes ? JSON.parse(envDeclBytes.toString('utf-8')) : null;
     const envDeclSha = envDeclBytes ? sha256(envDeclBytes) : null;
     const self401 = await anon401(cfg.baseURL);
+    const preProbes = await devAuthProbes(cfg.baseURL);
     let env: EnvGate[] = evaluateEnv(
       envDecl,
       self401,
       { slotGeneration: String(base?.slotGeneration ?? ''), baseURL: cfg.baseURL },
-      { batchStart, maxAgeMin }
+      { batchStart, maxAgeMin },
+      preProbes
     );
     let envD = envDecision(env);
     // review2 RB3: a bound PRE declaring test-login disabled is checked against
@@ -248,7 +308,8 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
             envDeclarationSha256: envDeclSha,
             envPreBaseURL: typeof envDecl?.baseURL === 'string' ? envDecl.baseURL : null,
             envPreValues: envDecl ? sharedEnvValues(envDecl) : null,
-            envPreSourcesKey: envDecl ? sourcesKey(envDecl.e_env_1_sources) : null,
+            envPreProvenanceKey: envDecl ? provenanceKey(envDecl.e_env_1_provenance) : null,
+            envPreDevAuthProbes: preProbes,
             authCheckInventory,
             expectedRecords,
             statesSelected: cfg.states,
@@ -502,12 +563,20 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
         redirectFollowed: false,
         error: String(e),
       }));
+      const postProbes = await devAuthProbes(cfg.baseURL);
+      const postProbeCls = classifyDevAuthProbes(postProbes.api, postProbes.web);
+      const postProbesOk = postProbeCls.api === 'off' && postProbeCls.web === 'off';
       const expected = base?.mainJsSha256 ?? null;
       const mainOk = !!expected && mainPre?.sha256 === expected && mainPost.sha256 === expected;
       const envOk = !envD.stop;
       const postAnonOk = postAnon.status === 401;
       const batchValid =
-        !aborted && mainOk && envOk && postAnonOk && (evidence ? pairErrors.length === 0 : true);
+        !aborted &&
+        mainOk &&
+        envOk &&
+        postAnonOk &&
+        postProbesOk &&
+        (evidence ? pairErrors.length === 0 : true);
       const reasons = [
         aborted ? `batch aborted: ${aborted}` : null,
         !expected
@@ -519,6 +588,9 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
           ? `E-ENV pre-window gates not all passing (${[...envD.fails, ...envD.missing].join(', ')})`
           : null,
         !postAnonOk ? `post-batch anonymous probe status ${postAnon.status} (E-ENV-2)` : null,
+        !postProbesOk
+          ? `post-batch dev-auth probes P-API ${postProbeCls.api}, P-WEB ${postProbeCls.web} (E-ENV-1${postProbeCls.api === 'on' || postProbeCls.web === 'on' ? ' FAIL' : ''})`
+          : null,
       ].filter(Boolean);
       const batchInvalidReason = batchValid ? null : reasons.join('; ');
       const captureIds: string[] = [];
@@ -546,6 +618,7 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
         abortReason: aborted,
         mainJs: { expected, pre: mainPre, post: mainPost },
         envPostSelfAnon401: postAnon,
+        envPostDevAuthProbes: postProbes,
         envPostDeclarationRequired:
           'validate-run --env-post <steward POST declaration covering startedAt..endedAt>',
         captureIds,

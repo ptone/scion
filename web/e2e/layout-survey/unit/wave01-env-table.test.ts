@@ -21,13 +21,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyAuthCheck,
-  deriveDevAuth,
+  classifyDevAuthProbes,
   envDecision,
   evaluateEnv,
   evaluateEnvPost,
   SHARED_ENV_BOOLEANS,
   sharedEnvValues,
-  sourcesKey,
+  provenanceKey,
 } from '../wave01/records.mjs';
 
 const HOST = 'https://baseline.example';
@@ -36,32 +36,44 @@ const batchStart = '2026-10-07T16:00:00Z';
 const W = { batchStart, maxAgeMin: 30 };
 const rel = { slotGeneration: 'gen-1', baseURL: HOST };
 const self401 = { status: 401, at: '2026-10-07T15:59:00Z' };
-const SOURCES = {
-  'unit/args': { '--dev-auth': false, '--hosted': true, '--production': 'absent' },
-  settings: {
-    global: 'absent',
-    local: { 'auth.devMode': false, 'auth.mode': 'absent', mode: 'hosted' },
+const PROV = {
+  flags: { '--hosted': true, '--production': 'absent', '--dev-auth': false },
+  load_path: 'settings-global',
+  files_examined: ['~/.scion/settings.yaml'],
+  path_values: {
+    'server.mode': 'hosted',
+    'server.auth.dev_mode': false,
+    'server.auth.mode': 'absent',
   },
-  environment: {
+  env: {
+    SCION_SERVER_MODE: 'absent',
     SCION_SERVER_AUTH_DEVMODE: 'absent',
     SCION_SERVER_AUTH_MODE: 'absent',
-    SCION_SERVER_MODE: 'absent',
+    SCION_SERVER_AUTH_DEV_MODE: 'absent',
   },
-  keys_checked: ['argv', 'settings.local:server.auth', 'env:SCION_SERVER_*'],
+  declared_effective_hosted: true,
+  declared_effective_auth_mode: 'oauth',
 } as Record<string, any>;
-/** Deep-patch helper for the sources fixture. */
-const src = (patch: (s: Record<string, any>) => void) => {
-  const c = JSON.parse(JSON.stringify(SOURCES));
+/** Deep-patch helper for the provenance fixture. */
+const prov = (patch: (p: Record<string, any>) => void) => {
+  const c = JSON.parse(JSON.stringify(PROV));
   patch(c);
   return c;
 };
+const P_API_OFF = {
+  status: 401,
+  message: 'development authentication is not enabled',
+  at: '2026-10-07T15:59:30Z',
+};
+const P_WEB_OFF = { status: 401, hasIdentity: false, at: '2026-10-07T15:59:31Z' };
+const PROBES_OFF = { api: P_API_OFF, web: P_WEB_OFF };
 
 const PRE = {
   baseURL: HOST,
   window_start: '2026-10-07T15:45:00Z',
   slotGeneration: 'gen-1',
   e_env_1_dev_auth_effective: false,
-  e_env_1_sources: SOURCES,
+  e_env_1_provenance: PROV,
   e_env_2_anon_401: { status: 401, ts: '2026-10-07T15:46:00Z' },
   e_env_3_test_login_enabled: true,
   e_env_4_runtime_broker_effective: false,
@@ -79,7 +91,7 @@ const POST = {
   window_end: '2026-10-07T16:30:00Z',
   slotGeneration: 'gen-1',
   e_env_1_dev_auth_effective: false,
-  e_env_1_sources: SOURCES,
+  e_env_1_provenance: PROV,
   e_env_2_anon_401: { status: 401, ts: '2026-10-07T16:21:00Z' },
   e_env_3_test_login_enabled: true,
   e_env_4_runtime_broker_effective: false,
@@ -93,12 +105,12 @@ const RUN = {
   baseURL: HOST,
   preBaseURL: HOST,
   preValues: sharedEnvValues(PRE),
-  preSourcesKey: sourcesKey(SOURCES),
+  preProvenanceKey: provenanceKey(PROV),
   testLoginUsed: true,
 };
 
-const gate = (decl: unknown, id: string, self = self401) =>
-  evaluateEnv(decl, self, rel, W).find((g) => g.gate === id)!;
+const gate = (decl: unknown, id: string, self = self401, probes: unknown = PROBES_OFF) =>
+  evaluateEnv(decl, self, rel, W, probes as never).find((g) => g.gate === id)!;
 const without = (o: Record<string, unknown>, k: string) => {
   const c = { ...o };
   delete c[k];
@@ -107,209 +119,198 @@ const without = (o: Record<string, unknown>, k: string) => {
 
 describe('baseline fixtures are valid (guards the tables below)', () => {
   it('PRE passes with E-ENV-4 awaiting POST, POST passes', () => {
-    const r = evaluateEnv(PRE, self401, rel, W);
+    const r = evaluateEnv(PRE, self401, rel, W, PROBES_OFF);
     expect(r.map((g) => g.outcome)).toEqual(['pass', 'pass', 'pass', 'inconclusive', 'pass']);
     expect(envDecision(r).stop).toBe(false);
     expect(evaluateEnvPost(POST, RUN).outcome).toBe('pass');
   });
 });
 
-describe('R-6: E-ENV-1 derived through backend precedence (assessor order)', () => {
-  const rows: Array<[string, (s: Record<string, any>) => void, Record<string, unknown>, string]> = [
-    // PASS
-    ['baseline: --hosted, --dev-auth=false, settings OFF ⇒ PASS', () => {}, {}, 'pass'],
+describe('rev 4 E-ENV-1a probe classification', () => {
+  const api: Array<[string, unknown, string]> = [
+    ['401 "development authentication is not enabled" ⇒ off', P_API_OFF, 'off'],
     [
-      'all optional layers explicitly "absent", hosted via flag, explicit --dev-auth=false ⇒ PASS',
-      (c) => {
-        c.settings = { global: 'absent', local: 'absent' };
-      },
-      {},
-      'pass',
+      '401 "invalid development token" ⇒ on',
+      { ...P_API_OFF, message: 'invalid development token' },
+      'on',
     ],
+    ['200 ⇒ on', { ...P_API_OFF, status: 200, message: null }, 'on'],
     [
-      'env devMode=true overridden by explicit --dev-auth=false in hosted mode ⇒ PASS (precedence)',
-      (c) => {
-        c.environment.SCION_SERVER_AUTH_DEVMODE = true;
-      },
-      {},
-      'pass',
+      '401 "missing authorization header" ⇒ unexplained',
+      { ...P_API_OFF, message: 'missing authorization header' },
+      'unexplained',
     ],
-    [
-      'hosted via config mode (no flags), config devMode false ⇒ PASS',
-      (c) => {
-        c['unit/args'] = { '--dev-auth': 'absent', '--hosted': 'absent', '--production': 'absent' };
-      },
-      {},
-      'pass',
-    ],
-    // FAIL (forbidden established, FAIL wins over completeness)
-    [
-      'explicit --dev-auth=true ⇒ FAIL',
-      (c) => {
-        c['unit/args']['--dev-auth'] = true;
-      },
-      {},
-      'fail',
-    ],
-    [
-      'explicit --dev-auth=true with settings/env classes MISSING ⇒ FAIL (missing cannot change it)',
-      (c) => {
-        c['unit/args']['--dev-auth'] = true;
-        delete c.settings;
-        delete c.environment;
-      },
-      {},
-      'fail',
-    ],
-    [
-      'non-hosted (--hosted=false) without explicit --dev-auth ⇒ FAIL (workstation default ON)',
-      (c) => {
-        c['unit/args'] = { '--dev-auth': 'absent', '--hosted': false, '--production': 'absent' };
-      },
-      {},
-      'fail',
-    ],
-    [
-      'hosted, no flag, env devMode=true over local false ⇒ FAIL',
-      (c) => {
-        c['unit/args']['--dev-auth'] = 'absent';
-        c.environment.SCION_SERVER_AUTH_DEVMODE = true;
-      },
-      {},
-      'fail',
-    ],
-    [
-      'effective auth.mode "dev" from env ⇒ FAIL',
-      (c) => {
-        c.environment.SCION_SERVER_AUTH_MODE = 'dev';
-      },
-      {},
-      'fail',
-    ],
-    [
-      'auth.mode "dev" in local settings, env absent ⇒ FAIL',
-      (c) => {
-        c.settings.local['auth.mode'] = 'dev';
-      },
-      {},
-      'fail',
-    ],
-    [
-      'declared effective ON, layers derive OFF ⇒ FAIL (declared ON)',
-      () => {},
-      { e_env_1_dev_auth_effective: true },
-      'fail',
-    ],
-    // INCONCLUSIVE (OFF not proven)
-    [
-      'class unit/args missing ⇒ INCONCLUSIVE',
-      (c) => {
-        delete c['unit/args'];
-      },
-      {},
-      'inconclusive',
-    ],
-    [
-      'class settings missing ⇒ INCONCLUSIVE',
-      (c) => {
-        delete c.settings;
-      },
-      {},
-      'inconclusive',
-    ],
-    [
-      'class environment missing ⇒ INCONCLUSIVE',
-      (c) => {
-        delete c.environment;
-      },
-      {},
-      'inconclusive',
-    ],
-    [
-      'settings.global key not written (never defaulted) ⇒ INCONCLUSIVE',
-      (c) => {
-        delete c.settings.global;
-      },
-      {},
-      'inconclusive',
-    ],
-    [
-      'env key missing ⇒ INCONCLUSIVE',
-      (c) => {
-        delete c.environment.SCION_SERVER_AUTH_MODE;
-      },
-      {},
-      'inconclusive',
-    ],
-    [
-      'flag value malformed ⇒ INCONCLUSIVE',
-      (c) => {
-        c['unit/args']['--dev-auth'] = 'off';
-      },
-      {},
-      'inconclusive',
-    ],
-    [
-      'unknown class ⇒ INCONCLUSIVE',
-      (c) => {
-        c.registry = {};
-      },
-      {},
-      'inconclusive',
-    ],
-    [
-      'flat pre-R-6 form ⇒ INCONCLUSIVE',
-      (c) => {
-        for (const k of Object.keys(c)) delete c[k];
-        Object.assign(c, { 'unit/args': false, settings: 'absent', environment: false });
-      },
-      {},
-      'inconclusive',
-    ],
-    [
-      'non-hosted with explicit --dev-auth=false ⇒ INCONCLUSIVE (hosted mode not evidenced)',
-      (c) => {
-        c['unit/args']['--hosted'] = false;
-      },
-      {},
-      'inconclusive',
-    ],
-    [
-      'declared effective missing ⇒ INCONCLUSIVE',
-      () => {},
-      { e_env_1_dev_auth_effective: undefined },
-      'inconclusive',
-    ],
+    ['302 ⇒ unexplained', { ...P_API_OFF, status: 302, message: null }, 'unexplained'],
+    ['missing ⇒ missing', null, 'missing'],
   ];
-  for (const [label, patch, declPatch, expected] of rows) {
-    it(label, () => {
-      expect(gate({ ...PRE, e_env_1_sources: src(patch), ...declPatch }, 'E-ENV-1').outcome).toBe(
-        expected
+  for (const [label, probe, expected] of api) {
+    it(`P-API ${label}`, () =>
+      expect(classifyDevAuthProbes(probe as never, P_WEB_OFF).api).toBe(expected));
+  }
+  const web: Array<[string, unknown, string]> = [
+    ['401 without identity ⇒ off', P_WEB_OFF, 'off'],
+    [
+      '200 with identity (dev auto-login) ⇒ on',
+      { ...P_WEB_OFF, status: 200, hasIdentity: true },
+      'on',
+    ],
+    ['401 with identity ⇒ on', { ...P_WEB_OFF, hasIdentity: true }, 'on'],
+    ['200 without identity ⇒ unexplained', { ...P_WEB_OFF, status: 200 }, 'unexplained'],
+    ['missing ⇒ missing', null, 'missing'],
+  ];
+  for (const [label, probe, expected] of web) {
+    it(`P-WEB ${label}`, () =>
+      expect(classifyDevAuthProbes(P_API_OFF, probe as never).web).toBe(expected));
+  }
+});
+
+describe('rev 4 E-ENV-1b provenance record (binding/completeness/contradictions, no resolver)', () => {
+  const missingRows: Array<[string, (p: Record<string, any>) => void]> = [
+    ['flags.--hosted', (p) => delete p.flags['--hosted']],
+    ['flags.--production', (p) => delete p.flags['--production']],
+    ['flags.--dev-auth', (p) => delete p.flags['--dev-auth']],
+    ['load_path', (p) => delete p.load_path],
+    ['unknown load_path', (p) => (p.load_path = 'auto')],
+    ['files_examined', (p) => (p.files_examined = [])],
+    ['path_values.server.mode', (p) => delete p.path_values['server.mode']],
+    ['path_values.server.auth.dev_mode', (p) => delete p.path_values['server.auth.dev_mode']],
+    ['path_values.server.auth.mode', (p) => delete p.path_values['server.auth.mode']],
+    ['env.SCION_SERVER_MODE', (p) => delete p.env.SCION_SERVER_MODE],
+    ['env.SCION_SERVER_AUTH_DEVMODE', (p) => delete p.env.SCION_SERVER_AUTH_DEVMODE],
+    ['env.SCION_SERVER_AUTH_MODE', (p) => delete p.env.SCION_SERVER_AUTH_MODE],
+    ['env.SCION_SERVER_AUTH_DEV_MODE presence', (p) => (p.env.SCION_SERVER_AUTH_DEV_MODE = false)],
+    ['declared_effective_hosted', (p) => delete p.declared_effective_hosted],
+    ['declared_effective_auth_mode', (p) => delete p.declared_effective_auth_mode],
+    ['legacy path without per-file values', (p) => (p.load_path = 'legacy')],
+  ];
+  for (const [label, patch] of missingRows) {
+    it(`missing/malformed ${label} ⇒ INCONCLUSIVE`, () => {
+      expect(gate({ ...PRE, e_env_1_provenance: prov(patch) }, 'E-ENV-1').outcome).toBe(
+        'inconclusive'
       );
     });
   }
-  it('declared-vs-derived disagreement is recorded alongside the FAIL', () => {
-    const g = gate(
-      { ...PRE, e_env_1_sources: src((c) => (c['unit/args']['--dev-auth'] = true)) },
-      'E-ENV-1'
+  it('complete legacy-path record (per merged file) ⇒ PASS', () => {
+    const p = prov((c) => {
+      c.load_path = 'legacy';
+      c.files_examined = ['~/.scion/server.yaml', './server.yaml'];
+      c.path_values = {
+        files: [
+          {
+            file: '~/.scion/server.yaml',
+            mode: 'hosted',
+            'auth.devMode': false,
+            'auth.mode': 'absent',
+          },
+          {
+            file: './server.yaml',
+            mode: 'absent',
+            'auth.devMode': 'absent',
+            'auth.mode': 'absent',
+          },
+        ],
+      };
+    });
+    expect(gate({ ...PRE, e_env_1_provenance: p }, 'E-ENV-1').outcome).toBe('pass');
+  });
+  const forbidden: Array<[string, Record<string, unknown>]> = [
+    ['declared effective dev-auth ON', { e_env_1_dev_auth_effective: true }],
+    [
+      'declared hosted false',
+      { e_env_1_provenance: prov((c) => (c.declared_effective_hosted = false)) },
+    ],
+    [
+      'explicit --dev-auth=true',
+      { e_env_1_provenance: prov((c) => (c.flags['--dev-auth'] = true)) },
+    ],
+    [
+      'declared auth.mode "dev"',
+      { e_env_1_provenance: prov((c) => (c.declared_effective_auth_mode = 'dev')) },
+    ],
+  ];
+  for (const [label, patch] of forbidden) {
+    it(`bound record: ${label} ⇒ FAIL`, () =>
+      expect(gate({ ...PRE, ...patch }, 'E-ENV-1').outcome).toBe('fail'));
+    it(`UNBOUND record: ${label} ⇒ INCONCLUSIVE (R-7: excluded, counts as missing)`, () =>
+      expect(gate({ ...PRE, ...patch, baseURL: OTHER }, 'E-ENV-1').outcome).toBe('inconclusive'));
+  }
+  const contradictions: Array<[string, (p: Record<string, any>) => void, Record<string, unknown>]> =
+    [
+      [
+        'explicit --dev-auth=false vs declared ON is FAIL (forbidden wins)',
+        () => {},
+        { e_env_1_dev_auth_effective: true },
+      ],
+      [
+        'explicit --hosted=false vs declared hosted true ⇒ INCONCLUSIVE',
+        (p) => (p.flags['--hosted'] = false),
+        {},
+      ],
+      [
+        'SCION_SERVER_AUTH_MODE=proxy vs declared oauth ⇒ INCONCLUSIVE',
+        (p) => (p.env.SCION_SERVER_AUTH_MODE = 'proxy'),
+        {},
+      ],
+    ];
+  for (const [label, patch, extra] of contradictions) {
+    const expected = label.includes('FAIL') ? 'fail' : 'inconclusive';
+    it(label, () =>
+      expect(gate({ ...PRE, e_env_1_provenance: prov(patch), ...extra }, 'E-ENV-1').outcome).toBe(
+        expected
+      )
     );
-    expect(g.outcome).toBe('fail');
-    expect((g.details as { declaredVsDerived: string }).declaredVsDerived).toBe('disagree');
+  }
+  it('lower-layer file values are NOT checked against declarations (no resolver)', () => {
+    const p = prov((c) => (c.path_values['server.auth.dev_mode'] = true)); // e.g. overridden by explicit --dev-auth=false
+    expect(gate({ ...PRE, e_env_1_provenance: p }, 'E-ENV-1').outcome).toBe('pass');
   });
-  it('derivation records where each config value came from', () => {
-    const d = deriveDevAuth(src((c) => (c.environment.SCION_SERVER_AUTH_DEVMODE = true)));
-    expect(d.config['auth.devMode']).toEqual({ value: true, from: 'environment' });
-    expect(d.config.mode).toEqual({ value: 'hosted', from: 'settings.local' });
-    expect(d.effectiveDevMode).toBe(false);
-  });
-  it('unbound declaration with forbidden layers ⇒ INCONCLUSIVE (R-3 first)', () => {
-    const decl = {
-      ...PRE,
-      baseURL: OTHER,
-      e_env_1_sources: src((c) => (c['unit/args']['--dev-auth'] = true)),
-    };
-    expect(gate(decl, 'E-ENV-1').outcome).toBe('inconclusive');
-  });
+});
+
+describe('R-7: per-artifact attribution for E-ENV-1', () => {
+  const ON = { api: { ...P_API_OFF, message: 'invalid development token' }, web: P_WEB_OFF };
+  const rows: Array<[string, unknown, unknown, string]> = [
+    ['probes OFF + bound complete record ⇒ PASS', PRE, PROBES_OFF, 'pass'],
+    ['probe ON + bound record ⇒ FAIL', PRE, ON, 'fail'],
+    [
+      'probe ON + UNBOUND record ⇒ FAIL (own probe attributable by construction)',
+      { ...PRE, baseURL: OTHER },
+      ON,
+      'fail',
+    ],
+    ['probe ON + other-generation record ⇒ FAIL', { ...PRE, slotGeneration: 'gen-2' }, ON, 'fail'],
+    ['probe ON + no declaration ⇒ FAIL', null, ON, 'fail'],
+    [
+      'probes OFF + UNBOUND record ⇒ INCONCLUSIVE',
+      { ...PRE, baseURL: OTHER },
+      PROBES_OFF,
+      'inconclusive',
+    ],
+    [
+      'probes OFF + no declaration ⇒ INCONCLUSIVE (record required)',
+      null,
+      PROBES_OFF,
+      'inconclusive',
+    ],
+    [
+      'probes OFF + record missing ⇒ INCONCLUSIVE',
+      without(PRE, 'e_env_1_provenance'),
+      PROBES_OFF,
+      'inconclusive',
+    ],
+    [
+      'P-WEB unexplained ⇒ INCONCLUSIVE',
+      PRE,
+      { api: P_API_OFF, web: { ...P_WEB_OFF, status: 500 } },
+      'inconclusive',
+    ],
+    ['probes missing ⇒ INCONCLUSIVE', PRE, null, 'inconclusive'],
+  ];
+  for (const [label, decl, probes, expected] of rows) {
+    it(label, () => {
+      const r = evaluateEnv(decl, self401, rel, W, probes as never);
+      expect(r.find((g) => g.gate === 'E-ENV-1')!.outcome).toBe(expected);
+    });
+  }
 });
 
 describe('R-3: bound vs unbound declarations, per forbidden value', () => {
@@ -365,7 +366,7 @@ describe('independent run-probe contradictions are FAIL whatever the declaration
   ];
   for (const [label, decl] of decls) {
     it(`own anonymous probe 200, ${label} ⇒ E-ENV-2 FAIL, stop`, () => {
-      const r = evaluateEnv(decl, { status: 200, at: '2026-10-07T15:59:00Z' }, rel, W);
+      const r = evaluateEnv(decl, { status: 200, at: '2026-10-07T15:59:00Z' }, rel, W, PROBES_OFF);
       expect(r.find((g) => g.gate === 'E-ENV-2')!.outcome).toBe('fail');
       expect(envDecision(r).stop).toBe(true);
     });
@@ -379,24 +380,26 @@ describe('RB3: POST shared booleans (required / disagreement)', () => {
       expect(evaluateEnvPost(without(POST, k), RUN).outcome).toBe('inconclusive');
     });
   }
-  it('POST without E-ENV-1 at all is allowed (R-4: not mandated on POST)', () => {
+  it('POST without an E-ENV-1b record is allowed (required on PRE only)', () => {
     expect(
-      evaluateEnvPost(without(without(POST, 'e_env_1_dev_auth_effective'), 'e_env_1_sources'), RUN)
-        .outcome
+      evaluateEnvPost(
+        without(without(POST, 'e_env_1_dev_auth_effective'), 'e_env_1_provenance'),
+        RUN
+      ).outcome
     ).toBe('pass');
   });
-  it('POST with E-ENV-1 but incomplete sources ⇒ INCONCLUSIVE', () => {
+  it('POST with an incomplete E-ENV-1b record ⇒ INCONCLUSIVE', () => {
     expect(
-      evaluateEnvPost({ ...POST, e_env_1_sources: src((c) => delete c.settings) }, RUN).outcome
+      evaluateEnvPost({ ...POST, e_env_1_provenance: prov((c) => delete c.load_path) }, RUN).outcome
     ).toBe('inconclusive');
   });
-  it('POST layer values differing from PRE (same slot, both derive OFF) ⇒ FAIL', () => {
+  it('POST provenance differing from PRE (same slot) ⇒ FAIL', () => {
     const r = evaluateEnvPost(
-      { ...POST, e_env_1_sources: src((c) => (c.environment.SCION_SERVER_AUTH_DEVMODE = true)) },
+      { ...POST, e_env_1_provenance: prov((c) => (c.files_examined = ['./other.yaml'])) },
       RUN
     );
     expect(r.outcome).toBe('fail');
-    expect(r.problems.join(' ')).toContain('e_env_1_sources layer values');
+    expect(r.problems.join(' ')).toContain('e_env_1_provenance');
   });
   const flips: Array<[string, unknown]> = [
     ['e_env_1_dev_auth_effective', true],
@@ -443,12 +446,12 @@ describe('RB3: POST shared booleans (required / disagreement)', () => {
 describe('RB3: PRE test-login disabled ⇒ runner auth check', () => {
   const decl = { ...PRE, e_env_3_test_login_enabled: false };
   it('pending auth check stops the batch until resolved', () => {
-    const r = evaluateEnv(decl, self401, rel, W);
+    const r = evaluateEnv(decl, self401, rel, W, PROBES_OFF);
     expect(r.find((g) => g.gate === 'E-ENV-3')!.awaitingAuthCheck).toBe(true);
     expect(envDecision(r)).toMatchObject({ stop: true, authCheckPending: true, missing: [] });
   });
   it('runner test-login succeeded ⇒ E-ENV-3 FAIL (contradiction)', () => {
-    const r = applyAuthCheck(evaluateEnv(decl, self401, rel, W), {
+    const r = applyAuthCheck(evaluateEnv(decl, self401, rel, W, PROBES_OFF), {
       succeeded: true,
       at: batchStart,
     });
@@ -456,7 +459,7 @@ describe('RB3: PRE test-login disabled ⇒ runner auth check', () => {
     expect(envDecision(r)).toMatchObject({ stop: true, fails: ['E-ENV-3'] });
   });
   it('runner test-login refused ⇒ E-ENV-3 INCONCLUSIVE, stop', () => {
-    const r = applyAuthCheck(evaluateEnv(decl, self401, rel, W), {
+    const r = applyAuthCheck(evaluateEnv(decl, self401, rel, W, PROBES_OFF), {
       succeeded: false,
       at: batchStart,
     });
@@ -464,7 +467,7 @@ describe('RB3: PRE test-login disabled ⇒ runner auth check', () => {
     expect(envDecision(r)).toMatchObject({ stop: true, missing: ['E-ENV-3'] });
   });
   it('an UNBOUND declaration with test-login disabled triggers no auth check (R-3)', () => {
-    const r = evaluateEnv({ ...decl, baseURL: OTHER }, self401, rel, W);
+    const r = evaluateEnv({ ...decl, baseURL: OTHER }, self401, rel, W, PROBES_OFF);
     expect(r.find((g) => g.gate === 'E-ENV-3')!.awaitingAuthCheck).toBe(false);
   });
 });
