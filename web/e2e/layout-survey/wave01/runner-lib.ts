@@ -22,7 +22,14 @@
 import type { Browser, BrowserContext, Page } from '@playwright/test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { ACTIONABLE, ENVIRONMENT, NAMED_SCROLLERS, POLICIES, type ProfileId } from './contract.js';
+import {
+  ACTIONABLE,
+  APP_SHELL_TAG,
+  ENVIRONMENT,
+  NAMED_SCROLLERS,
+  POLICIES,
+  type ProfileId,
+} from './contract.js';
 import {
   probe,
   type MeasureResult,
@@ -270,10 +277,10 @@ export async function measure(
 }
 
 export async function navRaw(ctx: SubstepCtx): Promise<NavRaw[]> {
-  const raw = (await pe(ctx.page, { op: 'nav', within: 'scion-app-shell' })) as Array<
+  const raw = (await pe(ctx.page, { op: 'nav', within: APP_SHELL_TAG })) as Array<
     Omit<NavRaw, 'accessibleName'>
   >;
-  const loc = ctx.page.locator('scion-app-shell a.nav-link');
+  const loc = ctx.page.locator(`${APP_SHELL_TAG} a.nav-link`);
   const n = await loc.count();
   const names = new Map<string, string | null>();
   for (let i = 0; i < n; i++) {

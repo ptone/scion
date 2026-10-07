@@ -31,7 +31,7 @@ const HTML = `<!doctype html><html><head><style>
   html,body{margin:0;height:100%;font:14px sans-serif}
   #cover{position:fixed;left:0;top:700px;width:390px;height:80px;background:rgba(0,0,0,.5)}
 </style></head><body>
-<scion-app-shell>
+<scion-app>
   <div data-scion-page>
     <table aria-label="Groups"><caption class="sr-only">Hidden caption with a long sentence</caption>
       <tr><td><a class="group-name-link" href="/g/1">First</a></td></tr></table>
@@ -40,10 +40,10 @@ const HTML = `<!doctype html><html><head><style>
     <button id="covered" style="position:absolute;top:720px;left:10px">Covered</button>
     <div class="wide-clip" style="width:200px;overflow:hidden"><div style="width:600px">wide</div></div>
   </div>
-</scion-app-shell>
+</scion-app>
 <div id="cover"></div>
 <script>
-  customElements.define('scion-app-shell', class extends HTMLElement {
+  customElements.define('scion-app', class extends HTMLElement {
     constructor(){super();const r=this.attachShadow({mode:'open'});
       r.innerHTML='<style>.content{height:600px;overflow:auto;padding:8px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}</style><header><button class="mobile-menu-btn">Menu</button></header><div class="content"><slot></slot></div>';}
   });

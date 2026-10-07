@@ -67,7 +67,7 @@ import {
   type ScrollerName,
   type SubstepCtx,
 } from './runner-lib.js';
-import { ACTIONABLE, POLICIES } from './contract.js';
+import { ACTIONABLE, APP_SHELL_TAG, POLICIES } from './contract.js';
 
 export const PAGE_SIZE = 25; // admin-groups.ts:51 (UI's default list request limit)
 const ROW_LINK = 'a.group-name-link';
@@ -207,8 +207,8 @@ const badgeCss = (id: string) => `tr:has(${linkCss(id)}) .type-badge`;
 
 function shellQueries(): ProbeQuery[] {
   return [
-    { key: 'sidebar', op: 'one', css: '.sidebar', within: 'scion-app-shell' },
-    { key: 'content', op: 'one', css: '.content', within: 'scion-app-shell' },
+    { key: 'sidebar', op: 'one', css: '.sidebar', within: APP_SHELL_TAG },
+    { key: 'content', op: 'one', css: '.content', within: APP_SHELL_TAG },
     { key: 'header', op: 'one', css: 'scion-header' },
     { key: 'menuBtn', op: 'one', css: '.mobile-menu-btn', within: 'scion-header' },
     { key: 'headerTargets', op: 'actionable', within: 'scion-header' },

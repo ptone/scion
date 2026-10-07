@@ -595,3 +595,47 @@ describe('A-F1 keyboard (rev 2 rules, no repair)', () => {
     ).toBe('pass');
   });
 });
+
+describe('B-A2 pairs C(name-link) with the badge observation of the same step', () => {
+  it('a badge resolved at pos-1 is checked against the link container measured at pos-1', () => {
+    const cAt = (top: number) => ({
+      path: '.table-container',
+      viewport: false,
+      clientWidth: 356,
+      contentBox: { left: 16, top, right: 372, bottom: top + 300 },
+    });
+    const content = chain({
+      path: '.content',
+      overflowY: 'auto',
+      padBox: { left: 0, top: 0, right: VW, bottom: 800 },
+      scrollHeight: 3000,
+      policies: ['POL-V-APP-CONTENT'],
+    });
+    const offBadge = el({
+      box: { x: 20, y: 1500 },
+      chain: [content, viewport()],
+      hit: { cx: 45, cy: 1510, inViewport: false, hitPath: null, ok: false },
+    });
+    const onBadge = el({
+      box: { x: 20, y: 300 },
+      chain: [{ ...content, scrollTop: 1200 }, viewport()],
+    });
+    const r = evalBA2([
+      {
+        key: 'long',
+        id: 'g',
+        name: 'n',
+        accessibleName: null,
+        link: [
+          { step: 'primary', method: 'initial', innerWidth: VW, el: el({ clipC: cAt(1400) }) },
+          { step: 'pos-1', method: 'wheel', innerWidth: VW, el: el({ clipC: cAt(200) }) },
+        ],
+        badge: [
+          { step: 'primary', method: 'initial', innerWidth: VW, el: offBadge },
+          { step: 'pos-1', method: 'wheel', innerWidth: VW, el: onBadge },
+        ],
+      },
+    ]);
+    expect(r.outcome).toBe('pass');
+  });
+});

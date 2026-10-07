@@ -452,8 +452,13 @@ export interface FixtureRowObs {
 }
 
 /** B-A2 element check: badge within viewport x, within C(name-link) content box ±1, hit test. */
-export function badgeCheck(linkClipC: RawElement['clipC']): ElementCheck {
+export function badgeCheck(
+  linkClipCFor: (badge: RawElement) => RawElement['clipC'] | null
+): ElementCheck {
   return (badge, innerWidth) => {
+    // C(name-link) is taken from the SAME observation step as the badge, so
+    // both boxes are at the same scroll offsets.
+    const linkClipC = linkClipCFor(badge);
     const inVp = badge.box.x >= -TOL && badge.box.right <= innerWidth + TOL;
     const cb = linkClipC?.contentBox;
     const inC =
@@ -487,10 +492,16 @@ export function evalBA2(rows: FixtureRowObs[]): ClauseResult {
     };
   }
   const per = rows.map((r) => {
-    const linkClipC = r.link[0]?.el.clipC ?? null;
     if (r.badge.length === 0)
       return { key: r.key, outcome: 'fail' as Outcome, trail: ['no .type-badge'] };
-    const res = resolveObservations(r.badge, badgeCheck(linkClipC));
+    const byBadge = new Map<RawElement, RawElement['clipC'] | null>();
+    for (const b of r.badge) {
+      byBadge.set(b.el, r.link.find((l) => l.step === b.step)?.el.clipC ?? null);
+    }
+    const res = resolveObservations(
+      r.badge,
+      badgeCheck((badge) => byBadge.get(badge) ?? null)
+    );
     return { key: r.key, ...res };
   });
   return {

@@ -1,5 +1,9 @@
 # Layout survey — Phase-1 runner (`/admin/groups`)
 
+> Wave01 (15 states × 3 profiles, contract FROZEN rev 2) uses a separate
+> runner: see [`WAVE01.md`](WAVE01.md). Everything below is the unchanged
+> Phase-1 pilot runner.
+
 Attach-only capture of the real Hub `/admin/groups` page at 390×844,
 820×1180 and 1440×900, plus the steward seed, the four manual records
 (Release, Capture, Finding, Verification), a credential scan, and immutable

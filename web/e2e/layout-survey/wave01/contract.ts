@@ -59,6 +59,16 @@ export const ENVIRONMENT = Object.freeze({
   timezoneId: 'UTC',
 });
 
+/**
+ * APP shell element. Contract §1a names it "`scion-app-shell` (app-shell.ts)";
+ * the component defined in app-shell.ts:67 at 1694e511 is registered as
+ * `scion-app` (main.ts:1267-1269 SHELL_TAGS.app). The policies are pinned by
+ * file:line (e.g. POL-V-APP-CONTENT `.content` app-shell.ts:169-185), so the
+ * runner keys on the tag actually defined there. Assessor ruling R-1
+ * (2026-10-07T15:20Z): the cited file:line governs; no revision needed.
+ */
+export const APP_SHELL_TAG = 'scion-app';
+
 /** §1 tolerance for every geometry comparison. */
 export const TOL = 1;
 
@@ -122,7 +132,7 @@ export const POLICIES: readonly PolicyDef[] = Object.freeze([
   {
     id: 'POL-V-APP-CONTENT',
     kind: 'V',
-    host: 'scion-app-shell',
+    host: APP_SHELL_TAG,
     selector: '.content',
     cite: 'app-shell.ts:169-185',
   },
