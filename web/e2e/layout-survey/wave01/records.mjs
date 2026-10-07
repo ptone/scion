@@ -106,7 +106,76 @@ export function classifyDevAuthProbes(api, web) {
  * @param {unknown} prov
  * @param {unknown} declaredDevAuth e_env_1_dev_auth_effective
  */
-export function checkProvenance(prov, declaredDevAuth) {
+export const HOSTED_LOG_LINE = 'Server mode: hosted';
+export const WORKSTATION_LOG_PREFIX = 'Server mode: workstation';
+export const AUTH_MODE_SOURCES = Object.freeze([
+  'settings:server.auth.mode',
+  'legacy-file',
+  'env:SCION_SERVER_AUTH_MODE',
+  'unset-default',
+]);
+
+/**
+ * Ruling R-8: support required for each declared_effective_* field.
+ *   hosted    — the CURRENT process start's log line "Server mode: hosted"
+ *               (cmd/server_foreground.go:240-244) with its timestamp, at or
+ *               after the recorded process start of THIS slot generation;
+ *               "Server mode: workstation (…)" ⇒ hosted false ⇒ FAIL.
+ *   dev-auth  — the steward's determination from the recorded inputs; the
+ *               startup "WARNING: Development authentication enabled" line
+ *               (:313-320, hosted ∧ dev-auth) PRESENT ⇒ FAIL; its absence is
+ *               supporting only, never OFF proof (probes decide OFF).
+ *   auth.mode — the input that sets it (settings server.auth.mode via
+ *               settings_v1.go:3280, a legacy file, or SCION_SERVER_AUTH_MODE),
+ *               or "unset" citing the default (hub_config.go:583-584).
+ * Missing support ⇒ record incomplete ⇒ INCONCLUSIVE (R-7).
+ */
+export function checkSupport(support, prov, slotGeneration) {
+  const missing = [];
+  const forbidden = [];
+  if (!isObj(support)) return { missing: ['support'], forbidden };
+  const h = support.hosted;
+  if (!isObj(h)) missing.push('support.hosted');
+  else {
+    if (typeof h.log_line !== 'string' || !h.log_line) missing.push('support.hosted.log_line');
+    else if (h.log_line.startsWith(WORKSTATION_LOG_PREFIX))
+      forbidden.push(`startup log "${h.log_line}" (non-hosted)`);
+    else if (h.log_line !== HOSTED_LOG_LINE)
+      missing.push('support.hosted.log_line (not the "Server mode: hosted" line)');
+    const lt = Date.parse(h.log_ts ?? '');
+    const pt = Date.parse(h.process_start_ts ?? '');
+    if (!/Z$/.test(h.log_ts ?? '') || Number.isNaN(lt)) missing.push('support.hosted.log_ts');
+    if (!/Z$/.test(h.process_start_ts ?? '') || Number.isNaN(pt))
+      missing.push('support.hosted.process_start_ts');
+    if (!Number.isNaN(lt) && !Number.isNaN(pt) && lt < pt)
+      missing.push('support.hosted log line predates the current process start (not attributable)');
+    if (slotGeneration !== undefined && h.slot_generation !== slotGeneration)
+      missing.push('support.hosted.slot_generation (log not attributable to this slot generation)');
+  }
+  const d = support.dev_auth;
+  if (!isObj(d)) missing.push('support.dev_auth');
+  else {
+    if (d.basis !== 'recorded-inputs') missing.push('support.dev_auth.basis');
+    if (typeof d.dev_auth_warning_present !== 'boolean')
+      missing.push('support.dev_auth.dev_auth_warning_present');
+    else if (d.dev_auth_warning_present)
+      forbidden.push('startup "WARNING: Development authentication enabled" present');
+  }
+  const a = support.auth_mode;
+  if (!isObj(a) || !AUTH_MODE_SOURCES.includes(a.source)) missing.push('support.auth_mode.source');
+  else {
+    const declared = prov?.declared_effective_auth_mode;
+    if (a.source === 'unset-default' && declared !== 'unset')
+      missing.push('support.auth_mode: unset-default requires declared "unset"');
+    if (a.source !== 'unset-default' && declared === 'unset')
+      missing.push('support.auth_mode: declared "unset" requires source unset-default');
+    if (a.source === 'legacy-file' && (typeof a.file !== 'string' || !a.file))
+      missing.push('support.auth_mode.file');
+  }
+  return { missing, forbidden };
+}
+
+export function checkProvenance(prov, declaredDevAuth, slotGeneration) {
   const missing = [];
   const contradictions = [];
   const forbidden = [];
@@ -150,6 +219,9 @@ export function checkProvenance(prov, declaredDevAuth) {
   )
     missing.push('declared_effective_auth_mode');
   if (typeof declaredDevAuth !== 'boolean') missing.push('e_env_1_dev_auth_effective');
+  const sup = checkSupport(prov.support, prov, slotGeneration);
+  missing.push(...sup.missing);
+  forbidden.push(...sup.forbidden);
   // Forbidden states declared or directly recorded.
   if (declaredDevAuth === true) forbidden.push('declared effective dev-auth ON');
   if (prov.declared_effective_hosted === false)
@@ -209,7 +281,11 @@ export function checkProvenance(prov, declaredDevAuth) {
 export function gradeEEnv1(decl, probes, b) {
   const cls = classifyDevAuthProbes(probes?.api ?? null, probes?.web ?? null);
   const prov = b.attributable
-    ? checkProvenance(decl?.e_env_1_provenance, decl?.e_env_1_dev_auth_effective)
+    ? checkProvenance(
+        decl?.e_env_1_provenance,
+        decl?.e_env_1_dev_auth_effective,
+        decl?.slotGeneration
+      )
     : null;
   const details = {
     probes: { observed: probes ?? null, classified: cls },
@@ -613,7 +689,11 @@ export function evaluateEnvPost(post, run) {
   if (post.e_env_1_provenance !== undefined) {
     // E-ENV-1b is required on PRE; on POST it is optional, but if carried it
     // must be complete, not forbidden, and equal to PRE.
-    const pc = checkProvenance(post.e_env_1_provenance, post.e_env_1_dev_auth_effective);
+    const pc = checkProvenance(
+      post.e_env_1_provenance,
+      post.e_env_1_dev_auth_effective,
+      post.slotGeneration
+    );
     if (pc.forbidden.length) fails.push(`E-ENV-1 (POST record): ${pc.forbidden.join('; ')}`);
     else if (!pc.complete || pc.contradictions.length)
       problems.push(

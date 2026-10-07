@@ -14,6 +14,7 @@ withdrawn.
   - R-2/R-3: slot binding.
   - R-5: whitespace set.
 - R-7: per-artifact E-ENV-1 attribution.
+- R-8: support for each declared value.
 
 This is measurement tooling only. It changes no product code. The pilot
 runner (`capture.pw.ts`, `playwright.config.ts`) is unchanged.
@@ -82,7 +83,17 @@ They contain key names, booleans and UTC timestamps only.
       "SCION_SERVER_AUTH_DEV_MODE": "absent"
     },
     "declared_effective_hosted": true,
-    "declared_effective_auth_mode": "oauth"
+    "declared_effective_auth_mode": "unset",
+    "support": {
+      "hosted": {
+        "log_line": "Server mode: hosted",
+        "log_ts": "…Z",
+        "process_start_ts": "…Z",
+        "slot_generation": "…"
+      },
+      "dev_auth": { "basis": "recorded-inputs", "dev_auth_warning_present": false },
+      "auth_mode": { "source": "unset-default" }
+    }
   },
   "e_env_3_test_login_enabled": true,
   "e_env_4_runtime_broker_effective": false,
@@ -97,8 +108,31 @@ written explicitly. A missing key is never defaulted.
 
 On the legacy load path, `path_values` is
 `{ "files": [ { "file", "mode", "auth.devMode", "auth.mode" }, … ] }`, listed in
-merge order. The exact record shape is pending ii2's confirmation after the
-roll.
+merge order. ii2 source-verified this record shape against backend 4a253489
+(16:38Z). **Support for each declared value (ruling R-8; `support`, required):**
+
+- **hosted:** the current process start's log line `Server mode: hosted`
+  (`cmd/server_foreground.go:240-244`). It needs `log_ts` ≥
+  `process_start_ts` and `slot_generation` equal to this slot's generation.
+  `Server mode: workstation (…)` ⇒ FAIL. A missing or unattributable line ⇒
+  INCONCLUSIVE.
+- **dev_auth:** `basis: "recorded-inputs"` (the steward's determination from
+  the flags, load path values and env), plus `dev_auth_warning_present`.
+  The startup `WARNING: Development authentication enabled` line (:313-320)
+  present ⇒ FAIL. Its absence is supporting only and never proves OFF; the
+  probes decide OFF.
+- **auth_mode:** `source` is one of `settings:server.auth.mode`
+  (`settings_v1.go:3280`), `legacy-file` (with `file`),
+  `env:SCION_SERVER_AUTH_MODE`, or `unset-default`. `unset-default` pairs with
+  declared `"unset"`, the default noted at `hub_config.go:583-584`. Declared
+  `"dev"` ⇒ FAIL.
+
+Any required declaration without its support ⇒ record incomplete ⇒
+INCONCLUSIVE.
+
+`env` is an overlay applied on every load path, so it is always filled in;
+`load_path` names the file source. `run.json` embeds the value-free PRE
+declaration, which is checked by `assertValueFree` at load.
 
 ### Binding (rulings R-2/R-3)
 

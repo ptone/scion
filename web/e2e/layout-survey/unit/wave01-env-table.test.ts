@@ -52,7 +52,17 @@ const PROV = {
     SCION_SERVER_AUTH_DEV_MODE: 'absent',
   },
   declared_effective_hosted: true,
-  declared_effective_auth_mode: 'oauth',
+  declared_effective_auth_mode: 'unset',
+  support: {
+    hosted: {
+      log_line: 'Server mode: hosted',
+      log_ts: '2026-10-07T15:30:05Z',
+      process_start_ts: '2026-10-07T15:30:00Z',
+      slot_generation: 'gen-1',
+    },
+    dev_auth: { basis: 'recorded-inputs', dev_auth_warning_present: false },
+    auth_mode: { source: 'unset-default' },
+  },
 } as Record<string, any>;
 /** Deep-patch helper for the provenance fixture. */
 const prov = (patch: (p: Record<string, any>) => void) => {
@@ -260,6 +270,92 @@ describe('rev 4 E-ENV-1b provenance record (binding/completeness/contradictions,
       )
     );
   }
+  // Ruling R-8: support for each declared_effective_* field.
+  const r8: Array<[string, (p: Record<string, any>) => void, string]> = [
+    ['support missing ⇒ INCONCLUSIVE', (p) => delete p.support, 'inconclusive'],
+    [
+      'hosted log line missing ⇒ INCONCLUSIVE',
+      (p) => delete p.support.hosted.log_line,
+      'inconclusive',
+    ],
+    [
+      'hosted "Server mode: workstation (…)" ⇒ FAIL',
+      (p) => (p.support.hosted.log_line = 'Server mode: workstation (binding to 127.0.0.1)'),
+      'fail',
+    ],
+    [
+      'other log line ⇒ INCONCLUSIVE',
+      (p) => (p.support.hosted.log_line = 'Server starting'),
+      'inconclusive',
+    ],
+    [
+      'hosted log before current process start ⇒ INCONCLUSIVE (not attributable)',
+      (p) => (p.support.hosted.log_ts = '2026-10-07T15:29:00Z'),
+      'inconclusive',
+    ],
+    [
+      'hosted log from another slot generation ⇒ INCONCLUSIVE',
+      (p) => (p.support.hosted.slot_generation = 'gen-0'),
+      'inconclusive',
+    ],
+    [
+      'process start timestamp missing ⇒ INCONCLUSIVE',
+      (p) => delete p.support.hosted.process_start_ts,
+      'inconclusive',
+    ],
+    [
+      'dev-auth WARNING present ⇒ FAIL',
+      (p) => (p.support.dev_auth.dev_auth_warning_present = true),
+      'fail',
+    ],
+    [
+      'dev-auth warning presence not recorded ⇒ INCONCLUSIVE',
+      (p) => delete p.support.dev_auth.dev_auth_warning_present,
+      'inconclusive',
+    ],
+    [
+      'dev-auth basis missing ⇒ INCONCLUSIVE',
+      (p) => delete p.support.dev_auth.basis,
+      'inconclusive',
+    ],
+    ['auth.mode source missing ⇒ INCONCLUSIVE', (p) => delete p.support.auth_mode, 'inconclusive'],
+    [
+      'declared "unset" without unset-default source ⇒ INCONCLUSIVE',
+      (p) => (p.support.auth_mode = { source: 'settings:server.auth.mode' }),
+      'inconclusive',
+    ],
+    [
+      'unset-default source with declared "oauth" ⇒ INCONCLUSIVE',
+      (p) => (p.declared_effective_auth_mode = 'oauth'),
+      'inconclusive',
+    ],
+    [
+      'settings source citing a set mode ⇒ PASS',
+      (p) => {
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'settings:server.auth.mode' };
+        p.path_values['server.auth.mode'] = 'oauth';
+      },
+      'pass',
+    ],
+    [
+      'legacy-file source without file ⇒ INCONCLUSIVE',
+      (p) => {
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'legacy-file' };
+      },
+      'inconclusive',
+    ],
+  ];
+  for (const [label, patch, expected] of r8) {
+    it(`R-8 ${label}`, () =>
+      expect(gate({ ...PRE, e_env_1_provenance: prov(patch) }, 'E-ENV-1').outcome).toBe(expected));
+  }
+  it('R-8: absence of the dev-auth warning never proves OFF on its own (probe missing ⇒ INCONCLUSIVE)', () => {
+    expect(gate(PRE, 'E-ENV-1', self401, { api: null, web: P_WEB_OFF }).outcome).toBe(
+      'inconclusive'
+    );
+  });
   it('lower-layer file values are NOT checked against declarations (no resolver)', () => {
     const p = prov((c) => (c.path_values['server.auth.dev_mode'] = true)); // e.g. overridden by explicit --dev-auth=false
     expect(gate({ ...PRE, e_env_1_provenance: p }, 'E-ENV-1').outcome).toBe('pass');

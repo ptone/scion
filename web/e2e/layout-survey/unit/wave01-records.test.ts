@@ -65,7 +65,17 @@ const PROV = {
     SCION_SERVER_AUTH_DEV_MODE: 'absent',
   },
   declared_effective_hosted: true,
-  declared_effective_auth_mode: 'oauth',
+  declared_effective_auth_mode: 'unset',
+  support: {
+    hosted: {
+      log_line: 'Server mode: hosted',
+      log_ts: '2026-10-07T15:30:05Z',
+      process_start_ts: '2026-10-07T15:30:00Z',
+      slot_generation: 'gen-1',
+    },
+    dev_auth: { basis: 'recorded-inputs', dev_auth_warning_present: false },
+    auth_mode: { source: 'unset-default' },
+  },
 };
 const PROBES_OFF = {
   api: {

@@ -14,9 +14,18 @@ export declare function classifyDevAuthProbes(
   api: { status: number; message: string | null; at: string } | null,
   web: { status: number; hasIdentity: boolean; at: string } | null
 ): { api: ProbeClass; web: ProbeClass };
+export declare const HOSTED_LOG_LINE: string;
+export declare const WORKSTATION_LOG_PREFIX: string;
+export declare const AUTH_MODE_SOURCES: readonly string[];
+export declare function checkSupport(
+  support: unknown,
+  prov: unknown,
+  slotGeneration: string | undefined
+): { missing: string[]; forbidden: string[] };
 export declare function checkProvenance(
   prov: unknown,
-  declaredDevAuth: unknown
+  declaredDevAuth: unknown,
+  slotGeneration?: string
 ): { complete: boolean; missing: string[]; contradictions: string[]; forbidden: string[] };
 export declare function gradeEEnv1(
   decl: unknown,

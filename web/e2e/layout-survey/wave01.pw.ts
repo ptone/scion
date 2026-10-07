@@ -59,7 +59,7 @@ import {
   RUN_KIND,
   type EnvGate,
 } from './wave01/records.mjs';
-import { sha256, validatePair } from './wave01/release.mjs';
+import { assertValueFree, sha256, validatePair } from './wave01/release.mjs';
 import {
   CaptureError,
   closeSubstep,
@@ -206,6 +206,7 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
     const maxAgeMin = Number(process.env.LAYOUT_SURVEY_ENV_MAX_AGE_MIN || DEFAULT_ENV_MAX_AGE_MIN);
     const envDeclBytes = cfg.envDeclarationFile ? fs.readFileSync(cfg.envDeclarationFile) : null;
     const envDecl = envDeclBytes ? JSON.parse(envDeclBytes.toString('utf-8')) : null;
+    if (envDecl) assertValueFree(envDecl, 'env PRE declaration'); // never embed credential material
     const envDeclSha = envDeclBytes ? sha256(envDeclBytes) : null;
     const self401 = await anon401(cfg.baseURL);
     const preProbes = await devAuthProbes(cfg.baseURL);
@@ -306,6 +307,9 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
             envDecision: envD,
             envMaxAgeMin: maxAgeMin,
             envDeclarationSha256: envDeclSha,
+            // Value-free steward PRE declaration, embedded so the assessor grades
+            // from the record itself (assertValueFree enforced at load).
+            envPreDeclaration: envDecl,
             envPreBaseURL: typeof envDecl?.baseURL === 'string' ? envDecl.baseURL : null,
             envPreValues: envDecl ? sharedEnvValues(envDecl) : null,
             envPreProvenanceKey: envDecl ? provenanceKey(envDecl.e_env_1_provenance) : null,
