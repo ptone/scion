@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "kind": "verification",
+  "id": "verification-<uuid>",
+  "createdAt": "<UTC ISO>",
+  "producer": "<independent verifier identity — NOT the developer, reviewer or capturer>",
+  "findingId": "<finding id>",
+  "acceptanceSha256": "<must equal finding.acceptance.sha256>",
+  "baselineCaptureIds": ["<capture ids on the baseline release>"],
+  "candidateCaptureIds": ["<capture ids on the steward-built verification release>"],
+  "verificationReleaseId": "<release id with releaseKind=verification>",
+  "verificationSourceSha": "<40-hex source SHA of that release>",
+  "identities": {
+    "author": "<change author>",
+    "capturer": "<steward/capturer who ran the captures>",
+    "reviewer": "<independent code reviewer>",
+    "verifier": "<this record's author>"
+  },
+  "assertionsRun": ["<assertion ids graded>"],
+  "evidence": ["<bundle digests / relative paths verified by the grader>"],
+  "verdict": "<pass|fail|blocked|inconclusive>",
+  "rationale": "<graded from raw evidence against the frozen acceptance>",
+  "remainingIssues": "<…>",
+  "verifierIdentity": "<independent verifier identity>"
+}

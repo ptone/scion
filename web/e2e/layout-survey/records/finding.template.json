@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "kind": "finding",
+  "id": "finding-<uuid>",
+  "createdAt": "<UTC ISO, e.g. 2026-10-07T11:00:00.000Z>",
+  "producer": "<assessor identity>",
+  "captureIds": ["<capture record id(s) from the baseline bundle>"],
+  "scenarioKey": "admin-groups",
+  "affectedProfiles": ["phone-390x844", "tablet-820x1180"],
+  "category": "layout-defect",
+  "severity": "<high|medium|low>",
+  "confidence": "<high|medium|low>",
+  "symptom": "<observed behaviour, with geometry facts from the capture's geometry JSON>",
+  "expectedBehavior": "<what should happen>",
+  "reproduction": ["<ordered actions from the Capture record>"],
+  "location": { "route": "/admin/groups", "states": ["default", "fixture-filter"], "crop": "<relative file path + region>" },
+  "suspectedSharedCause": "<HYPOTHESIS ONLY>",
+  "dedupeKey": "<component/behaviour/width-class>",
+  "acceptance": {
+    "revision": 1,
+    "sha256": "<sha256 of the frozen acceptance text, authored by the independent grader/owner>",
+    "frozenAt": "<UTC ISO, before any fix is built>",
+    "author": "<acceptance author (not the developer)>",
+    "requiredProfiles": ["phone-390x844", "tablet-820x1180", "desktop-1440x900"],
+    "clauses": ["<machine-checkable assertion ids + definitions, e.g. LS-A2-type-badge-unclipped>"],
+    "verdictRules": { "pass": "<…>", "fail": "<…>", "inconclusive": "<…>" }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "recipeId": "layout-survey/groups-v1",
+  "schemaVersion": 1,
+  "description": "Phase-1 /admin/groups fixture: one short name, one realistic long wrapping name, one multiline Unicode description. Profiles: normal + long-content. No pathological strings.",
+  "groups": [
+    {
+      "key": "short",
+      "profile": "normal",
+      "name": "Platform",
+      "slugSuffix": "short",
+      "description": "Platform engineering on-call rotation.",
+      "labels": { "team": "platform" }
+    },
+    {
+      "key": "long",
+      "profile": "long-content",
+      "name": "Infrastructure Reliability and Developer Productivity Working Group for the Northern Hemisphere Regions",
+      "slugSuffix": "long-wrapping-name",
+      "description": "Coordinates capacity planning, incident reviews, and release readiness for every production region in the northern hemisphere, including quarterly disaster-recovery exercises.",
+      "labels": {
+        "team": "sre",
+        "region": "northern-hemisphere",
+        "tier": "critical",
+        "cost-center": "infra-4410"
+      }
+    },
+    {
+      "key": "unicode",
+      "profile": "long-content",
+      "name": "Équipe Données — 数据团队",
+      "slugSuffix": "unicode-multiline",
+      "description": "Première ligne : ingestion et qualité des données.\nSecond line: 数据管道 owners — café ☕ rota.\nThird line: Ünïcödé naïve résumé review — München ↔ Zürich.",
+      "labels": { "team": "data", "locale": "fr-zh" }
+    }
+  ]
+}

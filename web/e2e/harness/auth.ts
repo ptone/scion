@@ -93,8 +93,14 @@ function signJWT(
  * "scion-test-login" audience, signed with the user signing key derived
  * from the known session secret.
  */
-export function generateTestLoginToken(subject = 'e2e-harness'): string {
-  const signingKey = deriveSigningKey(E2E_SESSION_SECRET, USER_SIGNING_KEY_NAME);
+export function generateTestLoginToken(
+  subject = 'e2e-harness',
+  sessionSecret: string = E2E_SESSION_SECRET,
+): string {
+  if (!sessionSecret) {
+    throw new Error('generateTestLoginToken: sessionSecret must be non-empty');
+  }
+  const signingKey = deriveSigningKey(sessionSecret, USER_SIGNING_KEY_NAME);
   const now = Math.floor(Date.now() / 1000);
 
   const payload = {
@@ -131,14 +137,31 @@ export interface AuthSession {
 }
 
 /**
+ * Optional overrides for {@link createSession}. Defaults preserve the root
+ * E2E harness behaviour (well-known secret, shared temp storage directory);
+ * attach-only callers such as the layout survey pass a slot-specific secret
+ * and a private (0700) storage directory instead.
+ */
+export interface CreateSessionOptions {
+  /** Session secret the target Hub was started with. */
+  sessionSecret?: string;
+  /** Directory for the storageState file (created 0700 if missing). */
+  storageDir?: string;
+}
+
+/** Default storageState directory used by the root E2E harness. */
+export const DEFAULT_AUTH_STORAGE_DIR = path.join(os.tmpdir(), 'scion-e2e-auth');
+
+/**
  * Create a session for the given user via the test-login endpoint.
  * Returns the session info and the path to a storageState JSON file.
  */
 export async function createSession(
   baseURL: string,
   testUser: TestUser,
+  opts: CreateSessionOptions = {},
 ): Promise<AuthSession> {
-  const challengeToken = generateTestLoginToken();
+  const challengeToken = generateTestLoginToken('e2e-harness', opts.sessionSecret ?? E2E_SESSION_SECRET);
 
   const res = await fetch(`${baseURL}/api/v1/auth/test-login`, {
     method: 'POST',
@@ -173,11 +196,11 @@ export async function createSession(
   };
 
   // Write to a temp file
-  const storageDir = path.join(os.tmpdir(), 'scion-e2e-auth');
-  fs.mkdirSync(storageDir, { recursive: true });
+  const storageDir = opts.storageDir ?? DEFAULT_AUTH_STORAGE_DIR;
+  fs.mkdirSync(storageDir, { recursive: true, mode: 0o700 });
   const safeName = testUser.email.replace(/[^a-zA-Z0-9]/g, '_');
   const storageStatePath = path.join(storageDir, `${safeName}.json`);
-  fs.writeFileSync(storageStatePath, JSON.stringify(storageState, null, 2));
+  fs.writeFileSync(storageStatePath, JSON.stringify(storageState, null, 2), { mode: 0o600 });
 
   return {
     user: data.user,
@@ -262,7 +285,7 @@ export async function createAdminSession(
  * Clean up all storageState files.
  */
 export function cleanupAuthState(): void {
-  const storageDir = path.join(os.tmpdir(), 'scion-e2e-auth');
+  const storageDir = DEFAULT_AUTH_STORAGE_DIR;
   try {
     fs.rmSync(storageDir, { recursive: true, force: true });
   } catch {

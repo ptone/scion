@@ -1,0 +1,16 @@
+{
+  // Typecheck: npx tsc -p e2e/layout-survey/tsconfig.json
+  // The two relaxed options below exist only because the imported root
+  // harness files (hub.ts unused import, seed.ts optional fetch body) do not
+  // pass them today; the layout-survey files themselves pass the full root
+  // strict set (verified by temporarily re-enabling both).
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "noEmit": true,
+    "types": ["node"],
+    "noUnusedLocals": false,
+    "exactOptionalPropertyTypes": false
+  },
+  "include": ["./*.ts", "./lib/*.ts", "./lib/*.d.mts", "./unit/*.ts"]
+}
