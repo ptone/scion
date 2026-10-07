@@ -486,9 +486,12 @@ their timestamps are kept in the M1 raw record. Per press:
 Each press records `diffU1U2`, `diffU2F` (all property names),
 `unstableKeys` and the counted `diffKeys`. A visibility or hit-test failure
 is FAIL whatever the indicator. In the aggregate, FAIL dominates, then
-INCONCLUSIVE. The runner never repairs focus or scroll. An element with no
-U1/U2 sample (not focusable when sampled) is treated as undeterminable
-(INCONCLUSIVE); that interpretation has been raised with the assessor.
+INCONCLUSIVE. The runner never repairs focus or scroll. Ruling R-11 (assessor
+17:32Z): when the focused element has no U1/U2 sample (not rendered or
+focusable when sampled), (a)/(b) are still evaluated on F first; if neither
+holds, rule (c) cannot be evaluated ⇒ undeterminable ⇒ that press is
+INCONCLUSIVE (never PASS or FAIL on the indicator alone). Visibility and hit
+test still FAIL independently. Such presses record `baselineMissing: true`.
 
 ### validate-run checks
 

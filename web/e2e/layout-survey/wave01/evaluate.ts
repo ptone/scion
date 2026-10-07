@@ -670,6 +670,8 @@ export function pressChecks(
   /** Non-outline U1/U2 differences (unstable properties). */
   unstableKeys: string[];
   undeterminableReason: string | null;
+  /** Ruling R-11: U1/U2 missing for the focused element (rule (c) not evaluable). */
+  baselineMissing: boolean;
 } {
   if (p.outside || !p.element)
     return {
@@ -685,6 +687,7 @@ export function pressChecks(
       diffU2F: null,
       unstableKeys: [],
       undeterminableReason: null,
+      baselineMissing: false,
     };
   const e = p.element;
   const b = e.box;
@@ -709,6 +712,7 @@ export function pressChecks(
   else if (boxShadow && boxShadow !== 'none') indicatorBy = 'box-shadow';
   const u1 = baseline.u1[e.path];
   const u2 = baseline.u2[e.path];
+  const baselineMissing = !u1 || !u2;
   // Raw differences are always recorded when samples exist (rev 5: each press
   // records U1/U2 and U2/F property names), whichever rule decides.
   const diffU1U2 = u1 && u2 ? diffNames(u1, u2) : null;
@@ -723,7 +727,10 @@ export function pressChecks(
     // Chromium's UA :focus-visible outline-offset change, review1 B1). An
     // unstable property (e.g. a running animation, review4 O-b) makes the
     // indicator undeterminable when nothing stable differs.
-    if (!u1 || !u2) {
+    if (baselineMissing) {
+      // Ruling R-11: (a)/(b) were evaluated first on F; without U1/U2 rule
+      // (c) cannot be evaluated ⇒ undeterminable (never PASS/FAIL on the
+      // indicator alone; visibility/hit still FAIL independently).
       indicator = 'undeterminable';
       undeterminableReason = 'no same-context unfocused samples (U1/U2) for this element';
     } else {
@@ -756,6 +763,7 @@ export function pressChecks(
     diffU2F,
     unstableKeys,
     undeterminableReason,
+    baselineMissing,
   };
 }
 

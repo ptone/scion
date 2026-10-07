@@ -632,11 +632,39 @@ describe('A-F1 keyboard (rev 3 rules, no repair)', () => {
       }).outcome
     ).toBe('fail');
   });
-  it('rev 5 (c): no unfocused samples for the element ⇒ undeterminable (INCONCLUSIVE), never PASS', () => {
+  it('R-11: no U1/U2 for the element ⇒ (a)/(b) first; else undeterminable (INCONCLUSIVE), baselineMissing recorded', () => {
     expect(pressChecks(press(1, el({ path: 'p' })), EMPTY_BASELINE)).toMatchObject({
       indicator: 'undeterminable',
       result: 'inconclusive',
+      baselineMissing: true,
     });
+    // (a) outline on F needs no baseline ⇒ present / PASS, flag still recorded.
+    expect(pressChecks(press(1, focused('p')), EMPTY_BASELINE)).toMatchObject({
+      indicator: 'present',
+      indicatorBy: 'outline',
+      result: 'pass',
+      baselineMissing: true,
+    });
+    // (b) box-shadow on F needs no baseline.
+    expect(
+      pressChecks(
+        press(1, el({ path: 'p', style: { ...el({}).style, boxShadow: '0 0 0 2px blue' } })),
+        EMPTY_BASELINE
+      )
+    ).toMatchObject({ indicator: 'present', indicatorBy: 'box-shadow', result: 'pass' });
+    // Visibility/hit stay independent: offscreen without baseline ⇒ FAIL.
+    const off = el({
+      path: 'p',
+      box: { y: 2000 },
+      hit: { cx: 35, cy: 2010, inViewport: false, hitPath: null, ok: false },
+    });
+    expect(pressChecks(press(1, off), EMPTY_BASELINE)).toMatchObject({
+      result: 'fail',
+      baselineMissing: true,
+    });
+    // With samples present the flag is false.
+    const plain = el({ path: 'p' });
+    expect(pressChecks(press(1, plain), bl('p', { ...plain.style })).baselineMissing).toBe(false);
   });
   it('focus offscreen (no native scroll repair) fails', () => {
     const off = focused('o', {
