@@ -28,6 +28,7 @@ import {
   evalBOVR,
   hitTest,
   pressChecks,
+  renderedTextEquals,
   resolveObservations,
   type PressRecord,
 } from '../wave01/evaluate.js';
@@ -74,6 +75,7 @@ function el(
     opacity: '1',
     position: 'static',
     text: 'Name',
+    innerText: 'Name',
     title: null,
     ariaLabel: null,
     scrollWidth: b.width,
@@ -397,7 +399,7 @@ describe('A-S1 / A-S2 (nested controls)', () => {
   });
 });
 
-describe('A-N2 (rev 2)', () => {
+describe('A-N2 (rev 3)', () => {
   const nav = (o: Partial<Parameters<typeof evalAN2>[0][number]>) => ({
     path: 'a',
     rendered: true,
@@ -475,8 +477,8 @@ describe('B-* groups clauses (pilot finding rev 2)', () => {
     const mk = (link: RawElement, acc: string | null = null) => [
       { ...row(el(), link), name, accessibleName: acc },
     ];
-    expect(evalBA3(mk(el({ text: name }))).outcome).toBe('pass');
-    const truncated = el({ text: name, scrollWidth: 300, clientWidth: 120 });
+    expect(evalBA3(mk(el({ text: name, innerText: name }))).outcome).toBe('pass');
+    const truncated = el({ text: name, innerText: name, scrollWidth: 300, clientWidth: 120 });
     expect(evalBA3(mk(truncated)).outcome).toBe('fail');
     expect(evalBA3(mk({ ...truncated, title: name })).outcome).toBe('pass');
     expect(evalBA3(mk(truncated, name)).outcome).toBe('pass');
@@ -484,7 +486,7 @@ describe('B-* groups clauses (pilot finding rev 2)', () => {
   });
 });
 
-describe('A-F1 keyboard (rev 2 rules, no repair)', () => {
+describe('A-F1 keyboard (rev 3 rules, no repair)', () => {
   const focused = (path: string, over: Parameters<typeof el>[0] = {}) =>
     el({
       path,
@@ -637,5 +639,40 @@ describe('B-A2 pairs C(name-link) with the badge observation of the same step', 
       },
     ]);
     expect(r.outcome).toBe('pass');
+  });
+});
+
+describe('rev 3 rendered-text comparison (B-A3 shape (i))', () => {
+  it('normal/nowrap: collapse all whitespace runs in v (incl. newlines) and trim, compare with innerText', () => {
+    expect(renderedTextEquals('Platform Team', '  Platform\n  Team ', 'normal').equal).toBe(true);
+    expect(renderedTextEquals('Platform Team', 'Platform  Team', 'nowrap').equal).toBe(true);
+    expect(renderedTextEquals('Platform Tea', 'Platform Team', 'normal').equal).toBe(false);
+  });
+  it('pre/pre-wrap/break-spaces: exact', () => {
+    expect(renderedTextEquals('A  B', 'A  B', 'pre-wrap').equal).toBe(true);
+    expect(renderedTextEquals('A B', 'A  B', 'pre').equal).toBe(false);
+  });
+  it('pre-line: collapse spaces/tabs only (newlines kept)', () => {
+    expect(renderedTextEquals('A B\nC', 'A \t B\nC', 'pre-line').equal).toBe(true);
+    expect(renderedTextEquals('A B C', 'A B\nC', 'pre-line').equal).toBe(false);
+  });
+  it('B-A3 records the raw readback name and the transformed comparison', () => {
+    const link = el({ innerText: 'Double Space', whiteSpace: 'normal' });
+    const r = evalBA3([
+      {
+        key: 'k',
+        id: 'g',
+        name: 'Double  Space',
+        accessibleName: null,
+        link: [{ step: 'primary', method: 'initial', innerWidth: VW, el: link }],
+        badge: [],
+      },
+    ]);
+    expect(r.outcome).toBe('pass');
+    expect(JSON.stringify(r.details)).toContain('Double  Space');
+    expect(JSON.stringify(r.details)).toContain('collapse-all-trim');
+  });
+  it('a missing innerText never passes shape (i)', () => {
+    expect(renderedTextEquals(null, 'x', 'normal').equal).toBe(false);
   });
 });

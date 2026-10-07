@@ -45,7 +45,8 @@ import {
 } from './suite-digest.mjs';
 
 export const COMPANION_KIND = 'wave01-release-ext';
-export const CONTRACT_SHA256 = '1877b1d40a5e4bf04d87e47d419a4451cac5ccb2d3f27f9a63d8ce32c88a5447';
+export const CONTRACT_SHA256 = '69ec8b81af27c0bbb5be53a4cdf0722c98022368d6ebc947213431aeb03d6680';
+export const CONTRACT_NAME = 'wave01-contract-FROZEN-rev3.md';
 export const FRONTEND_BASELINE = '1694e51145a0a26bedf754751a130d7b05544232';
 export const BACKEND = '4a253489ebe3298fcfe4d7271b3642a5578b2b31';
 const SHA_RE = /^[0-9a-f]{64}$/;
@@ -121,7 +122,7 @@ const COMPANION_REQUIRED = [
  * Validate a base Release + companion pair. Returns errors (empty = valid).
  * Missing/unparseable inputs are reported as `missing:` errors so callers
  * can grade INCONCLUSIVE; disagreements as `mismatch:` (FAIL).
- * @param {{baseBytes: Buffer, companion: any, expect?: {runnerCommit?: string, suiteDigest?: string, browserVersion?: string, baseURL?: string}}} a
+ * @param {{baseBytes: Buffer, companion: any, expect?: {runnerCommit?: string, suiteDigest?: string, suiteFileCount?: number, browserVersion?: string, baseURL?: string}}} a
  */
 export function validatePair({ baseBytes, companion, expect = {} }) {
   const errs = [];
@@ -139,7 +140,8 @@ export function validatePair({ baseBytes, companion, expect = {} }) {
   if (companion.kind !== COMPANION_KIND)
     errs.push(`mismatch: companion.kind must be ${COMPANION_KIND}`);
   const eq = (label, a, b) => {
-    if (a === undefined || b === undefined) errs.push(`missing: ${label}`);
+    if (a === undefined || b === undefined || a === null || b === null)
+      errs.push(`missing: ${label}`);
     else if (JSON.stringify(a) !== JSON.stringify(b))
       errs.push(`mismatch: ${label} (${JSON.stringify(a)} != ${JSON.stringify(b)})`);
   };
@@ -164,6 +166,7 @@ export function validatePair({ baseBytes, companion, expect = {} }) {
     base.backendSourceSha
   );
   eq('companion.contract.sha256', companion.contract?.sha256, CONTRACT_SHA256);
+  eq('companion.contract.name', companion.contract?.name, CONTRACT_NAME);
   eq(
     'companion.runner.suiteDigest vs base.scenarioSuiteSha',
     companion.runner?.suiteDigest,
@@ -238,6 +241,12 @@ export function validatePair({ baseBytes, companion, expect = {} }) {
   }
   if (expect.runnerCommit !== undefined)
     eq('companion.runner.commit vs runner HEAD', r.commit, expect.runnerCommit);
+  if (expect.suiteFileCount !== undefined)
+    eq(
+      'companion.runner.suiteFileCount vs computed suite file count',
+      r.suiteFileCount,
+      expect.suiteFileCount
+    );
   if (expect.suiteDigest !== undefined)
     eq('companion.runner.suiteDigest vs computed suite digest', r.suiteDigest, expect.suiteDigest);
   if (expect.browserVersion !== undefined)
@@ -255,14 +264,27 @@ export function validatePair({ baseBytes, companion, expect = {} }) {
   return errs;
 }
 
-/** Baseline and candidate must be distinct pairs on distinct hosts (not ports alone). */
+/**
+ * Baseline and each candidate are DISTINCT pairs (assessor ruling R-2,
+ * 15:39Z): distinct base Release and companion (ids and file sha256),
+ * host-distinct baseURLs (not ports alone), and each pair internally
+ * consistent (validatePair). slotGeneration VALUES need not differ; slot
+ * identity is keyed on (baseURL host, slotGeneration).
+ * @param {{base: any, companion: any, baseSha256?: string, companionSha256?: string}} a
+ * @param {{base: any, companion: any, baseSha256?: string, companionSha256?: string}} b
+ */
 export function validateDistinctPairs(a, b) {
   const errs = [];
   if (a.companion.id === b.companion.id) errs.push('same companion id');
   if (a.base.id === b.base.id) errs.push('same base Release id');
-  if (a.base.slotGeneration === b.base.slotGeneration) errs.push('same slotGeneration');
-  if (new URL(a.base.baseURL).hostname === new URL(b.base.baseURL).hostname)
-    errs.push('baseline/candidate baseURL hosts must differ (not ports alone)');
+  if (a.baseSha256 && a.baseSha256 === b.baseSha256) errs.push('same base Release file sha256');
+  if (a.companionSha256 && a.companionSha256 === b.companionSha256)
+    errs.push('same companion file sha256');
+  const hostA = new URL(a.base.baseURL).hostname;
+  const hostB = new URL(b.base.baseURL).hostname;
+  if (hostA === hostB) errs.push('baseline/candidate baseURL hosts must differ (not ports alone)');
+  if (`${hostA}|${a.base.slotGeneration}` === `${hostB}|${b.base.slotGeneration}`)
+    errs.push('same slot identity (host, slotGeneration)');
   return errs;
 }
 
@@ -355,7 +377,7 @@ export function buildCompanion(args) {
     baseURL: base.baseURL,
     releaseKind: base.releaseKind,
     phase: need(args, 'phase'),
-    contract: { name: 'wave01-contract-FROZEN-rev2.md', sha256: CONTRACT_SHA256 },
+    contract: { name: CONTRACT_NAME, sha256: CONTRACT_SHA256 },
     servedSourceSha: base.sourceSha,
     backendSourceSha: base.backendSourceSha,
     runner: {
@@ -407,7 +429,27 @@ function main() {
     console.log(errs.length ? `INVALID\n  ${errs.join('\n  ')}` : 'ok');
     process.exit(errs.length ? 1 : 0);
   }
-  console.error('usage: release.mjs base|companion|validate-pair …');
+  if (cmd === 'validate-distinct') {
+    // validate-distinct --base-a F --companion-a F --base-b F --companion-b F
+    const load = (k) => fs.readFileSync(need(args, k));
+    const pair = (bk, ck) => {
+      const bb = load(bk);
+      const cb = load(ck);
+      return {
+        base: JSON.parse(bb.toString('utf-8')),
+        companion: JSON.parse(cb.toString('utf-8')),
+        baseSha256: sha256(bb),
+        companionSha256: sha256(cb),
+      };
+    };
+    const errs = validateDistinctPairs(
+      pair('base-a', 'companion-a'),
+      pair('base-b', 'companion-b')
+    );
+    console.log(errs.length ? `NOT DISTINCT\n  ${errs.join('\n  ')}` : 'ok');
+    process.exit(errs.length ? 1 : 0);
+  }
+  console.error('usage: release.mjs base|companion|validate-pair|validate-distinct …');
   process.exit(2);
 }
 

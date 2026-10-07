@@ -24,7 +24,9 @@ import {
   applyBatch,
   clearQuarantine,
   emptyLedger,
+  envDecision,
   envStop,
+  evaluateEnvPost,
   evaluateEnv,
   isQuarantined,
   validateCapture,
@@ -92,9 +94,9 @@ describe('suite digest (§5b E-RUN, assessor-confirmed canonical form)', () => {
 });
 
 describe('manifest and pins', () => {
-  it('pins contract rev 2', () => {
+  it('pins contract rev 3', () => {
     expect(CONTRACT.sha256).toBe(
-      '1877b1d40a5e4bf04d87e47d419a4451cac5ccb2d3f27f9a63d8ce32c88a5447'
+      '69ec8b81af27c0bbb5be53a4cdf0722c98022368d6ebc947213431aeb03d6680'
     );
     expect(CONTRACT_SHA256).toBe(CONTRACT.sha256);
   });
@@ -158,7 +160,7 @@ function mkPair(over: { base?: Record<string, unknown>; comp?: Record<string, un
     baseURL: 'https://baseline.example',
     releaseKind: 'verification',
     phase: 'baseline',
-    contract: { name: 'wave01-contract-FROZEN-rev2.md', sha256: CONTRACT_SHA256 },
+    contract: { name: 'wave01-contract-FROZEN-rev3.md', sha256: CONTRACT_SHA256 },
     servedSourceSha: base.sourceSha,
     backendSourceSha: base.backendSourceSha,
     runner: {
@@ -248,7 +250,7 @@ describe('Release pair (base + wave01-release-ext companion)', () => {
       )
     ).toBe(true);
   });
-  it('baseline/candidate pairs must differ by host, not port alone', () => {
+  it('baseline/candidate pairs must differ by host, not port alone (R-2)', () => {
     const a = mkPair();
     const b = mkPair({
       base: { baseURL: 'https://baseline.example:8443', id: 'release-2', slotGeneration: 'gen-2' },
@@ -261,6 +263,25 @@ describe('Release pair (base + wave01-release-ext companion)', () => {
       )
     ).toContain('baseline/candidate baseURL hosts must differ (not ports alone)');
   });
+  it('R-2: equal slotGeneration values on different hosts are allowed; ids/file shas must differ', () => {
+    const a = mkPair();
+    const b = mkPair({
+      base: { baseURL: 'https://candidate.example', id: 'release-2' },
+      comp: { id: 'c2' },
+    });
+    expect(
+      validateDistinctPairs(
+        { base: a.base, companion: a.comp, baseSha256: 'x', companionSha256: 'y' },
+        { base: b.base, companion: b.comp, baseSha256: 'z', companionSha256: 'w' }
+      )
+    ).toEqual([]);
+    expect(
+      validateDistinctPairs(
+        { base: a.base, companion: a.comp, baseSha256: 'x' },
+        { base: b.base, companion: b.comp, baseSha256: 'x' }
+      )
+    ).toContain('same base Release file sha256');
+  });
   it('value-free guard rejects token-like strings', () => {
     expect(() =>
       assertValueFree(
@@ -272,50 +293,145 @@ describe('Release pair (base + wave01-release-ext companion)', () => {
   });
 });
 
-describe('E-ENV gates', () => {
+describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
+  const batchStart = '2026-10-07T16:00:00Z';
+  const W = { batchStart, maxAgeMin: 60 };
   const decl = {
-    window_ts: '2026-10-07T15:00:00Z',
+    window_start: '2026-10-07T15:50:00Z',
     slotGeneration: 'gen-1',
     e_env_1_dev_auth_effective: false,
+    e_env_1_sources: ['unit/args', 'settings', 'environment'],
     e_env_3_test_login_enabled: true,
     e_env_4_runtime_broker_effective: false,
-    e_env_2_anon_401: { status: 401, ts: 'x' },
-    e_env_5: { probe: 'repo-default-secret-challenge', result_status: 401, ts: 'x' },
+    e_env_4_no_broker_process_or_dispatch: true,
+    e_env_2_anon_401: { status: 401, ts: '2026-10-07T15:51:00Z' },
+    e_env_5: {
+      probe: 'repo-default-secret-challenge',
+      result_status: 401,
+      ts: '2026-10-07T15:52:00Z',
+    },
   };
-  it('all present and consistent ⇒ pass', () => {
-    expect(
-      evaluateEnv(decl, { status: 401, at: 'x' }, { slotGeneration: 'gen-1' }).every(
-        (g) => g.outcome === 'pass'
-      )
-    ).toBe(true);
+  const self = { status: 401, at: '2026-10-07T15:59:00Z' };
+  const rel = { slotGeneration: 'gen-1' };
+  const gate = (r: ReturnType<typeof evaluateEnv>, id: string) => r.find((x) => x.gate === id)!;
+
+  it('complete, bound evidence ⇒ E-ENV-1/2/3/5 pass, E-ENV-4 awaits POST evidence, no stop', () => {
+    const r = evaluateEnv(decl, self, rel, W);
+    expect(['E-ENV-1', 'E-ENV-2', 'E-ENV-3', 'E-ENV-5'].map((g) => gate(r, g).outcome)).toEqual([
+      'pass',
+      'pass',
+      'pass',
+      'pass',
+    ]);
+    expect(gate(r, 'E-ENV-4')).toMatchObject({ outcome: 'inconclusive', awaitingPost: true });
+    expect(envDecision(r)).toMatchObject({ stop: false, fails: [], missing: [] });
   });
-  it('accepted repo-default secret ⇒ E-ENV-5 FAIL and batch stop', () => {
+  it('review1 B2 repro: broker effective ON + anonymous 200 ⇒ FAIL and stop', () => {
+    const r = evaluateEnv(
+      { ...decl, e_env_4_runtime_broker_effective: true },
+      { ...self, status: 200 },
+      rel,
+      W
+    );
+    expect(gate(r, 'E-ENV-2').outcome).toBe('fail');
+    expect(gate(r, 'E-ENV-4').outcome).toBe('fail');
+    expect(envDecision(r)).toMatchObject({ stop: true, fails: ['E-ENV-2', 'E-ENV-4'] });
+  });
+  it('review1 B3 repro: stale window, stale E-ENV-5 ts, empty sources, no-dispatch false ⇒ never all-pass; stop', () => {
+    const r = evaluateEnv(
+      {
+        ...decl,
+        window_start: '2020-01-01T00:00:00Z',
+        e_env_5: { ...decl.e_env_5, ts: '2020-01-01T00:00:00Z' },
+        e_env_1_sources: [],
+        e_env_4_no_broker_process_or_dispatch: false,
+      },
+      self,
+      rel,
+      W
+    );
+    expect(gate(r, 'E-ENV-1').outcome).toBe('inconclusive');
+    expect(gate(r, 'E-ENV-4').outcome).toBe('fail');
+    expect(gate(r, 'E-ENV-5').outcome).toBe('inconclusive');
+    expect(envDecision(r).stop).toBe(true);
+  });
+  it('empty E-ENV-1 sources alone ⇒ inconclusive (stop)', () => {
+    const r = evaluateEnv({ ...decl, e_env_1_sources: [] }, self, rel, W);
+    expect(gate(r, 'E-ENV-1').outcome).toBe('inconclusive');
+    expect(envDecision(r).missing).toContain('E-ENV-1');
+  });
+  it('missing no-dispatch attestation ⇒ E-ENV-4 inconclusive without awaitingPost (stop)', () => {
+    const { e_env_4_no_broker_process_or_dispatch: _x, ...d } = decl;
+    const r = evaluateEnv(d, self, rel, W);
+    expect(gate(r, 'E-ENV-4')).toMatchObject({ outcome: 'inconclusive', awaitingPost: false });
+    expect(envDecision(r).stop).toBe(true);
+  });
+  it('window in the future or older than maxAge ⇒ inconclusive; window_ts alias accepted', () => {
+    expect(
+      gate(evaluateEnv({ ...decl, window_start: '2026-10-07T16:05:00Z' }, self, rel, W), 'E-ENV-1')
+        .outcome
+    ).toBe('inconclusive');
+    expect(
+      gate(evaluateEnv({ ...decl, window_start: '2026-10-07T14:30:00Z' }, self, rel, W), 'E-ENV-1')
+        .outcome
+    ).toBe('inconclusive');
+    const { window_start: ws, ...d } = decl;
+    expect(gate(evaluateEnv({ ...d, window_ts: ws }, self, rel, W), 'E-ENV-1').outcome).toBe(
+      'pass'
+    );
+  });
+  it('a self probe before the window start is not evidence for this window', () => {
+    expect(
+      gate(evaluateEnv(decl, { status: 401, at: '2026-10-07T15:00:00Z' }, rel, W), 'E-ENV-2')
+        .outcome
+    ).toBe('inconclusive');
+  });
+  it('accepted repo-default secret ⇒ E-ENV-5 FAIL, stop, security report', () => {
     const r = evaluateEnv(
       { ...decl, e_env_5: { ...decl.e_env_5, result_status: 200 } },
-      { status: 401, at: 'x' },
-      { slotGeneration: 'gen-1' }
+      self,
+      rel,
+      W
     );
-    expect(r.find((g) => g.gate === 'E-ENV-5')?.outcome).toBe('fail');
+    expect(gate(r, 'E-ENV-5').outcome).toBe('fail');
+    expect(envDecision(r)).toMatchObject({ stop: true, securityReport: true });
     expect(envStop(r)).toBe(true);
   });
   it('a redirect is not a 401', () => {
-    expect(
-      evaluateEnv(decl, { status: 302, at: 'x' }, { slotGeneration: 'gen-1' }).find(
-        (g) => g.gate === 'E-ENV-2'
-      )?.outcome
-    ).toBe('fail');
+    expect(gate(evaluateEnv(decl, { ...self, status: 302 }, rel, W), 'E-ENV-2').outcome).toBe(
+      'fail'
+    );
   });
   it('missing declaration or other slot generation ⇒ inconclusive', () => {
     expect(
-      evaluateEnv(null, { status: 401, at: 'x' }, { slotGeneration: 'gen-1' }).filter(
-        (g) => g.outcome === 'inconclusive'
-      )
+      evaluateEnv(null, self, rel, W).filter((g) => g.outcome === 'inconclusive')
     ).toHaveLength(4);
+    expect(gate(evaluateEnv(decl, self, { slotGeneration: 'gen-9' }, W), 'E-ENV-1').outcome).toBe(
+      'inconclusive'
+    );
+  });
+  it('POST declaration must cover the batch and attest no broker process/dispatch', () => {
+    const run = {
+      startedAt: '2026-10-07T16:00:00Z',
+      endedAt: '2026-10-07T16:20:00Z',
+      slotGeneration: 'gen-1',
+    };
+    const post = {
+      window_start: '2026-10-07T15:50:00Z',
+      window_end: '2026-10-07T16:25:00Z',
+      slotGeneration: 'gen-1',
+      e_env_1_dev_auth_effective: false,
+      e_env_4_runtime_broker_effective: false,
+      e_env_4_no_broker_process_or_dispatch: true,
+    };
+    expect(evaluateEnvPost(post, run).outcome).toBe('pass');
+    expect(evaluateEnvPost({ ...post, window_end: '2026-10-07T16:10:00Z' }, run).outcome).toBe(
+      'inconclusive'
+    );
     expect(
-      evaluateEnv(decl, { status: 401, at: 'x' }, { slotGeneration: 'gen-9' }).find(
-        (g) => g.gate === 'E-ENV-1'
-      )?.outcome
-    ).toBe('inconclusive');
+      evaluateEnvPost({ ...post, e_env_4_no_broker_process_or_dispatch: false }, run).outcome
+    ).toBe('fail');
+    expect(evaluateEnvPost(null, run).outcome).toBe('inconclusive');
   });
 });
 
@@ -348,7 +464,18 @@ describe('E7 quarantine', () => {
 });
 
 describe('capture records and validate-run', () => {
-  function writeRun(mutate?: (c: Record<string, any>) => void) {
+  function writeRun(
+    mutate?: (c: Record<string, any>) => void,
+    mutateRun?: (r: Record<string, any>) => void,
+    envPost: Record<string, unknown> | null | 'omit' = {
+      window_start: '2026-10-07T15:00:00Z',
+      window_end: '2026-10-07T16:00:00Z',
+      slotGeneration: 'gen-1',
+      e_env_1_dev_auth_effective: false,
+      e_env_4_runtime_broker_effective: false,
+      e_env_4_no_broker_process_or_dispatch: true,
+    }
+  ) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wave01-run-'));
     const { base, baseBytes, comp } = mkPair();
     fs.writeFileSync(path.join(dir, 'base.json'), baseBytes);
@@ -388,7 +515,9 @@ describe('capture records and validate-run', () => {
       readiness: [],
       actions: [],
       outcomes: [{ clause: 'B-C1', outcome: 'pass', policyIds: [] }],
-      files: [{ kind: 'shot', path: 'shot.png', sha256: sha('png-bytes') }],
+      files: [
+        { kind: 'M0-primary-screenshot-fullpage', path: 'shot.png', sha256: sha('png-bytes') },
+      ],
       loadedScripts: [{ url: 'https://baseline.example/assets/main.js' }],
       loadedMainEntry: {
         url: 'https://baseline.example/assets/main.js',
@@ -399,24 +528,93 @@ describe('capture records and validate-run', () => {
     };
     mutate?.(capture);
     fs.writeFileSync(path.join(runDir, 'W01-S01.P1.M0.capture.json'), JSON.stringify(capture));
-    fs.writeFileSync(
-      path.join(runDir, 'run.json'),
-      JSON.stringify({
-        kind: 'wave01-capture-run',
-        runId: 'run-1',
-        evidenceMode: 'evidence',
-        batchValid: true,
-        baseReleaseSha256: sha(baseBytes),
-        companionSha256: compSha,
-        contractSha256: CONTRACT_SHA256,
-        runner: { head: comp.runner.commit, suiteDigest: comp.runner.suiteDigest },
-        captureIds: ['cap-1'],
-      })
-    );
-    return validateRun(runDir, path.join(dir, 'base.json'), path.join(dir, 'comp.json'));
+    const runObj: Record<string, any> = {
+      kind: 'wave01-capture-run',
+      runId: 'run-1',
+      evidenceMode: 'evidence',
+      batchValid: true,
+      baseReleaseSha256: sha(baseBytes),
+      companionSha256: compSha,
+      contractSha256: CONTRACT_SHA256,
+      runner: { head: comp.runner.commit, suiteDigest: comp.runner.suiteDigest },
+      captureIds: ['cap-1'],
+      startedAt: '2026-10-07T15:10:00Z',
+      endedAt: '2026-10-07T15:20:00Z',
+      expectedRecords: ['W01-S01.P1.M0.capture.json'],
+      env: [
+        { gate: 'E-ENV-1', outcome: 'pass' },
+        { gate: 'E-ENV-2', outcome: 'pass' },
+        { gate: 'E-ENV-3', outcome: 'pass' },
+        { gate: 'E-ENV-4', outcome: 'inconclusive', awaitingPost: true },
+        { gate: 'E-ENV-5', outcome: 'pass' },
+      ],
+      envPostSelfAnon401: { status: 401, at: '2026-10-07T15:20:01Z' },
+    };
+    mutateRun?.(runObj);
+    fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify(runObj));
+    let postFile: string | undefined;
+    if (envPost !== 'omit') {
+      postFile = path.join(dir, 'env-post.json');
+      if (envPost) fs.writeFileSync(postFile, JSON.stringify(envPost));
+    }
+    return validateRun(runDir, path.join(dir, 'base.json'), path.join(dir, 'comp.json'), postFile);
   }
   it('a consistent run validates', () => {
     expect(writeRun()).toEqual([]);
+  });
+  it('validate-run independently rejects E-ENV failures and missing POST evidence (review1 B2/B3)', () => {
+    expect(
+      writeRun(undefined, (r) => (r.env[1] = { gate: 'E-ENV-2', outcome: 'fail' })).some((e) =>
+        e.includes('E-ENV-2 FAIL')
+      )
+    ).toBe(true);
+    expect(
+      writeRun(undefined, (r) => (r.env[3] = { gate: 'E-ENV-4', outcome: 'inconclusive' })).some(
+        (e) => e.startsWith('missing: E-ENV-4')
+      )
+    ).toBe(true);
+    expect(
+      writeRun(undefined, (r) => (r.envPostSelfAnon401 = { status: 200 })).some((e) =>
+        e.includes('post-batch anonymous probe')
+      )
+    ).toBe(true);
+    expect(
+      writeRun(undefined, undefined, 'omit').some((e) =>
+        e.includes('POST env declaration not supplied')
+      )
+    ).toBe(true);
+    expect(writeRun(undefined, undefined, null).some((e) => e.includes('missing: POST env'))).toBe(
+      true
+    );
+    expect(
+      writeRun(undefined, undefined, {
+        window_start: '2026-10-07T15:00:00Z',
+        window_end: '2026-10-07T16:00:00Z',
+        slotGeneration: 'gen-1',
+        e_env_1_dev_auth_effective: false,
+        e_env_4_runtime_broker_effective: false,
+        e_env_4_no_broker_process_or_dispatch: false,
+      }).some((e) => e.startsWith('mismatch: POST env E-ENV-4'))
+    ).toBe(true);
+  });
+  it('an aborted run never validates (review1 B4)', () => {
+    expect(
+      writeRun(undefined, (r) =>
+        Object.assign(r, { aborted: true, abortReason: 'readback exception' })
+      ).some((e) => e.includes('run aborted'))
+    ).toBe(true);
+  });
+  it('completeness: a missing expected record or M0-primary screenshot is reported (review1 N5)', () => {
+    expect(
+      writeRun(undefined, (r) => r.expectedRecords.push('W01-S01.P2.M0.capture.json')).some((e) =>
+        e.includes('missing: expected record W01-S01.P2.M0')
+      )
+    ).toBe(true);
+    expect(
+      writeRun((c) => (c.files[0].kind = 'other')).some((e) =>
+        e.includes('M0-primary full-page screenshot')
+      )
+    ).toBe(true);
   });
   it('rejects a capture bound to another companion, a changed file or a wrong loaded main entry', () => {
     expect(

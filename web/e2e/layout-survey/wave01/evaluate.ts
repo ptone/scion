@@ -14,7 +14,7 @@
 
 /**
  * Pure Wave01 clause evaluators over RAW probe output (contract FROZEN
- * rev 2). No browser access: every function maps stored measurements to an
+ * rev 3). No browser access: every function maps stored measurements to an
  * outcome, so the assessor can recompute from the raw JSON. Each outcome
  * carries its clause ID, the policy IDs it relied on and its raw inputs.
  */
@@ -27,7 +27,7 @@ export type Outcome = 'pass' | 'fail' | 'pending' | 'inconclusive' | 'not-applic
 export interface ClauseResult {
   clause: string;
   /** Source of the clause definition. */
-  source: 'contract-rev2' | 'pilot-finding-rev2';
+  source: 'contract-rev3' | 'pilot-finding-rev2';
   outcome: Outcome;
   policyIds: string[];
   details: unknown;
@@ -260,7 +260,7 @@ function combine(outcomes: Outcome[]): Outcome {
 export function evalAD1(m: Pick<MeasureResult, 'doc' | 'innerWidth'>): ClauseResult {
   return {
     clause: 'A-D1',
-    source: 'contract-rev2',
+    source: 'contract-rev3',
     outcome: m.doc.scrollWidth <= m.innerWidth + TOL ? 'pass' : 'fail',
     policyIds: [],
     details: { docScrollWidth: m.doc.scrollWidth, innerWidth: m.innerWidth },
@@ -272,7 +272,7 @@ export function evalAC1(overflow: RawOverflowEntry[] | null): ClauseResult {
   if (!overflow) {
     return {
       clause: 'A-C1',
-      source: 'contract-rev2',
+      source: 'contract-rev3',
       outcome: 'inconclusive',
       policyIds: [],
       details: 'no overflow scan',
@@ -289,7 +289,7 @@ export function evalAC1(overflow: RawOverflowEntry[] | null): ClauseResult {
   }
   return {
     clause: 'A-C1',
-    source: 'contract-rev2',
+    source: 'contract-rev3',
     outcome: failing.length === 0 ? 'pass' : 'fail',
     policyIds: Array.from(new Set(exempt.map((e) => e.exemptBy))),
     details: { scanned: overflow.length, failing, exempt },
@@ -317,7 +317,7 @@ export function evalAS1(
     const ok = sidebarHidden && !!menuBtn && menuBtn.visible && btn?.status === 'pass';
     return {
       clause: 'A-S1',
-      source: 'contract-rev2',
+      source: 'contract-rev3',
       outcome: ok ? 'pass' : btn?.status === 'pending' && sidebarHidden ? 'pending' : 'fail',
       policyIds: [],
       details: {
@@ -335,7 +335,7 @@ export function evalAS1(
       : 0;
   return {
     clause: 'A-S1',
-    source: 'contract-rev2',
+    source: 'contract-rev3',
     outcome: visible && inX && !!content && ow <= TOL ? 'pass' : 'fail',
     policyIds: [],
     details: {
@@ -376,7 +376,7 @@ export function evalAS2(
   const outcome: Outcome = !headerOk || overlaps.length ? 'fail' : combine(statuses);
   return {
     clause: 'A-S2',
-    source: 'contract-rev2',
+    source: 'contract-rev3',
     outcome,
     policyIds: [],
     details: { headerBox: header?.box ?? null, targets: per, siblingOverlaps: overlaps },
@@ -394,13 +394,13 @@ export interface NavRaw {
   accessibleName: string | null;
 }
 
-/** A-N2 (rev 2): rendered = checkVisibility(); zero rendered ⇒ not-applicable. */
+/** A-N2 (rev 3): rendered = checkVisibility(); zero rendered ⇒ not-applicable. */
 export function evalAN2(nav: NavRaw[]): ClauseResult {
   const rendered = nav.filter((n) => n.rendered);
   if (rendered.length === 0) {
     return {
       clause: 'A-N2',
-      source: 'contract-rev2',
+      source: 'contract-rev3',
       outcome: 'not-applicable',
       policyIds: [],
       details: { rendered: 0, domCount: nav.length },
@@ -413,7 +413,7 @@ export function evalAN2(nav: NavRaw[]): ClauseResult {
   });
   return {
     clause: 'A-N2',
-    source: 'contract-rev2',
+    source: 'contract-rev3',
     outcome: per.every((p) => p.nameOk && p.tipOk) ? 'pass' : 'fail',
     policyIds: [],
     details: { rendered: rendered.length, domCount: nav.length, entries: per },
@@ -514,10 +514,38 @@ export function evalBA2(rows: FixtureRowObs[]): ClauseResult {
 }
 
 /** B-A3 element check for one row. */
+/**
+ * Rev 3 §1 rendered-text comparison: apply the element's computed
+ * white-space collapsing to v, then compare with the element's innerText.
+ * normal/nowrap: collapse every whitespace run (incl. newlines) to one space
+ * and trim; pre/pre-wrap/break-spaces: exact; pre-line: collapse spaces/tabs
+ * only. Returns the transformed v for the record.
+ */
+export function renderedTextEquals(
+  innerText: string | null,
+  v: string,
+  whiteSpace: string
+): { equal: boolean; expected: string; rule: string } {
+  let expected: string;
+  let rule: string;
+  if (whiteSpace === 'pre' || whiteSpace === 'pre-wrap' || whiteSpace === 'break-spaces') {
+    expected = v;
+    rule = 'exact';
+  } else if (whiteSpace === 'pre-line') {
+    expected = v.replace(/[ \t]+/g, ' ');
+    rule = 'collapse-spaces-tabs';
+  } else {
+    expected = v.replace(/\s+/g, ' ').trim();
+    rule = 'collapse-all-trim';
+  }
+  return { equal: innerText !== null && innerText === expected, expected, rule };
+}
+
 export function nameCheck(name: string, accessibleName: string | null): ElementCheck {
   return (link, innerWidth) => {
     const onScreen = link.box.x >= -TOL && link.box.right <= innerWidth + TOL;
-    const shapeI = link.text === name && link.scrollWidth <= link.clientWidth + TOL;
+    const rendered = renderedTextEquals(link.innerText, name, link.whiteSpace);
+    const shapeI = rendered.equal && link.scrollWidth <= link.clientWidth + TOL;
     const shapeII =
       link.scrollWidth > link.clientWidth &&
       (link.title === name || link.ariaLabel === name || accessibleName === name);
@@ -525,7 +553,10 @@ export function nameCheck(name: string, accessibleName: string | null): ElementC
     const h = clip(link).status === 'pending' ? 'pending' : hitTest(link);
     const details = {
       box: link.box,
-      text: link.text,
+      innerText: link.innerText,
+      whiteSpace: link.whiteSpace,
+      readbackName: name,
+      renderedTextComparison: rendered,
       scrollWidth: link.scrollWidth,
       clientWidth: link.clientWidth,
       title: link.title,
@@ -577,7 +608,7 @@ export function evalBOVR(bc1: ClauseResult, hiddenColumns: RawElement[]): Clause
   };
 }
 
-// ─── A-F1 keyboard (§2, rev 2 rules) ─────────────────────────────────────
+// ─── A-F1 keyboard (§2, rev 3 rules) ─────────────────────────────────────
 
 export interface PressRecord {
   direction: 'forward' | 'backward';
@@ -600,6 +631,7 @@ export function pressChecks(
   hit: boolean;
   indicator: boolean;
   indicatorBy: string | null;
+  diffKeys: string[];
 } {
   if (p.outside || !p.element)
     return {
@@ -609,6 +641,7 @@ export function pressChecks(
       hit: false,
       indicator: false,
       indicatorBy: null,
+      diffKeys: [],
     };
   const e = p.element;
   const b = e.box;
@@ -624,13 +657,29 @@ export function pressChecks(
   let indicatorBy: string | null = null;
   if (s.outlineStyle !== 'none' && parseFloat(s.outlineWidth ?? '0') > 0) indicatorBy = 'outline';
   else if (s.boxShadow && s.boxShadow !== 'none') indicatorBy = 'box-shadow';
-  else {
+  let diffKeys: string[] = [];
+  if (indicatorBy === null) {
+    // Fallback (iii): a computed style difference from the same element
+    // unfocused. outline-* is excluded: the outline is fully judged by rule
+    // (i), and Chromium's UA :focus-visible rule changes outline-offset (and
+    // may change outline-width/color) even under author `outline: none`,
+    // which is not a visible indicator (review1 B1).
     const base = baseline[e.path];
-    if (base && Object.keys(s).some((k) => s[k] !== base[k]))
-      indicatorBy = 'style-diff-from-unfocused';
+    if (base) {
+      diffKeys = Object.keys(s).filter((k) => !k.startsWith('outline') && s[k] !== base[k]);
+      if (diffKeys.length) indicatorBy = 'style-diff-from-unfocused';
+    }
   }
   const indicator = indicatorBy !== null;
-  return { graded: true, ok: visible && hit && indicator, visible, hit, indicator, indicatorBy };
+  return {
+    graded: true,
+    ok: visible && hit && indicator,
+    visible,
+    hit,
+    indicator,
+    indicatorBy,
+    diffKeys,
+  };
 }
 
 export function evalAF1(input: {
@@ -670,7 +719,7 @@ export function evalAF1(input: {
   const unreached = input.targets.filter((t) => !reachedF.has(t) && !reachedB.has(t));
   return {
     clause: 'A-F1',
-    source: 'contract-rev2',
+    source: 'contract-rev3',
     outcome: anyBad || unreached.length > 0 ? 'fail' : 'pass',
     policyIds: [],
     details: {

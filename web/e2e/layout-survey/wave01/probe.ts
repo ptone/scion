@@ -87,7 +87,10 @@ export interface RawElement {
   opacity: string;
   position: string;
   box: RawBox;
+  /** textContent with whitespace runs collapsed (diagnostic only). */
   text: string;
+  /** Rendered text (HTMLElement.innerText), unmodified (contract rev 3 rendered-text rule). */
+  innerText: string | null;
   title: string | null;
   ariaLabel: string | null;
   scrollWidth: number;
@@ -492,6 +495,7 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
       position: cs.position,
       box: boxOf(r),
       text: (el.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      innerText: el instanceof HTMLElement ? el.innerText : null,
       title: el.getAttribute('title'),
       ariaLabel: el.getAttribute('aria-label'),
       scrollWidth: he.scrollWidth,

@@ -16,7 +16,7 @@
  * W01-S01 / W01-S02 adapter (/admin/groups default and fixture filter).
  * Groups-table clauses are the pilot finding rev 2 B-* definitions with
  * fixture IDs bound from Wave01 in-batch readback; shell clauses and A-F1
- * follow contract FROZEN rev 2.
+ * follow contract FROZEN rev 3.
  */
 
 import { AF1_N, NAV_TIMEOUT_MS, TOL, type ProfileId } from './contract.js';
@@ -116,7 +116,36 @@ const sortKeys = (o: Record<string, string>) =>
  * Fixture rows are bound by slug and must equal the recipe content; the
  * steward map's ids must equal the readback ids (drift ⇒ capture error).
  */
+/**
+ * Guarded in-batch readback: any network/parse exception becomes a recorded
+ * readback failure (rb.ok = false), which the runner turns into per-substep
+ * CAPTURE ERRORs (§2b), never a batch abort (review1 B4).
+ */
 export async function readback(
+  baseURL: string,
+  token: string,
+  principalId: string,
+  state: StateDef,
+  map: GroupsFixtureMap
+): Promise<Readback> {
+  try {
+    return await readbackUnguarded(baseURL, token, principalId, state, map);
+  } catch (e) {
+    return {
+      endpoint: 'groups readback',
+      status: 0,
+      at: now(),
+      principalId,
+      bodySha256: null,
+      ok: false,
+      ids: [],
+      fixture: [],
+      problems: [`readback exception: ${String(e instanceof Error ? e.message : e).slice(0, 300)}`],
+    };
+  }
+}
+
+async function readbackUnguarded(
   baseURL: string,
   token: string,
   principalId: string,
@@ -546,7 +575,8 @@ export async function traverse(
   ctx: SubstepCtx,
   direction: 'forward' | 'backward',
   targets: Record<string, string>,
-  limit: number
+  limit: number,
+  opts: { expectBodyStart: boolean } = { expectBodyStart: true }
 ): Promise<{
   presses: PressRecord[];
   baseline: Record<string, Record<string, string>>;
@@ -567,6 +597,19 @@ export async function traverse(
     element: RawElement | null;
   };
   const startPath = start.element?.path ?? null;
+  // Rev 3 §2 A-F1 start point: states without measured preparation actions
+  // (all S01/S02) start from a fresh load with focus on body (review1 N3).
+  if (opts.expectBodyStart)
+    ctx.readiness.push({
+      id: `M1:${direction}:native-start-focus-on-body`,
+      ok: start.outside,
+      at: now(),
+      details: { deepActiveElement: startPath ?? 'body/document', outside: start.outside },
+    });
+  if (opts.expectBodyStart && !start.outside)
+    throw new CaptureError(
+      `A-F1 start point is not body after a fresh load (deep activeElement ${startPath})`
+    );
   const startReached = reachedBy(startPath ?? undefined, targets);
   const remaining = new Set(Object.keys(targets).filter((k) => !startReached.includes(k)));
   const presses: PressRecord[] = [];
@@ -597,7 +640,7 @@ export async function traverse(
       element: a.element,
       reached,
     });
-    if (a.outside) break; // rev 2: focus leaving the page ends this direction
+    if (a.outside) break; // rev 3 §2 A-F1: focus leaving the page ends this direction
   }
   return { presses, baseline, startPath, startReached };
 }

@@ -15,15 +15,18 @@
 /**
  * Pinned identities and frozen constants of the Wave01 acceptance contract.
  * Values are copied from the contract text; the runner never learns them
- * from results. Section references (§) are to FROZEN rev 2.
+ * from results. Section references (§) are to FROZEN rev 3.
  */
 
 export const CONTRACT = Object.freeze({
-  name: 'wave01-contract-FROZEN-rev2.md',
-  revision: 2,
-  bytes: 42455,
-  sha256: '1877b1d40a5e4bf04d87e47d419a4451cac5ccb2d3f27f9a63d8ce32c88a5447',
-  supersedes: 'f7143415343058363d29fb0fcf693bdd4183088a4fcf916d62d7feea2747e8ae',
+  name: 'wave01-contract-FROZEN-rev3.md',
+  revision: 3,
+  bytes: 44319,
+  sha256: '69ec8b81af27c0bbb5be53a4cdf0722c98022368d6ebc947213431aeb03d6680',
+  supersedes: [
+    '1877b1d40a5e4bf04d87e47d419a4451cac5ccb2d3f27f9a63d8ce32c88a5447',
+    'f7143415343058363d29fb0fcf693bdd4183088a4fcf916d62d7feea2747e8ae',
+  ],
 });
 
 /** Pilot finding rev 2: B-* clauses for S01/S02 (contract §2 "Groups table"). */
@@ -65,7 +68,7 @@ export const ENVIRONMENT = Object.freeze({
  * `scion-app` (main.ts:1267-1269 SHELL_TAGS.app). The policies are pinned by
  * file:line (e.g. POL-V-APP-CONTENT `.content` app-shell.ts:169-185), so the
  * runner keys on the tag actually defined there. Assessor ruling R-1
- * (2026-10-07T15:20Z): the cited file:line governs; no revision needed.
+ * (2026-10-07T15:20Z), folded into rev 3 §1a as an erratum.
  */
 export const APP_SHELL_TAG = 'scion-app';
 

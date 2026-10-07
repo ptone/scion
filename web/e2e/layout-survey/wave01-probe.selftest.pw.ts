@@ -24,8 +24,16 @@
 
 import { test, expect, type Page } from '@playwright/test';
 import { ACTIONABLE, POLICIES } from './wave01/contract.js';
-import { clip, clipAndHit, evalAC1, pressChecks } from './wave01/evaluate.js';
+import {
+  clip,
+  clipAndHit,
+  evalAC1,
+  evalAN2,
+  pressChecks,
+  renderedTextEquals,
+} from './wave01/evaluate.js';
 import { probe, type MeasureResult, type ProbeRequest, type RawElement } from './wave01/probe.js';
+import { navRaw, type SubstepCtx } from './wave01/runner-lib.js';
 
 const HTML = `<!doctype html><html><head><style>
   html,body{margin:0;height:100%;font:14px sans-serif}
@@ -106,7 +114,7 @@ test('probe walks slot + shadow chain, matches policies by host, detects POL-SR'
   ).toBe(true);
   expect(
     failing.some((p) => p.includes('caption')),
-    'POL-SR caption is exempt (rev 2)'
+    'POL-SR caption is exempt (rev 2+)'
   ).toBe(false);
 });
 
@@ -200,4 +208,128 @@ test('nav op and element-bound path op', async ({ page }) => {
   );
   const m = await measure(page, [{ key: 'l', op: 'one', css: 'a.group-name-link' }]);
   expect(p).toBe(m.elements.l![0]!.path);
+});
+
+// ─── Real-Chromium controls for review1 B1, B5 (rev 3) and N4 ─────────────
+
+const HTML2 = `<!doctype html><html><head><style>
+  html,body{margin:0;font:14px sans-serif}
+  #bg:focus-visible{outline:none;background:rgb(255,255,0)}
+</style></head><body>
+<a id="noring" href="#a" style="outline:none">No ring</a>
+<a id="zero" href="#b" style="outline:0">Zero outline</a>
+<a id="bg" href="#c">Background indicator</a>
+<span id="ws-normal" style="white-space:normal">Double  Space
+  wrapped</span>
+<span id="ws-pre" style="white-space:pre-wrap">A  B</span>
+<scion-app></scion-app>
+<script>
+  customElements.define('scion-nav', class extends HTMLElement {
+    constructor(){super();const r=this.attachShadow({mode:'open'});
+      r.innerHTML='<nav class="nav-container">'
+        +'<sl-tooltip content="Projects"><a class="nav-link" href="/projects"><span aria-hidden="true">*</span><span class="nav-link-text">Projects</span></a></sl-tooltip>'
+        +'<sl-tooltip content="Say \\u0022hi\\u0022 \\\\ there"><a class="nav-link" href="/q"><span class="nav-link-text">Say "hi" \\\\ there</span></a></sl-tooltip>'
+        +'<sl-tooltip content="Groups"><a class="nav-link" href="/g" aria-label="Override"><span class="nav-link-text">Groups</span></a></sl-tooltip>'
+        +'<a class="nav-link" href="/hidden" style="display:none"><span class="nav-link-text">Hidden</span></a>'
+        +'</nav>';}
+  });
+  customElements.define('scion-app', class extends HTMLElement {
+    constructor(){super();const r=this.attachShadow({mode:'open'});
+      r.innerHTML='<aside class="sidebar"><scion-nav></scion-nav></aside>';}
+  });
+</script></body></html>`;
+
+async function tabTo(page: Page, id: string) {
+  const baseline = await run<Record<string, Record<string, string>>>(
+    page,
+    req({ op: 'focus-baseline' })
+  );
+  for (let i = 0; i < 15; i++) {
+    await page.keyboard.press('Tab');
+    const a = await run<{
+      outside: boolean;
+      element: RawElement | null;
+      innerWidth: number;
+      innerHeight: number;
+    }>(page, req({ op: 'active', policies: POLICIES, policyContext: [], actionable: ACTIONABLE }));
+    if (a.element?.idAttr === id) {
+      return pressChecks(
+        {
+          direction: 'forward',
+          press: i + 1,
+          outside: false,
+          innerWidth: a.innerWidth,
+          innerHeight: a.innerHeight,
+          element: a.element,
+          reached: [],
+        },
+        baseline
+      );
+    }
+  }
+  throw new Error(`never focused #${id}`);
+}
+
+test('B1 negative control: outline:none / outline:0 with no other change has NO indicator (rev 3 (c))', async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const none = await tabTo(page, 'noring');
+  expect(none.indicator, JSON.stringify(none)).toBe(false);
+  const zero = await tabTo(page, 'zero');
+  expect(zero.indicator, JSON.stringify(zero)).toBe(false);
+});
+
+test('rev 3 (c) positive control: a non-outline focus style change IS an indicator', async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const bg = await tabTo(page, 'bg');
+  expect(bg).toMatchObject({ indicator: true, indicatorBy: 'style-diff-from-unfocused' });
+  expect(bg.diffKeys).toContain('backgroundColor');
+  expect(bg.diffKeys.some((k) => k.startsWith('outline'))).toBe(false);
+});
+
+test('rev 3 rendered-text rule against real innerText and computed white-space', async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const m = await measure(page, [
+    { key: 'n', op: 'one', css: '#ws-normal' },
+    { key: 'p', op: 'one', css: '#ws-pre' },
+  ]);
+  const n = m.elements.n![0]!;
+  const p = m.elements.p![0]!;
+  expect(n.whiteSpace).toBe('normal');
+  expect(renderedTextEquals(n.innerText, 'Double  Space\n  wrapped', n.whiteSpace).equal).toBe(
+    true
+  );
+  expect(renderedTextEquals(n.innerText, 'Double Spaced wrapped', n.whiteSpace).equal).toBe(false);
+  expect(p.whiteSpace).toBe('pre-wrap');
+  expect(renderedTextEquals(p.innerText, 'A  B', p.whiteSpace).equal).toBe(true);
+  expect(renderedTextEquals(p.innerText, 'A B', p.whiteSpace).equal).toBe(false);
+});
+
+test('N4: nav op + computed accessible names through shadow roots (quotes, backslash, aria-label override)', async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const nav = await navRaw({ page, policyContext: [] } as unknown as SubstepCtx);
+  const byHref = Object.fromEntries(nav.map((n) => [n.href, n]));
+  expect(nav).toHaveLength(4);
+  expect(byHref['/projects']).toMatchObject({
+    rendered: true,
+    labelText: 'Projects',
+    tooltipContent: 'Projects',
+    accessibleName: 'Projects',
+  });
+  expect(byHref['/q']).toMatchObject({
+    labelText: 'Say "hi" \\ there',
+    accessibleName: 'Say "hi" \\ there',
+  });
+  expect(byHref['/g']).toMatchObject({ labelText: 'Groups', accessibleName: 'Override' });
+  expect(byHref['/hidden']).toMatchObject({ rendered: false, accessibleName: null });
+  const an2 = evalAN2(nav);
+  expect(an2.outcome, 'aria-label override ≠ label ⇒ A-N2 fails').toBe('fail');
+  expect((an2.details as { domCount: number }).domCount).toBe(4);
 });
