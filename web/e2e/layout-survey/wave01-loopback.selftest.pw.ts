@@ -274,6 +274,13 @@ async function runRunner(mode: Mode) {
     .filter((f) =>
       /scion_dev_[0-9a-f]{16,}/.test(fs.readFileSync(path.join(runDir, f)).toString('latin1'))
     );
+  // review5 O-3 / owner: write-once evidence policy — every run file is 0444
+  // (JSON created exclusively read-only; screenshots chmod'ed; run dir sealed),
+  // in every mode including aborted and stopped runs.
+  const writable = fs
+    .readdirSync(runDir)
+    .filter((f) => (fs.statSync(path.join(runDir, f)).mode & 0o777) !== 0o444);
+  expect(writable, 'every run artifact is read-only (0444)').toEqual([]);
   return { code, runDir, run, read, files: fs.readdirSync(runDir), tokenHits };
 }
 
@@ -357,7 +364,7 @@ test('test-login failure: honest aborted run.json, batchValid false, test fails'
   expect(r.code).not.toBe(0);
 });
 
-test('dev-auth ON (rev 4 probes): E-ENV-1 FAIL stops the batch before capture with an honest run.json', async () => {
+test('dev-auth ON (E-ENV-1a probes): E-ENV-1 FAIL stops the batch before capture with an honest run.json', async () => {
   const r = await runRunner('dev-auth-on');
   expect(r.run.batchValid).toBe(false);
   expect((r.run.stopped as string[]).join(' ')).toContain('E-ENV-1');

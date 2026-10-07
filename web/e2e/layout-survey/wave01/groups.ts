@@ -16,7 +16,7 @@
  * W01-S01 / W01-S02 adapter (/admin/groups default and fixture filter).
  * Groups-table clauses are the pilot finding rev 2 B-* definitions with
  * fixture IDs bound from Wave01 in-batch readback; shell clauses and A-F1
- * follow contract FROZEN rev 5.
+ * follow contract FROZEN rev 7.
  */
 
 import { AF1_N, NAV_TIMEOUT_MS, TOL, type ProfileId } from './contract.js';
@@ -585,7 +585,7 @@ export async function traverse(
   startPath: string | null;
   startReached: string[];
 }> {
-  // Rev 5 A-F1 (c): U1, settle, U2 before the first press (raw maps are
+  // Rev 7 A-F1 (c): U1, settle, U2 before the first press (raw maps are
   // preserved in the M1 raw record).
   const baseline = await sampleFocusBaseline(ctx.page);
   const start = (await pe(ctx.page, {
@@ -629,6 +629,7 @@ export async function traverse(
       element: RawElement | null;
       innerWidth: number;
       innerHeight: number;
+      runningAnimations?: PressRecord['runningAnimations'];
     };
     const reached = reachedBy(a.element?.path, targets);
     reached.forEach((r) => remaining.delete(r));
@@ -640,6 +641,7 @@ export async function traverse(
       innerHeight: a.innerHeight,
       element: a.element,
       reached,
+      runningAnimations: a.runningAnimations ?? [],
     });
     if (a.outside) break; // rev 3 §2 A-F1: focus leaving the page ends this direction
   }

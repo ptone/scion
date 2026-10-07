@@ -1051,7 +1051,7 @@ export function validateCapture(rec) {
   if (rec.schemaVersion !== 1) errs.push('schemaVersion must be 1');
   if (rec.kind !== CAPTURE_KIND) errs.push(`kind must be ${CAPTURE_KIND}`);
   if (rec.contractSha256 !== CONTRACT_SHA256)
-    errs.push('contractSha256 is not the pinned FROZEN rev 5 digest');
+    errs.push('contractSha256 is not the pinned FROZEN rev 7 digest');
   if (!SUBSTEPS.includes(rec.substep)) errs.push(`substep ${rec.substep} invalid`);
   if (!STATUSES.includes(rec.status)) errs.push(`status ${rec.status} invalid`);
   if (rec.status !== 'complete' && isEmpty(rec.errorReason))

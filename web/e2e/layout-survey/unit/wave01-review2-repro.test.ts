@@ -33,13 +33,24 @@
  * private (0600):
  *   post4.mjs        2656 B c8ebb04b… (RB4-1 P0–P6, translated below)
  *   tamper-repro.sh  1232 B 729759b0… (RB4-2, translated to a temp-repo test below)
- *   o2-anim.mjs      1313 B 27d58e6a… (O-b ⇒ contract rev 5 A-F1 (c); real-Chromium
+ *   o2-anim.mjs      1313 B 27d58e6a… (O-b ⇒ contract rev 5, now rev 7 A-F1 (c); real-Chromium
  *                    controls in wave01-probe.selftest.pw.ts)
  *   env3-tagged.mjs  5492 B ca0937c1da575bcd0abd0905aa2ec9f523edbfa0fae1b38d5e6bd117a396e491
  *   env3b-tagged.mjs 2954 B e681292eb747b42eb4b977f1b8aae9e14ccc5485eeaea96d2c12ca74ffbc9f7a
  *   env3c-tagged.mjs 2225 B c3f18a3bf160bc33e6d0d1b45f3174d92eba8eca30f42a2e10f821d3ea51e363
  *                    (review3 Q/C cases with source tags; outputs identical at
  *                    719ccced and this head; covered by the review3 section)
+ *
+ * review5 round 1 (report wl-wave1-runner-review5-r1.md 17935 B
+ * 3d181e1a61b56c61a13479ba0807bcc70213711dd98b96ee937db4bdd4863643, head
+ * fc414643) artifacts, byte-verified and kept private (0600):
+ *   mask.mjs       2837 B d4fdab8f209689a0ab442fe9ce271193746e0d7f602bfb772f779e4210d6e80c (RB5-1 M0–M5)
+ *   rv5-insert.txt 1334 B 5002e79317e1a3a1cddbb1654968188f613e079f64115426024dcb006f100023 (RB5-2;
+ *                  translated in unit/wave01-records.test.ts "R-13" cases)
+ *   rb42.sh         919 B 27c01103573086387baf561cf34de722746e6a57877310d21a817345e9a4c861 (RB4-2 recheck)
+ *   restart.mjs    1769 B 80797fdbd4acf7d2156283db6b2de3e5192d07473a38a4811ee43622799021da (O-2 ⇒ ruling R-14, below)
+ *   o-slow.mjs     1951 B 36f24d8cb509317215e75eea4ce3be708956e61f7d3a82897824c14768909eef (O-1 ⇒ contract rev 6/7;
+ *                  real-Chromium steps(1)/60 s controls in wave01-probe.selftest.pw.ts)
  */
 
 import { execFileSync } from 'node:child_process';
@@ -783,5 +794,106 @@ describe('R-12: attributable POST compares recorded environment values BEFORE co
     });
     const whole = { ...run, preProvenanceKey: provenanceKey(PROV), preSupportKey: undefined };
     expect(evaluateEnvPost(post({ e_env_1_provenance: p }), whole).outcome).toBe('fail');
+  });
+});
+
+describe('review5 RB5-1 (mask.mjs M0–M5): incompleteness never masks a same-process environment FAIL', () => {
+  const mut = (f: (p: any) => void) => {
+    const p = JSON.parse(JSON.stringify(PROV));
+    f(p);
+    return p;
+  };
+  const cases: Array<[string, (p: any) => void, string]> = [
+    [
+      'M0 complete record, env differs (control)',
+      (p) => (p.env.SCION_SERVER_AUTH_DEVMODE = 'false'),
+      'env.SCION_SERVER_AUTH_DEVMODE',
+    ],
+    [
+      'M1 log_ts_source missing + env differs',
+      (p) => {
+        delete p.support.hosted.log_ts_source;
+        p.env.SCION_SERVER_AUTH_DEVMODE = 'false';
+      },
+      'env.SCION_SERVER_AUTH_DEVMODE',
+    ],
+    [
+      'M2 dev_auth.basis wording + flags --dev-auth false→absent',
+      (p) => {
+        p.support.dev_auth.basis = 'x';
+        p.flags['--dev-auth'] = 'absent';
+      },
+      'flags.--dev-auth',
+    ],
+    [
+      'M3 files_examined deleted + env SCION_SERVER_MODE absent→workstation',
+      (p) => {
+        delete p.files_examined;
+        p.env.SCION_SERVER_MODE = 'workstation';
+      },
+      'env.SCION_SERVER_MODE',
+    ],
+    [
+      'M4 support.auth_mode deleted + load_path settings-global→settings-local',
+      (p) => {
+        delete p.support.auth_mode;
+        p.load_path = 'settings-local';
+      },
+      'load_path',
+    ],
+    [
+      'M5 internal contradiction (--hosted false, declared hosted true) + DEVMODE differs',
+      (p) => {
+        p.flags['--hosted'] = false;
+        p.env.SCION_SERVER_AUTH_DEVMODE = 'true';
+      },
+      'env.SCION_SERVER_AUTH_DEVMODE',
+    ],
+  ];
+  for (const [id, f, path] of cases)
+    it(`${id} ⇒ FAIL naming ${path}`, () => {
+      const out = evaluateEnvPost(post({ e_env_1_provenance: mut(f) }), run);
+      expect(out.outcome).toBe('fail');
+      expect(out.fails.join(' ')).toContain(path);
+    });
+  it('M3: the deleted files_examined is not compared (one-sided), never a FAIL by itself', () => {
+    const out = evaluateEnvPost(
+      post({
+        e_env_1_provenance: mut((p) => {
+          delete p.files_examined;
+          p.env.SCION_SERVER_MODE = 'workstation';
+        }),
+      }),
+      run
+    );
+    expect(out.fails.join(' ')).not.toContain('files_examined');
+    expect(out.open.join(' ')).toContain('files_examined');
+  });
+});
+
+describe('ruling R-14 (review5 O-2, restart.mjs): shared booleans are slot-level, provenance is process-level', () => {
+  const restarted = { serving_process_start_ts: '2026-10-07T16:10:00Z' };
+  it('restart + PRE test-login true / POST false ⇒ FAIL (slot environment changed during the batch; FAIL wins over restart)', () => {
+    const out = evaluateEnvPost(post({ ...restarted, e_env_3_test_login_enabled: false }), {
+      ...run,
+      testLoginUsed: false,
+    });
+    expect(out.outcome).toBe('fail');
+    expect(out.fails.join(' ')).toContain('e_env_3_test_login_enabled');
+    expect(out.open.join(' ')).toContain('restarted');
+  });
+  it('restart alone ⇒ INCONCLUSIVE, not FAIL', () => {
+    const out = evaluateEnvPost(post(restarted), run);
+    expect(out.outcome).toBe('inconclusive');
+    expect(out.fails).toEqual([]);
+  });
+  it('restart + a provenance environment difference (process-level) ⇒ not compared ⇒ INCONCLUSIVE', () => {
+    const p = JSON.parse(JSON.stringify(PROV));
+    p.support.hosted.process_start_ts = '2026-10-07T16:10:00Z';
+    p.support.hosted.log_ts = '2026-10-07T16:10:05Z';
+    p.env.SCION_SERVER_MODE = 'workstation';
+    const out = evaluateEnvPost(post({ ...restarted, e_env_1_provenance: p }), run);
+    expect(out.outcome).toBe('inconclusive');
+    expect(out.fails).toEqual([]);
   });
 });

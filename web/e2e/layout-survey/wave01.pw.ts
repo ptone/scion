@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /**
- * ATTACH-ONLY Wave01 measurement batch (contract FROZEN rev 5).
+ * ATTACH-ONLY Wave01 measurement batch (contract FROZEN rev 7).
  *
  * Never builds, starts, seeds, resets or stops anything; registers no route
  * interception. Per batch: capture-host + suite-digest checks, Release pair
@@ -65,6 +65,8 @@ import {
   now,
   openSubstep,
   screenshot,
+  EVIDENCE_FILE_MODE,
+  sealRunDir,
   type SubstepCtx,
 } from './wave01/runner-lib.js';
 import { captureHostCheck, suiteDigest } from './wave01/suite-digest.mjs';
@@ -339,8 +341,10 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
           null,
           2
         ) + '\n',
-        { flag: 'wx' }
+        { flag: 'wx', mode: EVIDENCE_FILE_MODE }
       );
+      // run.json is the last artifact written: seal the run directory (O-3).
+      sealRunDir(runDir);
     };
 
     if (stops.length) {
@@ -382,7 +386,7 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
           null,
           2
         ) + '\n',
-        { flag: 'wx' }
+        { flag: 'wx', mode: EVIDENCE_FILE_MODE }
       );
       if (evidence) ledger = applyBatch(ledger, runId, [r]);
     };
@@ -616,6 +620,7 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
           validationErrors.push(...validateCapture(final).map((e2) => `${fileName}: ${e2}`));
         fs.writeFileSync(path.join(runDir, fileName), JSON.stringify(final, null, 2) + '\n', {
           flag: 'wx',
+          mode: EVIDENCE_FILE_MODE,
         });
         captureIds.push(r.id);
       }
@@ -681,9 +686,10 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
           null,
           2
         ) + '\n',
-        { flag: 'wx' }
+        { flag: 'wx', mode: EVIDENCE_FILE_MODE }
       );
     }
+    sealRunDir(runDir);
     throw e;
   }
 });

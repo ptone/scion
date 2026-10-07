@@ -487,7 +487,7 @@ describe('B-* groups clauses (pilot finding rev 2)', () => {
   });
 });
 
-describe('A-F1 keyboard (rev 3 rules, no repair)', () => {
+describe('A-F1 keyboard (rev 7 rules, no repair)', () => {
   const focused = (path: string, over: Parameters<typeof el>[0] = {}) =>
     el({
       path,
@@ -528,19 +528,44 @@ describe('A-F1 keyboard (rev 3 rules, no repair)', () => {
     });
     expect(r.outcome).toBe('pass');
   });
-  // Rev 5 §2 A-F1 rule (c): stable difference only (U1 == U2, F != U2).
+  // Rev 7 §2 A-F1: an indicator is established only by (a)/(b) on F; rule (c)
+  // yields FAIL (fully static) or INCONCLUSIVE, never PASS.
   const bl = (path: string, u1: Record<string, string>, u2: Record<string, string> = u1) => ({
     u1: { [path]: u1 },
     u2: { [path]: u2 },
   });
-  it('rev 5 (c): no outline/box-shadow and NO difference at all ⇒ indicator absent ⇒ FAIL', () => {
+  const anim = [{ path: 'p', kind: 'CSSAnimation', name: 'pulse' }];
+  it('rev 7: (a) outline or (b) box-shadow on F ⇒ PASS, with and without baseline', () => {
+    expect(pressChecks(press(1, focused('p')), EMPTY_BASELINE)).toMatchObject({
+      indicator: 'present',
+      decidedBy: 'outline',
+      result: 'pass',
+      baselineMissing: true,
+    });
+    const shadow = el({ path: 'p', style: { ...el({}).style, boxShadow: '0 0 0 2px blue' } });
+    expect(pressChecks(press(1, shadow), EMPTY_BASELINE)).toMatchObject({
+      decidedBy: 'box-shadow',
+      result: 'pass',
+    });
+    expect(pressChecks(press(1, shadow), bl('p', { ...el({}).style }))).toMatchObject({
+      decidedBy: 'box-shadow',
+      result: 'pass',
+      baselineMissing: false,
+    });
+    // (a) still decides even with a running animation at F.
+    expect(
+      pressChecks({ ...press(1, focused('p')), runningAnimations: anim }, EMPTY_BASELINE).result
+    ).toBe('pass');
+  });
+  it('rev 7 (c): fully static (U1 = U2, no animation, F = U2 non-outline) ⇒ no indicator ⇒ FAIL', () => {
     const plain = el({ path: 'p' });
     const c = pressChecks(press(1, plain), bl('p', { ...plain.style }));
     expect(c).toMatchObject({
       indicator: 'absent',
+      decidedBy: 'static-no-indicator',
       result: 'fail',
-      diffKeys: [],
-      unstableKeys: [],
+      diffU1U2: [],
+      diffU2F: [],
     });
     expect(
       evalAF1({
@@ -553,118 +578,100 @@ describe('A-F1 keyboard (rev 3 rules, no repair)', () => {
       }).outcome
     ).toBe('fail');
   });
-  it('rev 5 (c): a stable non-outline difference (U1 == U2, F differs) counts ⇒ PASS', () => {
-    const plain = el({ path: 'p' });
-    const u = { ...plain.style, color: 'rgb(9, 9, 9)' };
-    expect(pressChecks(press(1, plain), bl('p', u, { ...u }))).toMatchObject({
-      indicator: 'present',
-      indicatorBy: 'stable-style-diff-from-unfocused',
-      diffKeys: ['color'],
-      diffU1U2: [],
-      result: 'pass',
+  it('rev 7 (c): an outline-* change only (Chromium UA outline-offset) is still static ⇒ FAIL', () => {
+    const f = el({ path: 'p', style: { ...el({}).style, 'outline-offset': '1px' } });
+    const u = { ...f.style, 'outline-offset': '0px' };
+    expect(pressChecks(press(1, f), bl('p', u, { ...u }))).toMatchObject({
+      decidedBy: 'static-no-indicator',
+      result: 'fail',
+      diffU2F: [],
     });
   });
-  it('rev 5 (c): animation only (unstable U1/U2, nothing stable differs) ⇒ undeterminable ⇒ A-F1 INCONCLUSIVE, never PASS', () => {
-    const plain = el({ path: 'p', style: { ...el({}).style, color: 'rgb(3, 3, 3)' } });
-    const u1 = { ...plain.style, color: 'rgb(1, 1, 1)' };
-    const u2 = { ...plain.style, color: 'rgb(2, 2, 2)' };
-    const c = pressChecks(press(1, plain), bl('p', u1, u2));
+  it('rev 7 (c): a stable non-outline focus change (U1 = U2 ≠ F) ⇒ INCONCLUSIVE, never PASS (open coverage)', () => {
+    const plain = el({ path: 'p' });
+    const u = { ...plain.style, color: 'rgb(9, 9, 9)' };
+    const c = pressChecks(press(1, plain), bl('p', u, { ...u }));
     expect(c).toMatchObject({
       indicator: 'undeterminable',
+      decidedBy: 'undeterminable',
       result: 'inconclusive',
-      diffKeys: [],
-      unstableKeys: ['color'],
-      diffU1U2: ['color'],
       diffU2F: ['color'],
+      indicatorBy: null,
     });
     const r = evalAF1({
       targets: [],
       forward: [press(1, plain)],
       backward: null,
-      baselineForward: bl('p', u1, u2),
+      baselineForward: bl('p', u, { ...u }),
       baselineBackward: null,
       startReached: [],
     });
     expect(r.outcome).toBe('inconclusive');
   });
-  it('rev 5 (c): animation AND a stable focus style change ⇒ PASS on the stable property only', () => {
-    const f = el({
-      path: 'p',
-      style: { ...el({}).style, color: 'rgb(3, 3, 3)', 'font-weight': '700' },
-    });
-    const u1 = { ...f.style, color: 'rgb(1, 1, 1)', 'font-weight': '400' };
-    const u2 = { ...f.style, color: 'rgb(2, 2, 2)', 'font-weight': '400' };
-    expect(pressChecks(press(1, f), bl('p', u1, u2))).toMatchObject({
-      indicator: 'present',
-      diffKeys: ['font-weight'],
-      unstableKeys: ['color'],
-      result: 'pass',
+  it('rev 7 (c): U1 ≠ U2 ⇒ INCONCLUSIVE', () => {
+    const plain = el({ path: 'p' });
+    const c = pressChecks(
+      press(1, plain),
+      bl('p', { ...plain.style, color: 'rgb(1, 1, 1)' }, { ...plain.style })
+    );
+    expect(c).toMatchObject({ result: 'inconclusive', diffU1U2: ['color'] });
+  });
+  it('rev 7 (c): U1 ≠ U2 on an outline-* property only is not "U1 = U2 in every property" ⇒ INCONCLUSIVE', () => {
+    const plain = el({ path: 'p' });
+    const c = pressChecks(
+      press(1, plain),
+      bl('p', { ...plain.style, outlineWidth: '1px' }, { ...plain.style })
+    );
+    expect(c).toMatchObject({
+      result: 'inconclusive',
+      diffU1U2: [],
+      anyDiffU1U2: ['outlineWidth'],
     });
   });
-  it('rev 5 (c): outline-* changes never count, stable or not', () => {
-    const f = el({ path: 'p', style: { ...el({}).style, 'outline-offset': '1px' } });
-    const u = { ...f.style, 'outline-offset': '0px' };
-    expect(pressChecks(press(1, f), bl('p', u, { ...u }))).toMatchObject({
-      indicator: 'absent',
-      result: 'fail',
-      diffU2F: ['outline-offset'],
+  it('rev 7 (c): running animation at F with an otherwise static element ⇒ INCONCLUSIVE; recorded', () => {
+    const plain = el({ path: 'p' });
+    const c = pressChecks(
+      { ...press(1, plain), runningAnimations: anim },
+      bl('p', { ...plain.style })
+    );
+    expect(c).toMatchObject({ result: 'inconclusive', runningAnimations: anim });
+  });
+  it('rev 7 (c): animation AND a stable font-weight focus change ⇒ INCONCLUSIVE', () => {
+    const f = el({ path: 'p', style: { ...el({}).style, 'font-weight': '700' } });
+    const u = { ...f.style, 'font-weight': '400' };
+    expect(
+      pressChecks({ ...press(1, f), runningAnimations: anim }, bl('p', u, { ...u })).result
+    ).toBe('inconclusive');
+  });
+  it('rev 7 (c): no U1/U2 baseline and no (a)/(b) ⇒ INCONCLUSIVE, baselineMissing recorded', () => {
+    expect(pressChecks(press(1, el({ path: 'p' })), EMPTY_BASELINE)).toMatchObject({
+      result: 'inconclusive',
+      baselineMissing: true,
     });
   });
-  it('rev 5 (c): FAIL dominates INCONCLUSIVE in the aggregate; visibility failure is FAIL even with an undeterminable indicator', () => {
-    const anim = el({ path: 'p', style: { ...el({}).style, color: 'rgb(3, 3, 3)' } });
-    const u1 = { ...anim.style, color: 'rgb(1, 1, 1)' };
-    const u2 = { ...anim.style, color: 'rgb(2, 2, 2)' };
+  it('rev 7: visibility/hit failures FAIL independently of the indicator (incl. undeterminable)', () => {
     const off = el({
       path: 'p',
-      style: anim.style,
       box: { y: 2000 },
       hit: { cx: 35, cy: 2010, inViewport: false, hitPath: null, ok: false },
     });
-    expect(pressChecks(press(1, off), bl('p', u1, u2)).result).toBe('fail');
+    expect(pressChecks(press(1, off), EMPTY_BASELINE).result).toBe('fail');
+    expect(
+      pressChecks(press(1, { ...focused('p'), box: off.box, hit: off.hit }), EMPTY_BASELINE).result
+    ).toBe('fail');
+  });
+  it('rev 7: FAIL dominates INCONCLUSIVE in the aggregate', () => {
+    const plain = el({ path: 'q' });
     expect(
       evalAF1({
         targets: [],
-        forward: [press(1, anim), press(2, el({ path: 'q' }))],
+        forward: [press(1, el({ path: 'p' })), press(2, plain)],
         backward: null,
-        baselineForward: { u1: { p: u1, q: el({}).style }, u2: { p: u2, q: el({}).style } },
+        baselineForward: bl('q', { ...plain.style }),
         baselineBackward: null,
         startReached: [],
       }).outcome
     ).toBe('fail');
-  });
-  it('R-11: no U1/U2 for the element ⇒ (a)/(b) first; else undeterminable (INCONCLUSIVE), baselineMissing recorded', () => {
-    expect(pressChecks(press(1, el({ path: 'p' })), EMPTY_BASELINE)).toMatchObject({
-      indicator: 'undeterminable',
-      result: 'inconclusive',
-      baselineMissing: true,
-    });
-    // (a) outline on F needs no baseline ⇒ present / PASS, flag still recorded.
-    expect(pressChecks(press(1, focused('p')), EMPTY_BASELINE)).toMatchObject({
-      indicator: 'present',
-      indicatorBy: 'outline',
-      result: 'pass',
-      baselineMissing: true,
-    });
-    // (b) box-shadow on F needs no baseline.
-    expect(
-      pressChecks(
-        press(1, el({ path: 'p', style: { ...el({}).style, boxShadow: '0 0 0 2px blue' } })),
-        EMPTY_BASELINE
-      )
-    ).toMatchObject({ indicator: 'present', indicatorBy: 'box-shadow', result: 'pass' });
-    // Visibility/hit stay independent: offscreen without baseline ⇒ FAIL.
-    const off = el({
-      path: 'p',
-      box: { y: 2000 },
-      hit: { cx: 35, cy: 2010, inViewport: false, hitPath: null, ok: false },
-    });
-    expect(pressChecks(press(1, off), EMPTY_BASELINE)).toMatchObject({
-      result: 'fail',
-      baselineMissing: true,
-    });
-    // With samples present the flag is false.
-    const plain = el({ path: 'p' });
-    expect(pressChecks(press(1, plain), bl('p', { ...plain.style })).baselineMissing).toBe(false);
   });
   it('focus offscreen (no native scroll repair) fails', () => {
     const off = focused('o', {

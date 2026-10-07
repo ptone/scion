@@ -33,7 +33,7 @@ import {
   renderedTextEquals,
 } from './wave01/evaluate.js';
 import { probe, type MeasureResult, type ProbeRequest, type RawElement } from './wave01/probe.js';
-import { navRaw, sampleFocusBaseline, type SubstepCtx } from './wave01/runner-lib.js';
+import { navRaw, sampleFocusBaseline, twoFrames, type SubstepCtx } from './wave01/runner-lib.js';
 
 const HTML = `<!doctype html><html><head><style>
   html,body{margin:0;height:100%;font:14px sans-serif}
@@ -211,6 +211,7 @@ test('nav op and element-bound path op', async ({ page }) => {
 
 const HTML2 = `<!doctype html><html><head><style>
   html,body{margin:0;font:14px sans-serif}
+  body>a{display:inline-block;margin:2px}
   #bg:focus-visible{outline:none;background:rgb(255,255,0)}
   #fw:focus-visible{outline:none;font-weight:700}
   #blw{border-left:0 solid black}
@@ -219,6 +220,12 @@ const HTML2 = `<!doctype html><html><head><style>
   #anim{outline:none;animation:pulse 0.7s infinite alternate}
   #animfw{outline:none;animation:pulse 0.7s infinite alternate}
   #animfw:focus-visible{font-weight:700}
+  @keyframes step{0%{color:rgb(0,0,0)}50%{color:rgb(0,0,255)}}
+  #step{outline:none;animation:step 2s steps(1) infinite}
+  @keyframes slow{from{color:rgb(0,0,0)}to{color:rgb(0,0,255)}}
+  #slow{outline:none;animation:slow 60s linear infinite}
+  #ring:focus-visible{outline:2px solid rgb(0,0,255)}
+  #shadow:focus-visible{outline:none;box-shadow:0 0 0 3px rgb(0,0,255)}
 </style></head><body>
 <a id="noring" href="#a" style="outline:none">No ring</a>
 <a id="zero" href="#b" style="outline:0">Zero outline</a>
@@ -227,6 +234,10 @@ const HTML2 = `<!doctype html><html><head><style>
 <a id="blw" href="#e">Border-left indicator</a>
 <a id="anim" href="#f">Animated, no focus style</a>
 <a id="animfw" href="#g">Animated, stable font-weight focus style</a>
+<a id="step" href="#h">Stepped animation, no focus style</a>
+<a id="slow" href="#i">Slow animation, no focus style</a>
+<a id="ring" href="#j">Outline focus style</a>
+<a id="shadow" href="#k">Box-shadow focus style</a>
 <span id="ws-normal" style="white-space:normal">Double  Space
   wrapped</span>
 <span id="ws-pre" style="white-space:pre-wrap">A  B</span>
@@ -252,11 +263,13 @@ async function tabTo(page: Page, id: string) {
   const baseline = await sampleFocusBaseline(page);
   for (let i = 0; i < 15; i++) {
     await page.keyboard.press('Tab');
+    await twoFrames(page); // same post-Tab settle as the runner (review5 O-3)
     const a = await run<{
       outside: boolean;
       element: RawElement | null;
       innerWidth: number;
       innerHeight: number;
+      runningAnimations?: Array<{ path: string; kind: string; name: string | null }>;
     }>(page, req({ op: 'active', policies: POLICIES, policyContext: [], actionable: ACTIONABLE }));
     if (a.element?.idAttr === id) {
       return pressChecks(
@@ -268,6 +281,7 @@ async function tabTo(page: Page, id: string) {
           innerHeight: a.innerHeight,
           element: a.element,
           reached: [],
+          runningAnimations: a.runningAnimations ?? [],
         },
         baseline
       );
@@ -276,28 +290,42 @@ async function tabTo(page: Page, id: string) {
   throw new Error(`never focused #${id}`);
 }
 
-test('B1 negative control: static outline:none / outline:0 with no other change has NO indicator ⇒ FAIL (rev 5 (c))', async ({
+test('B1 negative control: static outline:none / outline:0 with no other change has NO indicator ⇒ FAIL (rev 7 (c))', async ({
   page,
 }) => {
   await page.setContent(HTML2);
   const none = await tabTo(page, 'noring');
-  expect(none, JSON.stringify(none)).toMatchObject({ indicator: 'absent', result: 'fail' });
-  expect(none.unstableKeys).toEqual([]);
+  expect(none, JSON.stringify(none)).toMatchObject({
+    indicator: 'absent',
+    decidedBy: 'static-no-indicator',
+    result: 'fail',
+    runningAnimations: [],
+  });
   const zero = await tabTo(page, 'zero');
   expect(zero, JSON.stringify(zero)).toMatchObject({ indicator: 'absent', result: 'fail' });
 });
 
-test('rev 5 (c) positive control: a stable non-outline focus style change IS an indicator', async ({
+test('rev 7: a real outline or box-shadow focus style ⇒ PASS (rule (a)/(b))', async ({ page }) => {
+  await page.setContent(HTML2);
+  const ring = await tabTo(page, 'ring');
+  expect(ring, JSON.stringify(ring)).toMatchObject({ decidedBy: 'outline', result: 'pass' });
+  await page.setContent(HTML2);
+  const shadow = await tabTo(page, 'shadow');
+  expect(shadow, JSON.stringify(shadow)).toMatchObject({ decidedBy: 'box-shadow', result: 'pass' });
+});
+
+test('rev 7 (c): a stable background focus change ⇒ INCONCLUSIVE (candidate indicator, never PASS)', async ({
   page,
 }) => {
   await page.setContent(HTML2);
   const bg = await tabTo(page, 'bg');
-  expect(bg).toMatchObject({
-    indicator: 'present',
-    indicatorBy: 'stable-style-diff-from-unfocused',
+  expect(bg, JSON.stringify(bg)).toMatchObject({
+    indicator: 'undeterminable',
+    result: 'inconclusive',
+    indicatorBy: null,
   });
-  expect(bg.diffKeys).toContain('background-color');
-  expect(bg.diffKeys.some((k) => k.startsWith('outline'))).toBe(false);
+  expect(bg.diffU2F).toContain('background-color');
+  expect(bg.diffU2F!.some((k) => k.startsWith('outline'))).toBe(false);
 });
 
 test('rev 3 rendered-text rule against real innerText and computed white-space', async ({
@@ -355,52 +383,37 @@ test('R-5 real-Chromium control: NBSP and U+3000 stay significant in innerText a
   expect(renderedTextEquals(e.innerText, 'A B C', e.whiteSpace).equal).toBe(false);
 });
 
-test('O2 (rev 5): stable font-weight / border-left-width focus changes count as indicators', async ({
+test('O2 (rev 7): stable font-weight / border-left-width focus changes ⇒ INCONCLUSIVE (open coverage)', async ({
   page,
 }) => {
   await page.setContent(HTML2);
   const fw = await tabTo(page, 'fw');
-  expect(fw).toMatchObject({
-    indicator: 'present',
-    indicatorBy: 'stable-style-diff-from-unfocused',
-  });
-  expect(fw.diffKeys).toContain('font-weight');
-  expect(fw.diffKeys.some((k) => k.startsWith('outline'))).toBe(false);
+  expect(fw, JSON.stringify(fw)).toMatchObject({ result: 'inconclusive', indicatorBy: null });
+  expect(fw.diffU2F).toContain('font-weight');
+  await page.setContent(HTML2);
   const blw = await tabTo(page, 'blw');
-  expect(blw).toMatchObject({
-    indicator: 'present',
-    indicatorBy: 'stable-style-diff-from-unfocused',
-  });
-  expect(blw.diffKeys).toContain('border-left-width');
+  expect(blw, JSON.stringify(blw)).toMatchObject({ result: 'inconclusive', indicatorBy: null });
+  expect(blw.diffU2F).toContain('border-left-width');
 });
 
-// ─── rev 5 A-F1 (c) controls (review4 O-b; assessor 17:17Z) ──────────────
+// ─── rev 7 A-F1 (c) animation controls (review4 O-b, review5 O-1) ───────
 
-test('rev 5 (c) review4 O-b: running animation, outline:none, NO focus style ⇒ undeterminable ⇒ INCONCLUSIVE (never PASS)', async ({
-  page,
-}) => {
-  await page.setContent(HTML2);
-  const a = await tabTo(page, 'anim');
-  expect(a, JSON.stringify(a)).toMatchObject({
-    indicator: 'undeterminable',
-    result: 'inconclusive',
-    diffKeys: [],
+for (const [id, label] of [
+  ['anim', 'review4 O-b: running alternate animation, no focus style'],
+  ['step', 'review5 O-1: steps(1) animation, no focus style'],
+  ['slow', 'review5 O-1: 60 s linear animation, no focus style'],
+  ['animfw', 'animation AND a stable font-weight focus style'],
+] as const)
+  test(`rev 7 (c) ${label} ⇒ INCONCLUSIVE (never PASS); running animation recorded`, async ({
+    page,
+  }) => {
+    await page.setContent(HTML2);
+    const c = await tabTo(page, id);
+    expect(c, JSON.stringify(c)).toMatchObject({
+      indicator: 'undeterminable',
+      result: 'inconclusive',
+      indicatorBy: null,
+    });
+    expect(c.runningAnimations.length).toBeGreaterThan(0);
+    expect(c.undeterminableReasons).toContain('animation/transition running at F');
   });
-  expect(a.unstableKeys).toContain('color');
-  expect(a.indicatorBy).toBeNull();
-});
-
-test('rev 5 (c): running animation AND a stable focus style change ⇒ PASS on the stable property', async ({
-  page,
-}) => {
-  await page.setContent(HTML2);
-  const a = await tabTo(page, 'animfw');
-  expect(a, JSON.stringify(a)).toMatchObject({
-    indicator: 'present',
-    indicatorBy: 'stable-style-diff-from-unfocused',
-    result: 'pass',
-  });
-  expect(a.diffKeys).toContain('font-weight');
-  expect(a.diffKeys).not.toContain('color');
-  expect(a.unstableKeys).toContain('color');
-});

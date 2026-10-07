@@ -143,9 +143,9 @@ describe('suite digest (§5b E-RUN, assessor-confirmed canonical form)', () => {
 });
 
 describe('manifest and pins', () => {
-  it('pins contract rev 5', () => {
+  it('pins contract rev 7', () => {
     expect(CONTRACT.sha256).toBe(
-      '9df504e038c1f76539063c776b8b919d3c245c4a02e31db9cbff943c070c288d'
+      '3e3662f5080c084dac2de8445923642592e0db048b7b321c77c5274a64d34008'
     );
     expect(CONTRACT_SHA256).toBe(CONTRACT.sha256);
   });
@@ -209,7 +209,7 @@ function mkPair(over: { base?: Record<string, unknown>; comp?: Record<string, un
     baseURL: 'https://baseline.example',
     releaseKind: 'verification',
     phase: 'baseline',
-    contract: { name: 'wave01-contract-FROZEN-rev5.md', sha256: CONTRACT_SHA256 },
+    contract: { name: 'wave01-contract-FROZEN-rev7.md', sha256: CONTRACT_SHA256 },
     servedSourceSha: base.sourceSha,
     backendSourceSha: base.backendSourceSha,
     runner: {

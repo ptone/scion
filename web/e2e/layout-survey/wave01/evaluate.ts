@@ -27,7 +27,7 @@ export type Outcome = 'pass' | 'fail' | 'pending' | 'inconclusive' | 'not-applic
 export interface ClauseResult {
   clause: string;
   /** Source of the clause definition. */
-  source: 'contract-rev5' | 'pilot-finding-rev2';
+  source: 'contract-rev7' | 'pilot-finding-rev2';
   outcome: Outcome;
   policyIds: string[];
   details: unknown;
@@ -260,7 +260,7 @@ function combine(outcomes: Outcome[]): Outcome {
 export function evalAD1(m: Pick<MeasureResult, 'doc' | 'innerWidth'>): ClauseResult {
   return {
     clause: 'A-D1',
-    source: 'contract-rev5',
+    source: 'contract-rev7',
     outcome: m.doc.scrollWidth <= m.innerWidth + TOL ? 'pass' : 'fail',
     policyIds: [],
     details: { docScrollWidth: m.doc.scrollWidth, innerWidth: m.innerWidth },
@@ -272,7 +272,7 @@ export function evalAC1(overflow: RawOverflowEntry[] | null): ClauseResult {
   if (!overflow) {
     return {
       clause: 'A-C1',
-      source: 'contract-rev5',
+      source: 'contract-rev7',
       outcome: 'inconclusive',
       policyIds: [],
       details: 'no overflow scan',
@@ -289,7 +289,7 @@ export function evalAC1(overflow: RawOverflowEntry[] | null): ClauseResult {
   }
   return {
     clause: 'A-C1',
-    source: 'contract-rev5',
+    source: 'contract-rev7',
     outcome: failing.length === 0 ? 'pass' : 'fail',
     policyIds: Array.from(new Set(exempt.map((e) => e.exemptBy))),
     details: { scanned: overflow.length, failing, exempt },
@@ -317,7 +317,7 @@ export function evalAS1(
     const ok = sidebarHidden && !!menuBtn && menuBtn.visible && btn?.status === 'pass';
     return {
       clause: 'A-S1',
-      source: 'contract-rev5',
+      source: 'contract-rev7',
       outcome: ok ? 'pass' : btn?.status === 'pending' && sidebarHidden ? 'pending' : 'fail',
       policyIds: [],
       details: {
@@ -335,7 +335,7 @@ export function evalAS1(
       : 0;
   return {
     clause: 'A-S1',
-    source: 'contract-rev5',
+    source: 'contract-rev7',
     outcome: visible && inX && !!content && ow <= TOL ? 'pass' : 'fail',
     policyIds: [],
     details: {
@@ -376,7 +376,7 @@ export function evalAS2(
   const outcome: Outcome = !headerOk || overlaps.length ? 'fail' : combine(statuses);
   return {
     clause: 'A-S2',
-    source: 'contract-rev5',
+    source: 'contract-rev7',
     outcome,
     policyIds: [],
     details: { headerBox: header?.box ?? null, targets: per, siblingOverlaps: overlaps },
@@ -400,7 +400,7 @@ export function evalAN2(nav: NavRaw[]): ClauseResult {
   if (rendered.length === 0) {
     return {
       clause: 'A-N2',
-      source: 'contract-rev5',
+      source: 'contract-rev7',
       outcome: 'not-applicable',
       policyIds: [],
       details: { rendered: 0, domCount: nav.length },
@@ -413,7 +413,7 @@ export function evalAN2(nav: NavRaw[]): ClauseResult {
   });
   return {
     clause: 'A-N2',
-    source: 'contract-rev5',
+    source: 'contract-rev7',
     outcome: per.every((p) => p.nameOk && p.tipOk) ? 'pass' : 'fail',
     policyIds: [],
     details: { rendered: rendered.length, domCount: nav.length, entries: per },
@@ -616,7 +616,7 @@ export function evalBOVR(bc1: ClauseResult, hiddenColumns: RawElement[]): Clause
   };
 }
 
-// ─── A-F1 keyboard (§2, rev 5 rules) ─────────────────────────────────────
+// ─── A-F1 keyboard (§2, rev 7 rules) ─────────────────────────────────────
 
 export interface PressRecord {
   direction: 'forward' | 'backward';
@@ -627,10 +627,12 @@ export interface PressRecord {
   element: RawElement | null;
   /** Declared target keys this press reached. */
   reached: string[];
+  /** Rev 7: running CSS animations/transitions on the element or flat-tree ancestors at F. */
+  runningAnimations?: Array<{ path: string; kind: string; name: string | null }>;
 }
 
 /**
- * Rev 5 §2 A-F1 rule (c) unfocused samples, taken in the same context before
+ * Rev 7 §2 A-F1 rule (c) unfocused samples, taken in the same context before
  * the first key press: U1, then the inter-press settle (two animation frames,
  * the same settle used after every Tab), then U2. Maps are keyed by deep path.
  */
@@ -650,28 +652,35 @@ const diffNames = (a: Record<string, string>, b: Record<string, string>) =>
 
 export type IndicatorState = 'present' | 'absent' | 'undeterminable';
 
+/**
+ * Rev 7 §2 A-F1 per-press checks. An indicator is ESTABLISHED only by (a)
+ * outline-style ≠ none with width > 0 or (b) box-shadow ≠ none on F. Rule (c)
+ * can never establish one: it yields FAIL only for a fully static element
+ * (U1 = U2 in every property, no animation/transition running at F, F = U2 in
+ * every non-outline property), and INCONCLUSIVE in every other case.
+ */
 export function pressChecks(
   p: PressRecord,
   baseline: FocusBaseline
 ): {
   graded: boolean;
-  /** Per-press outcome (rev 5): fail dominates; an undeterminable indicator is inconclusive. */
+  /** Per-press outcome: visibility/hit FAIL dominates; then the indicator rule. */
   result: 'pass' | 'fail' | 'inconclusive' | 'not-graded';
   ok: boolean;
   visible: boolean;
   hit: boolean;
   indicator: IndicatorState;
+  /** Deciding rule: 'outline' (a), 'box-shadow' (b), or rule (c) 'static-no-indicator' / 'undeterminable'. */
+  decidedBy: 'outline' | 'box-shadow' | 'static-no-indicator' | 'undeterminable' | null;
   indicatorBy: string | null;
-  /** Rule (c) counted properties: non-outline, U1 == U2, F != U2. */
-  diffKeys: string[];
-  /** Raw differing property names U1/U2 and U2/F (all properties, outline included). */
+  /** Non-outline properties differing U1/U2 and U2/F (rule (c) record). */
   diffU1U2: string[] | null;
   diffU2F: string[] | null;
-  /** Non-outline U1/U2 differences (unstable properties). */
-  unstableKeys: string[];
-  undeterminableReason: string | null;
-  /** Ruling R-11: U1/U2 missing for the focused element (rule (c) not evaluable). */
+  /** Any property (outline included) differing U1/U2 — the FAIL branch needs none. */
+  anyDiffU1U2: string[] | null;
+  undeterminableReasons: string[];
   baselineMissing: boolean;
+  runningAnimations: Array<{ path: string; kind: string; name: string | null }>;
 } {
   if (p.outside || !p.element)
     return {
@@ -681,13 +690,14 @@ export function pressChecks(
       visible: false,
       hit: false,
       indicator: 'absent',
+      decidedBy: null,
       indicatorBy: null,
-      diffKeys: [],
       diffU1U2: null,
       diffU2F: null,
-      unstableKeys: [],
-      undeterminableReason: null,
+      anyDiffU1U2: null,
+      undeterminableReasons: [],
       baselineMissing: false,
+      runningAnimations: [],
     };
   const e = p.element;
   const b = e.box;
@@ -700,48 +710,49 @@ export function pressChecks(
   const visible = intersects(vp) && scrollers.every((c) => intersects(c.padBox));
   const hit = !!e.hit && e.hit.inViewport && e.hit.ok;
   const s = e.style;
-  let indicatorBy: string | null = null;
   // Both style forms are accepted: full computed (kebab-case, A-F1 probe) and
   // the legacy small vector (camelCase).
   const get = (kebab: string, camel: string) => s[kebab] ?? s[camel];
   const outlineStyle = get('outline-style', 'outlineStyle');
   const outlineWidth = get('outline-width', 'outlineWidth');
   const boxShadow = get('box-shadow', 'boxShadow');
-  if (outlineStyle !== undefined && outlineStyle !== 'none' && parseFloat(outlineWidth ?? '0') > 0)
-    indicatorBy = 'outline';
-  else if (boxShadow && boxShadow !== 'none') indicatorBy = 'box-shadow';
   const u1 = baseline.u1[e.path];
   const u2 = baseline.u2[e.path];
   const baselineMissing = !u1 || !u2;
-  // Raw differences are always recorded when samples exist (rev 5: each press
-  // records U1/U2 and U2/F property names), whichever rule decides.
-  const diffU1U2 = u1 && u2 ? diffNames(u1, u2) : null;
-  const diffU2F = u2 ? diffNames(u2, s) : null;
-  const unstableKeys = (diffU1U2 ?? []).filter((k) => !isOutlineProp(k));
-  let diffKeys: string[] = [];
-  let indicator: IndicatorState = indicatorBy ? 'present' : 'absent';
-  let undeterminableReason: string | null = null;
-  if (indicatorBy === null) {
-    // Rule (c), rev 5: a STABLE non-outline difference — identical in U1 and
-    // U2, different in F. outline-* never counts (judged only by (a);
-    // Chromium's UA :focus-visible outline-offset change, review1 B1). An
-    // unstable property (e.g. a running animation, review4 O-b) makes the
-    // indicator undeterminable when nothing stable differs.
-    if (baselineMissing) {
-      // Ruling R-11: (a)/(b) were evaluated first on F; without U1/U2 rule
-      // (c) cannot be evaluated ⇒ undeterminable (never PASS/FAIL on the
-      // indicator alone; visibility/hit still FAIL independently).
+  const running = p.runningAnimations ?? [];
+  // Raw rule (c) record, always kept when samples exist.
+  const anyDiffU1U2 = u1 && u2 ? diffNames(u1, u2) : null;
+  const diffU1U2 = anyDiffU1U2 ? anyDiffU1U2.filter((k) => !isOutlineProp(k)) : null;
+  const diffU2F = u2 ? diffNames(u2, s).filter((k) => !isOutlineProp(k)) : null;
+  let decidedBy: 'outline' | 'box-shadow' | 'static-no-indicator' | 'undeterminable';
+  let indicator: IndicatorState;
+  const undeterminableReasons: string[] = [];
+  if (
+    outlineStyle !== undefined &&
+    outlineStyle !== 'none' &&
+    parseFloat(outlineWidth ?? '0') > 0
+  ) {
+    decidedBy = 'outline';
+    indicator = 'present';
+  } else if (boxShadow && boxShadow !== 'none') {
+    decidedBy = 'box-shadow';
+    indicator = 'present';
+  } else {
+    // Rule (c), rev 7: FAIL or INCONCLUSIVE only. outline-* changes are never
+    // an indicator (judged only by (a); review1 B1).
+    if (baselineMissing) undeterminableReasons.push('no U1/U2 baseline');
+    if (anyDiffU1U2 && anyDiffU1U2.length) undeterminableReasons.push('U1 differs from U2');
+    if (running.length) undeterminableReasons.push('animation/transition running at F');
+    if (diffU2F && diffU2F.length)
+      undeterminableReasons.push(
+        'non-outline difference U2/F (candidate indicator, not establishable)'
+      );
+    if (undeterminableReasons.length) {
+      decidedBy = 'undeterminable';
       indicator = 'undeterminable';
-      undeterminableReason = 'no same-context unfocused samples (U1/U2) for this element';
     } else {
-      diffKeys = (diffU2F ?? []).filter((k) => !isOutlineProp(k) && u1[k] === u2[k]);
-      if (diffKeys.length) {
-        indicatorBy = 'stable-style-diff-from-unfocused';
-        indicator = 'present';
-      } else if (unstableKeys.length) {
-        indicator = 'undeterminable';
-        undeterminableReason = 'unstable non-outline properties between U1 and U2';
-      }
+      decidedBy = 'static-no-indicator';
+      indicator = 'absent';
     }
   }
   const result: 'pass' | 'fail' | 'inconclusive' =
@@ -757,13 +768,14 @@ export function pressChecks(
     visible,
     hit,
     indicator,
-    indicatorBy,
-    diffKeys,
+    decidedBy,
+    indicatorBy: indicator === 'present' ? decidedBy : null,
     diffU1U2,
     diffU2F,
-    unstableKeys,
-    undeterminableReason,
+    anyDiffU1U2,
+    undeterminableReasons,
     baselineMissing,
+    runningAnimations: running,
   };
 }
 
@@ -806,8 +818,8 @@ export function evalAF1(input: {
   const unreached = input.targets.filter((t) => !reachedF.has(t) && !reachedB.has(t));
   return {
     clause: 'A-F1',
-    source: 'contract-rev5',
-    // Rev 5: FAIL dominates; an undeterminable indicator on any graded press
+    source: 'contract-rev7',
+    // Rev 7: FAIL dominates; an undeterminable indicator on any graded press
     // makes A-F1 INCONCLUSIVE (never PASS, never a defect by itself).
     outcome: anyBad || unreached.length > 0 ? 'fail' : anyInconclusive ? 'inconclusive' : 'pass',
     policyIds: [],

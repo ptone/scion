@@ -15,7 +15,7 @@
 import { defineConfig } from '@playwright/test';
 
 /**
- * ATTACH-ONLY Wave01 measurement config (contract FROZEN rev 5 §5b).
+ * ATTACH-ONLY Wave01 measurement config (contract FROZEN rev 7 §5b).
  *
  * Deliberately has NO globalSetup / globalTeardown / webServer: it never
  * builds, starts, seeds, resets or stops a Hub. testMatch selects only the

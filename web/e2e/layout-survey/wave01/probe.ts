@@ -671,12 +671,27 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
         innerHeight: window.innerHeight,
       };
     }
+    // Rev 7 A-F1 (c): CSS animations/transitions in play state `running` on
+    // the focused element or any flat-tree ancestor at the time F is sampled.
+    const runningAnimations: Array<{ path: string; kind: string; name: string | null }> = [];
+    for (let e: Element | null = a; e; e = flatParent(e)) {
+      for (const an of e.getAnimations()) {
+        if (an.playState !== 'running') continue;
+        const x = an as Animation & { animationName?: string; transitionProperty?: string };
+        runningAnimations.push({
+          path: deepPath(e),
+          kind: an.constructor?.name ?? 'Animation',
+          name: x.animationName ?? x.transitionProperty ?? (an.id || null),
+        });
+      }
+    }
     return {
       outside: false,
       innerWidth: window.innerWidth,
       innerHeight: window.innerHeight,
       tag: a.localName,
       element: measureEl(a, req.policies, req.policyContext, req.actionable, true),
+      runningAnimations,
     };
   }
 

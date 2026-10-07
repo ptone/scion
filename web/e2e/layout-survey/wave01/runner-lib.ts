@@ -160,6 +160,30 @@ export async function closeSubstep(ctx: SubstepCtx): Promise<void> {
   await ctx.context.close().catch(() => undefined);
 }
 
+/**
+ * Evidence immutability policy (owner O-3, review5): every run artifact is
+ * write-once. JSON records are created exclusively (`wx`, never overwritten)
+ * with mode 0444; screenshots are made 0444 immediately after capture; the
+ * batch end seals every regular file in the run directory to 0444. The run
+ * directory itself stays writable by the operator only so a separate
+ * validation record can be added; integrity is established by the sha256
+ * bindings checked by validate-run, not by file modes.
+ */
+export const EVIDENCE_FILE_MODE = 0o444;
+
+/** Write-once evidence file (exclusive create, read-only mode). */
+export function writeEvidenceFile(file: string, text: string): void {
+  fs.writeFileSync(file, text, { flag: 'wx', mode: EVIDENCE_FILE_MODE });
+}
+
+/** Seal every regular file in a run directory read-only (idempotent). */
+export function sealRunDir(runDir: string): void {
+  for (const f of fs.readdirSync(runDir)) {
+    const abs = path.join(runDir, f);
+    if (fs.lstatSync(abs).isFile()) fs.chmodSync(abs, EVIDENCE_FILE_MODE);
+  }
+}
+
 export function writeRaw(
   ctx: SubstepCtx,
   name: string,
@@ -167,7 +191,7 @@ export function writeRaw(
   kind = 'raw-json'
 ): FileEntry {
   const file = path.join(ctx.runDir, `${ctx.prefix}.${name}.json`);
-  fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', { flag: 'wx' });
+  writeEvidenceFile(file, JSON.stringify(data, null, 2) + '\n');
   const e = { kind, path: path.basename(file), sha256: sha256(fs.readFileSync(file)) };
   ctx.files.push(e);
   return e;
@@ -181,6 +205,7 @@ export async function screenshot(
 ): Promise<FileEntry> {
   const file = path.join(ctx.runDir, `${ctx.prefix}.${name}.png`);
   await ctx.page.screenshot({ path: file, fullPage, animations: 'allow', caret: 'initial' });
+  fs.chmodSync(file, EVIDENCE_FILE_MODE);
   const e = { kind, path: path.basename(file), sha256: sha256(fs.readFileSync(file)) };
   ctx.files.push(e);
   return e;
@@ -438,7 +463,7 @@ export async function twoFrames(page: Page): Promise<void> {
 }
 
 /**
- * Rev 5 §2 A-F1 rule (c): two unfocused full-style samples U1, U2 of every
+ * Rev 7 §2 A-F1 rule (c): two unfocused full-style samples U1, U2 of every
  * focusable element in this context, separated by the SAME settle used after
  * every key press (twoFrames), with no input in between. Never focuses or
  * scrolls. Shared by the batch runner and the real-Chromium selftests.
