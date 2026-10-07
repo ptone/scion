@@ -58,6 +58,8 @@ const PROV = {
       log_line: 'Server mode: hosted',
       log_ts: '2026-10-07T15:30:05Z',
       process_start_ts: '2026-10-07T15:30:00Z',
+      process_start_source: 'proc:/proc/<pid>/stat starttime',
+      log_ts_source: 'journal:scion-hub.service',
       slot_generation: 'gen-1',
     },
     dev_auth: { basis: 'recorded-inputs', dev_auth_warning_present: false },
@@ -99,6 +101,7 @@ const POST = {
   baseURL: HOST,
   window_start: '2026-10-07T15:45:00Z',
   window_end: '2026-10-07T16:30:00Z',
+  serving_process_start_ts: '2026-10-07T15:30:00Z',
   slotGeneration: 'gen-1',
   e_env_1_dev_auth_effective: false,
   e_env_1_provenance: PROV,
@@ -116,6 +119,7 @@ const RUN = {
   preBaseURL: HOST,
   preValues: sharedEnvValues(PRE),
   preProvenanceKey: provenanceKey(PROV),
+  preProcessStartTs: '2026-10-07T15:30:00Z',
   testLoginUsed: true,
 };
 
@@ -349,6 +353,136 @@ describe('rev 4 E-ENV-1b provenance record (binding/completeness/contradictions,
   ];
   for (const [label, patch, expected] of r8) {
     it(`R-8 ${label}`, () =>
+      expect(gate({ ...PRE, e_env_1_provenance: prov(patch) }, 'E-ENV-1').outcome).toBe(expected));
+  }
+  // Ruling R-9: auth_mode support consistency + record-established FAIL.
+  const r9: Array<[string, (p: Record<string, any>) => void, string]> = [
+    [
+      'settings path, file server.auth.mode=dev, env absent ⇒ FAIL',
+      (p) => {
+        p.path_values['server.auth.mode'] = 'dev';
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'settings:server.auth.mode' };
+      },
+      'fail',
+    ],
+    [
+      'SCION_SERVER_AUTH_MODE=dev recorded ⇒ FAIL',
+      (p) => {
+        p.env.SCION_SERVER_AUTH_MODE = 'dev';
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'env:SCION_SERVER_AUTH_MODE' };
+      },
+      'fail',
+    ],
+    [
+      'cited settings input recorded absent ⇒ INCONCLUSIVE',
+      (p) => {
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'settings:server.auth.mode' };
+      },
+      'inconclusive',
+    ],
+    [
+      'cited settings value ≠ declared ⇒ INCONCLUSIVE',
+      (p) => {
+        p.path_values['server.auth.mode'] = 'proxy';
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'settings:server.auth.mode' };
+      },
+      'inconclusive',
+    ],
+    [
+      'cited settings input but load path is legacy ⇒ INCONCLUSIVE',
+      (p) => {
+        p.load_path = 'legacy';
+        p.path_values = {
+          files: [{ file: 'a.yaml', mode: 'hosted', 'auth.devMode': false, 'auth.mode': 'oauth' }],
+        };
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'settings:server.auth.mode' };
+      },
+      'inconclusive',
+    ],
+    [
+      'cited legacy file not among merged files ⇒ INCONCLUSIVE',
+      (p) => {
+        p.load_path = 'legacy';
+        p.path_values = {
+          files: [{ file: 'a.yaml', mode: 'hosted', 'auth.devMode': false, 'auth.mode': 'oauth' }],
+        };
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'legacy-file', file: 'b.yaml' };
+      },
+      'inconclusive',
+    ],
+    [
+      'cited legacy file with matching value ⇒ PASS',
+      (p) => {
+        p.load_path = 'legacy';
+        p.path_values = {
+          files: [{ file: 'a.yaml', mode: 'hosted', 'auth.devMode': false, 'auth.mode': 'oauth' }],
+        };
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'legacy-file', file: 'a.yaml' };
+      },
+      'pass',
+    ],
+    [
+      'legacy merged file auth.mode=dev, env absent, declared oauth ⇒ INCONCLUSIVE (merge not resolved)',
+      (p) => {
+        p.load_path = 'legacy';
+        p.path_values = {
+          files: [
+            { file: 'a.yaml', mode: 'hosted', 'auth.devMode': false, 'auth.mode': 'dev' },
+            { file: 'b.yaml', mode: 'absent', 'auth.devMode': 'absent', 'auth.mode': 'oauth' },
+          ],
+        };
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'legacy-file', file: 'b.yaml' };
+      },
+      'inconclusive',
+    ],
+    [
+      'unset declared but selected file sets auth.mode ⇒ INCONCLUSIVE',
+      (p) => (p.path_values['server.auth.mode'] = 'oauth'),
+      'inconclusive',
+    ],
+    [
+      'unset declared but SCION_SERVER_AUTH_MODE set ⇒ INCONCLUSIVE',
+      (p) => (p.env.SCION_SERVER_AUTH_MODE = 'oauth'),
+      'inconclusive',
+    ],
+    [
+      'cited env value ≠ declared ⇒ INCONCLUSIVE',
+      (p) => {
+        p.env.SCION_SERVER_AUTH_MODE = 'proxy';
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'env:SCION_SERVER_AUTH_MODE' };
+      },
+      'inconclusive',
+    ],
+    [
+      'cited env recorded absent ⇒ INCONCLUSIVE',
+      (p) => {
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'env:SCION_SERVER_AUTH_MODE' };
+      },
+      'inconclusive',
+    ],
+    [
+      'settings file cited although env is set (env applied last) ⇒ INCONCLUSIVE',
+      (p) => {
+        p.path_values['server.auth.mode'] = 'oauth';
+        p.env.SCION_SERVER_AUTH_MODE = 'oauth';
+        p.declared_effective_auth_mode = 'oauth';
+        p.support.auth_mode = { source: 'settings:server.auth.mode' };
+      },
+      'inconclusive',
+    ],
+  ];
+  for (const [label, patch, expected] of r9) {
+    it(`R-9 ${label}`, () =>
       expect(gate({ ...PRE, e_env_1_provenance: prov(patch) }, 'E-ENV-1').outcome).toBe(expected));
   }
   it('R-8: absence of the dev-auth warning never proves OFF on its own (probe missing ⇒ INCONCLUSIVE)', () => {

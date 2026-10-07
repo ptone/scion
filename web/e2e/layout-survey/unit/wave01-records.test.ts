@@ -35,6 +35,7 @@ import {
   isQuarantined,
   validateCapture,
   validateRun,
+  validationRecord,
 } from '../wave01/records.mjs';
 import {
   CONTRACT_SHA256,
@@ -71,6 +72,8 @@ const PROV = {
       log_line: 'Server mode: hosted',
       log_ts: '2026-10-07T15:30:05Z',
       process_start_ts: '2026-10-07T15:30:00Z',
+      process_start_source: 'proc:/proc/<pid>/stat starttime',
+      log_ts_source: 'journal:scion-hub.service',
       slot_generation: 'gen-1',
     },
     dev_auth: { basis: 'recorded-inputs', dev_auth_warning_present: false },
@@ -464,11 +467,13 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
         e_env_4_no_broker_process_or_dispatch: true,
       },
       preProvenanceKey: provenanceKey(PROV),
+      preProcessStartTs: '2026-10-07T15:30:00Z',
     };
     const post = {
       baseURL: 'https://baseline.example',
       window_start: '2026-10-07T15:50:00Z',
       window_end: '2026-10-07T16:25:00Z',
+      serving_process_start_ts: '2026-10-07T15:30:00Z',
       slotGeneration: 'gen-1',
       e_env_1_dev_auth_effective: false,
       e_env_1_provenance: PROV,
@@ -601,6 +606,7 @@ describe('capture records and validate-run', () => {
       baseURL: 'https://baseline.example',
       window_start: '2026-10-07T15:00:00Z',
       window_end: '2026-10-07T16:00:00Z',
+      serving_process_start_ts: '2026-10-07T15:30:00Z',
       slotGeneration: 'gen-1',
       e_env_1_dev_auth_effective: false,
       e_env_1_provenance: PROV,
@@ -661,7 +667,38 @@ describe('capture records and validate-run', () => {
     };
     mutate?.(capture);
     fs.writeFileSync(path.join(runDir, 'W01-S01.P1.M0.capture.json'), JSON.stringify(capture));
+    // O1: a real bound PRE declaration embedded raw; validate-run recomputes the gates.
+    const preDecl = {
+      baseURL: 'https://baseline.example',
+      window_start: '2026-10-07T15:35:00Z',
+      slotGeneration: 'gen-1',
+      e_env_1_dev_auth_effective: false,
+      e_env_1_provenance: PROV,
+      e_env_2_anon_401: { status: 401, ts: '2026-10-07T15:36:00Z' },
+      e_env_3_test_login_enabled: true,
+      e_env_4_runtime_broker_effective: false,
+      e_env_4_no_broker_process_or_dispatch: true,
+      e_env_5: {
+        probe: 'repo-default-secret-challenge',
+        result_status: 401,
+        ts: '2026-10-07T15:36:30Z',
+      },
+    };
+    const preRaw = JSON.stringify(preDecl);
+    const preProbes = {
+      api: {
+        status: 401,
+        message: 'development authentication is not enabled',
+        at: '2026-10-07T15:39:30Z',
+      },
+      web: { status: 401, hasIdentity: false, at: '2026-10-07T15:39:31Z' },
+    };
     const runObj: Record<string, any> = {
+      envPreDeclarationRaw: preRaw,
+      envDeclarationSha256: sha(preRaw),
+      envPreSelfAnon401: { status: 401, at: '2026-10-07T15:39:00Z' },
+      envPreDevAuthProbes: preProbes,
+      envMaxAgeMin: 30,
       kind: 'wave01-capture-run',
       runId: 'run-1',
       evidenceMode: 'evidence',
@@ -671,8 +708,8 @@ describe('capture records and validate-run', () => {
       contractSha256: CONTRACT_SHA256,
       runner: { head: comp.runner.commit, suiteDigest: comp.runner.suiteDigest },
       captureIds: ['cap-1'],
-      startedAt: '2026-10-07T15:10:00Z',
-      endedAt: '2026-10-07T15:20:00Z',
+      startedAt: '2026-10-07T15:40:00Z',
+      endedAt: '2026-10-07T15:50:00Z',
       expectedRecords: ['W01-S01.P1.M0.capture.json'],
       env: [
         { gate: 'E-ENV-1', outcome: 'pass' },
@@ -681,8 +718,9 @@ describe('capture records and validate-run', () => {
         { gate: 'E-ENV-4', outcome: 'inconclusive', awaitingPost: true },
         { gate: 'E-ENV-5', outcome: 'pass' },
       ],
-      envPostSelfAnon401: { status: 401, at: '2026-10-07T15:20:01Z' },
+      envPostSelfAnon401: { status: 401, at: '2026-10-07T15:50:01Z' },
       envPreBaseURL: 'https://baseline.example',
+      envPreProcessStartTs: '2026-10-07T15:30:00Z',
       envPostDevAuthProbes: PROBES_OFF,
       envPreValues: {
         e_env_1_dev_auth_effective: false,
@@ -733,6 +771,7 @@ describe('capture records and validate-run', () => {
         baseURL: 'https://baseline.example',
         window_start: '2026-10-07T15:00:00Z',
         window_end: '2026-10-07T16:00:00Z',
+        serving_process_start_ts: '2026-10-07T15:30:00Z',
         slotGeneration: 'gen-1',
         e_env_1_dev_auth_effective: false,
         e_env_1_provenance: PROV,
@@ -751,6 +790,24 @@ describe('capture records and validate-run', () => {
     expect(
       writeRun(undefined, (r) => delete r.envPreBaseURL).some((e) =>
         e.includes('run.envPreBaseURL')
+      )
+    ).toBe(true);
+  });
+  it('O1: validate-run recomputes PRE gates from the embedded raw declaration (tampered run.env / bytes rejected)', () => {
+    expect(
+      writeRun(undefined, (r) => (r.env[0] = { gate: 'E-ENV-1', outcome: 'inconclusive' })).some(
+        (e) => e.includes('recomputed E-ENV-1 pass != recorded inconclusive')
+      )
+    ).toBe(true);
+    expect(
+      writeRun(
+        undefined,
+        (r) => (r.envPreDeclarationRaw = r.envPreDeclarationRaw.replace('15:35:00Z', '15:34:00Z'))
+      ).some((e) => e.includes('do not match envDeclarationSha256'))
+    ).toBe(true);
+    expect(
+      writeRun(undefined, (r) => delete r.envPreDeclarationRaw).some((e) =>
+        e.includes('envPreDeclarationRaw')
       )
     ).toBe(true);
   });
@@ -799,5 +856,25 @@ describe('capture records and validate-run', () => {
         (e) => e.includes('unresolved pending')
       )
     ).toBe(true);
+  });
+});
+
+describe('O5: validation record binds the validator code identity', () => {
+  it('carries the validator runner commit and suite digest', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wave01-val-'));
+    fs.writeFileSync(path.join(dir, 'run.json'), '{}');
+    const rec = validationRecord(
+      dir,
+      '/nonexistent/base.json',
+      '/nonexistent/comp.json',
+      undefined,
+      ['missing: x']
+    ) as {
+      validator: { head: string; suiteDigest: string };
+      classification: string;
+    };
+    expect(rec.validator.head).toMatch(/^[0-9a-f]{40}$/);
+    expect(rec.validator.suiteDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(rec.classification).toBe('INCONCLUSIVE');
   });
 });

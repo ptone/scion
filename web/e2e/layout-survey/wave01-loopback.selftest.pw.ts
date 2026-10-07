@@ -268,7 +268,13 @@ async function runRunner(mode: Mode) {
   const runDir = path.join(evidence, runs[0]!);
   const run = JSON.parse(fs.readFileSync(path.join(runDir, 'run.json'), 'utf-8'));
   const read = (f: string) => JSON.parse(fs.readFileSync(path.join(runDir, f), 'utf-8'));
-  return { code, runDir, run, read, files: fs.readdirSync(runDir) };
+  // review3 O6: the probe token pattern must not appear in ANY run artifact.
+  const tokenHits = fs
+    .readdirSync(runDir)
+    .filter((f) =>
+      /scion_dev_[0-9a-f]{16,}/.test(fs.readFileSync(path.join(runDir, f)).toString('latin1'))
+    );
+  return { code, runDir, run, read, files: fs.readdirSync(runDir), tokenHits };
 }
 
 test.describe.configure({ mode: 'serial' });
@@ -310,6 +316,7 @@ test('clean loopback: every expected record written; S01/S02 substeps complete; 
   );
   expect(r.read('W01-S02.P1.M3.capture.json').outcomes[0].clause).toBe('B-I1');
   expect(r.read('W01-S01.P1.M1.capture.json').outcomes[0].clause).toBe('A-F1');
+  expect(r.tokenHits, 'no artifact in the run dir carries a probe token').toEqual([]);
 });
 
 test('SAFETY: a page POST during measurement makes every affected substep a capture error with SAFETY first', async () => {
@@ -360,6 +367,7 @@ test('dev-auth ON (rev 4 probes): E-ENV-1 FAIL stops the batch before capture wi
   expect(e1.outcome).toBe('fail');
   expect(r.files.filter((f) => f.endsWith('.capture.json'))).toEqual([]);
   expect(JSON.stringify(r.run)).not.toMatch(/scion_dev_[0-9a-f]{64}/);
+  expect(r.tokenHits, 'no artifact in the run dir carries a probe token').toEqual([]);
   expect(r.code).not.toBe(0);
 });
 

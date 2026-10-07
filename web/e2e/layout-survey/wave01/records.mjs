@@ -23,6 +23,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sha256, validatePair, CONTRACT_SHA256 } from './release.mjs';
+import { suiteDigest } from './suite-digest.mjs';
 
 export const CAPTURE_KIND = 'wave01-capture';
 export const RUN_KIND = 'wave01-capture-run';
@@ -130,7 +131,7 @@ export const AUTH_MODE_SOURCES = Object.freeze([
  *               or "unset" citing the default (hub_config.go:583-584).
  * Missing support ⇒ record incomplete ⇒ INCONCLUSIVE (R-7).
  */
-export function checkSupport(support, prov, slotGeneration) {
+export function checkSupport(support, prov, slotGeneration, batchStart) {
   const missing = [];
   const forbidden = [];
   if (!isObj(support)) return { missing: ['support'], forbidden };
@@ -147,8 +148,37 @@ export function checkSupport(support, prov, slotGeneration) {
     if (!/Z$/.test(h.log_ts ?? '') || Number.isNaN(lt)) missing.push('support.hosted.log_ts');
     if (!/Z$/.test(h.process_start_ts ?? '') || Number.isNaN(pt))
       missing.push('support.hosted.process_start_ts');
+    // Source attribution (owner via ii2, 16:55Z): timestamps must say where
+    // they came from (OS process table / service manager; serve-path log).
+    if (typeof h.process_start_source !== 'string' || !h.process_start_source.trim())
+      missing.push('support.hosted.process_start_source');
+    if (typeof h.log_ts_source !== 'string' || !h.log_ts_source.trim())
+      missing.push('support.hosted.log_ts_source');
     if (!Number.isNaN(lt) && !Number.isNaN(pt) && lt < pt)
       missing.push('support.hosted log line predates the current process start (not attributable)');
+    // Ruling R-10: process_start_ts <= log_ts <= batch start — the supporting
+    // line must come from the process that served this batch. (The gap
+    // between process start and the log line is recorded, not graded.)
+    const bs = Date.parse(batchStart ?? '');
+    if (!Number.isNaN(bs)) {
+      if (!Number.isNaN(pt) && pt > bs)
+        missing.push('support.hosted.process_start_ts after batch start (not the serving process)');
+      if (!Number.isNaN(lt) && lt > bs)
+        missing.push(
+          'support.hosted.log_ts after batch start (not from the serving process start)'
+        );
+    }
+    // Owner 16:55Z: the bound is the runner-recorded batch start; a declared
+    // batch_start (optional, recorded) must be consistent and cannot move it.
+    if (h.batch_start !== undefined) {
+      const db = Date.parse(h.batch_start ?? '');
+      if (!/Z$/.test(h.batch_start ?? '') || Number.isNaN(db))
+        missing.push('support.hosted.batch_start malformed');
+      else if ((!Number.isNaN(lt) && db < lt) || (!Number.isNaN(bs) && db > bs))
+        missing.push(
+          'support.hosted.batch_start inconsistent with log_ts / runner-recorded batch start'
+        );
+    }
     if (slotGeneration !== undefined && h.slot_generation !== slotGeneration)
       missing.push('support.hosted.slot_generation (log not attributable to this slot generation)');
   }
@@ -161,21 +191,82 @@ export function checkSupport(support, prov, slotGeneration) {
     else if (d.dev_auth_warning_present)
       forbidden.push('startup "WARNING: Development authentication enabled" present');
   }
+  // Ruling R-9: auth_mode support must be backed by the SAME record, and a
+  // forbidden effective auth.mode established by the record itself is FAIL
+  // (no general resolver: env overlay is applied last; the settings path has
+  // a single selected file; legacy merge order is never resolved here).
   const a = support.auth_mode;
+  const declared = prov?.declared_effective_auth_mode;
+  const envAM = isObj(prov?.env) ? prov.env.SCION_SERVER_AUTH_MODE : undefined;
+  const envSet = typeof envAM === 'string' && envAM !== 'absent';
+  const settingsPath =
+    prov?.load_path === 'settings-global' || prov?.load_path === 'settings-local';
+  const legacyPath = prov?.load_path === 'legacy';
+  const settingsAM =
+    settingsPath && isObj(prov?.path_values) ? prov.path_values['server.auth.mode'] : undefined;
+  const legacyFiles =
+    legacyPath && isObj(prov?.path_values) && Array.isArray(prov.path_values.files)
+      ? prov.path_values.files
+      : [];
+  // (c) FAIL cases established by the record.
+  if (envSet && envAM === 'dev')
+    forbidden.push('SCION_SERVER_AUTH_MODE=dev recorded (env overlay applied last)');
+  if (settingsPath && envAM === 'absent' && settingsAM === 'dev')
+    forbidden.push('selected settings file server.auth.mode=dev with env absent');
+  // Legacy merge with a dev-valued file and no env overlay: establishing the
+  // effective value would need the merge order resolved ⇒ not proven
+  // (INCONCLUSIVE) unless declared "dev" (which is FAIL via R-8).
+  if (
+    legacyPath &&
+    !envSet &&
+    declared !== 'dev' &&
+    legacyFiles.some((f) => isObj(f) && f['auth.mode'] === 'dev')
+  )
+    missing.push(
+      'legacy merged file sets auth.mode=dev; effective value not established without resolving merge order'
+    );
   if (!isObj(a) || !AUTH_MODE_SOURCES.includes(a.source)) missing.push('support.auth_mode.source');
   else {
-    const declared = prov?.declared_effective_auth_mode;
-    if (a.source === 'unset-default' && declared !== 'unset')
-      missing.push('support.auth_mode: unset-default requires declared "unset"');
-    if (a.source !== 'unset-default' && declared === 'unset')
-      missing.push('support.auth_mode: declared "unset" requires source unset-default');
-    if (a.source === 'legacy-file' && (typeof a.file !== 'string' || !a.file))
-      missing.push('support.auth_mode.file');
+    const fail = (why) => missing.push(`support.auth_mode invalid: ${why}`);
+    if (a.source === 'unset-default') {
+      // (b) every recorded auth.mode input must be absent.
+      if (declared !== 'unset') fail('unset-default requires declared "unset"');
+      if (envAM !== 'absent') fail('SCION_SERVER_AUTH_MODE not recorded absent');
+      if (settingsPath && settingsAM !== 'absent')
+        fail('selected settings file server.auth.mode not absent');
+      if (
+        legacyPath &&
+        (legacyFiles.length === 0 ||
+          legacyFiles.some((f) => !isObj(f) || f['auth.mode'] !== 'absent'))
+      )
+        fail('a merged legacy file sets auth.mode');
+    } else {
+      if (declared === 'unset') fail('declared "unset" requires source unset-default');
+      if (a.source === 'env:SCION_SERVER_AUTH_MODE') {
+        if (!envSet) fail('cited SCION_SERVER_AUTH_MODE is not recorded present');
+        else if (envAM !== declared) fail('cited SCION_SERVER_AUTH_MODE value != declared');
+      } else if (a.source === 'settings:server.auth.mode') {
+        if (!settingsPath) fail('cited settings input but load_path is not a settings path');
+        else if (typeof settingsAM !== 'string' || settingsAM === 'absent')
+          fail('cited server.auth.mode is not recorded present');
+        else if (settingsAM !== declared) fail('cited server.auth.mode value != declared');
+        else if (envSet) fail('SCION_SERVER_AUTH_MODE is set and applied last; cite the env input');
+      } else if (a.source === 'legacy-file') {
+        const f = legacyFiles.find((x) => isObj(x) && x.file === a.file);
+        if (!legacyPath) fail('cited legacy file but load_path is not legacy');
+        else if (typeof a.file !== 'string' || !a.file) fail('legacy-file source needs file');
+        else if (!f) fail('cited file is not among the recorded merged files');
+        else if (typeof f['auth.mode'] !== 'string' || f['auth.mode'] === 'absent')
+          fail('cited file does not record auth.mode');
+        else if (f['auth.mode'] !== declared) fail('cited file auth.mode != declared');
+        else if (envSet) fail('SCION_SERVER_AUTH_MODE is set and applied last; cite the env input');
+      }
+    }
   }
   return { missing, forbidden };
 }
 
-export function checkProvenance(prov, declaredDevAuth, slotGeneration) {
+export function checkProvenance(prov, declaredDevAuth, slotGeneration, batchStart) {
   const missing = [];
   const contradictions = [];
   const forbidden = [];
@@ -219,7 +310,7 @@ export function checkProvenance(prov, declaredDevAuth, slotGeneration) {
   )
     missing.push('declared_effective_auth_mode');
   if (typeof declaredDevAuth !== 'boolean') missing.push('e_env_1_dev_auth_effective');
-  const sup = checkSupport(prov.support, prov, slotGeneration);
+  const sup = checkSupport(prov.support, prov, slotGeneration, batchStart);
   missing.push(...sup.missing);
   forbidden.push(...sup.forbidden);
   // Forbidden states declared or directly recorded.
@@ -284,7 +375,8 @@ export function gradeEEnv1(decl, probes, b) {
     ? checkProvenance(
         decl?.e_env_1_provenance,
         decl?.e_env_1_dev_auth_effective,
-        decl?.slotGeneration
+        decl?.slotGeneration,
+        b.batchStart
       )
     : null;
   const details = {
@@ -293,6 +385,15 @@ export function gradeEEnv1(decl, probes, b) {
     recordAttributable: b.attributable,
     recordBoundToWindow: b.bound,
   };
+  // Ruling R-10: the probes must come after the serving process start.
+  const pst = Date.parse(decl?.e_env_1_provenance?.support?.hosted?.process_start_ts ?? '');
+  const probesBeforeStart =
+    b.attributable && !Number.isNaN(pst)
+      ? ['api', 'web'].filter((k) => {
+          const at = Date.parse(probes?.[k]?.at ?? '');
+          return !Number.isNaN(at) && at < pst;
+        })
+      : [];
   if (cls.api === 'on' || cls.web === 'on')
     return {
       outcome: 'fail',
@@ -309,6 +410,10 @@ export function gradeEEnv1(decl, probes, b) {
   else if (!b.bound) open.push('provenance record not bound to this capture window');
   if (prov && !prov.complete) open.push(`provenance incomplete: ${prov.missing.join(', ')}`);
   if (prov && prov.contradictions.length) open.push(...prov.contradictions);
+  if (probesBeforeStart.length)
+    open.push(
+      `probe(s) ${probesBeforeStart.join(', ')} taken before the serving process start (R-10)`
+    );
   return { outcome: open.length ? 'inconclusive' : 'pass', reasons: open, ...details };
 }
 
@@ -471,7 +576,7 @@ export function evaluateEnv(decl, selfAnon401, release, window, probes = null) {
     if (!bound || !extraOk) return 'inconclusive';
     return b;
   };
-  const e1 = gradeEEnv1(decl, probes, { attributable, bound });
+  const e1 = gradeEEnv1(decl, probes, { attributable, bound, batchStart: window?.batchStart });
   const out = [
     g('E-ENV-1', e1.outcome, {
       rule: 'rev 4 §5a E-ENV-1a probes + 1b provenance (R-7)',
@@ -636,7 +741,7 @@ export function envStop(results) {
  * [run.startedAt, run.endedAt]; same slotGeneration; dev-auth and runtime
  * broker effective false; no broker process/dispatch true.
  * @param {any} post
- * @param {{startedAt: string, endedAt: string, slotGeneration: string, baseURL: string, preBaseURL?: string, preValues?: Record<string, boolean | null>, preProvenanceKey?: string | null, testLoginUsed?: boolean}} run
+ * @param {{startedAt: string, endedAt: string, slotGeneration: string, baseURL: string, preBaseURL?: string, preValues?: Record<string, boolean | null>, preProvenanceKey?: string | null, preProcessStartTs?: string | null, testLoginUsed?: boolean}} run
  */
 export function evaluateEnvPost(post, run) {
   if (!post) return { outcome: 'inconclusive', problems: ['missing: POST env declaration'] };
@@ -692,7 +797,8 @@ export function evaluateEnvPost(post, run) {
     const pc = checkProvenance(
       post.e_env_1_provenance,
       post.e_env_1_dev_auth_effective,
-      post.slotGeneration
+      post.slotGeneration,
+      run.startedAt
     );
     if (pc.forbidden.length) fails.push(`E-ENV-1 (POST record): ${pc.forbidden.join('; ')}`);
     else if (!pc.complete || pc.contradictions.length)
@@ -700,12 +806,36 @@ export function evaluateEnvPost(post, run) {
         `POST e_env_1_provenance incomplete/contradictory: ${[...pc.missing, ...pc.contradictions].join('; ')}`
       );
     else if (
+      run.preProcessStartTs &&
+      post.e_env_1_provenance?.support?.hosted?.process_start_ts !== run.preProcessStartTs
+    )
+      // R-10: a different serving-process start is a restart ⇒ continuity
+      // INCONCLUSIVE (reported below), not an environment-value FAIL.
+      problems.push(
+        'POST record from a different serving-process start (restart; R-10) — not compared'
+      );
+    else if (
       run.preProvenanceKey &&
       provenanceKey(post.e_env_1_provenance) !== run.preProvenanceKey
     )
-      fails.push('same-slot PRE/POST disagreement on e_env_1_provenance');
+      fails.push('same-slot PRE/POST disagreement on e_env_1_provenance (environment values)');
   } else if (post.e_env_1_dev_auth_effective === true)
     fails.push('E-ENV-1 (POST): declared effective dev-auth ON');
+  // Ruling R-10 continuity: POST must show the SAME serving-process start as
+  // PRE (a restart during the batch means no single attributable process
+  // covered it ⇒ INCONCLUSIVE).
+  {
+    const postStart =
+      post.serving_process_start_ts ?? post.e_env_1_provenance?.support?.hosted?.process_start_ts;
+    if (run.preProcessStartTs === undefined || run.preProcessStartTs === null)
+      problems.push('missing: PRE serving process start (run.envPreProcessStartTs)');
+    else if (typeof postStart !== 'string' || !postStart)
+      problems.push('POST serving_process_start_ts missing (R-10 continuity)');
+    else if (postStart !== run.preProcessStartTs)
+      problems.push(
+        `serving process restarted during the batch (PRE ${run.preProcessStartTs}, POST ${postStart}) — R-10`
+      );
+  }
   const sw = post.e_env_2_anon_401;
   if (sw && typeof sw.status === 'number' && sw.status !== 401)
     fails.push(`E-ENV-2: POST steward anonymous probe status ${sw.status}`);
@@ -860,6 +990,35 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
       errs.push(`missing: ${gte.gate} ${gte.outcome} (pre window)`);
   }
   if (!run.envPreValues) errs.push('missing: run.envPreValues (PRE shared env values)');
+  // review3 O1: recompute the PRE gates from the embedded RAW declaration and
+  // the recorded probe / auth-check results instead of trusting run.env.
+  if (typeof run.envPreDeclarationRaw !== 'string') errs.push('missing: run.envPreDeclarationRaw');
+  else {
+    if (sha256(Buffer.from(run.envPreDeclarationRaw, 'utf-8')) !== run.envDeclarationSha256)
+      errs.push('mismatch: embedded PRE declaration bytes do not match envDeclarationSha256');
+    let decl = null;
+    try {
+      decl = JSON.parse(run.envPreDeclarationRaw);
+    } catch {
+      errs.push('mismatch: embedded PRE declaration is not JSON');
+    }
+    if (decl) {
+      let recomputed = evaluateEnv(
+        decl,
+        run.envPreSelfAnon401 ?? null,
+        { slotGeneration: base.slotGeneration, baseURL: run.baseURL ?? base.baseURL },
+        { batchStart: run.startedAt, maxAgeMin: run.envMaxAgeMin },
+        run.envPreDevAuthProbes ?? null
+      );
+      if (run.envAuthCheck) recomputed = applyAuthCheck(recomputed, run.envAuthCheck);
+      for (const g of recomputed) {
+        const recorded = (run.env ?? []).find((x) => x.gate === g.gate);
+        if (!recorded) errs.push(`missing: run.env ${g.gate}`);
+        else if (recorded.outcome !== g.outcome || !!recorded.awaitingPost !== !!g.awaitingPost)
+          errs.push(`mismatch: recomputed ${g.gate} ${g.outcome} != recorded ${recorded.outcome}`);
+      }
+    }
+  }
   if (!run.envPreBaseURL) errs.push('missing: run.envPreBaseURL (PRE declaration baseURL)');
   else if (hostBinding({ baseURL: run.envPreBaseURL }, base.baseURL).status !== 'ok')
     errs.push(
@@ -903,6 +1062,7 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
       preBaseURL: run.envPreBaseURL ?? undefined,
       preValues: run.envPreValues ?? undefined,
       preProvenanceKey: run.envPreProvenanceKey ?? undefined,
+      preProcessStartTs: run.envPreProcessStartTs ?? null,
       testLoginUsed:
         Array.isArray(run.issuanceInventory?.credentials) &&
         run.issuanceInventory.credentials.length > 0,
@@ -987,6 +1147,16 @@ export function coverageSummary(runDir) {
   return { perState, totals };
 }
 
+/** review3 O5: which code produced the verdict (runner commit + suite digest). */
+function validatorIdentity() {
+  try {
+    const d = suiteDigest();
+    return { head: d.commit, suiteDigest: d.digest, suiteFileCount: d.fileCount, method: d.method };
+  } catch (e) {
+    return { error: String(e instanceof Error ? e.message : e).slice(0, 200) };
+  }
+}
+
 /**
  * Immutable validation result bound to the exact inputs (owner 16:04Z: the
  * passing validate-run output, not run.json batchValid, is the final
@@ -1006,6 +1176,7 @@ export function validationRecord(runDir, baseFile, companionFile, envPostFile, e
     kind: 'wave01-validation',
     createdAt: new Date().toISOString(),
     contractSha256: CONTRACT_SHA256,
+    validator: validatorIdentity(),
     runDir: path.basename(runDir),
     verdict: errs.length === 0 ? 'accepted' : 'rejected',
     classification:

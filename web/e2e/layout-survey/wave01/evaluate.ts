@@ -663,8 +663,15 @@ export function pressChecks(
   const hit = !!e.hit && e.hit.inViewport && e.hit.ok;
   const s = e.style;
   let indicatorBy: string | null = null;
-  if (s.outlineStyle !== 'none' && parseFloat(s.outlineWidth ?? '0') > 0) indicatorBy = 'outline';
-  else if (s.boxShadow && s.boxShadow !== 'none') indicatorBy = 'box-shadow';
+  // Both style forms are accepted: full computed (kebab-case, A-F1 probe) and
+  // the legacy small vector (camelCase).
+  const get = (kebab: string, camel: string) => s[kebab] ?? s[camel];
+  const outlineStyle = get('outline-style', 'outlineStyle');
+  const outlineWidth = get('outline-width', 'outlineWidth');
+  const boxShadow = get('box-shadow', 'boxShadow');
+  if (outlineStyle !== undefined && outlineStyle !== 'none' && parseFloat(outlineWidth ?? '0') > 0)
+    indicatorBy = 'outline';
+  else if (boxShadow && boxShadow !== 'none') indicatorBy = 'box-shadow';
   let diffKeys: string[] = [];
   if (indicatorBy === null) {
     // Fallback (iii): a computed style difference from the same element

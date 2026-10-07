@@ -336,6 +336,19 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
     return false;
   };
 
+  // Full computed style (every property, kebab-case names) for A-F1 rule (c)
+  // (assessor/owner 16:56Z, review3 O2): used for the focused element and the
+  // same-context unfocused baseline. The small vector below is kept for the
+  // geometry records, where indicator grading does not apply.
+  const fullStyle = (cs: CSSStyleDeclaration): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (let i = 0; i < cs.length; i++) {
+      const name = cs.item(i);
+      out[name] = cs.getPropertyValue(name);
+    }
+    return out;
+  };
+
   const styleVector = (cs: CSSStyleDeclaration): Record<string, string> => ({
     outlineStyle: cs.outlineStyle,
     outlineWidth: cs.outlineWidth,
@@ -448,7 +461,8 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
     el: Element,
     policies: readonly PolicyDef[],
     ctx: string[],
-    actionableDef: { tags: readonly string[]; roles: readonly string[] }
+    actionableDef: { tags: readonly string[]; roles: readonly string[] },
+    full = false
   ): RawElement => {
     const cs = getComputedStyle(el);
     const he = el as HTMLElement;
@@ -514,7 +528,7 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
       chain,
       hit,
       clipC: clipC(el),
-      style: styleVector(cs),
+      style: full ? fullStyle(cs) : styleVector(cs),
     };
   };
 
@@ -662,7 +676,7 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
       innerWidth: window.innerWidth,
       innerHeight: window.innerHeight,
       tag: a.localName,
-      element: measureEl(a, req.policies, req.policyContext, req.actionable),
+      element: measureEl(a, req.policies, req.policyContext, req.actionable, true),
     };
   }
 
@@ -672,7 +686,7 @@ export function probe(a: ProbeRequest | Element, b?: ProbeRequest): unknown {
     const out: Record<string, Record<string, string>> = {};
     for (const el of allDeep(document)) {
       if ((el as HTMLElement).tabIndex >= 0 || el.localName === 'a') {
-        out[deepPath(el)] = styleVector(getComputedStyle(el));
+        out[deepPath(el)] = fullStyle(getComputedStyle(el));
       }
     }
     return out;

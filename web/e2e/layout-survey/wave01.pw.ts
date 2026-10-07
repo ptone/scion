@@ -221,19 +221,21 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
     // review2 RB3: a bound PRE declaring test-login disabled is checked against
     // the runner's own test-login attempt (success ⇒ FAIL, refusal ⇒ INCONCLUSIVE).
     let authCheckInventory: unknown = null;
+    let authCheckAttempt: { succeeded: boolean; at: string; detail?: string } | null = null;
     if (envD.authCheckPending) {
       const at = now();
       try {
         const o = await openAdminSession({ ...cfg, purpose: `wave01-authcheck-${runId}` });
         authCheckInventory = o.inventory;
-        env = applyAuthCheck(env, { succeeded: true, at });
+        authCheckAttempt = { succeeded: true, at };
       } catch (e) {
-        env = applyAuthCheck(env, {
+        authCheckAttempt = {
           succeeded: false,
           at,
           detail: String(e instanceof Error ? e.message : e).slice(0, 300),
-        });
+        };
       }
+      env = applyAuthCheck(env, authCheckAttempt);
       envD = envDecision(env);
       stops.push(
         `E-ENV-3 auth check: PRE declares test-login disabled (${envD.fails.includes('E-ENV-3') ? 'runner test-login succeeded: contradiction, FAIL' : 'runner test-login refused: capture impossible, INCONCLUSIVE'})`
@@ -314,7 +316,12 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
             envPreValues: envDecl ? sharedEnvValues(envDecl) : null,
             envPreProvenanceKey: envDecl ? provenanceKey(envDecl.e_env_1_provenance) : null,
             envPreDevAuthProbes: preProbes,
+            envPreSelfAnon401: self401,
+            envPreDeclarationRaw: envDeclBytes ? envDeclBytes.toString('utf-8') : null,
+            envPreProcessStartTs:
+              envDecl?.e_env_1_provenance?.support?.hosted?.process_start_ts ?? null,
             authCheckInventory,
+            envAuthCheck: authCheckAttempt,
             expectedRecords,
             statesSelected: cfg.states,
             attachOnly: {

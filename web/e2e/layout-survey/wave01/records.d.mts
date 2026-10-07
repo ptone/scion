@@ -20,17 +20,19 @@ export declare const AUTH_MODE_SOURCES: readonly string[];
 export declare function checkSupport(
   support: unknown,
   prov: unknown,
-  slotGeneration: string | undefined
+  slotGeneration: string | undefined,
+  batchStart?: string
 ): { missing: string[]; forbidden: string[] };
 export declare function checkProvenance(
   prov: unknown,
   declaredDevAuth: unknown,
-  slotGeneration?: string
+  slotGeneration?: string,
+  batchStart?: string
 ): { complete: boolean; missing: string[]; contradictions: string[]; forbidden: string[] };
 export declare function gradeEEnv1(
   decl: unknown,
   probes: { api: unknown; web: unknown } | null,
-  b: { attributable: boolean; bound: boolean }
+  b: { attributable: boolean; bound: boolean; batchStart?: string }
 ): { outcome: 'pass' | 'fail' | 'inconclusive'; reasons: string[] } & Record<string, unknown>;
 export declare function provenanceKey(prov: unknown): string | null;
 export declare function sharedEnvValues(decl: unknown): Record<string, boolean | null>;
@@ -70,6 +72,7 @@ export declare function evaluateEnvPost(
     preBaseURL?: string;
     preValues?: Record<string, boolean | null>;
     preProvenanceKey?: string | null;
+    preProcessStartTs?: string | null;
     testLoginUsed?: boolean;
   }
 ): { outcome: 'pass' | 'fail' | 'inconclusive'; problems: string[]; attributable: boolean };

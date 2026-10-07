@@ -215,10 +215,15 @@ test('nav op and element-bound path op', async ({ page }) => {
 const HTML2 = `<!doctype html><html><head><style>
   html,body{margin:0;font:14px sans-serif}
   #bg:focus-visible{outline:none;background:rgb(255,255,0)}
+  #fw:focus-visible{outline:none;font-weight:700}
+  #blw{border-left:0 solid black}
+  #blw:focus-visible{outline:none;border-left-width:4px}
 </style></head><body>
 <a id="noring" href="#a" style="outline:none">No ring</a>
 <a id="zero" href="#b" style="outline:0">Zero outline</a>
 <a id="bg" href="#c">Background indicator</a>
+<a id="fw" href="#d">Font-weight indicator</a>
+<a id="blw" href="#e">Border-left indicator</a>
 <span id="ws-normal" style="white-space:normal">Double  Space
   wrapped</span>
 <span id="ws-pre" style="white-space:pre-wrap">A  B</span>
@@ -287,7 +292,7 @@ test('rev 3 (c) positive control: a non-outline focus style change IS an indicat
   await page.setContent(HTML2);
   const bg = await tabTo(page, 'bg');
   expect(bg).toMatchObject({ indicator: true, indicatorBy: 'style-diff-from-unfocused' });
-  expect(bg.diffKeys).toContain('backgroundColor');
+  expect(bg.diffKeys).toContain('background-color');
   expect(bg.diffKeys.some((k) => k.startsWith('outline'))).toBe(false);
 });
 
@@ -344,4 +349,17 @@ test('R-5 real-Chromium control: NBSP and U+3000 stay significant in innerText a
   expect(e.innerText).toBe('A\u00a0B\u3000C');
   expect(renderedTextEquals(e.innerText, 'A\u00a0B\u3000C', e.whiteSpace).equal).toBe(true);
   expect(renderedTextEquals(e.innerText, 'A B C', e.whiteSpace).equal).toBe(false);
+});
+
+test('O2: full computed-style diff — font-weight / border-left-width (outside the old subset) count as indicators', async ({
+  page,
+}) => {
+  await page.setContent(HTML2);
+  const fw = await tabTo(page, 'fw');
+  expect(fw).toMatchObject({ indicator: true, indicatorBy: 'style-diff-from-unfocused' });
+  expect(fw.diffKeys).toContain('font-weight');
+  expect(fw.diffKeys.some((k) => k.startsWith('outline'))).toBe(false);
+  const blw = await tabTo(page, 'blw');
+  expect(blw).toMatchObject({ indicator: true, indicatorBy: 'style-diff-from-unfocused' });
+  expect(blw.diffKeys).toContain('border-left-width');
 });
