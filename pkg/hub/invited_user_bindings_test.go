@@ -17,7 +17,8 @@
 package hub
 
 // Invited users' memberships and role bindings take effect at first
-// sign-in: decide's account-status gate, token refresh and web sign-in.
+// sign-in: decide's account-status gate, token refresh and web sign-in,
+// for users created by invite, allow list or POST /api/v1/users.
 
 import (
 	"context"
@@ -582,4 +583,71 @@ func TestDeleteUser_InvitedUser_CascadesBindingsAndGroups(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, groups, 1, "group membership is kept")
 	})
+}
+
+// A user created through POST /api/v1/users is the same invited record:
+// memberships and role bindings recorded for it take effect at first
+// sign-in, on the same user ID.
+func TestProvisionedUser_PreRecordedBindings_InertUntilSignIn(t *testing.T) {
+	f := newProvisionFixture(t)
+	ctx := context.Background()
+	project := newTestProject(t, f.s, "project-provisioned", "Provisioned Project")
+	other := newTestProject(t, f.s, "project-provisioned-other", "Provisioned Other")
+
+	rec := provisionAs(t, f.srv, f.superAdmin, map[string]interface{}{"email": "Provisioned.Person@Example.com"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	resp := decodeProvisionResponse(t, rec)
+	require.Equal(t, store.UserStatusInvited, resp.User.Status)
+	provisioned, err := f.s.GetUser(ctx, resp.User.ID)
+	require.NoError(t, err)
+
+	memberRD, err := f.s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	rec = doRequestAsUser(t, f.srv, f.superAdmin, http.MethodPut,
+		fmt.Sprintf("/api/v1/projects/%s/members/principals/user/%s", project.ID, provisioned.Email),
+		map[string]interface{}{"roleDefinitionIds": []string{memberRD.ID}})
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, rec.Body.String())
+	projRole := createCustomRoleDef(t, f.s, "provisioned-project-updater", []string{"project.update"})
+	sysRole, err := f.s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: "provisioned-system-updater", ScopeType: store.RoleScopeSystem, Permissions: []string{"project.update"},
+	})
+	require.NoError(t, err)
+	for _, req := range []createRoleBindingRequest{
+		{RoleDefinitionID: projRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: provisioned.Email,
+			ScopeType: store.RoleScopeProject, ScopeID: project.ID},
+		{RoleDefinitionID: sysRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: provisioned.Email,
+			ScopeType: store.RoleScopeSystem},
+	} {
+		rec := doRequestAsUser(t, f.srv, f.superAdmin, http.MethodPost, "/api/v1/admin/role-bindings", req)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	require.Len(t, allBindingsFor(t, f.s, provisioned.ID), 3)
+
+	checks := []struct {
+		res  Resource
+		perm string
+	}{
+		{projectResource(project), "project.read"},
+		{projectResource(project), "project.update"},
+		{projectResource(other), "project.update"},
+	}
+	decide := func(u *store.User, res Resource, perm string) Decision {
+		action, ok := registryActionFor(perm)
+		require.True(t, ok)
+		return decidePerm(f.srv.authzService, NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb)), res, action, perm, false)
+	}
+	for _, c := range checks {
+		d := decide(provisioned, c.res, c.perm)
+		assert.False(t, d.Allowed, "%s on %s denied before first sign-in", c.perm, c.res.ID)
+		assert.Equal(t, principalNotActiveReason, d.Reason)
+	}
+
+	signedIn, err := f.srv.provisionUser(ctx, &ExternalUserInfo{Email: provisioned.Email})
+	require.NoError(t, err)
+	require.Equal(t, provisioned.ID, signedIn.ID, "activation keeps the user ID")
+	require.Equal(t, store.UserStatusActive, signedIn.Status)
+	for _, c := range checks {
+		d := decide(signedIn, c.res, c.perm)
+		assert.True(t, d.Allowed, "%s on %s allowed after first sign-in: %s", c.perm, c.res.ID, d.Reason)
+	}
 }
