@@ -639,12 +639,12 @@ async function setupScriptAnimations(page: Page) {
         el(id).animate(KF, { ...LONG, pseudoElement: '::after' });
         el(id).style.setProperty('--c', "'x'");
       }
-      // own ::after box created, animated, removed, recreated
+      // own ::after box created (style resolved), then animated while it exists;
+      // removal and recreation happen in SEPARATE frames below (review8 O-8-4)
       for (const id of ['recreate', 'shre', 'slotre']) {
         el(id).style.setProperty('--c', "'x'");
+        void getComputedStyle(el(id), '::after').content;
         el(id).animate(KF, { ...LONG, pseudoElement: '::after' });
-        el(id).style.setProperty('--c', 'none');
-        el(id).style.setProperty('--c', "'y'");
       }
       // unanimated twins with the same ::after box
       for (const id of ['lightctl', 'shctl', 'slotctl']) el(id).style.setProperty('--c', "'x'");
@@ -654,6 +654,23 @@ async function setupScriptAnimations(page: Page) {
     },
     { KF, LONG }
   );
+  // review8 O8-4: really remove the ::after box in its own frames, prove it is
+  // gone, then recreate it in later frames.
+  const toggle = (c: string) =>
+    page.evaluate((c) => {
+      const sh = document.getElementById('sh')!.shadowRoot!;
+      return ['recreate', 'shre', 'slotre'].map((id) => {
+        const e = (document.getElementById(id) ?? sh.getElementById(id)) as HTMLElement;
+        e.style.setProperty('--c', c);
+        return getComputedStyle(e, '::after').content;
+      });
+    }, c);
+  await twoFrames(page);
+  expect(await toggle('none'), 'the ::after boxes are removed').toEqual(['none', 'none', 'none']);
+  await twoFrames(page);
+  await page.waitForTimeout(50);
+  expect(await toggle("'y'"), 'the ::after boxes are recreated').toEqual(['"y"', '"y"', '"y"']);
+  await twoFrames(page);
 }
 
 for (const [id, label, suffix] of [
