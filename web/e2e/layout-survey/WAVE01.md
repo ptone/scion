@@ -57,6 +57,7 @@ They contain key names, booleans and UTC timestamps only.
 
 ```json
 {
+  "baseURL": "https://<slot host>",
   "window_start": "…Z",
   "window_end": "…Z (POST only)",
   "slotGeneration": "…",
@@ -71,6 +72,28 @@ They contain key names, booleans and UTC timestamps only.
 ```
 
 `window_ts` is accepted as an alias for `window_start`.
+
+**Binding (rulings R-2/R-3; ii2 and owner, 15:54–15:57Z).** Each
+declaration must carry `baseURL`: the served target, as a canonical
+http(s) origin. It must use the configured hostname, never a raw IP, and
+must have no path or credentials. It is compared by exact parsed `origin`
+equality, the same way the Release pair is validated. There is no `host`
+alias and no substring matching.
+
+PRE.baseURL must equal POST.baseURL, which must equal the run's served
+baseURL. Each declaration's `slotGeneration` must equal the base Release's.
+
+- **Not bound** (other host or origin, PRE and POST on different hosts, or
+  another generation): the declaration is not evidence for this slot, so its
+  gates are **INCONCLUSIVE** whatever its values say. It is recorded as
+  `crossHost` / `bindingMismatch`.
+- **FAIL** only for contradictions of the environment:
+  - the runner's own probes (anonymous probe ≠ 401);
+  - a correctly bound declaration reporting a forbidden state (dev-auth on,
+    broker on, dispatch during the batch, E-ENV-5 accepted);
+  - same-slot PRE and POST disagreeing on an environment value.
+
+Either outcome stops capture, and validate-run rejects the run.
 
 ### PRE declaration
 

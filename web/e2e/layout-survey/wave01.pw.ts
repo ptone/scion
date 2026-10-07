@@ -142,7 +142,7 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
   const env: EnvGate[] = evaluateEnv(
     envDecl,
     self401,
-    { slotGeneration: String(base?.slotGeneration ?? '') },
+    { slotGeneration: String(base?.slotGeneration ?? ''), baseURL: cfg.baseURL },
     { batchStart, maxAgeMin }
   );
   const envD = envDecision(env);
@@ -214,6 +214,7 @@ test('Wave01 attach-only measurement batch', async ({ browser }) => {
           envDecision: envD,
           envMaxAgeMin: maxAgeMin,
           envDeclarationSha256: envDeclSha,
+          envPreBaseURL: typeof envDecl?.baseURL === 'string' ? envDecl.baseURL : null,
           expectedRecords,
           statesSelected: cfg.states,
           attachOnly: {

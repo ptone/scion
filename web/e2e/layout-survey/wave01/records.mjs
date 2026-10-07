@@ -43,6 +43,48 @@ const ms = (iso) => {
   return /Z$/.test(iso) ? t : NaN;
 };
 
+const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}|\[[0-9a-f:]+\])$/i;
+
+/**
+ * Canonical origin of a served-target URL, as Release validation uses it:
+ * http(s), no credentials/path/query/fragment, configured hostname (never a
+ * raw IP). Returns null when it is not such a URL.
+ * @param {unknown} v
+ */
+export function canonicalOrigin(v) {
+  if (typeof v !== 'string') return null;
+  let u;
+  try {
+    u = new URL(v);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  if (u.username || u.password || (u.pathname && u.pathname !== '/') || u.search || u.hash)
+    return null;
+  if (IP_RE.test(u.hostname)) return null;
+  return u.origin;
+}
+
+/**
+ * Host binding of an env declaration (ii2 + review2 amendment 15:54Z; owner
+ * 15:55Z: parsed canonical origin, compared exactly as the Release pair is,
+ * no aliases or substrings). `baseURL` is required. Any status other than
+ * 'ok' (missing, unparseable, raw IP, or a different origin) means the
+ * declaration is not evidence for THIS run ⇒ INCONCLUSIVE (assessor ruling
+ * relayed 15:55Z); 'mismatch' is still reported distinctly.
+ * @param {any} decl
+ * @param {string} runBaseURL
+ * @returns {{status: 'ok' | 'missing' | 'mismatch', declared: string | null, runOrigin: string | null}}
+ */
+export function hostBinding(decl, runBaseURL) {
+  const runOrigin = canonicalOrigin(runBaseURL);
+  const declared = typeof decl?.baseURL === 'string' ? decl.baseURL : null;
+  const d = canonicalOrigin(declared);
+  if (!runOrigin || !d) return { status: 'missing', declared, runOrigin };
+  return { status: d === runOrigin ? 'ok' : 'mismatch', declared, runOrigin };
+}
+
 /**
  * Grade E-ENV-1..5 for the PRE window (contract §5a; review1 B2/B3).
  *
@@ -59,7 +101,7 @@ const ms = (iso) => {
  *
  * @param {any} decl
  * @param {{status: number, at: string} | null} selfAnon401
- * @param {{slotGeneration: string}} release
+ * @param {{slotGeneration: string, baseURL: string}} release
  * @param {{batchStart: string, maxAgeMin?: number}} window
  */
 export function evaluateEnv(decl, selfAnon401, release, window) {
@@ -98,12 +140,24 @@ export function evaluateEnv(decl, selfAnon401, release, window) {
     maxAgeMin,
     genOk,
     windowOk,
+    host: hostBinding(decl, release.baseURL),
   };
-  const bound = genOk && windowOk;
+  const hostStatus = binding.host.status;
+  // Ruling R-3: a declaration not bound to THIS slot (host + generation) is
+  // unattributable ⇒ every gate it feeds is INCONCLUSIVE, whatever its
+  // values say; contradictions are FAIL only on an attributable declaration.
+  const attributable = genOk && hostStatus === 'ok';
+  if (!genOk)
+    binding.bindingMismatch = {
+      declared: decl.slotGeneration ?? null,
+      release: release.slotGeneration,
+    };
+  const bound = attributable && windowOk;
   const bool3 = (v, good) =>
     typeof v !== 'boolean' ? 'inconclusive' : v === good ? 'pass' : 'fail';
   // A contradiction is a FAIL even on a stale/mismatched declaration; missing/stale otherwise ⇒ inconclusive.
   const grade = (v, good, extraOk = true) => {
+    if (!attributable) return 'inconclusive';
     const b = bool3(v, good);
     if (b === 'fail') return 'fail';
     if (!bound || !extraOk) return 'inconclusive';
@@ -138,8 +192,9 @@ export function evaluateEnv(decl, selfAnon401, release, window) {
   ];
   const eff4 = bool3(decl.e_env_4_runtime_broker_effective, false);
   const nob4 = bool3(decl.e_env_4_no_broker_process_or_dispatch, true);
-  const pre4 =
-    eff4 === 'fail' || nob4 === 'fail'
+  const pre4 = !attributable
+    ? 'inconclusive'
+    : eff4 === 'fail' || nob4 === 'fail'
       ? 'fail'
       : !bound || eff4 !== 'pass' || nob4 !== 'pass'
         ? 'inconclusive'
@@ -170,14 +225,26 @@ export function evaluateEnv(decl, selfAnon401, release, window) {
   out.push(
     g(
       'E-ENV-5',
-      st !== null && st !== 401 && st !== 403
-        ? 'fail'
-        : !bound || st === null || !t5Ok
-          ? 'inconclusive'
-          : 'pass',
+      !attributable
+        ? 'inconclusive'
+        : st !== null && st !== 401 && st !== 403
+          ? 'fail'
+          : !bound || st === null || !t5Ok
+            ? 'inconclusive'
+            : 'pass',
       { probe: e5?.probe ?? null, resultStatus: st, at: e5?.ts ?? null, tsInWindow: t5Ok, binding }
     )
   );
+  if (hostStatus === 'mismatch') {
+    // Assessor grading ruling (relayed by ii2 15:55Z): a declaration not
+    // bound to this run's host is MISSING evidence for this run ⇒
+    // INCONCLUSIVE (bound=false above), never PASS; FAIL stays reserved for
+    // contradictions. Recorded explicitly.
+    for (const gte of out) {
+      if (gte.gate === 'E-ENV-2') continue;
+      gte.details = { ...gte.details, crossHost: binding.host };
+    }
+  }
   return out;
 }
 
@@ -209,7 +276,7 @@ export function envStop(results) {
  * [run.startedAt, run.endedAt]; same slotGeneration; dev-auth and runtime
  * broker effective false; no broker process/dispatch true.
  * @param {any} post
- * @param {{startedAt: string, endedAt: string, slotGeneration: string}} run
+ * @param {{startedAt: string, endedAt: string, slotGeneration: string, baseURL: string, preBaseURL?: string}} run
  */
 export function evaluateEnvPost(post, run) {
   if (!post) return { outcome: 'inconclusive', problems: ['missing: POST env declaration'] };
@@ -219,7 +286,24 @@ export function evaluateEnvPost(post, run) {
   const we = ms(post.window_end);
   const rs = ms(run.startedAt);
   const re = ms(run.endedAt);
-  if (post.slotGeneration !== run.slotGeneration) problems.push('POST slotGeneration != run');
+  if (post.slotGeneration !== run.slotGeneration)
+    problems.push(
+      `bindingMismatch: POST slotGeneration ${post.slotGeneration ?? null} != ${run.slotGeneration}`
+    );
+  const hb = hostBinding(post, run.baseURL);
+  if (hb.status === 'mismatch')
+    problems.push(
+      `cross-host: POST baseURL ${hb.declared} != run ${hb.runOrigin} (not evidence for this run)`
+    );
+  else if (hb.status !== 'ok')
+    problems.push(`POST baseURL ${hb.status} (canonical http(s) origin required)`);
+  if (run.preBaseURL !== undefined) {
+    const hp = hostBinding(post, run.preBaseURL);
+    if (hp.status !== 'ok')
+      problems.push(
+        `POST baseURL ${hb.declared} != PRE baseURL ${run.preBaseURL} (not evidence for this run)`
+      );
+  }
   if (Number.isNaN(ws) || Number.isNaN(we) || Number.isNaN(rs) || Number.isNaN(re))
     problems.push('POST/run window timestamps missing or not UTC ISO');
   else if (!(ws <= rs && we >= re))
@@ -236,9 +320,23 @@ export function evaluateEnvPost(post, run) {
     fails.push('E-ENV-4: broker process/dispatch during the batch');
   else if (post.e_env_4_no_broker_process_or_dispatch !== true)
     problems.push('POST e_env_4_no_broker_process_or_dispatch missing');
+  // Ruling R-3: a POST declaration not bound to this run's host (or not
+  // matching PRE's host) or generation is unattributable ⇒ INCONCLUSIVE; its
+  // value contradictions are recorded but not graded FAIL.
+  const attributable =
+    post.slotGeneration === run.slotGeneration &&
+    hb.status === 'ok' &&
+    (run.preBaseURL === undefined || hostBinding(post, run.preBaseURL).status === 'ok');
+  if (!attributable && fails.length) {
+    problems.push(
+      ...fails.map((f) => `unattributable (crossHost/bindingMismatch), not graded: ${f}`)
+    );
+    fails.length = 0;
+  }
   return {
     outcome: fails.length ? 'fail' : problems.length ? 'inconclusive' : 'pass',
     problems: [...fails, ...problems],
+    attributable,
   };
 }
 
@@ -364,6 +462,13 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
     else if (gte.outcome !== 'pass' && !(gte.gate === 'E-ENV-4' && gte.awaitingPost))
       errs.push(`missing: ${gte.gate} ${gte.outcome} (pre window)`);
   }
+  if (!run.envPreBaseURL) errs.push('missing: run.envPreBaseURL (PRE declaration baseURL)');
+  else if (hostBinding({ baseURL: run.envPreBaseURL }, base.baseURL).status !== 'ok')
+    errs.push(
+      `missing: PRE env baseURL ${run.envPreBaseURL} is not bound to Release baseURL ${base.baseURL} (INCONCLUSIVE)`
+    );
+  if (run.baseURL && new URL(run.baseURL).origin !== new URL(base.baseURL).origin)
+    errs.push('mismatch: run.baseURL != Release baseURL');
   if (!Array.isArray(run.env) || run.env.length !== 5)
     errs.push('missing: run.env must carry E-ENV-1..5');
   if (run.envPostSelfAnon401?.status !== 401)
@@ -380,6 +485,8 @@ export function validateRun(runDir, baseFile, companionFile, envPostFile) {
       startedAt: run.startedAt,
       endedAt: run.endedAt,
       slotGeneration: base.slotGeneration,
+      baseURL: run.baseURL ?? base.baseURL,
+      preBaseURL: run.envPreBaseURL ?? undefined,
     });
     if (r.outcome === 'fail') errs.push(...r.problems.map((p) => `mismatch: POST env ${p}`));
     else if (r.outcome !== 'pass') errs.push(...r.problems.map((p) => `missing: POST env ${p}`));

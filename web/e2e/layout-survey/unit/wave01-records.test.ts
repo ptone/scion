@@ -25,9 +25,11 @@ import {
   clearQuarantine,
   emptyLedger,
   DEFAULT_ENV_MAX_AGE_MIN,
+  canonicalOrigin,
   envDecision,
   envStop,
   evaluateEnvPost,
+  hostBinding,
   evaluateEnv,
   isQuarantined,
   validateCapture,
@@ -300,6 +302,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
   const decl = {
     window_start: '2026-10-07T15:50:00Z',
     slotGeneration: 'gen-1',
+    baseURL: 'https://baseline.example',
     e_env_1_dev_auth_effective: false,
     e_env_1_sources: ['unit/args', 'settings', 'environment'],
     e_env_3_test_login_enabled: true,
@@ -313,7 +316,7 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
     },
   };
   const self = { status: 401, at: '2026-10-07T15:59:00Z' };
-  const rel = { slotGeneration: 'gen-1' };
+  const rel = { slotGeneration: 'gen-1', baseURL: 'https://baseline.example' };
   const gate = (r: ReturnType<typeof evaluateEnv>, id: string) => r.find((x) => x.gate === id)!;
 
   it('complete, bound evidence ⇒ E-ENV-1/2/3/5 pass, E-ENV-4 awaits POST evidence, no stop', () => {
@@ -415,17 +418,28 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
     expect(
       evaluateEnv(null, self, rel, W).filter((g) => g.outcome === 'inconclusive')
     ).toHaveLength(4);
-    expect(gate(evaluateEnv(decl, self, { slotGeneration: 'gen-9' }, W), 'E-ENV-1').outcome).toBe(
-      'inconclusive'
-    );
+    expect(
+      gate(
+        evaluateEnv(
+          decl,
+          self,
+          { slotGeneration: 'gen-9', baseURL: 'https://baseline.example' },
+          W
+        ),
+        'E-ENV-1'
+      ).outcome
+    ).toBe('inconclusive');
   });
   it('POST declaration must cover the batch and attest no broker process/dispatch', () => {
     const run = {
       startedAt: '2026-10-07T16:00:00Z',
       endedAt: '2026-10-07T16:20:00Z',
       slotGeneration: 'gen-1',
+      baseURL: 'https://baseline.example',
+      preBaseURL: 'https://baseline.example',
     };
     const post = {
+      baseURL: 'https://baseline.example',
       window_start: '2026-10-07T15:50:00Z',
       window_end: '2026-10-07T16:25:00Z',
       slotGeneration: 'gen-1',
@@ -441,6 +455,85 @@ describe('E-ENV gates (capture-window bound; review1 B2/B3)', () => {
       evaluateEnvPost({ ...post, e_env_4_no_broker_process_or_dispatch: false }, run).outcome
     ).toBe('fail');
     expect(evaluateEnvPost(null, run).outcome).toBe('inconclusive');
+    // host binding (ii2/review2 15:54Z; owner 15:55Z canonical origin)
+    expect(evaluateEnvPost({ ...post, baseURL: 'https://candidate.example' }, run).outcome).toBe(
+      'inconclusive'
+    );
+    expect(
+      evaluateEnvPost(post, { ...run, preBaseURL: 'https://candidate.example' }).problems.join(' ')
+    ).toContain('!= PRE baseURL');
+    expect(evaluateEnvPost({ ...post, baseURL: undefined }, run).outcome).toBe('inconclusive');
+    // R-3: PRE/POST on different hosts with a forbidden POST value ⇒ INCONCLUSIVE (unattributable)
+    const cross = evaluateEnvPost(
+      { ...post, baseURL: 'https://candidate.example', e_env_4_runtime_broker_effective: true },
+      run
+    );
+    expect(cross).toMatchObject({ outcome: 'inconclusive', attributable: false });
+    // R-3: same host+generation, PRE broker off / POST broker on ⇒ FAIL
+    expect(evaluateEnvPost({ ...post, e_env_4_runtime_broker_effective: true }, run)).toMatchObject(
+      {
+        outcome: 'fail',
+        attributable: true,
+      }
+    );
+  });
+
+  it('negative control: SAME slotGeneration on a DIFFERENT host is never evidence for this run (R-2)', () => {
+    const r = evaluateEnv({ ...decl, baseURL: 'https://candidate.example' }, self, rel, W);
+    for (const g of ['E-ENV-1', 'E-ENV-3', 'E-ENV-4', 'E-ENV-5'])
+      expect(gate(r, g).outcome, g).toBe('inconclusive');
+    expect(gate(r, 'E-ENV-4').awaitingPost).toBe(false);
+    expect(JSON.stringify(gate(r, 'E-ENV-1').details)).toContain('crossHost');
+    expect(envDecision(r).stop).toBe(true);
+  });
+  it('R-3: a cross-host declaration is unattributable ⇒ INCONCLUSIVE even with forbidden values', () => {
+    const r = evaluateEnv(
+      {
+        ...decl,
+        baseURL: 'https://candidate.example',
+        e_env_1_dev_auth_effective: true,
+        e_env_5: { ...decl.e_env_5, result_status: 200 },
+      },
+      self,
+      rel,
+      W
+    );
+    expect(gate(r, 'E-ENV-1').outcome).toBe('inconclusive');
+    expect(gate(r, 'E-ENV-5').outcome).toBe('inconclusive');
+    expect(envDecision(r)).toMatchObject({ stop: true, fails: [] });
+  });
+  it('R-3: generation mismatch is recorded as bindingMismatch and is INCONCLUSIVE', () => {
+    const r = evaluateEnv(
+      { ...decl, slotGeneration: 'gen-2', e_env_4_runtime_broker_effective: true },
+      self,
+      rel,
+      W
+    );
+    expect(gate(r, 'E-ENV-4').outcome).toBe('inconclusive');
+    expect(JSON.stringify(gate(r, 'E-ENV-4').details)).toContain('bindingMismatch');
+  });
+  it('R-3: a BOUND declaration reporting a forbidden state is FAIL', () => {
+    expect(
+      gate(evaluateEnv({ ...decl, e_env_1_dev_auth_effective: true }, self, rel, W), 'E-ENV-1')
+        .outcome
+    ).toBe('fail');
+  });
+  it('baseURL is compared as a parsed canonical origin: no host alias, no IP, no path, port matters', () => {
+    expect(canonicalOrigin('https://baseline.example/')).toBe('https://baseline.example');
+    expect(canonicalOrigin('https://10.0.0.5')).toBeNull();
+    expect(canonicalOrigin('https://baseline.example/app')).toBeNull();
+    expect(canonicalOrigin('baseline.example')).toBeNull();
+    expect(hostBinding({ host: 'baseline.example' }, 'https://baseline.example').status).toBe(
+      'missing'
+    );
+    expect(
+      hostBinding({ baseURL: 'https://baseline.example:8443' }, 'https://baseline.example').status
+    ).toBe('mismatch');
+    expect(
+      hostBinding({ baseURL: 'https://BASELINE.example' }, 'https://baseline.example').status
+    ).toBe('ok');
+    const { baseURL: _b, ...noUrl } = decl;
+    expect(gate(evaluateEnv(noUrl, self, rel, W), 'E-ENV-1').outcome).toBe('inconclusive');
   });
 });
 
@@ -477,6 +570,7 @@ describe('capture records and validate-run', () => {
     mutate?: (c: Record<string, any>) => void,
     mutateRun?: (r: Record<string, any>) => void,
     envPost: Record<string, unknown> | null | 'omit' = {
+      baseURL: 'https://baseline.example',
       window_start: '2026-10-07T15:00:00Z',
       window_end: '2026-10-07T16:00:00Z',
       slotGeneration: 'gen-1',
@@ -558,6 +652,8 @@ describe('capture records and validate-run', () => {
         { gate: 'E-ENV-5', outcome: 'pass' },
       ],
       envPostSelfAnon401: { status: 401, at: '2026-10-07T15:20:01Z' },
+      envPreBaseURL: 'https://baseline.example',
+      baseURL: 'https://baseline.example',
     };
     mutateRun?.(runObj);
     fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify(runObj));
@@ -597,6 +693,7 @@ describe('capture records and validate-run', () => {
     );
     expect(
       writeRun(undefined, undefined, {
+        baseURL: 'https://baseline.example',
         window_start: '2026-10-07T15:00:00Z',
         window_end: '2026-10-07T16:00:00Z',
         slotGeneration: 'gen-1',
@@ -604,6 +701,18 @@ describe('capture records and validate-run', () => {
         e_env_4_runtime_broker_effective: false,
         e_env_4_no_broker_process_or_dispatch: false,
       }).some((e) => e.startsWith('mismatch: POST env E-ENV-4'))
+    ).toBe(true);
+  });
+  it('validate-run: PRE/POST baseURL must bind to the run and to each other', () => {
+    expect(
+      writeRun(undefined, (r) => (r.envPreBaseURL = 'https://candidate.example')).some((e) =>
+        e.includes('not bound to Release baseURL')
+      )
+    ).toBe(true);
+    expect(
+      writeRun(undefined, (r) => delete r.envPreBaseURL).some((e) =>
+        e.includes('run.envPreBaseURL')
+      )
     ).toBe(true);
   });
   it('an aborted run never validates (review1 B4)', () => {

@@ -14,7 +14,7 @@ export interface EnvGate {
 export declare function evaluateEnv(
   decl: unknown,
   selfAnon401: { status: number; at: string } | null,
-  release: { slotGeneration: string },
+  release: { slotGeneration: string; baseURL: string },
   window: { batchStart: string; maxAgeMin?: number }
 ): EnvGate[];
 export declare function envDecision(results: EnvGate[]): {
@@ -26,8 +26,19 @@ export declare function envDecision(results: EnvGate[]): {
 export declare function envStop(results: EnvGate[]): boolean;
 export declare function evaluateEnvPost(
   post: unknown,
-  run: { startedAt: string; endedAt: string; slotGeneration: string }
-): { outcome: 'pass' | 'fail' | 'inconclusive'; problems: string[] };
+  run: {
+    startedAt: string;
+    endedAt: string;
+    slotGeneration: string;
+    baseURL: string;
+    preBaseURL?: string;
+  }
+): { outcome: 'pass' | 'fail' | 'inconclusive'; problems: string[]; attributable: boolean };
+export declare function canonicalOrigin(v: unknown): string | null;
+export declare function hostBinding(
+  decl: unknown,
+  runBaseURL: string
+): { status: 'ok' | 'missing' | 'mismatch'; declared: string | null; runOrigin: string | null };
 export declare function validateCapture(rec: unknown): string[];
 export declare function validateRun(
   runDir: string,
