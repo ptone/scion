@@ -664,6 +664,12 @@ type mockAuthzStore struct {
 	listProjectsReturnNil bool                                // when true, ListProjects returns (nil, nil)
 }
 
+// GetUser reports every principal as an existing, active account; the
+// tests using this mock exercise role bindings, not account status.
+func (m *mockAuthzStore) GetUser(_ context.Context, id string) (*store.User, error) {
+	return &store.User{ID: id, Status: store.UserStatusActive}, nil
+}
+
 func (m *mockAuthzStore) GetEffectiveGroups(_ context.Context, _ string) ([]string, error) {
 	return nil, nil
 }

@@ -743,6 +743,26 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		permissionID = resolved
 	}
 
+	// ── Account-status gate ──────────────────────────────────────────
+	// A user principal whose account is not active holds no authority from
+	// any binding or relationship. Evaluated before every credential gate
+	// and grant stage so that condition yields one reason
+	// (authz_principal_status.go).
+	if reason, cause := a.principalStatusGate(ctx, principal); reason != "" {
+		d := Decision{Allowed: false, Reason: reason, DenyCause: cause}
+		if request.Explain {
+			d.Provenance = &DecisionProvenance{
+				Permission:      permissionID,
+				DenyReasons:     []string{reason},
+				Grants:          []GrantDetail{},
+				InactiveGrants:  []GrantDetail{},
+				Restrictions:    []RestrictionProvenance{},
+				MembershipPaths: []MembershipPathDetail{},
+			}
+		}
+		return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+	}
+
 	// ── Step 0: Delivery credential gate (ptone/scion#2228) ───────────
 	// Deliver permissions are admitted only for a delivery credential kind.
 	// The gate precedes every grant stage, so a role binding, synthetic
