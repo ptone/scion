@@ -35,7 +35,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB = path.resolve(HERE, '..', '..');
 const PW_CLI = path.join(WEB, 'node_modules', '@playwright', 'test', 'cli.js');
 
-type Mode = 'clean' | 'safety' | 'bad-readback' | 'login-fail' | 'dev-auth-on';
+type Mode = 'clean' | 'safety' | 'bad-readback' | 'login-fail' | 'dev-auth-on' | 'mixed';
 
 const GROUPS = [
   {
@@ -102,7 +102,7 @@ customElements.define('scion-page-admin-groups', class extends HTMLElement {
       + '.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}</style>'
       + '<h1>Groups</h1><button id="create-group-btn">Create group</button>'
       + '<div class="table-container"><table aria-label="Groups"><caption class="sr-only">List of groups</caption><tbody>' + tmp.innerHTML + '</tbody></table></div>';
-    ${mode === 'safety' ? "setTimeout(() => fetch('/api/v1/groups', { method: 'POST', credentials: 'include', body: '{}' }), 50);" : ''}
+    ${mode === 'safety' || mode === 'mixed' ? "setTimeout(() => fetch('/api/v1/groups', { method: 'POST', credentials: 'include', body: '{}' }), 50);" : ''}
   }
 });
 const p = location.pathname;
@@ -113,6 +113,7 @@ document.body.innerHTML = p.startsWith('/admin/groups/')
 }
 
 function startServer(mode: Mode): Promise<{ server: http.Server; baseURL: string }> {
+  let searchCalls = 0;
   const server = http.createServer((req, res) => {
     const u = new URL(req.url ?? '/', 'http://x');
     const authed =
@@ -177,7 +178,10 @@ function startServer(mode: Mode): Promise<{ server: http.Server; baseURL: string
         return res.end('{"error":"unauthorized"}');
       }
       const search = u.searchParams.get('search');
-      if (mode === 'bad-readback' && search) {
+      if (search) searchCalls++;
+      // 'mixed' reproduces review2 fakehub mode a: the 2nd fixture readback
+      // (S02's, after S01's binding readback) returns non-JSON.
+      if ((mode === 'bad-readback' && search) || (mode === 'mixed' && search && searchCalls >= 2)) {
         res.writeHead(200, { 'content-type': 'application/json' });
         return res.end('<<not json>>');
       }
@@ -356,5 +360,19 @@ test('dev-auth ON (rev 4 probes): E-ENV-1 FAIL stops the batch before capture wi
   expect(e1.outcome).toBe('fail');
   expect(r.files.filter((f) => f.endsWith('.capture.json'))).toEqual([]);
   expect(JSON.stringify(r.run)).not.toMatch(/scion_dev_[0-9a-f]{64}/);
+  expect(r.code).not.toBe(0);
+});
+
+test('review2 fakehub mode a (mixed): S01 = 6 SAFETY capture errors, S02 = 9 readback capture errors', async () => {
+  const r = await runRunner('mixed');
+  const pick = (prefix: string) =>
+    (r.run.expectedRecords as string[]).filter((n) => n.startsWith(prefix)).map(r.read);
+  const s01 = pick('W01-S01.');
+  const s02 = pick('W01-S02.');
+  expect(s01).toHaveLength(6);
+  expect(s02).toHaveLength(9);
+  for (const c of s01) expect(c.errorReason).toMatch(/^SAFETY: /);
+  for (const c of s02) expect(c.errorReason).toContain('in-batch readback failed');
+  expect(r.run.counts.captureError).toBe(15);
   expect(r.code).not.toBe(0);
 });
