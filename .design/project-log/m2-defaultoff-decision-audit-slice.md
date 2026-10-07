@@ -330,3 +330,90 @@ history is preserved byte-for-byte, and all sealed reports/evidence stay outside
 Git unchanged. Human-directed messages/questions from this worker: none.
 Completion/deletion remains held for durable receipt, independent re-review and
 explicit lifecycle disposition.
+
+## Fresh test-review closure — bounded fixture correction, 2026-10-07
+
+Checkpoint base: `2d11b29bbdefdff419b76d7d245ca7c4419759fb`.
+Fresh independent code review APPROVE and security review APPROVE apply only
+to the bounded default-off correction. Fresh test review REQUEST CHANGES for
+R1 High (recovered-loop masking by stop cleanup) and R2 Medium (missing actual
+captured-attachment publication coverage); neither approval waived those items.
+Protected fresh report SHA-256 identities:
+
+| Report | SHA-256 |
+| --- | --- |
+| m2-defaultoff-fix-code-review-1.md | f85f6f8fa225e696babe3cd54b7b8614ade6f649b64594714eaff7aa9ec88216 |
+| m2-defaultoff-fix-test-review-1.md | 5eeec2c0116a58ce2c4dc06d0abc60244760ddf88fdc8bc489c88ad9fbe333f2 |
+| m2-defaultoff-fix-security-review-1.md | 7fa71c8528a59278e13d989a6808d6c4c844f03b53bc709478b8ad3ae6912206 |
+
+A33 changes only operational_settings_test.go. R1 now asserts the real recovered
+subscription path's persistent loss after unsubscribe completion and BEFORE the
+independent stop cleanup closure: loss already latched, both copied/router proofs
+wholly empty, healthy same-attachment Refresh unable to revive either proof,
+and exactly one legacy/zero NEW owner. Only then stop/join the poll goroutine.
+The obsolete cleanup comment is corrected. Existing stop/channel-close/read-stop
+assertions and the later explicit handoff recovery remain separate and intact.
+
+R2 adds four finite actual OperationalSettings captured-A callbacks after explicit
+same-source handoff to fresh B: loss, successful read completion, store-error
+completion, and rejected/untracked read completion. Each requires full copied
+Ops/router B proof equality and exactly one NEW/zero legacy owner. Current B loss
+then invalidates both proofs and healthy same-attachment reads remain legacy-only;
+only explicit C handoff and fresh captured C read recover finite NEW ownership.
+Tracked A success/error setup releases only A's old pending router bookkeeping
+before real B publication, then resumes the ORIGINAL A Ops completion. That
+preparatory router call is not the publication oracle and proves no availability
+with an outstanding tracked-old read. Same-valued generic cache ingestion keeps
+private publication ownership separate from snapshot mismatch. No production
+source, top-level test name, selector, arbitrary callback or timing bound changed.
+
+Protected A33/A34 artifacts under the workstream reviews directory:
+
+| Artifact | Lines | Bytes | SHA-256 |
+| --- | ---: | ---: | --- |
+| m2-defaultoff-fix-test-closure-amendment-33.patch | 243 | 10721 | ad21f91a96adf238fa418cab80cbba80f3b83daa48aa806c2c2fcc53bc62e1c1 |
+| m2-defaultoff-fix-test-closure-review-amendment-33.md | 186 | 12682 | a9e5ba80141761fd24f52455e388be171d66764291e23bf5ff584e5d2b47c8eb |
+| m2-defaultoff-fix-test-closure-green-amendment-34.txt | 1200 | 125196 | 812069d5403bec24bae2034baecae0a4c4bc940786973704ca0f862d8668d34a |
+
+A34's single literal focused GREEN began 2026-10-06 23:42:18.740425Z and ended
+23:58:05.282848Z, wall 946.542528 seconds including queue. Slot 4 acquired after
+396 seconds at 32 GB available; the independent execution cap was respected.
+Exit 0: experiments PASS 0.006s, Hub PASS 8.897s. Exact stable census: 35 named
+plus 159 subtests = 194 matching RUN/PASS outcomes, no FAIL/SKIP/missing/
+unexpected/duplicate outcome. All four captured-A subcases and recovered-loop
+pre-cleanup case PASS. The caught subscription panic is expected fixture output.
+No setup/compile/VCS/resource/timeout/deadlock/watchdog/unrecovered-panic failure.
+
+Literal command remains sealed in A34 raw evidence: HEAVY_BUILD_MAX_WAIT=2700
+normal wrapper (45m queue), acquire-time available >=30 GB, ulimit -v 12000000,
+GOMEMLIMIT=6GiB, GOGC=40, GOFLAGS=-gcflags=-c=1,
+GOCACHE=/scion-volumes/gocache, independent timeout 15m, go test -timeout 14m
+-count=1 -p 1 -v ./pkg/experiments ./pkg/hub with unchanged literal 35-name
+selector. No outer timeout, retry, resource bypass or additional Go invocation.
+It began before the broker pause and continued alone under the explicit
+running-work exception; no new create/build/test was started after the pause.
+
+A34 accepted one disclosed nonsemantic reading-order exception for A33 only:
+all four required input identities matched before edits, security contained no
+corrective direction, its complete body was read before delivery, and the exact
+patch was unchanged afterward. The late security-body read was disclosed and
+recorded in the validation evidence; this exception is not generalized or repeated.
+
+Production files remain unchanged. NEW remains structurally unadmitted and the
+registered experiment remains default false, including fresh true override.
+All earlier hard pre-activation gates remain rejecting: ratified census/manifest,
+T1–T25/SCC/provenance/constructor authority, clean build/live profile and exact
+binding/capture graph, elapsed clock/timer/scheduler, cooperative store/handler/
+originating caller, complete stop/return/cleanup, independent critical warning/
+alert/dashboard delivery, production freshness/drain/persistence/no-loss and
+explicit activation/cutover approval. Finite GREEN grants no trust, activation,
+deployment, cutover, persistence, production timing, alert delivery, legacy
+retirement, PR/main merge or explain round 7 claim. Existing #2502 legacy
+lifecycle, authorization outcomes and sampling remain separate and unchanged.
+
+Commit/push and fresh independent test re-review remain pending. This log append
+is unstaged; the accepted operational_settings_test.go remains the sole staged
+path. No all-quality-gates-closed or independent post-closure approval is claimed.
+All earlier history is preserved byte-for-byte; protected artifacts stay sealed
+outside Git. Human-directed messages/questions from this worker: none. Retain
+and block pending exact log acceptance, durability and explicit lifecycle release.
