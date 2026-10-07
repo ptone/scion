@@ -16,21 +16,21 @@ runner (`capture.pw.ts`, `playwright.config.ts`) is unchanged.
 
 ## Files
 
-| Path | Role |
-|---|---|
-| `playwright.wave01.config.ts` → `wave01.pw.ts` | Measured, attach-only batch. It has no globalSetup/globalTeardown/webServer and no `page.route`. It never builds, starts, seeds, resets or stops anything. |
-| `wave01/contract.ts` | Pinned digests, profiles, tolerance, policy table (§1b), named scrollers, actionable definition, APP shell tag. |
-| `wave01/manifest.ts` | The 15 frozen states (§4a). Each has `adapter: implemented \| blocked`. |
-| `wave01/probe.ts` | Self-contained in-page RAW probe. It only reads layout. The single exception is the labelled `programmatic-scroll` fallback (§2b). |
-| `wave01/evaluate.ts` | Pure clause evaluators over raw JSON, so the assessor can recompute any outcome. |
-| `wave01/groups.ts` | W01-S01/S02 adapter: guarded in-batch readback, M0-primary + M0-pos-k, M1 (A-F1), M3 (B-I1). |
-| `wave01/runner-lib.ts` | Fresh context per substep, R0, native wheel/pointer/keyboard input, screenshots, raw files, accessible names. |
-| `wave01/suite-digest.mjs` | §5b E-RUN suite digest and capture-host checks. |
-| `wave01/release.mjs` | Steward tooling: base Release (`releaseKind: verification`), `wave01-release-ext` companion, `validate-pair`, `validate-distinct`. |
-| `wave01/records.mjs` | E-ENV PRE/POST gates, capture-record validation, `validate-run`, E7 quarantine ledger. |
-| `wave01/config.ts` | Environment loader (evidence vs debug-non-evidence). |
-| `playwright.wave01-selftest.config.ts` → `wave01-probe.selftest.pw.ts` | **Local non-evidence** real-Chromium self-test on a synthetic shadow/slot DOM. |
-| `unit/wave01-*.test.ts` | Hub-free unit tests. |
+| Path                                                                   | Role                                                                                                                                                       |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `playwright.wave01.config.ts` → `wave01.pw.ts`                         | Measured, attach-only batch. It has no globalSetup/globalTeardown/webServer and no `page.route`. It never builds, starts, seeds, resets or stops anything. |
+| `wave01/contract.ts`                                                   | Pinned digests, profiles, tolerance, policy table (§1b), named scrollers, actionable definition, APP shell tag.                                            |
+| `wave01/manifest.ts`                                                   | The 15 frozen states (§4a). Each has `adapter: implemented \| blocked`.                                                                                    |
+| `wave01/probe.ts`                                                      | Self-contained in-page RAW probe. It only reads layout. The single exception is the labelled `programmatic-scroll` fallback (§2b).                         |
+| `wave01/evaluate.ts`                                                   | Pure clause evaluators over raw JSON, so the assessor can recompute any outcome.                                                                           |
+| `wave01/groups.ts`                                                     | W01-S01/S02 adapter: guarded in-batch readback, M0-primary + M0-pos-k, M1 (A-F1), M3 (B-I1).                                                               |
+| `wave01/runner-lib.ts`                                                 | Fresh context per substep, R0, native wheel/pointer/keyboard input, screenshots, raw files, accessible names.                                              |
+| `wave01/suite-digest.mjs`                                              | §5b E-RUN suite digest and capture-host checks.                                                                                                            |
+| `wave01/release.mjs`                                                   | Steward tooling: base Release (`releaseKind: verification`), `wave01-release-ext` companion, `validate-pair`, `validate-distinct`.                         |
+| `wave01/records.mjs`                                                   | E-ENV PRE/POST gates, capture-record validation, `validate-run`, E7 quarantine ledger.                                                                     |
+| `wave01/config.ts`                                                     | Environment loader (evidence vs debug-non-evidence).                                                                                                       |
+| `playwright.wave01-selftest.config.ts` → `wave01-probe.selftest.pw.ts` | **Local non-evidence** real-Chromium self-test on a synthetic shadow/slot DOM.                                                                             |
+| `unit/wave01-*.test.ts`                                                | Hub-free unit tests.                                                                                                                                       |
 
 ## Suite digest (§5b E-RUN; canonical form confirmed by the assessor)
 
@@ -56,12 +56,18 @@ The steward (ii2) writes two value-free JSON declarations per capture window.
 They contain key names, booleans and UTC timestamps only.
 
 ```json
-{ "window_start": "…Z", "window_end": "…Z (POST only)", "slotGeneration": "…",
-  "e_env_1_dev_auth_effective": false, "e_env_1_sources": ["unit/args", "settings", "environment"],
+{
+  "window_start": "…Z",
+  "window_end": "…Z (POST only)",
+  "slotGeneration": "…",
+  "e_env_1_dev_auth_effective": false,
+  "e_env_1_sources": ["unit/args", "settings", "environment"],
   "e_env_3_test_login_enabled": true,
-  "e_env_4_runtime_broker_effective": false, "e_env_4_no_broker_process_or_dispatch": true,
-  "e_env_2_anon_401": {"status": 401, "ts": "…Z"},
-  "e_env_5": {"probe": "repo-default-secret-challenge", "result_status": 401, "ts": "…Z"} }
+  "e_env_4_runtime_broker_effective": false,
+  "e_env_4_no_broker_process_or_dispatch": true,
+  "e_env_2_anon_401": { "status": 401, "ts": "…Z" },
+  "e_env_5": { "probe": "repo-default-secret-challenge", "result_status": 401, "ts": "…Z" }
+}
 ```
 
 `window_ts` is accepted as an alias for `window_start`.
@@ -132,6 +138,7 @@ Steps:
 
    Check with
    `release.mjs validate-distinct --base-a … --companion-a … --base-b … --companion-b …`.
+
 4. **PRE env declaration** for this window (see above).
 5. **Capture:**
    ```bash
@@ -247,32 +254,32 @@ still writes the final records gathered so far and `run.json` with
 - **BLOCKED** = not implemented at this commit. The affected states emit
   BLOCKED records, never placeholders.
 
-| Clause | Code | Status |
-|---|---|---|
-| §1 profiles, DPR 1, light, en-US, UTC; fresh context per (state, profile, substep) | `contract.ts`; `runner-lib.openSubstep`; M1 Shift+Tab retry in its own context | impl |
-| §1 tolerance 1px | `contract.TOL` | impl |
-| §1 shadow/slot walk; deep hit test | `probe` deepAll/flatParent/deepPoint/composedContains | impl (self-test) |
-| §1 K(e) + axis-aware CLIP; scrollers, offscreen ≠ clipped, reachability | `probe.chainEntry`, `evaluate.clip` (pending + inner-scroller deferral), `runner-lib.positionStep`, `resolveObservations` | impl |
-| §1 programmatic positioning (labelled; never reachability) | `probe` `programmatic-scroll`; resolution ⇒ inconclusive | impl |
-| §1 actionable target | `contract.ACTIONABLE`, `probe.isActionable` | impl |
-| §1 rendered-text comparison (rev 3) | `evaluate.renderedTextEquals` on `innerText` + computed `white-space`; raw readback recorded | impl for B-A3 (real-Chromium control) |
-| §1 FULL(e, v) generic rule | — (S01/S02 use the pilot B-A3 shapes) | BLOCKED (A-L3/A-T1, S03+) |
-| §1a APP shell `scion-app` (R-1 erratum) | `contract.APP_SHELL_TAG` | impl |
-| §1b policies, POL-SR | `contract.POLICIES`, `probe.policiesFor`, `probe.isSrOnly` | impl |
-| §1b hide-mobile hidden at P1 | raw `hideMobile`/display; B-OVR lists hidden columns | grading BLOCKED with S07/S10/S11/S13/S14 |
-| A-D1, A-C1, A-S1/A-S2 (page layer), A-N2 | `evalAD1/AC1/AS1/AS2/AN2` (+ live accessible names) | impl |
-| §2c active layer / background inert / M0-underlay | — | BLOCKED (S05, A-N1 P1) |
-| A-N1 (M2) | — | BLOCKED (S04, S05) |
-| A-F1 (rev 3: body start asserted, Tab/Shift+Tab, stop rule, focus-outside-document, composed-descendant target; indicator (a) outline, (b) box-shadow, (c) non-outline style diff) | `groups.traverse`, `evaluate.pressChecks`/`evalAF1` | impl (real-Chromium negative + positive controls). BLOCKED with S05/S07/S08/S15: start points after preparation actions, and drawer focus scope |
-| A-L1…A-L5, A-T1…A-T3 | — | BLOCKED (S03–S15) |
-| B-C1, B-A1, B-A2, B-A3, B-OVR, B-I1 (pilot finding rev 2 + rev 3 rendered-text rule) | `evalBC1/BA1/BA2/BA3/BOVR`, `groups.runM3` | impl (S01/S02) |
-| §2a measured interactions / forbidden activation | `pointerClick` (refuses on a failed hit test); SAFETY non-GET check with priority | impl |
-| §2a R0 (no networkidle), readback-bound expectations | `waitR0`, guarded `groups.readback` | impl |
-| §2b M0-primary + M0-pos-k (same context), M1, M3 | `groups.runM0/runM1Forward/runM1Backward/runM3` | impl; M2 BLOCKED |
-| §3 capture errors never graded; quarantine after 3 (immediate, in-batch) | `wave01.pw.ts`; `records.applyBatch/isQuarantined/clearQuarantine` | impl |
-| §4 counting | `expectedRecords` = 15 × 3 × substeps; one M0 per state × profile | impl (S01/S02 captured; others BLOCKED records) |
-| §5 fixtures | groups via API + readback; companion `fixtureHelper` | impl for groups; helper states BLOCKED |
-| §5a E-ENV-1…5 | `records.evaluateEnv` (PRE, window-bound), `envDecision`, post anonymous probe, `evaluateEnvPost` via `validate-run --env-post` | impl |
-| §5b E-REL (pair; R-2 distinctness) | `release.mjs` buildBase/buildCompanion/validatePair/validateDistinctPairs | impl |
-| §5b E-MAIN, E-RUN, attach-only | `wave01.pw.ts`, `suite-digest.mjs`, `playwright.wave01.config.ts` | impl |
-| §5b E-XFER, E-ID, E-CRED retirement, E-PUB | steward / assessor processes; the runner records a value-free issuance inventory | outside runner |
+| Clause                                                                                                                                                                             | Code                                                                                                                            | Status                                                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| §1 profiles, DPR 1, light, en-US, UTC; fresh context per (state, profile, substep)                                                                                                 | `contract.ts`; `runner-lib.openSubstep`; M1 Shift+Tab retry in its own context                                                  | impl                                                                                                                                            |
+| §1 tolerance 1px                                                                                                                                                                   | `contract.TOL`                                                                                                                  | impl                                                                                                                                            |
+| §1 shadow/slot walk; deep hit test                                                                                                                                                 | `probe` deepAll/flatParent/deepPoint/composedContains                                                                           | impl (self-test)                                                                                                                                |
+| §1 K(e) + axis-aware CLIP; scrollers, offscreen ≠ clipped, reachability                                                                                                            | `probe.chainEntry`, `evaluate.clip` (pending + inner-scroller deferral), `runner-lib.positionStep`, `resolveObservations`       | impl                                                                                                                                            |
+| §1 programmatic positioning (labelled; never reachability)                                                                                                                         | `probe` `programmatic-scroll`; resolution ⇒ inconclusive                                                                        | impl                                                                                                                                            |
+| §1 actionable target                                                                                                                                                               | `contract.ACTIONABLE`, `probe.isActionable`                                                                                     | impl                                                                                                                                            |
+| §1 rendered-text comparison (rev 3)                                                                                                                                                | `evaluate.renderedTextEquals` on `innerText` + computed `white-space`; raw readback recorded                                    | impl for B-A3 (real-Chromium control)                                                                                                           |
+| §1 FULL(e, v) generic rule                                                                                                                                                         | — (S01/S02 use the pilot B-A3 shapes)                                                                                           | BLOCKED (A-L3/A-T1, S03+)                                                                                                                       |
+| §1a APP shell `scion-app` (R-1 erratum)                                                                                                                                            | `contract.APP_SHELL_TAG`                                                                                                        | impl                                                                                                                                            |
+| §1b policies, POL-SR                                                                                                                                                               | `contract.POLICIES`, `probe.policiesFor`, `probe.isSrOnly`                                                                      | impl                                                                                                                                            |
+| §1b hide-mobile hidden at P1                                                                                                                                                       | raw `hideMobile`/display; B-OVR lists hidden columns                                                                            | grading BLOCKED with S07/S10/S11/S13/S14                                                                                                        |
+| A-D1, A-C1, A-S1/A-S2 (page layer), A-N2                                                                                                                                           | `evalAD1/AC1/AS1/AS2/AN2` (+ live accessible names)                                                                             | impl                                                                                                                                            |
+| §2c active layer / background inert / M0-underlay                                                                                                                                  | —                                                                                                                               | BLOCKED (S05, A-N1 P1)                                                                                                                          |
+| A-N1 (M2)                                                                                                                                                                          | —                                                                                                                               | BLOCKED (S04, S05)                                                                                                                              |
+| A-F1 (rev 3: body start asserted, Tab/Shift+Tab, stop rule, focus-outside-document, composed-descendant target; indicator (a) outline, (b) box-shadow, (c) non-outline style diff) | `groups.traverse`, `evaluate.pressChecks`/`evalAF1`                                                                             | impl (real-Chromium negative + positive controls). BLOCKED with S05/S07/S08/S15: start points after preparation actions, and drawer focus scope |
+| A-L1…A-L5, A-T1…A-T3                                                                                                                                                               | —                                                                                                                               | BLOCKED (S03–S15)                                                                                                                               |
+| B-C1, B-A1, B-A2, B-A3, B-OVR, B-I1 (pilot finding rev 2 + rev 3 rendered-text rule)                                                                                               | `evalBC1/BA1/BA2/BA3/BOVR`, `groups.runM3`                                                                                      | impl (S01/S02)                                                                                                                                  |
+| §2a measured interactions / forbidden activation                                                                                                                                   | `pointerClick` (refuses on a failed hit test); SAFETY non-GET check with priority                                               | impl                                                                                                                                            |
+| §2a R0 (no networkidle), readback-bound expectations                                                                                                                               | `waitR0`, guarded `groups.readback`                                                                                             | impl                                                                                                                                            |
+| §2b M0-primary + M0-pos-k (same context), M1, M3                                                                                                                                   | `groups.runM0/runM1Forward/runM1Backward/runM3`                                                                                 | impl; M2 BLOCKED                                                                                                                                |
+| §3 capture errors never graded; quarantine after 3 (immediate, in-batch)                                                                                                           | `wave01.pw.ts`; `records.applyBatch/isQuarantined/clearQuarantine`                                                              | impl                                                                                                                                            |
+| §4 counting                                                                                                                                                                        | `expectedRecords` = 15 × 3 × substeps; one M0 per state × profile                                                               | impl (S01/S02 captured; others BLOCKED records)                                                                                                 |
+| §5 fixtures                                                                                                                                                                        | groups via API + readback; companion `fixtureHelper`                                                                            | impl for groups; helper states BLOCKED                                                                                                          |
+| §5a E-ENV-1…5                                                                                                                                                                      | `records.evaluateEnv` (PRE, window-bound), `envDecision`, post anonymous probe, `evaluateEnvPost` via `validate-run --env-post` | impl                                                                                                                                            |
+| §5b E-REL (pair; R-2 distinctness)                                                                                                                                                 | `release.mjs` buildBase/buildCompanion/validatePair/validateDistinctPairs                                                       | impl                                                                                                                                            |
+| §5b E-MAIN, E-RUN, attach-only                                                                                                                                                     | `wave01.pw.ts`, `suite-digest.mjs`, `playwright.wave01.config.ts`                                                               | impl                                                                                                                                            |
+| §5b E-XFER, E-ID, E-CRED retirement, E-PUB                                                                                                                                         | steward / assessor processes; the runner records a value-free issuance inventory                                                | outside runner                                                                                                                                  |
