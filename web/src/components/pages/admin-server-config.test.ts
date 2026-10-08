@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import { render } from 'lit';
 
 // ── Shared mock data builders ──
 
@@ -288,6 +289,21 @@ describe('scion-page-admin-server-config', () => {
       expect.stringContaining('/api/v1/admin/server-config'),
       expect.any(Object)
     );
+  });
+
+  it('names the role minting actually needs when minting is not configured', async () => {
+    element = await createComponent(createFetchHandler(makeBaseConfig()));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el = element as any;
+    el.gcpQuotaData = { minting_configured: false };
+    const host = document.createElement('div');
+    render(el.renderGCPQuotaContent(), host);
+    const text = (host.textContent ?? '').replace(/\s+/g, ' ');
+    // The flow sets IAM policy on and deletes the new SA, which
+    // serviceAccountCreator cannot do.
+    expect(text).toContain('roles/iam.serviceAccountAdmin');
+    expect(text).not.toContain('serviceAccountCreator');
+    expect(text).toContain('hub.gcpProjectId');
   });
 
   // ── Criterion 1: Seeded lifecycle (UI aspects) ──

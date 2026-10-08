@@ -467,6 +467,33 @@ describe('scion-gcp-service-account-list', () => {
     });
   });
 
+  describe('mint dialog', () => {
+    it('states the Hub SA permission minting needs, with a docs link', async () => {
+      const el = await createComponent(
+        { scope: 'project', scopeId: 'proj-1' },
+        makeFetch([], { items: [], _capabilities: { actions: ['create', 'mint'] } })
+      );
+      const root = el.shadowRoot as ShadowRoot;
+      // Positive control: the dialog is the mint dialog, always in the DOM.
+      const dialog = root.querySelector('sl-dialog[label="Mint GCP Service Account"]');
+      expect(dialog).not.toBeNull();
+
+      const note = dialog!.querySelector('.mint-permission-note');
+      expect(note).not.toBeNull();
+      const text = (note!.textContent ?? '').replace(/\s+/g, ' ');
+      expect(text).toContain('roles/iam.serviceAccountAdmin');
+      expect(text).toContain('hub_sa_minting');
+
+      const link = note!.querySelector('a');
+      expect(link?.getAttribute('href')).toBe(
+        'https://googlecloudplatform.github.io/scion/hosted/ha/permissions/#service-account-minting-permissions'
+      );
+      expect(link?.getAttribute('target')).toBe('_blank');
+      // No new icon: anything rendered here would need registering in USED_ICONS.
+      expect(note!.querySelector('sl-icon')).toBeNull();
+    });
+  });
+
   describe('links out', () => {
     it('links parentless accounts to a detail page and project ones nowhere', async () => {
       const hubEl = await createComponent(

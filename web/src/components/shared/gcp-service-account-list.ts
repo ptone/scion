@@ -62,6 +62,13 @@ import { showToast } from '../../utils/toast.js';
 import { showConfirm } from './confirm-dialog.js';
 import { formatRelative } from '../../utils/time.js';
 
+/**
+ * Docs anchor explaining the Hub service account's own IAM requirement for
+ * minting (roles/iam.serviceAccountAdmin) and its project-wide trade-off.
+ */
+export const SA_MINTING_DOCS_URL =
+  'https://googlecloudplatform.github.io/scion/hosted/ha/permissions/#service-account-minting-permissions';
+
 /** Detail payload for the `sa-list-changed` CustomEvent. */
 export interface SAListChangedDetail {
   action: 'registered' | 'verified' | 'minted' | 'deleted';
@@ -118,6 +125,12 @@ export class ScionGCPServiceAccountList extends LitElement {
   static override styles = [
     resourceStyles,
     css`
+      .mint-permission-note {
+        margin: 0;
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
       .status-cell-inline {
         display: inline-flex;
         align-items: center;
@@ -975,6 +988,13 @@ export class ScionGCPServiceAccountList extends LitElement {
             The Hub will create a new service account in its own GCP project. The SA is
             automatically verified for impersonation by the Hub.
           </div>
+
+          <p class="mint-permission-note">
+            Minting uses the Hub's own service account, which needs
+            <code>roles/iam.serviceAccountAdmin</code> on the Hub's GCP project. On Terraform
+            deployments this is off by default (<code>hub_sa_minting</code>).
+            <a href=${SA_MINTING_DOCS_URL} target="_blank" rel="noopener noreferrer">Learn more</a>
+          </p>
 
           ${this.mintDialogError
             ? html`<div class="dialog-error">${this.mintDialogError}</div>`
