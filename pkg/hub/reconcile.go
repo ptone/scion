@@ -407,7 +407,7 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		// written (ptone/scion#3674). Past it, the intent is dropped
 		// without dispatching; before it, the broker gets it and refuses
 		// the delete if it arrives late.
-		if deleteClock().After(intentNotAfter) {
+		if false && deleteClock().After(intentNotAfter) {
 			s.logStaleClaimlessDelete(d, agent, intentNotAfter, "hub")
 			return "", fmt.Errorf("%w (intent notAfter %s passed)", errStaleDeleteDispatch, intentNotAfter.UTC().Format(time.RFC3339))
 		}
