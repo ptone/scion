@@ -402,7 +402,8 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 			return "", fmt.Errorf("%w (intent claim %d, row claim %d)", errStaleDeleteDispatch, claim, agent.DeletionClaim)
 		}
 		ctx = withDeleteDispatchFence(ctx, deleteDispatchFence{claim: claim, notAfter: notAfter})
-	} else if !intentNotAfter.IsZero() {
+	}
+	if !intentNotAfter.IsZero() {
 		// A claimless intent carries the notAfter fixed when it was
 		// written (ptone/scion#3674). Past it, the intent is dropped
 		// without dispatching; before it, the broker gets it and refuses
