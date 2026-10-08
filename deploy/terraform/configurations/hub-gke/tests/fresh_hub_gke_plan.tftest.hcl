@@ -244,6 +244,23 @@ run "fresh_gke_hub_plans_clean" {
   }
 }
 
+# hub_sa_minting = true reaches hub-identity: exactly one serviceAccountAdmin
+# grant is planned for the hub SA. hub_sa_minting_enabled is
+# length(google_project_iam_member.hub_sa_minting) == 1, so true means exactly
+# one grant (a root test cannot read the child module's resources directly).
+run "hub_sa_minting_opt_in_reaches_hub_identity" {
+  command = plan
+
+  variables {
+    hub_sa_minting = true
+  }
+
+  assert {
+    condition     = module.hub_identity.hub_sa_minting_enabled == true
+    error_message = "hub_sa_minting = true must be passed through to hub-identity and plan exactly one serviceAccountAdmin grant."
+  }
+}
+
 # iap_audience depends on the backend service's generated_id, unknown in
 # plan mode under Terraform 1.9. This run applies against the MOCK
 # providers only (no API calls), targeted at the Helm release, which pulls
