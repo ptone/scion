@@ -667,6 +667,30 @@ its own namespace, so that namespace must equal the entry's resolved namespace;
 otherwise the dispatch is refused with 400. The entry's `context` is not consulted in
 this case.
 
+### 2j. Hub Runner SA — Service Account Admin (Optional, for Minting)
+
+Skip this step unless users should be able to **mint** new GCP service accounts from the Hub (project settings, service accounts). Registering service accounts that already exist doesn't need it.
+
+The Hub mints with its own identity. It creates the service account in its GCP project (`hub.gcpProjectId`), sets IAM policy on it (granting itself `roles/iam.serviceAccountTokenCreator` and the requester `roles/iam.serviceAccountUser`), and deletes it if a later step fails. That needs **Service Account Admin** (`roles/iam.serviceAccountAdmin`) on that project. Service Account Creator (`roles/iam.serviceAccountCreator`) isn't enough, because it can't set IAM policy or delete.
+
+```bash
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:$SA_HUB" \
+  --role="roles/iam.serviceAccountAdmin" \
+  --condition=None \
+  --quiet
+```
+
+On a Terraform deployment (`deploy/terraform`), set `hub_sa_minting = true` in the hub configuration's tfvars instead. It's off by default.
+
+:::caution[Project-wide grant]
+This role applies to **every** service account in the project, not just the ones the Hub mints. The Hub Runner SA can then create and delete any service account in the project, and set IAM policy on any of them, including those used by other services or other Hubs. GCP has no name-scoped form of it: `iam.serviceAccounts.create` is checked against the project, and IAM conditions on service accounts see the unique ID, not the account name.
+
+Grant it only in a GCP project dedicated to this Hub. Never grant it in a project shared by several Hubs.
+:::
+
+Without this role, minting fails with a 403 whose message names the missing role.
+
 ### IAM Verification
 
 ```bash
@@ -701,6 +725,7 @@ gcloud projects get-iam-policy $PROJECT_ID \
 | `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On itself** | Generate GCS signed URLs |
 | `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On `scion-transport` SA** | Mint IAP tokens for agents |
 | `scion-hub-runner` | `roles/iam.securityReviewer` | Project/Org | Policy Troubleshooter (Optional, for SA assignment gates) |
+| `scion-hub-runner` | `roles/iam.serviceAccountAdmin` | Project | Mint service accounts for users (Optional, project-wide; see 2j) |
 | `scion-transport` | `roles/iap.httpsResourceAccessor` | Project | Allow IAP access to Hub |
 | `scion-transport` | `roles/run.invoker` | Hub service | Allow Cloud Run invocation |
 | `scion-discord-runner` | `roles/cloudsql.client` | Project | Cloud SQL connections |
