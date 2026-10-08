@@ -160,6 +160,46 @@ access to a model. The model(s) an agent will call must also be enabled
 for the project in Vertex AI Model Garden — that enablement is a
 per-project step outside this Terraform.
 
+#### Minting service accounts (opt-in)
+
+Besides registering existing service accounts, the hub can **mint** new GCP
+service accounts for users (project settings, service accounts). It does
+this with its own identity: it creates the service account, sets IAM policy
+on it (granting itself `roles/iam.serviceAccountTokenCreator` and the
+requester `roles/iam.serviceAccountUser`), and deletes it if a later step
+fails. That needs `roles/iam.serviceAccountAdmin` on the hub's project.
+`roles/iam.serviceAccountCreator` is not enough, because it can't set IAM
+policy or delete.
+
+This Terraform doesn't grant it by default, so minting fails with a 403
+until you opt in. To opt in, set this in the hub's tfvars
+(`configurations/hub` or `configurations/hub-gke`):
+
+```hcl
+hub_sa_minting = true
+```
+
+This adds exactly one additive, unconditioned
+`google_project_iam_member` (`roles/iam.serviceAccountAdmin` for the
+`<hub>-hub` service account). Turning it off again destroys only that
+binding. Service accounts minted earlier stay registered and usable,
+because their own IAM is untouched; only new mints fail.
+
+**The grant is project-wide.** With it, the hub service account can create
+and delete every service account in the project, and set IAM policy on any
+of them, including other hubs' and the shared infrastructure's. GCP offers
+no name-scoped form of this role: `iam.serviceAccounts.create` is checked
+against the project, and conditions on service accounts see the unique ID,
+not the account name, so there's no way to limit it to this hub's accounts.
+It's the one deliberate exception to the IAM scope rule in
+`modules/hub-identity`.
+
+- Prefer a GCP project dedicated to a single hub when you enable minting.
+- Never enable it in a shared project that holds several hubs: one hub's
+  service account could then take over every other hub's service accounts.
+- If you leave it off, users can still register service accounts that an
+  administrator created out of band.
+
 ## Harness images
 
 Agents pull `<image_registry>/scion-<harness>:<tag>` (`image_registry` is

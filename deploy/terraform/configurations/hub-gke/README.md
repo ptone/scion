@@ -20,7 +20,7 @@ Terraform's control.
 | Module | Creates |
 |---|---|
 | `shared-lookup` | nothing; it reads the shared infra by naming convention |
-| `hub-identity` | the hub, transport and agent GSAs and their IAM, plus (opt-in `hub_workload_identity_ksa`) `roles/iam.workloadIdentityUser` on the hub GSA for `<hub>-system/scion-hub` only |
+| `hub-identity` | the hub, transport and agent GSAs and their IAM, plus (opt-in `hub_workload_identity_ksa`) `roles/iam.workloadIdentityUser` on the hub GSA for `<hub>-system/scion-hub` only, and (opt-in `hub_sa_minting`, default off) project-wide `roles/iam.serviceAccountAdmin` so the hub can mint service accounts for users; see [Minting service accounts (opt-in)](../../README.md#minting-service-accounts-opt-in) before enabling |
 | `cloudsql-database` | the hub's database, user and password |
 | `agent-runtime-k8s` | the agent namespace `<hub>`, the agent KSA's Workload Identity binding, and the NFS PV/PVC. With `create_hub_rbac = false`, the chart owns the hub's RBAC instead |
 | `hub-lb` | global IP (`prevent_destroy`), managed cert, HTTPS proxy and forwarding rule, HTTP->HTTPS redirect, health check (`/readyz` on 8080), health-check firewall rule (destination: the pod range only), backend service (IAP, Google-managed OAuth client), and IAP accessor grants |
