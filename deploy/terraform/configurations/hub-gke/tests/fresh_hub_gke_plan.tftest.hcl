@@ -235,6 +235,13 @@ run "fresh_gke_hub_plans_clean" {
     condition     = output.hub_rbac_created_by_terraform == false
     error_message = "create_hub_rbac must be false for hub-gke: the chart owns the hub's RBAC."
   }
+
+  # hub_sa_minting is opt-in: by default no project-wide serviceAccountAdmin
+  # grant exists, so existing hubs plan unchanged after upgrading.
+  assert {
+    condition     = module.hub_identity.hub_sa_minting_enabled == false
+    error_message = "hub_sa_minting must default to off: no serviceAccountAdmin grant for the hub SA."
+  }
 }
 
 # iap_audience depends on the backend service's generated_id, unknown in

@@ -113,6 +113,7 @@ module "hub_identity" {
   hub_name       = local.hub_id
 
   hub_workload_identity_ksa = local.hub_ksa
+  hub_sa_minting            = var.hub_sa_minting
 }
 
 module "cloudsql_database" {

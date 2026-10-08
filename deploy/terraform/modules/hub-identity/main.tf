@@ -47,6 +47,14 @@ resource "google_service_account" "agent" {
 #      verified empirically against the live API: it does, so no
 #      pre-create fallback is needed.
 #
+# Exception, operator-chosen: hub_sa_minting (below), off by default. When
+# enabled it grants project-wide roles/iam.serviceAccountAdmin, which reaches
+# every service account in the project. GCP cannot scope it to this hub's
+# names: iam.serviceAccounts.create is evaluated on the project, and
+# SA-resource conditions see the unique ID, not the account name. It is
+# documented as project-wide and meant only for a project dedicated to
+# this hub.
+#
 # project_number (below) always comes from the shared-lookup data source via
 # var.project_number, never a literal — a hardcoded project number in this
 # expression would silently stop matching if this Terraform were ever
@@ -90,6 +98,26 @@ resource "google_project_iam_member" "hub_container_cluster_viewer" {
 resource "google_project_iam_member" "hub_logging_log_writer" {
   project = var.project_id
   role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.hub.email}"
+}
+
+# --- Hub SA: service account minting (opt-in) ---
+#
+# The hub mints per-user GCP service accounts with its own identity: it
+# creates the SA, sets IAM policy on it, and deletes it if a later step
+# fails. That needs roles/iam.serviceAccountAdmin (roles/iam.serviceAccountCreator
+# lacks setIamPolicy). The grant is project-wide and cannot carry a
+# name-scoped condition, so it is the documented exception to the IAM scope
+# rule above, and off by default. No condition block, so toggling it is a
+# single add or destroy, never a replacement.
+#
+# Not part of hub_iam_grants: minting is a request-time operation, not a
+# boot prerequisite, so it doesn't need to gate the Cloud Run revision.
+resource "google_project_iam_member" "hub_sa_minting" {
+  count = var.hub_sa_minting ? 1 : 0
+
+  project = var.project_id
+  role    = "roles/iam.serviceAccountAdmin"
   member  = "serviceAccount:${google_service_account.hub.email}"
 }
 

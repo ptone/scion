@@ -40,3 +40,8 @@ output "hub_workload_identity_member" {
   description = "The Workload Identity member granted roles/iam.workloadIdentityUser on the hub GSA (\"serviceAccount:<project>.svc.id.goog[<ns>/<ksa>]\"), or null when hub_workload_identity_ksa is unset. A real resource attribute, so a consumer that must not start before the grant exists (hub-gke's boot_prerequisites) gets a genuine dependency edge from it."
   value       = one(google_service_account_iam_member.hub_workload_identity_user[*].member)
 }
+
+output "hub_sa_minting_enabled" {
+  description = "Whether the hub SA holds the opt-in project-level roles/iam.serviceAccountAdmin grant for service account minting (var.hub_sa_minting)."
+  value       = length(google_project_iam_member.hub_sa_minting) == 1
+}

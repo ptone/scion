@@ -70,3 +70,15 @@ variable "hub_workload_identity_ksa" {
     error_message = "hub_workload_identity_ksa.namespace and .name must be lowercase DNS labels (^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$)."
   }
 }
+
+variable "hub_sa_minting" {
+  description = <<-EOT
+    Grant the hub SA project-level roles/iam.serviceAccountAdmin so the hub can
+    mint GCP service accounts for users. This is project-wide: the hub SA can then
+    create, delete and set IAM policy on EVERY service account in var.project_id,
+    including other hubs' and shared-infra SAs. GCP offers no name-scoped form.
+    Enable only in a project dedicated to this hub. Default off.
+  EOT
+  type        = bool
+  default     = false
+}

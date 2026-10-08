@@ -126,3 +126,9 @@ variable "nfs_capacity" {
   type        = string
   default     = "1Ti"
 }
+
+variable "hub_sa_minting" {
+  description = "Opt-in: grant the hub SA project-level roles/iam.serviceAccountAdmin so the hub can mint GCP service accounts for users. Project-wide (every SA in project_id, including other hubs' and shared-infra SAs) and not name-scopable; enable only in a project dedicated to this hub. Default off. See modules/hub-identity."
+  type        = bool
+  default     = false
+}
