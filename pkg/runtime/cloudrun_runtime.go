@@ -920,7 +920,7 @@ func cloudRunInstancePhase(inst *runpb.Instance) string {
 	if inst.GetDeleteTime() != nil {
 		return string(state.PhaseStopping)
 	}
-	return ""
+	return string(state.PhaseRunning)
 }
 
 func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error) {
