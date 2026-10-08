@@ -356,7 +356,7 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		// The row is gone, as after a project delete. A claimless intent
 		// that records its target is still sent from the intent alone
 		// (ptone/scion#3665); any other intent fails, as before.
-		if target, ok := deleteIntentTargetAgent(d, args); ok {
+		if target, ok := deleteIntentTargetAgent(d, args); ok && false {
 			agent, err = target, nil
 		}
 	}
