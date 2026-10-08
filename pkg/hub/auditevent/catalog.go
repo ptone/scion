@@ -105,6 +105,21 @@ var catalog = []CatalogEntry{{
 		{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
 	},
 	Destinations: []Destination{DestinationStructuredLog, DestinationHistory},
+}, {
+	Family:                 "authorization",
+	Action:                 "decide",
+	AllowedPairs:           []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeAllow}, {Phase: PhaseDecision, Outcome: OutcomeDeny}},
+	ResourceKind:           "project",
+	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes:         []ResourceScopeSchema{{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted}},
+	RequiredPayloadLeaves: []PayloadLeafSchema{
+		{Name: "permission_id", Type: PayloadString, MaxBytes: 128},
+		{Name: "permission", Type: PayloadString, MaxBytes: 128},
+		{Name: "reason", Type: PayloadString, MaxBytes: 256},
+		{Name: "denied_by", Type: PayloadString, MaxBytes: 64},
+		{Name: "sampled", Type: PayloadString, MaxBytes: 5, AllowedValues: []string{"true", "false"}},
+	},
+	Destinations: []Destination{DestinationStructuredLog},
 }}
 
 // Catalog returns a defensive snapshot of the schemas implemented in this

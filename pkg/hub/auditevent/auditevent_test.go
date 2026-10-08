@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -108,6 +109,9 @@ func TestCatalogRejectsEveryUndeclaredPhaseOutcomePair(t *testing.T) {
 			for _, phase := range phases {
 				for _, outcome := range outcomes {
 					event := validCreateEvent(t)
+					if entry.Family == "authorization" && entry.Action == "decide" {
+						event = validAuthorizationDecisionEvent(OutcomeAllow)
+					}
 					event.Family = entry.Family
 					event.Action = entry.Action
 					event.Phase = phase
@@ -693,6 +697,8 @@ func TestRenderIsRaceSafeAgainstMutationOfBuilderInputAliases(t *testing.T) {
 func TestCatalogSnapshotAccessBoundaryCreate(t *testing.T) {
 	t.Parallel()
 
+	entries := Catalog()
+	require.Len(t, entries, 2)
 	assert.Equal(t, []CatalogEntry{{
 		Family:                 "access_boundary",
 		Action:                 "create",
@@ -718,7 +724,211 @@ func TestCatalogSnapshotAccessBoundaryCreate(t *testing.T) {
 			{Name: "changed_fields", Type: PayloadStringArray, MaxItems: 32, ItemMaxBytes: 256},
 		},
 		Destinations: []Destination{DestinationStructuredLog, DestinationHistory},
-	}}, Catalog())
+	}}, entries[:1])
+}
+
+func TestAuthorizationDecisionEnvelope_AllowDeny(t *testing.T) {
+	t.Parallel()
+
+	entries := Catalog()
+	require.Len(t, entries, 2)
+	assert.Equal(t, CatalogEntry{
+		Family:                 "authorization",
+		Action:                 "decide",
+		AllowedPairs:           []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeAllow}, {Phase: PhaseDecision, Outcome: OutcomeDeny}},
+		ResourceKind:           "project",
+		RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+		ResourceScopes:         []ResourceScopeSchema{{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted}},
+		RequiredPayloadLeaves: []PayloadLeafSchema{
+			{Name: "permission_id", Type: PayloadString, MaxBytes: 128},
+			{Name: "permission", Type: PayloadString, MaxBytes: 128},
+			{Name: "reason", Type: PayloadString, MaxBytes: 256},
+			{Name: "denied_by", Type: PayloadString, MaxBytes: 64},
+			{Name: "sampled", Type: PayloadString, MaxBytes: 5, AllowedValues: []string{"true", "false"}},
+		},
+		OptionalPayloadLeaves: []PayloadLeafSchema{},
+		Destinations:          []Destination{DestinationStructuredLog},
+	}, entries[1])
+
+	for _, outcome := range []Outcome{OutcomeAllow, OutcomeDeny} {
+		for _, sampled := range []string{"true", "false"} {
+			t.Run(string(outcome)+"/sampled-"+sampled, func(t *testing.T) {
+				event := validAuthorizationDecisionEvent(outcome)
+				payload := event.Payload.(AuthorizationDecisionPayload)
+				payload.Sampled = sampled
+				event.Payload = payload
+				require.NoError(t, Validate(event))
+				rendered, err := Render(event)
+				require.NoError(t, err)
+				var got map[string]any
+				require.NoError(t, json.Unmarshal(rendered, &got))
+				assert.Equal(t, "decision", got["phase"])
+				assert.Equal(t, string(outcome), got["outcome"])
+				assert.Equal(t, string(severityForOutcome(outcome)), got["severity"])
+				assert.Equal(t, map[string]any{
+					"permission_id": "fixture.permission", "permission": "read",
+					"reason": "fixture decision", "denied_by": "none", "sampled": sampled,
+				}, got["payload"])
+				// The schema preserves explicit permission data; it does not resolve
+				// or infer an operation from a permission or resource.
+				assert.NotContains(t, got, "operation_id")
+				assert.NotContains(t, got, "credential")
+			})
+		}
+	}
+}
+
+func TestAuthorizationDecisionEnvelope_RejectsInvalidContract(t *testing.T) {
+	t.Parallel()
+
+	const canary = "rejected-value-canary"
+	cases := []struct {
+		name          string
+		rejectedValue string
+		mutate        func(*EnvelopeV1)
+	}{
+		{"family", canary, func(e *EnvelopeV1) { e.Family = canary }},
+		{"action", canary, func(e *EnvelopeV1) { e.Action = canary }},
+		{"commit-succeeded", "succeeded", func(e *EnvelopeV1) { e.Phase, e.Outcome = PhaseCommit, OutcomeSucceeded }},
+		{"decision-succeeded", "succeeded", func(e *EnvelopeV1) { e.Outcome = OutcomeSucceeded }},
+		{"missing-principal", "", func(e *EnvelopeV1) { e.Principal = nil }},
+		{"missing-resource", "", func(e *EnvelopeV1) { e.Resource = nil }},
+		{"wrong-resource-kind", canary, func(e *EnvelopeV1) { e.Resource.Kind = canary }},
+		{"unknown-resource-scope", canary, func(e *EnvelopeV1) { e.Resource.Scope = ResourceScope(canary) }},
+		{"unexpected-project-id", canary, func(e *EnvelopeV1) { e.Resource.ProjectID = canary }},
+		{"wrong-severity", "warning", func(e *EnvelopeV1) { e.Severity = SeverityWarning }},
+		{"missing-payload", "", func(e *EnvelopeV1) { e.Payload = nil }},
+		{"sampled-enum", "TRUE", func(e *EnvelopeV1) {
+			payload := e.Payload.(AuthorizationDecisionPayload)
+			payload.Sampled = "TRUE"
+			e.Payload = payload
+		}},
+		{"raw-credential-leaf", "Bearer " + canary, func(e *EnvelopeV1) {
+			leaves := e.Payload.auditPayloadLeaves()
+			leaves["raw_credential"] = "Bearer " + canary
+			e.Payload = retainedMapPayload{leaves: leaves}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event := validAuthorizationDecisionEvent(OutcomeAllow)
+			tc.mutate(&event)
+			err := Validate(event)
+			require.Error(t, err)
+			var validationErr *ValidationError
+			require.ErrorAs(t, err, &validationErr)
+			if tc.rejectedValue != "" {
+				assertValidationErrorDoesNotRetain(t, err, validationErr.Field, validationErr.Rule, tc.rejectedValue)
+			}
+			rendered, renderErr := Render(event)
+			require.Error(t, renderErr)
+			assert.Nil(t, rendered, "rejected values must never cross the render boundary")
+			require.ErrorAs(t, renderErr, &validationErr)
+			if tc.rejectedValue != "" {
+				assertValidationErrorDoesNotRetain(t, renderErr, validationErr.Field, validationErr.Rule, tc.rejectedValue)
+			}
+		})
+	}
+
+	for _, leaf := range []struct {
+		name string
+		cap  int
+	}{
+		{"permission_id", 128}, {"permission", 128}, {"reason", 256}, {"denied_by", 64}, {"sampled", 5},
+	} {
+		for _, mutation := range []string{"missing", "empty", "oversize"} {
+			t.Run(leaf.name+"/"+mutation, func(t *testing.T) {
+				event := validAuthorizationDecisionEvent(OutcomeAllow)
+				leaves := event.Payload.auditPayloadLeaves()
+				switch mutation {
+				case "missing":
+					delete(leaves, leaf.name)
+				case "empty":
+					leaves[leaf.name] = ""
+				case "oversize":
+					leaves[leaf.name] = strings.Repeat("x", leaf.cap+1)
+				}
+				event.Payload = retainedMapPayload{leaves: leaves}
+				err := Validate(event)
+				require.Error(t, err)
+				var validationErr *ValidationError
+				require.ErrorAs(t, err, &validationErr)
+				assert.Equal(t, "payload."+leaf.name, validationErr.Field)
+				if mutation == "oversize" {
+					assertValidationErrorDoesNotRetain(t, err, validationErr.Field, validationErr.Rule, strings.Repeat("x", leaf.cap+1))
+				}
+				rendered, renderErr := Render(event)
+				require.Error(t, renderErr)
+				assert.Nil(t, rendered)
+				require.ErrorAs(t, renderErr, &validationErr)
+				if mutation == "oversize" {
+					assertValidationErrorDoesNotRetain(t, renderErr, validationErr.Field, validationErr.Rule, strings.Repeat("x", leaf.cap+1))
+				}
+			})
+		}
+		// The valid maximum separates byte-cap enforcement from enum rejection.
+		t.Run(leaf.name+"/at-cap", func(t *testing.T) {
+			event := validAuthorizationDecisionEvent(OutcomeAllow)
+			leaves := event.Payload.auditPayloadLeaves()
+			leaves[leaf.name] = strings.Repeat("x", leaf.cap)
+			if leaf.name == "sampled" {
+				leaves[leaf.name] = "false"
+			}
+			event.Payload = retainedMapPayload{leaves: leaves}
+			require.NoError(t, Validate(event))
+		})
+	}
+}
+
+func TestAuthorizationDecisionEnvelope_RenderAndSinkAgree(t *testing.T) {
+	t.Parallel()
+
+	for _, outcome := range []Outcome{OutcomeAllow, OutcomeDeny} {
+		t.Run(string(outcome), func(t *testing.T) {
+			event := validAuthorizationDecisionEvent(outcome)
+			want, err := Render(event)
+			require.NoError(t, err)
+			// One concrete local capture handler, no decorators or exporter.
+			handler := &captureSlogHandler{}
+			sink, err := NewSlogSink(slog.New(handler))
+			require.NoError(t, err)
+			require.NoError(t, sink.Emit(context.Background(), event))
+			records := handler.Records()
+			require.Len(t, records, 1)
+			assert.Equal(t, EventName, records[0].Message)
+			assert.Equal(t, event.OccurredAt, records[0].Time)
+			level := slog.LevelInfo
+			if outcome == OutcomeDeny {
+				level = slog.LevelWarn
+			}
+			assert.Equal(t, level, records[0].Level)
+			got, err := json.Marshal(slogRecordMap(t, records[0]))
+			require.NoError(t, err)
+			assert.JSONEq(t, string(want), string(got))
+			assert.NotContains(t, string(got), "raw_credential")
+			assert.NotContains(t, string(got), "operation_id")
+		})
+	}
+}
+
+func validAuthorizationDecisionEvent(outcome Outcome) EnvelopeV1 {
+	return EnvelopeV1{
+		SchemaVersion: SchemaVersion,
+		EventID:       "11111111-1111-4111-8111-111111111111",
+		OccurredAt:    time.Date(2026, 10, 1, 12, 34, 56, 123456789, time.UTC),
+		Family:        "authorization",
+		Action:        "decide",
+		Phase:         PhaseDecision,
+		Outcome:       outcome,
+		Severity:      severityForOutcome(outcome),
+		CorrelationID: "corr-1",
+		Principal:     &IdentityRef{Kind: IdentityUser, ID: "user-1"},
+		Resource:      &ResourceRef{Kind: "project", ID: "project-1", Scope: ResourceScopeSystem},
+		Payload: AuthorizationDecisionPayload{
+			PermissionID: "fixture.permission", Permission: "read", Reason: "fixture decision",
+			DeniedBy: "none", Sampled: "false",
+		},
+	}
 }
 
 func TestRenderIsStableAndOmitsUnknownOptionalFields(t *testing.T) {

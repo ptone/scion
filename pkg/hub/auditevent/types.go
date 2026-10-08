@@ -165,6 +165,26 @@ type Payload interface {
 	auditPayloadLeaves() map[string]any
 }
 
+// AuthorizationDecisionPayload is the exact v1 payload for authorization
+// decision events. Sampled is the catalog-bounded string "true" or "false".
+type AuthorizationDecisionPayload struct {
+	PermissionID string
+	Permission   string
+	Reason       string
+	DeniedBy     string
+	Sampled      string
+}
+
+func (p AuthorizationDecisionPayload) auditPayloadLeaves() map[string]any {
+	return map[string]any{
+		"permission_id": p.PermissionID,
+		"permission":    p.Permission,
+		"reason":        p.Reason,
+		"denied_by":     p.DeniedBy,
+		"sampled":       p.Sampled,
+	}
+}
+
 // AccessBoundaryPayload is the exact v1 payload for access-boundary create,
 // update, and recovery events.
 type AccessBoundaryPayload struct {
