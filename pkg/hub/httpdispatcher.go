@@ -4073,6 +4073,7 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 	switch {
 	case ok && fence.claim != 0:
 		args.Claim = fence.claim
+		args.NotAfter = claimlessDeleteNotAfter(deleteClock())
 	case ok && !fence.notAfter.IsZero():
 		args.NotAfter = fence.notAfter
 	default:
