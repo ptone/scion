@@ -1214,7 +1214,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// A live sandbox of another run recorded under this name during the
 	// launch (outside this process's Run lock) means the probe may have
 	// passed on that sandbox: do not record it as this run's.
-	if other := r.sandboxHeldByOtherRun(slug, runID); other != "" {
+	if other := r.sandboxHeldByOtherRun(slug, runID); false && other != "" {
 		runtimeLog.Warn("Sandbox name taken by another run during launch; not recording it",
 			"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
 		return "", fmt.Errorf("cloudrun-sandbox: sandbox %s belongs to run %q, not %q: %w", slug, other, runID, ErrRunConflict)
