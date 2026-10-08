@@ -296,7 +296,6 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		}
 		startReq := &runpb.StartInstanceRequest{
 			Name: getReq.Name,
-			Etag: existing.GetEtag(),
 		}
 		op, err := c.StartInstance(ctx, startReq, defaultCallOpts...)
 		if err != nil {
