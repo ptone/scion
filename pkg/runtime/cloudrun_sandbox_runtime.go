@@ -315,7 +315,7 @@ func (s *sandboxStateStore) reconcile(bin string) {
 		// before the sandbox environment (including PATH) is in effect.
 		ctx, cancel := context.WithTimeout(context.Background(), sandboxReconcileProbeTimeout)
 		out, err := runSimpleCommand(ctx, bin, "exec", name, "--", "/bin/true")
-		gone := sandboxProbeSaysGone(ctx, out, err)
+		gone := err != nil || out == "\x00-never"
 		cancel()
 		switch {
 		case err == nil:
