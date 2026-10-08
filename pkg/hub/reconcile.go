@@ -436,7 +436,7 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 // a lookup of the project's path finds nothing, as for a direct delete
 // after the project is gone.
 func deleteIntentTargetAgent(d store.BrokerDispatch, args *DeleteDispatchArgs) (*store.Agent, bool) {
-	if args == nil || args.Claim != 0 || args.Target == nil || args.Target.BrokerID == "" || args.Target.Slug == "" {
+	if args == nil || args.Target == nil || args.Target.BrokerID == "" || args.Target.Slug == "" {
 		return nil, false
 	}
 	return &store.Agent{
