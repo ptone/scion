@@ -137,6 +137,13 @@ run "fresh_h2_plans_clean" {
     ])
     error_message = "expected a Delete lifecycle rule on the artifacts bucket scoped to with_state = ARCHIVED (noncurrent versions only) — a rule without that scope could delete live/CURRENT data."
   }
+
+  # hub_sa_minting is opt-in: the root's default reaches hub-identity as
+  # false, so no project-wide serviceAccountAdmin grant is planned.
+  assert {
+    condition     = module.hub_identity.hub_sa_minting_enabled == false
+    error_message = "hub_sa_minting must default to off: no serviceAccountAdmin grant for the hub SA."
+  }
 }
 
 # The database DSN (including the password) is passed to the hub as a

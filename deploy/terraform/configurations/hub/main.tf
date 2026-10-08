@@ -73,6 +73,8 @@ module "hub_identity" {
   project_id     = var.project_id
   project_number = module.shared_lookup.shared.project_number
   hub_name       = local.hub_id
+
+  hub_sa_minting = var.hub_sa_minting
 }
 
 module "agent_runtime_k8s" {

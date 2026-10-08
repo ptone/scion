@@ -78,4 +78,9 @@ run "hub_identity_adds_no_workload_identity_grant_by_default" {
     condition     = length(output.hub_iam_grants) == 7
     error_message = "hub_iam_grants must stay the same 7 handles (hub-cloudrun keys boot ordering on them)."
   }
+
+  assert {
+    condition     = length(google_project_iam_member.hub_sa_minting) == 0 && output.hub_sa_minting_enabled == false
+    error_message = "hub_sa_minting must default to false and create no serviceAccountAdmin grant."
+  }
 }

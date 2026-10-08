@@ -27,6 +27,12 @@ hub_image = "us-central1-docker.pkg.dev/my-project/tfha-scion/hub:v1.2.3"
 # next apply.
 # db_password_rotation = "REPLACE_ME_WITH_ROTATION_MARKER"
 
+# Optional, default off. Lets the hub mint GCP service accounts for users by
+# granting its SA project-wide roles/iam.serviceAccountAdmin (every SA in the
+# project, not just this hub's). Enable only in a project dedicated to this
+# hub; see deploy/terraform/README.md, "Minting service accounts (opt-in)".
+# hub_sa_minting = false
+
 iap_members  = []
 admin_emails = []
 
