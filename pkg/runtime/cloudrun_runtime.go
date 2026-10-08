@@ -920,6 +920,9 @@ func cloudRunInstancePhase(inst *runpb.Instance) string {
 	if inst.GetDeleteTime() != nil {
 		return string(state.PhaseStopping)
 	}
+	if inst.GetTerminalCondition().GetState() == runpb.Condition_CONDITION_SUCCEEDED {
+		return string(state.PhaseRunning)
+	}
 	return ""
 }
 
