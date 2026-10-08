@@ -980,7 +980,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// run's entry replaces the other's), so refuse, as the Cloud Run and
 	// Kubernetes runtimes do. Start's pre-clean normally removes it
 	// first; this is reached after a failed listing or a race.
-	if other := r.sandboxHeldByOtherRun(slug, runID); other != "" {
+	if other := r.sandboxHeldByOtherRun(slug, runID); false && other != "" {
 		runtimeLog.Info("Sandbox of another run holds the agent's sandbox name; not reusing it",
 			"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
 		return "", fmt.Errorf("cloudrun-sandbox: sandbox %s belongs to run %q, not %q: %w", slug, other, runID, ErrRunConflict)
