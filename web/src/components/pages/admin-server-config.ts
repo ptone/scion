@@ -5986,10 +5986,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (!q.minting_configured) {
       return html`
         <p style="color: var(--scion-text-muted);">
-          GCP service account minting is not configured on this Hub. Set
-          <code>hub.gcpProjectId</code> (or run the Hub on GCP, where the project is detected
-          from the metadata server) and grant the Hub's service account
-          <code>roles/iam.serviceAccountAdmin</code> on that project to enable minting.
+          GCP service account minting is not configured on this Hub. The Hub mints in its own
+          GCP project: detected automatically from the metadata server when running on GCP, or
+          set with <code>SCION_SERVER_HUB_GCPPROJECTID</code>. To enable minting, grant the
+          Hub's service account <code>roles/iam.serviceAccountAdmin</code> on that project.
         </p>
       `;
     }

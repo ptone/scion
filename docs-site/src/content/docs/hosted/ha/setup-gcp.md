@@ -671,7 +671,7 @@ this case.
 
 Skip this step unless users should be able to **mint** new GCP service accounts from the Hub (project settings, service accounts). Registering service accounts that already exist doesn't need it.
 
-The Hub mints with its own identity. It creates the service account in its GCP project (`hub.gcpProjectId`), sets IAM policy on it (granting itself `roles/iam.serviceAccountTokenCreator` and the requester `roles/iam.serviceAccountUser`), and deletes it if a later step fails. That needs **Service Account Admin** (`roles/iam.serviceAccountAdmin`) on that project. Service Account Creator (`roles/iam.serviceAccountCreator`) isn't enough, because it can't set IAM policy or delete.
+The Hub mints with its own identity. It creates the service account in the Hub's GCP project (detected automatically from the metadata server when running on GCP, or set with `SCION_SERVER_HUB_GCPPROJECTID`), sets IAM policy on it (granting itself `roles/iam.serviceAccountTokenCreator` and the requester `roles/iam.serviceAccountUser`), and deletes it if a later step fails. That needs **Service Account Admin** (`roles/iam.serviceAccountAdmin`) on that project. Service Account Creator (`roles/iam.serviceAccountCreator`) isn't enough, because it can't set IAM policy or delete.
 
 ```bash
 gcloud projects add-iam-policy-binding $PROJECT_ID \

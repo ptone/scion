@@ -303,7 +303,9 @@ describe('scion-page-admin-server-config', () => {
     // serviceAccountCreator cannot do.
     expect(text).toContain('roles/iam.serviceAccountAdmin');
     expect(text).not.toContain('serviceAccountCreator');
-    expect(text).toContain('hub.gcpProjectId');
+    // The v1 settings.yaml has no hub GCP project key; point at the env var.
+    expect(text).toContain('SCION_SERVER_HUB_GCPPROJECTID');
+    expect(text).not.toContain('hub.gcpProjectId');
   });
 
   // ── Criterion 1: Seeded lifecycle (UI aspects) ──
