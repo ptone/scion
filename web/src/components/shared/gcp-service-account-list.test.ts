@@ -488,7 +488,9 @@ describe('scion-gcp-service-account-list', () => {
       expect(link?.getAttribute('href')).toBe(
         'https://googlecloudplatform.github.io/scion/hosted/ha/permissions/#service-account-minting-permissions'
       );
+      // Opens in a new tab without handing the docs page a window.opener.
       expect(link?.getAttribute('target')).toBe('_blank');
+      expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
       // No new icon: anything rendered here would need registering in USED_ICONS.
       expect(note!.querySelector('sl-icon')).toBeNull();
     });
