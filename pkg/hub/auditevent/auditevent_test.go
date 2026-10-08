@@ -733,12 +733,13 @@ func TestAuthorizationDecisionEnvelope_AllowDeny(t *testing.T) {
 	entries := Catalog()
 	require.Len(t, entries, 2)
 	assert.Equal(t, CatalogEntry{
-		Family:                 "authorization",
-		Action:                 "decide",
-		AllowedPairs:           []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeAllow}, {Phase: PhaseDecision, Outcome: OutcomeDeny}},
-		ResourceKind:           "project",
-		RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
-		ResourceScopes:         []ResourceScopeSchema{{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted}},
+		Family:                  "authorization",
+		Action:                  "decide",
+		AllowedPairs:            []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeAllow}, {Phase: PhaseDecision, Outcome: OutcomeDeny}},
+		ResourceKind:            "project",
+		AdditionalResourceKinds: []string{"agent"},
+		RequiredEnvelopeLeaves:  []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+		ResourceScopes:          []ResourceScopeSchema{{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted}},
 		RequiredPayloadLeaves: []PayloadLeafSchema{
 			{Name: "permission_id", Type: PayloadString, MaxBytes: 128},
 			{Name: "permission", Type: PayloadString, MaxBytes: 128},
@@ -750,30 +751,36 @@ func TestAuthorizationDecisionEnvelope_AllowDeny(t *testing.T) {
 		Destinations:          []Destination{DestinationStructuredLog},
 	}, entries[1])
 
-	for _, outcome := range []Outcome{OutcomeAllow, OutcomeDeny} {
-		for _, sampled := range []string{"true", "false"} {
-			t.Run(string(outcome)+"/sampled-"+sampled, func(t *testing.T) {
-				event := validAuthorizationDecisionEvent(outcome)
-				payload := event.Payload.(AuthorizationDecisionPayload)
-				payload.Sampled = sampled
-				event.Payload = payload
-				require.NoError(t, Validate(event))
-				rendered, err := Render(event)
-				require.NoError(t, err)
-				var got map[string]any
-				require.NoError(t, json.Unmarshal(rendered, &got))
-				assert.Equal(t, "decision", got["phase"])
-				assert.Equal(t, string(outcome), got["outcome"])
-				assert.Equal(t, string(severityForOutcome(outcome)), got["severity"])
-				assert.Equal(t, map[string]any{
-					"permission_id": "fixture.permission", "permission": "read",
-					"reason": "fixture decision", "denied_by": "none", "sampled": sampled,
-				}, got["payload"])
-				// The schema preserves explicit permission data; it does not resolve
-				// or infer an operation from a permission or resource.
-				assert.NotContains(t, got, "operation_id")
-				assert.NotContains(t, got, "credential")
-			})
+	for _, kind := range []string{"project", "agent"} {
+		for _, outcome := range []Outcome{OutcomeAllow, OutcomeDeny} {
+			for _, sampled := range []string{"true", "false"} {
+				t.Run(kind+"/"+string(outcome)+"/sampled-"+sampled, func(t *testing.T) {
+					event := validAuthorizationDecisionEvent(outcome)
+					event.Resource.Kind = kind
+					event.Resource.ID = kind + "-1"
+					payload := event.Payload.(AuthorizationDecisionPayload)
+					payload.Sampled = sampled
+					event.Payload = payload
+					require.NoError(t, Validate(event))
+					rendered, err := Render(event)
+					require.NoError(t, err)
+					var got map[string]any
+					require.NoError(t, json.Unmarshal(rendered, &got))
+					assert.Equal(t, "decision", got["phase"])
+					assert.Equal(t, string(outcome), got["outcome"])
+					assert.Equal(t, string(severityForOutcome(outcome)), got["severity"])
+					assert.Equal(t, map[string]any{"kind": kind, "id": kind + "-1"}, got["resource"])
+					assert.Equal(t, `{"schema_version":1,"event_id":"11111111-1111-4111-8111-111111111111","occurred_at":"2026-10-01T12:34:56.123456789Z","family":"authorization","action":"decide","phase":"decision","outcome":"`+string(outcome)+`","severity":"`+string(severityForOutcome(outcome))+`","correlation_id":"corr-1","principal":{"kind":"user","id":"user-1"},"resource":{"kind":"`+kind+`","id":"`+kind+`-1"},"payload":{"denied_by":"none","permission":"read","permission_id":"fixture.permission","reason":"fixture decision","sampled":"`+sampled+`"}}`, string(rendered))
+					assert.Equal(t, map[string]any{
+						"permission_id": "fixture.permission", "permission": "read",
+						"reason": "fixture decision", "denied_by": "none", "sampled": sampled,
+					}, got["payload"])
+					// The schema preserves explicit permission data; it does not resolve
+					// or infer an operation from a permission or resource.
+					assert.NotContains(t, got, "operation_id")
+					assert.NotContains(t, got, "credential")
+				})
+			}
 		}
 	}
 }
@@ -883,31 +890,145 @@ func TestAuthorizationDecisionEnvelope_RejectsInvalidContract(t *testing.T) {
 func TestAuthorizationDecisionEnvelope_RenderAndSinkAgree(t *testing.T) {
 	t.Parallel()
 
-	for _, outcome := range []Outcome{OutcomeAllow, OutcomeDeny} {
-		t.Run(string(outcome), func(t *testing.T) {
-			event := validAuthorizationDecisionEvent(outcome)
-			want, err := Render(event)
-			require.NoError(t, err)
-			// One concrete local capture handler, no decorators or exporter.
-			handler := &captureSlogHandler{}
-			sink, err := NewSlogSink(slog.New(handler))
-			require.NoError(t, err)
-			require.NoError(t, sink.Emit(context.Background(), event))
-			records := handler.Records()
-			require.Len(t, records, 1)
-			assert.Equal(t, EventName, records[0].Message)
-			assert.Equal(t, event.OccurredAt, records[0].Time)
-			level := slog.LevelInfo
-			if outcome == OutcomeDeny {
-				level = slog.LevelWarn
+	for _, kind := range []string{"project", "agent"} {
+		for _, outcome := range []Outcome{OutcomeAllow, OutcomeDeny} {
+			t.Run(kind+"/"+string(outcome), func(t *testing.T) {
+				event := validAuthorizationDecisionEvent(outcome)
+				event.Resource.Kind = kind
+				event.Resource.ID = kind + "-1"
+				want, err := Render(event)
+				require.NoError(t, err)
+				// One concrete local capture handler, no decorators or exporter.
+				handler := &captureSlogHandler{}
+				sink, err := NewSlogSink(slog.New(handler))
+				require.NoError(t, err)
+				require.NoError(t, sink.Emit(context.Background(), event))
+				records := handler.Records()
+				require.Len(t, records, 1)
+				assert.Equal(t, EventName, records[0].Message)
+				assert.Equal(t, event.OccurredAt, records[0].Time)
+				level := slog.LevelInfo
+				if outcome == OutcomeDeny {
+					level = slog.LevelWarn
+				}
+				assert.Equal(t, level, records[0].Level)
+				got, err := json.Marshal(slogRecordMap(t, records[0]))
+				require.NoError(t, err)
+				assert.JSONEq(t, string(want), string(got))
+				var envelope map[string]any
+				require.NoError(t, json.Unmarshal(got, &envelope))
+				assert.Equal(t, map[string]any{"kind": kind, "id": kind + "-1"}, envelope["resource"])
+				assert.NotContains(t, string(got), "raw_credential")
+				assert.NotContains(t, string(got), "operation_id")
+			})
+		}
+	}
+}
+
+func TestCatalogAdditionalResourceKindsAreDefensiveCopies(t *testing.T) {
+	t.Parallel()
+
+	want := Catalog()
+	require.Len(t, want, 2)
+	assert.Nil(t, want[0].AdditionalResourceKinds)
+	require.Equal(t, []string{"agent"}, want[1].AdditionalResourceKinds)
+	for _, boundary := range []string{"enumeration", "lookup"} {
+		t.Run(boundary, func(t *testing.T) {
+			var entry CatalogEntry
+			if boundary == "enumeration" {
+				entry = Catalog()[1]
+			} else {
+				var ok bool
+				entry, ok = catalogEntry("authorization", "decide")
+				require.True(t, ok)
 			}
-			assert.Equal(t, level, records[0].Level)
-			got, err := json.Marshal(slogRecordMap(t, records[0]))
-			require.NoError(t, err)
-			assert.JSONEq(t, string(want), string(got))
-			assert.NotContains(t, string(got), "raw_credential")
-			assert.NotContains(t, string(got), "operation_id")
+			require.Equal(t, []string{"agent"}, entry.AdditionalResourceKinds)
+			entry.AdditionalResourceKinds[0] = "broker"
+			entry.AdditionalResourceKinds = append(entry.AdditionalResourceKinds, "skill")
+			entry.ResourceKind = "user"
+			assert.Equal(t, want, Catalog())
+			fresh, ok := catalogEntry("authorization", "decide")
+			require.True(t, ok)
+			assert.Equal(t, "project", fresh.ResourceKind)
+			assert.Equal(t, []string{"agent"}, fresh.AdditionalResourceKinds)
+			for _, kind := range []string{"project", "agent", "broker", "skill", "user"} {
+				event := validAuthorizationDecisionEvent(OutcomeAllow)
+				event.Resource.Kind = kind
+				if kind == "project" || kind == "agent" {
+					require.NoError(t, Validate(event))
+				} else {
+					require.Error(t, Validate(event))
+				}
+			}
 		})
+	}
+	boundary, ok := catalogEntry("access_boundary", "create")
+	require.True(t, ok)
+	assert.Nil(t, boundary.AdditionalResourceKinds)
+	missing, ok := catalogEntry("unknown", "unknown")
+	assert.False(t, ok)
+	assert.Equal(t, CatalogEntry{}, missing)
+}
+
+func TestCatalogResourceKindMembershipContract(t *testing.T) {
+	t.Parallel()
+
+	for _, contract := range []struct {
+		name    string
+		outcome Outcome
+	}{
+		{"authorization-allow", OutcomeAllow},
+		{"authorization-deny", OutcomeDeny},
+		{"access-boundary-create", OutcomeSucceeded},
+	} {
+		for _, kind := range []string{"project", "agent", "access_constraint", "", "Agent", "PROJECT", "agent-child", "project-child", "broker", "user", "skill", "template", "unknown-kind-canary"} {
+			name := kind
+			if name == "" {
+				name = "empty"
+			}
+			t.Run(contract.name+"/"+name, func(t *testing.T) {
+				event := validAuthorizationDecisionEvent(contract.outcome)
+				wantValid := kind == "project" || kind == "agent"
+				if contract.outcome == OutcomeSucceeded {
+					event = validCreateEvent(t)
+					wantValid = kind == "access_constraint"
+				}
+				event.Resource.Kind = kind
+				handler := &captureSlogHandler{}
+				sink, err := NewSlogSink(slog.New(handler))
+				require.NoError(t, err)
+				err = Validate(event)
+				if wantValid {
+					require.NoError(t, err)
+					_, err = Render(event)
+					require.NoError(t, err)
+					require.NoError(t, sink.Emit(context.Background(), event))
+					require.Len(t, handler.Records(), 1)
+					return
+				}
+				require.Error(t, err)
+				var validationErr *ValidationError
+				require.ErrorAs(t, err, &validationErr)
+				assert.Equal(t, "resource.kind", validationErr.Field)
+				if kind != "" {
+					assertValidationErrorDoesNotRetain(t, err, validationErr.Field, validationErr.Rule, kind)
+				}
+				rendered, err := Render(event)
+				require.Error(t, err)
+				assert.Nil(t, rendered)
+				require.ErrorAs(t, err, &validationErr)
+				if kind != "" {
+					assertValidationErrorDoesNotRetain(t, err, validationErr.Field, validationErr.Rule, kind)
+				}
+				err = sink.Emit(context.Background(), event)
+				require.Error(t, err)
+				require.ErrorAs(t, err, &validationErr)
+				if kind != "" {
+					assertValidationErrorDoesNotRetain(t, err, validationErr.Field, validationErr.Rule, kind)
+				}
+				assert.Empty(t, handler.Records(), "rejected resource kinds must not reach Handle")
+			})
+		}
 	}
 }
 

@@ -14,6 +14,8 @@
 
 package auditevent
 
+import "slices"
+
 // PhaseOutcome is one exact phase/result pair declared by the catalog.
 type PhaseOutcome struct {
 	Phase   Phase
@@ -69,15 +71,16 @@ type ResourceScopeSchema struct {
 
 // CatalogEntry is the machine-readable schema for one action.
 type CatalogEntry struct {
-	Family                 string
-	Action                 string
-	AllowedPairs           []PhaseOutcome
-	ResourceKind           string
-	RequiredEnvelopeLeaves []string
-	ResourceScopes         []ResourceScopeSchema
-	RequiredPayloadLeaves  []PayloadLeafSchema
-	OptionalPayloadLeaves  []PayloadLeafSchema
-	Destinations           []Destination
+	Family                  string
+	Action                  string
+	AllowedPairs            []PhaseOutcome
+	ResourceKind            string
+	AdditionalResourceKinds []string
+	RequiredEnvelopeLeaves  []string
+	ResourceScopes          []ResourceScopeSchema
+	RequiredPayloadLeaves   []PayloadLeafSchema
+	OptionalPayloadLeaves   []PayloadLeafSchema
+	Destinations            []Destination
 }
 
 var catalog = []CatalogEntry{{
@@ -106,12 +109,13 @@ var catalog = []CatalogEntry{{
 	},
 	Destinations: []Destination{DestinationStructuredLog, DestinationHistory},
 }, {
-	Family:                 "authorization",
-	Action:                 "decide",
-	AllowedPairs:           []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeAllow}, {Phase: PhaseDecision, Outcome: OutcomeDeny}},
-	ResourceKind:           "project",
-	RequiredEnvelopeLeaves: []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
-	ResourceScopes:         []ResourceScopeSchema{{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted}},
+	Family:                  "authorization",
+	Action:                  "decide",
+	AllowedPairs:            []PhaseOutcome{{Phase: PhaseDecision, Outcome: OutcomeAllow}, {Phase: PhaseDecision, Outcome: OutcomeDeny}},
+	ResourceKind:            "project",
+	AdditionalResourceKinds: []string{"agent"},
+	RequiredEnvelopeLeaves:  []string{"schema_version", "event_id", "occurred_at", "family", "action", "phase", "outcome", "severity", "correlation_id", "principal", "resource"},
+	ResourceScopes:          []ResourceScopeSchema{{Scope: ResourceScopeSystem, ProjectID: ResourceProjectIDOmitted}},
 	RequiredPayloadLeaves: []PayloadLeafSchema{
 		{Name: "permission_id", Type: PayloadString, MaxBytes: 128},
 		{Name: "permission", Type: PayloadString, MaxBytes: 128},
@@ -128,6 +132,7 @@ func Catalog() []CatalogEntry {
 	result := make([]CatalogEntry, len(catalog))
 	for i, entry := range catalog {
 		result[i] = entry
+		result[i].AdditionalResourceKinds = slices.Clone(entry.AdditionalResourceKinds)
 		result[i].AllowedPairs = append([]PhaseOutcome(nil), entry.AllowedPairs...)
 		result[i].RequiredEnvelopeLeaves = append([]string(nil), entry.RequiredEnvelopeLeaves...)
 		result[i].ResourceScopes = append([]ResourceScopeSchema(nil), entry.ResourceScopes...)
@@ -150,6 +155,7 @@ func clonePayloadLeafSchemas(schemas []PayloadLeafSchema) []PayloadLeafSchema {
 func catalogEntry(family, action string) (CatalogEntry, bool) {
 	for _, entry := range catalog {
 		if entry.Family == family && entry.Action == action {
+			entry.AdditionalResourceKinds = slices.Clone(entry.AdditionalResourceKinds)
 			return entry, true
 		}
 	}
