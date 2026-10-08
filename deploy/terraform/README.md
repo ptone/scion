@@ -164,15 +164,23 @@ per-project step outside this Terraform.
 
 Besides registering existing service accounts, the hub can **mint** new GCP
 service accounts for users (project settings, service accounts). It does
-this with its own identity: it creates the service account, sets IAM policy
-on it (granting itself `roles/iam.serviceAccountTokenCreator` and the
-requester `roles/iam.serviceAccountUser`), and deletes it if a later step
-fails. That needs `roles/iam.serviceAccountAdmin` on the hub's project.
-`roles/iam.serviceAccountCreator` is not enough, because it can't set IAM
-policy or delete.
+this with its own identity: it creates the service account, then sets IAM
+policy on it. It grants itself `roles/iam.serviceAccountTokenCreator`, and,
+unless the request turns it off (it's on by default), grants the minted
+account `roles/iam.serviceAccountUser` on itself so it can serve as a
+project default for agents that create sub-agents. If a grant fails, it
+deletes the account. That needs `roles/iam.serviceAccountAdmin` on the
+hub's project. `roles/iam.serviceAccountCreator` is not enough, because it
+can't set IAM policy or delete.
 
-This Terraform doesn't grant it by default, so minting fails with a 403
-until you opt in. To opt in, set this in the hub's tfvars
+This Terraform doesn't grant it by default, so minting fails until you opt
+in. Without any create permission, the mint request returns 502 with GCP's
+403 embedded and a hint naming `roles/iam.serviceAccountAdmin`. With only
+`roles/iam.serviceAccountCreator`, the account is created, the IAM policy
+step then fails, and the request returns 502 with a generic message that
+doesn't name the role. Creator can't delete either, so the cleanup fails
+and the new account is left in the project. To opt in, set this in the
+hub's tfvars
 (`configurations/hub` or `configurations/hub-gke`):
 
 ```hcl
