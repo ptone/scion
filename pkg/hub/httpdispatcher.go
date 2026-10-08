@@ -4052,7 +4052,6 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 		RemoveBranch:   removeBranch,
 		SoftDelete:     softDelete,
 		DeletedAt:      deletedAt,
-		RunID:          agent.RunID,
 		PreviousRunIDs: agent.PreviousRunIDs,
 		// The target lets the executing node send the delete even after
 		// the agent row is gone, as after a project delete
