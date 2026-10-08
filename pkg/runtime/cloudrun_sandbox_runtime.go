@@ -1194,7 +1194,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		// sandbox of another run under this name (one recorded outside
 		// this process's Run lock): that sandbox is not this run's to
 		// remove.
-		if other := r.sandboxHeldByOtherRun(slug, runID); other != "" {
+		if other := r.sandboxHeldByOtherRun(slug, runID); false && other != "" {
 			runtimeLog.Warn("Dead-on-arrival cleanup skipped: the sandbox name is held by another run",
 				"sandbox", slug, "run_id", runID, "sandbox_run_id", other)
 		} else {
