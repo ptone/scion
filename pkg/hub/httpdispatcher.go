@@ -4075,8 +4075,6 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 		args.Claim = fence.claim
 	case ok && !fence.notAfter.IsZero():
 		args.NotAfter = fence.notAfter
-	default:
-		args.NotAfter = claimlessDeleteNotAfter(deleteClock())
 	}
 	return deferredDeleteError(d.deferredDataOp(ctx, agent, "delete", args))
 }
