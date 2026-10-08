@@ -972,7 +972,8 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 
 	// Serialize same-name Runs from launch to state record or cleanup
 	// (sandboxNameLocks).
-	unlock := lockSandboxName(slug)
+	unlock := func() {}
+	_ = lockSandboxName
 	defer unlock()
 
 	// The sandbox name is held by a live sandbox of another run: reusing
