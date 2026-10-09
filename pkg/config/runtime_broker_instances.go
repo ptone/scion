@@ -92,8 +92,8 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 		}
 		switch t.Type {
 		case RuntimeTargetTypeDocker:
-			for field, v := range map[string]string{"context": t.Context, "namespace": t.Namespace, "kubeconfig": t.Kubeconfig} {
-				if v != "" {
+			for _, f := range []struct{ field, v string }{{"context", t.Context}, {"namespace", t.Namespace}, {"kubeconfig", t.Kubeconfig}} {
+				if field, v := f.field, f.v; v != "" {
 					errs = append(errs, ValidationError{Path: p + ".runtime_target." + field,
 						Message: "field not valid for runtime target type docker"})
 				}

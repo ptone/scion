@@ -286,6 +286,14 @@ func NewKubernetesRuntimeFromConfig(kubeconfigPath string, rtConfig config.V1Run
 	if err != nil {
 		return nil, err
 	}
+	return NewKubernetesRuntimeFromClient(k8sClient, rtConfig)
+}
+
+// NewKubernetesRuntimeFromClient builds a Kubernetes runtime on an already
+// constructed client: it verifies the connection, then applies rtConfig's
+// namespace, GKE (explicit or auto-detected), listing and priority class
+// settings. Its only error is the connection check's.
+func NewKubernetesRuntimeFromClient(k8sClient *k8s.Client, rtConfig config.V1RuntimeConfig) (*KubernetesRuntime, error) {
 	if err := k8sClient.Verify(); err != nil {
 		return nil, err
 	}

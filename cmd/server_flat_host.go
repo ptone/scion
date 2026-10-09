@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -80,10 +81,24 @@ func newFlatInstanceRuntime(_ context.Context, inst config.V1RuntimeBrokerInstan
 	case brokeridentity.TargetTypeDocker:
 		return runtime.NewDockerRuntime(), nil
 	case brokeridentity.TargetTypeKubernetes:
-		rt, err := runtime.NewKubernetesRuntimeFromConfig(t.Kubeconfig, config.V1RuntimeConfig{
+		var client *k8s.Client
+		var err error
+		if t.Kubeconfig != "" {
+			// The explicit file is the only source: no default loading
+			// rules and no in-cluster fallback.
+			client, err = k8s.NewClientFromKubeconfigFile(t.Kubeconfig, t.Context)
+		} else {
+			client, err = k8s.NewClientWithContext("", t.Context)
+		}
+		if err != nil {
+			return nil, err // a configuration error: the file, its parse or its context
+		}
+		rt, err := runtime.NewKubernetesRuntimeFromClient(client, config.V1RuntimeConfig{
 			Type: "kubernetes", Context: t.Context, Namespace: t.Namespace})
 		if err != nil {
-			return nil, err
+			// The connection check failed: the cluster cannot be identified.
+			return nil, fmt.Errorf("%w: Cannot identify Kubernetes execution scope: the API server is unreachable or the request failed; "+
+				"the instance was not activated: %v", brokeridentity.ErrExecutionScopeUnidentified, err)
 		}
 		return rt, nil
 	default:

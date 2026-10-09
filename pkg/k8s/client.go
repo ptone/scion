@@ -51,6 +51,12 @@ type Client struct {
 	Clientset      kubernetes.Interface
 	Config         *rest.Config
 	CurrentContext string
+
+	// explicitFile is set for a client built from exactly one kubeconfig
+	// file (NewClientFromKubeconfigFile): the file selects the credential
+	// source too, so Verify never substitutes Application Default
+	// Credentials when the file's exec credential plugin fails.
+	explicitFile bool
 }
 
 // NewClient creates a Kubernetes client using the default or specified kubeconfig.
@@ -74,6 +80,42 @@ func NewClientWithContext(kubeconfigPath, contextName string) (*Client, error) {
 			return kubernetes.NewForConfig(config)
 		},
 	)
+}
+
+// NewClientFromKubeconfigFile creates a client from exactly one kubeconfig
+// file, for a caller that must never use another source: no default loading
+// rules, no KUBECONFIG, and no in-cluster fallback (the deferred loader can
+// fall back to in-cluster credentials when the explicit file yields an
+// empty configuration). An empty file, a file with no usable context, or a
+// context it does not define is an error. If contextName is empty, the
+// file's current context is used.
+func NewClientFromKubeconfigFile(path, contextName string) (*Client, error) {
+	cfg, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
+	}
+	// Relative paths in the file (certificates, keys, token files, exec
+	// commands) stay relative to the file, as the loading rules resolve them.
+	if err := clientcmd.ResolveLocalPaths(cfg); err != nil {
+		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
+	}
+	restCfg, err := clientcmd.NewNonInteractiveClientConfig(*cfg, contextName,
+		&clientcmd.ConfigOverrides{CurrentContext: contextName}, nil).ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
+	}
+	current := contextName
+	if current == "" {
+		current = cfg.CurrentContext
+	}
+	c, err := newClientFromConfig(restCfg, current,
+		func(config *rest.Config) (dynamic.Interface, error) { return dynamic.NewForConfig(config) },
+		func(config *rest.Config) (kubernetes.Interface, error) { return kubernetes.NewForConfig(config) })
+	if err != nil {
+		return nil, err
+	}
+	c.explicitFile = true
+	return c, nil
 }
 
 func newClientWithContext(
@@ -179,6 +221,14 @@ func (c *Client) Verify() error {
 	// Detect exec-based credential plugin failures.
 	if !strings.Contains(errMsg, "getting credentials: exec:") {
 		return fmt.Errorf("failed to connect to Kubernetes cluster: %w", err)
+	}
+
+	// A client built from one explicit kubeconfig file uses only the
+	// credential source that file selects: no Application Default
+	// Credentials substitution.
+	if c.explicitFile {
+		return fmt.Errorf("the exec credential plugin of the explicit kubeconfig failed; fix the plugin or its environment "+
+			"(no other credential source is used for this kubeconfig): %w", err)
 	}
 
 	// On GCE, transparently fall back to Application Default Credentials

@@ -292,6 +292,8 @@ func TestFlatKubernetes_UnidentifiedScopeRefusesOnlyThatInstance(t *testing.T) {
 		h, act := prepareK8sHost(t, t.TempDir(), k8sInstance("k8s-gone", kc, "agents"))
 		st := statusOf(h, "k8s-gone")
 		assert.Equal(t, brokerhost.StateRefused, st.State)
+		assert.True(t, errors.Is(act.refused["k8s-gone"], brokeridentity.ErrExecutionScopeUnidentified), "unreachable is an unidentified scope: %v", act.refused["k8s-gone"])
+		assert.Contains(t, st.Error, "the API server is unreachable or the request failed")
 		assert.NotContains(t, st.Error, k8sTestToken)
 		assert.NotContains(t, act.activated, "k8s-gone")
 	})
