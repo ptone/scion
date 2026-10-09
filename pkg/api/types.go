@@ -1319,6 +1319,12 @@ type ResourceHandle struct {
 // targets the entry with that label (ptone/scion#2550).
 const LabelRunID = "scion.run_id"
 
+// LabelRuntimeBrokerID is the reserved runtime label naming the flat
+// Runtime Broker instance that owns a runtime object (ptone/scion#3274).
+// Only the owning instance sets it, before the object becomes visible;
+// caller, template or agent labels never set or replace it.
+const LabelRuntimeBrokerID = "scion.runtime_broker_id"
+
 // Error-detail keys a runtime broker sets on a start or restart failure
 // that happened inside Manager.Start (ptone/scion#2550). By then the broker
 // has acted: Start may already have removed the previous same-name entry
