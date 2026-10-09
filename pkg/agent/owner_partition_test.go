@@ -78,3 +78,55 @@ func TestOwnerPartition_StartPreCleanNeverRemovesForeignObject(t *testing.T) {
 		}
 	}
 }
+
+// TestOwnerPartition_ProvisionTakesWorkspaceLockOnRepo: an owned manager's
+// provisioning of an agent in a git project takes the host's workspace lock
+// on the repository root before the worktree is created and releases it
+// afterwards; a legacy manager takes none.
+func TestOwnerPartition_ProvisionTakesWorkspaceLockOnRepo(t *testing.T) {
+	mockRuntimeForTest(t)
+	t.Setenv("SCION_HOST_UID", "")
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("HOME", tmpDir)
+	require.NoError(t, config.InitMachine(getTestHarnesses()))
+	projectDir := filepath.Join(tmpDir, "project")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+	setupGitRepo(t, projectDir)
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(".scion/agents/\n"), 0o644))
+	require.NoError(t, config.InitProject(filepath.Join(projectDir, ".scion"), getTestHarnesses()))
+	require.NoError(t, os.Chdir(projectDir))
+	repoRoot, err := filepath.EvalSymlinks(projectDir)
+	require.NoError(t, err)
+
+	var events []string
+	lock := func(_ context.Context, paths ...string) (func(), error) {
+		for _, p := range paths {
+			real, _ := filepath.EvalSymlinks(p)
+			events = append(events, "lock:"+real)
+		}
+		worktree := filepath.Join(projectDir, ".scion", "agents", "locked-agent", "workspace", ".git")
+		if _, err := os.Stat(worktree); err == nil {
+			events = append(events, "worktree-before-lock")
+		}
+		return func() {
+			if _, err := os.Stat(worktree); err == nil {
+				events = append(events, "unlock-after-worktree")
+			} else {
+				events = append(events, "unlock")
+			}
+		}, nil
+	}
+	m := NewManager(&runtime.MockRuntime{}).(*AgentManager)
+	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a", WorkspaceLock: lock})
+	_, err = m.Provision(context.Background(), api.StartOptions{Name: "locked-agent", ProjectPath: projectDir, HarnessConfig: "claude", NoAuth: true})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"lock:" + repoRoot, "unlock-after-worktree"}, events)
+
+	events = nil
+	legacy := NewManager(&runtime.MockRuntime{}).(*AgentManager)
+	_, err = legacy.Provision(context.Background(), api.StartOptions{Name: "legacy-agent", ProjectPath: projectDir, HarnessConfig: "claude", NoAuth: true})
+	require.NoError(t, err)
+	assert.Empty(t, events, "a legacy manager takes no workspace lock")
+}

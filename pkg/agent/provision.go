@@ -649,6 +649,7 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 //   - a sibling agent's directory (both branches resolve strictly this
 //     agent's own agentDir via checkAgentDirContained/CheckAgentDirContained).
 func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	ctx = m.withWorkspaceLock(ctx)
 	hasGitClone := opts.GitClone != nil
 	if !api.ReincarnateEligible(hasGitClone, opts.Workspace, opts.EmptyPerAgentWorkspace) {
 		return nil, fmt.Errorf("%w: agent %q is neither clone-per-agent, empty-per-agent, nor has an explicit workspace; reincarnate currently supports those workspace modes only", ErrReprovisionRefused, opts.Name)
@@ -819,6 +820,7 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	ctx = m.withWorkspaceLock(ctx)
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
 	if err != nil {
@@ -1385,6 +1387,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	} else if isGit {
 		// Case 2: Git Repository (and no explicit workspace)
+		// A flat Runtime Broker instance serializes the repository's
+		// worktree and sharer changes with every instance of its host (the
+		// host's workspace lock, P2.3 S2), through the rest of provisioning.
+		if repoRoot, rootErr := util.RepoRootDir(projectDir); rootErr == nil && repoRoot != "" {
+			unlockRepo, lockErr := lockWorkspace(ctx, repoRoot)
+			if lockErr != nil {
+				return "", "", nil, fmt.Errorf("workspace lock: %w", lockErr)
+			}
+			defer unlockRepo()
+		}
 		targetBranch := branch
 		if targetBranch == "" {
 			// Use slugified agent name for valid git branch names

@@ -57,6 +57,31 @@ type OwnerScope struct {
 	// journal of one of the instance's own launches whose recording
 	// failed. Nil means no handle is owned.
 	LaunchHandleOwned func(h api.ResourceHandle) bool
+	// WorkspaceLock, when set, takes the host's workspace lock on shared
+	// paths (all at once) for provisioning steps that change them (a
+	// repository's worktrees and sharer markers); it returns the release.
+	WorkspaceLock func(ctx context.Context, paths ...string) (func(), error)
+}
+
+type workspaceLockKey struct{}
+
+// withWorkspaceLock carries an owned manager's workspace lock to the
+// provisioning code it calls.
+func (m *AgentManager) withWorkspaceLock(ctx context.Context) context.Context {
+	if m.owner == nil || m.owner.WorkspaceLock == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, workspaceLockKey{}, m.owner.WorkspaceLock)
+}
+
+// lockWorkspace takes the workspace lock carried by ctx on paths, or does
+// nothing without one (a legacy manager, the CLI).
+func lockWorkspace(ctx context.Context, paths ...string) (func(), error) {
+	fn, _ := ctx.Value(workspaceLockKey{}).(func(context.Context, ...string) (func(), error))
+	if fn == nil {
+		return func() {}, nil
+	}
+	return fn(ctx, paths...)
 }
 
 // SetOwner restricts the manager to one instance's objects. Call it once,
