@@ -212,9 +212,9 @@ Decided in this spec without a question (raise one if you disagree):
 **Behaviour (proposed):**
 1. A broker Kubernetes runtime or profile setting names a **block KSA**: a dedicated KSA, provisioned by the operator, with no GSA annotation and no grants. Scion does not create it (consistent with Q2).
 2. When the mode resolves to block, from the request or from any default, the pod runs as the block KSA with `automountServiceAccountToken: false` and a node selector requiring Workload Identity nodes. The mode is accepted, not refused.
-3. If no block KSA is configured, the hub returns 400 `identity_block_unconfigured`. The message names the profile and the setting a broker operator must add. The behaviour never falls back to passthrough or to the `default` KSA. `scion doctor` and broker startup warn when a block default exists and a Kubernetes profile has no block KSA.
+3. If no block KSA is configured, the pod runs as the namespace's default KSA with `automountServiceAccountToken: false` and the Workload Identity node selector. *Decided by product owner (2026-10-09), Q7 (b): trust and defer to the namespace admin.* What the default KSA is bound to or granted is the namespace admin's responsibility. The create succeeds, and the agent identity line shows "block (namespace default KSA)". `scion doctor` reports, as information, which Kubernetes profiles have no block KSA configured. The behaviour never falls back to passthrough.
 4. Optional hardening per profile: the broker attaches an egress NetworkPolicy restricting the pod's outbound access. It ships only after a live test on Dataplane V2 and Calico, and it needs new RBAC or an operator-installed policy selected by a scion pod label.
 5. Inspect: the agent identity line (section 8) shows "block (zero-privilege KSA)" or "block (egress restricted)", so the guarantee level is visible. The docs state the IAM preconditions an operator must keep true.
 6. The status code of the current refusal (502 → 400) is fixed separately under #3329 and is not part of this item.
 
-Q7 (product owner) is about point 3: when block resolves but no block KSA is configured, refuse, use the `default` KSA with automount off, or fall back to passthrough.
+Q7 (product owner, decided 2026-10-09: (b)) covered point 3.
