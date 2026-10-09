@@ -204,6 +204,12 @@ type ServerConfig struct {
 	// no instance competes to own the host's mounts.
 	NFSVerifyOnlyReason string
 
+	// NFSHostMounter, when set, is the host's single NFS mount owner (P2.3
+	// S3): a host-bind instance registers its requirement with it and uses
+	// its shared reconciler instead of building and running its own; a
+	// Kubernetes or Cloud Run instance keeps its own verify-only check.
+	NFSHostMounter *HostNFSMounter
+
 	// WorkspaceLocks coordinates operations on shared local paths with
 	// every other Runtime Broker server of the process (P2.3 S2). The flat
 	// host passes one service to all its instances; nil gives this server
@@ -249,6 +255,8 @@ type Server struct {
 	mux        *http.ServeMux
 	mu         sync.RWMutex
 	startTime  time.Time
+	// servicesStarted is set once startServices begins (Started).
+	servicesStarted bool
 
 	// workspaceDownload replaces syncWorkspaceFromGCS for the GCS workspace
 	// bootstrap when set (see SetWorkspaceDownloader).
@@ -373,6 +381,12 @@ type Server struct {
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
+	// nfsHostOwned is set when nfsMountReconciler is the host mounter's:
+	// the host runs its loop, this server never does.
+	nfsHostOwned bool
+	// hostSetupErr refuses an instance whose host-level setup failed (an
+	// NFS requirement incompatible with another instance's).
+	hostSetupErr error
 	// exportIDs reads (or creates) the export identity marker reported in
 	// the workspace storage descriptor.
 	exportIDs exportIDProbe
@@ -510,9 +524,32 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		}
 	}
 
+	// A host-bind instance of a host with a single NFS mount owner uses
+	// that owner's reconciler (registered requirement, shared status, one
+	// mounter); everything else builds its own below.
+	hostNFS := cfg.NFSHostMounter != nil && cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 &&
+		rt != nil && !NFSWarnOnlyRuntime(rt.Name())
+	if hostNFS {
+		key := cfg.BrokerID
+		if fi := srv.flatInstance(); fi != nil {
+			key = fi.Instance.Key
+		}
+		r, err := cfg.NFSHostMounter.Register(key, rt.Name(), cfg.NFSConfig)
+		if err != nil {
+			srv.hostSetupErr = err
+			slog.Error("Runtime Broker instance will not serve", "error", err)
+		} else if r != nil {
+			srv.nfsMountReconciler = r
+			srv.nfsHostOwned = true
+			done := make(chan struct{})
+			srv.nfsStartupReconcileDone = done
+			go func() { <-cfg.NFSHostMounter.FirstPassDone(); close(done) }()
+		}
+	}
+
 	// Initialize NFS mount reconciler when NFS storage is configured.
 	// This only constructs the reconciler; its loop is started in Start().
-	if cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 {
+	if !hostNFS && cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 {
 		nfsLog := logging.Subsystem("broker.nfs-mount")
 		checker := cfg.NFSMountChecker
 		if checker == nil {
@@ -1217,6 +1254,13 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// Started reports whether the server's services were started.
+func (s *Server) Started() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.servicesStarted
+}
+
 // StartServices starts everything Start does except the HTTP listener: hub
 // connections (control channel, heartbeat), NFS checks and the credential
 // watcher. It returns once they are started. A host that owns the listener
@@ -1239,9 +1283,13 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	if s.ownershipSetupErr != nil {
 		return s.ownershipSetupErr
 	}
+	if s.hostSetupErr != nil {
+		return s.hostSetupErr
+	}
 
 	s.mu.Lock()
 	s.startTime = time.Now()
+	s.servicesStarted = true
 	if err := s.validateBrokerAuthStartup(); err != nil {
 		s.mu.Unlock()
 		return err
@@ -1335,8 +1383,8 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 // starts at most one loop per Server. The loop stops when ctx is cancelled
 // or Shutdown is called.
 func (s *Server) startNFSReconcileLoop(ctx context.Context) {
-	if s.nfsMountReconciler == nil {
-		return
+	if s.nfsMountReconciler == nil || s.nfsHostOwned {
+		return // none, or the host mounter runs it
 	}
 	s.nfsReconcileOnce.Do(func() {
 		loopCtx, cancel := context.WithCancel(ctx)

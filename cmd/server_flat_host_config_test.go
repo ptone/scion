@@ -32,7 +32,7 @@ import (
 )
 
 // TestFlatInstanceServerConfig covers the production per-instance server
-// configuration: the NFS verify-only rule by CONFIGURED count, and the
+// configuration: the host NFS mount owner every instance shares, and the
 // per-mode Hub wiring (co-located: HubInProcess + in-memory credentials;
 // remote: validated instance credentials enable the Hub integration,
 // control channel and heartbeat).
@@ -57,16 +57,13 @@ func TestFlatInstanceServerConfig(t *testing.T) {
 		t.Run(fmt.Sprintf("%s multi=%v", tc.mode, tc.multi), func(t *testing.T) {
 			act := tc.act
 			sh := flatServerShared{cfg: &config.GlobalConfig{RuntimeBroker: config.RuntimeBrokerConfig{Host: "127.0.0.1", Port: 9800}},
-				mode: tc.mode, multiInstance: tc.multi, hubEndpoint: tc.hubEndpoint}
+				mode: tc.mode, multiInstance: tc.multi, hubEndpoint: tc.hubEndpoint, nfsMounter: runtimebroker.NewHostNFSMounter(nil, nil)}
 			c := flatInstanceServerConfig(sh, brokerhost.InstanceContext{Instance: inst, Identity: id, Activation: &act})
 
 			assert.Equal(t, "rb-a", c.BrokerID)
 			assert.Equal(t, "a", c.BrokerName)
-			if tc.multi {
-				assert.NotEmpty(t, c.NFSVerifyOnlyReason, "several configured: no instance mounts")
-			} else {
-				assert.Empty(t, c.NFSVerifyOnlyReason, "one configured: unchanged")
-			}
+			assert.Same(t, sh.nfsMounter, c.NFSHostMounter, "every instance uses the host's single NFS mount owner")
+			assert.Empty(t, c.NFSVerifyOnlyReason, "the interim verify-only rule is replaced by the host mounter")
 			if assert.NotNil(t, c.FlatInstance) {
 				assert.Same(t, id, c.FlatInstance.Identity)
 				assert.Equal(t, tc.mode == brokerhost.ModeColocated, c.FlatInstance.HubInProcess)

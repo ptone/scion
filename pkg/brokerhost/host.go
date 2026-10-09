@@ -113,6 +113,12 @@ type Candidate struct {
 	StateDir string
 }
 
+// Service is a host-level service (see Config.Services).
+type Service interface {
+	Start(ctx context.Context) error
+	Stop(ctx context.Context)
+}
+
 // Activator validates an instance's Hub binding. Activate returns a non-nil
 // Activation only for a bound result; any error leaves the instance
 // unactivated. Refused records a refusal (from any step) for reporting.
@@ -179,8 +185,13 @@ type Config struct {
 	// (InstanceContext.ConflictingKeys); those instances refuse operations
 	// on that key, nothing else.
 	OwnershipKeys func(ctx context.Context, c Candidate) ([]string, error)
-	Listener      ListenerConfig
-	Logger        *slog.Logger
+	// Services are host-level services every instance depends on (the
+	// single NFS mount owner): Run starts them, in order, before any
+	// instance's services, and every shutdown stops them, in reverse
+	// order, after every instance has shut down.
+	Services []Service
+	Listener ListenerConfig
+	Logger   *slog.Logger
 	// ShutdownTimeout bounds the whole shutdown; zero means
 	// runtimebroker.ShutdownDeadline (30s, as for a single Runtime Broker).
 	ShutdownTimeout time.Duration
@@ -227,6 +238,8 @@ type Host struct {
 	prepared  bool
 	httpSrv   *http.Server
 	addr      string
+	// servicesStop stops the host services once.
+	servicesStop sync.Once
 }
 
 // New validates cfg and returns a Host. Invalid instance configuration
@@ -673,6 +686,16 @@ func (h *Host) Run(ctx context.Context) error {
 	if !prepared {
 		return errors.New("brokerhost: Run before Prepare")
 	}
+	for i, svc := range h.cfg.Services {
+		if err := svc.Start(ctx); err != nil {
+			sctx, cancel := context.WithTimeout(context.Background(), h.shutdownTimeout())
+			defer cancel()
+			for j := i - 1; j >= 0; j-- {
+				h.cfg.Services[j].Stop(sctx)
+			}
+			return fmt.Errorf("brokerhost: starting a host service: %w", err)
+		}
+	}
 	for _, a := range h.Active() {
 		err := a.Server.StartServices(ctx)
 		if err == nil && h.MultiInstance() && a.Server.HubConnectionCount() == 0 {
@@ -777,6 +800,7 @@ func (h *Host) Shutdown(ctx context.Context) error {
 }
 
 func (h *Host) shutdownInstances(ctx context.Context) {
+	defer h.stopServices(ctx)
 	var wg sync.WaitGroup
 	for _, a := range h.Active() {
 		wg.Add(1)
@@ -795,6 +819,16 @@ func (h *Host) shutdownInstances(ctx context.Context) {
 		}
 	}
 	h.mu.Unlock()
+}
+
+// stopServices stops the host services, in reverse order, once (after the
+// instances that depend on them have shut down).
+func (h *Host) stopServices(ctx context.Context) {
+	h.servicesStop.Do(func() {
+		for i := len(h.cfg.Services) - 1; i >= 0; i-- {
+			h.cfg.Services[i].Stop(ctx)
+		}
+	})
 }
 
 // ReasonError attaches a stable reason code to a refusal (see

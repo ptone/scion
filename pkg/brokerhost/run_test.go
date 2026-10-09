@@ -16,7 +16,9 @@ package brokerhost
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -197,4 +199,90 @@ func TestHost_RunInstanceNotServingIsStopped(t *testing.T) {
 
 	_, err = stop()
 	require.NoError(t, err)
+}
+
+// orderService records, when started and stopped, what the instances were
+// doing.
+type orderService struct {
+	h                     *Host
+	mu                    sync.Mutex
+	startedWithInstanceUp bool
+	stoppedWithInstanceUp bool
+	starts, stops         int
+}
+
+func (s *orderService) Start(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.starts++
+	for _, a := range s.h.Active() {
+		if a.Server.Started() {
+			s.startedWithInstanceUp = true
+		}
+	}
+	return nil
+}
+
+func (s *orderService) Stop(context.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stops++
+	for _, st := range s.h.Status() {
+		if st.State == StateActive {
+			s.stoppedWithInstanceUp = true
+		}
+	}
+}
+
+// TestHost_ServicesStartBeforeAndStopAfterInstances: a host service (the
+// single NFS mount owner) starts before any instance's services and stops,
+// once, after every instance has shut down.
+func TestHost_ServicesStartBeforeAndStopAfterInstances(t *testing.T) {
+	f := newFixture(t)
+	cfg := authConfig(t, f, dockerInstance("docker-a", "a"), dockerInstance("docker-b", "b"))
+	cfg.Listener = ListenerConfig{Host: "127.0.0.1", Port: 0}
+	svc := &orderService{}
+	cfg.Services = []Service{svc}
+	h, err := New(cfg)
+	require.NoError(t, err)
+	svc.h = h
+	require.NoError(t, h.Prepare(context.Background()))
+
+	_, stop := runHost(t, h)
+	for _, a := range h.Active() {
+		assert.True(t, a.Server.Started(), "instances started after the service")
+	}
+	_, err = stop()
+	require.NoError(t, err)
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	assert.Equal(t, 1, svc.starts)
+	assert.Equal(t, 1, svc.stops, "stopped once")
+	assert.False(t, svc.startedWithInstanceUp, "the service starts before any instance's services")
+	assert.False(t, svc.stoppedWithInstanceUp, "the service stops after every instance shut down")
+}
+
+// failingService fails to start.
+type failingService struct{ stopped bool }
+
+func (s *failingService) Start(context.Context) error { return errors.New("cannot start") }
+func (s *failingService) Stop(context.Context)        { s.stopped = true }
+
+// TestHost_ServiceStartFailureStopsEarlierServices: a host service that
+// fails to start ends Run before any instance starts, and the services
+// already started are stopped.
+func TestHost_ServiceStartFailureStopsEarlierServices(t *testing.T) {
+	f := newFixture(t)
+	cfg := authConfig(t, f, dockerInstance("docker-a", "a"))
+	first := &orderService{}
+	cfg.Services = []Service{first, &failingService{}}
+	h, err := New(cfg)
+	require.NoError(t, err)
+	first.h = h
+	require.NoError(t, h.Prepare(context.Background()))
+	require.Error(t, h.Run(context.Background()))
+	assert.Equal(t, 1, first.stops, "the started service is stopped")
+	for _, a := range h.Active() {
+		assert.False(t, a.Server.Started(), "no instance starts")
+	}
 }

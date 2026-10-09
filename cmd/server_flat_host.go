@@ -388,6 +388,11 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		workspaceLocks:          runtimebroker.NewWorkspaceLocks(),
 		containerHub:            containerHub,
 	}
+	var hostServices []brokerhost.Service
+	if brokerNFS != nil && len(brokerNFS.Shares) > 0 {
+		shared.nfsMounter = runtimebroker.NewHostNFSMounter(nil, logging.Subsystem("broker.nfs-mount"))
+		hostServices = append(hostServices, shared.nfsMounter)
+	}
 	if p.hubSrv != nil {
 		shared.colocatedStorage = p.hubSrv.GetStorage()
 	}
@@ -414,6 +419,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		BuildServer:        buildServer,
 		OwnershipPreflight: flatOwnershipPreflight,
 		OwnershipKeys:      flatOwnershipKeys,
+		Services:           hostServices,
 		Listener: brokerhost.ListenerConfig{
 			Host:         cfg.RuntimeBroker.Host,
 			Port:         cfg.RuntimeBroker.Port,
@@ -593,6 +599,8 @@ type flatServerShared struct {
 	// workspaceLocks is the one process-wide workspace lock service every
 	// instance shares (P2.3 S2).
 	workspaceLocks *runtimebroker.WorkspaceLocks
+	// nfsMounter is the host's single NFS mount owner (nil without NFS).
+	nfsMounter *runtimebroker.HostNFSMounter
 	// containerHub resolves an instance runtime's container Hub settings
 	// (nil: none).
 	containerHub func(rtName string) containerHubEndpointResult
@@ -661,11 +669,9 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 	if ic.Activation.InMemoryCredentials != nil && sh.colocatedStorage != nil {
 		rhCfg.ColocatedStorage = sh.colocatedStorage
 	}
-	if sh.multiInstance {
-		// Configured cardinality, not the active count: with more than
-		// one instance configured no instance owns the host's mounts.
-		rhCfg.NFSVerifyOnlyReason = "several Runtime Broker instances share this host, so no instance mounts it"
-	}
+	// The host's single NFS mount owner (P2.3 S3): host-bind instances
+	// register with it instead of mounting themselves.
+	rhCfg.NFSHostMounter = sh.nfsMounter
 	return rhCfg
 }
 
