@@ -379,24 +379,9 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 		Status: status,
 		// Design §3.4 Amendment A2.2(b): report capabilities on every heartbeat so the hub's
 		// `scion reincarnate` gate is never stuck on a stale join-time
-		// snapshot for an already-registered broker. Sync and Reprovision
-		// are a fixed property of this broker binary; Attach reflects the
-		// default runtime's own optional capability
-		// (scionrt.HasAttachSupport), same as handleInfo's Capabilities.Attach.
-		Capabilities: &hubclient.BrokerCapabilities{
-			WebPTY:                 false,
-			Sync:                   true,
-			Attach:                 scionrt.HasAttachSupport(defaultRuntime),
-			Reprovision:            true,
-			AsyncLaunch:            true,
-			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(defaultRuntime),
-			// This broker honours localOnly deletes and confirms a moved
-			// agent's NFS workspace before provisioning it (agent move).
-			AgentMove: true,
-			// This broker's reprovision reuses an empty-per-agent
-			// workspace in place (miller79/scion#167).
-			ReprovisionEmptyPerAgent: true,
-		},
+		// snapshot for an already-registered broker. The same static set is
+		// sent at registration (StaticCapabilities).
+		Capabilities: StaticCapabilities(defaultRuntime),
 	}
 	if s.workspaceStorage != nil {
 		heartbeat.WorkspaceStorage = s.workspaceStorage()
