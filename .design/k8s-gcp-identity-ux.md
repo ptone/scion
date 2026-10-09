@@ -1,7 +1,7 @@
 # Kubernetes GCP identity UX: GSA/KSA lifecycle (spec)
 
 Issue: ptone/scion#4004. Mechanics: ptone/scion#3329 (phases 2-5). Related: #3935, #3947, #4005, #3942, #2328, #1801, #3430, epic #1956.
-Status: draft for product-owner questions (section 9). Q4 and Q6 are decided by the lead as design-level choices; Q1, Q2, Q3 and Q5 are open with the product owner. Baseline: `main` at 2849295. Based on code reading; nothing here was reproduced live.
+Status: draft for product-owner questions (section 9). Decisions recorded 2026-10-09: the product owner accepted every recommendation (Q1a, Q2a, Q3b, Q4a, Q5a, Q6a plus list column) and the decided-without-question items. Baseline: `main` at 2849295. Based on code reading; nothing here was reproduced live.
 
 ## 1. Problem in one paragraph
 
@@ -132,21 +132,21 @@ The broker keeps returning detailed text for its operator log. The hub recognise
 
 ## 9. Product-owner open questions
 
-Q1. **Account-string visibility.** Who may see a GSA email in errors and views?
+Q1. **Account-string visibility.** *Decided by product owner (2026-10-09): (a).* Who may see a GSA email in errors and views?
 - (a) any project member, agents included;
 - (b) project users only, with agents seeing display names and ids;
 - (c) the account's managers only.
 
 Context: agents can already see their own email in the pod environment and in the agent record. The account-list endpoints currently have no authorization check. **Recommendation: (a).** Treat the email as an identifier, not a credential. Fix the list endpoints so only project members can read them, and print the email in errors to anyone with project read.
 
-Q2. **Who owns the GSA → KSA mapping?**
+Q2. **Who owns the GSA → KSA mapping?** *Decided by product owner (2026-10-09): (a) now, (c) follow-up.*
 - (a) broker operator only, visible read-only to project members;
 - (b) project admins may write mappings within broker-allowed namespaces;
 - (c) (a) plus a hub-admin CLI or web editor over the existing server-config overlay.
 
 **Recommendation: (a) now, (c) as a follow-up.** Make (b) a separate design if it is ever needed.
 
-Q3. **Deleting a referenced account.**
+Q3. **Deleting a referenced account.** *Decided by product owner (2026-10-09): (b).*
 - (a) block while defaults or agents reference it;
 - (b) block on defaults, with `--force` clearing them, and leave agents to fail at next start with the existing clear message;
 - (c) cascade silently.
@@ -159,7 +159,7 @@ Q4. **Same email registered at project and hub scope.** *Decided by lead (design
 
 **Recommendation: (a).** It matches narrowest-scope-wins elsewhere. Duplicate display names are always an ambiguity error.
 
-Q5. **Hub-scope bring-your-own registration.** It is enabled in the hub but documented as disabled.
+Q5. **Hub-scope bring-your-own registration.** *Decided by product owner (2026-10-09): (a).* It is enabled in the hub but documented as disabled.
 - (a) intended: fix the docs;
 - (b) not intended: gate it in the hub.
 
