@@ -576,7 +576,7 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 // A2). A List error is not treated as "not running" by the caller — see the
 // call site's comment.
 func (m *AgentManager) containerIsRunning(ctx context.Context, name string) (bool, error) {
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": name})
+	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": name})
 	if err != nil {
 		return false, err
 	}
@@ -2572,7 +2572,7 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 	if opts.Env != nil {
 		projectID = opts.Env["SCION_PROJECT_ID"]
 	}
-	entries, err := m.Runtime.List(ctx, map[string]string{"scion.name": api.Slugify(opts.Name)})
+	entries, err := m.listRuntime(ctx, map[string]string{"scion.name": api.Slugify(opts.Name)})
 	if err != nil {
 		return true
 	}

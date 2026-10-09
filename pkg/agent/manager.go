@@ -161,6 +161,10 @@ type AgentManager struct {
 	// tmuxVersionCacheKey's doc comment for why the key is not ContainerID
 	// alone.
 	tmuxVersionOK sync.Map
+
+	// owner, when set, restricts the manager to one flat Runtime Broker
+	// instance's objects (SetOwner, owner.go).
+	owner *OwnerScope
 }
 
 // defaultBufferDelay is the debounce window for message delivery.
@@ -363,7 +367,7 @@ func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID str
 	// not support lookup-by-name (e.g. Apple's `container` CLI) receive
 	// the actual container ID.  This mirrors the resolution logic in Delete().
 	slug := api.Slugify(agentID)
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if runID != "" {
 		// A run-scoped stop never falls back to the bare name: the name may
 		// now belong to an agent recreated under a different run.
@@ -397,7 +401,14 @@ func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID str
 		}
 	}
 	// Fallback: agentID may already be a container ID, or the list
-	// failed — pass it through directly.
+	// failed — pass it through directly. An owned manager never passes an
+	// unresolved name or ID to the runtime.
+	if m.owner != nil {
+		if err != nil {
+			return fmt.Errorf("failed to list agents for stop of %q: %w", agentID, err)
+		}
+		return fmt.Errorf("stop %q: %w", agentID, ErrNotOwned)
+	}
 	return m.Runtime.Stop(ctx, runtime.RunRef{ID: agentID})
 }
 
@@ -434,7 +445,7 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	util.Debugf("delete: listing containers in mgr.Delete for %s", agentID)
 	listStart := time.Now()
 	slug := api.Slugify(agentID)
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	agents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	util.Debugf("delete: mgr.Delete container list completed in %v", time.Since(listStart))
 	var target runtime.RunRef
 	if err == nil {
@@ -569,7 +580,7 @@ func (m *AgentManager) checkDeliveryTarget(ctx context.Context, agentID, project
 	if projectID != "" {
 		filter["scion.project_id"] = projectID
 	}
-	agents, err := m.Runtime.List(ctx, filter)
+	agents, err := m.listRuntime(ctx, filter)
 	if err != nil {
 		slog.Warn("message target lookup failed; using buffered delivery",
 			"agent", agentID, "project_id", projectID, "error", err)

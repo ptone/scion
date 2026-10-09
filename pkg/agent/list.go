@@ -58,7 +58,7 @@ import (
 // The scan runs only when filter carries scion.project_path, or when filter
 // is empty or only {scion.agent: true} (the current and global projects).
 func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
-	agents, err := m.Runtime.List(ctx, filter)
+	agents, err := m.listRuntime(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -275,6 +275,11 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				}
 
 				if !scionruntime.LabelsMatchFilter(createdAgentLabels(e.Name(), projectName, gp, info, filter, projectIDLabel), filter) {
+					continue
+				}
+				// An owned manager sees only the file-only agents its
+				// instance's durable ownership record claims.
+				if m.owner != nil && !m.ownsFileAgent(projectIDLabel(), e.Name()) {
 					continue
 				}
 
