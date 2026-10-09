@@ -228,6 +228,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// before any agent file or runtime object exists (ptone/scion#3274).
 	// The run gets an ID here when the request carried none, so the same ID
 	// labels every object the start creates.
+	var ownedProjectID, ownedAgentID string
 	if s.ownership != nil {
 		if in.RunID == "" {
 			in.RunID = uuid.NewString()
@@ -244,6 +245,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			span.SetStatus(codes.Error, err.Error())
 			return nil, &startContextError{Status: http.StatusConflict, Message: "The agent's ownership cannot be recorded by this Runtime Broker instance", OriginalErr: err}
 		}
+		ownedProjectID, ownedAgentID = in.ProjectID, agentID
 	}
 
 	// --- Hub-managed project path resolution ---
@@ -1206,6 +1208,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// re-run this same check after their own, later resolution.
 	downgradeUnverifiedHubDefaultPassthrough(env, envCls, gcpMetadataMode, requireLocalRuntime, dispatchRuntimeType)
 
+	if s.ownership != nil {
+		// Mirror every runtime object the start creates into the record;
+		// a mirroring failure stops further creates (Checkpoint) and is
+		// checked again when Start returns (completeOwnedStart).
+		s.installOwnedStart(&opts, ownedProjectID, ownedAgentID)
+	}
 	sc := &startContext{
 		Opts:                        opts,
 		TemplateSlug:                templateSlug,

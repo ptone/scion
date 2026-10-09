@@ -313,6 +313,9 @@ type Server struct {
 	// ownership is a flat instance's durable ownership record store
 	// (ownership.go); nil for a legacy Runtime Broker.
 	ownership *OwnershipStore
+	// ownedStarts maps a run ID to its in-flight ownership mirror
+	// (installOwnedStart / completeOwnedStart).
+	ownedStarts sync.Map
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).

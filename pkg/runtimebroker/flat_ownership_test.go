@@ -16,7 +16,12 @@ package runtimebroker
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Ownership-negative coverage for a flat instance (ptone/scion#3274, P2.3
@@ -125,5 +130,97 @@ func TestFlatOwnership_CreateEstablishesOwnership(t *testing.T) {
 	}
 	if rec.AgentSlug != "flat-agent" || len(rec.Runs) != 1 {
 		t.Fatalf("record = %+v", rec)
+	}
+}
+
+func launchHandles() []api.ResourceHandle {
+	return []api.ResourceHandle{
+		{Kind: api.ResourceKindSecret, Name: "s-1", UID: "uid-secret"},
+		{Kind: api.ResourceKindContainer, Name: "c-1", UID: "uid-container"},
+	}
+}
+
+func flatCreateAccepted(f *flatInstanceFixture, name string) *httptest.ResponseRecorder {
+	return serveFlat(f.srv, http.MethodPost, "/api/v1/agents", flatCreateBody("req-"+name, name,
+		map[string]interface{}{"expectedRuntimeTargetId": f.identity.RuntimeTarget.ID, "config": map[string]interface{}{"template": "claude"}}))
+}
+
+// TestFlatOwnership_SyncStartMirrorsEveryResource: a synchronous create
+// records every created object, then marks the run created.
+func TestFlatOwnership_SyncStartMirrorsEveryResource(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.mgr.createHandles = launchHandles()
+	w := flatCreateAccepted(f, "mirror-agent")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	rec, ok, err := f.srv.ownership.Get(flatTestProjectID, "agent-id-mirror-agent")
+	if err != nil || !ok || len(rec.Runs) != 1 {
+		t.Fatalf("record = %+v, %v", rec, err)
+	}
+	run := rec.Runs[0]
+	if run.State != OwnershipStateCreated || len(run.Resources) != 2 || !rec.OwnsUID("uid-secret") || !rec.OwnsUID("uid-container") {
+		t.Fatalf("run = %+v, want created with both objects", run)
+	}
+}
+
+// TestFlatOwnership_FinalResourcePersistFailureUndoesStart: mirroring the
+// LAST created object fails; Start itself succeeded, but the create is
+// refused and exactly the journaled objects are cleaned up.
+func TestFlatOwnership_FinalResourcePersistFailureUndoesStart(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.mgr.createHandles = launchHandles()
+	recordDir := filepath.Join(f.srv.stateDir, "ownership", flatTestProjectID)
+	f.mgr.beforeCreate = func(i int) {
+		if i == 1 { // the record becomes unwritable before the last object
+			_ = os.Chmod(recordDir, 0o500)
+		}
+	}
+	t.Cleanup(func() { _ = os.Chmod(recordDir, 0o700) })
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	w := flatCreateAccepted(f, "final-agent")
+	if w.Code < 500 {
+		t.Fatalf("status = %d, want a server error: %s", w.Code, w.Body.String())
+	}
+	f.mgr.mu.Lock()
+	calls, handles := f.mgr.cleanupLaunchCalls, f.mgr.lastCleanupLaunchHandles
+	f.mgr.mu.Unlock()
+	if calls != 1 || len(handles) != 2 || handles[0].UID != "uid-secret" || handles[1].UID != "uid-container" {
+		t.Fatalf("cleanup calls=%d handles=%+v, want one cleanup of exactly both journaled objects", calls, handles)
+	}
+	_ = os.Chmod(recordDir, 0o700)
+	rec, ok, err := f.srv.ownership.Get(flatTestProjectID, "agent-id-final-agent")
+	if err != nil || !ok || rec.Runs[0].State == OwnershipStateCreated {
+		t.Fatalf("the run must not be marked created: %+v %v", rec, err)
+	}
+}
+
+// TestFlatOwnership_PersistFailureStopsFurtherCreates: once mirroring an
+// object fails, the next resource-creating call is refused.
+func TestFlatOwnership_PersistFailureStopsFurtherCreates(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.mgr.createHandles = append(launchHandles(), api.ResourceHandle{Kind: api.ResourceKindContainer, Name: "c-2", UID: "uid-third"})
+	recordDir := filepath.Join(f.srv.stateDir, "ownership", flatTestProjectID)
+	var created []int
+	f.mgr.beforeCreate = func(i int) {
+		created = append(created, i)
+		if i == 0 {
+			_ = os.Chmod(recordDir, 0o500) // the first object's mirror fails
+		}
+	}
+	t.Cleanup(func() { _ = os.Chmod(recordDir, 0o700) })
+	w := flatCreateAccepted(f, "stop-agent")
+	if w.Code < 400 {
+		t.Fatalf("status = %d, want a refusal: %s", w.Code, w.Body.String())
+	}
+	// beforeCreate ran for the first and the second create attempt; the
+	// checkpoint before the second refused it, so no third.
+	if len(created) != 2 {
+		t.Fatalf("create attempts = %v, want the second refused at its checkpoint", created)
 	}
 }

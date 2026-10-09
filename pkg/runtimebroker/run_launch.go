@@ -286,7 +286,9 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	// Runtime hooks (design §3.8.3, §3.8.4): a Hub-answered checkpoint
 	// immediately before each resource-creating call, and each created
 	// resource recorded for CleanupLaunch.
-	lc.opts.Checkpoint = sender.Checkpoint
+	// A flat instance's ownership mirror checkpoint (installed by
+	// buildStartContext) runs first.
+	lc.opts.Checkpoint = chainCheckpoint(lc.opts.Checkpoint, sender.Checkpoint)
 	lc.opts.OnResourceCreated = rec.AddHandle
 	if sender.IsAborted() {
 		s.handleKeepaliveAbort(sender, rec, lc)
@@ -304,6 +306,8 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	startCh := make(chan startResult, 1)
 	go func() {
 		info, err := lc.mgr.Start(ctx, lc.opts)
+		// The async failure path cleans up the launch's journaled handles.
+		err = s.completeOwnedStart(ctx, lc.mgr, lc.opts.RunID, err, false)
 		startCh <- startResult{info, err}
 	}()
 

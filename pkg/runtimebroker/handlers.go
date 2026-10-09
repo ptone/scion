@@ -1554,6 +1554,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Full start: provision and launch the container
 	startOpStart := time.Now()
 	agentInfo, err := sc.Manager.Start(ctx, opts)
+	err = s.completeOwnedStart(ctx, sc.Manager, opts.RunID, err, true)
 	if err != nil {
 		// An unresolvable named resource (harness-config or template) is a
 		// naming problem the caller can act on, not an infrastructure
@@ -2916,6 +2917,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	ctx = s.withHarnessConfigPolicy(ctx)
 	defer s.reportRuntimePanic(ctx, w, mgr, id, projectID, opts.RunID, "start agent")
 	agentInfo, err := mgr.Start(ctx, opts)
+	err = s.completeOwnedStart(ctx, mgr, opts.RunID, err, true)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if d, ok := harnessPolicyRefusalFrom(err); ok {
@@ -3128,7 +3130,9 @@ func (s *Server) projectScopedTargetFrom(ctx context.Context, id, projectID stri
 	if err != nil && !errors.Is(err, ErrAgentNotFound) {
 		return "", nil, err
 	}
-	if projectID != "" {
+	// A flat instance never passes an unresolved name to its runtime: an
+	// agent it does not own (or cannot find) is not found.
+	if projectID != "" || s.isFlat() {
 		return "", nil, nil
 	}
 	return id, s.resolveManagerForAgent(ctx, id, projectID), nil
@@ -3843,6 +3847,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// the stop refuses the cases visible without Start's resolution.
 	ctx = s.withHarnessConfigPolicy(ctx)
 	agentInfo, err := mgr.Start(ctx, opts)
+	err = s.completeOwnedStart(ctx, mgr, opts.RunID, err, true)
 	if err != nil {
 		if d, ok := harnessPolicyRefusalFrom(err); ok {
 			trace.SpanFromContext(ctx).SetStatus(codes.Error, d.detail())
@@ -4613,6 +4618,12 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 	rt := s.resolveRuntimeForAgent(ctx, id, projectID)
 	containerID := found.ContainerID
 	if containerID == "" {
+		if s.isFlat() {
+			// A flat instance never passes an unresolved name to its
+			// runtime; an owned agent without a container has no logs yet.
+			NotFound(w, "Agent container")
+			return
+		}
 		containerID = id
 	}
 	logs, err := rt.GetLogs(ctx, containerID)

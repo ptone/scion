@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
@@ -639,4 +641,117 @@ func (s *Server) beginOwnedRun(projectID, agentID, slug, runID string, create bo
 		}
 	}
 	return s.ownership.BeginRun(projectID, agentID, slug, runID)
+}
+
+// ownedStart is one flat start's ownership journal mirror: it records every
+// created runtime object (the runtime's ObserveResourceCreated) into the
+// durable record and latches the first failure. The in-memory handles are
+// the trusted current launch journal for cleanup when mirroring failed.
+type ownedStart struct {
+	store                     *OwnershipStore
+	projectID, agentID, runID string
+
+	mu      sync.Mutex
+	err     error
+	handles []api.ResourceHandle
+}
+
+func (o *ownedStart) observe(h api.ResourceHandle) {
+	o.mu.Lock()
+	o.handles = append(o.handles, h)
+	failed := o.err != nil
+	o.mu.Unlock()
+	if failed {
+		return
+	}
+	if err := o.store.AddResource(o.projectID, o.agentID, o.runID, h); err != nil {
+		o.mu.Lock()
+		if o.err == nil {
+			o.err = fmt.Errorf("recording runtime object %s (%s) of run %s: %w", h.Name, h.UID, o.runID, err)
+		}
+		o.mu.Unlock()
+	}
+}
+
+func (o *ownedStart) latched() error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.err
+}
+
+func (o *ownedStart) snapshot() []api.ResourceHandle {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]api.ResourceHandle(nil), o.handles...)
+}
+
+// checkpoint refuses the next resource-creating call once mirroring failed.
+func (o *ownedStart) checkpoint(context.Context, string) error {
+	if err := o.latched(); err != nil {
+		return fmt.Errorf("flat Runtime Broker: not creating more runtime objects: %w", err)
+	}
+	return nil
+}
+
+// chainCheckpoint runs first, then second (either may be nil).
+func chainCheckpoint(first, second func(context.Context, string) error) func(context.Context, string) error {
+	switch {
+	case first == nil:
+		return second
+	case second == nil:
+		return first
+	}
+	return func(ctx context.Context, step string) error {
+		if err := first(ctx, step); err != nil {
+			return err
+		}
+		return second(ctx, step)
+	}
+}
+
+// installOwnedStart wires a flat start's ownership mirror into opts: the
+// observer and a checkpoint that refuses further creates after a mirroring
+// failure (chained before any checkpoint already set).
+func (s *Server) installOwnedStart(opts *api.StartOptions, projectID, agentID string) {
+	if s.ownership == nil || opts.RunID == "" {
+		return
+	}
+	o := &ownedStart{store: s.ownership, projectID: projectID, agentID: agentID, runID: opts.RunID}
+	s.ownedStarts.Store(opts.RunID, o)
+	opts.ObserveResourceCreated = o.observe
+	opts.Checkpoint = chainCheckpoint(o.checkpoint, opts.Checkpoint)
+}
+
+// completeOwnedStart finishes a flat start's ownership mirror after
+// Manager.Start returned. A failed start is returned as is (its run stays
+// provisioning; the existing failure cleanup applies). A successful start
+// whose mirroring failed (including on its last object) is undone: when
+// cleanup is set, exactly the journaled objects are removed with their UID
+// preconditions (the synchronous path); the async path's own failure
+// cleanup removes them otherwise. Only then is the run marked created.
+func (s *Server) completeOwnedStart(ctx context.Context, mgr agent.Manager, runID string, startErr error, cleanup bool) error {
+	v, ok := s.ownedStarts.LoadAndDelete(runID)
+	if !ok {
+		return startErr
+	}
+	o := v.(*ownedStart)
+	if startErr != nil {
+		return startErr
+	}
+	err := o.latched()
+	if err == nil {
+		err = o.store.SetRunState(o.projectID, o.agentID, o.runID, OwnershipStateCreated)
+	}
+	if err == nil {
+		return nil
+	}
+	if cleanup && mgr != nil {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		if cerr := mgr.CleanupLaunch(cctx, o.snapshot()); cerr != nil {
+			s.agentLifecycleLog.Error("Undoing a start whose ownership could not be recorded failed; its objects stay labelled for reconciliation",
+				"run_id", runID, "error", cerr)
+		}
+	}
+	return fmt.Errorf("flat Runtime Broker: the agent's runtime objects could not be recorded, so the start was undone: %w", err)
 }
