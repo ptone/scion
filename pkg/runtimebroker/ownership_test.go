@@ -197,3 +197,46 @@ func TestOwnershipStore_RepairSlugIndex(t *testing.T) {
 	holder, _ = s.SlugHolder("proj-1", "worker")
 	assert.Equal(t, "agent-x", holder, "left as found for the operator")
 }
+
+func labelledObject(labels map[string]string) api.AgentInfo {
+	l := map[string]string{api.LabelRuntimeBrokerID: "broker-a", "scion.project_id": "proj-1", "agent_id": "agent-1", "scion.name": "worker", api.LabelRunID: "run-1"}
+	for k, v := range labels {
+		if v == "" {
+			delete(l, k)
+		} else {
+			l[k] = v
+		}
+	}
+	return api.AgentInfo{Name: "worker", ContainerID: "cid-1", Labels: l}
+}
+
+// TestOwnershipStore_Reconstruct: a labelled object with complete metadata
+// re-creates its record; incomplete or contradictory metadata is
+// unresolved; a terminal run is never revived.
+func TestOwnershipStore_Reconstruct(t *testing.T) {
+	s := NewOwnershipStore(t.TempDir(), "broker-a")
+	require.NoError(t, s.Reconstruct(labelledObject(nil)))
+	rec, ok, err := s.Get("proj-1", "agent-1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, OwnershipStateCreated, rec.Run("run-1").State)
+	assert.True(t, rec.OwnsUID("cid-1"))
+	require.NoError(t, s.Reconstruct(labelledObject(nil)), "idempotent")
+
+	for name, labels := range map[string]map[string]string{
+		"owner label alone": {"scion.project_id": "", "agent_id": "", "scion.name": "", api.LabelRunID: ""},
+		"no run":            {api.LabelRunID: ""},
+		"no agent ID":       {"agent_id": ""},
+		"another owner":     {api.LabelRuntimeBrokerID: "broker-b"},
+		"slug contradicts":  {"scion.name": "other"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Error(t, s.Reconstruct(labelledObject(labels)))
+		})
+	}
+
+	require.NoError(t, s.SetRunState("proj-1", "agent-1", "run-1", OwnershipStateDeleted))
+	o := labelledObject(nil)
+	o.ContainerID = "cid-new"
+	assert.Error(t, s.Reconstruct(o), "a terminal run is never revived")
+}

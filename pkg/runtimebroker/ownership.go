@@ -755,3 +755,59 @@ func (s *Server) completeOwnedStart(ctx context.Context, mgr agent.Manager, runI
 	}
 	return fmt.Errorf("flat Runtime Broker: the agent's runtime objects could not be recorded, so the start was undone: %w", err)
 }
+
+// Reconstruct ensures the record of a runtime object that carries this
+// instance's owner label: an object whose labels give the complete project
+// ID, agent ID, slug and run ID, and which has an object identity (its
+// container or pod ID), is recorded (record and run created as needed, the
+// object added) without reviving a terminal run. Missing metadata, or a
+// record that contradicts the labels, is an error (unresolved).
+func (s *OwnershipStore) Reconstruct(o api.AgentInfo) error {
+	if o.Labels[api.LabelRuntimeBrokerID] != s.brokerID {
+		return fmt.Errorf("object %s is not labelled for this instance", o.Name)
+	}
+	projectID := o.Labels["scion.project_id"]
+	agentID := o.Labels["agent_id"]
+	slug := o.Labels["scion.name"]
+	runID := o.Labels[api.LabelRunID]
+	uid := o.ContainerID
+	if uid == "" {
+		uid = o.ID
+	}
+	if projectID == "" || agentID == "" || slug == "" || runID == "" || uid == "" {
+		return fmt.Errorf("labels are incomplete (project, agent, name, run and object ID are all required)")
+	}
+	rec, ok, err := s.Get(projectID, agentID)
+	if err != nil {
+		return err
+	}
+	if ok {
+		if rec.AgentSlug != slug {
+			return fmt.Errorf("record names slug %q, the object %q", rec.AgentSlug, slug)
+		}
+		if run := rec.Run(runID); run != nil {
+			if runStateOrder[run.State] >= runStateOrder[OwnershipStateDeleting] {
+				return fmt.Errorf("run %s is %s and cannot be revived", runID, run.State)
+			}
+			if rec.OwnsUID(uid) {
+				return nil
+			}
+			return s.AddResource(projectID, agentID, runID, api.ResourceHandle{Kind: reconstructedKind(o), Name: o.Name, UID: uid})
+		}
+	}
+	if err := s.BeginRun(projectID, agentID, slug, runID); err != nil {
+		return err
+	}
+	if err := s.AddResource(projectID, agentID, runID, api.ResourceHandle{Kind: reconstructedKind(o), Name: o.Name, UID: uid}); err != nil {
+		return err
+	}
+	return s.SetRunState(projectID, agentID, runID, OwnershipStateCreated)
+}
+
+// reconstructedKind is the resource kind of a listed agent object.
+func reconstructedKind(o api.AgentInfo) string {
+	if o.Runtime == "kubernetes" {
+		return api.ResourceKindPod
+	}
+	return api.ResourceKindContainer
+}

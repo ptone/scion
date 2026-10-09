@@ -49,7 +49,8 @@ func TestFlatOwnershipPreflight(t *testing.T) {
 
 	labelled := func(context.Context, map[string]string) ([]api.AgentInfo, error) {
 		return []api.AgentInfo{
-			{Name: "mine", Labels: map[string]string{api.LabelRuntimeBrokerID: "rb-a"}},
+			{Name: "mine", ContainerID: "cid-m", Labels: map[string]string{api.LabelRuntimeBrokerID: "rb-a",
+				"scion.project_id": "proj-1", "agent_id": "agent-m", "scion.name": "mine", api.LabelRunID: "run-m"}},
 			{Name: "theirs", Labels: map[string]string{api.LabelRuntimeBrokerID: "rb-b"}},
 		}, nil
 	}
@@ -57,7 +58,6 @@ func TestFlatOwnershipPreflight(t *testing.T) {
 
 	unlabeled := func(context.Context, map[string]string) ([]api.AgentInfo, error) {
 		return []api.AgentInfo{
-			{Name: "mine", Labels: map[string]string{api.LabelRuntimeBrokerID: "rb-a"}},
 			{Name: "old-agent", Labels: map[string]string{"scion.project_id": "proj-1"}},
 		}, nil
 	}
@@ -103,4 +103,30 @@ func TestFlatOwnershipPreflight_RefusesBeforeActivation(t *testing.T) {
 	assert.Equal(t, "ownership_unresolved", st.Reason)
 	assert.Contains(t, st.Error, "legacy-agent")
 	assert.Empty(t, act.activated, "no Hub activation for an instance with unresolved ownership")
+}
+
+// TestFlatOwnershipPreflight_ReconstructsOwnObjects: this instance's
+// labelled objects with complete metadata re-create their records; an own
+// object with incomplete labels is unresolved.
+func TestFlatOwnershipPreflight_ReconstructsOwnObjects(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ctx := context.Background()
+	complete := api.AgentInfo{Name: "worker", ContainerID: "cid-1", Labels: map[string]string{
+		api.LabelRuntimeBrokerID: "rb-a", "scion.project_id": "proj-1", "agent_id": "agent-1", "scion.name": "worker", api.LabelRunID: "run-1"}}
+	require.NoError(t, flatOwnershipPreflight(ctx, preflightCandidate(func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{complete}, nil
+	})))
+	dir, err := runtimebroker.DefaultStateDir("rb-a")
+	require.NoError(t, err)
+	rec, ok, err := runtimebroker.NewOwnershipStore(dir, "rb-a").Get("proj-1", "agent-1")
+	require.NoError(t, err)
+	require.True(t, ok, "record reconstructed from complete labels")
+	assert.True(t, rec.OwnsUID("cid-1"))
+
+	incomplete := api.AgentInfo{Name: "half", ContainerID: "cid-2", Labels: map[string]string{api.LabelRuntimeBrokerID: "rb-a"}}
+	err = flatOwnershipPreflight(ctx, preflightCandidate(func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{incomplete}, nil
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "half")
 }

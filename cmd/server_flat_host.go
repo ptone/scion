@@ -480,10 +480,26 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 	if err != nil {
 		return fmt.Errorf("cannot read the execution scope to establish ownership: %w", err)
 	}
+	dir, err := runtimebroker.DefaultStateDir(c.Identity.RuntimeBrokerID)
+	if err != nil {
+		return err
+	}
+	records := runtimebroker.NewOwnershipStore(dir, c.Identity.RuntimeBrokerID)
 	var unresolved []string
 	for _, o := range objects {
-		if o.Labels[api.LabelRuntimeBrokerID] != "" {
+		switch owner := o.Labels[api.LabelRuntimeBrokerID]; owner {
+		case "":
+			// below: unattributable
+		case c.Identity.RuntimeBrokerID:
+			// This instance's object: make sure its record exists
+			// (reconstruction needs the complete project, agent, run and
+			// object identity; anything less is unresolved).
+			if err := records.Reconstruct(o); err != nil {
+				unresolved = append(unresolved, fmt.Sprintf("%s (%v)", o.Name, err))
+			}
 			continue
+		default:
+			continue // another instance's object
 		}
 		name := o.Name
 		if p := o.Labels["scion.project_id"]; p != "" {
@@ -493,15 +509,11 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 	}
 	if len(unresolved) > 0 {
 		sort.Strings(unresolved)
-		return fmt.Errorf("%d agent object(s) on this execution scope have no Runtime Broker owner and cannot be attributed: %s; "+
+		return fmt.Errorf("%d agent object(s) on this execution scope have unresolved ownership (no owner label, or labels too incomplete to reconstruct the record): %s; "+
 			"drain or recreate them through the Runtime Broker that created them before activating this instance",
 			len(unresolved), strings.Join(unresolved, ", "))
 	}
-	dir, err := runtimebroker.DefaultStateDir(c.Identity.RuntimeBrokerID)
-	if err != nil {
-		return err
-	}
-	problems, err := runtimebroker.NewOwnershipStore(dir, c.Identity.RuntimeBrokerID).RepairSlugIndex()
+	problems, err := records.RepairSlugIndex()
 	if err != nil {
 		return fmt.Errorf("ownership records cannot be read: %w", err)
 	}
