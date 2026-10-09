@@ -1381,6 +1381,33 @@ func (s *Server) Handler() http.Handler {
 	return s.applyMiddleware(s.mux)
 }
 
+// PrefixedHandler serves this server's routes under prefix (for example
+// "/instances/<runtimeBrokerID>"), for a host that runs several Runtime
+// Broker instances behind one listener (ptone/scion#3273). The broker
+// authentication verifies the request signature over the full, prefixed
+// path the Hub signed; only then is the prefix removed and the request
+// handled exactly as Handler would handle the unprefixed path. The health
+// endpoints under the prefix stay unauthenticated. A path outside the prefix
+// is 404.
+func (s *Server) PrefixedHandler(prefix string) http.Handler {
+	prefix = strings.TrimSuffix(prefix, "/")
+	inner := http.StripPrefix(prefix, s.innerMiddleware(s.mux))
+	authenticated := s.outerMiddleware(inner)
+	health := otelhttp.NewHandler(inner, "broker")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rest, ok := strings.CutPrefix(r.URL.Path, prefix)
+		if !ok || (rest != "" && !strings.HasPrefix(rest, "/")) {
+			http.NotFound(w, r)
+			return
+		}
+		if rest == "/healthz" || rest == "/readyz" {
+			health.ServeHTTP(w, r)
+			return
+		}
+		authenticated.ServeHTTP(w, r)
+	})
+}
+
 // getAuxiliaryManagers returns the managers for all registered auxiliary runtimes.
 func (s *Server) getAuxiliaryManagers() []agent.Manager {
 	entries := s.sortedAuxiliaryRuntimes()
@@ -2688,6 +2715,12 @@ func (s *Server) registerRoutes() {
 
 // applyMiddleware wraps the handler with middleware.
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
+	return s.outerMiddleware(s.innerMiddleware(h))
+}
+
+// innerMiddleware is the middleware that runs after authentication:
+// profile resolution, recovery, request logging and CORS.
+func (s *Server) innerMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
 	h = s.profileResolutionMiddleware(h)
 	h = s.recoveryMiddleware(h)
@@ -2699,6 +2732,12 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	if s.config.CORSEnabled {
 		h = s.corsMiddleware(h)
 	}
+	return h
+}
+
+// outerMiddleware is broker authentication (when configured) inside OTel
+// tracing.
+func (s *Server) outerMiddleware(h http.Handler) http.Handler {
 	// Apply broker auth middleware if configured
 	if s.brokerAuthMiddleware != nil {
 		h = s.brokerAuthMiddleware.Middleware(h)
