@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -31,6 +32,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
@@ -130,6 +132,10 @@ func TestRegisterInstance_UserCredentialRequired(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, got)
 	assert.Contains(t, err.Error(), "flat Runtime Broker registration failed")
+	var apiErr *apiclient.APIError
+	if assert.True(t, errors.As(err, &apiErr), "the Hub's answer: %v", err) {
+		assert.Equal(t, 401, apiErr.StatusCode, "the registration endpoint requires a user credential")
+	}
 	_, statErr := os.Stat(otherCredDir)
 	assert.True(t, os.IsNotExist(statErr), "nothing saved for a refused registration")
 
