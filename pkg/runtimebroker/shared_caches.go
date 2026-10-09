@@ -96,7 +96,10 @@ func openGitHubResolutionCache() *agent.GitHubResolutionCache {
 //     about to read. Partitioned, eviction in an object only races the
 //     same instance's own starts, as for a single Runtime Broker. The cost
 //     is that instances do not share downloads and each partition has the
-//     full size bound.
+//     full size bound (twice TemplateCacheMaxSize plus 500 MB for skills).
+//     A partition is not reclaimed when its instance is removed from the
+//     configuration or recreated with a new broker ID; its directory stays
+//     on disk until removed by hand.
 //   - GitHub resolution (agent.GitHubResolutionCache, metadata only): one
 //     object shared by every instance; its own locks serialize reads,
 //     refreshes and the delayed write of its file. The host closes it once,
