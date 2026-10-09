@@ -328,9 +328,11 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 func (s *Server) checkColocatedBrokerHealth(checks map[string]string) {
 	state := s.embeddedBrokerSnapshot()
 	switch {
-	case state.id != "":
+	case len(state.ids) > 0 && state.regErr == "":
 		checks["colocated_broker"] = "healthy"
 	case state.regErr != "":
+		// With several co-located flat instances, one refused instance
+		// degrades the check even when its siblings activated.
 		// Fixed string: /healthz and /health are unauthenticated (see
 		// isPublicRoute in web.go), and state.regErr is the verbatim error
 		// chain from registerGlobalProjectAndBroker, which can carry store/

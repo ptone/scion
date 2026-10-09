@@ -316,10 +316,12 @@ const embeddedGlobalProjectSlug = "global"
 func (s *Server) RegisterEmbeddedFlatRuntimeBroker(ctx context.Context, id *brokeridentity.Identity, inst config.V1RuntimeBrokerInstanceConfig, opts ...EmbeddedFlatRegistrationOptions) (*store.RuntimeBroker, error) {
 	row, err := s.registerEmbeddedFlat(ctx, id, inst, opts...)
 	if err != nil {
-		s.EmbeddedBrokerRegistrationFailed(err)
+		s.EmbeddedFlatInstanceFailed(inst.Key, err)
 		return nil, err
 	}
-	s.SetEmbeddedBrokerID(row.ID)
+	s.mu.Lock()
+	s.recordEmbeddedFlatActivatedLocked(inst.Key, row.ID)
+	s.mu.Unlock()
 	return row, nil
 }
 
