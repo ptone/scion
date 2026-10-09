@@ -196,7 +196,7 @@ Decided in this spec without a question (raise one if you disagree):
 **Product rule (product owner, 2026-10-09).** A Kubernetes agent whose identity resolves to block should have no GCP identity. If GKE cannot enforce that, a zero-privilege identity is acceptable, for example a KSA with no GSA binding and no grants. Assign means the agent's KSA bound to that GSA.
 
 **What GKE can enforce** (from public GKE and IAM docs; not tested live):
-- On a Workload Identity node pool, GKE cannot give one pod "no identity". Every KSA is a federated principal and receives a federated token from the metadata server, with or without the GSA annotation.
+- On a Workload Identity node pool, GKE cannot give one pod "no identity". Every KSA is a federated principal and receives a federated token, with or without the GSA annotation.
 - Such a principal is zero-privilege only if nothing grants it anything. That includes:
   - no direct grants to it;
   - no namespace-wide, cluster-wide or pool-wide principal-set grants;
@@ -204,17 +204,17 @@ Decided in this spec without a question (raise one if you disagree):
   - no same-named namespace/KSA in another cluster of the project that receives grants.
 
   The broker cannot verify any of these with its current credentials.
-- The only per-pod "none" is an egress NetworkPolicy denying the metadata endpoints. GKE documents this, but it needs network policy enforcement, new broker RBAC or an operator-installed policy, and a live test.
+- The only per-pod "none" is an egress NetworkPolicy restricting the pod's outbound access. It needs network policy enforcement, new broker RBAC or an operator-installed policy, and a live test.
 - On a node pool without Workload Identity, a pod reaches the node's service account. The node label `iam.gke.io/gke-metadata-server-enabled` can be used as a node selector to avoid such pools.
-- `automountServiceAccountToken: false` removes the Kubernetes API token, not the metadata token.
+- `automountServiceAccountToken: false` removes the Kubernetes API token, not the federated GCP token.
 - Today a passthrough pod runs as the namespace `default` KSA with its token mounted (#1801). Block is refused outright, including when it comes from an inherited default, so every create under a block default fails.
 
 **Behaviour (proposed):**
 1. A broker Kubernetes runtime or profile setting names a **block KSA**: a dedicated KSA, provisioned by the operator, with no GSA annotation and no grants. Scion does not create it (consistent with Q2).
 2. When the mode resolves to block, from the request or from any default, the pod runs as the block KSA with `automountServiceAccountToken: false` and a node selector requiring Workload Identity nodes. The mode is accepted, not refused.
 3. If no block KSA is configured, the hub returns 400 `identity_block_unconfigured`. The message names the profile and the setting a broker operator must add. The behaviour never falls back to passthrough or to the `default` KSA. `scion doctor` and broker startup warn when a block default exists and a Kubernetes profile has no block KSA.
-4. Optional hardening per profile: the broker attaches an egress NetworkPolicy denying the metadata endpoints. It ships only after a live test on Dataplane V2 and Calico, and it needs new RBAC or an operator-installed policy selected by a scion pod label.
-5. Inspect: the agent identity line (section 8) shows "block (zero-privilege KSA)" or "block (metadata denied)", so the guarantee level is visible. The docs state the IAM preconditions an operator must keep true.
+4. Optional hardening per profile: the broker attaches an egress NetworkPolicy restricting the pod's outbound access. It ships only after a live test on Dataplane V2 and Calico, and it needs new RBAC or an operator-installed policy selected by a scion pod label.
+5. Inspect: the agent identity line (section 8) shows "block (zero-privilege KSA)" or "block (egress restricted)", so the guarantee level is visible. The docs state the IAM preconditions an operator must keep true.
 6. The status code of the current refusal (502 → 400) is fixed separately under #3329 and is not part of this item.
 
 Q7 (product owner) is about point 3: when block resolves but no block KSA is configured, refuse, use the `default` KSA with automount off, or fall back to passthrough.
