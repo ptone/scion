@@ -1,6 +1,6 @@
 # P2 amendment: instance Kubernetes identity policy and registration parity
 
-Status: architecture decision, revision 3, 2026-10-09; block semantics confirmed by the GCP identity feature owner; P2M evidence substitution recorded below. Delivery timing belongs to the delivery lead. This document changes the P2 contract only; it does not reopen the deferred flat dispatch-policy proposal.
+Status: architecture decision, revision 4, 2026-10-09; block semantics confirmed by the GCP identity feature owner; post-merge evidence substitution recorded below. Revision 4 changes wording only. Delivery timing belongs to the delivery lead. This document changes the P2 contract only; it does not reopen the deferred flat dispatch-policy proposal.
 
 Reference surfaces: upstream `75e87c07b`, P2 configuration at `67d7055ba`, and the P1 saved-profile guard at `6b626f1d`. The implementation must be reviewed at its eventual merged revision.
 
@@ -80,9 +80,9 @@ Embedded registration continues to take AutoProvide from trusted in-process Hub/
 3. Review the merged revision and run the relevant local checks. Delivery lead owns the merge timing.
 4. Keep the planned initial P2+S6 gate on its pre-merge pin. Run a separate required post-merge verification block on the same disposable VMs before the P2 compare link. Record both exact revisions; final P2 readiness includes both evidence blocks and identifies the final merged revision.
 
-The merged implementation fully supports assign and block, including omitted block ServiceAccount behavior, start/restart consistency, and registration parity. It does not use temporary unsupported-mode refusals as its success oracle. No move of the initial gate pin is required by this amendment. The post-merge evidence uses the explicitly adjusted scope below.
+The merged implementation fully supports assign and block, including omitted block ServiceAccount behavior, start/restart consistency, and registration parity. Temporary unsupported-mode refusals do not count as evidence of completed support. No move of the initial gate pin is required by this amendment. The post-merge evidence uses the explicitly adjusted scope below.
 
-### P2M evidence substitution (revision 3)
+### Post-merge evidence substitution (introduced in revision 3)
 
 The disposable environment lacks the cloud IAM setup needed to pass the Hub's real GSA verification through IAM Credentials GenerateAccessToken. The architecture review therefore accepts the following substitution for the earlier requirement to run both modes live on those VMs. This changes verification scope, not production behavior.
 
