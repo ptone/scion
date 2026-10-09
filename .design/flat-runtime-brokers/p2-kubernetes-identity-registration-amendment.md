@@ -1,6 +1,6 @@
 # P2 amendment: instance Kubernetes identity policy and registration parity
 
-Status: architecture decision, revision 2, 2026-10-09; block semantics confirmed by the GCP identity feature owner. Delivery timing belongs to the delivery lead. This document changes the P2 contract only; it does not reopen the deferred flat dispatch-policy proposal.
+Status: architecture decision, revision 3, 2026-10-09; block semantics confirmed by the GCP identity feature owner; P2M evidence substitution recorded below. Delivery timing belongs to the delivery lead. This document changes the P2 contract only; it does not reopen the deferred flat dispatch-policy proposal.
 
 Reference surfaces: upstream `75e87c07b`, P2 configuration at `67d7055ba`, and the P1 saved-profile guard at `6b626f1d`. The implementation must be reviewed at its eventual merged revision.
 
@@ -80,7 +80,17 @@ Embedded registration continues to take AutoProvide from trusted in-process Hub/
 3. Review the merged revision and run the relevant local checks. Delivery lead owns the merge timing.
 4. Keep the planned initial P2+S6 gate on its pre-merge pin. Run a separate required post-merge verification block on the same disposable VMs before the P2 compare link. Record both exact revisions; final P2 readiness includes both evidence blocks and identifies the final merged revision.
 
-The post-merge block exercises fully wired assign and block, including omitted block ServiceAccount behavior, start/restart consistency, and registration parity. It does not use temporary unsupported-mode refusals as its success oracle. No move of the initial gate pin is required by this amendment.
+The merged implementation fully supports assign and block, including omitted block ServiceAccount behavior, start/restart consistency, and registration parity. It does not use temporary unsupported-mode refusals as its success oracle. No move of the initial gate pin is required by this amendment. The post-merge evidence uses the explicitly adjusted scope below.
+
+### P2M evidence substitution (revision 3)
+
+The disposable environment lacks the cloud IAM setup needed to pass the Hub's real GSA verification through IAM Credentials GenerateAccessToken. The architecture review therefore accepts the following substitution for the earlier requirement to run both modes live on those VMs. This changes verification scope, not production behavior.
+
+- Live Hub-to-IAM-to-Kubernetes assign rows, including refusal scenarios that require that verification prerequisite, are **NOT RUN**. Record a named cloud-integration follow-up. No production test path, fabricated live verification flag, or cloud resource creation is required by this amendment.
+- Assign evidence at the exact merged revision must exercise the production flat policy resolver and actual pod builder in tests: mapped KSA, activated namespace, environment, missing mapping, explicit KSA/namespace conflicts, sibling-instance isolation, and legacy behavior. Record simulated dependencies. This evidence does not prove end-to-end cloud identity operation.
+- Block runs live on kind, including configured and omitted block ServiceAccount cases. A reversible node label may satisfy the required scheduling selector. Record that environmental adjustment and inspect the actual pod's ServiceAccount, disabled token automount, required selector, block-mode environment, and absence of assign-mode identity additions. This proves pod configuration and execution in that environment, not actual GKE Workload Identity/IAM behavior or cloud privileges of the namespace default account.
+- Start/restart early-versus-late mismatch refusals may use controlled unit evidence where an immutable instance snapshot makes them unreachable through the normal external interface. Live restart and snapshot-change cases separately verify their externally observable consistency. Do not introduce a production mutation hook solely to provoke a mismatch.
+- The final report distinguishes live PASS, unit PASS, and cloud NOT RUN, identifies each exact tested revision, and carries the assign integration gap forward explicitly. Fully implemented support and completed evidence under this exception must not be described as complete live cloud coverage.
 
 ## Acceptance criteria
 
@@ -93,7 +103,7 @@ The post-merge block exercises fully wired assign and block, including omitted b
 - Start/restart runtime or instance-selection mismatch refuses; flat operations never reload a saved profile. Legacy and Docker behavior remain unchanged.
 - New/false-to-true AutoProvide requests require upstream permission; preserve-true, disable, PreserveSettings, and re-mint credential cases match upstream. Stale match and stale preserve-true decisions refuse without mutation or token issuance.
 - Embedded AutoProvide comes from the trusted operator path; external requests cannot claim that authority. No registration case creates a flat provider link.
-- The final evidence records the original gate revision and the reviewed post-merge revision separately, with fully implemented identity modes at the latter.
+- The final evidence records the original gate revision and the reviewed post-merge revision separately, with fully implemented identity modes at the latter and the revision-3 evidence substitution clearly identified.
 
 ## Open questions
 
