@@ -255,3 +255,43 @@ func TestOwner_CleanupLaunchDeletesOnlyOwnedHandles(t *testing.T) {
 	require.ErrorIs(t, m.CleanupLaunch(context.Background(), []ResourceHandle{{Kind: "pod", Name: "worker", UID: "uid-mine"}}), ErrNotOwned)
 	assert.Empty(t, none.deleted, "no ownership callback: nothing is deleted")
 }
+
+// leftoverCleanerRuntime records which leftover cleanup a manager calls.
+type leftoverCleanerRuntime struct {
+	runtime.Runtime
+	calls []string
+}
+
+func (c *leftoverCleanerRuntime) CleanupAgentResources(_ context.Context, name, projectID string) error {
+	c.calls = append(c.calls, "unscoped:"+projectID+"/"+name)
+	return nil
+}
+
+type ownedLeftoverCleanerRuntime struct{ *leftoverCleanerRuntime }
+
+func (c ownedLeftoverCleanerRuntime) CleanupOwnedAgentResources(_ context.Context, name, projectID, brokerID string) error {
+	c.calls = append(c.calls, "owned:"+projectID+"/"+name+"/"+brokerID)
+	return nil
+}
+
+// TestOwner_LeftoverCleanupIsOwnerScoped: an owned manager uses only the
+// owner-scoped cleanup, and on a runtime without it removes nothing; a
+// legacy manager keeps the unscoped cleanup.
+func TestOwner_LeftoverCleanupIsOwnerScoped(t *testing.T) {
+	base := &leftoverCleanerRuntime{Runtime: &runtime.MockRuntime{}}
+	legacy := &AgentManager{Runtime: base}
+	require.NoError(t, legacy.CleanupAgentResources(context.Background(), "worker", "p1"))
+	assert.Equal(t, []string{"unscoped:p1/worker"}, base.calls)
+
+	plain := &leftoverCleanerRuntime{Runtime: &runtime.MockRuntime{}}
+	m := &AgentManager{Runtime: plain}
+	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a"})
+	require.NoError(t, m.CleanupAgentResources(context.Background(), "worker", "p1"))
+	assert.Empty(t, plain.calls, "no unscoped cleanup for an owned manager")
+
+	inner := &leftoverCleanerRuntime{Runtime: &runtime.MockRuntime{}}
+	m = &AgentManager{Runtime: ownedLeftoverCleanerRuntime{inner}}
+	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a"})
+	require.NoError(t, m.CleanupAgentResources(context.Background(), "worker", "p1"))
+	assert.Equal(t, []string{"owned:p1/worker/broker-a"}, inner.calls)
+}

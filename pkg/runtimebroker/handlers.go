@@ -2396,7 +2396,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 				NotFound(w, "Agent")
 				return
 			}
-			s.cleanupLeftoverAgentResources(ctx, id, projectID, runID)
+			if cleanErr := s.cleanupLeftoverAgentResources(ctx, id, projectID, runID); cleanErr != nil {
+				s.writeRuntimeOpError(w, ctx, "delete agent", cleanErr, "agent_id", id, "project_id", projectID)
+				return
+			}
 			s.agentLifecycleLog.Info("Agent delete: no matching agent in project",
 				"agent_id", id, "project_id", projectID)
 			NotFound(w, "Agent")
@@ -2601,7 +2604,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		// The container was already gone, so DeleteTarget made no runtime
 		// call and the runtime never removed the objects it created with
 		// the container.
-		s.cleanupLeftoverAgentResources(ctx, target.name, projectID, runID)
+		if cleanErr := s.cleanupLeftoverAgentResources(ctx, target.name, projectID, runID); cleanErr != nil {
+			s.writeRuntimeOpError(w, ctx, "delete agent", cleanErr, "agent_id", id, "project_id", projectID)
+			return
+		}
 	}
 
 	// On the NFS workspace, the agent's worktree (worktree-per-agent) or
@@ -7022,16 +7028,21 @@ type agentResourceCleaner interface {
 // record this instance holds, and never, for a delete fenced to a run, while
 // another run of the agent is live: leftover objects are found by name, so
 // they may be that newer run's (ptone/scion#3274).
-func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, projectID, runID string) {
+//
+// A legacy Runtime Broker logs a cleanup failure and goes on (the delete
+// still succeeds); a flat instance returns it, so the delete fails and is
+// retried rather than reported done with its objects left behind.
+func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, projectID, runID string) error {
 	if projectID == "" {
-		return
+		return nil
 	}
 	slug := api.Slugify(agentName)
 	if !s.leftoverCleanupAllowed(projectID, slug, runID) {
 		s.agentLifecycleLog.Info("Agent delete: leftover runtime objects left in place (not this instance's to remove, or another run is live)",
 			"agent_id", agentName, "project_id", projectID, "run_id", runID)
-		return
+		return nil
 	}
+	var errs []error
 	for _, mgr := range s.allManagers(ctx) {
 		c, ok := mgr.(agentResourceCleaner)
 		if !ok {
@@ -7040,8 +7051,13 @@ func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, p
 		if err := c.CleanupAgentResources(ctx, slug, projectID); err != nil {
 			s.agentLifecycleLog.Warn("Agent delete: failed to remove leftover runtime objects",
 				"agent_id", agentName, "project_id", projectID, "error", err)
+			errs = append(errs, err)
 		}
 	}
+	if s.ownership == nil {
+		return nil
+	}
+	return errors.Join(errs...)
 }
 
 // findAgentProjectDir returns the .scion dir of the project that owns the

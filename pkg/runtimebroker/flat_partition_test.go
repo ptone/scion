@@ -46,6 +46,8 @@ type sharedDaemon struct {
 	mu      sync.Mutex
 	objects []api.AgentInfo
 	calls   []string // "stop:<id>", "delete:<id>", "logs:<id>", "exec:<id>", "deleteResource:<uid>"
+	// ownedCleanupErr, when set, fails every owner-scoped leftover cleanup.
+	ownedCleanupErr error
 }
 
 func (d *sharedDaemon) add(o api.AgentInfo) {
@@ -113,6 +115,15 @@ func (r *daemonRuntime) DeleteResource(_ context.Context, h api.ResourceHandle) 
 func (r *daemonRuntime) CleanupAgentResources(_ context.Context, agentName, projectID string) error {
 	r.d.record("cleanupAgentResources:" + projectID + "/" + agentName)
 	return nil
+}
+
+// CleanupOwnedAgentResources is the owner-scoped leftover cleanup
+// (runtime.OwnedAgentResourceCleaner); ownedCleanupErr makes it fail.
+func (r *daemonRuntime) CleanupOwnedAgentResources(_ context.Context, agentName, projectID, runtimeBrokerID string) error {
+	r.d.record("cleanupOwned:" + projectID + "/" + agentName + "/" + runtimeBrokerID)
+	r.d.mu.Lock()
+	defer r.d.mu.Unlock()
+	return r.d.ownedCleanupErr
 }
 
 func newDaemonRuntime(d *sharedDaemon) *daemonRuntime {

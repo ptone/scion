@@ -513,7 +513,22 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref
 // container itself is already gone, so deleteResolved never reaches
 // Runtime.Delete. It is a no-op for a runtime that does not implement
 // runtime.AgentResourceCleaner. See that interface for the scoping rules.
+//
+// An owned (flat instance) manager removes only objects carrying its
+// instance's owner label (runtime.OwnedAgentResourceCleaner); on a runtime
+// without that variant it removes nothing (never the unscoped cleanup) and
+// logs a warning.
 func (m *AgentManager) CleanupAgentResources(ctx context.Context, agentName, projectID string) error {
+	if m.owner != nil {
+		if c, ok := m.Runtime.(runtime.OwnedAgentResourceCleaner); ok {
+			return c.CleanupOwnedAgentResources(ctx, agentName, projectID, m.owner.RuntimeBrokerID)
+		}
+		if _, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
+			slog.Warn("Leftover agent objects not removed: the runtime cannot limit the cleanup to this Runtime Broker instance's objects",
+				"agent", agentName, "project_id", projectID, "runtime_broker_id", m.owner.RuntimeBrokerID, "runtime", m.Runtime.Name())
+		}
+		return nil
+	}
 	if c, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
 		return c.CleanupAgentResources(ctx, agentName, projectID)
 	}

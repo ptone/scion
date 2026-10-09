@@ -1506,10 +1506,38 @@ func (r *KubernetesRuntime) CleanupAgentResources(ctx context.Context, agentName
 	if agentName == "" || projectID == "" {
 		return nil
 	}
-	selector, err := labels.ValidatedSelectorFromSet(map[string]string{
+	return r.cleanupAgentResourcesSelected(ctx, agentName, map[string]string{
 		"scion.name":               agentName,
 		projectkeys.LabelProjectID: projectID,
 	})
+}
+
+// CleanupOwnedAgentResources is CleanupAgentResources limited to the
+// objects carrying the owning flat Runtime Broker instance's reserved label
+// (api.LabelRuntimeBrokerID = runtimeBrokerID); same kinds, same pod-gone
+// rule (OwnedAgentResourceCleaner). An empty or invalid runtimeBrokerID is
+// an error and nothing is deleted: there is no unscoped fallback.
+func (r *KubernetesRuntime) CleanupOwnedAgentResources(ctx context.Context, agentName, projectID, runtimeBrokerID string) error {
+	if runtimeBrokerID == "" {
+		return errors.New("owned agent cleanup: a Runtime Broker ID is required")
+	}
+	if errs := k8svalidation.IsValidLabelValue(runtimeBrokerID); len(errs) > 0 {
+		return fmt.Errorf("owned agent cleanup: invalid Runtime Broker ID %q: %s", runtimeBrokerID, strings.Join(errs, "; "))
+	}
+	if agentName == "" || projectID == "" {
+		return nil
+	}
+	return r.cleanupAgentResourcesSelected(ctx, agentName, map[string]string{
+		"scion.name":               agentName,
+		projectkeys.LabelProjectID: projectID,
+		api.LabelRuntimeBrokerID:   runtimeBrokerID,
+	})
+}
+
+// cleanupAgentResourcesSelected removes the per-agent objects matching set
+// whose pod is gone (the rules of CleanupAgentResources).
+func (r *KubernetesRuntime) cleanupAgentResourcesSelected(ctx context.Context, agentName string, set map[string]string) error {
+	selector, err := labels.ValidatedSelectorFromSet(set)
 	if err != nil {
 		return fmt.Errorf("invalid agent selector: %w", err)
 	}

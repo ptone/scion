@@ -73,7 +73,7 @@ func newRunFenceFixture(t *testing.T, newRunState string, oldGone bool) *partiti
 func assertNewerRunUntouched(t *testing.T, f *partitionFixture, newRunState string) {
 	t.Helper()
 	for _, c := range f.d.recorded() {
-		if strings.Contains(c, fenceNewUID) || strings.HasPrefix(c, "cleanupAgentResources:") {
+		if strings.Contains(c, fenceNewUID) || (strings.HasPrefix(c, "cleanupAgentResources:") || strings.HasPrefix(c, "cleanupOwned:")) {
 			t.Errorf("a path fenced to %s acted on the newer run: %s (calls %v)", fenceOldRun, c, f.d.recorded())
 		}
 	}
@@ -152,7 +152,7 @@ func TestFlatRunFence_NoDeleteOrCleanupPathActsOnNewerRun(t *testing.T) {
 			serveFlat(f.a.srv, http.MethodDelete, deleteURL+"&deleteFiles=true", "")
 		}},
 		{"leftover cleanup called directly", true, func(t *testing.T, f *partitionFixture) {
-			f.a.srv.cleanupLeftoverAgentResources(context.Background(), "worker", "proj-1", fenceOldRun)
+			_ = f.a.srv.cleanupLeftoverAgentResources(context.Background(), "worker", "proj-1", fenceOldRun)
 		}},
 		{"sync start undo of the old run", false, func(t *testing.T, f *partitionFixture) {
 			o := &ownedStart{store: f.a.srv.ownership, projectID: "proj-1", agentID: "agent-a1", runID: fenceOldRun,
