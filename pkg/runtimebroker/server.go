@@ -495,6 +495,31 @@ func (s *Server) RuntimeName() string {
 	return s.runtime.Name()
 }
 
+// defaultPair returns one consistent snapshot of the broker's default
+// manager and runtime, read under s.mu: SwapRuntime replaces both together
+// while requests are in flight. A caller that uses both takes one snapshot
+// and uses it throughout, so it never pairs the old manager with the new
+// runtime. Callers must not hold s.mu.
+func (s *Server) defaultPair() (agent.Manager, scionrt.Runtime) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.manager, s.runtime
+}
+
+// currentManager returns the broker's default manager, read under s.mu
+// (see defaultPair). Callers must not hold s.mu.
+func (s *Server) currentManager() agent.Manager {
+	mgr, _ := s.defaultPair()
+	return mgr
+}
+
+// currentRuntime returns the broker's default runtime, read under s.mu
+// (see defaultPair). Callers must not hold s.mu.
+func (s *Server) currentRuntime() scionrt.Runtime {
+	_, rt := s.defaultPair()
+	return rt
+}
+
 // SwapRuntime replaces the broker's container runtime and agent manager.
 // This is called when the co-located hub detects a runtime configuration
 // change (e.g. during onboarding) so the broker picks up the new engine
@@ -1394,13 +1419,14 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 // de-duplication and registration directly, without depending on the
 // broker's on-disk project discovery.
 func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
+	defRT := s.currentRuntime()
 	// Compared against every resolved profile below so that a profile
 	// pointing at the broker's own runtime instance — not merely the same
 	// TYPE as the broker's default — is recognized and skipped. A broker
 	// whose default is Kubernetes must still register a profile aimed at a
 	// different cluster/context/namespace as an auxiliary runtime; comparing
 	// types alone would wrongly treat it as "the default" and drop it.
-	defaultIdentity := auxiliaryRuntimeIdentity(s.runtime)
+	defaultIdentity := auxiliaryRuntimeIdentity(defRT)
 
 	discoveredIdentities := make(map[string]bool)
 
@@ -1529,11 +1555,12 @@ func canonicalRuntimeTypeName(runtimeType string) string {
 // means the cheap check could not prove a match, so the caller should fall
 // back to fully resolving the profile for a conclusive answer.
 func (s *Server) defaultRuntimeMatchesProfile(runtimeType string, rtConfig config.V1RuntimeConfig) bool {
-	if canonicalRuntimeTypeName(runtimeType) != s.runtime.Name() {
+	defRT := s.currentRuntime()
+	if canonicalRuntimeTypeName(runtimeType) != defRT.Name() {
 		return false
 	}
 
-	defaultK8s, isDefaultK8s := s.runtime.(*scionrt.KubernetesRuntime)
+	defaultK8s, isDefaultK8s := defRT.(*scionrt.KubernetesRuntime)
 	if !isDefaultK8s {
 		// Every non-Kubernetes type uses the bare type-name identity
 		// (see auxiliaryRuntimeIdentity): a type match is an identity match,
@@ -1687,7 +1714,8 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 // run is listed beside it (for example in another namespace). With an
 // empty runID it is exactly lookupAgentMatch.
 func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, runID string) (agentMatch, error) {
-	if s.manager == nil {
+	defMgr, defRT := s.defaultPair()
+	if defMgr == nil {
 		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
 
@@ -1711,14 +1739,14 @@ func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, ru
 	var agents []api.AgentInfo
 	var err error
 	if useDefault {
-		agents, err = s.manager.List(ctx, filter)
+		agents, err = defMgr.List(ctx, filter)
 		if err != nil {
 			return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
 		agents = agentsForProject(agents, projectID)
 	}
-	matchManager := s.manager
-	matchRuntime := s.runtime
+	matchManager := defMgr
+	matchRuntime := defRT
 
 	// Fall back to auxiliary runtimes (e.g. kubernetes when default is docker)
 	if len(agents) == 0 {
@@ -1738,14 +1766,14 @@ func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, ru
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		if useDefault {
-			agents, err = s.manager.List(ctx, fallbackFilter)
+			agents, err = defMgr.List(ctx, fallbackFilter)
 			if err != nil {
 				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 			}
 			agents = agentsWithoutProjectLabel(agents)
 		}
-		matchManager = s.manager
-		matchRuntime = s.runtime
+		matchManager = defMgr
+		matchRuntime = defRT
 		if len(agents) == 0 {
 			auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
 			if auxErr != nil {
@@ -1943,7 +1971,8 @@ var errAuxiliaryRuntimeList = errors.New("auxiliary runtime")
 // It looks up an agent by slug and returns detailed info including the runtime.
 // projectID scopes the lookup to prevent cross-project collision.
 func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*AgentLookupResult, error) {
-	if s.manager == nil {
+	defMgr, defRT := s.defaultPair()
+	if defMgr == nil {
 		return nil, fmt.Errorf("agent manager not available")
 	}
 
@@ -1968,14 +1997,14 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		}
 	} else {
 		// Try default manager first
-		agents, err = s.manager.List(ctx, filter)
+		agents, err = defMgr.List(ctx, filter)
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
 		agents = agentsForProject(agents, projectID)
 	}
 
-	runtimeName := s.runtime.Name()
+	runtimeName := defRT.Name()
 	var matchedRuntime scionrt.Runtime
 	if own != nil {
 		runtimeName = own.rt.Name()
@@ -2022,7 +2051,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" && own == nil {
 		fallbackFilter := map[string]string{"scion.name": slug}
-		agents, err = s.manager.List(ctx, fallbackFilter)
+		agents, err = defMgr.List(ctx, fallbackFilter)
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
@@ -2070,10 +2099,10 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 
 	// Determine the exec user from the runtime that owns this agent.
 	// resolvedRuntime is the same one that produced ag: nil matchedRuntime
-	// means the primary s.manager/s.runtime pair matched.
+	// means the primary defMgr/defRT pair matched.
 	resolvedRuntime := matchedRuntime
 	if resolvedRuntime == nil {
-		resolvedRuntime = s.runtime
+		resolvedRuntime = defRT
 	}
 	execUser := "scion"
 	if resolvedRuntime != nil {
@@ -2084,7 +2113,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// actually produced this match: matchedRuntime is set on every
 	// auxiliary-runtime match path above (including the no-project-label
 	// fallback stage), and stays nil only when the match came from the
-	// primary manager, in which case it's s.runtime. Callers use this to
+	// primary manager, in which case it's defRT. Callers use this to
 	// ask capability questions (e.g. scionrt.HasAttachSupport) about the
 	// runtime that actually owns the agent, not assume it is the broker's
 	// default.
@@ -2094,7 +2123,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		ExecUser:    execUser,
 		// Phase is deliberately re-read from the runtime directly
 		// (rawRuntimePhase), not taken from ag.Phase above: ag came from
-		// s.manager.List / aux.Manager.List, which is agent.Manager's merged
+		// defMgr.List / aux.Manager.List, which is agent.Manager's merged
 		// view (runtime status overlaid with agent-info.json). That overlay
 		// can keep reporting a stale "stopped"/"error" phase for a
 		// container that has since restarted or is still starting up (see
@@ -2371,11 +2400,12 @@ func (s *Server) buildProjectFilterForHub(hubEndpoint string) func(string) bool 
 		// For now, try to find the project's settings to determine its hub endpoint.
 		// This requires the agent manager to provide project paths.
 		// As a simple implementation, we scan agents and check their project settings.
-		if s.manager == nil {
+		mgr := s.currentManager()
+		if mgr == nil {
 			return true // Can't filter without a manager
 		}
 
-		agents, err := s.manager.List(context.Background(), nil)
+		agents, err := mgr.List(context.Background(), nil)
 		if err != nil {
 			return true // Allow on error
 		}

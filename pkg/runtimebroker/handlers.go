@@ -542,7 +542,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		filter["status"] = status
 	}
 
-	agents, err := s.manager.List(ctx, filter)
+	agents, err := s.currentManager().List(ctx, filter)
 	if err != nil {
 		s.writeRuntimeOpError(w, ctx, "list agents", err)
 		return
@@ -1529,8 +1529,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// the broker's default runtime: the hub records this value as the
 		// agent's runtime.
 		agentResp.RuntimeType = sc.RuntimeType
-		if agentResp.RuntimeType == "" && s.runtime != nil {
-			agentResp.RuntimeType = s.runtime.Name()
+		if rt := s.currentRuntime(); agentResp.RuntimeType == "" && rt != nil {
+			agentResp.RuntimeType = rt.Name()
 		}
 
 		resp := CreateAgentResponse{
@@ -3171,7 +3171,7 @@ type managerRuntimeProvider interface {
 // sort the full manager list, so a broker with no prober never pays for
 // either on an unresolved stop.
 func (s *Server) hasRecordlessProber() bool {
-	if am, ok := s.manager.(*agent.AgentManager); ok && am.Runtime != nil {
+	if am, ok := s.currentManager().(*agent.AgentManager); ok && am.Runtime != nil {
 		if _, ok := am.Runtime.(scionrt.RecordlessActorProber); ok {
 			return true
 		}
@@ -5563,7 +5563,7 @@ func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID st
 			return auxRuntimes[0].Manager, auxRuntimes[0].Runtime
 		}
 	}
-	return s.manager, s.runtime
+	return s.defaultPair()
 }
 
 // findAgentRuntimeTarget searches the runtimes a request carrying ctx may
@@ -5595,12 +5595,13 @@ func (s *Server) findAgentRuntimeTarget(ctx context.Context, id, projectID strin
 	// A recorded runtime type (ptone/scion#2748) restricts the search to
 	// runtimes of that type; without one every runtime is searched.
 	useDefault := s.defaultRuntimeAllowed(ctx)
+	defMgr, defRT := s.defaultPair()
 
 	// Try the default runtime first.
 	if useDefault {
-		agents, err := s.manager.List(ctx, filter)
+		agents, err := defMgr.List(ctx, filter)
 		if err == nil && len(agents) > 0 {
-			return s.manager, s.runtime, true
+			return defMgr, defRT, true
 		}
 	}
 
@@ -5621,9 +5622,9 @@ func (s *Server) findAgentRuntimeTarget(ctx context.Context, id, projectID strin
 	if projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		if useDefault {
-			agents, err := s.manager.List(ctx, fallbackFilter)
+			agents, err := defMgr.List(ctx, fallbackFilter)
 			if err == nil && hasAgentInProjectOrUnlabeled(agents, projectID) {
-				return s.manager, s.runtime, true
+				return defMgr, defRT, true
 			}
 		}
 		for _, aux := range auxRuntimes {
@@ -5663,11 +5664,12 @@ func (s *Server) allManagers(ctx context.Context) []agent.Manager {
 		return []agent.Manager{own.mgr}
 	}
 	var managers []agent.Manager
+	defMgr := s.currentManager()
 	if s.defaultRuntimeAllowed(ctx) {
-		managers = append(managers, s.manager)
+		managers = append(managers, defMgr)
 	}
 	for _, aux := range s.sortedAuxiliaryRuntimesFor(ctx) {
-		if aux.Manager != nil && aux.Manager != s.manager {
+		if aux.Manager != nil && aux.Manager != defMgr {
 			managers = append(managers, aux.Manager)
 		}
 	}
@@ -5715,17 +5717,18 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 // promised — it only turns a would-be preflight message into a later
 // runtime-error message instead.
 func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
+	defRT := s.currentRuntime()
 	if s.isFlat() {
-		return s.runtime.Name()
+		return defRT.Name()
 	}
 	if s.config.ForceRuntime != "" {
-		if s.config.ForceRuntime == s.runtime.Name() {
-			return s.runtime.Name()
+		if s.config.ForceRuntime == defRT.Name() {
+			return defRT.Name()
 		}
 		if aux, ok := s.findAuxiliaryRuntimeByType(s.config.ForceRuntime); ok {
 			return aux.Runtime.Name()
 		}
-		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", s.runtime.Name())
+		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", defRT.Name())
 	}
 
 	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
@@ -5735,14 +5738,14 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
 			"projectDir", projectDir, "error", err)
 	}
 	if vs == nil {
-		return s.runtime.Name()
+		return defRT.Name()
 	}
 
 	// ResolveRuntime("") uses vs.ActiveProfile as the fallback.
 	_, runtimeType, err := vs.ResolveRuntime(opts.Profile)
 	if err != nil {
 		// Profile or its runtime not found in settings; use default
-		return s.runtime.Name()
+		return defRT.Name()
 	}
 	return runtimeType
 }
@@ -5841,25 +5844,26 @@ func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettin
 // settings content. The full detail is logged here at Warn, once per
 // failure.
 func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profileResolution, fallbackLevel slog.Level) (agent.Manager, string, error) {
+	defMgr, defRT := s.defaultPair()
 	// A flat instance serves exactly one runtime target: it never consults
 	// the saved agent profile or the settings active_profile, so it never
 	// fails strict saved-profile resolution either.
 	if s.isFlat() {
-		return s.manager, s.runtime.Name(), nil
+		return defMgr, defRT.Name(), nil
 	}
 	strict := mode != profileLenient
 	if s.config.ForceRuntime != "" {
-		if s.config.ForceRuntime == s.runtime.Name() {
-			// A ForceRuntime naming the default runtime returns s.manager
+		if s.config.ForceRuntime == defRT.Name() {
+			// A ForceRuntime naming the default runtime returns defMgr
 			// here, bypassing the per-profile resolution below entirely —
 			// a second profile of the same runtime type with its own
 			// runtime config is not reachable under ForceRuntime.
-			return s.manager, s.runtime.Name(), nil
+			return defMgr, defRT.Name(), nil
 		}
 		if aux, ok := s.findAuxiliaryRuntimeByType(s.config.ForceRuntime); ok {
 			return aux.Manager, aux.Runtime.Name(), nil
 		}
-		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", s.runtime.Name())
+		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", defRT.Name())
 	}
 
 	// Load settings to check if the profile/active-profile specifies a
@@ -5888,7 +5892,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 				fmt.Errorf("%w: agent %q profile %q: no project settings found",
 					errSavedProfileUnresolved, opts.Name, opts.Profile))
 		}
-		return s.manager, s.runtime.Name(), nil
+		return defMgr, defRT.Name(), nil
 	}
 
 	// ResolveRuntime("") uses vs.ActiveProfile as the fallback. The
@@ -5911,7 +5915,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 				fmt.Errorf("%w: agent %q: %v", errSavedProfileUnresolved, opts.Name, err))
 		}
 		// Profile or its runtime not found in settings; use default
-		return s.manager, s.runtime.Name(), nil
+		return defMgr, defRT.Name(), nil
 	}
 
 	// Cheap pre-check: a profile matching the broker's own default runtime
@@ -5934,8 +5938,8 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// default runtime's profile identity, so it cannot tell whether the
 	// requested profile is the one the default runtime was built from; it
 	// relies on the capability instead.
-	if s.defaultRuntimeMatchesProfile(runtimeType, rtConfig) && !scionrt.HasPerProfileInstances(s.runtime) {
-		return s.manager, s.runtime.Name(), nil
+	if s.defaultRuntimeMatchesProfile(runtimeType, rtConfig) && !scionrt.HasPerProfileInstances(defRT) {
+		return defMgr, defRT.Name(), nil
 	}
 
 	// Resolve the profile's runtime so its true identity can be compared
@@ -5970,7 +5974,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 		s.agentLifecycleLog.Debug("Resolved runtime for start options",
 			"agent", opts.Name, "profile", opts.Profile,
 			"activeProfile", vs.ActiveProfile,
-			"defaultRuntime", s.runtime.Name(),
+			"defaultRuntime", defRT.Name(),
 			"resolvedRuntime", resolved.Name(),
 		)
 	}
@@ -5989,8 +5993,8 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// carries context/namespace), so two distinct same-type instances of such
 	// a runtime would otherwise collapse to one identity and incorrectly
 	// share the default manager.
-	if !scionrt.HasPerProfileInstances(s.runtime) && auxiliaryRuntimeIdentity(resolved) == auxiliaryRuntimeIdentity(s.runtime) {
-		return s.manager, s.runtime.Name(), nil
+	if !scionrt.HasPerProfileInstances(defRT) && auxiliaryRuntimeIdentity(resolved) == auxiliaryRuntimeIdentity(defRT) {
+		return defMgr, defRT.Name(), nil
 	}
 
 	// Keyed by resolved IDENTITY, not type (see auxiliaryRuntimeIdentity):
@@ -6020,17 +6024,18 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 // agent's image provenance; agent-info.json is not consulted, and the 503
 // names the provisioned profile and how to recover.
 func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, mode profileResolution, level slog.Level, cause, clientErr error) (agent.Manager, string, error) {
+	defMgr, defRT := s.defaultPair()
 	if mode == profileStrictProvisioned {
 		s.logSavedProfileUnresolved(opts, projectDir, cause)
 		return nil, "", fmt.Errorf("%w; it is the profile the agent was provisioned with, which no longer resolves on this broker: restore the profile in settings, or re-provision the agent (scion reincarnate, or delete and re-create it)", clientErr)
 	}
 	if recorded := agent.GetSavedRuntime(opts.Name, opts.ProjectPath); recorded != "" &&
-		recorded == s.runtime.Name() &&
-		!scionrt.HasPerProfileInstances(s.runtime) &&
-		auxiliaryRuntimeIdentity(s.runtime) == s.runtime.Name() {
+		recorded == defRT.Name() &&
+		!scionrt.HasPerProfileInstances(defRT) &&
+		auxiliaryRuntimeIdentity(defRT) == defRT.Name() {
 		s.agentLifecycleLog.Log(context.Background(), level, "saved runtime profile cannot be resolved; agent last ran on the broker default runtime, using it",
 			"agent", opts.Name, "profile", opts.Profile, "runtime", recorded, "projectDir", projectDir, "error", cause)
-		return s.manager, s.runtime.Name(), nil
+		return defMgr, defRT.Name(), nil
 	}
 	s.logSavedProfileUnresolved(opts, projectDir, cause)
 	return nil, "", clientErr
@@ -6812,7 +6817,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, 
 	s.agentLifecycleLog.Debug("Resolved agent project path for file-only delete",
 		"agent_id", id, "project_id", projectID, "path", resolved)
 	return &deleteTarget{
-		mgr:         s.manager,
+		mgr:         s.currentManager(),
 		name:        id,
 		projectPath: resolved,
 		projectID:   projectID,

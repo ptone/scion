@@ -299,11 +299,12 @@ func buildHubClientOpts(creds *brokercredentials.BrokerCredentials, secretKey []
 // newHeartbeatService builds the heartbeat service for one hub connection.
 // A flat instance's service is in flat mode (HeartbeatService.flat).
 func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brokerID, hubEndpoint string, interval time.Duration) *HeartbeatService {
+	mgr, rt := s.defaultPair()
 	hb := NewHeartbeatService(
 		client,
 		brokerID,
 		interval,
-		s.manager,
+		mgr,
 		s.buildProjectFilterForHub(hubEndpoint),
 		logging.Subsystem("broker.heartbeat"),
 	)
@@ -315,6 +316,6 @@ func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brok
 	hb.defaultProfile = s.defaultProfile
 	hb.flat = s.isFlat()
 	hb.SetVersion(s.version)
-	hb.SetDefaultRuntime(s.runtime)
+	hb.SetDefaultRuntime(rt)
 	return hb
 }

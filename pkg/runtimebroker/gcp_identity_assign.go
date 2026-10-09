@@ -312,8 +312,8 @@ func (s *Server) forcedRuntime() (scionrt.Runtime, bool) {
 	if s.config.ForceRuntime == "" {
 		return nil, false
 	}
-	if s.config.ForceRuntime == s.runtime.Name() {
-		return s.runtime, true
+	if rt := s.currentRuntime(); s.config.ForceRuntime == rt.Name() {
+		return rt, true
 	}
 	if aux, ok := s.findAuxiliaryRuntimeByType(s.config.ForceRuntime); ok {
 		return aux.Runtime, true

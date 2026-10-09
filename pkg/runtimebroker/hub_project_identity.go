@@ -186,10 +186,11 @@ func recordHubProjectIdentity(projectPath, slug, projectID string, inUse func() 
 // agentID is known to this broker in any phase other than stopped or error.
 // A listing failure counts as in use.
 func (s *Server) otherProjectAgentsInUse(ctx context.Context, projectID, agentID string) (bool, error) {
-	if s.manager == nil {
+	mgr := s.currentManager()
+	if mgr == nil {
 		return true, nil
 	}
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true", "scion.project_id": projectID})
+	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true", "scion.project_id": projectID})
 	if err != nil {
 		return true, err
 	}

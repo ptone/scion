@@ -298,8 +298,9 @@ func (s *Server) handleWorkspaceApply(w http.ResponseWriter, r *http.Request) {
 // It first tries to find the container and inspect its volume mounts,
 // then falls back to the known worktree location pattern.
 func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (string, error) {
+	defMgr, defRT := s.defaultPair()
 	// First, try to find the agent in the manager
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
+	agents, err := defMgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
 		return "", fmt.Errorf("failed to list agents: %w", err)
 	}
@@ -322,8 +323,8 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	}
 
 	// Try to get workspace from runtime (Docker volume mounts)
-	if s.runtime != nil {
-		workspacePath, err := s.runtime.GetWorkspacePath(ctx, containerID)
+	if defRT != nil {
+		workspacePath, err := defRT.GetWorkspacePath(ctx, containerID)
 		if err == nil && workspacePath != "" {
 			// Verify the path exists
 			if _, statErr := os.Stat(workspacePath); statErr == nil {
