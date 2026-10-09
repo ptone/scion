@@ -106,6 +106,11 @@ type Candidate struct {
 	Instance config.V1RuntimeBrokerInstanceConfig
 	Identity *brokeridentity.Identity
 	Runtime  runtime.Runtime
+	// StateDir is the instance's broker state root
+	// (runtimebroker.DefaultStateDir of its Runtime Broker ID), resolved
+	// once by the host: its ownership records live there, and its server
+	// uses the same directory (InstanceContext.StateDir).
+	StateDir string
 }
 
 // Activator validates an instance's Hub binding. Activate returns a non-nil
@@ -126,6 +131,8 @@ type InstanceContext struct {
 	Activation *Activation
 	// MultiInstance is true when more than one instance is configured.
 	MultiInstance bool
+	// StateDir is the instance's broker state root (Candidate.StateDir).
+	StateDir string
 	// ConflictingKeys are ownership keys this instance claims that another
 	// configured instance claims too; the instance refuses operations on
 	// them (unresolved ownership).
@@ -203,10 +210,12 @@ type instance struct {
 	scope    brokeridentity.ExecutionScope
 	// ownershipKeys are the instance's live ownership keys (pass 1).
 	ownershipKeys []string
-	server        *runtimebroker.Server
-	ctx           InstanceContext
-	state         State
-	err           error
+	// stateDir is the instance's broker state root (pass 1).
+	stateDir string
+	server   *runtimebroker.Server
+	ctx      InstanceContext
+	state    State
+	err      error
 }
 
 // Host hosts the configured instances.
@@ -301,20 +310,25 @@ func (h *Host) Prepare(ctx context.Context) error {
 			h.refuse(in, fmt.Errorf("flat Runtime Broker instance %q: %w", in.cfg.Key, err))
 			continue
 		}
+		stateDir, err := runtimebroker.DefaultStateDir(id.RuntimeBrokerID)
+		if err != nil {
+			h.refuse(in, fmt.Errorf("flat Runtime Broker instance %q: resolving its state directory: %w", in.cfg.Key, err))
+			continue
+		}
 		if h.cfg.OwnershipPreflight != nil {
-			if err := h.cfg.OwnershipPreflight(ctx, Candidate{Instance: in.cfg, Identity: id, Runtime: rt}); err != nil {
+			if err := h.cfg.OwnershipPreflight(ctx, Candidate{Instance: in.cfg, Identity: id, Runtime: rt, StateDir: stateDir}); err != nil {
 				h.refuse(in, WithReason("ownership_unresolved", fmt.Errorf("flat Runtime Broker instance %q: %w", in.cfg.Key, err)))
 				continue
 			}
 		}
 		var ownKeys []string
 		if h.cfg.OwnershipKeys != nil {
-			if ownKeys, err = h.cfg.OwnershipKeys(ctx, Candidate{Instance: in.cfg, Identity: id, Runtime: rt}); err != nil {
+			if ownKeys, err = h.cfg.OwnershipKeys(ctx, Candidate{Instance: in.cfg, Identity: id, Runtime: rt, StateDir: stateDir}); err != nil {
 				h.refuse(in, WithReason("ownership_unresolved", fmt.Errorf("flat Runtime Broker instance %q: reading its ownership records: %w", in.cfg.Key, err)))
 				continue
 			}
 		}
-		in.rt, in.scope, in.identity, in.ownershipKeys = rt, scope, id, ownKeys
+		in.rt, in.scope, in.identity, in.ownershipKeys, in.stateDir = rt, scope, id, ownKeys, stateDir
 		candidates = append(candidates, in)
 	}
 
@@ -373,7 +387,7 @@ func (h *Host) Prepare(ctx context.Context) error {
 
 	// Pass 2: activate each eligible instance independently.
 	for _, in := range eligible {
-		act, err := h.cfg.Activator.Activate(ctx, Candidate{Instance: in.cfg, Identity: in.identity, Runtime: in.rt})
+		act, err := h.cfg.Activator.Activate(ctx, Candidate{Instance: in.cfg, Identity: in.identity, Runtime: in.rt, StateDir: in.stateDir})
 		if err != nil {
 			h.refuse(in, err)
 			continue
@@ -390,6 +404,7 @@ func (h *Host) Prepare(ctx context.Context) error {
 			Activation:      act,
 			MultiInstance:   h.MultiInstance(),
 			ConflictingKeys: conflicts[in.cfg.Key],
+			StateDir:        in.stateDir,
 			Logger: h.log.With(slog.String(logging.AttrBrokerID, in.identity.RuntimeBrokerID),
 				slog.String("instance", in.cfg.Key)),
 		}

@@ -120,6 +120,9 @@ func TestFlatInstanceServerConfig_ContainerHubAndColocatedStorage(t *testing.T) 
 	assert.Equal(t, "https://public", colocated.ColocatedPublicHubEndpoint)
 	assert.Equal(t, 8080, colocated.HubListenPort)
 	assert.Same(t, st, colocated.ColocatedStorage)
+	withDir := flatInstanceServerConfig(sh, brokerhost.InstanceContext{Instance: inst, Identity: id, Runtime: rt, StateDir: "/state/rb-a",
+		Activation: &brokerhost.Activation{InMemoryCredentials: &brokercredentials.BrokerCredentials{BrokerID: "rb-a"}}})
+	assert.Equal(t, "/state/rb-a", withDir.StateDir, "the server uses the state root the host resolved")
 
 	remote := flatInstanceServerConfig(sh, brokerhost.InstanceContext{Instance: inst, Identity: id, Runtime: rt,
 		Activation: &brokerhost.Activation{RemoteCredentials: []brokercredentials.BrokerCredentials{{BrokerID: "rb-a"}}}})

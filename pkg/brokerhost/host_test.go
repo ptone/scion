@@ -320,3 +320,38 @@ func TestHost_OwnershipKeysConflictAndReadFailure(t *testing.T) {
 		t.Fatal("an instance whose ownership keys cannot be read was built")
 	}
 }
+
+// TestHost_StateDirResolvedOncePerInstance: the host resolves each
+// instance's state root once (DefaultStateDir of its Runtime Broker ID) and
+// gives the same directory to the ownership preflight, the ownership keys
+// and the instance's server context.
+func TestHost_StateDirResolvedOncePerInstance(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := newFixture(t)
+	cfg := f.config(t, dockerInstance("docker-a", "a"), dockerInstance("docker-b", "b"))
+	seen := map[string][]string{}
+	cfg.OwnershipPreflight = func(_ context.Context, c Candidate) error {
+		seen[c.Instance.Key] = append(seen[c.Instance.Key], c.StateDir)
+		return nil
+	}
+	cfg.OwnershipKeys = func(_ context.Context, c Candidate) ([]string, error) {
+		seen[c.Instance.Key] = append(seen[c.Instance.Key], c.StateDir)
+		return nil, nil
+	}
+	build := cfg.BuildServer
+	cfg.BuildServer = func(ic InstanceContext) (*runtimebroker.Server, error) {
+		seen[ic.Instance.Key] = append(seen[ic.Instance.Key], ic.StateDir)
+		return build(ic)
+	}
+	h, err := New(cfg)
+	require.NoError(t, err)
+	require.NoError(t, h.Prepare(context.Background()))
+	dirs := map[string]bool{}
+	for _, st := range h.Status() {
+		want, err := runtimebroker.DefaultStateDir(st.RuntimeBrokerID)
+		require.NoError(t, err)
+		require.Equal(t, []string{want, want, want}, seen[st.Key], st.Key)
+		dirs[want] = true
+	}
+	assert.Len(t, dirs, 2, "one state root per instance")
+}

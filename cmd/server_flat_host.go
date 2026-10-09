@@ -483,7 +483,7 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 	if err != nil {
 		return fmt.Errorf("cannot read the execution scope to establish ownership: %w", err)
 	}
-	dir, err := runtimebroker.DefaultStateDir(c.Identity.RuntimeBrokerID)
+	dir, err := candidateStateDir(c)
 	if err != nil {
 		return err
 	}
@@ -536,11 +536,21 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 // host compares across instances: a key two instances claim is conflicting
 // and both refuse operations on it.
 func flatOwnershipKeys(_ context.Context, c brokerhost.Candidate) ([]string, error) {
-	dir, err := runtimebroker.DefaultStateDir(c.Identity.RuntimeBrokerID)
+	dir, err := candidateStateDir(c)
 	if err != nil {
 		return nil, err
 	}
 	return runtimebroker.NewOwnershipStore(dir, c.Identity.RuntimeBrokerID).LiveKeys()
+}
+
+// candidateStateDir is the state root the host resolved for the candidate
+// (the same directory its server uses), or DefaultStateDir of its Runtime
+// Broker ID when called without a host.
+func candidateStateDir(c brokerhost.Candidate) (string, error) {
+	if c.StateDir != "" {
+		return c.StateDir, nil
+	}
+	return runtimebroker.DefaultStateDir(c.Identity.RuntimeBrokerID)
 }
 
 // flatServerShared are the process-wide inputs of every flat instance's
@@ -582,6 +592,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 		WriteTimeout:                  cfg.RuntimeBroker.WriteTimeout,
 		HubEndpoint:                   sh.hubEndpoint,
 		BrokerID:                      ic.Identity.RuntimeBrokerID,
+		StateDir:                      ic.StateDir,
 		BrokerName:                    ic.Instance.Name,
 		CORSEnabled:                   cfg.RuntimeBroker.CORSEnabled,
 		CORSAllowedOrigins:            cfg.RuntimeBroker.CORSAllowedOrigins,
