@@ -502,3 +502,35 @@ func TestOwnershipStore_BeginDeleteVersusConcurrentStart(t *testing.T) {
 		}
 	}
 }
+
+// TestOwnershipStore_ReconstructKnowsObjectsOfAnUnfinishedDelete: an
+// object of a record (or run) whose delete started is known and pending
+// deletion: Reconstruct appends nothing and does not fail; an object of a
+// finished run is unresolved.
+func TestOwnershipStore_ReconstructKnowsObjectsOfAnUnfinishedDelete(t *testing.T) {
+	labels := map[string]string{api.LabelRuntimeBrokerID: "rb-a", "scion.project_id": "p", "agent_id": "a",
+		"scion.name": "worker", api.LabelRunID: "run-1"}
+	obj := api.AgentInfo{Name: "worker", ContainerID: "cid-1", Labels: labels}
+	for name, tc := range map[string]struct {
+		set     func(s *OwnershipStore)
+		wantErr bool
+	}{
+		"record deleting": {func(s *OwnershipStore) { require.NoError(t, s.SetRecordState("p", "a", OwnershipStateDeleting)) }, false},
+		"run deleting":    {func(s *OwnershipStore) { require.NoError(t, s.SetRunState("p", "a", "run-1", OwnershipStateDeleting)) }, false},
+		"run deleted":     {func(s *OwnershipStore) { require.NoError(t, s.SetRunState("p", "a", "run-1", OwnershipStateDeleted)) }, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := NewOwnershipStore(t.TempDir(), "rb-a")
+			require.NoError(t, s.BeginRun("p", "a", "worker", "run-1"))
+			tc.set(s)
+			err := s.Reconstruct(obj)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			rec, _, _ := s.Get("p", "a")
+			assert.Empty(t, rec.Run("run-1").Resources, "nothing appended to a delete in progress")
+		})
+	}
+}

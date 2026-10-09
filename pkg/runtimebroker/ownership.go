@@ -993,7 +993,7 @@ func (s *Server) completeOwnedStart(ctx context.Context, mgr agent.Manager, runI
 	if o.latched() != nil {
 		// Recording failed, so the record may lack some of these objects;
 		// the launch's own journal makes them this instance's to clean up.
-		// Each UID stays bound to its project, agent and run.
+		// The creating run is kept with each UID for diagnosis.
 		for _, h := range o.snapshot() {
 			if h.UID != "" {
 				s.unmirroredUIDs.Store(h.UID, ownedRunKey{projectID: o.projectID, agentID: o.agentID, runID: o.runID})

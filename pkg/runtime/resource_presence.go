@@ -31,8 +31,8 @@ import (
 )
 
 // Exact presence of launch-created objects, for a flat Runtime Broker
-// instance's ownership records (ptone/scion#3274, architecture ruling r10:
-// a successful delete request is not confirmed absence).
+// instance's ownership records (ptone/scion#3274): a successful delete
+// request is not confirmed absence.
 
 // ResourceAbsenceChecker establishes whether the object a handle names is
 // gone, by its immutable identity. ResourceAbsent returns true only for an

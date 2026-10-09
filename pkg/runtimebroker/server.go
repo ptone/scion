@@ -335,10 +335,12 @@ type Server struct {
 	// ownedStarts maps a run ID to its in-flight ownership mirror
 	// (installOwnedStart / completeOwnedStart).
 	ownedStarts sync.Map
-	// unmirroredUIDs maps object UIDs from the journals of this instance's
-	// launches whose ownership recording failed to the run (project, agent,
-	// run) that created them; launch cleanup may delete them although the
-	// record may lack them (launchHandleOwned).
+	// unmirroredUIDs holds the object UIDs from the journals of this
+	// instance's launches whose ownership recording failed; launch cleanup
+	// may delete them although the record may lack them (launchHandleOwned).
+	// The value is the creating run, kept for diagnosis only: ownership is
+	// decided by the UID, which is immutable and unique on every runtime a
+	// flat instance can use (each must confirm absence by identity).
 	unmirroredUIDs sync.Map
 	// ownershipSetupErr refuses a flat instance whose manager could not be
 	// owner-scoped (startServices).
@@ -494,7 +496,8 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		// Fail closed: without an exact absence check a deleted agent's
-		// record and slug could never be finished (architecture ruling r10).
+		// record and slug could never be finished (a delete request is not
+		// confirmed absence).
 		if _, ok := rt.(scionrt.ResourceAbsenceChecker); !ok {
 			srv.ownershipSetupErr = fmt.Errorf("flat Runtime Broker %s: its runtime (%T) cannot confirm that a deleted object is gone, so it cannot serve as a flat instance", fi.Identity.RuntimeBrokerID, rt)
 			slog.Error("Flat Runtime Broker instance will not serve", "error", srv.ownershipSetupErr)

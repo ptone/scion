@@ -104,7 +104,7 @@ func assertNewerRunUntouched(t *testing.T, f *partitionFixture, newRunState stri
 	}
 }
 
-// TestFlatRunFence_OldRunDeleteSparesNewerRun is the review reproduction:
+// TestFlatRunFence_OldRunDeleteSparesNewerRun is the regression test:
 // a delete fenced to the old run removes only the old run's object and
 // moves only that run to deleted.
 func TestFlatRunFence_OldRunDeleteSparesNewerRun(t *testing.T) {
