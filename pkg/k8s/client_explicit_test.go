@@ -15,13 +15,19 @@
 package k8s
 
 import (
+	"context"
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+
+	"golang.org/x/oauth2"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 const explicitTestKubeconfig = `apiVersion: v1
@@ -47,8 +53,11 @@ contexts:
 current-context: ctx-a
 `
 
-// simulatePod makes the in-cluster environment variables present, so a
-// loader that could fall back to in-cluster credentials would try to.
+// simulatePod sets the in-cluster environment variables. client-go's
+// in-cluster configuration also needs the service-account token file at
+// its fixed path, which a test cannot create, so this does NOT make an
+// in-cluster fallback possible: the absence of the in-cluster leg is
+// proven structurally by TestExplicitFileClientConfig_IsDirectWithNoInClusterLeg.
 func simulatePod(t *testing.T) {
 	t.Helper()
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
@@ -110,13 +119,18 @@ func TestNewClientFromKubeconfigFile_NoFallback(t *testing.T) {
 	if err := os.WriteFile(contextless, []byte(noCurrent), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for name, path := range map[string]string{
-		"zero-byte file":     empty,
-		"no current-context": contextless,
-		"missing file":       filepath.Join(dir, "missing.kubeconfig"),
+	valid := filepath.Join(dir, "valid.kubeconfig")
+	if err := os.WriteFile(valid, []byte(explicitTestKubeconfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct{ path, context string }{
+		"zero-byte file":     {empty, ""},
+		"no current-context": {contextless, ""},
+		"missing file":       {filepath.Join(dir, "missing.kubeconfig"), ""},
+		"unknown context":    {valid, "no-such-context"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c, err := NewClientFromKubeconfigFile(path, "")
+			c, err := NewClientFromKubeconfigFile(tc.path, tc.context)
 			if err == nil {
 				t.Fatalf("got a client (context %q, host %q); want an error with no fallback", c.CurrentContext, c.Config.Host)
 			}
@@ -138,26 +152,59 @@ func writeTestCA(t *testing.T, dir string) {
 	}
 }
 
-// TestNewClientFromKubeconfigFile_NoADCSubstitution: when the explicit
-// file's exec credential plugin fails on GCE, Verify refuses instead of
-// switching to Application Default Credentials.
-func TestNewClientFromKubeconfigFile_NoADCSubstitution(t *testing.T) {
-	t.Setenv("GCE_METADATA_HOST", "127.0.0.1:1") // metadata.OnGCE reports true
-	dir := t.TempDir()
-	path := filepath.Join(dir, "exec.kubeconfig")
+// versionServer is a TLS API server that answers /version only to a
+// request carrying "Bearer <token>"; it records the Authorization headers.
+func versionServer(t *testing.T, token string) (*httptest.Server, *[]string) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"major":"1","minor":"30","gitVersion":"v1.30.0"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &seen
+}
+
+// stubADC replaces the Application Default Credentials token source with a
+// usable static token and counts how often it is requested.
+func stubADC(t *testing.T, token string) *atomic.Int32 {
+	t.Helper()
+	var calls atomic.Int32
+	orig := defaultTokenSource
+	t.Cleanup(func() { defaultTokenSource = orig })
+	defaultTokenSource = func(context.Context, ...string) (oauth2.TokenSource, error) {
+		calls.Add(1)
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}), nil
+	}
+	return &calls
+}
+
+// execKubeconfig writes a kubeconfig for server whose user is the exec
+// credential plugin command.
+func execKubeconfig(t *testing.T, server, command string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "exec.kubeconfig")
 	content := `apiVersion: v1
 kind: Config
 clusters:
 - name: c
   cluster:
-    server: https://127.0.0.1:1
+    server: ` + server + `
     insecure-skip-tls-verify: true
 users:
 - name: u
   user:
     exec:
       apiVersion: client.authentication.k8s.io/v1beta1
-      command: /bin/false
+      command: ` + command + `
       interactiveMode: Never
 contexts:
 - name: ctx
@@ -169,7 +216,18 @@ current-context: ctx
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c, err := NewClientFromKubeconfigFile(path, "")
+	return path
+}
+
+// TestNewClientFromKubeconfigFile_NoADCSubstitution: on GCE, with usable
+// Application Default Credentials that the cluster would accept, a failing
+// exec plugin of an explicit file makes Verify refuse, and the ADC source is
+// never requested.
+func TestNewClientFromKubeconfigFile_NoADCSubstitution(t *testing.T) {
+	t.Setenv("GCE_METADATA_HOST", "127.0.0.1:1") // metadata.OnGCE reports true
+	srv, seen := versionServer(t, "adc-token")
+	adc := stubADC(t, "adc-token")
+	c, err := NewClientFromKubeconfigFile(execKubeconfig(t, srv.URL, "/bin/false"), "")
 	if err != nil {
 		t.Fatalf("construct: %v", err)
 	}
@@ -183,7 +241,96 @@ current-context: ctx
 	if !strings.Contains(err.Error(), "Ensure the credential plugin is installed") {
 		t.Errorf("want the operator hint, got: %v", err)
 	}
-	if strings.Contains(err.Error(), "Application Default Credentials (ADC) auth fallback") {
-		t.Errorf("the ADC fallback was attempted: %v", err)
+	if n := adc.Load(); n != 0 {
+		t.Errorf("the ADC token source was requested %d time(s)", n)
+	}
+	for _, h := range *seen {
+		if h == "Bearer adc-token" {
+			t.Error("a request reached the cluster with the ADC token")
+		}
+	}
+}
+
+// TestVerify_DefaultClientExecFailureStillUsesADC: the default/legacy
+// client (not an explicit file) keeps its recovery: on GCE a failing exec
+// plugin falls back to Application Default Credentials, which the cluster
+// accepts.
+func TestVerify_DefaultClientExecFailureStillUsesADC(t *testing.T) {
+	t.Setenv("GCE_METADATA_HOST", "127.0.0.1:1")
+	t.Setenv("KUBECONFIG", "")
+	srv, seen := versionServer(t, "adc-token")
+	adc := stubADC(t, "adc-token")
+	c, err := NewClientWithContext(execKubeconfig(t, srv.URL, "/bin/false"), "")
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	if err := c.Verify(); err != nil {
+		t.Fatalf("the default client must recover through ADC: %v", err)
+	}
+	if n := adc.Load(); n != 1 {
+		t.Errorf("ADC token source requested %d time(s), want 1", n)
+	}
+	found := false
+	for _, h := range *seen {
+		found = found || h == "Bearer adc-token"
+	}
+	if !found {
+		t.Errorf("the cluster never saw the ADC token: %v", *seen)
+	}
+}
+
+// TestNewClientFromKubeconfigFile_ExecPluginSucceedsAndRefreshes: the
+// explicit file's own exec plugin acquires the credential, and acquires it
+// again once it expired; ADC is never requested.
+func TestNewClientFromKubeconfigFile_ExecPluginSucceedsAndRefreshes(t *testing.T) {
+	t.Setenv("GCE_METADATA_HOST", "127.0.0.1:1")
+	srv, _ := versionServer(t, "plugin-token")
+	adc := stubADC(t, "adc-token")
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "runs")
+	script := filepath.Join(dir, "plugin.sh")
+	// The credential is already expired when issued, so the next request
+	// runs the plugin again (client-go refreshes an expired credential).
+	body := "#!/bin/sh\necho run >> '" + counter + "'\n" +
+		`echo '{"apiVersion":"client.authentication.k8s.io/v1beta1","kind":"ExecCredential","status":{"token":"plugin-token","expirationTimestamp":"2000-01-01T00:00:00Z"}}'` + "\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewClientFromKubeconfigFile(execKubeconfig(t, srv.URL, script), "")
+	if err != nil {
+		t.Fatalf("construct: %v", err)
+	}
+	if err := c.Verify(); err != nil {
+		t.Fatalf("Verify with the plugin's credential: %v", err)
+	}
+	if _, err := c.Clientset.Discovery().ServerVersion(); err != nil {
+		t.Fatalf("request after the credential expired: %v", err)
+	}
+	data, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runs := strings.Count(string(data), "run"); runs < 2 {
+		t.Errorf("the plugin ran %d time(s), want a refresh (at least 2)", runs)
+	}
+	if n := adc.Load(); n != 0 {
+		t.Errorf("the ADC token source was requested %d time(s)", n)
+	}
+}
+
+// TestExplicitFileClientConfig_IsDirectWithNoInClusterLeg: the explicit
+// file's configuration is a direct client configuration, never the deferred
+// loader (whose in-cluster leg can substitute in-cluster credentials).
+func TestExplicitFileClientConfig_IsDirectWithNoInClusterLeg(t *testing.T) {
+	cfg, err := clientcmd.Load([]byte(explicitTestKubeconfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc := explicitFileClientConfig(cfg, "")
+	if _, ok := cc.(*clientcmd.DirectClientConfig); !ok {
+		t.Fatalf("explicit file config is %T, want *clientcmd.DirectClientConfig", cc)
+	}
+	if _, ok := cc.(*clientcmd.DeferredLoadingClientConfig); ok {
+		t.Fatal("explicit file config is the deferred loader")
 	}
 }

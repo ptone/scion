@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 var (
@@ -99,8 +100,7 @@ func NewClientFromKubeconfigFile(path, contextName string) (*Client, error) {
 	if err := clientcmd.ResolveLocalPaths(cfg); err != nil {
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
-	restCfg, err := clientcmd.NewNonInteractiveClientConfig(*cfg, contextName,
-		&clientcmd.ConfigOverrides{CurrentContext: contextName}, nil).ClientConfig()
+	restCfg, err := explicitFileClientConfig(cfg, contextName).ClientConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
 	}
@@ -116,6 +116,15 @@ func NewClientFromKubeconfigFile(path, contextName string) (*Client, error) {
 	}
 	c.explicitFile = true
 	return c, nil
+}
+
+// explicitFileClientConfig is the client configuration of one loaded
+// kubeconfig file: a direct configuration with no loading rules and no
+// in-cluster leg (unlike the deferred loader, which falls back to
+// in-cluster credentials when its sources yield an empty configuration).
+func explicitFileClientConfig(cfg *clientcmdapi.Config, contextName string) clientcmd.ClientConfig {
+	return clientcmd.NewNonInteractiveClientConfig(*cfg, contextName,
+		&clientcmd.ConfigOverrides{CurrentContext: contextName}, nil)
 }
 
 func newClientWithContext(
