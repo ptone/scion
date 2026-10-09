@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=187   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: seven refusals, four acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check).
+EXPECTED_TOTAL=193   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: seven refusals, four acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 6 (image digest-or-tag: four refusals, two rendered-reference checks).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -29,7 +29,7 @@ HELM="${HELM:-helm}"
 # BASE render would return an error string instead of manifests and every check below would
 # accuse the chart of a fault it does not have. The chart will not default it - a generated
 # secret rotates on every helm upgrade, invalidating every session and the JWT signing key.
-BASE=(--set image.repository=r --set agents.imageRegistry=example.invalid/agents --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid --set auth.sessionSecret=harness-not-a-real-secret --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
+BASE=(--set image.repository=r --set image.tag=ci --set agents.imageRegistry=example.invalid/agents --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid --set auth.sessionSecret=harness-not-a-real-secret --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
 
 # A COMPLETE WEB CLIENT CREDENTIAL, for the rows that need auth.mode=oauth to
 # render at all. Not folded into BASE, because several rows below exist
@@ -640,6 +640,38 @@ reject "runAsUser 0, helper layer"   "runAsUser may not be 0"     --skip-schema-
 reject "runAsGroup 0, helper layer"  "runAsGroup may not be 0"    --skip-schema-validation --set hub.securityContext.runAsGroup=0
 reject "image.repository empty, schema layer" "String length must be greater than or equal to 1" --set image.repository=""
 reject "image.repository empty, helper layer" "image.repository is required" --skip-schema-validation --set image.repository=""
+
+echo "== image version: digest or an explicit tag, never an implicit default =="
+# image.tag used to default to the chart appVersion, which is not a published
+# tag, so the default rendered clean and failed at pull time. BASE sets
+# image.tag=ci; each refusal row below clears it. The two positive rows read the
+# rendered reference, so a guard that accepted but emitted the wrong image would
+# still go red.
+_IMG_DIGEST=sha256:abababababababababababababababababababababababababababababababab
+reject "neither digest nor tag: names both values" "image.digest or image.tag is required" --set image.tag=""
+reject "neither digest nor tag: names the remedy"  "Set image.digest (preferred)"          --set image.tag=""
+reject "tag key removed entirely (null)"           "image.digest or image.tag is required" --set image.tag=null
+reject "digest and tag together"                   "mutually exclusive"                    --set image.digest="$_IMG_DIGEST"
+# renders_image <label> <expected image reference> <helm args...>
+renders_image() {
+  local label="$1" want="$2"; shift 2
+  executed=$((executed + 1))
+  local out
+  if ! out="$(render "$@")"; then
+    echo "FAIL  rejected but must accept: ${label}"
+    echo "        $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+    failed=$((failed + 1)); return
+  fi
+  if printf '%s\n' "$out" | grep -qxF "          image: \"${want}\""; then
+    echo "ok    accepted: ${label} -> ${want}"
+  else
+    echo "FAIL  ${label}: rendered, but the hub image is not ${want}"
+    echo "        got:  $(printf '%s\n' "$out" | grep -E '^ +image: ' | tr '\n' ' ' | cut -c1-200)"
+    failed=$((failed + 1))
+  fi
+}
+renders_image "explicit tag only"  "r:abc1234"         --set image.tag=abc1234
+renders_image "digest only"        "r@${_IMG_DIGEST}"  --set image.tag="" --set image.digest="$_IMG_DIGEST"
 
 echo "== startup budget: A PRODUCT, WHICH NO PER-FIELD SCHEMA BOUND CAN EXPRESS =="
 # Every one of these rendered clean with the schema FULLY ACTIVE before the

@@ -522,7 +522,13 @@ default. Without these verbs that path fails with a permission error.
 {{- end }}
 
 {{/*
-Container image reference. digest wins; tag defaults to the chart appVersion.
+Container image reference. Exactly one of image.digest and image.tag must be set.
+
+NO DEFAULT VERSION. The tag used to default to .Chart.AppVersion, and no image is
+published under that tag (hack/version.sh leaves the version empty off-tag), so
+the default rendered cleanly and failed at pull time with ErrImagePull, naming
+neither value. A render with neither set now fails here and names both. Do not
+replace the failure with a moving tag such as latest.
 
 image.repository is required HERE as well as in the schema, and the second layer
 is the point. With the schema layer removed - deleted, or skipped with
@@ -550,8 +556,10 @@ layers are now asserted separately in the guard table.
 {{- end }}
 {{- if .Values.image.digest }}
 {{- printf "%s@%s" $repository .Values.image.digest }}
+{{- else if .Values.image.tag }}
+{{- printf "%s:%s" $repository .Values.image.tag }}
 {{- else }}
-{{- printf "%s:%s" $repository (default .Chart.AppVersion .Values.image.tag) }}
+{{- fail "image.digest or image.tag is required: neither is set, and the chart has no default image version. Set image.digest (preferred) to the sha256 digest of your scion-hub-gke build, or set image.tag explicitly to a tag that build pushed (image-build/cloudbuild-hub-gke.yaml pushes the git short SHA). The chart appVersion is not used as a tag: no image is published under it." }}
 {{- end }}
 {{- end }}
 

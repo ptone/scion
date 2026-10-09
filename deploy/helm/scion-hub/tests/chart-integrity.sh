@@ -51,7 +51,7 @@ CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # and B accuse the chart of dropping templates it never dropped. The chart will not default it -
 # a generated secret rotates on every upgrade - so the harness supplies one, exactly as it
 # supplies a base URL.
-BASE_NO_SECRET=(--set image.repository=example.invalid/scion-hub --set agents.imageRegistry=example.invalid/agents --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)
+BASE_NO_SECRET=(--set image.repository=example.invalid/scion-hub --set image.tag=ci --set agents.imageRegistry=example.invalid/agents --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)
 BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real-secret)
 
 # HELD AT 26 ON PURPOSE, AND THIS SCRIPT THEREFORE EXITS 2.

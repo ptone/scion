@@ -51,10 +51,10 @@ type: application
 # The chart's own version. Bumped independently of appVersion.
 version: 0.1.0
 
-# appVersion tracks the hub release the chart is written against, and is the
-# default for image.tag. The repository publishes no version tags today
-# (hack/version.sh leaves the version empty off-tag), so this is a placeholder:
-# pin image.digest, or set image.tag explicitly, for any real install.
+# appVersion tracks the hub release the chart is written against. It is NOT a
+# default for image.tag: the repository publishes no version tags today
+# (hack/version.sh leaves the version empty off-tag), so the chart refuses to
+# render unless image.digest or image.tag is set explicitly.
 appVersion: "0.1.0"
 
 home: https://github.com/GoogleCloudPlatform/scion

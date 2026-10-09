@@ -110,7 +110,10 @@ image:
   #   repository: us-docker.pkg.dev/my-project/my-repo/scion-hub-gke
   #
 
-  # Defaults to .Chart.AppVersion when empty. Prefer digest.
+  # Set exactly one of tag and digest; the chart refuses to render with neither.
+  # There is no default version: the chart appVersion is not a published tag,
+  # and a moving tag such as latest is not accepted as a default either.
+  # A tag here is one your build pushed, e.g. the git short SHA.
   tag: ""
   # Preferred over tag, and mutually exclusive with it. A tag can be repointed
   # underneath a running cluster; a digest cannot.

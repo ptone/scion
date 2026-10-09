@@ -100,9 +100,10 @@ gcloud builds submit \
 [`image-build/README.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/image-build/README.md#gke-hub-image-cloudbuild-hub-gkeyaml).
 
 Pin the image by digest with `image.digest`. `image.tag` is accepted, but a tag
-can be repointed and a digest cannot. The two are mutually exclusive. If neither
-is set, the tag defaults to the chart's `appVersion` (`0.1.0`), which is a
-placeholder that no build pushes. Because the image is amd64 only, set
+can be repointed and a digest cannot. The two are mutually exclusive, and one of
+them is required: the chart has no default image version, and `helm template` /
+`helm install` fail with a message naming both values if neither is set. The
+chart's `appVersion` is not used as a tag. Because the image is amd64 only, set
 `hub.nodeSelector` to `{kubernetes.io/arch: amd64}` on clusters that also have
 arm64 nodes.
 
@@ -120,6 +121,7 @@ value.
 | `hub.baseUrl` | The external URL of the hub, for example `https://hub.example.com`. It must start with `https://`: the session cookie's `Secure` attribute is derived from that prefix. |
 | `auth.existingSecret` or `auth.sessionSecret` | Exactly one. The session secret is both the cookie encryption key and the hub's JWT signing key, so every replica must see the same value. `auth.existingSecret` names a Secret you manage; the key defaults to `SCION_SERVER_SESSION_SECRET` and can be changed with `auth.existingSecretKey`. |
 | `image.repository` | Your `scion-hub-gke` repository (see above). |
+| `image.digest` or `image.tag` | Exactly one. Prefer `image.digest`. There is no default version (see above). |
 | `agents.imageRegistry` | The registry prefix agent images are pulled from, for example `us-docker.pkg.dev/my-project/scion`. The in-process Runtime Broker does not start without one. The chart also accepts `profiles.default.image_registry` set through `config.extra` (the chart fixes `active_profile` to `default`, and `config.extra` cannot override it), or `SCION_IMAGE_REGISTRY` / `SCION_MAINTENANCE_IMAGE_REGISTRY` set through `hub.extraEnv`. Under `config.existingSecret` this value is not checked, and your settings file must set it. |
 | `auth.proxy.iap.audience` | Required while `auth.mode` is `proxy`, which is the default. See [Authentication](#4-authentication). |
 
@@ -440,7 +442,7 @@ refuse to render, with a message naming the value, in cases including:
 - a missing or non-`https://` `hub.baseUrl`, a missing `hub.hubId`,
   `image.repository`, or agent image registry;
 - no session secret, or both `auth.sessionSecret` and `auth.existingSecret`;
-- both `image.tag` and `image.digest`;
+- both `image.tag` and `image.digest`, or neither;
 - an HA deployment whose settings the hub's preflight would refuse (see above);
 - `database.driver: postgres` without `cloudsql.enabled`, or without
   `database.auth`;

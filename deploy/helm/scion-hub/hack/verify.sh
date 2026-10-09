@@ -506,6 +506,7 @@ expect_render_failure() {
 # PROBE_CREDS.
 BASE_ES=(
   --set image.repository=example.test/scion-hub-gke
+  --set image.tag=ci
   --set hub.hubId=neg
   --set hub.baseUrl=https://neg.example.com
   --set auth.sessionSecret=neg-session-secret
@@ -2105,7 +2106,7 @@ declare -A PROBE_MUTATION=(
   [hub.home]='--set-string|hub.home=/probe/home'
   [hub.hubId]='--set-string|hub.hubId=probe-two'
   [hub.tolerations]='--set-string|hub.tolerations[0].key=probe|--set-string|hub.tolerations[0].operator=Exists'
-  [image.digest]='--set-string|image.digest=sha256:abababababababababababababababababababababababababababababababab'
+  [image.digest]='--set-string|image.tag=|--set-string|image.digest=sha256:abababababababababababababababababababababababababababababababab'
   [image.pullPolicy]='--set-string|image.pullPolicy=Never'
   [image.pullSecrets]='--set-string|image.pullSecrets[0].name=probe-secret'
   [image.repository]='--set-string|image.repository=other.test/probe-img'
@@ -3878,6 +3879,7 @@ expect_render_failure \
 cat >"$WORK/pem-env.yaml" <<'PEMVALUES'
 image:
   repository: example.test/scion-hub-gke
+  tag: ci
 hub:
   hubId: neg
   baseUrl: https://neg.example.com
@@ -3994,6 +3996,7 @@ expect_render_failure \
 cat >"$WORK/extra-nil.yaml" <<'NILVALUES'
 image:
   repository: example.test/scion-hub-gke
+  tag: ci
 hub:
   hubId: neg
   baseUrl: https://neg.example.com
@@ -4031,6 +4034,7 @@ expect_render_failure \
 cat >"$WORK/null-server.yaml" <<'NULLSERVER'
 image:
   repository: example.test/scion-hub-gke
+  tag: ci
 hub:
   hubId: neg
   baseUrl: https://neg.example.com
@@ -4072,6 +4076,7 @@ expect_render_failure \
   "the SCHEMA rejects a plaintext base URL" \
   "baseUrl" \
   --set image.repository=example.test/scion-hub-gke \
+  --set image.tag=ci \
   --set hub.hubId=neg \
   --set hub.baseUrl=http://neg.example.com
 
@@ -4117,6 +4122,7 @@ expect_render_failure \
   "The session cookie's Secure attribute is derived from this prefix" \
   --skip-schema-validation \
   --set image.repository=example.test/scion-hub-gke \
+  --set image.tag=ci \
   --set hub.hubId=neg \
   --set hub.baseUrl=http://neg.example.com \
   --set auth.sessionSecret=neg-session-secret \
@@ -4307,6 +4313,7 @@ done
 cat >"$WORK/multiline-env.yaml" <<'MLVALUES'
 image:
   repository: example.test/scion-hub-gke
+  tag: ci
 hub:
   hubId: neg
   baseUrl: https://neg.example.com

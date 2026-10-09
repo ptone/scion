@@ -77,12 +77,12 @@
         },
         "tag": {
           "type": "string",
-          "description": "Defaults to the chart appVersion. Mutually exclusive with digest."
+          "description": "No default: the chart refuses to render unless this or digest is set. Mutually exclusive with digest."
         },
         "digest": {
           "type": "string",
           "pattern": "^(|sha256:[a-f0-9]{64})$",
-          "description": "Preferred over tag. Mutually exclusive with it."
+          "description": "Preferred over tag. Mutually exclusive with it. One of the two is required."
         },
         "pullPolicy": {
           "type": "string",
