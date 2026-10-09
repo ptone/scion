@@ -90,10 +90,12 @@ func partitionObject(owner, agentID, slug, id string) api.AgentInfo {
 func preparePartitionHost(t *testing.T, globalDir string, d *partitionDaemon, key string) *brokerhost.Host {
 	t.Helper()
 	h, err := brokerhost.New(brokerhost.Config{
-		GlobalDir:  globalDir,
-		Instances:  []config.V1RuntimeBrokerInstanceConfig{{Key: key, Name: key, RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}},
-		Mode:       brokerhost.ModeColocated,
-		NewRuntime: func(context.Context, config.V1RuntimeBrokerInstanceConfig) (runtime.Runtime, error) { return d.runtime(), nil },
+		GlobalDir: globalDir,
+		Instances: []config.V1RuntimeBrokerInstanceConfig{{Key: key, Name: key, RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}}},
+		Mode:      brokerhost.ModeColocated,
+		NewRuntime: func(context.Context, config.V1RuntimeBrokerInstanceConfig) (runtime.Runtime, error) {
+			return d.runtime(), nil
+		},
 		ProbeScope: fakeScopeProber("shared-daemon"),
 		Activator:  &recordingFlatActivator{},
 		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
