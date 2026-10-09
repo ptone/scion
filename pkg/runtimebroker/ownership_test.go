@@ -442,3 +442,63 @@ func TestOwnershipStore_ReconcileAbsentUsesExactCheckForUnlistedPods(t *testing.
 	rec, _, _ = s.Get("proj", "agent-1")
 	assert.False(t, rec.OwnsUID("pod-uid"))
 }
+
+func TestOwnershipStore_BeginDeleteDecision(t *testing.T) {
+	newStore := func(t *testing.T, liveOther bool) *OwnershipStore {
+		s := NewOwnershipStore(t.TempDir(), "rb-a")
+		require.NoError(t, s.BeginRun("p", "a", "worker", "run-old"))
+		if liveOther {
+			require.NoError(t, s.BeginRun("p", "a", "worker", "run-new"))
+		}
+		return s
+	}
+	for name, tc := range map[string]struct {
+		liveOther  bool
+		runID      string
+		wholeAgent bool
+		want       deleteScope
+	}{
+		"fenced, newer run live":           {true, "run-old", true, deleteScopeRun},
+		"fenced, no other run":             {false, "run-old", true, deleteScopeRecord},
+		"fenced, not whole":                {false, "run-old", false, deleteScopeRun},
+		"unknown run, newer run live":      {true, "run-gone", true, deleteScopeNone},
+		"unfenced whole":                   {true, "", true, deleteScopeRecord},
+		"unfenced, not whole":              {true, "", false, deleteScopeNone},
+		"unknown run, old run live, whole": {false, "run-gone", true, deleteScopeNone},
+		"unknown run, no other, not whole": {false, "run-gone", false, deleteScopeNone},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newStore(t, tc.liveOther)
+			got, err := s.BeginDelete("p", "a", tc.runID, tc.wholeAgent)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+			rec, _, _ := s.Get("p", "a")
+			assert.Equal(t, tc.want == deleteScopeRecord, rec.State == OwnershipStateDeleting)
+			if tc.want == deleteScopeRun {
+				assert.Equal(t, OwnershipStateDeleting, rec.Run(tc.runID).State)
+			}
+		})
+	}
+}
+
+// TestOwnershipStore_BeginDeleteVersusConcurrentStart: a whole-agent delete
+// fenced to the old run and a new run's BeginRun racing each other never
+// end with the whole record deleting AND the new run begun: either the new
+// run starts first (the delete then acts on the old run only) or the delete
+// wins (the new run is refused).
+func TestOwnershipStore_BeginDeleteVersusConcurrentStart(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		s := NewOwnershipStore(t.TempDir(), "rb-a")
+		require.NoError(t, s.BeginRun("p", "a", "worker", "run-old"))
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); _, _ = s.BeginDelete("p", "a", "run-old", true) }()
+		go func() { defer wg.Done(); _ = s.BeginRun("p", "a", "worker", "run-new") }()
+		wg.Wait()
+		rec, _, err := s.Get("p", "a")
+		require.NoError(t, err)
+		if rec.State == OwnershipStateDeleting && rec.Run("run-new") != nil {
+			t.Fatalf("iteration %d: the whole record is deleting with a just-begun run: %+v", i, rec.Runs)
+		}
+	}
+}

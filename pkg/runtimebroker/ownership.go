@@ -1549,31 +1549,76 @@ func (s *Server) beginOwnedDelete(projectID, slug, runID string, hasObject, whol
 	if err != nil || rec == nil {
 		return nil, err
 	}
-	if rec.State == OwnershipStateActive && runID != "" {
-		otherLive := liveRunsOtherThan(rec, runID)
-		run := rec.Run(runID)
-		if run == nil {
-			if otherLive || !wholeAgent {
-				return nil, nil
-			}
-		} else if otherLive || !wholeAgent {
-			if runStateOrder[run.State] >= runStateOrder[OwnershipStateDeleted] {
-				return nil, nil
-			}
-			if err := s.ownership.SetRunState(projectID, rec.AgentID, runID, OwnershipStateDeleting); err != nil {
-				return nil, err
-			}
-			return &ownedDelete{projectID: projectID, agentID: rec.AgentID, runID: runID}, nil
-		}
-	}
-	if !wholeAgent {
-		return nil, nil
-	}
-	if err := s.ownership.SetRecordState(projectID, rec.AgentID, OwnershipStateDeleting); err != nil {
+	scope, err := s.ownership.BeginDelete(projectID, rec.AgentID, runID, wholeAgent)
+	switch {
+	case err != nil:
 		return nil, err
+	case scope == deleteScopeRun:
+		return &ownedDelete{projectID: projectID, agentID: rec.AgentID, runID: runID}, nil
+	case scope == deleteScopeRecord:
+		return &ownedDelete{projectID: projectID, agentID: rec.AgentID, wholeRecord: true}, nil
 	}
-	return &ownedDelete{projectID: projectID, agentID: rec.AgentID, wholeRecord: true}, nil
+	return nil, nil
 }
+
+// deleteScope is what a delete acts on (BeginDelete).
+type deleteScope int
+
+const (
+	deleteScopeNone deleteScope = iota
+	deleteScopeRun
+	deleteScopeRecord
+)
+
+// BeginDelete decides what a delete acts on and moves it to deleting, in
+// one step under the record's key lock, so a concurrent BeginRun cannot
+// land between the decision and the transition:
+//   - a delete fenced to a run (runID) acts on that run only when another
+//     run is live or the delete is not a whole-agent delete; it does
+//     nothing when it names a run the record does not have while another
+//     run is live, or a run already deleted;
+//   - otherwise a whole-agent delete moves the whole record to deleting
+//     (an already deleting record continues as a whole-record delete);
+//   - anything else acts on nothing.
+func (s *OwnershipStore) BeginDelete(projectID, agentID, runID string, wholeAgent bool) (deleteScope, error) {
+	scope := deleteScopeNone
+	_, err := s.mutate(projectID, agentID, func(r *OwnershipRecord) error {
+		scope = deleteScopeNone
+		if r.State == OwnershipStateActive && runID != "" {
+			otherLive := liveRunsOtherThan(r, runID)
+			if run := r.Run(runID); run == nil {
+				if otherLive || !wholeAgent {
+					return errNoChange
+				}
+			} else if otherLive || !wholeAgent {
+				if runStateOrder[run.State] >= runStateOrder[OwnershipStateDeleted] {
+					return errNoChange
+				}
+				if runStateOrder[run.State] < runStateOrder[OwnershipStateDeleting] {
+					run.State = OwnershipStateDeleting
+				}
+				scope = deleteScopeRun
+				return nil
+			}
+		}
+		if !wholeAgent {
+			return errNoChange
+		}
+		if recordStateOrder[r.State] > recordStateOrder[OwnershipStateDeleting] {
+			return fmt.Errorf("%w: agent %q from %s to %s", ErrOwnershipStateOrder, agentID, r.State, OwnershipStateDeleting)
+		}
+		r.State = OwnershipStateDeleting
+		scope = deleteScopeRecord
+		return nil
+	})
+	if errors.Is(err, errNoChange) {
+		return deleteScopeNone, nil
+	}
+	return scope, err
+}
+
+// errNoChange makes mutate leave a record unwritten.
+var errNoChange = errors.New("no change")
 
 // finishOwnedDelete completes a delete after the runtime delete succeeded.
 // The objects in scope (every run's for a whole-record delete, the one
