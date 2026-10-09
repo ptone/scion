@@ -17,9 +17,11 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -282,17 +284,24 @@ func TestFlatKubernetesPod_AssignRefusalsSubmitNoPod(t *testing.T) {
 	mapped := config.V1RuntimeTargetConfig{KubernetesServiceAccountMappings: map[string]string{flatTestGSA: "instance-ksa"}}
 	assign := &GCPIdentityConfig{MetadataMode: "assign", SAEmail: flatTestGSA, ProjectID: "proj"}
 	for name, tc := range map[string]struct {
-		target config.V1RuntimeTargetConfig
-		k8s    *api.KubernetesConfig
+		target   config.V1RuntimeTargetConfig
+		k8s      *api.KubernetesConfig
+		wantCode string // the refusal's code ("" when it has none)
+		wantText string // a fragment of the refusal message
 	}{
-		"unmapped":           {config.V1RuntimeTargetConfig{}, nil},
-		"explicit KSA":       {mapped, &api.KubernetesConfig{ServiceAccountName: "other-ksa"}},
-		"explicit namespace": {mapped, &api.KubernetesConfig{Namespace: "elsewhere"}},
+		"unmapped":           {config.V1RuntimeTargetConfig{}, nil, ErrCodeIdentityNotMapped, "this flat Runtime Broker instance's runtime_target"},
+		"explicit KSA":       {mapped, &api.KubernetesConfig{ServiceAccountName: "other-ksa"}, ErrCodeIdentityKSAMismatch, "this instance's kubernetes_service_account_mappings"},
+		"explicit namespace": {mapped, &api.KubernetesConfig{Namespace: "elsewhere"}, "", "this flat Runtime Broker instance's namespace \"agents\""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFlatPodFixture(t, "k8s-a", tc.target)
-			if _, err := f.start(t, "pod-refused", assign, tc.k8s); err == nil {
-				t.Fatal("want a refusal before any pod")
+			_, err := f.start(t, "pod-refused", assign, tc.k8s)
+			var sce *startContextError
+			if !errors.As(err, &sce) {
+				t.Fatalf("want a start context refusal before any pod, got %v", err)
+			}
+			if sce.Status != http.StatusBadRequest || sce.Code != tc.wantCode || !strings.Contains(sce.Message, tc.wantText) {
+				t.Fatalf("refusal = %d %q %q, want 400 %q containing %q", sce.Status, sce.Code, sce.Message, tc.wantCode, tc.wantText)
 			}
 			if len(f.pods) != 0 {
 				t.Fatalf("a pod was submitted: %+v", f.pods[0].Spec.ServiceAccountName)
