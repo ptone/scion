@@ -260,3 +260,50 @@ func TestFlatOwnershipPreflight_DeniedVersusAbsent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, runtimebroker.OwnershipStateProvisioning, rec.Run("run-only").State, "the latest run is kept")
 }
+
+// TestFlatOwnershipPreflight_UnfinishedDeleteDoesNotRefuse: after a delete
+// that moved the record (or only the run) to deleting failed and the
+// object stayed, a restart's preflight accepts the object as known and
+// pending deletion, without appending to the record; an object of a run
+// already deleted is still unresolved.
+func TestFlatOwnershipPreflight_UnfinishedDeleteDoesNotRefuse(t *testing.T) {
+	ctx := context.Background()
+	object := func(agentID, runID string) api.AgentInfo {
+		return api.AgentInfo{Name: "worker", ContainerID: "cid-" + agentID, Labels: map[string]string{api.LabelRuntimeBrokerID: "rb-a",
+			"scion.project_id": "proj-1", "agent_id": agentID, "scion.name": "worker-" + agentID, api.LabelRunID: runID}}
+	}
+	for name, tc := range map[string]struct {
+		set     func(st *runtimebroker.OwnershipStore)
+		refused bool
+	}{
+		"record deleting": {func(st *runtimebroker.OwnershipStore) {
+			require.NoError(t, st.SetRecordState("proj-1", "agent-1", runtimebroker.OwnershipStateDeleting))
+		}, false},
+		"run deleting": {func(st *runtimebroker.OwnershipStore) {
+			require.NoError(t, st.SetRunState("proj-1", "agent-1", "run-1", runtimebroker.OwnershipStateDeleting))
+		}, false},
+		"run deleted": {func(st *runtimebroker.OwnershipStore) {
+			require.NoError(t, st.SetRunState("proj-1", "agent-1", "run-1", runtimebroker.OwnershipStateDeleted))
+		}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			dir, err := runtimebroker.DefaultStateDir("rb-a")
+			require.NoError(t, err)
+			st := runtimebroker.NewOwnershipStore(dir, "rb-a")
+			require.NoError(t, st.BeginRun("proj-1", "agent-1", "worker-agent-1", "run-1"))
+			tc.set(st)
+			before, _, _ := st.Get("proj-1", "agent-1")
+			err = flatOwnershipPreflight(ctx, preflightCandidate(func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{object("agent-1", "run-1")}, nil
+			}))
+			if tc.refused {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err, "an unfinished delete must not refuse the instance")
+			after, _, _ := st.Get("proj-1", "agent-1")
+			assert.Equal(t, len(before.Runs[0].Resources), len(after.Runs[0].Resources), "nothing appended to a record being deleted")
+		})
+	}
+}

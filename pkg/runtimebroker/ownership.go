@@ -1007,7 +1007,16 @@ func (s *OwnershipStore) Reconstruct(o api.AgentInfo) error {
 		if rec.AgentSlug != slug {
 			return fmt.Errorf("record names slug %q, the object %q", rec.AgentSlug, slug)
 		}
+		// An object of an agent (or run) whose delete started but did not
+		// finish is known and pending deletion: nothing is appended, and the
+		// instance is not refused; the delete retry removes it.
+		if rec.State == OwnershipStateDeleting {
+			return nil
+		}
 		if run := rec.Run(runID); run != nil {
+			if run.State == OwnershipStateDeleting {
+				return nil
+			}
 			if runStateOrder[run.State] >= runStateOrder[OwnershipStateDeleting] {
 				return fmt.Errorf("run %s is %s and cannot be revived", runID, run.State)
 			}
