@@ -131,7 +131,15 @@ var (
 	ErrOwnershipSlugHeld    = errors.New("agent slug is held by another agent of this Runtime Broker instance")
 	ErrOwnershipStateOrder  = errors.New("ownership state cannot move backwards")
 	ErrOwnershipUnreadable  = errors.New("ownership record unreadable")
+	ErrOwnershipConflict    = errors.New("ownership is claimed by more than one configured Runtime Broker instance")
 )
+
+// OwnershipAgentKey and OwnershipSlugKey are the ownership keys compared
+// across a host's instances (LiveKeys, SetConflicting).
+func OwnershipAgentKey(projectID, agentID string) string { return "agent:" + projectID + "/" + agentID }
+
+// OwnershipSlugKey is the ownership key of a slug in a project.
+func OwnershipSlugKey(projectID, slug string) string { return "slug:" + projectID + "/" + slug }
 
 // OwnershipStore reads and writes one instance's ownership records under
 // <stateDir>/ownership/<projectId>/<agentId>.json, with the slug index under
@@ -145,6 +153,57 @@ type OwnershipStore struct {
 	locks   map[string]*sync.Mutex
 	// slugMu serializes slug index changes within a project.
 	slugMu sync.Mutex
+	// conflicting are keys another configured instance claims too; every
+	// operation on them is refused (set once, before the store is used).
+	conflicting map[string]bool
+}
+
+// SetConflicting marks ownership keys (OwnershipAgentKey,
+// OwnershipSlugKey) that another configured instance also claims. Reads and
+// writes of those keys fail with ErrOwnershipConflict. Call it once, before
+// the store is used.
+func (s *OwnershipStore) SetConflicting(keys map[string]bool) {
+	s.conflicting = make(map[string]bool, len(keys))
+	for k, v := range keys {
+		if v {
+			s.conflicting[k] = true
+		}
+	}
+}
+
+// ConflictingLabels reports whether a runtime object's labels name an agent
+// or slug whose ownership is conflicting.
+func (s *OwnershipStore) ConflictingLabels(labels map[string]string) bool {
+	if len(s.conflicting) == 0 {
+		return false
+	}
+	p := labels["scion.project_id"]
+	return s.conflicting[OwnershipAgentKey(p, labels["agent_id"])] || s.conflicting[OwnershipSlugKey(p, labels["scion.name"])]
+}
+
+func (s *OwnershipStore) agentConflict(projectID, agentID string) error {
+	if s.conflicting[OwnershipAgentKey(projectID, agentID)] {
+		return fmt.Errorf("%w: agent %q in project %q", ErrOwnershipConflict, agentID, projectID)
+	}
+	return nil
+}
+
+// LiveKeys returns the agent and slug keys of every live (not deleted)
+// record, for comparison with the host's other instances. An unreadable
+// record is an error.
+func (s *OwnershipStore) LiveKeys() ([]string, error) {
+	recs, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, r := range recs {
+		if r.State == OwnershipStateDeleted {
+			continue
+		}
+		keys = append(keys, OwnershipAgentKey(r.ProjectID, r.AgentID), OwnershipSlugKey(r.ProjectID, r.AgentSlug))
+	}
+	return keys, nil
 }
 
 // NewOwnershipStore returns the store of the instance with this Runtime
@@ -196,6 +255,14 @@ func (s *OwnershipStore) Get(projectID, agentID string) (*OwnershipRecord, bool,
 }
 
 func (s *OwnershipStore) read(projectID, agentID string) (*OwnershipRecord, bool, error) {
+	if err := s.agentConflict(projectID, agentID); err != nil {
+		return nil, false, err
+	}
+	return s.readFile(projectID, agentID)
+}
+
+// readFile reads the record without the conflict check (List, LiveKeys).
+func (s *OwnershipStore) readFile(projectID, agentID string) (*OwnershipRecord, bool, error) {
 	p, err := s.recordPath(projectID, agentID)
 	if err != nil {
 		return nil, false, err
@@ -217,8 +284,16 @@ func (s *OwnershipStore) read(projectID, agentID string) (*OwnershipRecord, bool
 	return &rec, true, nil
 }
 
-// SlugHolder returns the agent ID holding slug in the project, or "".
+// SlugHolder returns the agent ID holding slug in the project, or "". A
+// conflicting slug is an error.
 func (s *OwnershipStore) SlugHolder(projectID, slug string) (string, error) {
+	if s.conflicting[OwnershipSlugKey(projectID, slug)] {
+		return "", fmt.Errorf("%w: slug %q in project %q", ErrOwnershipConflict, slug, projectID)
+	}
+	return s.slugHolder(projectID, slug)
+}
+
+func (s *OwnershipStore) slugHolder(projectID, slug string) (string, error) {
 	p, err := s.slugPath(projectID, slug)
 	if err != nil {
 		return "", err
@@ -466,7 +541,7 @@ func (s *OwnershipStore) RepairSlugIndex() ([]string, error) {
 			continue
 		}
 		live[k] = r.AgentID
-		holder, err := s.SlugHolder(r.ProjectID, r.AgentSlug)
+		holder, err := s.slugHolder(r.ProjectID, r.AgentSlug)
 		if err != nil {
 			problems = append(problems, err.Error())
 			continue
@@ -509,7 +584,10 @@ func (s *OwnershipStore) List() ([]OwnershipRecord, error) {
 			if f.IsDir() || !ok || strings.HasPrefix(f.Name(), ".") {
 				continue
 			}
-			rec, found, err := s.Get(p.Name(), agentID)
+			l := s.keyLock(p.Name(), agentID)
+			l.Lock()
+			rec, found, err := s.readFile(p.Name(), agentID)
+			l.Unlock()
 			if err != nil {
 				return nil, err
 			}

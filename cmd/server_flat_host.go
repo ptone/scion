@@ -411,6 +411,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		Activator:          activator,
 		BuildServer:        buildServer,
 		OwnershipPreflight: flatOwnershipPreflight,
+		OwnershipKeys:      flatOwnershipKeys,
 		Listener: brokerhost.ListenerConfig{
 			Host:         cfg.RuntimeBroker.Host,
 			Port:         cfg.RuntimeBroker.Port,
@@ -523,6 +524,18 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 	return nil
 }
 
+// flatOwnershipKeys returns a flat instance's live ownership keys (its
+// records after the preflight reconstructed any missing ones), which the
+// host compares across instances: a key two instances claim is conflicting
+// and both refuse operations on it.
+func flatOwnershipKeys(_ context.Context, c brokerhost.Candidate) ([]string, error) {
+	dir, err := runtimebroker.DefaultStateDir(c.Identity.RuntimeBrokerID)
+	if err != nil {
+		return nil, err
+	}
+	return runtimebroker.NewOwnershipStore(dir, c.Identity.RuntimeBrokerID).LiveKeys()
+}
+
 // flatServerShared are the process-wide inputs of every flat instance's
 // Runtime Broker server configuration.
 type flatServerShared struct {
@@ -583,6 +596,8 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 			Instance:          ic.Instance,
 			HubInProcess:      sh.mode == brokerhost.ModeColocated,
 			RemoteCredentials: ic.Activation.RemoteCredentials,
+
+			ConflictingOwnershipKeys: ic.ConflictingKeys,
 		},
 	}
 	if sh.multiInstance {

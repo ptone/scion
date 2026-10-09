@@ -459,8 +459,10 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		// A flat instance owns only what its records and its reserved
 		// label say it owns (ptone/scion#3274).
 		srv.ownership = NewOwnershipStore(srv.stateDir, fi.Identity.RuntimeBrokerID)
+		srv.ownership.SetConflicting(fi.ConflictingOwnershipKeys)
 		if am, ok := mgr.(*agent.AgentManager); ok {
-			am.SetOwner(agent.OwnerScope{RuntimeBrokerID: fi.Identity.RuntimeBrokerID, FileAgentOwned: srv.fileAgentOwned})
+			am.SetOwner(agent.OwnerScope{RuntimeBrokerID: fi.Identity.RuntimeBrokerID,
+				FileAgentOwned: srv.fileAgentOwned, EntryUnresolved: srv.ownership.ConflictingLabels})
 		}
 	}
 	if srv.stateDir != "" {

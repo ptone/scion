@@ -272,3 +272,51 @@ func TestHost_PrepareOnce(t *testing.T) {
 	assert.Error(t, h.Prepare(context.Background()))
 	assert.Error(t, (&Host{cfg: h.cfg}).Run(context.Background()), "Run requires Prepare")
 }
+
+// TestHost_OwnershipKeysConflictAndReadFailure: a key claimed by two
+// instances is reported to both (and only that key); an instance whose keys
+// cannot be read is refused in pass 1 with ownership_unresolved.
+func TestHost_OwnershipKeysConflictAndReadFailure(t *testing.T) {
+	f := newFixture(t)
+	cfg := f.config(t, dockerInstance("docker-a", "a"), dockerInstance("docker-b", "b"), dockerInstance("docker-c", "c"), dockerInstance("docker-d", "d"))
+	cfg.OwnershipKeys = func(_ context.Context, c Candidate) ([]string, error) {
+		switch c.Instance.Key {
+		case "docker-a":
+			return []string{"agent:p/x", "slug:p/x", "agent:p/a"}, nil
+		case "docker-b":
+			return []string{"agent:p/x", "slug:p/x"}, nil
+		case "docker-c":
+			return []string{"agent:p/c"}, nil
+		}
+		return nil, errors.New("record unreadable")
+	}
+	got := map[string]map[string]bool{}
+	build := cfg.BuildServer
+	cfg.BuildServer = func(ic InstanceContext) (*runtimebroker.Server, error) {
+		got[ic.Instance.Key] = ic.ConflictingKeys
+		return build(ic)
+	}
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"agent:p/x": true, "slug:p/x": true}
+	for _, k := range []string{"docker-a", "docker-b"} {
+		if len(got[k]) != len(want) || !got[k]["agent:p/x"] || !got[k]["slug:p/x"] {
+			t.Errorf("%s conflicting keys = %v, want %v", k, got[k], want)
+		}
+	}
+	if len(got["docker-c"]) != 0 {
+		t.Errorf("docker-c has conflicting keys %v", got["docker-c"])
+	}
+	st := statusByKey(h)["docker-d"]
+	if st.State != StateRefused || st.Reason != "ownership_unresolved" {
+		t.Fatalf("docker-d = %s/%s, want refused/ownership_unresolved", st.State, st.Reason)
+	}
+	if _, built := got["docker-d"]; built {
+		t.Fatal("an instance whose ownership keys cannot be read was built")
+	}
+}

@@ -42,6 +42,11 @@ type OwnerScope struct {
 	// empty when the project has none). Nil means no file-only agent is
 	// owned.
 	FileAgentOwned func(projectID, slug string) bool
+	// EntryUnresolved, when set, reports a runtime object carrying the
+	// owner label whose ownership is nevertheless unresolved (its agent or
+	// slug is claimed by another configured instance too). Such an object
+	// is not owned.
+	EntryUnresolved func(labels map[string]string) bool
 }
 
 // SetOwner restricts the manager to one instance's objects. Call it once,
@@ -61,12 +66,15 @@ func (m *AgentManager) OwnerRuntimeBrokerID() string {
 
 // ownsEntry reports whether a runtime entry belongs to this manager: always
 // for a legacy manager; for an owned manager only when the reserved label
-// names its instance.
+// names its instance and its ownership is not unresolved.
 func (m *AgentManager) ownsEntry(a api.AgentInfo) bool {
 	if m.owner == nil {
 		return true
 	}
-	return a.Labels[api.LabelRuntimeBrokerID] == m.owner.RuntimeBrokerID
+	if a.Labels[api.LabelRuntimeBrokerID] != m.owner.RuntimeBrokerID {
+		return false
+	}
+	return m.owner.EntryUnresolved == nil || !m.owner.EntryUnresolved(a.Labels)
 }
 
 // ownsFileAgent reports whether a file-only agent belongs to this manager.

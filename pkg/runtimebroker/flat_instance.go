@@ -48,6 +48,11 @@ type FlatInstanceConfig struct {
 	// remote credentials is refused (flat_runtime_broker_remote_unsupported),
 	// so a server can never serve an unvalidated remote flat instance.
 	RemoteCredentials []brokercredentials.BrokerCredentials
+	// ConflictingOwnershipKeys are ownership keys (OwnershipAgentKey,
+	// OwnershipSlugKey) another configured instance of the host also
+	// claims. The instance refuses every operation on them (P2.3
+	// conflicting ownership); its other agents are unaffected.
+	ConflictingOwnershipKeys map[string]bool
 }
 
 // remoteActivated reports whether this flat instance is a validated remote

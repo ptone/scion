@@ -126,6 +126,10 @@ type InstanceContext struct {
 	Activation *Activation
 	// MultiInstance is true when more than one instance is configured.
 	MultiInstance bool
+	// ConflictingKeys are ownership keys this instance claims that another
+	// configured instance claims too; the instance refuses operations on
+	// them (unresolved ownership).
+	ConflictingKeys map[string]bool
 	// Logger carries the instance's broker_id and key.
 	Logger *slog.Logger
 }
@@ -161,8 +165,15 @@ type Config struct {
 	// agent objects, or when the scope cannot be inspected. A refused
 	// candidate is never activated.
 	OwnershipPreflight func(ctx context.Context, c Candidate) error
-	Listener           ListenerConfig
-	Logger             *slog.Logger
+	// OwnershipKeys, when set, returns a candidate's live ownership keys
+	// (project ID + agent ID, and project ID + slug). After pass 1 the
+	// host reports a key claimed by more than one configured instance as
+	// conflicting to every instance that claims it
+	// (InstanceContext.ConflictingKeys); those instances refuse operations
+	// on that key, nothing else.
+	OwnershipKeys func(ctx context.Context, c Candidate) ([]string, error)
+	Listener      ListenerConfig
+	Logger        *slog.Logger
 	// ShutdownTimeout bounds the whole shutdown; zero means
 	// runtimebroker.ShutdownDeadline (30s, as for a single Runtime Broker).
 	ShutdownTimeout time.Duration
@@ -190,10 +201,12 @@ type instance struct {
 	rt       runtime.Runtime
 	identity *brokeridentity.Identity
 	scope    brokeridentity.ExecutionScope
-	server   *runtimebroker.Server
-	ctx      InstanceContext
-	state    State
-	err      error
+	// ownershipKeys are the instance's live ownership keys (pass 1).
+	ownershipKeys []string
+	server        *runtimebroker.Server
+	ctx           InstanceContext
+	state         State
+	err           error
 }
 
 // Host hosts the configured instances.
@@ -294,7 +307,14 @@ func (h *Host) Prepare(ctx context.Context) error {
 				continue
 			}
 		}
-		in.rt, in.scope, in.identity = rt, scope, id
+		var ownKeys []string
+		if h.cfg.OwnershipKeys != nil {
+			if ownKeys, err = h.cfg.OwnershipKeys(ctx, Candidate{Instance: in.cfg, Identity: id, Runtime: rt}); err != nil {
+				h.refuse(in, WithReason("ownership_unresolved", fmt.Errorf("flat Runtime Broker instance %q: reading its ownership records: %w", in.cfg.Key, err)))
+				continue
+			}
+		}
+		in.rt, in.scope, in.identity, in.ownershipKeys = rt, scope, id, ownKeys
 		candidates = append(candidates, in)
 	}
 
@@ -326,6 +346,31 @@ func (h *Host) Prepare(ctx context.Context) error {
 		}
 	}
 
+	// Ownership keys claimed by more than one instance that passed pass 1
+	// (including members of a refused scope-conflict group, whose records
+	// still exist) are conflicting for every claimant.
+	conflicts := map[string]map[string]bool{} // instance key -> conflicting ownership keys
+	{
+		claims := map[string][]string{}
+		for _, in := range candidates {
+			for _, k := range in.ownershipKeys {
+				claims[k] = append(claims[k], in.cfg.Key)
+			}
+		}
+		for k, owners := range claims {
+			if len(owners) < 2 {
+				continue
+			}
+			h.log.Error("Ownership key claimed by several Runtime Broker instances; operations on it are refused", "key", k, "instances", owners)
+			for _, o := range owners {
+				if conflicts[o] == nil {
+					conflicts[o] = map[string]bool{}
+				}
+				conflicts[o][k] = true
+			}
+		}
+	}
+
 	// Pass 2: activate each eligible instance independently.
 	for _, in := range eligible {
 		act, err := h.cfg.Activator.Activate(ctx, Candidate{Instance: in.cfg, Identity: in.identity, Runtime: in.rt})
@@ -338,12 +383,13 @@ func (h *Host) Prepare(ctx context.Context) error {
 			continue
 		}
 		ic := InstanceContext{
-			Instance:      in.cfg,
-			Identity:      in.identity,
-			Runtime:       in.rt,
-			Manager:       agent.NewManager(in.rt),
-			Activation:    act,
-			MultiInstance: h.MultiInstance(),
+			Instance:        in.cfg,
+			Identity:        in.identity,
+			Runtime:         in.rt,
+			Manager:         agent.NewManager(in.rt),
+			Activation:      act,
+			MultiInstance:   h.MultiInstance(),
+			ConflictingKeys: conflicts[in.cfg.Key],
 			Logger: h.log.With(slog.String(logging.AttrBrokerID, in.identity.RuntimeBrokerID),
 				slog.String("instance", in.cfg.Key)),
 		}

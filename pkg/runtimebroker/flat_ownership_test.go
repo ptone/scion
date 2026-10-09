@@ -334,3 +334,39 @@ func TestFlatOwnership_FileOnlyDeleteNeedsRecord(t *testing.T) {
 		t.Fatalf("a file-only agent without a record was deleted")
 	}
 }
+
+// TestFlatOwnership_ConflictingKeyRefusedOthersServed: a key another
+// configured instance also claims (multi-instance conflicting ownership) is
+// refused for start, create and file-only ownership on this instance, while
+// its other agents are served.
+func TestFlatOwnership_ConflictingKeyRefusedOthersServed(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	f.seedOwnedAgent(t)
+	f.srv.ownership.SetConflicting(map[string]bool{
+		OwnershipAgentKey(flatTestProjectID, flatTestAgentID): true,
+		OwnershipSlugKey(flatTestProjectID, "shared-slug"):    true,
+	})
+	target := `"expectedRuntimeTargetId":"` + f.identity.RuntimeTarget.ID + `"`
+
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery, `{`+target+`,`+flatAgentEnv+`}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("start of a conflicting agent: status = %d, want 409: %s", w.Code, w.Body.String())
+	}
+	w = serveFlat(f.srv, http.MethodPost, "/api/v1/agents", flatCreateBody("req-shared", "shared-slug",
+		map[string]interface{}{"expectedRuntimeTargetId": f.identity.RuntimeTarget.ID}))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("create claiming a conflicting slug: status = %d, want 409: %s", w.Code, w.Body.String())
+	}
+	if n := mgrStartCalls(f); n != 0 {
+		t.Fatalf("runtime started for a conflicting key: %d", n)
+	}
+	if f.srv.fileAgentOwned(flatTestProjectID, "test-agent-1") {
+		t.Fatal("a file-only agent of a conflicting key is owned")
+	}
+
+	w = serveFlat(f.srv, http.MethodPost, "/api/v1/agents", flatCreateBody("req-other", "flat-agent",
+		map[string]interface{}{"expectedRuntimeTargetId": f.identity.RuntimeTarget.ID, "config": map[string]interface{}{"template": "claude"}}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("an unrelated agent is refused: status = %d: %s", w.Code, w.Body.String())
+	}
+}

@@ -130,3 +130,87 @@ func TestFlatOwnershipPreflight_ReconstructsOwnObjects(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "half")
 }
+
+// TestFlatOwnership_MultiInstanceConflictingClaimsBothRefuse: two
+// configured instances whose records claim the same agent (and slug) both
+// receive that key as conflicting, through the production preflight, key
+// reader and server configuration; each refuses only that key. A labelled
+// object of one instance whose key the other's record claims conflicts the
+// same way (the preflight reconstructs the labelled object's record first).
+func TestFlatOwnership_MultiInstanceConflictingClaimsBothRefuse(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	globalDir := t.TempDir()
+	insts := []config.V1RuntimeBrokerInstanceConfig{
+		{Key: "docker-a", Name: "a", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}},
+		{Key: "docker-b", Name: "b", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"}},
+	}
+	scope := func(key string) brokeridentity.ExecutionScope {
+		return brokeridentity.ExecutionScope{Type: "docker", Docker: &brokeridentity.DockerScope{DaemonID: "daemon-" + key}}
+	}
+	ids := map[string]*brokeridentity.Identity{}
+	for _, in := range insts {
+		id, err := brokeridentity.LoadOrCreate(brokeridentity.InstanceDir(globalDir, in.Key), in.Key, "docker", scope(in.Key), nil)
+		require.NoError(t, err)
+		ids[in.Key] = id
+	}
+	store := func(key string) *runtimebroker.OwnershipStore {
+		dir, err := runtimebroker.DefaultStateDir(ids[key].RuntimeBrokerID)
+		require.NoError(t, err)
+		return runtimebroker.NewOwnershipStore(dir, ids[key].RuntimeBrokerID)
+	}
+	// docker-a records the shared agent and one of its own; docker-b's
+	// runtime has a labelled object for the shared agent.
+	require.NoError(t, store("docker-a").BeginRun("proj-1", "agent-shared", "shared", "run-a"))
+	require.NoError(t, store("docker-a").BeginRun("proj-1", "agent-a", "a-only", "run-a2"))
+	objects := map[string][]api.AgentInfo{
+		"docker-b": {{Name: "shared", ContainerID: "cid-b", Labels: map[string]string{api.LabelRuntimeBrokerID: ids["docker-b"].RuntimeBrokerID,
+			"scion.project_id": "proj-1", "agent_id": "agent-shared", "scion.name": "shared", api.LabelRunID: "run-b"}}},
+	}
+
+	sh := flatServerShared{cfg: &config.GlobalConfig{RuntimeBroker: config.RuntimeBrokerConfig{Host: "127.0.0.1", Port: 9800}},
+		mode: brokerhost.ModeRemote, multiInstance: true}
+	conflicting := map[string]map[string]bool{}
+	act := &recordingFlatActivator{}
+	h, err := brokerhost.New(brokerhost.Config{
+		GlobalDir: globalDir,
+		Instances: insts,
+		Mode:      brokerhost.ModeRemote,
+		NewRuntime: func(_ context.Context, in config.V1RuntimeBrokerInstanceConfig) (runtime.Runtime, error) {
+			return &runtime.MockRuntime{ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+				return objects[in.Key], nil
+			}}, nil
+		},
+		ProbeScope: func(_ context.Context, in config.V1RuntimeBrokerInstanceConfig, _ runtime.Runtime) (brokeridentity.ExecutionScope, error) {
+			return scope(in.Key), nil
+		},
+		Activator: act,
+		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
+			c := flatInstanceServerConfig(sh, ic)
+			conflicting[ic.Instance.Key] = c.FlatInstance.ConflictingOwnershipKeys
+			return nil, errors.New("not serving in this test")
+		},
+		OwnershipPreflight: flatOwnershipPreflight,
+		OwnershipKeys:      flatOwnershipKeys,
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.Prepare(context.Background()))
+
+	want := map[string]bool{
+		runtimebroker.OwnershipAgentKey("proj-1", "agent-shared"): true,
+		runtimebroker.OwnershipSlugKey("proj-1", "shared"):        true,
+	}
+	assert.Equal(t, want, conflicting["docker-a"], "docker-a refuses the shared key")
+	assert.Equal(t, want, conflicting["docker-b"], "docker-b refuses the shared key")
+
+	for _, key := range []string{"docker-a", "docker-b"} {
+		s := store(key)
+		s.SetConflicting(conflicting[key])
+		_, _, err := s.Get("proj-1", "agent-shared")
+		assert.ErrorIs(t, err, runtimebroker.ErrOwnershipConflict, key)
+	}
+	a := store("docker-a")
+	a.SetConflicting(conflicting["docker-a"])
+	_, ok, err := a.Get("proj-1", "agent-a")
+	require.NoError(t, err)
+	assert.True(t, ok, "docker-a's unrelated agent is unaffected")
+}

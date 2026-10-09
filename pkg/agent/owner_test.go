@@ -94,3 +94,18 @@ func TestOwner_LabelsCarryTheReservedOwner(t *testing.T) {
 	assert.True(t, m.ownsFileAgent("p", "worker"))
 	assert.False(t, m.ownsFileAgent("p", "other"))
 }
+
+func TestOwner_UnresolvedLabelledObjectIsNotOwned(t *testing.T) {
+	rt := &runtime.MockRuntime{ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{
+			{ID: "c-1", ContainerID: "c-1", Name: "worker", Labels: map[string]string{"scion.name": "worker", "agent_id": "agent-1", api.LabelRuntimeBrokerID: "broker-a"}},
+			{ID: "c-2", ContainerID: "c-2", Name: "helper", Labels: map[string]string{"scion.name": "helper", "agent_id": "agent-2", api.LabelRuntimeBrokerID: "broker-a"}},
+		}, nil
+	}}
+	m := NewManager(rt).(*AgentManager)
+	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a", EntryUnresolved: func(l map[string]string) bool { return l["agent_id"] == "agent-1" }})
+	owned, err := m.listRuntime(context.Background(), nil)
+	require.NoError(t, err)
+	require.Len(t, owned, 1, "an object of a conflicting key is not owned even with this instance's label")
+	assert.Equal(t, "c-2", owned[0].ContainerID)
+}

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -239,4 +240,52 @@ func TestOwnershipStore_Reconstruct(t *testing.T) {
 	o := labelledObject(nil)
 	o.ContainerID = "cid-new"
 	assert.Error(t, s.Reconstruct(o), "a terminal run is never revived")
+}
+
+// TestOwnershipStore_ConflictingKeysRefused: a key another configured
+// instance claims too is refused for reads and writes; other keys and the
+// raw listing are unaffected.
+func TestOwnershipStore_ConflictingKeysRefused(t *testing.T) {
+	s := NewOwnershipStore(t.TempDir(), "rb-a")
+	for _, a := range [][2]string{{"agent-1", "one"}, {"agent-2", "two"}} {
+		if err := s.BeginRun("proj", a[0], a[1], "run-"+a[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys, err := s.LiveKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{OwnershipAgentKey("proj", "agent-1"), OwnershipSlugKey("proj", "one"), OwnershipAgentKey("proj", "agent-2"), OwnershipSlugKey("proj", "two")}
+	if strings.Join(keys, ",") != strings.Join(want, ",") {
+		t.Fatalf("LiveKeys = %v, want %v", keys, want)
+	}
+
+	s.SetConflicting(map[string]bool{OwnershipAgentKey("proj", "agent-1"): true, OwnershipSlugKey("proj", "three"): true})
+	if _, _, err := s.Get("proj", "agent-1"); !errors.Is(err, ErrOwnershipConflict) {
+		t.Fatalf("Get of a conflicting agent: %v", err)
+	}
+	if err := s.BeginRun("proj", "agent-1", "one", "run-new"); !errors.Is(err, ErrOwnershipConflict) {
+		t.Fatalf("BeginRun of a conflicting agent: %v", err)
+	}
+	if err := s.SetRecordState("proj", "agent-1", OwnershipStateDeleting); !errors.Is(err, ErrOwnershipConflict) {
+		t.Fatalf("state change of a conflicting agent: %v", err)
+	}
+	if err := s.BeginRun("proj", "agent-3", "three", "run-3"); !errors.Is(err, ErrOwnershipConflict) {
+		t.Fatalf("BeginRun claiming a conflicting slug: %v", err)
+	}
+	if _, ok, _ := s.Get("proj", "agent-3"); ok {
+		t.Fatal("a refused claim created a record")
+	}
+	if _, ok, err := s.Get("proj", "agent-2"); err != nil || !ok {
+		t.Fatalf("an unrelated key is affected: ok=%v err=%v", ok, err)
+	}
+	if recs, err := s.List(); err != nil || len(recs) != 2 {
+		t.Fatalf("List = %d records, %v", len(recs), err)
+	}
+	if !s.ConflictingLabels(map[string]string{"scion.project_id": "proj", "agent_id": "agent-1", "scion.name": "one"}) ||
+		!s.ConflictingLabels(map[string]string{"scion.project_id": "proj", "agent_id": "agent-9", "scion.name": "three"}) ||
+		s.ConflictingLabels(map[string]string{"scion.project_id": "proj", "agent_id": "agent-2", "scion.name": "two"}) {
+		t.Fatal("ConflictingLabels does not match the conflicting keys")
+	}
 }
