@@ -586,8 +586,23 @@ func TestFlatHost_ControlChannelStaleSessionFenced(t *testing.T) {
 
 	// The old A session disconnects: it must not remove the new connection.
 	require.NoError(t, oldA.Shutdown(context.Background()))
-	time.Sleep(300 * time.Millisecond)
-	require.True(t, r.mgr.IsConnected(idA), "the stale session's disconnect leaves the new A connection")
+	// Wait until the Hub has torn the old session down (its requests fail
+	// as closed), rather than for a fixed time.
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		_, err := oldSession.TunnelRequest(ctx, &wsprotocol.RequestEnvelope{Type: wsprotocol.TypeRequest, Method: http.MethodGet, Path: "/api/v1/info"})
+		return err != nil
+	}, 10*time.Second, 50*time.Millisecond, "the Hub tears the old A session down")
+	// While both A servers ran they shared one identity, so their sessions
+	// may have displaced each other; the old server's last session may
+	// even have been current when it stopped. The new A server's session
+	// is (re)established, and from then on no teardown of the old server's
+	// sessions drops it.
+	require.Eventually(t, func() bool { return r.mgr.IsConnected(idA) }, 10*time.Second, 20*time.Millisecond,
+		"the new A server holds the connection")
+	require.Never(t, func() bool { return !r.mgr.IsConnected(idA) }, 300*time.Millisecond, 10*time.Millisecond,
+		"the stale session's disconnect leaves the new A connection")
 	code, body, err := r.info(t, idA)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, code)

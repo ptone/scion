@@ -247,3 +247,46 @@ func TestHostRouting_SingleAuthenticationPassOverFullPath(t *testing.T) {
 	rec := signedGet(t, h.Handler(), InstancePrefix(id)+"/api/v1/info", id, secretFor("docker-a"))
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
+
+// TestHostRouting_EscapedSuffixSameAnswerAsSingletonRoot: on a singleton
+// host, a route suffix carrying escaped data gets exactly the answer the
+// root alias gives for the same suffix (status and body), so the prefixed
+// route keeps the instance's existing contract.
+func TestHostRouting_EscapedSuffixSameAnswerAsSingletonRoot(t *testing.T) {
+	h, ids := preparedAuthHost(t, nil, dockerInstance("docker-a", "a"))
+	handler := h.Handler()
+	a := ids["docker-a"]
+	serve := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "http://broker"+path, nil)
+		require.NoError(t, (&apiclient.HMACAuth{BrokerID: a, SecretKey: secretFor("docker-a")}).ApplyAuth(req))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	for _, suffix := range []string{"/api/v1/agents/a%20b/logs", "/api/v1/agents/a%2Fb/logs", "/api/v1/agents/%E2%9C%93/logs", "/api/v1/agents?projectId=p%2F1"} {
+		t.Run(suffix, func(t *testing.T) {
+			root, prefixed := serve(suffix), serve(InstancePrefix(a)+suffix)
+			assert.Equal(t, root.Code, prefixed.Code, "root %s / prefixed %s", root.Body.String(), prefixed.Body.String())
+			assert.Equal(t, root.Body.String(), prefixed.Body.String())
+		})
+	}
+}
+
+// TestHostRouting_DecodedDotSegmentRefused: a suffix whose decoded and
+// cleaned form would be a valid route (here /api/v1/info) is refused by the
+// host, not cleaned and served.
+func TestHostRouting_DecodedDotSegmentRefused(t *testing.T) {
+	h, ids := preparedAuthHost(t, nil, dockerInstance("docker-a", "a"), dockerInstance("docker-b", "b"))
+	handler := h.Handler()
+	a := ids["docker-a"]
+	for _, suffix := range []string{"/api/v1/agents/%2E%2E/info", "/api/v1/agents/%2e%2e/info", "/api/v1/%2E/info"} {
+		t.Run(suffix, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://broker"+InstancePrefix(a)+suffix, nil)
+			require.NoError(t, (&apiclient.HMACAuth{BrokerID: a, SecretKey: secretFor("docker-a")}).ApplyAuth(req))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+			assert.Empty(t, rec.Header().Get("Location"), "no redirect")
+		})
+	}
+}
