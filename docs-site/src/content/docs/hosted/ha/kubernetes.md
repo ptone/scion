@@ -733,6 +733,51 @@ When Scion runs on GCE or GKE and the kubeconfig's exec credential plugin fails 
 | namespaces | get, list |
 | pods (cluster-wide) | list |
 
+### Additional for Flat Kubernetes Runtime Broker Instances
+
+A flat Runtime Broker instance of type `kubernetes` (configured under `server.broker.instances`) identifies its cluster before it activates, at first start and at every restart. It reads the UID of the Namespace object named `kube-system`, using the instance's own credentials. Those credentials therefore also need `get` on the Namespace object named `kube-system`, in addition to the workload permissions above. Profile-based (legacy) Runtime Brokers don't need this permission, and their behavior is unchanged.
+
+| Resource | Verbs | Scope |
+|---|---|---|
+| namespaces, `resourceNames: ["kube-system"]` | get | cluster (Namespace objects are cluster-scoped) |
+
+Scion doesn't create this grant. The cluster operator can grant only this read, separately from the workload role, for example:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: scion-flat-runtime-broker-cluster-identity
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  resourceNames: ["kube-system"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: scion-flat-runtime-broker-cluster-identity
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: scion-flat-runtime-broker-cluster-identity
+subjects:
+- kind: ServiceAccount
+  name: scion-broker        # the identity the instance's kubeconfig uses
+  namespace: scion-agents
+```
+
+Don't use a broad role such as `cluster-admin` for this. See the [Kubernetes RBAC documentation](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) for `resourceNames`.
+
+Without this permission the instance is not activated, and startup reports:
+
+```
+Cannot identify Kubernetes execution scope: access denied reading Namespace kube-system; this flat Runtime Broker instance requires get permission on namespaces/kube-system. Ask the cluster operator to grant this read permission; the instance was not activated.
+```
+
+Other instances in the same process are not affected. If the Namespace object is missing, the request fails, or the UID is empty, the instance is also not activated, with a message that names the cause. Losing the permission after activation does not change the running instance; the next restart refuses to activate it.
+
 ### Example ClusterRole
 
 ```yaml
