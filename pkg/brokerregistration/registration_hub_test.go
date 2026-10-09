@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/knadh/koanf/v2"
@@ -45,12 +46,16 @@ import (
 
 const realHubDevToken = "scion_dev_brokerregistration_test_0123456789abcdef"
 
+// realHubSeq makes each real Hub's in-memory database unique per run, so
+// repeated runs of one test (-count) never share a database.
+var realHubSeq atomic.Int64
+
 // newRealHub runs the in-process Hub (SQLite) with hub.flat_runtime_brokers
 // on and a dev user that may create Runtime Brokers.
 func newRealHub(t *testing.T) (*httptest.Server, store.Store) {
 	t.Helper()
 	ctx := context.Background()
-	dbName := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+	dbName := fmt.Sprintf("%s_%d", strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()), realHubSeq.Add(1))
 	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(ctx, client))
