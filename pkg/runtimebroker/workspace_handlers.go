@@ -250,6 +250,16 @@ func (s *Server) handleWorkspaceApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The apply writes into the workspace (for a shared-workspace agent,
+	// the project's shared checkout) under the process-wide workspace lock
+	// on that path (P2.3 S2), through the permission changes below.
+	unlockWorkspace, err := s.locks().Lock(ctx, workspacePath)
+	if err != nil {
+		s.writeRuntimeOpError(w, ctx, opDownloadWorkspace, err, "agent_slug", req.Slug)
+		return
+	}
+	defer unlockWorkspace()
+
 	// Sync workspace from GCS to local using rclone
 	filesPath := req.StoragePath + "/files"
 	if err := s.workspaceDownloader()(ctx, bucket, filesPath, workspacePath); err != nil {

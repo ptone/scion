@@ -15,9 +15,12 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -30,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 func TestCanonicalWorkspacePath_AliasesAndMissingPaths(t *testing.T) {
@@ -436,6 +440,52 @@ func TestWorkspaceLocks_WorkspaceDownloadWaitsForProjectLock(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the download did not proceed after the release")
+	}
+	assert.Equal(t, int32(1), downloads.Load())
+}
+
+// TestWorkspaceLocks_WorkspaceApplyWaitsForTheWorkspace: a workspace apply
+// writes into the agent's workspace only while no other instance holds it.
+func TestWorkspaceLocks_WorkspaceApplyWaitsForTheWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectPath := filepath.Join(tmpDir, "myproject")
+	worktreePath := filepath.Join(tmpDir, ".scion_worktrees", filepath.Base(tmpDir), "test-agent")
+	require.NoError(t, os.MkdirAll(worktreePath, 0o755))
+	locks := NewWorkspaceLocks()
+	cfg := DefaultServerConfig()
+	cfg.StorageBucket = "test-bucket"
+	cfg.WorkspaceLocks = locks
+	mgr := &mockAgentManager{agents: []api.AgentInfo{{Name: "test-agent", ContainerID: "test-agent", ProjectPath: projectPath}}}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" },
+		GetWorkspacePathFunc: func(context.Context, string) (string, error) { return "", nil }}
+	srv := New(cfg, mgr, rt)
+	var downloads atomic.Int32
+	srv.SetWorkspaceDownloader(func(context.Context, string, string, string) error { downloads.Add(1); return nil })
+
+	other := &Server{workspaceLocks: locks}
+	unlock, err := other.locks().Lock(context.Background(), worktreePath)
+	require.NoError(t, err)
+	done := make(chan int, 1)
+	go func() {
+		body, _ := json.Marshal(WorkspaceApplyRequest{Slug: "test-agent", StoragePath: "workspaces/project/agent"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/workspace/apply", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.handleWorkspaceApply(rec, req)
+		done <- rec.Code
+	}()
+	select {
+	case code := <-done:
+		t.Fatalf("apply ran (%d) while another instance holds the workspace", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+	assert.Zero(t, downloads.Load())
+	unlock()
+	select {
+	case code := <-done:
+		require.Equal(t, http.StatusOK, code)
+	case <-time.After(10 * time.Second):
+		t.Fatal("apply did not proceed after the release")
 	}
 	assert.Equal(t, int32(1), downloads.Load())
 }
