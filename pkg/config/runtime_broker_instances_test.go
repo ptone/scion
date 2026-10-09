@@ -428,6 +428,13 @@ func TestRuntimeBrokerInstances_SchemaMatchesValidator(t *testing.T) {
 		"numeric key":       {instancesYAML("- {key: 123, name: x, runtime_target: {type: docker}}"), false},
 		"numeric name":      {instancesYAML("- {key: a, name: 7, runtime_target: {type: docker}}"), false},
 		"broker not a map":  {"schema_version: \"1\"\nserver:\n  broker: 5\n", false},
+		"k8s block sa":      {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubernetes_block_service_account: zero-priv}}"), true},
+		"k8s bad block sa":  {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubernetes_block_service_account: Bad_SA}}"), false},
+		"k8s mappings":      {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubernetes_service_account_mappings: {agent@proj.iam.gserviceaccount.com: ksa-agent}}}"), true},
+		"k8s bad gsa":       {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubernetes_service_account_mappings: {Agent@example.com: ksa-agent}}}"), false},
+		"k8s bad ksa":       {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubernetes_service_account_mappings: {agent@proj.iam.gserviceaccount.com: Bad_KSA}}}"), false},
+		"docker block sa":   {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, kubernetes_block_service_account: zero-priv}}"), false},
+		"docker mappings":   {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, kubernetes_service_account_mappings: {agent@proj.iam.gserviceaccount.com: ksa-agent}}}"), false},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -520,5 +527,29 @@ func TestRuntimeBrokerInstanceHosting_RemoteRefused(t *testing.T) {
 	}
 	if err := CheckRuntimeBrokerInstanceHosting(inst, true); err != nil {
 		t.Fatalf("co-located flat hosting must be allowed: %v", err)
+	}
+}
+
+// TestRuntimeBrokerInstances_KubernetesIdentityPolicyRoundTrips: the
+// instance's Kubernetes identity policy survives both config-family
+// conversions, and the mapping is copied rather than shared.
+func TestRuntimeBrokerInstances_KubernetesIdentityPolicyRoundTrips(t *testing.T) {
+	in := []V1RuntimeBrokerInstanceConfig{{Key: "k8s-a", Name: "a", RuntimeTarget: &V1RuntimeTargetConfig{
+		Type: RuntimeTargetTypeKubernetes, Namespace: "agents",
+		KubernetesBlockServiceAccount:    "zero-priv",
+		KubernetesServiceAccountMappings: map[string]string{"agent@proj.iam.gserviceaccount.com": "ksa-agent"},
+	}}}
+	global := v1InstancesToGlobal(in)
+	if got := global[0].RuntimeTarget; got.KubernetesBlockServiceAccount != "zero-priv" ||
+		got.KubernetesServiceAccountMappings["agent@proj.iam.gserviceaccount.com"] != "ksa-agent" {
+		t.Fatalf("server-config form lost the policy: %+v", got)
+	}
+	back := globalInstancesToV1(global)
+	if !reflect.DeepEqual(back, in) {
+		t.Fatalf("round trip = %+v, want %+v", back[0].RuntimeTarget, in[0].RuntimeTarget)
+	}
+	global[0].RuntimeTarget.KubernetesServiceAccountMappings["other@proj.iam.gserviceaccount.com"] = "x"
+	if len(in[0].RuntimeTarget.KubernetesServiceAccountMappings) != 1 || len(back[0].RuntimeTarget.KubernetesServiceAccountMappings) != 1 {
+		t.Fatal("the mapping is shared between the converted copies")
 	}
 }

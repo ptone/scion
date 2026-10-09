@@ -92,16 +92,29 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 		}
 		switch t.Type {
 		case RuntimeTargetTypeDocker:
-			for _, f := range []struct{ field, v string }{{"context", t.Context}, {"namespace", t.Namespace}, {"kubeconfig", t.Kubeconfig}} {
+			for _, f := range []struct{ field, v string }{{"context", t.Context}, {"namespace", t.Namespace}, {"kubeconfig", t.Kubeconfig},
+				{"kubernetes_block_service_account", t.KubernetesBlockServiceAccount}} {
 				if field, v := f.field, f.v; v != "" {
 					errs = append(errs, ValidationError{Path: p + ".runtime_target." + field,
 						Message: "field not valid for runtime target type docker"})
 				}
 			}
+			if len(t.KubernetesServiceAccountMappings) > 0 {
+				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubernetes_service_account_mappings",
+					Message: "field not valid for runtime target type docker"})
+			}
 		case RuntimeTargetTypeKubernetes:
 			if t.Kubeconfig != "" && !validInstanceKubeconfigPath(t.Kubeconfig) {
 				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubeconfig",
 					Message: fmt.Sprintf("kubeconfig must be one absolute local file path (no ~, environment variables or path list): %q", t.Kubeconfig)})
+			}
+			if t.KubernetesBlockServiceAccount != "" {
+				if err := ValidateKubernetesBlockServiceAccount(t.KubernetesBlockServiceAccount); err != nil {
+					errs = append(errs, ValidationError{Path: p + ".runtime_target.kubernetes_block_service_account", Message: err.Error()})
+				}
+			}
+			if err := ValidateKubernetesServiceAccountMappings(t.KubernetesServiceAccountMappings); err != nil {
+				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubernetes_service_account_mappings", Message: err.Error()})
 			}
 		default:
 			errs = append(errs, ValidationError{Path: p + ".runtime_target.type",
@@ -303,11 +316,13 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 		o := RuntimeBrokerInstanceConfig{Key: i.Key, Name: i.Name}
 		if i.RuntimeTarget != nil {
 			o.RuntimeTarget = &RuntimeTargetConfig{
-				Type:        i.RuntimeTarget.Type,
-				DisplayName: i.RuntimeTarget.DisplayName,
-				Context:     i.RuntimeTarget.Context,
-				Namespace:   i.RuntimeTarget.Namespace,
-				Kubeconfig:  i.RuntimeTarget.Kubeconfig,
+				Type:                             i.RuntimeTarget.Type,
+				DisplayName:                      i.RuntimeTarget.DisplayName,
+				Context:                          i.RuntimeTarget.Context,
+				Namespace:                        i.RuntimeTarget.Namespace,
+				Kubeconfig:                       i.RuntimeTarget.Kubeconfig,
+				KubernetesBlockServiceAccount:    i.RuntimeTarget.KubernetesBlockServiceAccount,
+				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
 			}
 		}
 		out = append(out, o)
@@ -325,11 +340,13 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 		o := V1RuntimeBrokerInstanceConfig{Key: i.Key, Name: i.Name}
 		if i.RuntimeTarget != nil {
 			o.RuntimeTarget = &V1RuntimeTargetConfig{
-				Type:        i.RuntimeTarget.Type,
-				DisplayName: i.RuntimeTarget.DisplayName,
-				Context:     i.RuntimeTarget.Context,
-				Namespace:   i.RuntimeTarget.Namespace,
-				Kubeconfig:  i.RuntimeTarget.Kubeconfig,
+				Type:                             i.RuntimeTarget.Type,
+				DisplayName:                      i.RuntimeTarget.DisplayName,
+				Context:                          i.RuntimeTarget.Context,
+				Namespace:                        i.RuntimeTarget.Namespace,
+				Kubeconfig:                       i.RuntimeTarget.Kubeconfig,
+				KubernetesBlockServiceAccount:    i.RuntimeTarget.KubernetesBlockServiceAccount,
+				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
 			}
 		}
 		out = append(out, o)
@@ -342,4 +359,16 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 // comparison against GlobalConfig.RuntimeBroker.Instances.
 func RuntimeBrokerInstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInstanceConfig {
 	return v1InstancesToGlobal(in)
+}
+
+// copyStringMap returns a copy of m (nil for an empty map).
+func copyStringMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
