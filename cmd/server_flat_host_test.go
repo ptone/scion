@@ -453,19 +453,38 @@ func flatAuthTestHub(t *testing.T, s store.Store) *hub.Server {
 	return srv
 }
 
-// TestFlatHost_ControlChannelTwoInstancesDistinct: two co-located flat
-// instances in one process each hold their own control channel to the Hub;
-// a request tunnelled to one is served by that instance only, and closing
-// one instance's channel leaves the other connected and serving.
-func TestFlatHost_ControlChannelTwoInstancesDistinct(t *testing.T) {
+// ccTestRig is two co-located flat instances connected to a Hub over their
+// control channels.
+type ccTestRig struct {
+	s      store.Store
+	mgr    *hub.ControlChannelManager
+	active []brokerhost.ActiveInstance
+	build  func(ic brokerhost.InstanceContext) *runtimebroker.Server
+	ctx    context.Context
+	hubURL string
+	ids    [2]string
+}
+
+func newCCTestRig(t *testing.T) *ccTestRig {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 	s := newTestStore(t)
 	srv := flatAuthTestHub(t, s)
 	hubTS := httptest.NewServer(srv.Handler())
 	t.Cleanup(hubTS.Close)
 	globalDir := t.TempDir()
-
+	build := func(ic brokerhost.InstanceContext) *runtimebroker.Server {
+		cfg := runtimebroker.DefaultServerConfig()
+		cfg.BrokerID = ic.Identity.RuntimeBrokerID
+		cfg.StateDir = t.TempDir()
+		cfg.HubEnabled = true
+		cfg.HubEndpoint = hubTS.URL
+		cfg.ControlChannelEnabled = true
+		cfg.InMemoryCredentials = ic.Activation.InMemoryCredentials
+		cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
+		return runtimebroker.New(cfg, ic.Manager, ic.Runtime)
+	}
 	h, err := brokerhost.New(brokerhost.Config{
 		GlobalDir: globalDir,
 		Instances: []config.V1RuntimeBrokerInstanceConfig{
@@ -479,18 +498,8 @@ func TestFlatHost_ControlChannelTwoInstancesDistinct(t *testing.T) {
 		ProbeScope: func(_ context.Context, inst config.V1RuntimeBrokerInstanceConfig, _ runtime.Runtime) (brokeridentity.ExecutionScope, error) {
 			return brokeridentity.ExecutionScope{Type: "docker", Docker: &brokeridentity.DockerScope{DaemonID: "daemon-" + inst.Key}}, nil
 		},
-		Activator: &colocatedFlatActivator{hubSrv: srv, endpoint: "http://localhost:9800", hubEndpoint: hubTS.URL},
-		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
-			cfg := runtimebroker.DefaultServerConfig()
-			cfg.BrokerID = ic.Identity.RuntimeBrokerID
-			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
-			cfg.HubEnabled = true
-			cfg.HubEndpoint = hubTS.URL
-			cfg.ControlChannelEnabled = true
-			cfg.InMemoryCredentials = ic.Activation.InMemoryCredentials
-			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
-			return runtimebroker.New(cfg, ic.Manager, ic.Runtime), nil
-		},
+		Activator:   &colocatedFlatActivator{hubSrv: srv, endpoint: "http://localhost:9800", hubEndpoint: hubTS.URL},
+		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) { return build(ic), nil },
 	})
 	require.NoError(t, err)
 	require.NoError(t, h.Prepare(ctx))
@@ -499,29 +508,41 @@ func TestFlatHost_ControlChannelTwoInstancesDistinct(t *testing.T) {
 	for _, a := range active {
 		require.NoError(t, a.Server.StartServices(ctx))
 	}
-	mgr := srv.GetControlChannelManager()
-	idA, idB := active[0].Context.Identity.RuntimeBrokerID, active[1].Context.Identity.RuntimeBrokerID
-	require.Eventually(t, func() bool { return mgr.IsConnected(idA) && mgr.IsConnected(idB) }, 10*time.Second, 50*time.Millisecond)
+	r := &ccTestRig{s: s, mgr: srv.GetControlChannelManager(), active: active, build: build, ctx: ctx, hubURL: hubTS.URL,
+		ids: [2]string{active[0].Context.Identity.RuntimeBrokerID, active[1].Context.Identity.RuntimeBrokerID}}
+	require.Eventually(t, func() bool { return r.mgr.IsConnected(r.ids[0]) && r.mgr.IsConnected(r.ids[1]) }, 10*time.Second, 50*time.Millisecond)
+	return r
+}
 
-	info := func(id string) (int, string, error) {
-		secret, err := s.GetBrokerSecret(ctx, id)
-		require.NoError(t, err)
-		req := httptest.NewRequest(http.MethodGet, "http://runtime-broker/api/v1/info", nil)
-		require.NoError(t, (&apiclient.HMACAuth{BrokerID: id, SecretKey: secret.SecretKey}).ApplyAuth(req))
-		headers := map[string]string{}
-		for k := range req.Header {
-			headers[k] = req.Header.Get(k)
-		}
-		tctx, tcancel := context.WithTimeout(ctx, 5*time.Second)
-		defer tcancel()
-		resp, err := mgr.TunnelRequest(tctx, id, wsprotocol.NewRequestEnvelope("req-"+id, http.MethodGet, "/api/v1/info", "", headers, nil))
-		if err != nil {
-			return 0, "", err
-		}
-		return resp.StatusCode, string(resp.Body), nil
+// info tunnels a Hub-signed GET /api/v1/info to id over its control channel.
+func (r *ccTestRig) info(t *testing.T, id string) (int, string, error) {
+	t.Helper()
+	secret, err := r.s.GetBrokerSecret(r.ctx, id)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, "http://runtime-broker/api/v1/info", nil)
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: id, SecretKey: secret.SecretKey}).ApplyAuth(req))
+	headers := map[string]string{}
+	for k := range req.Header {
+		headers[k] = req.Header.Get(k)
 	}
+	tctx, tcancel := context.WithTimeout(r.ctx, 5*time.Second)
+	defer tcancel()
+	resp, err := r.mgr.TunnelRequest(tctx, id, wsprotocol.NewRequestEnvelope("req-"+id+"-"+time.Now().Format(time.RFC3339Nano), http.MethodGet, "/api/v1/info", "", headers, nil))
+	if err != nil {
+		return 0, "", err
+	}
+	return resp.StatusCode, string(resp.Body), nil
+}
+
+// TestFlatHost_ControlChannelTwoInstancesDistinct: two co-located flat
+// instances in one process each hold their own control channel to the Hub;
+// a request tunnelled to one is served by that instance only, and closing
+// one instance's channel leaves the other connected and serving.
+func TestFlatHost_ControlChannelTwoInstancesDistinct(t *testing.T) {
+	r := newCCTestRig(t)
+	idA, idB := r.ids[0], r.ids[1]
 	for _, pair := range [][2]string{{idA, idB}, {idB, idA}} {
-		code, body, err := info(pair[0])
+		code, body, err := r.info(t, pair[0])
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, code, body)
 		assert.Contains(t, body, pair[0], "served by the addressed instance")
@@ -529,13 +550,50 @@ func TestFlatHost_ControlChannelTwoInstancesDistinct(t *testing.T) {
 	}
 
 	// Closing B's services removes only B's channel.
-	require.NoError(t, active[1].Server.Shutdown(context.Background()))
-	require.Eventually(t, func() bool { return !mgr.IsConnected(idB) }, 10*time.Second, 50*time.Millisecond)
-	assert.True(t, mgr.IsConnected(idA))
-	code, body, err := info(idA)
+	require.NoError(t, r.active[1].Server.Shutdown(context.Background()))
+	require.Eventually(t, func() bool { return !r.mgr.IsConnected(idB) }, 10*time.Second, 50*time.Millisecond)
+	assert.True(t, r.mgr.IsConnected(idA))
+	code, body, err := r.info(t, idA)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, code)
 	assert.Contains(t, body, idA)
-	_, _, err = info(idB)
+	_, _, err = r.info(t, idB)
 	assert.Error(t, err, "a request for B is never served by A")
+}
+
+// TestFlatHost_ControlChannelStaleSessionFenced: instance A's control
+// channel is replaced by a new session for the same identity; when the old
+// A session then disconnects, the new A connection stays registered and
+// serving, and B stays usable throughout.
+func TestFlatHost_ControlChannelStaleSessionFenced(t *testing.T) {
+	r := newCCTestRig(t)
+	idA, idB := r.ids[0], r.ids[1]
+	oldA := r.active[0].Server
+	oldSession := r.mgr.GetConnection(idA)
+	require.NotNil(t, oldSession)
+
+	// A replacement session for A (same identity and credentials).
+	newA := r.build(r.active[0].Context)
+	require.NoError(t, newA.StartServices(r.ctx))
+	require.Eventually(t, func() bool {
+		c := r.mgr.GetConnection(idA)
+		return c != nil && c != oldSession
+	}, 10*time.Second, 50*time.Millisecond, "the new A session replaces the old one")
+
+	// The old A session disconnects: it must not remove the new connection.
+	require.NoError(t, oldA.Shutdown(context.Background()))
+	time.Sleep(300 * time.Millisecond)
+	require.True(t, r.mgr.IsConnected(idA), "the stale session's disconnect leaves the new A connection")
+	code, body, err := r.info(t, idA)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, code)
+	assert.Contains(t, body, idA)
+
+	// B is usable throughout.
+	assert.True(t, r.mgr.IsConnected(idB))
+	code, body, err = r.info(t, idB)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, code)
+	assert.Contains(t, body, idB)
+	t.Cleanup(func() { _ = newA.Shutdown(context.Background()) })
 }

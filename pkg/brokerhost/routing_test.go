@@ -202,6 +202,8 @@ func TestHostRouting_PathVariantsNeverSelectAnotherInstance(t *testing.T) {
 		"/instances//" + a + "/api/v1/info",
 		"/instances/" + a + "//api/v1/info",
 		"/instances/" + a + "%2F..%2F" + b + "/api/v1/info",
+		"/instances/" + a + "/api/%2E%2E/v1/info",
+		"/instances%2F" + a + "/api/v1/info",
 		"/instances/" + fmt.Sprintf("%%%02X", a[0]) + a[1:] + "/api/v1/info",
 		"/instances/" + strings.ToUpper(a) + "/api/v1/info",
 		"/instances/" + a + "x/api/v1/info",
@@ -220,6 +222,20 @@ func TestHostRouting_PathVariantsNeverSelectAnotherInstance(t *testing.T) {
 	// A legitimate suffix and query survive the strip.
 	rec := signedGet(t, handler, InstancePrefix(a)+"/api/v1/agents?projectId=p1", a, secretFor("docker-a"))
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Escaped data in the route suffix is the instance's own route contract:
+	// the request reaches the instance and gets the instance's own JSON
+	// answer (as over the root route), not the host's plain 404.
+	for _, suffix := range []string{"/api/v1/agents/a%20b/logs", "/api/v1/agents/a%2Fb/logs", "/api/v1/agents/%E2%9C%93/logs"} {
+		t.Run("escaped suffix "+suffix, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://broker"+InstancePrefix(a)+suffix, nil)
+			require.NoError(t, (&apiclient.HMACAuth{BrokerID: a, SecretKey: secretFor("docker-a")}).ApplyAuth(req))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Contains(t, rec.Body.String(), `"error":{"code":`, "served by the instance: %d %s", rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "404 page not found", "not refused by the host")
+		})
+	}
 }
 
 // TestHostRouting_SingleAuthenticationPassOverFullPath: the signature is

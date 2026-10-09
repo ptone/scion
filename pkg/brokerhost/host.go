@@ -472,13 +472,13 @@ func (h *Host) Handler() http.Handler {
 			root.ServeHTTP(w, r)
 			return
 		}
-		if !canonicalInstancePath(r) {
+		id, ok := instanceRouteID(r)
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}
-		id, _, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, InstancePathPrefix), "/")
 		target, ok := prefixed[id]
-		if id == "" || !ok {
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}
@@ -499,17 +499,38 @@ func bindBrokerID(id string, next http.Handler) http.Handler {
 	})
 }
 
-// canonicalInstancePath reports whether a request path under the instance
-// namespace is exactly as a client builds it: no percent-encoded
-// characters in the path, no empty, "." or ".." segments.
-func canonicalInstancePath(r *http.Request) bool {
-	if r.URL.RawPath != "" && r.URL.RawPath != r.URL.Path {
-		return false
+// instanceRouteID returns the Runtime Broker ID a request under the
+// instance namespace selects. The namespace and the ID segment are matched
+// literally, as sent (no percent-encoding in the ID), and the path must have
+// no empty, "." or ".." segment (sent or after decoding), so a request is
+// never cleaned or redirected into another route. Percent-encoded data in
+// the route suffix and the query is the instance's own route contract and
+// passes through unchanged.
+func instanceRouteID(r *http.Request) (string, bool) {
+	escaped := r.URL.EscapedPath()
+	rest, ok := strings.CutPrefix(escaped, InstancePathPrefix)
+	if !ok {
+		return "", false
 	}
-	segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	id, _, _ := strings.Cut(rest, "/")
+	if id == "" || strings.Contains(id, "%") {
+		return "", false
+	}
+	if !cleanSegments(escaped, true) || !cleanSegments(r.URL.Path, false) {
+		return "", false
+	}
+	return id, true
+}
+
+// cleanSegments reports whether path has no "." or ".." segment and, when
+// noEmpty is set, no empty segment except a trailing one.
+func cleanSegments(path string, noEmpty bool) bool {
+	segments := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	for i, seg := range segments {
-		last := i == len(segments)-1
-		if seg == "." || seg == ".." || (seg == "" && !last) {
+		if seg == "." || seg == ".." {
+			return false
+		}
+		if noEmpty && seg == "" && i != len(segments)-1 {
 			return false
 		}
 	}
