@@ -198,6 +198,12 @@ type ServerConfig struct {
 	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
 	NFSMountChecker MountChecker
 
+	// NFSVerifyOnlyReason, when non-empty, puts the NFS reconciler in
+	// verify-only mode: this server checks the shares but never mounts them.
+	// A host that runs several Runtime Broker instances sets it on each, so
+	// no instance competes to own the host's mounts.
+	NFSVerifyOnlyReason string
+
 	// FlatInstance, when set, makes this server host exactly one flat Runtime
 	// Broker instance bound to one runtime target (see FlatInstanceConfig).
 	// Nil keeps the legacy, profile-resolving Runtime Broker.
@@ -424,6 +430,15 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		messageLog:        logging.Subsystem("broker.messages"),
 		envSecretLog:      logging.Subsystem("broker.env-secrets"),
 	}
+	// A flat instance's own loggers carry its identity, so several
+	// instances in one process log distinguishably without changing the
+	// process-wide default logger.
+	if fi := srv.flatInstance(); fi != nil {
+		attrs := []any{slog.String(logging.AttrBrokerID, fi.Identity.RuntimeBrokerID), slog.String("instance", fi.Instance.Key)}
+		srv.agentLifecycleLog = srv.agentLifecycleLog.With(attrs...)
+		srv.messageLog = srv.messageLog.With(attrs...)
+		srv.envSecretLog = srv.envSecretLog.With(attrs...)
+	}
 
 	srv.stateDir = cfg.StateDir
 	if srv.stateDir == "" {
@@ -458,6 +473,8 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		if rt != nil && NFSWarnOnlyRuntime(rt.Name()) {
 			srv.nfsMountReconciler.SetVerifyOnly(fmt.Sprintf(
 				"the broker's default runtime is %s, so the broker does not mount it", rt.Name()))
+		} else if cfg.NFSVerifyOnlyReason != "" {
+			srv.nfsMountReconciler.SetVerifyOnly(cfg.NFSVerifyOnlyReason)
 		}
 		srv.nfsStartupReconcileDone = make(chan struct{})
 		srv.nfsReconcileStopped = make(chan struct{})
@@ -477,7 +494,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	// Initialize Hub integration if enabled. A flat instance that may not be
 	// hosted here (no Hub in the same process) sets up no Hub connection at
 	// all; Start refuses it.
-	if cfg.HubEnabled && (cfg.HubEndpoint != "" || cfg.InMemoryCredentials != nil) && srv.flatHostingError() == nil {
+	if cfg.HubEnabled && (cfg.HubEndpoint != "" || cfg.InMemoryCredentials != nil || srv.flatInstance().remoteActivated()) && srv.flatHostingError() == nil {
 		if err := srv.initHubIntegration(); err != nil {
 			slog.Warn("Failed to initialize Hub integration", "error", err)
 		}
@@ -650,6 +667,25 @@ func (s *Server) initHubIntegration() error {
 	// broker-credentials.json or a config-derived connection, so the
 	// steps below are skipped and no credential watcher is started.
 	if s.isFlat() {
+		// A validated remote activation connects only with the instance's
+		// own credentials (contract R10).
+		for i := range s.flatInstance().RemoteCredentials {
+			c := s.flatInstance().RemoteCredentials[i]
+			if c.Name == "" {
+				c.Name = brokercredentials.DeriveHubName(c.HubEndpoint)
+			}
+			if _, exists := s.hubConnections[c.Name]; exists {
+				continue
+			}
+			conn, err := s.createHubConnection(c.Name, &c)
+			if err != nil {
+				slog.Warn("Failed to create hub connection from instance credentials", "name", c.Name, "error", err)
+				continue
+			}
+			s.hubMu.Lock()
+			s.hubConnections[c.Name] = conn
+			s.hubMu.Unlock()
+		}
 		s.buildAuthMiddleware()
 		slog.Info("Hub integration initialized for flat Runtime Broker instance",
 			"connections", len(s.hubConnections),
@@ -1093,11 +1129,45 @@ func (s *Server) GetHydrator() *templatecache.Hydrator {
 	return nil
 }
 
-// Start starts the HTTP server.
+// Start starts the broker's services and its own HTTP listener, and blocks
+// until ctx is done (then shuts down) or the listener fails.
 func (s *Server) Start(ctx context.Context) error {
-	// P1 hosts a flat instance only co-located with its Hub
-	// (flat_runtime_broker_remote_unsupported); refuse before serving,
-	// connecting or accepting any dispatch.
+	if err := s.startServices(ctx, true); err != nil {
+		return err
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return s.Shutdown(context.Background())
+	}
+}
+
+// StartServices starts everything Start does except the HTTP listener: hub
+// connections (control channel, heartbeat), NFS checks and the credential
+// watcher. It returns once they are started. A host that owns the listener
+// (several Runtime Broker instances in one process) serves Handler itself
+// and calls Shutdown when done.
+func (s *Server) StartServices(ctx context.Context) error {
+	return s.startServices(ctx, false)
+}
+
+// startServices is Start without serving; withListener also builds the
+// server's own http.Server.
+func (s *Server) startServices(ctx context.Context, withListener bool) error {
+	// A flat instance is served only co-located with its Hub or after the
+	// host validated its remote activation
+	// (flat_runtime_broker_remote_unsupported otherwise); refuse before
+	// serving, connecting or accepting any dispatch.
 	if err := s.flatHostingError(); err != nil {
 		return err
 	}
@@ -1109,13 +1179,13 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
-	handler := s.applyMiddleware(s.mux)
-
-	s.httpServer = &http.Server{
-		Addr:         fmt.Sprintf("%s:%d", s.config.Host, s.config.Port),
-		Handler:      handler,
-		ReadTimeout:  s.config.ReadTimeout,
-		WriteTimeout: s.config.WriteTimeout,
+	if withListener {
+		s.httpServer = &http.Server{
+			Addr:         fmt.Sprintf("%s:%d", s.config.Host, s.config.Port),
+			Handler:      s.applyMiddleware(s.mux),
+			ReadTimeout:  s.config.ReadTimeout,
+			WriteTimeout: s.config.WriteTimeout,
+		}
 	}
 	s.mu.Unlock()
 
@@ -1189,20 +1259,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.startCredentialWatcher(ctx)
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-		close(errCh)
-	}()
-
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		return s.Shutdown(context.Background())
-	}
+	return nil
 }
 
 // startNFSReconcileLoop starts the NFS reconciler's background loop (see
