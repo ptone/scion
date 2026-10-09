@@ -39,6 +39,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"gopkg.in/yaml.v3"
+
+	"github.com/google/uuid"
 )
 
 // startContext holds all the resolved state needed to start an agent.
@@ -88,7 +90,11 @@ type startContextInputs struct {
 	// Agent identity
 	Name    string
 	AgentID string // Hub UUID (for env injection and logging)
-	Slug    string
+	// OwnershipAgentID is the Hub agent ID a flat instance records
+	// ownership under when AgentID is not set for the operation (restart
+	// carries it only in the Hub-injected resolved env).
+	OwnershipAgentID string
+	Slug             string
 
 	// SharedWorkspace is the shared-workspace flag for a start/restart that
 	// carries no Config (restart): it selects the agents root the agent's
@@ -217,6 +223,28 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	ctx, span := tracer.Start(ctx, "broker.agent.provision")
 	defer span.End()
 	span.SetAttributes(attribute.String("scion.agent.name", in.Name))
+
+	// A flat instance records the run in its durable ownership record
+	// before any agent file or runtime object exists (ptone/scion#3274).
+	// The run gets an ID here when the request carried none, so the same ID
+	// labels every object the start creates.
+	if s.ownership != nil {
+		if in.RunID == "" {
+			in.RunID = uuid.NewString()
+		}
+		slug := in.Slug
+		if slug == "" {
+			slug = api.Slugify(in.Name)
+		}
+		agentID := in.AgentID
+		if agentID == "" {
+			agentID = in.OwnershipAgentID
+		}
+		if err := s.beginOwnedRun(in.ProjectID, agentID, slug, in.RunID, in.Operation == opCreate); err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return nil, &startContextError{Status: http.StatusConflict, Message: "The agent's ownership cannot be recorded by this Runtime Broker instance", OriginalErr: err}
+		}
+	}
 
 	// --- Hub-managed project path resolution ---
 	if in.ProjectSlug != "" && in.ProjectPath == "" {

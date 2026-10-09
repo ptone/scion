@@ -310,6 +310,10 @@ type Server struct {
 
 	stateDir string
 
+	// ownership is a flat instance's durable ownership record store
+	// (ownership.go); nil for a legacy Runtime Broker.
+	ownership *OwnershipStore
+
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
 	// Used by LookupContainerID/LookupAgent as a fallback when the default
@@ -451,6 +455,14 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 				brokerDir = "default"
 			}
 			srv.stateDir = filepath.Join(homeDir, ".scion", "runtime-broker-state", brokerDir)
+		}
+	}
+	if fi := srv.flatInstance(); fi != nil && srv.stateDir != "" {
+		// A flat instance owns only what its records and its reserved
+		// label say it owns (ptone/scion#3274).
+		srv.ownership = NewOwnershipStore(srv.stateDir, fi.Identity.RuntimeBrokerID)
+		if am, ok := mgr.(*agent.AgentManager); ok {
+			am.SetOwner(agent.OwnerScope{RuntimeBrokerID: fi.Identity.RuntimeBrokerID, FileAgentOwned: srv.fileAgentOwned})
 		}
 	}
 	if srv.stateDir != "" {

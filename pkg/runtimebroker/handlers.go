@@ -3736,6 +3736,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		ProjectID:   projectID,
 		HTTPRequest: r,
 		Operation:   opHTTPRestart,
+		// The Hub injects the agent's immutable ID into every restart's
+		// resolved env (DispatchAgentRestart → buildStartEnv); a flat
+		// instance records ownership under it.
+		OwnershipAgentID: restartReq.ResolvedEnv["SCION_AGENT_ID"],
 	})
 	if err != nil {
 		s.writeStartContextError(w, err, "restart agent")

@@ -599,3 +599,44 @@ func syncDir(dir string) {
 		_ = d.Close()
 	}
 }
+
+// fileAgentOwned reports whether this flat instance's durable record claims
+// the agent holding slug in the project (the authority for file-only
+// agents). Missing, unreadable or deleted records are not owned.
+func (s *Server) fileAgentOwned(projectID, slug string) bool {
+	if s.ownership == nil || projectID == "" {
+		return false
+	}
+	agentID, err := s.ownership.SlugHolder(projectID, slug)
+	if err != nil || agentID == "" {
+		return false
+	}
+	rec, ok, err := s.ownership.Get(projectID, agentID)
+	return err == nil && ok && rec.State == OwnershipStateActive
+}
+
+// beginOwnedRun records a flat instance's run before the operation creates
+// any agent file or runtime object. A legacy Runtime Broker records nothing.
+// A create may start a new record; any other operation (start, restart of
+// an existing agent) requires the agent's existing live record, so an agent
+// whose ownership is not established is never adopted by starting it. A
+// missing project or agent ID, a slug held by another agent, or a write
+// failure refuses the operation before any side effect.
+func (s *Server) beginOwnedRun(projectID, agentID, slug, runID string, create bool) error {
+	if s.ownership == nil {
+		return nil
+	}
+	if projectID == "" || agentID == "" {
+		return fmt.Errorf("flat Runtime Broker %s: a project ID and an agent ID are required to record ownership", s.ownership.RuntimeBrokerID())
+	}
+	if !create {
+		rec, ok, err := s.ownership.Get(projectID, agentID)
+		if err != nil {
+			return err
+		}
+		if !ok || rec.State != OwnershipStateActive {
+			return fmt.Errorf("%w: agent %s in project %s has no live ownership record of this Runtime Broker instance", ErrOwnershipNotRecorded, agentID, projectID)
+		}
+	}
+	return s.ownership.BeginRun(projectID, agentID, slug, runID)
+}
