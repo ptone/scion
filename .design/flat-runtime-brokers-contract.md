@@ -123,8 +123,8 @@ server:
 
 | Condition | Error (path, message gist) |
 |---|---|
-| Duplicate `key` | `server.broker.instances[i].key`: duplicate instance key "k" (also at index j). Reported even when the count rule also fails |
-| More than one entry | `server.broker.instances`: only one Runtime Broker instance is supported in this release |
+| Duplicate `key` | `server.broker.instances[i].key`: duplicate instance key "k" (also at index j). Rejected independently of instance count |
+| More than one entry (P1 only; superseded in P2.1) | P1 rejects with `server.broker.instances`: only one Runtime Broker instance is supported in this release. P2.1 accepts multiple otherwise valid entries with distinct keys; no fixed count ceiling |
 | `key` missing or not matching `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` | invalid instance key |
 | `name` empty | name is required |
 | `runtime_target` missing or `type` empty | runtime_target.type is required |
@@ -669,14 +669,14 @@ Group F tests are the dispatch half:
 - `TestRuntimeBrokerInstances_ProjectSettingsIgnoredByServer`
 - `TestRuntimeBrokerInstances_EmptyListIsLegacy`
 - `TestRuntimeBrokerInstances_DuplicateKeyRejected`
-- `TestRuntimeBrokerInstances_MultipleEntriesRejected`
+- `TestRuntimeBrokerInstances_MultipleEntriesAccepted` (P2.1 replacement for P1 `TestRuntimeBrokerInstances_MultipleEntriesRejected`): two distinct valid Docker entries pass configuration validation; this does not assert that both activate
 - `TestRuntimeBrokerInstances_InvalidKeyRejected`
 - `TestRuntimeBrokerInstances_NameRequired`
 - `TestRuntimeBrokerInstances_TargetTypeRequired`
 - `TestRuntimeBrokerInstances_KubernetesNotImplemented`
 - `TestRuntimeBrokerInstances_UnsupportedTypeRejected`
 - `TestRuntimeBrokerInstances_DockerRejectsKubernetesFields`
-- `TestRuntimeBrokerInstances_SchemaMatchesValidator`
+- `TestRuntimeBrokerInstances_SchemaMatchesValidator`: from P2.1, the "two entries" case is valid in both schema and validator. Remove the instances-array schema `maxItems: 1`; preserve duplicate-key rejection in the validator and every other validation rule
 - `TestRuntimeBrokerInstances_OverlayDoesNotTouchInstances`
 - `TestRuntimeBrokerInstances_LegacyConfigUnchanged`
 - `TestRuntimeBrokerInstanceHosting_RemoteRefused`: non-empty `instances` with `hubInProcess=false` gives `flat_runtime_broker_remote_unsupported`, including with instance-scoped and legacy credential files present in the test HOME. Empty `instances` with `hubInProcess=false` is allowed (legacy remote hosting unchanged). Non-empty with `hubInProcess=true` is allowed. The case documenting that `--simulate-remote-broker` (Hub in process, but `colocatedBrokerRegisters` false) passes `hubInProcess=false` and is refused.
@@ -918,6 +918,8 @@ If dispatch authorization fails, its error is returned and no flat check is eval
 **Forward rule.** ptone/scion#3340 phase 1 changes dispatch authorization in one place, the body of `canDispatchToBroker` (or a successor that `checkBrokerDispatchAccess` and the resolver's selection filter call in its place), and changes link creation in the explicit link paths. The flat checks, their order after authorization, and their codes need no change. **The co-located auto-link convenience in ptone/scion#3340 does not apply to flat rows.** Its link paths must exclude every row with a stored runtime target, including the embedded flat instance that R7 records with `SetEmbeddedBrokerID`. They must not key the convenience on the embedded-Runtime Broker identity alone.
 
 ## Change log
+
+- **P2.1 count-cap amendment (2026-10-09; approved by the architecture consultant):** this narrow amendment supersedes the P1-only count limit in section 2 and the affected frozen test expectation in section 15. `ValidateRuntimeBrokerInstances` no longer rejects a list solely because its length exceeds one; remove the instances-array schema `maxItems: 1`. Replace `TestRuntimeBrokerInstances_MultipleEntriesRejected` with `TestRuntimeBrokerInstances_MultipleEntriesAccepted` (two distinct valid Docker entries, no validation errors), and make the schema/validator parity test's "two entries" case valid. Duplicate keys remain invalid at every list size, and all other strict field/runtime validation stays. There is no new fixed count ceiling and no capacity guarantee. This approves only the named contract/test changes; historical P1 behavior is unchanged. Configuration acceptance is separate from activation: the P2 host contract r4 two-pass preflight still refuses every member of a conflicting scope group before activation, until the full P2.3 ownership and shared-resource prerequisites are implemented and tested. Empty-list legacy behavior, target binding and identity invariants are unchanged. See `design/p2-host-contract.md`, Q1/Q3. The delivery review must include this amendment alongside the schema, validator and test changes.
 
 - **Name-conflict details (approved by the delivery lead):** `runtime_broker_name_conflict` details are `name` and `slug` only, for every caller.
 - **Stage B review appendix changes A1–A5 (approved by the delivery lead):** the agent-caller legacy create is 403 with no link, as today (§9 step 1, §15, §17); `runtime_target_move_unsupported` is verdict-only through `writeMoveRefusal`; the empty-actual mismatch message reads "serves no runtime target"; group F's frozen internals and the two-place remote gate are documented; "no build tags" is replaced by "compiles in the default build".
