@@ -546,7 +546,9 @@ func (s *OwnershipStore) MarkAbsent(projectID, agentID, uid string) error {
 //     before the slug is free.
 //   - finishOwnedDelete from finishPendingOwnedDelete runs without that
 //     lock. Its caller found neither a runtime entry nor files for the
-//     agent, and while the record is deleting no new run can take the slug.
+//     agent, and while the record is deleting no new run can take the slug
+//     (an active record is moved to deleting first, and only when no run
+//     is live).
 //   - ReconcileAbsent runs without that lock, from the instance's ownership
 //     preflight, before the instance serves any request.
 func (s *OwnershipStore) ReleaseSlug(projectID, agentID string) error {
@@ -1503,15 +1505,22 @@ func (s *Server) ownedDeleteTarget(projectID, slug string, hasObject bool) (*Own
 	return rec, nil
 }
 
-// finishPendingOwnedDelete retries the finish of an earlier whole-agent
-// delete of the agent holding slug whose objects were not yet all
-// confirmed gone (its record is deleting). Its caller found neither a
-// runtime entry nor files for the agent, which proves the files are gone,
-// so it records that, cleans up the still-recorded objects again (UID
-// preconditions) and finishes the record once they are confirmed gone. It
-// does nothing for a legacy Runtime Broker or when no such record holds the
-// slug.
-func (s *Server) finishPendingOwnedDelete(ctx context.Context, projectID, slug string) {
+// finishPendingOwnedDelete finishes the record of the agent holding slug
+// when its caller found neither a runtime entry nor files for the agent,
+// which proves the files are gone. It acts on:
+//   - a record already deleting: an earlier whole-agent delete whose
+//     objects were not yet all confirmed gone, retried;
+//   - for a whole-agent delete (wholeAgent), an active record with no live
+//     run: an agent whose every run already ended, such as a create that
+//     failed and had its run cleaned up before the Hub's rollback delete
+//     arrived. It is moved to deleting first (RetireFinishedRecord), so
+//     the slug is not left reserved by an agent the Hub no longer has.
+//
+// It records that the files are gone, cleans up the still-recorded objects
+// again (UID preconditions) and finishes the record once they are confirmed
+// gone. It does nothing for a legacy Runtime Broker, when no record holds
+// the slug, or for a record with a live run.
+func (s *Server) finishPendingOwnedDelete(ctx context.Context, projectID, slug string, wholeAgent bool) {
 	if s.ownership == nil || projectID == "" {
 		return
 	}
@@ -1520,7 +1529,22 @@ func (s *Server) finishPendingOwnedDelete(ctx context.Context, projectID, slug s
 		return
 	}
 	rec, ok, err := s.ownership.Get(projectID, agentID)
-	if err != nil || !ok || rec.State != OwnershipStateDeleting {
+	if err != nil || !ok {
+		return
+	}
+	switch {
+	case rec.State == OwnershipStateDeleting:
+	case rec.State == OwnershipStateActive && wholeAgent:
+		retired, err := s.ownership.RetireFinishedRecord(projectID, agentID)
+		if err != nil {
+			s.agentLifecycleLog.Warn("Agent delete: an ended agent's ownership record was not moved to deleting",
+				"agent_id", agentID, "project_id", projectID, "error", err)
+			return
+		}
+		if !retired {
+			return
+		}
+	default:
 		return
 	}
 	s.finishOwnedDelete(ctx, s.currentManager(), &ownedDelete{projectID: projectID, agentID: agentID, wholeRecord: true, filesRemoved: true})
@@ -1645,6 +1669,26 @@ func (s *OwnershipStore) BeginDelete(projectID, agentID, runID string, wholeAgen
 		return deleteScopeNone, nil
 	}
 	return scope, err
+}
+
+// RetireFinishedRecord moves an active record with no live run (every run
+// deleting or deleted) to deleting, for a whole-agent delete that found
+// nothing left of the agent. It reports whether it did; a record with a
+// live run, or one not active, is left unchanged. The check and the move
+// happen under the record's key lock, so a concurrent BeginRun cannot land
+// between them.
+func (s *OwnershipStore) RetireFinishedRecord(projectID, agentID string) (bool, error) {
+	_, err := s.mutate(projectID, agentID, func(r *OwnershipRecord) error {
+		if r.State != OwnershipStateActive || liveRunsOtherThan(r, "") {
+			return errNoChange
+		}
+		r.State = OwnershipStateDeleting
+		return nil
+	})
+	if errors.Is(err, errNoChange) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // errNoChange makes mutate leave a record unwritten.
